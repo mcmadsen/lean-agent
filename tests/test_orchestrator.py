@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 
 CLI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins", "lean-agent", "scripts", "lean_agent.py")
@@ -20,6 +21,9 @@ FAKE_CLAUDE = textwrap.dedent("""\
         fh.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "task": task,
                              "append": open(append).read(),
                              "addclaudemd": os.environ.get("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD")}) + "\\n")
+    import time
+    if os.environ.get("FAKE_FINISH_AT"):  # make parallel fake workers finish together
+        time.sleep(max(0.0, float(os.environ["FAKE_FINISH_AT"]) - time.time()))
     fb = os.environ.get("FAKE_FEEDBACK", '{"status": "done", "used": [], "unneeded": [], "missing": ""}')
     print(json.dumps({"type": "result", "subtype": os.environ.get("FAKE_SUBTYPE", "success"), "is_error": False,
                       "num_turns": 3, "session_id": "sess-1", "total_cost_usd": 0.05,
@@ -173,6 +177,17 @@ class CliTest(unittest.TestCase):
         self.assertIn("archive style", out)
         self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "t2", FAKE_FEEDBACK=fb)
         self.assertIn("sqlite fixture", self.calls()[-1]["append"])  # core card sent without --cards
+
+    def test_parallel_runs_keep_all_stats(self):
+        self.cli("learn", self.proj)
+        fb = json.dumps({"status": "done", "used": ["testing"], "unneeded": [], "missing": ""})
+        env = dict(self.env, FAKE_FEEDBACK=fb, FAKE_FINISH_AT=str(time.time() + 1.5))
+        procs = [subprocess.Popen([sys.executable, CLI, "run", "-p", "proj", "-m", "haiku", "--why", "x",
+                                   "--cards", "testing", f"task {i}"], env=env, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for i in range(16)]
+        self.assertEqual([p.wait() for p in procs], [0] * 16)
+        self.assertRegex(self.cli("cards", "proj").stdout, r"testing\s+claude-md\s+\d+\s+16/16")
+        self.assertIn("haiku             16", self.cli("stats").stdout)
 
     def test_daily_budget_blocks(self):
         self.cli("learn", self.proj)

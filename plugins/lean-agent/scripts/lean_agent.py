@@ -8,6 +8,7 @@ only the context cards and tools the orchestrator picked. Workers report back
 which context they used, and the context library improves from that.
 """
 import argparse
+import contextlib
 import datetime
 import glob
 import hashlib
@@ -17,6 +18,11 @@ import re
 import subprocess
 import sys
 import uuid
+
+try:
+    import fcntl
+except ImportError:  # Windows: no locking, parallel runs may lose a stats update
+    fcntl = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -80,7 +86,7 @@ def load_json(path, default):
 
 def save_json(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as fh:
         json.dump(data, fh, indent=1)
     os.replace(tmp, path)
@@ -158,6 +164,21 @@ def resolve_project(ref):
 
 def library_path(slug):
     return home("library", slug, "cards.json")
+
+
+@contextlib.contextmanager
+def library_lock(slug):
+    """Serialise read-modify-write of a project's cards across parallel lean-agent processes."""
+    path = home("library", slug, ".lock")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        if fcntl:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl:
+                fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def load_cards(slug):
@@ -314,20 +335,21 @@ def learn(path, include_user_skills=False, quiet=False, name=None):
             name, desc, body = parse_skill(f)
             add("skill", f"skill {name}" + (f" - {desc}" if desc else ""), f, body, base="skill-" + slugify(name, 32))
 
-    prev_slug = next((s for s, v in projects().items() if v["path"] == path), slug)
-    old = {c["id"]: c for c in load_cards(slug) or load_cards(prev_slug)}
-    cards = []
-    for c in fresh:
-        prev = old.pop(c["id"], {})
-        c.update({
-            "tokens": est_tokens(c["text"]),
-            "core": prev.get("core", False), "archived": prev.get("archived", False),
-            "offered": prev.get("offered", 0), "used": prev.get("used", 0), "unneeded": prev.get("unneeded", 0),
-            "updated": now_iso(),
-        })
-        cards.append(c)
-    cards += [c for c in old.values() if c["kind"] == "note"]  # learned notes survive re-learning
-    save_cards(slug, cards)
+    with library_lock(slug):
+        prev_slug = next((s for s, v in projects().items() if v["path"] == path), slug)
+        old = {c["id"]: c for c in load_cards(slug) or load_cards(prev_slug)}
+        cards = []
+        for c in fresh:
+            prev = old.pop(c["id"], {})
+            c.update({
+                "tokens": est_tokens(c["text"]),
+                "core": prev.get("core", False), "archived": prev.get("archived", False),
+                "offered": prev.get("offered", 0), "used": prev.get("used", 0), "unneeded": prev.get("unneeded", 0),
+                "updated": now_iso(),
+            })
+            cards.append(c)
+        cards += [c for c in old.values() if c["kind"] == "note"]  # learned notes survive re-learning
+        save_cards(slug, cards)
 
     projs = projects()
     for other in [s for s, v in projs.items() if v["path"] == path and s != slug]:
@@ -387,6 +409,12 @@ def find_card(cards, cid):
 
 
 def cmd_card(a):
+    slug, _ = resolve_project(a.project)
+    with library_lock(slug):
+        _cmd_card(a)
+
+
+def _cmd_card(a):
     slug, _ = resolve_project(a.project)
     cards = load_cards(slug)
     if a.action == "show":
@@ -585,18 +613,19 @@ def cmd_run(a):
     weighted = usage.weighted(u)
 
     # learning: card stats and missing context
-    lib = load_cards(slug)
     used, unneeded = set(fb.get("used") or []), set(fb.get("unneeded") or [])
     sent = {c["id"] for c in cards}
-    for c in lib:
-        if c["id"] in sent:
-            c["offered"] += 1
-        if c["id"] in used:
-            c["used"] += 1
-        if c["id"] in unneeded:
-            c["unneeded"] += 1
     if sent or used or unneeded:
-        save_cards(slug, lib)
+        with library_lock(slug):
+            lib = load_cards(slug)
+            for c in lib:
+                if c["id"] in sent:
+                    c["offered"] += 1
+                if c["id"] in used:
+                    c["used"] += 1
+                if c["id"] in unneeded:
+                    c["unneeded"] += 1
+            save_cards(slug, lib)
     missing_note = (fb.get("missing") or "").strip()
     if missing_note:
         append_jsonl(home("library", slug, "missing.jsonl"),
@@ -654,6 +683,12 @@ def cmd_stats(a):
 
 
 def cmd_optimize(a):
+    slug, _ = resolve_project(a.project)
+    with library_lock(slug):
+        _cmd_optimize(a)
+
+
+def _cmd_optimize(a):
     slug, _ = resolve_project(a.project)
     cards = load_cards(slug)
     actions = []

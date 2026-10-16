@@ -136,7 +136,7 @@ def load_state(session_id):
 
 def save_state(session_id, state):
     path = state_path(session_id)
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as fh:
         json.dump(state, fh)
     os.replace(tmp, path)
