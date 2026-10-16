@@ -368,6 +368,18 @@ class CliTest(unittest.TestCase):
         self.assertIn("my-sandbox", out)
         self.assertNotIn("Ignored", out)
 
+    def test_up_pins_orchestrator_model(self):
+        # `up` execs claude; the fake records argv, so the model pin and flags can be checked
+        p = self.cli("up", "--model", "sonnet", "--local", check=False)
+        home = self.cli("home").stdout.strip()
+        with open(os.path.join(home, ".claude", "settings.json")) as fh:
+            data = json.load(fh)
+        self.assertEqual(data["model"], "sonnet")
+        self.assertIn("Bash(lean-agent:*)", data["permissions"]["allow"])
+        self.cli("up", "--model", "default", "--local", check=False)
+        with open(os.path.join(home, ".claude", "settings.json")) as fh:
+            self.assertNotIn("model", json.load(fh))
+
     def test_home_template(self):
         h = self.cli("home").stdout.strip()
         with open(os.path.join(h, "CLAUDE.md")) as fh:
