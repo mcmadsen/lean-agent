@@ -28,12 +28,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import usage  # noqa: E402
 import lean_mcp  # noqa: E402
+import lean_memory  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
 PLUGIN = "lean-agent@lean-agent"
 TEMPLATE_MARK = "<!-- lean-agent orchestrator template v"
-TEMPLATE_VERSION = 2
+TEMPLATE_VERSION = 3
 
 WORKER_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
 READONLY_TOOLS = "Read,Glob,Grep"
@@ -55,7 +56,12 @@ project files only when the task needs them.
 
 End your reply with a short result (what you did, files changed, anything
 unresolved), then one final line exactly like this:
-LEAN-FEEDBACK {{"status": "done|partial|failed", "used": ["card-id"], "unneeded": ["card-id"], "missing": "context you had to discover that should have been given up front, or empty"}}
+LEAN-FEEDBACK {{"status": "done|partial|failed", "used": ["card-id"], "unneeded": ["card-id"], "missing": "context you had to discover that should have been given up front, or empty", "remember": []}}
+
+"remember" is shared memory for future agents. Usually leave it empty. Add an item
+only for a durable fact that can't be derived from the code or git history, such as a
+user correction, a decision, or where external info lives:
+{{"type": "feedback|project|reference|user", "text": "one or two sentences"}}
 """
 
 
@@ -227,13 +233,19 @@ def split_sections(text):
 
 
 def find_memory_files(root, max_depth=5):
-    """CLAUDE.md files (incl. dir/.claude/CLAUDE.md) and .claude/rules, skipping worktrees and submodules."""
+    """CLAUDE.md / CLAUDE.local.md / AGENTS.md files and .claude/rules, skipping worktrees and submodules."""
     found = []
     for dirpath, dirnames, filenames in os.walk(root):
         rel = os.path.relpath(dirpath, root)
         depth = 0 if rel == "." else rel.count(os.sep) + 1
         if "CLAUDE.md" in filenames:
             found.append(("claude-md", os.path.join(dirpath, "CLAUDE.md")))
+        if "CLAUDE.local.md" in filenames:
+            found.append(("local-md", os.path.join(dirpath, "CLAUDE.local.md")))
+        has_claude = ("CLAUDE.md" in filenames or "CLAUDE.local.md" in filenames
+                      or os.path.isfile(os.path.join(dirpath, ".claude", "CLAUDE.md")))
+        if "AGENTS.md" in filenames and not has_claude:  # Claude Code's default: AGENTS.md only without CLAUDE.md
+            found.append(("agents-md", os.path.join(dirpath, "AGENTS.md")))
         if os.path.basename(dirpath) == ".claude":
             dirnames[:] = []  # never descend into .claude/ (worktrees, skills, settings)
             continue
@@ -349,7 +361,7 @@ def learn(path, include_user_skills=False, quiet=False, name=None):
                 "updated": now_iso(),
             })
             cards.append(c)
-        cards += [c for c in old.values() if c["kind"] == "note"]  # learned notes survive re-learning
+        cards += [c for c in old.values() if c["kind"] in ("note", "memory")]  # survive re-learning
         save_cards(slug, cards)
 
     projs = projects()
@@ -357,12 +369,42 @@ def learn(path, include_user_skills=False, quiet=False, name=None):
         del projs[other]  # renamed with --name
     projs[slug] = {"path": path, "learned": now_iso()}
     save_json(home("projects.json"), projs)
+    cards = sync_memory(slug)
 
     if not quiet:
         total = sum(c["tokens"] for c in cards)
         print(f"Learned {path} as '{slug}': {len(cards)} cards, ~{total:,} tokens if loaded in full.")
         print(f"Workers get only the cards you pick. List them: lean-agent cards {slug}")
     return slug
+
+
+def memory_store():
+    return lean_memory.store_dir(home())
+
+
+def sync_memory(slug):
+    """Mirror the shared memory store into a project's cards (global memories + this project's)."""
+    mems = [m for m in lean_memory.read_all(memory_store()) if m["scope"] in (lean_memory.GLOBAL, slug)]
+    fresh = {}
+    for m in mems:
+        cid = "mem-" + slugify(m["stem"], 40)
+        fresh[cid] = {"id": cid, "kind": "memory", "title": f"memory {m['type']}: {m['description'] or m['name']}"[:120],
+                      "source": m["file"], "text": m["body"], "tokens": est_tokens(m["body"])}
+    with library_lock(slug):
+        cards = load_cards(slug)
+        kept = []
+        for c in cards:
+            if c["kind"] != "memory":
+                kept.append(c)
+            elif c["id"] in fresh:
+                c.update(fresh.pop(c["id"]))
+                kept.append(c)
+        for c in fresh.values():
+            c.update({"core": False, "archived": False, "offered": 0, "used": 0, "unneeded": 0, "updated": now_iso()})
+            kept.append(c)
+        if kept != cards or fresh:
+            save_cards(slug, kept)
+    return kept
 
 
 def card_rate(c):
@@ -386,6 +428,7 @@ def cmd_projects(a):
 
 def cmd_cards(a):
     slug, _ = resolve_project(a.project)
+    sync_memory(slug)
     cards = [c for c in load_cards(slug) if a.all or not c.get("archived")]
     if a.filter:
         f = a.filter.lower()
@@ -463,6 +506,8 @@ def suggest(slug, task, max_tokens):
         if c.get("core"):
             continue
         overlap = 3 * len(tw & words(c["title"])) + len(tw & words(c["text"]))
+        if not overlap and c["kind"] == "memory" and c["title"].startswith(("memory user", "memory feedback")):
+            overlap = 1  # preferences and corrections apply broadly; optimize archives the ones never used
         if overlap:
             usefulness = (c["used"] + 1) / (c["offered"] + 2)  # Laplace-smoothed hit rate
             scored.append((overlap * (0.5 + usefulness), c))
@@ -475,6 +520,7 @@ def suggest(slug, task, max_tokens):
 
 def cmd_suggest(a):
     slug, _ = resolve_project(a.project)
+    sync_memory(slug)
     picked = suggest(slug, a.task, a.max_tokens)
     if not picked:
         print("No matching cards; the worker will start with the project path only.")
@@ -595,6 +641,7 @@ def cmd_run(a):
         tools = prev.get("tools", WORKER_TOOLS)
     else:
         slug, project = resolve_project(a.project)
+        sync_memory(slug)
         lib = {c["id"]: c for c in load_cards(slug)}
         wanted = [x for x in (a.cards or "").split(",") if x]
         if a.cards == "auto":
@@ -640,6 +687,7 @@ def cmd_run(a):
     env = dict(os.environ)
     env.pop("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", None)  # never pull in the project's CLAUDE.md
     env.setdefault("BASH_MAX_OUTPUT_LENGTH", os.environ.get("LEAN_AGENT_WORKER_BASH_OUTPUT") or "12000")
+    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"  # memory comes from lean-agent cards instead
 
     started = datetime.datetime.now()
     started_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
@@ -689,6 +737,17 @@ def cmd_run(a):
                 if c["id"] in unneeded:
                     c["unneeded"] += 1
             save_cards(slug, lib)
+    remembered = []
+    for item in fb.get("remember") or []:
+        if isinstance(item, str):
+            item = {"type": "project", "text": item}
+        if not isinstance(item, dict) or not str(item.get("text", "")).strip():
+            continue
+        mtype = item.get("type") if item.get("type") in lean_memory.TYPES else "project"
+        scope = lean_memory.GLOBAL if mtype in ("user", "feedback") else slug
+        path = lean_memory.add(memory_store(), str(item["text"]), mtype, scope=scope, source=f"run {run_id}")
+        if path:
+            remembered.append(os.path.splitext(os.path.basename(path))[0])
     missing_note = (fb.get("missing") or "").strip()
     if missing_note:
         append_jsonl(home("library", slug, "missing.jsonl"),
@@ -715,6 +774,8 @@ def cmd_run(a):
         print((err or raw)[-1500:].strip())
     if fb:
         print(f"feedback: used={sorted(used)} unneeded={sorted(unneeded)}" + (f" missing={missing_note!r}" if missing_note else ""))
+    if remembered:
+        print(f"remembered: {', '.join(remembered)}")
     if mcp_specs:
         calls = entry["mcp_calls"]
         print("mcp: " + (", ".join(f"{k} x{v}" for k, v in sorted(calls.items())) or "no MCP tool calls"))
@@ -776,6 +837,62 @@ def measure_server(name, cfg):
     print(f"{name}: ~{sizes[1] - sizes[0]:,} tokens of context per worker turn (baseline {sizes[0]:,})")
 
 
+def cmd_memory(a):
+    store = memory_store()
+    scope = lean_memory.GLOBAL
+    project_path = None
+    if getattr(a, "project", None):
+        scope, project_path = resolve_project(a.project)
+    if a.action == "where":
+        print(f"lean-agent memory store: {store}")
+        dirs = lean_memory.claude_memory_dirs(project_path)
+        print("Claude Code auto-memory folders found: " + (", ".join(dirs) if dirs else "none"))
+        return
+    if a.action == "import":
+        sources = [os.path.abspath(os.path.expanduser(a.source))] if a.source else lean_memory.claude_memory_dirs(project_path)
+        if not sources:
+            die("no Claude Code auto-memory folders found; pass one with --from DIR")
+        added, skipped = lean_memory.import_dirs(store, sources, scope=scope)
+        print(f"Imported {added} memories ({skipped} duplicates skipped) from: {', '.join(sources)}")
+        print(f"Store: {store}")
+        if added:
+            print("Your original files are untouched. Once you're happy, stop Claude Code loading MEMORY.md into every "
+                  "session: set \"autoMemoryEnabled\": false in ~/.claude/settings.json (and drop autoMemoryDirectory).")
+        for slug in projects():
+            sync_memory(slug)
+        return
+    if a.action == "add":
+        if not a.text:
+            die("memory add needs the text")
+        mtype = a.type or "project"
+        path = lean_memory.add(store, a.text, mtype, scope=scope, name=a.name, source="lean-agent memory add")
+        print(f"saved {os.path.basename(path)}" if path else "already remembered")
+        for slug in projects():
+            sync_memory(slug)
+        return
+    if a.action == "rm":
+        if not a.text:
+            die("memory rm needs the memory name (file name without .md)")
+        stem = a.text[4:] if a.text.startswith("mem-") else a.text
+        matches = [m["stem"] for m in lean_memory.read_all(store) if slugify(m["stem"], 40) == slugify(stem, 40)]
+        if not matches or not lean_memory.remove(store, matches[0]):
+            die(f"no memory {a.text!r}")
+        for slug in projects():
+            sync_memory(slug)
+        print(f"removed {matches[0]}")
+        return
+    mems = lean_memory.read_all(store)
+    if a.project:
+        mems = [m for m in mems if m["scope"] in (lean_memory.GLOBAL, scope)]
+    if not mems:
+        print(f"No memories in {store}. Import Claude Code's: lean-agent memory import")
+        return
+    for m in mems:
+        sc = "" if m["scope"] == lean_memory.GLOBAL else f" [{m['scope']}]"
+        print(f"mem-{slugify(m['stem'], 40):<44}{m['type']:<10}{est_tokens(m['body']):>5} tok{sc}  {(m['description'] or m['name'])[:60]}")
+    print(f"{len(mems)} memories in {store}")
+
+
 def cmd_stats(a):
     runs = ledger()
     if a.project:
@@ -806,6 +923,7 @@ def cmd_stats(a):
 
 def cmd_optimize(a):
     slug, _ = resolve_project(a.project)
+    sync_memory(slug)
     with library_lock(slug):
         _cmd_optimize(a)
 
@@ -871,6 +989,7 @@ def _cmd_optimize(a):
 # ---------------------------------------------------------------- commands: setup
 
 ORCHESTRATOR_ENV = {
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",   # memory lives in lean-agent; no MEMORY.md on every turn
     "LEAN_AGENT_BUDGET": "1000000",           # orchestrator session budget (weighted tokens)
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70",
     "BASH_MAX_OUTPUT_LENGTH": "20000",
@@ -1076,6 +1195,15 @@ def main(argv=None):
     s.add_argument("--probe", action="store_true", help="list: query stdio servers for their tools")
     s.add_argument("--measure", action="store_true", help="tools: measure real per-turn cost with 2 Haiku calls")
     s.set_defaults(fn=cmd_mcp)
+
+    s = sub.add_parser("memory", help="shared memory: where | import | list | add | rm")
+    s.add_argument("action", choices=["where", "import", "list", "add", "rm"])
+    s.add_argument("text", nargs="?", help="add: the memory text; rm: its name")
+    s.add_argument("--project", "-p", help="scope to a project (default: global)")
+    s.add_argument("--type", choices=lean_memory.TYPES, help="add: memory type (default project)")
+    s.add_argument("--name", help="add: short name")
+    s.add_argument("--from", dest="source", metavar="DIR", help="import: folder to import (default: Claude's)")
+    s.set_defaults(fn=cmd_memory)
 
     s = sub.add_parser("stats", help="runs, success rate and tokens by model")
     s.add_argument("--project", "-p")

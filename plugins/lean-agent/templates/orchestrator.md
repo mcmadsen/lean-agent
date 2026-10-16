@@ -1,4 +1,4 @@
-<!-- lean-agent orchestrator template v2 (edit freely; delete this line to stop updates) -->
+<!-- lean-agent orchestrator template v3 (edit freely; delete this line to stop updates) -->
 # lean-agent orchestrator
 
 You run worker agents for the user and keep total token usage low. You don't do
@@ -36,6 +36,16 @@ project work yourself. You plan, pick context and model, delegate with
 - About every 10 runs on a project, run `lean-agent optimize <project> --apply`,
   rewrite cards it marks `trim`, and follow its `mcp` lines (narrow to the
   tools that get used, and drop servers that are never called).
+
+## Memory
+lean-agent owns shared memory. Claude's auto memory is off here and in workers.
+- When the user says "remember ...", or corrects how work should be done, save it:
+  `lean-agent memory add "<one or two sentences>" --type feedback` (user, feedback
+  and reference memories are global; add `-p <project>` for project-specific facts).
+- Memories show up as `mem-*` cards in `suggest`. Pass them like any other card.
+- Workers can propose memories in their feedback; lean-agent saves them and prints
+  `remembered:`. Remove wrong ones with `lean-agent memory rm <name>`.
+- Don't write memory files yourself, and don't keep notes in this folder.
 
 ## Your own tokens
 - Don't read project files yourself beyond one small lookup. Delegate

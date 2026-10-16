@@ -124,10 +124,43 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   that get used, or dropping it.
 - Not covered: claude.ai connectors (they aren't in a local config file). Remote OAuth servers are untested.
 
+## Shared memory
+
+lean-agent replaces Claude Code's auto memory (including a shared `autoMemoryDirectory` setup) as the one place
+agents remember things:
+
+```sh
+lean-agent memory where            # lean-agent's store + the Claude auto-memory folders it found
+lean-agent memory import           # copy them in (reads autoMemoryDirectory from settings.json, or --from DIR)
+lean-agent memory list [-p shop]
+lean-agent memory add "Never merge on Fridays" --type feedback        # global
+lean-agent memory add "Staging DB resets nightly" -p shop             # project-only
+lean-agent memory rm <name>
+```
+
+- **Same format as auto memory:** one topic file per memory with `type` (user, feedback, project, reference) and
+  `scope` (`global` or a project) frontmatter, plus a `MEMORY.md` index. Default location is `~/.lean-agent/memory/`.
+  Set `LEAN_AGENT_MEMORY_DIR` to a git repo to share it across machines or with a team.
+- **Nothing is loaded on every turn.** Auto memory loads up to 25 KB of `MEMORY.md` into *every* session. lean-agent
+  turns auto memory off for the orchestrator and workers (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`). Memories become
+  `mem-*` cards, so a worker only gets the ones its task needs. User and feedback memories are always candidates
+  in `suggest`, and `optimize` archives the ones that are never used.
+- **Agents write memory too:** the orchestrator saves anything you ask it to remember, and workers can add durable
+  facts to the `remember` field of their feedback line. User and feedback memories become global; project and
+  reference memories stay with that project. Duplicate text is skipped.
+- **Migration:** `import` copies and never changes your files. Once you're happy, set `"autoMemoryEnabled": false`
+  in `~/.claude/settings.json` and remove `autoMemoryDirectory`, so normal sessions stop loading `MEMORY.md`.
+
+Tested end to end: three imported memories, then *"Remember: prices shown to customers are VAT-inclusive. Then add a
+function that splits a total in cents across N people, with tests"*. The orchestrator saved the new memory scoped to
+the project. The worker received the imported *"money tests use integer cents and cover rounding"* memory and wrote
+exact-cent tests with 1-cent remainder cases.
+
 ## How learning works
 
-1. `learn` splits each `CLAUDE.md` (root, any `dir/.claude/CLAUDE.md`, nested up to 5 levels), `.claude/rules/*.md`
-   and each `.claude/skills/*/SKILL.md` into **cards** at `#`/`##` headings. Card ids are prefixed with the folder
+1. `learn` splits each `CLAUDE.md` (root, any `dir/.claude/CLAUDE.md`, nested up to 5 levels), `CLAUDE.local.md`,
+   `AGENTS.md` (only where a folder has no `CLAUDE.md`, as Claude Code does by default), `.claude/rules/*.md`
+   and each `.claude/skills/*/SKILL.md` into **cards** at `#`/`##` headings. Shared memories are added as `mem-*` cards. Card ids are prefixed with the folder
    (`mobile-app-rules`, `admin-portal-app-rules`). Git worktrees (including Claude's `.claude/worktrees/`) and
    submodules are skipped, so agent checkouts don't duplicate cards.
 2. Every worker ends with a `LEAN-FEEDBACK {...}` line: status, cards `used`, cards `unneeded`, and context

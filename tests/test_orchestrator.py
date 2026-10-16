@@ -33,6 +33,7 @@ FAKE_CLAUDE = textwrap.dedent("""\
     with open(log, "a") as fh:
         fh.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "task": task,
                              "append": open(append).read(), "mcp": mcp,
+                             "automem": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
                              "addclaudemd": os.environ.get("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD")}) + "\\n")
     import time
     if os.environ.get("FAKE_FINISH_AT"):  # make parallel fake workers finish together
@@ -288,6 +289,84 @@ class CliTest(unittest.TestCase):
                      FAKE_MCP_CALL="mcp__tickets__get_ticket")
         out = self.cli("optimize", "proj").stdout
         self.assertIn("--mcp tickets:get_ticket", out)
+
+    def make_auto_memory(self):
+        mem = os.path.join(self.tmp.name, "shared-memory")
+        os.makedirs(mem)
+        with open(os.path.join(self.env["CLAUDE_CONFIG_DIR"], "settings.json"), "w") as fh:
+            json.dump({"autoMemoryDirectory": mem}, fh)
+        with open(os.path.join(mem, "feedback_small_prs.md"), "w") as fh:
+            fh.write("---\nname: small PRs\ndescription: Prefers small focused PRs\ntype: feedback\n---\n"
+                     "Keep pull requests small and focused; split refactors from behaviour changes.\n")
+        with open(os.path.join(mem, "reference_tracker.md"), "w") as fh:
+            fh.write("---\ntype: reference\n---\nBugs are tracked in the Linear project PAY; dashboards in Grafana.\n")
+        with open(os.path.join(mem, "notes.md"), "w") as fh:  # no frontmatter, described by the index
+            fh.write("The billing migration is frozen until the audit ends.\n")
+        with open(os.path.join(mem, "MEMORY.md"), "w") as fh:
+            fh.write("- [Small PRs](feedback_small_prs.md) - prefers small PRs\n- [Freeze](notes.md) - billing freeze\n")
+        return mem
+
+    def test_memory_import_and_cards(self):
+        mem = self.make_auto_memory()
+        self.cli("learn", self.proj)
+        self.assertIn(mem, self.cli("memory", "where").stdout)
+        out = self.cli("memory", "import").stdout
+        self.assertIn("Imported 3 memories", out)
+        self.assertIn("autoMemoryEnabled", out)
+        self.assertIn("0 duplicates", out)
+        self.assertIn("Imported 0 memories (3 duplicates", self.cli("memory", "import").stdout)
+        listing = self.cli("memory", "list").stdout
+        self.assertIn("mem-feedback-small-prs ", listing)
+        self.assertIn("mem-reference-tracker ", listing)
+        self.assertIn("billing freeze", listing)
+        cards = self.cli("cards", "proj", "memory").stdout
+        self.assertIn("3 cards", cards)
+        # broad preferences are offered even without keyword overlap
+        self.assertIn("small", self.cli("suggest", "proj", "rename a variable").stdout)
+        with open(os.path.join(mem, "feedback_small_prs.md")) as fh:  # originals untouched
+            self.assertIn("type: feedback", fh.read())
+
+    def test_memory_add_rm_and_scope(self):
+        self.cli("learn", self.proj)
+        self.cli("memory", "add", "Always run the linter before committing", "--type", "feedback")
+        self.cli("memory", "add", "The api deploys on Tuesdays only", "-p", "proj")
+        self.assertIn("already remembered", self.cli("memory", "add", "always run the linter  before committing").stdout)
+        other = os.path.join(self.tmp.name, "other")
+        os.makedirs(other)
+        self.cli("learn", other, "--name", "other")
+        self.assertIn("linter", self.cli("cards", "other").stdout)
+        self.assertNotIn("Tuesdays", self.cli("cards", "other").stdout)  # project-scoped
+        self.assertIn("Tuesdays", self.cli("cards", "proj").stdout)
+        name = [l.split()[0] for l in self.cli("memory", "list").stdout.splitlines() if "linter" in l][0]
+        self.cli("memory", "rm", name)
+        self.assertNotIn("linter", self.cli("cards", "proj").stdout)
+
+    def test_worker_remember_and_no_auto_memory(self):
+        self.cli("learn", self.proj)
+        fb = json.dumps({"status": "done", "used": [], "unneeded": [], "missing": "",
+                         "remember": [{"type": "feedback", "text": "User wants tests named after the bug id."},
+                                      {"type": "project", "text": "Payments sandbox key lives in 1Password vault Dev."}]})
+        out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", FAKE_FEEDBACK=fb).stdout
+        self.assertIn("remembered:", out)
+        self.assertEqual(self.calls()[-1]["automem"], "1")
+        mems = self.cli("memory", "list").stdout
+        self.assertIn("bug id", mems)
+        self.assertIn("[proj-", [l for l in mems.splitlines() if "sandbox" in l][0])
+        self.assertIn("remember", self.calls()[-1]["append"])  # protocol tells workers how
+
+    def test_learn_agents_md_and_local(self):
+        os.makedirs(os.path.join(self.proj, "tools"))
+        with open(os.path.join(self.proj, "tools", "AGENTS.md"), "w") as fh:
+            fh.write("## Tooling\nTools are written in Go; run go vet before pushing anything here.\n")
+        with open(os.path.join(self.proj, "AGENTS.md"), "w") as fh:  # ignored: root has CLAUDE.md
+            fh.write("## Ignored\nThis root AGENTS.md is shadowed by CLAUDE.md in Claude Code.\n")
+        with open(os.path.join(self.proj, "CLAUDE.local.md"), "w") as fh:
+            fh.write("## My sandbox\nMy local database runs on port 5544 with user dev.\n")
+        self.cli("learn", self.proj)
+        out = self.cli("cards", "proj").stdout
+        self.assertIn("tools-tooling", out)
+        self.assertIn("my-sandbox", out)
+        self.assertNotIn("Ignored", out)
 
     def test_home_template(self):
         h = self.cli("home").stdout.strip()
