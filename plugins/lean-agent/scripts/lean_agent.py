@@ -27,12 +27,13 @@ except ImportError:  # Windows: no locking, parallel runs may lose a stats updat
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import usage  # noqa: E402
+import lean_mcp  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
 PLUGIN = "lean-agent@lean-agent"
 TEMPLATE_MARK = "<!-- lean-agent orchestrator template v"
-TEMPLATE_VERSION = 1
+TEMPLATE_VERSION = 2
 
 WORKER_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
 READONLY_TOOLS = "Read,Glob,Grep"
@@ -518,6 +519,52 @@ def build_append(project, cards):
     return "\n".join(parts)
 
 
+def mcp_cache():
+    return load_json(home("mcp-tools.json"), {})
+
+
+def server_tools(name, cfg, refresh=False):
+    """Tool list for a server as {tool: ~tokens}, from cache or a direct stdio probe; None if unknown."""
+    cache = mcp_cache()
+    if not refresh and name in cache:
+        return cache[name]["tools"]
+    try:
+        tools = lean_mcp.probe(cfg)
+    except lean_mcp.ProbeError:
+        return None
+    cache[name] = {"tools": {t["name"]: lean_mcp.tool_tokens(t) for t in tools if t.get("name")},
+                   "probed": now_iso(), "type": lean_mcp.server_type(cfg)}
+    save_json(home("mcp-tools.json"), cache)
+    return cache[name]["tools"]
+
+
+def resolve_mcp(project, specs):
+    """Turn --mcp specs into (servers config, allowed tool rules, disallowed tool names)."""
+    available = lean_mcp.discover(project)
+    servers, allowed, disallowed = {}, [], []
+    for name, wanted in lean_mcp.parse_specs(specs):
+        if name not in available:
+            die(f"unknown MCP server {name!r}; configured: {', '.join(sorted(available)) or 'none'} "
+                f"(see: lean-agent mcp list)")
+        cfg = available[name]["config"]
+        servers[name] = cfg
+        prefix = lean_mcp.tool_prefix(name)
+        if not wanted:
+            allowed.append(prefix.rstrip("_"))  # mcp__server: every tool of that server
+            continue
+        known = server_tools(name, cfg)
+        if known is not None:
+            unknown = [t for t in wanted if t not in known]
+            if unknown:
+                die(f"{name} has no tool(s) {', '.join(unknown)}; it has: {', '.join(sorted(known))}")
+            disallowed += [prefix + t for t in known if t not in wanted]
+        else:
+            print(f"lean-agent: tool list of {name} unknown (not stdio, or probe failed); only the chosen tools "
+                  "are allowed, but the others' definitions still load", file=sys.stderr)
+        allowed += [prefix + t for t in wanted]
+    return servers, allowed, disallowed
+
+
 def cmd_run(a):
     prev = None
     if a.resume:
@@ -565,10 +612,22 @@ def cmd_run(a):
             fh.write(build_append(project, cards))
         tools = a.tools or (READONLY_TOOLS if a.read_only else WORKER_TOOLS)
 
+    mcp_specs = prev.get("mcp") if prev else (a.mcp or [])
+    mcp_servers, mcp_allowed, mcp_disallowed = resolve_mcp(project, mcp_specs) if mcp_specs else ({}, [], [])
+    mcp_path = os.path.join(workdir, "mcp.json")
+    if mcp_servers:
+        lean_mcp.write_config(mcp_path, mcp_servers)
+        # --safe-mode disables MCP; this keeps the same isolation but admits exactly these servers
+        isolation = ["--setting-sources", "", "--strict-mcp-config", "--mcp-config", mcp_path]
+        if mcp_disallowed:
+            isolation += ["--disallowedTools", ",".join(mcp_disallowed)]
+    else:
+        isolation = ["--safe-mode"]
+
     claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
     cmd = [claude, "-p", "--output-format", "json", "--model", model,
-           "--safe-mode", "--disable-slash-commands",
-           "--tools", tools, "--allowedTools", tools,
+           *isolation, "--disable-slash-commands",
+           "--tools", tools, "--allowedTools", ",".join([tools] + mcp_allowed),
            "--permission-mode", os.environ.get("LEAN_AGENT_WORKER_PERMISSION_MODE") or "acceptEdits",
            "--add-dir", project,
            "--append-system-prompt-file", os.path.join(workdir, "append.md"),
@@ -583,6 +642,7 @@ def cmd_run(a):
     env.setdefault("BASH_MAX_OUTPUT_LENGTH", os.environ.get("LEAN_AGENT_WORKER_BASH_OUTPUT") or "12000")
 
     started = datetime.datetime.now()
+    started_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     try:
         proc = subprocess.run(cmd, input=task, capture_output=True, text=True, cwd=workdir, env=env,
                               timeout=env_num("LEAN_AGENT_RUN_TIMEOUT", 1800))
@@ -592,6 +652,9 @@ def cmd_run(a):
         raw = raw.decode() if isinstance(raw, bytes) else raw
     except FileNotFoundError:
         die(f"'{claude}' not found on PATH")
+    finally:
+        if os.path.exists(mcp_path):
+            os.remove(mcp_path)  # may hold tokens; rebuilt from your config on --resume
     seconds = int((datetime.datetime.now() - started).total_seconds())
 
     try:
@@ -638,6 +701,8 @@ def cmd_run(a):
         "usage": {k: u.get(k, 0) for k in usage.FIELDS}, "weighted": weighted,
         "cost_usd": out.get("total_cost_usd"), "session_id": out.get("session_id") or (prev and prev["session_id"]),
         "resumed": bool(prev), "task": task[:300], "missing": missing_note,
+        "mcp": mcp_specs, "mcp_calls": lean_mcp.count_mcp_calls(workdir, out.get("session_id"), started_utc)
+        if mcp_specs else {},
     }
     append_jsonl(home("ledger.jsonl"), entry)
 
@@ -650,8 +715,65 @@ def cmd_run(a):
         print((err or raw)[-1500:].strip())
     if fb:
         print(f"feedback: used={sorted(used)} unneeded={sorted(unneeded)}" + (f" missing={missing_note!r}" if missing_note else ""))
+    if mcp_specs:
+        calls = entry["mcp_calls"]
+        print("mcp: " + (", ".join(f"{k} x{v}" for k, v in sorted(calls.items())) or "no MCP tool calls"))
     print(f"resume: lean-agent run --resume {run_id} \"<follow-up>\"")
     return 0 if status in ("done", "partial") else 1
+
+
+def cmd_mcp(a):
+    project = resolve_project(a.project)[1] if getattr(a, "project", None) else None
+    servers = lean_mcp.discover(project)
+    if a.action == "list":
+        if not servers:
+            print("No MCP servers configured (looked in ~/.claude.json, <project>/.mcp.json, Claude Desktop config).")
+            return
+        cache = mcp_cache()
+        print(f"{'server':<24}{'type':<7}{'source':<9}{'tools':>6}{'~tok':>8}")
+        for name, info in sorted(servers.items()):
+            tools = cache.get(name, {}).get("tools")
+            if tools is None and a.probe:
+                tools = server_tools(name, info["config"], refresh=True)
+            n, tok = (len(tools), f"{sum(tools.values()):,}") if tools is not None else ("?", "?")
+            print(f"{name:<24}{lean_mcp.server_type(info['config']):<7}{info['source']:<9}{n:>6}{tok:>8}")
+        print("~tok = tool definitions a worker carries on every turn if given the whole server."
+              + ("" if a.probe else "  Fill in ? with --probe (stdio servers)."))
+        return
+    if a.server not in servers:
+        die(f"unknown MCP server {a.server!r}; configured: {', '.join(sorted(servers)) or 'none'}")
+    cfg = servers[a.server]["config"]
+    if a.measure:
+        measure_server(a.server, cfg)
+        return
+    tools = server_tools(a.server, cfg, refresh=True)
+    if tools is None:
+        die(f"could not list tools of {a.server} directly; try --measure")
+    for t, tok in sorted(tools.items(), key=lambda kv: -kv[1]):
+        print(f"{tok:>7,} tok  {t}")
+    print(f"{sum(tools.values()):>7,} tok  total for {len(tools)} tools.  "
+          f"Give a worker only what it needs: --mcp {a.server}:<tool>,<tool>")
+
+
+def measure_server(name, cfg):
+    """Measure a server's per-turn context cost with two tiny Haiku calls (works for any server type)."""
+    claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
+    d = home("work", "measure-" + uuid.uuid4().hex[:6])
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "mcp.json")
+    lean_mcp.write_config(path, {name: cfg})
+    sizes = []
+    try:
+        for extra in ([], ["--mcp-config", path]):
+            out = subprocess.run([claude, "-p", "--output-format", "json", "--model", "haiku", "--setting-sources", "",
+                                  "--strict-mcp-config", *extra, "--disable-slash-commands", "--tools", WORKER_TOOLS,
+                                  "--max-turns", "1"], input="Reply with just OK. Do not use tools.",
+                                 capture_output=True, text=True, cwd=d, timeout=180)
+            u = (json.loads(out.stdout.strip().splitlines()[-1]) if out.stdout.strip() else {}).get("usage") or {}
+            sizes.append(sum(u.get(k, 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")))
+    finally:
+        os.remove(path)
+    print(f"{name}: ~{sizes[1] - sizes[0]:,} tokens of context per worker turn (baseline {sizes[0]:,})")
 
 
 def cmd_stats(a):
@@ -718,6 +840,27 @@ def _cmd_optimize(a):
                 c["archived"] = True
         save_cards(slug, cards)
         print("Applied core/uncore/archive changes (trims are up to you).")
+    mcp_runs = {}
+    for r in ledger():
+        if r.get("project") != slug or r.get("resumed"):
+            continue
+        for name, wanted in lean_mcp.parse_specs(r.get("mcp")):
+            m = mcp_runs.setdefault(name, {"runs": 0, "used_runs": 0, "calls": {}})
+            m["runs"] += 1
+            prefix = lean_mcp.tool_prefix(name)
+            mine = {k[len(prefix):]: v for k, v in (r.get("mcp_calls") or {}).items() if k.startswith(prefix)}
+            m["used_runs"] += bool(mine)
+            for t, v in mine.items():
+                m["calls"][t] = m["calls"].get(t, 0) + v
+    for name, m in sorted(mcp_runs.items()):
+        if m["runs"] < a.min_runs:
+            continue
+        if not m["used_runs"]:
+            print(f"mcp     {name:<34}given in {m['runs']} runs, never called: stop passing --mcp {name}")
+        else:
+            used = sorted(m["calls"], key=lambda t: -m["calls"][t])
+            print(f"mcp     {name:<34}called in {m['used_runs']}/{m['runs']} runs; tools used: "
+                  f"{', '.join(used)} -> --mcp {name}:{','.join(used)}")
     notes = list(read_jsonl(home("library", slug, "missing.jsonl")))[-a.notes:]
     if notes:
         print("\nRecent context gaps reported by workers (turn recurring ones into cards with `lean-agent card add`):")
@@ -922,7 +1065,17 @@ def main(argv=None):
     s.add_argument("--max-usd", type=float, default=env_num("LEAN_AGENT_RUN_MAX_USD", 3.0, float))
     s.add_argument("--task-file")
     s.add_argument("--resume", metavar="RUN_ID", help="continue a previous run's session")
+    s.add_argument("--mcp", action="append", metavar="SERVER[:TOOL,TOOL]",
+                   help="give the worker this MCP server, optionally only these tools (repeatable)")
     s.set_defaults(fn=cmd_run)
+
+    s = sub.add_parser("mcp", help="MCP servers workers can use: list, tools <server>")
+    s.add_argument("action", choices=["list", "tools"])
+    s.add_argument("server", nargs="?")
+    s.add_argument("--project", "-p", help="include this project's .mcp.json and local-scope servers")
+    s.add_argument("--probe", action="store_true", help="list: query stdio servers for their tools")
+    s.add_argument("--measure", action="store_true", help="tools: measure real per-turn cost with 2 Haiku calls")
+    s.set_defaults(fn=cmd_mcp)
 
     s = sub.add_parser("stats", help="runs, success rate and tokens by model")
     s.add_argument("--project", "-p")
