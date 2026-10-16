@@ -1097,9 +1097,22 @@ def cmd_trust(a):
     return subprocess.run(["claude"]).returncode
 
 
+def bridge_pointer(h):
+    """Where `claude remote-control` remembers the session to bring back for this folder."""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    return os.path.join(cfg, "projects", re.sub(r"[^A-Za-z0-9]", "-", h), "bridge-pointer.json")
+
+
 def cmd_up(a):
     h = prepare_home()
     set_home_model(h, a.model)
+    if a.fresh:
+        # remote-control keeps a pointer on exit so the next start can resume the old session; if that
+        # session was archived or expired, every start fails with "registerWorker ... 404". Start clean.
+        for path in dict.fromkeys([bridge_pointer(h), bridge_pointer(os.path.realpath(h))]):
+            if os.path.exists(path):
+                os.remove(path)
+                print(f"lean-agent: removed {path}; starting a new Remote Control session")
     if not is_trusted(h):
         print(f"lean-agent: warning: {TRUST_HINT}", file=sys.stderr)
     env = dict(os.environ)
@@ -1178,6 +1191,8 @@ def main(argv=None):
     s.add_argument("--budget-week", type=int, help="lean-agent budget per 7 days (Sonnet-equivalent tokens)")
     s.add_argument("--permission-mode", help="e.g. acceptEdits, auto")
     s.add_argument("--local", action="store_true", help="interactive terminal session instead of Remote Control")
+    s.add_argument("--fresh", action="store_true",
+                   help="don't resume the previous Remote Control session (fixes 'registerWorker ... 404')")
     s.add_argument("extra", nargs=argparse.REMAINDER,
                    help="after --: extra flags for claude / claude remote-control, e.g. -- --debug")
     s.set_defaults(fn=cmd_up)

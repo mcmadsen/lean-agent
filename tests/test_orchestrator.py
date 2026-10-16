@@ -436,6 +436,20 @@ class CliTest(unittest.TestCase):
         with open(fake_log) as fh:
             self.assertEqual(fh.read(), "--model sonnet remote-control --name la --debug --debug-file /tmp/rc.log")
 
+    def test_up_fresh_removes_bridge_pointer(self):
+        import re as _re
+        home = self.cli("home").stdout.strip()
+        d = os.path.join(self.env["CLAUDE_CONFIG_DIR"], "projects", _re.sub(r"[^A-Za-z0-9]", "-", home))
+        os.makedirs(d, exist_ok=True)
+        pointer = os.path.join(d, "bridge-pointer.json")
+        with open(pointer, "w") as fh:
+            fh.write("{}")
+        self.cli("up", check=False)
+        self.assertTrue(os.path.exists(pointer))  # kept by default so normal resume works
+        out = self.cli("up", "--fresh", check=False).stdout
+        self.assertFalse(os.path.exists(pointer))
+        self.assertIn("starting a new Remote Control session", out)
+
     def test_home_template(self):
         h = self.cli("home").stdout.strip()
         with open(os.path.join(h, "CLAUDE.md")) as fh:
