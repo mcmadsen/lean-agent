@@ -127,6 +127,10 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   within 5% of a real measurement. For HTTP servers, use `mcp tools <server> --measure` (two tiny Haiku calls).
 - The config is copied into the run folder owner-only (`0600`) and **deleted when the run ends**, because MCP
   configs often contain tokens. Server names and tool-call counts go into the ledger; configs don't.
+- **Presets:** `lean-agent mcp preset <server> <name> <tool,tool>` saves a named set, and
+  `--mcp <server>:<name>` uses it. Every server whose tool list is known gets an automatic `read` preset
+  (get/list/search/query/... tools). `run` prints each server's chosen tools and per-turn cost before it starts,
+  e.g. `mcp: tracker 6/40 tools ~1,900 tok per turn (whole server ~18,800)`.
 - lean-agent counts which MCP tools each worker called. `optimize` then suggests narrowing a server to the tools
   that get used, or dropping it.
 - Not covered: claude.ai connectors (they aren't in a local config file). Remote OAuth servers are untested.

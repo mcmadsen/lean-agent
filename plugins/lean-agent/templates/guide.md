@@ -33,8 +33,11 @@ results, and report briefly.
    - `--read-only`: Read/Glob/Grep plus read-only git, written as
      `git -C <repo> show|log|grep|diff|blame|status|ls-files|ls-tree|cat-file|rev-parse|branch|fetch`.
      For a stale checkout, read `git -C <repo> show origin/<branch>:<path>`. No `git archive` snapshot is needed.
-   - `--mcp <server>:<tool>,<tool>`: only when the task needs an external system. See what
+   - `--mcp <server>:<preset or tool>,...`: only when the task needs an external system. See what
      exists and what it costs with `lean-agent mcp list -p <project>` and `lean-agent mcp tools <server>`.
+     Use a preset rather than the whole server: `lean-agent mcp preset <server>` lists them; `read` is
+     automatic (get/list/search tools). A whole server can cost tens of thousands of tokens per turn,
+     and `run` prints the cost before it starts.
    - `--chrome=<tool>,<tool>`: the user's real Chrome (Teams, Gmail ...). It needs
      `lean-agent chrome check` once, on the user's machine.
    - `--max-usd`, `--max-turns`: size them to the task.

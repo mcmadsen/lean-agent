@@ -722,6 +722,24 @@ class CliTest(unittest.TestCase):
         stats = self.cli("stats").stdout
         self.assertIn("sonnet-eq", stats)
 
+    def test_mcp_presets_and_cost_line(self):
+        self.cli("learn", self.proj)
+        self.cli("mcp", "tools", "tickets")  # probe and cache tool costs
+        out = self.cli("mcp", "preset", "tickets").stdout
+        self.assertIn("tickets:read (automatic)  2 tools", out)  # get_ticket + search_tickets
+        self.cli("mcp", "preset", "tickets", "lookup", "get_ticket")
+        self.assertIn("tickets:lookup  1 tools", self.cli("mcp", "preset", "tickets").stdout)
+        out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tickets:lookup", "t").stdout
+        self.assertRegex(out.splitlines()[0], r"^mcp: tickets 1/2 tools ~\d+ tok per turn \(whole server ~[\d,]+\)")
+        argv = self.calls()[-1]["argv"]
+        self.assertEqual(argv[argv.index("--disallowedTools") + 1], "mcp__tickets__search_tickets")
+        out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tickets", "t").stdout
+        self.assertIn("mcp: tickets 2/2 tools", out)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tickets:nope", "t", check=False)
+        self.assertIn("presets: lookup, read", p.stderr)
+        self.cli("mcp", "preset", "tickets", "lookup", "--rm")
+        self.assertNotIn("lookup", self.cli("mcp", "preset", "tickets").stdout)
+
     def test_home_template(self):
         h = self.cli("home").stdout.strip()
         with open(os.path.join(h, "CLAUDE.md")) as fh:
