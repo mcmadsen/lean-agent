@@ -59,6 +59,14 @@ class SqueezeTest(Base):
         out = run_hook("squeeze_hook.py", self.event("downloading...\n" * 5000 + "done"), **self.env)
         self.assertIn("[repeated 5000x]", out["hookSpecificOutput"]["updatedToolOutput"]["stdout"])
 
+    def test_reads_are_never_squeezed(self):
+        big = "line\n" * 5000
+        for cmd in ("cat src/app.py", "cd /repo && sed -n '1,400p' a.py", "git -C /repo show origin/develop:a.py",
+                    "git grep -n foo", "FOO=1 rg -n bar src | head -300"):
+            self.assertIsNone(run_hook("squeeze_hook.py", self.event(big, command=cmd), **self.env), cmd)
+        self.assertIsNotNone(run_hook("squeeze_hook.py", self.event(big, command="npm test"), **self.env))
+        self.assertIsNotNone(run_hook("squeeze_hook.py", self.event(big, command="git push"), **self.env))
+
     def test_opt_out(self):
         big = "x\n" * 10000
         self.assertIsNone(run_hook("squeeze_hook.py", self.event(big, command="LEAN_RAW=1 cat f"), **self.env))
