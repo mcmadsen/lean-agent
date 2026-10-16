@@ -775,6 +775,31 @@ def server_tools(name, cfg, refresh=False):
     return cache[name]["tools"]
 
 
+READ_TOOL_RE = re.compile(r"(^|[_-])(get|list|search|read|query|fetch|find|view|show|describe|count|lookup)([_-]|$)", re.I)
+
+
+def mcp_presets(server, known=None):
+    """{preset: [tools]} for a server: the user's presets plus an automatic `read` preset."""
+    presets = dict(load_json(home("mcp-presets.json"), {}).get(server, {}))
+    if known and "read" not in presets:
+        read = sorted(t for t in known if READ_TOOL_RE.search(t))
+        if read:
+            presets["read"] = read
+    return presets
+
+
+def expand_tools(server, wanted, known):
+    """Expand preset names in a --mcp tool list; keep real tool names."""
+    presets = mcp_presets(server, known)
+    out = []
+    for t in wanted:
+        if (known is None or t not in known) and t in presets:
+            out += presets[t]
+        else:
+            out.append(t)
+    return list(dict.fromkeys(out))
+
+
 def resolve_mcp(project, specs):
     """Turn --mcp specs into (servers config, allowed tool rules, disallowed tool names)."""
     available = lean_mcp.discover(project)
@@ -790,10 +815,13 @@ def resolve_mcp(project, specs):
             allowed.append(prefix.rstrip("_"))  # mcp__server: every tool of that server
             continue
         known = server_tools(name, cfg)
+        wanted = expand_tools(name, wanted, known)
         if known is not None:
             unknown = [t for t in wanted if t not in known]
             if unknown:
-                die(f"{name} has no tool(s) {', '.join(unknown)}; it has: {', '.join(sorted(known))}")
+                presets = ", ".join(sorted(mcp_presets(name, known))) or "none"
+                die(f"{name} has no tool or preset {', '.join(unknown)}; presets: {presets}; "
+                    f"tools: {', '.join(sorted(known))}")
             disallowed += [prefix + t for t in known if t not in wanted]
         else:
             print(f"lean-agent: tool list of {name} unknown (not stdio, or probe failed); only the chosen tools "
@@ -909,6 +937,9 @@ def cmd_run(a):
     env.pop("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", None)  # never pull in the project's CLAUDE.md
     env.setdefault("BASH_MAX_OUTPUT_LENGTH", os.environ.get("LEAN_AGENT_WORKER_BASH_OUTPUT") or "12000")
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"  # memory comes from lean-agent cards instead
+
+    for line in mcp_cost_lines(mcp_specs, chrome_spec):
+        print(line, flush=True)
 
     started = datetime.datetime.now()
     started_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
@@ -1030,12 +1061,35 @@ def cmd_run(a):
     return 0 if status in ("done", "partial", "needs-input", "awaiting-confirmation") else 1
 
 
+def mcp_cost_lines(mcp_specs, chrome_spec):
+    """One line per MCP server (and the browser) with the per-turn cost of the chosen tools."""
+    lines, cache = [], mcp_cache()
+    for name, wanted in lean_mcp.parse_specs(mcp_specs):
+        known = (cache.get(name) or {}).get("tools")
+        if not known:
+            lines.append(f"mcp: {name} (tool cost unknown; measure with `lean-agent mcp tools {name}`)")
+            continue
+        chosen = expand_tools(name, wanted, known) if wanted else list(known)
+        cost, whole = sum(known.get(t, 0) for t in chosen), sum(known.values())
+        line = f"mcp: {name} {len(chosen)}/{len(known)} tools ~{cost:,} tok per turn (whole server ~{whole:,})"
+        if not wanted and whole > 5000:
+            line += f"; narrow it: --mcp {name}:<preset|tool,...> (presets: lean-agent mcp preset {name})"
+        lines.append(line)
+    if chrome_spec:
+        st = chrome_state()
+        n = len(st.get("tools") or [])
+        k = n if chrome_spec == "all" else len(chrome_spec.split(","))
+        lines.append(f"browser: {k}/{n} Claude in Chrome tools ~{tools_overhead([], [], chrome_spec):,} tok per turn")
+    return lines
+
+
 def tools_overhead(mcp_specs, mcp_allowed, chrome_spec):
     """Estimated tokens per turn for the MCP and browser tool definitions a run carries."""
     total, cache = 0, mcp_cache()
     for name, wanted in lean_mcp.parse_specs(mcp_specs):
         tools = (cache.get(name) or {}).get("tools") or {}
-        total += sum(v for t, v in tools.items() if not wanted or t in wanted)
+        chosen = set(expand_tools(name, wanted, tools)) if wanted else set(tools)
+        total += sum(v for t, v in tools.items() if t in chosen)
     if chrome_spec:
         st = chrome_state()
         all_tools = st.get("tools") or []
@@ -1175,6 +1229,30 @@ def cmd_mcp(a):
             print(f"{CHROME:<24}{'chrome':<7}{'builtin':<9}{'?':>6}{'?':>8}  (run: lean-agent chrome check)")
         print("~tok = tool definitions a worker carries on every turn if given the whole server."
               + ("" if a.probe else "  Fill in ? with --probe (stdio servers)."))
+        return
+    if a.action == "preset":
+        if not a.server:
+            die("mcp preset needs a server: lean-agent mcp preset <server> [<name> <tool,tool>] [--rm]")
+        known = mcp_cache().get(a.server, {}).get("tools")
+        store = load_json(home("mcp-presets.json"), {})
+        if a.preset_name and (a.preset_tools or a.rm):
+            mine = store.setdefault(a.server, {})
+            if a.rm:
+                mine.pop(a.preset_name, None)
+            else:
+                tools = [t.strip() for t in a.preset_tools.split(",") if t.strip()]
+                bad = [t for t in tools if known and t not in known]
+                if bad:
+                    die(f"{a.server} has no tool(s) {', '.join(bad)}")
+                mine[a.preset_name] = tools
+            save_json(home("mcp-presets.json"), store)
+        presets = mcp_presets(a.server, known)
+        if not presets:
+            print(f"No presets for {a.server}. Add one: lean-agent mcp preset {a.server} <name> <tool,tool>")
+        for name, tools in sorted(presets.items()):
+            cost = sum((known or {}).get(t, 0) for t in tools)
+            auto = " (automatic)" if name == "read" and name not in store.get(a.server, {}) else ""
+            print(f"{a.server}:{name}{auto}  {len(tools)} tools ~{cost:,} tok  {', '.join(tools)}")
         return
     if a.server == CHROME:
         return cmd_chrome(argparse.Namespace(action="status"))
@@ -1984,9 +2062,12 @@ def build_parser():
     s.add_argument("action", choices=["check", "status"])
     s.set_defaults(fn=cmd_chrome)
 
-    s = sub.add_parser("mcp", help="MCP servers workers can use: list, tools <server>")
-    s.add_argument("action", choices=["list", "tools"])
+    s = sub.add_parser("mcp", help="MCP servers workers can use: list, tools <server>, preset <server> ...")
+    s.add_argument("action", choices=["list", "tools", "preset"])
     s.add_argument("server", nargs="?")
+    s.add_argument("preset_name", nargs="?", help="preset: name to set or remove")
+    s.add_argument("preset_tools", nargs="?", help="preset: comma-separated tools")
+    s.add_argument("--rm", action="store_true", help="preset: remove it")
     s.add_argument("--project", "-p", help="include this project's .mcp.json and local-scope servers")
     s.add_argument("--probe", action="store_true", help="list: query stdio servers for their tools")
     s.add_argument("--measure", action="store_true", help="tools: measure real per-turn cost with 2 Haiku calls")
