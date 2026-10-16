@@ -114,7 +114,11 @@ def est_tokens(text):
 
 
 def slugify(text, limit=48):
-    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:limit].strip("-") or "card"
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    if len(slug) > limit:  # cut at a word boundary
+        cut = slug[:limit + 1].rfind("-")
+        slug = slug[:cut if cut > limit // 2 else limit]
+    return slug.strip("-") or "card"
 
 
 def now_iso():
@@ -228,16 +232,16 @@ GENERIC_DIRS = {"app", "apps", "src", "web", "api", "lib", "libs", "client", "se
                 "backend", "packages", "core", "main", "docs", "test", "tests"}
 
 
-def scope_of(rel_dir):
+def scope_of(rel_dir, min_parts=1):
     """(title scope, id scope) for where a CLAUDE.md lives, ignoring '.claude' path parts.
 
-    The id uses the folder name, plus its parent when the name is generic (App, src, ...)."""
+    The id uses the folder name, plus parents when the name is generic (App, src, ...)
+    or when min_parts asks for more to avoid a clash with another folder."""
     parts = [p for p in rel_dir.split(os.sep) if p and p not in (".", ".claude")]
     if not parts:
         return "", ""
-    last = parts[-1]
-    id_parts = parts[-2:] if slugify(last) in GENERIC_DIRS and len(parts) > 1 else [last]
-    return "/".join(parts[-2:]), slugify("-".join(id_parts), 28)
+    n = max(min_parts, 2 if slugify(parts[-1]) in GENERIC_DIRS else 1)
+    return "/".join(parts[-max(n, 2):]), slugify("-".join(parts[-n:]), 28)
 
 
 def parse_skill(path):
@@ -278,17 +282,28 @@ def learn(path, include_user_skills=False, quiet=False, name=None):
         ids.add(cid)
         fresh.append({"id": cid, "kind": kind, "title": title, "source": source, "text": text})
 
+    scope_owner = {}  # id scope -> folder, so two folders never share a prefix
     for kind, f in find_memory_files(path):
         rel = os.path.relpath(f, path)
         if kind == "rule":
             scope = "rule " + os.path.splitext(os.path.basename(f))[0]
             ss = slugify(scope, 28)
         else:
-            scope, ss = scope_of(os.path.dirname(rel))
-        for head, body in split_sections(read_text(f)):
+            d = os.path.dirname(rel)
+            n = 1
+            scope, ss = scope_of(d, n)
+            while ss and scope_owner.get(ss, d) != d and n < 6:
+                n += 1
+                scope, ss = scope_of(d, n)
+            if ss:
+                scope_owner[ss] = d
+        for i, (head, body) in enumerate(split_sections(read_text(f))):
             title = f"{scope}: {head}" if scope else head
             hs = slugify(head, 28)
-            base = hs if not ss or hs.startswith(ss) else f"{ss}-{hs}"
+            if ss and i == 0 and (body.startswith(f"# {head}\n") or head == "overview"):
+                base = ss  # a nested file's intro section is named after its folder
+            else:
+                base = hs if not ss or hs.startswith(ss) else f"{ss}-{hs}"
             add(kind, title, rel, body, base=base)
 
     skill_dirs = [os.path.join(path, ".claude", "skills")]
