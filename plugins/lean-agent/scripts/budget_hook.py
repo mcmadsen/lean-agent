@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""PreToolUse hook: enforce a per-session token budget.
+"""PreToolUse hook: enforce lean-agent's plan-window budgets and a per-session token budget.
+
+Window budgets (`lean-agent limits`) apply only to sessions in the lean-agent home, and
+`lean-agent limits` / `lean-agent stats` stay allowed so the user can see and raise them.
 
 Reads LEAN_AGENT_BUDGET (weighted tokens, 0/unset = track only) and
 LEAN_AGENT_WARN_PCT (default 80). Past the warning threshold Claude gets a
@@ -27,6 +30,20 @@ def main():
     session_id = event.get("session_id")
     if not transcript or not session_id:
         return 0
+
+    # Plan windows: enforced only for sessions inside the lean-agent home (the orchestrator),
+    # never for the user's normal sessions that also have this plugin enabled.
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    home = os.path.realpath(usage.lean_home())
+    command = str((event.get("tool_input") or {}).get("command") or "").strip()
+    checking = event.get("tool_name") == "Bash" and command.startswith(("lean-agent limits", "lean-agent stats"))
+    if (cwd == home or cwd.startswith(home + os.sep)) and not checking:
+        hit = usage.exhausted_window()
+        if hit:
+            emit(permissionDecision="deny",
+                 permissionDecisionReason=usage.describe_exhausted(hit) + " Do not call more tools: tell the user "
+                 "briefly what is done and what remains, then end your turn.")
+            return 0
 
     state = usage.load_state(session_id)
     usage.update(state, transcript)

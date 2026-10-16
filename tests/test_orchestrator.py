@@ -212,13 +212,58 @@ class CliTest(unittest.TestCase):
         self.assertRegex(self.cli("cards", "proj").stdout, r"testing\s+claude-md\s+\d+\s+16/16")
         self.assertIn("haiku             16", self.cli("stats").stdout)
 
-    def test_daily_budget_blocks(self):
+    def write_usage(self, project_dir, hours_ago, model, input_tokens, mid):
+        import datetime as dt, re as _re
+        d = os.path.join(self.env["CLAUDE_CONFIG_DIR"], "projects", project_dir)
+        os.makedirs(d, exist_ok=True)
+        ts = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        with open(os.path.join(d, "s.jsonl"), "a") as fh:
+            fh.write(json.dumps({"type": "assistant", "timestamp": ts, "message": {"id": mid, "model": model,
+                     "usage": {"input_tokens": input_tokens, "output_tokens": 0}}}) + "\n")
+
+    def lean_project_dir(self, suffix):
+        import re as _re
+        return _re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(self.env["LEAN_AGENT_HOME"])) + suffix
+
+    def test_window_budgets(self):
         self.cli("learn", self.proj)
-        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t")
-        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False,
-                     LEAN_AGENT_DAILY_BUDGET="1000")
+        os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
+        work = self.lean_project_dir("-work-0101-000000-abcd")
+        self.write_usage(work, 1, "claude-fable-5-1", 10000, "a")     # 5x -> 50,000 now
+        self.write_usage(work, 7, "claude-haiku-5-5", 100000, "b")    # 0.05x -> 5,000, outside 5h
+        self.write_usage(work, 3 * 24, "claude-sonnet-5-5", 20000, "c")  # 1x -> 20,000, this week
+        self.write_usage("-Users-me-other-project", 1, "claude-opus-5-5", 10000, "d")  # not lean: 20,000
+        out = self.cli("limits").stdout
+        self.assertIn("Last 5 hours: lean-agent 50,000 (no budget)  | all Claude Code on this machine: 70,000", out)
+        self.assertIn("Last 7 days : lean-agent 75,000 (no budget)  | all Claude Code on this machine: 95,000", out)
+        self.cli("limits", "--5h", "40000", "--week", "1000000")
+        self.assertIn("50,000 of 40,000 (125%), frees up from", self.cli("limits").stdout)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False)
         self.assertEqual(p.returncode, 3)
-        self.assertIn("daily budget", p.stderr)
+        self.assertIn("5-hour budget used up", p.stderr)
+        self.cli("limits", "--5h", "0", "--week", "60000")
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False)
+        self.assertIn("weekly budget used up", p.stderr)
+        self.cli("limits", "--off")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t")
+
+    def test_window_hook_only_in_lean_home(self):
+        home = self.cli("home").stdout.strip()
+        self.write_usage(self.lean_project_dir("-home"), 1, "claude-sonnet-5-5", 50000, "a")
+        self.cli("limits", "--5h", "10000")
+        hook = os.path.join(os.path.dirname(CLI), "budget_hook.py")
+        transcript = os.path.join(self.tmp.name, "t.jsonl")
+        open(transcript, "w").close()
+
+        def call(cwd, command="ls"):
+            ev = {"session_id": "s", "transcript_path": transcript, "cwd": cwd, "tool_name": "Bash",
+                  "tool_input": {"command": command}}
+            p = subprocess.run([sys.executable, hook], input=json.dumps(ev), capture_output=True, text=True,
+                               env=self.env)
+            return json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"] if p.stdout.strip() else None
+        self.assertEqual(call(home), "deny")
+        self.assertIsNone(call(self.proj))                      # normal sessions are never blocked
+        self.assertIsNone(call(home, "lean-agent limits --5h 0"))  # the user can still raise it
 
     def test_max_budget_status(self):
         self.cli("learn", self.proj)

@@ -1,4 +1,4 @@
-<!-- lean-agent orchestrator template v3 (edit freely; delete this line to stop updates) -->
+<!-- lean-agent orchestrator template v4 (edit freely; delete this line to stop updates) -->
 # lean-agent orchestrator
 
 You run worker agents for the user and keep total token usage low. You don't do
@@ -51,4 +51,5 @@ lean-agent owns shared memory. Claude's auto memory is off here and in workers.
 - Don't read project files yourself beyond one small lookup. Delegate
   exploration to a `--model haiku --read-only` worker.
 - Keep replies short. Don't paste worker output unless the user asks.
-- Check `lean-agent stats --today` against the daily budget.
+- Check `lean-agent limits` before large jobs. If a 5-hour or weekly budget is
+  nearly used, tell the user and prefer `haiku` workers or smaller steps.

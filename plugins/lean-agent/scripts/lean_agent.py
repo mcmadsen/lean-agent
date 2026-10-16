@@ -34,7 +34,7 @@ PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
 PLUGIN = "lean-agent@lean-agent"
 TEMPLATE_MARK = "<!-- lean-agent orchestrator template v"
-TEMPLATE_VERSION = 3
+TEMPLATE_VERSION = 4
 
 WORKER_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
 READONLY_TOOLS = "Read,Glob,Grep"
@@ -536,11 +536,6 @@ def ledger():
     return list(read_jsonl(home("ledger.jsonl")))
 
 
-def spent_today():
-    today = datetime.date.today().isoformat()
-    return sum(r.get("weighted", 0) for r in ledger() if r.get("ts", "").startswith(today))
-
-
 def parse_feedback(text):
     """Split the worker reply into (summary, feedback dict)."""
     fb, lines = {}, text.rstrip().splitlines()
@@ -631,9 +626,9 @@ def cmd_run(a):
     if not prev and not a.why:
         die("say why you chose this model and context: --why \"...\"")
 
-    daily = env_num("LEAN_AGENT_DAILY_BUDGET", 0)
-    if daily and spent_today() >= daily:
-        die(f"daily budget used up ({spent_today():,} / {daily:,} weighted tokens); raise LEAN_AGENT_DAILY_BUDGET to continue", 3)
+    hit = usage.exhausted_window()
+    if hit:
+        die(usage.describe_exhausted(hit), 3)
 
     if prev:
         slug, project = prev["project"], prev["project_path"]
@@ -758,6 +753,7 @@ def cmd_run(a):
         "model": model, "why": a.why or (prev and "resume"), "cards": sorted(sent), "tools": tools,
         "status": status, "turns": out.get("num_turns"), "seconds": seconds,
         "usage": {k: u.get(k, 0) for k in usage.FIELDS}, "weighted": weighted,
+        "units": int(usage.units(u, model)),
         "cost_usd": out.get("total_cost_usd"), "session_id": out.get("session_id") or (prev and prev["session_id"]),
         "resumed": bool(prev), "task": task[:300], "missing": missing_note,
         "mcp": mcp_specs, "mcp_calls": lean_mcp.count_mcp_calls(workdir, out.get("session_id"), started_utc)
@@ -908,18 +904,49 @@ def cmd_stats(a):
     else:
         by = {}
         for r in runs:
-            m = by.setdefault(r["model"], {"n": 0, "ok": 0, "w": 0, "usd": 0.0})
+            m = by.setdefault(r["model"], {"n": 0, "ok": 0, "u": 0, "usd": 0.0})
             m["n"] += 1
             m["ok"] += r["status"] == "done"
-            m["w"] += r.get("weighted", 0)
+            m["u"] += r.get("units", int(r.get("weighted", 0) * usage.model_rate(r["model"])))
             m["usd"] += r.get("cost_usd") or 0
-        print(f"{'model':<14}{'runs':>6}{'done':>7}{'avg weighted':>15}{'total weighted':>17}{'cost':>10}")
-        for model, m in sorted(by.items(), key=lambda kv: -kv[1]["w"]):
-            print(f"{model:<14}{m['n']:>6}{m['ok'] * 100 // m['n']:>6}%{m['w'] // m['n']:>15,}{m['w']:>17,}{'$%.2f' % m['usd']:>10}")
-    daily = env_num("LEAN_AGENT_DAILY_BUDGET", 0)
-    today = spent_today()
-    print(f"\nToday: {today:,} weighted tokens" + (f" of {daily:,} daily budget ({today * 100 // daily}%)" if daily else " (no daily budget set)"))
+        print(f"{'model':<14}{'runs':>6}{'done':>7}{'avg sonnet-eq':>15}{'total sonnet-eq':>17}{'API $':>9}")
+        for model, m in sorted(by.items(), key=lambda kv: -kv[1]["u"]):
+            print(f"{model:<14}{m['n']:>6}{m['ok'] * 100 // m['n']:>6}%{m['u'] // m['n']:>15,}{m['u']:>17,}{'$%.2f' % m['usd']:>9}")
+    print()
+    print_limits()
 
+
+def print_limits():
+    w = usage.window_usage()
+    budgets = usage.window_budgets()
+    for name, label in (("5h", "Last 5 hours"), ("week", "Last 7 days ")):
+        lean, total, budget = w[name]["lean"], w[name]["all"], budgets[name]
+        line = f"{label}: lean-agent {lean:,}"
+        if budget:
+            line += f" of {budget:,} ({lean * 100 // budget}%)"
+            if lean >= budget and w[name]["frees_at"]:
+                line += f", frees up from {w[name]['frees_at']:%a %H:%M}"
+        else:
+            line += " (no budget)"
+        print(line + f"  | all Claude Code on this machine: {total:,}")
+    print("Units: Sonnet-equivalent tokens (Haiku 5.5 counts 0.05x, Opus 5.5 2x, Fable 5.1 5x). "
+          "Compare with /usage in Claude Code.")
+
+
+def cmd_limits(a):
+    if a.off or a.five_h is not None or a.week is not None:
+        cur = load_json(usage.limits_path(), {})
+        if a.off:
+            cur = {}
+        if a.five_h is not None:
+            cur["5h"] = a.five_h
+        if a.week is not None:
+            cur["week"] = a.week
+        save_json(usage.limits_path(), cur)
+    for env in ("LEAN_AGENT_5H_BUDGET", "LEAN_AGENT_WEEKLY_BUDGET"):
+        if os.environ.get(env):
+            print(f"note: {env} is set in the environment and overrides the saved value")
+    print_limits()
 
 def cmd_optimize(a):
     slug, _ = resolve_project(a.project)
@@ -1080,8 +1107,13 @@ def cmd_up(a):
         env.setdefault(k, v)
     if a.budget:
         env["LEAN_AGENT_BUDGET"] = str(a.budget)
-    if a.daily_budget:
-        env["LEAN_AGENT_DAILY_BUDGET"] = str(a.daily_budget)
+    if a.budget_5h is not None or a.budget_week is not None:
+        cur = load_json(usage.limits_path(), {})
+        if a.budget_5h is not None:
+            cur["5h"] = a.budget_5h
+        if a.budget_week is not None:
+            cur["week"] = a.budget_week
+        save_json(usage.limits_path(), cur)
     bindir = os.path.join(PLUGIN_ROOT, "bin")
     env["PATH"] = bindir + os.pathsep + env.get("PATH", "")  # `lean-agent` works even without the plugin
     cmd = [os.environ.get("LEAN_AGENT_CLAUDE") or "claude"]
@@ -1140,7 +1172,8 @@ def main(argv=None):
                    help="orchestrator model, pinned in the home's settings (default: sonnet; 'default' = your own)")
     s.add_argument("--name", default="lean-agent", help="session name in the Claude app")
     s.add_argument("--budget", type=int, help="orchestrator session budget, weighted tokens")
-    s.add_argument("--daily-budget", type=int, help="daily budget for all worker runs, weighted tokens")
+    s.add_argument("--budget-5h", type=int, help="lean-agent budget per 5-hour window (Sonnet-equivalent tokens)")
+    s.add_argument("--budget-week", type=int, help="lean-agent budget per 7 days (Sonnet-equivalent tokens)")
     s.add_argument("--permission-mode", help="e.g. acceptEdits, auto")
     s.add_argument("--local", action="store_true", help="interactive terminal session instead of Remote Control")
     s.set_defaults(fn=cmd_up)
@@ -1221,6 +1254,12 @@ def main(argv=None):
     s.add_argument("--name", help="add: short name")
     s.add_argument("--from", dest="source", metavar="DIR", help="import: folder to import (default: Claude's)")
     s.set_defaults(fn=cmd_memory)
+
+    s = sub.add_parser("limits", help="usage in the 5-hour and weekly windows; set budgets for them")
+    s.add_argument("--5h", dest="five_h", type=int, metavar="N", help="budget per rolling 5 hours (0 = none)")
+    s.add_argument("--week", type=int, metavar="N", help="budget per rolling 7 days (0 = none)")
+    s.add_argument("--off", action="store_true", help="remove both budgets")
+    s.set_defaults(fn=cmd_limits)
 
     s = sub.add_parser("stats", help="runs, success rate and tokens by model")
     s.add_argument("--project", "-p")

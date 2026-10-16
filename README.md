@@ -85,7 +85,7 @@ Other ways to run the orchestrator:
 - Claude Desktop: open the folder `~/.lean-agent/home` in the Code tab (`lean-agent home` prints the path)
 
 `up` options: `--model` (default `sonnet`, `default` = your own default model), `--name`, `--budget` (orchestrator session, weighted tokens),
-`--daily-budget` (all workers per day), `--permission-mode`.
+`--budget-5h` / `--budget-week` (see Budgets), `--permission-mode`.
 
 ### Commands the orchestrator uses (you can too)
 
@@ -192,13 +192,40 @@ You can also switch the model of a running session in the app.
 
 ## Budgets
 
-All budgets are in **weighted tokens**, input-token equivalents using the usual API price ratios:
+### Plan windows (Claude Pro / Max)
+
+Subscription plans limit usage per rolling **5-hour window** and per **week**, and budget in those same windows:
+
+```sh
+lean-agent limits                          # usage in both windows, lean-agent vs all Claude Code on this machine
+lean-agent limits --5h 2000000 --week 15000000
+lean-agent limits --off
+```
+
+- **What's counted:** usage comes from Claude Code's session logs on this machine, read incrementally and
+  timestamped. That includes the orchestrator, every worker and their subagents.
+- **Model-aware units:** **Sonnet-equivalent tokens**, which are weighted tokens scaled by the model's price
+  relative to Sonnet 5.5. Haiku 5.5 counts 0.05×, Opus 5.5 2× and Fable 5.1 5×. Anthropic doesn't publish exactly
+  how each model counts against plan limits, so price ratios are the proxy.
+- **What the budgets limit:** budgets apply to lean-agent's own sessions. `limits` also shows all Claude Code
+  usage on this machine, so you can compare it with `/usage`. Claude.ai chats and other machines are not visible.
+- **Enforcement:** when a window's budget is used up, `run` refuses new workers and says when the window starts
+  freeing up. The orchestrator's hook blocks its own tool calls the same way, but `lean-agent limits` and `stats`
+  stay allowed so you can raise the budget from your phone. Your normal sessions are never blocked.
+- **Calibrating:** work normally for a while, compare `limits` with `/usage`, then set the share of your plan you
+  want agents to use. Windows here are rolling, which is slightly stricter than a window that resets 5 hours after
+  your first message.
+- Budgets are saved in `~/.lean-agent/limits.json`. The env vars `LEAN_AGENT_5H_BUDGET` and
+  `LEAN_AGENT_WEEKLY_BUDGET` override them.
+
+### Other limits
+
+The session budget is in **weighted tokens**, input-token equivalents using the usual API price ratios:
 `input + 1.25×cache_write + 0.1×cache_read + 5×output`.
 
 | Variable | Default | |
 |---|---|---|
 | `LEAN_AGENT_BUDGET` | `up`: 1,000,000 | Orchestrator session budget, enforced by a PreToolUse hook (warns at `LEAN_AGENT_WARN_PCT`, default 80%, then blocks tool calls). |
-| `LEAN_AGENT_DAILY_BUDGET` | off | `run` refuses new workers once today's ledger total reaches it. |
 | `LEAN_AGENT_RUN_MAX_USD` | `3.0` | Default `--max-usd` per worker (`claude --max-budget-usd`). |
 | `LEAN_AGENT_MAX_TURNS` | `40` | Default `--max-turns` per worker. |
 | `LEAN_AGENT_WORKER_PERMISSION_MODE` | `acceptEdits` | Worker permission mode. |
