@@ -254,11 +254,12 @@ Installing the plugin also gives any Claude Code session (not just the orchestra
 
 ## Troubleshooting Remote Control
 
-Errors such as `CCR v2 worker registration failed ... 404` come from `claude remote-control` itself, not from
-lean-agent. A 404 means Anthropic's servers no longer know that session (e.g. it was archived, or it belongs to an
-earlier server run). Archive that session in the app and start a new one. If it keeps happening: `claude update`,
-then `claude auth logout && claude auth login`, then `lean-agent up -- --debug --debug-file /tmp/rc.log` and look at
-the log. See also the [Remote Control troubleshooting docs](https://code.claude.com/docs/en/remote-control#troubleshooting).
+`CCR v2 worker registration failed ... 404` on every start: when you stop `claude remote-control`, it keeps a
+pointer so the next start can bring back the same session. If that session was archived or expired in the meantime,
+the server answers "Session not found" and the worker registration fails, again on every start. Run
+`lean-agent up --fresh` once to drop the pointer and start a new session. The server itself keeps working either way.
+For other errors: `claude update`, then `claude auth logout && claude auth login`, then
+`lean-agent up -- --debug --debug-file /tmp/rc.log` and look at the log. See also the [Remote Control troubleshooting docs](https://code.claude.com/docs/en/remote-control#troubleshooting).
 
 ## Caveats
 
