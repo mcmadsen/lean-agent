@@ -646,6 +646,37 @@ class CliTest(unittest.TestCase):
         self.cli("home")
         self.assertEqual(open(os.path.join(h, "CLAUDE.md")).read(), "my own orchestrator notes\n")
 
+    def test_orchestrator_home_settings_trim_context(self):
+        with open(os.path.join(self.env["CLAUDE_CONFIG_DIR"], "settings.json"), "w") as fh:
+            json.dump({"enabledPlugins": {"figma@market": True, "lean-agent@lean-agent": True}}, fh)
+        h = self.cli("home").stdout.strip()
+        with open(os.path.join(h, ".claude", "settings.json")) as fh:
+            d = json.load(fh)
+        deny = d["permissions"]["deny"]
+        for tool in ("Agent", "Task", "Workflow", "Edit", "Write", "WebFetch", "mcp__tickets"):
+            self.assertIn(tool, deny)
+        for tool in ("Bash", "Read"):
+            self.assertNotIn(tool, deny)
+        self.assertIn("Bash(lean-agent:*)", d["permissions"]["allow"])
+        self.assertTrue(d["disableBundledSkills"] and d["disableClaudeAiConnectors"])
+        self.assertEqual(d["enabledPlugins"], {"figma@market": False})
+        self.assertIn(os.path.join(self.env["CLAUDE_CONFIG_DIR"], "CLAUDE.md"), d["claudeMdExcludes"])
+        self.assertIn(os.path.join(self.tmp.name, "CLAUDE.md"), d["claudeMdExcludes"])  # ~/CLAUDE.md
+        with open(os.path.join(h, ".claude", "settings.local.json")) as fh:
+            self.assertFalse(json.load(fh)["syncClaudeAiSkills"])
+        self.cli("up", "--model", "sonnet", "--local", check=False)
+        with open(os.path.join(h, ".claude", "settings.json")) as fh:
+            d = json.load(fh)
+        self.assertEqual(d["model"], "sonnet")  # other keys survive
+        self.assertIn("Workflow", d["permissions"]["deny"])
+        self.cli("home", LEAN_AGENT_ORCHESTRATOR_TRIM="0")
+        with open(os.path.join(h, ".claude", "settings.json")) as fh:
+            d = json.load(fh)
+        self.assertIn("Bash(lean-agent:*)", d["permissions"]["allow"])
+        self.assertNotIn("deny", d["permissions"])
+        self.assertNotIn("disableBundledSkills", d)
+        self.assertEqual(d["model"], "sonnet")
+
     def test_home_template(self):
         h = self.cli("home").stdout.strip()
         with open(os.path.join(h, "CLAUDE.md")) as fh:

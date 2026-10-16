@@ -131,6 +131,23 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   that get used, or dropping it.
 - Not covered: claude.ai connectors (they aren't in a local config file). Remote OAuth servers are untested.
 
+## A lean orchestrator
+
+The orchestrator's own fixed context is paid on every turn, so lean-agent writes `~/.lean-agent/home/.claude/settings.json`
+to cut it. It:
+- denies every tool except Bash, Read and the background-task tools. The built-in Agent and Workflow tools are gone,
+  so "delegate with `lean-agent run`" is enforced, not just requested.
+- disables bundled skills, synced claude.ai skills (`settings.local.json`) and claude.ai connectors
+- disables your other plugins and your user-level MCP servers in this folder only
+- excludes outside CLAUDE.md files (`~/.claude/CLAUDE.md`, `~/CLAUDE.md` and other parent folders), which also
+  removes conflicting subagent or workflow guidance. Bring personal preferences in as lean-agent memories instead
+  (`lean-agent memory import`, or `memory add --type user`).
+
+Measured with a typical setup (many skills, a plugin, 39 tools): **~35,700 → ~6,600 tokens of fixed context per
+orchestrator turn**, plus ~2,000 for the guide. Other keys in that file, such as `model`, are kept.
+`LEAN_AGENT_ORCHESTRATOR_TRIM=0 lean-agent home` removes the trimming. This applies only to the orchestrator
+home; your normal sessions in a repo are untouched.
+
 ## Rules in every repo, and `doctor`
 
 The orchestrator's instructions come from one generated guide, `lean-agent guide`. It holds the hard rules, the
