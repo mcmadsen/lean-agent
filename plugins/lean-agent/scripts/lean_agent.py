@@ -1282,6 +1282,7 @@ def cmd_trust(a):
     print(f"Opening Claude Code in {h}.")
     print("Accept the trust dialog, then type /exit. (Or rerun with --write-config to set it without the dialog.)")
     os.chdir(h)
+    sys.stdout.flush()
     return subprocess.run(["claude"]).returncode
 
 
@@ -1332,6 +1333,8 @@ def cmd_up(a):
     extra = a.extra[1:] if a.extra[:1] == ["--"] else a.extra
     cmd += extra  # e.g. `lean-agent up -- --debug --debug-file /tmp/rc.log`
     os.chdir(h)
+    sys.stdout.flush()  # exec replaces the process; unflushed output would be lost when piped
+    sys.stderr.flush()
     try:
         os.execvpe(cmd[0], cmd, env)
     except FileNotFoundError:
