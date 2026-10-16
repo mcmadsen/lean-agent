@@ -424,6 +424,17 @@ class CliTest(unittest.TestCase):
         self.cli("up", "--model", "default", "--local", check=False)
         with open(os.path.join(home, ".claude", "settings.json")) as fh:
             self.assertNotIn("model", json.load(fh))
+        fake_log = os.path.join(self.tmp.name, "up-argv.txt")
+        with open(self.env["LEAN_AGENT_CLAUDE"]) as fh:
+            body = fh.read()
+        argv_dumper = os.path.join(self.tmp.name, "claude-argv")
+        with open(argv_dumper, "w") as fh:
+            fh.write(f"#!{sys.executable}\nimport sys\nopen({fake_log!r}, 'w').write(' '.join(sys.argv[1:]))\n")
+        os.chmod(argv_dumper, 0o755)
+        self.cli("up", "--name", "la", "--", "--debug", "--debug-file", "/tmp/rc.log",
+                 check=False, LEAN_AGENT_CLAUDE=argv_dumper)
+        with open(fake_log) as fh:
+            self.assertEqual(fh.read(), "--model sonnet remote-control --name la --debug --debug-file /tmp/rc.log")
 
     def test_home_template(self):
         h = self.cli("home").stdout.strip()
