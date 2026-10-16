@@ -529,6 +529,123 @@ class CliTest(unittest.TestCase):
         self.cli("home")
         self.assertNotIn("teams", self.cli("memory", "list").stdout)  # deleted recipes stay deleted
 
+    def lean_path(self):
+        bindir = os.path.join(self.tmp.name, "bin")
+        os.makedirs(bindir, exist_ok=True)
+        link = os.path.join(bindir, "lean-agent")
+        if not os.path.exists(link):
+            os.symlink(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "lean-agent"), link)
+        return bindir + os.pathsep + os.environ.get("PATH", "")
+
+    def sh_blocks(self, text):
+        import re as _re
+        return _re.findall(r"```sh\n(.*?)```", text, _re.S)
+
+    def test_every_guide_and_block_example_runs_verbatim(self):
+        shop = os.path.join(self.tmp.name, "shop")
+        os.makedirs(os.path.join(shop, "tests"))
+        with open(os.path.join(shop, "CLAUDE.md"), "w") as fh:
+            fh.write("# Shop\nA shop.\n\n## Testing\nRun pytest -q. Checkout tests live in tests/test_checkout.py.\n")
+        self.cli("learn", shop, "--name", "shop")
+        env = dict(self.env, PATH=self.lean_path())
+        guide = self.cli("guide", "shop").stdout
+        block = read = open(os.path.join(shop, "CLAUDE.local.md")).read()
+        blocks = self.sh_blocks(guide) + self.sh_blocks(block)
+        self.assertGreaterEqual(len(blocks), 4)
+        for code in blocks:
+            p = subprocess.run(["bash", "-e", "-c", code], capture_output=True, text=True, env=env,
+                               cwd=self.tmp.name, stdin=subprocess.DEVNULL)
+            self.assertEqual(p.returncode, 0, f"example failed:\n{code}\n--- stdout\n{p.stdout}\n--- stderr\n{p.stderr}")
+        self.assertIn("lean-agent run [--project PROJECT]", guide)  # generated reference
+        self.assertNotIn("{{", guide + block)
+
+    def test_repo_block_is_idempotent_and_keeps_hand_written_text(self):
+        subprocess.run(["git", "init", "-q", self.proj], check=True)
+        local = os.path.join(self.proj, "CLAUDE.local.md")
+        with open(local, "w") as fh:
+            fh.write("# My notes\nMy sandbox runs on port 5544.\n")
+        self.cli("learn", self.proj, "--name", "proj")
+        first = open(local).read()
+        self.assertIn("My sandbox runs on port 5544.", first)
+        self.assertEqual(first.count("<!-- lean-agent:begin"), 1)
+        self.assertIn("Never use the built-in Agent (Task) tool", first)
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("rules", "proj")
+        self.assertEqual(open(local).read(), first)  # idempotent
+        with open(os.path.join(self.proj, ".git", "info", "exclude")) as fh:
+            self.assertIn("/CLAUDE.local.md", fh.read())
+        self.assertNotIn("how-to-work", self.cli("cards", "proj").stdout)  # the block isn't indexed as a card
+        self.cli("rules", "proj", "--off")
+        self.assertEqual(open(local).read().strip(), "# My notes\nMy sandbox runs on port 5544.")
+        self.cli("learn", self.proj, "--name", "proj")  # stays off until `rules proj`
+        self.assertNotIn("lean-agent:begin", open(local).read())
+
+    def test_repo_block_uses_rules_dir_when_repo_relies_on_agents_md(self):
+        other = os.path.join(self.tmp.name, "agents-repo")
+        os.makedirs(other)
+        with open(os.path.join(other, "AGENTS.md"), "w") as fh:
+            fh.write("## Build\nRun make; always run make test before pushing changes.\n")
+        self.cli("learn", other, "--name", "ag")
+        self.assertFalse(os.path.exists(os.path.join(other, "CLAUDE.local.md")))
+        self.assertIn("lean-agent:begin", open(os.path.join(other, ".claude", "rules", "lean-agent.md")).read())
+
+    def test_doctor_green_then_red_then_fixed(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("trust", "--write-config")
+        env = {"PATH": self.lean_path()}
+        out = self.cli("doctor", self.proj, **env).stdout
+        self.assertIn("doctor: all good", out)
+        self.assertIn("lean-agent rules load here", out)
+        # red: block missing
+        local = os.path.join(self.proj, "CLAUDE.local.md")
+        os.remove(local)
+        p = self.cli("doctor", self.proj, check=False, **env)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("✗ lean-agent rules load here", p.stdout)
+        # red: a global file contradicts
+        with open(os.path.join(self.tmp.name, "CLAUDE.md"), "w") as fh:  # ~/CLAUDE.md (HOME is an ancestor)
+            fh.write("# Me\nSpawn up to 4 subagents and use Workflow for big jobs.\n")
+        p = self.cli("doctor", self.proj, check=False, **env)
+        self.assertIn("contradicts lean-agent", p.stdout)
+        out = self.cli("doctor", self.proj, "--fix", **env).stdout
+        self.assertIn("added a note that lean-agent rules take precedence", out)
+        self.assertIn("doctor: all good", self.cli("doctor", self.proj, **env).stdout)
+        self.assertIn("lean-agent:precedence", open(os.path.join(self.tmp.name, "CLAUDE.md")).read())
+
+    def test_memory_and_card_edits_persist(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("memory", "add", "Prefer small PRs.", "--type", "feedback", "--name", "feedback_small-prs")
+        listing = self.cli("memory", "list").stdout
+        self.assertIn("mem-feedback-small-prs ", listing)  # no feedback_feedback_ prefix
+        self.cli("card", "core", "proj", "mem-feedback-small-prs")
+        self.cli("card", "add", "proj", "mem-feedback-small-prs", "--text", "Prefer small, focused PRs.")
+        self.cli("memory", "add", "Unrelated new memory to force a re-sync.", "--type", "project")
+        cards = self.cli("cards", "proj", "small").stdout
+        self.assertIn("*mem-feedback-small-prs", cards)  # still core
+        self.assertIn("Prefer small, focused PRs.", self.cli("card", "show", "proj", "mem-feedback-small-prs").stdout)
+        self.cli("memory", "edit", "small-prs", "Prefer small PRs; split refactors out.")
+        self.assertIn("split refactors", self.cli("card", "show", "proj", "mem-feedback-small-prs").stdout)
+        # hand edits to learned cards survive re-learning
+        self.cli("card", "add", "proj", "testing", "--text", "Run pytest -q in api/.")
+        with open(os.path.join(self.proj, "CLAUDE.md"), "a") as fh:
+            fh.write("\n## Later\nA later section with enough words to be its own card here.\n")
+        out = self.cli("learn", self.proj, "--name", "proj").stdout
+        self.assertEqual(self.cli("card", "show", "proj", "testing").stdout.strip().splitlines()[-1], "Run pytest -q in api/.")
+        # --cards none
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--cards", "none", "t")
+
+    def test_home_guide_replaces_old_template_but_not_hand_written(self):
+        h = os.path.join(self.env["LEAN_AGENT_HOME"], "home")
+        os.makedirs(h)
+        with open(os.path.join(h, "CLAUDE.md"), "w") as fh:
+            fh.write("<!-- lean-agent orchestrator template v5 (edit freely) -->\nold\n")
+        self.cli("home")
+        self.assertTrue(open(os.path.join(h, "CLAUDE.md")).read().startswith("<!-- lean-agent guide "))
+        with open(os.path.join(h, "CLAUDE.md"), "w") as fh:
+            fh.write("my own orchestrator notes\n")
+        self.cli("home")
+        self.assertEqual(open(os.path.join(h, "CLAUDE.md")).read(), "my own orchestrator notes\n")
+
     def test_home_template(self):
         h = self.cli("home").stdout.strip()
         with open(os.path.join(h, "CLAUDE.md")) as fh:

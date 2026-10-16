@@ -131,6 +131,35 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   that get used, or dropping it.
 - Not covered: claude.ai connectors (they aren't in a local config file). Remote OAuth servers are untested.
 
+## Rules in every repo, and `doctor`
+
+The orchestrator's instructions come from one generated guide, `lean-agent guide`. It holds the hard rules, the
+precedence rule, worked examples and a CLI reference generated from the CLI itself, and the test suite executes
+every example in it, so it can't drift from the CLI. The orchestrator home's `CLAUDE.md` is that guide.
+
+Sessions often start inside a project repo instead of the home, so `learn` also writes a compact, marked
+**lean-agent block** into the repo's `CLAUDE.local.md`:
+
+- **Personal:** `CLAUDE.local.md` is Claude Code's file for personal, uncommitted project instructions, and lean-agent
+  adds it to `.git/info/exclude`.
+- **AGENTS.md repos:** if the repo relies on `AGENTS.md`, the block goes into `.claude/rules/lean-agent.md`
+  instead, because a `CLAUDE.local.md` would stop Claude reading `AGENTS.md`.
+- **What it says:** delegate with `lean-agent run`, never the built-in Agent or Workflow tools for project work,
+  at most 4 workers at a time, and these rules take precedence over `~/CLAUDE.md`.
+- **Updating:** re-running replaces only the text between the markers, so your own notes in the file stay. `install`,
+  `up` and `learn` refresh it. `lean-agent rules <project> [--off]` turns it on or off.
+
+`lean-agent doctor [path]` checks:
+- that the CLI is on PATH
+- the guide and trust in the orchestrator home
+- that the folder belongs to a learned project
+- which instruction files load there, and whether the lean-agent rules are among them
+- whether a file outside the repo (like `~/CLAUDE.md`) contradicts them
+- the AGENTS.md trap
+
+It exits 1 on problems. `doctor --fix` refreshes the guide and block, and adds a one-line marked precedence note to
+contradicting files outside the repo. It never edits files tracked in your repo.
+
 ## Browser tasks (Claude in Chrome)
 
 Workers can use your real, signed-in Chrome through the
