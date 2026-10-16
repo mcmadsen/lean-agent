@@ -80,7 +80,7 @@ Other ways to run the orchestrator:
 | Command | |
 |---|---|
 | `lean-agent projects` / `learn <path> [--name n]` | Register a project, or refresh its cards after CLAUDE.md changes. Card stats survive. |
-| `lean-agent cards <project>` | Cards with size and hit rate (`used/sent`). `*` = core. |
+| `lean-agent cards <project> [filter]` | Cards with size and hit rate (`used/sent`). `*` = core. Filter by id, title or path, e.g. `cards shop infra`. |
 | `lean-agent suggest <project> "<task>"` | Core cards plus best matches by keyword overlap × past usefulness, within a token cap. |
 | `lean-agent run -p <project> -m <model> --why "..." [--cards a,b \| auto] [--read-only] [--max-usd X] [--max-turns N] "<task>"` | Run an isolated worker. Model and reason are **required**. |
 | `lean-agent run --resume <run-id> "<follow-up>"` | Continue a worker's session (cheap: its context is cached). |
@@ -90,8 +90,10 @@ Other ways to run the orchestrator:
 
 ## How learning works
 
-1. `learn` splits each `CLAUDE.md` (root, `.claude/`, nested up to 3 levels), `.claude/rules/*.md` and each
-   `.claude/skills/*/SKILL.md` into **cards** at `#`/`##` headings.
+1. `learn` splits each `CLAUDE.md` (root, any `dir/.claude/CLAUDE.md`, nested up to 5 levels), `.claude/rules/*.md`
+   and each `.claude/skills/*/SKILL.md` into **cards** at `#`/`##` headings. Card ids are prefixed with the folder
+   (`mobile-app-rules`, `admin-portal-app-rules`). Git worktrees (including Claude's `.claude/worktrees/`) and
+   submodules are skipped, so agent checkouts don't duplicate cards.
 2. Every worker ends with a `LEAN-FEEDBACK {...}` line: status, cards `used`, cards `unneeded`, and context
    that was `missing`. lean-agent strips that line and records it.
 3. `optimize` uses the counts: ≥80% used → **core** (sent automatically), core <40% → demoted, ≤20% used and

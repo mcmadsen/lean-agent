@@ -75,6 +75,33 @@ class CliTest(unittest.TestCase):
         for cid in ("testing", "style", "web-frontend-build", "skill-deploy"):
             self.assertIn(cid, cards)
 
+    def test_learn_monorepo_layout(self):
+        def write(rel, text):
+            path = os.path.join(self.proj, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write(text)
+        body = "Some real guidance that is long enough to stand on its own as a card.\n"
+        # Claude's own agent worktrees and submodules must be ignored.
+        write(".claude/worktrees/agent-abc/CLAUDE.md", "## Testing\n" + body)
+        write(".claude/worktrees/agent-abc/.git", "gitdir: elsewhere\n")
+        write("vendored/.git", "gitdir: elsewhere\n")
+        write("vendored/CLAUDE.md", "## Vendored\n" + body)
+        write("services/.claude/CLAUDE.md", "# Platform\n" + body + "\n## Rules\n" + body)
+        write("services/ios-app/.claude/CLAUDE.md", "## Rules\n" + body)
+        write("services/admin-portal/App/CLAUDE.md", "## Rules\n" + body)
+        write("services/billing-portal/App/CLAUDE.md", "## Rules\n" + body)
+        write("qa/CLAUDE.md", "# QA Suite\n\n## Quick Start\n" + body)
+        self.cli("learn", self.proj, "--name", "mono")
+        out = self.cli("cards", "mono").stdout
+        self.assertNotIn("worktrees", out)
+        self.assertNotIn("vendored", out)
+        for cid in ("services-platform", "services-rules", "ios-app-rules",
+                    "admin-portal-app-rules", "billing-portal-app-rules", "qa-quick-start"):
+            self.assertRegex(out, rf"\n {cid}\s")
+        self.assertNotIn("qa-suite", out)  # bare H1 stub merged into the next section
+        self.assertIn("2 cards", self.cli("cards", "mono", "/app").stdout)
+
     def test_suggest_matches_task(self):
         self.cli("learn", self.proj)
         out = self.cli("suggest", "proj", "fix the failing pytest database fixture").stdout
