@@ -1,0 +1,20 @@
+name: tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python tests/test_hooks.py
+      - run: python tests/test_orchestrator.py
+      - run: sh -n bin/lean-agent && sh -n plugins/lean-agent/bin/lean-agent && sh -n plugins/lean-agent/bin/lean-budget

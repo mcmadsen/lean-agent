@@ -752,8 +752,51 @@ def prepare_home():
     return h
 
 
+def claude_global_config():
+    base = os.environ.get("CLAUDE_CONFIG_DIR")
+    return os.path.join(base, ".claude.json") if base else os.path.expanduser("~/.claude.json")
+
+
+def is_trusted(folder):
+    projs = load_json(claude_global_config(), {}).get("projects") or {}
+    return any((projs.get(p) or {}).get("hasTrustDialogAccepted")
+               for p in {folder, os.path.realpath(folder)})
+
+
+TRUST_HINT = ("the orchestrator home is not trusted yet, so Claude Code ignores its permission rules and every "
+              "`lean-agent` command will ask for approval. Fix once with: lean-agent trust")
+
+
+def cmd_trust(a):
+    h = prepare_home()
+    if is_trusted(h):
+        print(f"{h} is already trusted.")
+        return 0
+    if a.write_config:
+        cfg = claude_global_config()
+        if not os.path.exists(cfg):
+            die(f"{cfg} not found; run `claude` once first")
+        data = load_json(cfg, None)
+        if data is None:
+            die(f"could not parse {cfg}; not touching it")
+        backup = cfg + ".lean-agent.bak"
+        with open(cfg) as src, open(backup, "w") as dst:
+            dst.write(src.read())
+        data.setdefault("projects", {}).setdefault(h, {})["hasTrustDialogAccepted"] = True
+        save_json(cfg, data)
+        print(f"Marked {h} as trusted in {cfg} (backup: {backup}).")
+        print("Do this while no Claude Code session is starting up, since Claude Code also writes that file.")
+        return 0
+    print(f"Opening Claude Code in {h}.")
+    print("Accept the trust dialog, then type /exit. (Or rerun with --write-config to set it without the dialog.)")
+    os.chdir(h)
+    return subprocess.run(["claude"]).returncode
+
+
 def cmd_up(a):
     h = prepare_home()
+    if not is_trusted(h):
+        print(f"lean-agent: warning: {TRUST_HINT}", file=sys.stderr)
     env = dict(os.environ)
     for k, v in ORCHESTRATOR_ENV.items():
         env.setdefault(k, v)
@@ -787,6 +830,8 @@ def cmd_install(a):
     r = subprocess.run(["claude", "plugin", "install", PLUGIN])
     h = prepare_home()
     print(f"Orchestrator home: {h}")
+    if not is_trusted(h):
+        print(f"Next: {TRUST_HINT}")
     sys.exit(r.returncode)
 
 
@@ -823,6 +868,10 @@ def main(argv=None):
 
     s = sub.add_parser("install", help="install the plugin and create the orchestrator home")
     s.set_defaults(fn=cmd_install)
+    s = sub.add_parser("trust", help="trust the orchestrator home so its permission rules apply")
+    s.add_argument("--write-config", action="store_true",
+                   help="set hasTrustDialogAccepted in ~/.claude.json instead of opening Claude")
+    s.set_defaults(fn=cmd_trust)
     s = sub.add_parser("home", help="create (if needed) and print the orchestrator home folder")
     s.set_defaults(fn=cmd_home)
     s = sub.add_parser("env", help="print orchestrator env defaults")

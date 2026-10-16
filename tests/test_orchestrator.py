@@ -204,6 +204,21 @@ class CliTest(unittest.TestCase):
         self.assertIn("stopped:max_budget_usd", p.stdout)
         self.assertEqual(p.returncode, 1)
 
+    def test_trust_write_config(self):
+        cfg_dir = os.path.join(self.tmp.name, "cfg")
+        os.makedirs(cfg_dir)
+        with open(os.path.join(cfg_dir, ".claude.json"), "w") as fh:
+            json.dump({"projects": {"/other": {"hasTrustDialogAccepted": True}}, "keep": 1}, fh)
+        out = self.cli("trust", "--write-config", CLAUDE_CONFIG_DIR=cfg_dir).stdout
+        self.assertIn("Marked", out)
+        with open(os.path.join(cfg_dir, ".claude.json")) as fh:
+            data = json.load(fh)
+        home = self.cli("home").stdout.strip()
+        self.assertTrue(data["projects"][home]["hasTrustDialogAccepted"])
+        self.assertEqual(data["keep"], 1)
+        self.assertTrue(data["projects"]["/other"]["hasTrustDialogAccepted"])
+        self.assertIn("already trusted", self.cli("trust", CLAUDE_CONFIG_DIR=cfg_dir).stdout)
+
     def test_home_template(self):
         h = self.cli("home").stdout.strip()
         with open(os.path.join(h, "CLAUDE.md")) as fh:
