@@ -179,27 +179,65 @@ def split_sections(text):
             buf.append(line)
     if "\n".join(buf).strip():
         sections.append([head, "\n".join(buf).strip()])
-    merged = []
+    def content_len(body):
+        lines = body.split("\n", 1)
+        rest = lines[1] if body.startswith("#") and len(lines) > 1 else ("" if body.startswith("#") else body)
+        return len(rest.strip())
+
+    merged, carry = [], None
     for h, body in sections:
-        content = body.split("\n", 1)[1] if body.startswith("#") and "\n" in body else ("" if body.startswith("#") else body)
-        if merged and len(content.strip()) < 40:  # a heading with (almost) nothing under it
-            merged[-1][1] += "\n\n" + body
+        if content_len(body) == 0:  # heading with nothing under it, e.g. a bare "# Title"
+            carry = body if carry is None else carry + "\n\n" + body
+            continue
+        if carry:
+            body, carry = carry + "\n\n" + body, None
+        merged.append([h, body])
+    if carry:
+        if merged:
+            merged[-1][1] += "\n\n" + carry
         else:
-            merged.append([h, body])
+            merged.append([sections[0][0], carry])
     return merged
 
 
-def find_memory_files(root, max_depth=3):
+def find_memory_files(root, max_depth=5):
+    """CLAUDE.md files (incl. dir/.claude/CLAUDE.md) and .claude/rules, skipping worktrees and submodules."""
     found = []
     for dirpath, dirnames, filenames in os.walk(root):
-        depth = os.path.relpath(dirpath, root).count(os.sep) + (dirpath != root)
-        dirnames[:] = [] if depth >= max_depth else sorted(
-            d for d in dirnames if d not in SKIP_DIRS and (not d.startswith(".") or d == ".claude"))
+        rel = os.path.relpath(dirpath, root)
+        depth = 0 if rel == "." else rel.count(os.sep) + 1
         if "CLAUDE.md" in filenames:
             found.append(("claude-md", os.path.join(dirpath, "CLAUDE.md")))
+        if os.path.basename(dirpath) == ".claude":
+            dirnames[:] = []  # never descend into .claude/ (worktrees, skills, settings)
+            continue
+        keep = []
+        for d in sorted(dirnames):
+            if d in SKIP_DIRS or (d.startswith(".") and d != ".claude") or depth >= max_depth:
+                continue
+            if os.path.isfile(os.path.join(dirpath, d, ".git")):
+                continue  # git worktree or submodule: a separate checkout
+            keep.append(d)
+        dirnames[:] = keep
     for path in sorted(glob.glob(os.path.join(root, ".claude", "rules", "**", "*.md"), recursive=True)):
         found.append(("rule", path))
     return found
+
+
+GENERIC_DIRS = {"app", "apps", "src", "web", "api", "lib", "libs", "client", "server", "frontend",
+                "backend", "packages", "core", "main", "docs", "test", "tests"}
+
+
+def scope_of(rel_dir):
+    """(title scope, id scope) for where a CLAUDE.md lives, ignoring '.claude' path parts.
+
+    The id uses the folder name, plus its parent when the name is generic (App, src, ...)."""
+    parts = [p for p in rel_dir.split(os.sep) if p and p not in (".", ".claude")]
+    if not parts:
+        return "", ""
+    last = parts[-1]
+    id_parts = parts[-2:] if slugify(last) in GENERIC_DIRS and len(parts) > 1 else [last]
+    return "/".join(parts[-2:]), slugify("-".join(id_parts), 28)
 
 
 def parse_skill(path):
@@ -242,11 +280,16 @@ def learn(path, include_user_skills=False, quiet=False, name=None):
 
     for kind, f in find_memory_files(path):
         rel = os.path.relpath(f, path)
-        prefix = "" if rel in ("CLAUDE.md", os.path.join(".claude", "CLAUDE.md")) else os.path.dirname(rel).replace(".claude/rules", "rule").strip("/") + ": "
         if kind == "rule":
-            prefix = "rule " + os.path.splitext(os.path.basename(f))[0] + ": "
+            scope = "rule " + os.path.splitext(os.path.basename(f))[0]
+            ss = slugify(scope, 28)
+        else:
+            scope, ss = scope_of(os.path.dirname(rel))
         for head, body in split_sections(read_text(f)):
-            add(kind, (prefix + head).strip(), rel, body)
+            title = f"{scope}: {head}" if scope else head
+            hs = slugify(head, 28)
+            base = hs if not ss or hs.startswith(ss) else f"{ss}-{hs}"
+            add(kind, title, rel, body, base=base)
 
     skill_dirs = [os.path.join(path, ".claude", "skills")]
     if include_user_skills:
@@ -305,14 +348,20 @@ def cmd_projects(a):
 
 def cmd_cards(a):
     slug, _ = resolve_project(a.project)
-    cards = load_cards(slug)
-    print(f"{'id':<34}{'kind':<10}{'~tok':>6}  {'used':>6}  title")
+    cards = [c for c in load_cards(slug) if a.all or not c.get("archived")]
+    if a.filter:
+        f = a.filter.lower()
+        cards = [c for c in cards if f in c["id"] or f in c["title"].lower() or f in c["source"].lower()]
+    if not cards:
+        print("No cards match.")
+        return
+    w = max(len(c["id"]) for c in cards) + 2
+    print(f" {'id':<{w}}{'kind':<10}{'~tok':>6}  {'used':>6}  title")
     for c in cards:
-        if c.get("archived") and not a.all:
-            continue
         flag = "*" if c.get("core") else ("x" if c.get("archived") else " ")
-        print(f"{flag}{c['id'][:33]:<33}{c['kind']:<10}{c['tokens']:>6}  {card_rate(c):>6}  {c['title'][:60]}")
-    print("* = core (always sent)   used = times a worker used it / times it was sent")
+        print(f"{flag}{c['id']:<{w}}{c['kind']:<10}{c['tokens']:>6}  {card_rate(c):>6}  {c['title'][:70]}")
+    print(f"{len(cards)} cards, ~{sum(c['tokens'] for c in cards):,} tokens.  * = core (always sent)   "
+          "used = times a worker used it / times it was sent")
 
 
 def find_card(cards, cid):
@@ -742,6 +791,7 @@ def main(argv=None):
     s.set_defaults(fn=cmd_projects)
     s = sub.add_parser("cards", help="list a project's context cards")
     s.add_argument("project")
+    s.add_argument("filter", nargs="?", help="only cards whose id, title or source contains this")
     s.add_argument("--all", action="store_true", help="include archived cards")
     s.set_defaults(fn=cmd_cards)
     s = sub.add_parser("card", help="show/add/rm/core one card")
