@@ -145,7 +145,8 @@ class CliTest(unittest.TestCase):
     def test_suggest_matches_task(self):
         self.cli("learn", self.proj)
         out = self.cli("suggest", "proj", "fix the failing pytest database fixture").stdout
-        self.assertIn("testing", out.splitlines()[0])
+        match_lines = [l for l in out.splitlines() if l.startswith("match")]
+        self.assertTrue(match_lines and "testing" in match_lines[0], out)
 
     def test_run_requires_model_and_why(self):
         self.cli("learn", self.proj)
@@ -203,17 +204,44 @@ class CliTest(unittest.TestCase):
             self.assertIn(f"git -C {self.proj}", call["append"])
         self.assertEqual(second["argv"][second["argv"].index("--resume") + 1], "sess-1")
 
-    def test_optimize_promotes_core(self):
+    def test_optimize_promotes_core_per_task_type(self):
         self.cli("learn", self.proj)
         fb = json.dumps({"status": "done", "used": ["testing"], "unneeded": ["style"], "missing": ""})
-        for _ in range(3):
-            self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--cards", "testing,style", "t",
+        for _ in range(4):
+            self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--cards", "testing,style", "fix bug",
                      FAKE_FEEDBACK=fb)
+        self.assertNotIn("core    testing", self.cli("optimize", "proj").stdout)  # 4 < 5 runs
+        self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--cards", "testing,style", "fix bug",
+                 FAKE_FEEDBACK=fb)
         out = self.cli("optimize", "proj", "--apply").stdout
         self.assertIn("core    testing", out)
+        self.assertIn("for change tasks", out)
         self.assertIn("archive style", out)
-        self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "t2", FAKE_FEEDBACK=fb)
-        self.assertIn("sqlite fixture", self.calls()[-1]["append"])  # core card sent without --cards
+        self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "implement the next step", FAKE_FEEDBACK=fb)
+        self.assertIn("sqlite fixture", self.calls()[-1]["append"])  # core for change tasks
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "which file has the fixture",
+                 FAKE_FEEDBACK=fb)
+        self.assertNotIn("sqlite fixture", self.calls()[-1]["append"])  # but not for read tasks
+
+    def test_suggest_relevance_cost_model_and_split(self):
+        self.cli("learn", self.proj)
+        big = "Detailed VS Code extension maintenance guide. " * 300
+        self.cli("card", "add", "proj", "vscode-extension", "--title", "skill vscode-extension", "--text",
+                 big + " Also mentions a reply message and the team.")
+        out = self.cli("suggest", "proj", "post a reply message in Teams to the team").stdout
+        self.assertIn("task type: browser", out)
+        self.assertNotIn("vscode-extension", out.split("No relevant")[0] if "No relevant" in out else out)
+        out = self.cli("suggest", "proj", "quantum entanglement of teapots").stdout
+        self.assertIn("No relevant cards", out)
+        self.assertIn("Run without --cards", out)
+        out = self.cli("suggest", "proj", "fix the failing pytest database fixture").stdout
+        self.assertIn("total ~", out)
+        self.assertIn("recommended: -m sonnet", out)
+        out = self.cli("suggest", "proj", "investigate the fixture setup and decide whether to replace it").stdout
+        self.assertIn("split: 1) -m haiku --read-only gathers", out)
+        for _ in range(3):
+            self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "fix the fixture")
+        self.assertIn("recommended: -m haiku", self.cli("suggest", "proj", "fix the fixture name").stdout)
 
     def test_parallel_runs_keep_all_stats(self):
         self.cli("learn", self.proj)
@@ -346,7 +374,7 @@ class CliTest(unittest.TestCase):
         for _ in range(3):
             self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tickets", "t",
                      FAKE_MCP_CALL="mcp__tickets__get_ticket")
-        out = self.cli("optimize", "proj").stdout
+        out = self.cli("optimize", "proj", "--min-runs", "3").stdout
         self.assertIn("--mcp tickets:get_ticket", out)
 
     def make_auto_memory(self):
