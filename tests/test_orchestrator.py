@@ -91,16 +91,21 @@ class CliTest(unittest.TestCase):
         write("services/ios-app/.claude/CLAUDE.md", "## Rules\n" + body)
         write("services/admin-portal/App/CLAUDE.md", "## Rules\n" + body)
         write("services/billing-portal/App/CLAUDE.md", "## Rules\n" + body)
-        write("qa/CLAUDE.md", "# QA Suite\n\n## Quick Start\n" + body)
+        write("qa/CLAUDE.md", "# QA Suite\n\n## Quick Start\n" + body + "\n## Architecture\n" + body)
+        write("qa/apps/login-app/qa/CLAUDE.md", "# CLAUDE.md\n" + body + "\n## Architecture\n" + body)
+        write("services/billing-portal/App/notes/CLAUDE.md",
+              "## Production has a strict Content-Security-Policy that blocks inline scripts\n" + body)
         self.cli("learn", self.proj, "--name", "mono")
         out = self.cli("cards", "mono").stdout
         self.assertNotIn("worktrees", out)
         self.assertNotIn("vendored", out)
-        for cid in ("services-platform", "services-rules", "ios-app-rules",
-                    "admin-portal-app-rules", "billing-portal-app-rules", "qa-quick-start"):
+        for cid in ("services", "services-rules", "ios-app-rules", "admin-portal-app-rules",
+                    "billing-portal-app-rules", "qa-quick-start", "qa-architecture",
+                    "login-app-qa", "login-app-qa-architecture",
+                    "notes-production-has-a-strict"):
             self.assertRegex(out, rf"\n {cid}\s")
         self.assertNotIn("qa-suite", out)  # bare H1 stub merged into the next section
-        self.assertIn("2 cards", self.cli("cards", "mono", "/app").stdout)
+        self.assertIn("2 cards", self.cli("cards", "mono", "/app: rules").stdout)
 
     def test_suggest_matches_task(self):
         self.cli("learn", self.proj)
