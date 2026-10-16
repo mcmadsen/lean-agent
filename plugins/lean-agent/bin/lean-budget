@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Print token usage for the current (or given) Claude Code session.
+here="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "$here/../scripts/usage.py" report "$@"
