@@ -315,7 +315,7 @@ The session budget is in **weighted tokens**, input-token equivalents using the 
 | `LEAN_AGENT_MAX_TURNS` | `40` | Default `--max-turns` per worker. |
 | `LEAN_AGENT_WORKER_PERMISSION_MODE` | `acceptEdits` | Worker permission mode. |
 | `LEAN_AGENT_WORKER_BASH_OUTPUT` | `12000` | `BASH_MAX_OUTPUT_LENGTH` for workers. |
-| `LEAN_AGENT_RESULT_CHARS` | `2500` | Max worker summary printed back to the orchestrator (full result is saved). |
+| `LEAN_AGENT_RESULT_CHARS` | `12000` | Max worker reply printed back to the orchestrator (workers lead with a summary; the full result is saved). |
 | `LEAN_AGENT_HOME` | `~/.lean-agent` | Where everything lives. |
 
 ## The plugin

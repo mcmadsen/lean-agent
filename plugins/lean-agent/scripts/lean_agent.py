@@ -57,7 +57,8 @@ Project: {project}
 Your working directory is NOT the project. Use absolute paths.
 {shell_rule}
 
-Work frugally: Grep/Glob before Read, read line ranges rather than whole files,
+Work frugally: Grep/Glob for the symbol first, then Read only the line range you need
+(offset/limit); never read a whole file over ~200 lines. Don't re-read what you already have,
 use quiet command flags (-q, --silent, | tail -n 40), no narration. Read other
 project files only when the task needs them. Put LEAN_RAW=1 in front of a command
 whose full output you need unshortened.
@@ -68,8 +69,8 @@ return status "needs-input" with your question and the candidates you found.
 
 {send_rule}
 {browser_rule}
-End your reply with a short result (what you did, files changed, anything
-unresolved), then one final line exactly like this:
+Start your reply with a one or two sentence summary of the outcome. Then give the result
+(what you did, files changed, anything unresolved), then one final line exactly like this:
 LEAN-FEEDBACK {{"status": "done|partial|failed|needs-input|awaiting-confirmation", "used": ["card-id"], "unneeded": ["card-id"], "missing": "context you had to discover that should have been given up front, or empty", "remember": []}}
 
 "remember" is shared memory for future agents. Usually leave it empty. Add an item
@@ -880,8 +881,21 @@ def cmd_run(a):
     append_jsonl(home("ledger.jsonl"), entry)
 
     cost = f"${entry['cost_usd']:.2f}" if isinstance(entry["cost_usd"], (int, float)) else "$?"
-    print(f"run {run_id} · {model} · {status} · {entry['turns'] or '?'} turns · {weighted:,} weighted tok · {cost} · {seconds}s")
-    limit = env_num("LEAN_AGENT_RESULT_CHARS", 2500)
+    print(f"run {run_id} · {model} · {status} · {entry['turns'] or '?'} turns · {seconds}s · "
+          f"{entry['units']:,} sonnet-eq tok · {cost}")
+    print(f"  tokens: input {u.get('input_tokens', 0):,} · cache write {u.get('cache_creation_input_tokens', 0):,}"
+          f" · cache read {u.get('cache_read_input_tokens', 0):,} · output {u.get('output_tokens', 0):,}")
+    ctx = u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0) + u.get("cache_read_input_tokens", 0)
+    if ctx and entry["turns"]:
+        per_turn = ctx // max(1, entry["turns"])
+        own = est_tokens(read_text(os.path.join(workdir, "append.md")))
+        ext = tools_overhead(mcp_specs, mcp_allowed, chrome_spec)
+        print(f"  context per turn ~{per_turn:,}: lean-agent protocol + cards ~{own:,} · MCP/browser tools ~{ext:,}"
+              f" · Claude Code system prompt, built-in tools, conversation ~{max(0, per_turn - own - ext):,}")
+    line, low = budget_line()
+    if line:
+        print("  " + line)
+    limit = env_num("LEAN_AGENT_RESULT_CHARS", 12000)
     if summary:
         print(summary if len(summary) <= limit else summary[:limit] + f"\n… [{len(summary) - limit} chars more in {workdir}/result.json]")
     elif status == "error":
@@ -901,6 +915,38 @@ def cmd_run(a):
         print("mcp: " + (", ".join(f"{k} x{v}" for k, v in sorted(calls.items())) or "no MCP tool calls"))
     print(f"resume: lean-agent run --resume {run_id} \"<follow-up>\"")
     return 0 if status in ("done", "partial", "needs-input", "awaiting-confirmation") else 1
+
+
+def tools_overhead(mcp_specs, mcp_allowed, chrome_spec):
+    """Estimated tokens per turn for the MCP and browser tool definitions a run carries."""
+    total, cache = 0, mcp_cache()
+    for name, wanted in lean_mcp.parse_specs(mcp_specs):
+        tools = (cache.get(name) or {}).get("tools") or {}
+        total += sum(v for t, v in tools.items() if not wanted or t in wanted)
+    if chrome_spec:
+        st = chrome_state()
+        all_tools = st.get("tools") or []
+        share = 1.0 if chrome_spec == "all" or not all_tools else len(chrome_spec.split(",")) / len(all_tools)
+        total += int(st.get("tokens", 0) * min(1.0, share))
+    return total
+
+
+def budget_line():
+    """('budget left: 5h 62% · week 80%', low?) for the plan windows that have a budget."""
+    budgets = usage.window_budgets()
+    if not any(budgets.values()):
+        return "", False
+    w = usage.window_usage()
+    parts, low = [], False
+    for name, label in (("5h", "5h"), ("week", "week")):
+        if budgets[name]:
+            left = max(0, 100 - w[name]["lean"] * 100 // budgets[name])
+            parts.append(f"{label} {left}%")
+            low = low or left < 25
+    text = "budget left: " + " · ".join(parts)
+    if low:
+        text += " (low: prefer -m haiku, --read-only and smaller steps)"
+    return text, low
 
 
 def chrome_state():
