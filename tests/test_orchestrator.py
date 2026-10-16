@@ -17,9 +17,22 @@ FAKE_CLAUDE = textwrap.dedent("""\
     task = sys.stdin.read()
     log = os.environ["FAKE_LOG"]
     append = sys.argv[sys.argv.index("--append-system-prompt-file") + 1]
+    mcp = None
+    if "--mcp-config" in sys.argv:
+        mp = sys.argv[sys.argv.index("--mcp-config") + 1]
+        mcp = {"servers": json.load(open(mp))["mcpServers"], "mode": oct(os.stat(mp).st_mode & 0o777), "path": mp}
+    if os.environ.get("FAKE_MCP_CALL"):
+        import datetime, re
+        cfg = os.environ["CLAUDE_CONFIG_DIR"]
+        d = os.path.join(cfg, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.getcwd()))
+        os.makedirs(d, exist_ok=True)
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        with open(os.path.join(d, "sess-1.jsonl"), "a") as fh:
+            fh.write(json.dumps({"type": "assistant", "timestamp": ts, "message": {"content": [
+                {"type": "tool_use", "id": "tu-" + str(os.getpid()), "name": os.environ["FAKE_MCP_CALL"], "input": {}}]}}) + "\\n")
     with open(log, "a") as fh:
         fh.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "task": task,
-                             "append": open(append).read(),
+                             "append": open(append).read(), "mcp": mcp,
                              "addclaudemd": os.environ.get("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD")}) + "\\n")
     import time
     if os.environ.get("FAKE_FINISH_AT"):  # make parallel fake workers finish together
@@ -56,7 +69,16 @@ class CliTest(unittest.TestCase):
         os.chmod(fake, 0o755)
         self.log = os.path.join(t, "calls.jsonl")
         self.env = dict(os.environ, LEAN_AGENT_HOME=os.path.join(t, "home"), LEAN_AGENT_CLAUDE=fake,
-                        FAKE_LOG=self.log, CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD="1")
+                        FAKE_LOG=self.log, CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD="1",
+                        HOME=t, CLAUDE_CONFIG_DIR=os.path.join(t, "cfg"))
+        os.makedirs(os.path.join(t, "cfg"))
+        fake_mcp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "fake_mcp.py")
+        self.mcp_cfg = {"type": "stdio", "command": sys.executable, "args": [fake_mcp], "env": {"TOKEN": "s3cret"}}
+        with open(os.path.join(t, "cfg", ".claude.json"), "w") as fh:
+            json.dump({"mcpServers": {"tickets": self.mcp_cfg},
+                       "projects": {self.proj: {"mcpServers": {"localdb": {"type": "http", "url": "http://localhost:1"}}}}}, fh)
+        with open(os.path.join(self.proj, ".mcp.json"), "w") as fh:
+            json.dump({"mcpServers": {"docs": {"type": "http", "url": "https://example.invalid/mcp"}}}, fh)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -206,7 +228,6 @@ class CliTest(unittest.TestCase):
 
     def test_trust_write_config(self):
         cfg_dir = os.path.join(self.tmp.name, "cfg")
-        os.makedirs(cfg_dir)
         with open(os.path.join(cfg_dir, ".claude.json"), "w") as fh:
             json.dump({"projects": {"/other": {"hasTrustDialogAccepted": True}}, "keep": 1}, fh)
         out = self.cli("trust", "--write-config", CLAUDE_CONFIG_DIR=cfg_dir).stdout
@@ -218,6 +239,55 @@ class CliTest(unittest.TestCase):
         self.assertEqual(data["keep"], 1)
         self.assertTrue(data["projects"]["/other"]["hasTrustDialogAccepted"])
         self.assertIn("already trusted", self.cli("trust", CLAUDE_CONFIG_DIR=cfg_dir).stdout)
+
+    def test_mcp_list_and_tools(self):
+        self.cli("learn", self.proj)
+        out = self.cli("mcp", "list", "-p", "proj", "--probe").stdout
+        self.assertRegex(out, r"tickets\s+stdio\s+user\s+2\s")
+        self.assertRegex(out, r"docs\s+http\s+project\s+\?")
+        self.assertRegex(out, r"localdb\s+http\s+local")
+        tools = self.cli("mcp", "tools", "tickets").stdout
+        self.assertIn("search_tickets", tools.splitlines()[0])  # biggest first
+        self.assertIn("get_ticket", tools)
+
+    def test_run_with_mcp_tool_subset(self):
+        self.cli("learn", self.proj)
+        out = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "needs ticket", "--mcp", "tickets:get_ticket",
+                       "read ticket T-1", FAKE_MCP_CALL="mcp__tickets__get_ticket").stdout
+        self.assertIn("mcp: mcp__tickets__get_ticket x1", out)
+        call = self.calls()[-1]
+        argv = call["argv"]
+        self.assertNotIn("--safe-mode", argv)
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "")
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertEqual(argv[argv.index("--disallowedTools") + 1], "mcp__tickets__search_tickets")
+        self.assertIn("mcp__tickets__get_ticket", argv[argv.index("--allowedTools") + 1].split(","))
+        self.assertEqual(call["mcp"]["servers"], {"tickets": self.mcp_cfg})
+        self.assertEqual(call["mcp"]["mode"], "0o600")
+        self.assertFalse(os.path.exists(call["mcp"]["path"]))  # removed after the run
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "ledger.jsonl")) as fh:
+            self.assertNotIn("s3cret", fh.read())
+
+    def test_run_mcp_whole_server_and_errors(self):
+        self.cli("learn", self.proj)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tickets", "t")
+        argv = self.calls()[-1]["argv"]
+        self.assertIn("mcp__tickets", argv[argv.index("--allowedTools") + 1].split(","))
+        self.assertNotIn("--disallowedTools", argv)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "nope", "t", check=False)
+        self.assertIn("unknown MCP server", p.stderr)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tickets:missing_tool", "t", check=False)
+        self.assertIn("has no tool", p.stderr)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t")
+        self.assertIn("--safe-mode", self.calls()[-1]["argv"])  # no MCP -> safe mode as before
+
+    def test_optimize_suggests_mcp_narrowing(self):
+        self.cli("learn", self.proj)
+        for _ in range(3):
+            self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tickets", "t",
+                     FAKE_MCP_CALL="mcp__tickets__get_ticket")
+        out = self.cli("optimize", "proj").stdout
+        self.assertIn("--mcp tickets:get_ticket", out)
 
     def test_home_template(self):
         h = self.cli("home").stdout.strip()

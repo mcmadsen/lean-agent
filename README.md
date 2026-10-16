@@ -100,6 +100,30 @@ Other ways to run the orchestrator:
 | `lean-agent optimize <project> [--apply]` | Promote/demote core cards, archive dead ones, flag big cards to trim, list recent context gaps. |
 | `lean-agent stats [--today] [--project p]` | Runs, success rate, avg/total weighted tokens and cost per model. |
 
+## MCP servers in workers
+
+Workers get **no MCP servers** unless the orchestrator asks for them, and then only the tools it names:
+
+```sh
+lean-agent mcp list -p shop --probe        # servers from ~/.claude.json, <project>/.mcp.json, Claude Desktop
+lean-agent mcp tools tickets               # per-tool cost of the tool definitions, biggest first
+lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
+    --mcp tickets:get_ticket "Fetch ticket T-42 and say which file is responsible"
+```
+
+- `--safe-mode` turns MCP off, so a run with `--mcp` uses `--setting-sources "" --strict-mcp-config
+  --mcp-config <file>` instead. Measured: same 8,070-token baseline and the same isolation (no user or project
+  CLAUDE.md, settings, plugins or hooks), plus exactly the chosen servers.
+- `server:tool,tool` blocks every other tool of that server with `--disallowedTools`, which removes their
+  definitions from context. Example server: all tools ~2,150 tokens per turn, only `get_ticket` ~90.
+- `mcp tools` asks stdio servers for their tool list directly, with no model call. The estimates were
+  within 5% of a real measurement. For HTTP servers, use `mcp tools <server> --measure` (two tiny Haiku calls).
+- The config is copied into the run folder owner-only (`0600`) and **deleted when the run ends**, because MCP
+  configs often contain tokens. Server names and tool-call counts go into the ledger; configs don't.
+- lean-agent counts which MCP tools each worker called. `optimize` then suggests narrowing a server to the tools
+  that get used, or dropping it.
+- Not covered: claude.ai connectors (they aren't in a local config file). Remote OAuth servers are untested.
+
 ## How learning works
 
 1. `learn` splits each `CLAUDE.md` (root, any `dir/.claude/CLAUDE.md`, nested up to 5 levels), `.claude/rules/*.md`
