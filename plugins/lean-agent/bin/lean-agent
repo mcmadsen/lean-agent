@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# lean-agent CLI (on the Bash PATH while the plugin is enabled).
+here="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "$here/../scripts/lean_agent.py" "$@"

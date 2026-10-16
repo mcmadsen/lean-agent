@@ -1,117 +1,163 @@
 # lean-agent
 
-Keep Claude Code agents running on fewer tokens.
+**An orchestrator for Claude Code that runs worker agents on as few tokens as possible.**
 
-`lean-agent` is a Claude Code plugin (works in the CLI and the **Claude Desktop Code tab**) plus a
-small launcher for long-running agents you drive from your phone with **Remote Control**.
+You talk to one lean-agent orchestrator, from your phone through Remote Control, the Claude Desktop app, or
+a terminal. It never does project work itself. For each piece of work it decides:
 
-| Piece | What it does |
+- **which context** the worker needs, chosen from a library learned from your project's `CLAUDE.md`, rules and skills
+- **which model** (Sonnet by default, Haiku for cheap read-only work, Opus only when it's worth it)
+- **which tools and limits** (read-only or not, max turns, max $)
+
+Then it starts an isolated worker. Workers report back which context they used and what was missing, and the
+library tunes itself: cards that are always used become *core*, unused ones are archived, and recurring gaps become new cards.
+
+```
+ you ──▶ orchestrator  (~/.lean-agent/home, Sonnet, short playbook CLAUDE.md, session budget)
+            │  lean-agent suggest / run / stats / optimize
+            ├──▶ worker  sonnet  cards: testing, code-style      tools: all      ─┐
+            ├──▶ worker  haiku   cards: (none)       --read-only tools: R/Glob/Grep├─▶ ledger + card stats
+            └──▶ worker  sonnet  --resume <run>                                   ─┘
+                     cwd ~/.lean-agent/work/<run>,  --add-dir <your project>
+```
+
+## Why workers are cheap
+
+A normal Claude Code session in your project loads the project's `CLAUDE.md`, every skill (project, user,
+plugins), your plugins' hooks, MCP servers and dozens of tool schemas, and resends all of it on every turn.
+lean-agent workers run with:
+
+```
+claude -p --safe-mode --disable-slash-commands --tools Bash,Read,Edit,Write,Glob,Grep \
+          --add-dir <project> --append-system-prompt-file <protocol + selected cards> \
+          --model <chosen> --max-turns N --max-budget-usd X
+```
+
+from a scratch folder, not your project, so nothing project-level auto-loads. Measured on Claude Code 2.1.301:
+
+| Same one-line prompt | Context per turn |
 |---|---|
-| **Output squeezer** (PostToolUse hook) | Shrinks noisy Bash output (test runs, builds, installs, logs) to the head, the tail and every error-looking line, collapses repeated lines and progress bars, and saves the full output to a file Claude can grep if it needs more. |
-| **Budget guard** (PreToolUse hook) | Tracks tokens used by the session *and its subagents*. At 80% it nudges Claude to wrap up; at 100% it blocks further tool calls and tells Claude to summarise and stop. |
-| **`/lean-agent:budget`** skill + `lean-budget` command | Per-model breakdown of input, cache write, cache read and output tokens. |
-| **`/lean-agent:lean-mode`** skill | Frugal working rules: search before reading, read line ranges, quiet commands, delegate bulk work to a small model, keep a `PROGRESS.md` for resumable long runs. |
-| **`lean-agent up`** launcher | Starts `claude remote-control` with cheap defaults (subagents on Haiku, earlier auto-compaction, smaller tool output limits, a session budget). |
+| Default session started in the project | ~36,000 tokens |
+| lean-agent worker | **~8,100 tokens** |
 
-Example of what Claude sees for a 10.8 KB test log with one failure:
-
-```
-[lean-agent: output squeezed 10,806 -> 280 chars. Full output: ~/.claude/plugins/data/…/toolu_….log (grep it or Read with offset/limit if you need more)]
-1
-2
-…
-… [1985 lines omitted] …
-1999
-2000
-ERROR: boom at step 7
-1
-…
-```
+That gap is paid on *every* turn of *every* worker. A real run, "add `multiply()` to calc.py with a test",
+took a Sonnet worker 3 turns, **9.4K weighted tokens and $0.02**. It followed the two cards it was given (type
+hints, docstrings, the test command) and never saw the rest.
 
 ## Install
 
-Requirements: Claude Code (CLI or Claude Desktop), `python3` on PATH. No other dependencies.
-
-**Claude Desktop (Code tab):** click **+** next to the prompt box → **Plugins** → **Add plugin**, add the
-marketplace `mcmadsen/lean-agent`, then install `lean-agent`.
-
-**CLI:**
+Requirements: Claude Code 2.1.300+ (CLI or Claude Desktop) and `python3`. No other dependencies.
 
 ```sh
-claude plugin marketplace add mcmadsen/lean-agent
-claude plugin install lean-agent@lean-agent
+git clone https://github.com/mcmadsen/lean-agent
+export PATH="$PWD/lean-agent/bin:$PATH"     # add to your shell profile
+lean-agent install                          # installs the plugin, creates ~/.lean-agent/home
 ```
 
-or, after cloning this repo, `./bin/lean-agent install`.
+The plugin can also be added in **Claude Desktop**: **+** next to the prompt → **Plugins** → **Add plugin** →
+marketplace `mcmadsen/lean-agent`.
 
-Try it for one session without installing: `claude --plugin-dir ./plugins/lean-agent`.
-
-## Long-running agents with Remote Control
+## Use
 
 ```sh
-git clone https://github.com/mcmadsen/lean-agent && export PATH="$PWD/lean-agent/bin:$PATH"
-lean-agent install
-lean-agent up ~/code/my-project --budget 3000000 --model sonnet --permission-mode acceptEdits
+lean-agent learn ~/code/shop --name shop    # index CLAUDE.md files, .claude/rules, .claude/skills
+lean-agent up                               # orchestrator via Remote Control (Sonnet)
 ```
 
-Then open the Claude app (or claude.ai/code), pick the session named `lean: my-project`, and give it work.
-The agent runs on your machine with your files, you steer it from anywhere, and the budget guard
-stops it before it burns through your usage.
+Open the Claude app → Code → **lean-agent**, and ask for work: *"In shop, fix the flaky checkout test and add a
+regression test."* The orchestrator follows its playbook (`~/.lean-agent/home/CLAUDE.md`): picks cards, picks
+a model, runs workers, and reports back briefly.
 
-`lean-agent up` options: `--budget N`, `--model M`, `--subagent-model M` (default `haiku`), `--name NAME`,
-`--permission-mode MODE`, `--worktree` (each remote session gets its own git worktree).
+Other ways to run the orchestrator:
+- `lean-agent up --local`: interactive in your terminal
+- Claude Desktop: open the folder `~/.lean-agent/home` in the Code tab (`lean-agent home` prints the path)
 
-## Configuration
+`up` options: `--model` (default `sonnet`), `--name`, `--budget` (orchestrator session, weighted tokens),
+`--daily-budget` (all workers per day), `--permission-mode`.
 
-Everything is environment variables. `lean-agent up` sets them for you; for Claude Desktop or plain
-`claude`, put them in the `env` block of `~/.claude/settings.json` (`lean-agent env --json` prints one).
+### Commands the orchestrator uses (you can too)
 
-| Variable | Default | Meaning |
+| Command | |
+|---|---|
+| `lean-agent projects` / `learn <path> [--name n]` | Register a project, or refresh its cards after CLAUDE.md changes. Card stats survive. |
+| `lean-agent cards <project>` | Cards with size and hit rate (`used/sent`). `*` = core. |
+| `lean-agent suggest <project> "<task>"` | Core cards plus best matches by keyword overlap × past usefulness, within a token cap. |
+| `lean-agent run -p <project> -m <model> --why "..." [--cards a,b \| auto] [--read-only] [--max-usd X] [--max-turns N] "<task>"` | Run an isolated worker. Model and reason are **required**. |
+| `lean-agent run --resume <run-id> "<follow-up>"` | Continue a worker's session (cheap: its context is cached). |
+| `lean-agent card show\|add\|rm\|core <project> <id>` | Inspect or edit cards; `add` creates *note* cards from what workers had to discover. |
+| `lean-agent optimize <project> [--apply]` | Promote/demote core cards, archive dead ones, flag big cards to trim, list recent context gaps. |
+| `lean-agent stats [--today] [--project p]` | Runs, success rate, avg/total weighted tokens and cost per model. |
+
+## How learning works
+
+1. `learn` splits each `CLAUDE.md` (root, `.claude/`, nested up to 3 levels), `.claude/rules/*.md` and each
+   `.claude/skills/*/SKILL.md` into **cards** at `#`/`##` headings.
+2. Every worker ends with a `LEAN-FEEDBACK {...}` line: status, cards `used`, cards `unneeded`, and context
+   that was `missing`. lean-agent strips that line and records it.
+3. `optimize` uses the counts: ≥80% used → **core** (sent automatically), core <40% → demoted, ≤20% used and
+   marked unneeded → **archived**. Big, often-used cards are flagged for rewriting shorter.
+4. Recurring `missing` notes are turned into **note cards** by the orchestrator (`card add`). Notes survive
+   re-learning.
+
+Your project files are never modified by learning. Everything lives in `~/.lean-agent/`:
+
+```
+~/.lean-agent/
+  home/                 orchestrator folder (CLAUDE.md playbook, .claude/settings.json)
+  library/<project>/    cards.json, missing.jsonl
+  work/<run-id>/        worker cwd, append.md (exact context sent), result.json
+  ledger.jsonl          one line per run: model, why, cards, tokens, cost, status
+  projects.json
+```
+
+## Budgets
+
+All budgets are in **weighted tokens**, input-token equivalents using the usual API price ratios:
+`input + 1.25×cache_write + 0.1×cache_read + 5×output`.
+
+| Variable | Default | |
 |---|---|---|
-| `LEAN_AGENT_BUDGET` | unset (track only) | Per-session budget in **weighted tokens** (see below). `up` defaults it to 2,000,000. |
-| `LEAN_AGENT_WARN_PCT` | `80` | Nudge Claude to wrap up at this percentage. |
-| `LEAN_AGENT_SQUEEZE` | on | `0` disables the output squeezer. |
-| `LEAN_AGENT_SQUEEZE_OVER` | `6000` | Only squeeze Bash output longer than this many characters. |
-| `LEAN_AGENT_SQUEEZE_TO` | `4000` | Target size after squeezing. |
+| `LEAN_AGENT_BUDGET` | `up`: 1,000,000 | Orchestrator session budget, enforced by a PreToolUse hook (warns at `LEAN_AGENT_WARN_PCT`, default 80%, then blocks tool calls). |
+| `LEAN_AGENT_DAILY_BUDGET` | off | `run` refuses new workers once today's ledger total reaches it. |
+| `LEAN_AGENT_RUN_MAX_USD` | `3.0` | Default `--max-usd` per worker (`claude --max-budget-usd`). |
+| `LEAN_AGENT_MAX_TURNS` | `40` | Default `--max-turns` per worker. |
+| `LEAN_AGENT_WORKER_PERMISSION_MODE` | `acceptEdits` | Worker permission mode. |
+| `LEAN_AGENT_WORKER_BASH_OUTPUT` | `12000` | `BASH_MAX_OUTPUT_LENGTH` for workers. |
+| `LEAN_AGENT_RESULT_CHARS` | `2500` | Max worker summary printed back to the orchestrator (full result is saved). |
+| `LEAN_AGENT_HOME` | `~/.lean-agent` | Where everything lives. |
 
-Put `LEAN_RAW=1` anywhere in a command (e.g. `LEAN_RAW=1 npm test`) to get its raw output once.
+## The plugin
 
-Claude Code settings that `up` also sets (all are standard Claude Code env vars):
-`CLAUDE_CODE_SUBAGENT_MODEL=haiku`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70`,
-`BASH_MAX_OUTPUT_LENGTH=20000`, `MAX_MCP_OUTPUT_TOKENS=10000`.
+Installing the plugin also gives any Claude Code session (not just the orchestrator):
 
-### Weighted tokens
+- **Output squeezer:** a PostToolUse hook that shrinks noisy Bash output (6K to 30K chars) to the head, the tail
+  and the error lines, and saves the full log for grep. Opt out per command with `LEAN_RAW=1`, or entirely
+  with `LEAN_AGENT_SQUEEZE=0`. (Workers run in safe mode, so hooks don't run there. They get a smaller
+  `BASH_MAX_OUTPUT_LENGTH` and frugal-command instructions instead.)
+- **Budget guard:** the session budget above.
+- Skills `/lean-agent:budget` (token breakdown for the session) and `/lean-agent:lean-mode` (frugal working rules).
+- `lean-agent` on the Bash PATH.
 
-Token kinds cost very different amounts, so the budget counts them in input-token equivalents using the
-usual API price ratios:
+## Caveats
 
-```
-weighted = input + 1.25 × cache_write + 0.1 × cache_read + 5 × output
-```
-
-A budget of 2,000,000 weighted tokens costs about what 2M uncached input tokens would on the session's
-model. Run `lean-budget` (or `/lean-agent:budget`) to see the breakdown.
-
-## How it works and limits
-
-- The squeezer uses the PostToolUse `updatedToolOutput` field, so it only changes what Claude *sees*. The
-  command already ran and the full output is kept in `~/.claude/plugins/data/<plugin>/outputs/` for 2 days.
-- Very large outputs (above `BASH_MAX_OUTPUT_LENGTH`, 30,000 chars by default) are already moved to a file
-  by Claude Code itself, so lean-agent saves most in the 6K to 30K range, which would otherwise go into
-  context in full on every later turn.
-- Squeezing is heuristic. If Claude needs a line that was cut, it can grep the saved log, and `LEAN_RAW=1`
-  turns squeezing off for one command.
-- Token usage is read from Claude Code's session transcripts (`~/.claude/projects/…/*.jsonl`). That format
-  is internal to Claude Code and not a public API, so a future release could break the budget guard. If it
-  does, the guard fails open (it never blocks because of a parse error).
-- The budget is checked before each tool call, so a single long reply with no tool calls can overshoot it.
+- **Workers can run Bash without asking** (`--allowedTools` includes Bash, permission mode `acceptEdits`) in
+  your project. Use a git repo, review diffs, use `--read-only` for investigation, or set
+  `LEAN_AGENT_WORKER_PERMISSION_MODE` / `--tools` to restrict.
+- Workers in safe mode get no MCP servers, hooks or plugins. If a task needs one, the orchestrator should
+  do that step itself or you run it in a normal session.
+- Your user-level `~/.claude/CLAUDE.md` and plugins still load in the **orchestrator** (Remote Control
+  doesn't accept `--settings`/`--setting-sources`). Keep them small, or run the orchestrator under a
+  separate `CLAUDE_CONFIG_DIR`.
+- The session budget guard and `lean-agent budget` read Claude Code's transcript files, whose format is
+  internal. Worker accounting uses the documented `--output-format json` result instead.
+- Card selection is keyword-based plus learned hit rates. The orchestrator model makes the final call.
 
 ## Development
 
 ```sh
-python3 tests/test_hooks.py          # unit tests for both hooks and the report
-claude plugin validate .             # marketplace manifest
-claude plugin validate plugins/lean-agent
+python3 tests/test_hooks.py           # squeeze + budget hooks
+python3 tests/test_orchestrator.py    # CLI with a fake `claude` binary
+claude plugin validate . && claude plugin validate plugins/lean-agent
 ```
 
 ## License
