@@ -40,7 +40,13 @@ from a scratch folder, not your project, so nothing project-level auto-loads. Me
 | Default session started in the project | ~36,000 tokens |
 | lean-agent worker | **~8,100 tokens** |
 
-That gap is paid on *every* turn of *every* worker. A real run, "add `multiply()` to calc.py with a test",
+That gap is paid on *every* turn of *every* worker.
+
+End to end, a headless Sonnet orchestrator was given *"orders with a discount are charged too little, the discount
+seems applied twice; fix it and add a regression test"* in a sample monorepo with API, web and infra
+`CLAUDE.md` files. It ran `suggest`, started one Sonnet worker with just the `api-layout` and `api-testing`
+cards (why: *"bug fix plus test, moderate reasoning"*), and reported back. The worker fixed the bug with a 2-line
+diff and added a regression test that failed before the fix. Total: **$0.07** (orchestrator $0.036, worker $0.030). A real run, "add `multiply()` to calc.py with a test",
 took a Sonnet worker 3 turns, **9.4K weighted tokens and $0.02**. It followed the two cards it was given (type
 hints, docstrings, the test command) and never saw the rest.
 
@@ -52,7 +58,13 @@ Requirements: Claude Code 2.1.300+ (CLI or Claude Desktop) and `python3`. No oth
 git clone https://github.com/mcmadsen/lean-agent
 export PATH="$PWD/lean-agent/bin:$PATH"     # add to your shell profile
 lean-agent install                          # installs the plugin, creates ~/.lean-agent/home
+lean-agent trust                            # once: accept Claude Code's trust dialog for that folder
 ```
+
+`trust` matters. Claude Code ignores a folder's permission rules until the folder is trusted, and Remote Control
+never shows the trust dialog, so without it every `lean-agent` call the orchestrator makes waits for your approval.
+`lean-agent trust` opens Claude once in the orchestrator home so you can accept the dialog.
+`lean-agent trust --write-config` sets `hasTrustDialogAccepted` in `~/.claude.json` directly, after a backup.
 
 The plugin can also be added in **Claude Desktop**: **+** next to the prompt → **Plugins** → **Add plugin** →
 marketplace `mcmadsen/lean-agent`.
