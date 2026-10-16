@@ -71,6 +71,7 @@ return status "needs-input" with your question and the candidates you found.
 {browser_rule}
 Start your reply with a one or two sentence summary of the outcome. Then give the result
 (what you did, files changed, anything unresolved), then one final line exactly like this:
+"used" lists only cards whose content changed what you did, not cards you merely received.
 LEAN-FEEDBACK {{"status": "done|partial|failed|needs-input|awaiting-confirmation", "used": ["card-id"], "unneeded": ["card-id"], "missing": "context you had to discover that should have been given up front, or empty", "remember": []}}
 
 "remember" is shared memory for future agents. Usually leave it empty. Add an item
@@ -171,8 +172,42 @@ def now_iso():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+def stem(w):
+    for suffix in ("ing", "ies", "es", "ed", "s"):
+        if w.endswith(suffix) and len(w) - len(suffix) >= 4:
+            return w[: -len(suffix)] + ("y" if suffix == "ies" else "")
+    return w
+
+
 def words(text):
-    return {w for w in re.findall(r"[a-z][a-z0-9_]{2,}", text.lower()) if w not in STOPWORDS}
+    return {stem(w) for w in re.findall(r"[a-z][a-z0-9_]{2,}", text.lower()) if w not in STOPWORDS}
+
+
+BROWSER_WORDS = {stem(w) for w in "teams gmail slack outlook email mail chat message messages post reply browser "
+                 "website webpage chrome".split()}
+READ_WORDS = {stem(w) for w in "find which where what list show explain investigate look check summarize summarise "
+              "compare why how read review audit inspect trace locate count search".split()}
+CHANGE_WORDS = {stem(w) for w in "fix implement change refactor rename update write create build migrate remove "
+                "delete bump upgrade edit patch".split()}
+JUDGE_WORDS = {stem(w) for w in "decide decision verdict recommend recommendation assess evaluate judge should "
+               "whether choose pick prioritize".split()}
+GATHER_WORDS = {stem(w) for w in "investigate gather collect find check compare research look list".split()}
+
+
+def task_type(task, read_only=False, chrome=False):
+    """read | change | browser, used for per-type core cards and model stats."""
+    tw = words(task)
+    if chrome or tw & BROWSER_WORDS:
+        return "browser"
+    if read_only:
+        return "read"
+    if tw & CHANGE_WORDS:
+        return "change"
+    return "read" if tw & READ_WORDS else "change"
+
+
+def is_core(c, ttype):
+    return bool(c.get("core")) or ttype in (c.get("core_types") or [])
 
 
 # ---------------------------------------------------------------- projects & library
@@ -581,38 +616,110 @@ def _cmd_card(a):
     print(f"{a.action} {a.id}: ok")
 
 
-def suggest(slug, task, max_tokens):
+def suggest(slug, task, max_tokens, ttype=None, explain=False):
+    """Core cards for this task type plus the most relevant cards that fit `max_tokens`.
+
+    Relevance uses word rarity across the library (common words count little) and requires a
+    distinctive title word, or several body words; big cards need a title match. Returns the picked
+    cards, or with explain=True (picked, reasons, closest rejected card)."""
+    import math
     cards = [c for c in load_cards(slug) if not c.get("archived")]
+    ttype = ttype or task_type(task)
     tw = words(task)
-    picked = [c for c in cards if c.get("core")]
-    budget = max_tokens - sum(c["tokens"] for c in picked)
-    scored = []
+    n = len(cards) or 1
+    df = {}
     for c in cards:
-        if c.get("core"):
+        for w in words(c["title"]) | words(c["text"]):
+            df[w] = df.get(w, 0) + 1
+    idf = {w: math.log((n + 1) / (df.get(w, 0) + 1)) for w in tw}
+    picked = [c for c in cards if is_core(c, ttype)]
+    reasons = {c["id"]: f"core for {ttype}" if ttype in (c.get("core_types") or []) else "core" for c in picked}
+    budget = max_tokens - sum(c["tokens"] for c in picked)
+    scored, closest = [], None
+    for c in cards:
+        if is_core(c, ttype):
             continue
-        overlap = 3 * len(tw & words(c["title"])) + len(tw & words(c["text"]))
-        if not overlap and c["kind"] == "memory" and c["title"].startswith(("memory user", "memory feedback")):
-            overlap = 1  # preferences and corrections apply broadly; optimize archives the ones never used
-        if overlap:
-            usefulness = (c["used"] + 1) / (c["offered"] + 2)  # Laplace-smoothed hit rate
-            scored.append((overlap * (0.5 + usefulness), c))
-    for score, c in sorted(scored, key=lambda x: -x[0]):
+        title_hits = tw & words(c["title"])
+        body_hits = (tw & words(c["text"])) - title_hits
+        t_score = sum(idf[w] for w in title_hits)
+        b_score = sum(idf[w] for w in body_hits)
+        relevant = t_score >= 1.0 or (b_score >= 3.0 and len(body_hits) >= 2)
+        if c["tokens"] > 800 and t_score < 1.0:
+            relevant = False  # a big card has to be clearly about the task
+        why = ", ".join(sorted(title_hits)) and f"title: {', '.join(sorted(title_hits))}" or \
+            f"text: {', '.join(sorted(body_hits))}"
+        pref = (c["kind"] == "memory" and c["title"].startswith(("memory user", "memory feedback"))
+                and c["tokens"] <= 150)
+        if not relevant and pref:
+            scored.append((0.5, c, "preference memory"))
+            continue
+        if not relevant:
+            if (t_score + b_score) and (closest is None or t_score + b_score > closest[0]):
+                closest = (t_score + b_score, c, why)
+            continue
+        usefulness = (c["used"] + 1) / (c["offered"] + 2)
+        score = (3 * t_score + b_score) * (0.5 + usefulness) / (1 + c["tokens"] / 1500)
+        scored.append((score, c, why))
+    for score, c, why in sorted(scored, key=lambda x: -x[0]):
         if c["tokens"] <= budget:
             picked.append(c)
+            reasons[c["id"]] = why
             budget -= c["tokens"]
+    if explain:
+        return picked, reasons, closest
     return picked
+
+
+def recommend_model(ttype):
+    """(model, why) for a task type: cheapest model that has done this type well, else a default."""
+    runs = [r for r in ledger() if not r.get("resumed")]
+    best = None
+    for model in ("haiku", "sonnet", "opus"):
+        mine = [r for r in runs if r["model"] == model and
+                (r.get("type") or ("read" if r.get("read_only") else "change")) == ttype]
+        if len(mine) >= 3:
+            ok = sum(r["status"] in ("done", "awaiting-confirmation") for r in mine) / len(mine)
+            avg = sum(r.get("units", 0) for r in mine) // len(mine)
+            if ok >= 0.8:
+                best = (model, f"{ttype} runs on {model}: {ok:.0%} done, ~{avg:,} sonnet-eq avg")
+                break
+    if not best:
+        best = {"read": ("haiku", "default for read-only lookups"),
+                "browser": ("sonnet", "default for browser tasks"),
+                "change": ("sonnet", "default for code changes")}[ttype]
+    line, low = budget_line()
+    if low and best[0] != "haiku":
+        best = ("haiku", best[1] + "; budget is low, so prefer haiku and smaller steps")
+    return best
 
 
 def cmd_suggest(a):
     slug, _ = resolve_project(a.project)
     sync_memory(slug)
-    picked = suggest(slug, a.task, a.max_tokens)
+    ttype = task_type(a.task)
+    picked, reasons, closest = suggest(slug, a.task, a.max_tokens, ttype, explain=True)
+    model, why = recommend_model(ttype)
+    flags = f"-m {model}" + (" --read-only" if ttype == "read" else "") + (" --chrome" if ttype == "browser" else "")
+    print(f"task type: {ttype} · recommended: {flags}  ({why})")
+    tw = words(a.task)
+    if tw & JUDGE_WORDS and tw & GATHER_WORDS:
+        print("split: 1) -m haiku --read-only gathers the facts; 2) -m sonnet judges from those facts only "
+              "(pass run 1's answer with --task-file)")
+    line, _ = budget_line()
+    if line:
+        print(line)
     if not picked:
-        print("No matching cards; the worker will start with the project path only.")
+        hint = f" (closest: {closest[1]['id']}, {closest[2]}, not distinctive enough)" if closest else ""
+        print(f"No relevant cards{hint}. Run without --cards.")
         return
+    total = 0
     for c in picked:
-        print(f"{'core' if c.get('core') else 'match':<6}{c['id']:<34}~{c['tokens']:>5} tok  used {card_rate(c):>5}  {c['title'][:50]}")
-    print(f"\n--cards {','.join(c['id'] for c in picked if not c.get('core'))}   (core cards are always sent)")
+        total += c["tokens"]
+        label = "core" if reasons[c["id"]].startswith("core") else "match"
+        print(f"{label:<6}{c['id']:<36}~{c['tokens']:>5,} tok  used {card_rate(c):>5}  {reasons[c['id']]}")
+    print(f"total ~{total:,} tok of {a.max_tokens:,} budget")
+    extra = [c["id"] for c in picked if not reasons[c["id"]].startswith("core")]
+    print(f"--cards {','.join(extra)}   (core cards are sent anyway)" if extra else "Only core cards apply; leave out --cards.")
 
 
 # ---------------------------------------------------------------- commands: runs
@@ -735,12 +842,13 @@ def cmd_run(a):
         lib = {c["id"]: c for c in load_cards(slug)}
         wanted = [x for x in (a.cards or "").split(",") if x and x != "none"]
         if a.cards == "auto":
-            cards = suggest(slug, task, a.max_context)
+            cards = suggest(slug, task, a.max_context, task_type(task, a.read_only, bool(a.chrome)))
         else:
             missing = [x for x in wanted if x not in lib]
             if missing:
                 die(f"unknown card(s): {', '.join(missing)} (see: lean-agent cards {slug})")
-            cards = [c for c in lib.values() if c.get("core") and not c.get("archived")]
+            ttype = task_type(task, a.read_only, bool(a.chrome))
+            cards = [c for c in lib.values() if is_core(c, ttype) and not c.get("archived")]
             cards += [lib[x] for x in wanted if lib[x] not in cards]
         run_id = datetime.datetime.now().strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
         workdir = home("work", run_id)
@@ -837,18 +945,23 @@ def cmd_run(a):
     weighted = usage.weighted(u)
 
     # learning: card stats and missing context
+    run_type = (prev or {}).get("type") or task_type(task, read_only, bool(chrome_spec))
     used, unneeded = set(fb.get("used") or []), set(fb.get("unneeded") or [])
     sent = {c["id"] for c in cards}
     if sent or used or unneeded:
         with library_lock(slug):
             lib = load_cards(slug)
             for c in lib:
+                bt = c.setdefault("by_type", {}).setdefault(run_type, {"offered": 0, "used": 0, "unneeded": 0})
                 if c["id"] in sent:
                     c["offered"] += 1
+                    bt["offered"] += 1
                 if c["id"] in used:
                     c["used"] += 1
+                    bt["used"] += 1
                 if c["id"] in unneeded:
                     c["unneeded"] += 1
+                    bt["unneeded"] += 1
             save_cards(slug, lib)
     remembered = []
     for item in fb.get("remember") or []:
@@ -876,7 +989,7 @@ def cmd_run(a):
         "resumed": bool(prev), "task": task[:300], "missing": missing_note,
         "mcp": mcp_specs, "mcp_calls": lean_mcp.count_mcp_calls(workdir, out.get("session_id"), started_utc)
         if (mcp_specs or chrome_spec) else {},
-        "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send),
+        "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
     }
     append_jsonl(home("ledger.jsonl"), entry)
 
@@ -1237,27 +1350,34 @@ def _cmd_optimize(a):
     cards = load_cards(slug)
     actions = []
     for c in cards:
-        if c.get("archived") or c["offered"] < a.min_runs:
+        if c.get("archived"):
             continue
-        rate = c["used"] / c["offered"]
-        if not c.get("core") and rate >= 0.8:
-            actions.append(("core", c, f"used in {card_rate(c)} runs: always send it"))
-        elif c.get("core") and rate < 0.4:
-            actions.append(("uncore", c, f"core but used in only {card_rate(c)} runs"))
-        elif not c.get("core") and rate <= 0.2 and c["unneeded"] >= 2:
-            actions.append(("archive", c, f"used in {card_rate(c)} runs, marked unneeded {c['unneeded']}x"))
-        if rate >= 0.5 and c["tokens"] > 600:
-            actions.append(("trim", c, f"~{c['tokens']} tok and often used: rewrite shorter with `card add {slug} {c['id']} --file ...`"))
+        for t, bt in sorted((c.get("by_type") or {}).items()):
+            if bt["offered"] < a.min_runs:
+                continue
+            rate = bt["used"] / bt["offered"]
+            in_core = t in (c.get("core_types") or [])
+            if not in_core and rate >= 0.8 and not bt["unneeded"]:
+                actions.append(("core", c, f"for {t} tasks: used in {bt['used']}/{bt['offered']}, never unneeded", t))
+            elif in_core and rate < 0.4:
+                actions.append(("uncore", c, f"for {t} tasks: used in only {bt['used']}/{bt['offered']}", t))
+        if c["offered"] >= a.min_runs:
+            rate = c["used"] / c["offered"]
+            if not is_core(c, "") and rate <= 0.2 and c["unneeded"] >= 2:
+                actions.append(("archive", c, f"used in {card_rate(c)} runs, marked unneeded {c['unneeded']}x", None))
+            if rate >= 0.5 and c["tokens"] > 600:
+                actions.append(("trim", c, f"~{c['tokens']} tok and often used: rewrite shorter with "
+                                f"`card add {slug} {c['id']} --file ...`", None))
     if not actions:
         print(f"No card changes suggested yet (cards need {a.min_runs}+ runs of data).")
-    for act, c, why in actions:
+    for act, c, why, _ in actions:
         print(f"{act:<8}{c['id']:<34}{why}")
     if a.apply:
-        for act, c, _ in actions:
+        for act, c, _, t in actions:
             if act == "core":
-                c["core"] = True
+                c["core_types"] = sorted(set(c.get("core_types") or []) | {t})
             elif act == "uncore":
-                c["core"] = False
+                c["core_types"] = [x for x in c.get("core_types") or [] if x != t]
             elif act == "archive":
                 c["archived"] = True
         save_cards(slug, cards)
@@ -1896,7 +2016,7 @@ def build_parser():
     s = sub.add_parser("optimize", help="tune a project's cards from worker feedback")
     s.add_argument("project")
     s.add_argument("--apply", action="store_true")
-    s.add_argument("--min-runs", type=int, default=3)
+    s.add_argument("--min-runs", type=int, default=5, help="runs of a task type before a card can become core for it")
     s.add_argument("--notes", type=int, default=10)
     s.set_defaults(fn=cmd_optimize)
 

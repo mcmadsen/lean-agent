@@ -100,7 +100,7 @@ Other ways to run the orchestrator:
 |---|---|
 | `lean-agent projects` / `learn <path> [--name n]` | Register a project, or refresh its cards after CLAUDE.md changes. Card stats survive. |
 | `lean-agent cards <project> [filter]` | Cards with size and hit rate (`used/sent`). `*` = core. Filter by id, title or path, e.g. `cards shop infra`. |
-| `lean-agent suggest <project> "<task>"` | Core cards plus best matches by keyword overlap × past usefulness, within a token cap. |
+| `lean-agent suggest <project> "<task>"` | Task type (read/change/browser), recommended model (from your `stats` per type, else defaults; Haiku when a budget is low), a gather/judge split hint, then core cards plus relevant cards with cost and reason, or an explicit "No relevant cards". |
 | `lean-agent run <project> -m <model> --why "..." [--cards a,b \| auto] [--read-only] [--chrome[=tools]] [--mcp s:t] [--max-usd X] [--max-turns N] -- "<task>"` | Run an isolated worker. Model and reason are **required**. `--read-only` allows Read/Glob/Grep and read-only `git -C <project> show/log/grep/diff/blame/fetch`. |
 | `lean-agent run --resume <run-id> "<follow-up>"` | Continue a worker's session (cheap: its context is cached). |
 | `lean-agent card show\|add\|rm\|core <project> <id>` | Inspect or edit cards; `add` creates *note* cards from what workers had to discover. |
@@ -250,8 +250,12 @@ exact-cent tests with 1-cent remainder cases.
    submodules are skipped, so agent checkouts don't duplicate cards.
 2. Every worker ends with a `LEAN-FEEDBACK {...}` line: status, cards `used`, cards `unneeded`, and context
    that was `missing`. lean-agent strips that line and records it.
-3. `optimize` uses the counts: ≥80% used → **core** (sent automatically), core <40% → demoted, ≤20% used and
-   marked unneeded → **archived**. Big, often-used cards are flagged for rewriting shorter.
+3. `optimize` works **per task type**. A card used in at least 80% of 5 or more runs of one type, and never marked
+   unneeded, becomes **core for that type**: it's sent automatically to that type only. Core cards used in under 40%
+   are demoted. Cards used in at most 20% and marked unneeded are **archived**, and big, often-used cards are flagged
+   for rewriting shorter. Workers report a card as used only if it changed what they did.
+   Relevance in `suggest`: words are weighted by how rare they are across your cards. A card needs a distinctive
+   title word or several body words, cards over 800 tokens need a title match, and ranking divides by card size.
 4. Recurring `missing` notes are turned into **note cards** by the orchestrator (`card add`). Notes survive
    re-learning.
 
