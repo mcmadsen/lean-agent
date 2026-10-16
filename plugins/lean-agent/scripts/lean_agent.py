@@ -1128,6 +1128,8 @@ def cmd_up(a):
         print(f"lean-agent: orchestrator in {h}, model {a.model or 'default'}, "
               f"session budget {env['LEAN_AGENT_BUDGET']} weighted tokens")
         print(f"lean-agent: open the Claude app (Code) and pick \"{a.name}\"")
+    extra = a.extra[1:] if a.extra[:1] == ["--"] else a.extra
+    cmd += extra  # e.g. `lean-agent up -- --debug --debug-file /tmp/rc.log`
     os.chdir(h)
     try:
         os.execvpe(cmd[0], cmd, env)
@@ -1176,6 +1178,8 @@ def main(argv=None):
     s.add_argument("--budget-week", type=int, help="lean-agent budget per 7 days (Sonnet-equivalent tokens)")
     s.add_argument("--permission-mode", help="e.g. acceptEdits, auto")
     s.add_argument("--local", action="store_true", help="interactive terminal session instead of Remote Control")
+    s.add_argument("extra", nargs=argparse.REMAINDER,
+                   help="after --: extra flags for claude / claude remote-control, e.g. -- --debug")
     s.set_defaults(fn=cmd_up)
 
     s = sub.add_parser("install", help="install the plugin and create the orchestrator home")
