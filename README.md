@@ -84,7 +84,7 @@ Other ways to run the orchestrator:
 - `lean-agent up --local`: interactive in your terminal
 - Claude Desktop: open the folder `~/.lean-agent/home` in the Code tab (`lean-agent home` prints the path)
 
-`up` options: `--model` (default `sonnet`), `--name`, `--budget` (orchestrator session, weighted tokens),
+`up` options: `--model` (default `sonnet`, `default` = your own default model), `--name`, `--budget` (orchestrator session, weighted tokens),
 `--daily-budget` (all workers per day), `--permission-mode`.
 
 ### Commands the orchestrator uses (you can too)
@@ -180,6 +180,15 @@ Your project files are never modified by learning. Everything lives in `~/.lean-
   ledger.jsonl          one line per run: model, why, cards, tokens, cost, status
   projects.json
 ```
+
+### Which model runs the orchestrator
+
+`claude remote-control` silently drops a `--model` flag, so remote sessions would start on your default model,
+which may be the most expensive one. `up` therefore writes the model into `~/.lean-agent/home/.claude/settings.json`,
+which those sessions do read. Token counts are similar across models, but price per token is not: Fable 5.1 costs
+5× Sonnet 5.5 for input and output. The orchestrator only plans, picks cards and models, and reads short summaries,
+and Sonnet handled that well in every test. Use `up --model default` to run it on your own default model instead.
+You can also switch the model of a running session in the app.
 
 ## Budgets
 

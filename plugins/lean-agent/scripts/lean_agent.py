@@ -1014,6 +1014,21 @@ def prepare_home():
     return h
 
 
+def set_home_model(h, model):
+    """Pin the orchestrator's model in its folder's settings.
+
+    `claude remote-control` silently drops a global --model flag, so remote sessions
+    would start on your default model (possibly the most expensive one); a `model`
+    key in the folder's .claude/settings.json is what those sessions read."""
+    path = os.path.join(h, ".claude", "settings.json")
+    data = load_json(path, {})
+    if model in (None, "", "default"):
+        data.pop("model", None)
+    else:
+        data["model"] = model
+    save_json(path, data)
+
+
 def claude_global_config():
     base = os.environ.get("CLAUDE_CONFIG_DIR")
     return os.path.join(base, ".claude.json") if base else os.path.expanduser("~/.claude.json")
@@ -1057,6 +1072,7 @@ def cmd_trust(a):
 
 def cmd_up(a):
     h = prepare_home()
+    set_home_model(h, a.model)
     if not is_trusted(h):
         print(f"lean-agent: warning: {TRUST_HINT}", file=sys.stderr)
     env = dict(os.environ)
@@ -1068,7 +1084,7 @@ def cmd_up(a):
         env["LEAN_AGENT_DAILY_BUDGET"] = str(a.daily_budget)
     bindir = os.path.join(PLUGIN_ROOT, "bin")
     env["PATH"] = bindir + os.pathsep + env.get("PATH", "")  # `lean-agent` works even without the plugin
-    cmd = ["claude"]
+    cmd = [os.environ.get("LEAN_AGENT_CLAUDE") or "claude"]
     if a.model:
         cmd += ["--model", a.model]
     if a.local:
@@ -1120,7 +1136,8 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("up", help="start the orchestrator (Remote Control by default)")
-    s.add_argument("--model", default="sonnet", help="orchestrator model (default: sonnet)")
+    s.add_argument("--model", default="sonnet",
+                   help="orchestrator model, pinned in the home's settings (default: sonnet; 'default' = your own)")
     s.add_argument("--name", default="lean-agent", help="session name in the Claude app")
     s.add_argument("--budget", type=int, help="orchestrator session budget, weighted tokens")
     s.add_argument("--daily-budget", type=int, help="daily budget for all worker runs, weighted tokens")
