@@ -18,3 +18,11 @@ jobs:
       - run: python tests/test_hooks.py
       - run: python tests/test_orchestrator.py
       - run: sh -n bin/lean-agent && sh -n plugins/lean-agent/bin/lean-agent && sh -n plugins/lean-agent/bin/lean-budget
+      - name: ./install in a scratch home
+        run: |
+          export T="$RUNNER_TEMP/home"; mkdir -p "$T"
+          env -i HOME="$T" SHELL=/bin/zsh PATH=/usr/bin:/bin:"$(dirname "$(command -v python3)")" ./install --no-plugin
+          grep -q "added by lean-agent ./install" "$T/.zshrc"
+          env -i HOME="$T" PATH=/usr/bin:/bin:"$(dirname "$(command -v python3)")" sh -c ". \"$T/.zshrc\"; cd /; lean-agent home"
+          env -i HOME="$T" SHELL=/bin/zsh PATH=/usr/bin:/bin ./install --uninstall
+          ! grep -q "lean-agent" "$T/.zshrc"

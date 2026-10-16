@@ -1,6 +1,17 @@
 #!/usr/bin/env sh
 # lean-agent CLI for your terminal: lean-agent install | up | learn | run | stats ...
+# Works when symlinked from anywhere (e.g. ~/.local/bin by ./install).
 src="$0"
-while [ -L "$src" ]; do src="$(readlink "$src")"; done
+while [ -L "$src" ]; do
+  target="$(readlink "$src")"
+  case "$target" in
+    /*) src="$target" ;;
+    *) src="$(dirname "$src")/$target" ;;
+  esac
+done
 here="$(cd "$(dirname "$src")" && pwd)"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "lean-agent: python3 not found on PATH" >&2
+  exit 1
+fi
 exec python3 "$here/../plugins/lean-agent/scripts/lean_agent.py" "$@"

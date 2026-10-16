@@ -1,0 +1,76 @@
+#!/usr/bin/env sh
+# Install lean-agent for your user: puts `lean-agent` on your PATH, installs the
+# Claude Code plugin and creates the orchestrator home.
+#
+#   ./install                 install (safe to re-run)
+#   ./install --no-plugin     only the command, skip `claude plugin install`
+#   ./install --uninstall     remove the command and the PATH line (keeps ~/.lean-agent)
+set -eu
+
+repo="$(cd "$(dirname "$0")" && pwd)"
+bindir="${LEAN_AGENT_BIN_DIR:-$HOME/.local/bin}"
+link="$bindir/lean-agent"
+marker="# added by lean-agent ./install"
+
+case "$(basename "${SHELL:-sh}")" in
+  zsh) rc="$HOME/.zshrc" ;;
+  bash) if [ "$(uname)" = Darwin ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi ;;
+  fish) rc="$HOME/.config/fish/config.fish" ;;
+  *) rc="$HOME/.profile" ;;
+esac
+
+path_line() {
+  if [ "$(basename "$rc")" = config.fish ]; then
+    echo "fish_add_path \"$bindir\" $marker"
+  else
+    echo "export PATH=\"$bindir:\$PATH\" $marker"
+  fi
+}
+
+if [ "${1:-}" = "--uninstall" ]; then
+  if [ -L "$link" ]; then rm "$link"; echo "removed $link"; fi
+  if [ -f "$rc" ] && grep -qF "$marker" "$rc"; then
+    tmp="$rc.lean-agent.tmp"
+    grep -vF "$marker" "$rc" > "$tmp" && mv "$tmp" "$rc"
+    echo "removed the PATH line from $rc"
+  fi
+  echo "Your data in ~/.lean-agent is kept. Remove the plugin with: claude plugin uninstall lean-agent@lean-agent"
+  exit 0
+fi
+
+command -v python3 >/dev/null 2>&1 || { echo "lean-agent needs python3 (3.9+); install it first." >&2; exit 1; }
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || { echo "lean-agent needs Python 3.9 or newer." >&2; exit 1; }
+
+mkdir -p "$bindir"
+chmod +x "$repo/bin/lean-agent"
+ln -sfn "$repo/bin/lean-agent" "$link"
+echo "linked $link -> $repo/bin/lean-agent"
+
+case ":$PATH:" in
+  *":$bindir:"*) on_path=1 ;;
+  *) on_path=0 ;;
+esac
+if [ "$on_path" = 0 ]; then
+  if [ -f "$rc" ] && grep -qF "$marker" "$rc"; then
+    echo "$rc already adds $bindir to PATH"
+  else
+    mkdir -p "$(dirname "$rc")"
+    printf '\n%s\n' "$(path_line)" >> "$rc"
+    echo "added $bindir to PATH in $rc"
+  fi
+fi
+
+if [ "${1:-}" != "--no-plugin" ]; then
+  if command -v claude >/dev/null 2>&1; then
+    "$link" install || echo "plugin install failed; you can retry later with: lean-agent install" >&2
+  else
+    echo "claude not found on PATH; skipping the plugin. Install Claude Code, then run: lean-agent install" >&2
+    "$link" home >/dev/null
+  fi
+fi
+
+echo
+echo "Done. Open a new terminal (or run: exec \$SHELL -l), then:"
+echo "  lean-agent trust            # once, so the orchestrator's permission rules apply"
+echo "  lean-agent learn <project> --name <name>"
+echo "  lean-agent up"

@@ -55,11 +55,17 @@ hints, docstrings, the test command) and never saw the rest.
 Requirements: Claude Code 2.1.300+ (CLI or Claude Desktop) and `python3`. No other dependencies.
 
 ```sh
-git clone https://github.com/mcmadsen/lean-agent
-export PATH="$PWD/lean-agent/bin:$PATH"     # add to your shell profile
-lean-agent install                          # installs the plugin, creates ~/.lean-agent/home
-lean-agent trust                            # once: accept Claude Code's trust dialog for that folder
+git clone https://github.com/mcmadsen/lean-agent ~/lean-agent
+~/lean-agent/install          # puts `lean-agent` on your PATH, installs the plugin, creates ~/.lean-agent/home
+# open a new terminal, then:
+lean-agent trust              # once: accept Claude Code's trust dialog for the orchestrator folder
 ```
+
+`./install` links `lean-agent` into `~/.local/bin` (`LEAN_AGENT_BIN_DIR` changes this) and, if that folder isn't on
+your PATH, adds one marked line to your shell's startup file (`~/.zshrc`, `~/.bash_profile`/`~/.bashrc`, fish
+config or `~/.profile`). Running it again changes nothing. `./install --no-plugin` skips the plugin, and
+`./install --uninstall` removes the link and the PATH line but keeps `~/.lean-agent`. To update, run `git pull` in the
+clone; the link points at it, so there's nothing to reinstall.
 
 `trust` matters. Claude Code ignores a folder's permission rules until the folder is trusted, and Remote Control
 never shows the trust dialog, so without it every `lean-agent` call the orchestrator makes waits for your approval.
