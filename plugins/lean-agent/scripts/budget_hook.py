@@ -4,7 +4,7 @@
 Window budgets (`lean-agent limits`) apply only to sessions in the lean-agent home, and
 `lean-agent limits` / `lean-agent stats` stay allowed so the user can see and raise them.
 
-Reads LEAN_AGENT_BUDGET (weighted tokens, 0/unset = track only) and
+Reads LEAN_AGENT_BUDGET (Sonnet-equivalent tokens, 0/unset = track only) and
 LEAN_AGENT_WARN_PCT (default 80). Past the warning threshold Claude gets a
 one-time nudge to wrap up; past the budget every tool call is denied with an
 instruction to summarise and stop.
@@ -50,14 +50,14 @@ def main():
 
     budget = int(os.environ.get("LEAN_AGENT_BUDGET") or 0)
     warn_pct = int(os.environ.get("LEAN_AGENT_WARN_PCT") or 80)
-    used = usage.weighted(state["totals"])
+    used = usage.units_total(state)  # Sonnet-equivalent tokens, the unit used everywhere
 
     if budget > 0 and used >= budget:
         usage.save_state(session_id, state)
         emit(
             permissionDecision="deny",
             permissionDecisionReason=(
-                f"lean-agent: session token budget reached ({used:,} / {budget:,} weighted tokens). "
+                f"lean-agent: session token budget reached ({used:,} / {budget:,} sonnet-eq tokens). "
                 "Do not call more tools. Reply with a short summary of what is done, what remains, "
                 "and how to resume, then end your turn. The user can raise LEAN_AGENT_BUDGET to continue."
             ),

@@ -142,6 +142,11 @@ def save_state(session_id, state):
     os.replace(tmp, path)
 
 
+def units_total(state):
+    """Sonnet-equivalent tokens across all models in a scan state (the one unit lean-agent reports)."""
+    return int(sum(units(t, m) for m, t in state.get("models", {}).items()))
+
+
 def projects_dir():
     cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
     return os.path.join(cfg, "projects")
@@ -175,30 +180,23 @@ def report(arg=None):
     state = update(new_state(), path)
     totals = state["totals"]
     budget = int(os.environ.get("LEAN_AGENT_BUDGET") or 0)
-    used = weighted(totals)
     print(f"Session: {os.path.basename(path)[:-6]}")
     print(f"Files:   {len(state['files'])} transcript(s) incl. subagents")
     print()
-    print(f"{'model':<28}{'input':>12}{'cache write':>14}{'cache read':>14}{'output':>12}{'weighted':>12}")
-    for model, t in sorted(state["models"].items(), key=lambda kv: -weighted(kv[1])):
+    used = units_total(state)
+    print(f"{'model':<28}{'input':>12}{'cache write':>14}{'cache read':>14}{'output':>12}{'sonnet-eq':>12}")
+    for model, t in sorted(state["models"].items(), key=lambda kv: -units(kv[1], kv[0])):
         print(f"{model[:27]:<28}{fmt(t['input_tokens']):>12}{fmt(t['cache_creation_input_tokens']):>14}"
-              f"{fmt(t['cache_read_input_tokens']):>14}{fmt(t['output_tokens']):>12}{fmt(weighted(t)):>12}")
+              f"{fmt(t['cache_read_input_tokens']):>14}{fmt(t['output_tokens']):>12}{fmt(int(units(t, model))):>12}")
     print(f"{'TOTAL':<28}{fmt(totals['input_tokens']):>12}{fmt(totals['cache_creation_input_tokens']):>14}"
           f"{fmt(totals['cache_read_input_tokens']):>14}{fmt(totals['output_tokens']):>12}{fmt(used):>12}")
     print()
     if budget > 0:
-        print(f"Budget:  {fmt(used)} / {fmt(budget)} weighted tokens ({used * 100 // budget}%)")
+        print(f"Session budget: {fmt(used)} / {fmt(budget)} sonnet-eq tokens ({used * 100 // budget}%)")
     else:
-        print("Budget:  none set (export LEAN_AGENT_BUDGET=<weighted tokens> to enforce one)")
-    print("Weighted = input + 1.25*cache_write + 0.1*cache_read + 5*output (input-token equivalents)")
+        print("Session budget: none (LEAN_AGENT_BUDGET, in sonnet-eq tokens)")
+    print("sonnet-eq = (input + 1.25*cache write + 0.1*cache read + 5*output) x model price relative to Sonnet")
     return 0
-
-
-if __name__ == "__main__":
-    if len(sys.argv) >= 2 and sys.argv[1] == "report":
-        sys.exit(report(sys.argv[2] if len(sys.argv) > 2 else None))
-    print(__doc__.strip(), file=sys.stderr)
-    sys.exit(2)
 
 
 # ---------------------------------------------------------------- plan windows
@@ -405,3 +403,10 @@ def describe_exhausted(hit):
     var = "LEAN_AGENT_5H_BUDGET" if name == "5h" else "LEAN_AGENT_WEEKLY_BUDGET"
     return (f"lean-agent {label} budget used up ({used:,} / {budget:,} Sonnet-equivalent tokens){when}. "
             f"Raise {var} to continue.")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) >= 2 and sys.argv[1] == "report":
+        sys.exit(report(sys.argv[2] if len(sys.argv) > 2 else None))
+    print(__doc__.strip(), file=sys.stderr)
+    sys.exit(2)

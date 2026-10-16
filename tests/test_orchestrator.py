@@ -677,6 +677,23 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("disableBundledSkills", d)
         self.assertEqual(d["model"], "sonnet")
 
+    def test_run_reports_breakdown_overhead_and_budget(self):
+        self.cli("learn", self.proj)
+        self.cli("limits", "--5h", "4000")
+        out = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--cards", "testing", "t").stdout
+        self.assertIn("3 turns", out)
+        self.assertIn("3,100 sonnet-eq tok · $0.05", out)
+        self.assertIn("tokens: input 100 · cache write 800 · cache read 5,000 · output 300", out)
+        self.assertIn("context per turn ~1,966: lean-agent protocol + cards ~", out)
+        self.assertIn("budget left: 5h", out)
+        self.write_usage(self.lean_project_dir("-work-0101-000000-abcd"), 0.2, "claude-sonnet-5-5", 3500, "z")
+        out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t").stdout
+        self.assertIn("155 sonnet-eq tok", out)  # haiku counts 0.05x
+        self.assertIn("budget left: 5h 13% (low", out)
+        self.assertIn("low: prefer -m haiku", out)
+        stats = self.cli("stats").stdout
+        self.assertIn("sonnet-eq", stats)
+
     def test_home_template(self):
         h = self.cli("home").stdout.strip()
         with open(os.path.join(h, "CLAUDE.md")) as fh:
