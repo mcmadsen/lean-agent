@@ -1,0 +1,10 @@
+{
+  "name": "lean-agent",
+  "version": "0.1.0",
+  "description": "Keep Claude Code agents running on fewer tokens: squeezes noisy command output, enforces a per-session token budget, and teaches frugal work habits.",
+  "author": { "name": "McMadsen", "url": "https://github.com/mcmadsen" },
+  "homepage": "https://github.com/mcmadsen/lean-agent",
+  "repository": "https://github.com/mcmadsen/lean-agent",
+  "license": "MIT",
+  "keywords": ["tokens", "budget", "cost", "context", "hooks", "remote-control"]
+}

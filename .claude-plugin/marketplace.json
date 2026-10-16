@@ -1,0 +1,14 @@
+{
+  "name": "lean-agent",
+  "description": "Token-saving plugins for Claude Code",
+  "owner": { "name": "McMadsen", "url": "https://github.com/mcmadsen" },
+  "plugins": [
+    {
+      "name": "lean-agent",
+      "source": "./plugins/lean-agent",
+      "description": "Squeeze noisy tool output, enforce a token budget, and work frugally.",
+      "category": "productivity",
+      "tags": ["tokens", "budget", "cost"]
+    }
+  ]
+}
