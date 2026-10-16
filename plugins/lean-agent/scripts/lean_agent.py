@@ -1393,14 +1393,61 @@ def write_home_guide(h):
     return managed
 
 
+# Tools an orchestrator never needs. Denying them removes their definitions from every turn's context
+# (measured: ~35.7k -> ~6.6k tokens per turn) and makes the "never the Agent/Workflow tool" rule a hard
+# guarantee. Names that don't exist in a given Claude Code version are ignored.
+ORCHESTRATOR_DENY = [
+    "Agent", "Task", "Workflow", "Edit", "MultiEdit", "Write", "NotebookEdit", "NotebookRead", "WebFetch", "WebSearch",
+    "Skill", "Glob", "Grep", "LS", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "EnterPlanMode",
+    "EnterWorktree", "ExitWorktree", "LSP", "Artifact", "ArtifactComments", "ArtifactData", "CronCreate", "CronDelete",
+    "CronList", "DesignSync", "ListAgents", "ListConnectors", "ListPlugins", "ListSkills", "ReadNotifications",
+    "ReportFindings", "ScheduleWakeup", "SearchMcpRegistry", "SearchPlugins", "SearchSkills", "SendMessage",
+    "SendUserFile", "ShowOnboardingRolePicker", "SuggestConnectors", "SuggestPluginInstall", "SuggestSkills",
+]
+PLUGIN_ID = "lean-agent@lean-agent"
+
+
+def orchestrator_settings(existing):
+    """lean-agent's keys for the home's .claude/settings.json; other keys (e.g. model) are kept."""
+    data = dict(existing)
+    perms = dict(data.get("permissions") or {})
+    perms["allow"] = sorted(set(perms.get("allow") or []) | {"Bash(lean-agent:*)"})
+    if os.environ.get("LEAN_AGENT_ORCHESTRATOR_TRIM") == "0":  # full context: drop lean-agent's trimming keys
+        perms.pop("deny", None)
+        data["permissions"] = perms
+        for key in ("disableBundledSkills", "disableClaudeAiConnectors", "claudeMdExcludes", "enabledPlugins"):
+            data.pop(key, None)
+        return data
+    servers = [n for n, v in lean_mcp.discover().items() if v["source"] in ("user", "desktop")]
+    perms["deny"] = sorted(set(ORCHESTRATOR_DENY) | {lean_mcp.tool_prefix(n).rstrip("_") for n in servers})
+    data["permissions"] = perms
+    data["disableBundledSkills"] = True
+    data["disableClaudeAiConnectors"] = True
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    excludes = [os.path.join(cfg, "CLAUDE.md")]
+    p = os.path.dirname(home("home"))
+    while True:  # CLAUDE.md files in folders above the home (e.g. ~/CLAUDE.md)
+        excludes += [os.path.join(p, "CLAUDE.md"), os.path.join(p, "CLAUDE.local.md")]
+        if os.path.dirname(p) == p:
+            break
+        p = os.path.dirname(p)
+    data["claudeMdExcludes"] = excludes
+    user = load_json(os.path.join(cfg, "settings.json"), {})
+    plugins = {k: False for k, v in (user.get("enabledPlugins") or {}).items() if v and k != PLUGIN_ID}
+    data["enabledPlugins"] = dict(data.get("enabledPlugins") or {}, **plugins)
+    return data
+
+
 def prepare_home():
     h = home("home")
     os.makedirs(os.path.join(h, ".claude"), exist_ok=True)
     seed_recipes()
     write_home_guide(h)
     settings = os.path.join(h, ".claude", "settings.json")
-    if not os.path.exists(settings):
-        save_json(settings, {"permissions": {"allow": ["Bash(lean-agent:*)"]}})
+    save_json(settings, orchestrator_settings(load_json(settings, {})))
+    local = os.path.join(h, ".claude", "settings.local.json")
+    if os.environ.get("LEAN_AGENT_ORCHESTRATOR_TRIM") != "0":
+        save_json(local, dict(load_json(local, {}), syncClaudeAiSkills=False))  # only honoured in local/user scope
     return h
 
 
