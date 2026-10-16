@@ -10,7 +10,8 @@ Env:
     LEAN_AGENT_SQUEEZE=0          disable
     LEAN_AGENT_SQUEEZE_OVER=6000  only squeeze outputs longer than this (chars)
     LEAN_AGENT_SQUEEZE_TO=4000    target size after squeezing (chars)
-Put LEAN_RAW=1 anywhere in a command to bypass it for that command.
+Put LEAN_RAW=1 anywhere in a command to bypass it for that command. Reads (cat, sed -n, head,
+grep/rg, git show/grep/diff/log/blame) are never squeezed: their output is what was asked for.
 """
 import glob
 import json
@@ -29,6 +30,25 @@ ERRORISH = re.compile(
     re.IGNORECASE,
 )
 HEAD, TAIL, CONTEXT, MAX_HITS = 15, 40, 2, 80
+# Commands whose output is content the agent asked for (files, search hits, diffs): never squeezed.
+READ_COMMANDS = {"cat", "head", "tail", "sed", "nl", "less", "more", "bat", "grep", "egrep", "fgrep", "rg", "ag",
+                 "ack", "jq", "yq", "awk", "diff", "xxd", "od"}
+READ_GIT = {"show", "grep", "diff", "log", "blame", "cat-file"}
+
+
+def is_read_command(command):
+    """True when the command's main step reads content (cat, sed -n, git show, rg, ...)."""
+    segment = re.split(r"&&|;|\|\|", command)[-1].split("|")[0].strip()
+    words = [w for w in segment.split() if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w)]
+    if not words:
+        return False
+    prog = os.path.basename(words[0])
+    if prog == "git":
+        rest = words[1:]
+        while rest and rest[0].startswith("-"):  # git -C <dir> / -c key=val
+            rest = rest[2:] if rest[0] in ("-C", "-c") else rest[1:]
+        return bool(rest) and rest[0] in READ_GIT
+    return prog in READ_COMMANDS
 KEEP_LOGS_SECONDS = 2 * 24 * 3600
 
 
@@ -102,7 +122,7 @@ def main():
         return 0
     command = (event.get("tool_input") or {}).get("command") or ""
     # Never squeeze explicit opt-outs or reads of our own saved logs.
-    if "LEAN_RAW" in command or "lean-agent" in command:
+    if "LEAN_RAW" in command or "lean-agent" in command or is_read_command(command):
         return 0
     stdout = resp.get("stdout") if isinstance(resp.get("stdout"), str) else ""
     stderr = resp.get("stderr") if isinstance(resp.get("stderr"), str) else ""

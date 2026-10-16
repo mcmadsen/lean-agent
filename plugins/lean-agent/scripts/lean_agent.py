@@ -34,7 +34,7 @@ PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
 PLUGIN = "lean-agent@lean-agent"
 TEMPLATE_MARK = "<!-- lean-agent orchestrator template v"
-TEMPLATE_VERSION = 4
+TEMPLATE_VERSION = 5
 
 WORKER_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
 READONLY_TOOLS = "Read,Glob,Grep"
@@ -47,22 +47,46 @@ You are a lean-agent worker. Another agent gave you one task; it cannot see your
 reasoning, only your final reply.
 
 Project: {project}
-Your working directory is NOT the project. Use absolute paths, and run shell
-commands as `cd {project} && <command>`.
+Your working directory is NOT the project. Use absolute paths.
+{shell_rule}
 
 Work frugally: Grep/Glob before Read, read line ranges rather than whole files,
 use quiet command flags (-q, --silent, | tail -n 40), no narration. Read other
-project files only when the task needs them.
+project files only when the task needs them. Put LEAN_RAW=1 in front of a command
+whose full output you need unshortened.
 
+Ask, don't guess: if the task's target (a person, chat, channel, ticket, branch or
+file) or its intent is not uniquely clear from the task and what you find, stop and
+return status "needs-input" with your question and the candidates you found.
+
+{send_rule}
+{browser_rule}
 End your reply with a short result (what you did, files changed, anything
 unresolved), then one final line exactly like this:
-LEAN-FEEDBACK {{"status": "done|partial|failed", "used": ["card-id"], "unneeded": ["card-id"], "missing": "context you had to discover that should have been given up front, or empty", "remember": []}}
+LEAN-FEEDBACK {{"status": "done|partial|failed|needs-input|awaiting-confirmation", "used": ["card-id"], "unneeded": ["card-id"], "missing": "context you had to discover that should have been given up front, or empty", "remember": []}}
 
 "remember" is shared memory for future agents. Usually leave it empty. Add an item
 only for a durable fact that can't be derived from the code or git history, such as a
 user correction, a decision, or where external info lives:
 {{"type": "feedback|project|reference|user", "text": "one or two sentences"}}
 """
+
+SHELL_RULE = "Run shell commands as `cd {project} && <command>`."
+READONLY_SHELL_RULE = ("You are read-only. The only shell commands you can run are read-only git commands, written as\n"
+                       "`git -C {project} <show|log|grep|diff|blame|status|ls-files|rev-parse|branch|fetch> ...`\n"
+                       "(no `cd`, no pipes to other programs). Everything else is refused.")
+SEND_RULE = ("Outward actions: do NOT do anything that leaves this machine and can't be undone, such as\n"
+             "sending or posting a message, submitting a form, publishing, merging, deploying, or deleting\n"
+             "remote data. Do the work up to that point (e.g. type the draft), then stop with status\n"
+             "\"awaiting-confirmation\" and state exactly what would be done: where, to whom, and the exact text.\n")
+ALLOW_SEND_RULE = ("Outward actions: the user explicitly approved this outward action: {approved}\n"
+                   "Do exactly that, once, then verify it happened. Anything beyond it still needs approval:\n"
+                   "stop with status \"awaiting-confirmation\".\n")
+BROWSER_RULE = ("Browser: you control the user's real Chrome (signed in as them) through the Claude in Chrome\n"
+                "tools. Always work in a new tab and never touch the user's existing tabs. If a login, MFA,\n"
+                "CAPTCHA or account picker appears, stop with status \"needs-input\".\n")
+READONLY_GIT = ("show", "log", "grep", "diff", "blame", "status", "ls-files", "rev-parse", "branch", "fetch")
+CHROME = "claude-in-chrome"
 
 
 # ---------------------------------------------------------------- helpers
@@ -167,6 +191,13 @@ def resolve_project(ref):
                 return s, path
         return learn(path, quiet=True), path
     die(f"unknown project {ref!r}; register it with: lean-agent learn <path>")
+
+
+def is_project_ref(ref):
+    projs = projects()
+    if ref in projs or any(os.path.basename(v["path"]) == ref for v in projs.values()):
+        return True
+    return os.path.isdir(os.path.expanduser(ref)) and os.sep in ref
 
 
 def library_path(slug):
@@ -551,8 +582,12 @@ def parse_feedback(text):
     return "\n".join(lines).strip(), fb if isinstance(fb, dict) else {}
 
 
-def build_append(project, cards):
-    parts = [WORKER_PROTOCOL.format(project=project)]
+def build_append(project, cards, read_only=False, allow_send=None, chrome=False):
+    parts = [WORKER_PROTOCOL.format(
+        project=project,
+        shell_rule=(READONLY_SHELL_RULE if read_only else SHELL_RULE).format(project=project),
+        send_rule=ALLOW_SEND_RULE.format(approved=allow_send) if allow_send else SEND_RULE,
+        browser_rule=BROWSER_RULE if chrome else "")]
     if cards:
         parts.append("# Project context (selected for this task)\n")
         for c in cards:
@@ -634,6 +669,12 @@ def cmd_run(a):
         slug, project = prev["project"], prev["project_path"]
         cards, workdir, run_id = [], prev["workdir"], prev["id"]
         tools = prev.get("tools", WORKER_TOOLS)
+        read_only = prev.get("read_only", False)
+        chrome_spec = prev.get("chrome")
+        lib = {c["id"]: c for c in load_cards(slug)}
+        with open(os.path.join(workdir, "append.md"), "w") as fh:  # same context, current send/browser rules
+            fh.write(build_append(project, [lib[c] for c in prev.get("cards", []) if c in lib], read_only,
+                                  a.allow_send, bool(chrome_spec)))
     else:
         slug, project = resolve_project(a.project)
         sync_memory(slug)
@@ -650,27 +691,50 @@ def cmd_run(a):
         run_id = datetime.datetime.now().strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
         workdir = home("work", run_id)
         os.makedirs(workdir, exist_ok=True)
+        read_only = bool(a.read_only)
+        chrome_spec = a.chrome
+        if chrome_spec and not re.match(r"^[\w,-]+$", chrome_spec):  # `--chrome "the task"`: it's the task
+            task = (chrome_spec + " " + task).strip()
+            chrome_spec = "all"
+        for spec in list(a.mcp or []):  # --mcp claude-in-chrome[:tools] is an alias for --chrome[=tools]
+            if spec.split(":", 1)[0] == CHROME:
+                a.mcp.remove(spec)
+                chrome_spec = spec.split(":", 1)[1] if ":" in spec else "all"
         with open(os.path.join(workdir, "append.md"), "w") as fh:
-            fh.write(build_append(project, cards))
-        tools = a.tools or (READONLY_TOOLS if a.read_only else WORKER_TOOLS)
+            fh.write(build_append(project, cards, read_only, a.allow_send, bool(chrome_spec)))
+        tools = a.tools or (READONLY_TOOLS + ",Bash" if read_only else WORKER_TOOLS)
 
     mcp_specs = prev.get("mcp") if prev else (a.mcp or [])
     mcp_servers, mcp_allowed, mcp_disallowed = resolve_mcp(project, mcp_specs) if mcp_specs else ({}, [], [])
     mcp_path = os.path.join(workdir, "mcp.json")
-    if mcp_servers:
-        lean_mcp.write_config(mcp_path, mcp_servers)
-        # --safe-mode disables MCP; this keeps the same isolation but admits exactly these servers
-        isolation = ["--setting-sources", "", "--strict-mcp-config", "--mcp-config", mcp_path]
-        if mcp_disallowed:
-            isolation += ["--disallowedTools", ",".join(mcp_disallowed)]
+    chrome_allowed, chrome_disallowed, chrome_profile = resolve_chrome(chrome_spec, project) if chrome_spec else ([], [], None)
+    if mcp_servers or chrome_spec:
+        if mcp_servers:
+            lean_mcp.write_config(mcp_path, mcp_servers)
+        # --safe-mode disables MCP and Chrome; this keeps the same isolation but admits exactly these servers
+        isolation = ["--setting-sources", ""]
+        if chrome_profile != "loose":
+            isolation += ["--strict-mcp-config"]
+        if mcp_servers:
+            isolation += ["--mcp-config", mcp_path]
+        if chrome_spec:
+            isolation += ["--chrome"]
+        if mcp_disallowed or chrome_disallowed:
+            isolation += ["--disallowedTools", ",".join(mcp_disallowed + chrome_disallowed)]
     else:
         isolation = ["--safe-mode"]
+    if read_only:
+        allowed = READONLY_TOOLS.split(",") + [f"Bash(git -C {project} {sub}:*)" for sub in READONLY_GIT]
+        permission_mode = "default"
+    else:
+        allowed = [tools]
+        permission_mode = os.environ.get("LEAN_AGENT_WORKER_PERMISSION_MODE") or "acceptEdits"
 
     claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
     cmd = [claude, "-p", "--output-format", "json", "--model", model,
            *isolation, "--disable-slash-commands",
-           "--tools", tools, "--allowedTools", ",".join([tools] + mcp_allowed),
-           "--permission-mode", os.environ.get("LEAN_AGENT_WORKER_PERMISSION_MODE") or "acceptEdits",
+           "--tools", tools, "--allowedTools", ",".join(allowed + mcp_allowed + chrome_allowed),
+           "--permission-mode", permission_mode,
            "--add-dir", project,
            "--append-system-prompt-file", os.path.join(workdir, "append.md"),
            "--max-turns", str(a.max_turns)]
@@ -757,7 +821,8 @@ def cmd_run(a):
         "cost_usd": out.get("total_cost_usd"), "session_id": out.get("session_id") or (prev and prev["session_id"]),
         "resumed": bool(prev), "task": task[:300], "missing": missing_note,
         "mcp": mcp_specs, "mcp_calls": lean_mcp.count_mcp_calls(workdir, out.get("session_id"), started_utc)
-        if mcp_specs else {},
+        if (mcp_specs or chrome_spec) else {},
+        "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send),
     }
     append_jsonl(home("ledger.jsonl"), entry)
 
@@ -772,11 +837,108 @@ def cmd_run(a):
         print(f"feedback: used={sorted(used)} unneeded={sorted(unneeded)}" + (f" missing={missing_note!r}" if missing_note else ""))
     if remembered:
         print(f"remembered: {', '.join(remembered)}")
-    if mcp_specs:
+    if status == "needs-input":
+        print("ACTION NEEDED: the worker needs an answer (see above). Ask the user, then: "
+              f"lean-agent run --resume {run_id} \"<answer>\"")
+    elif status == "awaiting-confirmation":
+        print("ACTION NEEDED: an outward action is prepared but NOT done. Show the user exactly what would happen. "
+              f"Only if they approve: lean-agent run --resume {run_id} --allow-send \"<what was approved>\" \"Do it now\"")
+    if mcp_specs or chrome_spec:
         calls = entry["mcp_calls"]
         print("mcp: " + (", ".join(f"{k} x{v}" for k, v in sorted(calls.items())) or "no MCP tool calls"))
     print(f"resume: lean-agent run --resume {run_id} \"<follow-up>\"")
-    return 0 if status in ("done", "partial") else 1
+    return 0 if status in ("done", "partial", "needs-input", "awaiting-confirmation") else 1
+
+
+def chrome_state():
+    return load_json(home("chrome.json"), {})
+
+
+def resolve_chrome(spec, project):
+    """(allowed rules, disallowed tool names, profile) for a --chrome[=tools] run."""
+    st = chrome_state()
+    if not st.get("ok"):
+        die("Claude in Chrome hasn't been verified for workers yet: run `lean-agent chrome check` once "
+            "(Chrome running, extension installed and signed in)")
+    prefix = lean_mcp.tool_prefix(CHROME)
+    known = st.get("tools") or []
+    disallowed = []
+    if st.get("profile") == "loose":  # no --strict-mcp-config: keep the user's other MCP servers out
+        disallowed += [lean_mcp.tool_prefix(n).rstrip("_") for n in lean_mcp.discover(project)]
+    if spec in (None, "", "all"):
+        return [prefix.rstrip("_")], disallowed, st.get("profile")
+    wanted = [t.strip() for t in spec.split(",") if t.strip()]
+    unknown = [t for t in wanted if known and t not in known]
+    if unknown:
+        die(f"{CHROME} has no tool(s) {', '.join(unknown)}; it has: {', '.join(known)}")
+    disallowed += [prefix + t for t in known if t not in wanted]
+    return [prefix + t for t in wanted], disallowed, st.get("profile")
+
+
+def _probe_session(extra, cwd):
+    """Start a 1-turn Haiku session; return (tool names, mcp servers, context tokens) from its stream."""
+    claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
+    cmd = [claude, "-p", "--output-format", "stream-json", "--verbose", "--model", "haiku",
+           "--disable-slash-commands", "--tools", "Read", "--max-turns", "1", *extra]
+    try:
+        out = subprocess.run(cmd, input="Reply with just OK. Do not use tools.", capture_output=True,
+                             text=True, cwd=cwd, timeout=180).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return [], [], 0
+    tools, servers, ctx = [], [], 0
+    for line in out.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") == "system" and ev.get("subtype") == "init":
+            tools, servers = ev.get("tools") or [], ev.get("mcp_servers") or []
+        elif ev.get("type") == "result":
+            u = ev.get("usage") or {}
+            ctx = sum(u.get(k, 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    return tools, servers, ctx
+
+
+def cmd_chrome(a):
+    if a.action == "status":
+        st = chrome_state()
+        if not st:
+            print("Not checked yet. Run: lean-agent chrome check")
+        else:
+            print(f"{'OK' if st.get('ok') else 'NOT available'} (checked {st.get('checked')}, profile {st.get('profile')}); "
+                  f"{len(st.get('tools') or [])} tools, ~{st.get('tokens', 0):,} tokens per worker turn")
+            if st.get("tools"):
+                print("tools: " + ", ".join(st["tools"]))
+        return
+    d = home("work", "chrome-check")
+    os.makedirs(d, exist_ok=True)
+    prefix = lean_mcp.tool_prefix(CHROME)
+    base = ["--setting-sources", ""]
+    _, _, baseline = _probe_session(base + ["--strict-mcp-config"], d)
+    result = {"ok": False, "checked": now_iso()}
+    for profile, extra in (("strict", ["--strict-mcp-config", "--chrome"]),
+                           ("loose", ["--chrome"] + (["--disallowedTools", ",".join(
+                               lean_mcp.tool_prefix(n).rstrip("_") for n in lean_mcp.discover())]
+                               if lean_mcp.discover() else []))):
+        tools, servers, ctx = _probe_session(base + extra, d)
+        chrome_tools = [t[len(prefix):] for t in tools if t.startswith(prefix)]
+        status = next((s.get("status") for s in servers if s.get("name") == CHROME), None)
+        print(f"{profile:<7} {CHROME}: {status or 'absent'}, {len(chrome_tools)} tools")
+        if chrome_tools:
+            result.update(ok=True, profile=profile, tools=chrome_tools, tokens=max(0, ctx - baseline),
+                          server_status=status)
+            break
+    save_json(home("chrome.json"), result)
+    if result["ok"]:
+        print(f"Workers can use Claude in Chrome ({result['profile']} isolation): {len(result['tools'])} tools, "
+              f"~{result['tokens']:,} tokens of context per worker turn.")
+        print("Give a worker only what it needs, e.g. --chrome " + ",".join(result["tools"][:3]))
+        print("Sites must be allowed in the Claude extension's settings; headless workers can't answer site prompts.")
+    else:
+        print("Claude in Chrome isn't available to headless workers on this machine. Check: Chrome is running, "
+              "the Claude extension is installed and signed in to the same account/organization as Claude Code "
+              "(`/status`), and `claude --chrome` then `/chrome` shows Status: Enabled.")
+        return 1
 
 
 def cmd_mcp(a):
@@ -794,9 +956,16 @@ def cmd_mcp(a):
                 tools = server_tools(name, info["config"], refresh=True)
             n, tok = (len(tools), f"{sum(tools.values()):,}") if tools is not None else ("?", "?")
             print(f"{name:<24}{lean_mcp.server_type(info['config']):<7}{info['source']:<9}{n:>6}{tok:>8}")
+        st = chrome_state()
+        if st.get("ok"):
+            print(f"{CHROME:<24}{'chrome':<7}{'builtin':<9}{len(st['tools']):>6}{st.get('tokens', 0):>8,}  (use --chrome)")
+        elif not st:
+            print(f"{CHROME:<24}{'chrome':<7}{'builtin':<9}{'?':>6}{'?':>8}  (run: lean-agent chrome check)")
         print("~tok = tool definitions a worker carries on every turn if given the whole server."
               + ("" if a.probe else "  Fill in ? with --probe (stdio servers)."))
         return
+    if a.server == CHROME:
+        return cmd_chrome(argparse.Namespace(action="status"))
     if a.server not in servers:
         die(f"unknown MCP server {a.server!r}; configured: {', '.join(sorted(servers)) or 'none'}")
     cfg = servers[a.server]["config"]
@@ -1025,6 +1194,24 @@ ORCHESTRATOR_ENV = {
 }
 
 
+def seed_recipes():
+    """Add built-in how-to memories once (a recipe you delete stays deleted)."""
+    seeded_path = home("recipes-seeded.json")
+    seeded = load_json(seeded_path, [])
+    changed = False
+    for f in sorted(glob.glob(os.path.join(PLUGIN_ROOT, "templates", "recipes", "*.md"))):
+        stem = "recipe_" + os.path.splitext(os.path.basename(f))[0]
+        if stem in seeded:
+            continue
+        meta, body = lean_memory.parse(read_text(f))
+        lean_memory.add(memory_store(), body, meta.get("type", "reference"), name=meta.get("name"),
+                        description=meta.get("description"), stem=stem, source="lean-agent recipe")
+        seeded.append(stem)
+        changed = True
+    if changed:
+        save_json(seeded_path, seeded)
+
+
 def prepare_home():
     h = home("home")
     os.makedirs(os.path.join(h, ".claude"), exist_ok=True)
@@ -1035,6 +1222,7 @@ def prepare_home():
     if not current or (m and int(m.group(1)) < TEMPLATE_VERSION):
         with open(target, "w") as fh:
             fh.write(template)
+    seed_recipes()
     settings = os.path.join(h, ".claude", "settings.json")
     if not os.path.exists(settings):
         save_json(settings, {"permissions": {"allow": ["Bash(lean-agent:*)"]}})
@@ -1253,9 +1441,17 @@ def main(argv=None):
     s.add_argument("--max-usd", type=float, default=env_num("LEAN_AGENT_RUN_MAX_USD", 3.0, float))
     s.add_argument("--task-file")
     s.add_argument("--resume", metavar="RUN_ID", help="continue a previous run's session")
+    s.add_argument("--chrome", nargs="?", const="all", metavar="TOOL,TOOL",
+                   help="give the worker the user's Chrome via Claude in Chrome (optionally only these tools)")
+    s.add_argument("--allow-send", metavar="WHAT",
+                   help="the user approved this outward action (send/post/submit...); describe exactly what")
     s.add_argument("--mcp", action="append", metavar="SERVER[:TOOL,TOOL]",
                    help="give the worker this MCP server, optionally only these tools (repeatable)")
     s.set_defaults(fn=cmd_run)
+
+    s = sub.add_parser("chrome", help="Claude in Chrome for workers: check (once) | status")
+    s.add_argument("action", choices=["check", "status"])
+    s.set_defaults(fn=cmd_chrome)
 
     s = sub.add_parser("mcp", help="MCP servers workers can use: list, tools <server>")
     s.add_argument("action", choices=["list", "tools"])
@@ -1292,7 +1488,15 @@ def main(argv=None):
     s.add_argument("--notes", type=int, default=10)
     s.set_defaults(fn=cmd_optimize)
 
-    a = ap.parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if (len(argv) > 2 and argv[0] == "run" and not argv[1].startswith("-")
+            and not {"-p", "--project", "--resume"} & set(argv) and is_project_ref(argv[1])):
+        argv = ["run", "-p", argv[1]] + argv[2:]  # `lean-agent run <project> ...` like `cards <project>`
+    a, leftover = ap.parse_known_args(argv)
+    if leftover:
+        if a.cmd != "run" or any(x.startswith("-") for x in leftover):
+            ap.error("unrecognized arguments: " + " ".join(leftover))
+        a.task += leftover  # task words given after options
     if a.cmd == "run" and not a.resume and not a.project:
         ap.error("run needs --project (or --resume)")
     return a.fn(a) or 0

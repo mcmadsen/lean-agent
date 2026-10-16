@@ -15,6 +15,14 @@ FAKE_CLAUDE = textwrap.dedent("""\
     #!/usr/bin/env python3
     import json, os, sys
     task = sys.stdin.read()
+    if "stream-json" in sys.argv:  # session probe used by `lean-agent chrome check`
+        chrome = "--chrome" in sys.argv and os.environ.get("FAKE_CHROME") == ("strict" if "--strict-mcp-config" in sys.argv else "loose") 
+        tools = ["Read"] + (["mcp__claude-in-chrome__navigate", "mcp__claude-in-chrome__find",
+                             "mcp__claude-in-chrome__form_input", "mcp__claude-in-chrome__gif_creator"] if chrome else [])
+        print(json.dumps({"type": "system", "subtype": "init", "tools": tools,
+                          "mcp_servers": [{"name": "claude-in-chrome", "status": "connected"}] if chrome else []}))
+        print(json.dumps({"type": "result", "usage": {"input_tokens": 8000 + (3000 if chrome else 0)}}))
+        sys.exit(0)
     log = os.environ["FAKE_LOG"]
     append = sys.argv[sys.argv.index("--append-system-prompt-file") + 1]
     mcp = None
@@ -185,9 +193,15 @@ class CliTest(unittest.TestCase):
         run_id = out.split()[1]
         self.cli("run", "--resume", run_id, "now also y")
         first, second = self.calls()
-        self.assertEqual(first["argv"][first["argv"].index("--tools") + 1], "Read,Glob,Grep")
+        for call in (first, second):
+            argv = call["argv"]
+            self.assertEqual(argv[argv.index("--tools") + 1], "Read,Glob,Grep,Bash")
+            allowed = argv[argv.index("--allowedTools") + 1].split(",")
+            self.assertIn(f"Bash(git -C {self.proj} show:*)", allowed)
+            self.assertNotIn("Bash", allowed)  # only the read-only git patterns
+            self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
+            self.assertIn(f"git -C {self.proj}", call["append"])
         self.assertEqual(second["argv"][second["argv"].index("--resume") + 1], "sess-1")
-        self.assertEqual(second["argv"][second["argv"].index("--tools") + 1], "Read,Glob,Grep")
 
     def test_optimize_promotes_core(self):
         self.cli("learn", self.proj)
@@ -449,6 +463,71 @@ class CliTest(unittest.TestCase):
         out = self.cli("up", "--fresh", check=False).stdout
         self.assertFalse(os.path.exists(pointer))
         self.assertIn("starting a new Remote Control session", out)
+
+    def test_chrome_check_and_run(self):
+        self.cli("learn", self.proj)
+        p = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--chrome", "--", "draft it", check=False)
+        self.assertIn("chrome check", p.stderr)  # refuses until verified
+        out = self.cli("chrome", "check", FAKE_CHROME="strict").stdout
+        self.assertIn("Workers can use Claude in Chrome (strict isolation): 4 tools, ~3,000 tokens", out)
+        self.assertRegex(self.cli("mcp", "list").stdout, r"claude-in-chrome\s+chrome\s+builtin\s+4\s+3,000")
+        self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--chrome", "navigate,find", "--", "draft a reply")
+        argv = self.calls()[-1]["argv"]
+        self.assertIn("--chrome", argv)
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertNotIn("--safe-mode", argv)
+        self.assertEqual(argv[argv.index("--disallowedTools") + 1],
+                         "mcp__claude-in-chrome__form_input,mcp__claude-in-chrome__gif_creator")
+        self.assertIn("mcp__claude-in-chrome__navigate", argv[argv.index("--allowedTools") + 1])
+        self.assertIn("new tab", self.calls()[-1]["append"])
+        # --mcp alias
+        self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--mcp", "claude-in-chrome", "t")
+        argv = self.calls()[-1]["argv"]
+        self.assertIn("--chrome", argv)
+        self.assertIn("mcp__claude-in-chrome", argv[argv.index("--allowedTools") + 1].split(","))
+        # loose profile keeps the user's configured MCP servers out
+        self.assertIn("loose", self.cli("chrome", "check", FAKE_CHROME="loose").stdout)
+        self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--chrome", "--", "t")
+        argv = self.calls()[-1]["argv"]
+        self.assertNotIn("--strict-mcp-config", argv)
+        self.assertIn("mcp__tickets", argv[argv.index("--disallowedTools") + 1].split(","))
+        p = self.cli("chrome", "check", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("isn't available", p.stdout)
+
+    def test_draft_send_split_and_needs_input(self):
+        self.cli("learn", self.proj)
+        fb = json.dumps({"status": "awaiting-confirmation", "used": [], "unneeded": [], "missing": ""})
+        out = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "reply to Alex", FAKE_FEEDBACK=fb)
+        self.assertIn("NOT done", out.stdout)
+        self.assertEqual(out.returncode, 0)
+        first = self.calls()[-1]
+        self.assertIn("awaiting-confirmation", first["append"])
+        self.assertIn("do NOT do anything that leaves this machine", first["append"])
+        run_id = out.stdout.split()[1]
+        self.cli("run", "--resume", run_id, "--allow-send", "the drafted reply to Alex in Teams", "Send it now")
+        self.assertIn("explicitly approved this outward action: the drafted reply to Alex in Teams",
+                      self.calls()[-1]["append"])
+        fb = json.dumps({"status": "needs-input", "used": [], "unneeded": [], "missing": ""})
+        out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "message Sam", FAKE_FEEDBACK=fb).stdout
+        self.assertIn("needs an answer", out)
+
+    def test_run_project_positional_and_late_task_words(self):
+        self.cli("learn", self.proj)
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "find", "things")
+        self.assertEqual(self.calls()[-1]["task"], "find things")
+        self.cli("run", "-m", "haiku", "--why", "x", "-p", "proj", "first", "--read-only", "second")
+        self.assertEqual(self.calls()[-1]["task"], "first second")
+
+    def test_teams_recipe_is_seeded_once(self):
+        self.cli("learn", self.proj)
+        self.cli("home")
+        mems = self.cli("memory", "list").stdout
+        self.assertIn("mem-recipe-teams-message", mems)
+        self.assertIn("mem-recipe-teams-message", self.cli("suggest", "proj", "write a reply in Teams to Alex").stdout)
+        self.cli("memory", "rm", "recipe_teams_message")
+        self.cli("home")
+        self.assertNotIn("teams", self.cli("memory", "list").stdout)  # deleted recipes stay deleted
 
     def test_home_template(self):
         h = self.cli("home").stdout.strip()

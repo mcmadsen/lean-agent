@@ -101,7 +101,7 @@ Other ways to run the orchestrator:
 | `lean-agent projects` / `learn <path> [--name n]` | Register a project, or refresh its cards after CLAUDE.md changes. Card stats survive. |
 | `lean-agent cards <project> [filter]` | Cards with size and hit rate (`used/sent`). `*` = core. Filter by id, title or path, e.g. `cards shop infra`. |
 | `lean-agent suggest <project> "<task>"` | Core cards plus best matches by keyword overlap × past usefulness, within a token cap. |
-| `lean-agent run -p <project> -m <model> --why "..." [--cards a,b \| auto] [--read-only] [--max-usd X] [--max-turns N] "<task>"` | Run an isolated worker. Model and reason are **required**. |
+| `lean-agent run <project> -m <model> --why "..." [--cards a,b \| auto] [--read-only] [--chrome[=tools]] [--mcp s:t] [--max-usd X] [--max-turns N] -- "<task>"` | Run an isolated worker. Model and reason are **required**. `--read-only` allows Read/Glob/Grep and read-only `git -C <project> show/log/grep/diff/blame/fetch`. |
 | `lean-agent run --resume <run-id> "<follow-up>"` | Continue a worker's session (cheap: its context is cached). |
 | `lean-agent card show\|add\|rm\|core <project> <id>` | Inspect or edit cards; `add` creates *note* cards from what workers had to discover. |
 | `lean-agent optimize <project> [--apply]` | Promote/demote core cards, archive dead ones, flag big cards to trim, list recent context gaps. |
@@ -130,6 +130,38 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
 - lean-agent counts which MCP tools each worker called. `optimize` then suggests narrowing a server to the tools
   that get used, or dropping it.
 - Not covered: claude.ai connectors (they aren't in a local config file). Remote OAuth servers are untested.
+
+## Browser tasks (Claude in Chrome)
+
+Workers can use your real, signed-in Chrome through the
+[Claude in Chrome](https://code.claude.com/docs/en/chrome) extension, for example to draft a reply in Teams, Gmail or
+a ticket system that has no MCP server:
+
+```sh
+lean-agent chrome check        # once: starts a tiny Haiku session with --chrome and records tools and token cost
+lean-agent run proj -m sonnet --why "reply in Teams" --chrome --cards mem-recipe-teams-message \
+    -- "Draft a reply to Alex's last message in Teams: 'Thanks, I'll look at it today.'"
+```
+
+- **How it's isolated:** a `--chrome` run swaps `--safe-mode` for `--setting-sources "" --strict-mcp-config --chrome`.
+  You keep the same isolation, and the only extra tools are the browser's. `--chrome=navigate,find` narrows it
+  further, removing the other browser tools from context. `chrome check` tests whether the strict setup exposes the
+  browser on your machine. If it doesn't, check falls back to a setup without `--strict-mcp-config` that blocks your
+  configured MCP servers instead.
+- **Site permissions:** these come from the Claude extension's settings. A headless worker can't answer a site prompt,
+  so allow the sites it should use (e.g. Teams) in the extension first.
+- **Built-in recipe:** the `mem-recipe-teams-message` memory explains the Teams steps: new tab, search, verify the
+  header, Shift+Enter for line breaks because Enter sends, then stop before sending.
+
+### Draft first, send only on approval
+
+Workers are told never to do outward actions that can't be undone (send or post a message, submit, publish, merge,
+deploy, delete remote data) on their own. Instead they stop with status **`awaiting-confirmation`** and say exactly
+what they would do. After the user approves, the orchestrator resumes the same worker with
+`--allow-send "<what was approved>"`. If a target is ambiguous (two people called Alex, no matching chat), the worker
+returns **`needs-input`** with the candidates instead of guessing. This is enforced by instruction, not
+technically: lean-agent can't block a click on a web page's Send button, so the browser recipe and the playbook repeat
+it. Review what workers do in your browser.
 
 ## Shared memory
 
@@ -245,7 +277,8 @@ The session budget is in **weighted tokens**, input-token equivalents using the 
 Installing the plugin also gives any Claude Code session (not just the orchestrator):
 
 - **Output squeezer:** a PostToolUse hook that shrinks noisy Bash output (6K to 30K chars) to the head, the tail
-  and the error lines, and saves the full log for grep. Opt out per command with `LEAN_RAW=1`, or entirely
+  and the error lines, and saves the full log for grep. Reads (`cat`, `sed -n`, `head`, `grep`/`rg`,
+  `git show/grep/diff/log/blame`) are never squeezed. Opt out per command with `LEAN_RAW=1`, or entirely
   with `LEAN_AGENT_SQUEEZE=0`. (Workers run in safe mode, so hooks don't run there. They get a smaller
   `BASH_MAX_OUTPUT_LENGTH` and frugal-command instructions instead.)
 - **Budget guard:** the session budget above.
