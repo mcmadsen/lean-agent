@@ -33,8 +33,15 @@ import lean_memory  # noqa: E402
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
 PLUGIN = "lean-agent@lean-agent"
-TEMPLATE_MARK = "<!-- lean-agent orchestrator template v"
-TEMPLATE_VERSION = 5
+OLD_TEMPLATE_MARK = "<!-- lean-agent orchestrator template v"   # homes written before the generated guide
+GUIDE_MARK = "<!-- lean-agent guide "
+BLOCK_BEGIN = "<!-- lean-agent:begin"
+BLOCK_END = "<!-- lean-agent:end -->"
+BLOCK_RE = re.compile(r"\n*<!-- lean-agent:begin[^>]*-->.*?<!-- lean-agent:end -->\n*", re.S)
+PRECEDENCE_MARK = "<!-- lean-agent:precedence -->"
+PRECEDENCE_LINE = (PRECEDENCE_MARK + " In repos and sessions with lean-agent rules (a lean-agent block or the lean-agent "
+                   "home), those rules on subagents, the Agent tool and workflows take precedence over this file.")
+CONFLICT_RE = re.compile(r"(?i)\b(sub-?agents?|agent tool|task tool|workflow tool|workflows?|spawn)\b")
 
 WORKER_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
 READONLY_TOOLS = "Read,Glob,Grep"
@@ -73,7 +80,7 @@ user correction, a decision, or where external info lives:
 
 SHELL_RULE = "Run shell commands as `cd {project} && <command>`."
 READONLY_SHELL_RULE = ("You are read-only. The only shell commands you can run are read-only git commands, written as\n"
-                       "`git -C {project} <show|log|grep|diff|blame|status|ls-files|rev-parse|branch|fetch> ...`\n"
+                       "`git -C {project} <show|log|grep|diff|blame|status|ls-files|ls-tree|cat-file|rev-parse|branch|fetch> ...`\n"
                        "(no `cd`, no pipes to other programs). Everything else is refused.")
 SEND_RULE = ("Outward actions: do NOT do anything that leaves this machine and can't be undone, such as\n"
              "sending or posting a message, submitting a form, publishing, merging, deploying, or deleting\n"
@@ -85,7 +92,8 @@ ALLOW_SEND_RULE = ("Outward actions: the user explicitly approved this outward a
 BROWSER_RULE = ("Browser: you control the user's real Chrome (signed in as them) through the Claude in Chrome\n"
                 "tools. Always work in a new tab and never touch the user's existing tabs. If a login, MFA,\n"
                 "CAPTCHA or account picker appears, stop with status \"needs-input\".\n")
-READONLY_GIT = ("show", "log", "grep", "diff", "blame", "status", "ls-files", "rev-parse", "branch", "fetch")
+READONLY_GIT = ("show", "log", "grep", "diff", "blame", "status", "ls-files", "ls-tree", "cat-file", "rev-parse",
+                "branch", "fetch")
 CHROME = "claude-in-chrome"
 
 
@@ -204,17 +212,31 @@ def library_path(slug):
     return home("library", slug, "cards.json")
 
 
+_held_locks = {}
+
+
 @contextlib.contextmanager
 def library_lock(slug):
-    """Serialise read-modify-write of a project's cards across parallel lean-agent processes."""
+    """Serialise read-modify-write of a project's cards across parallel lean-agent processes.
+
+    Re-entrant within one process, so a locked command can call helpers that lock too."""
+    if _held_locks.get(slug):
+        _held_locks[slug] += 1
+        try:
+            yield
+        finally:
+            _held_locks[slug] -= 1
+        return
     path = home("library", slug, ".lock")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as fh:
         if fcntl:
             fcntl.flock(fh, fcntl.LOCK_EX)
+        _held_locks[slug] = 1
         try:
             yield
         finally:
+            _held_locks[slug] = 0
             if fcntl:
                 fcntl.flock(fh, fcntl.LOCK_UN)
 
@@ -325,7 +347,7 @@ def parse_skill(path):
     return meta.get("name") or os.path.basename(d), meta.get("description", ""), body.strip()
 
 
-def learn(path, include_user_skills=False, quiet=False, name=None):
+def learn(path, include_user_skills=False, quiet=False, name=None, rules=None):
     path = os.path.abspath(os.path.expanduser(path))
     if not os.path.isdir(path):
         die(f"not a directory: {path}")
@@ -362,7 +384,7 @@ def learn(path, include_user_skills=False, quiet=False, name=None):
                 scope, ss = scope_of(d, n)
             if ss:
                 scope_owner[ss] = d
-        for i, (head, body) in enumerate(split_sections(read_text(f))):
+        for i, (head, body) in enumerate(split_sections(BLOCK_RE.sub("\n", read_text(f)))):
             title = f"{scope}: {head}" if scope else head
             hs = slugify(head, 28)
             if ss and i == 0 and (body.startswith(f"# {head}\n") or head == "overview"):
@@ -383,8 +405,14 @@ def learn(path, include_user_skills=False, quiet=False, name=None):
         prev_slug = next((s for s, v in projects().items() if v["path"] == path), slug)
         old = {c["id"]: c for c in load_cards(slug) or load_cards(prev_slug)}
         cards = []
+        source_changed = []
         for c in fresh:
             prev = old.pop(c["id"], {})
+            if prev.get("edited"):  # hand edits (card add) win over the source; say when the source moved on
+                if prev.get("source_text") != c["text"]:
+                    source_changed.append(c["id"])
+                c.update(text=prev["text"], title=prev.get("title", c["title"]), edited=True,
+                         source_text=c["text"])
             c.update({
                 "tokens": est_tokens(c["text"]),
                 "core": prev.get("core", False), "archived": prev.get("archived", False),
@@ -398,9 +426,19 @@ def learn(path, include_user_skills=False, quiet=False, name=None):
     projs = projects()
     for other in [s for s, v in projs.items() if v["path"] == path and s != slug]:
         del projs[other]  # renamed with --name
-    projs[slug] = {"path": path, "learned": now_iso()}
+    rules = "off" if rules is False else (projs.get(slug) or {}).get("rules")
+    projs[slug] = {"path": path, "learned": now_iso(), "rules": rules}
     save_json(home("projects.json"), projs)
     cards = sync_memory(slug)
+    if rules != "off":
+        target, _ = install_block(slug)
+        if not quiet:
+            print(f"lean-agent rules for this repo: {target} (refresh with `lean-agent rules {slug}`, "
+                  f"remove with `--off`)")
+    elif rules == "off":
+        remove_blocks(path)
+    if source_changed and not quiet:
+        print("note: kept your edited text for cards whose CLAUDE.md source changed since: " + ", ".join(source_changed))
 
     if not quiet:
         total = sum(c["tokens"] for c in cards)
@@ -423,6 +461,7 @@ def sync_memory(slug):
                       "source": m["file"], "text": m["body"], "tokens": est_tokens(m["body"])}
     with library_lock(slug):
         cards = load_cards(slug)
+        before = json.dumps(cards, sort_keys=True)
         kept = []
         for c in cards:
             if c["kind"] != "memory":
@@ -433,7 +472,7 @@ def sync_memory(slug):
         for c in fresh.values():
             c.update({"core": False, "archived": False, "offered": 0, "used": 0, "unneeded": 0, "updated": now_iso()})
             kept.append(c)
-        if kept != cards or fresh:
+        if json.dumps(kept, sort_keys=True) != before:  # cards are updated in place, so compare snapshots
             save_cards(slug, kept)
     return kept
 
@@ -445,7 +484,7 @@ def card_rate(c):
 # ---------------------------------------------------------------- commands: library
 
 def cmd_learn(a):
-    learn(a.path, include_user_skills=a.user_skills, name=a.name)
+    learn(a.path, include_user_skills=a.user_skills, name=a.name, rules=False if a.no_rules else None)
 
 
 def cmd_projects(a):
@@ -502,7 +541,19 @@ def _cmd_card(a):
         if not text.strip():
             die("card add needs --text or --file")
         existing = next((c for c in cards if c["id"] == a.id), None)
+        if existing and existing["kind"] == "memory":  # write through, or the next sync would undo it
+            if not lean_memory.edit(memory_store(), a.id, text, description=a.title):
+                die(f"memory behind {a.id} not found")
+            if a.core:
+                existing["core"] = True
+                save_cards(slug, cards)
+            sync_memory(slug)
+            print(f"updated memory {a.id} (~{est_tokens(text)} tok); its card keeps stats and core flag")
+            return
         if existing:
+            if existing["kind"] != "note":
+                existing.setdefault("source_text", existing["text"])
+                existing["edited"] = True  # `learn` keeps this text
             existing.update(text=text.strip(), tokens=est_tokens(text), updated=now_iso(), archived=False)
             if a.title:
                 existing["title"] = a.title
@@ -521,6 +572,8 @@ def _cmd_card(a):
             cards.remove(c)
         else:
             c["archived"] = True
+            if c["kind"] == "memory":
+                print(f"archived the card in {slug} only; delete the memory everywhere with `lean-agent memory rm {a.id}`")
     elif a.action == "core":
         c["core"] = not a.off
     save_cards(slug, cards)
@@ -679,7 +732,7 @@ def cmd_run(a):
         slug, project = resolve_project(a.project)
         sync_memory(slug)
         lib = {c["id"]: c for c in load_cards(slug)}
-        wanted = [x for x in (a.cards or "").split(",") if x]
+        wanted = [x for x in (a.cards or "").split(",") if x and x != "none"]
         if a.cards == "auto":
             cards = suggest(slug, task, a.max_context)
         else:
@@ -1035,6 +1088,15 @@ def cmd_memory(a):
         for slug in projects():
             sync_memory(slug)
         return
+    if a.action == "edit":
+        if not a.text or not a.new_text:
+            die('memory edit needs the memory name and the new text: lean-agent memory edit <name> "<text>"')
+        if not lean_memory.edit(store, a.text, a.new_text, mtype=a.type, description=a.name):
+            die(f"no memory {a.text!r} (see: lean-agent memory list)")
+        for slug in projects():
+            sync_memory(slug)
+        print(f"updated {a.text}")
+        return
     if a.action == "rm":
         if not a.text:
             die("memory rm needs the memory name (file name without .md)")
@@ -1212,21 +1274,271 @@ def seed_recipes():
         save_json(seeded_path, seeded)
 
 
+def cli_reference():
+    """Markdown list of every subcommand's exact usage, generated from the parser."""
+    ap = build_parser()
+    subs = next(x for x in ap._actions if isinstance(x, argparse._SubParsersAction))
+    helps = {c.dest: c.help for c in subs._choices_actions}
+    lines = []
+    for name, parser in subs.choices.items():
+        usage = " ".join(parser.format_usage().replace("usage: ", "", 1).replace("[-h] ", "").split())
+        lines.append(f"- `{usage}`: {helps.get(name, '')}")
+    return "\n".join(lines)
+
+
+def default_project(path=None):
+    """Learned project containing `path` (default: cwd), else the first learned one, else 'shop'."""
+    projs = projects()
+    p = os.path.realpath(path or os.getcwd())
+    for slug, v in projs.items():
+        root = os.path.realpath(v["path"])
+        if p == root or p.startswith(root + os.sep):
+            return slug
+    return next(iter(sorted(projs)), "shop")
+
+
+def render(template, project):
+    text = read_text(os.path.join(PLUGIN_ROOT, "templates", template)).replace("{{P}}", project)
+    if "{{CLI_REFERENCE}}" in text:
+        text = text.replace("{{CLI_REFERENCE}}", cli_reference())
+    return text
+
+
+def text_hash(text):
+    return hashlib.sha1(text.encode()).hexdigest()[:10]
+
+
+def render_guide(project=None):
+    return render("guide.md", project or default_project())
+
+
+def render_block(slug):
+    body = render("repo-block.md", slug).strip()
+    return f"{BLOCK_BEGIN} {text_hash(body)} (generated by lean-agent; edits inside are replaced) -->\n{body}\n{BLOCK_END}"
+
+
+def rules_target(path):
+    """CLAUDE.local.md, unless the repo relies on AGENTS.md (a CLAUDE.local.md would stop Claude reading it)."""
+    has_claude = any(os.path.exists(os.path.join(path, f)) for f in ("CLAUDE.md", os.path.join(".claude", "CLAUDE.md")))
+    if os.path.exists(os.path.join(path, "AGENTS.md")) and not has_claude:
+        return os.path.join(path, ".claude", "rules", "lean-agent.md")
+    return os.path.join(path, "CLAUDE.local.md")
+
+
+def git_exclude(path, target):
+    """Keep `target` out of git via .git/info/exclude (local only), unless it's already ignored."""
+    rel = os.path.relpath(target, path)
+    try:
+        if subprocess.run(["git", "-C", path, "check-ignore", "-q", rel], capture_output=True).returncode == 0:
+            return
+        common = subprocess.run(["git", "-C", path, "rev-parse", "--git-common-dir"], capture_output=True,
+                                text=True)
+    except OSError:
+        return
+    if common.returncode != 0:
+        return
+    git_dir = common.stdout.strip()
+    git_dir = git_dir if os.path.isabs(git_dir) else os.path.join(path, git_dir)
+    exclude = os.path.join(git_dir, "info", "exclude")
+    os.makedirs(os.path.dirname(exclude), exist_ok=True)
+    with open(exclude, "a") as fh:
+        fh.write(f"\n/{rel}\n")
+
+
+def install_block(slug):
+    """Write or refresh the lean-agent block in the project's rules file. Returns (file, changed)."""
+    path = projects()[slug]["path"]
+    target = rules_target(path)
+    block = render_block(slug)
+    current = read_text(target) if os.path.exists(target) else ""
+    if BLOCK_BEGIN in current:
+        new = BLOCK_RE.sub("\n\n" + block + "\n", current, count=1).strip("\n") + "\n"
+    else:
+        new = (current.rstrip("\n") + "\n\n" if current.strip() else "") + block + "\n"
+    if new == current:
+        return target, False
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w") as fh:
+        fh.write(new)
+    git_exclude(path, target)
+    return target, True
+
+
+def remove_blocks(path):
+    for target in (os.path.join(path, "CLAUDE.local.md"), os.path.join(path, ".claude", "rules", "lean-agent.md")):
+        if os.path.exists(target) and BLOCK_BEGIN in read_text(target):
+            rest = BLOCK_RE.sub("\n\n", read_text(target)).strip()
+            if rest:
+                with open(target, "w") as fh:
+                    fh.write(rest + "\n")
+            else:
+                os.remove(target)
+
+
+def refresh_blocks():
+    for slug, v in projects().items():
+        if v.get("rules") != "off" and os.path.isdir(v["path"]):
+            install_block(slug)
+
+
+def write_home_guide(h):
+    target = os.path.join(h, "CLAUDE.md")
+    body = render_guide()
+    text = f"{GUIDE_MARK}{text_hash(body)} (generated by lean-agent; delete this line to stop updates) -->\n{body}"
+    current = read_text(target) if os.path.exists(target) else ""
+    managed = not current or current.startswith(GUIDE_MARK) or current.startswith(OLD_TEMPLATE_MARK)
+    if managed and current != text:
+        with open(target, "w") as fh:
+            fh.write(text)
+    return managed
+
+
 def prepare_home():
     h = home("home")
     os.makedirs(os.path.join(h, ".claude"), exist_ok=True)
-    target = os.path.join(h, "CLAUDE.md")
-    template = read_text(os.path.join(PLUGIN_ROOT, "templates", "orchestrator.md"))
-    current = read_text(target) if os.path.exists(target) else ""
-    m = re.search(re.escape(TEMPLATE_MARK) + r"(\d+)", current)
-    if not current or (m and int(m.group(1)) < TEMPLATE_VERSION):
-        with open(target, "w") as fh:
-            fh.write(template)
     seed_recipes()
+    write_home_guide(h)
     settings = os.path.join(h, ".claude", "settings.json")
     if not os.path.exists(settings):
         save_json(settings, {"permissions": {"allow": ["Bash(lean-agent:*)"]}})
     return h
+
+
+def cmd_guide(a):
+    print(render_guide(resolve_project(a.project)[0] if a.project else None))
+
+
+def cmd_rules(a):
+    slug, path = resolve_project(a.project)
+    projs = projects()
+    projs[slug]["rules"] = "off" if a.off else None
+    save_json(home("projects.json"), projs)
+    if a.off:
+        remove_blocks(path)
+        print(f"removed the lean-agent block from {path}")
+    else:
+        target, changed = install_block(slug)
+        print(f"{'updated' if changed else 'up to date'}: {target}")
+
+
+def cmd_runs(a):
+    runs = ledger()
+    if a.project:
+        slug, _ = resolve_project(a.project)
+        runs = [r for r in runs if r["project"] == slug]
+    if a.last:
+        if not runs:
+            die("no runs yet")
+        print(runs[-1]["id"])
+        return
+    for r in runs[-a.n:]:
+        print(f"{r['id']}  {r['status']:<22} {r['model']:<7} {r['project']:<16} {r['task'][:70]}")
+
+
+def instruction_files(path):
+    """Instruction files Claude Code loads at launch in `path`, in load order."""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    files = [os.path.join(cfg, "CLAUDE.md")]
+    chain, p = [], os.path.realpath(path)
+    while True:
+        chain.append(p)
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    for d in reversed(chain):
+        files += [os.path.join(d, "CLAUDE.md"), os.path.join(d, ".claude", "CLAUDE.md"),
+                  os.path.join(d, "CLAUDE.local.md")]
+        files += sorted(glob.glob(os.path.join(d, ".claude", "rules", "*.md")))
+    return [f for f in dict.fromkeys(files) if os.path.isfile(f)]
+
+
+def cmd_doctor(a):
+    path = os.path.realpath(os.path.expanduser(a.path or os.getcwd()))
+    bad = []
+
+    def report(ok, msg, fix=None):
+        mark = {True: "✓", False: "✗", None: "!"}[ok]
+        print(f"{mark} {msg}" + (f"\n    fix: {fix}" if fix and ok is not True else ""))
+        if ok is False:
+            bad.append(msg)
+
+    import shutil
+    report(bool(shutil.which("lean-agent")), "lean-agent is on PATH", "run ./install in your lean-agent clone")
+    h = home("home")
+    if a.fix:
+        prepare_home()
+    guide_file = os.path.join(h, "CLAUDE.md")
+    current = read_text(guide_file) if os.path.exists(guide_file) else ""
+    expected = text_hash(render_guide())
+    if not current:
+        report(False, "orchestrator home has a guide", "lean-agent home  (or doctor --fix)")
+    elif not current.startswith(GUIDE_MARK):
+        report(None, "orchestrator guide is hand-maintained (no lean-agent marker), so it isn't updated")
+    else:
+        report(current.startswith(f"{GUIDE_MARK}{expected}"), "orchestrator guide is current",
+               "lean-agent home  (or doctor --fix)")
+    report(is_trusted(h), "orchestrator home is trusted", "lean-agent trust")
+
+    slug = default_project(path)
+    projs = projects()
+    in_project = slug in projs and (path + os.sep).startswith(os.path.realpath(projs[slug]["path"]) + os.sep)
+    root = os.path.realpath(projs[slug]["path"]) if in_project else None
+    is_home = path == os.path.realpath(h) or path.startswith(os.path.realpath(h) + os.sep)
+    if not in_project and not is_home:
+        report(False, f"{path} is inside a learned project or the lean-agent home",
+               "lean-agent learn <repo root> --name <name>")
+    if in_project and a.fix and projs[slug].get("rules") != "off":
+        install_block(slug)
+
+    files = instruction_files(path)
+    print("  instruction files loaded here: " + (", ".join(files) or "none"))
+    if in_project:
+        want = render_block(slug).splitlines()[0]
+        holders = [f for f in files if BLOCK_BEGIN in read_text(f)]
+        current_holders = [f for f in holders if want in read_text(f)]
+        if projs[slug].get("rules") == "off":
+            report(None, f"lean-agent block is switched off for {slug}", f"lean-agent rules {slug}")
+        elif current_holders:
+            report(True, f"lean-agent rules load here (from {current_holders[0]})")
+        else:
+            report(False, "lean-agent rules load here" + (" (block is outdated)" if holders else ""),
+                   f"lean-agent rules {slug}  (or doctor --fix)")
+        if (os.path.exists(os.path.join(root, "AGENTS.md")) and os.path.exists(os.path.join(root, "CLAUDE.local.md"))
+                and not os.path.exists(os.path.join(root, "CLAUDE.md"))):
+            report(None, "this repo has AGENTS.md; a CLAUDE.local.md stops Claude reading it",
+                   "move the block: delete CLAUDE.local.md, then lean-agent rules " + slug)
+
+    for f in files:
+        text = BLOCK_RE.sub("\n", read_text(f))
+        if f.startswith(os.path.realpath(h) + os.sep):
+            continue  # the guide itself
+        hits = [(i + 1, line.strip()) for i, line in enumerate(text.splitlines())
+                if CONFLICT_RE.search(line) and PRECEDENCE_MARK not in line]
+        if not hits:
+            continue
+        inside = root and f.startswith(root + os.sep)
+        if PRECEDENCE_MARK in text:
+            report(True, f"{f} mentions subagents/workflows but defers to lean-agent")
+            continue
+        if a.fix and not inside:
+            with open(f, "a") as fh:
+                fh.write("\n" + PRECEDENCE_LINE + "\n")
+            report(True, f"{f}: added a note that lean-agent rules take precedence")
+            continue
+        where = "; ".join(f"line {n}: {t[:70]}" for n, t in hits[:2])
+        if inside:
+            report(None, f"{f} has subagent/workflow guidance ({where}); the lean-agent block says it wins")
+        else:
+            report(False, f"{f} contradicts lean-agent ({where})", "lean-agent doctor --fix  (adds a one-line precedence note)")
+
+    st = chrome_state()
+    print("  chrome for workers: " + ("verified" if st.get("ok") else "not verified (lean-agent chrome check)"))
+    budgets = usage.window_budgets()
+    print("  window budgets: " + (", ".join(f"{k}={v:,}" for k, v in budgets.items() if v) or "none (lean-agent limits)"))
+    print("doctor: " + ("all good" if not bad else f"{len(bad)} problem(s)"))
+    return 1 if bad else 0
+
 
 
 def set_home_model(h, model):
@@ -1294,6 +1606,7 @@ def bridge_pointer(h):
 
 def cmd_up(a):
     h = prepare_home()
+    refresh_blocks()
     set_home_model(h, a.model)
     if a.fresh:
         # remote-control keeps a pointer on exit so the next start can resume the old session; if that
@@ -1345,6 +1658,7 @@ def cmd_install(a):
     subprocess.run(["claude", "plugin", "marketplace", "add", REPO])
     r = subprocess.run(["claude", "plugin", "install", PLUGIN])
     h = prepare_home()
+    refresh_blocks()
     print(f"Orchestrator home: {h}")
     if not is_trusted(h):
         print(f"Next: {TRUST_HINT}")
@@ -1369,7 +1683,7 @@ def cmd_home(a):
 
 # ---------------------------------------------------------------- CLI
 
-def main(argv=None):
+def build_parser():
     ap = argparse.ArgumentParser(prog="lean-agent", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -1405,6 +1719,7 @@ def main(argv=None):
 
     s = sub.add_parser("learn", help="index a project's CLAUDE.md, rules and skills into context cards")
     s.add_argument("path")
+    s.add_argument("--no-rules", action="store_true", help="don't write the lean-agent block into the repo")
     s.add_argument("--name", help="short project name to use instead of <folder>-<hash>")
     s.add_argument("--user-skills", action="store_true", help="also index ~/.claude/skills")
     s.set_defaults(fn=cmd_learn)
@@ -1464,12 +1779,13 @@ def main(argv=None):
     s.add_argument("--measure", action="store_true", help="tools: measure real per-turn cost with 2 Haiku calls")
     s.set_defaults(fn=cmd_mcp)
 
-    s = sub.add_parser("memory", help="shared memory: where | import | list | add | rm")
-    s.add_argument("action", choices=["where", "import", "list", "add", "rm"])
-    s.add_argument("text", nargs="?", help="add: the memory text; rm: its name")
+    s = sub.add_parser("memory", help="shared memory: where | import | list | add | edit | rm")
+    s.add_argument("action", choices=["where", "import", "list", "add", "edit", "rm"])
+    s.add_argument("text", nargs="?", help="add: the memory text; edit/rm: the memory's name")
+    s.add_argument("new_text", nargs="?", help="edit: the new text")
     s.add_argument("--project", "-p", help="scope to a project (default: global)")
     s.add_argument("--type", choices=lean_memory.TYPES, help="add: memory type (default project)")
-    s.add_argument("--name", help="add: short name")
+    s.add_argument("--name", help="add: short name (the type is added for you); edit: new description")
     s.add_argument("--from", dest="source", metavar="DIR", help="import: folder to import (default: Claude's)")
     s.set_defaults(fn=cmd_memory)
 
@@ -1491,6 +1807,30 @@ def main(argv=None):
     s.add_argument("--notes", type=int, default=10)
     s.set_defaults(fn=cmd_optimize)
 
+    s = sub.add_parser("runs", help="recent worker runs (id, status, model, task)")
+    s.add_argument("--project", "-p")
+    s.add_argument("--last", action="store_true", help="print only the id of the latest run")
+    s.add_argument("-n", type=int, default=10)
+    s.set_defaults(fn=cmd_runs)
+
+    s = sub.add_parser("guide", help="print the full orchestrator guide (rules, examples, CLI reference)")
+    s.add_argument("project", nargs="?")
+    s.set_defaults(fn=cmd_guide)
+
+    s = sub.add_parser("rules", help="write/refresh (or --off: remove) the lean-agent block in a repo")
+    s.add_argument("project")
+    s.add_argument("--off", action="store_true")
+    s.set_defaults(fn=cmd_rules)
+
+    s = sub.add_parser("doctor", help="check setup and which instructions load in a folder (default: here)")
+    s.add_argument("path", nargs="?")
+    s.add_argument("--fix", action="store_true", help="refresh guide and repo block, add precedence notes")
+    s.set_defaults(fn=cmd_doctor)
+    return ap
+
+
+def main(argv=None):
+    ap = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
     if (len(argv) > 2 and argv[0] == "run" and not argv[1].startswith("-")
             and not {"-p", "--project", "--resume"} & set(argv) and is_project_ref(argv[1])):

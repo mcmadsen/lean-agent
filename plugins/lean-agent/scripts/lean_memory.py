@@ -165,7 +165,10 @@ def add(d, text, mtype="project", scope=GLOBAL, name=None, source=None, rebuild=
         return None
     mtype = mtype if mtype in TYPES else "project"
     name = name or text.splitlines()[0][:60]
-    stem, n = _slug(stem, 60) if stem else f"{mtype}_{_slug(name)}", 2
+    base = _slug(name)
+    if base.startswith(mtype + "_"):  # `--name feedback_x` must not become feedback_feedback_x
+        base = base[len(mtype) + 1:]
+    stem, n = _slug(stem, 60) if stem else f"{mtype}_{base}", 2
     path = os.path.join(d, stem + ".md")
     while os.path.exists(path):
         path, n = os.path.join(d, f"{stem}_{n}.md"), n + 1
@@ -192,6 +195,44 @@ def import_dirs(d, sources, scope=GLOBAL):
             added, skipped = (added + 1, skipped) if ok else (added, skipped + 1)
     rebuild_index(d)
     return added, skipped
+
+
+def find(d, ref):
+    """A memory by file stem, `mem-<id>` card id, or its name; None if not found."""
+    def norm(x):
+        return re.sub(r"[^a-z0-9]+", "-", x.lower()).strip("-")
+
+    key = norm(ref[4:] if ref.startswith("mem-") else ref)
+    for m in read_all(d):
+        names = {norm(m["stem"]), norm(m["name"])}
+        names |= {n[len(m["type"]) + 1:] for n in list(names) if n.startswith(m["type"] + "-")}  # without type
+        if key in names:
+            return m
+    return None
+
+
+def edit(d, ref, text=None, mtype=None, description=None, scope=None):
+    """Rewrite one memory in place (same file, so its card id, stats and core flag survive)."""
+    m = find(d, ref)
+    if not m:
+        return None
+    with open(m["file"], encoding="utf-8", errors="replace") as fh:
+        meta, body = parse(fh.read())
+    if text is not None:
+        body = text.strip()
+    if mtype in TYPES:
+        meta["type"] = mtype
+    if description:
+        meta["description"] = description[:120]
+    elif text is not None and not meta.get("description"):
+        meta["description"] = body.splitlines()[0][:120]
+    if scope:
+        meta["scope"] = scope
+    meta["modified"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    with open(m["file"], "w") as fh:
+        fh.write(_frontmatter(meta) + "\n" + body + "\n")
+    rebuild_index(d)
+    return m["file"]
 
 
 def remove(d, stem):
