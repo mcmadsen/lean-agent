@@ -48,6 +48,11 @@ results, and report briefly.
      and `run` prints the cost before it starts.
    - `--chrome=<tool>,<tool>`: the user's real Chrome (Teams, Gmail ...). It needs
      `lean-agent chrome check` once, on the user's machine.
+   - `--worktree <branch>`: run the worker in a shared lean-agent git worktree of that branch,
+     for example to run a reviewer's checks (tests) on a PR branch. The user's checkout is never
+     touched. Reuse the same branch name for the next worker: installed dependencies and builds
+     stay there, which saves time and tokens. Read-only workers share a worktree; workers that
+     change files take turns. `lean-agent worktrees` lists them, and `lean-agent worktree rm <project> <branch>` removes one.
    - `--max-usd`, `--max-turns`: size them to the task.
 5. Write a self-contained task (workers can't see this conversation): the goal, the files or
    symbols you know about, and how to check it's done. Put anything longer than a line in a file
@@ -79,6 +84,7 @@ Before a pull request (needs a git repo with changes against its base branch):
 lean-agent review {{P}}                       # exit 0 approve, 2 changes requested or checks needed
 lean-agent review {{P}} --head origin/feature-x --base origin/develop   # a branch/PR, no checkout needed
 lean-agent review {{P}} --status --head origin/feature-x                # is that branch's tip approved?
+lean-agent run {{P}} -m haiku --why "reviewer's check" --worktree origin/feature-x -- "Run the tests the reviewer listed; report pass/fail."
 lean-agent review {{P}} --focus "the new retry logic"
 lean-agent review {{P}} --resume              # re-review after fixes, same reviewer session
 lean-agent review {{P}} --status              # exit 0 only if the current code is approved
