@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
-# lean-agent CLI (on the Bash PATH while the plugin is enabled).
+# lean-agent CLI (on the Bash PATH while the plugin is enabled). Runs the user's git clone
+# when one is registered (~/.lean-agent/source), so a `git pull` takes effect without a
+# plugin update; otherwise this plugin copy.
 here="$(cd "$(dirname "$0")" && pwd)"
-exec python3 "$here/../scripts/lean_agent.py" "$@"
+exec python3 "$here/../scripts/trampoline.py" lean_agent.py "$@"

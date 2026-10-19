@@ -112,5 +112,15 @@ lean-agent card core {{P}} checkout-notes
   `lean-agent limits`; when a window is nearly used, prefer `haiku` workers and smaller steps.
 - When something seems off, run `lean-agent doctor`.
 
+## Keeping lean-agent current
+When the user asks to update lean-agent, run `lean-agent sync`. It pulls the code, updates the plugin,
+and refreshes this guide, the orchestrator settings, every learned project and the repo blocks. If it
+says the guide changed, re-read it now with `lean-agent guide`; it applies fully from the next session.
+The server started by `lean-agent up` keeps running. Only if `sync` says so, ask the user to restart it.
+```text
+lean-agent sync
+lean-agent guide
+```
+
 ## CLI reference (generated from the CLI)
 {{CLI_REFERENCE}}

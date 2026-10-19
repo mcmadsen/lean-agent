@@ -61,6 +61,17 @@ git clone https://github.com/mcmadsen/lean-agent ~/lean-agent
 lean-agent trust              # once: accept Claude Code's trust dialog for the orchestrator folder
 ```
 
+**Updating:** run `lean-agent sync` (or ask the orchestrator to). It:
+- pulls the clone (fast-forward only, and never with local changes) and re-runs itself on the new code
+- runs `claude plugin marketplace update` and `claude plugin update`
+- regenerates the orchestrator guide and settings
+- re-learns every project, keeping card stats, and refreshes the repo blocks.
+
+You don't need to close Claude Desktop or restart `lean-agent up`. The installed plugin's hooks and in-session
+`lean-agent` command hand over to your clone (`~/.lean-agent/source`), so pulled code takes effect immediately, and
+each new orchestrator session reads the refreshed guide and settings. `sync` says when a restart *is* needed (only
+if the server's own settings changed), and an open session can re-read the rules with `lean-agent guide`.
+
 `./install` links `lean-agent` into `~/.local/bin` (`LEAN_AGENT_BIN_DIR` changes this) and, if that folder isn't on
 your PATH, adds one marked line to your shell's startup file (`~/.zshrc`, `~/.bash_profile`/`~/.bashrc`, fish
 config or `~/.profile`). Running it again changes nothing. `./install --no-plugin` skips the plugin, and
