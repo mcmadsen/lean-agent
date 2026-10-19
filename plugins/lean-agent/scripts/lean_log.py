@@ -56,3 +56,16 @@ def verbose_path(name):
         except OSError:
             pass
     return os.path.join(d, datetime.datetime.now().strftime("%m%d-%H%M%S-") + name)
+
+
+def record_saving(kind, before, after):
+    """A local note of output lean-agent shortened (chars before and after), for `lean-agent savings`."""
+    import json as _json
+    path = os.path.join(os.path.dirname(log_dir()), "savings.jsonl")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a") as fh:
+            fh.write(_json.dumps({"ts": datetime.datetime.now().isoformat(timespec="seconds"), "kind": kind,
+                                  "before": before, "after": after}) + "\n")
+    except OSError:
+        pass

@@ -278,6 +278,7 @@ def main():
     for st in (st_out, st_err):
         for k, v in (st.get("noise") or {}).items():
             noise[k] = noise.get(k, 0) + v
+    lean_log.record_saving("squeeze", original, len(new_out) + len(new_err))
     lean_log.log("debug", "squeeze", f"`{command[:200]}` {original:,} -> {len(new_out) + len(new_err):,} chars; "
                  f"noise dropped {noise or 'none'}; full {path}")
     if n_errors:
@@ -318,6 +319,7 @@ def run_wrapped(argv):
         print(f"[lean-sq: output squeezed {len(text):,} -> {len(out):,} chars. Full output: {path}"
               + (f" · errors and warnings only ({n_errors} error lines): {err_path}" if err_path else "") + "]")
         print(out)
+        lean_log.record_saving("lean-sq", len(text), len(out))
         lean_log.log("debug", "lean-sq", f"`{command[:200]}` exit {p.returncode}, {len(text):,} -> {len(out):,} "
                      f"chars; noise dropped {stats.get('noise') or 'none'}; full {path}")
     if p.returncode:

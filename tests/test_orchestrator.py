@@ -231,6 +231,25 @@ class CliTest(unittest.TestCase):
         rid = out.split("run ")[1].split()[0]
         self.assertIn(rid, self.cli("runs", "--show", rid).stdout)
 
+    def test_savings_estimate(self):
+        self.cli("learn", self.proj)
+        out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t").stdout
+        # fake run: 3 turns, ~1,966 context/turn vs an assumed 30,000: (30000-1966.7)*(1.25+0.2)*0.05 = 2,032
+        self.assertIn("saved ~", out)
+        self.assertIn("vs a normal session's ~30,000/turn (assumed)", out)
+        self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "t")
+        sq = os.path.join(self.env["LEAN_AGENT_HOME"], "savings.jsonl")
+        with open(sq, "w") as fh:
+            fh.write(json.dumps({"ts": "2999-01-01T00:00:00", "kind": "squeeze", "before": 40000, "after": 4000}) + "\n")
+        out = self.cli("savings").stdout
+        self.assertIn("worker context", out)
+        self.assertRegex(out, r"output squeezing\s+9,000  \(1 long outputs")
+        self.assertIn("(assumed; measure: lean-agent savings --measure)", out)
+        self.assertIn("without lean-agent ~", out)
+        out = self.cli("savings", "--measure", "-p", "proj").stdout  # the fake reports 8,000 tokens
+        self.assertRegex(out, r"proj-\w+: a normal Claude Code turn carries ~8,000 tokens of context")
+        self.assertIn("(measured)", out)
+
     def test_run_requires_model_and_why(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "do it", check=False)
@@ -652,6 +671,48 @@ class CliTest(unittest.TestCase):
         out = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--mcp", "obs:read", "another widget check",
                        FAKE_MCP_CALL=p + "get_obs_metric", **env).stdout
         self.assertIn("preset plugin:obs:mcp:dashboards covers it", out)
+        # task-specific text is generalised; read-only work never gets a write tool; names never collide
+        for task, calls_, ro in (("Goal: compare PR 5512 metric for run 99123 at /Users/me/x/y", "get_obs_metric,search_obs_metrics", True),
+                                 ("Goal: tag dashboards on ticket AB#771", "search_obs_dashboards,create_obs_dashboard", False),
+                                 ("Goal: tag dashboards on ticket AB#772", "search_obs_dashboards,create_obs_dashboard", False)):
+            args = ["run", "-p", "proj", "-m", "sonnet", "--why", "x", "--mcp", "obs"] + (["--read-only"] if ro else []) + [task]
+            self.cli(*args, FAKE_MCP_CALL=",".join(p + t for t in calls_.split(",")), **env)
+        out = self.cli("optimize", "proj", **env).stdout
+        self.assertNotIn("5512", out)
+        self.assertNotIn("99123", out)
+        self.assertNotIn("AB#77", out)
+        self.assertNotIn("Goal:", out)
+        self.assertNotIn("/Users/me", out)
+        presets = [l for l in out.splitlines() if l.startswith("preset")]
+        names = [l.split("--mcp ")[1].split(" =")[0] for l in presets]
+        self.assertEqual(len(names), len(set(names)), out)
+        for l in presets:
+            if "read-only" in l:
+                self.assertNotIn("create_obs_dashboard", l)
+        self.assertTrue(any("-write = " in l and "includes write tools: create_obs_dashboard" in l for l in presets), out)
+        self.assertIn("Cards: nothing to promote", out)
+        self.assertNotIn("Cards: nothing", self.cli("optimize", "proj", "--reject", "x", **env).stdout)
+        # a big MCP result saved to a file: workers are pointed at lean-json, and read-only workers may run it
+        self.assertIn("bin/lean-json <file>", self.calls()[-1]["append"] if self.calls()[-1].get("mcp") else
+                      [c for c in self.calls() if c.get("mcp")][-1]["append"])
+        ro_call = [c for c in self.calls() if "--permission-mode" in c["argv"] and
+                   c["argv"][c["argv"].index("--permission-mode") + 1] == "default"][-1]
+        self.assertIn("bin/lean-json:*)", " ".join(ro_call["argv"]))
+
+    def test_lean_json_compacts_big_results(self):
+        f = os.path.join(self.tmp.name, "big.json")
+        inner = {"value": [{"id": 1, "status": "active", "_links": {"self": {"href": "https://x"}},
+                            "comments": [{"author": {"displayName": "A", "imageUrl": "u", "url": "v"},
+                                          "content": "duplicates the counter", "commentType": "text"}]},
+                           {"id": 2, "comments": [{"author": {"displayName": "Build"}, "content": "status",
+                                                   "commentType": "system"}]}]}
+        with open(f, "w") as fh:
+            json.dump({"content": [{"type": "text", "text": json.dumps(inner)}]}, fh)
+        tool = os.path.join(os.path.dirname(CLI), "..", "bin", "lean-json")
+        out = subprocess.run([tool, f, "--exclude", '"commentType":"system"'], capture_output=True, text=True).stdout
+        self.assertEqual(out.strip(), '{"id":1,"status":"active","comments":[{"author":"A","content":"duplicates the counter","commentType":"text"}]}')
+        out = subprocess.run([tool, f, "--fields", "id,comments.content"], capture_output=True, text=True).stdout
+        self.assertIn('{"id":2,"comments.content":["status"]}', out)
 
     def test_installed_and_synced_copies_of_a_plugin(self):
         cfg = self.env["CLAUDE_CONFIG_DIR"]
