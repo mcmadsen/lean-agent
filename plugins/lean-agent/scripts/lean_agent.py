@@ -1870,9 +1870,33 @@ def orchestrator_settings(existing):
     return data
 
 
+REPO_ROOT = os.path.dirname(os.path.dirname(PLUGIN_ROOT))
+
+
+def clone_root():
+    """The git clone this code runs from, or None (e.g. when running from Claude Code's plugin cache)."""
+    if os.path.isdir(os.path.join(REPO_ROOT, ".git")) and os.path.isfile(os.path.join(REPO_ROOT, "bin", "lean-agent")):
+        return REPO_ROOT
+    return None
+
+
+def register_source():
+    """Point the installed plugin's hooks and CLI at this clone (see scripts/trampoline.py)."""
+    root = clone_root()
+    if not root:
+        return
+    path = home("source")
+    current = read_text(path).strip() if os.path.exists(path) else ""
+    if current != root:
+        os.makedirs(home(), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(root + "\n")
+
+
 def prepare_home():
     h = home("home")
     os.makedirs(os.path.join(h, ".claude"), exist_ok=True)
+    register_source()
     seed_recipes()
     write_home_guide(h)
     settings = os.path.join(h, ".claude", "settings.json")
@@ -2086,6 +2110,8 @@ def bridge_pointer(h):
 def cmd_up(a):
     h = prepare_home()
     refresh_blocks()
+    save_json(home("up.json"), {"started": now_iso(), "server_env": ORCHESTRATOR_ENV, "name": a.name,
+                                "local": a.local})
     set_home_model(h, a.model)
     if a.fresh:
         # remote-control keeps a pointer on exit so the next start can resume the old session; if that
@@ -2131,6 +2157,76 @@ def cmd_up(a):
         os.execvpe(cmd[0], cmd, env)
     except FileNotFoundError:
         die("'claude' not found on PATH")
+
+
+def cmd_sync(a):
+    root = clone_root()
+    if not root:
+        die("this lean-agent isn't running from a git clone, so there's nothing to pull; "
+            "update the plugin with: claude plugin update " + PLUGIN_ID)
+    claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
+    if not a.no_pull:
+        old = git(root, "rev-parse", "HEAD")
+        if git(root, "status", "--porcelain", "--untracked-files=no"):
+            print(f"lean-agent: {root} has local changes; not pulling (commit or stash them, then sync again)")
+        else:
+            p = subprocess.run(["git", "-C", root, "pull", "--ff-only", "-q"], capture_output=True, text=True)
+            if p.returncode != 0:
+                print(f"lean-agent: git pull failed: {(p.stderr or p.stdout).strip()[:300]}")
+            new = git(root, "rev-parse", "HEAD")
+            if new and old and new != old:
+                log = git(root, "log", "--oneline", f"{old}..{new}") or ""
+                print(f"pulled {len(log.splitlines())} commit(s) ({old[:7]}..{new[:7]}):")
+                for line in log.splitlines()[:15]:
+                    print("  " + line)
+                sys.stdout.flush()
+                script = os.path.join(root, "plugins", "lean-agent", "scripts", "lean_agent.py")
+                os.execv(sys.executable, [sys.executable, script, "sync", "--no-pull", "--pulled"]
+                         + (["--no-learn"] if a.no_learn else []))
+            elif p.returncode == 0:
+                print(f"code: already up to date ({(new or '?')[:7]})")
+
+    plugin = "skipped (claude not found)"
+    try:
+        subprocess.run([claude, "plugin", "marketplace", "update", "lean-agent"], capture_output=True, text=True,
+                       timeout=120)
+        p = subprocess.run([claude, "plugin", "update", PLUGIN_ID], capture_output=True, text=True, timeout=120)
+        plugin = "updated" if p.returncode == 0 else f"not updated ({(p.stderr or p.stdout).strip()[:120]})"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    guide_file = home("home", "CLAUDE.md")
+    before = read_text(guide_file) if os.path.exists(guide_file) else ""
+    settings_file = home("home", ".claude", "settings.json")
+    settings_before = read_text(settings_file) if os.path.exists(settings_file) else ""
+    prepare_home()
+    guide_changed = (read_text(guide_file) if os.path.exists(guide_file) else "") != before
+    settings_changed = read_text(settings_file) != settings_before
+
+    relearned = []
+    if not a.no_learn:
+        for slug, v in sorted(projects().items()):
+            if os.path.isdir(v["path"]):
+                n_before = len(load_cards(slug))
+                learn(v["path"], quiet=True, name=slug)
+                relearned.append(f"{slug} ({n_before}->{len(load_cards(slug))} cards)")
+    refresh_blocks()
+
+    up = load_json(home("up.json"), {})
+    restart = bool(up) and not up.get("local") and up.get("server_env") != ORCHESTRATOR_ENV
+    print(f"plugin: {plugin}")
+    print(f"orchestrator guide: {'changed' if guide_changed else 'unchanged'} · "
+          f"orchestrator settings: {'changed' if settings_changed else 'unchanged'}")
+    if relearned:
+        print("re-learned: " + ", ".join(relearned) + " (card stats kept; repo blocks refreshed)")
+    print(f"hooks and in-session `lean-agent` now run {root}")
+    if restart:
+        print("NEXT: restart `lean-agent up` once: its server settings changed.")
+    elif guide_changed or settings_changed or a.pulled:
+        print("NEXT: start a new lean-agent session in the Claude app (no need to restart `lean-agent up`; "
+              "the server keeps running). A session that's already open can re-read the rules with `lean-agent guide`.")
+    else:
+        print("Nothing changed for running sessions.")
 
 
 def cmd_install(a):
@@ -2300,6 +2396,12 @@ def build_parser():
     s.add_argument("--max-turns", type=int, default=env_num("LEAN_AGENT_REVIEW_MAX_TURNS", 60))
     s.add_argument("--max-context", type=int, default=4000, help="token cap for the review's cards")
     s.set_defaults(fn=cmd_review)
+
+    s = sub.add_parser("sync", help="pull lean-agent, update the plugin, refresh guide, settings, projects and repo blocks")
+    s.add_argument("--no-pull", action="store_true", help="don't git pull; just refresh everything")
+    s.add_argument("--no-learn", action="store_true", help="don't re-learn projects")
+    s.add_argument("--pulled", action="store_true", help=argparse.SUPPRESS)
+    s.set_defaults(fn=cmd_sync)
 
     s = sub.add_parser("runs", help="recent worker runs (id, status, model, task)")
     s.add_argument("--project", "-p")

@@ -14,6 +14,10 @@ CLI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins", 
 FAKE_CLAUDE = textwrap.dedent("""\
     #!/usr/bin/env python3
     import json, os, sys
+    if sys.argv[1:2] == ["plugin"]:
+        with open(os.environ["FAKE_LOG"], "a") as fh:
+            fh.write(json.dumps({"plugin": sys.argv[1:]}) + "\\n")
+        sys.exit(0)
     task = sys.stdin.read()
     if "stream-json" in sys.argv:  # session probe used by `lean-agent chrome check`
         chrome = "--chrome" in sys.argv and os.environ.get("FAKE_CHROME") == ("strict" if "--strict-mcp-config" in sys.argv else "loose") 
@@ -102,7 +106,11 @@ class CliTest(unittest.TestCase):
 
     def calls(self):
         with open(self.log) as fh:
-            return [json.loads(l) for l in fh]
+            return [c for c in (json.loads(l) for l in fh) if "plugin" not in c]
+
+    def plugin_calls(self):
+        with open(self.log) as fh:
+            return [c["plugin"] for c in (json.loads(l) for l in fh) if "plugin" in c]
 
     def test_learn_and_cards(self):
         out = self.cli("learn", self.proj).stdout
@@ -802,6 +810,79 @@ class CliTest(unittest.TestCase):
         g("clean", "-qfd")
         p = self.cli("review", "proj", check=False)
         self.assertIn("nothing to review", p.stderr)
+
+    def make_clone(self):
+        """A throwaway lean-agent git clone with its own bare origin; returns (clone, other clone, git)."""
+        import shutil
+        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+        origin = os.path.join(self.tmp.name, "origin.git")
+        clone = os.path.join(self.tmp.name, "clone")
+        shutil.copytree(src, clone, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+
+        def g(cwd, *args):
+            subprocess.run(["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", *args], check=True,
+                           capture_output=True)
+        g(clone, "init", "-q", "-b", "main")
+        g(clone, "add", "-A")
+        g(clone, "commit", "-qm", "v1")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+        g(clone, "remote", "add", "origin", origin)
+        g(clone, "push", "-q", "-u", "origin", "main")
+        other = os.path.join(self.tmp.name, "other-clone")
+        subprocess.run(["git", "clone", "-q", origin, other], check=True)
+        return clone, other, g
+
+    def test_sync_pulls_updates_plugin_and_refreshes(self):
+        clone, other, g = self.make_clone()
+        cli = os.path.join(clone, "bin", "lean-agent")
+        env = dict(self.env)
+
+        def run(*args):
+            p = subprocess.run([cli, *args], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            return p.stdout
+        run("learn", self.proj, "--name", "proj")
+        run("home")
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "source")) as fh:
+            self.assertEqual(fh.read().strip(), clone)  # the plugin's hooks/CLI now follow the clone
+        guide = os.path.join(other, "plugins", "lean-agent", "templates", "guide.md")
+        with open(guide, "a") as fh:
+            fh.write("\nSYNC-MARKER: new rule from upstream.\n")
+        g(other, "commit", "-qam", "new guide rule")
+        g(other, "push", "-q")
+        out = run("sync")
+        self.assertIn("pulled 1 commit(s)", out)
+        self.assertIn("new guide rule", out)
+        self.assertIn("orchestrator guide: changed", out)
+        self.assertIn("re-learned: proj", out)
+        self.assertIn("no need to restart `lean-agent up`", out)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "home", "CLAUDE.md")) as fh:
+            self.assertIn("SYNC-MARKER", fh.read())
+        self.assertIn(["plugin", "update", "lean-agent@lean-agent"], self.plugin_calls())
+        out = run("sync")
+        self.assertIn("already up to date", out)
+        self.assertIn("Nothing changed for running sessions.", out)
+        # local changes: no pull
+        with open(os.path.join(clone, "README.md"), "a") as fh:
+            fh.write("local edit\n")
+        self.assertIn("has local changes; not pulling", run("sync", "--no-learn"))
+
+    def test_trampoline_runs_the_clone(self):
+        clone, _, _ = self.make_clone()
+        with open(os.path.join(clone, "plugins", "lean-agent", "scripts", "squeeze_hook.py"), "w") as fh:
+            fh.write("import sys\nprint('FROM-CLONE', sys.argv[1:], sys.stdin.read())\n")
+        os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "source"), "w") as fh:
+            fh.write(clone + "\n")
+        tramp = os.path.join(os.path.dirname(CLI), "trampoline.py")
+        p = subprocess.run([sys.executable, tramp, "squeeze_hook.py", "x"], input="stdin-data",
+                           capture_output=True, text=True, env=self.env)
+        self.assertIn("FROM-CLONE ['x'] stdin-data", p.stdout)
+        os.remove(os.path.join(self.env["LEAN_AGENT_HOME"], "source"))  # no clone: use the plugin's own copy
+        p = subprocess.run([sys.executable, tramp, "squeeze_hook.py"], input="{}", capture_output=True, text=True,
+                           env=self.env)
+        self.assertNotIn("FROM-CLONE", p.stdout)
+        self.assertEqual(p.returncode, 0)
 
     def test_home_template(self):
         h = self.cli("home").stdout.strip()
