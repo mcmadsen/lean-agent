@@ -1417,6 +1417,32 @@ class CliTest(unittest.TestCase):
         subprocess.run(["git", "clone", "-q", origin, other], check=True)
         return clone, other, g
 
+    def test_old_plugin_copies_forward_to_the_clone(self):
+        clone, _, _ = self.make_clone()
+        cfg = self.env["CLAUDE_CONFIG_DIR"]
+        old = os.path.join(cfg, "plugins", "cache", "lean-agent", "lean-agent", "0.2.0", "scripts")
+        os.makedirs(old)
+        with open(os.path.join(old, "budget_hook.py"), "w") as fh:  # an old hook: denies everything
+            fh.write("import json\nprint(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', "
+                     "'permissionDecision': 'deny', 'permissionDecisionReason': 'old cap'}}))\n")
+        lean = [sys.executable, os.path.join(clone, "plugins", "lean-agent", "scripts", "lean_agent.py")]
+        env = dict(self.env)
+        doc = subprocess.run(lean + ["doctor"], capture_output=True, text=True, env=env).stdout
+        self.assertIn("1 hook script(s) in older cached plugin copies run outdated code", doc)
+        os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "source"), "w") as fh:
+            fh.write(clone)
+        doc = subprocess.run(lean + ["doctor", "--fix"], capture_output=True, text=True, env=env).stdout
+        self.assertIn("forwarded 1 old hook script(s) to the clone", doc)
+        transcript = os.path.join(self.tmp.name, "t.jsonl")
+        open(transcript, "w").close()
+        ev = {"session_id": "s", "transcript_path": transcript, "cwd": self.tmp.name, "tool_name": "Bash",
+              "tool_input": {"command": "ls"}}
+        p = subprocess.run([sys.executable, os.path.join(old, "budget_hook.py")], input=json.dumps(ev),
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn("old cap", p.stdout)  # the clone's hook ran instead
+
     def test_sync_pulls_updates_plugin_and_refreshes(self):
         clone, other, g = self.make_clone()
         cli = os.path.join(clone, "bin", "lean-agent")
