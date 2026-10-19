@@ -17,6 +17,9 @@ FAKE_CLAUDE = textwrap.dedent("""\
     if sys.argv[1:3] == ["mcp", "list"]:
         print(os.environ.get("FAKE_MCP_LIST", ""))
         sys.exit(0)
+    if sys.argv[1:3] == ["mcp", "get"]:
+        print(os.environ.get("FAKE_MCP_GET", ""))
+        sys.exit(0)
     if sys.argv[1:2] == ["plugin"]:
         with open(os.environ["FAKE_LOG"], "a") as fh:
             fh.write(json.dumps({"plugin": sys.argv[1:]}) + "\\n")
@@ -31,7 +34,8 @@ FAKE_CLAUDE = textwrap.dedent("""\
         if "--mcp-config" in sys.argv:  # an http server probe: FAKE_HTTP_TOOLS={"<server>": [tools]}
             cfg = json.load(open(sys.argv[sys.argv.index("--mcp-config") + 1]))["mcpServers"]
             for name, c in cfg.items():
-                ok = os.environ.get("FAKE_HTTP_URL", "") in c.get("url", "")
+                ok = os.environ.get("FAKE_HTTP_URL", "") in c.get("url", "") and (
+                    "type" in c or not os.environ.get("FAKE_HTTP_NEED_TYPE"))
                 servers.append({"name": name, "status": "connected" if ok else "needs-auth"})
                 if ok:
                     names = json.loads(os.environ.get("FAKE_HTTP_TOOLS") or "{}").get(name, [])
@@ -648,6 +652,50 @@ class CliTest(unittest.TestCase):
         self.assertIn("plugin MCP server plugin:obs:mcp: usable by workers", doc)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "obs", "t", **env)
         self.assertEqual(self.calls()[-1]["mcp"]["servers"]["plugin:obs:mcp"]["url"], "https://mcp.example.eu/v1")
+
+    def test_plugin_env_from_command_and_alignment_with_claude(self):
+        cfg = self.env["CLAUDE_CONFIG_DIR"]
+        roots = {}
+        for name, server in (("gh", {"type": "http", "url": "https://api.example.com/mcp",
+                                     "headers": {"Authorization": "Bearer ${GH_PAT}"}}),
+                             ("fig", {"url": "https://mcp.example.org/mcp"})):  # no type: Claude Code says http
+            root = os.path.join(cfg, "plugins", "cache", "mkt", name, "1")
+            os.makedirs(os.path.join(root, ".claude-plugin"))
+            with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w") as fh:
+                json.dump({"name": name}, fh)
+            with open(os.path.join(root, ".mcp.json"), "w") as fh:
+                json.dump({"mcpServers": {name: server}}, fh)
+            roots[name] = root
+        with open(os.path.join(cfg, "plugins", "installed_plugins.json"), "w") as fh:
+            json.dump({"version": 2, "plugins": {f"{n}@mkt": [{"installPath": r}] for n, r in roots.items()}}, fh)
+        with open(os.path.join(cfg, "settings.json"), "w") as fh:
+            json.dump({"enabledPlugins": {"gh@mkt": True, "fig@mkt": True}}, fh)
+        tools = {"plugin:gh:gh": ["get_issue"], "plugin:fig:fig": ["get_design"]}
+        env = dict(FAKE_HTTP_URL="example", FAKE_HTTP_NEED_TYPE="1", FAKE_HTTP_TOOLS=json.dumps(tools),
+                   FAKE_MCP_LIST="plugin:gh:gh: https://api.example.com/mcp (HTTP) - ✓ Connected\n"
+                                 "plugin:fig:fig: https://mcp.example.org/mcp (HTTP) - ✓ Connected",
+                   FAKE_MCP_GET="plugin:fig:fig:\n  Scope: Dynamic config\n  Type: http\n  URL: https://mcp.example.org/mcp")
+        doc = self.cli("doctor", check=False, **env).stdout
+        self.assertIn("uses ${GH_PAT} and lean-agent can't see that variable", doc)
+        self.assertIn("lean-agent mcp env GH_PAT --command", doc)
+        self.assertIn("plugin:fig:fig: usable by workers after matching Claude Code's type", doc)
+        out = self.cli("mcp", "env", "GH_PAT", "--command", "printf tok-%s secret-123", **env).stdout
+        self.assertIn("the command works", out)
+        self.assertIn("usable by workers", self.cli("doctor", check=False, **env).stdout.split("plugin:gh:gh")[1])
+        self.cli("learn", self.proj)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "gh", "--mcp", "fig", "t", **env)
+        servers = self.calls()[-1]["mcp"]["servers"]
+        self.assertEqual(servers["plugin:gh:gh"]["headers"]["Authorization"], "Bearer tok-secret-123")
+        self.assertEqual(servers["plugin:fig:fig"]["type"], "http")
+        for dirpath, _, files in os.walk(self.env["LEAN_AGENT_HOME"]):  # the token is never written to disk
+            for f in files:
+                with open(os.path.join(dirpath, f), errors="replace") as fh:
+                    self.assertNotIn("tok-secret-123", fh.read(), os.path.join(dirpath, f))
+        # a header difference is reported, not copied (header values can be secrets)
+        os.remove(os.path.join(self.env["LEAN_AGENT_HOME"], "mcp-overrides.json"))
+        env["FAKE_MCP_GET"] += "\n  Headers:\n    X-Org: 42"
+        doc = self.cli("doctor", check=False, **env).stdout
+        self.assertIn("lean-agent's copy differs from Claude Code's in type, header X-Org", doc)
 
     def test_optimize_suggests_mcp_narrowing(self):
         self.cli("learn", self.proj)

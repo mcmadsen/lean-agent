@@ -1877,6 +1877,23 @@ def cmd_chrome(a):
 
 
 def cmd_mcp(a):
+    if a.action == "env":
+        store = load_json(home("mcp-env.json"), {})
+        if a.server and (a.command or a.rm):
+            if a.rm:
+                store.pop(a.server, None)
+            else:
+                store[a.server] = {"command": a.command}
+            save_json(home("mcp-env.json"), store)
+        if a.server and a.command:
+            ok = lean_mcp.env_from_command(a.server) is not None
+            print(f"{a.server}: " + ("the command works; workers get the value when they start" if ok else
+                                      "the command printed nothing or failed; fix it and set it again"))
+        for k, v in sorted(store.items()):
+            print(f"{k:<32} from: {v['command']}")
+        if not store:
+            print("No variables. For a plugin config that uses ${VAR}: lean-agent mcp env VAR --command \"...\"")
+        return
     project = resolve_project(a.project)[1] if getattr(a, "project", None) else None
     servers = lean_mcp.discover(project)
     if a.server and a.server != CHROME:
@@ -1959,6 +1976,38 @@ MCP_AUTH_HINT = ("Workers connect with the same name and config as Claude Code, 
                  "if it says needs-auth, sign in once in Claude Code (/mcp, pick {name}), then: lean-agent mcp tools {name}")
 
 
+def align_with_claude(name, info):
+    """Compare lean-agent's copy of a server with `claude mcp get`. A different type or url (no secrets) is
+    saved as a correction and tried; header differences are only reported. Returns a doctor result or None."""
+    theirs = lean_mcp.claude_mcp_get(name)
+    mine = info["config"]
+    if not theirs:
+        return None
+    diff = [k for k in ("type", "url") if theirs.get(k) and theirs[k] != mine.get(k)]
+    h_mine, h_theirs = mine.get("headers") or {}, theirs.get("headers")
+    h_diff = [] if h_theirs is None else sorted(k for k in set(h_mine) | set(h_theirs)
+                                               if h_mine.get(k) != h_theirs.get(k))
+    label = f"plugin MCP server {name}"
+    if diff and not h_diff:
+        fixes = load_json(home("mcp-overrides.json"), {})
+        fixes[name] = {"from": lean_mcp.server_target(mine), **{k: theirs[k] for k in diff}}
+        save_json(home("mcp-overrides.json"), fixes)
+        cfg = {**mine, **{k: theirs[k] for k in diff}}
+        server_tools(name, cfg, refresh=True)
+        c = mcp_cache().get(name) or {}
+        if c.get("status") == "connected" and c.get("tools"):
+            return True, (f"{label}: usable by workers after matching Claude Code's {' and '.join(diff)} "
+                          f"({len(c['tools'])} tools)"), None
+        return (False, f"{label}: still {c.get('status') or 'unknown'} as a worker after matching Claude Code's "
+                f"{' and '.join(diff)}", "sign in once more in Claude Code (/mcp), then: lean-agent doctor")
+    if diff or h_diff:
+        what = ", ".join(diff + [f"header {h}" for h in h_diff])
+        return (False, f"{label}: connected in Claude Code but needs-auth as a worker: lean-agent's copy differs "
+                f"from Claude Code's in {what}", "header values can be secrets, so lean-agent won't copy them; "
+                "compare `claude mcp get " + name + "` with the plugin's .mcp.json")
+    return None
+
+
 def diagnose_plugin_server(name, info, claude_view, servers):
     """(ok, message, fix) for one plugin MCP server: can a worker use it, and if not, why."""
     label = f"plugin MCP server {name}"
@@ -1970,9 +2019,12 @@ def diagnose_plugin_server(name, info, claude_view, servers):
                 f"in Claude Code's credentials store), so workers can't build its config",
                 "set the option non-sensitively in /plugin manage, or add the server with `claude mcp add`")
     if env_missing:
+        v = env_missing[0]
         return (False, f"{label}: its config uses ${{{'}, ${'.join(env_missing)}}} and lean-agent can't see "
-                "that variable", f"put it in the `env` block of {lean_mcp.config_dir()}/settings.json "
-                "(lean-agent reads it there), or export it before `lean-agent up`")
+                "that variable", f"let lean-agent fetch it when a worker starts, with no token on disk: "
+                f"lean-agent mcp env {v} --command \"<prints it>\" (for GitHub: \"gh auth token\"; on macOS "
+                f"a keychain item: \"security find-generic-password -s <name> -w\"). Or export it before "
+                f"`lean-agent up`, or put it in the settings.json `env` block")
     c = mcp_cache().get(name) or {}
     fresh = c.get("key") == config_key(info["config"]) and c.get("probed", "") >= (
         datetime.datetime.now() - datetime.timedelta(days=1)).isoformat(timespec="seconds")
@@ -2000,6 +2052,10 @@ def diagnose_plugin_server(name, info, claude_view, servers):
         return (False, f"{label}: {worker} as a worker; Claude Code connects to {theirs} but lean-agent built "
                 f"{mine}", "the plugin's config has a value lean-agent resolves differently (an env var set "
                 "only in Claude Code's environment?); put it in the settings.json `env` block")
+    if worker == "needs-auth" and theirs_status == "connected":
+        fixed = align_with_claude(name, info)
+        if fixed:
+            return fixed
     if worker == "needs-auth":
         seen = "connected in Claude Code but " if theirs_status == "connected" else ""
         return (False, f"{label}: {seen}needs-auth as a worker: no stored login matches lean-agent's copy of "
@@ -3251,11 +3307,12 @@ def build_parser():
     s.set_defaults(fn=cmd_chrome)
 
     s = sub.add_parser("mcp", help="MCP servers workers can use: list, tools <server>, preset <server> ...")
-    s.add_argument("action", choices=["list", "tools", "preset"])
-    s.add_argument("server", nargs="?")
+    s.add_argument("action", choices=["list", "tools", "preset", "env"])
+    s.add_argument("server", nargs="?", help="a server; for env: the variable name")
     s.add_argument("preset_name", nargs="?", help="preset: name to set or remove")
     s.add_argument("preset_tools", nargs="?", help="preset: comma-separated tools")
-    s.add_argument("--rm", action="store_true", help="preset: remove it")
+    s.add_argument("--rm", action="store_true", help="preset/env: remove it")
+    s.add_argument("--command", metavar="CMD", help="env: a command that prints the value (run per worker, not stored)")
     s.add_argument("--project", "-p", help="include this project's .mcp.json and local-scope servers")
     s.add_argument("--probe", action="store_true", help="list: query stdio servers for their tools")
     s.add_argument("--measure", action="store_true", help="tools: measure real per-turn cost with 2 Haiku calls")

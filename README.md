@@ -155,7 +155,14 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   stored OAuth login by exactly those, so the login you already did is reused: no second sign-in.
   If a plugin is both installed and synced from claude.ai, the installed copy is used, or, once `doctor` has
   seen `claude mcp list`, whichever copy Claude Code itself connects to.
-  `lean-agent doctor` connects to each plugin server as a worker (once a day) and says whether it's usable. Options
+  `lean-agent doctor` connects to each plugin server as a worker (once a day) and says whether it's usable.
+  When Claude Code connects but a worker gets needs-auth, doctor compares lean-agent's copy with
+  `claude mcp get`: a different `type` or URL is corrected and retried automatically, and a header difference is
+  named but not copied (header values can be secrets).
+- **Variables without a token on disk:** a plugin config that uses `${VAR}` (e.g. a GitHub token) can get it
+  from a command run when a worker starts: `lean-agent mcp env GITHUB_PERSONAL_ACCESS_TOKEN --command "gh auth
+  token"` (or a macOS keychain item: `security find-generic-password -s <name> -w`). Only the command is saved;
+  the value goes into the run's owner-only MCP config, which is deleted when the run ends. Options
   marked sensitive live in Claude Code's credentials store; lean-agent can't read them and doctor says so.
 - Not covered: claude.ai connectors (they aren't in a local config file).
 
