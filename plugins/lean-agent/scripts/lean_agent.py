@@ -793,19 +793,56 @@ def mcp_cache():
     return load_json(home("mcp-tools.json"), {})
 
 
-def server_tools(name, cfg, refresh=False):
-    """Tool list for a server as {tool: ~tokens}, from cache or a direct stdio probe; None if unknown."""
+def server_tools(name, cfg, refresh=False, session=True):
+    """Tool list for a server as {tool: ~tokens}, from cache, a direct stdio probe, or (any server type,
+    with session=True) a one-turn Haiku session that connects the way a worker does; None if unknown."""
     cache = mcp_cache()
-    if not refresh and name in cache:
+    if (not refresh and name in cache and cache[name].get("tools")
+            and cache[name].get("key", config_key(cfg)) == config_key(cfg)):  # a plugin update changes the config
         return cache[name]["tools"]
     try:
         tools = lean_mcp.probe(cfg)
+        entry = {"tools": {t["name"]: lean_mcp.tool_tokens(t) for t in tools if t.get("name")}, "status": "connected"}
     except lean_mcp.ProbeError:
-        return None
-    cache[name] = {"tools": {t["name"]: lean_mcp.tool_tokens(t) for t in tools if t.get("name")},
-                   "probed": now_iso(), "type": lean_mcp.server_type(cfg)}
+        if not session:
+            return None
+        entry = session_probe_server(name, cfg)
+    entry.update(probed=now_iso(), type=lean_mcp.server_type(cfg), key=config_key(cfg))
+    cache = mcp_cache()
+    cache[name] = entry
     save_json(home("mcp-tools.json"), cache)
-    return cache[name]["tools"]
+    return entry["tools"] or None
+
+
+def config_key(cfg):
+    return hashlib.sha1(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def session_probe_server(name, cfg):
+    """Connect to one server exactly as a worker would (same name and config, so a stored login is reused)
+    and read its status and tool names; tokens per tool are the measured total split evenly."""
+    print(f"lean-agent: connecting to {name} the way a worker does (one small Haiku call; cached)...",
+          file=sys.stderr, flush=True)
+    d = home("work", "mcp-probe")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "mcp.json")
+    lean_mcp.write_config(path, {name: cfg})
+    base = ["--setting-sources", "", "--strict-mcp-config"]
+    try:
+        cache = mcp_cache()
+        baseline = (cache.get("_baseline") or {}).get("ctx")
+        if not baseline:
+            _, _, baseline = _probe_session(base, d)
+            cache["_baseline"] = {"ctx": baseline, "probed": now_iso()}
+            save_json(home("mcp-tools.json"), cache)
+        tools, servers, ctx = _probe_session(base + ["--mcp-config", path], d)
+    finally:
+        os.remove(path)
+    prefix = lean_mcp.tool_prefix(name)
+    names = [t[len(prefix):] for t in tools if t.startswith(prefix)]
+    status = next((x.get("status") for x in servers if x.get("name") == name), None) or "absent"
+    each = max(0, ctx - baseline) // len(names) if names and baseline else 0
+    return {"tools": {t: each for t in names}, "status": status, "estimated": True}
 
 
 READ_TOOL_RE = re.compile(r"(^|[_-])(get|list|search|read|query|fetch|find|view|show|describe|count|lookup)([_-]|$)", re.I)
@@ -833,14 +870,30 @@ def expand_tools(server, wanted, known):
     return list(dict.fromkeys(out))
 
 
+def unknown_server(name, available):
+    names = [f"{n} ({al})" if al else n for n, al in sorted(lean_mcp.display_names(available).items())]
+    die(f"unknown MCP server {name!r}; configured: {', '.join(names) or 'none'} (see: lean-agent mcp list)")
+
+
+def canonical_specs(project, specs):
+    """--mcp specs with plugin aliases replaced by full server names (plugin:<plugin>:<server>)."""
+    available = lean_mcp.discover(project)
+    out = []
+    for name, wanted in lean_mcp.parse_specs(specs):
+        full = lean_mcp.resolve_name(name, available)
+        if not full:
+            unknown_server(name, available)
+        out.append(full + (":" + ",".join(wanted) if wanted else ""))
+    return out
+
+
 def resolve_mcp(project, specs):
     """Turn --mcp specs into (servers config, allowed tool rules, disallowed tool names)."""
     available = lean_mcp.discover(project)
     servers, allowed, disallowed = {}, [], []
     for name, wanted in lean_mcp.parse_specs(specs):
         if name not in available:
-            die(f"unknown MCP server {name!r}; configured: {', '.join(sorted(available)) or 'none'} "
-                f"(see: lean-agent mcp list)")
+            unknown_server(name, available)
         cfg = available[name]["config"]
         servers[name] = cfg
         prefix = lean_mcp.tool_prefix(name)
@@ -857,8 +910,12 @@ def resolve_mcp(project, specs):
                     f"tools: {', '.join(sorted(known))}")
             disallowed += [prefix + t for t in known if t not in wanted]
         else:
-            print(f"lean-agent: tool list of {name} unknown (not stdio, or probe failed); only the chosen tools "
-                  "are allowed, but the others' definitions still load", file=sys.stderr)
+            print(f"lean-agent: tool list of {name} unknown (it didn't connect: `lean-agent mcp tools {name}`); "
+                  "only the chosen tools are allowed, but the others' definitions still load", file=sys.stderr)
+        status = (mcp_cache().get(name) or {}).get("status")
+        if status and status != "connected":
+            print(f"lean-agent: warning: {name} was {status} when lean-agent last connected to it as a worker "
+                  f"(see: lean-agent doctor)", file=sys.stderr)
         allowed += [prefix + t for t in wanted]
     return servers, allowed, disallowed
 
@@ -945,7 +1002,7 @@ def cmd_run(a):
             fh.write(build_append(project, cards, read_only, a.allow_send, bool(chrome_spec), role_rule))
         tools = a.tools or (READONLY_TOOLS + ",Bash" if read_only else WORKER_TOOLS)
 
-    mcp_specs = prev.get("mcp") if prev else (a.mcp or [])
+    mcp_specs = prev.get("mcp") if prev else canonical_specs(project, a.mcp or [])
     mcp_servers, mcp_allowed, mcp_disallowed = resolve_mcp(project, mcp_specs) if mcp_specs else ({}, [], [])
     mcp_path = os.path.join(workdir, "mcp.json")
     chrome_allowed, chrome_disallowed, chrome_profile = resolve_chrome(chrome_spec, project) if chrome_spec else ([], [], None)
@@ -1759,25 +1816,36 @@ def cmd_chrome(a):
 def cmd_mcp(a):
     project = resolve_project(a.project)[1] if getattr(a, "project", None) else None
     servers = lean_mcp.discover(project)
+    if a.server and a.server != CHROME:
+        a.server = lean_mcp.resolve_name(a.server, servers) or a.server
     if a.action == "list":
         if not servers:
             print("No MCP servers configured (looked in ~/.claude.json, <project>/.mcp.json, Claude Desktop config).")
             return
         cache = mcp_cache()
-        print(f"{'server':<24}{'type':<7}{'source':<9}{'tools':>6}{'~tok':>8}")
+        aliases = lean_mcp.display_names(servers)
+        width = max([24] + [len(n) + 2 for n in servers])
+        print(f"{'server':<{width}}{'type':<7}{'source':<9}{'tools':>6}{'~tok':>8}")
         for name, info in sorted(servers.items()):
             tools = cache.get(name, {}).get("tools")
             if tools is None and a.probe:
                 tools = server_tools(name, info["config"], refresh=True)
-            n, tok = (len(tools), f"{sum(tools.values()):,}") if tools is not None else ("?", "?")
-            print(f"{name:<24}{lean_mcp.server_type(info['config']):<7}{info['source']:<9}{n:>6}{tok:>8}")
+            n, tok = (len(tools), f"{sum(tools.values()):,}") if tools else ("?", "?")
+            notes = []
+            if aliases.get(name):
+                notes.append(f"--mcp {aliases[name]}:...")
+            st = cache.get(name, {}).get("status")
+            if st and st != "connected":
+                notes.append(f"{st} for workers")
+            print(f"{name:<{width}}{lean_mcp.server_type(info['config']):<7}{info['source']:<9}{n:>6}{tok:>8}"
+                  + (f"  ({'; '.join(notes)})" if notes else ""))
         st = chrome_state()
         if st.get("ok"):
             print(f"{CHROME:<24}{'chrome':<7}{'builtin':<9}{len(st['tools']):>6}{st.get('tokens', 0):>8,}  (use --chrome)")
         elif not st:
             print(f"{CHROME:<24}{'chrome':<7}{'builtin':<9}{'?':>6}{'?':>8}  (run: lean-agent chrome check)")
         print("~tok = tool definitions a worker carries on every turn if given the whole server."
-              + ("" if a.probe else "  Fill in ? with --probe (stdio servers)."))
+              + ("" if a.probe else "  Fill in ? with --probe (http servers: one small Haiku call each)."))
         return
     if a.action == "preset":
         if not a.server:
@@ -1806,18 +1874,26 @@ def cmd_mcp(a):
     if a.server == CHROME:
         return cmd_chrome(argparse.Namespace(action="status"))
     if a.server not in servers:
-        die(f"unknown MCP server {a.server!r}; configured: {', '.join(sorted(servers)) or 'none'}")
+        unknown_server(a.server, servers)
     cfg = servers[a.server]["config"]
     if a.measure:
         measure_server(a.server, cfg)
         return
     tools = server_tools(a.server, cfg, refresh=True)
+    status = (mcp_cache().get(a.server) or {}).get("status")
     if tools is None:
-        die(f"could not list tools of {a.server} directly; try --measure")
+        die(f"{a.server} gave workers no tools (status: {status or 'unknown'}). "
+            + (MCP_AUTH_HINT.format(name=a.server) if status in ("needs-auth", "failed") else "Try --measure."))
+    if (mcp_cache().get(a.server) or {}).get("estimated"):
+        print("(per-tool tokens are the measured total split evenly)")
     for t, tok in sorted(tools.items(), key=lambda kv: -kv[1]):
         print(f"{tok:>7,} tok  {t}")
     print(f"{sum(tools.values()):>7,} tok  total for {len(tools)} tools.  "
           f"Give a worker only what it needs: --mcp {a.server}:<tool>,<tool>")
+
+
+MCP_AUTH_HINT = ("Workers connect with the same name and config as Claude Code, so they reuse its stored login; "
+                 "if it says needs-auth, sign in once in Claude Code (/mcp, pick {name}), then: lean-agent mcp tools {name}")
 
 
 def measure_server(name, cfg):
@@ -2512,6 +2588,27 @@ def cmd_doctor(a):
 
     st = chrome_state()
     print("  chrome for workers: " + ("verified" if st.get("ok") else "not verified (lean-agent chrome check)"))
+    for name, info in sorted(lean_mcp.discover().items()):
+        if info["source"] != "plugin":
+            continue
+        if info.get("missing_options"):
+            report(False, f"plugin MCP server {name}: option(s) {', '.join(info['missing_options'])} aren't readable "
+                   "(sensitive options are in Claude Code's credentials store), so workers can't connect",
+                   f"use a configured server instead, or set the option non-sensitively in /plugin manage")
+            continue
+        c = mcp_cache().get(name) or {}
+        fresh = c.get("key") == config_key(info["config"]) and c.get("probed", "") >= (
+            datetime.datetime.now() - datetime.timedelta(days=1)).isoformat(timespec="seconds")
+        if not fresh:
+            server_tools(name, info["config"], refresh=True)
+            c = mcp_cache().get(name) or {}
+        alias = lean_mcp.display_names(lean_mcp.discover()).get(name)
+        use = f"--mcp {alias or name}:<preset|tools>"
+        if c.get("status") == "connected" and c.get("tools"):
+            report(True, f"plugin MCP server {name}: usable by workers ({len(c['tools'])} tools; {use})")
+        else:
+            report(False, f"plugin MCP server {name}: {c.get('status') or 'unknown'} when connected as a worker",
+                   MCP_AUTH_HINT.format(name=name))
     budgets = usage.window_budgets()
     parts = [f"{k}={v:,}" for k, v in budgets.items() if v]
     parts += [f"{k}={v}% of plan" for k, v in usage.pct_budgets().items()]

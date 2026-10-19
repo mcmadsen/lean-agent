@@ -123,7 +123,7 @@ Other ways to run the orchestrator:
 Workers get **no MCP servers** unless the orchestrator asks for them, and then only the tools it names:
 
 ```sh
-lean-agent mcp list -p shop --probe        # servers from ~/.claude.json, <project>/.mcp.json, Claude Desktop
+lean-agent mcp list -p shop --probe        # servers from ~/.claude.json, <project>/.mcp.json, Claude Desktop, plugins
 lean-agent mcp tools tickets               # per-tool cost of the tool definitions, biggest first
 lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
     --mcp tickets:get_ticket "Fetch ticket T-42 and say which file is responsible"
@@ -135,7 +135,8 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
 - `server:tool,tool` blocks every other tool of that server with `--disallowedTools`, which removes their
   definitions from context. Example server: all tools ~2,150 tokens per turn, only `get_ticket` ~90.
 - `mcp tools` asks stdio servers for their tool list directly, with no model call. The estimates were
-  within 5% of a real measurement. For HTTP servers, use `mcp tools <server> --measure` (two tiny Haiku calls).
+  within 5% of a real measurement. HTTP servers are listed by connecting the way a worker does (one tiny Haiku
+  call, cached); the per-tool cost is the measured total split evenly. `--measure` gives the exact total.
 - The config is copied into the run folder owner-only (`0600`) and **deleted when the run ends**, because MCP
   configs often contain tokens. Server names and tool-call counts go into the ledger; configs don't.
 - **Presets:** `lean-agent mcp preset <server> <name> <tool,tool>` saves a named set, and
@@ -144,7 +145,15 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   e.g. `mcp: tracker 6/40 tools ~1,900 tok per turn (whole server ~18,800)`.
 - lean-agent counts which MCP tools each worker called. `optimize` then suggests narrowing a server to the tools
   that get used, or dropping it.
-- Not covered: claude.ai connectors (they aren't in a local config file). Remote OAuth servers are untested.
+- **Servers from Claude Code plugins** (`claude mcp list` shows them as `plugin:<plugin>:<server>`) are found in
+  the enabled plugins' `.mcp.json`/`plugin.json`, with `${CLAUDE_PLUGIN_ROOT}`, `${user_config.*}` (from the
+  plugin's options in your settings) and `${ENV}` filled in. Use the full name or the short alias `mcp list`
+  shows, e.g. `--mcp datadog:read` when no other server is called `datadog`, else
+  `--mcp plugin:datadog:mcp:read`. Workers get the server under the same name and config, and Claude Code keys a
+  stored OAuth login by exactly those, so the login you already did is reused: no second sign-in.
+  `lean-agent doctor` connects to each plugin server as a worker (once a day) and says whether it's usable. Options
+  marked sensitive live in Claude Code's credentials store; lean-agent can't read them and doctor says so.
+- Not covered: claude.ai connectors (they aren't in a local config file).
 
 ## Shared worktrees
 

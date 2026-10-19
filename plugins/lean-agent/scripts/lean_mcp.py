@@ -39,11 +39,124 @@ def desktop_config_paths():
     return [os.path.expanduser("~/.config/Claude/claude_desktop_config.json")]
 
 
+def config_dir():
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+
+
+def enabled_plugins(project_path=None):
+    """Plugin ids (name@marketplace) switched on in user, project or local settings (later files win)."""
+    files = [os.path.join(config_dir(), "settings.json")]
+    if project_path:
+        files += [os.path.join(project_path, ".claude", f) for f in ("settings.json", "settings.local.json")]
+    state = {}
+    for f in files:
+        for pid, on in (_load(f).get("enabledPlugins") or {}).items():
+            state[pid] = bool(on)
+    return {pid for pid, on in state.items() if on}
+
+
+def installed_plugins(project_path=None):
+    """[(plugin id, install path)] from Claude Code's installed_plugins.json (format 1 or 2)."""
+    data = _load(os.path.join(config_dir(), "plugins", "installed_plugins.json")).get("plugins") or {}
+    out = []
+    for pid, recs in data.items():
+        for rec in recs if isinstance(recs, list) else [recs]:
+            if not isinstance(rec, dict) or not rec.get("installPath"):
+                continue
+            where = rec.get("projectPath")
+            if where and (not project_path or os.path.realpath(where) != os.path.realpath(project_path)):
+                continue  # installed for another project
+            out.append((pid, rec["installPath"]))
+            break
+    return out
+
+
+def plugin_options(pid, manifest):
+    """A plugin's option values: its userConfig defaults, then pluginConfigs.<id>.options in user settings.
+    Sensitive options live in Claude Code's credentials store and aren't readable here."""
+    opts = {k: v.get("default") for k, v in (manifest.get("userConfig") or {}).items()
+            if isinstance(v, dict) and v.get("default") is not None}
+    conf = (_load(os.path.join(config_dir(), "settings.json")).get("pluginConfigs") or {}).get(pid) or {}
+    opts.update(conf.get("options") or {})
+    return opts
+
+
+def _expand(value, root, data, options=None, missing=None):
+    """${CLAUDE_PLUGIN_ROOT}, ${CLAUDE_PLUGIN_DATA}, ${user_config.x} and ${ENV} in a plugin's server config,
+    as Claude Code does; option names it can't fill are added to `missing`."""
+    if isinstance(value, str):
+        value = value.replace("${CLAUDE_PLUGIN_ROOT}", root).replace("${CLAUDE_PLUGIN_DATA}", data)
+
+        def opt(m):
+            if (options or {}).get(m.group(1)) is not None:
+                return str(options[m.group(1)])
+            if missing is not None:
+                missing.append(m.group(1))
+            return m.group(0)
+        value = re.sub(r"\$\{user_config\.([^}]+)\}", opt, value)
+        return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}",
+                      lambda m: os.environ.get(m.group(1), m.group(2) if m.group(2) is not None else m.group(0)), value)
+    if isinstance(value, list):
+        return [_expand(v, root, data, options, missing) for v in value]
+    if isinstance(value, dict):
+        return {k: _expand(v, root, data, options, missing) for k, v in value.items()}
+    return value
+
+
+def plugin_servers(project_path=None):
+    """MCP servers that enabled Claude Code plugins provide, named like Claude Code does: plugin:<plugin>:<server>.
+
+    The config is kept as the plugin wrote it (only variables expanded): Claude Code keys a server's stored
+    OAuth login by its name plus type, url and headers, so a worker given the same name and config reuses it."""
+    on = enabled_plugins(project_path)
+    found = {}
+    for pid, root in installed_plugins(project_path):
+        if pid not in on:
+            continue
+        manifest = _load(os.path.join(root, ".claude-plugin", "plugin.json"))
+        name = manifest.get("name") or pid.split("@")[0]
+        decl = manifest.get("mcpServers", "./.mcp.json")
+        mapping = {}
+        for item in decl if isinstance(decl, list) else [decl]:
+            if isinstance(item, str):
+                item = _load(os.path.join(root, item))
+            if isinstance(item, dict):
+                item = item.get("mcpServers", item)
+                mapping.update({k: v for k, v in item.items() if isinstance(v, dict)})
+        data = os.path.join(config_dir(), "plugins", "data", re.sub(r"[^A-Za-z0-9_-]", "-", pid))
+        options = plugin_options(pid, manifest)
+        for server, cfg in mapping.items():
+            missing = []
+            cfg = _expand(cfg, root, data, options, missing)
+            if "command" in cfg and options:  # stdio servers also get the options as env vars
+                env = dict(cfg.get("env") or {})
+                for k, v in options.items():
+                    env.setdefault("CLAUDE_PLUGIN_OPTION_" + re.sub(r"[^A-Za-z0-9]", "_", k).upper(), str(v))
+                cfg = dict(cfg, env=env)
+            found[f"plugin:{name}:{server}"] = {"config": cfg, "source": "plugin", "plugin": pid,
+                                                "alias": name if len(mapping) == 1 else f"{name}-{server}",
+                                                "missing_options": sorted(set(missing))}
+    return found
+
+
+def resolve_name(name, servers):
+    """A configured server name, or a plugin server's short alias; None if neither."""
+    if name in servers:
+        return name
+    hits = [n for n, v in servers.items() if v.get("alias") == name]
+    return hits[0] if len(hits) == 1 else None
+
+
+def display_names(servers):
+    """{full name: alias or None}: an alias is shown only when no configured server has that name."""
+    return {n: (v.get("alias") if v.get("alias") and v["alias"] not in servers else None) for n, v in servers.items()}
+
+
 def discover(project_path=None):
     """Configured MCP servers as {name: {"config": {...}, "source": str}}.
 
     Later sources win, matching Claude Code's precedence (local > project > user);
-    Claude Desktop chat-app servers rank lowest.
+    Claude Desktop chat-app servers rank lowest. Plugin servers have their own names.
     """
     servers = {}
 
@@ -52,6 +165,7 @@ def discover(project_path=None):
             if isinstance(cfg, dict):
                 servers[name] = {"config": cfg, "source": source}
 
+    servers.update(plugin_servers(project_path))
     for p in desktop_config_paths():
         add("desktop", _load(p).get("mcpServers"))
     cj = _load(claude_json_path())
@@ -143,6 +257,11 @@ def parse_specs(specs):
     """['tickets:get_ticket,create_ticket', 'github'] -> [('tickets', ['get_ticket', 'create_ticket']), ('github', None)]"""
     out = []
     for spec in specs or []:
+        if spec.startswith("plugin:"):  # plugin:<plugin>:<server>[:tools]
+            parts = spec.split(":", 3)
+            name, tools = ":".join(parts[:3]), (parts[3] if len(parts) > 3 else "")
+            out.append((name.strip(), [t.strip() for t in tools.split(",") if t.strip()] or None))
+            continue
         name, _, tools = spec.partition(":")
         out.append((name.strip(), [t.strip() for t in tools.split(",") if t.strip()] or None))
     return out
@@ -156,7 +275,7 @@ def write_config(path, servers):
 
 
 def transcript_for(workdir, session_id):
-    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    cfg = config_dir()
     for d in dict.fromkeys([workdir, os.path.realpath(workdir)]):
         path = os.path.join(cfg, "projects", re.sub(r"[^A-Za-z0-9]", "-", d), session_id + ".jsonl")
         if os.path.isfile(path):

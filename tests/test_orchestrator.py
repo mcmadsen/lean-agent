@@ -23,9 +23,20 @@ FAKE_CLAUDE = textwrap.dedent("""\
         chrome = "--chrome" in sys.argv and os.environ.get("FAKE_CHROME") == ("strict" if "--strict-mcp-config" in sys.argv else "loose") 
         tools = ["Read"] + (["mcp__claude-in-chrome__navigate", "mcp__claude-in-chrome__find",
                              "mcp__claude-in-chrome__form_input", "mcp__claude-in-chrome__gif_creator"] if chrome else [])
-        print(json.dumps({"type": "system", "subtype": "init", "tools": tools,
-                          "mcp_servers": [{"name": "claude-in-chrome", "status": "connected"}] if chrome else []}))
-        print(json.dumps({"type": "result", "usage": {"input_tokens": 8000 + (3000 if chrome else 0)}}))
+        servers = [{"name": "claude-in-chrome", "status": "connected"}] if chrome else []
+        extra = 0
+        if "--mcp-config" in sys.argv:  # an http server probe: FAKE_HTTP_TOOLS={"<server>": [tools]}
+            cfg = json.load(open(sys.argv[sys.argv.index("--mcp-config") + 1]))["mcpServers"]
+            for name, c in cfg.items():
+                ok = os.environ.get("FAKE_HTTP_URL", "") in c.get("url", "")
+                servers.append({"name": name, "status": "connected" if ok else "needs-auth"})
+                if ok:
+                    names = json.loads(os.environ.get("FAKE_HTTP_TOOLS") or "{}").get(name, [])
+                    pre = "mcp__" + "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in name) + "__"
+                    tools += [pre + t for t in names]
+                    extra += 400 * len(names)
+        print(json.dumps({"type": "system", "subtype": "init", "tools": tools, "mcp_servers": servers}))
+        print(json.dumps({"type": "result", "usage": {"input_tokens": 8000 + (3000 if chrome else 0) + extra}}))
         sys.exit(0)
     log = os.environ["FAKE_LOG"]
     append = sys.argv[sys.argv.index("--append-system-prompt-file") + 1]
@@ -452,6 +463,50 @@ class CliTest(unittest.TestCase):
         self.assertIn("has no tool", p.stderr)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t")
         self.assertIn("--safe-mode", self.calls()[-1]["argv"])  # no MCP -> safe mode as before
+
+    def test_plugin_mcp_servers(self):
+        cfg = self.env["CLAUDE_CONFIG_DIR"]
+        root = os.path.join(cfg, "plugins", "cache", "mkt", "dd", "1.0.0")
+        os.makedirs(os.path.join(root, ".claude-plugin"))
+        with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w") as fh:
+            json.dump({"name": "dd", "userConfig": {"site": {"type": "string", "default": "example.com"}}}, fh)
+        with open(os.path.join(root, ".mcp.json"), "w") as fh:
+            json.dump({"mcpServers": {"mcp": {"type": "http", "url": "https://mcp.${user_config.site}/v1/mcp?v=1",
+                                              "headers": {"X-Root": "${CLAUDE_PLUGIN_ROOT}"}}}}, fh)
+        with open(os.path.join(cfg, "plugins", "installed_plugins.json"), "w") as fh:
+            json.dump({"version": 2, "plugins": {"dd@mkt": [{"scope": "user", "installPath": root}]}}, fh)
+        settings = {"enabledPlugins": {"dd@mkt": True}, "pluginConfigs": {"dd@mkt": {"options": {"site": "example.eu"}}}}
+        with open(os.path.join(cfg, "settings.json"), "w") as fh:
+            json.dump(settings, fh)
+        tools = json.dumps({"plugin:dd:mcp": ["search_logs", "get_monitor", "create_monitor", "query_metrics"]})
+        env = dict(FAKE_HTTP_URL="mcp.example.eu/v1/mcp", FAKE_HTTP_TOOLS=tools)
+        out = self.cli("mcp", "list", **env).stdout
+        self.assertIn("plugin:dd:mcp", out)
+        self.assertIn("--mcp dd:...", out)
+        out = self.cli("mcp", "tools", "dd", **env).stdout
+        self.assertIn("search_logs", out)
+        self.assertIn("1,600 tok  total for 4 tools", out)
+        self.assertIn("read (automatic)  3 tools ~1,200 tok  get_monitor, query_metrics, search_logs", self.cli("mcp", "preset", "dd", **env).stdout)
+        self.cli("learn", self.proj)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "dd:read", "check logs", **env)
+        call = self.calls()[-1]
+        server = call["mcp"]["servers"]["plugin:dd:mcp"]  # same name and config: Claude Code's stored login applies
+        self.assertEqual(server, {"type": "http", "url": "https://mcp.example.eu/v1/mcp?v=1", "headers": {"X-Root": root}})
+        argv = call["argv"]
+        self.assertIn("mcp__plugin_dd_mcp__create_monitor", argv[argv.index("--disallowedTools") + 1])
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "plugin:dd:mcp:search_logs", "t", **env)
+        self.assertIn("mcp__plugin_dd_mcp__search_logs", " ".join(self.calls()[-1]["argv"]))
+        doc = self.cli("doctor", check=False, **env).stdout
+        self.assertIn("plugin MCP server plugin:dd:mcp: usable by workers (4 tools; --mcp dd:<preset|tools>)", doc)
+        settings["pluginConfigs"]["dd@mkt"]["options"]["site"] = "example.org"  # login doesn't match: needs-auth
+        with open(os.path.join(cfg, "settings.json"), "w") as fh:
+            json.dump(settings, fh)
+        doc = self.cli("doctor", check=False, **env).stdout
+        self.assertIn("plugin MCP server plugin:dd:mcp: needs-auth when connected as a worker", doc)
+        settings["enabledPlugins"]["dd@mkt"] = False
+        with open(os.path.join(cfg, "settings.json"), "w") as fh:
+            json.dump(settings, fh)
+        self.assertNotIn("plugin:dd", self.cli("mcp", "list", **env).stdout)
 
     def test_optimize_suggests_mcp_narrowing(self):
         self.cli("learn", self.proj)
