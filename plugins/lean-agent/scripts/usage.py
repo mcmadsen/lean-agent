@@ -101,6 +101,11 @@ def scan(path, fstate, totals, models):
             if isinstance(v, (int, float)):
                 totals[k] = totals.get(k, 0) + int(v)
                 mt[k] = mt.get(k, 0) + int(v)
+        ctx = sum(int(msg["usage"].get(k) or 0) for k in
+                  ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+        totals["_calls"] = totals.get("_calls", 0) + 1
+        totals["_ctx"] = totals.get("_ctx", 0) + ctx
+        totals.setdefault("_first_ctx", ctx)  # the main transcript is scanned first
     fstate["offset"] = offset + end + 1
     fstate["seen"] = seen[-SEEN_KEEP:]
 
@@ -182,6 +187,11 @@ def report(arg=None):
     budget = int(os.environ.get("LEAN_AGENT_BUDGET") or 0)
     print(f"Session: {os.path.basename(path)[:-6]}")
     print(f"Files:   {len(state['files'])} transcript(s) incl. subagents")
+    calls = totals.get("_calls", 0)
+    if calls:
+        print(f"Calls:   {calls} API calls · first call context {fmt(totals['_first_ctx'])} tokens "
+              f"(~ the fixed context: system prompt, tools, skills, CLAUDE.md) · "
+              f"average context per call {fmt(totals['_ctx'] // calls)}")
     print()
     used = units_total(state)
     print(f"{'model':<28}{'input':>12}{'cache write':>14}{'cache read':>14}{'output':>12}{'sonnet-eq':>12}")

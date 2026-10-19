@@ -106,6 +106,7 @@ class BudgetTest(Base):
         p = subprocess.run([sys.executable, os.path.join(ROOT, "usage.py"), "report", self.transcript],
                            capture_output=True, text=True, env=dict(os.environ, **self.env), check=True)
         self.assertIn("3,450", p.stdout)
+        self.assertIn("Calls:   2 API calls · first call context 11,100 tokens", p.stdout)
         self.assertIn("claude-small", p.stdout)
 
 
