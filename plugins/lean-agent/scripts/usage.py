@@ -79,6 +79,7 @@ def scan(path, fstate, totals, models):
         return
     seen = fstate.get("seen", [])
     seen_set = set(seen)
+    last_ctx = None
     for raw in data[:end].split(b"\n"):
         try:
             entry = json.loads(raw)
@@ -106,8 +107,10 @@ def scan(path, fstate, totals, models):
         totals["_calls"] = totals.get("_calls", 0) + 1
         totals["_ctx"] = totals.get("_ctx", 0) + ctx
         totals.setdefault("_first_ctx", ctx)  # the main transcript is scanned first
+        last_ctx = ctx
     fstate["offset"] = offset + end + 1
     fstate["seen"] = seen[-SEEN_KEEP:]
+    return last_ctx
 
 
 def new_state():
@@ -115,10 +118,20 @@ def new_state():
 
 
 def update(state, transcript_path):
-    for path in transcript_files(transcript_path):
+    for i, path in enumerate(transcript_files(transcript_path)):
         fstate = state["files"].setdefault(path, {})
-        scan(path, fstate, state["totals"], state["models"])
+        last = scan(path, fstate, state["totals"], state["models"])
+        if i == 0 and last is not None:  # the main conversation's latest call = its context size now
+            state["last_ctx"] = last
     return state
+
+
+def cap_units(state):
+    """What the self-set session cap counts. LEAN_AGENT_BUDGET_COUNT=new leaves out cache re-reads (the
+    same context billed again each turn) and counts only new tokens; the default counts all billed tokens."""
+    if (os.environ.get("LEAN_AGENT_BUDGET_COUNT") or "billed").lower() == "new":
+        return int(sum(units(dict(t, cache_read_input_tokens=0), m) for m, t in state.get("models", {}).items()))
+    return units_total(state)
 
 
 def state_path(session_id):
@@ -231,8 +244,16 @@ def report(arg=None, workers=None):
         print("Workers started from this session: none")
     print()
     if budget > 0:
-        print(f"Self-set session cap (LEAN_AGENT_BUDGET, not your Claude plan): {fmt(used)} / {fmt(budget)} "
-              f"sonnet-eq for this session ({used * 100 // budget}%)")
+        st = new_state()
+        update(st, path)
+        capped = cap_units(st)
+        new_only = (os.environ.get("LEAN_AGENT_BUDGET_COUNT") or "").lower() == "new"
+        print(f"Self-set session spend cap (LEAN_AGENT_BUDGET, not your Claude plan and not the context window): "
+              f"{fmt(capped)} / {fmt(budget)} sonnet-eq "
+              + ("new tokens (cache re-reads not counted)" if new_only else "billed over all turns")
+              + f" ({capped * 100 // budget}%)")
+        if st.get("last_ctx"):
+            print(f"Context window now: ~{fmt(st['last_ctx'])} tokens")
     else:
         print("No session cap set. For your plan's usage see `lean-agent limits` (and /usage in Claude Code).")
     print("sonnet-eq = (input + 1.25*cache write + 0.1*cache read + 5*output) x model price relative to Sonnet")
