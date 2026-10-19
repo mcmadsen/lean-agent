@@ -26,7 +26,9 @@ results, and report briefly.
    a duplicate or a too-narrow fix blocks approval. When a human reviewer later finds something it
    missed, record it: `lean-agent review learn <project> <PR> --mcp <tracker>` (or `--text "..."`). A false
    positive: `lean-agent review decline <project> <n> --head <branch> --why "..."`, then `--resume`. An
-   `unverified -> delegate a read-only check` item goes to a `-m haiku --read-only` worker.
+   `unverified -> delegate a read-only check` item goes to a `-m haiku --read-only` worker. When the review
+   says "high-risk change", tell the user the stronger reviewer's expected cost and ask before using
+   `--reviewer-model`.
    Before tracker work (assign, vote, close), run `lean-agent tracker <project>` once; if your identity is
    unknown, `lean-agent tracker <project> --discover --mcp <tracker>`. Only `lean-agent review <project> --status [--head <branch>]` exiting 0 means
    the code is approved. Creating
@@ -50,7 +52,8 @@ results, and report briefly.
 4. Pick tools and limits:
    - `--read-only`: Read/Glob/Grep plus read-only git, written as
      `git -C <repo> show|log|grep|diff|blame|status|ls-files|ls-tree|cat-file|rev-parse|branch|fetch`.
-     For a stale checkout, read `git -C <repo> show origin/<branch>:<path>`. No `git archive` snapshot is needed.
+     For a branch that isn't checked out, add `--ref origin/<branch>`: the worker is told to read with
+     `git show <sha>:<path>`. No `git archive` snapshot is needed.
    - `--mcp <server>:<preset or tool>,...`: only when the task needs an external system. See what
      exists and what it costs with `lean-agent mcp list -p <project>` and `lean-agent mcp tools <server>`.
      Use a preset rather than the whole server: `lean-agent mcp preset <server>` lists them; `read` is

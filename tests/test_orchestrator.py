@@ -112,7 +112,7 @@ class CliTest(unittest.TestCase):
         self.log = os.path.join(t, "calls.jsonl")
         self.env = dict(os.environ, LEAN_AGENT_HOME=os.path.join(t, "home"), LEAN_AGENT_CLAUDE=fake,
                         FAKE_LOG=self.log, CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD="1",
-                        HOME=t, CLAUDE_CONFIG_DIR=os.path.join(t, "cfg"))
+                        HOME=t, CLAUDE_CONFIG_DIR=os.path.join(t, "cfg"), LEAN_AGENT_LAUNCH_GUARD="0")
         os.makedirs(os.path.join(t, "cfg"))
         fake_mcp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "fake_mcp.py")
         self.mcp_cfg = {"type": "stdio", "command": sys.executable, "args": [fake_mcp], "env": {"TOKEN": "s3cret"}}
@@ -272,6 +272,54 @@ class CliTest(unittest.TestCase):
             self.assertNotIn("attribution", json.load(fh))
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t")
         self.assertNotIn("--settings", self.calls()[-1]["argv"])
+
+    def test_duplicate_launch_guard_ref_and_extra_cost(self):
+        self.cli("learn", self.proj)
+        on = dict(LEAN_AGENT_LAUNCH_GUARD="1")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "count the specs", **on)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "count the specs", check=False, **on)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("the same task finished moments ago", p.stderr)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--again", "count the specs", **on)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "count the tests", **on)  # a different task
+        # a read-only worker on a branch that isn't checked out
+        subprocess.run(["git", "-C", self.proj, "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", self.proj, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                        "--allow-empty", "-m", "x"], check=True)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "--ref", "main", "list files")
+        self.assertIn("the project's working tree is NOT on it", self.calls()[-1]["append"])
+        self.assertIn("show ", self.calls()[-1]["append"])
+        out = self.cli("run", "-p", "proj", "-m", "opus", "--why", "x", "hard one").stdout
+        self.assertIn("opus costs ~", out)
+        self.assertNotIn("saved ~-", out)
+
+    def test_change_focus_on_the_replay_fixture(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures"))
+        import review_case
+        root = review_case.build(os.path.join(self.tmp.name, "case"))
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        mb = L.git(root, "merge-base", "main", "fix-races")
+        fc = L.change_focus(root, [mb, L.git(root, "rev-parse", "fix-races")])
+        self.assertEqual(len(fc["tests"]), 4)
+        self.assertIn("test/runner.spec.js: 'shares a running check for a scope inside the running scope' "
+                      "(renamed or removed)", fc["tests"])
+        self.assertEqual(fc["params"], ["capturedAtMs = Date.now() (src/checks/runner.js:41)"])
+        self.assertEqual([x.split(" ")[0] for x in fc["state"]], ["queuedScope", "hintShown"])  # `running` existed
+        self.cli("learn", root, "--name", "case")
+        out = self.cli("review", "case", "--head", "fix-races", "--base", "main", "--second-opinion", "off",
+                       check=False, FAKE_REVIEW=json.dumps({"verdict": "approve", "findings": [], "checks": [],
+                                                            "searches": [{"for": "x", "found": "nothing"}],
+                                                            "reuse": [{"symbol": n, "verdict": "justified-new"}
+                                                                      for n in ("merge", "shareable", "isSent", "takePending")]})).stdout
+        self.assertIn("4 edited tests, 1 defaults, 2 module state", out)
+        self.assertIn("coverage not checked for 4 of 4 edited tests", out)
+        self.assertNotIn("REVIEW: APPROVE", out)
+        self.assertIn("reviewer: sonnet, effort high (expected ~$", out)
+        self.assertIn("high-risk change (touches", out)
+        append = self.calls()[-1]["append"]
+        self.assertIn("capturedAtMs = Date.now()", append)
+        self.assertIn("4. Tests. For every test the change edits", append)
 
     def test_run_requires_model_and_why(self):
         self.cli("learn", self.proj)
@@ -1334,14 +1382,14 @@ class CliTest(unittest.TestCase):
         self.assertIn("1 new files, 2 new symbols for the reuse pass", out)  # test files don't count
         calls = self.calls()
         second = next(c for c in calls if "search-only second opinion" in c["append"])
-        main = next(c for c in calls if "Reuse and duplication (mandatory)" in c["append"])
+        main = next(c for c in calls if "Reuse and duplication. For every new file" in c["append"])
         follow = calls[-1]  # sent back once, same session, to finish the reuse pass
         self.assertIn("Your reuse pass isn't complete", follow["task"])
         self.assertIn("useOverlayOpen", follow["task"])
         self.assertIn("--resume", follow["argv"])
         self.assertIn("sending the reviewer back once", out)
         self.assertEqual(second["argv"][second["argv"].index("--model") + 1], "haiku")
-        self.assertIn("Reuse and duplication (mandatory)", main["append"])
+        self.assertIn("Reuse and duplication. For every new file", main["append"])
         self.assertIn("- createOverlayStore (src/dialogs/overlayStore.ts)", main["append"])
         self.assertIn("- useOverlayOpen (src/dialogs/overlayStore.ts)", main["append"])
         self.assertNotIn("helperInTest", main["append"])
@@ -1533,7 +1581,7 @@ class CliTest(unittest.TestCase):
                            {"severity": "major", "category": "duplication", "file": "src/ui/label.ts", "line": 1,
                             "issue": "label built like three other components", "suggestion": "optional follow-up"},
                            {"severity": "major", "category": "scope", "file": "src/sync/index.ts", "line": 3,
-                            "issue": "pendingScope may survive logout; I did not confirm it is cleared"}],
+                            "issue": "queuedScope may survive logout; I did not confirm it is cleared"}],
               "checks": []}
         out = self.cli("review", "proj", "--head", "fix", "--base", "main", "--second-opinion", "off", check=False,
                        FAKE_REVIEW=json.dumps(rv)).stdout
@@ -1541,7 +1589,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("dropped a duplication finding that points at the change's own lines", out)
         self.assertIn("lowered a finding the reviewer calls optional/follow-up/pre-existing to minor", out)
         self.assertIn("turned an unverified major into a check", out)
-        self.assertIn("[check] unverified -> delegate a read-only check: src/sync/index.ts: pendingScope", out)
+        self.assertIn("[check] unverified -> delegate a read-only check: src/sync/index.ts: queuedScope", out)
         self.assertIn("1. [major/duplication] resetScheduler", out)  # copies code outside the change
         self.assertIn("cost: this review $0.05 (3,100 sonnet-eq) · fix so far $0.05 over 1 review run(s)", out)
         # decline the auto-raised one; it must not come back on --resume, and can't flip the verdict
