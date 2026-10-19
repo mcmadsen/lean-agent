@@ -29,6 +29,9 @@ FAKE_CLAUDE = textwrap.dedent("""\
             fh.write(json.dumps({"plugin": sys.argv[1:]}) + "\\n")
         sys.exit(0)
     task = sys.stdin.read()
+    if "--append-system-prompt-file" not in sys.argv and task.startswith("Rewrite this context card"):
+        print(json.dumps({"type": "result", "result": os.environ.get("FAKE_SHORT", "## Testing\\nRun pytest -q in api/.")}))
+        sys.exit(0)
     if "stream-json" in sys.argv and "--append-system-prompt-file" not in sys.argv:  # a session probe, not a worker
         chrome = "--chrome" in sys.argv and os.environ.get("FAKE_CHROME") == ("strict" if "--strict-mcp-config" in sys.argv else "loose") 
         tools = ["Read"] + (["mcp__claude-in-chrome__navigate", "mcp__claude-in-chrome__find",
@@ -337,6 +340,18 @@ class CliTest(unittest.TestCase):
         self.cli("run", "-p", "proj", "-m", "opus", "--why", "x", "--yes", "deep review")
         self.assertIn("Plan (from Claude", self.cli("budget", check=False).stdout)
         self.assertIn("No runs in progress", self.cli("runs", "--running").stdout)
+
+    def test_card_shorten_checks_what_is_kept(self):
+        self.cli("learn", self.proj)
+        out = self.cli("card", "shorten", "proj", "testing", check=False).stdout
+        self.assertIn("lost (not in the shorter text):", out)
+        self.assertIn("DOCKER", out)
+        p = self.cli("card", "shorten", "proj", "testing", "--save", check=False)
+        self.assertIn("not saved", p.stderr)
+        good = "## Testing\nRun pytest -q in api/; use the sqlite fixture in tests/conftest.py, never the real db. DOCKER=1 for integration."
+        out = self.cli("card", "shorten", "proj", "testing", "--save", FAKE_SHORT=good).stdout
+        self.assertIn("saved card testing", out)
+        self.assertIn("never the real db", self.cli("card", "show", "proj", "testing").stdout)
 
     def test_run_requires_model_and_why(self):
         self.cli("learn", self.proj)
@@ -779,7 +794,33 @@ class CliTest(unittest.TestCase):
                 self.assertNotIn("create_obs_dashboard", l)
         self.assertTrue(any("-write = " in l and "includes write tools: create_obs_dashboard" in l for l in presets), out)
         self.assertIn("Cards: nothing to promote", out)
-        self.assertNotIn("Cards: nothing", self.cli("optimize", "proj", "--reject", "x", **env).stdout)
+        rej = self.cli("optimize", "proj", "--reject", "x", **env).stdout
+        self.assertNotIn("Cards: nothing", rej)
+        self.assertIn("rejected x (no open draft has that id now", rej)
+        # an existing preset with the same tools is never re-drafted; one with fewer gets an "extend" draft
+        store = {"plugin:obs:mcp": {"metrics": ["get_obs_metric", "search_obs_metrics"],
+                                    "dash": ["search_obs_dashboards"]}}
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "mcp-presets.json"), "w") as fh:
+            json.dump(store, fh)
+        out = self.cli("optimize", "proj", **env).stdout
+        self.assertNotIn("= get_obs_metric,search_obs_metrics ", out)
+        self.assertIn("extend existing preset dash with create_obs_dashboard", out)
+        names = [l.split("--mcp ")[1].split(" =")[0] for l in out.splitlines() if l.startswith("preset")]
+        tools = [l.split(" = ")[1].split("  (")[0] for l in out.splitlines() if l.startswith("preset")]
+        self.assertEqual(len(tools), len(set(tools)), out)  # never two drafts with the same tool set
+        # context gaps a card already covers are hidden; others can be acknowledged
+        miss = os.path.join(self.env["LEAN_AGENT_HOME"], "library", [d for d in os.listdir(
+            os.path.join(self.env["LEAN_AGENT_HOME"], "library")) if d.startswith("proj")][0], "missing.jsonl")
+        with open(miss, "a") as fh:
+            fh.write(json.dumps({"run": "r1", "missing": "widget value comparison on earlier Mondays"}) + "\n")
+            fh.write(json.dumps({"run": "r2", "missing": "the description limit of the tracker is 4000 characters"}) + "\n")
+        out = self.cli("optimize", "proj", **env).stdout
+        self.assertNotIn("[r1]", out)  # the accepted recipe card covers it
+        self.assertIn("[r2] the description limit", out)
+        self.assertIn("gap(s) hidden: a card or tracker note already covers them", out)
+        out = self.cli("optimize", "proj", "--ack", "r2", **env).stdout
+        self.assertIn("acknowledged gap from run r2", out)
+        self.assertNotIn("[r2]", out)
         # a big MCP result saved to a file: workers are pointed at lean-json, and read-only workers may run it
         self.assertIn("bin/lean-json <file>", self.calls()[-1]["append"] if self.calls()[-1].get("mcp") else
                       [c for c in self.calls() if c.get("mcp")][-1]["append"])
