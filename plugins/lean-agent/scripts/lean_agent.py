@@ -1627,6 +1627,8 @@ def _cmd_optimize(a):
                 actions.append(("core", c, f"for {t} tasks: used in {bt['used']}/{bt['offered']}, never unneeded", t))
             elif in_core and rate < 0.4:
                 actions.append(("uncore", c, f"for {t} tasks: used in only {bt['used']}/{bt['offered']}", t))
+        if c.get("core") and c["offered"] >= a.min_runs and c["used"] / c["offered"] < 0.4:
+            actions.append(("uncore", c, f"core for every task but used in only {card_rate(c)} runs", "*"))
         if c["offered"] >= a.min_runs:
             rate = c["used"] / c["offered"]
             if not is_core(c, "") and rate <= 0.2 and c["unneeded"] >= 2:
@@ -1642,6 +1644,8 @@ def _cmd_optimize(a):
         for act, c, _, t in actions:
             if act == "core":
                 c["core_types"] = sorted(set(c.get("core_types") or []) | {t})
+            elif act == "uncore" and t == "*":
+                c["core"] = False  # an old global core card that workers don't use
             elif act == "uncore":
                 c["core_types"] = [x for x in c.get("core_types") or [] if x != t]
             elif act == "archive":
