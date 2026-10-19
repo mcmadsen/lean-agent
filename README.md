@@ -153,6 +153,8 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   shows, e.g. `--mcp datadog:read` when no other server is called `datadog`, else
   `--mcp plugin:datadog:mcp:read`. Workers get the server under the same name and config, and Claude Code keys a
   stored OAuth login by exactly those, so the login you already did is reused: no second sign-in.
+  If a plugin is both installed and synced from claude.ai, the installed copy is used, or, once `doctor` has
+  seen `claude mcp list`, whichever copy Claude Code itself connects to.
   `lean-agent doctor` connects to each plugin server as a worker (once a day) and says whether it's usable. Options
   marked sensitive live in Claude Code's credentials store; lean-agent can't read them and doctor says so.
 - Not covered: claude.ai connectors (they aren't in a local config file).

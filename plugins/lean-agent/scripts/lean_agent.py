@@ -1983,7 +1983,7 @@ def diagnose_plugin_server(name, info, claude_view, servers):
     alias = lean_mcp.display_names(servers).get(name)
     if worker == "connected" and c.get("tools"):
         return True, f"{label}: usable by workers ({len(c['tools'])} tools; --mcp {alias or name}:<preset|tools>)", None
-    mine = info["config"].get("url") or " ".join([info["config"].get("command", "")] + info["config"].get("args", []))
+    mine = lean_mcp.server_target(info["config"])
     if claude_view and name not in claude_view:
         return (False, f"{label}: {worker} as a worker, and Claude Code doesn't list it (`claude mcp list`)",
                 "enable the plugin in /plugin, or ignore this if you don't use it")
@@ -1993,6 +1993,10 @@ def diagnose_plugin_server(name, info, claude_view, servers):
                else "it fails in Claude Code too: fix it there first (`claude mcp list`, /mcp)")
         return False, f"{label}: {theirs_status} in Claude Code itself, so workers can't use it either", how
     if theirs and theirs.split("?")[0] != mine.split("?")[0]:
+        if info.get("other_copies"):
+            return (False, f"{label}: {worker} as a worker; Claude Code connects to {theirs}, and none of the "
+                    f"plugin's copies ({info['path']}, {', '.join(info['other_copies'])}) builds that",
+                    "an env var set only in Claude Code's environment? put it in the settings.json `env` block")
         return (False, f"{label}: {worker} as a worker; Claude Code connects to {theirs} but lean-agent built "
                 f"{mine}", "the plugin's config has a value lean-agent resolves differently (an env var set "
                 "only in Claude Code's environment?); put it in the settings.json `env` block")
@@ -2899,6 +2903,8 @@ def cmd_doctor(a):
     print("  chrome for workers: " + ("verified" if st.get("ok") else "not verified (lean-agent chrome check)"))
     plugin_srv = {n: v for n, v in lean_mcp.discover().items() if v["source"] == "plugin"}
     claude_view = lean_mcp.claude_mcp_list() if plugin_srv else {}
+    if claude_view:  # now that Claude Code's choice is known, pick the same copy of duplicated plugins
+        plugin_srv = {n: v for n, v in lean_mcp.discover().items() if v["source"] == "plugin"}
     for name, info in sorted(plugin_srv.items()):
         report(*diagnose_plugin_server(name, info, claude_view, plugin_srv))
     budgets = usage.window_budgets()
