@@ -1318,12 +1318,12 @@ class CliTest(unittest.TestCase):
         self.cli("learn", self.proj, "--name", "proj")
         reuse = json.dumps({"verdict": "needs-checks", "searches": [{"for": "counter", "found": "src/init/surfaces.ts:2"}],
                             "reuse": [{"symbol": "createOverlayStore", "candidates": ["src/init/surfaces.ts:2 registerSurface"],
-                                       "verdict": "extend", "why": "same ref counter"}],
+                                       "verdict": "duplicate", "why": "same ref counter"}],
                             "siblings": [{"checked": "other dialogs", "needs_fix": True}], "findings": [], "checks": []})
         main_review = json.dumps({"verdict": "approve", "searches": [{"for": "createOverlayStore", "found": "nothing"}],
                                   "reuse": [{"symbol": "createOverlayStore", "candidates": ["src/init/surfaces.ts:2"],
-                                             "verdict": "extend"}],
-                                  "findings": [{"severity": "minor", "category": "duplication", "file": "src/dialogs/overlayStore.ts",
+                                             "verdict": "duplicate"}],
+                                  "findings": [{"severity": "major", "category": "duplication", "file": "src/dialogs/overlayStore.ts",
                                                 "line": 2, "issue": "near-copy of registerSurface"},
                                                {"severity": "nit", "category": "tests", "file": "x.test.ts", "line": 1,
                                                 "issue": "test name"}], "checks": []})
@@ -1345,13 +1345,12 @@ class CliTest(unittest.TestCase):
         self.assertIn("- createOverlayStore (src/dialogs/overlayStore.ts)", main["append"])
         self.assertIn("- useOverlayOpen (src/dialogs/overlayStore.ts)", main["append"])
         self.assertNotIn("helperInTest", main["append"])
-        self.assertIn("src/init/surfaces.ts:2 registerSurface (suggests extend", main["task"])
+        self.assertIn("src/init/surfaces.ts:2 registerSurface (suggests duplicate", main["task"])
         self.assertIn("sibling that may share the problem: other dialogs", main["task"])
         self.assertIn("REVIEW: CHANGES-REQUESTED", out)
-        self.assertIn("raised a duplication finding to major", out)
         self.assertIn("reuse not checked for", out)
         self.assertIn("changed the verdict from approve to changes-requested", out)
-        self.assertIn("createOverlayStore -> src/init/surfaces.ts:2 -> extend", out)
+        self.assertIn("createOverlayStore -> src/init/surfaces.ts:2 -> duplicate", out)
         self.assertLess(out.index("[major/duplication]"), out.index("[nit/tests]"))
         self.assertNotEqual(self.cli("review", "proj", "--status", "--head", "feature", check=False).returncode, 0)
         self.assertIn("reuse: 2 of 3 new symbols checked · 1 searches", out)
@@ -1382,7 +1381,7 @@ class CliTest(unittest.TestCase):
         out = self.cli("review", "proj", "--head", "feature", "--base", "main", "--second-opinion", "on", check=False,
                        FAKE_REUSE=reuse, FAKE_REVIEW=weak).stdout
         self.assertIn("justified-new verdict(s) not accepted", out)
-        self.assertIn("createOverlayStore: the second opinion says extend src/init/surfaces.ts:2", out)
+        self.assertIn("createOverlayStore: the second opinion says duplicate src/init/surfaces.ts:2", out)
         self.assertNotIn("REVIEW: APPROVE", out)
         # after fixes, --resume runs the passes again on what changed
         g("checkout", "-q", "feature")
@@ -1391,7 +1390,8 @@ class CliTest(unittest.TestCase):
         g("checkout", "-q", "main")
         self.cli("review", "proj", "--resume", "--head", "feature", check=False, FAKE_REVIEW=main_review)
         task = self.calls()[-1]["task"]
-        self.assertIn("Run the reuse, scope and platform passes again", task)
+        self.assertIn("Re-check only (a) your earlier open findings", task)
+        self.assertIn("declined: [scope] src/dialogs/overlayStore.ts", task)
         self.assertIn("deferOverlay (src/dialogs/overlayStore.ts)", task)
 
     def test_review_learn_builds_checklist_cards(self):
@@ -1484,6 +1484,86 @@ class CliTest(unittest.TestCase):
         self.assertIn("couldn't find PR 43", p.stdout)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tracker", "list open work items")
         self.assertIn("project Storefront, repo web-app", self.calls()[-1]["append"])
+        # the tracker: who the user is and the project's rules, learned once and given to every MCP worker
+        found = json.dumps({"me": {"id": "1a2b-3c", "name": "Pat"},
+                            "notes": ["User Story states: New, Active, Resolved, Closed (no Removed); no delete"]})
+        out = self.cli("tracker", "proj", "--discover", "--mcp", "tracker",
+                       FAKE_FEEDBACK='{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-TRACKER ' + found).stdout
+        self.assertIn("me_id 1a2b-3c, me_name Pat", out)
+        self.assertIn("1. User Story states", out)
+        self.cli("tracker", "proj", "--note", "Voting on a PR needs the reviewer id")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tracker", "approve the PR")
+        append = self.calls()[-1]["append"]
+        self.assertIn("You act as Pat (identity id 1a2b-3c)", append)
+        self.assertIn("- Voting on a PR needs the reviewer id", append)
+        # thread ids learned from are remembered per PR
+        lesson2 = json.dumps({"checklist": ["Check logout cleanup for every scheduler"], "threads_read": [7, 9]})
+        self.cli("review", "learn", "proj", "44", "--mcp", "tracker", check=False,
+                 FAKE_FEEDBACK='{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-CHECKLIST ' + lesson2)
+        self.cli("review", "learn", "proj", "44", "--mcp", "tracker", check=False,
+                 FAKE_FEEDBACK='{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-CHECKLIST ' + lesson2)
+        self.assertIn("Threads already learned from: 7, 9", self.calls()[-1]["append"])
+
+    def test_review_noise_rules_and_convergence(self):
+        def g(*args):
+            subprocess.run(["git", "-C", self.proj, "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                           check=True, capture_output=True)
+
+        def write(rel, text):
+            os.makedirs(os.path.dirname(os.path.join(self.proj, rel)), exist_ok=True)
+            with open(os.path.join(self.proj, rel), "w") as fh:
+                fh.write(text)
+        write("src/sync/index.ts", "export function onLogout() {\n  gen++\n}\n" + "// filler\n" * 80)
+        write("src/util/timers.ts", "export function clearTimer(t) { clearTimeout(t) }\n")
+        g("init", "-q", "-b", "main")
+        g("add", "-A")
+        g("commit", "-qm", "base")
+        g("checkout", "-qb", "fix")
+        write("src/sync/index.ts", "export function onLogout(reason) {\n  gen++\n  scope = null\n}\n"
+              + "// filler\n" * 78 + "export function resetScheduler() { clearTimer(t) }\n")
+        g("commit", "-qam", "fix races")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        rv = {"verdict": "changes-requested", "searches": [{"for": "resetScheduler", "found": "src/util/timers.ts:1"}],
+              "reuse": [{"symbol": "resetScheduler", "candidates": ["src/util/timers.ts:1 clearTimer"],
+                         "verdict": "duplicate"},
+                        {"symbol": "onLogout", "candidates": ["src/sync/index.ts:3 scope reset"], "verdict": "duplicate"}],
+              "findings": [{"severity": "major", "category": "duplication", "file": "src/sync/index.ts", "line": 3,
+                            "issue": "scope reset duplicates src/sync/index.ts:3", "suggestion": "extend it"},
+                           {"severity": "major", "category": "duplication", "file": "src/ui/label.ts", "line": 1,
+                            "issue": "label built like three other components", "suggestion": "optional follow-up"},
+                           {"severity": "major", "category": "scope", "file": "src/sync/index.ts", "line": 3,
+                            "issue": "pendingScope may survive logout; I did not confirm it is cleared"}],
+              "checks": []}
+        out = self.cli("review", "proj", "--head", "fix", "--base", "main", "--second-opinion", "off", check=False,
+                       FAKE_REVIEW=json.dumps(rv)).stdout
+        self.assertIn("1 new symbols for the reuse pass", out)  # onLogout was edited, not added
+        self.assertIn("dropped a duplication finding that points at the change's own lines", out)
+        self.assertIn("lowered a finding the reviewer calls optional/follow-up/pre-existing to minor", out)
+        self.assertIn("turned an unverified major into a check", out)
+        self.assertIn("[check] unverified -> delegate a read-only check: src/sync/index.ts: pendingScope", out)
+        self.assertIn("1. [major/duplication] resetScheduler", out)  # copies code outside the change
+        self.assertIn("cost: this review $0.05 (3,100 sonnet-eq) · fix so far $0.05 over 1 review run(s)", out)
+        # decline the auto-raised one; it must not come back on --resume, and can't flip the verdict
+        self.cli("review", "decline", "proj", "1", "--head", "fix", "--why", "false positive: it calls clearTimer")
+        resumed = dict(rv, verdict="changes-requested", findings=[])
+        out = self.cli("review", "proj", "--resume", "--head", "fix", check=False, FAKE_REVIEW=json.dumps(resumed)).stdout
+        self.assertNotIn("[major/duplication]", out)
+        self.assertIn("left out 1 finding(s) declined earlier", out)
+        self.assertIn("REVIEW: APPROVE", out)
+        self.assertIn("declined earlier: resetScheduler", out)
+        self.assertIn("over 2 review run(s)", out)
+        # a change that only edits existing code has no new symbols
+        g("checkout", "-qb", "edit", "main")
+        write("src/util/timers.ts", "export function clearTimer(t) { if (t) clearTimeout(t) }\n")
+        g("commit", "-qam", "edit")
+        g("checkout", "-q", "main")
+        out = self.cli("review", "proj", "--head", "edit", "--base", "main", check=False,
+                       FAKE_REVIEW=json.dumps({"verdict": "approve", "findings": [], "checks": [],
+                                               "reuse": [{"symbol": "clearTimer", "verdict": "wraps-existing"}]})).stdout
+        self.assertIn("0 new files, 0 new symbols", out)
+        self.assertIn("reuse: no new symbols (the change edits existing code)", out)
+        self.assertIn("REVIEW: APPROVE", out)
 
     def test_shared_worktree_for_workers(self):
         g = self.git_project()

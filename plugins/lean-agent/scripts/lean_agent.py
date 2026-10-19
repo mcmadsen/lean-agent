@@ -801,7 +801,7 @@ def repo_identity(slug, path):
     """Where this project lives in its git host / tracker: a saved `review learn --tracker ...` setting wins,
     else what the origin remote says."""
     ident = parse_remote(git(path, "remote", "get-url", "origin") or "")
-    ident.update((projects().get(slug) or {}).get("tracker") or {})
+    ident.update({k: v for k, v in ((projects().get(slug) or {}).get("tracker") or {}).items() if k != "notes"})
     return ident
 
 
@@ -811,10 +811,18 @@ def repo_identity_text(slug, path):
         return ("Repository identity: unknown (no origin remote). Don't guess the organization, project or "
                 "repository; if a tool needs them and you can't find them, stop with needs-input and ask.")
     parts = [f"{k} {ident[k]}" for k in ("host", "org", "project", "repo") if ident.get(k)]
-    return ("Repository identity (from git; use these exact values in tool calls, and never use lean-agent's "
+    text = ("Repository identity (from git; use these exact values in tool calls, and never use lean-agent's "
             f"project name `{slug}` as a tracker project): " + ", ".join(parts) + ". If a lookup with these "
             "returns nothing, say exactly what you called and stop with needs-input instead of answering "
             "from nothing.")
+    if ident.get("me_id") or ident.get("me_name"):
+        text += (f"\nYou act as {ident.get('me_name') or 'the user'}" + (f" (identity id {ident['me_id']})" if
+                 ident.get("me_id") else "") + ": use that id where a tool needs the user (assignee, reviewer, "
+                 "vote); `@me` may not work.")
+    notes = ((projects().get(slug) or {}).get("tracker") or {}).get("notes") or []
+    if notes:
+        text += "\nTracker notes for this project:\n" + "\n".join(f"- {n}" for n in notes[:15])
+    return text
 
 
 def build_append(project, cards, read_only=False, allow_send=None, chrome=False, role_rule=""):
@@ -1156,6 +1164,9 @@ def cmd_run(a):
     elif role == "review-learn":
         summary, learned = parse_marker(summary, "LEAN-CHECKLIST")
         save_json(os.path.join(workdir, "checklist.json"), learned or {})
+    elif role == "tracker-discover":
+        summary, found = parse_marker(summary, "LEAN-TRACKER")
+        save_json(os.path.join(workdir, "tracker.json"), found or {})
     subtype = out.get("subtype") or "error"
     if subtype.startswith("error_max"):
         status = "stopped:" + subtype[len("error_"):]
@@ -1418,15 +1429,22 @@ Do these passes in this order. The first three come before any correctness, test
    formatter catches. Be specific (file:line, what, why, a concrete suggestion). Don't pad: if the change
    is good after all four passes, approve it.
 
-Severity: blocker (must fix before the PR), major (should fix), minor, nit. Duplication of existing code,
-a reinvented mechanism, or a too-narrow fix with obvious siblings is major or blocker; test hygiene and
-comments are minor or nit and never outrank them. Give each finding a category: duplication, scope,
+Severity: blocker (must fix before the PR), major (should fix), minor, nit. Duplication is major only when
+the change copies logic that exists elsewhere (about 10+ lines, or a multi-branch algorithm) or adds a second
+copy of a mechanism (a counter, store, subscription, cache); a field map, label formatter or 2-3 line pattern
+is minor, and duplication that already exists across other components is a minor follow-up. A too-narrow fix
+with obvious siblings is major. If you'd call it optional or a follow-up, it is minor. A finding that rests on
+something you didn't verify goes under "checks" ("unverified: ..."), not as a major. Test hygiene and
+comments are minor or nit and never outrank design findings.
+Reuse verdicts: "duplicate" (new code copies existing code outside this change: reuse it instead),
+"extends-existing" or "wraps-existing" (the change builds on existing code: good, no finding),
+"justified-new" (nothing existing fits; say why). Give each finding a category: duplication, scope,
 platform, correctness, tests, security, compatibility, performance or style.
 Verdict: "approve" (no blockers or majors, and every new symbol has a reuse entry), "changes-requested",
 or "needs-checks" (you can't judge without something being run or verified; list exactly what).
 
 Before the LEAN-FEEDBACK line, add one line exactly like this (valid JSON, one line):
-LEAN-REVIEW {{"verdict": "approve|changes-requested|needs-checks", "searches": [{{"for": "what you searched", "found": "file:line, ... or nothing"}}], "reuse": [{{"symbol": "new symbol", "candidates": ["file:line existing symbol"], "verdict": "reuse|extend|wraps-existing|justified-new", "why": "..."}}], "siblings": [{{"checked": "sibling", "needs_fix": true}}], "findings": [{{"severity": "blocker|major|minor|nit", "category": "duplication|scope|platform|correctness|tests|security|compatibility|performance|style", "file": "path", "line": 0, "issue": "...", "why": "...", "suggestion": "..."}}], "checks": [{{"what": "what to run or verify", "why": "..."}}]}}
+LEAN-REVIEW {{"verdict": "approve|changes-requested|needs-checks", "searches": [{{"for": "what you searched", "found": "file:line, ... or nothing"}}], "reuse": [{{"symbol": "new symbol", "candidates": ["file:line existing symbol"], "verdict": "duplicate|extends-existing|wraps-existing|justified-new", "why": "..."}}], "siblings": [{{"checked": "sibling", "needs_fix": true}}], "findings": [{{"severity": "blocker|major|minor|nit", "category": "duplication|scope|platform|correctness|tests|security|compatibility|performance|style", "file": "path", "line": 0, "issue": "...", "why": "...", "suggestion": "..."}}], "checks": [{{"what": "what to run or verify", "why": "..."}}]}}
 """
 
 REUSE_RULE = """\
@@ -1446,7 +1464,7 @@ defer, hide, retry, debounce, poll, map) with Grep/Glob or `git -C {project} gre
 Also note siblings that share the problem (other dialogs, fields, endpoints). Be brief.
 
 Before the LEAN-FEEDBACK line, add one line exactly like this (valid JSON, one line):
-LEAN-REVIEW {{"verdict": "needs-checks", "searches": [{{"for": "...", "found": "..."}}], "reuse": [{{"symbol": "...", "candidates": ["file:line existing symbol"], "verdict": "reuse|extend|wraps-existing|justified-new", "why": "..."}}], "siblings": [{{"checked": "...", "needs_fix": true}}], "findings": [], "checks": []}}
+LEAN-REVIEW {{"verdict": "needs-checks", "searches": [{{"for": "...", "found": "..."}}], "reuse": [{{"symbol": "...", "candidates": ["file:line existing symbol"], "verdict": "duplicate|extends-existing|wraps-existing|justified-new", "why": "..."}}], "siblings": [{{"checked": "...", "needs_fix": true}}], "findings": [], "checks": []}}
 """
 
 NEW_SYMBOL_RES = [re.compile(p) for p in (
@@ -1464,9 +1482,37 @@ NEW_SYMBOL_RES = [re.compile(p) for p in (
 TEST_PATH_RE = re.compile(r"(^|/)(tests?|__tests__|spec|e2e)(/|$)|[._-](test|spec)s?\.\w+$|_test\.go$", re.I)
 
 
+def changed_hunks(path, rng_args):
+    """{file: [(first, last), ...]} of the lines this change adds or edits (new side of the diff)."""
+    out, cur = {}, None
+    for line in (git(path, "diff", "-U0", "--no-color", *rng_args) or "").splitlines():
+        if line.startswith("+++ "):
+            cur = line[6:] if line.startswith("+++ b/") else None
+        elif line.startswith("@@") and cur:
+            m = re.search(r"\+(\d+)(?:,(\d+))?", line)
+            if m:
+                start, n = int(m.group(1)), int(m.group(2) or 1)
+                if n:
+                    out.setdefault(cur, []).append((start, start + n - 1))
+    return out
+
+
+def existed_before(path, base, rel, name):
+    """Whether `name` was already defined in `rel` at `base` (then the change edits it; it isn't new)."""
+    text = git(path, "show", f"{base}:{rel}") if base else None
+    if not text:
+        return False
+    return re.search(r"\b(function\*?|const|let|var|class|interface|type|enum|def|func|fn|struct|trait|record)\s+"
+                     + re.escape(name) + r"\b", text) is not None or re.search(
+                     r"^\s*(public|internal|protected|private)?[\w<>\[\],.?\s]*\b" + re.escape(name) + r"\s*\(",
+                     text, re.M) is not None and name[:1].isupper()
+
+
 def new_symbols(path, rng_args, new_files=()):
-    """New files and newly defined symbols in a diff (not in test files), for the reuse pass."""
+    """New files and newly defined symbols in a diff (not in test files), for the reuse pass. A symbol that
+    already existed at the base (a signature change, an edit) isn't new."""
     diff = git(path, "diff", "-U0", "--no-color", *rng_args) or ""
+    base = rng_args[0] if rng_args else None
     files, syms, cur = [], [], None
     for line in diff.splitlines():
         if line.startswith("+++ "):
@@ -1478,7 +1524,7 @@ def new_symbols(path, rng_args, new_files=()):
             m = rx.match(line)
             if m:
                 name = m.group(1)
-                if len(name) > 2 and (name, cur) not in syms:
+                if len(name) > 2 and (name, cur) not in syms and not existed_before(path, base, cur, name):
                     syms.append((name, cur))
                 break
     for line in (git(path, "diff", "--name-status", *rng_args) or "").splitlines():
@@ -1614,8 +1660,21 @@ def _words(t):
     return {w for w in re.findall(r"[a-z0-9]{3,}", str(t).lower())}
 
 
+def finding_symbol(f):
+    """The code symbol a finding is about: its own field, else the first identifier-like word in its text."""
+    if f.get("symbol"):
+        return str(f["symbol"]).split(" (")[0]
+    text = " ".join(str(f.get(k, "")) for k in ("issue", "file"))
+    m = re.search(r"`([A-Za-z_$][\w$.]{2,})`", text) or re.search(r"\b([a-z]+[A-Z][\w$]*|[A-Z][a-z]+[A-Z][\w$]*)\b", text)
+    return m.group(1) if m else ""
+
+
 def is_declined(f, declined):
+    sym = finding_symbol(f)
     for d in declined:
+        if d.get("symbol") and sym and d["symbol"] == sym and (not d.get("category") or not f.get("category")
+                                                                or d["category"] == f["category"]):
+            return True  # stable key: same symbol and kind, whatever the number, file field or wording
         if d.get("category") and f.get("category") and d["category"] != f["category"]:
             continue
         if d.get("file") and f.get("file") and os.path.basename(str(d["file"])) != os.path.basename(str(f["file"])):
@@ -1637,6 +1696,7 @@ def second_opinion(a, slug, path, ns_syms, names, scope, read_rule, rng, grep_re
                             model=model, why="reuse/duplication second opinion", cards=None, card_list=cards,
                             project=slug, read_only=True, chrome=None, mcp=None, tools=None, allow_send=None,
                             max_turns=30, max_usd=1.0, max_context=a.max_context, ttype="review", role="reuse-check",
+                            review_meta={"ref": getattr(a, "_label", None), "mode": "second-opinion"},
                             effort="low", role_rule=REUSE_RULE.format(scope=scope, project=path, diff_range=rng,
                                                                      read_rule=read_rule, grep_ref=grep_ref,
                                                                      new_symbols=symbols_text(ns_syms),
@@ -1649,14 +1709,14 @@ def second_opinion(a, slug, path, ns_syms, names, scope, read_rule, rng, grep_re
     rv = load_json(os.path.join(run["workdir"], "review.json"), {}) if run else {}
     lines = []
     for r in rv.get("reuse") or []:
-        if isinstance(r, dict) and r.get("candidates"):
+        if isinstance(r, dict) and r.get("candidates") and r.get("verdict") not in REUSE_OK:
             lines.append(f"- {r.get('symbol')}: {', '.join(map(str, r['candidates']))[:300]} "
                          f"(suggests {r.get('verdict', '?')}: {str(r.get('why', ''))[:160]})")
     for sb in rv.get("siblings") or []:
         if isinstance(sb, dict) and sb.get("needs_fix"):
             lines.append(f"- sibling that may share the problem: {sb.get('checked')}")
     a._second = [r for r in rv.get("reuse") or [] if isinstance(r, dict) and r.get("candidates")
-                 and r.get("verdict") in ("reuse", "extend")]
+                 and r.get("verdict") in ("reuse", "duplicate")]
     return "\n".join(lines[:25])
 
 
@@ -1694,7 +1754,7 @@ The project's review cards already say this (don't repeat it; to correct a line,
    Skip style nits.
 
 Before the LEAN-FEEDBACK line, add one line exactly like this (valid JSON, one line):
-LEAN-CHECKLIST {{"checklist": ["..."], "helpers": [{{"name": "...", "where": "path/in/repo", "what": "..."}}], "replace": [{{"old": "existing line", "new": "corrected line"}}], "declined": [{{"file": "path", "category": "scope|duplication|platform|correctness|tests|style", "issue": "...", "why": "..."}}]}}
+LEAN-CHECKLIST {{"checklist": ["..."], "helpers": [{{"name": "...", "where": "path/in/repo", "what": "..."}}], "replace": [{{"old": "existing line", "new": "corrected line"}}], "declined": [{{"file": "path", "category": "scope|duplication|platform|correctness|tests|style", "issue": "...", "why": "..."}}], "threads_read": [1, 2]}}
 """
 
 
@@ -1765,6 +1825,7 @@ def cmd_review_decline(a):
         f = last["findings"][n - 1]
         append_jsonl(declined_path(slug), {"ts": now_iso(), "ref": None if a.all_branches else last.get("ref"),
                                            "file": f.get("file"), "category": f.get("category"),
+                                           "symbol": finding_symbol(f),
                                            "issue": f.get("issue", ""), "why": a.why, "review": last["run"]})
         print(f"declined {n}. [{f.get('severity')}/{f.get('category') or '?'}] {f.get('file')}: {f.get('issue', '')[:100]}")
     print(f"Later reviews of {'every branch' if a.all_branches else last.get('ref')} are told about it and leave it out.")
@@ -1859,6 +1920,69 @@ def code_path_exists(path, rel, ref=None):
     return code_location(path, rel, "", [r for r in (ref, "HEAD") if r])[0]
 
 
+TRACKER_KEYS = ("host", "org", "project", "repo", "me_id", "me_name")
+DISCOVER_RULE = """\
+Role: find out, once, how this project's tracker works for the user, so later workers don't learn it by failing.
+You can only read. With the MCP tools you have, find:
+1. the signed-in user's identity: display name and identity id (the id tools want for assignee, reviewer or vote);
+2. for each work item type in the project, the allowed states (and which one means removed/closed);
+3. whether work items or pull request votes need anything special (e.g. no delete; voting needs a reviewer id).
+Don't change anything. Before the LEAN-FEEDBACK line, add one line exactly like this (valid JSON, one line):
+LEAN-TRACKER {{"me": {{"id": "...", "name": "..."}}, "notes": ["User Story states: New, Active, Resolved, Closed (no Removed)", "..."]}}
+"""
+
+
+def cmd_tracker(a):
+    """Where the project lives in its tracker, who the user is there, and notes every MCP worker gets."""
+    slug, path = resolve_project(a.project)
+    projs = projects()
+    conf = projs[slug].setdefault("tracker", {})
+    for kv in a.values or []:
+        k, _, v = kv.partition("=")
+        k = k.strip()
+        if k not in TRACKER_KEYS or not v.strip():
+            die(f"use {', '.join(k_ + '=...' for k_ in TRACKER_KEYS)} (got {kv!r})")
+        conf[k] = v.strip()
+    if a.note:
+        conf.setdefault("notes", []).append(a.note.strip())
+    if a.rm_note:
+        notes = conf.get("notes") or []
+        if not 1 <= a.rm_note <= len(notes):
+            die(f"there are {len(notes)} notes")
+        notes.pop(a.rm_note - 1)
+    save_json(home("projects.json"), projs)
+    if a.discover:
+        if not a.mcp:
+            die("--discover needs the tracker's MCP server: --mcp <server>[:tools]")
+        ns = argparse.Namespace(resume=None, task=["Find the user's tracker identity and the project's work item rules."],
+                                task_file=None, model=a.model, why="learn the tracker's identity and rules once",
+                                cards="none", card_list=None, project=slug, read_only=True, chrome=None, mcp=a.mcp,
+                                tools=None, allow_send=None, max_turns=20, max_usd=1.0, max_context=2000, max_cards=4,
+                                ttype="read", role="tracker-discover", effort="low", role_rule=DISCOVER_RULE)
+        cmd_run(ns)
+        run = next((r for r in reversed(ledger()) if r.get("role") == "tracker-discover" and r["project"] == slug), None)
+        got = load_json(os.path.join(run["workdir"], "tracker.json"), {}) if run else {}
+        projs = projects()
+        conf = projs[slug].setdefault("tracker", {})
+        me = got.get("me") or {}
+        if me.get("id"):
+            conf["me_id"] = str(me["id"])
+        if me.get("name"):
+            conf["me_name"] = str(me["name"])
+        for n in got.get("notes") or []:
+            if isinstance(n, str) and not any(_similar(n, x) for x in conf.get("notes") or []):
+                conf.setdefault("notes", []).append(n)
+        save_json(home("projects.json"), projs)
+        if not got:
+            print("discover: the worker didn't report anything usable; see its reply above")
+    ident = repo_identity(slug, path)
+    print(f"{slug} tracker: " + (", ".join(f"{k} {ident[k]}" for k in TRACKER_KEYS if ident.get(k)) or "nothing known"))
+    for i, n in enumerate(projects()[slug].get("tracker", {}).get("notes") or [], 1):
+        print(f"  {i}. {n}")
+    print("Every worker given --mcp gets this.")
+    return 0
+
+
 def cmd_review_learn(a):
     slug, path = resolve_project(a.project)
     a.pr = a.pr or a.pr_id
@@ -1869,8 +1993,8 @@ def cmd_review_learn(a):
         conf = projs[slug].setdefault("tracker", {})
         for kv in a.tracker:
             k, _, v = kv.partition("=")
-            if k.strip() not in ("org", "project", "repo", "host") or not v.strip():
-                die(f"--tracker takes org=..., project=..., repo=... or host=... (got {kv!r})")
+            if k.strip() not in TRACKER_KEYS or not v.strip():
+                die(f"--tracker takes {', '.join(k_ + '=...' for k_ in TRACKER_KEYS)} (got {kv!r})")
             conf[k.strip()] = v.strip()
         save_json(home("projects.json"), projs)
         print(f"{slug}: tracker " + ", ".join(f"{k} {v}" for k, v in conf.items()) + " (saved; used by MCP workers)")
@@ -1895,6 +2019,10 @@ def cmd_review_learn(a):
             ours = f"(review {last['run']} of {last.get('ref')}, verdict {last['verdict']})\n" + ours
         lib = {c["id"]: c for c in load_cards(slug)}
         existing = "\n".join(lib[c]["text"] for c in REVIEW_CARDS if c in lib) or "(nothing yet)"
+        seen_threads = load_json(home("reviews", slug + ".threads.json"), {}).get(str(a.pr)) or []
+        if seen_threads:
+            ours += ("\n\nThreads already learned from: " + ", ".join(map(str, seen_threads[:100])) + ". Fetch only "
+                     "the others (by thread id if the tool takes one), unless one of these has new comments.")
         ns = argparse.Namespace(resume=None, task=[f"Learn from the human review of pull request {a.pr}."],
                                 task_file=None, model=a.model, why="turn human review findings into checklist lines",
                                 cards="none", card_list=None, project=slug, read_only=True, chrome=None, mcp=a.mcp,
@@ -1914,6 +2042,11 @@ def cmd_review_learn(a):
                 continue
             helpers.append(dict(h, where=where))
         replace = [r for r in got.get("replace") or [] if isinstance(r, dict)]
+        if got.get("threads_read"):
+            tp = home("reviews", slug + ".threads.json")
+            th = load_json(tp, {})
+            th[str(a.pr)] = sorted(set(map(str, th.get(str(a.pr), []))) | set(map(str, got["threads_read"])))
+            save_json(tp, th)
         for d in got.get("declined") or []:
             if isinstance(d, dict) and d.get("issue"):
                 append_jsonl(declined_path(slug), {"ts": now_iso(), "ref": a.head, "file": d.get("file"),
@@ -1986,11 +2119,17 @@ def cmd_review(a):
         ns_syms = new_symbols(path, since, untracked_files(path) if meta.get("mode") != "ref" else ()) \
             if since else {"files": [], "symbols": []}
         meta["new_symbols"] = ns_syms["files"] + ns_syms["symbols"]
+        meta["resume"] = True
+        mb = meta.get("merge_base")
+        if mb:
+            meta["hunks"] = changed_hunks(path, [mb, meta["head"]] if meta.get("mode") == "ref" else [mb])
         where += (" " + decisions_text(slug, meta.get("ref")).replace("\n", " ") if decisions_text(slug, meta.get("ref")) else "")
-        where += (f" Since your last review these files changed: {', '.join(changed[:30]) or 'none'}. Run the reuse, "
-                  "scope and platform passes again on them, and reconsider the design itself, not only whether "
-                  "your earlier findings are fixed. New symbols since then:" + symbols_text(ns_syms) +
-                  " Reply with a complete LEAN-REVIEW line again, including searches and reuse.")
+        where += (f" Since your last review these files changed: {', '.join(changed[:30]) or 'none'}. Re-check only "
+                  "(a) your earlier open findings against the new code (say for each: fixed / still open) and (b) "
+                  "the changed files above, with the reuse, scope and platform passes limited to them. Don't "
+                  "re-derive the design of code that didn't change, and don't raise declined findings again. New "
+                  "symbols since then:" + symbols_text(ns_syms) + " Reply with a complete LEAN-REVIEW line again "
+                  "(open findings only, plus searches and reuse for the new symbols).")
         task = (f"The change was updated after your review. {where} Check whether each earlier finding is "
                 "resolved, and look for new problems. " + (a.focus or ""))
         ns = argparse.Namespace(resume=prev["id"], task=[task], task_file=None, model=None, why=None, cards=None,
@@ -2034,6 +2173,7 @@ def cmd_review(a):
     ns_syms = new_symbols(path, [merge_base, sha] if mode == "ref" else [merge_base], new)
     grep_ref = sha if mode == "ref" else ""
     a._decisions = decisions_text(slug, label)
+    a._label = label
     print(f"review: {len(ns_syms['files'])} new files, {len(ns_syms['symbols'])} new symbols for the reuse pass",
           flush=True)
     task = f"Review this change before it becomes a pull request.\n\nFiles changed:\n{stat}\n"
@@ -2057,7 +2197,8 @@ def cmd_review(a):
         task += f"\nThe author asks you to look closely at: {a.focus}\n"
     meta = {"base": base, "merge_base": merge_base, "head": sha, "dirty": dirty, "ref": label, "mode": mode,
             "files": len(names), "new_symbols": ns_syms["files"] + ns_syms["symbols"],
-            "second_opinion": getattr(a, "_second", [])}
+            "second_opinion": getattr(a, "_second", []),
+            "hunks": changed_hunks(path, [merge_base, sha] if mode == "ref" else [merge_base])}
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=model,
                             why=f"pre-PR review ({effort} effort)", cards=None, card_list=cards, project=slug,
                             read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=a.max_turns,
@@ -2098,43 +2239,80 @@ CATEGORY_ORDER = {c: i for i, c in enumerate(DESIGN_CATEGORIES + ("correctness",
                                                                    "performance", "tests", "style"))}
 
 
+REUSE_OK = ("extend", "extends-existing", "wraps-existing")  # the change reuses existing code: no finding
+OPTIONAL_RE = re.compile(r"\b(optional|follow-?up|not required|nice to have|could later|pre-?existing|already "
+                         r"(duplicated|repeated) (in|across)|out of scope for this pr)\b", re.I)
+UNVERIFIED_RE = re.compile(r"\b(i )?(did not|didn't|could not|couldn't|cannot|can't) (confirm|verify|check|see)|"
+                           r"\bunverified\b|\bnot (verified|confirmed)\b", re.I)
+
+
+def in_changed_lines(candidate, hunks):
+    """Whether a candidate like 'path/file.ts:80 name' points into lines this change edits (= the change itself)."""
+    m = re.match(r"\s*([^\s:]+):(\d+)", str(candidate))
+    if not m:
+        return False
+    f, line = m.group(1).lstrip("./"), int(m.group(2))
+    for path, ranges in (hunks or {}).items():
+        if path == f or path.endswith("/" + f) or f.endswith("/" + path):
+            if any(lo - 3 <= line <= hi + 3 for lo, hi in ranges):
+                return True
+    return False
+
+
 def enforce_review_rules(review, meta, declined=()):
-    """lean-agent's own rules on top of the reviewer's verdict:
+    """lean-agent's own rules on top of the reviewer's verdict.
+
     - every new symbol needs a reuse entry, else "reuse not checked" (no approve);
-    - a reuse/extend verdict, or a duplication/scope/platform finding, is at least major;
-    - a reuse entry saying reuse/extend without a matching finding gets one.
+    - "duplicate"/"reuse" with an existing candidate outside the change becomes a major duplication finding;
+      extend / wraps-existing are reuse (no finding), and a candidate inside the edited lines is the change itself;
+    - a weak or disputed justified-new needs a reason;
+    - findings the reviewer calls optional / follow-up / pre-existing are minor; unverified ones become checks;
+    - declined findings (lean-agent review decline) are left out last, whoever raised them, and never flip the
+      verdict; on a re-review, only minor or declined findings left means approve.
     Returns (verdict, findings, checks, notes)."""
     verdict = review.get("verdict") or "unknown"
     findings = [f for f in review.get("findings") or [] if isinstance(f, dict)]
     checks = [c for c in review.get("checks") or [] if isinstance(c, dict)]
     reuse = [r for r in review.get("reuse") or [] if isinstance(r, dict)]
+    hunks = meta.get("hunks") or {}
     notes = []
-    if declined:
-        kept = [f for f in findings if not is_declined(f, declined)]
-        if len(kept) < len(findings):
-            notes.append(f"left out {len(findings) - len(kept)} finding(s) declined earlier (lean-agent review decline)")
-        findings = kept
-    for f in findings:
-        if f.get("category") in DESIGN_CATEGORIES and f.get("severity") in ("minor", "nit"):
-            f["severity"] = "major"
-            notes.append(f"raised a {f['category']} finding to major ({f.get('file', '?')})")
+
+    for f in list(findings):
+        text = " ".join(str(f.get(k, "")) for k in ("issue", "why", "suggestion"))
+        if f.get("severity") in ("blocker", "major") and UNVERIFIED_RE.search(text):
+            findings.remove(f)
+            checks.append({"what": f"unverified -> delegate a read-only check: {f.get('file', '?')}: "
+                                   f"{str(f.get('issue', ''))[:200]}", "why": "the reviewer didn't verify it"})
+            notes.append(f"turned an unverified {f.get('severity')} into a check ({f.get('file', '?')})")
+        elif f.get("severity") in ("blocker", "major") and OPTIONAL_RE.search(text):
+            f["severity"] = "minor"
+            notes.append(f"lowered a finding the reviewer calls optional/follow-up/pre-existing to minor "
+                         f"({f.get('file', '?')})")
+
+    for f in list(findings):  # a duplication finding whose only "original" is inside the change itself
+        if f.get("category") == "duplication":
+            refs = re.findall(r"[\w./-]+\.\w{1,5}:\d+", " ".join(str(f.get(k, "")) for k in ("issue", "suggestion")))
+            if refs and all(in_changed_lines(x, hunks) for x in refs):
+                findings.remove(f)
+                notes.append(f"dropped a duplication finding that points at the change's own lines ({f.get('file', '?')})")
     def mentions(f, names):
         text = " ".join(str(f.get(k, "")) for k in ("file", "issue", "suggestion", "why"))
         return any(n and n in text for n in names)
     for r in reuse:
-        if r.get("verdict") in ("reuse", "extend") and r.get("candidates"):
-            sym = str(r.get("symbol") or "").split(" (")[0]
-            names = [n for n in re.split(r"[\s/,]+", sym) if len(n) > 2]
-            names += [str(c).split(":")[0] for c in r["candidates"]]  # the existing code's files
-            names += [w.split(" (")[1].rstrip(")") for w in meta.get("new_symbols") or []  # the new symbol's file
-                      if " (" in w and w.split(" (")[0] in names]
-            if not any(f.get("severity") in ("blocker", "major") and (f.get("category") == "duplication" or
-                                                                     mentions(f, names[:1])) and mentions(f, names)
-                       for f in findings):
-                findings.append({"severity": "major", "category": "duplication", "file": r.get("symbol", "?"),
-                                 "line": 0, "issue": f"{sym} duplicates existing code: {', '.join(map(str, r['candidates']))[:200]}",
-                                 "suggestion": f"{r['verdict']} the existing code instead" +
-                                               (f": {r['why']}" if r.get("why") else "")})
+        cands = [c for c in r.get("candidates") or [] if not in_changed_lines(c, hunks)]
+        if r.get("verdict") not in ("reuse", "duplicate") or not cands:
+            continue  # extend / wraps-existing / justified-new, or the "existing code" is this change itself
+        sym = str(r.get("symbol") or "").split(" (")[0]
+        names = [n for n in re.split(r"[\s/,]+", sym) if len(n) > 2]
+        names += [str(c).split(":")[0] for c in cands]
+        names += [w.split(" (")[1].rstrip(")") for w in meta.get("new_symbols") or []
+                  if " (" in w and w.split(" (")[0] in names]
+        if not any(f.get("category") == "duplication" and mentions(f, names) for f in findings):
+            findings.append({"severity": "major", "category": "duplication", "file": r.get("symbol", "?"),
+                             "line": 0, "symbol": sym,
+                             "issue": f"{sym} duplicates existing code: {', '.join(map(str, cands))[:200]}",
+                             "suggestion": "reuse the existing code instead" + (f": {r['why']}" if r.get("why") else "")})
+
     disputed = []
     second = {str(x.get("symbol", "")).split(" (")[0]: x for x in meta.get("second_opinion") or []}
     for r in reuse:
@@ -2142,7 +2320,7 @@ def enforce_review_rules(review, meta, declined=()):
             continue
         sym = str(r.get("symbol") or "").split(" (")[0]
         other = next((x for k, x in second.items() if k and (k in sym or sym in k)), None)
-        if other:
+        if other and [c for c in other.get("candidates") or [] if not in_changed_lines(c, hunks)]:
             disputed.append(f"{sym}: the second opinion says {other.get('verdict')} "
                             f"{', '.join(map(str, other['candidates']))[:160]}")
         elif r.get("candidates") and len(str(r.get("why") or "")) < 40:
@@ -2153,6 +2331,7 @@ def enforce_review_rules(review, meta, declined=()):
     if disputed:
         notes.append(f"{len(disputed)} justified-new verdict(s) not accepted")
     review["_disputed"] = disputed
+
     wanted = meta.get("new_symbols") or []
     covered = " ".join(str(r.get("symbol", "")) + " " + " ".join(map(str, r.get("candidates") or [])) for r in reuse)
     covered += " " + " ".join(str(f.get("file", "")) for f in findings if f.get("category") == "duplication")
@@ -2171,12 +2350,26 @@ def enforce_review_rules(review, meta, declined=()):
         checks.append({"what": "reuse not checked for: " + ", ".join(missing[:10]),
                        "why": "every new symbol needs a search for existing code that does the same job"})
         notes.append(f"reuse not checked for {len(missing)} of {len(wanted)} new symbols")
-    if wanted and not review.get("searches"):
-        notes.append("the review lists no searches")
+
+    if declined:  # last, so nothing re-adds a declined finding
+        kept = [f for f in findings if not is_declined(f, declined)]
+        if len(kept) < len(findings):
+            notes.append(f"left out {len(findings) - len(kept)} finding(s) declined earlier (lean-agent review decline)")
+        findings = kept
+    review["_declined_shown"] = [d for d in declined][:10]
+
     blocking = [f for f in findings if f.get("severity") in ("blocker", "major")]
+    open_checks = [c for c in checks if not str(c.get("what", "")).startswith("unverified")] if meta.get("resume") else checks
     if verdict == "approve" and (blocking or missing or disputed or (wanted and not review.get("searches"))):
         verdict = "changes-requested" if blocking else "needs-checks"
         notes.append(f"lean-agent changed the verdict from approve to {verdict}")
+    elif verdict == "changes-requested" and not blocking and not missing and not disputed:
+        # what made it request changes was declined, optional or unverified: nothing left to fix
+        verdict = "needs-checks" if any(str(c.get("what", "")).startswith("unverified") for c in checks) else "approve"
+        notes.append(f"only minor{', declined' if declined else ''} or unverified findings left: {verdict}")
+    elif verdict == "needs-checks" and meta.get("resume") and not blocking and not missing and not disputed \
+            and not open_checks and not any(str(c.get("what", "")).startswith("unverified") for c in checks):
+        verdict = "approve"
     return verdict, findings, checks, notes
 
 
@@ -2201,10 +2394,12 @@ def report_review(slug, project, entry, review, meta):
     for n in notes:
         print(f"  [lean-agent] {n}")
     n_new = len(meta.get("new_symbols") or [])
-    print(f"  reuse: {review.get('_covered', 0)} of {n_new} new symbols checked"
-          + (f" (+{len(reuse) - review.get('_covered', 0)} other reuse entries)"
-             if len(reuse) > review.get("_covered", 0) else "")
-          + f" · {len(review.get('searches') or [])} searches")
+    if n_new:
+        print(f"  reuse: {review.get('_covered', 0)} of {n_new} new symbols checked · "
+              f"{len(review.get('searches') or [])} searches")
+    else:
+        print("  reuse: no new symbols (the change edits existing code)")
+        reuse = []
     for r in reuse:
         cands = ", ".join(map(str, r.get("candidates") or [])) or "nothing found"
         print(f"    {r.get('symbol', '?')} -> {cands[:160]} -> {r.get('verdict', '?')}")
@@ -2220,6 +2415,14 @@ def report_review(slug, project, entry, review, meta):
             print(f"      fix: {f['suggestion']}")
     for c in checks:
         print(f"  [check] {c.get('what', '')}" + (f" ({c['why']})" if c.get("why") else ""))
+    if review.get("_declined_shown"):
+        print("  declined earlier: " + "; ".join(f"{d.get('symbol') or d.get('file', '?')}: {str(d.get('issue', ''))[:60]}"
+                                                for d in review["_declined_shown"]))
+    runs = [r for r in ledger() if r.get("project") == slug and r.get("role") in ("reviewer", "reuse-check")
+            and (r.get("review_meta") or {}).get("ref") == meta.get("ref")]
+    cost = lambda rs: sum(r.get("cost_usd") or 0 for r in rs)
+    print(f"  cost: this review ${entry.get('cost_usd') or 0:.2f} ({entry.get('units', 0):,} sonnet-eq) · "
+          f"{meta.get('ref') or 'this change'} so far ${cost(runs):.2f} over {len(runs)} review run(s)")
     blocking = [f for f in findings if f.get("severity") in ("blocker", "major")]
     if verdict == "approve" and not blocking:
         print("Approved: OK to prepare the PR (still an outward action: ask the user before creating it).")
@@ -4354,6 +4557,17 @@ def build_parser():
     s.add_argument("--max-turns", type=int, default=env_num("LEAN_AGENT_REVIEW_MAX_TURNS", 80))
     s.add_argument("--max-context", type=int, default=4000, help="token cap for the review's cards")
     s.set_defaults(fn=cmd_review)
+
+    s = sub.add_parser("tracker", help="the project's tracker: identity (org/project/repo, who you are) and notes "
+                       "every MCP worker gets; --discover learns them once")
+    s.add_argument("project")
+    s.add_argument("values", nargs="*", metavar="KEY=VALUE", help=", ".join(TRACKER_KEYS))
+    s.add_argument("--note", help="a fact workers should know, e.g. \"User Story has no Removed state\"")
+    s.add_argument("--rm-note", type=int, metavar="N", help="remove note N")
+    s.add_argument("--discover", action="store_true", help="find your identity id and the work item rules with a worker")
+    s.add_argument("--mcp", action="append", metavar="SERVER[:TOOLS]", help="--discover: the tracker's MCP server")
+    s.add_argument("-m", "--model", default="haiku", help="--discover: model (default haiku)")
+    s.set_defaults(fn=cmd_tracker)
 
     s = sub.add_parser("review-decline", help="findings of the latest review that were discussed and declined "
                        "(also: review decline <project> <n>...)")
