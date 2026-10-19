@@ -29,6 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import usage  # noqa: E402
 import lean_mcp  # noqa: E402
+import lean_log  # noqa: E402
 import lean_memory  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
@@ -60,9 +61,12 @@ Your working directory is NOT the project. Use absolute paths.
 
 Work frugally: Grep/Glob for the symbol first, then Read only the line range you need
 (offset/limit); never read a whole file over ~200 lines. Don't re-read what you already have,
-use quiet command flags (-q, --silent, | tail -n 40), no narration. Read other
-project files only when the task needs them. Put LEAN_RAW=1 in front of a command
-whose full output you need unshortened.
+use quiet command flags (-q, --silent), no narration. Read other project files only
+when the task needs them. Run builds, tests, installs and linters through
+`{sq} <command>`: it drops the noise (progress, downloads, passing tests,
+repeated warnings), keeps every error with its stack trace and the closing summary, keeps
+the exit code, and saves the full output and an errors-only copy (paths in its first line).
+Don't pipe those commands through `tail`/`head`: that cuts off the errors.
 
 Ask, don't guess: if the task's target (a person, chat, channel, ticket, branch or
 file) or its intent is not uniquely clear from the task and what you find, stop and
@@ -115,6 +119,7 @@ def env_num(name, default, cast=int):
 
 def die(msg, code=1):
     print(f"lean-agent: {msg}", file=sys.stderr)
+    lean_log.log("error" if code not in (0, 2, 3) else "debug", "cli", f"{' '.join(sys.argv[1:3])}: {msg}")
     sys.exit(code)
 
 
@@ -777,7 +782,7 @@ def parse_feedback(text):
 
 def build_append(project, cards, read_only=False, allow_send=None, chrome=False, role_rule=""):
     parts = [WORKER_PROTOCOL.format(
-        project=project,
+        project=project, sq=os.path.join(PLUGIN_ROOT, "bin", "lean-sq"),
         shell_rule=(READONLY_SHELL_RULE if read_only else SHELL_RULE).format(project=project),
         send_rule=ALLOW_SEND_RULE.format(approved=allow_send) if allow_send else SEND_RULE,
         browser_rule=BROWSER_RULE if chrome else "",
@@ -1146,6 +1151,10 @@ def cmd_run(a):
         "role": role, "effort": effort, "worktree": wt_name, "review_meta": review_meta,
     }
     append_jsonl(home("ledger.jsonl"), entry)
+    lean_log.log("error" if entry["status"] in ("failed", "error") or entry["status"].startswith("stopped") else "debug",
+                 "run", f"{run_id} {slug} {model} {entry['status']} {entry.get('units', 0):,} sonnet-eq"
+                 f"{' role ' + role if role else ''}: {task[:160]!r}"
+                 + (f"; worker said: {str(out.get('result') or '')[:300]!r}" if entry["status"] in ("failed", "error") else ""))
 
     cost = f"${entry['cost_usd']:.2f}" if isinstance(entry["cost_usd"], (int, float)) else "$?"
     print(f"run {run_id} · {model} · {status} · {entry['turns'] or '?'} turns · {seconds}s · "
@@ -2475,6 +2484,33 @@ def cmd_rules(a):
         print(f"{'updated' if changed else 'up to date'}: {target}")
 
 
+def cmd_logs(a):
+    if a.level == "verbose":
+        files = sorted(glob.glob(lean_log.log_dir("verbose", "*.log")), key=os.path.getmtime)[-a.n:]
+        if not files:
+            print(f"No saved command outputs yet ({lean_log.log_dir('verbose')}).")
+        for f in files:
+            print(f"{os.path.getsize(f):>10,}  {f}")
+        return 0
+    path = lean_log.log_dir(f"{a.level}.log")
+    if not os.path.exists(path):
+        print(f"No {a.level} log yet ({path}).")
+        return 0
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        lines = fh.readlines()
+    entries, cur = [], []
+    for line in lines:  # continuation lines start with 4 spaces
+        if line.startswith("    ") and cur:
+            cur.append(line)
+        else:
+            cur = [line]
+            entries.append(cur)
+    for e in entries[-a.n:]:
+        sys.stdout.write("".join(e))
+    print(f"({len(entries[-a.n:])} of {len(entries)} entries from {path})")
+    return 0
+
+
 def cmd_runs(a):
     runs = ledger()
     if a.project:
@@ -3031,6 +3067,11 @@ def build_parser():
     s.add_argument("--allow-send", metavar="APPROVED", help="push: what the user approved (the push happens only with this)")
     s.add_argument("--no-fetch", action="store_true", help="push: don't fetch origin first")
     s.set_defaults(fn=cmd_worktree)
+
+    s = sub.add_parser("logs", help="lean-agent's local logs: error (default), debug, or verbose (saved outputs)")
+    s.add_argument("level", nargs="?", default="error", choices=["error", "debug", "verbose"])
+    s.add_argument("-n", type=int, default=20, help="last N entries")
+    s.set_defaults(fn=cmd_logs)
 
     s = sub.add_parser("runs", help="recent worker runs (id, status, model, task)")
     s.add_argument("--project", "-p")

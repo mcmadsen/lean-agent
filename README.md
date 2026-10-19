@@ -418,11 +418,21 @@ The session budget is in **weighted tokens**, input-token equivalents using the 
 
 Installing the plugin also gives any Claude Code session (not just the orchestrator):
 
-- **Output squeezer:** a PostToolUse hook that shrinks noisy Bash output (6K to 30K chars) to the head, the tail
-  and the error lines, and saves the full log for grep. Reads (`cat`, `sed -n`, `head`, `grep`/`rg`,
-  `git show/grep/diff/log/blame`) are never squeezed. Opt out per command with `LEAN_RAW=1`, or entirely
-  with `LEAN_AGENT_SQUEEZE=0`. (Workers run in safe mode, so hooks don't run there. They get a smaller
-  `BASH_MAX_OUTPUT_LENGTH` and frugal-command instructions instead.)
+- **Output squeezer:** a PostToolUse hook for noisy Bash output over 6,000 chars. Noise goes first: progress
+  bars, downloads, build steps, passing tests, deprecation notices and warnings that only differ in numbers or
+  paths (one copy is kept, with a count). Then the room goes, in order, to the first error with its whole stack
+  trace, the closing summary, the other distinct errors (the last one before the middle ones; repeats are
+  counted, not repeated), the start, and one line per kind of warning. A long run of warnings can no longer
+  push the real error out, and nothing is cut through the middle of an error. The full output and an
+  errors-and-warnings-only copy (with line numbers) are saved, and both paths are in the first line. Reads
+  (`cat`, `sed -n`, `head`, `grep`/`rg`, `git show/grep/diff/log/blame`) are never squeezed. Opt out per command
+  with `LEAN_RAW=1`, or entirely with `LEAN_AGENT_SQUEEZE=0`.
+- **`lean-sq <command>`:** the same filter as a wrapper, for places hooks don't run. Workers run in safe mode, so
+  they're told to run builds, tests, installs and linters through it instead of `| tail`. It keeps the exit code.
+- **Local logs, split by level** in `~/.lean-agent/logs/`: `error.log` (failed workers, CLI and hook errors,
+  errors found in command output, each with the path of the full output), `debug.log` (every run, squeeze and
+  decision), and `verbose/` (full outputs and their errors-only copies, kept 2 days). `lean-agent logs [error|debug|verbose]`
+  shows the latest entries. Nothing is sent to Claude unless it reads a file.
 - **Budget guard:** the session budget above.
 - Skills `/lean-agent:budget` (token breakdown for the session) and `/lean-agent:lean-mode` (frugal working rules).
 - `lean-agent` on the Bash PATH.
