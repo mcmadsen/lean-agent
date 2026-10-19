@@ -318,7 +318,9 @@ def scan_windows():
             with open(path) as fh:
                 st = json.load(fh)
         except (OSError, ValueError):
-            st = {"files": {}, "buckets": {}}
+            st = {}
+        if st.get("v") != 2:  # v2 adds per-model-family token components: rescan the last 8 days
+            st = {"v": 2, "files": {}, "buckets": {}}
         cutoff = time.time() - KEEP_HOURS * 3600
         pattern = [os.path.join(projects_dir(), "*", "*.jsonl"),
                    os.path.join(projects_dir(), "*", "*", "subagents", "*.jsonl")]
@@ -378,30 +380,235 @@ def _scan_into(path, fstate, buckets, is_lean):
         seen_set.add(mid)
         seen.append(mid)
         u = units(msg["usage"], msg.get("model"))
-        b = buckets.setdefault(key, {"lean": 0, "all": 0})
+        b = buckets.setdefault(key, {"lean": 0, "all": 0, "fam": {}})
         b["all"] += u
         if is_lean:
             b["lean"] += u
+        comp = b.setdefault("fam", {}).setdefault(family(msg.get("model")), [0, 0, 0, 0])
+        for i, k in enumerate(FIELDS):
+            v = msg["usage"].get(k) or 0
+            comp[i] += int(v) if isinstance(v, (int, float)) else 0
     fstate["offset"] = offset + end + 1
     fstate["seen"] = seen[-SEEN_KEEP:]
 
 
-def window_usage(buckets=None):
-    """{"5h": {"lean", "all", "frees_at"}, "week": {...}} in Sonnet-equivalent tokens."""
+FAMILIES = {"fable": "claude-fable-5-1", "opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5",
+            "haiku": "claude-haiku-5-5"}
+DEFAULT_WEIGHTS = {"cache_read": 0.1, "output": 5.0}
+
+
+def family(model):
+    m = (model or "").lower()
+    m = ALIASES.get(m.split("[")[0], m)
+    if "fable" in m or "mythos" in m:
+        return "fable"
+    for f in ("opus", "sonnet", "haiku"):
+        if f in m:
+            return f
+    return "other"
+
+
+def load_limits():
+    try:
+        with open(limits_path()) as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_limits(d):
+    os.makedirs(lean_home(), exist_ok=True)
+    tmp = f"{limits_path()}.{os.getpid()}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(d, fh, indent=1)
+    os.replace(tmp, limits_path())
+
+
+def _dt(key):
+    import datetime
+    return datetime.datetime.strptime(key, "%Y-%m-%dT%H:%M").replace(tzinfo=datetime.timezone.utc)
+
+
+def _key(dt):
+    import datetime
+    dt = dt.astimezone(datetime.timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:") + f"{dt.minute // BUCKET_MINUTES * BUCKET_MINUTES:02d}"
+
+
+def plan_windows(buckets, now=None):
+    """{"5h": (start, reset), "week": (start, reset)} aligned to the plan's reset times, or {} without a plan.
+
+    A session window lasts 5 hours and the next one starts with the first message after a reset, as on
+    Claude plans; (None, None) means no session has started since the last reset."""
+    import datetime
+    plan = load_limits().get("plan") or {}
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    out = {}
+    if plan.get("session_reset"):
+        reset = datetime.datetime.fromisoformat(plan["session_reset"])
+        if now < reset:
+            out["5h"] = (reset - datetime.timedelta(hours=5), reset)
+        else:
+            t, window = reset, (None, None)
+            used = sorted(k for k, b in buckets.items() if b.get("all"))
+            while True:
+                first = next((k for k in used if k >= _key(t)), None)
+                if not first:
+                    break
+                start = _dt(first)
+                if now < start + datetime.timedelta(hours=5):
+                    window = (start, start + datetime.timedelta(hours=5))
+                    break
+                t = start + datetime.timedelta(hours=5)
+            out["5h"] = window
+    if plan.get("week_reset"):
+        wd, hhmm = plan["week_reset"]["weekday"], plan["week_reset"]["time"]
+        local_now = now.astimezone()
+        h, m = (int(x) for x in hhmm.split(":"))
+        last = local_now.replace(hour=h, minute=m, second=0, microsecond=0)
+        last -= datetime.timedelta(days=(last.weekday() - wd) % 7)
+        if last > local_now:
+            last -= datetime.timedelta(days=7)
+        out["week"] = (last.astimezone(datetime.timezone.utc), (last + datetime.timedelta(days=7)).astimezone(
+            datetime.timezone.utc))
+    return out
+
+
+def plan_units(fam_comp, weights=None):
+    """Plan-weighted units of per-family raw token components [input, cache write, cache read, output]."""
+    w = dict(DEFAULT_WEIGHTS, **(weights or {}))
+    total = 0.0
+    for fam, (inp, cw, cr, out) in fam_comp.items():
+        rate = model_rate(FAMILIES.get(fam, ""))
+        total += rate * (inp + 1.25 * cw + w["cache_read"] * cr + w["output"] * out)
+    return total
+
+
+def _features(fam_comp):
+    a = b = c = 0.0
+    for fam, (inp, cw, cr, out) in fam_comp.items():
+        rate = model_rate(FAMILIES.get(fam, ""))
+        a += rate * (inp + 1.25 * cw)
+        b += rate * cr
+        c += rate * out
+    return a, b, c
+
+
+def window_usage(buckets=None, now=None):
+    """Per window: lean-agent and all usage (sonnet-eq), per-family components, start, reset, plan %.
+
+    Windows follow the plan's reset times when `lean-agent limits plan` is set, else they roll."""
     import datetime
     buckets = scan_windows() if buckets is None else buckets
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    plan = plan_windows(buckets, now)
+    cfg = load_limits()
+    caps, weights = cfg.get("caps") or {}, cfg.get("weights") or {}
     out = {}
     for name, hours in WINDOWS:
-        start = _utc_key(hours * 3600)
-        keys = sorted(k for k in buckets if k >= start)
+        aligned = name in plan
+        if aligned:
+            start, reset = plan[name]
+            keys = [] if start is None else sorted(k for k in buckets if _key(start) <= k < _key(reset))
+        else:
+            start = now - datetime.timedelta(hours=hours)
+            keys = sorted(k for k in buckets if k >= _key(start))
+            reset = None
+        fam = {}
+        for k in keys:
+            for f, comp in (buckets[k].get("fam") or {}).items():
+                acc = fam.setdefault(f, [0, 0, 0, 0])
+                for i in range(4):
+                    acc[i] += comp[i]
         lean = sum(buckets[k]["lean"] for k in keys)
-        first_lean = next((k for k in keys if buckets[k]["lean"]), None)
-        frees = None
-        if first_lean:
-            t = datetime.datetime.strptime(first_lean, "%Y-%m-%dT%H:%M").replace(tzinfo=datetime.timezone.utc)
-            frees = (t + datetime.timedelta(hours=hours, minutes=BUCKET_MINUTES)).astimezone()
-        out[name] = {"lean": int(lean), "all": int(sum(buckets[k]["all"] for k in keys)), "frees_at": frees}
+        if aligned:
+            frees = reset.astimezone() if reset else None
+        else:
+            first_lean = next((k for k in keys if buckets[k]["lean"]), None)
+            frees = ((_dt(first_lean) + datetime.timedelta(hours=hours, minutes=BUCKET_MINUTES)).astimezone()
+                     if first_lean else None)
+        cap = caps.get("session" if name == "5h" else "week")
+        pct = plan_units(fam, weights) * 100 / cap if cap else None
+        fam_pct = {}
+        if name == "week":
+            for f, c in (caps.get("families") or {}).items():
+                fam_pct[f] = plan_units({f: fam[f]} if f in fam else {}, weights) * 100 / c if c else None
+        out[name] = {"lean": int(lean), "all": int(sum(buckets[k]["all"] for k in keys)), "frees_at": frees,
+                     "start": start, "reset": reset, "aligned": aligned, "fam": fam, "plan_pct": pct,
+                     "family_pct": fam_pct}
     return out
+
+
+def _solve3(m, v):
+    """Solve a 3x3 linear system (Cramer's rule); None if singular."""
+    def det(a):
+        return (a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
+                + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]))
+    d = det(m)
+    if abs(d) < 1e-12:
+        return None
+    res = []
+    for i in range(3):
+        mi = [row[:] for row in m]
+        for r in range(3):
+            mi[r][i] = v[r]
+        res.append(det(mi) / d)
+    return res
+
+
+def calibrate(pcts, now=None):
+    """Record /usage percentages for the current windows and derive the plan's denominators.
+
+    pcts: {"session": 37, "week": 12, "fable": 8, ...} (families are weekly). With 3+ session points the
+    cache-read and output weights are fitted too (least squares); otherwise the defaults are kept."""
+    import datetime
+    cfg = load_limits()
+    w = window_usage(now=now)
+    points = cfg.setdefault("points", [])
+    ts = (now or datetime.datetime.now(datetime.timezone.utc)).isoformat(timespec="seconds")
+    for key, pct in pcts.items():
+        if pct is None or pct <= 0:
+            continue
+        if key == "session":
+            fam = w["5h"]["fam"]
+        elif key == "week":
+            fam = w["week"]["fam"]
+        else:
+            fam = {key: w["week"]["fam"][key]} if key in w["week"]["fam"] else {}
+        points.append({"ts": ts, "window": key, "pct": pct, "x": list(_features(fam))})
+    cfg["points"] = points[-60:]
+    weights = dict(DEFAULT_WEIGHTS)
+    sess = [p for p in cfg["points"] if p["window"] == "session" and any(p["x"])]
+    fit_note = "default weights (calibrate 3+ times at different moments to fit them)"
+    if len(sess) >= 3:
+        xtx = [[sum(p["x"][i] * p["x"][j] for p in sess) for j in range(3)] for i in range(3)]
+        xty = [sum(p["x"][i] * p["pct"] / 100 for p in sess) for i in range(3)]
+        k = _solve3(xtx, xty)
+        if k and k[0] > 0:
+            cr, out = k[1] / k[0], k[2] / k[0]
+            if 0 <= cr <= 1 and 0.5 <= out <= 25:
+                weights = {"cache_read": round(cr, 4), "output": round(out, 3)}
+                fit_note = f"fitted from {len(sess)} points: cache read {cr:.3f}x, output {out:.2f}x"
+            else:
+                fit_note = f"fit from {len(sess)} points out of range (cache read {cr:.2f}, output {out:.2f}); kept defaults"
+    cfg["weights"] = weights
+    caps = {"families": {}}
+    for key in {p["window"] for p in cfg["points"]}:
+        latest = [p for p in cfg["points"] if p["window"] == key and any(p["x"])][-1:]
+        if not latest:
+            continue
+        a, b, c = latest[0]["x"]
+        units_now = a + weights["cache_read"] * b + weights["output"] * c
+        cap = units_now * 100 / latest[0]["pct"]
+        if key in ("session", "week"):
+            caps[key] = cap
+        else:
+            caps["families"][key] = cap
+    cfg["caps"] = caps
+    cfg["fit"] = fit_note
+    save_limits(cfg)
+    return cfg
 
 
 def limits_path():
@@ -424,21 +631,35 @@ def window_budgets():
     return {"5h": num("LEAN_AGENT_5H_BUDGET", "5h"), "week": num("LEAN_AGENT_WEEKLY_BUDGET", "week")}
 
 
+def pct_budgets():
+    return {k: v for k, v in (load_limits().get("pct_budgets") or {}).items() if v}
+
+
 def exhausted_window(usage_by_window=None):
-    """(window name, used, budget, frees_at) for the first window whose budget is used up, else None."""
-    budgets = window_budgets()
-    if not any(budgets.values()):
+    """(window, used, budget, frees_at, kind) for the first used-up budget, else None.
+
+    kind "tokens": lean-agent's own sonnet-eq budget; kind "plan": a share of the calibrated plan."""
+    budgets, pbud = window_budgets(), pct_budgets()
+    if not any(budgets.values()) and not pbud:
         return None
     w = usage_by_window or window_usage()
     for name, _ in WINDOWS:
         if budgets[name] and w[name]["lean"] >= budgets[name]:
-            return name, w[name]["lean"], budgets[name], w[name]["frees_at"]
+            return name, w[name]["lean"], budgets[name], w[name]["frees_at"], "tokens"
+        key = "session" if name == "5h" else "week"
+        if pbud.get(key) and w[name]["plan_pct"] is not None and w[name]["plan_pct"] >= pbud[key]:
+            return name, round(w[name]["plan_pct"]), pbud[key], w[name]["frees_at"], "plan"
     return None
 
 
 def describe_exhausted(hit):
-    name, used, budget, frees = hit
+    name, used, budget, frees = hit[:4]
     label = "5-hour" if name == "5h" else "weekly"
+    if len(hit) > 4 and hit[4] == "plan":
+        label = "session" if name == "5h" else "weekly"
+        when = f"; it resets around {frees:%a %H:%M}" if frees else ""
+        return (f"lean-agent stopped at {used}% of your plan's {label} limit (you allowed agents up to {budget}%)"
+                f"{when}. Raise it with `lean-agent limits --{'session' if name == '5h' else 'week'}-pct N`.")
     when = f"; it starts freeing up around {frees:%a %H:%M}" if frees else ""
     var = "LEAN_AGENT_5H_BUDGET" if name == "5h" else "LEAN_AGENT_WEEKLY_BUDGET"
     return (f"lean-agent {label} budget used up ({used:,} / {budget:,} Sonnet-equivalent tokens){when}. "
