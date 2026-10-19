@@ -49,7 +49,8 @@ FAKE_CLAUDE = textwrap.dedent("""\
     fb = os.environ.get("FAKE_FEEDBACK", '{"status": "done", "used": [], "unneeded": [], "missing": ""}')
     print(json.dumps({"type": "result", "subtype": os.environ.get("FAKE_SUBTYPE", "success"), "is_error": False,
                       "num_turns": 3, "session_id": "sess-1", "total_cost_usd": 0.05,
-                      "result": "Did the thing.\\nLEAN-FEEDBACK " + fb,
+                      "result": "Did the thing.\\n" + (("LEAN-REVIEW " + os.environ["FAKE_REVIEW"] + "\\n")
+                                                         if os.environ.get("FAKE_REVIEW") else "") + "LEAN-FEEDBACK " + fb,
                       "usage": {"input_tokens": 100, "cache_creation_input_tokens": 800,
                                 "cache_read_input_tokens": 5000, "output_tokens": 300}}))
 """)
@@ -739,6 +740,68 @@ class CliTest(unittest.TestCase):
         self.assertIn("presets: lookup, read", p.stderr)
         self.cli("mcp", "preset", "tickets", "lookup", "--rm")
         self.assertNotIn("lookup", self.cli("mcp", "preset", "tickets").stdout)
+
+    def git_project(self):
+        def g(*args):
+            subprocess.run(["git", "-C", self.proj, *args], check=True, capture_output=True)
+        g("init", "-q", "-b", "main")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+        g("checkout", "-qb", "feature")
+        os.makedirs(os.path.join(self.proj, "api"), exist_ok=True)
+        with open(os.path.join(self.proj, "api", "totals.py"), "w") as fh:
+            fh.write("def total(xs):\n    return sum(xs) * 1.1\n")
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "feature")
+        with open(os.path.join(self.proj, "web", "page.txt"), "w") as fh:
+            fh.write("uncommitted\n")
+        return g
+
+    def test_review_gate(self):
+        self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        review = json.dumps({"verdict": "changes-requested", "findings": [
+            {"severity": "minor", "file": "web/page.txt", "line": 1, "issue": "placeholder text"},
+            {"severity": "blocker", "file": "api/totals.py", "line": 2, "issue": "float money math",
+             "suggestion": "use integer cents"}],
+            "checks": [{"what": "run pytest -q", "why": "no test covers total()"}]})
+        p = self.cli("review", "proj", check=False, FAKE_REVIEW=review)
+        self.assertEqual(p.returncode, 2)
+        out = p.stdout
+        self.assertIn("REVIEW: CHANGES-REQUESTED · 2 findings · 1 checks", out)
+        self.assertLess(out.index("[blocker] api/totals.py:2"), out.index("[minor] web/page.txt:1"))
+        self.assertIn("[check] run pytest -q", out)
+        self.assertIn("lean-agent review proj --resume", out)
+        call = self.calls()[-1]
+        argv = call["argv"]
+        self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
+        self.assertEqual(argv[argv.index("--effort") + 1], "high")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Glob,Grep,Bash")
+        self.assertNotIn("Edit", argv[argv.index("--allowedTools") + 1])
+        self.assertIn("Role: you are the reviewer", call["append"])
+        self.assertIn("including uncommitted changes", call["append"])
+        self.assertIn("api/totals.py", call["task"])
+        self.assertEqual(self.cli("review", "proj", "--status", check=False).returncode, 1)
+        approve = json.dumps({"verdict": "approve", "findings": [], "checks": []})
+        p = self.cli("review", "proj", "--resume", check=False, FAKE_REVIEW=approve)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("Re-review the current diff", self.calls()[-1]["task"])
+        self.assertIn("--resume", self.calls()[-1]["argv"])
+        self.assertIn("Role: you are the reviewer", self.calls()[-1]["append"])  # same role on resume
+        self.assertEqual(self.cli("review", "proj", "--status").returncode, 0)
+        with open(os.path.join(self.proj, "api", "totals.py"), "a") as fh:
+            fh.write("# later edit\n")
+        p = self.cli("review", "proj", "--status", check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("stale", p.stdout)
+
+    def test_review_needs_changes_and_base(self):
+        g = self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        g("checkout", "-q", "-f", "main")
+        g("clean", "-qfd")
+        p = self.cli("review", "proj", check=False)
+        self.assertIn("nothing to review", p.stderr)
 
     def test_home_template(self):
         h = self.cli("home").stdout.strip()

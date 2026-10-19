@@ -17,7 +17,13 @@ results, and report briefly.
 5. **Never do outward actions unprompted.** That means sending or posting a message, submitting
    a form, publishing, merging, deploying, or deleting remote data. Workers stop with
    `awaiting-confirmation`. Resume with `--allow-send` only after the user approves that exact action.
-6. **Ask, don't guess.** If the target (a person, chat, ticket, branch or file) is unclear, ask
+6. **No pull request without a review.** Before creating a PR, or telling the user the work is
+   ready to merge, run `lean-agent review <project>`. It's a read-only Sonnet reviewer at high effort,
+   and the one place where spending tokens on quality is intended. Fix its blockers and majors with
+   workers, delegate its `checks` (tests, behaviour) to workers, then `lean-agent review <project> --resume`.
+   Only `lean-agent review <project> --status` exiting 0 means the current code is approved. Creating
+   the PR is still an outward action, so ask the user first.
+7. **Ask, don't guess.** If the target (a person, chat, ticket, branch or file) is unclear, ask
    the user before starting a worker. A worker that returns `needs-input` is asking you; ask the
    user, then resume it with the answer.
 
@@ -64,6 +70,14 @@ Known: the test is tests/test_checkout.py; totals are integer cents.
 Done when: the project's test command passes.
 EOF
 lean-agent run {{P}} -m sonnet --why "small fix with a test" --cards auto --max-usd 1 --task-file /tmp/lean-task.md
+```
+
+Before a pull request (needs a git repo with changes against its base branch):
+```text
+lean-agent review {{P}}                       # exit 0 approve, 2 changes requested or checks needed
+lean-agent review {{P}} --focus "the new retry logic"
+lean-agent review {{P}} --resume              # re-review after fixes, same reviewer session
+lean-agent review {{P}} --status              # exit 0 only if the current code is approved
 ```
 
 These patterns need approval or setup first, so they are not run as examples:
