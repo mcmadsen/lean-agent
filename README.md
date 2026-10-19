@@ -343,29 +343,39 @@ You can also switch the model of a running session in the app.
 
 ### Plan windows (Claude Pro / Max)
 
-Subscription plans limit usage per rolling **5-hour window** and per **week**, and budget in those same windows:
+Subscription plans limit usage per **session** (5 hours, starting with your first message after a reset) and
+per **week** (a fixed reset time), and some models have their own weekly limit. lean-agent can follow the same
+windows and show the same percentages `/usage` shows:
 
 ```sh
-lean-agent limits                          # usage in both windows, lean-agent vs all Claude Code on this machine
-lean-agent limits --5h 2000000 --week 15000000
-lean-agent limits --off
+lean-agent limits                                                  # usage now
+lean-agent limits plan --session-resets 13:30 --week-resets "Sat 12:00"   # once: the reset times /usage shows
+lean-agent limits calibrate session=37 week=12 fable=8             # the percentages /usage shows right now
+lean-agent limits --session-pct 60 --week-pct 70                   # agents stop at this share of your plan
+lean-agent limits --5h 2000000 --week 15000000                     # or: a fixed sonnet-eq budget for lean-agent
+lean-agent limits --off                                            # remove the budgets
 ```
 
 - **What's counted:** usage comes from Claude Code's session logs on this machine, read incrementally and
-  timestamped. That includes the orchestrator, every worker and their subagents.
-- **Model-aware units:** **Sonnet-equivalent tokens**, which are weighted tokens scaled by the model's price
-  relative to Sonnet 5.5. Haiku 5.5 counts 0.05×, Opus 5.5 2× and Fable 5.1 5×. Anthropic doesn't publish exactly
-  how each model counts against plan limits, so price ratios are the proxy.
-- **What the budgets limit:** budgets apply to lean-agent's own sessions. `limits` also shows all Claude Code
-  usage on this machine, so you can compare it with `/usage`. Claude.ai chats and other machines are not visible.
-- **Enforcement:** when a window's budget is used up, `run` refuses new workers and says when the window starts
-  freeing up. The orchestrator's hook blocks its own tool calls the same way, but `lean-agent limits` and `stats`
-  stay allowed so you can raise the budget from your phone. Your normal sessions are never blocked.
-- **Calibrating:** work normally for a while, compare `limits` with `/usage`, then set the share of your plan you
-  want agents to use. Windows here are rolling, which is slightly stricter than a window that resets 5 hours after
-  your first message.
-- Budgets are saved in `~/.lean-agent/limits.json`. The env vars `LEAN_AGENT_5H_BUDGET` and
-  `LEAN_AGENT_WEEKLY_BUDGET` override them.
+  timestamped, in 10-minute buckets. That includes the orchestrator, every worker and their subagents, and your
+  other Claude Code sessions (shown as "all Claude Code here").
+- **Windows:** after `limits plan`, the session window ends at your reset time; the next one starts with the
+  first message after it and lasts 5 hours. The week runs from the weekly reset. Without a plan the windows roll
+  (the last 5 hours, the last 7 days), which is a bit stricter.
+- **Units:** **Sonnet-equivalent tokens**, which are weighted tokens scaled by the model's price relative to
+  Sonnet 5.5. Haiku 5.5 counts 0.05×, Opus 5.5 2× and Fable 5.1 5×. The weekly line also splits usage by model
+  family, because a model with its own weekly bar fills that bar separately.
+- **Calibration:** `calibrate` divides the usage seen in each window by the percentage you give, so `limits`
+  can show "plan ≈ N%". A model family (`fable=8`) calibrates that family's own weekly limit. After three or more
+  session calibrations at different moments, lean-agent also fits how much cache reads and output count (least
+  squares; it keeps the defaults if the fit is implausible). Claude.ai chats and other machines aren't visible,
+  so calibrate again now and then; the latest point wins.
+- **Enforcement:** when a budget is used up (`--session-pct`/`--week-pct` of your calibrated plan, or the fixed
+  `--5h`/`--week` budgets for lean-agent's own usage), `run` refuses new workers and says when the window resets.
+  The orchestrator's hook blocks its own tool calls the same way, but `lean-agent limits` and `stats` stay allowed
+  so you can raise the budget from your phone. Your normal sessions are never blocked.
+- Everything is saved in `~/.lean-agent/limits.json`. The env vars `LEAN_AGENT_5H_BUDGET` and
+  `LEAN_AGENT_WEEKLY_BUDGET` override the fixed budgets.
 
 ### Other limits
 

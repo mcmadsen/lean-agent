@@ -1147,15 +1147,20 @@ def tools_overhead(mcp_specs, mcp_allowed, chrome_spec):
 
 def budget_line():
     """('budget left: 5h 62% · week 80%', low?) for the plan windows that have a budget."""
-    budgets = usage.window_budgets()
-    if not any(budgets.values()):
+    budgets, pbud = usage.window_budgets(), usage.pct_budgets()
+    if not any(budgets.values()) and not pbud:
         return "", False
     w = usage.window_usage()
     parts, low = [], False
-    for name, label in (("5h", "5h"), ("week", "week")):
+    for name, label in (("5h", "session"), ("week", "week")):
         if budgets[name]:
             left = max(0, 100 - w[name]["lean"] * 100 // budgets[name])
             parts.append(f"{label} {left}%")
+            low = low or left < 25
+        cap = pbud.get("session" if name == "5h" else "week")
+        if cap and w[name]["plan_pct"] is not None:
+            left = max(0, round(100 - w[name]["plan_pct"] * 100 / cap))
+            parts.append(f"{label} {left}% of your {cap}% plan share")
             low = low or left < 25
     text = "budget left: " + " · ".join(parts)
     if low:
@@ -1750,35 +1755,146 @@ def cmd_stats(a):
 
 def print_limits():
     w = usage.window_usage()
-    budgets = usage.window_budgets()
-    for name, label in (("5h", "Last 5 hours"), ("week", "Last 7 days ")):
-        lean, total, budget = w[name]["lean"], w[name]["all"], budgets[name]
-        line = f"{label}: lean-agent {lean:,}"
-        if budget:
-            line += f" of {budget:,} ({lean * 100 // budget}%)"
-            if lean >= budget and w[name]["frees_at"]:
-                line += f", frees up from {w[name]['frees_at']:%a %H:%M}"
+    budgets, pbud = usage.window_budgets(), usage.pct_budgets()
+    cfg = usage.load_limits()
+    for name in ("5h", "week"):
+        x = w[name]
+        if x["aligned"]:
+            label = "Session" if name == "5h" else "Week   "
+            if x["start"] is None:
+                print(f"{label}: no session since the last reset; the next one starts with your next message")
+                continue
+            span = f" ({x['start'].astimezone():%a %H:%M} to {x['reset'].astimezone():%a %H:%M})"
         else:
-            line += " (no budget)"
-        print(line + f"  | all Claude Code on this machine: {total:,}")
-    print("Units: Sonnet-equivalent tokens (Haiku 5.5 counts 0.05x, Opus 5.5 2x, Fable 5.1 5x). "
-          "Compare with /usage in Claude Code.")
+            label, span = ("Last 5 hours" if name == "5h" else "Last 7 days "), ""
+        line = f"{label}{span}: lean-agent {x['lean']:,}"
+        if budgets[name]:
+            line += f" of {budgets[name]:,} ({x['lean'] * 100 // budgets[name]}%)"
+            if x["lean"] >= budgets[name] and x["frees_at"]:
+                line += f", frees up from {x['frees_at']:%a %H:%M}"
+        line += f" | all Claude Code here {x['all']:,}"
+        if x["plan_pct"] is not None:
+            line += f" | plan ≈ {x['plan_pct']:.0f}%"
+            cap = pbud.get("session" if name == "5h" else "week")
+            if cap:
+                line += f" (agents stop at {cap}%)"
+        print(line)
+        if name == "week" and x["fam"]:
+            fams = []
+            for f, comp in sorted(x["fam"].items(), key=lambda kv: -usage.plan_units({kv[0]: kv[1]})):
+                part = f"{f} {int(usage.plan_units({f: comp}, cfg.get('weights'))):,}"
+                if x["family_pct"].get(f) is not None:
+                    part += f" (≈ {x['family_pct'][f]:.0f}% of its own limit)"
+                fams.append(part)
+            print("  by model: " + ", ".join(fams))
+    print("Units: Sonnet-equivalent tokens (Haiku 5.5 counts 0.05x, Opus 5.5 2x, Fable 5.1 5x).")
+    if not cfg.get("plan"):
+        print("Windows roll. To follow your plan's reset times: "
+              "lean-agent limits plan --session-resets 13:30 --week-resets \"Sat 12:00\" (as /usage shows them)")
+    elif not cfg.get("caps"):
+        print("Plan % unknown. Calibrate once from /usage: lean-agent limits calibrate session=37 week=12 [fable=8]")
+    else:
+        print(f"Plan % calibrated from /usage ({cfg.get('fit', 'default weights')}). Usage from claude.ai "
+              "or other machines isn't seen here; calibrate again now and then.")
+
+
+def parse_reset(text, weekly=False):
+    """'13:30', '1:30 PM', '2026-10-19 13:30' (session) or 'Sat 12:00', 'Saturday 12pm' (weekly), local time."""
+    import datetime
+    t = text.strip().lower().replace(".", "")
+    day = None
+    if weekly:
+        names = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        first, _, rest = t.partition(" ")
+        if first[:3] not in names:
+            die(f"--week-resets: start with a weekday, e.g. \"Sat 12:00\" (got {text!r})")
+        day, t = names.index(first[:3]), rest.strip()
+    date = None
+    if not weekly and len(t) > 10 and t[4] == "-":
+        date, t = datetime.date.fromisoformat(t[:10]), t[10:].strip()
+    pm, am = t.endswith("pm"), t.endswith("am")
+    t = t[:-2].strip() if pm or am else t
+    try:
+        h, _, m = t.partition(":")
+        h, m = int(h), int(m or 0)
+    except ValueError:
+        die(f"can't read the time in {text!r}; use e.g. 13:30 or 1:30 PM")
+    if pm and h < 12:
+        h += 12
+    if am and h == 12:
+        h = 0
+    if not (0 <= h < 24 and 0 <= m < 60):
+        die(f"can't read the time in {text!r}")
+    if weekly:
+        return {"weekday": day, "time": f"{h:02d}:{m:02d}"}
+    now = datetime.datetime.now().astimezone()
+    if date:
+        r = datetime.datetime.combine(date, datetime.time(h, m)).astimezone()
+    else:
+        r = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        if r <= now:
+            r += datetime.timedelta(days=1)
+    return r.isoformat(timespec="minutes")
 
 
 def cmd_limits(a):
-    if a.off or a.five_h is not None or a.week is not None:
-        cur = load_json(usage.limits_path(), {})
+    action = a.action or "show"
+    cfg = usage.load_limits()
+    if action == "plan":
+        if not (a.session_resets or a.week_resets or a.off):
+            die("say when your windows reset, as /usage shows: --session-resets 13:30 --week-resets \"Sat 12:00\"")
+        plan = {} if a.off else cfg.get("plan") or {}
+        if a.session_resets:
+            plan["session_reset"] = parse_reset(a.session_resets)
+        if a.week_resets:
+            plan["week_reset"] = parse_reset(a.week_resets, weekly=True)
+        cfg["plan"] = plan
         if a.off:
-            cur = {}
-        if a.five_h is not None:
-            cur["5h"] = a.five_h
-        if a.week is not None:
-            cur["week"] = a.week
-        save_json(usage.limits_path(), cur)
+            cfg.pop("caps", None)
+        usage.save_limits(cfg)
+    elif action == "calibrate":
+        if not a.values:
+            die("give the percentages /usage shows now: lean-agent limits calibrate session=37 week=12 [fable=8]")
+        pcts = {}
+        for v in a.values:
+            k, _, n = v.partition("=")
+            k = {"5h": "session", "weekly": "week", "mythos": "fable"}.get(k.strip().lower(), k.strip().lower())
+            if k not in ("session", "week", *usage.FAMILIES) or not n:
+                die(f"can't read {v!r}: use session=N, week=N or a model family ({', '.join(usage.FAMILIES)})=N")
+            try:
+                pcts[k] = float(n.rstrip("%"))
+            except ValueError:
+                die(f"can't read the percentage in {v!r}")
+        if not (cfg.get("plan") or {}).get("session_reset") and "session" in pcts:
+            print("note: no plan reset time set, so the session is taken as the last 5 hours "
+                  "(lean-agent limits plan --session-resets HH:MM is more exact)")
+        w = usage.window_usage()
+        if "session" in pcts and not w["5h"]["fam"]:
+            die("no usage seen in the current session window on this machine, so there is nothing to calibrate against")
+        cfg = usage.calibrate(pcts)
+        print(f"calibrated: {cfg['fit']}")
+    else:
+        changed = False
+        if a.off:
+            cfg = {k: v for k, v in cfg.items() if k not in ("5h", "week", "pct_budgets")}
+            changed = True
+        for key, val in (("5h", a.five_h), ("week", a.week)):
+            if val is not None:
+                cfg[key] = val
+                changed = True
+        for key, val in (("session", a.session_pct), ("week", a.week_pct)):
+            if val is not None:
+                cfg.setdefault("pct_budgets", {})[key] = val
+                changed = True
+        if (a.session_pct or a.week_pct) and not cfg.get("caps"):
+            print("note: the plan % budgets apply once you calibrate: lean-agent limits calibrate session=N week=N")
+        if changed:
+            usage.save_limits(cfg)
     for env in ("LEAN_AGENT_5H_BUDGET", "LEAN_AGENT_WEEKLY_BUDGET"):
         if os.environ.get(env):
             print(f"note: {env} is set in the environment and overrides the saved value")
     print_limits()
+
 
 def cmd_optimize(a):
     slug, _ = resolve_project(a.project)
@@ -2217,7 +2333,12 @@ def cmd_doctor(a):
     st = chrome_state()
     print("  chrome for workers: " + ("verified" if st.get("ok") else "not verified (lean-agent chrome check)"))
     budgets = usage.window_budgets()
-    print("  window budgets: " + (", ".join(f"{k}={v:,}" for k, v in budgets.items() if v) or "none (lean-agent limits)"))
+    parts = [f"{k}={v:,}" for k, v in budgets.items() if v]
+    parts += [f"{k}={v}% of plan" for k, v in usage.pct_budgets().items()]
+    cfg = usage.load_limits()
+    print("  window budgets: " + (", ".join(parts) or "none (lean-agent limits)")
+          + ("; plan reset times set" if cfg.get("plan") else "; windows roll (lean-agent limits plan)")
+          + ("; calibrated" if cfg.get("caps") else ""))
     print("doctor: " + ("all good" if not bad else f"{len(bad)} problem(s)"))
     return 1 if bad else 0
 
@@ -2573,10 +2694,17 @@ def build_parser():
     s.add_argument("--from", dest="source", metavar="DIR", help="import: folder to import (default: Claude's)")
     s.set_defaults(fn=cmd_memory)
 
-    s = sub.add_parser("limits", help="usage in the 5-hour and weekly windows; set budgets for them")
-    s.add_argument("--5h", dest="five_h", type=int, metavar="N", help="budget per rolling 5 hours (0 = none)")
-    s.add_argument("--week", type=int, metavar="N", help="budget per rolling 7 days (0 = none)")
-    s.add_argument("--off", action="store_true", help="remove both budgets")
+    s = sub.add_parser("limits", help="usage in your plan's session and weekly windows; budgets for agents")
+    s.add_argument("action", nargs="?", choices=["show", "plan", "calibrate"],
+                   help="plan: set the reset times /usage shows; calibrate: record /usage percentages")
+    s.add_argument("values", nargs="*", metavar="KEY=PCT", help="calibrate: session=37 week=12 fable=8")
+    s.add_argument("--session-resets", metavar="TIME", help="plan: when the current session resets (13:30, 1:30 PM)")
+    s.add_argument("--week-resets", metavar="DAY TIME", help="plan: when the week resets (\"Sat 12:00\")")
+    s.add_argument("--session-pct", type=int, metavar="PCT", help="stop agents at this %% of the session limit (0 = none)")
+    s.add_argument("--week-pct", type=int, metavar="PCT", help="stop agents at this %% of the weekly limit (0 = none)")
+    s.add_argument("--5h", dest="five_h", type=int, metavar="N", help="lean-agent budget per session window, sonnet-eq (0 = none)")
+    s.add_argument("--week", type=int, metavar="N", help="lean-agent budget per week window, sonnet-eq (0 = none)")
+    s.add_argument("--off", action="store_true", help="remove the budgets (with plan: the plan and calibration)")
     s.set_defaults(fn=cmd_limits)
 
     s = sub.add_parser("stats", help="runs, success rate and tokens by model")

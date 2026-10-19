@@ -285,8 +285,9 @@ class CliTest(unittest.TestCase):
         self.write_usage(work, 3 * 24, "claude-sonnet-5-5", 20000, "c")  # 1x -> 20,000, this week
         self.write_usage("-Users-me-other-project", 1, "claude-opus-5-5", 10000, "d")  # not lean: 20,000
         out = self.cli("limits").stdout
-        self.assertIn("Last 5 hours: lean-agent 50,000 (no budget)  | all Claude Code on this machine: 70,000", out)
-        self.assertIn("Last 7 days : lean-agent 75,000 (no budget)  | all Claude Code on this machine: 95,000", out)
+        self.assertIn("Last 5 hours: lean-agent 50,000 | all Claude Code here 70,000", out)
+        self.assertIn("Last 7 days : lean-agent 75,000 | all Claude Code here 95,000", out)
+        self.assertIn("by model: fable 50,000, sonnet 20,000, opus 20,000, haiku 5,000", out)
         self.cli("limits", "--5h", "40000", "--week", "1000000")
         self.assertIn("50,000 of 40,000 (125%), frees up from", self.cli("limits").stdout)
         p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False)
@@ -297,6 +298,60 @@ class CliTest(unittest.TestCase):
         self.assertIn("weekly budget used up", p.stderr)
         self.cli("limits", "--off")
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t")
+
+    def test_plan_windows_and_calibration(self):
+        import datetime as dt
+        os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
+        work = self.lean_project_dir("-work-0101-000000-abcd")
+        self.write_usage(work, 1, "claude-sonnet-5-5", 30000, "a")       # this session
+        self.write_usage(work, 6, "claude-sonnet-5-5", 99000, "b")       # previous session
+        self.write_usage("-Users-me-other", 2, "claude-fable-5-1", 2000, "c")  # 5x -> 10,000, not lean
+        out = self.cli("limits").stdout
+        self.assertIn("Windows roll", out)
+        reset = (dt.datetime.now() + dt.timedelta(hours=3)).strftime("%H:%M")
+        out = self.cli("limits", "plan", "--session-resets", reset, "--week-resets", "Sat 12:00").stdout
+        self.assertRegex(out, r"Session \(\w{3} \d\d:\d\d to \w{3} \d\d:\d\d\): lean-agent 30,000 \| all Claude Code here 40,000")
+        self.assertIn("Plan % unknown", out)
+        out = self.cli("limits", "calibrate", "session=20", "week=10", "fable=4").stdout
+        self.assertIn("default weights", out)
+        self.assertIn("plan ≈ 20%", out)
+        self.assertIn("fable 10,000 (≈ 4% of its own limit)", out)
+        self.cli("limits", "--session-pct", "15")
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False)
+        self.assertEqual(p.returncode, 3)
+        self.assertIn("20% of your plan's session limit (you allowed agents up to 15%)", p.stderr)
+        self.cli("limits", "--session-pct", "50")
+        self.assertIn("can't read 'bogus=3'", self.cli("limits", "calibrate", "bogus=3", check=False).stderr)
+        # a reset in the past: the next session starts with the first message after it
+        lim = os.path.join(self.env["LEAN_AGENT_HOME"], "limits.json")
+        with open(lim) as fh:
+            d = json.load(fh)
+        d["plan"]["session_reset"] = (dt.datetime.now().astimezone() - dt.timedelta(hours=1, minutes=30)).isoformat()
+        with open(lim, "w") as fh:
+            json.dump(d, fh)
+        self.assertIn("lean-agent 30,000", self.cli("limits").stdout)
+        d["plan"]["session_reset"] = (dt.datetime.now().astimezone() - dt.timedelta(minutes=30)).isoformat()
+        with open(lim, "w") as fh:
+            json.dump(d, fh)
+        self.assertIn("no session since the last reset", self.cli("limits").stdout)
+
+    def test_calibration_fits_weights(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import usage
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        try:
+            # true weights: cache read 0.05, output 8; cap 1,000,000 plan units
+            pts = []
+            for a, b, c in ((100000, 2000000, 5000), (50000, 4000000, 20000), (200000, 500000, 1000), (80000, 3000000, 9000)):
+                pts.append({"ts": "x", "window": "session", "pct": (a + 0.05 * b + 8 * c) / 10000, "x": [a, b, c]})
+            os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
+            usage.save_limits({"points": pts})
+            cfg = usage.calibrate({})
+            self.assertAlmostEqual(cfg["weights"]["cache_read"], 0.05, places=3)
+            self.assertAlmostEqual(cfg["weights"]["output"], 8, places=2)
+            self.assertAlmostEqual(cfg["caps"]["session"], 1000000, delta=10)
+        finally:
+            os.environ.pop("LEAN_AGENT_HOME", None)
 
     def test_window_hook_only_in_lean_home(self):
         home = self.cli("home").stdout.strip()
@@ -722,11 +777,11 @@ class CliTest(unittest.TestCase):
         self.assertIn("3,100 sonnet-eq tok · $0.05", out)
         self.assertIn("tokens: input 100 · cache write 800 · cache read 5,000 · output 300", out)
         self.assertIn("context per turn ~1,966: lean-agent protocol + cards ~", out)
-        self.assertIn("budget left: 5h", out)
+        self.assertIn("budget left: session", out)
         self.write_usage(self.lean_project_dir("-work-0101-000000-abcd"), 0.2, "claude-sonnet-5-5", 3500, "z")
         out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t").stdout
         self.assertIn("155 sonnet-eq tok", out)  # haiku counts 0.05x
-        self.assertIn("budget left: 5h 13% (low", out)
+        self.assertIn("budget left: session 13% (low", out)
         self.assertIn("low: prefer -m haiku", out)
         stats = self.cli("stats").stdout
         self.assertIn("sonnet-eq", stats)
