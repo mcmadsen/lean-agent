@@ -884,6 +884,16 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("FROM-CLONE", p.stdout)
         self.assertEqual(p.returncode, 0)
 
+    def test_optimize_demotes_unused_global_core(self):
+        self.cli("learn", self.proj)
+        self.cli("card", "core", "proj", "style")
+        fb = json.dumps({"status": "done", "used": [], "unneeded": [], "missing": ""})
+        for _ in range(5):
+            self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "fix it", FAKE_FEEDBACK=fb)
+        out = self.cli("optimize", "proj", "--apply").stdout
+        self.assertIn("core for every task but used in only 0/5", out)
+        self.assertNotIn("*style", self.cli("cards", "proj").stdout)
+
     def test_home_template(self):
         h = self.cli("home").stdout.strip()
         with open(os.path.join(h, "CLAUDE.md")) as fh:
