@@ -780,6 +780,43 @@ def parse_feedback(text):
     return "\n".join(lines).strip(), fb if isinstance(fb, dict) else {}
 
 
+def parse_remote(url):
+    """{"host", "org", "project", "repo"} from a git remote URL (Azure DevOps https/ssh, GitHub, GitLab, ...)."""
+    u = (url or "").strip()
+    m = (re.match(r"^https?://(?:[^@/]+@)?dev\.azure\.com/([^/]+)/([^/]+)/_git/([^/?#]+)", u)
+         or re.match(r"^(?:ssh://)?git@ssh\.dev\.azure\.com:(?:22/)?v3/([^/]+)/([^/]+)/([^/?#]+)", u))
+    if m:
+        return {"host": "Azure DevOps", "org": m.group(1), "project": m.group(2), "repo": m.group(3)}
+    m = (re.match(r"^https?://(?:[^@/]+@)?([^./]+)\.visualstudio\.com/(?:DefaultCollection/)?([^/]+)/_git/([^/?#]+)", u)
+         or re.match(r"^(?:ssh://)?[^@]+@vs-ssh\.visualstudio\.com:(?:22/)?v3/([^/]+)/([^/]+)/([^/?#]+)", u))
+    if m:
+        return {"host": "Azure DevOps", "org": m.group(1), "project": m.group(2), "repo": m.group(3)}
+    m = re.match(r"^(?:https?://(?:[^@/]+@)?|(?:ssh://)?git@)([^/:]+)[/:](.+?)/([^/]+?)(?:\.git)?/?$", u)
+    if m:
+        return {"host": m.group(1), "org": m.group(2), "project": None, "repo": m.group(3)}
+    return {}
+
+
+def repo_identity(slug, path):
+    """Where this project lives in its git host / tracker: a saved `review learn --tracker ...` setting wins,
+    else what the origin remote says."""
+    ident = parse_remote(git(path, "remote", "get-url", "origin") or "")
+    ident.update((projects().get(slug) or {}).get("tracker") or {})
+    return ident
+
+
+def repo_identity_text(slug, path):
+    ident = repo_identity(slug, path)
+    if not ident:
+        return ("Repository identity: unknown (no origin remote). Don't guess the organization, project or "
+                "repository; if a tool needs them and you can't find them, stop with needs-input and ask.")
+    parts = [f"{k} {ident[k]}" for k in ("host", "org", "project", "repo") if ident.get(k)]
+    return ("Repository identity (from git; use these exact values in tool calls, and never use lean-agent's "
+            f"project name `{slug}` as a tracker project): " + ", ".join(parts) + ". If a lookup with these "
+            "returns nothing, say exactly what you called and stop with needs-input instead of answering "
+            "from nothing.")
+
+
 def build_append(project, cards, read_only=False, allow_send=None, chrome=False, role_rule=""):
     parts = [WORKER_PROTOCOL.format(
         project=project, sq=os.path.join(PLUGIN_ROOT, "bin", "lean-sq"),
@@ -1000,6 +1037,9 @@ def cmd_run(a):
         role_rule = getattr(a, "role_rule", "") or ""
         if wt:
             role_rule = WORKTREE_RULE.format(**wt) + ("\n" + role_rule if role_rule else "")
+        if a.mcp:  # external systems need the exact identifiers, not a guess from lean-agent's project name
+            ident = repo_identity_text(slug, project)
+            role_rule = (role_rule + "\n" if role_rule else "") + ident
         if role_rule:
             with open(os.path.join(workdir, "role.md"), "w") as fh:
                 fh.write(role_rule)
@@ -1570,7 +1610,9 @@ REVIEW_CARDS = {
 
 LEARN_RULE = """\
 Role: you turn a human code review into lessons for an automated reviewer. You can only read.
-Read the review threads of pull request {pr} with the MCP tools you have. Here is what lean-agent's own
+Read the review threads of pull request {pr} with the MCP tools you have (all threads people wrote; skip
+system/status threads). If the tools return no threads, check the identifiers you used against the
+repository identity below; don't report "no comments" unless the pull request itself was found. Here is what lean-agent's own
 reviewer found for this change (it may have missed things):
 {ours}
 
@@ -1613,6 +1655,16 @@ def add_to_review_cards(slug, checklist=(), helpers=()):
 def cmd_review_learn(a):
     slug, path = resolve_project(a.project)
     a.pr = a.pr or a.pr_id
+    if a.tracker:
+        projs = projects()
+        conf = projs[slug].setdefault("tracker", {})
+        for kv in a.tracker:
+            k, _, v = kv.partition("=")
+            if k.strip() not in ("org", "project", "repo", "host") or not v.strip():
+                die(f"--tracker takes org=..., project=..., repo=... or host=... (got {kv!r})")
+            conf[k.strip()] = v.strip()
+        save_json(home("projects.json"), projs)
+        print(f"{slug}: tracker " + ", ".join(f"{k} {v}" for k, v in conf.items()) + " (saved; used by MCP workers)")
     checklist = [a.text] if a.text else []
     if a.file:
         checklist += [l.strip("-* \t") for l in read_text(a.file).splitlines() if l.strip()]
@@ -1642,8 +1694,14 @@ def cmd_review_learn(a):
         got = load_json(os.path.join(run["workdir"], "checklist.json"), {}) if run else {}
         checklist += [c for c in got.get("checklist") or [] if isinstance(c, str)]
         helpers += [h for h in got.get("helpers") or [] if isinstance(h, dict) and h.get("name")]
+        if run and run.get("status") == "needs-input" and not got:
+            print(f"The worker couldn't find PR {a.pr}; see its question above. If the remote doesn't name the "
+                  f"tracker project, set it once: lean-agent review learn {slug} --tracker project=<name>")
+            return 2
         if rc and not got:
             return rc
+    if not checklist and not helpers and a.tracker and not a.pr:
+        return 0
     if not checklist and not helpers:
         die("nothing to learn: give --text, --file, --helper \"name | where | what\", or --pr <id> --mcp <server>")
     added = add_to_review_cards(slug, checklist, helpers)
@@ -3836,6 +3894,9 @@ def build_parser():
     s.add_argument("--mcp", action="append", metavar="SERVER[:TOOLS]", help="the tracker's MCP server, for --pr")
     s.add_argument("--head", metavar="REF", help="--pr: the branch the PR is for (to compare with its lean-agent review)")
     s.add_argument("-m", "--model", default="sonnet", help="--pr: model for reading the threads (default sonnet)")
+    s.add_argument("--tracker", action="append", metavar="KEY=VALUE",
+                   help="where the repo lives in the tracker when the git remote doesn't say (org=, project=, repo=); "
+                        "saved for the project and given to every MCP worker")
     s.set_defaults(fn=cmd_review_learn)
 
     s = sub.add_parser("sync", help="pull lean-agent, update the plugin, refresh guide, settings, projects and repo blocks")

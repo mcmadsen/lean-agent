@@ -159,6 +159,11 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   When Claude Code connects but a worker gets needs-auth, doctor compares lean-agent's copy with
   `claude mcp get`: a different `type` or URL is corrected and retried automatically, and a header difference is
   named but not copied (header values can be secrets).
+- **Exact identifiers for external systems:** every worker given `--mcp` gets the repository's identity from its
+  git `origin` remote (Azure DevOps organization, project and repository; GitHub/GitLab owner and repository) and
+  is told never to use lean-agent's project name as a tracker project, and to stop with `needs-input` if a
+  lookup finds nothing. When the remote doesn't say, set it once: `lean-agent review learn <project> --tracker
+  project=<name>` (also `org=`, `repo=`).
 - **Variables without a token on disk:** a plugin config that uses `${VAR}` (e.g. a GitHub token) can get it
   from a command run when a worker starts: `lean-agent mcp env GITHUB_PERSONAL_ACCESS_TOKEN --command "gh auth
   token"` (or a macOS keychain item: `security find-generic-password -s <name> -w`). Only the command is saved;
