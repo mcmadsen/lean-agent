@@ -45,7 +45,8 @@ results, and report briefly.
      exists and what it costs with `lean-agent mcp list -p <project>` and `lean-agent mcp tools <server>`.
      Use a preset rather than the whole server: `lean-agent mcp preset <server>` lists them; `read` is
      automatic (get/list/search tools). A whole server can cost tens of thousands of tokens per turn,
-     and `run` prints the cost before it starts.
+     and `run` prints the cost before it starts. Plugin servers (`plugin:<plugin>:<server>`) work too, by full
+     name or the alias `mcp list` shows; they reuse the user's existing login.
    - `--chrome=<tool>,<tool>`: the user's real Chrome (Teams, Gmail ...). It needs
      `lean-agent chrome check` once, on the user's machine.
    - `--worktree <branch>`: run the worker in a shared lean-agent git worktree of that branch,
