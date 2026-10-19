@@ -374,7 +374,7 @@ The session budget is in **weighted tokens**, input-token equivalents using the 
 
 | Variable | Default | |
 |---|---|---|
-| `LEAN_AGENT_BUDGET` | `up`: 1,000,000 | Orchestrator session budget, enforced by a PreToolUse hook (warns at `LEAN_AGENT_WARN_PCT`, default 80%, then blocks tool calls). |
+| `LEAN_AGENT_BUDGET` | off | Optional self-set cap per orchestrator session in sonnet-eq tokens (not your plan), enforced by a PreToolUse hook (warns at `LEAN_AGENT_WARN_PCT`, default 80%, then blocks tool calls). `lean-agent budget` shows a percentage only when it's set. |
 | `LEAN_AGENT_RUN_MAX_USD` | `3.0` | Default `--max-usd` per worker (`claude --max-budget-usd`). |
 | `LEAN_AGENT_MAX_TURNS` | `40` | Default `--max-turns` per worker. |
 | `LEAN_AGENT_WORKER_PERMISSION_MODE` | `acceptEdits` | Worker permission mode. |

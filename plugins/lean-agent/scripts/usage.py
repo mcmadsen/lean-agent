@@ -177,7 +177,24 @@ def fmt(n):
     return f"{n:,}"
 
 
-def report(arg=None):
+def transcript_span(path):
+    """(first, last) ISO UTC timestamps found in a transcript, or (None, None)."""
+    first = last = None
+    try:
+        with open(path) as fh:
+            for line in fh:
+                m = re.search(r'"timestamp":\s*"([^"]+)"', line)
+                if m:
+                    first = first or m.group(1)
+                    last = m.group(1)
+    except OSError:
+        pass
+    return first, last
+
+
+def report(arg=None, workers=None):
+    """Print the session report. `workers(session_id, first_ts, last_ts)` returns
+    [(model, runs, sonnet-eq)] for worker runs started from this session."""
     path = find_transcript(arg)
     if not path:
         print("lean-agent: no session transcript found", file=sys.stderr)
@@ -201,10 +218,23 @@ def report(arg=None):
     print(f"{'TOTAL':<28}{fmt(totals['input_tokens']):>12}{fmt(totals['cache_creation_input_tokens']):>14}"
           f"{fmt(totals['cache_read_input_tokens']):>14}{fmt(totals['output_tokens']):>12}{fmt(used):>12}")
     print()
+    session_id = os.path.basename(path)[:-6]
+    rows = workers(session_id, *transcript_span(path)) if workers else []
+    if rows:
+        w_total = sum(u for _, _, u in rows)
+        print(f"Workers and reviewers started from this session ({sum(n for _, n, _ in rows)} runs):")
+        for model, n, u in sorted(rows, key=lambda r: -r[2]):
+            print(f"  {model:<26}{n:>4} runs{fmt(int(u)):>14} sonnet-eq")
+        print(f"Combined (this session + its workers): {fmt(used + int(w_total))} sonnet-eq "
+              f"(orchestrator {fmt(used)}, workers {fmt(int(w_total))})")
+    elif workers:
+        print("Workers started from this session: none")
+    print()
     if budget > 0:
-        print(f"Session budget: {fmt(used)} / {fmt(budget)} sonnet-eq tokens ({used * 100 // budget}%)")
+        print(f"Self-set session cap (LEAN_AGENT_BUDGET, not your Claude plan): {fmt(used)} / {fmt(budget)} "
+              f"sonnet-eq for this session ({used * 100 // budget}%)")
     else:
-        print("Session budget: none (LEAN_AGENT_BUDGET, in sonnet-eq tokens)")
+        print("No session cap set. For your plan's usage see `lean-agent limits` (and /usage in Claude Code).")
     print("sonnet-eq = (input + 1.25*cache write + 0.1*cache read + 5*output) x model price relative to Sonnet")
     return 0
 

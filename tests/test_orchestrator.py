@@ -980,6 +980,23 @@ class CliTest(unittest.TestCase):
         self.assertIn("core for every task but used in only 0/5", out)
         self.assertNotIn("*style", self.cli("cards", "proj").stdout)
 
+    def test_budget_includes_workers_and_labels_cap(self):
+        self.cli("learn", self.proj)
+        self.write_usage("-orch-home", 0.5, "claude-sonnet-5-5", 10000, "o1")
+        transcript = os.path.join(self.env["CLAUDE_CONFIG_DIR"], "projects", "-orch-home", "s.jsonl")
+        os.rename(transcript, os.path.join(os.path.dirname(transcript), "orch-1.jsonl"))
+        transcript = os.path.join(os.path.dirname(transcript), "orch-1.jsonl")
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "t", CLAUDE_CODE_SESSION_ID="orch-1")
+        self.cli("run", "proj", "-m", "sonnet", "--why", "x", "t", CLAUDE_CODE_SESSION_ID="orch-1")
+        self.cli("run", "proj", "-m", "sonnet", "--why", "x", "t", CLAUDE_CODE_SESSION_ID="someone-else")
+        out = self.cli("budget", transcript).stdout
+        self.assertIn("Workers and reviewers started from this session (2 runs):", out)
+        self.assertIn("Combined (this session + its workers): 13,255 sonnet-eq", out)  # 10,000 + 3,100 + 155
+        self.assertIn("No session cap set", out)
+        self.assertNotIn("%", out.split("Workers")[0])
+        out = self.cli("budget", transcript, LEAN_AGENT_BUDGET="40000").stdout
+        self.assertIn("Self-set session cap (LEAN_AGENT_BUDGET, not your Claude plan): 10,000 / 40,000", out)
+
     def test_home_template(self):
         h = self.cli("home").stdout.strip()
         with open(os.path.join(h, "CLAUDE.md")) as fh:
