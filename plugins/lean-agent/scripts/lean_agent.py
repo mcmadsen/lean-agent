@@ -565,6 +565,71 @@ def find_card(cards, cid):
     die(f"no card {cid!r}")
 
 
+KEY_TOKEN_RES = [re.compile(r"`([^`]{2,80})`"), re.compile(r"(?m)^#+\s*(.+)$"),
+                 re.compile(r"\b[\w.-]+/[\w./-]+\b"), re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b"),
+                 re.compile(r"\b\w*[a-z][A-Z]\w*\b"), re.compile(r"\b\w+_\w+\b"), re.compile(r"\b\d[\d.,:]*\b")]
+
+
+def key_tokens(text):
+    """What a shorter card must keep: headings, `code`, paths, CONSTANTS, camelCase/snake_case names, numbers."""
+    out = set()
+    for rx in KEY_TOKEN_RES:
+        for m in rx.finditer(text):
+            out.add((m.group(1) if rx.groups else m.group(0)).strip())
+    return {t for t in out if t}
+
+
+SHORTEN_PROMPT = """Rewrite this context card for an AI coding agent to be about half as long. Keep every rule, command,
+path, name, number and heading; drop repetition, filler and explanations the agent doesn't need to act. Use the
+same headings. Output only the new card text, nothing else.
+
+---
+{text}
+"""
+
+
+def shorten_card(slug, cards, a):
+    """Propose a shorter text for a card (one Haiku call) and check nothing important got lost."""
+    c = find_card(cards, a.id)
+    claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
+    d = home("work", "shorten")
+    os.makedirs(d, exist_ok=True)
+    try:
+        out = subprocess.run([claude, "-p", "--output-format", "stream-json", "--verbose", "--model", a.model or "haiku",
+                              "--max-turns", "1", "--tools", "", "--safe-mode"],
+                             input=SHORTEN_PROMPT.format(text=c["text"]), capture_output=True, text=True, cwd=d,
+                             timeout=180).stdout
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        die(f"couldn't run {claude}: {exc}")
+    new = ""
+    for line in out.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") == "result":
+            new = (ev.get("result") or "").strip()
+        elif ev.get("type") == "rate_limit_event":
+            usage.record_plan_usage(ev.get("rate_limit_info"))
+    if not new:
+        die("no shorter text came back")
+    lost = sorted(key_tokens(c["text"]) - key_tokens(new) - {t for t in key_tokens(c["text"]) if t in new})
+    print(f"{c['id']}: ~{c['tokens']:,} -> ~{est_tokens(new):,} tokens")
+    print("--- proposed text ---\n" + new + "\n---")
+    if lost:
+        print("lost (not in the shorter text): " + ", ".join(lost[:30]))
+    if a.save:
+        if lost and not a.force:
+            die("not saved: the shorter text lost the items above (edit it, or --save --force)")
+        c.update(text=new, tokens=est_tokens(new), updated=now_iso(), edited=True)
+        c.setdefault("source_text", c.get("text"))
+        save_cards(slug, cards)
+        print(f"saved card {c['id']}")
+    else:
+        print(f"save it with: lean-agent card shorten {slug} {c['id']} --save" + ("" if not lost else " --force"))
+    return 0
+
+
 def cmd_card(a):
     slug, _ = resolve_project(a.project)
     with library_lock(slug):
@@ -574,6 +639,8 @@ def cmd_card(a):
 def _cmd_card(a):
     slug, _ = resolve_project(a.project)
     cards = load_cards(slug)
+    if a.action == "shorten":
+        return shorten_card(slug, cards, a)
     if a.action == "show":
         c = find_card(cards, a.id)
         print(f"# {c['title']}  ({c['kind']}, ~{c['tokens']} tok, used {card_rate(c)}, source {c['source']})\n")
@@ -3662,7 +3729,7 @@ def draft_proposals(slug):
             and r.get("status") == "done" and r.get("role") != "reviewer"]
     cards = [c for c in load_cards(slug) if not c.get("archived")]
     cache = mcp_cache()
-    groups, used_names = [], {}
+    groups, used_names, drafted = [], {}, {}
     for r in runs:
         tools = run_tools(r)
         if not tools:
@@ -3724,7 +3791,20 @@ def draft_proposals(slug):
             writes = [t for t in all_ts if is_write_tool(t)]
             variants = [("", reads)] if g["read_only"] or not writes else [("", reads), ("-write", all_ts)]
             for suffix, ts in variants:
-                if not ts or any(set(ts) == set(v) for v in presets.values()):
+                if not ts or any(set(ts) <= set(v) and len(v) <= max(len(ts) + 2, int(len(ts) * 1.5))
+                                 for v in presets.values()):
+                    continue  # an existing preset already covers these tools closely (a broad one like `read` doesn't)
+                if frozenset(ts) in drafted.setdefault(srv, set()):
+                    continue  # another draft in this batch has exactly these tools
+                drafted[srv].add(frozenset(ts))
+                sup = [(p_, v) for p_, v in presets.items() if set(v) < set(ts)]
+                if sup:  # extend the closest existing preset instead of a new name next to it
+                    p_, v = max(sup, key=lambda x: len(x[1]))
+                    extra = [t for t in ts if t not in v]
+                    drafts.append({"id": f"draft-extend-{key}-{slugify(srv, 20)}-{p_}", "kind": "preset", "server": srv,
+                                   "name": p_, "tools": list(dict.fromkeys(list(v) + extra)), "runs": n,
+                                   "why": f"extend existing preset {p_} with {', '.join(extra)}"
+                                          + ("; includes write tools" if any(is_write_tool(t) for t in extra) else "")})
                     continue
                 if not (n >= 2 or (offered and offered >= 2 * len(ts) and offered - len(ts) >= 5)):
                     continue
@@ -3754,7 +3834,10 @@ def _draft_proposals(a, slug):
     drafts = [d for d in draft_proposals(slug) if state.get(d["id"]) not in ("accepted", "rejected")]
     for rid in (a.reject or "").split(","):
         if rid:
+            known_ids = {d["id"] for d in draft_proposals(slug)}
             state[rid] = "rejected"
+            print(f"rejected {rid}: won't be proposed again" if rid in known_ids else
+                  f"rejected {rid} (no open draft has that id now; it won't be proposed if it comes up)")
     accept = [x for x in (a.accept or "").split(",") if x]
     for d in drafts:
         if d["id"] in accept:
@@ -3809,8 +3892,8 @@ def _cmd_optimize(a):
             if not is_core(c, "") and rate <= 0.2 and c["unneeded"] >= 2:
                 actions.append(("archive", c, f"used in {card_rate(c)} runs, marked unneeded {c['unneeded']}x", None))
             if rate >= 0.5 and c["tokens"] > 600:
-                actions.append(("trim", c, f"~{c['tokens']} tok and often used: rewrite shorter with "
-                                f"`card add {slug} {c['id']} --file ...`", None))
+                actions.append(("trim", c, f"~{c['tokens']} tok and often used: `lean-agent card shorten {slug} "
+                                f"{c['id']}` proposes a shorter text and checks nothing important is lost", None))
     if not actions and not (a.accept or a.reject):
         print(f"Cards: nothing to promote, demote, archive or trim right now (that needs {a.min_runs}+ runs per card; "
               "earlier --apply changes are already in). New-card and preset drafts follow below, if any.")
@@ -3852,11 +3935,36 @@ def _cmd_optimize(a):
     if list(read_jsonl(reviews_path(slug))) and not any(c["id"] == "review-checklist" for c in load_cards(slug)):
         print(f"review  after a human review of a PR, teach the reviewer what it missed: "
               f"lean-agent review learn {slug} <PR> --mcp <tracker>  (or --text \"...\")")
-    notes = list(read_jsonl(home("library", slug, "missing.jsonl")))[-a.notes:]
-    if notes:
-        print("\nRecent context gaps reported by workers (turn recurring ones into cards with `lean-agent card add`):")
-        for n in notes:
+    acked_path = home("library", slug, "gaps-acked.json")
+    acked = set(load_json(acked_path, []))
+    if a.ack:
+        ids = [x for x in a.ack.split(",") if x]
+        acked |= set(ids)
+        save_json(acked_path, sorted(acked))
+        for x in ids:
+            print(f"acknowledged gap from run {x}: not shown again")
+    known = " ".join(c["text"] for c in load_cards(slug) if not c.get("archived"))
+    tconf = (projects().get(slug) or {}).get("tracker") or {}
+    known += " " + " ".join(map(str, (tconf.get("notes") or []) + tracker_facts_text(tconf)))
+    known_words = _words(known)
+    notes = list(read_jsonl(home("library", slug, "missing.jsonl")))[-a.notes * 3:]
+    open_gaps, covered = [], 0
+    for n in notes:
+        gw = {w for w in _words(n["missing"]) if len(w) > 3}
+        if n["run"] in acked:
+            continue
+        if gw and len(gw & known_words) / len(gw) >= 0.6:
+            covered += 1  # a card or tracker note already says this
+            continue
+        open_gaps.append(n)
+    open_gaps = open_gaps[-a.notes:]
+    if open_gaps:
+        print("\nContext gaps reported by workers (turn recurring ones into cards with `lean-agent card add`; "
+              f"hide one with --ack <run-id>):")
+        for n in open_gaps:
             print(f"- [{n['run']}] {n['missing'][:200]}")
+    if covered:
+        print(f"({covered} earlier gap(s) hidden: a card or tracker note already covers them)")
 
 
 # ---------------------------------------------------------------- commands: setup
@@ -4817,9 +4925,12 @@ def build_parser():
     s.add_argument("--all", action="store_true", help="include archived cards")
     s.set_defaults(fn=cmd_cards)
     s = sub.add_parser("card", help="show/add/rm/core one card")
-    s.add_argument("action", choices=["show", "add", "rm", "core"])
+    s.add_argument("action", choices=["show", "add", "rm", "core", "shorten"])
     s.add_argument("project")
     s.add_argument("id")
+    s.add_argument("--save", action="store_true", help="shorten: save the proposal (only if nothing important is lost)")
+    s.add_argument("--force", action="store_true", help="shorten: save even if something is lost")
+    s.add_argument("-m", "--model", help="shorten: model (default haiku)")
     s.add_argument("--title")
     s.add_argument("--text")
     s.add_argument("--file")
@@ -4913,6 +5024,7 @@ def build_parser():
     s.add_argument("--notes", type=int, default=10)
     s.add_argument("--accept", metavar="IDS", help="write these drafts (cards with card add, presets with mcp preset)")
     s.add_argument("--reject", metavar="IDS", help="stop proposing these drafts")
+    s.add_argument("--ack", metavar="RUN_IDS", help="hide these runs' context gaps (already handled)")
     s.set_defaults(fn=cmd_optimize)
 
     s = sub.add_parser("review", help="pre-PR review by a read-only reviewer (sonnet, high effort)")
