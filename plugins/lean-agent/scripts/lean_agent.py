@@ -3329,6 +3329,13 @@ def cmd_doctor(a):
         else:
             report(False, f"{f} contradicts lean-agent ({where})", "lean-agent doctor --fix  (adds a one-line precedence note)")
 
+    stale = forward_old_hooks(dry=not a.fix)
+    if stale and not a.fix:
+        report(False, f"{len(stale)} hook script(s) in older cached plugin copies run outdated code (sessions "
+               "started on them keep using them, e.g. an old session cap)", "lean-agent doctor --fix  (or sync)")
+    elif stale:
+        report(True, f"forwarded {len(stale)} old hook script(s) to the clone; open sessions use them from their "
+               "next tool call")
     st = chrome_state()
     print("  chrome for workers: " + ("verified" if st.get("ok") else "not verified (lean-agent chrome check)"))
     plugin_srv = {n: v for n, v in lean_mcp.discover().items() if v["source"] == "plugin"}
@@ -3466,6 +3473,56 @@ def cmd_up(a):
         die("'claude' not found on PATH")
 
 
+FORWARD_MARK = "lean-agent: forwards to the clone"
+FORWARD_STUB = """#!/usr/bin/env python3
+# {mark}. This is an older cached copy of the plugin; sessions started on it keep this path for their
+# hooks, so it hands over to the current code in the clone recorded in ~/.lean-agent/source.
+import os, sys
+home = os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent")
+try:
+    root = open(os.path.join(home, "source")).read().strip()
+except OSError:
+    root = {root!r}
+target = os.path.join(root, "plugins", "lean-agent", "scripts", {name!r})
+if not os.path.isfile(target):
+    sys.exit(0)  # no clone: do nothing rather than run outdated rules
+os.execv(sys.executable, [sys.executable, target] + sys.argv[1:])
+"""
+HOOK_SCRIPTS = ("budget_hook.py", "squeeze_hook.py")
+
+
+def old_plugin_copies():
+    """Cached copies of this plugin other than the clone: Claude Code keeps the version a session started with,
+    and sessions from before 0.3 call their hook scripts there directly (no trampoline)."""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    root = clone_root()
+    out = []
+    for d in glob.glob(os.path.join(cfg, "plugins", "cache", "*", "lean-agent", "*", "scripts")):
+        if root and os.path.realpath(d).startswith(os.path.realpath(root)):
+            continue
+        out.append(d)
+    return sorted(out)
+
+
+def forward_old_hooks(dry=False):
+    """Replace the hook scripts in older cached plugin copies with a stub that runs the clone's current code,
+    so sessions that are already open get today's hooks from their next tool call. Returns the files changed."""
+    root = clone_root()
+    if not root:
+        return []
+    changed = []
+    for d in old_plugin_copies():
+        for name in HOOK_SCRIPTS:
+            path = os.path.join(d, name)
+            if not os.path.isfile(path) or FORWARD_MARK in read_text(path):
+                continue
+            changed.append(path)
+            if not dry:
+                with open(path, "w") as fh:
+                    fh.write(FORWARD_STUB.format(mark=FORWARD_MARK, root=root, name=name))
+    return changed
+
+
 def cmd_sync(a):
     root = clone_root()
     if not root:
@@ -3522,6 +3579,10 @@ def cmd_sync(a):
     up = load_json(home("up.json"), {})
     restart = bool(up) and not up.get("local") and up.get("server_env") != ORCHESTRATOR_ENV
     print(f"plugin: {plugin}")
+    forwarded = forward_old_hooks()
+    if forwarded:
+        print(f"older plugin copies: {len(forwarded)} hook script(s) now forward to the clone, so sessions that "
+              "were already open get the current hooks from their next tool call")
     print(f"orchestrator guide: {'changed' if guide_changed else 'unchanged'} · "
           f"orchestrator settings: {'changed' if settings_changed else 'unchanged'}")
     if relearned:
