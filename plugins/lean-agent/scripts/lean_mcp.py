@@ -106,6 +106,28 @@ def plugin_options(pid, manifest):
     return opts
 
 
+def lean_file(name):
+    return os.path.join(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent"), name)
+
+
+_ENV_CACHE = {}
+
+
+def env_from_command(name):
+    """A variable's value from the command saved with `lean-agent mcp env NAME --command ...` (e.g.
+    `gh auth token`), run when needed and kept in memory only; None if there's no command or it failed."""
+    cmd = (_load(lean_file("mcp-env.json")).get(name) or {}).get("command")
+    if not cmd:
+        return None
+    if name not in _ENV_CACHE:
+        try:
+            p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+            _ENV_CACHE[name] = p.stdout.strip() if p.returncode == 0 and p.stdout.strip() else None
+        except (OSError, subprocess.TimeoutExpired):
+            _ENV_CACHE[name] = None
+    return _ENV_CACHE[name]
+
+
 def _expand(value, root, data, options=None, missing=None, env=None):
     """${CLAUDE_PLUGIN_ROOT}, ${CLAUDE_PLUGIN_DATA}, ${user_config.x}, ${VAR} and ${VAR:-default} in a plugin's
     server config, as Claude Code does; names it can't fill go into `missing` ("env:VAR" for variables)."""
@@ -126,6 +148,9 @@ def _expand(value, root, data, options=None, missing=None, env=None):
                 return env.get(m.group(1)) or m.group(2)
             if m.group(1) in env:
                 return env[m.group(1)]
+            from_cmd = env_from_command(m.group(1))
+            if from_cmd is not None:
+                return from_cmd
             if missing is not None:
                 missing.append("env:" + m.group(1))
             return m.group(0)
@@ -173,8 +198,13 @@ def plugin_servers(project_path=None):
                 "config": cfg, "source": "plugin", "plugin": pid, "copy": kind, "path": root,
                 "alias": name if len(mapping) == 1 else f"{name}-{server}", "missing_options": sorted(set(missing))})
     seen = load_claude_view()
+    fixes = _load(lean_file("mcp-overrides.json"))
     found = {}
     for full, entries in copies.items():
+        for e in entries:  # corrections doctor learned from `claude mcp get` (type and url only, never secrets)
+            fix = fixes.get(full) or {}
+            if fix and fix.get("from") == server_target(e["config"]):
+                e["config"] = {**e["config"], **{k: v for k, v in fix.items() if k in ("type", "url")}}
         # The copy Claude Code itself uses, when `claude mcp list` has been seen (doctor records it):
         # same target; else the installed one, which Claude Code prefers over a synced duplicate.
         target = (seen.get(full) or {}).get("target")
@@ -231,6 +261,32 @@ def claude_mcp_list(timeout=90):
     if found:
         save_claude_view(found)
     return found
+
+
+def claude_mcp_get(name, timeout=60):
+    """Claude Code's own view of one server ({"type", "url", "headers"}) from `claude mcp get`; {} if unknown."""
+    claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
+    try:
+        out = subprocess.run([claude, "mcp", "get", name], capture_output=True, text=True, timeout=timeout,
+                             stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    cfg, in_headers = {}, False
+    for line in out.splitlines():
+        m = re.match(r"^\s{2}(Type|URL|Command|Args|Headers):\s?(.*)$", line)
+        if m:
+            in_headers = m.group(1) == "Headers"
+            if m.group(1) in ("Type", "URL"):
+                cfg[m.group(1).lower()] = m.group(2).strip()
+            elif in_headers:
+                cfg["headers"] = {}
+            continue
+        h = re.match(r"^\s{4}([^:\s][^:]*):\s?(.*)$", line)
+        if in_headers and h:
+            cfg["headers"][h.group(1)] = h.group(2).strip()
+        elif not line.startswith("    "):
+            in_headers = False
+    return cfg
 
 
 def resolve_name(name, servers):
