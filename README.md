@@ -227,6 +227,10 @@ uncommitted changes and new untracked files.
   can't overrule a second opinion that found existing code for it. Open items send the reviewer back once, in the
   same session, to finish the reuse pass before you get the result; duplication, scope and platform findings are at least major, a reuse or
   extend verdict without a matching finding gets one, and design findings are listed before test and style ones.
+- **Wrappers and decisions:** a thin wrapper or hook that calls existing code is `wraps-existing` (reuse done
+  right, not a duplicate). Findings are numbered; `lean-agent review decline <project> <n> --why "separate
+  ticket"` records a decision for that branch (`--all-branches` for the project), so later reviews and the second
+  opinion are told and a matching finding isn't raised again.
 - **Second opinion:** for new abstractions or big diffs (`--second-opinion auto|on|off`), a cheap search-only
   Haiku pass looks for reuse candidates and siblings first. The main reviewer has to confirm or reject each.
 - **Lessons from human reviews:** `lean-agent review learn <project> --text "Before adding overlay state, check
@@ -234,6 +238,10 @@ uncommitted changes and new untracked files.
   project gets: `review-checklist` and `shared-helpers` (the latter also for code changes). `review learn
   <project> <PR> --mcp <tracker>` reads the PR's human review threads through the tracker's MCP server, compares
   them with lean-agent's own review of that branch, and turns what was missed into checklist lines and helpers.
+  The worker has to open the code for every helper: one whose path isn't in the repository is left out. It gets
+  the cards' current text, so near-duplicates are skipped, a known helper's line is updated, and wrong lines are
+  corrected (`replace`). Threads that ended in a decision to leave something out become declined findings, not
+  lessons. `review learn <project> --verify` cleans existing cards (paths that don't exist, "not confirmed").
 - **Re-review:** `review <project> --resume` continues the same reviewer session, which is cheap because its
   context is cached, and checks earlier findings first. It also runs the reuse, scope and platform passes again
   on the files changed since the last review and asks it to reconsider the design, not only the earlier findings. Add `--head <branch>` to resume the review of that
