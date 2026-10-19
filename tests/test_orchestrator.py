@@ -321,6 +321,23 @@ class CliTest(unittest.TestCase):
         self.assertIn("capturedAtMs = Date.now()", append)
         self.assertIn("4. Tests. For every test the change edits", append)
 
+    def test_expensive_run_asks_first(self):
+        import time as _t
+        self.cli("learn", self.proj)
+        plan = json.dumps({"status": "allowed", "unifiedWindows": {
+            "five_hour": {"utilization": 0.63, "resetsAt": int(_t.time()) + 3600}}})
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", FAKE_PLAN=plan)
+        self.assertIn("run ", p.stderr)
+        self.assertIn(" started · haiku · proj", p.stderr)
+        p = self.cli("run", "-p", "proj", "-m", "opus", "--why", "x", "deep review", check=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("opus run, expected ~", p.stderr)
+        self.assertIn("(session window now 63%)", p.stderr)
+        self.assertIn("ask the user, then add --yes", p.stderr)
+        self.cli("run", "-p", "proj", "-m", "opus", "--why", "x", "--yes", "deep review")
+        self.assertIn("Plan (from Claude", self.cli("budget", check=False).stdout)
+        self.assertIn("No runs in progress", self.cli("runs", "--running").stdout)
+
     def test_run_requires_model_and_why(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "do it", check=False)

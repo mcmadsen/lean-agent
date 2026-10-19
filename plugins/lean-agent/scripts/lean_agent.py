@@ -970,6 +970,50 @@ def resolve_mcp(project, specs):
     return servers, allowed, disallowed
 
 
+def expected_run_units(model, ttype=None):
+    """Average sonnet-eq of earlier runs on this model (same task type when known), or None."""
+    runs = [r for r in ledger() if usage.model_rate(r.get("model")) == usage.model_rate(model) and not r.get("resumed")
+            and r.get("units")]
+    typed = [r for r in runs if ttype and r.get("type") == ttype]
+    pick = typed if len(typed) >= 2 else runs
+    return (sum(r["units"] for r in pick) // len(pick), len(pick)) if pick else (None, 0)
+
+
+def plan_share(units):
+    """(share of the session window `units` would take, session % now) from Claude's numbers; (None, None)."""
+    real, age = usage.plan_usage()
+    if not real or "five_hour" not in real or age is None or age > 120:
+        return None, None
+    now_pct = real["five_hour"]["pct"]
+    w = usage.window_usage()["5h"]
+    if not now_pct or not w["all"]:
+        return None, now_pct
+    per_pct = w["all"] / now_pct  # sonnet-eq per 1% of the session window, from what this machine used
+    return units / per_pct, now_pct
+
+
+def expensive_run_check(a, model, task):
+    """Before an Opus/Fable-class run: print the expected cost and plan share; ask for --yes when it's large."""
+    if usage.model_rate(model) < 2:
+        return
+    units, n = expected_run_units(model, getattr(a, "ttype", None))
+    if units is None:
+        units = 200000 * usage.model_rate(model)  # no history yet: a rough guess
+        how = "a rough guess (no earlier runs on this model)"
+    else:
+        how = f"average of {n} earlier run(s)"
+    share, now_pct = plan_share(units)
+    line = f"lean-agent: {model} run, expected ~{units:,} sonnet-eq ({how})"
+    if share is not None:
+        line += f", about {share:.0f}% of your session window (now {now_pct:.0f}%)"
+    elif now_pct is not None:
+        line += f" (session window now {now_pct:.0f}%)"
+    print(line, file=sys.stderr, flush=True)
+    limit = env_num("LEAN_AGENT_CONFIRM_PCT", 10)
+    if not getattr(a, "yes", False) and ((share or 0) >= limit or (now_pct or 0) >= 50):
+        die(f"that's a large share of your plan: ask the user, then add --yes (or use -m sonnet)", 2)
+
+
 def duplicate_launch_guard(a, model, task):
     """Refuse the same task (project, model, task text) while it runs or right after it finished, unless --again:
     an orchestrator that retries a command it thinks failed shouldn't pay for the work twice."""
@@ -1022,6 +1066,8 @@ def cmd_run(a):
     launch_key = None
     if not prev and not getattr(a, "role", None) and os.environ.get("LEAN_AGENT_LAUNCH_GUARD") != "0":
         launch_key = duplicate_launch_guard(a, model, task)
+    if not prev and not getattr(a, "role", None):
+        expensive_run_check(a, model, task)
 
     wt = None
     if prev:
@@ -1155,6 +1201,11 @@ def cmd_run(a):
     env.setdefault("BASH_MAX_OUTPUT_LENGTH", os.environ.get("LEAN_AGENT_WORKER_BASH_OUTPUT") or "12000")
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"  # memory comes from lean-agent cards instead
 
+    print(f"run {run_id} started · {model} · {slug}" + (" (resumed)" if prev else "") +
+          f" · see it later with `lean-agent runs --show {run_id}`", file=sys.stderr, flush=True)
+    if launch_key:
+        save_json(home("running", launch_key + ".json"), {"pid": os.getpid(), "started": now_iso(), "run": run_id,
+                                                         "task": task[:120], "model": model, "project": slug})
     for line in mcp_cost_lines(mcp_specs, chrome_spec):
         print(line, flush=True)
 
@@ -4056,6 +4107,20 @@ def cmd_runs(a):
     if a.project:
         slug, _ = resolve_project(a.project)
         runs = [r for r in runs if r["project"] == slug]
+    if a.running:
+        found = False
+        for f in sorted(glob.glob(home("running", "*.json"))):
+            m = load_json(f, {})
+            try:
+                os.kill(m.get("pid", 0), 0)
+            except (OSError, TypeError):
+                continue
+            found = True
+            print(f"{m.get('run', '?')}  running since {m.get('started', '?')[11:19]}  {m.get('model', '?'):<7} "
+                  f"{m.get('project', '?'):<16} {m.get('task', '')[:70]}")
+        if not found:
+            print("No runs in progress.")
+        return
     if a.show or a.tokens:
         rid = a.show if a.show and a.show != "last" else (runs[-1]["id"] if runs else None)
         r = next((x for x in reversed(runs) if x["id"] == rid), None)
@@ -4626,6 +4691,7 @@ def cmd_budget(a):
               "applies to running sessions from their next tool call")
         if a.session is None:
             return 0
+    print_plan_line()
     sys.exit(usage.report(a.session, workers=session_workers))
 
 
@@ -4724,6 +4790,7 @@ def build_parser():
     s.add_argument("--read-only", action="store_true", help=f"tools: {READONLY_TOOLS}")
     s.add_argument("--ref", metavar="REF", help="the branch/commit to look at when it isn't checked out (read with git show)")
     s.add_argument("--again", action="store_true", help="run even if the same task is running or just finished")
+    s.add_argument("--yes", action="store_true", help="confirm an expensive run (large share of the plan window)")
     s.add_argument("--tools", help=f"explicit tool list (default {WORKER_TOOLS})")
     s.add_argument("--max-turns", type=int, default=env_num("LEAN_AGENT_MAX_TURNS", 40))
     s.add_argument("--max-usd", type=float, default=env_num("LEAN_AGENT_RUN_MAX_USD", 3.0, float))
@@ -4879,6 +4946,7 @@ def build_parser():
     s = sub.add_parser("runs", help="recent worker runs (id, status, model, task)")
     s.add_argument("--project", "-p")
     s.add_argument("--last", action="store_true", help="print only the id of the latest run")
+    s.add_argument("--running", action="store_true", help="runs in progress right now")
     s.add_argument("--tokens", action="store_true", help="print the latest (or --show) run's run/tokens/context lines again")
     s.add_argument("--show", nargs="?", const="last", metavar="RUN_ID",
                    help="print a run's whole summary again (default: the latest run)")
