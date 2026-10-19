@@ -218,7 +218,9 @@ uncommitted changes and new untracked files.
      the change adds permanent state.
   The review reports its `searches`, a `reuse` table (new symbol -> existing candidate -> reuse / extend /
   justified-new) and the `siblings` it checked. lean-agent enforces it: a new symbol without a reuse entry means
-  "reuse not checked" and no approve; duplication, scope and platform findings are at least major, a reuse or
+  "reuse not checked" and no approve; "justified-new" next to an existing candidate needs a concrete reason, and
+  can't overrule a second opinion that found existing code for it. Open items send the reviewer back once, in the
+  same session, to finish the reuse pass before you get the result; duplication, scope and platform findings are at least major, a reuse or
   extend verdict without a matching finding gets one, and design findings are listed before test and style ones.
 - **Second opinion:** for new abstractions or big diffs (`--second-opinion auto|on|off`), a cheap search-only
   Haiku pass looks for reuse candidates and siblings first. The main reviewer has to confirm or reject each.
@@ -444,7 +446,7 @@ The session budget is in **weighted tokens**, input-token equivalents using the 
 
 | Variable | Default | |
 |---|---|---|
-| `LEAN_AGENT_BUDGET` | off | Optional self-set **spend** cap per orchestrator session in sonnet-eq tokens: billed tokens summed over every turn, so it's not your plan and not the context window (a session at 11% context can have billed far more). Enforced by a PreToolUse hook: at `LEAN_AGENT_WARN_PCT` (default 80%) a one-time note to spend less, with the current context size, suggesting a hand-off only if the context itself is over `LEAN_AGENT_HANDOFF_CONTEXT` (150,000); at 100% tool calls are blocked. `LEAN_AGENT_BUDGET_COUNT=new` counts only new tokens (no cache re-reads). `lean-agent budget` shows a percentage only when it's set. |
+| `LEAN_AGENT_BUDGET` | off | Optional self-set **spend** cap per orchestrator session in sonnet-eq tokens: billed tokens summed over every turn, so it's not your plan and not the context window (a session at 11% context can have billed far more). Enforced by a PreToolUse hook: at `LEAN_AGENT_WARN_PCT` (default 80%) a one-time note to spend less, with the current context size, suggesting a hand-off only if the context itself is over `LEAN_AGENT_HANDOFF_CONTEXT` (150,000); at 100% tool calls are blocked. `LEAN_AGENT_BUDGET_COUNT=new` counts only new tokens (no cache re-reads). `lean-agent budget --cap N\|off [--count new\|billed]` changes it for running orchestrator sessions from their next tool call, no restart (and wins over the env var); `lean-agent budget/limits/stats/runs/logs/doctor` always run, even when capped. The 1,000,000 default that `up` set before v0.5 is ignored. `lean-agent budget` shows a percentage only when a cap is set. |
 | `LEAN_AGENT_RUN_MAX_USD` | `3.0` | Default `--max-usd` per worker (`claude --max-budget-usd`). |
 | `LEAN_AGENT_MAX_TURNS` | `40` | Default `--max-turns` per worker. |
 | `LEAN_AGENT_WORKER_PERMISSION_MODE` | `acceptEdits` | Worker permission mode. |

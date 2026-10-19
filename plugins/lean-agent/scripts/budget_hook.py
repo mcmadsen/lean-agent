@@ -38,8 +38,11 @@ def main():
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     home = os.path.realpath(usage.lean_home())
     command = str((event.get("tool_input") or {}).get("command") or "").strip()
-    checking = event.get("tool_name") == "Bash" and command.startswith(("lean-agent limits", "lean-agent stats"))
-    if (cwd == home or cwd.startswith(home + os.sep)) and not checking:
+    # lean-agent's own status and budget commands always run, so a blocked session can see and lift its limits
+    checking = event.get("tool_name") == "Bash" and command.startswith(tuple(
+        "lean-agent " + c for c in ("limits", "stats", "budget", "runs", "logs", "doctor")))
+    in_home = cwd == home or cwd.startswith(home + os.sep)
+    if in_home and not checking:
         hit = usage.exhausted_window()
         if hit:
             emit(permissionDecision="deny",
@@ -50,30 +53,31 @@ def main():
     state = usage.load_state(session_id)
     usage.update(state, transcript)
 
-    budget = int(os.environ.get("LEAN_AGENT_BUDGET") or 0)
+    budget, count, _ = usage.session_cap(orchestrator=in_home)
     warn_pct = int(os.environ.get("LEAN_AGENT_WARN_PCT") or 80)
-    used = usage.cap_units(state)  # Sonnet-equivalent tokens, the unit used everywhere
-    new_only = (os.environ.get("LEAN_AGENT_BUDGET_COUNT") or "").lower() == "new"
+    used = usage.cap_units(state, count)  # Sonnet-equivalent tokens, the unit used everywhere
+    new_only = count == "new"
     counted = ("new tokens this session (cache re-reads not counted)" if new_only else
                "tokens billed this session, summed over every turn (cache re-reads count 0.1x)")
     ctx = state.get("last_ctx") or 0
     ctx_big = ctx >= int(os.environ.get("LEAN_AGENT_HANDOFF_CONTEXT") or 150000)
     ctx_note = f"The context window is a different number: ~{ctx:,} tokens now" if ctx else ""
 
-    if budget > 0 and used >= budget:
+    if budget > 0 and used >= budget and not checking:
         usage.save_state(session_id, state)
         emit(
             permissionDecision="deny",
             permissionDecisionReason=(
                 f"lean-agent: the session spend cap you set is reached: {used:,} / {budget:,} sonnet-eq {counted}. "
                 + (ctx_note + ". " if ctx_note else "")
-                + "Do not call more tools. Reply with a short summary of what is done, what remains, and how to "
-                "resume, then end your turn. The user can raise LEAN_AGENT_BUDGET to continue."
+                + "Do not call more tools (only `lean-agent budget` still runs). Reply with a short summary of what "
+                "is done and what remains, then end your turn. The user can lift it right away, without a restart: "
+                "`lean-agent budget --cap off` or `--cap <higher>` (and `--count new` to leave cache re-reads out)."
             ),
         )
         return 0
 
-    if budget > 0 and used >= budget * warn_pct / 100 and not state.get("warned"):
+    if budget > 0 and used >= budget * warn_pct / 100 and not state.get("warned") and not checking:
         state["warned"] = True
         usage.save_state(session_id, state)
         advice = ("Spend less from here: fewer, larger steps; delegate reading to -m haiku workers; don't re-read "
