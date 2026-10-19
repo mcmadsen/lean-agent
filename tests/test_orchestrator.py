@@ -29,7 +29,7 @@ FAKE_CLAUDE = textwrap.dedent("""\
             fh.write(json.dumps({"plugin": sys.argv[1:]}) + "\\n")
         sys.exit(0)
     task = sys.stdin.read()
-    if "stream-json" in sys.argv:  # session probe used by `lean-agent chrome check`
+    if "stream-json" in sys.argv and "--append-system-prompt-file" not in sys.argv:  # a session probe, not a worker
         chrome = "--chrome" in sys.argv and os.environ.get("FAKE_CHROME") == ("strict" if "--strict-mcp-config" in sys.argv else "loose") 
         tools = ["Read"] + (["mcp__claude-in-chrome__navigate", "mcp__claude-in-chrome__find",
                              "mcp__claude-in-chrome__form_input", "mcp__claude-in-chrome__gif_creator"] if chrome else [])
@@ -47,6 +47,8 @@ FAKE_CLAUDE = textwrap.dedent("""\
                     tools += [pre + t for t in names]
                     extra += 400 * len(names)
         print(json.dumps({"type": "system", "subtype": "init", "tools": tools, "mcp_servers": servers}))
+        if os.environ.get("FAKE_PLAN"):  # what Claude reports about the plan, as in real stream-json output
+            print(json.dumps({"type": "rate_limit_event", "rate_limit_info": json.loads(os.environ["FAKE_PLAN"])}))
         print(json.dumps({"type": "result", "usage": {"input_tokens": 8000 + (3000 if chrome else 0) + extra}}))
         sys.exit(0)
     log = os.environ["FAKE_LOG"]
@@ -76,6 +78,8 @@ FAKE_CLAUDE = textwrap.dedent("""\
     fb = os.environ.get("FAKE_FEEDBACK", '{"status": "done", "used": [], "unneeded": [], "missing": ""}')
     second = "search-only second opinion" in open(append).read()
     rv = os.environ.get("FAKE_REUSE") if second else os.environ.get("FAKE_REVIEW")
+    if os.environ.get("FAKE_PLAN"):
+        print(json.dumps({"type": "rate_limit_event", "rate_limit_info": json.loads(os.environ["FAKE_PLAN"])}))
     print(json.dumps({"type": "result", "subtype": os.environ.get("FAKE_SUBTYPE", "success"), "is_error": False,
                       "num_turns": 3, "session_id": "sess-1", "total_cost_usd": 0.05,
                       "result": "Did the thing.\\n" + (("LEAN-REVIEW " + rv + "\\n") if rv else "") + "LEAN-FEEDBACK " + fb,
@@ -381,7 +385,6 @@ class CliTest(unittest.TestCase):
         reset = (dt.datetime.now() + dt.timedelta(hours=3)).strftime("%H:%M")
         out = self.cli("limits", "plan", "--session-resets", reset, "--week-resets", "Sat 12:00").stdout
         self.assertRegex(out, r"Session \(\w{3} \d\d:\d\d to \w{3} \d\d:\d\d\): lean-agent 30,000 \| all Claude Code here 40,000")
-        self.assertIn("Plan % unknown", out)
         out = self.cli("limits", "calibrate", "session=20", "week=10", "fable=4").stdout
         self.assertIn("default weights", out)
         self.assertIn("plan ≈ 20%", out)
@@ -422,6 +425,28 @@ class CliTest(unittest.TestCase):
             self.assertAlmostEqual(cfg["caps"]["session"], 1000000, delta=10)
         finally:
             os.environ.pop("LEAN_AGENT_HOME", None)
+
+    def test_real_plan_usage_from_claude(self):
+        import time as _t
+        self.cli("learn", self.proj)
+        self.assertIn("Plan (from Claude): not seen yet", self.cli("limits").stdout)
+        soon, later = int(_t.time()) + 3600, int(_t.time()) + 4 * 86400
+        plan = json.dumps({"status": "allowed", "unifiedWindows": {
+            "five_hour": {"utilization": 0.37, "resetsAt": soon}, "seven_day": {"utilization": 0.12, "resetsAt": later},
+            "seven_day_opus": {"utilization": 0.08, "resetsAt": later}}})
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", FAKE_PLAN=plan)
+        out = self.cli("limits").stdout
+        self.assertRegex(out, r"Plan \(from Claude, 0 min ago\): session 37% \(resets \w{3} \d\d:\d\d\) · week 12%")
+        self.assertIn("opus week 8%", out)
+        self.assertIn("| plan 37%", out)
+        self.assertIn("come from Claude itself", out)
+        self.cli("limits", "--session-pct", "30")
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False)
+        self.assertEqual(p.returncode, 3)
+        self.assertIn("37% of your plan's session limit", p.stderr)
+        self.cli("limits", "--session-pct", "0")
+        plan2 = json.dumps({"status": "allowed", "unifiedWindows": {"five_hour": {"utilization": 0.05, "resetsAt": soon}}})
+        self.assertIn("session 5%", self.cli("limits", "--refresh", FAKE_PLAN=plan2).stdout)
 
     def test_window_hook_only_in_lean_home(self):
         home = self.cli("home").stdout.strip()

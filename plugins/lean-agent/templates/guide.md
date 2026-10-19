@@ -132,8 +132,8 @@ lean-agent card core {{P}} checkout-notes
   `grep`/`rg`, `git show/grep/diff/log/blame`). Put `LEAN_RAW=1` in front of a command for full output.
 - Keep replies short and don't paste worker output unless asked. Before large jobs, check
   `lean-agent limits`; when a window is nearly used, prefer `haiku` workers and smaller steps.
-- If the user tells you what `/usage` shows, record it: `lean-agent limits calibrate session=N week=N`
-  (add `fable=N` etc. for a model's own weekly bar). Reset times go in `lean-agent limits plan`.
+- `lean-agent limits` shows the plan's real usage as Claude reports it (updated by every worker run;
+  `--refresh` fetches it now). Use it before large jobs instead of guessing.
 - If the session spend cap blocks you, only `lean-agent budget|limits|stats|runs|logs|doctor` still run. Tell the
   user, who can lift it at once: `lean-agent budget --cap off` (no restart).
 - When something seems off, run `lean-agent doctor`, and `lean-agent logs` for recent errors

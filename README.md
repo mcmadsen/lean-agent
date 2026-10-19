@@ -410,18 +410,22 @@ You can also switch the model of a running session in the app.
 
 ### Plan windows (Claude Pro / Max)
 
-Subscription plans limit usage per **session** (5 hours, starting with your first message after a reset) and
-per **week** (a fixed reset time), and some models have their own weekly limit. lean-agent can follow the same
-windows and show the same percentages `/usage` shows:
+Subscription plans limit usage per **session** (5 hours) and per **week**, and some models have their own weekly
+limit. lean-agent reads the plan's **real** usage: every `claude -p` call in `stream-json` mode reports the
+plan's utilization and reset times (the same numbers `/usage` shows), and workers run that way, so each worker
+run updates them. `lean-agent limits --refresh` asks for them right away with one tiny Haiku call.
 
 ```sh
-lean-agent limits                                                  # usage now
-lean-agent limits plan --session-resets 13:30 --week-resets "Sat 12:00"   # once: the reset times /usage shows
-lean-agent limits calibrate session=37 week=12 fable=8             # the percentages /usage shows right now
-lean-agent limits --session-pct 60 --week-pct 70                   # agents stop at this share of your plan
-lean-agent limits --5h 2000000 --week 15000000                     # or: a fixed sonnet-eq budget for lean-agent
-lean-agent limits --off                                            # remove the budgets
+lean-agent limits                                  # Plan (from Claude, 3 min ago): session 37% (resets 13:30) · week 12% ...
+lean-agent limits --refresh                        # the same, fetched now
+lean-agent limits --session-pct 60 --week-pct 70   # agents stop at this share of your plan (real numbers when fresh)
+lean-agent limits --5h 2000000 --week 15000000     # or: a fixed sonnet-eq budget for lean-agent's own usage
+lean-agent limits --off                            # remove the budgets
 ```
+
+Claude's numbers are used while they're under 30 minutes old, and they include claude.ai and other machines.
+Between reports lean-agent estimates from local session logs; `limits plan` (reset times) and `limits calibrate
+session=N week=N` (percentages from `/usage`) make that estimate closer, and are only needed if you rarely run workers.
 
 - **What's counted:** usage comes from Claude Code's session logs on this machine, read incrementally and
   timestamped, in 10-minute buckets. That includes the orchestrator, every worker and their subagents, and your
