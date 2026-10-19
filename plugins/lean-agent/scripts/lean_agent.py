@@ -69,7 +69,7 @@ return status "needs-input" with your question and the candidates you found.
 
 {send_rule}
 {browser_rule}
-Start your reply with a one or two sentence summary of the outcome. Then give the result
+{role_rule}Start your reply with a one or two sentence summary of the outcome. Then give the result
 (what you did, files changed, anything unresolved), then one final line exactly like this:
 "used" lists only cards whose content changed what you did, not cards you merely received.
 LEAN-FEEDBACK {{"status": "done|partial|failed|needs-input|awaiting-confirmation", "used": ["card-id"], "unneeded": ["card-id"], "missing": "context you had to discover that should have been given up front, or empty", "remember": []}}
@@ -728,6 +728,21 @@ def ledger():
     return list(read_jsonl(home("ledger.jsonl")))
 
 
+def parse_marker(text, marker):
+    """(text without the `MARKER {json}` line, parsed dict) for the last such line."""
+    lines = text.rstrip().splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        m = re.search(re.escape(marker) + r"\s*(\{.*\})", lines[i])
+        if m:
+            try:
+                data = json.loads(m.group(1))
+            except ValueError:
+                data = {}
+            del lines[i]
+            return "\n".join(lines).strip(), data if isinstance(data, dict) else {}
+    return text.strip(), {}
+
+
 def parse_feedback(text):
     """Split the worker reply into (summary, feedback dict)."""
     fb, lines = {}, text.rstrip().splitlines()
@@ -743,12 +758,13 @@ def parse_feedback(text):
     return "\n".join(lines).strip(), fb if isinstance(fb, dict) else {}
 
 
-def build_append(project, cards, read_only=False, allow_send=None, chrome=False):
+def build_append(project, cards, read_only=False, allow_send=None, chrome=False, role_rule=""):
     parts = [WORKER_PROTOCOL.format(
         project=project,
         shell_rule=(READONLY_SHELL_RULE if read_only else SHELL_RULE).format(project=project),
         send_rule=ALLOW_SEND_RULE.format(approved=allow_send) if allow_send else SEND_RULE,
-        browser_rule=BROWSER_RULE if chrome else "")]
+        browser_rule=BROWSER_RULE if chrome else "",
+        role_rule=role_rule)]
     if cards:
         parts.append("# Project context (selected for this task)\n")
         for c in cards:
@@ -860,22 +876,27 @@ def cmd_run(a):
         tools = prev.get("tools", WORKER_TOOLS)
         read_only = prev.get("read_only", False)
         chrome_spec = prev.get("chrome")
+        role_file = os.path.join(workdir, "role.md")
+        role_rule = getattr(a, "role_rule", None) or (read_text(role_file) if os.path.exists(role_file) else "")
         lib = {c["id"]: c for c in load_cards(slug)}
         with open(os.path.join(workdir, "append.md"), "w") as fh:  # same context, current send/browser rules
             fh.write(build_append(project, [lib[c] for c in prev.get("cards", []) if c in lib], read_only,
-                                  a.allow_send, bool(chrome_spec)))
+                                  a.allow_send, bool(chrome_spec), role_rule))
     else:
         slug, project = resolve_project(a.project)
         sync_memory(slug)
         lib = {c["id"]: c for c in load_cards(slug)}
         wanted = [x for x in (a.cards or "").split(",") if x and x != "none"]
-        if a.cards == "auto":
-            cards = suggest(slug, task, a.max_context, task_type(task, a.read_only, bool(a.chrome)))
+        if getattr(a, "card_list", None) is not None:  # chosen by the caller (e.g. `review`)
+            cards = a.card_list
+        elif a.cards == "auto":
+            cards = suggest(slug, task, a.max_context,
+                            getattr(a, "ttype", None) or task_type(task, a.read_only, bool(a.chrome)))
         else:
             missing = [x for x in wanted if x not in lib]
             if missing:
                 die(f"unknown card(s): {', '.join(missing)} (see: lean-agent cards {slug})")
-            ttype = task_type(task, a.read_only, bool(a.chrome))
+            ttype = getattr(a, "ttype", None) or task_type(task, a.read_only, bool(a.chrome))
             cards = [c for c in lib.values() if is_core(c, ttype) and not c.get("archived")]
             cards += [lib[x] for x in wanted if lib[x] not in cards]
         run_id = datetime.datetime.now().strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
@@ -890,8 +911,12 @@ def cmd_run(a):
             if spec.split(":", 1)[0] == CHROME:
                 a.mcp.remove(spec)
                 chrome_spec = spec.split(":", 1)[1] if ":" in spec else "all"
+        role_rule = getattr(a, "role_rule", "") or ""
+        if role_rule:
+            with open(os.path.join(workdir, "role.md"), "w") as fh:
+                fh.write(role_rule)
         with open(os.path.join(workdir, "append.md"), "w") as fh:
-            fh.write(build_append(project, cards, read_only, a.allow_send, bool(chrome_spec)))
+            fh.write(build_append(project, cards, read_only, a.allow_send, bool(chrome_spec), role_rule))
         tools = a.tools or (READONLY_TOOLS + ",Bash" if read_only else WORKER_TOOLS)
 
     mcp_specs = prev.get("mcp") if prev else (a.mcp or [])
@@ -928,6 +953,10 @@ def cmd_run(a):
            "--add-dir", project,
            "--append-system-prompt-file", os.path.join(workdir, "append.md"),
            "--max-turns", str(a.max_turns)]
+    role = getattr(a, "role", None) or (prev or {}).get("role")
+    effort = getattr(a, "effort", None) or (prev or {}).get("effort")
+    if effort:
+        cmd += ["--effort", effort]
     if a.max_usd > 0:
         cmd += ["--max-budget-usd", str(a.max_usd)]
     if prev:
@@ -965,6 +994,9 @@ def cmd_run(a):
         fh.write((raw.strip() or json.dumps({"stderr": err[-4000:]})) + "\n")
 
     summary, fb = parse_feedback(out.get("result") or "")
+    review = None
+    if role == "reviewer":
+        summary, review = parse_marker(summary, "LEAN-REVIEW")
     subtype = out.get("subtype") or "error"
     if subtype.startswith("error_max"):
         status = "stopped:" + subtype[len("error_"):]
@@ -976,7 +1008,7 @@ def cmd_run(a):
     weighted = usage.weighted(u)
 
     # learning: card stats and missing context
-    run_type = (prev or {}).get("type") or task_type(task, read_only, bool(chrome_spec))
+    run_type = (prev or {}).get("type") or getattr(a, "ttype", None) or task_type(task, read_only, bool(chrome_spec))
     used, unneeded = set(fb.get("used") or []), set(fb.get("unneeded") or [])
     sent = {c["id"] for c in cards}
     if sent or used or unneeded:
@@ -1021,6 +1053,7 @@ def cmd_run(a):
         "mcp": mcp_specs, "mcp_calls": lean_mcp.count_mcp_calls(workdir, out.get("session_id"), started_utc)
         if (mcp_specs or chrome_spec) else {},
         "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
+        "role": role, "effort": effort, "review_meta": getattr(a, "review_meta", None) or (prev or {}).get("review_meta"),
     }
     append_jsonl(home("ledger.jsonl"), entry)
 
@@ -1058,6 +1091,8 @@ def cmd_run(a):
         calls = entry["mcp_calls"]
         print("mcp: " + (", ".join(f"{k} x{v}" for k, v in sorted(calls.items())) or "no MCP tool calls"))
     print(f"resume: lean-agent run --resume {run_id} \"<follow-up>\"")
+    if role == "reviewer":
+        return report_review(slug, project, entry, review or {}, getattr(a, "review_meta", None) or {})
     return 0 if status in ("done", "partial", "needs-input", "awaiting-confirmation") else 1
 
 
@@ -1114,6 +1149,159 @@ def budget_line():
     if low:
         text += " (low: prefer -m haiku, --read-only and smaller steps)"
     return text, low
+
+
+REVIEWER_RULE = """\
+Role: you are the reviewer and tech lead for this change, the last quality gate before a pull request.
+Workers wrote it cheaply; your job is to make sure the quality is still right. You can only read code
+and git history. You can't run tests, build, or change anything, and you mustn't try.
+
+The change: {scope}
+Start with `git -C {project} diff --stat {merge_base}`, then read each file's diff with
+`git -C {project} diff {merge_base} -- <file>`, and only the surrounding code you need (line ranges).
+
+Judge what matters: correctness (logic, edge cases, error handling, concurrency), whether it does what
+the change intends, consistency with the project rules in your context, tests (do they cover the change
+and would they catch a regression?), security, data/migration/API compatibility, and performance
+pitfalls. Skip what a linter or formatter catches. Be specific (file:line, what, why, a concrete
+suggestion), and don't pad: if the change is good, approve it.
+
+Severity: blocker (must fix before the PR), major (should fix), minor, nit.
+Verdict: "approve" (no blockers or majors), "changes-requested", or "needs-checks" (you can't judge
+without something being run or verified; list exactly what under "checks").
+
+Before the LEAN-FEEDBACK line, add one line exactly like this (valid JSON, one line):
+LEAN-REVIEW {{"verdict": "approve|changes-requested|needs-checks", "findings": [{{"severity": "blocker|major|minor|nit", "file": "path", "line": 0, "issue": "...", "why": "...", "suggestion": "..."}}], "checks": [{{"what": "what to run or verify", "why": "..."}}]}}
+"""
+
+
+def git(path, *args):
+    p = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True)
+    return p.stdout.strip() if p.returncode == 0 else None
+
+
+def default_base(path):
+    ref = git(path, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    if ref:
+        return ref.replace("refs/remotes/", "")
+    for cand in ("origin/main", "origin/master", "origin/develop", "main", "master", "develop"):
+        if git(path, "rev-parse", "--verify", "--quiet", cand):
+            return cand
+    return None
+
+
+def untracked_files(path):
+    return (git(path, "ls-files", "--others", "--exclude-standard") or "").split()
+
+
+def review_state(path):
+    """A fingerprint of what's being reviewed: HEAD plus uncommitted and untracked changes."""
+    head = git(path, "rev-parse", "HEAD") or "?"
+    h = hashlib.sha1((git(path, "diff", "HEAD") or "").encode())
+    new = untracked_files(path)
+    for f in new:
+        h.update(f.encode())
+        try:
+            with open(os.path.join(path, f), "rb") as fh:
+                h.update(fh.read())
+        except OSError:
+            pass
+    dirty = bool(git(path, "diff", "HEAD")) or bool(new)
+    return head, h.hexdigest()[:12] if dirty else ""
+
+
+def reviews_path(slug):
+    return home("reviews", slug + ".jsonl")
+
+
+def cmd_review(a):
+    slug, path = resolve_project(a.project)
+    if a.status:
+        last = list(read_jsonl(reviews_path(slug)))[-1:] or [None]
+        last = last[0]
+        if not last:
+            print(f"No review yet. Run: lean-agent review {slug}")
+            return 1
+        head, dirty = review_state(path)
+        current = (last["head"], last["dirty"]) == (head, dirty)
+        print(f"last review {last['run']}: {last['verdict']}" + ("" if current else " (stale: the code changed since)"))
+        return 0 if current and last["verdict"] == "approve" else 1
+    model = os.environ.get("LEAN_AGENT_REVIEW_MODEL") or "sonnet"
+    effort = os.environ.get("LEAN_AGENT_REVIEW_EFFORT") or "high"
+    line, low = budget_line()
+    if low:
+        print(f"lean-agent: budget is low, but the reviewer stays on {model} (effort {effort}): quality gate.",
+              file=sys.stderr)
+    if a.resume:
+        prev = next((r for r in reversed(ledger()) if r.get("role") == "reviewer" and r["project"] == slug), None)
+        if not prev:
+            die(f"no earlier review of {slug} to resume")
+        meta = prev.get("review_meta") or {}
+        task = (f"The change was updated after your review. Re-review the current diff from {meta.get('merge_base')}: "
+                "check whether each earlier finding is resolved, and look for new problems. "
+                + (a.focus or ""))
+        ns = argparse.Namespace(resume=prev["id"], task=[task], task_file=None, model=None, why=None, cards=None,
+                                project=None, read_only=True, chrome=None, mcp=None, tools=None, allow_send=None,
+                                max_turns=a.max_turns, max_usd=a.max_usd, max_context=4000, role="reviewer",
+                                effort=effort, review_meta=meta)
+        return cmd_run(ns)
+    base = a.base or default_base(path)
+    if not base:
+        die("no base branch found; pass --base <branch>")
+    merge_base = git(path, "merge-base", base, "HEAD")
+    if not merge_base:
+        die(f"can't find a merge base between {base} and HEAD in {path}")
+    new = untracked_files(path)
+    names = (git(path, "diff", "--name-only", merge_base) or "").split() + new
+    if not names:
+        die(f"nothing to review: no changes since {base}")
+    stat = git(path, "diff", "--stat", merge_base) or ""
+    if new:
+        stat += "\nNew files not yet tracked by git (not in the diff; Read them in full):\n" + "\n".join(
+            f" {f}" for f in new)
+    head, dirty = review_state(path)
+    scope = (f"everything since branching from {base} (merge base {merge_base[:12]}) up to the working tree"
+             + (", including uncommitted changes" if dirty else "") + f": {len(names)} files"
+             + (f", {len(new)} of them new and untracked (read those directly)" if new else "") + ".")
+    path_words = " ".join(re.split(r"[/._-]+", " ".join(names)))
+    cards = suggest(slug, path_words + " " + (a.focus or ""), a.max_context, "review")
+    task = f"Review this change before it becomes a pull request.\n\nFiles changed:\n{stat}\n"
+    if a.focus:
+        task += f"\nThe author asks you to look closely at: {a.focus}\n"
+    meta = {"base": base, "merge_base": merge_base, "head": head, "dirty": dirty, "files": len(names)}
+    ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=model,
+                            why=f"pre-PR review ({effort} effort)", cards=None, card_list=cards, project=slug,
+                            read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=a.max_turns,
+                            max_usd=a.max_usd, max_context=a.max_context, ttype="review", role="reviewer",
+                            effort=effort, review_meta=meta,
+                            role_rule=REVIEWER_RULE.format(scope=scope, project=path, merge_base=merge_base))
+    return cmd_run(ns)
+
+
+def report_review(slug, project, entry, review, meta):
+    verdict = review.get("verdict") or "unknown"
+    findings = [f for f in review.get("findings") or [] if isinstance(f, dict)]
+    checks = [c for c in review.get("checks") or [] if isinstance(c, dict)]
+    head, dirty = review_state(project)
+    append_jsonl(reviews_path(slug), {"ts": now_iso(), "run": entry["id"], "verdict": verdict, "head": head,
+                                      "dirty": dirty, "base": meta.get("base"), "findings": findings,
+                                      "checks": checks})
+    order = {"blocker": 0, "major": 1, "minor": 2, "nit": 3}
+    print(f"\nREVIEW: {verdict.upper()} · {len(findings)} findings · {len(checks)} checks to run")
+    for f in sorted(findings, key=lambda f: order.get(f.get("severity"), 9)):
+        loc = f"{f.get('file', '?')}:{f.get('line', '')}".rstrip(":")
+        print(f"  [{f.get('severity', '?')}] {loc}: {f.get('issue', '')}")
+        if f.get("suggestion"):
+            print(f"      fix: {f['suggestion']}")
+    for c in checks:
+        print(f"  [check] {c.get('what', '')}" + (f" ({c['why']})" if c.get("why") else ""))
+    blocking = [f for f in findings if f.get("severity") in ("blocker", "major")]
+    if verdict == "approve" and not blocking:
+        print("Approved: OK to prepare the PR (still an outward action: ask the user before creating it).")
+        return 0
+    print("NOT approved. Delegate fixes (blockers/majors) and the checks to workers, then re-review: "
+          f"lean-agent review {slug} --resume")
+    return 2
 
 
 def chrome_state():
@@ -2050,6 +2238,7 @@ def build_parser():
     s.add_argument("--max-usd", type=float, default=env_num("LEAN_AGENT_RUN_MAX_USD", 3.0, float))
     s.add_argument("--task-file")
     s.add_argument("--resume", metavar="RUN_ID", help="continue a previous run's session")
+    s.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="model effort for the worker")
     s.add_argument("--chrome", nargs="?", const="all", metavar="TOOL,TOOL",
                    help="give the worker the user's Chrome via Claude in Chrome (optionally only these tools)")
     s.add_argument("--allow-send", metavar="WHAT",
@@ -2100,6 +2289,17 @@ def build_parser():
     s.add_argument("--min-runs", type=int, default=5, help="runs of a task type before a card can become core for it")
     s.add_argument("--notes", type=int, default=10)
     s.set_defaults(fn=cmd_optimize)
+
+    s = sub.add_parser("review", help="pre-PR review by a read-only reviewer (sonnet, high effort)")
+    s.add_argument("project")
+    s.add_argument("--base", help="branch the change is based on (default: origin's default branch)")
+    s.add_argument("--focus", help="what the reviewer should look at closely")
+    s.add_argument("--resume", action="store_true", help="re-review after fixes, in the same reviewer session")
+    s.add_argument("--status", action="store_true", help="exit 0 only if the current code has an approve")
+    s.add_argument("--max-usd", type=float, default=env_num("LEAN_AGENT_REVIEW_MAX_USD", 5.0, float))
+    s.add_argument("--max-turns", type=int, default=env_num("LEAN_AGENT_REVIEW_MAX_TURNS", 60))
+    s.add_argument("--max-context", type=int, default=4000, help="token cap for the review's cards")
+    s.set_defaults(fn=cmd_review)
 
     s = sub.add_parser("runs", help="recent worker runs (id, status, model, task)")
     s.add_argument("--project", "-p")

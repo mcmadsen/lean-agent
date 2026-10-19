@@ -135,6 +135,30 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   that get used, or dropping it.
 - Not covered: claude.ai connectors (they aren't in a local config file). Remote OAuth servers are untested.
 
+## The reviewer: a quality gate before every PR
+
+Low token use shouldn't mean low quality. `lean-agent review <project>` runs a **reviewer / tech lead** on
+everything since the branch point (merge base with `origin`'s default branch, or `--base`). That includes
+uncommitted changes and new untracked files.
+
+- **Sonnet at high effort, with adaptive thinking.** It's the one place where lean-agent spends tokens on purpose,
+  and it isn't downgraded when a budget runs low (`LEAN_AGENT_REVIEW_MODEL` / `LEAN_AGENT_REVIEW_EFFORT` change it).
+- **Read-only, enforced:** Read, Glob, Grep and read-only `git -C <repo> diff/show/log/blame...`. It can't edit, run
+  tests or build. What needs running goes back to the orchestrator as `checks`.
+- **Context:** cards are picked from the changed file paths, plus core cards for the `review` task type.
+- **Output:** a structured verdict (`approve`, `changes-requested`, `needs-checks`), findings with severity
+  (blocker/major/minor/nit), file:line, the issue, why it matters and a fix, plus the checks to delegate.
+  It exits 0 only on approve.
+- **Re-review:** `review <project> --resume` continues the same reviewer session, which is cheap because its
+  context is cached, and checks earlier findings first. `review <project> --status` exits 0 only if the
+  *current* code (HEAD plus uncommitted changes) has an approve. The guide and repo block make that a hard rule
+  before any PR.
+
+Measured on a sample repo: a planted float-money change with no tests got 3 majors. These were the float rounding
+bug with a concrete failing input, missing tests (citing the project's memory about money tests) and a double-VAT
+risk (citing another memory). After a worker fixed them, the re-review confirmed the fixes and caught a new problem:
+the worker had committed `__pycache__/*.pyc`. Each review cost about $0.06 and 30 s.
+
 ## A lean orchestrator
 
 The orchestrator's own fixed context is paid on every turn, so lean-agent writes `~/.lean-agent/home/.claude/settings.json`
