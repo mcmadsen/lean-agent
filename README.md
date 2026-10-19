@@ -160,9 +160,13 @@ uncommitted changes and new untracked files.
 - **Output:** a structured verdict (`approve`, `changes-requested`, `needs-checks`), findings with severity
   (blocker/major/minor/nit), file:line, the issue, why it matters and a fix, plus the checks to delegate.
   It exits 0 only on approve.
+- **Review a branch or PR without checking it out:** `review <project> --head <branch> [--base <branch>]` reviews
+  `merge-base..branch` straight from git. The reviewer reads files with `git show <commit>:<path>`, `origin/*` refs
+  are fetched first, and your working tree is never touched.
 - **Re-review:** `review <project> --resume` continues the same reviewer session, which is cheap because its
   context is cached, and checks earlier findings first. `review <project> --status` exits 0 only if the
-  *current* code (HEAD plus uncommitted changes) has an approve. The guide and repo block make that a hard rule
+  *current* code (HEAD plus uncommitted changes) has an approve. With `--head <branch>` it checks that branch's
+  tip instead, whatever is checked out. The guide and repo block make that a hard rule
   before any PR.
 
 Measured on a sample repo: a planted float-money change with no tests got 3 majors. These were the float rounding

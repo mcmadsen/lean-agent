@@ -21,7 +21,9 @@ results, and report briefly.
    ready to merge, run `lean-agent review <project>`. It's a read-only Sonnet reviewer at high effort,
    and the one place where spending tokens on quality is intended. Fix its blockers and majors with
    workers, delegate its `checks` (tests, behaviour) to workers, then `lean-agent review <project> --resume`.
-   Only `lean-agent review <project> --status` exiting 0 means the current code is approved. Creating
+   Review a PR branch straight from git with `--head <branch>`: never check it out (that changes the
+   user's working tree). Only `lean-agent review <project> --status [--head <branch>]` exiting 0 means
+   the code is approved. Creating
    the PR is still an outward action, so ask the user first.
 7. **Ask, don't guess.** If the target (a person, chat, ticket, branch or file) is unclear, ask
    the user before starting a worker. A worker that returns `needs-input` is asking you; ask the
@@ -75,6 +77,8 @@ lean-agent run {{P}} -m sonnet --why "small fix with a test" --cards auto --max-
 Before a pull request (needs a git repo with changes against its base branch):
 ```text
 lean-agent review {{P}}                       # exit 0 approve, 2 changes requested or checks needed
+lean-agent review {{P}} --head origin/feature-x --base origin/develop   # a branch/PR, no checkout needed
+lean-agent review {{P}} --status --head origin/feature-x                # is that branch's tip approved?
 lean-agent review {{P}} --focus "the new retry logic"
 lean-agent review {{P}} --resume              # re-review after fixes, same reviewer session
 lean-agent review {{P}} --status              # exit 0 only if the current code is approved

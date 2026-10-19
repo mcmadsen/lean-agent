@@ -1157,8 +1157,9 @@ Workers wrote it cheaply; your job is to make sure the quality is still right. Y
 and git history. You can't run tests, build, or change anything, and you mustn't try.
 
 The change: {scope}
-Start with `git -C {project} diff --stat {merge_base}`, then read each file's diff with
-`git -C {project} diff {merge_base} -- <file>`, and only the surrounding code you need (line ranges).
+Start with `git -C {project} diff --stat {diff_range}`, then read each file's diff with
+`git -C {project} diff {diff_range} -- <file>`, and only the surrounding code you need (line ranges).
+{read_rule}
 
 Judge what matters: correctness (logic, edge cases, error handling, concurrency), whether it does what
 the change intends, consistency with the project rules in your context, tests (do they cover the change
@@ -1214,18 +1215,48 @@ def reviews_path(slug):
     return home("reviews", slug + ".jsonl")
 
 
+def review_target(path, ref=None):
+    """(commit, dirty fingerprint, label, mode) of what a review covers: a ref, or the working tree."""
+    if ref:
+        sha = git(path, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
+        if not sha:
+            die(f"unknown ref {ref!r} in {path} (fetch it first, or check the name)")
+        return sha, "", ref, "ref"
+    head, dirty = review_state(path)
+    branch = git(path, "rev-parse", "--abbrev-ref", "HEAD") or "HEAD"
+    return head, dirty, branch, "worktree"
+
+
+def find_review(slug, path, ref=None):
+    """The latest review covering exactly the current state of `ref` (or of the working tree)."""
+    sha, dirty, label, mode = review_target(path, ref)
+    for r in reversed(list(read_jsonl(reviews_path(slug)))):
+        if r["head"] == sha and r.get("dirty", "") == dirty:
+            return r, (sha, label)
+    return None, (sha, label)
+
+
 def cmd_review(a):
     slug, path = resolve_project(a.project)
+    if a.head and a.head.startswith("origin/") and not a.no_fetch:
+        git(path, "fetch", "-q", "origin")  # updates remote refs only; the working tree isn't touched
     if a.status:
-        last = list(read_jsonl(reviews_path(slug)))[-1:] or [None]
-        last = last[0]
+        match, (sha, label) = find_review(slug, path, a.head)
+        if match:
+            print(f"review {match['run']} of {label} @ {sha[:12]}: {match['verdict']}")
+            return 0 if match["verdict"] == "approve" else 1
+        last = (list(read_jsonl(reviews_path(slug))) or [None])[-1]
         if not last:
-            print(f"No review yet. Run: lean-agent review {slug}")
-            return 1
-        head, dirty = review_state(path)
-        current = (last["head"], last["dirty"]) == (head, dirty)
-        print(f"last review {last['run']}: {last['verdict']}" + ("" if current else " (stale: the code changed since)"))
-        return 0 if current and last["verdict"] == "approve" else 1
+            print(f"No review yet. Run: lean-agent review {slug}" + (f" --head {a.head}" if a.head else ""))
+        else:
+            what = f"{last.get('ref') or '?'} @ {last['head'][:12]}"
+            why = ("uncommitted changes differ from the reviewed state" if last["head"] == sha
+                   else "new commits since")
+            print(f"stale: no review covers {label} @ {sha[:12]} as it is now ({why}). The latest review "
+                  f"({last['run']}, {last['verdict']}) was of {what}"
+                  + ("" if a.head or last.get("mode") != "ref" else f"; check it with --status --head {last['ref']}")
+                  + ".")
+        return 1
     model = os.environ.get("LEAN_AGENT_REVIEW_MODEL") or "sonnet"
     effort = os.environ.get("LEAN_AGENT_REVIEW_EFFORT") or "high"
     line, low = budget_line()
@@ -1236,10 +1267,20 @@ def cmd_review(a):
         prev = next((r for r in reversed(ledger()) if r.get("role") == "reviewer" and r["project"] == slug), None)
         if not prev:
             die(f"no earlier review of {slug} to resume")
-        meta = prev.get("review_meta") or {}
-        task = (f"The change was updated after your review. Re-review the current diff from {meta.get('merge_base')}: "
-                "check whether each earlier finding is resolved, and look for new problems. "
-                + (a.focus or ""))
+        meta = dict(prev.get("review_meta") or {})
+        if meta.get("mode") == "ref":
+            if meta.get("ref", "").startswith("origin/") and not a.no_fetch:
+                git(path, "fetch", "-q", "origin")
+            sha, _, _, _ = review_target(path, meta["ref"])
+            meta["head"] = sha
+            rng = f"{meta['merge_base']} {sha}"
+            where = (f"{meta['ref']} is now at {sha[:12]}. Re-review `git -C {path} diff {rng}`; read files with "
+                     f"`git -C {path} show {sha}:<path>` (they are not checked out).")
+        else:
+            meta["head"], meta["dirty"] = review_state(path)
+            where = f"Re-review the current diff from {meta.get('merge_base')} to the working tree."
+        task = (f"The change was updated after your review. {where} Check whether each earlier finding is "
+                "resolved, and look for new problems. " + (a.focus or ""))
         ns = argparse.Namespace(resume=prev["id"], task=[task], task_file=None, model=None, why=None, cards=None,
                                 project=None, read_only=True, chrome=None, mcp=None, tools=None, allow_send=None,
                                 max_turns=a.max_turns, max_usd=a.max_usd, max_context=4000, role="reviewer",
@@ -1248,33 +1289,48 @@ def cmd_review(a):
     base = a.base or default_base(path)
     if not base:
         die("no base branch found; pass --base <branch>")
-    merge_base = git(path, "merge-base", base, "HEAD")
+    sha, dirty, label, mode = review_target(path, a.head)
+    merge_base = git(path, "merge-base", base, sha)
     if not merge_base:
-        die(f"can't find a merge base between {base} and HEAD in {path}")
-    new = untracked_files(path)
-    names = (git(path, "diff", "--name-only", merge_base) or "").split() + new
+        die(f"can't find a merge base between {base} and {label} in {path}")
+    if mode == "ref":
+        rng = f"{merge_base} {sha}"
+        names = (git(path, "diff", "--name-only", merge_base, sha) or "").split()
+        new = []
+        stat = git(path, "diff", "--stat", merge_base, sha) or ""
+        scope = (f"the commits on {label} since it branched from {base} (merge base {merge_base[:12]}), "
+                 f"up to {sha[:12]}: {len(names)} files.")
+        read_rule = (f"These files are NOT checked out (the working tree is on something else). Read them at the "
+                     f"reviewed commit with `git -C {path} show {sha}:<path>`, and use `git -C {path} grep -n <pattern> "
+                     f"{sha}` to search. Never read the working-tree copies, they're a different version.")
+    else:
+        rng = merge_base
+        new = untracked_files(path)
+        names = (git(path, "diff", "--name-only", merge_base) or "").split() + new
+        stat = git(path, "diff", "--stat", merge_base) or ""
+        if new:
+            stat += "\nNew files not yet tracked by git (not in the diff; Read them in full):\n" + "\n".join(
+                f" {f}" for f in new)
+        scope = (f"everything since branching from {base} (merge base {merge_base[:12]}) up to the working tree"
+                 + (", including uncommitted changes" if dirty else "") + f": {len(names)} files"
+                 + (f", {len(new)} of them new and untracked (read those directly)" if new else "") + ".")
+        read_rule = ""
     if not names:
-        die(f"nothing to review: no changes since {base}")
-    stat = git(path, "diff", "--stat", merge_base) or ""
-    if new:
-        stat += "\nNew files not yet tracked by git (not in the diff; Read them in full):\n" + "\n".join(
-            f" {f}" for f in new)
-    head, dirty = review_state(path)
-    scope = (f"everything since branching from {base} (merge base {merge_base[:12]}) up to the working tree"
-             + (", including uncommitted changes" if dirty else "") + f": {len(names)} files"
-             + (f", {len(new)} of them new and untracked (read those directly)" if new else "") + ".")
+        die(f"nothing to review: no changes on {label} since {base}")
     path_words = " ".join(re.split(r"[/._-]+", " ".join(names)))
     cards = suggest(slug, path_words + " " + (a.focus or ""), a.max_context, "review")
     task = f"Review this change before it becomes a pull request.\n\nFiles changed:\n{stat}\n"
     if a.focus:
         task += f"\nThe author asks you to look closely at: {a.focus}\n"
-    meta = {"base": base, "merge_base": merge_base, "head": head, "dirty": dirty, "files": len(names)}
+    meta = {"base": base, "merge_base": merge_base, "head": sha, "dirty": dirty, "ref": label, "mode": mode,
+            "files": len(names)}
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=model,
                             why=f"pre-PR review ({effort} effort)", cards=None, card_list=cards, project=slug,
                             read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=a.max_turns,
                             max_usd=a.max_usd, max_context=a.max_context, ttype="review", role="reviewer",
                             effort=effort, review_meta=meta,
-                            role_rule=REVIEWER_RULE.format(scope=scope, project=path, merge_base=merge_base))
+                            role_rule=REVIEWER_RULE.format(scope=scope, project=path, diff_range=rng,
+                                                           read_rule=read_rule))
     return cmd_run(ns)
 
 
@@ -1282,10 +1338,13 @@ def report_review(slug, project, entry, review, meta):
     verdict = review.get("verdict") or "unknown"
     findings = [f for f in review.get("findings") or [] if isinstance(f, dict)]
     checks = [c for c in review.get("checks") or [] if isinstance(c, dict)]
-    head, dirty = review_state(project)
+    if meta.get("mode") == "ref":
+        head, dirty = meta["head"], ""
+    else:  # the working tree as it is now, after the review
+        head, dirty = review_state(project)
     append_jsonl(reviews_path(slug), {"ts": now_iso(), "run": entry["id"], "verdict": verdict, "head": head,
-                                      "dirty": dirty, "base": meta.get("base"), "findings": findings,
-                                      "checks": checks})
+                                      "dirty": dirty, "ref": meta.get("ref"), "mode": meta.get("mode", "worktree"),
+                                      "base": meta.get("base"), "findings": findings, "checks": checks})
     order = {"blocker": 0, "major": 1, "minor": 2, "nit": 3}
     print(f"\nREVIEW: {verdict.upper()} · {len(findings)} findings · {len(checks)} checks to run")
     for f in sorted(findings, key=lambda f: order.get(f.get("severity"), 9)):
@@ -2393,6 +2452,9 @@ def build_parser():
     s = sub.add_parser("review", help="pre-PR review by a read-only reviewer (sonnet, high effort)")
     s.add_argument("project")
     s.add_argument("--base", help="branch the change is based on (default: origin's default branch)")
+    s.add_argument("--head", metavar="REF", help="review this branch/commit straight from git (no checkout needed); "
+                   "with --status: check that ref")
+    s.add_argument("--no-fetch", action="store_true", help="don't `git fetch origin` for origin/* refs")
     s.add_argument("--focus", help="what the reviewer should look at closely")
     s.add_argument("--resume", action="store_true", help="re-review after fixes, in the same reviewer session")
     s.add_argument("--status", action="store_true", help="exit 0 only if the current code has an approve")

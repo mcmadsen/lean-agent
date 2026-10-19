@@ -803,6 +803,39 @@ class CliTest(unittest.TestCase):
         self.assertEqual(p.returncode, 1)
         self.assertIn("stale", p.stdout)
 
+    def test_review_a_ref_without_checkout(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("checkout", "-q", "main")  # the user works on main; the PR branch isn't checked out
+        self.cli("learn", self.proj, "--name", "proj")
+        approve = json.dumps({"verdict": "approve", "findings": [], "checks": []})
+        p = self.cli("review", "proj", "--head", "feature", "--base", "main", check=False, FAKE_REVIEW=approve)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        call = self.calls()[-1]
+        self.assertIn("NOT checked out", call["append"])
+        self.assertIn("git -C " + self.proj + " show ", call["append"])
+        self.assertIn("commits on feature", call["append"])
+        self.assertIn("api/totals.py", call["task"])
+        self.assertIn("web/page.txt", call["task"])
+        self.assertEqual(subprocess.run(["git", "-C", self.proj, "rev-parse", "--abbrev-ref", "HEAD"],
+                                        capture_output=True, text=True).stdout.strip(), "main")  # untouched
+        self.assertEqual(self.cli("review", "proj", "--status", "--head", "feature").returncode, 0)
+        p = self.cli("review", "proj", "--status", check=False)  # the working tree (main) wasn't reviewed
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("--status --head feature", p.stdout)
+        g("checkout", "-q", "feature")
+        with open(os.path.join(self.proj, "api", "totals.py"), "a") as fh:
+            fh.write("# fix\n")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "fix")
+        g("checkout", "-q", "main")
+        p = self.cli("review", "proj", "--status", "--head", "feature", check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("new commits since", p.stdout)
+        self.cli("review", "proj", "--resume", FAKE_REVIEW=approve)
+        self.assertIn("feature is now at", self.calls()[-1]["task"])
+        self.assertEqual(self.cli("review", "proj", "--status", "--head", "feature").returncode, 0)
+
     def test_review_needs_changes_and_base(self):
         g = self.git_project()
         self.cli("learn", self.proj, "--name", "proj")
