@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Compact view of a big JSON result (e.g. a large MCP tool output saved to a file).
+here="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "$here/../scripts/lean_json.py" "$@"

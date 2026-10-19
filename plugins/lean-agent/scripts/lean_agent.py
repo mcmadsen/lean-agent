@@ -1039,6 +1039,9 @@ def cmd_run(a):
             role_rule = WORKTREE_RULE.format(**wt) + ("\n" + role_rule if role_rule else "")
         if a.mcp:  # external systems need the exact identifiers, not a guess from lean-agent's project name
             ident = repo_identity_text(slug, project)
+            ident += ("\nWhen an MCP result is too big and Claude Code saves it to a file, don't read the file whole: "
+                      f"run `{os.path.join(PLUGIN_ROOT, 'bin', 'lean-json')} <file>` for a compact view (add "
+                      "`--fields a,b.c` to keep only some fields, `--grep TEXT` to keep matching items).")
             role_rule = (role_rule + "\n" if role_rule else "") + ident
         if role_rule:
             with open(os.path.join(workdir, "role.md"), "w") as fh:
@@ -1066,8 +1069,10 @@ def cmd_run(a):
             isolation += ["--disallowedTools", ",".join(mcp_disallowed + chrome_disallowed)]
     else:
         isolation = ["--safe-mode"]
+    lean_json = os.path.join(PLUGIN_ROOT, "bin", "lean-json")
     if read_only:
         allowed = READONLY_TOOLS.split(",") + [f"Bash(git -C {project} {sub}:*)" for sub in READONLY_GIT]
+        allowed.append(f"Bash({lean_json}:*)")  # reads a file, prints a compact view
         permission_mode = "default"
     else:
         allowed = [tools]
@@ -1233,6 +1238,11 @@ def cmd_run(a):
               f"{tools_note} · Claude Code system prompt, built-in tools, conversation ~{max(0, per_turn - own - ext):,}")
     for line in narrowing_hints(offered, mcp_seq):
         print("  " + line)
+    sv = run_savings(entry)
+    if sv["context"] or sv["model"]:
+        base, measured = baseline_ctx(slug)
+        print(f"  saved ~{sv['context'] + sv['model']:,} sonnet-eq (estimate): context ~{sv['context']:,} vs a normal "
+              f"session's ~{base:,}/turn{'' if measured else ' (assumed)'} · model choice ~{sv['model']:,}")
     line, low = budget_line()
     if line:
         print("  " + line)
@@ -2985,6 +2995,26 @@ def _jaccard(x, y):
     return len(x & y) / len(x | y) if x | y else 0.0
 
 
+WRITE_TOOL_RE = re.compile(r"(^|[_-])(create|update|delete|remove|add|set|post|send|reply|merge|close|resolve|edit|"
+                           r"write|upload|comment|assign|link|move|rename|trigger|start|stop|approve|vote|"
+                           r"complete|abandon|push|publish|submit|cancel|restart|deploy)([_-]|$)", re.I)
+
+
+def is_write_tool(name):
+    return bool(WRITE_TOOL_RE.search(name))
+
+
+def generalise(text):
+    """A run's task wording without the specifics of that one run (ids, numbers, hashes, labels)."""
+    t = re.sub(r"(?im)^\s*(goal|known|done when|context|task)\s*:\s*", "", str(text))
+    t = re.sub(r"(?i)\b(PR|pull request|MR|merge request|issue|ticket|work item|thread|run)s?\s*[#!]?\s*\d+", r"\1 <id>", t)
+    t = re.sub(r"\b[A-Z]{1,6}#\d+\b", "<ticket>", t)
+    t = re.sub(r"\b[0-9a-f]{7,40}\b", "<sha>", t)
+    t = re.sub(r"\b\d{3,}\b", "<n>", t)
+    t = re.sub(r"(?<![\w/])(?:/[\w.-]+){2,}", "<path>", t)  # absolute paths of this machine
+    return re.sub(r"[ \t]+", " ", t).strip()
+
+
 def preset_name(server, tools):
     """A short preset name from the words the tool names share (search_x_metrics, get_x_metric -> metric)."""
     skip = TOOL_VERBS | set(re.split(r"[^a-z0-9]+", server.lower()))
@@ -3008,13 +3038,15 @@ def draft_proposals(slug):
             and r.get("status") == "done" and r.get("role") != "reviewer"]
     cards = [c for c in load_cards(slug) if not c.get("archived")]
     cache = mcp_cache()
-    groups = []
+    groups, used_names = [], {}
     for r in runs:
         tools = run_tools(r)
         if not tools:
             continue
-        tw = words(r["task"])
+        tw = words(generalise(r["task"]))
         for g in groups:
+            if g["read_only"] != bool(r.get("read_only")):
+                continue  # read-only and changing runs never share a draft
             same_srv = set(tools) & set(g["tools"])
             if any(_jaccard(set(tools[s]), set(g["tools"][s])) >= 0.6 for s in same_srv) or _jaccard(tw, g["words"]) >= 0.5:
                 g["runs"].append(r)
@@ -3023,7 +3055,8 @@ def draft_proposals(slug):
                 g["words"] |= tw
                 break
         else:
-            groups.append({"runs": [r], "tools": {s: list(ts) for s, ts in tools.items()}, "words": set(tw)})
+            groups.append({"runs": [r], "tools": {s: list(ts) for s, ts in tools.items()}, "words": set(tw),
+                           "read_only": bool(r.get("read_only"))})
     drafts = []
     for g in groups:
         first, n = g["runs"][0], len(g["runs"])
@@ -3033,10 +3066,11 @@ def draft_proposals(slug):
         covered = next((c for c in cards if sum(t in c["text"] for t in all_tools) * 2 >= max(1, len(all_tools))), None)
         key = hashlib.sha1(json.dumps(sorted(g["tools"].items())).encode()).hexdigest()[:6]
         if distinctive and not covered:
-            title_words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9-]+", first["task"]) if w.lower() not in STOPWORDS]
+            task_line = next((l for l in generalise(first["task"]).splitlines() if l.strip()), "")
+            title_words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9-]+", task_line) if w.lower() not in STOPWORDS]
             title = "How to: " + " ".join(title_words[:9])
             lines = [f"Recipe from {n} successful run{'s' if n > 1 else ''} ({', '.join(r['id'] for r in g['runs'][:4])}).",
-                     f"Task like: {first['task'][:200]}", ""]
+                     f"Task like: {generalise(first['task'])[:200]}", ""]
             for srv, ts in g["tools"].items():
                 counts = {}
                 for r in g["runs"]:
@@ -3050,31 +3084,43 @@ def draft_proposals(slug):
                 cost = sum(known.get(t, 0) for t in ts)
                 lines.append(f"Give the worker only these: --mcp {srv}:{','.join(ts)}" + (f" (~{cost:,} tok/turn)" if cost else ""))
             if first.get("result_head"):
-                lines += ["", "What a good answer looked like: " + first["result_head"][:240].replace("\n", " ")]
+                lines += ["", "Example answer (from one run; its specifics will differ): "
+                          + generalise(first["result_head"])[:240].replace("\n", " ")]
             lines += ["", f"Cost without this card: {first.get('turns') or '?'} turns, {first.get('units', 0):,} sonnet-eq. "
                       "Edit the steps (ids, queries, time windows) so the next worker skips the exploring."]
             drafts.append({"id": f"draft-card-{key}", "kind": "card", "card_id": slugify("recipe-" + "-".join(
                 w.lower() for w in title_words[:5]), 50), "title": title, "text": "\n".join(lines), "runs": n,
                 "why": f"from {n} run{'s' if n > 1 else ''}: {first.get('turns') or '?'} turns, "
                        f"{first.get('units', 0):,} sonnet-eq, {calls} MCP calls"})
-        for srv, ts in g["tools"].items():
+        for srv, all_ts in g["tools"].items():
             known = (cache.get(srv) or {}).get("tools") or {}
             offered = max((r.get("mcp_offered") or {}).get(srv, 0) for r in g["runs"])
             presets = mcp_presets(srv, known)
-            if any(set(ts) == set(v) for v in presets.values()):
-                continue
-            if n >= 2 or (offered and offered >= 2 * len(ts) and offered - len(ts) >= 5):
-                name = preset_name(srv, ts)
-                while name in presets:
-                    name += "2"
+            reads = [t for t in all_ts if not is_write_tool(t)]
+            writes = [t for t in all_ts if is_write_tool(t)]
+            variants = [("", reads)] if g["read_only"] or not writes else [("", reads), ("-write", all_ts)]
+            for suffix, ts in variants:
+                if not ts or any(set(ts) == set(v) for v in presets.values()):
+                    continue
+                if not (n >= 2 or (offered and offered >= 2 * len(ts) and offered - len(ts) >= 5)):
+                    continue
+                taken = set(presets) | used_names.setdefault(srv, set())
+                name = preset_name(srv, ts) + suffix
+                k = 2
+                while name in taken:  # never two drafts (or a saved preset) with one name
+                    name = f"{preset_name(srv, ts)}{k}{suffix}"
+                    k += 1
+                used_names[srv].add(name)
                 cost, whole = sum(known.get(t, 0) for t in ts), sum(known.values())
                 used_preset = next((p for p, v in presets.items() if offered and len(v) == offered), None)
                 vs = (f" vs {used_preset} ~{sum(known.get(t, 0) for t in presets[used_preset]):,}" if used_preset
                       else f" vs whole server ~{whole:,}" if whole else "")
-                drafts.append({"id": f"draft-preset-{key}-{slugify(srv, 20)}", "kind": "preset", "server": srv,
+                drafts.append({"id": f"draft-preset-{key}-{slugify(srv, 20)}{suffix}", "kind": "preset", "server": srv,
                                "name": name, "tools": ts, "runs": n,
                                "why": f"{len(ts)} tools ~{cost:,} tok/turn{vs}; offered {offered or '?'}, used {len(ts)}"
-                                      f" in {n} run{'s' if n > 1 else ''}"})
+                                      f" in {n} run{'s' if n > 1 else ''}"
+                                      + (f"; includes write tools: {', '.join(t for t in ts if is_write_tool(t))}"
+                                         if suffix else "; read-only")})
     return drafts
 
 
@@ -3141,8 +3187,9 @@ def _cmd_optimize(a):
             if rate >= 0.5 and c["tokens"] > 600:
                 actions.append(("trim", c, f"~{c['tokens']} tok and often used: rewrite shorter with "
                                 f"`card add {slug} {c['id']} --file ...`", None))
-    if not actions:
-        print(f"No trim/core/archive changes yet (those need {a.min_runs}+ runs per card; new-card drafts don't).")
+    if not actions and not (a.accept or a.reject):
+        print(f"Cards: nothing to promote, demote, archive or trim right now (that needs {a.min_runs}+ runs per card; "
+              "earlier --apply changes are already in). New-card and preset drafts follow below, if any.")
     for act, c, why, _ in actions:
         print(f"{act:<8}{c['id']:<34}{why}")
     if a.apply:
@@ -3903,6 +3950,93 @@ def session_workers(session_id, first_ts, last_ts):
     return [(m, n, u) for m, (n, u) in rows.items()]
 
 
+ASSUMED_BASELINE_CTX = 30000  # a normal Claude Code turn in a project: system prompt, tools, CLAUDE.md, skills, MCP
+
+
+def baseline_ctx(slug):
+    """(context tokens of one normal Claude Code turn in this project, measured?)."""
+    b = load_json(home("baselines.json"), {}).get(slug) or {}
+    return (b["ctx"], True) if b.get("ctx") else (ASSUMED_BASELINE_CTX, False)
+
+
+def measure_baseline(slug, path):
+    """One tiny Haiku turn in the project with the user's normal setup (CLAUDE.md, skills, MCP, plugins)."""
+    claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
+    try:
+        out = subprocess.run([claude, "-p", "--output-format", "stream-json", "--verbose", "--model", "haiku",
+                              "--max-turns", "1"], input="Reply with just OK. Do not use tools.", capture_output=True,
+                             text=True, cwd=path, timeout=180).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    ctx = None
+    for line in out.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") == "rate_limit_event":
+            usage.record_plan_usage(ev.get("rate_limit_info"))
+        elif ev.get("type") == "result":
+            u = ev.get("usage") or {}
+            ctx = sum(u.get(k, 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    if ctx:
+        b = load_json(home("baselines.json"), {})
+        b[slug] = {"ctx": ctx, "measured": now_iso()}
+        save_json(home("baselines.json"), b)
+    return ctx
+
+
+def run_savings(r):
+    """{"context": sonnet-eq saved by the lean worker context, "model": saved by the model choice} for a run."""
+    u = r.get("usage") or {}
+    turns = max(1, r.get("turns") or 1)
+    ctx = sum(u.get(k, 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    base, _ = baseline_ctx(r.get("project"))
+    extra = max(0, base - ctx / turns)
+    rate = usage.model_rate(r.get("model"))
+    context = extra * (1.25 + 0.1 * (turns - 1)) * rate  # first turn written to the cache, later turns re-read it
+    weighted = r.get("weighted") or usage.weighted(u)
+    return {"context": int(context), "model": int(weighted - weighted * rate)}
+
+
+def cmd_savings(a):
+    if a.measure:
+        targets = [resolve_project(a.project)] if a.project else [(s_, v["path"]) for s_, v in projects().items()]
+        for slug, path in targets:
+            ctx = measure_baseline(slug, path)
+            print(f"{slug}: a normal Claude Code turn carries ~{ctx:,} tokens of context" if ctx else
+                  f"{slug}: couldn't measure (is `claude` signed in?)")
+    since = (datetime.datetime.now() - datetime.timedelta(days=a.days)).isoformat()
+    runs = [r for r in ledger() if r.get("ts", "") >= since and (not a.project or r["project"] == resolve_project(a.project)[0])]
+    ctx_saved = model_saved = used = 0
+    per_project = {}
+    for r in runs:
+        sv = run_savings(r)
+        ctx_saved += sv["context"]
+        model_saved += sv["model"]
+        used += r.get("units", 0)
+        per_project.setdefault(r["project"], [0, 0])
+        per_project[r["project"]][0] += 1
+        per_project[r["project"]][1] += sv["context"]
+    sq_n = sq_saved = 0
+    for e in read_jsonl(os.path.join(os.path.dirname(lean_log.log_dir()), "savings.jsonl")):
+        if e.get("ts", "") >= since:
+            sq_n += 1
+            sq_saved += max(0, e.get("before", 0) - e.get("after", 0)) // 4
+    total = ctx_saved + model_saved + sq_saved
+    print(f"Estimated tokens saved, last {a.days} days (sonnet-eq; estimates, not measurements):")
+    print(f"  worker context    {ctx_saved:>12,}  ({len(runs)} runs in a lean folder instead of the project)")
+    for slug, (n, sv) in sorted(per_project.items(), key=lambda kv: -kv[1][1]):
+        base, measured = baseline_ctx(slug)
+        print(f"    {slug:<20} {n:>4} runs  vs ~{base:,} tokens/turn normal "
+              + ("(measured)" if measured else "(assumed; measure: lean-agent savings --measure)"))
+    print(f"  model choice      {model_saved:>12,}  (vs running every worker on Sonnet; Opus runs count negative)")
+    print(f"  output squeezing  {sq_saved:>12,}  ({sq_n} long outputs shortened, counted once)")
+    print(f"  total             {total:>12,}  · workers used {used:,}"
+          + (f" · without lean-agent ~{used + total:,} ({(used + total) / used:.1f}x)" if used else ""))
+    return 0
+
+
 def cmd_budget(a):
     if a.cap is not None or a.count:
         cur = load_json(home("session-cap.json"), {})
@@ -3957,6 +4091,12 @@ def build_parser():
     s = sub.add_parser("env", help="print orchestrator env defaults")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_env)
+    s = sub.add_parser("savings", help="estimated tokens saved: lean worker context, model choice, squeezed output")
+    s.add_argument("--project", "-p")
+    s.add_argument("--days", type=int, default=7)
+    s.add_argument("--measure", action="store_true", help="measure a normal Claude Code turn per project (one tiny Haiku call each)")
+    s.set_defaults(fn=cmd_savings)
+
     s = sub.add_parser("budget", help="token usage of the current orchestrator session; --cap sets the spend cap")
     s.add_argument("session", nargs="?")
     s.add_argument("--cap", metavar="N|off", help="self-set session spend cap in sonnet-eq tokens, for running "

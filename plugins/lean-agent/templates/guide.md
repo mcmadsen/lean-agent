@@ -136,6 +136,8 @@ lean-agent card core {{P}} checkout-notes
   `--refresh` fetches it now). Use it before large jobs instead of guessing.
 - If the session spend cap blocks you, only `lean-agent budget|limits|stats|runs|logs|doctor` still run. Tell the
   user, who can lift it at once: `lean-agent budget --cap off` (no restart).
+- When the user asks what lean-agent saves, run `lean-agent savings` (estimates; `--measure` once per project
+  makes them closer).
 - When something seems off, run `lean-agent doctor`, and `lean-agent logs` for recent errors
   (`logs debug` for everything). A squeezed output's first line names the full output and an errors-only
   copy: read the errors file before the full one.

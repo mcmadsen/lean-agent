@@ -118,6 +118,7 @@ Other ways to run the orchestrator:
 | `lean-agent optimize <project> [--apply] [--accept ids] [--reject ids]` | Promote/demote core cards, archive dead ones, flag big cards to trim, list recent context gaps, and draft new recipe cards and MCP presets from what workers actually did. |
 | `lean-agent runs [--last] [--tokens] [--show [id]]` | Recent runs; `--tokens` prints the latest run's run/tokens/context lines again, `--show` its whole summary (saved per run, so a `| tail` can't lose it). |
 | `lean-agent stats [--today] [--project p]` | Runs, success rate, avg/total weighted tokens and cost per model. |
+| `lean-agent savings [--days 7] [-p project] [--measure]` | Estimated tokens saved: worker context (vs a normal Claude Code turn in that project: measured with `--measure`, one tiny Haiku call, else assumed 30,000), model choice (vs Sonnet for every worker), and output the squeezer shortened. Each run's summary also has a `saved ~N` line. |
 
 ## MCP servers in workers
 
@@ -159,6 +160,9 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   When Claude Code connects but a worker gets needs-auth, doctor compares lean-agent's copy with
   `claude mcp get`: a different `type` or URL is corrected and retried automatically, and a header difference is
   named but not copied (header values can be secrets).
+- **Big MCP results:** when a result is too big and Claude Code saves it to a file, workers are pointed at
+  `lean-json <file> [--fields a,b.c] [--grep TEXT] [--exclude TEXT]`, which prints a compact view (links, URLs,
+  avatars and empty values dropped, identities as names, one line per item). Read-only workers may run it too.
 - **Exact identifiers for external systems:** every worker given `--mcp` gets the repository's identity from its
   git `origin` remote (Azure DevOps organization, project and repository; GitHub/GitLab owner and repository) and
   is told never to use lean-agent's project name as a tracker project, and to stop with `needs-input` if a
@@ -385,7 +389,10 @@ exact-cent tests with 1-cent remainder cases.
    `--mcp` spec, what a good answer looked like, and what it cost without the card. Runs with the same server and a
    similar tool set, or similar wording, are grouped into one draft. A **preset** is drafted (named from the tool
    names, e.g. `datadog:metrics`) when a run was given far more tools than it used, or a pattern recurs. Drafts
-   already covered by a card are skipped. `optimize <project> --accept <id>` writes them (`card add`, `mcp
+   already covered by a card are skipped. Drafts are generalised (PR and ticket numbers, ids, hashes, local
+   paths and "Goal:"-style labels removed), read-only and changing runs never share a draft, a read-only preset
+   never contains a write tool (a separate `<name>-write` draft says which write tools it adds), and two drafts
+   never get the same preset name. `optimize <project> --accept <id>` writes them (`card add`, `mcp
    preset`), `--reject <id>` stops proposing one. The 5-run threshold only gates trim/core/archive.
    Relevance in `suggest` and `--cards auto`: words are weighted by how rare they are across your cards. A card
    needs a distinctive title word, or (if it's small) three distinctive body words; cards over 800 tokens need a
