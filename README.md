@@ -181,7 +181,10 @@ uncommitted changes and new untracked files.
   `merge-base..branch` straight from git. The reviewer reads files with `git show <commit>:<path>`, `origin/*` refs
   are fetched first, and your working tree is never touched.
 - **Re-review:** `review <project> --resume` continues the same reviewer session, which is cheap because its
-  context is cached, and checks earlier findings first. `review <project> --status` exits 0 only if the
+  context is cached, and checks earlier findings first. Add `--head <branch>` to resume the review of that
+  branch; the review is recorded for the branch's new tip (also when the reviewer is resumed with `run --resume`).
+  A fresh review of a branch that was reviewed before gets the earlier findings, so it says which are resolved
+  instead of starting blind. `review <project> --status` exits 0 only if the
   *current* code (HEAD plus uncommitted changes) has an approve. With `--head <branch>` it checks that branch's
   tip instead, whatever is checked out. The guide and repo block make that a hard rule
   before any PR.
