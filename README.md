@@ -175,6 +175,18 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   marked sensitive live in Claude Code's credentials store; lean-agent can't read them and doctor says so.
 - Not covered: claude.ai connectors (they aren't in a local config file).
 
+## Attribution (asked once)
+
+Whether commits and PRs credit Claude is your call, asked once: by `lean-agent up` in a terminal, or by the
+orchestrator before the first commit or PR (`lean-agent attribution` says "not set"). Save it with
+`lean-agent attribution on|off`. When it's off:
+
+- workers start with Claude Code's own `attribution` setting emptied (no Co-Authored-By line, no "Generated with
+  Claude Code", no session link), and so does the orchestrator;
+- workers and the orchestrator are told not to mention Claude or AI in commits, PR titles and descriptions, or
+  comments;
+- `lean-agent worktree push` refuses commits that still credit Claude.
+
 ## Shared worktrees
 
 `lean-agent run <project> --worktree <branch> ...` runs the worker in a git worktree of that branch at
@@ -245,7 +257,10 @@ uncommitted changes and new untracked files.
   The worker has to open the code for every helper: one whose path isn't in the repository is left out. It gets
   the cards' current text, so near-duplicates are skipped, a known helper's line is updated, and wrong lines are
   corrected (`replace`). Threads that ended in a decision to leave something out become declined findings, not
-  lessons. `review learn <project> --verify` cleans existing cards (paths that don't exist, "not confirmed").
+  lessons. `review learn <project> --verify [--head <branch>]` lists helper lines whose code can't be found, with
+  the reason; `--apply` removes them. It checks `--head`, HEAD, the default branch and every base branch your
+  reviews used, matches partial paths (relative to a package folder, in backticks, with `:line`), and keeps a
+  line whose symbol is found even when its path is wrong.
 - **Re-review:** `review <project> --resume` continues the same reviewer session, which is cheap because its
   context is cached, and checks earlier findings first. It also runs the reuse, scope and platform passes again
   on the files changed since the last review and asks it to reconsider the design, not only the earlier findings. Add `--head <branch>` to resume the review of that

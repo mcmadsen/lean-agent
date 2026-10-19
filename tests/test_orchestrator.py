@@ -250,6 +250,29 @@ class CliTest(unittest.TestCase):
         self.assertRegex(out, r"proj-\w+: a normal Claude Code turn carries ~8,000 tokens of context")
         self.assertIn("(measured)", out)
 
+    def test_attribution_asked_once_and_enforced(self):
+        self.cli("learn", self.proj)
+        p = self.cli("attribution", check=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("Ask the user once", p.stdout)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t")
+        self.assertNotIn("--settings", self.calls()[-1]["argv"])  # not set: Claude Code's defaults
+        self.assertIn("attribution: off", self.cli("attribution", "off").stdout)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t")
+        call = self.calls()[-1]
+        argv = call["argv"]
+        self.assertEqual(json.loads(argv[argv.index("--settings") + 1]),
+                         {"attribution": {"commit": "", "pr": "", "sessionUrl": False}})
+        self.assertIn("Never add \"Co-Authored-By: Claude", call["append"])
+        home = self.cli("home").stdout.strip()
+        with open(os.path.join(home, ".claude", "settings.json")) as fh:
+            self.assertEqual(json.load(fh)["attribution"], {"commit": "", "pr": "", "sessionUrl": False})
+        self.cli("attribution", "on")
+        with open(os.path.join(home, ".claude", "settings.json")) as fh:
+            self.assertNotIn("attribution", json.load(fh))
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t")
+        self.assertNotIn("--settings", self.calls()[-1]["argv"])
+
     def test_run_requires_model_and_why(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "do it", check=False)
@@ -1422,9 +1445,36 @@ class CliTest(unittest.TestCase):
         self.assertEqual(checklist.count("shared surface counter"), 1)
         self.assertIn("declined (from the PR): src/frame.ts: iframe case not handled", out)
         self.assertIn("The project's review cards already say this", self.calls()[-1]["append"])
-        out = self.cli("review", "learn", "proj", "--verify").stdout  # registerSurface's path isn't in this repo
-        self.assertIn("removed from shared-helpers: - registerSurface (src/init/surfaces.ts)", out)
-        self.assertIn("useOverlayDeferral", self.cli("card", "show", "proj", "shared-helpers").stdout)
+        # helpers that live only on another branch (e.g. a release branch), written with partial paths
+        g = lambda *a_: subprocess.run(["git", "-C", self.proj, "-c", "user.name=t", "-c", "user.email=t@t", *a_],
+                                       check=True, capture_output=True)
+        g("checkout", "-qb", "release")
+        os.makedirs(os.path.join(self.proj, "pkg", "src", "common", "detection"), exist_ok=True)
+        with open(os.path.join(self.proj, "pkg", "src", "common", "detection", "visible.ts"), "w") as fh:
+            fh.write("export function hasRenderedBox() {}\n")
+        g("add", "pkg")
+        g("commit", "-qm", "release helper")
+        g("checkout", "-q", "main")
+        self.cli("review", "learn", "proj", "--helper", "hasRenderedBox | `src/common/detection/visible.ts:12` | box check",
+                 "--helper", "subscribeShown | somewhere/else.ts | a counter")
+        os.makedirs(os.path.join(self.proj, "pkg"), exist_ok=True)
+        with open(os.path.join(self.proj, "pkg", "notes.ts"), "w") as fh:
+            fh.write("export const subscribeShown = 1\n")  # the symbol exists, the path given is wrong
+        g("add", "pkg/notes.ts")
+        g("commit", "-qm", "notes")
+        out = self.cli("review", "learn", "proj", "--verify", "--head", "release").stdout
+        self.assertIn("checking against: release, HEAD", out)
+        self.assertNotIn("hasRenderedBox", out)  # found on release via the partial path
+        self.assertNotIn("subscribeShown", out)  # found by its symbol
+        self.assertIn("would remove from shared-helpers: - registerSurface (src/init/surfaces.ts)", out)
+        self.assertIn("because path src/init/surfaces.ts and symbol registerSurface not found on release, HEAD", out)
+        self.assertIn("registerSurface", self.cli("card", "show", "proj", "shared-helpers").stdout)  # dry run
+        out = self.cli("review", "learn", "proj", "--verify", "--apply", "--head", "release").stdout
+        self.assertIn("removed from shared-helpers: - registerSurface", out)
+        helpers = self.cli("card", "show", "proj", "shared-helpers").stdout
+        self.assertNotIn("registerSurface", helpers)
+        self.assertIn("useOverlayDeferral", helpers)
+        self.assertIn("hasRenderedBox", helpers)
         # when the remote doesn't name the tracker project: set it once, every MCP worker gets it
         self.assertIn("tracker", self.cli("review", "learn", "proj", "--tracker", "project=Storefront").stdout)
         p = self.cli("review", "learn", "proj", "43", "--mcp", "tracker", check=False,
@@ -1506,6 +1556,15 @@ class CliTest(unittest.TestCase):
         self.assertEqual(p.returncode, 2)
         self.assertIn("no approving review", p.stderr)
         approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        self.cli("review", "proj", "--head", "feature", "--base", "main", FAKE_REVIEW=approve)
+        self.cli("attribution", "off")
+        subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--amend", "-m",
+                        "fix\n\nCo-Authored-By: Claude <noreply@anthropic.com>"], check=True)
+        self.cli("review", "proj", "--head", "feature", "--base", "main", FAKE_REVIEW=approve)
+        p = self.cli("worktree", "push", "proj", "origin/feature", check=False)
+        self.assertIn("credit Claude, but attribution is off", p.stderr)
+        subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--amend", "-m",
+                        "fix"], check=True)
         self.cli("review", "proj", "--head", "feature", "--base", "main", FAKE_REVIEW=approve)
         p = self.cli("worktree", "push", "proj", "origin/feature", check=False)
         self.assertEqual(p.returncode, 2)
