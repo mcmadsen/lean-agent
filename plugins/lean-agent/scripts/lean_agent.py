@@ -1039,6 +1039,9 @@ def resolve_mcp(project, specs):
     return servers, allowed, disallowed
 
 
+PRICE_SONNET_EQ_USD = 3.0 / 1_000_000  # one sonnet-eq token at Sonnet's input price, for comparing estimates
+
+
 def expected_run_units(model, ttype=None):
     """Average sonnet-eq of earlier runs on this model (same task type when known), or None."""
     runs = [r for r in ledger() if usage.model_rate(r.get("model")) == usage.model_rate(model) and not r.get("resumed")
@@ -1067,10 +1070,13 @@ def expensive_run_check(a, model, task):
         return
     units, n = expected_run_units(model, getattr(a, "ttype", None))
     if units is None:
-        units = 200000 * usage.model_rate(model)  # no history yet: a rough guess
-        how = "a rough guess (no earlier runs on this model)"
+        fix, k = estimate_correction("guess-run")
+        units = int(200000 * usage.model_rate(model) * fix)  # no history yet: a rough guess
+        how = "a rough guess (no earlier runs on this model)" + (f", corrected x{fix:.1f}" if k else "")
+        a.estimate = (units * PRICE_SONNET_EQ_USD, "guess-run")
     else:
         how = f"average of {n} earlier run(s)"
+        a.estimate = (units * PRICE_SONNET_EQ_USD, "history-run")
     share, now_pct = plan_share(units)
     line = f"lean-agent: {model} run, expected ~{units:,} sonnet-eq ({how})"
     if share is not None:
@@ -1386,6 +1392,8 @@ def cmd_run(a):
         "result_head": (summary or "")[:600],
         "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
         "role": role, "effort": effort, "worktree": wt_name, "review_meta": review_meta, "launch_key": launch_key,
+        "estimate_usd": (getattr(a, "estimate", None) or (None, None))[0],
+        "estimate_kind": (getattr(a, "estimate", None) or (None, None))[1],
     }
     append_jsonl(home("ledger.jsonl"), entry)
     if launch_key:
@@ -2420,8 +2428,16 @@ HIGH_RISK_WORDS = {"race", "concurrent", "concurrency", "mutex", "lock", "semaph
                    "pending", "inflight", "promise", "mutation"}
 
 
+def estimate_correction(kind):
+    """How far past estimates of this kind were off (median actual/estimate), from runs that recorded one."""
+    ratios = sorted(r["cost_usd"] / r["estimate_usd"] for r in ledger()
+                    if r.get("estimate_kind") == kind and r.get("estimate_usd") and r.get("cost_usd"))
+    return (ratios[len(ratios) // 2], len(ratios)) if ratios else (1.0, 0)
+
+
 def expected_review_cost(model):
-    """(dollars, how) for one review on `model`: the average of earlier ones, else Sonnet's scaled by price."""
+    """(dollars, how) for one review on `model`: the average of earlier ones, else Sonnet's scaled by price
+    and by how far such scaled estimates were off before."""
     def avg(m):
         xs = [r.get("cost_usd") or 0 for r in ledger() if r.get("role") == "reviewer" and not r.get("resumed")
               and usage.model_rate(r.get("model")) == usage.model_rate(m) and r.get("cost_usd")]
@@ -2431,7 +2447,10 @@ def expected_review_cost(model):
         return mine, f"average of {n} earlier review(s)"
     base, n = avg("sonnet")
     base = base if base is not None else 0.25
-    return base * usage.model_rate(model), "estimated from Sonnet reviews and the price ratio"
+    fix, k = estimate_correction("scaled-review")
+    how = "estimated from Sonnet reviews and the price ratio" + (f", corrected x{fix:.1f} from {k} earlier estimate(s)"
+                                                                  if k else "; a first estimate, often low")
+    return base * usage.model_rate(model) * fix, how
 
 
 def high_risk(path, rng_args, names):
@@ -2552,10 +2571,14 @@ def cmd_review(a):
     ns_syms = new_symbols(path, [merge_base, sha] if mode == "ref" else [merge_base], new)
     focus = change_focus(path, [merge_base, sha] if mode == "ref" else [merge_base])
     grep_ref = sha if mode == "ref" else ""
-    a._decisions = decisions_text(slug, label)
+    a._decisions = "" if a.independent else decisions_text(slug, label)
     a._label = label
+    if a.independent:
+        a.second_opinion = "off"
+        print("review: independent (no earlier findings, decisions or second opinion)", flush=True)
     cost, how = expected_review_cost(model)
     print(f"reviewer: {model}, effort {effort} (expected ~${cost:.2f}, {how})", flush=True)
+    a._estimate = (cost, "scaled-review" if "price ratio" in how else "history-review")
     risk = high_risk(path, [merge_base, sha] if mode == "ref" else [merge_base], names)
     if risk and usage.model_rate(model) <= 1:
         strong = os.environ.get("LEAN_AGENT_STRONG_REVIEW_MODEL") or "opus"
@@ -2572,7 +2595,7 @@ def cmd_review(a):
                  "(agree or say why not):\n" + second + "\n")
     if a._decisions:
         task += "\n" + a._decisions
-    earlier = previous_findings(slug, label, mode)
+    earlier = None if a.independent else previous_findings(slug, label, mode)
     if earlier and (earlier.get("findings") or earlier.get("checks")):
         lines = [f"- [{f.get('severity', '?')}] {f.get('file', '?')}:{f.get('line', '')} {f.get('issue', '')}"[:240]
                  for f in earlier.get("findings", [])[:15]]
@@ -2587,8 +2610,8 @@ def cmd_review(a):
             "files": len(names), "new_symbols": ns_syms["files"] + ns_syms["symbols"],
             "second_opinion": getattr(a, "_second", []),
             "hunks": changed_hunks(path, [merge_base, sha] if mode == "ref" else [merge_base]),
-            "edited_tests": focus["tests"]}
-    ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=model,
+            "edited_tests": focus["tests"], "independent": bool(a.independent)}
+    ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=model, estimate=getattr(a, "_estimate", None),
                             why=f"pre-PR review ({effort} effort)", cards=None, card_list=cards, project=slug,
                             read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=a.max_turns,
                             max_usd=a.max_usd, max_context=a.max_context, ttype="review", role="reviewer",
@@ -2786,7 +2809,8 @@ def enforce_review_rules(review, meta, declined=()):
 
 
 def report_review(slug, project, entry, review, meta):
-    verdict, findings, checks, notes = enforce_review_rules(review, meta, declined_for(slug, meta.get("ref")))
+    verdict, findings, checks, notes = enforce_review_rules(
+        review, meta, () if meta.get("independent") else declined_for(slug, meta.get("ref")))
     order = {"blocker": 0, "major": 1, "minor": 2, "nit": 3}
     findings.sort(key=lambda f: (order.get(f.get("severity"), 9), CATEGORY_ORDER.get(f.get("category"), 6)))
     if meta.get("mode") == "ref":
@@ -3943,18 +3967,22 @@ def _cmd_optimize(a):
         save_json(acked_path, sorted(acked))
         for x in ids:
             print(f"acknowledged gap from run {x}: not shown again")
-    known = " ".join(c["text"] for c in load_cards(slug) if not c.get("archived"))
+    live_cards = [c for c in load_cards(slug) if not c.get("archived")]
     tconf = (projects().get(slug) or {}).get("tracker") or {}
-    known += " " + " ".join(map(str, (tconf.get("notes") or []) + tracker_facts_text(tconf)))
-    known_words = _words(known)
+    note_words = _words(" ".join(map(str, (tconf.get("notes") or []) + tracker_facts_text(tconf))))
+    given = {r["id"]: set(r.get("cards") or []) for r in ledger() if r.get("project") == slug}
     notes = list(read_jsonl(home("library", slug, "missing.jsonl")))[-a.notes * 3:]
     open_gaps, covered = [], 0
     for n in notes:
         gw = {w for w in _words(n["missing"]) if len(w) > 3}
         if n["run"] in acked:
             continue
-        if gw and len(gw & known_words) / len(gw) >= 0.6:
-            covered += 1  # a card or tracker note already says this
+        # covered by a card the run DIDN'T get (it exists now), or by a tracker note. A card the run had and
+        # still reported missing is unclear: keep showing that gap.
+        had = given.get(n["run"], set())
+        known = note_words | _words(" ".join(c["text"] for c in live_cards if c["id"] not in had))
+        if gw and len(gw & known) / len(gw) >= 0.6:
+            covered += 1
             continue
         open_gaps.append(n)
     open_gaps = open_gaps[-a.notes:]
@@ -4838,6 +4866,103 @@ def cmd_attribution(a):
     return 0
 
 
+def recipes_path(slug):
+    return home("recipes", slug + ".json")
+
+
+def cmd_recipe(a):
+    slug, _ = resolve_project(a.project)
+    store = load_json(recipes_path(slug), {})
+    if a.action == "rm":
+        if store.pop(a.name, None) is None:
+            die(f"no recipe {a.name!r} in {slug}")
+        save_json(recipes_path(slug), store)
+        print(f"removed recipe {a.name}")
+        return 0
+    task = read_text(a.task_file) if a.task_file else (a.task or "")
+    if not task.strip() or not a.model or not a.why:
+        die("a recipe needs --task or --task-file, -m <model> and --why")
+    r = {"model": a.model, "why": a.why, "read_only": a.read_only, "mcp": a.mcp or [], "cards": a.cards,
+         "task": task.strip(), "evidence": a.evidence or [], "max_usd": a.max_usd, "max_turns": a.max_turns,
+         "updated": now_iso()}
+    if a.apply_task or a.apply_task_file:
+        r["apply"] = {"task": (read_text(a.apply_task_file) if a.apply_task_file else a.apply_task).strip(),
+                      "mcp": a.apply_mcp or a.mcp or [], "model": a.apply_model or a.model}
+    store[a.name] = r
+    save_json(recipes_path(slug), store)
+    need = sorted(set(re.findall(r"\{(\w+)\}", r["task"] + (r.get("apply") or {}).get("task", ""))))
+    print(f"saved recipe {a.name} for {slug}: lean-agent do {slug} {a.name}" + "".join(f" {k}=..." for k in need)
+          + (" [--apply]" if r.get("apply") else ""))
+    return 0
+
+
+def cmd_recipes(a):
+    slugs = [resolve_project(a.project)[0]] if a.project else sorted(projects())
+    found = False
+    for slug in slugs:
+        for name, r in sorted(load_json(recipes_path(slug), {}).items()):
+            found = True
+            need = sorted(set(re.findall(r"\{(\w+)\}", r["task"])))
+            flags = " --read-only" if r.get("read_only") else ""
+            flags += "".join(f" --mcp {m}" for m in r.get("mcp") or [])
+            print(f"{slug:<16} {name:<24} -m {r['model']}{flags}" + (" · has --apply" if r.get("apply") else "")
+                  + (f" · needs {', '.join(need)}" if need else ""))
+            print(f"{'':<17}{r['task'].splitlines()[0][:100]}")
+    if not found:
+        print("No recipes. Save one: lean-agent recipe add <project> <name> -m sonnet --why \"...\" --task-file <file>")
+    return 0
+
+
+def cmd_do(a):
+    """Run a saved recipe: the stored model, flags, presets, cards and task, with {placeholders} filled."""
+    slug, _ = resolve_project(a.project)
+    r = load_json(recipes_path(slug), {}).get(a.name)
+    if not r:
+        die(f"no recipe {a.name!r} in {slug} (see: lean-agent recipes {slug})")
+    values = {}
+    for kv in a.values or []:
+        k, _, v = kv.partition("=")
+        values[k.strip()] = v
+    step = r.get("apply") if a.apply else r
+    if a.apply and not step:
+        die(f"recipe {a.name} has no apply step")
+    text = step["task"]
+    missing = [k for k in sorted(set(re.findall(r"\{(\w+)\}", text))) if k not in values]
+    if missing:
+        die(f"recipe {a.name} needs " + ", ".join(f"{k}=..." for k in missing))
+    for k, v in values.items():
+        text = text.replace("{" + k + "}", v)
+    if r.get("evidence"):
+        text += "\n\nEvidence, strongest first:\n" + "\n".join(f"{i}. {e}" for i, e in enumerate(r["evidence"], 1))
+    if a.apply:
+        text += ("\n\nApply step: do only the changes listed in the check, one per item. "
+                 + ("The user approved: " + a.allow_send if a.allow_send else
+                    "Nothing is approved yet: list each change (item, from -> to, evidence) and stop with "
+                    "awaiting-confirmation."))
+    ns = argparse.Namespace(resume=None, task=[text], task_file=None, model=step.get("model") or r["model"],
+                            why=f"recipe {a.name}: {r['why']}", cards=r.get("cards"), project=slug,
+                            read_only=bool(r.get("read_only")) and not a.apply, chrome=None,
+                            mcp=list(step.get("mcp") or r.get("mcp") or []), tools=None, allow_send=a.allow_send,
+                            max_turns=r.get("max_turns") or 40, max_usd=r.get("max_usd") or 3.0, max_context=2000,
+                            max_cards=4, ref=None, again=a.again, yes=a.yes)
+    return cmd_run(ns)
+
+
+def cmd_text_len(a):
+    text = sys.stdin.read() if a.file == "-" else read_text(a.file)
+    print(f"{len(text):,} characters · {len(text.split()):,} words · {len(text.splitlines()):,} lines")
+    if a.project:
+        slug, _ = resolve_project(a.project)
+        conf = (projects().get(slug) or {}).get("tracker") or {}
+        for n in (conf.get("notes") or []) + tracker_facts_text(conf):
+            m = re.search(r"(\d[\d,.]*)\s*(?:-|\s)?char", str(n), re.I)
+            if m:
+                limit = int(re.sub(r"[,.]", "", m.group(1)))
+                state = "over" if len(text) > limit else "within"
+                print(f"{state} the {limit:,}-character limit in the tracker notes ({str(n)[:80]})")
+    return 0
+
+
 def cmd_budget(a):
     if a.cap is not None or a.count:
         cur = load_json(home("session-cap.json"), {})
@@ -4893,6 +5018,45 @@ def build_parser():
     s = sub.add_parser("env", help="print orchestrator env defaults")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_env)
+    s = sub.add_parser("recipe", help="save or remove a named recipe (a stored run: model, flags, presets, task)")
+    s.add_argument("action", choices=["add", "rm"])
+    s.add_argument("project")
+    s.add_argument("name")
+    s.add_argument("--model", "-m")
+    s.add_argument("--why")
+    s.add_argument("--task", help="task text; {name} placeholders are filled by `do ... name=value`")
+    s.add_argument("--task-file")
+    s.add_argument("--read-only", action="store_true")
+    s.add_argument("--mcp", action="append", metavar="SERVER[:PRESET]")
+    s.add_argument("--cards")
+    s.add_argument("--evidence", action="append", metavar="TEXT", help="evidence hint, strongest first (repeatable)")
+    s.add_argument("--apply-task", help="the step that makes the changes (outward actions need approval)")
+    s.add_argument("--apply-task-file")
+    s.add_argument("--apply-mcp", action="append", metavar="SERVER[:PRESET]", help="presets for the apply step (write tools)")
+    s.add_argument("--apply-model")
+    s.add_argument("--max-usd", type=float)
+    s.add_argument("--max-turns", type=int)
+    s.set_defaults(fn=cmd_recipe)
+
+    s = sub.add_parser("recipes", help="list saved recipes")
+    s.add_argument("project", nargs="?")
+    s.set_defaults(fn=cmd_recipes)
+
+    s = sub.add_parser("do", help="run a saved recipe: do <project> <recipe> [key=value ...] [--apply]")
+    s.add_argument("project")
+    s.add_argument("name")
+    s.add_argument("values", nargs="*", metavar="KEY=VALUE")
+    s.add_argument("--apply", action="store_true", help="run the recipe's apply step")
+    s.add_argument("--allow-send", metavar="APPROVED", help="--apply: what the user approved (else it stops with the list)")
+    s.add_argument("--again", action="store_true")
+    s.add_argument("--yes", action="store_true")
+    s.set_defaults(fn=cmd_do)
+
+    s = sub.add_parser("text-len", help="characters/words/lines of a text, checked against limits in tracker notes")
+    s.add_argument("file", help="a file, or - for stdin")
+    s.add_argument("--project", "-p")
+    s.set_defaults(fn=cmd_text_len)
+
     s = sub.add_parser("attribution", help="should commits and PRs credit Claude? ask the user once, then set on|off")
     s.add_argument("value", nargs="?", choices=["on", "off"])
     s.set_defaults(fn=cmd_attribution)
@@ -5036,6 +5200,8 @@ def build_parser():
     s.add_argument("--focus", help="what the reviewer should look at closely")
     s.add_argument("--resume", action="store_true", help="re-review after fixes, in the same reviewer session")
     s.add_argument("--status", action="store_true", help="exit 0 only if the current code has an approve")
+    s.add_argument("--independent", action="store_true", help="for comparison runs: no earlier findings, decisions, "
+                   "second opinion or decline filtering")
     s.add_argument("--reviewer-model", metavar="MODEL", help="model for this review (default sonnet; e.g. opus or fable "
                    "for high-risk changes; the expected cost is printed first)")
     s.add_argument("--second-opinion", choices=["auto", "on", "off"], default="auto",

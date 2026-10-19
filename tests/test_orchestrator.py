@@ -323,6 +323,29 @@ class CliTest(unittest.TestCase):
         append = self.calls()[-1]["append"]
         self.assertIn("capturedAtMs = Date.now()", append)
         self.assertIn("4. Tests. For every test the change edits", append)
+        # an independent comparison run sees no earlier findings or decisions
+        prev = json.dumps({"verdict": "changes-requested", "checks": [], "findings": [
+            {"severity": "major", "category": "correctness", "file": "src/checks/runner.js", "line": 25,
+             "issue": "uses the request scope"}], "searches": [{"for": "x", "found": "y"}],
+            "reuse": [{"symbol": n, "verdict": "justified-new"} for n in ("merge", "shareable", "isSent", "takePending")]})
+        self.cli("review", "case", "--head", "fix-races", "--base", "main", "--second-opinion", "off", check=False,
+                 FAKE_REVIEW=prev)
+        self.cli("review", "decline", "case", "1", "--head", "fix-races", "--why", "not a bug")
+        out = self.cli("review", "case", "--head", "fix-races", "--base", "main", "--independent", check=False,
+                       FAKE_REVIEW=prev).stdout
+        self.assertIn("review: independent", out)
+        task = self.calls()[-1]["task"]
+        self.assertNotIn("An earlier review", task)
+        self.assertNotIn("declined:", task)
+        self.assertNotIn("left out", out)  # no decline filtering either
+        self.assertIn("1. [major/correctness]", out)
+        # estimates learn from their misses: opus was estimated from Sonnet, then fable gets the correction
+        self.cli("review", "case", "--head", "fix-races", "--base", "main", "--independent", "--reviewer-model", "opus",
+                 check=False, FAKE_REVIEW=prev)
+        out = self.cli("review", "case", "--head", "fix-races", "--base", "main", "--independent",
+                       "--reviewer-model", "fable", check=False, FAKE_REVIEW=prev).stdout
+        self.assertRegex(out, r"reviewer: fable, effort high \(expected ~\$[\d.]+, estimated from Sonnet reviews and "
+                              r"the price ratio, corrected x[\d.]+ from \d+ earlier estimate")
 
     def test_expensive_run_asks_first(self):
         import time as _t
@@ -352,6 +375,39 @@ class CliTest(unittest.TestCase):
         out = self.cli("card", "shorten", "proj", "testing", "--save", FAKE_SHORT=good).stdout
         self.assertIn("saved card testing", out)
         self.assertIn("never the real db", self.cli("card", "show", "proj", "testing").stdout)
+
+    def test_recipes_and_text_len(self):
+        self.cli("learn", self.proj)
+        with open(os.path.join(self.proj, ".mcp.json"), "w") as fh:
+            json.dump({"mcpServers": {"tracker": {"command": "true"}}}, fh)
+        out = self.cli("recipe", "add", "proj", "item-states", "-m", "sonnet", "--why", "state check", "--read-only",
+                       "--mcp", "tracker", "--task", "For the items assigned to {who}, say which state each should be in.",
+                       "--evidence", "a 'fixed in commit' link on the item", "--evidence", "a PR linked to the item",
+                       "--apply-task", "Move the items for {who} to the states the check said.").stdout
+        self.assertIn("saved recipe item-states for proj", out)
+        self.assertRegex(out, r"lean-agent do proj-\w+ item-states who=\.\.\. \[--apply\]")
+        self.assertIn("item-states", self.cli("recipes").stdout)
+        p = self.cli("do", "proj", "item-states", check=False)
+        self.assertIn("needs who=...", p.stderr)
+        self.cli("do", "proj", "item-states", "who=me")
+        call = self.calls()[-1]
+        self.assertIn("For the items assigned to me, say which state", call["task"])
+        self.assertIn("1. a 'fixed in commit' link on the item", call["task"])
+        self.assertEqual(call["argv"][call["argv"].index("--model") + 1], "sonnet")
+        self.assertIn("default", call["argv"])  # read-only permission mode
+        self.cli("do", "proj", "item-states", "who=me", "--apply")
+        call = self.calls()[-1]
+        self.assertIn("Nothing is approved yet", call["task"])
+        self.assertIn("acceptEdits", call["argv"])  # the apply step may change things (after approval)
+        self.cli("do", "proj", "item-states", "who=me", "--apply", "--allow-send", "move the 3 listed items")
+        self.assertIn("The user approved: move the 3 listed items", self.calls()[-1]["task"])
+        self.cli("tracker", "proj", "--note", "PR descriptions are limited to 4000 characters")
+        f = os.path.join(self.tmp.name, "desc.md")
+        with open(f, "w") as fh:
+            fh.write("x" * 4200)
+        out = self.cli("text-len", f, "-p", "proj").stdout
+        self.assertIn("4,200 characters", out)
+        self.assertIn("over the 4,000-character limit", out)
 
     def test_run_requires_model_and_why(self):
         self.cli("learn", self.proj)
