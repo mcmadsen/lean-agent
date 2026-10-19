@@ -166,8 +166,12 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
 - **Exact identifiers for external systems:** every worker given `--mcp` gets the repository's identity from its
   git `origin` remote (Azure DevOps organization, project and repository; GitHub/GitLab owner and repository) and
   is told never to use lean-agent's project name as a tracker project, and to stop with `needs-input` if a
-  lookup finds nothing. When the remote doesn't say, set it once: `lean-agent review learn <project> --tracker
-  project=<name>` (also `org=`, `repo=`).
+  lookup finds nothing. When the remote doesn't say, set it once: `lean-agent tracker <project> project=<name>`
+  (also `org=`, `repo=`).
+- **Who you are in the tracker, and its rules:** `lean-agent tracker <project> --discover --mcp <tracker>` lets
+  a worker find your identity id and name and the project's work item rules (allowed states, no delete, voting
+  needs a reviewer id) once. Add your own with `--note "..."` or `me_id=... me_name=...`. Every MCP worker gets
+  them, so assigning, voting or closing doesn't have to fail first (`@me` often isn't accepted).
 - **Variables without a token on disk:** a plugin config that uses `${VAR}` (e.g. a GitHub token) can get it
   from a command run when a worker starts: `lean-agent mcp env GITHUB_PERSONAL_ACCESS_TOKEN --command "gh auth
   token"` (or a macOS keychain item: `security find-generic-password -s <name> -w`). Only the command is saved;
@@ -247,6 +251,16 @@ uncommitted changes and new untracked files.
   right, not a duplicate). Findings are numbered; `lean-agent review decline <project> <n> --why "separate
   ticket"` records a decision for that branch (`--all-branches` for the project), so later reviews and the second
   opinion are told and a matching finding isn't raised again.
+- **Less noise, and a loop that ends:** `duplicate` (copies code outside the change) is a finding; `extends-existing`
+  and `wraps-existing` are reuse (no finding), and a "candidate" inside the lines the change edits is the change
+  itself (dropped). Symbols that already existed before the change (edits, signature changes) aren't new; a change
+  with none prints "no new symbols". Duplication is major only for copied logic (about 10+ lines, a multi-branch
+  algorithm) or a second copy of a mechanism; what the reviewer calls optional, follow-up or pre-existing is minor;
+  a finding it says it didn't verify becomes `unverified -> delegate a read-only check`. Declines are keyed on the
+  finding's kind and symbol, apply to every later review and `--resume` (whoever raised the finding), and never
+  flip the verdict. `--resume` re-checks only the open findings and the files changed since; when only minor or
+  declined findings are left it approves and lists what was declined. The REVIEW footer shows the review's cost
+  and the running total for the branch.
 - **Second opinion:** for new abstractions or big diffs (`--second-opinion auto|on|off`), a cheap search-only
   Haiku pass looks for reuse candidates and siblings first. The main reviewer has to confirm or reject each.
 - **Lessons from human reviews:** `lean-agent review learn <project> --text "Before adding overlay state, check
