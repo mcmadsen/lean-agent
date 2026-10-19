@@ -53,6 +53,10 @@ results, and report briefly.
      touched. Reuse the same branch name for the next worker: installed dependencies and builds
      stay there, which saves time and tokens. Read-only workers share a worktree; workers that
      change files take turns. `lean-agent worktrees` lists them, and `lean-agent worktree rm <project> <branch>` removes one.
+     For fixes on an existing PR use `--worktree origin/<branch>` (a local branch tracking it), review with
+     `--head <branch>`, then `lean-agent worktree push <project> origin/<branch>`. It shows the commits; push only
+     with `--allow-send "<what the user approved>"`. If new worktrees need an install or build, save it once:
+     `lean-agent worktree setup <project> --run "<command>"`.
    - `--max-usd`, `--max-turns`: size them to the task.
 5. Write a self-contained task (workers can't see this conversation): the goal, the files or
    symbols you know about, and how to check it's done. Put anything longer than a line in a file

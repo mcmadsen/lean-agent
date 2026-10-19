@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import uuid
 
 try:
@@ -460,10 +461,11 @@ def learn(path, include_user_skills=False, quiet=False, name=None, rules=None):
         save_cards(slug, cards)
 
     projs = projects()
+    kept = dict(projs.get(slug) or {})
     for other in [s for s, v in projs.items() if v["path"] == path and s != slug]:
-        del projs[other]  # renamed with --name
-    rules = "off" if rules is False else (projs.get(slug) or {}).get("rules")
-    projs[slug] = {"path": path, "learned": now_iso(), "rules": rules}
+        kept = {**projs.pop(other), **kept}  # renamed with --name: keep its settings
+    rules = "off" if rules is False else kept.get("rules")
+    projs[slug] = {**kept, "path": path, "learned": now_iso(), "rules": rules}
     save_json(home("projects.json"), projs)
     cards = sync_memory(slug)
     if rules != "off":
@@ -1440,32 +1442,77 @@ def ensure_worktree(slug, repo, ref):
     name = slugify(ref.replace("/", "-"), 60)
     path = home("worktrees", slug, name)
     reused = os.path.isdir(path) and git(path, "rev-parse", "--git-dir") is not None
+    remote_branch = ref[len("origin/"):] if ref.startswith("origin/") else None
     if reused:
         branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
         if git(path, "status", "--porcelain", "--untracked-files=no"):
             print(f"lean-agent: worktree {path} has uncommitted changes; using it as it is", file=sys.stderr)
         elif not branch:
             git(path, "checkout", "-q", "--detach", sha)
+        elif remote_branch and git(path, "merge", "-q", "--ff-only", sha) is None:
+            print(f"lean-agent: branch {branch} in {path} has commits that aren't on {ref} (not pushed yet?); "
+                  "leaving it as it is", file=sys.stderr)
     else:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         branch = None
-        if git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + ref):
-            p = subprocess.run(["git", "-C", repo, "worktree", "add", "-q", path, ref], capture_output=True, text=True)
-            branch = ref if p.returncode == 0 else None  # fails when the branch is checked out elsewhere
+        local = remote_branch or ref
+        if remote_branch and not git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + local):
+            # a PR branch from the remote: a local branch that tracks it, so fixes can be pushed back
+            p = subprocess.run(["git", "-C", repo, "worktree", "add", "-q", "--track", "-b", local, path, ref],
+                               capture_output=True, text=True)
+            branch = local if p.returncode == 0 else None
+        elif git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + local):
+            p = subprocess.run(["git", "-C", repo, "worktree", "add", "-q", path, local], capture_output=True, text=True)
+            branch = local if p.returncode == 0 else None  # fails when the branch is checked out elsewhere
+            if branch and remote_branch and git(path, "merge", "-q", "--ff-only", sha) is None:
+                print(f"lean-agent: local branch {local} has commits that aren't on {ref}; using it as it is",
+                      file=sys.stderr)
         if not branch:
             p = subprocess.run(["git", "-C", repo, "worktree", "add", "-q", "--detach", path, sha],
                                capture_output=True, text=True)
             if p.returncode != 0:
                 die(f"git worktree add failed: {(p.stderr or p.stdout).strip()[:300]}")
+    setup = (projects().get(slug) or {}).get("worktree_setup")
+    idx_entry = (worktree_index().get(slug) or {}).get(name) or {}
+    if setup and (not reused or idx_entry.get("setup") not in ("ok", "running")):
+        run_worktree_setup(slug, name, path, setup)
     idx = worktree_index()
     entry = idx.setdefault(slug, {}).get(name, {"created": now_iso()})
     entry.update(path=path, ref=ref, sha=sha, branch=branch, repo=repo, last_used=now_iso())
     idx[slug][name] = entry
     save_json(home("worktrees.json"), idx)
-    commit_rule = (f"It's on branch {branch}, so commits you make land on that branch (never push)."
+    commit_rule = (f"It's on branch {branch}, so commits you make land on that branch. Never push: lean-agent "
+                   "pushes after review and the user's approval."
                    if branch else "It's a detached checkout: commits here are on no branch, so don't commit "
                    "unless the task asks you to.")
     return {"path": path, "name": name, "ref": ref, "branch": branch, "reused": reused, "commit_rule": commit_rule}
+
+
+def run_worktree_setup(slug, name, path, command):
+    """The project's setup command (install, build) in a new worktree, once; output goes to a log file."""
+    log = home("worktrees", slug, f".{name}.setup.log")
+    print(f"worktree setup: {command}", flush=True)
+
+    def mark(state):
+        idx = worktree_index()
+        idx.setdefault(slug, {}).setdefault(name, {"created": now_iso()})["setup"] = state
+        save_json(home("worktrees.json"), idx)
+    mark("running")
+    t0 = time.time()
+    with open(log, "w") as fh:
+        try:
+            rc = subprocess.run(command, shell=True, cwd=path, stdout=fh, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, timeout=3600).returncode
+        except subprocess.TimeoutExpired:
+            rc = 124
+    mark("ok" if rc == 0 else f"failed ({rc})")
+    if rc == 0:
+        print(f"worktree setup: done in {time.time() - t0:.0f}s (log {log})", flush=True)
+    else:
+        with open(log, errors="replace") as fh:
+            tail = "".join(fh.readlines()[-15:])
+        print(f"worktree setup FAILED (exit {rc}); the worker starts anyway. Last lines of {log}:\n{tail}",
+              file=sys.stderr, flush=True)
 
 
 @contextlib.contextmanager
@@ -1505,6 +1552,12 @@ def cmd_worktrees(a):
 
 
 def cmd_worktree(a):
+    if a.action == "setup":
+        return worktree_setup_cmd(a)
+    if a.action == "push":
+        return worktree_push(a)
+    if not a.ref:
+        die("which worktree? lean-agent worktree rm <project> <ref>")
     slug, repo = resolve_project(a.project)
     idx = worktree_index()
     name = slugify(a.ref.replace("/", "-"), 60)
@@ -1520,6 +1573,80 @@ def cmd_worktree(a):
     del idx[slug][name]
     save_json(home("worktrees.json"), idx)
     print(f"removed {w['path']}")
+
+
+def worktree_setup_cmd(a):
+    slug, _ = resolve_project(a.project)
+    projs = projects()
+    command = a.command
+    if a.off:
+        projs[slug].pop("worktree_setup", None)
+        save_json(home("projects.json"), projs)
+        print(f"{slug}: no setup command for new worktrees")
+        return 0
+    if command:
+        projs[slug]["worktree_setup"] = command
+        save_json(home("projects.json"), projs)
+    cur = projs[slug].get("worktree_setup")
+    print(f"{slug}: new worktrees run: {cur}" if cur else
+          f"{slug}: no setup command. Set one: lean-agent worktree setup {slug} --run \"npm ci && npm run build\"")
+    if command and a.ref:
+        w = (worktree_index().get(slug) or {}).get(slugify(a.ref.replace("/", "-"), 60))
+        if not w:
+            die(f"no lean-agent worktree for {a.ref} in {slug}")
+        run_worktree_setup(slug, slugify(a.ref.replace("/", "-"), 60), w["path"], command)
+    return 0
+
+
+def worktree_push(a):
+    """Push a worktree's branch to origin: an outward action, so it needs a review and the user's approval."""
+    slug, repo = resolve_project(a.project)
+    if not a.ref:
+        die("which branch? lean-agent worktree push <project> <ref>")
+    w = (worktree_index().get(slug) or {}).get(slugify(a.ref.replace("/", "-"), 60))
+    if not w or not os.path.isdir(w["path"]):
+        die(f"no lean-agent worktree for {a.ref} in {slug} (see: lean-agent worktrees {slug})")
+    path, branch = w["path"], git(w["path"], "symbolic-ref", "--quiet", "--short", "HEAD")
+    if not branch:
+        die(f"{path} is a detached checkout: there's no branch to push")
+    if git(path, "status", "--porcelain", "--untracked-files=no"):
+        die(f"{path} has uncommitted changes: have a worker commit them (or discard them) first")
+    upstream = git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    remote_ref = upstream or f"origin/{branch}"
+    if not a.no_fetch:
+        git(path, "fetch", "-q", "origin")
+    has_remote = git(path, "rev-parse", "--verify", "--quiet", remote_ref) is not None
+    if has_remote and git(path, "merge-base", "--is-ancestor", remote_ref, "HEAD") is None:
+        die(f"{remote_ref} has commits that {branch} doesn't have: someone else pushed. Let a worker merge or "
+            f"rebase onto {remote_ref} in the worktree, review again, then push. (lean-agent never force-pushes.)")
+    commits = (git(path, "log", "--oneline", f"{remote_ref}..HEAD") if has_remote
+               else git(path, "log", "--oneline", "-20", "HEAD")) or ""
+    if has_remote and not commits:
+        print(f"nothing to push: {branch} is the same as {remote_ref}")
+        return 0
+    sha = git(path, "rev-parse", "HEAD")
+    match, _ = find_review(slug, path, "HEAD")
+    if not match or match["verdict"] != "approve":
+        die(f"{branch} @ {sha[:12]} has no approving review. Run: lean-agent review {slug} --head {branch}"
+            + (f" --base <base>" if not has_remote else ""), 2)
+    target = remote_ref.split("/", 1)[1] if "/" in remote_ref else branch
+    print(f"push {branch} @ {sha[:12]} to origin/{target}" + ("" if has_remote else " (a new remote branch)")
+          + f", reviewed in {match['run']}:\n" + "\n".join("  " + c for c in commits.splitlines()))
+    if not a.allow_send:
+        print("ACTION NEEDED: pushing is an outward action and was NOT done. Show the user the commits above. Only if "
+              f"they approve: lean-agent worktree push {slug} {a.ref} --allow-send \"<what the user approved>\"")
+        return 2
+    p = subprocess.run(["git", "-C", path, "push", "origin", f"HEAD:refs/heads/{target}"],
+                       capture_output=True, text=True)
+    append_jsonl(home("pushes.jsonl"), {"ts": now_iso(), "project": slug, "branch": branch, "to": f"origin/{target}",
+                                        "sha": sha, "review": match["run"], "approved": a.allow_send,
+                                        "ok": p.returncode == 0})
+    if p.returncode != 0:
+        die(f"git push failed: {(p.stderr or p.stdout).strip()[:400]}")
+    if not upstream:
+        git(path, "branch", "-q", f"--set-upstream-to=origin/{target}")
+    print(f"pushed {branch} @ {sha[:12]} to origin/{target}")
+    return 0
 
 
 def chrome_state():
@@ -2779,11 +2906,15 @@ def build_parser():
     s = sub.add_parser("worktrees", help="list lean-agent's shared worktrees")
     s.add_argument("project", nargs="?")
     s.set_defaults(fn=cmd_worktrees)
-    s = sub.add_parser("worktree", help="remove a shared worktree: worktree rm <project> <ref>")
-    s.add_argument("action", choices=["rm"])
+    s = sub.add_parser("worktree", help="shared worktrees: rm, setup (run on new ones), push (after review + approval)")
+    s.add_argument("action", choices=["rm", "setup", "push"])
     s.add_argument("project")
-    s.add_argument("ref")
-    s.add_argument("--force", action="store_true", help="remove even with uncommitted changes")
+    s.add_argument("ref", nargs="?", help="the worktree's branch (setup: also run the command there now)")
+    s.add_argument("--run", dest="command", metavar="COMMAND", help="setup: the command for new worktrees")
+    s.add_argument("--force", action="store_true", help="rm: remove even with uncommitted changes")
+    s.add_argument("--off", action="store_true", help="setup: no setup command")
+    s.add_argument("--allow-send", metavar="APPROVED", help="push: what the user approved (the push happens only with this)")
+    s.add_argument("--no-fetch", action="store_true", help="push: don't fetch origin first")
     s.set_defaults(fn=cmd_worktree)
 
     s = sub.add_parser("runs", help="recent worker runs (id, status, model, task)")

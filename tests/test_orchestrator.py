@@ -961,6 +961,51 @@ class CliTest(unittest.TestCase):
         self.assertFalse(os.path.exists(wt))
         self.assertNotIn("branch feature", self.cli("worktrees", "proj").stdout)
 
+    def test_pr_branch_worktree_setup_and_push(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        origin = os.path.join(self.tmp.name, "origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+        g("remote", "add", "origin", origin)
+        g("push", "-q", "origin", "main", "feature")
+        g("checkout", "-q", "main")
+        g("branch", "-qD", "feature")  # the PR branch exists only on the remote
+        self.cli("learn", self.proj, "--name", "proj")
+        self.assertIn("new worktrees run: touch built.txt",
+                      self.cli("worktree", "setup", "proj", "--run", "touch built.txt").stdout)
+        self.cli("learn", self.proj, "--name", "proj")  # re-learning keeps the setup command
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "origin/feature", "--", "fix").stdout
+        self.assertIn("on branch feature", out)
+        self.assertIn("worktree setup: done", out)
+        wt = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", "origin-feature")
+        self.assertTrue(os.path.exists(os.path.join(wt, "built.txt")))
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "origin/feature", "--", "t").stdout
+        self.assertNotIn("worktree setup", out)  # once per worktree
+        self.assertIn("Never push", self.calls()[-1]["append"])
+        with open(os.path.join(wt, "api", "totals.py"), "a") as fh:
+            fh.write("# fixed\n")
+        subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "fix"],
+                       check=True)
+        p = self.cli("worktree", "push", "proj", "origin/feature", check=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("no approving review", p.stderr)
+        approve = json.dumps({"verdict": "approve", "findings": [], "checks": []})
+        self.cli("review", "proj", "--head", "feature", "--base", "main", FAKE_REVIEW=approve)
+        p = self.cli("worktree", "push", "proj", "origin/feature", check=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("ACTION NEEDED", p.stdout)
+        self.assertIn("fix", p.stdout)
+        remote = lambda: subprocess.run(["git", "-C", origin, "rev-parse", "feature"], capture_output=True,
+                                        text=True).stdout.strip()
+        before = remote()
+        self.assertIn("pushed feature", self.cli("worktree", "push", "proj", "origin/feature",
+                                                 "--allow-send", "push the fix").stdout)
+        local = subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        self.assertNotEqual(before, local)
+        self.assertEqual(remote(), local)
+        self.assertIn("nothing to push", self.cli("worktree", "push", "proj", "origin/feature").stdout)
+
     def test_worktree_writers_take_turns(self):
         self.git_project()
         self.cli("learn", self.proj, "--name", "proj")
