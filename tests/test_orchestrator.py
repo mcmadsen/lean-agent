@@ -1270,6 +1270,27 @@ class CliTest(unittest.TestCase):
         self.assertIn("createOverlayStore -> src/init/surfaces.ts:2 -> extend", out)
         self.assertLess(out.index("[major/duplication]"), out.index("[nit/tests]"))
         self.assertNotEqual(self.cli("review", "proj", "--status", "--head", "feature", check=False).returncode, 0)
+        self.assertIn("reuse: 2 of 3 new symbols checked · 1 searches", out)
+        self.assertEqual(out.count("duplicates existing code"), 0)  # the reviewer's own finding covers it
+        # a finding discussed and declined isn't raised again for this branch
+        scope = json.dumps(dict(json.loads(main_review), findings=[
+            {"severity": "major", "category": "scope", "file": "src/dialogs/overlayStore.ts", "line": 1,
+             "issue": "only the warning dialog is handled; other dialogs share the cause"}],
+            reuse=[{"symbol": s, "candidates": ["src/init/surfaces.ts:2"], "verdict": "wraps-existing"}
+                   for s in ("createOverlayStore", "useOverlayOpen", "src/dialogs/overlayStore.ts")]))
+        out = self.cli("review", "proj", "--head", "feature", "--base", "main", "--second-opinion", "off", check=False,
+                       FAKE_REVIEW=scope).stdout
+        self.assertIn("1. [major/scope] src/dialogs/overlayStore.ts:1", out)
+        self.assertNotIn("duplicates existing code", out)  # wraps-existing is reuse done right
+        self.assertIn("declined 1. [major/scope]", self.cli("review", "decline", "proj", "1", "--head", "feature",
+                                                             "--why", "other dialogs: separate ticket").stdout)
+        out = self.cli("review", "proj", "--head", "feature", "--base", "main", "--second-opinion", "on", check=False,
+                       FAKE_REUSE=reuse, FAKE_REVIEW=scope).stdout
+        self.assertIn("left out 1 finding(s) declined earlier", out)
+        self.assertIn("REVIEW: APPROVE", out)
+        calls = self.calls()
+        self.assertIn("declined: [scope] src/dialogs/overlayStore.ts", calls[-1]["task"])
+        self.assertIn("other dialogs: separate ticket", calls[-2]["append"])  # the second opinion knows too
         # justified-new is not accepted when the second opinion found existing code for it
         weak = json.dumps(dict(json.loads(main_review), findings=[], reuse=[
             {"symbol": "createOverlayStore", "candidates": [], "verdict": "justified-new", "why": "different"},
@@ -1306,8 +1327,19 @@ class CliTest(unittest.TestCase):
         # from a PR's threads, through the tracker's MCP server
         with open(os.path.join(self.proj, ".mcp.json"), "w") as fh:
             json.dump({"mcpServers": {"tracker": {"command": "true"}}}, fh)
-        lesson = json.dumps({"checklist": ["Fixes for one dialog type: check the sibling dialogs too"],
-                             "helpers": [{"name": "useOverlayDeferral", "where": "src/hooks", "what": "hides and restores"}]})
+        os.makedirs(os.path.join(self.proj, "src", "hooks"))
+        with open(os.path.join(self.proj, "src", "hooks", "overlay.ts"), "w") as fh:
+            fh.write("export function useOverlayDeferral() {}\n")
+        lesson = json.dumps({
+            "checklist": ["Fixes for one dialog type: check the sibling dialogs too",
+                          "Before adding overlay state check the shared surface counter",  # near-duplicate
+                          "useThing lives somewhere (exact file not confirmed)"],
+            "helpers": [{"name": "useOverlayDeferral", "where": "src/hooks/overlay.ts", "what": "hides and restores"},
+                        {"name": "ghostHelper", "where": "content/utils/ghost.ts", "what": "not in the code"}],
+            "replace": [{"old": "Before adding overlay state, check the shared surface counter",
+                         "new": "Before adding overlay or counter state, check the shared surface counter"}],
+            "declined": [{"file": "src/frame.ts", "category": "scope", "issue": "iframe case not handled",
+                          "why": "left out on purpose; noted in the PR"}]})
         fb = "\nLEAN-CHECKLIST " + lesson
         subprocess.run(["git", "-C", self.proj, "remote", "add", "origin",
                         "https://acme@dev.azure.com/acme/Shop/_git/web-app"], check=True)
@@ -1318,6 +1350,19 @@ class CliTest(unittest.TestCase):
         self.assertIn("host Azure DevOps, org acme, project Shop, repo web-app", append)
         self.assertIn("never use lean-agent's project name `proj` as a tracker project", append)
         self.assertIn("review-checklist: - Fixes for one dialog type", p.stdout + p.stderr)
+        out = p.stdout
+        helpers = self.cli("card", "show", "proj", "shared-helpers").stdout
+        self.assertIn("useOverlayDeferral (src/hooks/overlay.ts)", helpers)
+        self.assertNotIn("ghostHelper", helpers)
+        self.assertIn("left out helper ghostHelper: content/utils/ghost.ts isn't in the code", out)
+        checklist = self.cli("card", "show", "proj", "review-checklist").stdout
+        self.assertNotIn("not confirmed", checklist)
+        self.assertIn("Before adding overlay or counter state", checklist)  # corrected, not duplicated
+        self.assertEqual(checklist.count("shared surface counter"), 1)
+        self.assertIn("declined (from the PR): src/frame.ts: iframe case not handled", out)
+        self.assertIn("The project's review cards already say this", self.calls()[-1]["append"])
+        out = self.cli("review", "learn", "proj", "--verify").stdout  # registerSurface's path isn't in this repo
+        self.assertIn("removed from shared-helpers: - registerSurface (src/init/surfaces.ts)", out)
         self.assertIn("useOverlayDeferral", self.cli("card", "show", "proj", "shared-helpers").stdout)
         # when the remote doesn't name the tracker project: set it once, every MCP worker gets it
         self.assertIn("tracker", self.cli("review", "learn", "proj", "--tracker", "project=Storefront").stdout)
