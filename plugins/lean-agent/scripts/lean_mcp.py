@@ -5,6 +5,7 @@ servers uses `--setting-sources ""` + `--strict-mcp-config` instead: the same
 isolation (no user/project settings, CLAUDE.md, plugins or hooks), plus exactly the
 servers and tools the orchestrator picked.
 """
+import glob
 import json
 import os
 import queue
@@ -43,8 +44,8 @@ def config_dir():
     return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 
 
-def enabled_plugins(project_path=None):
-    """Plugin ids (name@marketplace) switched on in user, project or local settings (later files win)."""
+def plugin_switches(project_path=None):
+    """{plugin id (name@marketplace): on?} from user, project and local settings (later files win)."""
     files = [os.path.join(config_dir(), "settings.json")]
     if project_path:
         files += [os.path.join(project_path, ".claude", f) for f in ("settings.json", "settings.local.json")]
@@ -52,7 +53,17 @@ def enabled_plugins(project_path=None):
     for f in files:
         for pid, on in (_load(f).get("enabledPlugins") or {}).items():
             state[pid] = bool(on)
-    return {pid for pid, on in state.items() if on}
+    return state
+
+
+def enabled_plugins(project_path=None):
+    return {pid for pid, on in plugin_switches(project_path).items() if on}
+
+
+def settings_env():
+    """The `env` block of the user's settings: Claude Code puts it in its environment, so ${VAR} in a
+    plugin's config sees it too (it wins over the shell's value)."""
+    return {k: str(v) for k, v in (_load(os.path.join(config_dir(), "settings.json")).get("env") or {}).items()}
 
 
 def installed_plugins(project_path=None):
@@ -71,6 +82,20 @@ def installed_plugins(project_path=None):
     return out
 
 
+def synced_plugins():
+    """[(name@marketplace, path)] for plugins synced from claude.ai (plugins/synced/<bucket>/<dir>)."""
+    out = []
+    for manifest in sorted(glob.glob(os.path.join(config_dir(), "plugins", "synced", "*", "manifest.json"))):
+        bucket = os.path.dirname(manifest)
+        for rec in _load(manifest).get("plugins") or []:
+            path = os.path.join(bucket, str(rec.get("name") or ""))
+            if not rec.get("name") or not os.path.isdir(path):
+                continue
+            name = _load(os.path.join(path, ".claude-plugin", "plugin.json")).get("name") or rec["name"]
+            out.append((f"{name}@{rec.get('marketplaceName') or 'synced'}", path))
+    return out
+
+
 def plugin_options(pid, manifest):
     """A plugin's option values: its userConfig defaults, then pluginConfigs.<id>.options in user settings.
     Sensitive options live in Claude Code's credentials store and aren't readable here."""
@@ -81,9 +106,10 @@ def plugin_options(pid, manifest):
     return opts
 
 
-def _expand(value, root, data, options=None, missing=None):
-    """${CLAUDE_PLUGIN_ROOT}, ${CLAUDE_PLUGIN_DATA}, ${user_config.x} and ${ENV} in a plugin's server config,
-    as Claude Code does; option names it can't fill are added to `missing`."""
+def _expand(value, root, data, options=None, missing=None, env=None):
+    """${CLAUDE_PLUGIN_ROOT}, ${CLAUDE_PLUGIN_DATA}, ${user_config.x}, ${VAR} and ${VAR:-default} in a plugin's
+    server config, as Claude Code does; names it can't fill go into `missing` ("env:VAR" for variables)."""
+    env = env if env is not None else dict(os.environ, **settings_env())
     if isinstance(value, str):
         value = value.replace("${CLAUDE_PLUGIN_ROOT}", root).replace("${CLAUDE_PLUGIN_DATA}", data)
 
@@ -94,12 +120,20 @@ def _expand(value, root, data, options=None, missing=None):
                 missing.append(m.group(1))
             return m.group(0)
         value = re.sub(r"\$\{user_config\.([^}]+)\}", opt, value)
-        return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}",
-                      lambda m: os.environ.get(m.group(1), m.group(2) if m.group(2) is not None else m.group(0)), value)
+
+        def var(m):
+            if m.group(2) is not None:  # ${VAR:-default}: the default when unset or empty
+                return env.get(m.group(1)) or m.group(2)
+            if m.group(1) in env:
+                return env[m.group(1)]
+            if missing is not None:
+                missing.append("env:" + m.group(1))
+            return m.group(0)
+        return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}", var, value)
     if isinstance(value, list):
-        return [_expand(v, root, data, options, missing) for v in value]
+        return [_expand(v, root, data, options, missing, env) for v in value]
     if isinstance(value, dict):
-        return {k: _expand(v, root, data, options, missing) for k, v in value.items()}
+        return {k: _expand(v, root, data, options, missing, env) for k, v in value.items()}
     return value
 
 
@@ -108,10 +142,12 @@ def plugin_servers(project_path=None):
 
     The config is kept as the plugin wrote it (only variables expanded): Claude Code keys a server's stored
     OAuth login by its name plus type, url and headers, so a worker given the same name and config reuses it."""
-    on = enabled_plugins(project_path)
+    switches = plugin_switches(project_path)
     found = {}
-    for pid, root in installed_plugins(project_path):
-        if pid not in on:
+    candidates = [(pid, root, switches.get(pid, False)) for pid, root in installed_plugins(project_path)]
+    candidates += [(pid, root, switches.get(pid, True)) for pid, root in synced_plugins()]  # synced: on by default
+    for pid, root, on in candidates:
+        if not on:
             continue
         manifest = _load(os.path.join(root, ".claude-plugin", "plugin.json"))
         name = manifest.get("name") or pid.split("@")[0]
@@ -136,6 +172,27 @@ def plugin_servers(project_path=None):
             found[f"plugin:{name}:{server}"] = {"config": cfg, "source": "plugin", "plugin": pid,
                                                 "alias": name if len(mapping) == 1 else f"{name}-{server}",
                                                 "missing_options": sorted(set(missing))}
+    return found
+
+
+def claude_mcp_list(timeout=90):
+    """{server name: (status, target)} from `claude mcp list`, which connects every server the way the
+    user's own sessions do; {} if it can't run. Status: connected, needs-auth, failed or the raw text."""
+    claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
+    try:
+        out = subprocess.run([claude, "mcp", "list"], capture_output=True, text=True, timeout=timeout,
+                             stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    found = {}
+    for line in out.splitlines():
+        m = re.match(r"^(\S+?): (.*) - (.+)$", line.strip())
+        if not m:
+            continue
+        raw = m.group(3).lower()
+        status = ("connected" if "connected" in raw else "needs-auth" if "auth" in raw
+                  else "failed" if "fail" in raw else raw.strip())
+        found[m.group(1)] = (status, re.sub(r"\s*\((HTTP|SSE|stdio)\)$", "", m.group(2), flags=re.I).strip())
     return found
 
 
@@ -283,15 +340,14 @@ def transcript_for(workdir, session_id):
     return None
 
 
-def count_mcp_calls(workdir, session_id, since_utc):
-    """MCP tool calls a worker made after `since_utc` (ISO), read from its transcript.
+def mcp_call_sequence(workdir, session_id, since_utc):
+    """MCP tool names a worker called after `since_utc` (ISO), in order, read from its transcript.
 
-    The transcript format is internal to Claude Code; on any surprise this returns {}.
-    """
+    The transcript format is internal to Claude Code; on any surprise this returns []."""
     path = session_id and transcript_for(workdir, session_id)
-    counts, seen = {}, set()
+    seq, seen = [], set()
     if not path:
-        return counts
+        return seq
     try:
         with open(path) as fh:
             for line in fh:
@@ -305,7 +361,15 @@ def count_mcp_calls(workdir, session_id, since_utc):
                     if (isinstance(block, dict) and block.get("type") == "tool_use"
                             and str(block.get("name", "")).startswith("mcp__") and block.get("id") not in seen):
                         seen.add(block.get("id"))
-                        counts[block["name"]] = counts.get(block["name"], 0) + 1
+                        seq.append(block["name"])
     except OSError:
-        return {}
+        return []
+    return seq
+
+
+def count_mcp_calls(workdir, session_id, since_utc):
+    """{tool: calls} for the MCP tools a worker called after `since_utc`."""
+    counts = {}
+    for name in mcp_call_sequence(workdir, session_id, since_utc):
+        counts[name] = counts.get(name, 0) + 1
     return counts

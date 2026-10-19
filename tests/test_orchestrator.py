@@ -14,6 +14,9 @@ CLI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins", 
 FAKE_CLAUDE = textwrap.dedent("""\
     #!/usr/bin/env python3
     import json, os, sys
+    if sys.argv[1:3] == ["mcp", "list"]:
+        print(os.environ.get("FAKE_MCP_LIST", ""))
+        sys.exit(0)
     if sys.argv[1:2] == ["plugin"]:
         with open(os.environ["FAKE_LOG"], "a") as fh:
             fh.write(json.dumps({"plugin": sys.argv[1:]}) + "\\n")
@@ -51,8 +54,9 @@ FAKE_CLAUDE = textwrap.dedent("""\
         os.makedirs(d, exist_ok=True)
         ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         with open(os.path.join(d, "sess-1.jsonl"), "a") as fh:
-            fh.write(json.dumps({"type": "assistant", "timestamp": ts, "message": {"content": [
-                {"type": "tool_use", "id": "tu-" + str(os.getpid()), "name": os.environ["FAKE_MCP_CALL"], "input": {}}]}}) + "\\n")
+            for i, name in enumerate(os.environ["FAKE_MCP_CALL"].split(",")):  # several calls, in order
+                fh.write(json.dumps({"type": "assistant", "timestamp": ts, "message": {"content": [
+                    {"type": "tool_use", "id": "tu-%d-%d" % (os.getpid(), i), "name": name, "input": {}}]}}) + "\\n")
     with open(log, "a") as fh:
         fh.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "task": task,
                              "append": open(append).read(), "mcp": mcp,
@@ -201,6 +205,19 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("look up the fixture", err)
         self.assertIn("No saved command outputs", self.cli("logs", "verbose").stdout)
 
+    def test_runs_show_prints_summary_again(self):
+        self.cli("learn", self.proj)
+        out = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "t").stdout
+        again = self.cli("runs", "--last", "--tokens").stdout
+        self.assertTrue(again.startswith("run "), again)
+        self.assertIn("  tokens: input", again)
+        self.assertIn("context per turn", again)
+        self.assertNotIn("Did the thing", again)
+        full = self.cli("runs", "--show").stdout
+        self.assertEqual(full, out[out.index("run "):])
+        rid = out.split("run ")[1].split()[0]
+        self.assertIn(rid, self.cli("runs", "--show", rid).stdout)
+
     def test_run_requires_model_and_why(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "do it", check=False)
@@ -227,7 +244,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--add-dir") + 1], self.proj)
         self.assertNotEqual(os.path.realpath(call["cwd"]), os.path.realpath(self.proj))
         self.assertIsNone(call["addclaudemd"])
-        self.assertEqual(call["task"], "fix the test")
+        self.assertRegex(call["task"], r"^Today is \w+day \d{4}-\d\d-\d\d, \d\d:\d\d .*\(UTC[+-]\d\d:\d\d\)\.\n\nfix the test$")
         self.assertIn("sqlite fixture", call["append"])      # testing card sent
         self.assertNotIn("pnpm", call["append"])             # web card not sent
 
@@ -515,11 +532,92 @@ class CliTest(unittest.TestCase):
         with open(os.path.join(cfg, "settings.json"), "w") as fh:
             json.dump(settings, fh)
         doc = self.cli("doctor", check=False, **env).stdout
-        self.assertIn("plugin MCP server plugin:dd:mcp: needs-auth when connected as a worker", doc)
+        self.assertIn("plugin MCP server plugin:dd:mcp: needs-auth as a worker", doc)
+        listed = "plugin:dd:mcp: https://mcp.example.eu/v1/mcp?v=1 (HTTP) - ✓ Connected"
+        doc = self.cli("doctor", check=False, FAKE_MCP_LIST=listed, **env).stdout
+        self.assertIn("Claude Code connects to https://mcp.example.eu/v1/mcp?v=1 but lean-agent built "
+                      "https://mcp.example.org/v1/mcp?v=1", doc)
+        doc = self.cli("doctor", check=False, FAKE_MCP_LIST=listed.replace("✓ Connected", "! Needs authentication"),
+                       **env).stdout
+        self.assertIn("needs-auth in Claude Code itself", doc)
+        self.assertIn("/mcp, pick it, Authenticate", doc)
         settings["enabledPlugins"]["dd@mkt"] = False
         with open(os.path.join(cfg, "settings.json"), "w") as fh:
             json.dump(settings, fh)
         self.assertNotIn("plugin:dd", self.cli("mcp", "list", **env).stdout)
+
+    def test_synced_plugin_mcp_server(self):
+        """The layout of a plugin synced from claude.ai, with ${VAR:-default} and the settings `env` block."""
+        cfg = self.env["CLAUDE_CONFIG_DIR"]
+        bucket = os.path.join(cfg, "plugins", "synced", "abc_def")
+        root = os.path.join(bucket, "1111-2222")
+        os.makedirs(os.path.join(root, ".claude-plugin"))
+        with open(os.path.join(bucket, "manifest.json"), "w") as fh:
+            json.dump({"plugins": [{"name": "1111-2222", "marketplaceName": "dir"}]}, fh)
+        with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w") as fh:
+            json.dump({"name": "obs", "mcpServers": "./.obs_mcp.json"}, fh)
+        with open(os.path.join(root, ".obs_mcp.json"), "w") as fh:
+            json.dump({"mcpServers": {"mcp": {"type": "http", "url": "https://${OBS_DOMAIN:-not-setup}/v1/mcp",
+                                              "headers": {"API_KEY": "${OBS_KEY:-}", "T": "${OBS_TOKEN}"}}}}, fh)
+        with open(os.path.join(cfg, "settings.json"), "w") as fh:
+            json.dump({"env": {"OBS_DOMAIN": "mcp.example.eu"}}, fh)
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_mcp
+        old = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = cfg
+        try:
+            found = lean_mcp.plugin_servers()
+        finally:
+            os.environ.pop("CLAUDE_CONFIG_DIR") if old is None else os.environ.update(CLAUDE_CONFIG_DIR=old)
+        srv = found["plugin:obs:mcp"]
+        self.assertEqual(srv["config"]["url"], "https://mcp.example.eu/v1/mcp")
+        self.assertEqual(srv["config"]["headers"]["API_KEY"], "")
+        self.assertEqual(srv["missing_options"], ["env:OBS_TOKEN"])
+        doc = self.cli("doctor", check=False).stdout
+        self.assertIn("uses ${OBS_TOKEN} and lean-agent can't see that variable", doc)
+        with open(os.path.join(cfg, "settings.json"), "w") as fh:
+            json.dump({"enabledPlugins": {"obs@dir": False}}, fh)
+        self.assertNotIn("plugin:obs", self.cli("mcp", "list").stdout)
+
+    def test_optimize_drafts_cards_and_presets(self):
+        cfg = self.env["CLAUDE_CONFIG_DIR"]
+        root = os.path.join(cfg, "plugins", "cache", "mkt", "obs", "1")
+        os.makedirs(os.path.join(root, ".claude-plugin"))
+        with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w") as fh:
+            json.dump({"name": "obs"}, fh)
+        with open(os.path.join(root, ".mcp.json"), "w") as fh:
+            json.dump({"mcpServers": {"mcp": {"type": "http", "url": "https://mcp.example.eu/v1"}}}, fh)
+        with open(os.path.join(cfg, "plugins", "installed_plugins.json"), "w") as fh:
+            json.dump({"version": 2, "plugins": {"obs@mkt": [{"installPath": root}]}}, fh)
+        with open(os.path.join(cfg, "settings.json"), "w") as fh:
+            json.dump({"enabledPlugins": {"obs@mkt": True}}, fh)
+        names = ["search_obs_dashboards", "get_obs_dashboard", "get_obs_metric", "search_obs_metrics",
+                 "get_obs_metric_context"] + [f"search_obs_thing{i}" for i in range(15)]
+        env = dict(FAKE_HTTP_URL="mcp.example.eu", FAKE_HTTP_TOOLS=json.dumps({"plugin:obs:mcp": names}))
+        self.cli("learn", self.proj)
+        p = "mcp__plugin_obs_mcp__"
+        calls = ",".join(p + t for t in ["search_obs_dashboards", "get_obs_dashboard"] + ["get_obs_metric"] * 6)
+        out = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--mcp", "obs:read",
+                       "widget value now vs same time on earlier Mondays", FAKE_MCP_CALL=calls, **env).stdout
+        self.assertIn("(20 offered, 3 used)", out)
+        self.assertIn("mcp: plugin:obs:mcp offered 20 tools", out)
+        self.assertIn("next time --mcp plugin:obs:mcp:search_obs_dashboards,get_obs_dashboard,get_obs_metric", out)
+        out = self.cli("optimize", "proj", **env).stdout
+        self.assertIn("new card  draft-card-", out)
+        self.assertIn("How to: widget value now vs same time on earlier Mondays", out)
+        self.assertIn("3. get_obs_metric (x6)", out)
+        self.assertIn("preset    draft-preset-", out)
+        self.assertIn("--mcp plugin:obs:mcp:dashboards = search_obs_dashboards,get_obs_dashboard,get_obs_metric", out)
+        ids = [l.split()[1] if l.startswith("preset") else l.split()[2] for l in out.splitlines()
+               if l.startswith(("new card", "preset    "))]
+        out = self.cli("optimize", "proj", "--accept", ",".join(ids), **env).stdout
+        self.assertIn("saved card recipe-widget-value-now-vs-same", out)
+        self.assertIn("saved preset plugin:obs:mcp:dashboards", out)
+        self.assertNotIn("Drafts from what workers did", self.cli("optimize", "proj", **env).stdout)
+        self.assertIn("plugin:obs:mcp:dashboards", self.cli("mcp", "preset", "obs", **env).stdout)
+        out = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--mcp", "obs:read", "another widget check",
+                       FAKE_MCP_CALL=p + "get_obs_metric", **env).stdout
+        self.assertIn("preset plugin:obs:mcp:dashboards covers it", out)
 
     def test_optimize_suggests_mcp_narrowing(self):
         self.cli("learn", self.proj)
@@ -695,9 +793,9 @@ class CliTest(unittest.TestCase):
     def test_run_project_positional_and_late_task_words(self):
         self.cli("learn", self.proj)
         self.cli("run", "proj", "-m", "haiku", "--why", "x", "find", "things")
-        self.assertEqual(self.calls()[-1]["task"], "find things")
+        self.assertTrue(self.calls()[-1]["task"].endswith("\n\nfind things"))
         self.cli("run", "-m", "haiku", "--why", "x", "-p", "proj", "first", "--read-only", "second")
-        self.assertEqual(self.calls()[-1]["task"], "first second")
+        self.assertTrue(self.calls()[-1]["task"].endswith("\n\nfirst second"))
 
     def test_teams_recipe_is_seeded_once(self):
         self.cli("learn", self.proj)

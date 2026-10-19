@@ -115,7 +115,8 @@ Other ways to run the orchestrator:
 | `lean-agent run <project> -m <model> --why "..." [--cards a,b \| auto] [--read-only] [--chrome[=tools]] [--mcp s:t] [--max-usd X] [--max-turns N] -- "<task>"` | Run an isolated worker. Model and reason are **required**. `--read-only` allows Read/Glob/Grep and read-only `git -C <project> show/log/grep/diff/blame/fetch`. |
 | `lean-agent run --resume <run-id> "<follow-up>"` | Continue a worker's session (cheap: its context is cached). |
 | `lean-agent card show\|add\|rm\|core <project> <id>` | Inspect or edit cards; `add` creates *note* cards from what workers had to discover. |
-| `lean-agent optimize <project> [--apply]` | Promote/demote core cards, archive dead ones, flag big cards to trim, list recent context gaps. |
+| `lean-agent optimize <project> [--apply] [--accept ids] [--reject ids]` | Promote/demote core cards, archive dead ones, flag big cards to trim, list recent context gaps, and draft new recipe cards and MCP presets from what workers actually did. |
+| `lean-agent runs [--last] [--tokens] [--show [id]]` | Recent runs; `--tokens` prints the latest run's run/tokens/context lines again, `--show` its whole summary (saved per run, so a `| tail` can't lose it). |
 | `lean-agent stats [--today] [--project p]` | Runs, success rate, avg/total weighted tokens and cost per model. |
 
 ## MCP servers in workers
@@ -143,8 +144,9 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   `--mcp <server>:<name>` uses it. Every server whose tool list is known gets an automatic `read` preset
   (get/list/search/query/... tools). `run` prints each server's chosen tools and per-turn cost before it starts,
   e.g. `mcp: tracker 6/40 tools ~1,900 tok per turn (whole server ~18,800)`.
-- lean-agent counts which MCP tools each worker called. `optimize` then suggests narrowing a server to the tools
-  that get used, or dropping it.
+- lean-agent records which MCP tools each worker called, in order. The run summary says how many tools it was
+  given and how many it used (`MCP/browser tools ~25,000 (40 offered, 3 used)`), and which `--mcp` spec or saved
+  preset would have been enough. `optimize` suggests narrowing a server or dropping it after 2 runs.
 - **Servers from Claude Code plugins** (`claude mcp list` shows them as `plugin:<plugin>:<server>`) are found in
   the enabled plugins' `.mcp.json`/`plugin.json`, with `${CLAUDE_PLUGIN_ROOT}`, `${user_config.*}` (from the
   plugin's options in your settings) and `${ENV}` filled in. Use the full name or the short alias `mcp list`
@@ -334,6 +336,13 @@ exact-cent tests with 1-cent remainder cases.
    unneeded, becomes **core for that type**: it's sent automatically to that type only. Core cards used in under 40%
    are demoted. Cards used in at most 20% and marked unneeded are **archived**, and big, often-used cards are flagged
    for rewriting shorter. Workers report a card as used only if it changed what they did.
+   **New cards from what workers did:** one successful run with a distinctive MCP pattern (2+ tools, 4+ calls or
+   6+ turns) is enough for `optimize` to draft a recipe card: the task, the tools in the order they worked, the
+   `--mcp` spec, what a good answer looked like, and what it cost without the card. Runs with the same server and a
+   similar tool set, or similar wording, are grouped into one draft. A **preset** is drafted (named from the tool
+   names, e.g. `datadog:metrics`) when a run was given far more tools than it used, or a pattern recurs. Drafts
+   already covered by a card are skipped. `optimize <project> --accept <id>` writes them (`card add`, `mcp
+   preset`), `--reject <id>` stops proposing one. The 5-run threshold only gates trim/core/archive.
    Relevance in `suggest` and `--cards auto`: words are weighted by how rare they are across your cards. A card
    needs a distinctive title word, or (if it's small) three distinctive body words; cards over 800 tokens need a
    title match, and ranking divides by card size. Only cards scoring at least 40% of the best match are kept, at
