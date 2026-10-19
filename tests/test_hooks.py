@@ -170,6 +170,26 @@ class BudgetTest(Base):
                        **self.env)
         self.assertIn("suggest a fresh session", out["hookSpecificOutput"]["additionalContext"])
 
+    def test_cap_lifted_live_and_legacy_default_ignored(self):
+        with open(self.transcript, "a") as fh:  # 1,003,450 billed: over the old built-in 1,000,000 default
+            fh.write(assistant_line("m9", 1000000, 0, 0, 0))
+        self.assertIsNone(run_hook("budget_hook.py", self.ev, LEAN_AGENT_BUDGET="1000000", **self.env))
+        out = run_hook("budget_hook.py", self.ev, LEAN_AGENT_BUDGET="1000000", LEAN_AGENT_BUDGET_SET="1", **self.env)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("lean-agent budget --cap off", out["hookSpecificOutput"]["permissionDecisionReason"])
+        home = self.env["LEAN_AGENT_HOME"]
+        ev = dict(self.ev, cwd=home, tool_name="Bash", tool_input={"command": "lean-agent budget --cap off"})
+        os.makedirs(home, exist_ok=True)
+        self.assertIsNone(run_hook("budget_hook.py", ev, LEAN_AGENT_BUDGET="5000", LEAN_AGENT_BUDGET_SET="1", **self.env))
+        with open(os.path.join(home, "session-cap.json"), "w") as fh:
+            json.dump({"cap": 0}, fh)
+        ev["tool_input"] = {"command": "npm test"}
+        self.assertIsNone(run_hook("budget_hook.py", ev, LEAN_AGENT_BUDGET="5000", LEAN_AGENT_BUDGET_SET="1", **self.env))
+        # outside the lean-agent home the saved setting doesn't apply (the user's own sessions)
+        out = run_hook("budget_hook.py", dict(ev, cwd=self.tmp.name), LEAN_AGENT_BUDGET="5000",
+                       LEAN_AGENT_BUDGET_SET="1", **self.env)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
     def test_report(self):
         p = subprocess.run([sys.executable, os.path.join(ROOT, "usage.py"), "report", self.transcript],
                            capture_output=True, text=True, env=dict(os.environ, **self.env), check=True)

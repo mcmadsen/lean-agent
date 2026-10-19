@@ -1223,8 +1223,14 @@ class CliTest(unittest.TestCase):
         out = p.stdout
         self.assertEqual(p.returncode, 2, out)
         self.assertIn("1 new files, 2 new symbols for the reuse pass", out)  # test files don't count
-        second, main = self.calls()[-2], self.calls()[-1]
-        self.assertIn("search-only second opinion", second["append"])
+        calls = self.calls()
+        second = next(c for c in calls if "search-only second opinion" in c["append"])
+        main = next(c for c in calls if "Reuse and duplication (mandatory)" in c["append"])
+        follow = calls[-1]  # sent back once, same session, to finish the reuse pass
+        self.assertIn("Your reuse pass isn't complete", follow["task"])
+        self.assertIn("useOverlayOpen", follow["task"])
+        self.assertIn("--resume", follow["argv"])
+        self.assertIn("sending the reviewer back once", out)
         self.assertEqual(second["argv"][second["argv"].index("--model") + 1], "haiku")
         self.assertIn("Reuse and duplication (mandatory)", main["append"])
         self.assertIn("- createOverlayStore (src/dialogs/overlayStore.ts)", main["append"])
@@ -1239,6 +1245,15 @@ class CliTest(unittest.TestCase):
         self.assertIn("createOverlayStore -> src/init/surfaces.ts:2 -> extend", out)
         self.assertLess(out.index("[major/duplication]"), out.index("[nit/tests]"))
         self.assertNotEqual(self.cli("review", "proj", "--status", "--head", "feature", check=False).returncode, 0)
+        # justified-new is not accepted when the second opinion found existing code for it
+        weak = json.dumps(dict(json.loads(main_review), findings=[], reuse=[
+            {"symbol": "createOverlayStore", "candidates": [], "verdict": "justified-new", "why": "different"},
+            {"symbol": "useOverlayOpen", "candidates": [], "verdict": "justified-new", "why": "n/a"}]))
+        out = self.cli("review", "proj", "--head", "feature", "--base", "main", "--second-opinion", "on", check=False,
+                       FAKE_REUSE=reuse, FAKE_REVIEW=weak).stdout
+        self.assertIn("justified-new verdict(s) not accepted", out)
+        self.assertIn("createOverlayStore: the second opinion says extend src/init/surfaces.ts:2", out)
+        self.assertNotIn("REVIEW: APPROVE", out)
         # after fixes, --resume runs the passes again on what changed
         g("checkout", "-q", "feature")
         write("src/dialogs/overlayStore.ts", "export function deferOverlay() {}\n")

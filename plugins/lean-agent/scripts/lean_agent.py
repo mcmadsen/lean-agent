@@ -1555,6 +1555,8 @@ def second_opinion(a, slug, path, ns_syms, names, scope, read_rule, rng, grep_re
     for sb in rv.get("siblings") or []:
         if isinstance(sb, dict) and sb.get("needs_fix"):
             lines.append(f"- sibling that may share the problem: {sb.get('checked')}")
+    a._second = [r for r in rv.get("reuse") or [] if isinstance(r, dict) and r.get("candidates")
+                 and r.get("verdict") in ("reuse", "extend")]
     return "\n".join(lines[:25])
 
 
@@ -1764,7 +1766,8 @@ def cmd_review(a):
     if a.focus:
         task += f"\nThe author asks you to look closely at: {a.focus}\n"
     meta = {"base": base, "merge_base": merge_base, "head": sha, "dirty": dirty, "ref": label, "mode": mode,
-            "files": len(names), "new_symbols": ns_syms["files"] + ns_syms["symbols"]}
+            "files": len(names), "new_symbols": ns_syms["files"] + ns_syms["symbols"],
+            "second_opinion": getattr(a, "_second", [])}
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=model,
                             why=f"pre-PR review ({effort} effort)", cards=None, card_list=cards, project=slug,
                             read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=a.max_turns,
@@ -1773,6 +1776,30 @@ def cmd_review(a):
                             role_rule=REVIEWER_RULE.format(scope=scope, project=path, diff_range=rng,
                                                            read_rule=read_rule, new_symbols=symbols_text(ns_syms),
                                                            grep_ref=grep_ref))
+    rc = cmd_run(ns)
+    return reuse_follow_up(a, slug, meta, effort) if rc == 2 else rc
+
+
+def reuse_follow_up(a, slug, meta, effort):
+    """Once per review: if the reviewer left symbols unchecked or a justified-new verdict wasn't accepted, send it
+    back (same session, cached context) to finish the reuse pass before the result goes to the user."""
+    last = (list(read_jsonl(reviews_path(slug))) or [None])[-1]
+    gaps = (last or {}).get("unchecked", []) + (last or {}).get("disputed", [])
+    if not last or not gaps:
+        return 2
+    prev = next((r for r in reversed(ledger()) if r["id"] == last["run"]), None)
+    if not prev:
+        return 2
+    print(f"review: sending the reviewer back once to finish the reuse pass ({len(gaps)} open)", flush=True)
+    task = ("Your reuse pass isn't complete. For each item below, search the repository (at least one search "
+            "each) and give it a reuse entry; for justified-new, say concretely why the existing code can't be "
+            "reused or extended, or change your verdict and add a major duplication finding:\n"
+            + "\n".join(f"- {g}" for g in gaps[:20]) + "\nThen reply with a complete LEAN-REVIEW line again "
+            "(all findings, searches and reuse entries, not only the new ones).")
+    ns = argparse.Namespace(resume=prev["id"], task=[task], task_file=None, model=None, why=None, cards=None,
+                            project=None, read_only=True, chrome=None, mcp=None, tools=None, allow_send=None,
+                            max_turns=min(a.max_turns, 30), max_usd=min(a.max_usd, 2.0), max_context=4000,
+                            role="reviewer", effort=effort, review_meta=meta)
     return cmd_run(ns)
 
 
@@ -1811,6 +1838,24 @@ def enforce_review_rules(review, meta):
                                  "line": 0, "issue": f"{sym} duplicates existing code: {', '.join(map(str, r['candidates']))[:200]}",
                                  "suggestion": f"{r['verdict']} the existing code instead" +
                                                (f": {r['why']}" if r.get("why") else "")})
+    disputed = []
+    second = {str(x.get("symbol", "")).split(" (")[0]: x for x in meta.get("second_opinion") or []}
+    for r in reuse:
+        if r.get("verdict") != "justified-new":
+            continue
+        sym = str(r.get("symbol") or "").split(" (")[0]
+        other = next((x for k, x in second.items() if k and (k in sym or sym in k)), None)
+        if other:
+            disputed.append(f"{sym}: the second opinion says {other.get('verdict')} "
+                            f"{', '.join(map(str, other['candidates']))[:160]}")
+        elif r.get("candidates") and len(str(r.get("why") or "")) < 40:
+            disputed.append(f"{sym}: marked justified-new next to {', '.join(map(str, r['candidates']))[:160]} "
+                            "without saying why that can't be reused or extended")
+    for d in disputed:
+        checks.append({"what": "justify or fix: " + d, "why": "a new abstraction next to an existing one needs a reason"})
+    if disputed:
+        notes.append(f"{len(disputed)} justified-new verdict(s) not accepted")
+    review["_disputed"] = disputed
     wanted = meta.get("new_symbols") or []
     covered = " ".join(str(r.get("symbol", "")) + " " + " ".join(map(str, r.get("candidates") or [])) for r in reuse)
     covered += " " + " ".join(str(f.get("file", "")) for f in findings if f.get("category") == "duplication")
@@ -1823,6 +1868,7 @@ def enforce_review_rules(review, meta):
             return any(x.endswith(f"({name})") and x.split(" (")[0] in covered for x in wanted)
         return False
     missing = [w for w in wanted if not is_covered(w)]
+    review["_missing"] = missing
     if missing:
         checks.append({"what": "reuse not checked for: " + ", ".join(missing[:10]),
                        "why": "every new symbol needs a search for existing code that does the same job"})
@@ -1830,7 +1876,7 @@ def enforce_review_rules(review, meta):
     if wanted and not review.get("searches"):
         notes.append("the review lists no searches")
     blocking = [f for f in findings if f.get("severity") in ("blocker", "major")]
-    if verdict == "approve" and (blocking or missing or (wanted and not review.get("searches"))):
+    if verdict == "approve" and (blocking or missing or disputed or (wanted and not review.get("searches"))):
         verdict = "changes-requested" if blocking else "needs-checks"
         notes.append(f"lean-agent changed the verdict from approve to {verdict}")
     return verdict, findings, checks, notes
@@ -1845,7 +1891,8 @@ def report_review(slug, project, entry, review, meta):
     append_jsonl(reviews_path(slug), {"ts": now_iso(), "run": entry["id"], "verdict": verdict, "head": head,
                                       "dirty": dirty, "ref": meta.get("ref"), "mode": meta.get("mode", "worktree"),
                                       "base": meta.get("base"), "findings": findings, "checks": checks,
-                                      "reuse": review.get("reuse") or [], "new_symbols": meta.get("new_symbols") or []})
+                                      "reuse": review.get("reuse") or [], "new_symbols": meta.get("new_symbols") or [],
+                                      "unchecked": review.get("_missing") or [], "disputed": review.get("_disputed") or []})
     order = {"blocker": 0, "major": 1, "minor": 2, "nit": 3}
     label = meta.get("ref") or "the working tree"
     reuse = [r for r in review.get("reuse") or [] if isinstance(r, dict)]
@@ -3385,6 +3432,7 @@ def cmd_up(a):
         env.setdefault(k, v)
     if a.budget:
         env["LEAN_AGENT_BUDGET"] = str(a.budget)
+        env["LEAN_AGENT_BUDGET_SET"] = "1"  # chosen by the user (not the old built-in default)
     if a.budget_5h is not None or a.budget_week is not None:
         cur = load_json(usage.limits_path(), {})
         if a.budget_5h is not None:
@@ -3531,6 +3579,20 @@ def session_workers(session_id, first_ts, last_ts):
 
 
 def cmd_budget(a):
+    if a.cap is not None or a.count:
+        cur = load_json(home("session-cap.json"), {})
+        if a.cap is not None:
+            cur["cap"] = 0 if a.cap.lower() in ("off", "0", "none") else int(a.cap.replace(",", "").replace("_", ""))
+        if a.count:
+            cur["count"] = a.count
+        cur["set"] = now_iso()
+        save_json(home("session-cap.json"), cur)
+        cap = cur.get("cap")
+        print("session spend cap: " + ("off" if not cap else f"{cap:,} sonnet-eq") +
+              f" (counting {'new tokens only' if cur.get('count') == 'new' else 'all billed tokens'}); "
+              "applies to running sessions from their next tool call")
+        if a.session is None:
+            return 0
     sys.exit(usage.report(a.session, workers=session_workers))
 
 
@@ -3570,8 +3632,12 @@ def build_parser():
     s = sub.add_parser("env", help="print orchestrator env defaults")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_env)
-    s = sub.add_parser("budget", help="token usage of the current orchestrator session")
+    s = sub.add_parser("budget", help="token usage of the current orchestrator session; --cap sets the spend cap")
     s.add_argument("session", nargs="?")
+    s.add_argument("--cap", metavar="N|off", help="self-set session spend cap in sonnet-eq tokens, for running "
+                   "sessions too (no restart); off = none")
+    s.add_argument("--count", choices=["billed", "new"], help="what the cap counts: all billed tokens, or new "
+                   "tokens only (no cache re-reads)")
     s.set_defaults(fn=cmd_budget)
 
     s = sub.add_parser("learn", help="index a project's CLAUDE.md, rules and skills into context cards")

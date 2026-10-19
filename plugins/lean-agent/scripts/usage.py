@@ -126,10 +126,38 @@ def update(state, transcript_path):
     return state
 
 
-def cap_units(state):
-    """What the self-set session cap counts. LEAN_AGENT_BUDGET_COUNT=new leaves out cache re-reads (the
-    same context billed again each turn) and counts only new tokens; the default counts all billed tokens."""
-    if (os.environ.get("LEAN_AGENT_BUDGET_COUNT") or "billed").lower() == "new":
+LEGACY_DEFAULT_CAP = "1000000"  # what `lean-agent up` set by default before 0.5; never chosen by the user
+
+
+def session_cap(orchestrator=True):
+    """(cap, count mode, where it came from) for the self-set session spend cap; cap 0 = none.
+
+    `lean-agent budget --cap N|off [--count new|billed]` (saved, read on every tool call, so it applies to
+    running sessions without a restart) wins over LEAN_AGENT_BUDGET / LEAN_AGENT_BUDGET_COUNT in the
+    environment. The old built-in default of 1,000,000 that earlier `lean-agent up` versions set is ignored."""
+    saved = {}
+    if orchestrator:  # the saved cap is for lean-agent's own sessions, never the user's other sessions
+        try:
+            with open(os.path.join(lean_home(), "session-cap.json")) as fh:
+                saved = json.load(fh)
+        except (OSError, ValueError):
+            saved = {}
+    count = (saved.get("count") or os.environ.get("LEAN_AGENT_BUDGET_COUNT") or "billed").lower()
+    if "cap" in saved:
+        return int(saved["cap"] or 0), count, "lean-agent budget --cap"
+    env = os.environ.get("LEAN_AGENT_BUDGET") or ""
+    if env == LEGACY_DEFAULT_CAP and not os.environ.get("LEAN_AGENT_BUDGET_SET"):
+        return 0, count, "old built-in default (ignored)"
+    try:
+        return int(float(env or 0)), count, "LEAN_AGENT_BUDGET"
+    except ValueError:
+        return 0, count, "LEAN_AGENT_BUDGET (unreadable)"
+
+
+def cap_units(state, count=None):
+    """What the self-set session cap counts. Count "new" leaves out cache re-reads (the same context billed
+    again each turn) and counts only new tokens; the default, "billed", counts all billed tokens."""
+    if (count or os.environ.get("LEAN_AGENT_BUDGET_COUNT") or "billed").lower() == "new":
         return int(sum(units(dict(t, cache_read_input_tokens=0), m) for m, t in state.get("models", {}).items()))
     return units_total(state)
 
@@ -214,7 +242,6 @@ def report(arg=None, workers=None):
         return 1
     state = update(new_state(), path)
     totals = state["totals"]
-    budget = int(os.environ.get("LEAN_AGENT_BUDGET") or 0)
     print(f"Session: {os.path.basename(path)[:-6]}")
     print(f"Files:   {len(state['files'])} transcript(s) incl. subagents")
     calls = totals.get("_calls", 0)
@@ -243,11 +270,12 @@ def report(arg=None, workers=None):
     elif workers:
         print("Workers started from this session: none")
     print()
+    budget, count, source = session_cap()
     if budget > 0:
         st = new_state()
         update(st, path)
-        capped = cap_units(st)
-        new_only = (os.environ.get("LEAN_AGENT_BUDGET_COUNT") or "").lower() == "new"
+        capped = cap_units(st, count)
+        new_only = count == "new"
         print(f"Self-set session spend cap (LEAN_AGENT_BUDGET, not your Claude plan and not the context window): "
               f"{fmt(capped)} / {fmt(budget)} sonnet-eq "
               + ("new tokens (cache re-reads not counted)" if new_only else "billed over all turns")
@@ -255,7 +283,8 @@ def report(arg=None, workers=None):
         if st.get("last_ctx"):
             print(f"Context window now: ~{fmt(st['last_ctx'])} tokens")
     else:
-        print("No session cap set. For your plan's usage see `lean-agent limits` (and /usage in Claude Code).")
+        print("No session cap set" + (f" ({source})" if "ignored" in source else "") +
+              ". For your plan's usage see `lean-agent limits` (and /usage in Claude Code).")
     print("sonnet-eq = (input + 1.25*cache write + 0.1*cache read + 5*output) x model price relative to Sonnet")
     return 0
 
