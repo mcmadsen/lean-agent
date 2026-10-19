@@ -962,6 +962,9 @@ def cmd_run(a):
            "--append-system-prompt-file", os.path.join(workdir, "append.md"),
            "--max-turns", str(a.max_turns)]
     role = getattr(a, "role", None) or (prev or {}).get("role")
+    review_meta = getattr(a, "review_meta", None)
+    if not review_meta and prev and role == "reviewer":  # `run --resume` of a reviewer: review what's there now
+        review_meta, _ = refresh_review_meta(prev["project_path"], prev.get("review_meta") or {})
     effort = getattr(a, "effort", None) or (prev or {}).get("effort")
     if effort:
         cmd += ["--effort", effort]
@@ -1065,7 +1068,7 @@ def cmd_run(a):
         "mcp": mcp_specs, "mcp_calls": lean_mcp.count_mcp_calls(workdir, out.get("session_id"), started_utc)
         if (mcp_specs or chrome_spec) else {},
         "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
-        "role": role, "effort": effort, "worktree": wt_name, "review_meta": getattr(a, "review_meta", None) or (prev or {}).get("review_meta"),
+        "role": role, "effort": effort, "worktree": wt_name, "review_meta": review_meta,
     }
     append_jsonl(home("ledger.jsonl"), entry)
 
@@ -1104,7 +1107,7 @@ def cmd_run(a):
         print("mcp: " + (", ".join(f"{k} x{v}" for k, v in sorted(calls.items())) or "no MCP tool calls"))
     print(f"resume: lean-agent run --resume {run_id} \"<follow-up>\"")
     if role == "reviewer":
-        return report_review(slug, project, entry, review or {}, getattr(a, "review_meta", None) or {})
+        return report_review(slug, entry["project_path"], entry, review or {}, review_meta or {})
     return 0 if status in ("done", "partial", "needs-input", "awaiting-confirmation") else 1
 
 
@@ -1253,6 +1256,31 @@ def find_review(slug, path, ref=None):
     return None, (sha, label)
 
 
+def refresh_review_meta(path, meta, fetch=True):
+    """The review's target moved on (fixes landed): point the meta at what's there now. Returns (meta, where)."""
+    meta = dict(meta)
+    if meta.get("mode") == "ref":
+        if meta.get("ref", "").startswith("origin/") and fetch:
+            git(path, "fetch", "-q", "origin")
+        sha, _, _, _ = review_target(path, meta["ref"])
+        meta["head"] = sha
+        rng = f"{meta['merge_base']} {sha}"
+        where = (f"{meta['ref']} is now at {sha[:12]}. Re-review `git -C {path} diff {rng}`; read files with "
+                 f"`git -C {path} show {sha}:<path>` (they are not checked out).")
+    else:
+        meta["head"], meta["dirty"] = review_state(path)
+        where = f"Re-review the current diff from {meta.get('merge_base')} to the working tree."
+    return meta, where
+
+
+def previous_findings(slug, label, mode):
+    """The latest recorded review of the same branch/ref, for a fresh review to check against."""
+    for r in reversed(list(read_jsonl(reviews_path(slug)))):
+        if r.get("ref") == label and r.get("mode", "worktree") == mode:
+            return r
+    return None
+
+
 def cmd_review(a):
     slug, path = resolve_project(a.project)
     if a.head and a.head.startswith("origin/") and not a.no_fetch:
@@ -1281,21 +1309,19 @@ def cmd_review(a):
         print(f"lean-agent: budget is low, but the reviewer stays on {model} (effort {effort}): quality gate.",
               file=sys.stderr)
     if a.resume:
-        prev = next((r for r in reversed(ledger()) if r.get("role") == "reviewer" and r["project"] == slug), None)
+        def matches(r):
+            m = r.get("review_meta") or {}
+            if a.head:
+                return m.get("mode") == "ref" and m.get("ref") == a.head
+            return True
+        prev = next((r for r in reversed(ledger()) if r.get("role") == "reviewer" and r["project"] == slug
+                     and matches(r)), None)
         if not prev:
-            die(f"no earlier review of {slug} to resume")
-        meta = dict(prev.get("review_meta") or {})
-        if meta.get("mode") == "ref":
-            if meta.get("ref", "").startswith("origin/") and not a.no_fetch:
-                git(path, "fetch", "-q", "origin")
-            sha, _, _, _ = review_target(path, meta["ref"])
-            meta["head"] = sha
-            rng = f"{meta['merge_base']} {sha}"
-            where = (f"{meta['ref']} is now at {sha[:12]}. Re-review `git -C {path} diff {rng}`; read files with "
-                     f"`git -C {path} show {sha}:<path>` (they are not checked out).")
-        else:
-            meta["head"], meta["dirty"] = review_state(path)
-            where = f"Re-review the current diff from {meta.get('merge_base')} to the working tree."
+            die(f"no earlier review of {a.head or slug} to resume"
+                + (f"; start one: lean-agent review {slug} --head {a.head}" if a.head else ""))
+        meta, where = refresh_review_meta(path, prev.get("review_meta") or {}, fetch=not a.no_fetch)
+        print(f"re-review of {meta.get('ref') or '?'} @ {meta['head'][:12]} (resuming reviewer {prev['id']})",
+              flush=True)
         task = (f"The change was updated after your review. {where} Check whether each earlier finding is "
                 "resolved, and look for new problems. " + (a.focus or ""))
         ns = argparse.Namespace(resume=prev["id"], task=[task], task_file=None, model=None, why=None, cards=None,
@@ -1337,6 +1363,15 @@ def cmd_review(a):
     path_words = " ".join(re.split(r"[/._-]+", " ".join(names)))
     cards = suggest(slug, path_words + " " + (a.focus or ""), a.max_context, "review")
     task = f"Review this change before it becomes a pull request.\n\nFiles changed:\n{stat}\n"
+    earlier = previous_findings(slug, label, mode)
+    if earlier and (earlier.get("findings") or earlier.get("checks")):
+        lines = [f"- [{f.get('severity', '?')}] {f.get('file', '?')}:{f.get('line', '')} {f.get('issue', '')}"[:240]
+                 for f in earlier.get("findings", [])[:15]]
+        lines += [f"- [check] {c.get('what', '')}"[:240] for c in earlier.get("checks", [])[:5]]
+        task += (f"\nAn earlier review of {label} (at {earlier['head'][:12]}, verdict {earlier['verdict']}) found:\n"
+                 + "\n".join(lines) + "\nSay for each whether it is resolved now; don't repeat resolved ones as "
+                 "findings. Still look at the whole change.\n")
+        print(f"review: passing {len(lines)} earlier findings from review {earlier['run']} of {label}", flush=True)
     if a.focus:
         task += f"\nThe author asks you to look closely at: {a.focus}\n"
     meta = {"base": base, "merge_base": merge_base, "head": sha, "dirty": dirty, "ref": label, "mode": mode,
@@ -1363,7 +1398,9 @@ def report_review(slug, project, entry, review, meta):
                                       "dirty": dirty, "ref": meta.get("ref"), "mode": meta.get("mode", "worktree"),
                                       "base": meta.get("base"), "findings": findings, "checks": checks})
     order = {"blocker": 0, "major": 1, "minor": 2, "nit": 3}
-    print(f"\nREVIEW: {verdict.upper()} · {len(findings)} findings · {len(checks)} checks to run")
+    label = meta.get("ref") or "the working tree"
+    print(f"\nREVIEW: {verdict.upper()} · {len(findings)} findings · {len(checks)} checks to run"
+          f" · recorded for {label} @ {head[:12]}" + (" + uncommitted changes" if dirty else ""))
     for f in sorted(findings, key=lambda f: order.get(f.get("severity"), 9)):
         loc = f"{f.get('file', '?')}:{f.get('line', '')}".rstrip(":")
         print(f"  [{f.get('severity', '?')}] {loc}: {f.get('issue', '')}")

@@ -108,6 +108,10 @@ class CliTest(unittest.TestCase):
         with open(self.log) as fh:
             return [c for c in (json.loads(l) for l in fh) if "plugin" not in c]
 
+    def ledger(self):
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "ledger.jsonl")) as fh:
+            return [json.loads(l) for l in fh]
+
     def plugin_calls(self):
         with open(self.log) as fh:
             return [c["plugin"] for c in (json.loads(l) for l in fh) if "plugin" in c]
@@ -887,9 +891,34 @@ class CliTest(unittest.TestCase):
         p = self.cli("review", "proj", "--status", "--head", "feature", check=False)
         self.assertEqual(p.returncode, 1)
         self.assertIn("new commits since", p.stdout)
-        self.cli("review", "proj", "--resume", FAKE_REVIEW=approve)
+        out = self.cli("review", "proj", "--resume", "--head", "feature", FAKE_REVIEW=approve).stdout
+        self.assertIn("re-review of feature @ ", out)
+        self.assertIn("recorded for feature @ ", out)
         self.assertIn("feature is now at", self.calls()[-1]["task"])
         self.assertEqual(self.cli("review", "proj", "--status", "--head", "feature").returncode, 0)
+        p = self.cli("review", "proj", "--resume", "--head", "other", check=False)
+        self.assertIn("no earlier review of other", p.stderr)
+
+        def commit_fix(text):
+            g("checkout", "-q", "feature")
+            with open(os.path.join(self.proj, "api", "totals.py"), "a") as fh:
+                fh.write(text)
+            g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "fix")
+            g("checkout", "-q", "main")
+        # resuming the reviewer with plain `run --resume` also records the review for the branch's new tip
+        commit_fix("# fix 2\n")
+        reviewer = [r for r in self.ledger() if r.get("role") == "reviewer"][-1]["id"]
+        self.cli("run", "--resume", reviewer, "re-check", FAKE_REVIEW=approve)
+        self.assertEqual(self.cli("review", "proj", "--status", "--head", "feature").returncode, 0)
+        # a fresh review of the same branch gets the earlier findings
+        commit_fix("# fix 3\n")
+        bad = json.dumps({"verdict": "changes-requested", "checks": [], "findings": [
+            {"severity": "major", "file": "api/totals.py", "line": 3, "issue": "rounding drops cents"}]})
+        self.cli("review", "proj", "--head", "feature", "--base", "main", check=False, FAKE_REVIEW=bad)
+        commit_fix("# fix 4\n")
+        out = self.cli("review", "proj", "--head", "feature", "--base", "main", FAKE_REVIEW=approve).stdout
+        self.assertIn("passing 1 earlier findings", out)
+        self.assertIn("[major] api/totals.py:3 rounding drops cents", self.calls()[-1]["task"])
 
     def test_shared_worktree_for_workers(self):
         g = self.git_project()

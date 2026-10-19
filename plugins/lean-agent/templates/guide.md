@@ -87,6 +87,7 @@ lean-agent review {{P}} --status --head origin/feature-x                # is tha
 lean-agent run {{P}} -m haiku --why "reviewer's check" --worktree origin/feature-x -- "Run the tests the reviewer listed; report pass/fail."
 lean-agent review {{P}} --focus "the new retry logic"
 lean-agent review {{P}} --resume              # re-review after fixes, same reviewer session
+lean-agent review {{P}} --resume --head origin/feature-x                # re-review that branch's new tip
 lean-agent review {{P}} --status              # exit 0 only if the current code is approved
 ```
 
