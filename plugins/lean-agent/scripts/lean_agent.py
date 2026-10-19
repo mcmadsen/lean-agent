@@ -870,6 +870,7 @@ def cmd_run(a):
     if hit:
         die(usage.describe_exhausted(hit), 3)
 
+    wt = None
     if prev:
         slug, project = prev["project"], prev["project_path"]
         cards, workdir, run_id = [], prev["workdir"], prev["id"]
@@ -885,6 +886,11 @@ def cmd_run(a):
     else:
         slug, project = resolve_project(a.project)
         sync_memory(slug)
+        if getattr(a, "worktree", None):
+            wt = ensure_worktree(slug, project, a.worktree)
+            project = wt["path"]
+            print(f"worktree: {wt['ref']} at {wt['path']} ({'reused' if wt['reused'] else 'created'}"
+                  f"{', on branch ' + wt['branch'] if wt['branch'] else ', detached'})", flush=True)
         lib = {c["id"]: c for c in load_cards(slug)}
         wanted = [x for x in (a.cards or "").split(",") if x and x != "none"]
         if getattr(a, "card_list", None) is not None:  # chosen by the caller (e.g. `review`)
@@ -912,6 +918,8 @@ def cmd_run(a):
                 a.mcp.remove(spec)
                 chrome_spec = spec.split(":", 1)[1] if ":" in spec else "all"
         role_rule = getattr(a, "role_rule", "") or ""
+        if wt:
+            role_rule = WORKTREE_RULE.format(**wt) + ("\n" + role_rule if role_rule else "")
         if role_rule:
             with open(os.path.join(workdir, "role.md"), "w") as fh:
                 fh.write(role_rule)
@@ -970,11 +978,14 @@ def cmd_run(a):
     for line in mcp_cost_lines(mcp_specs, chrome_spec):
         print(line, flush=True)
 
+    wt_name = (prev or {}).get("worktree") or (wt and wt["name"])
+    wt_lock = worktree_lock(slug, wt_name, read_only) if wt_name else contextlib.nullcontext()
     started = datetime.datetime.now()
     started_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     try:
-        proc = subprocess.run(cmd, input=task, capture_output=True, text=True, cwd=workdir, env=env,
-                              timeout=env_num("LEAN_AGENT_RUN_TIMEOUT", 1800))
+        with wt_lock:
+            proc = subprocess.run(cmd, input=task, capture_output=True, text=True, cwd=workdir, env=env,
+                                  timeout=env_num("LEAN_AGENT_RUN_TIMEOUT", 1800))
         raw, err = proc.stdout, proc.stderr
     except subprocess.TimeoutExpired as exc:
         raw, err = exc.stdout or "", "timed out"
@@ -1053,7 +1064,7 @@ def cmd_run(a):
         "mcp": mcp_specs, "mcp_calls": lean_mcp.count_mcp_calls(workdir, out.get("session_id"), started_utc)
         if (mcp_specs or chrome_spec) else {},
         "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
-        "role": role, "effort": effort, "review_meta": getattr(a, "review_meta", None) or (prev or {}).get("review_meta"),
+        "role": role, "effort": effort, "worktree": wt_name, "review_meta": getattr(a, "review_meta", None) or (prev or {}).get("review_meta"),
     }
     append_jsonl(home("ledger.jsonl"), entry)
 
@@ -1361,6 +1372,111 @@ def report_review(slug, project, entry, review, meta):
     print("NOT approved. Delegate fixes (blockers/majors) and the checks to workers, then re-review: "
           f"lean-agent review {slug} --resume")
     return 2
+
+
+WORKTREE_RULE = """\
+Worktree: you work in a lean-agent git worktree of {ref} at {path}. It is shared with other
+workers and is NOT the user's checkout. {commit_rule}
+Dependencies and build output persist between workers, so check before installing (e.g. whether
+node_modules or a virtualenv already exists) and install only what's missing. Don't delete, reset
+or clean anything you didn't create.
+"""
+
+
+def worktree_index():
+    return load_json(home("worktrees.json"), {})
+
+
+def ensure_worktree(slug, repo, ref):
+    """A shared worktree of `ref` for this project: reuse it (moved to the ref's tip when clean) or create it."""
+    if ref.startswith("origin/"):
+        git(repo, "fetch", "-q", "origin")
+    sha = git(repo, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
+    if not sha:
+        die(f"unknown ref {ref!r} in {repo}")
+    name = slugify(ref.replace("/", "-"), 60)
+    path = home("worktrees", slug, name)
+    reused = os.path.isdir(path) and git(path, "rev-parse", "--git-dir") is not None
+    if reused:
+        branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
+        if git(path, "status", "--porcelain", "--untracked-files=no"):
+            print(f"lean-agent: worktree {path} has uncommitted changes; using it as it is", file=sys.stderr)
+        elif not branch:
+            git(path, "checkout", "-q", "--detach", sha)
+    else:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        branch = None
+        if git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + ref):
+            p = subprocess.run(["git", "-C", repo, "worktree", "add", "-q", path, ref], capture_output=True, text=True)
+            branch = ref if p.returncode == 0 else None  # fails when the branch is checked out elsewhere
+        if not branch:
+            p = subprocess.run(["git", "-C", repo, "worktree", "add", "-q", "--detach", path, sha],
+                               capture_output=True, text=True)
+            if p.returncode != 0:
+                die(f"git worktree add failed: {(p.stderr or p.stdout).strip()[:300]}")
+    idx = worktree_index()
+    entry = idx.setdefault(slug, {}).get(name, {"created": now_iso()})
+    entry.update(path=path, ref=ref, sha=sha, branch=branch, repo=repo, last_used=now_iso())
+    idx[slug][name] = entry
+    save_json(home("worktrees.json"), idx)
+    commit_rule = (f"It's on branch {branch}, so commits you make land on that branch (never push)."
+                   if branch else "It's a detached checkout: commits here are on no branch, so don't commit "
+                   "unless the task asks you to.")
+    return {"path": path, "name": name, "ref": ref, "branch": branch, "reused": reused, "commit_rule": commit_rule}
+
+
+@contextlib.contextmanager
+def worktree_lock(slug, name, shared):
+    """Read-only workers share a worktree; workers that change files get it to themselves."""
+    path = home("worktrees", slug, f".{name}.lock")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        if fcntl:
+            mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+            try:
+                fcntl.flock(fh, mode | fcntl.LOCK_NB)
+            except OSError:
+                print(f"lean-agent: waiting for another worker using worktree {name}...", file=sys.stderr, flush=True)
+                fcntl.flock(fh, mode)
+        try:
+            yield
+        finally:
+            if fcntl:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def cmd_worktrees(a):
+    idx = worktree_index()
+    slugs = [resolve_project(a.project)[0]] if a.project else sorted(idx)
+    found = False
+    for slug in slugs:
+        for name, w in sorted((idx.get(slug) or {}).items()):
+            if not os.path.isdir(w["path"]):
+                continue
+            found = True
+            dirty = " (uncommitted changes)" if git(w["path"], "status", "--porcelain") else ""
+            print(f"{slug:<16} {w['ref']:<36} {'branch ' + w['branch'] if w.get('branch') else 'detached':<24} "
+                  f"last used {w['last_used'][:16]}{dirty}\n{'':<17}{w['path']}")
+    if not found:
+        print("No lean-agent worktrees. Workers get one with: lean-agent run <project> --worktree <branch> ...")
+
+
+def cmd_worktree(a):
+    slug, repo = resolve_project(a.project)
+    idx = worktree_index()
+    name = slugify(a.ref.replace("/", "-"), 60)
+    w = (idx.get(slug) or {}).get(name)
+    if not w:
+        die(f"no lean-agent worktree for {a.ref} in {slug} (see: lean-agent worktrees {slug})")
+    if os.path.isdir(w["path"]) and git(w["path"], "status", "--porcelain") and not a.force:
+        die(f"{w['path']} has uncommitted changes; pass --force to remove it anyway")
+    p = subprocess.run(["git", "-C", repo, "worktree", "remove"] + (["--force"] if a.force else []) + [w["path"]],
+                       capture_output=True, text=True)
+    if p.returncode != 0 and os.path.isdir(w["path"]):
+        die(f"git worktree remove failed: {(p.stderr or p.stdout).strip()[:300]}")
+    del idx[slug][name]
+    save_json(home("worktrees.json"), idx)
+    print(f"removed {w['path']}")
 
 
 def chrome_state():
@@ -2398,6 +2514,8 @@ def build_parser():
     s.add_argument("--task-file")
     s.add_argument("--resume", metavar="RUN_ID", help="continue a previous run's session")
     s.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="model effort for the worker")
+    s.add_argument("--worktree", metavar="REF", help="run in a shared lean-agent git worktree of this branch/ref "
+                   "(your checkout is never touched; installed deps persist for the next worker)")
     s.add_argument("--chrome", nargs="?", const="all", metavar="TOOL,TOOL",
                    help="give the worker the user's Chrome via Claude in Chrome (optionally only these tools)")
     s.add_argument("--allow-send", metavar="WHAT",
@@ -2468,6 +2586,16 @@ def build_parser():
     s.add_argument("--no-learn", action="store_true", help="don't re-learn projects")
     s.add_argument("--pulled", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(fn=cmd_sync)
+
+    s = sub.add_parser("worktrees", help="list lean-agent's shared worktrees")
+    s.add_argument("project", nargs="?")
+    s.set_defaults(fn=cmd_worktrees)
+    s = sub.add_parser("worktree", help="remove a shared worktree: worktree rm <project> <ref>")
+    s.add_argument("action", choices=["rm"])
+    s.add_argument("project")
+    s.add_argument("ref")
+    s.add_argument("--force", action="store_true", help="remove even with uncommitted changes")
+    s.set_defaults(fn=cmd_worktree)
 
     s = sub.add_parser("runs", help="recent worker runs (id, status, model, task)")
     s.add_argument("--project", "-p")

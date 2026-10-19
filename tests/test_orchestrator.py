@@ -836,6 +836,59 @@ class CliTest(unittest.TestCase):
         self.assertIn("feature is now at", self.calls()[-1]["task"])
         self.assertEqual(self.cli("review", "proj", "--status", "--head", "feature").returncode, 0)
 
+    def test_shared_worktree_for_workers(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feature", "--", "run the tests").stdout
+        self.assertIn("worktree: feature at", out)
+        self.assertIn("(created, on branch feature)", out)
+        wt = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", "feature")
+        self.assertTrue(os.path.isfile(os.path.join(wt, "api", "totals.py")))  # the branch's files
+        call = self.calls()[-1]
+        argv = call["argv"]
+        self.assertEqual(argv[argv.index("--add-dir") + 1], wt)
+        self.assertIn("shared with other", call["append"])
+        self.assertIn("commits you make land on that branch", call["append"])
+        self.assertEqual(subprocess.run(["git", "-C", self.proj, "rev-parse", "--abbrev-ref", "HEAD"],
+                                        capture_output=True, text=True).stdout.strip(), "main")  # untouched
+        os.makedirs(os.path.join(wt, "node_modules"))  # deps a worker installed
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--read-only", "--worktree", "feature",
+                       "--", "list test files").stdout
+        self.assertIn("(reused, on branch feature)", out)
+        self.assertTrue(os.path.isdir(os.path.join(wt, "node_modules")))  # persisted for the next worker
+        run_id = out.split("run ")[1].split()[0]
+        self.cli("run", "--resume", run_id, "and the fixtures")
+        self.assertEqual(self.calls()[-1]["argv"][self.calls()[-1]["argv"].index("--add-dir") + 1], wt)
+        # the branch checked out in the user's repo can't be attached again: detached worktree
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "main", "--", "t").stdout
+        self.assertIn("(created, detached)", out)
+        self.assertIn("detached checkout", self.calls()[-1]["append"])
+        listing = self.cli("worktrees", "proj").stdout
+        self.assertIn("feature", listing)
+        self.assertIn("branch feature", listing)
+        with open(os.path.join(wt, "api", "totals.py"), "a") as fh:
+            fh.write("# wip\n")
+        p = self.cli("worktree", "rm", "proj", "feature", check=False)
+        self.assertIn("uncommitted changes", p.stderr)
+        self.cli("worktree", "rm", "proj", "feature", "--force")
+        self.assertFalse(os.path.exists(wt))
+        self.assertNotIn("branch feature", self.cli("worktrees", "proj").stdout)
+
+    def test_worktree_writers_take_turns(self):
+        self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        env = dict(self.env, FAKE_FINISH_AT=str(time.time() + 1.0))
+        cmd = [sys.executable, CLI, "run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feature", "--", "t"]
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feature", "--", "create it first")
+        procs = [subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                  stdin=subprocess.DEVNULL) for _ in range(2)]
+        outs = [p.communicate() for p in procs]
+        self.assertEqual([p.returncode for p in procs], [0, 0])
+        self.assertTrue(any("waiting for another worker" in err for _, err in outs))
+
     def test_review_needs_changes_and_base(self):
         g = self.git_project()
         self.cli("learn", self.proj, "--name", "proj")

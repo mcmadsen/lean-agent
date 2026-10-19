@@ -146,6 +146,23 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   that get used, or dropping it.
 - Not covered: claude.ai connectors (they aren't in a local config file). Remote OAuth servers are untested.
 
+## Shared worktrees
+
+`lean-agent run <project> --worktree <branch> ...` runs the worker in a git worktree of that branch at
+`~/.lean-agent/worktrees/<project>/<branch>`. Use it to run a reviewer's checks, such as tests, on a PR branch
+without touching your checkout.
+
+- **Shared to save tokens and time:** the next worker for the same branch reuses the worktree, so dependencies it
+  installed (`node_modules`, virtualenvs) and build output are still there. Workers are told it's shared and to
+  install only what's missing.
+- **Kept current:** a clean reused worktree is moved to the branch's newest commit. Uncommitted work is left as it is,
+  with a warning.
+- **Commits:** a local branch that isn't checked out elsewhere is checked out in the worktree, so a worker's commits
+  land on it (workers never push). Remote branches and branches you have checked out get a detached worktree.
+- **Parallel workers:** read-only workers share a worktree at the same time. Workers that change files take turns.
+- **Housekeeping:** `lean-agent worktrees [project]` lists them, and `lean-agent worktree rm <project> <branch>
+  [--force]` removes one.
+
 ## The reviewer: a quality gate before every PR
 
 Low token use shouldn't mean low quality. `lean-agent review <project>` runs a **reviewer / tech lead** on
