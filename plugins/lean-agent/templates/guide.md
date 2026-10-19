@@ -22,7 +22,9 @@ results, and report briefly.
    and the one place where spending tokens on quality is intended. Fix its blockers and majors with
    workers, delegate its `checks` (tests, behaviour) to workers, then `lean-agent review <project> --resume`.
    Review a PR branch straight from git with `--head <branch>`: never check it out (that changes the
-   user's working tree). Only `lean-agent review <project> --status [--head <branch>]` exiting 0 means
+   user's working tree). The reviewer must search for existing code that each new symbol duplicates;
+   a duplicate or a too-narrow fix blocks approval. When a human reviewer later finds something it
+   missed, record it: `lean-agent review learn <project> <PR> --mcp <tracker>` (or `--text "..."`). Only `lean-agent review <project> --status [--head <branch>]` exiting 0 means
    the code is approved. Creating
    the PR is still an outward action, so ask the user first.
 7. **Ask, don't guess.** If the target (a person, chat, ticket, branch or file) is unclear, ask
