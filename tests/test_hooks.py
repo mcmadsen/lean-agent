@@ -107,6 +107,17 @@ class SqueezeTest(Base):
         p = subprocess.run([sq, "echo small"], capture_output=True, text=True, env=dict(os.environ, **self.env))
         self.assertEqual((p.returncode, p.stdout), (0, "small\n"))
 
+    def test_worker_answer_never_squeezed(self):
+        log = "\n".join("Downloading dep %d" % i for i in range(3000))
+        answer = "run 1019-140000-abcd · sonnet · done · 5 turns\n" + "\n".join(
+            f"claim {i}: verdict {'true' if i % 2 else 'false'} because of reason number {i}" for i in range(150))
+        out = run_hook("squeeze_hook.py", self.event(log + "\n" + answer, command="bash run-checks.sh"), **self.env)
+        txt = out["hookSpecificOutput"]["updatedToolOutput"]["stdout"]
+        self.assertIn("claim 77: verdict true", txt)
+        self.assertTrue(txt.endswith(answer))
+        self.assertIsNone(run_hook("squeeze_hook.py", self.event(answer * 3, command="python3 x/lean_agent.py run"),
+                                   **self.env))
+
     def test_repeats_collapsed(self):
         out = run_hook("squeeze_hook.py", self.event("downloading...\n" * 5000 + "done"), **self.env)
         self.assertIn("[repeated 5000x]", out["hookSpecificOutput"]["updatedToolOutput"]["stdout"])

@@ -49,6 +49,7 @@ NOISE = [
     ("deprecation notice", re.compile(r"npm (WARN|warn) deprecated|DeprecationWarning:|is deprecated")),
 ]
 HEAD, TAIL, CONTEXT_BEFORE, CONTEXT_AFTER, MAX_BLOCK = 8, 25, 2, 2, 40
+RUN_LINE_RE = re.compile(r"(?m)^run \d{4}-\d{6}-[0-9a-f]{4} · ")  # the first line of a lean-agent run summary
 STACK = re.compile(r"^\s+\S|^\s*(at |File \"|Caused by|\.\.\. \d+ more|\^|-->|\|)")
 # Commands whose output is content the agent asked for (files, search hits, diffs): never squeezed.
 READ_COMMANDS = {"cat", "head", "tail", "sed", "nl", "less", "more", "bat", "grep", "egrep", "fgrep", "rg", "ag",
@@ -251,8 +252,9 @@ def main():
     if not isinstance(resp, dict):
         return 0
     command = (event.get("tool_input") or {}).get("command") or ""
-    # Never squeeze explicit opt-outs or reads of our own saved logs.
-    if "LEAN_RAW" in command or "lean-agent" in command or is_read_command(command):
+    # Never squeeze explicit opt-outs, lean-agent's own commands, or reads of saved logs.
+    if ("LEAN_RAW" in command or "lean-agent" in command or "lean_agent" in command or "lean-sq" in command
+            or is_read_command(command)):
         return 0
     stdout = resp.get("stdout") if isinstance(resp.get("stdout"), str) else ""
     stderr = resp.get("stderr") if isinstance(resp.get("stderr"), str) else ""
@@ -262,7 +264,17 @@ def main():
     if original <= over:
         return 0
 
-    path = save_full(event, stdout, stderr)
+    # A lean-agent run summary (however it got here: a pipe, a log file): the worker's answer is never cut;
+    # only what comes before the first run line may be squeezed.
+    m = RUN_LINE_RE.search(stdout)
+    if m:
+        head, keep = stdout[:m.start()], stdout[m.start():]
+        if len(head) <= over:
+            return 0
+        stdout = head
+    else:
+        keep = ""
+    path = save_full(event, stdout + keep, stderr)
     err_path, n_errors = save_errors(path, stdout, stderr)
     share = len(stdout) / original
     st_out, st_err = {}, {}
@@ -287,7 +299,7 @@ def main():
         lean_log.log("error", "command", f"`{command[:200]}`: {n_errors} error lines, first {first[:300]!r}; "
                      f"errors {err_path}; full {path}")
     updated = dict(resp)
-    updated["stdout"] = header + new_out
+    updated["stdout"] = header + new_out + (("\n" + keep) if keep else "")
     updated["stderr"] = new_err
     print(json.dumps({
         "hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": updated}
