@@ -114,6 +114,11 @@ Other ways to run the orchestrator:
 | `lean-agent suggest <project> "<task>"` | Task type (read/change/browser), recommended model (from your `stats` per type, else defaults; Haiku when a budget is low), a gather/judge split hint, then core cards plus relevant cards with cost and reason, or an explicit "No relevant cards". |
 | `lean-agent run <project> -m <model> --why "..." [--cards a,b \| auto] [--read-only] [--chrome[=tools]] [--mcp s:t] [--max-usd X] [--max-turns N] -- "<task>"` | Run an isolated worker. Model and reason are **required**. `--read-only` allows Read/Glob/Grep and read-only `git -C <project> show/log/grep/diff/blame/fetch`. |
 | `lean-agent run <project> ... --read-only --ref <branch>` | A read-only worker on a branch that isn't checked out: it's told to read with `git show <sha>:<path>` and search with `git grep ... <sha>`. Starting the same task again while it runs or right after it finished is refused (`--again` to run it anyway). |
+| `lean-agent recipe add <project> <name> -m <model> --why "..." --task-file F [--read-only] [--mcp s:p] [--evidence "..."] [--apply-task-file F2 --apply-mcp s:p]` | Save a named recipe: a stored run with `{placeholders}`, evidence hints (strongest first) and an optional apply step. `lean-agent recipes` lists them. |
+| `lean-agent do <project> <recipe> [key=value ...] [--apply [--allow-send "<approved>"]]` | Run a recipe in one command. `--apply` runs its apply step; outward changes stop with the list until the user approves them. |
+| `lean-agent text-len <file> [-p project]` | Characters, words, lines, checked against limits named in the project's tracker notes (e.g. a description limit). |
+| `lean-agent card shorten <project> <id> [--save]` | A shorter text for a card (one Haiku call); lists headings, `code`, paths, names and numbers that would be lost, and saves only if none are. |
+| `lean-agent runs --running` | Runs in progress. Every run prints `run <id> started` first, so a background launch is visible. |
 | `lean-agent run --resume <run-id> "<follow-up>"` | Continue a worker's session (cheap: its context is cached). |
 | `lean-agent card show\|add\|rm\|core <project> <id>` | Inspect or edit cards; `add` creates *note* cards from what workers had to discover. |
 | `lean-agent optimize <project> [--apply] [--accept ids] [--reject ids]` | Promote/demote core cards, archive dead ones, flag big cards to trim, list recent context gaps, and draft new recipe cards and MCP presets from what workers actually did. |
@@ -170,8 +175,11 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   lookup finds nothing. When the remote doesn't say, set it once: `lean-agent tracker <project> project=<name>`
   (also `org=`, `repo=`).
 - **Who you are in the tracker, and its rules:** `lean-agent tracker <project> --discover --mcp <tracker>` lets
-  a worker find your identity id and name and the project's work item rules (allowed states, no delete, voting
-  needs a reviewer id) once. Add your own with `--note "..."` or `me_id=... me_name=...`. Every MCP worker gets
+  a read-only worker find your identity id, name and email, each work item type's states (from the type
+  definition, cross-checked with real items), and whether rules hold (voting needs you as a reviewer, delete
+  or a Removed state, a description length limit): each `verified`, `false` or `unknown`, never guessed. A
+  re-run replaces what discovery found and keeps your own notes; `tracker` and `doctor` warn when the tracker
+  knows you by another email than your Claude account. Add your own with `--note "..."` or `me_id=... me_name=...`. Every MCP worker gets
   them, so assigning, voting or closing doesn't have to fail first (`@me` often isn't accepted).
 - **Variables without a token on disk:** a plugin config that uses `${VAR}` (e.g. a GitHub token) can get it
   from a command run when a worker starts: `lean-agent mcp env GITHUB_PERSONAL_ACCESS_TOKEN --command "gh auth
@@ -271,8 +279,13 @@ uncommitted changes and new untracked files.
   widened values to their consumers, and checks that specs reset new module state. An edited test without a
   coverage entry means no approve, like a new symbol without a reuse entry. It also lists what it checked and
   found fine and what it couldn't verify.
+- **Expensive runs ask first:** `run -m opus|fable` prints the expected cost (from earlier runs on that model) and
+  its share of your plan's session window; it needs `--yes` when that's 10% or more (`LEAN_AGENT_CONFIRM_PCT`) or
+  the window is already over 50%. `lean-agent budget` shows the plan line too.
 - **Model and cost:** `--reviewer-model opus` (or `fable`) for one review; the expected cost is printed first
-  (from your earlier reviews, else scaled from Sonnet's). For high-risk changes (concurrency, timers, auth and
+  (from your earlier reviews on that model, else scaled from Sonnet's and corrected by how far such scaled
+  estimates were off before; every estimate is stored with its run, so they improve). `--independent` gives a
+  clean comparison run: no earlier findings, declined decisions, second opinion or decline filtering. For high-risk changes (concurrency, timers, auth and
   logout, sync, migrations, or large diffs) the review suggests a stronger reviewer with its expected cost.
 - **Replay case:** `python3 tests/fixtures/review_case.py <dir>` builds a small repo whose change has a lost
   test case, a hiding default, a merged value with a stale consumer, unreset module state, a logout bug and an
@@ -434,7 +447,9 @@ exact-cent tests with 1-cent remainder cases.
    `--mcp` spec, what a good answer looked like, and what it cost without the card. Runs with the same server and a
    similar tool set, or similar wording, are grouped into one draft. A **preset** is drafted (named from the tool
    names, e.g. `datadog:metrics`) when a run was given far more tools than it used, or a pattern recurs. Drafts
-   already covered by a card are skipped. Drafts are generalised (PR and ticket numbers, ids, hashes, local
+   already covered by a card are skipped. A preset draft is skipped when an existing preset already covers its
+   tools closely, becomes an "extend <preset>" draft when an existing one has fewer, and two drafts never share a
+   tool set. Context gaps a card or tracker note already covers are hidden; `optimize --ack <run-id>` hides others. Drafts are generalised (PR and ticket numbers, ids, hashes, local
    paths and "Goal:"-style labels removed), read-only and changing runs never share a draft, a read-only preset
    never contains a write tool (a separate `<name>-write` draft says which write tools it adds), and two drafts
    never get the same preset name. `optimize <project> --accept <id>` writes them (`card add`, `mcp
@@ -527,7 +542,8 @@ The session budget is in **weighted tokens**, input-token equivalents using the 
 
 Installing the plugin also gives any Claude Code session (not just the orchestrator):
 
-- **Output squeezer:** a PostToolUse hook for noisy Bash output over 6,000 chars. Noise goes first: progress
+- **Output squeezer:** a PostToolUse hook for noisy Bash output over 6,000 chars. A lean-agent run summary in
+  the output (the worker's answer) is never cut, however it got there. Noise goes first: progress
   bars, downloads, build steps, passing tests, deprecation notices and warnings that only differ in numbers or
   paths (one copy is kept, with a count). Then the room goes, in order, to the first error with its whole stack
   trace, the closing summary, the other distinct errors (the last one before the middle ones; repeats are

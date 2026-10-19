@@ -147,6 +147,11 @@ lean-agent card core {{P}} checkout-notes
   `--refresh` fetches it now). Use it before large jobs instead of guessing.
 - If the session spend cap blocks you, only `lean-agent budget|limits|stats|runs|logs|doctor` still run. Tell the
   user, who can lift it at once: `lean-agent budget --cap off` (no restart).
+- Repeated jobs are recipes: `lean-agent recipes`, then `lean-agent do <project> <recipe> key=value`. Save a new
+  one with `lean-agent recipe add` once a run's task and flags worked. Before posting a long text to a tracker,
+  `lean-agent text-len <file> -p <project>`.
+- An `-m opus|fable` run that answers "ask the user, then add --yes": tell the user the expected cost and plan
+  share, and add `--yes` only after they agree.
 - When the user asks what lean-agent saves, run `lean-agent savings` (estimates; `--measure` once per project
   makes them closer).
 - When something seems off, run `lean-agent doctor`, and `lean-agent logs` for recent errors
