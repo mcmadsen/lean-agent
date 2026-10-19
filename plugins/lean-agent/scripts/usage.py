@@ -545,6 +545,65 @@ def _features(fam_comp):
     return a, b, c
 
 
+PLAN_FRESH_MINUTES = 30
+
+
+def plan_usage_path():
+    return os.path.join(lean_home(), "plan-usage.json")
+
+
+def record_plan_usage(info):
+    """Save the plan's real utilization from a `rate_limit_event` (every stream-json `claude -p` run has one):
+    {"at", "windows": {"five_hour": {"pct", "resets_at"}, "seven_day": ..., "seven_day_opus": ...}}."""
+    if not isinstance(info, dict):
+        return
+    import datetime
+    windows = {}
+    for name, w in (info.get("unifiedWindows") or {}).items():
+        if isinstance(w, dict) and isinstance(w.get("utilization"), (int, float)):
+            windows[name] = {"pct": round(w["utilization"] * 100, 1), "resets_at": w.get("resetsAt")}
+    kind = info.get("rateLimitType")
+    if kind and isinstance(info.get("utilization"), (int, float)) and kind not in windows:
+        windows[kind] = {"pct": round(info["utilization"] * 100, 1), "resets_at": info.get("resetsAt")}
+    if not windows:
+        return
+    try:
+        with open(plan_usage_path()) as fh:
+            prev = json.load(fh)
+    except (OSError, ValueError):
+        prev = {}
+    merged = dict(prev.get("windows") or {})
+    merged.update(windows)
+    data = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), "windows": merged,
+            "status": info.get("status")}
+    try:
+        os.makedirs(lean_home(), exist_ok=True)
+        tmp = f"{plan_usage_path()}.{os.getpid()}.tmp"
+        with open(tmp, "w") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, plan_usage_path())
+    except OSError:
+        pass
+
+
+def plan_usage(max_age_minutes=PLAN_FRESH_MINUTES):
+    """The last real plan utilization Claude reported, with its age in minutes; ({}, None) if none.
+    Windows whose reset time has passed since are dropped (they've started over)."""
+    import datetime, time as _t
+    try:
+        with open(plan_usage_path()) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}, None
+    at = datetime.datetime.fromisoformat(data["at"])
+    age = (datetime.datetime.now(datetime.timezone.utc) - at).total_seconds() / 60
+    now = _t.time()
+    windows = {k: v for k, v in (data.get("windows") or {}).items() if not v.get("resets_at") or v["resets_at"] > now}
+    if max_age_minutes is not None and age > max_age_minutes:
+        return windows, age  # caller decides; still useful as "as of"
+    return windows, age
+
+
 def window_usage(buckets=None, now=None):
     """Per window: lean-agent and all usage (sonnet-eq), per-family components, start, reset, plan %.
 
@@ -586,7 +645,22 @@ def window_usage(buckets=None, now=None):
                 fam_pct[f] = plan_units({f: fam[f]} if f in fam else {}, weights) * 100 / c if c else None
         out[name] = {"lean": int(lean), "all": int(sum(buckets[k]["all"] for k in keys)), "frees_at": frees,
                      "start": start, "reset": reset, "aligned": aligned, "fam": fam, "plan_pct": pct,
-                     "family_pct": fam_pct}
+                     "family_pct": fam_pct, "plan_source": "estimate" if pct is not None else None}
+    real, age = plan_usage()
+    if real and age is not None and age <= PLAN_FRESH_MINUTES:  # Claude's own numbers beat any estimate
+        for name, key in (("5h", "five_hour"), ("week", "seven_day")):
+            w = real.get(key)
+            if not w:
+                continue
+            out[name]["plan_pct"] = w["pct"]
+            out[name]["plan_source"] = "claude"
+            if w.get("resets_at"):
+                reset = datetime.datetime.fromtimestamp(w["resets_at"], datetime.timezone.utc)
+                out[name]["reset"] = reset
+                out[name]["frees_at"] = reset.astimezone()
+        for key, w in real.items():
+            if key.startswith("seven_day_") and key != "seven_day_oauth_apps":
+                out["week"]["family_pct"][key[len("seven_day_"):]] = w["pct"]
     return out
 
 

@@ -1074,7 +1074,7 @@ def cmd_run(a):
         permission_mode = os.environ.get("LEAN_AGENT_WORKER_PERMISSION_MODE") or "acceptEdits"
 
     claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
-    cmd = [claude, "-p", "--output-format", "json", "--model", model,
+    cmd = [claude, "-p", "--output-format", "stream-json", "--verbose", "--model", model,
            *isolation, "--disable-slash-commands",
            "--tools", tools, "--allowedTools", ",".join(allowed + mcp_allowed + chrome_allowed),
            "--permission-mode", permission_mode,
@@ -1121,12 +1121,20 @@ def cmd_run(a):
             os.remove(mcp_path)  # may hold tokens; rebuilt from your config on --resume
     seconds = int((datetime.datetime.now() - started).total_seconds())
 
-    try:
-        out = json.loads(raw.strip().splitlines()[-1]) if raw.strip() else {}
-    except ValueError:
-        out = {}
+    out, result_line = {}, ""
+    for line in raw.splitlines():  # stream-json: the final "result" event, plus the plan's rate-limit events
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("type") == "result":
+            out, result_line = ev, line
+        elif ev.get("type") == "rate_limit_event":
+            usage.record_plan_usage(ev.get("rate_limit_info"))
     with open(os.path.join(workdir, "result.json"), "a") as fh:
-        fh.write((raw.strip() or json.dumps({"stderr": err[-4000:]})) + "\n")
+        fh.write((result_line or json.dumps({"stderr": err[-4000:], "stdout_tail": raw[-2000:]})) + "\n")
 
     summary, fb = parse_feedback(out.get("result") or "")
     mcp_seq = (lean_mcp.mcp_call_sequence(workdir, out.get("session_id"), started_utc)
@@ -2257,6 +2265,8 @@ def _probe_session(extra, cwd):
             continue
         if ev.get("type") == "system" and ev.get("subtype") == "init":
             tools, servers = ev.get("tools") or [], ev.get("mcp_servers") or []
+        elif ev.get("type") == "rate_limit_event":
+            usage.record_plan_usage(ev.get("rate_limit_info"))
         elif ev.get("type") == "result":
             u = ev.get("usage") or {}
             ctx = sum(u.get(k, 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
@@ -2608,7 +2618,29 @@ def cmd_stats(a):
     print_limits()
 
 
+def print_plan_line():
+    """Claude's own plan utilization (from the last worker or probe), the same numbers /usage shows."""
+    real, age = usage.plan_usage()
+    if not real:
+        print("Plan (from Claude): not seen yet. It comes with every worker run; get it now with "
+              "`lean-agent limits --refresh` (one tiny Haiku call).")
+        return
+    names = {"five_hour": "session", "seven_day": "week"}
+    parts = []
+    for key, w in sorted(real.items(), key=lambda kv: (kv[0] not in names, kv[0])):
+        if key == "seven_day_oauth_apps":
+            continue
+        label = names.get(key) or (key.replace("seven_day_", "") + " week")
+        when = (f" (resets {datetime.datetime.fromtimestamp(w['resets_at']).astimezone():%a %H:%M})"
+                if w.get("resets_at") else "")
+        parts.append(f"{label} {w['pct']:.0f}%{when}")
+    stale = age is not None and age > usage.PLAN_FRESH_MINUTES
+    print(f"Plan (from Claude, {age:.0f} min ago): " + " · ".join(parts)
+          + ("  [old: refresh with `lean-agent limits --refresh`]" if stale else ""))
+
+
 def print_limits():
+    print_plan_line()
     w = usage.window_usage()
     budgets, pbud = usage.window_budgets(), usage.pct_budgets()
     cfg = usage.load_limits()
@@ -2629,7 +2661,8 @@ def print_limits():
                 line += f", frees up from {x['frees_at']:%a %H:%M}"
         line += f" | all Claude Code here {x['all']:,}"
         if x["plan_pct"] is not None:
-            line += f" | plan ≈ {x['plan_pct']:.0f}%"
+            line += (f" | plan {x['plan_pct']:.0f}%" if x.get("plan_source") == "claude"
+                     else f" | plan ≈ {x['plan_pct']:.0f}% (estimate)")
             cap = pbud.get("session" if name == "5h" else "week")
             if cap:
                 line += f" (agents stop at {cap}%)"
@@ -2643,14 +2676,13 @@ def print_limits():
                 fams.append(part)
             print("  by model: " + ", ".join(fams))
     print("Units: Sonnet-equivalent tokens (Haiku 5.5 counts 0.05x, Opus 5.5 2x, Fable 5.1 5x).")
-    if not cfg.get("plan"):
-        print("Windows roll. To follow your plan's reset times: "
-              "lean-agent limits plan --session-resets 13:30 --week-resets \"Sat 12:00\" (as /usage shows them)")
-    elif not cfg.get("caps"):
-        print("Plan % unknown. Calibrate once from /usage: lean-agent limits calibrate session=37 week=12 [fable=8]")
-    else:
-        print(f"Plan % calibrated from /usage ({cfg.get('fit', 'default weights')}). Usage from claude.ai "
-              "or other machines isn't seen here; calibrate again now and then.")
+    real, age = usage.plan_usage()
+    if real and age is not None and age <= usage.PLAN_FRESH_MINUTES:
+        print("Plan % and reset times come from Claude itself (includes claude.ai and other machines).")
+    elif cfg.get("caps"):
+        print(f"Between Claude's reports, plan % is estimated from /usage calibration ({cfg.get('fit', 'default weights')}).")
+    elif not cfg.get("plan"):
+        print("Windows roll until Claude reports its reset times (after the next worker, or `limits --refresh`).")
 
 
 def parse_reset(text, weekly=False):
@@ -2692,8 +2724,16 @@ def parse_reset(text, weekly=False):
     return r.isoformat(timespec="minutes")
 
 
+def refresh_plan_usage():
+    d = home("work", "plan-probe")
+    os.makedirs(d, exist_ok=True)
+    _probe_session(["--setting-sources", "", "--strict-mcp-config"], d)
+
+
 def cmd_limits(a):
     action = a.action or "show"
+    if a.refresh:
+        refresh_plan_usage()
     cfg = usage.load_limits()
     if action == "plan":
         if not (a.session_resets or a.week_resets or a.off):
@@ -3851,6 +3891,7 @@ def build_parser():
     s.add_argument("--5h", dest="five_h", type=int, metavar="N", help="lean-agent budget per session window, sonnet-eq (0 = none)")
     s.add_argument("--week", type=int, metavar="N", help="lean-agent budget per week window, sonnet-eq (0 = none)")
     s.add_argument("--off", action="store_true", help="remove the budgets (with plan: the plan and calibration)")
+    s.add_argument("--refresh", action="store_true", help="ask Claude for the plan's current usage now (one tiny Haiku call)")
     s.set_defaults(fn=cmd_limits)
 
     s = sub.add_parser("stats", help="runs, success rate and tokens by model")
