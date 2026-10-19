@@ -1284,11 +1284,25 @@ class CliTest(unittest.TestCase):
         lesson = json.dumps({"checklist": ["Fixes for one dialog type: check the sibling dialogs too"],
                              "helpers": [{"name": "useOverlayDeferral", "where": "src/hooks", "what": "hides and restores"}]})
         fb = "\nLEAN-CHECKLIST " + lesson
+        subprocess.run(["git", "-C", self.proj, "remote", "add", "origin",
+                        "https://acme@dev.azure.com/acme/Shop/_git/web-app"], check=True)
         p = self.cli("review", "learn", "proj", "42", "--mcp", "tracker", check=False,
                      FAKE_FEEDBACK='{"status": "done", "used": [], "unneeded": [], "missing": ""}' + fb)
-        self.assertIn("pull request 42", self.calls()[-1]["append"])
+        append = self.calls()[-1]["append"]
+        self.assertIn("pull request 42", append)
+        self.assertIn("host Azure DevOps, org acme, project Shop, repo web-app", append)
+        self.assertIn("never use lean-agent's project name `proj` as a tracker project", append)
         self.assertIn("review-checklist: - Fixes for one dialog type", p.stdout + p.stderr)
         self.assertIn("useOverlayDeferral", self.cli("card", "show", "proj", "shared-helpers").stdout)
+        # when the remote doesn't name the tracker project: set it once, every MCP worker gets it
+        self.assertIn("tracker", self.cli("review", "learn", "proj", "--tracker", "project=Storefront").stdout)
+        p = self.cli("review", "learn", "proj", "43", "--mcp", "tracker", check=False,
+                     FAKE_FEEDBACK='{"status": "needs-input", "used": [], "unneeded": [], "missing": ""}')
+        self.assertIn("project Storefront", self.calls()[-1]["append"])
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("couldn't find PR 43", p.stdout)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tracker", "list open work items")
+        self.assertIn("project Storefront, repo web-app", self.calls()[-1]["append"])
 
     def test_shared_worktree_for_workers(self):
         g = self.git_project()
