@@ -970,6 +970,32 @@ def resolve_mcp(project, specs):
     return servers, allowed, disallowed
 
 
+def duplicate_launch_guard(a, model, task):
+    """Refuse the same task (project, model, task text) while it runs or right after it finished, unless --again:
+    an orchestrator that retries a command it thinks failed shouldn't pay for the work twice."""
+    key = hashlib.sha1(f"{a.project}|{model}|{task.strip()}".encode()).hexdigest()[:16]
+    marker = home("running", key + ".json")
+    if not getattr(a, "again", False):
+        m = load_json(marker, {})
+        alive = False
+        if m.get("pid"):
+            try:
+                os.kill(m["pid"], 0)
+                alive = True
+            except OSError:
+                alive = False
+        if alive:
+            die(f"the same task is already running (started {m.get('started', '?')}, pid {m['pid']}); wait for it, "
+                "or pass --again to start another", 2)
+        recent = next((r for r in reversed(ledger()) if r.get("launch_key") == key), None)
+        if recent and (datetime.datetime.now() - datetime.datetime.fromisoformat(recent["ts"])).total_seconds() < 90:
+            die(f"the same task finished moments ago as run {recent['id']} ({recent['status']}): see it with "
+                f"`lean-agent runs --show {recent['id']}`, or pass --again to run it again", 2)
+    os.makedirs(os.path.dirname(marker), exist_ok=True)
+    save_json(marker, {"pid": os.getpid(), "started": now_iso()})
+    return key
+
+
 def cmd_run(a):
     prev = None
     if a.resume:
@@ -993,6 +1019,9 @@ def cmd_run(a):
     hit = usage.exhausted_window()
     if hit:
         die(usage.describe_exhausted(hit), 3)
+    launch_key = None
+    if not prev and not getattr(a, "role", None) and os.environ.get("LEAN_AGENT_LAUNCH_GUARD") != "0":
+        launch_key = duplicate_launch_guard(a, model, task)
 
     wt = None
     if prev:
@@ -1051,6 +1080,17 @@ def cmd_run(a):
                       f"run `{os.path.join(PLUGIN_ROOT, 'bin', 'lean-json')} <file>` for a compact view (add "
                       "`--fields a,b.c` to keep only some fields, `--grep TEXT` to keep matching items).\n")
             role_rule = (role_rule + "\n" if role_rule else "") + ident
+        if getattr(a, "ref", None):
+            if a.ref.startswith("origin/"):
+                git(project, "fetch", "-q", "origin")
+            ref_sha = git(project, "rev-parse", "--verify", "--quiet", a.ref + "^{commit}")
+            if not ref_sha:
+                die(f"unknown ref {a.ref!r} in {project}")
+            role_rule = (role_rule + "\n" if role_rule else "") + (
+                f"The code to look at is {a.ref} ({ref_sha[:12]}), and the project's working tree is NOT on it. "
+                f"Read files with `git -C {project} show {ref_sha}:<path>`, list them with `git -C {project} "
+                f"ls-tree -r --name-only {ref_sha}`, search with `git -C {project} grep -n <pattern> {ref_sha}`. "
+                "Never read the working-tree copies: they're a different version.\n")
         if attribution() == "off":
             role_rule = (role_rule + "\n" if role_rule else "") + NO_ATTRIBUTION_RULE
         if role_rule:
@@ -1225,9 +1265,14 @@ def cmd_run(a):
         "mcp_seq": mcp_seq[:60], "mcp_offered": {k: len(v) for k, v in offered.items()},
         "result_head": (summary or "")[:600],
         "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
-        "role": role, "effort": effort, "worktree": wt_name, "review_meta": review_meta,
+        "role": role, "effort": effort, "worktree": wt_name, "review_meta": review_meta, "launch_key": launch_key,
     }
     append_jsonl(home("ledger.jsonl"), entry)
+    if launch_key:
+        try:
+            os.remove(home("running", launch_key + ".json"))
+        except OSError:
+            pass
     if isinstance(sys.stdout, Tee):  # a second run in the same command (review after its second opinion)
         sys.stdout.close()
     sys.stdout = Tee(sys.stdout, os.path.join(workdir, f"summary-{len(glob.glob(os.path.join(workdir, 'summary-*.txt'))) + 1}.txt"))
@@ -1256,8 +1301,12 @@ def cmd_run(a):
     sv = run_savings(entry)
     if sv["context"] or sv["model"]:
         base, measured = baseline_ctx(slug)
-        print(f"  saved ~{sv['context'] + sv['model']:,} sonnet-eq (estimate): context ~{sv['context']:,} vs a normal "
-              f"session's ~{base:,}/turn{'' if measured else ' (assumed)'} · model choice ~{sv['model']:,}")
+        total = sv["context"] + sv["model"]
+        model_part = (f"model choice saved ~{sv['model']:,}" if sv["model"] >= 0 else
+                      f"{model} costs ~{-sv['model']:,} more than Sonnet would")
+        head = f"saved ~{total:,} sonnet-eq" if total >= 0 else f"extra cost vs Sonnet ~{-total:,} sonnet-eq"
+        print(f"  {head} (estimate): context saved ~{sv['context']:,} vs a normal session's ~{base:,}/turn"
+              f"{'' if measured else ' (assumed)'} · {model_part}")
     line, low = budget_line()
     if line:
         print("  " + line)
@@ -1394,57 +1443,58 @@ def budget_line():
 REVIEWER_RULE = """\
 Role: you are the reviewer and tech lead for this change, the last quality gate before a pull request.
 Workers wrote it cheaply; your job is to make sure the quality is still right. You can only read code
-and git history. You can't run tests, build, or change anything, and you mustn't try. Searching the
-codebase is the point of this review: spend your turns there, not on style.
+and git history. You can't run tests, build, or change anything, and you mustn't try. Spend your turns on
+reading and searching the code, not on style.
 
 The change: {scope}
 Start with `git -C {project} diff --stat {diff_range}`, then read each file's diff with
 `git -C {project} diff {diff_range} -- <file>`, and only the surrounding code you need (line ranges).
+The code before the change: `git -C {project} show {base_ref}:<path>`.
 {read_rule}
 New symbols and files in this change (found by lean-agent; check every one): {new_symbols}
+{focus}
+Do these passes in order. Report what you searched and found fine, and what you could not verify.
 
-Do these passes in this order. The first three come before any correctness, test or style finding.
+1. Correctness, tracing each changed path end to end: from its entry points (callers, events, timers) through
+   the changed code to its effects (state, requests, callbacks, consumers). Concurrency, ordering, cleanup on
+   logout/teardown, error paths, edge cases. Does the change do what it says?
+2. Reuse and duplication. For every new file, hook, store, util, component, class or exported function above:
+   search the repository (Grep/Glob, `git -C {project} grep -n <pattern> {grep_ref}`) for existing code with the
+   same job, by name, key identifiers and behaviour words (counter, register, subscribe, store, cache, overlay,
+   defer, retry, debounce, poll, map). At least one search per new symbol. A thin wrapper or hook that calls
+   existing code is "wraps-existing" (reuse done right); read the new symbol's body before calling it a copy.
+3. Scope and platform. Does it fix one instance of a class of problem (one dialog, field, site, endpoint) while
+   siblings share the cause? List the siblings you checked. For new state handling (dismiss, hide, defer,
+   cleanup, retries, caching), is there an existing hook or lifecycle that already does it reversibly?
+4. Tests. For every test the change edits so that its assertions change (renamed, expectation flipped,
+   deleted, skipped; the list above): what behaviour did it protect before? Is that still protected by another
+   test (search), lost, or removed on purpose (say why)? For each new or changed behaviour, is the complement
+   tested (the case that must NOT change), and the scoped vs unscoped / empty / boundary variants? Read each new
+   test against the code before the change: would it fail without the fix? Lost coverage of behaviour the
+   change says must stay is major.
+5. Defaults and state. For each new or changed parameter with a default (list above): do production callers
+   always pass it? If so, the default only hides mistakes ("make it required", minor); if the default
+   recomputes something the fix says must be captured earlier, it's a correctness finding. When the change
+   merges, widens or substitutes a value (scope, filter, version, token), list the consumers of the old value
+   (flags, timestamps, caches, metrics) and check they see the right one. For new module-level state (list
+   above): do the specs reset it, or does the module export a reset? Accidental isolation is a nit (tests).
+6. Then style and comments: import cycles, misleading names or comments, dead code. Skip what a linter catches.
 
-1. Reuse and duplication (mandatory). For every new file, hook, store, util, component, class or exported
-   function above: search the whole repository (Grep/Glob, `git -C {project} grep -n <pattern> {grep_ref}`)
-   for existing code with the same job. Search by its name, its key identifiers, and its behaviour
-   (words like counter, register, subscribe, store, cache, overlay, defer, hide, retry, debounce, poll,
-   map, format, parse, validate). For new blocks that look like a known pattern (counters, stores,
-   subscriptions, polling, debounce, retry, mapping tables), find the nearest existing implementation and
-   compare. Do at least one search per new symbol. A new abstraction next to an existing one that does
-   about the same job is at least MAJOR: name the existing symbol (file:line) and how to extend or reuse it.
-   A test that only proves a new duplicate works doesn't make the duplicate OK. But a thin wrapper, hook or
-   adapter that calls the existing code (so a new consumer can use it) is reuse done right: verdict
-   "wraps-existing", not a duplicate. Read the new symbol's body before you call it a copy.
-2. Scope and generality. Does the change fix one instance of a class of problem (one dialog, one field,
-   one site, one endpoint) while siblings clearly share the cause? Find the siblings, list the ones you
-   checked, and say whether they need the same fix.
-3. Does the platform already handle this? For new state handling (dismiss, hide, defer, close, cleanup,
-   retries, caching), look for an existing hook, lifecycle or helper that already does it, and flag
-   permanent state (ends for the whole visit/session) where an existing reversible mechanism hides and
-   restores.
-4. Then the rest: correctness (logic, edge cases, error handling, concurrency), whether it does what the
-   change intends, the project rules in your context, tests (do they cover the change and would they
-   catch a regression?), security, data/migration/API compatibility, performance. Skip what a linter or
-   formatter catches. Be specific (file:line, what, why, a concrete suggestion). Don't pad: if the change
-   is good after all four passes, approve it.
-
-Severity: blocker (must fix before the PR), major (should fix), minor, nit. Duplication is major only when
-the change copies logic that exists elsewhere (about 10+ lines, or a multi-branch algorithm) or adds a second
-copy of a mechanism (a counter, store, subscription, cache); a field map, label formatter or 2-3 line pattern
-is minor, and duplication that already exists across other components is a minor follow-up. A too-narrow fix
-with obvious siblings is major. If you'd call it optional or a follow-up, it is minor. A finding that rests on
-something you didn't verify goes under "checks" ("unverified: ..."), not as a major. Test hygiene and
-comments are minor or nit and never outrank design findings.
-Reuse verdicts: "duplicate" (new code copies existing code outside this change: reuse it instead),
-"extends-existing" or "wraps-existing" (the change builds on existing code: good, no finding),
-"justified-new" (nothing existing fits; say why). Give each finding a category: duplication, scope,
-platform, correctness, tests, security, compatibility, performance or style.
-Verdict: "approve" (no blockers or majors, and every new symbol has a reuse entry), "changes-requested",
-or "needs-checks" (you can't judge without something being run or verified; list exactly what).
+Severity: blocker (must fix before the PR), major (should fix), minor, nit. Duplication is major only when the
+change copies logic that exists elsewhere (about 10+ lines, or a multi-branch algorithm) or adds a second copy
+of a mechanism (a counter, store, subscription, cache); a field map, label formatter or 2-3 line pattern is
+minor, and duplication that already exists across other components is a minor follow-up. A too-narrow fix
+with obvious siblings is major. If you'd call it optional, it is minor. A finding that rests on something you
+didn't verify goes under "checks" ("unverified: ..."), not as a major. Style never outranks the passes above.
+Reuse verdicts: "duplicate" (copies existing code outside this change: reuse it instead), "extends-existing" or
+"wraps-existing" (builds on existing code: good, no finding), "justified-new" (nothing existing fits; say why).
+Categories: correctness, duplication, scope, platform, tests, security, compatibility, performance, style.
+Verdict: "approve" (no blockers or majors, every new symbol has a reuse entry, every edited test has a
+coverage entry), "changes-requested", or "needs-checks" (you can't judge without something being run).
+Be specific (file:line, what, why, a concrete suggestion). Don't pad: if the change is good, approve it.
 
 Before the LEAN-FEEDBACK line, add one line exactly like this (valid JSON, one line):
-LEAN-REVIEW {{"verdict": "approve|changes-requested|needs-checks", "searches": [{{"for": "what you searched", "found": "file:line, ... or nothing"}}], "reuse": [{{"symbol": "new symbol", "candidates": ["file:line existing symbol"], "verdict": "duplicate|extends-existing|wraps-existing|justified-new", "why": "..."}}], "siblings": [{{"checked": "sibling", "needs_fix": true}}], "findings": [{{"severity": "blocker|major|minor|nit", "category": "duplication|scope|platform|correctness|tests|security|compatibility|performance|style", "file": "path", "line": 0, "issue": "...", "why": "...", "suggestion": "..."}}], "checks": [{{"what": "what to run or verify", "why": "..."}}]}}
+LEAN-REVIEW {{"verdict": "approve|changes-requested|needs-checks", "searches": [{{"for": "what you searched", "found": "file:line, ... or nothing"}}], "reuse": [{{"symbol": "new symbol", "candidates": ["file:line existing symbol"], "verdict": "duplicate|extends-existing|wraps-existing|justified-new", "why": "..."}}], "siblings": [{{"checked": "sibling", "needs_fix": true}}], "coverage": [{{"test": "edited test", "protected": "behaviour it protected", "verdict": "still-covered|lost|intentional", "by": "other test or why"}}], "findings": [{{"severity": "blocker|major|minor|nit", "category": "correctness|duplication|scope|platform|tests|security|compatibility|performance|style", "file": "path", "line": 0, "issue": "...", "why": "...", "suggestion": "..."}}], "checks": [{{"what": "what to run or verify", "why": "..."}}], "fine": ["what you checked and found fine"], "unverified": ["what you could not verify"]}}
 """
 
 REUSE_RULE = """\
@@ -1546,6 +1596,130 @@ def new_symbols(path, rng_args, new_files=()):
         except OSError:
             pass
     return {"files": list(dict.fromkeys(files))[:20], "symbols": [f"{n} ({f})" for n, f in syms[:30]]}
+
+
+TEST_TITLE_RE = re.compile(r"""^\s*(?:it|test|specify)(?:\.(?:only|skip|each\([^)]*\)))?\s*\(\s*(['"`])(.+?)\1|"""
+                           r"""^\s*(?:async\s+)?def\s+(test_\w+)|^func\s+(Test\w+)|"""
+                           r"""^\s*\[(?:Fact|Test|TestMethod|Theory)\][^\n]*|^\s*public\s+(?:async\s+)?\w+\s+(\w+Test\w*)\s*\(""")
+ASSERT_RE = re.compile(r"\b(expect|assert\w*|should|toBe|toEqual|toHaveBeenCalled\w*|toMatch\w*|Assert\.)", re.I)
+SKIP_RE = re.compile(r"\b(it|test|describe)\.skip\b|\bx(it|describe)\s*\(|@(pytest\.mark\.)?skip|\[Ignore\]|t\.Skip\(")
+DEF_START_RE = re.compile(r"(?:\bfunction\b[^(]*|\bdef\s+\w+\s*|\b\w+\s*=\s*(?:async\s*)?|^\s*(?:export\s+)?(?:async\s+)?"
+                          r"(?:public\s+|private\s+|static\s+)*\w+\s*)\(")
+
+
+def def_params(line):
+    """Parameters of a function defined on this line (balanced parentheses), split at top-level commas."""
+    m = DEF_START_RE.search(line)
+    if not m or not re.search(r"\bfunction\b|\bdef\b|=>|\)\s*(\{|:)", line):
+        return []
+    i, depth, buf, parts = m.end(), 1, "", []
+    while i < len(line) and depth:
+        ch = line[i]
+        depth += ch in "([{"
+        depth -= ch in ")]}"
+        if depth and ch == "," and depth == 1:
+            parts.append(buf)
+            buf = ""
+        elif depth:
+            buf += ch
+        i += 1
+    return parts + ([buf] if buf.strip() else [])
+MODULE_STATE_RE = re.compile(r"^(?:export\s+)?(?:let|var)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*="
+                             r"\s*(?:new\s+(?:Map|Set|WeakMap|Array)\b|\[|\{)|^([a-z_]\w*)\s*(?::\s*[\w\[\], ]+)?=\s*"
+                             r"(?:\[|\{|None\b|set\(|dict\(|0\b)")
+
+
+def _test_title(line):
+    m = TEST_TITLE_RE.match(line)
+    if not m:
+        return None
+    return next((g for g in (m.group(2), m.group(3), m.group(4), m.group(5)) if g), None) or line.strip()[:60]
+
+
+def change_focus(path, rng_args):
+    """What a reviewer should look at besides reuse, found from the diff without a model:
+    tests whose assertions the change edits (renamed, flipped, deleted, skipped), new parameters with defaults,
+    and new module-level state."""
+    base = rng_args[0] if rng_args else None
+    diff = git(path, "diff", "-U0", "--no-color", *rng_args) or ""
+    tests, params, state = {}, [], []
+    cur = old_line = new_line = None
+    removed_titles, added_titles = {}, {}
+    old_assert_lines = {}
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            cur = line[6:] if line.startswith("+++ b/") else None
+            continue
+        if line.startswith("--- "):
+            continue
+        m = re.match(r"^@@ -(\d+)(?:,\d+)? \+(\d+)", line)
+        if m:
+            old_line, new_line = int(m.group(1)), int(m.group(2))
+            continue
+        if cur is None or old_line is None:
+            continue
+        is_test = bool(TEST_PATH_RE.search(cur))
+        if line.startswith("-"):
+            body = line[1:]
+            if is_test:
+                t = _test_title(body)
+                if t:
+                    removed_titles.setdefault(cur, []).append(t)
+                if ASSERT_RE.search(body):
+                    old_assert_lines.setdefault(cur, []).append(old_line)
+            old_line += 1
+        elif line.startswith("+"):
+            body = line[1:]
+            if is_test:
+                t = _test_title(body)
+                if t:
+                    added_titles.setdefault(cur, []).append(t)
+                if SKIP_RE.search(body):
+                    tests.setdefault(cur, {})[(t or body.strip())[:80]] = "skipped"
+            else:
+                for part in def_params(body):
+                    pm = re.match(r"\s*([A-Za-z_$][\w$]*)\s*(?::\s*[^=]+)?=\s*(.+)", part)
+                    if pm and not part.strip().startswith("..."):
+                        params.append(f"{pm.group(1)} = {pm.group(2).strip()} ({cur}:{new_line})")
+                ms = MODULE_STATE_RE.match(body)
+                if ms and not body.startswith((" ", "\t")):
+                    name = next(g for g in ms.groups() if g)
+                    base_text = (git(path, "show", f"{base}:{cur}") or "") if base else ""
+                    if not re.search(r"^(?:export\s+)?(?:let|var|const)?\s*" + re.escape(name) + r"\b\s*[:=]",
+                                     base_text, re.M):
+                        state.append(f"{name} ({cur}:{new_line})")
+            new_line += 1
+    for f, titles in removed_titles.items():
+        added = set(added_titles.get(f, []))
+        for t in titles:
+            if t not in added:
+                tests.setdefault(f, {})[t] = "renamed or removed"
+    for f, lines in old_assert_lines.items():  # map removed assertion lines to the test they were in
+        text = git(path, "show", f"{base}:{f}") if base else None
+        if not text:
+            continue
+        starts = [(i + 1, _test_title(l)) for i, l in enumerate(text.splitlines()) if _test_title(l)]
+        for ln in lines:
+            owner = None
+            for start, title in starts:
+                if start <= ln:
+                    owner = title
+            if owner:
+                tests.setdefault(f, {}).setdefault(owner, "assertions changed")
+    return {"tests": [f"{f}: '{t}' ({why})" for f, d in tests.items() for t, why in d.items()][:25],
+            "params": list(dict.fromkeys(params))[:15], "state": list(dict.fromkeys(state))[:15]}
+
+
+def focus_text(fc):
+    parts = []
+    if fc["tests"]:
+        parts.append("Tests whose assertions this change edits (pass 4: what did each protect, is that still "
+                     "protected elsewhere, or was it removed on purpose?):\n" + "\n".join(f"- {t}" for t in fc["tests"]))
+    if fc["params"]:
+        parts.append("New or changed parameters with defaults (pass 5):\n" + "\n".join(f"- {p}" for p in fc["params"]))
+    if fc["state"]:
+        parts.append("New module-level state (pass 5: do the specs reset it?):\n" + "\n".join(f"- {x}" for x in fc["state"]))
+    return ("\n".join(parts) + "\n") if parts else ""
 
 
 def symbols_text(ns):
@@ -2072,6 +2246,40 @@ def cmd_review_learn(a):
     return 0
 
 
+HIGH_RISK_WORDS = {"race", "concurrent", "concurrency", "mutex", "lock", "semaphore", "timeout", "interval", "timer",
+                   "debounce", "throttle", "logout", "login", "auth", "token", "session", "migrate", "migration",
+                   "schema", "sync", "async", "queue", "queued", "retry", "cache", "transaction", "webhook", "cron",
+                   "pending", "inflight", "promise", "mutation"}
+
+
+def expected_review_cost(model):
+    """(dollars, how) for one review on `model`: the average of earlier ones, else Sonnet's scaled by price."""
+    def avg(m):
+        xs = [r.get("cost_usd") or 0 for r in ledger() if r.get("role") == "reviewer" and not r.get("resumed")
+              and usage.model_rate(r.get("model")) == usage.model_rate(m) and r.get("cost_usd")]
+        return (sum(xs) / len(xs), len(xs)) if xs else (None, 0)
+    mine, n = avg(model)
+    if mine is not None:
+        return mine, f"average of {n} earlier review(s)"
+    base, n = avg("sonnet")
+    base = base if base is not None else 0.25
+    return base * usage.model_rate(model), "estimated from Sonnet reviews and the price ratio"
+
+
+def high_risk(path, rng_args, names):
+    """Reasons a change deserves a stronger reviewer: concurrency, timers, auth/logout, sync, migrations, size."""
+    diff = git(path, "diff", "-U0", "--no-color", *rng_args) or ""
+    added = "\n".join(l for l in diff.splitlines() if l.startswith(("+", "-")) and not l.startswith(("+++", "---")))
+    tokens = {t.lower() for t in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])", added)}  # splits camelCase too
+    hits = sorted(tokens & HIGH_RISK_WORDS)
+    why = []
+    if len(hits) >= 3:
+        why.append("touches " + ", ".join(hits[:5]))
+    if len(names) >= 15 or len(added.splitlines()) >= 600:
+        why.append(f"large ({len(names)} files)")
+    return why
+
+
 def cmd_review(a):
     slug, path = resolve_project(a.project)
     if a.head and a.head.startswith("origin/") and not a.no_fetch:
@@ -2093,7 +2301,7 @@ def cmd_review(a):
                   + ("" if a.head or last.get("mode") != "ref" else f"; check it with --status --head {last['ref']}")
                   + ".")
         return 1
-    model = os.environ.get("LEAN_AGENT_REVIEW_MODEL") or "sonnet"
+    model = getattr(a, "reviewer_model", None) or os.environ.get("LEAN_AGENT_REVIEW_MODEL") or "sonnet"
     effort = os.environ.get("LEAN_AGENT_REVIEW_EFFORT") or "high"
     line, low = budget_line()
     if low:
@@ -2120,6 +2328,8 @@ def cmd_review(a):
             if since else {"files": [], "symbols": []}
         meta["new_symbols"] = ns_syms["files"] + ns_syms["symbols"]
         meta["resume"] = True
+        focus = change_focus(path, since) if since else {"tests": [], "params": [], "state": []}
+        meta["edited_tests"] = focus["tests"]
         mb = meta.get("merge_base")
         if mb:
             meta["hunks"] = changed_hunks(path, [mb, meta["head"]] if meta.get("mode") == "ref" else [mb])
@@ -2128,8 +2338,9 @@ def cmd_review(a):
                   "(a) your earlier open findings against the new code (say for each: fixed / still open) and (b) "
                   "the changed files above, with the reuse, scope and platform passes limited to them. Don't "
                   "re-derive the design of code that didn't change, and don't raise declined findings again. New "
-                  "symbols since then:" + symbols_text(ns_syms) + " Reply with a complete LEAN-REVIEW line again "
-                  "(open findings only, plus searches and reuse for the new symbols).")
+                  "symbols since then:" + symbols_text(ns_syms) + " " + focus_text(focus).replace("\n", " ") +
+                  " Reply with a complete LEAN-REVIEW line again (open findings only, plus searches, reuse and "
+                  "coverage for what's new).")
         task = (f"The change was updated after your review. {where} Check whether each earlier finding is "
                 "resolved, and look for new problems. " + (a.focus or ""))
         ns = argparse.Namespace(resume=prev["id"], task=[task], task_file=None, model=None, why=None, cards=None,
@@ -2171,10 +2382,19 @@ def cmd_review(a):
     path_words = " ".join(re.split(r"[/._-]+", " ".join(names)))
     cards = suggest(slug, path_words + " " + (a.focus or ""), a.max_context, "review")
     ns_syms = new_symbols(path, [merge_base, sha] if mode == "ref" else [merge_base], new)
+    focus = change_focus(path, [merge_base, sha] if mode == "ref" else [merge_base])
     grep_ref = sha if mode == "ref" else ""
     a._decisions = decisions_text(slug, label)
     a._label = label
-    print(f"review: {len(ns_syms['files'])} new files, {len(ns_syms['symbols'])} new symbols for the reuse pass",
+    cost, how = expected_review_cost(model)
+    print(f"reviewer: {model}, effort {effort} (expected ~${cost:.2f}, {how})", flush=True)
+    risk = high_risk(path, [merge_base, sha] if mode == "ref" else [merge_base], names)
+    if risk and usage.model_rate(model) <= 1:
+        strong = os.environ.get("LEAN_AGENT_STRONG_REVIEW_MODEL") or "opus"
+        print(f"review: high-risk change ({'; '.join(risk)}). A stronger reviewer may find more: "
+              f"--reviewer-model {strong} (~${expected_review_cost(strong)[0]:.2f})", flush=True)
+    print(f"review: {len(ns_syms['files'])} new files, {len(ns_syms['symbols'])} new symbols for the reuse pass · "
+          f"{len(focus['tests'])} edited tests, {len(focus['params'])} defaults, {len(focus['state'])} module state",
           flush=True)
     task = f"Review this change before it becomes a pull request.\n\nFiles changed:\n{stat}\n"
     second = second_opinion(a, slug, path, ns_syms, names, scope, read_rule, rng, grep_ref, cards)
@@ -2198,7 +2418,8 @@ def cmd_review(a):
     meta = {"base": base, "merge_base": merge_base, "head": sha, "dirty": dirty, "ref": label, "mode": mode,
             "files": len(names), "new_symbols": ns_syms["files"] + ns_syms["symbols"],
             "second_opinion": getattr(a, "_second", []),
-            "hunks": changed_hunks(path, [merge_base, sha] if mode == "ref" else [merge_base])}
+            "hunks": changed_hunks(path, [merge_base, sha] if mode == "ref" else [merge_base]),
+            "edited_tests": focus["tests"]}
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=model,
                             why=f"pre-PR review ({effort} effort)", cards=None, card_list=cards, project=slug,
                             read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=a.max_turns,
@@ -2206,7 +2427,8 @@ def cmd_review(a):
                             effort=effort, review_meta=meta,
                             role_rule=REVIEWER_RULE.format(scope=scope, project=path, diff_range=rng,
                                                            read_rule=read_rule, new_symbols=symbols_text(ns_syms),
-                                                           grep_ref=grep_ref))
+                                                           grep_ref=grep_ref, base_ref=merge_base,
+                                                           focus=focus_text(focus)))
     rc = cmd_run(ns)
     return reuse_follow_up(a, slug, meta, effort) if rc == 2 else rc
 
@@ -2240,8 +2462,12 @@ CATEGORY_ORDER = {c: i for i, c in enumerate(DESIGN_CATEGORIES + ("correctness",
 
 
 REUSE_OK = ("extend", "extends-existing", "wraps-existing")  # the change reuses existing code: no finding
-OPTIONAL_RE = re.compile(r"\b(optional|follow-?up|not required|nice to have|could later|pre-?existing|already "
-                         r"(duplicated|repeated) (in|across)|out of scope for this pr)\b", re.I)
+# The reviewer's own words that a finding is optional. Only phrases, and only in its suggestion/why: "follow-up"
+# alone is often the topic of the code ("a follow-up check"), not a judgement.
+OPTIONAL_RE = re.compile(r"\b(optional(ly)?\b(?! (param|arg|field|chain))|(as|in) a (separate )?follow-?up|follow-?up "
+                         r"(pr|change|ticket|task|work)|not required (for|in) this|nice[- ]to[- ]have|could be done "
+                         r"later|pre-?existing (issue|duplication|pattern|code)|already (duplicated|repeated) (in|across)|"
+                         r"out of scope for this (pr|change))", re.I)
 UNVERIFIED_RE = re.compile(r"\b(i )?(did not|didn't|could not|couldn't|cannot|can't) (confirm|verify|check|see)|"
                            r"\bunverified\b|\bnot (verified|confirmed)\b", re.I)
 
@@ -2279,12 +2505,13 @@ def enforce_review_rules(review, meta, declined=()):
 
     for f in list(findings):
         text = " ".join(str(f.get(k, "")) for k in ("issue", "why", "suggestion"))
+        judgement = " ".join(str(f.get(k, "")) for k in ("why", "suggestion"))
         if f.get("severity") in ("blocker", "major") and UNVERIFIED_RE.search(text):
             findings.remove(f)
             checks.append({"what": f"unverified -> delegate a read-only check: {f.get('file', '?')}: "
                                    f"{str(f.get('issue', ''))[:200]}", "why": "the reviewer didn't verify it"})
             notes.append(f"turned an unverified {f.get('severity')} into a check ({f.get('file', '?')})")
-        elif f.get("severity") in ("blocker", "major") and OPTIONAL_RE.search(text):
+        elif f.get("severity") in ("blocker", "major") and OPTIONAL_RE.search(judgement):
             f["severity"] = "minor"
             notes.append(f"lowered a finding the reviewer calls optional/follow-up/pre-existing to minor "
                          f"({f.get('file', '?')})")
@@ -2351,6 +2578,23 @@ def enforce_review_rules(review, meta, declined=()):
                        "why": "every new symbol needs a search for existing code that does the same job"})
         notes.append(f"reuse not checked for {len(missing)} of {len(wanted)} new symbols")
 
+    cov = [c for c in review.get("coverage") or [] if isinstance(c, dict)]
+    edited = meta.get("edited_tests") or []
+    cov_text = " ".join(str(c.get("test", "")) for c in cov)
+    no_cov = [t for t in edited if t.split(": '", 1)[-1].split("' (")[0][:40] not in cov_text]
+    if no_cov:
+        checks.append({"what": "coverage not checked for edited tests: " + "; ".join(no_cov[:8]),
+                       "why": "for each: what it protected, and whether that's still tested"})
+        notes.append(f"coverage not checked for {len(no_cov)} of {len(edited)} edited tests")
+    lost = [c for c in cov if c.get("verdict") == "lost"]
+    if lost and not any(f.get("category") == "tests" and f.get("severity") in ("blocker", "major", "minor")
+                        for f in findings):  # one finding for all of them, unless the reviewer wrote its own
+        findings.append({"severity": "minor", "category": "tests", "file": "tests", "line": 0,
+                         "issue": "coverage lost: " + "; ".join(f"'{c.get('test')}' protected {c.get('protected', '?')}"
+                                                                for c in lost[:6]),
+                         "suggestion": "add tests for these back, or say why they no longer apply"})
+    review["_no_cov"] = no_cov
+
     if declined:  # last, so nothing re-adds a declined finding
         kept = [f for f in findings if not is_declined(f, declined)]
         if len(kept) < len(findings):
@@ -2360,14 +2604,14 @@ def enforce_review_rules(review, meta, declined=()):
 
     blocking = [f for f in findings if f.get("severity") in ("blocker", "major")]
     open_checks = [c for c in checks if not str(c.get("what", "")).startswith("unverified")] if meta.get("resume") else checks
-    if verdict == "approve" and (blocking or missing or disputed or (wanted and not review.get("searches"))):
+    if verdict == "approve" and (blocking or missing or disputed or no_cov or (wanted and not review.get("searches"))):
         verdict = "changes-requested" if blocking else "needs-checks"
         notes.append(f"lean-agent changed the verdict from approve to {verdict}")
-    elif verdict == "changes-requested" and not blocking and not missing and not disputed:
+    elif verdict == "changes-requested" and not blocking and not missing and not disputed and not no_cov:
         # what made it request changes was declined, optional or unverified: nothing left to fix
         verdict = "needs-checks" if any(str(c.get("what", "")).startswith("unverified") for c in checks) else "approve"
         notes.append(f"only minor{', declined' if declined else ''} or unverified findings left: {verdict}")
-    elif verdict == "needs-checks" and meta.get("resume") and not blocking and not missing and not disputed \
+    elif verdict == "needs-checks" and meta.get("resume") and not blocking and not missing and not disputed and not no_cov \
             and not open_checks and not any(str(c.get("what", "")).startswith("unverified") for c in checks):
         verdict = "approve"
     return verdict, findings, checks, notes
@@ -2403,6 +2647,12 @@ def report_review(slug, project, entry, review, meta):
     for r in reuse:
         cands = ", ".join(map(str, r.get("candidates") or [])) or "nothing found"
         print(f"    {r.get('symbol', '?')} -> {cands[:160]} -> {r.get('verdict', '?')}")
+    for c in review.get("coverage") or []:
+        if isinstance(c, dict):
+            print(f"    test '{str(c.get('test', '?'))[:70]}': {c.get('verdict', '?')}"
+                  + (f" ({str(c.get('by'))[:80]})" if c.get("by") else ""))
+    for x in (review.get("unverified") or [])[:6]:
+        print(f"    could not verify: {str(x)[:140]}")
     for sb in review.get("siblings") or []:
         if isinstance(sb, dict):
             print(f"    sibling {sb.get('checked', '?')}: {'needs the same fix' if sb.get('needs_fix') else 'fine'}")
@@ -4472,6 +4722,8 @@ def build_parser():
     s.add_argument("--max-context", type=int, default=2000, help="token cap for --cards auto")
     s.add_argument("--max-cards", type=int, default=4, help="--cards auto: at most this many matching cards")
     s.add_argument("--read-only", action="store_true", help=f"tools: {READONLY_TOOLS}")
+    s.add_argument("--ref", metavar="REF", help="the branch/commit to look at when it isn't checked out (read with git show)")
+    s.add_argument("--again", action="store_true", help="run even if the same task is running or just finished")
     s.add_argument("--tools", help=f"explicit tool list (default {WORKER_TOOLS})")
     s.add_argument("--max-turns", type=int, default=env_num("LEAN_AGENT_MAX_TURNS", 40))
     s.add_argument("--max-usd", type=float, default=env_num("LEAN_AGENT_RUN_MAX_USD", 3.0, float))
@@ -4551,6 +4803,8 @@ def build_parser():
     s.add_argument("--focus", help="what the reviewer should look at closely")
     s.add_argument("--resume", action="store_true", help="re-review after fixes, in the same reviewer session")
     s.add_argument("--status", action="store_true", help="exit 0 only if the current code has an approve")
+    s.add_argument("--reviewer-model", metavar="MODEL", help="model for this review (default sonnet; e.g. opus or fable "
+                   "for high-risk changes; the expected cost is printed first)")
     s.add_argument("--second-opinion", choices=["auto", "on", "off"], default="auto",
                    help="a cheap search-only reuse pass first (auto: for new abstractions or big diffs)")
     s.add_argument("--max-usd", type=float, default=env_num("LEAN_AGENT_REVIEW_MAX_USD", 6.0, float))

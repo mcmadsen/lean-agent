@@ -113,6 +113,7 @@ Other ways to run the orchestrator:
 | `lean-agent cards <project> [filter]` | Cards with size and hit rate (`used/sent`). `*` = core. Filter by id, title or path, e.g. `cards shop infra`. |
 | `lean-agent suggest <project> "<task>"` | Task type (read/change/browser), recommended model (from your `stats` per type, else defaults; Haiku when a budget is low), a gather/judge split hint, then core cards plus relevant cards with cost and reason, or an explicit "No relevant cards". |
 | `lean-agent run <project> -m <model> --why "..." [--cards a,b \| auto] [--read-only] [--chrome[=tools]] [--mcp s:t] [--max-usd X] [--max-turns N] -- "<task>"` | Run an isolated worker. Model and reason are **required**. `--read-only` allows Read/Glob/Grep and read-only `git -C <project> show/log/grep/diff/blame/fetch`. |
+| `lean-agent run <project> ... --read-only --ref <branch>` | A read-only worker on a branch that isn't checked out: it's told to read with `git show <sha>:<path>` and search with `git grep ... <sha>`. Starting the same task again while it runs or right after it finished is refused (`--again` to run it anyway). |
 | `lean-agent run --resume <run-id> "<follow-up>"` | Continue a worker's session (cheap: its context is cached). |
 | `lean-agent card show\|add\|rm\|core <project> <id>` | Inspect or edit cards; `add` creates *note* cards from what workers had to discover. |
 | `lean-agent optimize <project> [--apply] [--accept ids] [--reject ids]` | Promote/demote core cards, archive dead ones, flag big cards to trim, list recent context gaps, and draft new recipe cards and MCP presets from what workers actually did. |
@@ -261,6 +262,21 @@ uncommitted changes and new untracked files.
   flip the verdict. `--resume` re-checks only the open findings and the files changed since; when only minor or
   declined findings are left it approves and lists what was declined. The REVIEW footer shows the review's cost
   and the running total for the branch.
+- **Ordered passes, and what the diff shows by itself:** correctness with end-to-end flow tracing, reuse,
+  scope and platform, **tests**, **defaults and state**, then style. lean-agent finds in the diff, without a model,
+  the tests whose assertions the change edits (renamed, flipped, deleted, skipped), new parameters with
+  defaults, and new module-level state, and gives the reviewer those lists. The reviewer reports a `coverage`
+  table (edited test -> what it protected -> still-covered / lost / intentional), says whether each new test
+  would fail without the fix, checks that production callers pass a defaulted parameter, follows merged or
+  widened values to their consumers, and checks that specs reset new module state. An edited test without a
+  coverage entry means no approve, like a new symbol without a reuse entry. It also lists what it checked and
+  found fine and what it couldn't verify.
+- **Model and cost:** `--reviewer-model opus` (or `fable`) for one review; the expected cost is printed first
+  (from your earlier reviews, else scaled from Sonnet's). For high-risk changes (concurrency, timers, auth and
+  logout, sync, migrations, or large diffs) the review suggests a stronger reviewer with its expected cost.
+- **Replay case:** `python3 tests/fixtures/review_case.py <dir>` builds a small repo whose change has a lost
+  test case, a hiding default, a merged value with a stale consumer, unreset module state, a logout bug and an
+  import cycle; `--fixed` adds the author's fixes, to replay `review --resume` until it approves.
 - **Second opinion:** for new abstractions or big diffs (`--second-opinion auto|on|off`), a cheap search-only
   Haiku pass looks for reuse candidates and siblings first. The main reviewer has to confirm or reject each.
 - **Lessons from human reviews:** `lean-agent review learn <project> --text "Before adding overlay state, check
