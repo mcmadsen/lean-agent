@@ -158,7 +158,15 @@ without touching your checkout.
 - **Kept current:** a clean reused worktree is moved to the branch's newest commit. Uncommitted work is left as it is,
   with a warning.
 - **Commits:** a local branch that isn't checked out elsewhere is checked out in the worktree, so a worker's commits
-  land on it (workers never push). Remote branches and branches you have checked out get a detached worktree.
+  land on it (workers never push). A remote PR branch (`--worktree origin/feature-x`) gets a local `feature-x`
+  that tracks it, so fixes can go back to the PR. A branch you have checked out yourself gets a detached worktree.
+- **Setup once per worktree:** `lean-agent worktree setup <project> --run "npm ci && npm run build"` saves a
+  command that runs in every new worktree before the first worker starts (output in a log next to it). Add the
+  branch name to run it in an existing worktree too, and `--off` to remove it.
+- **Pushing fixes:** `lean-agent worktree push <project> <branch>` pushes the worktree's branch to origin, but only
+  when its tip has an approving review (`review --head <branch>`), there are no uncommitted changes, and nobody
+  else pushed in between (it never force-pushes). Without `--allow-send "<what the user approved>"` it only shows
+  the commits it would push, because pushing is an outward action.
 - **Parallel workers:** read-only workers share a worktree at the same time. Workers that change files take turns.
 - **Housekeeping:** `lean-agent worktrees [project]` lists them, and `lean-agent worktree rm <project> <branch>
   [--force]` removes one.
