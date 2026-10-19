@@ -143,10 +143,10 @@ def plugin_servers(project_path=None):
     The config is kept as the plugin wrote it (only variables expanded): Claude Code keys a server's stored
     OAuth login by its name plus type, url and headers, so a worker given the same name and config reuses it."""
     switches = plugin_switches(project_path)
-    found = {}
-    candidates = [(pid, root, switches.get(pid, False)) for pid, root in installed_plugins(project_path)]
-    candidates += [(pid, root, switches.get(pid, True)) for pid, root in synced_plugins()]  # synced: on by default
-    for pid, root, on in candidates:
+    copies = {}  # server name -> [entry, ...]: the installed copy first, then synced ones
+    candidates = [(pid, root, switches.get(pid, False), "installed") for pid, root in installed_plugins(project_path)]
+    candidates += [(pid, root, switches.get(pid, True), "synced") for pid, root in synced_plugins()]  # on by default
+    for pid, root, on, kind in candidates:
         if not on:
             continue
         manifest = _load(os.path.join(root, ".claude-plugin", "plugin.json"))
@@ -169,10 +169,45 @@ def plugin_servers(project_path=None):
                 for k, v in options.items():
                     env.setdefault("CLAUDE_PLUGIN_OPTION_" + re.sub(r"[^A-Za-z0-9]", "_", k).upper(), str(v))
                 cfg = dict(cfg, env=env)
-            found[f"plugin:{name}:{server}"] = {"config": cfg, "source": "plugin", "plugin": pid,
-                                                "alias": name if len(mapping) == 1 else f"{name}-{server}",
-                                                "missing_options": sorted(set(missing))}
+            copies.setdefault(f"plugin:{name}:{server}", []).append({
+                "config": cfg, "source": "plugin", "plugin": pid, "copy": kind, "path": root,
+                "alias": name if len(mapping) == 1 else f"{name}-{server}", "missing_options": sorted(set(missing))})
+    seen = load_claude_view()
+    found = {}
+    for full, entries in copies.items():
+        # The copy Claude Code itself uses, when `claude mcp list` has been seen (doctor records it):
+        # same target; else the installed one, which Claude Code prefers over a synced duplicate.
+        target = (seen.get(full) or {}).get("target")
+        pick = next((e for e in entries if target and server_target(e["config"]) == target), entries[0])
+        if len(entries) > 1:
+            pick = dict(pick, other_copies=[e["path"] for e in entries if e is not pick])
+        found[full] = pick
     return found
+
+
+def server_target(cfg):
+    """What `claude mcp list` prints for a server: its URL, or its command line."""
+    return cfg.get("url") or " ".join([str(cfg.get("command", ""))] + [str(x) for x in cfg.get("args") or []]).strip()
+
+
+def claude_view_path():
+    return os.path.join(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent"), "claude-mcp-view.json")
+
+
+def load_claude_view():
+    return _load(claude_view_path())
+
+
+def save_claude_view(view):
+    """Remember what `claude mcp list` showed, so discovery picks the same plugin copy as Claude Code."""
+    path = claude_view_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump({k: {"status": st, "target": t, "seen": time.strftime("%Y-%m-%dT%H:%M:%S")}
+                       for k, (st, t) in view.items()}, fh, indent=1)
+    except OSError:
+        pass
 
 
 def claude_mcp_list(timeout=90):
@@ -193,6 +228,8 @@ def claude_mcp_list(timeout=90):
         status = ("connected" if "connected" in raw else "needs-auth" if "auth" in raw
                   else "failed" if "fail" in raw else raw.strip())
         found[m.group(1)] = (status, re.sub(r"\s*\((HTTP|SSE|stdio)\)$", "", m.group(2), flags=re.I).strip())
+    if found:
+        save_claude_view(found)
     return found
 
 

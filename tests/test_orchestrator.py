@@ -619,6 +619,36 @@ class CliTest(unittest.TestCase):
                        FAKE_MCP_CALL=p + "get_obs_metric", **env).stdout
         self.assertIn("preset plugin:obs:mcp:dashboards covers it", out)
 
+    def test_installed_and_synced_copies_of_a_plugin(self):
+        cfg = self.env["CLAUDE_CONFIG_DIR"]
+
+        def plugin(root, url):
+            os.makedirs(os.path.join(root, ".claude-plugin"), exist_ok=True)
+            with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w") as fh:
+                json.dump({"name": "obs"}, fh)
+            with open(os.path.join(root, ".mcp.json"), "w") as fh:
+                json.dump({"mcpServers": {"mcp": {"type": "http", "url": url}}}, fh)
+        installed = os.path.join(cfg, "plugins", "cache", "mkt", "obs", "2")
+        plugin(installed, "https://mcp.example.eu/v2")
+        with open(os.path.join(cfg, "plugins", "installed_plugins.json"), "w") as fh:
+            json.dump({"version": 2, "plugins": {"obs@mkt": [{"installPath": installed}]}}, fh)
+        with open(os.path.join(cfg, "settings.json"), "w") as fh:
+            json.dump({"enabledPlugins": {"obs@mkt": True}}, fh)
+        bucket = os.path.join(cfg, "plugins", "synced", "b1")
+        plugin(os.path.join(bucket, "uuid-1"), "https://mcp.example.eu/v1")
+        with open(os.path.join(bucket, "manifest.json"), "w") as fh:
+            json.dump({"plugins": [{"name": "uuid-1", "marketplaceName": "dir"}]}, fh)
+        env = dict(FAKE_HTTP_URL="mcp.example.eu", FAKE_HTTP_TOOLS=json.dumps({"plugin:obs:mcp": ["get_x"]}))
+        self.cli("learn", self.proj)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "obs", "t", **env)
+        self.assertEqual(self.calls()[-1]["mcp"]["servers"]["plugin:obs:mcp"]["url"], "https://mcp.example.eu/v2")
+        # Claude Code turns out to use the synced copy: after doctor has seen that, workers use it too
+        listed = "plugin:obs:mcp: https://mcp.example.eu/v1 (HTTP) - ✓ Connected"
+        doc = self.cli("doctor", check=False, FAKE_MCP_LIST=listed, **env).stdout
+        self.assertIn("plugin MCP server plugin:obs:mcp: usable by workers", doc)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "obs", "t", **env)
+        self.assertEqual(self.calls()[-1]["mcp"]["servers"]["plugin:obs:mcp"]["url"], "https://mcp.example.eu/v1")
+
     def test_optimize_suggests_mcp_narrowing(self):
         self.cli("learn", self.proj)
         for _ in range(3):
