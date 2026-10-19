@@ -208,8 +208,28 @@ uncommitted changes and new untracked files.
 - **Review a branch or PR without checking it out:** `review <project> --head <branch> [--base <branch>]` reviews
   `merge-base..branch` straight from git. The reviewer reads files with `git show <commit>:<path>`, `origin/*` refs
   are fetched first, and your working tree is never touched.
+- **Reuse before style:** lean-agent lists the change's new files and newly defined symbols itself (exports,
+  functions, classes, hooks, stores; test files left out) and gives them to the reviewer, whose first three
+  passes are mandatory and come before any correctness, test or style finding:
+  1. **Reuse and duplication:** at least one search per new symbol (by name, key identifiers and behaviour
+     words like counter, subscribe, overlay, defer, retry) for existing code with the same job.
+  2. **Scope and generality:** does it fix one dialog/field/endpoint while siblings share the cause?
+  3. **Does the platform already handle it:** an existing hook or lifecycle that hides and restores, where
+     the change adds permanent state.
+  The review reports its `searches`, a `reuse` table (new symbol -> existing candidate -> reuse / extend /
+  justified-new) and the `siblings` it checked. lean-agent enforces it: a new symbol without a reuse entry means
+  "reuse not checked" and no approve; duplication, scope and platform findings are at least major, a reuse or
+  extend verdict without a matching finding gets one, and design findings are listed before test and style ones.
+- **Second opinion:** for new abstractions or big diffs (`--second-opinion auto|on|off`), a cheap search-only
+  Haiku pass looks for reuse candidates and siblings first. The main reviewer has to confirm or reject each.
+- **Lessons from human reviews:** `lean-agent review learn <project> --text "Before adding overlay state, check
+  the shared surface counter"` or `--helper "name | where | what"` adds to two cards that every review of the
+  project gets: `review-checklist` and `shared-helpers` (the latter also for code changes). `review learn
+  <project> <PR> --mcp <tracker>` reads the PR's human review threads through the tracker's MCP server, compares
+  them with lean-agent's own review of that branch, and turns what was missed into checklist lines and helpers.
 - **Re-review:** `review <project> --resume` continues the same reviewer session, which is cheap because its
-  context is cached, and checks earlier findings first. Add `--head <branch>` to resume the review of that
+  context is cached, and checks earlier findings first. It also runs the reuse, scope and platform passes again
+  on the files changed since the last review and asks it to reconsider the design, not only the earlier findings. Add `--head <branch>` to resume the review of that
   branch; the review is recorded for the branch's new tip (also when the reviewer is resumed with `run --resume`).
   A fresh review of a branch that was reviewed before gets the earlier findings, so it says which are resolved
   instead of starting blind. `review <project> --status` exits 0 only if the

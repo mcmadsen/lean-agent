@@ -9,6 +9,10 @@ import textwrap
 import time
 import unittest
 
+# A review that did the reuse pass for the symbols the test repo's change adds.
+REUSE_CHECKED = {"searches": [{"for": "total", "found": "nothing"}],
+                 "reuse": [{"symbol": s, "candidates": [], "verdict": "justified-new"}
+                           for s in ("api/totals.py", "web/page.txt", "total")]}
 CLI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins", "lean-agent", "scripts", "lean_agent.py")
 
 FAKE_CLAUDE = textwrap.dedent("""\
@@ -70,10 +74,11 @@ FAKE_CLAUDE = textwrap.dedent("""\
     if os.environ.get("FAKE_FINISH_AT"):  # make parallel fake workers finish together
         time.sleep(max(0.0, float(os.environ["FAKE_FINISH_AT"]) - time.time()))
     fb = os.environ.get("FAKE_FEEDBACK", '{"status": "done", "used": [], "unneeded": [], "missing": ""}')
+    second = "search-only second opinion" in open(append).read()
+    rv = os.environ.get("FAKE_REUSE") if second else os.environ.get("FAKE_REVIEW")
     print(json.dumps({"type": "result", "subtype": os.environ.get("FAKE_SUBTYPE", "success"), "is_error": False,
                       "num_turns": 3, "session_id": "sess-1", "total_cost_usd": 0.05,
-                      "result": "Did the thing.\\n" + (("LEAN-REVIEW " + os.environ["FAKE_REVIEW"] + "\\n")
-                                                         if os.environ.get("FAKE_REVIEW") else "") + "LEAN-FEEDBACK " + fb,
+                      "result": "Did the thing.\\n" + (("LEAN-REVIEW " + rv + "\\n") if rv else "") + "LEAN-FEEDBACK " + fb,
                       "usage": {"input_tokens": 100, "cache_creation_input_tokens": 800,
                                 "cache_read_input_tokens": 5000, "output_tokens": 300}}))
 """)
@@ -1087,11 +1092,11 @@ class CliTest(unittest.TestCase):
     def test_review_gate(self):
         self.git_project()
         self.cli("learn", self.proj, "--name", "proj")
-        review = json.dumps({"verdict": "changes-requested", "findings": [
+        review = json.dumps(dict(REUSE_CHECKED, verdict="changes-requested", findings=[
             {"severity": "minor", "file": "web/page.txt", "line": 1, "issue": "placeholder text"},
             {"severity": "blocker", "file": "api/totals.py", "line": 2, "issue": "float money math",
              "suggestion": "use integer cents"}],
-            "checks": [{"what": "run pytest -q", "why": "no test covers total()"}]})
+            checks=[{"what": "run pytest -q", "why": "no test covers total()"}]))
         p = self.cli("review", "proj", check=False, FAKE_REVIEW=review)
         self.assertEqual(p.returncode, 2)
         out = p.stdout
@@ -1109,7 +1114,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("including uncommitted changes", call["append"])
         self.assertIn("api/totals.py", call["task"])
         self.assertEqual(self.cli("review", "proj", "--status", check=False).returncode, 1)
-        approve = json.dumps({"verdict": "approve", "findings": [], "checks": []})
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
         p = self.cli("review", "proj", "--resume", check=False, FAKE_REVIEW=approve)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("Re-review the current diff", self.calls()[-1]["task"])
@@ -1128,7 +1133,7 @@ class CliTest(unittest.TestCase):
         g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
         g("checkout", "-q", "main")  # the user works on main; the PR branch isn't checked out
         self.cli("learn", self.proj, "--name", "proj")
-        approve = json.dumps({"verdict": "approve", "findings": [], "checks": []})
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
         p = self.cli("review", "proj", "--head", "feature", "--base", "main", check=False, FAKE_REVIEW=approve)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         call = self.calls()[-1]
@@ -1172,13 +1177,103 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.cli("review", "proj", "--status", "--head", "feature").returncode, 0)
         # a fresh review of the same branch gets the earlier findings
         commit_fix("# fix 3\n")
-        bad = json.dumps({"verdict": "changes-requested", "checks": [], "findings": [
-            {"severity": "major", "file": "api/totals.py", "line": 3, "issue": "rounding drops cents"}]})
+        bad = json.dumps(dict(REUSE_CHECKED, verdict="changes-requested", checks=[], findings=[
+            {"severity": "major", "file": "api/totals.py", "line": 3, "issue": "rounding drops cents"}]))
         self.cli("review", "proj", "--head", "feature", "--base", "main", check=False, FAKE_REVIEW=bad)
         commit_fix("# fix 4\n")
         out = self.cli("review", "proj", "--head", "feature", "--base", "main", FAKE_REVIEW=approve).stdout
         self.assertIn("passing 1 earlier findings", out)
         self.assertIn("[major] api/totals.py:3 rounding drops cents", self.calls()[-1]["task"])
+
+    def test_review_reuse_pass(self):
+        def g(*args):
+            subprocess.run(["git", "-C", self.proj, "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                           check=True, capture_output=True)
+
+        def write(rel, text):
+            os.makedirs(os.path.dirname(os.path.join(self.proj, rel)), exist_ok=True)
+            with open(os.path.join(self.proj, rel), "w") as fh:
+                fh.write(text)
+        write("src/init/surfaces.ts", "let n = 0\nexport function registerSurface() { n++ }\n"
+                                      "export const useSurfaceCount = () => n\n")
+        g("init", "-q", "-b", "main")
+        g("add", "-A")
+        g("commit", "-qm", "base")
+        g("checkout", "-qb", "feature")
+        write("src/dialogs/overlayStore.ts", "let count = 0\nexport function createOverlayStore() { count++ }\n"
+                                             "export const useOverlayOpen = () => count > 0\n")
+        write("src/dialogs/overlayStore.test.ts", "export function helperInTest() {}\n")
+        g("add", "-A")
+        g("commit", "-qm", "store")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        reuse = json.dumps({"verdict": "needs-checks", "searches": [{"for": "counter", "found": "src/init/surfaces.ts:2"}],
+                            "reuse": [{"symbol": "createOverlayStore", "candidates": ["src/init/surfaces.ts:2 registerSurface"],
+                                       "verdict": "extend", "why": "same ref counter"}],
+                            "siblings": [{"checked": "other dialogs", "needs_fix": True}], "findings": [], "checks": []})
+        main_review = json.dumps({"verdict": "approve", "searches": [{"for": "createOverlayStore", "found": "nothing"}],
+                                  "reuse": [{"symbol": "createOverlayStore", "candidates": ["src/init/surfaces.ts:2"],
+                                             "verdict": "extend"}],
+                                  "findings": [{"severity": "minor", "category": "duplication", "file": "src/dialogs/overlayStore.ts",
+                                                "line": 2, "issue": "near-copy of registerSurface"},
+                                               {"severity": "nit", "category": "tests", "file": "x.test.ts", "line": 1,
+                                                "issue": "test name"}], "checks": []})
+        p = self.cli("review", "proj", "--head", "feature", "--base", "main", "--second-opinion", "on", check=False,
+                     FAKE_REUSE=reuse, FAKE_REVIEW=main_review)
+        out = p.stdout
+        self.assertEqual(p.returncode, 2, out)
+        self.assertIn("1 new files, 2 new symbols for the reuse pass", out)  # test files don't count
+        second, main = self.calls()[-2], self.calls()[-1]
+        self.assertIn("search-only second opinion", second["append"])
+        self.assertEqual(second["argv"][second["argv"].index("--model") + 1], "haiku")
+        self.assertIn("Reuse and duplication (mandatory)", main["append"])
+        self.assertIn("- createOverlayStore (src/dialogs/overlayStore.ts)", main["append"])
+        self.assertIn("- useOverlayOpen (src/dialogs/overlayStore.ts)", main["append"])
+        self.assertNotIn("helperInTest", main["append"])
+        self.assertIn("src/init/surfaces.ts:2 registerSurface (suggests extend", main["task"])
+        self.assertIn("sibling that may share the problem: other dialogs", main["task"])
+        self.assertIn("REVIEW: CHANGES-REQUESTED", out)
+        self.assertIn("raised a duplication finding to major", out)
+        self.assertIn("reuse not checked for", out)
+        self.assertIn("changed the verdict from approve to changes-requested", out)
+        self.assertIn("createOverlayStore -> src/init/surfaces.ts:2 -> extend", out)
+        self.assertLess(out.index("[major/duplication]"), out.index("[nit/tests]"))
+        self.assertNotEqual(self.cli("review", "proj", "--status", "--head", "feature", check=False).returncode, 0)
+        # after fixes, --resume runs the passes again on what changed
+        g("checkout", "-q", "feature")
+        write("src/dialogs/overlayStore.ts", "export function deferOverlay() {}\n")
+        g("commit", "-qam", "fix")
+        g("checkout", "-q", "main")
+        self.cli("review", "proj", "--resume", "--head", "feature", check=False, FAKE_REVIEW=main_review)
+        task = self.calls()[-1]["task"]
+        self.assertIn("Run the reuse, scope and platform passes again", task)
+        self.assertIn("deferOverlay (src/dialogs/overlayStore.ts)", task)
+
+    def test_review_learn_builds_checklist_cards(self):
+        self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        out = self.cli("review", "learn", "proj", "--text", "Before adding overlay state, check the shared surface counter",
+                       "--helper", "registerSurface | src/init/surfaces.ts | ref-counted shown-surface counter").stdout
+        self.assertIn("2 lesson(s) added", out)
+        self.assertIn("Nothing new", self.cli("review", "learn", "proj", "--text",
+                                              "Before adding overlay state, check the shared surface counter").stdout)
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        self.cli("review", "proj", "--second-opinion", "off", FAKE_REVIEW=approve)
+        append = self.calls()[-1]["append"]
+        self.assertIn("Review checklist (lessons from human reviews)", append)
+        self.assertIn("check the shared surface counter", append)
+        self.assertIn("registerSurface (src/init/surfaces.ts): ref-counted shown-surface counter", append)
+        # from a PR's threads, through the tracker's MCP server
+        with open(os.path.join(self.proj, ".mcp.json"), "w") as fh:
+            json.dump({"mcpServers": {"tracker": {"command": "true"}}}, fh)
+        lesson = json.dumps({"checklist": ["Fixes for one dialog type: check the sibling dialogs too"],
+                             "helpers": [{"name": "useOverlayDeferral", "where": "src/hooks", "what": "hides and restores"}]})
+        fb = "\nLEAN-CHECKLIST " + lesson
+        p = self.cli("review", "learn", "proj", "42", "--mcp", "tracker", check=False,
+                     FAKE_FEEDBACK='{"status": "done", "used": [], "unneeded": [], "missing": ""}' + fb)
+        self.assertIn("pull request 42", self.calls()[-1]["append"])
+        self.assertIn("review-checklist: - Fixes for one dialog type", p.stdout + p.stderr)
+        self.assertIn("useOverlayDeferral", self.cli("card", "show", "proj", "shared-helpers").stdout)
 
     def test_shared_worktree_for_workers(self):
         g = self.git_project()
@@ -1250,7 +1345,7 @@ class CliTest(unittest.TestCase):
         p = self.cli("worktree", "push", "proj", "origin/feature", check=False)
         self.assertEqual(p.returncode, 2)
         self.assertIn("no approving review", p.stderr)
-        approve = json.dumps({"verdict": "approve", "findings": [], "checks": []})
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
         self.cli("review", "proj", "--head", "feature", "--base", "main", FAKE_REVIEW=approve)
         p = self.cli("worktree", "push", "proj", "origin/feature", check=False)
         self.assertEqual(p.returncode, 2)
