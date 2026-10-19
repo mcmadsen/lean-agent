@@ -161,6 +161,22 @@ class CliTest(unittest.TestCase):
         match_lines = [l for l in out.splitlines() if l.startswith("match")]
         self.assertTrue(match_lines and "testing" in match_lines[0], out)
 
+    def test_cards_auto_is_selective(self):
+        self.cli("learn", self.proj)
+        for i in range(12):
+            self.cli("card", "add", "proj", f"filler-{i}", "--title", f"filler {i}", "--text", "Nothing here.")
+        for i in range(6):
+            self.cli("card", "add", "proj", f"invoice-{i}", "--title", f"invoice notes {i}", "--text", "Short note.")
+        self.cli("card", "add", "proj", "loose", "--title", "unrelated", "--text", "refund and invoice")
+        out = self.cli("suggest", "proj", "fix the invoice refund").stdout
+        matches = [l for l in out.splitlines() if l.startswith("match")]
+        self.assertEqual(len(matches), 4, out)
+        self.assertNotIn("loose", out)  # two body words aren't enough for auto
+        out = self.cli("suggest", "proj", "fix the invoice refund", "--max-cards", "2").stdout
+        self.assertEqual(len([l for l in out.splitlines() if l.startswith("match")]), 2)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--cards", "auto", "fix the invoice refund")
+        self.assertEqual(self.calls()[-1]["append"].count("invoice notes"), 4)
+
     def test_run_requires_model_and_why(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "do it", check=False)

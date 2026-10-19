@@ -618,12 +618,15 @@ def _cmd_card(a):
     print(f"{a.action} {a.id}: ok")
 
 
-def suggest(slug, task, max_tokens, ttype=None, explain=False):
+def suggest(slug, task, max_tokens, ttype=None, explain=False, strict=False, limit=None):
     """Core cards for this task type plus the most relevant cards that fit `max_tokens`.
 
     Relevance uses word rarity across the library (common words count little) and requires a
-    distinctive title word, or several body words; big cards need a title match. Returns the picked
-    cards, or with explain=True (picked, reasons, closest rejected card)."""
+    distinctive title word, or several body words; big cards need a title match. strict (for
+    `--cards auto` and `suggest`) needs a title match or a small card sharing 3+ distinctive words,
+    keeps only cards scoring at least 40% of the
+    best one, and at most `limit` of them. Returns the picked cards, or with explain=True
+    (picked, reasons, closest rejected card)."""
     import math
     cards = [c for c in load_cards(slug) if not c.get("archived")]
     ttype = ttype or task_type(task)
@@ -645,7 +648,10 @@ def suggest(slug, task, max_tokens, ttype=None, explain=False):
         body_hits = (tw & words(c["text"])) - title_hits
         t_score = sum(idf[w] for w in title_hits)
         b_score = sum(idf[w] for w in body_hits)
-        relevant = t_score >= 1.0 or (b_score >= 3.0 and len(body_hits) >= 2)
+        if strict:  # a title match, or a small card that shares 3+ distinctive words with the task
+            relevant = t_score >= 1.0 or (b_score >= 3.0 and len(body_hits) >= 3 and c["tokens"] <= 400)
+        else:
+            relevant = t_score >= 1.0 or (b_score >= 3.0 and len(body_hits) >= 2)
         if c["tokens"] > 800 and t_score < 1.0:
             relevant = False  # a big card has to be clearly about the task
         why = ", ".join(sorted(title_hits)) and f"title: {', '.join(sorted(title_hits))}" or \
@@ -662,11 +668,19 @@ def suggest(slug, task, max_tokens, ttype=None, explain=False):
         usefulness = (c["used"] + 1) / (c["offered"] + 2)
         score = (3 * t_score + b_score) * (0.5 + usefulness) / (1 + c["tokens"] / 1500)
         scored.append((score, c, why))
+    top = max((sc for sc, _, why in scored if why != "preference memory"), default=0)
+    matches = 0
     for score, c, why in sorted(scored, key=lambda x: -x[0]):
+        pref = why == "preference memory"
+        if strict and not pref and (score < 0.4 * top or (limit is not None and matches >= limit)):
+            if closest is None:
+                closest = (score, c, why + "; weaker than the best matches")
+            continue
         if c["tokens"] <= budget:
             picked.append(c)
             reasons[c["id"]] = why
             budget -= c["tokens"]
+            matches += not pref
     if explain:
         return picked, reasons, closest
     return picked
@@ -699,7 +713,8 @@ def cmd_suggest(a):
     slug, _ = resolve_project(a.project)
     sync_memory(slug)
     ttype = task_type(a.task)
-    picked, reasons, closest = suggest(slug, a.task, a.max_tokens, ttype, explain=True)
+    picked, reasons, closest = suggest(slug, a.task, a.max_tokens, ttype, explain=True, strict=True,
+                                       limit=a.max_cards)
     model, why = recommend_model(ttype)
     flags = f"-m {model}" + (" --read-only" if ttype == "read" else "") + (" --chrome" if ttype == "browser" else "")
     print(f"task type: {ttype} · recommended: {flags}  ({why})")
@@ -899,7 +914,8 @@ def cmd_run(a):
             cards = a.card_list
         elif a.cards == "auto":
             cards = suggest(slug, task, a.max_context,
-                            getattr(a, "ttype", None) or task_type(task, a.read_only, bool(a.chrome)))
+                            getattr(a, "ttype", None) or task_type(task, a.read_only, bool(a.chrome)),
+                            strict=True, limit=a.max_cards)
         else:
             missing = [x for x in wanted if x not in lib]
             if missing:
@@ -2806,7 +2822,8 @@ def build_parser():
     s = sub.add_parser("suggest", help="suggest cards for a task")
     s.add_argument("project")
     s.add_argument("task")
-    s.add_argument("--max-tokens", type=int, default=3000)
+    s.add_argument("--max-tokens", type=int, default=2000)
+    s.add_argument("--max-cards", type=int, default=4, help="at most this many matching (non-core) cards")
     s.set_defaults(fn=cmd_suggest)
 
     s = sub.add_parser("run", help="run an isolated worker on a project")
@@ -2815,7 +2832,8 @@ def build_parser():
     s.add_argument("--model", "-m", help="haiku | sonnet | opus | full model id (required)")
     s.add_argument("--why", help="one line: why this model and context (required)")
     s.add_argument("--cards", help="comma-separated card ids, or 'auto'")
-    s.add_argument("--max-context", type=int, default=3000, help="token cap for --cards auto")
+    s.add_argument("--max-context", type=int, default=2000, help="token cap for --cards auto")
+    s.add_argument("--max-cards", type=int, default=4, help="--cards auto: at most this many matching cards")
     s.add_argument("--read-only", action="store_true", help=f"tools: {READONLY_TOOLS}")
     s.add_argument("--tools", help=f"explicit tool list (default {WORKER_TOOLS})")
     s.add_argument("--max-turns", type=int, default=env_num("LEAN_AGENT_MAX_TURNS", 40))

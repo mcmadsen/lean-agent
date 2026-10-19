@@ -325,8 +325,10 @@ exact-cent tests with 1-cent remainder cases.
    unneeded, becomes **core for that type**: it's sent automatically to that type only. Core cards used in under 40%
    are demoted. Cards used in at most 20% and marked unneeded are **archived**, and big, often-used cards are flagged
    for rewriting shorter. Workers report a card as used only if it changed what they did.
-   Relevance in `suggest`: words are weighted by how rare they are across your cards. A card needs a distinctive
-   title word or several body words, cards over 800 tokens need a title match, and ranking divides by card size.
+   Relevance in `suggest` and `--cards auto`: words are weighted by how rare they are across your cards. A card
+   needs a distinctive title word, or (if it's small) three distinctive body words; cards over 800 tokens need a
+   title match, and ranking divides by card size. Only cards scoring at least 40% of the best match are kept, at
+   most 4 (`--max-cards`) within ~2,000 tokens (`--max-context`). The reviewer's card pick is more lenient.
 4. Recurring `missing` notes are turned into **note cards** by the orchestrator (`card add`). Notes survive
    re-learning.
 
