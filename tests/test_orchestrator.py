@@ -188,6 +188,19 @@ class CliTest(unittest.TestCase):
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--cards", "auto", "fix the invoice refund")
         self.assertEqual(self.calls()[-1]["append"].count("invoice notes"), 4)
 
+    def test_logs_split_by_level(self):
+        self.cli("learn", self.proj)
+        self.assertIn("No error log yet", self.cli("logs").stdout)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "look up the fixture")
+        self.cli("run", "-p", "nope", "-m", "haiku", "--why", "x", "t", check=False)
+        debug = self.cli("logs", "debug").stdout
+        self.assertIn("DEBUG run: ", debug)
+        self.assertIn("look up the fixture", debug)
+        err = self.cli("logs").stdout
+        self.assertIn("ERROR cli: ", err)
+        self.assertNotIn("look up the fixture", err)
+        self.assertIn("No saved command outputs", self.cli("logs", "verbose").stdout)
+
     def test_run_requires_model_and_why(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "do it", check=False)

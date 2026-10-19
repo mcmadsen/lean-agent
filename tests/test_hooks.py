@@ -28,7 +28,8 @@ def assistant_line(mid, inp, cw, cr, out, model="claude-test"):
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.env = {"CLAUDE_PLUGIN_DATA": os.path.join(self.tmp.name, "data")}
+        self.env = {"CLAUDE_PLUGIN_DATA": os.path.join(self.tmp.name, "data"),
+                    "LEAN_AGENT_HOME": os.path.join(self.tmp.name, "home")}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -48,12 +49,63 @@ class SqueezeTest(Base):
         out = run_hook("squeeze_hook.py", self.event("\n".join(lines)), **self.env)
         upd = out["hookSpecificOutput"]["updatedToolOutput"]
         self.assertIn("AssertionError", upd["stdout"])
-        self.assertIn("PASS test_2999", upd["stdout"])
+        self.assertIn("[dropped noise: 2,999 passing test lines]", upd["stdout"])
         self.assertLess(len(upd["stdout"]), 6000)
         self.assertFalse(upd["interrupted"])
         path = upd["stdout"].split("Full output: ")[1].split(" ")[0]
         with open(path) as fh:
             self.assertEqual(fh.read().count("PASS"), 2999)
+
+    def test_real_error_survives_a_flood_of_warnings(self):
+        lines = ["Downloading package %d" % i for i in range(2000)]
+        lines += ["src/mod%d.ts:%d warning: unused variable 'x%d' (no-unused)" % (i % 7, i, i) for i in range(1500)]
+        lines += ["error TS2322: Type 'string' is not assignable to type 'number'.",
+                  "  at src/checkout/total.ts:42:7", "  at src/checkout/index.ts:10:3"]
+        lines += ["compiled with %d warnings" % 1500, "Found 1 error. Exit code 2"]
+        out = run_hook("squeeze_hook.py", self.event("\n".join(lines)), **self.env)
+        txt = out["hookSpecificOutput"]["updatedToolOutput"]["stdout"]
+        self.assertIn("TS2322", txt)
+        self.assertIn("at src/checkout/total.ts:42:7", txt)  # the stack trace stays with its error
+        self.assertIn("Found 1 error", txt)
+        self.assertIn("2,000 download lines", txt)
+        self.assertLess(txt.count("unused variable"), 5)  # one copy per kind of warning
+        err = txt.split("errors and warnings only (")[1].split(": ", 1)[1].split(" ")[0]
+        with open(err) as fh:
+            self.assertIn("TS2322", fh.read())
+        logs = os.path.join(self.env["LEAN_AGENT_HOME"], "logs")
+        with open(os.path.join(logs, "error.log")) as fh:
+            self.assertIn("TS2322", fh.read())
+        with open(os.path.join(logs, "debug.log")) as fh:
+            self.assertIn("squeeze", fh.read())
+
+    def test_first_and_last_errors_kept_repeats_counted(self):
+        body = ["step %d done" % i for i in range(4000)]
+        body[100] = "ERROR: connection refused to db (attempt 1)"
+        for i in range(200, 3000, 50):
+            body[i] = "ERROR: connection refused to db (attempt %d)" % i
+        body[3900] = "FATAL: migration 0042 failed: column missing"
+        txt = run_hook("squeeze_hook.py", self.event("\n".join(body)), **self.env)[
+            "hookSpecificOutput"]["updatedToolOutput"]["stdout"]
+        self.assertIn("migration 0042 failed", txt)
+        self.assertIn("(attempt 1)", txt)
+        self.assertIn("[same error", txt)
+
+    def test_lean_sq_wrapper(self):
+        script = os.path.join(self.tmp.name, "build.py")
+        with open(script, "w") as fh:
+            fh.write("import sys\nfor i in range(3000): print('Downloading dep %d' % i)\n"
+                     "print('Traceback (most recent call last):')\nprint('  File \"app.py\", line 3')\n"
+                     "print('ValueError: bad config')\nsys.exit(3)\n")
+        sq = os.path.join(ROOT, "..", "bin", "lean-sq")
+        p = subprocess.run([sq, sys.executable, script], capture_output=True, text=True, env=dict(os.environ, **self.env))
+        self.assertEqual(p.returncode, 3)
+        self.assertIn("ValueError: bad config", p.stdout)
+        self.assertIn('File "app.py", line 3', p.stdout)
+        self.assertIn("3,000 download lines", p.stdout)
+        self.assertIn("[exit code 3]", p.stdout)
+        self.assertLess(len(p.stdout), 2000)
+        p = subprocess.run([sq, "echo small"], capture_output=True, text=True, env=dict(os.environ, **self.env))
+        self.assertEqual((p.returncode, p.stdout), (0, "small\n"))
 
     def test_repeats_collapsed(self):
         out = run_hook("squeeze_hook.py", self.event("downloading...\n" * 5000 + "done"), **self.env)

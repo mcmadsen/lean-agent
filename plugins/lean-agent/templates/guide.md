@@ -128,7 +128,9 @@ lean-agent card core {{P}} checkout-notes
   `lean-agent limits`; when a window is nearly used, prefer `haiku` workers and smaller steps.
 - If the user tells you what `/usage` shows, record it: `lean-agent limits calibrate session=N week=N`
   (add `fable=N` etc. for a model's own weekly bar). Reset times go in `lean-agent limits plan`.
-- When something seems off, run `lean-agent doctor`.
+- When something seems off, run `lean-agent doctor`, and `lean-agent logs` for recent errors
+  (`logs debug` for everything). A squeezed output's first line names the full output and an errors-only
+  copy: read the errors file before the full one.
 
 ## Keeping lean-agent current
 When the user asks to update lean-agent, run `lean-agent sync`. It pulls the code, updates the plugin,

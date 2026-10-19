@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Run a command and print its output with the noise removed and the errors kept (full output saved).
+here="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "$here/../scripts/squeeze_hook.py" run "$@"
