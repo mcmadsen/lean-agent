@@ -1061,6 +1061,7 @@ def cmd_run(a):
         "units": int(usage.units(u, model)),
         "cost_usd": out.get("total_cost_usd"), "session_id": out.get("session_id") or (prev and prev["session_id"]),
         "resumed": bool(prev), "task": task[:300], "missing": missing_note,
+        "parent_session": os.environ.get("CLAUDE_CODE_SESSION_ID"),
         "mcp": mcp_specs, "mcp_calls": lean_mcp.count_mcp_calls(workdir, out.get("session_id"), started_utc)
         if (mcp_specs or chrome_spec) else {},
         "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
@@ -1859,7 +1860,6 @@ def _cmd_optimize(a):
 
 ORCHESTRATOR_ENV = {
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",   # memory lives in lean-agent; no MEMORY.md on every turn
-    "LEAN_AGENT_BUDGET": "1000000",           # orchestrator session budget (weighted tokens)
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70",
     "BASH_MAX_OUTPUT_LENGTH": "20000",
     "MAX_MCP_OUTPUT_TOKENS": "10000",
@@ -2324,8 +2324,9 @@ def cmd_up(a):
         cmd += ["remote-control", "--name", a.name]
         if a.permission_mode:
             cmd += ["--permission-mode", a.permission_mode]
-        print(f"lean-agent: orchestrator in {h}, model {a.model or 'default'}, "
-              f"session budget {env['LEAN_AGENT_BUDGET']} weighted tokens")
+        cap = env.get("LEAN_AGENT_BUDGET")
+        print(f"lean-agent: orchestrator in {h}, model {a.model or 'default'}"
+              + (f", self-set session cap {int(cap):,} sonnet-eq" if cap else ""))
         print(f"lean-agent: open the Claude app (Code) and pick \"{a.name}\"")
     extra = a.extra[1:] if a.extra[:1] == ["--"] else a.extra
     cmd += extra  # e.g. `lean-agent up -- --debug --debug-file /tmp/rc.log`
@@ -2427,8 +2428,31 @@ def cmd_env(a):
             print(f"export {k}={v}")
 
 
+def session_workers(session_id, first_ts, last_ts):
+    """[(model, runs, sonnet-eq)] for runs started from an orchestrator session: by recorded parent
+    session, or (older runs) by time within the session."""
+    def to_utc(local_iso):  # ledger times are local; transcript times are UTC
+        try:
+            return datetime.datetime.fromisoformat(local_iso).astimezone(datetime.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            return ""
+    rows = {}
+    for r in ledger():
+        if r.get("parent_session"):
+            mine = r["parent_session"] == session_id
+        else:
+            ts = to_utc(r.get("ts", ""))
+            mine = bool(first_ts and last_ts and ts and first_ts[:19] <= ts <= last_ts[:19])
+        if mine:
+            m = rows.setdefault(r["model"], [0, 0.0])
+            m[0] += 1
+            m[1] += r.get("units", r.get("weighted", 0) * usage.model_rate(r["model"]))
+    return [(m, n, u) for m, (n, u) in rows.items()]
+
+
 def cmd_budget(a):
-    sys.exit(usage.report(a.session))
+    sys.exit(usage.report(a.session, workers=session_workers))
 
 
 def cmd_home(a):
@@ -2445,7 +2469,7 @@ def build_parser():
     s.add_argument("--model", default="sonnet",
                    help="orchestrator model, pinned in the home's settings (default: sonnet; 'default' = your own)")
     s.add_argument("--name", default="lean-agent", help="session name in the Claude app")
-    s.add_argument("--budget", type=int, help="orchestrator session budget, weighted tokens")
+    s.add_argument("--budget", type=int, help="optional self-set cap per orchestrator session (sonnet-eq tokens)")
     s.add_argument("--budget-5h", type=int, help="lean-agent budget per 5-hour window (Sonnet-equivalent tokens)")
     s.add_argument("--budget-week", type=int, help="lean-agent budget per 7 days (Sonnet-equivalent tokens)")
     s.add_argument("--permission-mode", help="e.g. acceptEdits, auto")
