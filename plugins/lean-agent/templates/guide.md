@@ -118,8 +118,12 @@ lean-agent card core {{P}} checkout-notes
   its stats and core flag.
 - Hand edits to cards learned from CLAUDE.md files are kept when you re-run `learn`, and
   `learn` warns when the source changed.
-- Save recurring "missing" context as a card. About every 10 runs on a project, run
-  `lean-agent optimize <project> --apply` and rewrite cards it marks `trim`.
+- Save recurring "missing" context as a card. After a costly exploring run (many turns or MCP calls), and
+  about every 10 runs, run `lean-agent optimize <project>`. Review its drafts (recipe cards, MCP presets): fill in
+  the ids, queries and time windows the worker found, then `--accept <id>`. `--apply` takes the core/archive
+  changes; rewrite cards it marks `trim`.
+- Workers get today's date, time and time zone as the first line of every task: "last Monday" needs no brief.
+- If a run's summary was cut off, `lean-agent runs --last --tokens` (or `runs --show <id>`) prints it again.
 
 ## Your own tokens
 - Bash output over ~6,000 characters is shortened, except reads (`cat`, `sed -n`, `head`,

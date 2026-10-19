@@ -1067,7 +1067,8 @@ def cmd_run(a):
     started_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     try:
         with wt_lock:
-            proc = subprocess.run(cmd, input=task, capture_output=True, text=True, cwd=workdir, env=env,
+            proc = subprocess.run(cmd, input=today_line() + "\n\n" + task, capture_output=True, text=True,
+                                  cwd=workdir, env=env,
                                   timeout=env_num("LEAN_AGENT_RUN_TIMEOUT", 1800))
         raw, err = proc.stdout, proc.stderr
     except subprocess.TimeoutExpired as exc:
@@ -1088,6 +1089,9 @@ def cmd_run(a):
         fh.write((raw.strip() or json.dumps({"stderr": err[-4000:]})) + "\n")
 
     summary, fb = parse_feedback(out.get("result") or "")
+    mcp_seq = (lean_mcp.mcp_call_sequence(workdir, out.get("session_id"), started_utc)
+               if (mcp_specs or chrome_spec) else [])
+    offered = offered_tools(mcp_specs)
     review = None
     if role == "reviewer":
         summary, review = parse_marker(summary, "LEAN-REVIEW")
@@ -1145,14 +1149,18 @@ def cmd_run(a):
         "cost_usd": out.get("total_cost_usd"), "session_id": out.get("session_id") or (prev and prev["session_id"]),
         "resumed": bool(prev), "task": task[:300], "missing": missing_note,
         "parent_session": os.environ.get("CLAUDE_CODE_SESSION_ID"),
-        "mcp": mcp_specs, "mcp_calls": lean_mcp.count_mcp_calls(workdir, out.get("session_id"), started_utc)
-        if (mcp_specs or chrome_spec) else {},
+        "mcp": mcp_specs, "mcp_calls": {t: mcp_seq.count(t) for t in dict.fromkeys(mcp_seq)},
+        "mcp_seq": mcp_seq[:60], "mcp_offered": {k: len(v) for k, v in offered.items()},
+        "result_head": (summary or "")[:600],
         "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
         "role": role, "effort": effort, "worktree": wt_name, "review_meta": review_meta,
     }
     append_jsonl(home("ledger.jsonl"), entry)
+    if not isinstance(sys.stdout, Tee):
+        sys.stdout = Tee(sys.stdout, os.path.join(workdir, f"summary-{len(glob.glob(os.path.join(workdir, 'summary-*.txt'))) + 1}.txt"))
     lean_log.log("error" if entry["status"] in ("failed", "error") or entry["status"].startswith("stopped") else "debug",
-                 "run", f"{run_id} {slug} {model} {entry['status']} {entry.get('units', 0):,} sonnet-eq"
+                 "run", f"{run_id} {slug} {model} {entry['status']} {entry.get('turns') or '?'} turns "
+                 f"{entry.get('units', 0):,} sonnet-eq ${entry.get('cost_usd') or 0:.2f}"
                  f"{' role ' + role if role else ''}: {task[:160]!r}"
                  + (f"; worker said: {str(out.get('result') or '')[:300]!r}" if entry["status"] in ("failed", "error") else ""))
 
@@ -1166,8 +1174,12 @@ def cmd_run(a):
         per_turn = ctx // max(1, entry["turns"])
         own = est_tokens(read_text(os.path.join(workdir, "append.md")))
         ext = tools_overhead(mcp_specs, mcp_allowed, chrome_spec)
+        n_off, n_used = sum(len(v) for v in offered.values()), len(set(mcp_seq))
+        tools_note = f" ({n_off} offered, {n_used} used)" if offered else ""
         print(f"  context per turn ~{per_turn:,}: lean-agent protocol + cards ~{own:,} · MCP/browser tools ~{ext:,}"
-              f" · Claude Code system prompt, built-in tools, conversation ~{max(0, per_turn - own - ext):,}")
+              f"{tools_note} · Claude Code system prompt, built-in tools, conversation ~{max(0, per_turn - own - ext):,}")
+    for line in narrowing_hints(offered, mcp_seq):
+        print("  " + line)
     line, low = budget_line()
     if line:
         print("  " + line)
@@ -1193,6 +1205,48 @@ def cmd_run(a):
     if role == "reviewer":
         return report_review(slug, entry["project_path"], entry, review or {}, review_meta or {})
     return 0 if status in ("done", "partial", "needs-input", "awaiting-confirmation") else 1
+
+
+def today_line():
+    """The worker's first line, so 'last Monday' or 'this morning' needs no brief."""
+    now = datetime.datetime.now().astimezone()
+    off = now.strftime("%z")
+    return (f"Today is {now:%A %Y-%m-%d}, {now:%H:%M} {now.tzname() or ''} "
+            f"(UTC{off[:3]}:{off[3:]}).").replace("  ", " ")
+
+
+def offered_tools(mcp_specs):
+    """{server: [tool names the run was given]} for servers whose tool list is known."""
+    out, cache = {}, mcp_cache()
+    for name, wanted in lean_mcp.parse_specs(mcp_specs):
+        known = (cache.get(name) or {}).get("tools")
+        if known:
+            out[name] = expand_tools(name, wanted, known) if wanted else list(known)
+    return out
+
+
+def narrowing_hints(offered, mcp_seq):
+    """'offered N tools, used M' plus the --mcp spec (or a saved preset) that would have been enough."""
+    lines, cache = [], mcp_cache()
+    for name, tools in offered.items():
+        prefix = lean_mcp.tool_prefix(name)
+        used = list(dict.fromkeys(t[len(prefix):] for t in mcp_seq if t.startswith(prefix)))
+        if len(used) >= len(tools):
+            continue
+        known = (cache.get(name) or {}).get("tools") or {}
+        cost = lambda ts: sum(known.get(t, 0) for t in ts)
+        line = f"mcp: {name} offered {len(tools)} tools (~{cost(tools):,} tok/turn), used {len(used)}"
+        if not used:
+            lines.append(line + f": next time leave out --mcp {name}")
+            continue
+        fits = [(p, ts) for p, ts in mcp_presets(name, known).items() if set(used) <= set(ts) and len(ts) < len(tools)]
+        if fits:
+            p, ts = min(fits, key=lambda x: cost(x[1]))
+            lines.append(line + f": preset {name}:{p} covers it (~{cost(ts):,} tok)")
+        else:
+            lines.append(line + f" ({', '.join(used)}): next time --mcp {name}:{','.join(used)} (~{cost(used):,} tok), "
+                         f"or save it: lean-agent mcp preset {name} <name> {','.join(used)}")
+    return lines
 
 
 def mcp_cost_lines(mcp_specs, chrome_spec):
@@ -1905,6 +1959,53 @@ MCP_AUTH_HINT = ("Workers connect with the same name and config as Claude Code, 
                  "if it says needs-auth, sign in once in Claude Code (/mcp, pick {name}), then: lean-agent mcp tools {name}")
 
 
+def diagnose_plugin_server(name, info, claude_view, servers):
+    """(ok, message, fix) for one plugin MCP server: can a worker use it, and if not, why."""
+    label = f"plugin MCP server {name}"
+    missing = info.get("missing_options") or []
+    env_missing = [m[4:] for m in missing if m.startswith("env:")]
+    opt_missing = [m for m in missing if not m.startswith("env:")]
+    if opt_missing:
+        return (False, f"{label}: plugin option(s) {', '.join(opt_missing)} aren't readable (sensitive options are "
+                f"in Claude Code's credentials store), so workers can't build its config",
+                "set the option non-sensitively in /plugin manage, or add the server with `claude mcp add`")
+    if env_missing:
+        return (False, f"{label}: its config uses ${{{'}, ${'.join(env_missing)}}} and lean-agent can't see "
+                "that variable", f"put it in the `env` block of {lean_mcp.config_dir()}/settings.json "
+                "(lean-agent reads it there), or export it before `lean-agent up`")
+    c = mcp_cache().get(name) or {}
+    fresh = c.get("key") == config_key(info["config"]) and c.get("probed", "") >= (
+        datetime.datetime.now() - datetime.timedelta(days=1)).isoformat(timespec="seconds")
+    if not fresh:
+        server_tools(name, info["config"], refresh=True)
+        c = mcp_cache().get(name) or {}
+    worker = c.get("status") or "unknown"
+    alias = lean_mcp.display_names(servers).get(name)
+    if worker == "connected" and c.get("tools"):
+        return True, f"{label}: usable by workers ({len(c['tools'])} tools; --mcp {alias or name}:<preset|tools>)", None
+    mine = info["config"].get("url") or " ".join([info["config"].get("command", "")] + info["config"].get("args", []))
+    if claude_view and name not in claude_view:
+        return (False, f"{label}: {worker} as a worker, and Claude Code doesn't list it (`claude mcp list`)",
+                "enable the plugin in /plugin, or ignore this if you don't use it")
+    theirs_status, theirs = claude_view.get(name, (None, None))
+    if theirs_status and theirs_status != "connected":
+        how = ("sign in: open Claude Code, /mcp, pick it, Authenticate" if theirs_status == "needs-auth"
+               else "it fails in Claude Code too: fix it there first (`claude mcp list`, /mcp)")
+        return False, f"{label}: {theirs_status} in Claude Code itself, so workers can't use it either", how
+    if theirs and theirs.split("?")[0] != mine.split("?")[0]:
+        return (False, f"{label}: {worker} as a worker; Claude Code connects to {theirs} but lean-agent built "
+                f"{mine}", "the plugin's config has a value lean-agent resolves differently (an env var set "
+                "only in Claude Code's environment?); put it in the settings.json `env` block")
+    if worker == "needs-auth":
+        seen = "connected in Claude Code but " if theirs_status == "connected" else ""
+        return (False, f"{label}: {seen}needs-auth as a worker: no stored login matches lean-agent's copy of "
+                "the config (sign in once in Claude Code: /mcp)", "re-run `lean-agent mcp tools " + name + "`; if it stays, "
+                "add the server with `claude mcp add` and sign in once for workers")
+    empty = [h for h, v in (info["config"].get("headers") or {}).items() if v == ""]
+    return (False, f"{label}: {worker} as a worker" + (f" (empty headers: {', '.join(empty)})" if empty else ""),
+            f"see why: lean-agent mcp tools {name} --measure, and lean-agent logs")
+
+
 def measure_server(name, cfg):
     """Measure a server's per-turn context cost with two tiny Haiku calls (works for any server type)."""
     claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
@@ -2166,6 +2267,158 @@ def cmd_optimize(a):
     sync_memory(slug)
     with library_lock(slug):
         _cmd_optimize(a)
+        _draft_proposals(a, slug)
+
+
+TOOL_VERBS = {"get", "list", "search", "read", "query", "fetch", "find", "view", "show", "describe", "count",
+              "lookup", "create", "update", "delete", "set", "add", "remove", "run", "mcp", "the", "by", "for", "and"}
+
+
+def run_tools(r):
+    """{server: [tools in the order first called]} from a run record."""
+    seq = r.get("mcp_seq") or [t for t, n in (r.get("mcp_calls") or {}).items() for _ in range(n)]
+    out = {}
+    for name, _ in lean_mcp.parse_specs(r.get("mcp")):
+        prefix = lean_mcp.tool_prefix(name)
+        used = list(dict.fromkeys(t[len(prefix):] for t in seq if t.startswith(prefix)))
+        if used:
+            out[name] = used
+    return out
+
+
+def _jaccard(x, y):
+    return len(x & y) / len(x | y) if x | y else 0.0
+
+
+def preset_name(server, tools):
+    """A short preset name from the words the tool names share (search_x_metrics, get_x_metric -> metric)."""
+    skip = TOOL_VERBS | set(re.split(r"[^a-z0-9]+", server.lower()))
+    counts = {}
+    for t in tools:
+        for w in set(re.split(r"[^a-z0-9]+", t.lower())):
+            w = w[:-1] if w.endswith("s") and len(w) > 3 else w
+            if w and w not in skip:
+                counts[w] = counts.get(w, 0) + 1
+    best = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return (best[0][0] if best else "task") + ("s" if best and not best[0][0].endswith("s") else "")
+
+
+def draft_proposals(slug):
+    """New-card and preset drafts from what successful workers actually did (no 5-run threshold).
+
+    One successful run with a distinctive MCP pattern (2+ tools, or 4+ calls, or 6+ turns) gives a recipe
+    card draft; runs with the same server and a similar tool set, or similar task wording, are grouped.
+    A preset is drafted when a run was given far more tools than it used, or a pattern recurs."""
+    runs = [r for r in ledger() if r.get("project") == slug and not r.get("resumed")
+            and r.get("status") == "done" and r.get("role") != "reviewer"]
+    cards = [c for c in load_cards(slug) if not c.get("archived")]
+    cache = mcp_cache()
+    groups = []
+    for r in runs:
+        tools = run_tools(r)
+        if not tools:
+            continue
+        tw = words(r["task"])
+        for g in groups:
+            same_srv = set(tools) & set(g["tools"])
+            if any(_jaccard(set(tools[s]), set(g["tools"][s])) >= 0.6 for s in same_srv) or _jaccard(tw, g["words"]) >= 0.5:
+                g["runs"].append(r)
+                for s, ts in tools.items():
+                    g["tools"][s] = list(dict.fromkeys(g["tools"].get(s, []) + ts))
+                g["words"] |= tw
+                break
+        else:
+            groups.append({"runs": [r], "tools": {s: list(ts) for s, ts in tools.items()}, "words": set(tw)})
+    drafts = []
+    for g in groups:
+        first, n = g["runs"][0], len(g["runs"])
+        calls = sum(sum((r.get("mcp_calls") or {}).values()) for r in g["runs"])
+        distinctive = any(len(ts) >= 2 for ts in g["tools"].values()) or calls >= 4 or (first.get("turns") or 0) >= 6
+        all_tools = {t for ts in g["tools"].values() for t in ts}
+        covered = next((c for c in cards if sum(t in c["text"] for t in all_tools) * 2 >= max(1, len(all_tools))), None)
+        key = hashlib.sha1(json.dumps(sorted(g["tools"].items())).encode()).hexdigest()[:6]
+        if distinctive and not covered:
+            title_words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9-]+", first["task"]) if w.lower() not in STOPWORDS]
+            title = "How to: " + " ".join(title_words[:9])
+            lines = [f"Recipe from {n} successful run{'s' if n > 1 else ''} ({', '.join(r['id'] for r in g['runs'][:4])}).",
+                     f"Task like: {first['task'][:200]}", ""]
+            for srv, ts in g["tools"].items():
+                counts = {}
+                for r in g["runs"]:
+                    for t, k in (r.get("mcp_calls") or {}).items():
+                        counts[t] = counts.get(t, 0) + k
+                prefix = lean_mcp.tool_prefix(srv)
+                lines.append(f"Steps that worked ({srv}):")
+                lines += [f"{i}. {t}" + (f" (x{counts[prefix + t]})" if counts.get(prefix + t, 0) > 1 else "")
+                          for i, t in enumerate(ts, 1)]
+                known = (cache.get(srv) or {}).get("tools") or {}
+                cost = sum(known.get(t, 0) for t in ts)
+                lines.append(f"Give the worker only these: --mcp {srv}:{','.join(ts)}" + (f" (~{cost:,} tok/turn)" if cost else ""))
+            if first.get("result_head"):
+                lines += ["", "What a good answer looked like: " + first["result_head"][:240].replace("\n", " ")]
+            lines += ["", f"Cost without this card: {first.get('turns') or '?'} turns, {first.get('units', 0):,} sonnet-eq. "
+                      "Edit the steps (ids, queries, time windows) so the next worker skips the exploring."]
+            drafts.append({"id": f"draft-card-{key}", "kind": "card", "card_id": slugify("recipe-" + "-".join(
+                w.lower() for w in title_words[:5]), 50), "title": title, "text": "\n".join(lines), "runs": n,
+                "why": f"from {n} run{'s' if n > 1 else ''}: {first.get('turns') or '?'} turns, "
+                       f"{first.get('units', 0):,} sonnet-eq, {calls} MCP calls"})
+        for srv, ts in g["tools"].items():
+            known = (cache.get(srv) or {}).get("tools") or {}
+            offered = max((r.get("mcp_offered") or {}).get(srv, 0) for r in g["runs"])
+            presets = mcp_presets(srv, known)
+            if any(set(ts) == set(v) for v in presets.values()):
+                continue
+            if n >= 2 or (offered and offered >= 2 * len(ts) and offered - len(ts) >= 5):
+                name = preset_name(srv, ts)
+                while name in presets:
+                    name += "2"
+                cost, whole = sum(known.get(t, 0) for t in ts), sum(known.values())
+                used_preset = next((p for p, v in presets.items() if offered and len(v) == offered), None)
+                vs = (f" vs {used_preset} ~{sum(known.get(t, 0) for t in presets[used_preset]):,}" if used_preset
+                      else f" vs whole server ~{whole:,}" if whole else "")
+                drafts.append({"id": f"draft-preset-{key}-{slugify(srv, 20)}", "kind": "preset", "server": srv,
+                               "name": name, "tools": ts, "runs": n,
+                               "why": f"{len(ts)} tools ~{cost:,} tok/turn{vs}; offered {offered or '?'}, used {len(ts)}"
+                                      f" in {n} run{'s' if n > 1 else ''}"})
+    return drafts
+
+
+def _draft_proposals(a, slug):
+    path = home("library", slug, "drafts.json")
+    state = load_json(path, {})
+    drafts = [d for d in draft_proposals(slug) if state.get(d["id"]) not in ("accepted", "rejected")]
+    for rid in (a.reject or "").split(","):
+        if rid:
+            state[rid] = "rejected"
+    accept = [x for x in (a.accept or "").split(",") if x]
+    for d in drafts:
+        if d["id"] in accept:
+            if d["kind"] == "card":
+                _cmd_card(argparse.Namespace(project=slug, action="add", id=d["card_id"], title=d["title"],
+                                             text=d["text"], file=None, core=False))
+            else:
+                store = load_json(home("mcp-presets.json"), {})
+                store.setdefault(d["server"], {})[d["name"]] = d["tools"]
+                save_json(home("mcp-presets.json"), store)
+                print(f"saved preset {d['server']}:{d['name']} = {','.join(d['tools'])}")
+            state[d["id"]] = "accepted"
+    unknown = [x for x in accept if x not in {d["id"] for d in drafts}]
+    if unknown:
+        print(f"no open draft {', '.join(unknown)} (see: lean-agent optimize {slug})")
+    if a.accept or a.reject:
+        save_json(path, state)
+    left = [d for d in drafts if d["id"] not in accept and state.get(d["id"]) != "rejected"]
+    if not left:
+        return
+    print("\nDrafts from what workers did (review, then accept or reject):")
+    for d in left:
+        if d["kind"] == "card":
+            print(f"new card  {d['id']}  -> card {d['card_id']}: {d['title']}  ({d['why']})")
+            print("    " + d["text"].replace("\n", "\n    "))
+        else:
+            print(f"preset    {d['id']}  -> --mcp {d['server']}:{d['name']} = {','.join(d['tools'])}  ({d['why']})")
+    print(f"accept: lean-agent optimize {slug} --accept <id>[,<id>]   reject: --reject <id>. "
+          f"To change a card's text first, accept it, then `lean-agent card add {slug} <card> --file <file>`.")
 
 
 def _cmd_optimize(a):
@@ -2194,7 +2447,7 @@ def _cmd_optimize(a):
                 actions.append(("trim", c, f"~{c['tokens']} tok and often used: rewrite shorter with "
                                 f"`card add {slug} {c['id']} --file ...`", None))
     if not actions:
-        print(f"No card changes suggested yet (cards need {a.min_runs}+ runs of data).")
+        print(f"No trim/core/archive changes yet (those need {a.min_runs}+ runs per card; new-card drafts don't).")
     for act, c, why, _ in actions:
         print(f"{act:<8}{c['id']:<34}{why}")
     if a.apply:
@@ -2222,7 +2475,7 @@ def _cmd_optimize(a):
             for t, v in mine.items():
                 m["calls"][t] = m["calls"].get(t, 0) + v
     for name, m in sorted(mcp_runs.items()):
-        if m["runs"] < a.min_runs:
+        if m["runs"] < min(2, a.min_runs):
             continue
         if not m["used_runs"]:
             print(f"mcp     {name:<34}given in {m['runs']} runs, never called: stop passing --mcp {name}")
@@ -2516,6 +2769,26 @@ def cmd_runs(a):
     if a.project:
         slug, _ = resolve_project(a.project)
         runs = [r for r in runs if r["project"] == slug]
+    if a.show or a.tokens:
+        rid = a.show if a.show and a.show != "last" else (runs[-1]["id"] if runs else None)
+        r = next((x for x in reversed(runs) if x["id"] == rid), None)
+        if not r:
+            die(f"no run {rid!r}" if rid else "no runs yet")
+        files = sorted(glob.glob(os.path.join(r["workdir"], "summary-*.txt")),
+                       key=lambda f: int(re.sub(r"\D", "", os.path.basename(f)) or 0))
+        if not files:  # runs from before summaries were saved: rebuild the run line from the ledger
+            cost = f"${r['cost_usd']:.2f}" if isinstance(r.get("cost_usd"), (int, float)) else "$?"
+            print(f"run {r['id']} · {r['model']} · {r['status']} · {r.get('turns') or '?'} turns · "
+                  f"{r.get('units', 0):,} sonnet-eq tok · {cost}")
+            return
+        text = read_text(files[-1])
+        if a.tokens and not a.show:
+            text = "".join(l for l in text.splitlines(True)
+                           if l.startswith(("run ", "  tokens:", "  context per turn", "  mcp:", "  budget left")))
+        sys.stdout.write(text)
+        if len(files) > 1:
+            print(f"({len(files)} turns of this run; this is the latest: {files[-1]})")
+        return
     if a.last:
         if not runs:
             die("no runs yet")
@@ -2624,27 +2897,10 @@ def cmd_doctor(a):
 
     st = chrome_state()
     print("  chrome for workers: " + ("verified" if st.get("ok") else "not verified (lean-agent chrome check)"))
-    for name, info in sorted(lean_mcp.discover().items()):
-        if info["source"] != "plugin":
-            continue
-        if info.get("missing_options"):
-            report(False, f"plugin MCP server {name}: option(s) {', '.join(info['missing_options'])} aren't readable "
-                   "(sensitive options are in Claude Code's credentials store), so workers can't connect",
-                   f"use a configured server instead, or set the option non-sensitively in /plugin manage")
-            continue
-        c = mcp_cache().get(name) or {}
-        fresh = c.get("key") == config_key(info["config"]) and c.get("probed", "") >= (
-            datetime.datetime.now() - datetime.timedelta(days=1)).isoformat(timespec="seconds")
-        if not fresh:
-            server_tools(name, info["config"], refresh=True)
-            c = mcp_cache().get(name) or {}
-        alias = lean_mcp.display_names(lean_mcp.discover()).get(name)
-        use = f"--mcp {alias or name}:<preset|tools>"
-        if c.get("status") == "connected" and c.get("tools"):
-            report(True, f"plugin MCP server {name}: usable by workers ({len(c['tools'])} tools; {use})")
-        else:
-            report(False, f"plugin MCP server {name}: {c.get('status') or 'unknown'} when connected as a worker",
-                   MCP_AUTH_HINT.format(name=name))
+    plugin_srv = {n: v for n, v in lean_mcp.discover().items() if v["source"] == "plugin"}
+    claude_view = lean_mcp.claude_mcp_list() if plugin_srv else {}
+    for name, info in sorted(plugin_srv.items()):
+        report(*diagnose_plugin_server(name, info, claude_view, plugin_srv))
     budgets = usage.window_budgets()
     parts = [f"{k}={v:,}" for k, v in budgets.items() if v]
     parts += [f"{k}={v}% of plan" for k, v in usage.pct_budgets().items()]
@@ -3032,6 +3288,8 @@ def build_parser():
     s.add_argument("--apply", action="store_true")
     s.add_argument("--min-runs", type=int, default=5, help="runs of a task type before a card can become core for it")
     s.add_argument("--notes", type=int, default=10)
+    s.add_argument("--accept", metavar="IDS", help="write these drafts (cards with card add, presets with mcp preset)")
+    s.add_argument("--reject", metavar="IDS", help="stop proposing these drafts")
     s.set_defaults(fn=cmd_optimize)
 
     s = sub.add_parser("review", help="pre-PR review by a read-only reviewer (sonnet, high effort)")
@@ -3076,6 +3334,9 @@ def build_parser():
     s = sub.add_parser("runs", help="recent worker runs (id, status, model, task)")
     s.add_argument("--project", "-p")
     s.add_argument("--last", action="store_true", help="print only the id of the latest run")
+    s.add_argument("--tokens", action="store_true", help="print the latest (or --show) run's run/tokens/context lines again")
+    s.add_argument("--show", nargs="?", const="last", metavar="RUN_ID",
+                   help="print a run's whole summary again (default: the latest run)")
     s.add_argument("-n", type=int, default=10)
     s.set_defaults(fn=cmd_runs)
 
@@ -3108,7 +3369,34 @@ def main(argv=None):
         a.task += leftover  # task words given after options
     if a.cmd == "run" and not a.resume and not a.project:
         ap.error("run needs --project (or --resume)")
-    return a.fn(a) or 0
+    try:
+        return a.fn(a) or 0
+    finally:
+        if isinstance(sys.stdout, Tee):
+            sys.stdout.close()
+
+
+class Tee:
+    """Copy everything printed to a file too: a run's summary can be shown again with `runs --show`
+    even when the caller cut its output short (e.g. `| tail`)."""
+
+    def __init__(self, stream, path):
+        self.stream, self.fh = stream, open(path, "w", encoding="utf-8")
+
+    def write(self, text):
+        self.fh.write(text)
+        return self.stream.write(text)
+
+    def flush(self):
+        self.fh.flush()
+        self.stream.flush()
+
+    def close(self):
+        self.fh.close()
+        sys.stdout = self.stream
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
 
 
 if __name__ == "__main__":
