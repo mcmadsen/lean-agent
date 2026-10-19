@@ -146,13 +146,29 @@ class BudgetTest(Base):
 
     def test_warn_once_then_deny(self):
         out = run_hook("budget_hook.py", self.ev, LEAN_AGENT_BUDGET="4000", **self.env)
-        self.assertIn("86%", out["hookSpecificOutput"]["additionalContext"])
+        note = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("86%", note)
+        self.assertIn("spend cap", note)
+        self.assertIn("not the context window", note)
+        self.assertIn("~11,100 tokens now, which is fine, so no hand-off is needed", note)
+        self.assertNotIn("prepare to hand off", note)
         self.assertIsNone(run_hook("budget_hook.py", self.ev, LEAN_AGENT_BUDGET="4000", **self.env))
         with open(self.transcript, "a") as fh:
             fh.write(assistant_line("m3", 1000, 0, 0, 0))
         out = run_hook("budget_hook.py", self.ev, LEAN_AGENT_BUDGET="4000", **self.env)
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertIn("4,450", out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_cap_can_count_only_new_tokens(self):
+        # billed 3,450 (cache read 10,000 counts 1,000); new tokens only: 2,450
+        out = run_hook("budget_hook.py", self.ev, LEAN_AGENT_BUDGET="3000", LEAN_AGENT_BUDGET_COUNT="new", **self.env)
+        self.assertIn("81%", out["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("cache re-reads not counted", out["hookSpecificOutput"]["additionalContext"])
+
+    def test_large_context_suggests_fresh_session(self):
+        out = run_hook("budget_hook.py", self.ev, LEAN_AGENT_BUDGET="4000", LEAN_AGENT_HANDOFF_CONTEXT="10000",
+                       **self.env)
+        self.assertIn("suggest a fresh session", out["hookSpecificOutput"]["additionalContext"])
 
     def test_report(self):
         p = subprocess.run([sys.executable, os.path.join(ROOT, "usage.py"), "report", self.transcript],

@@ -1384,7 +1384,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("No session cap set", out)
         self.assertNotIn("%", out.split("Workers")[0])
         out = self.cli("budget", transcript, LEAN_AGENT_BUDGET="40000").stdout
-        self.assertIn("Self-set session cap (LEAN_AGENT_BUDGET, not your Claude plan): 10,000 / 40,000", out)
+        self.assertIn("Self-set session spend cap (LEAN_AGENT_BUDGET, not your Claude plan and not the context window): 10,000 / 40,000 sonnet-eq billed over all turns", out)
 
     def test_home_template(self):
         h = self.cli("home").stdout.strip()

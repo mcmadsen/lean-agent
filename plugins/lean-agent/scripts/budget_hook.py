@@ -4,10 +4,12 @@
 Window budgets (`lean-agent limits`) apply only to sessions in the lean-agent home, and
 `lean-agent limits` / `lean-agent stats` stay allowed so the user can see and raise them.
 
-Reads LEAN_AGENT_BUDGET (Sonnet-equivalent tokens, 0/unset = track only) and
-LEAN_AGENT_WARN_PCT (default 80). Past the warning threshold Claude gets a
-one-time nudge to wrap up; past the budget every tool call is denied with an
-instruction to summarise and stop.
+Reads LEAN_AGENT_BUDGET, a self-set spend cap in Sonnet-equivalent tokens (0/unset = track only):
+tokens billed this session, summed over every turn, so it grows much faster than the context window.
+LEAN_AGENT_BUDGET_COUNT=new counts only new tokens (no cache re-reads). LEAN_AGENT_WARN_PCT (default 80):
+past it Claude gets a one-time note to spend less (and to hand off only if the context itself is large,
+LEAN_AGENT_HANDOFF_CONTEXT, default 150,000); past the cap every tool call is denied with an instruction
+to summarise and stop.
 """
 import json
 import os
@@ -50,16 +52,23 @@ def main():
 
     budget = int(os.environ.get("LEAN_AGENT_BUDGET") or 0)
     warn_pct = int(os.environ.get("LEAN_AGENT_WARN_PCT") or 80)
-    used = usage.units_total(state)  # Sonnet-equivalent tokens, the unit used everywhere
+    used = usage.cap_units(state)  # Sonnet-equivalent tokens, the unit used everywhere
+    new_only = (os.environ.get("LEAN_AGENT_BUDGET_COUNT") or "").lower() == "new"
+    counted = ("new tokens this session (cache re-reads not counted)" if new_only else
+               "tokens billed this session, summed over every turn (cache re-reads count 0.1x)")
+    ctx = state.get("last_ctx") or 0
+    ctx_big = ctx >= int(os.environ.get("LEAN_AGENT_HANDOFF_CONTEXT") or 150000)
+    ctx_note = f"The context window is a different number: ~{ctx:,} tokens now" if ctx else ""
 
     if budget > 0 and used >= budget:
         usage.save_state(session_id, state)
         emit(
             permissionDecision="deny",
             permissionDecisionReason=(
-                f"lean-agent: session token budget reached ({used:,} / {budget:,} sonnet-eq tokens). "
-                "Do not call more tools. Reply with a short summary of what is done, what remains, "
-                "and how to resume, then end your turn. The user can raise LEAN_AGENT_BUDGET to continue."
+                f"lean-agent: the session spend cap you set is reached: {used:,} / {budget:,} sonnet-eq {counted}. "
+                + (ctx_note + ". " if ctx_note else "")
+                + "Do not call more tools. Reply with a short summary of what is done, what remains, and how to "
+                "resume, then end your turn. The user can raise LEAN_AGENT_BUDGET to continue."
             ),
         )
         return 0
@@ -67,11 +76,17 @@ def main():
     if budget > 0 and used >= budget * warn_pct / 100 and not state.get("warned"):
         state["warned"] = True
         usage.save_state(session_id, state)
+        advice = ("Spend less from here: fewer, larger steps; delegate reading to -m haiku workers; don't re-read "
+                  "files or re-run commands for output you already have.")
+        if ctx_big:
+            advice += " The context is also large: summarise and suggest a fresh session soon."
+        elif ctx_note:
+            ctx_note += ", which is fine, so no hand-off is needed for it"
         emit(
             additionalContext=(
-                f"lean-agent: {used * 100 // budget}% of this session's token budget is used "
-                f"({used:,} / {budget:,}). Finish the current step with as few tool calls as possible, "
-                "avoid re-reading files, and prepare to hand off."
+                f"lean-agent: {used * 100 // budget}% of the session spend cap you set (LEAN_AGENT_BUDGET) is used: "
+                f"{used:,} / {budget:,} sonnet-eq {counted}. This is a spend total, not the context window."
+                + (f" {ctx_note}." if ctx_note else "") + " " + advice
             )
         )
         return 0
