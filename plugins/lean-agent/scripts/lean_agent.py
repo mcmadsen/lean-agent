@@ -1041,8 +1041,10 @@ def cmd_run(a):
             ident = repo_identity_text(slug, project)
             ident += ("\nWhen an MCP result is too big and Claude Code saves it to a file, don't read the file whole: "
                       f"run `{os.path.join(PLUGIN_ROOT, 'bin', 'lean-json')} <file>` for a compact view (add "
-                      "`--fields a,b.c` to keep only some fields, `--grep TEXT` to keep matching items).")
+                      "`--fields a,b.c` to keep only some fields, `--grep TEXT` to keep matching items).\n")
             role_rule = (role_rule + "\n" if role_rule else "") + ident
+        if attribution() == "off":
+            role_rule = (role_rule + "\n" if role_rule else "") + NO_ATTRIBUTION_RULE
         if role_rule:
             with open(os.path.join(workdir, "role.md"), "w") as fh:
                 fh.write(role_rule)
@@ -1095,6 +1097,8 @@ def cmd_run(a):
         cmd += ["--effort", effort]
     if a.max_usd > 0:
         cmd += ["--max-budget-usd", str(a.max_usd)]
+    if attribution() == "off":  # Claude Code's own commit/PR attribution, switched off for this worker
+        cmd += ["--settings", json.dumps({"attribution": NO_ATTRIBUTION})]
     if prev:
         cmd += ["--resume", prev["session_id"]]
 
@@ -1767,43 +1771,99 @@ def cmd_review_decline(a):
     return 0
 
 
-def verify_review_cards(slug, path, ref=None):
-    """Drop shared-helpers lines whose path isn't in the code, and lines that say they weren't confirmed."""
+def verify_refs(slug, path, ref=None):
+    """Branches a helper may live on: --head, HEAD, the default branch, and the bases reviews used."""
+    refs = [ref, "HEAD", default_base(path)] + [r.get("base") for r in read_jsonl(reviews_path(slug))]
+    out = []
+    for r in refs:
+        if r and r not in out and git(path, "rev-parse", "--verify", "--quiet", r + "^{commit}"):
+            out.append(r)
+    return out
+
+
+_TREE_CACHE = {}
+
+
+def tracked_files(path, ref):
+    key = (path, ref)
+    if key not in _TREE_CACHE:
+        _TREE_CACHE[key] = (git(path, "ls-tree", "-r", "--name-only", ref) or "").splitlines()
+    return _TREE_CACHE[key]
+
+
+def path_candidates(where):
+    """Paths in a card's 'where' text: backticks, quotes, :line, #L, several paths in one go are all handled."""
+    out = []
+    for tok in re.split(r"[,;]|\s+and\s+|\s+", str(where)):
+        tok = tok.strip().strip("`'\"()[]").split("#")[0]
+        tok = re.sub(r":\d+(-\d+)?$", "", tok).lstrip("./")
+        if tok and ("/" in tok or re.search(r"\.\w{1,5}$", tok)):
+            out.append(tok.rstrip("/"))
+    return out
+
+
+def code_location(path, where, symbol, refs):
+    """(found?, how) for a helper: a path (suffix match on tracked files) or, failing that, its symbol."""
+    cands = path_candidates(where)
+    for ref in refs:
+        files = tracked_files(path, ref)
+        for c in cands:
+            if any(f == c or f.endswith("/" + c) or f.startswith(c + "/") or ("/" + c + "/") in ("/" + f) for f in files):
+                return True, f"{c} on {ref}"
+    names = [n for n in re.findall(r"[A-Za-z_$][\w$]{2,}", str(symbol))][:3]
+    for ref in refs:
+        for n in names:
+            if git(path, "grep", "-q", "-w", n, ref, "--") is not None:
+                return True, f"symbol {n} on {ref}"
+    return False, (f"path {', '.join(cands) or '(none)'} and symbol {', '.join(names) or '(none)'} not found on "
+                   + ", ".join(refs))
+
+
+def verify_review_cards(slug, path, ref=None, apply=False):
+    """Report (and with apply, remove) shared-helpers lines whose code can't be found on any relevant branch,
+    and lines that say they weren't confirmed. Always says why."""
+    refs = verify_refs(slug, path, ref)
+    print(f"checking against: {', '.join(refs) or 'the working tree only'}")
     cards = load_cards(slug)
-    removed = 0
+    flagged = 0
     for c in cards:
         if c["id"] not in REVIEW_CARDS:
             continue
         keep = []
         for line in c["text"].splitlines():
-            m = re.match(r"^- (.+?) \(([^)]+)\)", line) if c["id"] == "shared-helpers" else None
-            bad = "not confirmed" in line.lower() or (m and not code_path_exists(path, m.group(2).split(":")[0].strip(), ref))
-            if bad:
-                print(f"removed from {c['id']}: {line[:140]}")
-                removed += 1
-            else:
-                keep.append(line)
-        c.update(text="\n".join(keep), tokens=est_tokens("\n".join(keep)), updated=now_iso())
-    save_cards(slug, cards)
-    print(f"{removed} line(s) removed; edit the rest with: lean-agent card add {slug} <card> --file <file>")
+            why = "it says it wasn't confirmed" if "not confirmed" in line.lower() else None
+            m = re.match(r"^- (.+?) \((.+)\)(?::|$)", line) if c["id"] == "shared-helpers" and not why else None
+            if m:
+                found, how = code_location(path, m.group(2), m.group(1), refs)
+                if not found and not any(os.path.exists(os.path.join(path, x)) for x in path_candidates(m.group(2))):
+                    why = how
+            if why:
+                flagged += 1
+                print(f"{'removed' if apply else 'would remove'} from {c['id']}: {line[:120]}\n    because {why}")
+                if apply:
+                    continue
+            keep.append(line)
+        if apply:
+            c.update(text="\n".join(keep), tokens=est_tokens("\n".join(keep)), updated=now_iso())
+    if apply:
+        save_cards(slug, cards)
+    print(f"{flagged} line(s) {'removed' if apply else 'flagged'}"
+          + ("" if apply or not flagged else "; nothing changed. Remove them with --verify --apply"))
     return 0
 
 
 def code_path_exists(path, rel, ref=None):
-    """Whether `rel` is a file or folder in the repository (working tree, or the given ref)."""
+    """Whether `rel` is in the repository: the working tree, or (suffix match) on `ref` or HEAD."""
     if os.path.exists(os.path.join(path, rel)):
         return True
-    for r in [x for x in (ref, "HEAD") if x]:
-        if git(path, "cat-file", "-e", f"{r}:{rel}") is not None:
-            return True
-    return False
+    return code_location(path, rel, "", [r for r in (ref, "HEAD") if r])[0]
 
 
 def cmd_review_learn(a):
     slug, path = resolve_project(a.project)
     a.pr = a.pr or a.pr_id
     if a.verify:
-        return verify_review_cards(slug, path, a.head)
+        return verify_review_cards(slug, path, a.head, apply=a.apply)
     if a.tracker:
         projs = projects()
         conf = projs[slug].setdefault("tracker", {})
@@ -1829,7 +1889,8 @@ def cmd_review_learn(a):
         last = next((r for r in reversed(list(read_jsonl(reviews_path(slug))))
                      if not a.head or r.get("ref") == a.head), None)
         ours = "\n".join(f"- [{f.get('severity')}] {f.get('file')}: {f.get('issue')}"
-                         for f in (last or {}).get("findings", [])[:20]) or "- (no lean-agent review recorded)"
+                         for f in (last or {}).get("findings", [])[:20]) or (
+            "- (no findings)" if last else "- (no lean-agent review recorded)")
         if last:
             ours = f"(review {last['run']} of {last.get('ref')}, verdict {last['verdict']})\n" + ours
         lib = {c["id"]: c for c in load_cards(slug)}
@@ -2374,6 +2435,15 @@ def worktree_push(a):
         print(f"nothing to push: {branch} is the same as {remote_ref}")
         return 0
     sha = git(path, "rev-parse", "HEAD")
+    if attribution() == "off":
+        rng = f"{remote_ref}..HEAD" if has_remote else "HEAD~20..HEAD"
+        bodies = git(path, "log", "--format=%H%n%B%n--END--", rng) or ""
+        credited = [sha_[:12] for sha_, body in re.findall(r"(?s)([0-9a-f]{40})\n(.*?)--END--", bodies)
+                    if CLAUDE_CREDIT_RE.search(body)]
+        if credited:
+            die(f"commit(s) {', '.join(credited)} credit Claude, but attribution is off (lean-agent attribution). "
+                "Have a worker reword them (git commit --amend / rebase -i is not available to workers: ask for "
+                "`git rebase` with an exec that rewrites the message), or turn attribution on.")
     match, _ = find_review(slug, path, "HEAD")
     if not match or match["verdict"] != "approve":
         die(f"{branch} @ {sha[:12]} has no approving review. Run: lean-agent review {slug} --head {branch}"
@@ -3397,9 +3467,28 @@ ORCHESTRATOR_DENY = [
 PLUGIN_ID = "lean-agent@lean-agent"
 
 
+NO_ATTRIBUTION = {"commit": "", "pr": "", "sessionUrl": False}  # Claude Code's own switch: no Claude credit lines
+NO_ATTRIBUTION_RULE = """\
+Attribution: the user doesn't want Claude credited. Never add "Co-Authored-By: Claude ...", "Generated with
+Claude Code", a Claude session link or any other mention of Claude or AI to commit messages, PR titles or
+descriptions, code comments, or review/PR comments.
+"""
+CLAUDE_CREDIT_RE = re.compile(r"(?im)^\s*co-authored-by:.*\b(claude|anthropic)\b|generated with \[?claude code|"
+                              r"claude\.ai/code/session")
+
+
+def attribution():
+    """'on', 'off', or None when the user hasn't been asked yet."""
+    return load_json(home("config.json"), {}).get("attribution")
+
+
 def orchestrator_settings(existing):
     """lean-agent's keys for the home's .claude/settings.json; other keys (e.g. model) are kept."""
     data = dict(existing)
+    if attribution() == "off":
+        data["attribution"] = dict(NO_ATTRIBUTION)
+    elif data.get("attribution") == NO_ATTRIBUTION:
+        data.pop("attribution")
     perms = dict(data.get("permissions") or {})
     perms["allow"] = sorted(set(perms.get("allow") or []) | {"Bash(lean-agent:*)"})
     if os.environ.get("LEAN_AGENT_ORCHESTRATOR_TRIM") == "0":  # full context: drop lean-agent's trimming keys
@@ -3730,7 +3819,19 @@ def bridge_pointer(h):
     return os.path.join(cfg, "projects", re.sub(r"[^A-Za-z0-9]", "-", h), "bridge-pointer.json")
 
 
+def ask_attribution_once():
+    """At `up` in a terminal: the one question lean-agent asks before any commit or PR exists."""
+    if attribution() is not None or not sys.stdin.isatty() or os.environ.get("LEAN_AGENT_NO_PROMPT"):
+        return
+    try:
+        ans = input("lean-agent: should commits and PRs credit Claude as co-author? [y/N] ").strip().lower()
+    except EOFError:
+        return
+    cmd_attribution(argparse.Namespace(value="on" if ans in ("y", "yes") else "off"))
+
+
 def cmd_up(a):
+    ask_attribution_once()
     h = prepare_home()
     refresh_blocks()
     save_json(home("up.json"), {"started": now_iso(), "server_env": ORCHESTRATOR_ENV, "name": a.name,
@@ -4037,6 +4138,26 @@ def cmd_savings(a):
     return 0
 
 
+def cmd_attribution(a):
+    if a.value:
+        cfg = load_json(home("config.json"), {})
+        cfg["attribution"] = a.value
+        save_json(home("config.json"), cfg)
+        h = home("home")
+        settings = os.path.join(h, ".claude", "settings.json")
+        if os.path.isdir(os.path.join(h, ".claude")):
+            save_json(settings, orchestrator_settings(load_json(settings, {})))
+    v = attribution()
+    if v is None:
+        print("attribution: not set yet. Ask the user once: should commits and PRs credit Claude as co-author? "
+              "Then: lean-agent attribution on|off")
+        return 2
+    print(f"attribution: {v} · " + ("commits and PRs may credit Claude (Claude Code's default lines)" if v == "on" else
+          "no Claude co-author lines or mentions in commits, PRs or comments; workers get Claude Code's attribution "
+          "switched off, and worktree push refuses commits that credit Claude"))
+    return 0
+
+
 def cmd_budget(a):
     if a.cap is not None or a.count:
         cur = load_json(home("session-cap.json"), {})
@@ -4091,6 +4212,10 @@ def build_parser():
     s = sub.add_parser("env", help="print orchestrator env defaults")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_env)
+    s = sub.add_parser("attribution", help="should commits and PRs credit Claude? ask the user once, then set on|off")
+    s.add_argument("value", nargs="?", choices=["on", "off"])
+    s.set_defaults(fn=cmd_attribution)
+
     s = sub.add_parser("savings", help="estimated tokens saved: lean worker context, model choice, squeezed output")
     s.add_argument("--project", "-p")
     s.add_argument("--days", type=int, default=7)
@@ -4249,8 +4374,9 @@ def build_parser():
     s.add_argument("--pr", help="read this pull request's review threads (needs --mcp) and learn what the review missed")
     s.add_argument("--mcp", action="append", metavar="SERVER[:TOOLS]", help="the tracker's MCP server, for --pr")
     s.add_argument("--head", metavar="REF", help="--pr: the branch the PR is for (to compare with its lean-agent review)")
-    s.add_argument("--verify", action="store_true", help="drop card lines whose helper path isn't in the code "
-                   "(checks --head too) or that say they weren't confirmed")
+    s.add_argument("--verify", action="store_true", help="list card lines whose helper can't be found (path or symbol) "
+                   "on --head, HEAD, the default branch or a review base, with the reason")
+    s.add_argument("--apply", action="store_true", help="with --verify: remove those lines")
     s.add_argument("-m", "--model", default="sonnet", help="--pr: model for reading the threads (default sonnet)")
     s.add_argument("--tracker", action="append", metavar="KEY=VALUE",
                    help="where the repo lives in the tracker when the git remote doesn't say (org=, project=, repo=); "
