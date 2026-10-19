@@ -1550,17 +1550,36 @@ class CliTest(unittest.TestCase):
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tracker", "list open work items")
         self.assertIn("project Storefront, repo web-app", self.calls()[-1]["append"])
         # the tracker: who the user is and the project's rules, learned once and given to every MCP worker
-        found = json.dumps({"me": {"id": "1a2b-3c", "name": "Pat"},
-                            "notes": ["User Story states: New, Active, Resolved, Closed (no Removed); no delete"]})
-        out = self.cli("tracker", "proj", "--discover", "--mcp", "tracker",
-                       FAKE_FEEDBACK='{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-TRACKER ' + found).stdout
+        with open(os.path.join(self.env["CLAUDE_CONFIG_DIR"], ".claude.json"), "w") as fh:
+            json.dump({"oauthAccount": {"emailAddress": "pat@home.example"}}, fh)
+        found = json.dumps({"me": {"id": "1a2b-3c", "name": "Pat", "email": "pat@work.example"},
+                            "states": {"Bug": {"states": ["New", "Active", "In Review", "Done"], "source": "both"}},
+                            "rules": [{"rule": "voting needs the user as a reviewer", "status": "verified",
+                                       "how": "vote tool takes a reviewer id"},
+                                      {"rule": "work items can be deleted", "status": "unknown"}]})
+        fb = '{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-TRACKER '
+        out = self.cli("tracker", "proj", "--discover", "--mcp", "tracker", FAKE_FEEDBACK=fb + found).stdout
         self.assertIn("me_id 1a2b-3c, me_name Pat", out)
-        self.assertIn("1. User Story states", out)
+        self.assertIn("- Bug states: New, Active, In Review, Done (from both)", out)
+        self.assertIn("- work items can be deleted: unknown", out)
+        self.assertIn("warning: the tracker knows you as pat@work.example, but Claude is signed in as pat@home.example", out)
+        self.assertIn("tracker: the tracker knows you as", self.cli("doctor", check=False).stdout)
+        again = json.dumps({"me": {"id": "1a2b-3c", "name": "Pat"}, "states": {"Bug": {"states": ["New", "Done"]}}})
+        out = self.cli("tracker", "proj", "--discover", "--mcp", "tracker", FAKE_FEEDBACK=fb + again).stdout
+        self.assertIn("- Bug states: New, Done", out)
+        self.assertNotIn("In Review", out)  # replaced, not appended
         self.cli("tracker", "proj", "--note", "Voting on a PR needs the reviewer id")
+        self.cli("tracker", "proj", "--note", "a wrong note")
+        self.cli("tracker", "proj", "--note", "another wrong note")
+        out = self.cli("tracker", "proj", "--rm-note", "2", "--rm-note", "3").stdout
+        self.assertIn("removed note 3: another wrong note", out)
+        self.assertIn("removed note 2: a wrong note", out)
+        self.assertIn("1. Voting on a PR needs the reviewer id", out)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tracker", "approve the PR")
         append = self.calls()[-1]["append"]
         self.assertIn("You act as Pat (identity id 1a2b-3c)", append)
         self.assertIn("- Voting on a PR needs the reviewer id", append)
+        self.assertIn("- Bug states: New, Done", append)
         # thread ids learned from are remembered per PR
         lesson2 = json.dumps({"checklist": ["Check logout cleanup for every scheduler"], "threads_read": [7, 9]})
         self.cli("review", "learn", "proj", "44", "--mcp", "tracker", check=False,

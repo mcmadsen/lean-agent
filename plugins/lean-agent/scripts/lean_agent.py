@@ -819,9 +819,11 @@ def repo_identity_text(slug, path):
         text += (f"\nYou act as {ident.get('me_name') or 'the user'}" + (f" (identity id {ident['me_id']})" if
                  ident.get("me_id") else "") + ": use that id where a tool needs the user (assignee, reviewer, "
                  "vote); `@me` may not work.")
-    notes = ((projects().get(slug) or {}).get("tracker") or {}).get("notes") or []
+    conf = (projects().get(slug) or {}).get("tracker") or {}
+    notes = (conf.get("notes") or []) + tracker_facts_text(conf)
     if notes:
-        text += "\nTracker notes for this project:\n" + "\n".join(f"- {n}" for n in notes[:15])
+        text += "\nTracker notes for this project (\"unknown\" means check before relying on it):\n" + \
+            "\n".join(f"- {n}" for n in notes[:25])
     return text
 
 
@@ -2148,13 +2150,50 @@ def code_path_exists(path, rel, ref=None):
 TRACKER_KEYS = ("host", "org", "project", "repo", "me_id", "me_name")
 DISCOVER_RULE = """\
 Role: find out, once, how this project's tracker works for the user, so later workers don't learn it by failing.
-You can only read. With the MCP tools you have, find:
-1. the signed-in user's identity: display name and identity id (the id tools want for assignee, reviewer or vote);
-2. for each work item type in the project, the allowed states (and which one means removed/closed);
-3. whether work items or pull request votes need anything special (e.g. no delete; voting needs a reviewer id).
-Don't change anything. Before the LEAN-FEEDBACK line, add one line exactly like this (valid JSON, one line):
-LEAN-TRACKER {{"me": {{"id": "...", "name": "..."}}, "notes": ["User Story states: New, Active, Resolved, Closed (no Removed)", "..."]}}
+You can only read; never create, change or delete anything, not even to test.
+1. The signed-in user's identity: display name, identity id (what tools want for assignee, reviewer or vote) and
+   the email the tracker has for them. Look it up by name or from an item assigned to them if email doesn't work.
+2. Work item states: for each work item type the project uses, read the type's definition (its state list, in
+   order, with categories such as Proposed/In Progress/Resolved/Completed/Removed). Then cross-check with the
+   states the user's real items have (a query for distinct states per type). Say per type where the list came
+   from. Don't take state names from text matches in big files; when a result is saved to a file, read it with
+   the lean-json tool (`--fields`) instead.
+3. Rules that cost failures before. For each, say "verified" (and how: a tool schema, a type definition, a
+   documented limit), "false", or "unknown". Don't guess:
+   - voting on a pull request needs the user added as a reviewer first (does the vote tool take a reviewer id?)
+   - work items can be deleted, and/or a type has a Removed state
+   - a pull request description has a length limit (how many characters?)
+Before the LEAN-FEEDBACK line, add one line exactly like this (valid JSON, one line):
+LEAN-TRACKER {{"me": {{"id": "...", "name": "...", "email": "..."}}, "states": {{"<type>": {{"states": ["New", "Active", "Closed"], "source": "type definition|items|both"}}}}, "rules": [{{"rule": "...", "status": "verified|false|unknown", "how": "..."}}]}}
 """
+
+
+def claude_account_email():
+    return ((lean_mcp._load(lean_mcp.claude_json_path()).get("oauthAccount") or {}).get("emailAddress") or "").strip()
+
+
+def email_warning(conf):
+    me = ((conf.get("discovered") or {}).get("me") or {}).get("email") or ""
+    mine = claude_account_email()
+    if me and mine and me.lower() != mine.lower():
+        return (f"the tracker knows you as {me}, but Claude is signed in as {mine}: lookups by your Claude email "
+                "find nothing there; workers use the identity id instead")
+    return None
+
+
+def tracker_facts_text(conf):
+    """Discovered states and rules as lines for workers."""
+    d = conf.get("discovered") or {}
+    lines = []
+    for t, info in (d.get("states") or {}).items():
+        sts = info.get("states") if isinstance(info, dict) else info
+        if sts:
+            lines.append(f"{t} states: {', '.join(map(str, sts))}"
+                         + (f" (from {info.get('source')})" if isinstance(info, dict) and info.get("source") else ""))
+    for r in d.get("rules") or []:
+        if isinstance(r, dict) and r.get("rule"):
+            lines.append(f"{r['rule']}: {r.get('status', 'unknown')}" + (f" ({r['how']})" if r.get("how") else ""))
+    return lines
 
 
 def cmd_tracker(a):
@@ -2172,9 +2211,11 @@ def cmd_tracker(a):
         conf.setdefault("notes", []).append(a.note.strip())
     if a.rm_note:
         notes = conf.get("notes") or []
-        if not 1 <= a.rm_note <= len(notes):
-            die(f"there are {len(notes)} notes")
-        notes.pop(a.rm_note - 1)
+        bad = [n for n in a.rm_note if not 1 <= n <= len(notes)]
+        if bad or len(set(a.rm_note)) != len(a.rm_note):
+            die(f"there are {len(notes)} notes; got {', '.join(map(str, a.rm_note))}")
+        for n in sorted(a.rm_note, reverse=True):
+            print(f"removed note {n}: {notes.pop(n - 1)}")
     save_json(home("projects.json"), projs)
     if a.discover:
         if not a.mcp:
@@ -2194,16 +2235,25 @@ def cmd_tracker(a):
             conf["me_id"] = str(me["id"])
         if me.get("name"):
             conf["me_name"] = str(me["name"])
-        for n in got.get("notes") or []:
-            if isinstance(n, str) and not any(_similar(n, x) for x in conf.get("notes") or []):
-                conf.setdefault("notes", []).append(n)
+        if got:  # a re-run replaces what discovery found before; hand-added notes stay
+            conf["discovered"] = {"me": me, "states": got.get("states") or {}, "rules": got.get("rules") or [],
+                                  "at": now_iso()}
         save_json(home("projects.json"), projs)
         if not got:
             print("discover: the worker didn't report anything usable; see its reply above")
     ident = repo_identity(slug, path)
+    conf = projects()[slug].get("tracker", {})
     print(f"{slug} tracker: " + (", ".join(f"{k} {ident[k]}" for k in TRACKER_KEYS if ident.get(k)) or "nothing known"))
-    for i, n in enumerate(projects()[slug].get("tracker", {}).get("notes") or [], 1):
+    facts = tracker_facts_text(conf)
+    if facts:
+        print(f"discovered ({(conf.get('discovered') or {}).get('at', '?')[:16]}; re-run --discover to refresh):")
+        for f in facts:
+            print(f"  - {f}")
+    for i, n in enumerate(conf.get("notes") or [], 1):
         print(f"  {i}. {n}")
+    warn = email_warning(conf)
+    if warn:
+        print(f"warning: {warn}")
     print("Every worker given --mcp gets this.")
     return 0
 
@@ -4256,6 +4306,10 @@ def cmd_doctor(a):
                "next tool call")
     st = chrome_state()
     print("  chrome for workers: " + ("verified" if st.get("ok") else "not verified (lean-agent chrome check)"))
+    for s_, v in projects().items():
+        warn = email_warning(v.get("tracker") or {})
+        if warn:
+            report(None, f"{s_} tracker: {warn}")
     plugin_srv = {n: v for n, v in lean_mcp.discover().items() if v["source"] == "plugin"}
     claude_view = lean_mcp.claude_mcp_list() if plugin_srv else {}
     if claude_view:  # now that Claude Code's choice is known, pick the same copy of duplicated plugins
@@ -4884,7 +4938,7 @@ def build_parser():
     s.add_argument("project")
     s.add_argument("values", nargs="*", metavar="KEY=VALUE", help=", ".join(TRACKER_KEYS))
     s.add_argument("--note", help="a fact workers should know, e.g. \"User Story has no Removed state\"")
-    s.add_argument("--rm-note", type=int, metavar="N", help="remove note N")
+    s.add_argument("--rm-note", type=int, action="append", metavar="N", help="remove note N (repeatable)")
     s.add_argument("--discover", action="store_true", help="find your identity id and the work item rules with a worker")
     s.add_argument("--mcp", action="append", metavar="SERVER[:TOOLS]", help="--discover: the tracker's MCP server")
     s.add_argument("-m", "--model", default="haiku", help="--discover: model (default haiku)")
