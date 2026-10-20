@@ -614,11 +614,18 @@ def shorten_card(slug, cards, a):
     if not new:
         die("no shorter text came back")
     lost = sorted(key_tokens(c["text"]) - key_tokens(new) - {t for t in key_tokens(c["text"]) if t in new})
+    c["shorten_checked"] = now_iso()
+    if est_tokens(new) > c["tokens"] * 0.9:
+        save_cards(slug, cards)
+        print(f"{c['id']}: not worth it (~{c['tokens']:,} -> ~{est_tokens(new):,} tokens, under 10% saved); "
+              "optimize won't suggest trimming it again for 30 days")
+        return 0
     print(f"{c['id']}: ~{c['tokens']:,} -> ~{est_tokens(new):,} tokens")
     print("--- proposed text ---\n" + new + "\n---")
     if lost:
         print("lost (not in the shorter text): " + ", ".join(lost[:30]))
     if a.save:
+        save_cards(slug, cards)
         if lost and not a.force:
             die("not saved: the shorter text lost the items above (edit it, or --save --force)")
         c.update(text=new, tokens=est_tokens(new), updated=now_iso(), edited=True)
@@ -887,7 +894,7 @@ def repo_identity_text(slug, path):
                  ident.get("me_id") else "") + ": use that id where a tool needs the user (assignee, reviewer, "
                  "vote); `@me` may not work.")
     conf = (projects().get(slug) or {}).get("tracker") or {}
-    notes = (conf.get("notes") or []) + tracker_facts_text(conf)
+    notes = active_notes(conf) + tracker_facts_text(conf)
     if notes:
         text += "\nTracker notes for this project (\"unknown\" means check before relying on it):\n" + \
             "\n".join(f"- {n}" for n in notes[:25])
@@ -1043,12 +1050,12 @@ PRICE_SONNET_EQ_USD = 3.0 / 1_000_000  # one sonnet-eq token at Sonnet's input p
 
 
 def expected_run_units(model, ttype=None):
-    """Average sonnet-eq of earlier runs on this model (same task type when known), or None."""
+    """Median sonnet-eq of earlier plain runs (no reviews) on this model, same task type when there are enough."""
     runs = [r for r in ledger() if usage.model_rate(r.get("model")) == usage.model_rate(model) and not r.get("resumed")
-            and r.get("units")]
+            and r.get("units") and not r.get("role")]
     typed = [r for r in runs if ttype and r.get("type") == ttype]
-    pick = typed if len(typed) >= 2 else runs
-    return (sum(r["units"] for r in pick) // len(pick), len(pick)) if pick else (None, 0)
+    pick = sorted(r["units"] for r in (typed if len(typed) >= 2 else runs))
+    return (pick[len(pick) // 2], len(pick)) if pick else (None, 0)
 
 
 def plan_share(units):
@@ -1075,7 +1082,7 @@ def expensive_run_check(a, model, task):
         how = "a rough guess (no earlier runs on this model)" + (f", corrected x{fix:.1f}" if k else "")
         a.estimate = (units * PRICE_SONNET_EQ_USD, "guess-run")
     else:
-        how = f"average of {n} earlier run(s)"
+        how = f"typical run on this model: median of {n} earlier run(s)"
         a.estimate = (units * PRICE_SONNET_EQ_USD, "history-run")
     share, now_pct = plan_share(units)
     line = f"lean-agent: {model} run, expected ~{units:,} sonnet-eq ({how})"
@@ -2256,6 +2263,28 @@ def email_warning(conf):
     return None
 
 
+def active_notes(conf):
+    gone = set(conf.get("superseded") or [])
+    return [n for n in conf.get("notes") or [] if n not in gone]
+
+
+def note_conflicts(conf):
+    """(note number, note, discovered fact) where a hand-written note is about the same thing as a discovered fact
+    but says something else (e.g. a different state list, or a rule discovery marked unknown/false)."""
+    out = []
+    facts = tracker_facts_text(conf)
+    for i, n in enumerate(conf.get("notes") or [], 1):
+        if n in (conf.get("superseded") or []):
+            continue
+        nw = {w for w in _words(n) if len(w) > 3}
+        for f in facts:
+            fw = {w for w in _words(f) if len(w) > 3}
+            if nw and fw and len(nw & fw) >= 2 and _jaccard(nw, fw) >= 0.25 and not _similar(n, f, 0.8):
+                out.append((i, n, f))
+                break
+    return out
+
+
 def tracker_facts_text(conf):
     """Discovered states and rules as lines for workers."""
     d = conf.get("discovered") or {}
@@ -2284,6 +2313,12 @@ def cmd_tracker(a):
         conf[k] = v.strip()
     if a.note:
         conf.setdefault("notes", []).append(a.note.strip())
+    for n in a.supersede or []:
+        notes = conf.get("notes") or []
+        if not 1 <= n <= len(notes):
+            die(f"there are {len(notes)} notes")
+        conf.setdefault("superseded", []).append(notes[n - 1])
+        print(f"note {n} superseded (kept, but workers no longer get it): {notes[n - 1]}")
     if a.rm_note:
         notes = conf.get("notes") or []
         bad = [n for n in a.rm_note if not 1 <= n <= len(notes)]
@@ -2325,7 +2360,10 @@ def cmd_tracker(a):
         for f in facts:
             print(f"  - {f}")
     for i, n in enumerate(conf.get("notes") or [], 1):
-        print(f"  {i}. {n}")
+        print(f"  {i}. {n}" + ("  (superseded)" if n in (conf.get("superseded") or []) else ""))
+    for i, n, f in note_conflicts(conf):
+        print(f"warning: note {i} may contradict what discovery found: \"{f}\". If discovery is right: "
+              f"lean-agent tracker {slug} --supersede {i}")
     warn = email_warning(conf)
     if warn:
         print(f"warning: {warn}")
@@ -3753,7 +3791,7 @@ def draft_proposals(slug):
             and r.get("status") == "done" and r.get("role") != "reviewer"]
     cards = [c for c in load_cards(slug) if not c.get("archived")]
     cache = mcp_cache()
-    groups, used_names, drafted = [], {}, {}
+    groups, used_names, drafted, extends = [], {}, {}, {}
     for r in runs:
         tools = run_tools(r)
         if not tools:
@@ -3825,10 +3863,11 @@ def draft_proposals(slug):
                 if sup:  # extend the closest existing preset instead of a new name next to it
                     p_, v = max(sup, key=lambda x: len(x[1]))
                     extra = [t for t in ts if t not in v]
-                    drafts.append({"id": f"draft-extend-{key}-{slugify(srv, 20)}-{p_}", "kind": "preset", "server": srv,
-                                   "name": p_, "tools": list(dict.fromkeys(list(v) + extra)), "runs": n,
-                                   "why": f"extend existing preset {p_} with {', '.join(extra)}"
-                                          + ("; includes write tools" if any(is_write_tool(t) for t in extra) else "")})
+                    if any(is_write_tool(t) for t in extra) and not any(is_write_tool(t) for t in v):
+                        p_ = p_ if p_.endswith("-write") else p_ + "-write"  # a read-only preset stays read-only
+                    ext = extends.setdefault((srv, p_), {"base": list(presets.get(p_) or v), "extra": [], "runs": 0})
+                    ext["extra"] = list(dict.fromkeys(ext["extra"] + extra))
+                    ext["runs"] += n
                     continue
                 if not (n >= 2 or (offered and offered >= 2 * len(ts) and offered - len(ts) >= 5)):
                     continue
@@ -3849,6 +3888,17 @@ def draft_proposals(slug):
                                       f" in {n} run{'s' if n > 1 else ''}"
                                       + (f"; includes write tools: {', '.join(t for t in ts if is_write_tool(t))}"
                                          if suffix else "; read-only")})
+    for (srv, name), ext in sorted(extends.items()):  # one proposal per preset: the union of what runs needed
+        existing = mcp_presets(srv, (cache.get(srv) or {}).get("tools") or {})
+        tools = list(dict.fromkeys(ext["base"] + ext["extra"]))
+        if name in existing and set(tools) <= set(existing[name]):
+            continue
+        new_name = name not in existing
+        writes = [t for t in ext["extra"] if is_write_tool(t)]
+        drafts.append({"id": f"draft-extend-{slugify(srv, 20)}-{name}", "kind": "preset", "server": srv,
+                       "name": name, "tools": tools, "runs": ext["runs"],
+                       "why": (f"new preset {name}: " if new_name else f"extend existing preset {name} with ")
+                              + ", ".join(ext["extra"]) + (f"; write tools: {', '.join(writes)}" if writes else "")})
     return drafts
 
 
@@ -3915,7 +3965,8 @@ def _cmd_optimize(a):
             rate = c["used"] / c["offered"]
             if not is_core(c, "") and rate <= 0.2 and c["unneeded"] >= 2:
                 actions.append(("archive", c, f"used in {card_rate(c)} runs, marked unneeded {c['unneeded']}x", None))
-            if rate >= 0.5 and c["tokens"] > 600:
+            recently = (c.get("shorten_checked") or "") >= (datetime.datetime.now() - datetime.timedelta(days=30)).isoformat()
+            if rate >= 0.5 and c["tokens"] > 600 and not recently:
                 actions.append(("trim", c, f"~{c['tokens']} tok and often used: `lean-agent card shorten {slug} "
                                 f"{c['id']}` proposes a shorter text and checks nothing important is lost", None))
     if not actions and not (a.accept or a.reject):
@@ -4954,7 +5005,8 @@ def cmd_text_len(a):
     if a.project:
         slug, _ = resolve_project(a.project)
         conf = (projects().get(slug) or {}).get("tracker") or {}
-        for n in (conf.get("notes") or []) + tracker_facts_text(conf):
+        facts = [f for f in tracker_facts_text(conf) if re.search(r"limit|length", f, re.I)]
+        for n in facts or active_notes(conf):  # the discovered fact first, else hand-written notes
             m = re.search(r"(\d[\d,.]*)\s*(?:-|\s)?char", str(n), re.I)
             if m:
                 limit = int(re.sub(r"[,.]", "", m.group(1)))
@@ -5217,6 +5269,8 @@ def build_parser():
     s.add_argument("values", nargs="*", metavar="KEY=VALUE", help=", ".join(TRACKER_KEYS))
     s.add_argument("--note", help="a fact workers should know, e.g. \"User Story has no Removed state\"")
     s.add_argument("--rm-note", type=int, action="append", metavar="N", help="remove note N (repeatable)")
+    s.add_argument("--supersede", type=int, action="append", metavar="N",
+                   help="keep note N but stop giving it to workers (a discovered fact replaces it)")
     s.add_argument("--discover", action="store_true", help="find your identity id and the work item rules with a worker")
     s.add_argument("--mcp", action="append", metavar="SERVER[:TOOLS]", help="--discover: the tracker's MCP server")
     s.add_argument("-m", "--model", default="haiku", help="--discover: model (default haiku)")
