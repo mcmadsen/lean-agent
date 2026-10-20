@@ -1634,12 +1634,13 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0):
                         reads["stopped"] = True
                         proc.terminate()
                         break
-            try:
-                rest, _ = proc.communicate(timeout=30)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                rest, _ = proc.communicate()
-            lines.append(rest or "")
+            if reads["stopped"]:
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            lines.append(proc.stdout.read() or "")  # not communicate(): stdin is closed already (3.9 flushes it)
+            proc.wait()
         finally:
             timer.cancel()
         errf.seek(0)
