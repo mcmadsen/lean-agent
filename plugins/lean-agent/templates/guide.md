@@ -125,8 +125,8 @@ lean-agent memory list -p {{P}}
 lean-agent card add {{P}} checkout-notes --title "Checkout notes" --text "Totals are integer cents; tax is added last."
 lean-agent card core {{P}} checkout-notes
 lean-agent card protect {{P}} checkout-notes      # optimize never archives, demotes or trims it
-lean-agent optimize {{P}} --apply --skip style     # apply all suggestions except for these cards
-lean-agent card unarchive {{P}} style
+lean-agent optimize {{P}} --apply --skip checkout-notes   # apply the suggestions except for these cards
+lean-agent card unarchive {{P}} checkout-notes
 ```
 - `--name` is the plain name; lean-agent adds the type itself (`feedback_no-friday-merges`).
 - Change a memory with `memory edit`; `memory add` with the same text answers "already remembered".
