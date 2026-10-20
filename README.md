@@ -200,6 +200,16 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   token"` (or a macOS keychain item: `security find-generic-password -s <name> -w`). Only the command is saved;
   the value goes into the run's owner-only MCP config, which is deleted when the run ends. Options
   marked sensitive live in Claude Code's credentials store; lean-agent can't read them and doctor says so.
+  `${VAR:-default}` uses it too, and a plain value works for things that aren't secrets:
+  `lean-agent mcp env OBS_DOMAIN mcp.example.eu` (`--rm` removes any entry).
+- **The right plugin copy:** when a plugin is both installed and synced from claude.ai, workers use a copy that
+  is set up: a copy whose URL host is still a placeholder (a plugin's `${DOMAIN:-not-setup}` before its setup ran)
+  is never picked, and `doctor` says which copy is used and which isn't set up. The orchestrator home switches off
+  every plugin, synced ones included (Claude Code calls those `<name>@synced`); workers get plugin servers with `--mcp`.
+- **Why a server fails:** `mcp list` and `doctor` give the reason, not only "failed": a placeholder host, a variable
+  that isn't set, an `Authorization` header with no token or a line break in it, or the server's own answer
+  (e.g. "HTTP 400: malformed Authorization header", "host not found"). `run` warns before it starts a worker with
+  a config like that.
 - Not covered: claude.ai connectors (they aren't in a local config file).
 
 ## The orchestrator's own context

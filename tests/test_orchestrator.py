@@ -126,7 +126,8 @@ class CliTest(unittest.TestCase):
         self.log = os.path.join(t, "calls.jsonl")
         self.env = dict(os.environ, LEAN_AGENT_HOME=os.path.join(t, "home"), LEAN_AGENT_CLAUDE=fake,
                         FAKE_LOG=self.log, CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD="1",
-                        HOME=t, CLAUDE_CONFIG_DIR=os.path.join(t, "cfg"), LEAN_AGENT_LAUNCH_GUARD="0")
+                        HOME=t, CLAUDE_CONFIG_DIR=os.path.join(t, "cfg"), LEAN_AGENT_LAUNCH_GUARD="0",
+                        LEAN_AGENT_HTTP_CHECK="0")
         os.makedirs(os.path.join(t, "cfg"))
         fake_mcp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "fake_mcp.py")
         self.mcp_cfg = {"type": "stdio", "command": sys.executable, "args": [fake_mcp], "env": {"TOKEN": "s3cret"}}
@@ -888,7 +889,7 @@ class CliTest(unittest.TestCase):
         doc = self.cli("doctor", check=False).stdout
         self.assertIn("uses ${OBS_TOKEN} and lean-agent can't see that variable", doc)
         with open(os.path.join(cfg, "settings.json"), "w") as fh:
-            json.dump({"enabledPlugins": {"obs@dir": False}}, fh)
+            json.dump({"enabledPlugins": {"obs@synced": False}}, fh)  # Claude Code's id for a synced plugin
         self.assertNotIn("plugin:obs", self.cli("mcp", "list").stdout)
 
     def test_optimize_drafts_cards_and_presets(self):
@@ -1030,6 +1031,67 @@ class CliTest(unittest.TestCase):
         self.assertIn("plugin MCP server plugin:obs:mcp: usable by workers", doc)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "obs", "t", **env)
         self.assertEqual(self.calls()[-1]["mcp"]["servers"]["plugin:obs:mcp"]["url"], "https://mcp.example.eu/v1")
+
+    def test_plugin_copy_with_setup_placeholder_is_not_used(self):
+        cfg = self.env["CLAUDE_CONFIG_DIR"]
+
+        def plugin(root, default):
+            os.makedirs(os.path.join(root, ".claude-plugin"), exist_ok=True)
+            with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w") as fh:
+                json.dump({"name": "obs", "mcpServers": "./.obs_mcp.json"}, fh)
+            with open(os.path.join(root, ".obs_mcp.json"), "w") as fh:
+                json.dump({"mcpServers": {"mcp": {"type": "http", "url": "https://${OBS_DOMAIN:-%s}/v1/mcp" % default,
+                                                  "headers": {"X-Toolsets": "${OBS_TOOLSETS:-}"}}}}, fh)
+        installed = os.path.join(cfg, "plugins", "cache", "mkt", "obs", "7")
+        plugin(installed, "mcp.example.eu")  # set up: works in Claude Code
+        with open(os.path.join(cfg, "plugins", "installed_plugins.json"), "w") as fh:
+            json.dump({"version": 2, "plugins": {"obs@mkt": [{"installPath": installed}]}}, fh)
+        with open(os.path.join(cfg, "settings.json"), "w") as fh:
+            json.dump({"enabledPlugins": {"obs@mkt": True}}, fh)
+        bucket = os.path.join(cfg, "plugins", "synced", "b1")
+        plugin(os.path.join(bucket, "uuid-1"), "not-setup")  # the synced duplicate, never set up
+        with open(os.path.join(bucket, "manifest.json"), "w") as fh:
+            json.dump({"plugins": [{"name": "uuid-1", "marketplaceName": "dir"}]}, fh)
+        env = dict(FAKE_HTTP_URL="mcp.example.eu", FAKE_HTTP_TOOLS=json.dumps({"plugin:obs:mcp": ["get_x"]}),
+                   FAKE_MCP_LIST="plugin:obs:mcp: https://not-setup/v1/mcp (HTTP) - ✗ Failed to connect")
+        self.cli("learn", self.proj)
+        doc = self.cli("doctor", check=False, **env).stdout  # Claude Code's own list shows the broken copy
+        self.assertIn("plugin MCP server plugin:obs:mcp: usable by workers", doc)
+        self.assertIn("still has the setup placeholder; workers use the installed copy", doc)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "obs", "t", **env)
+        self.assertEqual(self.calls()[-1]["mcp"]["servers"]["plugin:obs:mcp"]["url"], "https://mcp.example.eu/v1/mcp")
+        self.assertIn("another copy isn't set up", self.cli("mcp", "list", **env).stdout)
+        # the orchestrator home switches off both copies: the installed id and the synced one ("<name>@synced")
+        self.cli("home")
+        home = self.cli("home").stdout.strip()
+        with open(os.path.join(home, ".claude", "settings.json")) as fh:
+            switches = json.load(fh)["enabledPlugins"]
+        self.assertEqual((switches.get("obs@mkt"), switches.get("obs@synced")), (False, False))
+        # only the broken copy: doctor names the cause; a value from `mcp env` fills ${VAR:-default}
+        os.remove(os.path.join(cfg, "plugins", "installed_plugins.json"))
+        doc = self.cli("doctor", check=False, **env).stdout
+        self.assertIn("URL host 'not-setup' is a placeholder: this plugin copy isn't set up", doc)
+        self.assertIn("run the plugin's setup once in Claude Code", doc)
+        self.assertIn("set", self.cli("mcp", "env", "OBS_DOMAIN", "mcp.example.eu").stdout)
+        self.assertIn("OBS_DOMAIN: used by plugin:obs:mcp", self.cli("mcp", "env", "OBS_DOMAIN", "mcp.example.eu").stdout)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "obs", "--again", "t", **env)
+        self.assertEqual(self.calls()[-1]["mcp"]["servers"]["plugin:obs:mcp"]["url"], "https://mcp.example.eu/v1/mcp")
+        self.assertIn("OBS_DOMAIN: removed", self.cli("mcp", "env", "OBS_DOMAIN", "--rm").stdout)
+        self.cli("mcp", "env", "OBS_DOMAIN", "--command", "echo mcp.example.eu")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "obs", "--again", "t", **env)
+        self.assertEqual(self.calls()[-1]["mcp"]["servers"]["plugin:obs:mcp"]["url"], "https://mcp.example.eu/v1/mcp")
+        self.assertIn("OBS_DOMAIN: removed", self.cli("mcp", "env", "OBS_DOMAIN", "--rm").stdout)
+        self.assertIn("OBS_DOMAIN: not set", self.cli("mcp", "env", "OBS_DOMAIN", "--rm").stdout)
+
+    def test_config_problems_name_the_cause(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_mcp
+        self.assertEqual(lean_mcp.config_problems({"url": "https://api.example.com/mcp",
+                                                   "headers": {"Authorization": "Bearer "}}),
+                         ["header Authorization has no token (its variable is empty)"])
+        self.assertIn("line break", lean_mcp.config_problems({"url": "https://a.example.com",
+                                                              "headers": {"Authorization": "Bearer abc\n"}})[0])
+        self.assertEqual(lean_mcp.config_problems({"url": "http://localhost:8080/mcp"}), [])
 
     def test_plugin_env_from_command_and_alignment_with_claude(self):
         cfg = self.env["CLAUDE_CONFIG_DIR"]

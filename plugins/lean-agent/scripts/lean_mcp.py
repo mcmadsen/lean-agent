@@ -83,7 +83,8 @@ def installed_plugins(project_path=None):
 
 
 def synced_plugins():
-    """[(name@marketplace, path)] for plugins synced from claude.ai (plugins/synced/<bucket>/<dir>)."""
+    """[(name@synced, path)] for plugins synced from claude.ai (plugins/synced/<bucket>/<dir>). Claude Code
+    loads them under the marketplace name "synced", so that's their id in enabledPlugins."""
     out = []
     for manifest in sorted(glob.glob(os.path.join(config_dir(), "plugins", "synced", "*", "manifest.json"))):
         bucket = os.path.dirname(manifest)
@@ -92,7 +93,7 @@ def synced_plugins():
             if not rec.get("name") or not os.path.isdir(path):
                 continue
             name = _load(os.path.join(path, ".claude-plugin", "plugin.json")).get("name") or rec["name"]
-            out.append((f"{name}@{rec.get('marketplaceName') or 'synced'}", path))
+            out.append((f"{name}@synced", path))
     return out
 
 
@@ -114,9 +115,13 @@ _ENV_CACHE = {}
 
 
 def env_from_command(name):
-    """A variable's value from the command saved with `lean-agent mcp env NAME --command ...` (e.g.
-    `gh auth token`), run when needed and kept in memory only; None if there's no command or it failed."""
-    cmd = (_load(lean_file("mcp-env.json")).get(name) or {}).get("command")
+    """A variable's value set with `lean-agent mcp env NAME VALUE`, or from the command saved with
+    `lean-agent mcp env NAME --command ...` (e.g. `gh auth token`), run when needed and kept in memory only;
+    None if there's neither or the command failed."""
+    rec = _load(lean_file("mcp-env.json")).get(name) or {}
+    if rec.get("value") is not None:
+        return str(rec["value"])
+    cmd = rec.get("command")
     if not cmd:
         return None
     if name not in _ENV_CACHE:
@@ -145,7 +150,7 @@ def _expand(value, root, data, options=None, missing=None, env=None):
 
         def var(m):
             if m.group(2) is not None:  # ${VAR:-default}: the default when unset or empty
-                return env.get(m.group(1)) or m.group(2)
+                return env.get(m.group(1)) or env_from_command(m.group(1)) or m.group(2)
             if m.group(1) in env:
                 return env[m.group(1)]
             from_cmd = env_from_command(m.group(1))
@@ -186,16 +191,16 @@ def plugin_servers(project_path=None):
                 mapping.update({k: v for k, v in item.items() if isinstance(v, dict)})
         data = os.path.join(config_dir(), "plugins", "data", re.sub(r"[^A-Za-z0-9_-]", "-", pid))
         options = plugin_options(pid, manifest)
-        for server, cfg in mapping.items():
+        for server, raw in mapping.items():
             missing = []
-            cfg = _expand(cfg, root, data, options, missing)
+            cfg = _expand(raw, root, data, options, missing)
             if "command" in cfg and options:  # stdio servers also get the options as env vars
                 env = dict(cfg.get("env") or {})
                 for k, v in options.items():
                     env.setdefault("CLAUDE_PLUGIN_OPTION_" + re.sub(r"[^A-Za-z0-9]", "_", k).upper(), str(v))
                 cfg = dict(cfg, env=env)
             copies.setdefault(f"plugin:{name}:{server}", []).append({
-                "config": cfg, "source": "plugin", "plugin": pid, "copy": kind, "path": root,
+                "config": cfg, "raw": raw, "source": "plugin", "plugin": pid, "copy": kind, "path": root,
                 "alias": name if len(mapping) == 1 else f"{name}-{server}", "missing_options": sorted(set(missing))})
     seen = load_claude_view()
     fixes = _load(lean_file("mcp-overrides.json"))
@@ -205,14 +210,86 @@ def plugin_servers(project_path=None):
             fix = fixes.get(full) or {}
             if fix and fix.get("from") == server_target(e["config"]):
                 e["config"] = {**e["config"], **{k: v for k, v in fix.items() if k in ("type", "url")}}
-        # The copy Claude Code itself uses, when `claude mcp list` has been seen (doctor records it):
-        # same target; else the installed one, which Claude Code prefers over a synced duplicate.
+        # A copy still holding the plugin's setup placeholder can't work; of the rest, the copy Claude Code
+        # itself uses when `claude mcp list` has been seen (doctor records it), else the installed one,
+        # which Claude Code prefers over a synced duplicate.
         target = (seen.get(full) or {}).get("target")
-        pick = next((e for e in entries if target and server_target(e["config"]) == target), entries[0])
+        usable = [e for e in entries if not placeholder_host(e["config"])] or entries
+        pick = next((e for e in usable if target and server_target(e["config"]) == target), usable[0])
         if len(entries) > 1:
-            pick = dict(pick, other_copies=[e["path"] for e in entries if e is not pick])
+            pick = dict(pick, other_copies=[e["path"] for e in entries if e is not pick],
+                        unset_copies=[e["path"] for e in entries if placeholder_host(e["config"])],
+                        copies_differ=len({json.dumps(e["config"], sort_keys=True) for e in entries}) > 1)
         found[full] = pick
     return found
+
+
+def placeholder_host(cfg):
+    """The host of a URL that can't be real (no dot, not localhost or an address), e.g. a plugin's
+    `${DOMAIN:-not-setup}` default before its setup ran; '' when the URL looks usable."""
+    m = re.match(r"^[a-z][a-z0-9+.-]*://(?:[^@/]*@)?([^/:?#]+)", str(cfg.get("url") or ""), re.I)
+    host = m.group(1).lower() if m else ""
+    if not host or "." in host or host == "localhost" or ":" in host or "${" in host:
+        return ""
+    return host
+
+
+def config_problems(cfg):
+    """What's visibly wrong with a server config before anything connects: a placeholder host, a variable
+    left unexpanded, a header with no value or token, a line break in a header."""
+    out = []
+    host = placeholder_host(cfg)
+    if host:
+        out.append(f"URL host {host!r} is a placeholder: this plugin copy isn't set up")
+    for where, text in [("URL", str(cfg.get("url") or ""))] + [
+            (f"header {k}", str(v)) for k, v in (cfg.get("headers") or {}).items()]:
+        left = re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", text)
+        if left:
+            out.append(f"{where} needs {', '.join(left)}, which isn't set")
+        elif where.startswith("header") and re.search(r"[\r\n]", text):
+            out.append(f"{where} contains a line break (a token with a trailing newline?)")
+        elif where.lower() == "header authorization" and re.fullmatch(r"\s*(Bearer|Basic|token)?\s*", text, re.I):
+            out.append(f"{where} has no token (its variable is empty)")
+    return out
+
+
+def http_reason(cfg, timeout=8):
+    """Why an http server refuses a connection, from one MCP initialize request with its headers: '' if it
+    answers normally or asks for a sign-in (the stored login handles that), else e.g. 'host not found' or
+    'HTTP 400: malformed Authorization header'."""
+    import urllib.error
+    import urllib.request
+    url = cfg.get("url")
+    if not url or cfg.get("type") not in ("http", "sse", None):
+        return ""
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "lean-agent", "version": "1"}}})
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+               **{k: str(v) for k, v in (cfg.get("headers") or {}).items() if v not in ("", None)}}
+    try:
+        req = urllib.request.Request(url, data=body.encode(), headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout):
+            return ""
+    except urllib.error.HTTPError as e:
+        if e.code == 401 and "www-authenticate" in {k.lower() for k in e.headers.keys()}:
+            return ""
+        try:
+            text = e.read(400).decode("utf-8", "replace")
+        except OSError:
+            text = ""
+        try:
+            j = json.loads(text)
+            text = str(j.get("message") or j.get("error_description") or j.get("error") or text)
+        except ValueError:
+            pass
+        first = " ".join(text.split())[:160]
+        return f"HTTP {e.code}" + (f": {first}" if first else "")
+    except urllib.error.URLError as e:
+        r = str(getattr(e, "reason", e))
+        return "host not found (no DNS entry)" if re.search(r"Name or service not known|nodename nor servname|"
+                                                             r"getaddrinfo|No address", r) else r[:160]
+    except (OSError, ValueError) as e:
+        return str(e)[:160]
 
 
 def server_target(cfg):
