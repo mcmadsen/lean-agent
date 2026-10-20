@@ -2514,7 +2514,8 @@ def email_warning(conf):
     mine = claude_account_email()
     if me and mine and me.lower() != mine.lower():
         return (f"the tracker knows you as {me}, but Claude is signed in as {mine}: lookups by your Claude email "
-                "find nothing there; workers use the identity id instead")
+                "find nothing there; workers use the identity id instead (if that's expected, silence this once: "
+                "lean-agent tracker <project> --ack-email)")
     return None
 
 
@@ -3487,8 +3488,14 @@ def worktree_push(a):
     path, branch = w["path"], git(w["path"], "symbolic-ref", "--quiet", "--short", "HEAD")
     if not branch:
         die(f"{path} is a detached checkout: there's no branch to push")
-    if git(path, "status", "--porcelain", "--untracked-files=no"):
-        die(f"{path} has uncommitted changes: have a worker commit them (or discard them) first")
+    dirty = git(path, "status", "--porcelain", "--untracked-files=no")
+    if dirty and not a.only_commits:
+        files = [l.split(None, 1)[-1] for l in dirty.splitlines() if l.strip()]  # "XY path" (git() strips the first)
+        die(f"{path} has uncommitted changes in {', '.join(files[:8])}" + (f" and {len(files) - 8} more" if len(files) > 8 else "")
+            + ": another worker's work in progress? Commit or discard them, or push only what is committed: "
+            f"lean-agent worktree push {slug} {a.ref} --only-commits ...")
+    if dirty:
+        print(f"note: {len(dirty.splitlines())} uncommitted change(s) stay in the worktree; only commits are pushed")
     upstream = git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     remote_ref = upstream or f"origin/{branch}"
     if not a.no_fetch:
@@ -3822,8 +3829,7 @@ def diagnose_plugin_server(name, info, claude_view, servers):
     label = f"plugin MCP server {name}"
     copies_note = ""
     if info.get("unset_copies") and info["path"] not in info["unset_copies"]:
-        copies_note = (f" [the plugin copy at {', '.join(info['unset_copies'])} still has the setup placeholder; "
-                       f"workers use the {info.get('copy', '')} copy at {info['path']}, which is set up]")
+        copies_note = f" (uses the {info.get('copy', '')} copy; an unused {'synced' if info.get('copy') == 'installed' else 'other'} copy isn't set up, which is fine)"
     elif info.get("copies_differ"):
         copies_note = f" [other copies differ: {', '.join(info.get('other_copies') or [])}; workers use {info['path']}]"
     problems = lean_mcp.config_problems(info["config"])
@@ -5084,6 +5090,32 @@ TRUST_HINT = ("the orchestrator home is not trusted yet, so Claude Code ignores 
               "`lean-agent` command will ask for approval. Fix once with: lean-agent trust")
 
 
+def disable_home_mcp(h):
+    """Switch off, for the orchestrator home only, the MCP servers Claude Code would otherwise connect there
+    (your user-scope servers and plugin servers): the orchestrator uses none of them, and a server that fails
+    at start only adds a warning. Workers still get them with --mcp. Writes the same per-folder list `/mcp`
+    uses (disabledMcpServers in ~/.claude.json); returns the names newly switched off."""
+    if os.environ.get("LEAN_AGENT_ORCHESTRATOR_TRIM") == "0":
+        return []
+    cfg = claude_global_config()
+    data = load_json(cfg, None) if os.path.exists(cfg) else None
+    if not isinstance(data, dict):
+        return []
+    names = sorted(n for n, v in lean_mcp.discover().items() if v["source"] in ("user", "plugin"))
+    proj = data.setdefault("projects", {}).setdefault(h, {})
+    have = list(proj.get("disabledMcpServers") or [])
+    new = [n for n in names if n not in have]
+    if not new:
+        return []
+    proj["disabledMcpServers"] = have + new
+    latest = load_json(cfg, None)  # Claude Code writes this file too: re-read right before writing
+    if isinstance(latest, dict):
+        latest.setdefault("projects", {}).setdefault(h, {})["disabledMcpServers"] = have + new
+        data = latest
+    save_json(cfg, data)
+    return new
+
+
 def cmd_trust(a):
     h = prepare_home()
     if is_trusted(h):
@@ -5139,6 +5171,10 @@ def cmd_up(a):
         drop_bridge_pointers(h)
     if not is_trusted(h):
         print(f"lean-agent: warning: {TRUST_HINT}", file=sys.stderr)
+    off = disable_home_mcp(h)
+    if off:
+        print(f"lean-agent: MCP servers off for the orchestrator itself (workers still get them with --mcp): "
+              f"{', '.join(off)}")
     env = dict(os.environ)
     for k, v in ORCHESTRATOR_ENV.items():
         env.setdefault(k, v)
@@ -5831,7 +5867,7 @@ def cmd_guard(a):
             die(f"lean-agent guard {a.action} <project> push-deny <pattern> ...")
         slug, _ = resolve_project(a.project)
         pats = list(a.patterns or [])
-        if pats and pats[0] == "push-deny":
+        if pats and pats[0] in ("push-deny", "require-pr"):  # the same thing: changed only through a pull request
             pats = pats[1:]
         if not pats:
             die("which branches? e.g. lean-agent guard add <project> push-deny \"release/*\" develop main")
@@ -5850,7 +5886,7 @@ def cmd_guard(a):
         pats = push_guard.project_patterns(slug)
         own = "push-deny" in ((projs.get(slug) or {}).get("guards") or {})
         print(f"{slug}: never pushes to " + (", ".join(pats) if pats else "(nothing guarded)")
-              + ("" if own else " (defaults)"))
+              + ("" if own else " (defaults)") + (": they change only through pull requests" if pats else ""))
     if not slugs:
         print("no projects; new ones never push to " + ", ".join(push_guard.DEFAULT_PUSH_DENY))
 
@@ -6187,6 +6223,8 @@ def build_parser():
     s.add_argument("--off", action="store_true", help="setup: no setup command")
     s.add_argument("--allow-send", metavar="APPROVED", help="push: what the user approved (the push happens only with this)")
     s.add_argument("--no-fetch", action="store_true", help="push: don't fetch origin first")
+    s.add_argument("--only-commits", action="store_true", help="push: push the commits even when the shared "
+                   "worktree has uncommitted changes (they aren't pushed)")
     s.add_argument("--override-guard", metavar="WHY", help="push: push to a guarded branch anyway (logged; only "
                    "when the user explicitly asked for exactly this)")
     s.set_defaults(fn=cmd_worktree)
