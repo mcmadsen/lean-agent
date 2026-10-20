@@ -5055,9 +5055,19 @@ STALE_SESSION_RE = re.compile(r"(?:worker registration failed|registerWorker)[\s
 
 def drop_bridge_pointers(h):
     """remote-control keeps a pointer on exit so the next start can resume the old session; if that session
-    was deleted, archived or expired, every start fails with "worker registration failed ... 404"."""
+    was deleted, archived or expired, every start fails with "worker registration failed ... 404". Forget the
+    session but keep the environment: remote-control leaves that registered when it stops, and a start that
+    doesn't reuse it is refused ("This folder is already served ...")."""
     for path in dict.fromkeys([bridge_pointer(h), bridge_pointer(os.path.realpath(h))]):
-        if os.path.exists(path):
+        if not os.path.exists(path):
+            continue
+        data = load_json(path, {})
+        if isinstance(data, dict) and data.get("environmentId"):
+            save_json(path, {"sessionId": "", "environmentId": data["environmentId"],
+                             "source": data.get("source") or "standalone"})
+            print(f"lean-agent: {path}: forgot the old session (kept its environment); starting a new Remote "
+                  "Control session", flush=True)
+        else:
             os.remove(path)
             print(f"lean-agent: removed {path}; starting a new Remote Control session", flush=True)
 
@@ -5069,7 +5079,7 @@ def remote_control(cmd, env, h):
     through a pseudo-terminal when this is a terminal, so it still draws for one; keys go to it directly."""
     import threading
     for attempt in (1, 2):
-        stale = threading.Event()
+        stale, served = threading.Event(), threading.Event()
         proc, sources = start_watched(cmd, env)
         if proc is None:
             die("'claude' not found on PATH")
@@ -5086,11 +5096,17 @@ def remote_control(cmd, env, h):
                 out.buffer.write(raw)
                 out.buffer.flush()
                 seen = (seen + ANSI_RE.sub("", raw.decode("utf-8", "replace")))[-4000:]
+                if not served.is_set() and SERVED_RE.search(seen):
+                    served.set()
+                    out.buffer.write(b"\nlean-agent: another Claude Code is serving this folder (often the Claude "
+                                     b"desktop app, or an older `lean-agent up` in another terminal). Close it, then "
+                                     b"run `lean-agent up` again.\n")
+                    out.buffer.flush()
                 if not stale.is_set() and STALE_SESSION_RE.search(seen):
                     stale.set()
                     if attempt == 1:
                         proc.terminate()
-                    else:  # the pointer wasn't where lean-agent looks: say what still works
+                    else:  # still the old session: say what still works
                         out.buffer.write(b"\nlean-agent: Remote Control still tries the old session. The server works; "
                                          b"pick the new session in the app. If it keeps happening: claude update\n")
                         out.buffer.flush()
@@ -5116,6 +5132,7 @@ def remote_control(cmd, env, h):
     return rc
 
 
+SERVED_RE = re.compile(r"already served by (?:a terminal|another Claude Code)", re.I)
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|\r")
 
 

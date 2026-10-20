@@ -617,8 +617,11 @@ Installing the plugin also gives any Claude Code session (not just the orchestra
 `CCR v2 worker registration failed ... 404` on every start: when you stop `claude remote-control`, it keeps a
 pointer so the next start can bring back the same session. If that session was archived or expired in the meantime,
 the server answers "Session not found" and the worker registration fails, again on every start (deleting the
-session in the app does the same). `lean-agent up` sees that error, drops the pointer and starts again with a new
-session by itself; `lean-agent up --fresh` does it up front. The server itself keeps working either way.
+session in the app does the same). `lean-agent up` sees that error, makes the pointer forget the old session (keeping its
+environment, which Remote Control leaves registered; a start without it is refused with "This folder is already
+served ...") and starts again with a new session by itself; `lean-agent up --fresh` does it up front. "This folder is already served by a terminal
+`claude remote-control`" means another Claude Code serves the home already, often the Claude desktop app: close it
+and run `lean-agent up` again (`up` says so when it sees that error). The server itself keeps working either way.
 For other errors: `claude update`, then `claude auth logout && claude auth login`, then
 `lean-agent up -- --debug --debug-file /tmp/rc.log` and look at the log. See also the [Remote Control troubleshooting docs](https://code.claude.com/docs/en/remote-control#troubleshooting).
 
