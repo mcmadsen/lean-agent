@@ -693,6 +693,17 @@ def _cmd_card(a):
                 print(f"archived the card in {slug} only; delete the memory everywhere with `lean-agent memory rm {a.id}`")
     elif a.action == "core":
         c["core"] = not a.off
+        if c["core"] and c.get("archived"):
+            c["archived"] = False
+            print(f"{a.id} was archived; unarchived it (a core card has to be live)")
+    elif a.action == "unarchive":
+        if not c.get("archived"):
+            print(f"{a.id} isn't archived")
+            return
+        c["archived"] = False
+    elif a.action == "protect":
+        c["protected"] = not a.off
+        print(f"{a.id}: " + ("protected: optimize won't archive, demote or trim it" if c["protected"] else "no longer protected"))
     save_cards(slug, cards)
     print(f"{a.action} {a.id}: ok")
 
@@ -4112,8 +4123,9 @@ def _cmd_optimize(a):
     slug, _ = resolve_project(a.project)
     cards = load_cards(slug)
     actions = []
+    skip = {x for x in (a.skip or "").split(",") if x}
     for c in cards:
-        if c.get("archived"):
+        if c.get("archived") or c["id"] in skip:
             continue
         for t, bt in sorted((c.get("by_type") or {}).items()):
             if bt["offered"] < a.min_runs:
@@ -4134,6 +4146,10 @@ def _cmd_optimize(a):
             if rate >= 0.5 and c["tokens"] > 600 and not recently:
                 actions.append(("trim", c, f"~{c['tokens']} tok and often used: `lean-agent card shorten {slug} "
                                 f"{c['id']}` proposes a shorter text and checks nothing important is lost", None))
+    held = [x for x in actions if x[1].get("protected") and x[0] in ("archive", "uncore", "trim")]
+    actions = [x for x in actions if x not in held]
+    for act, c, _, _ in held:
+        print(f"(protected: not suggesting {act} for {c['id']})")
     if not actions and not (a.accept or a.reject):
         print(f"Cards: nothing to promote, demote, archive or trim right now (that needs {a.min_runs}+ runs per card; "
               "earlier --apply changes are already in). New-card and preset drafts follow below, if any.")
@@ -4150,7 +4166,12 @@ def _cmd_optimize(a):
             elif act == "archive":
                 c["archived"] = True
         save_cards(slug, cards)
-        print("Applied core/uncore/archive changes (trims are up to you).")
+        for act, c, _, _ in actions:
+            if act in ("core", "uncore", "archive"):
+                print(f"applied: {act} {c['id']}" + (f"  (undo: lean-agent card unarchive {slug} {c['id']})"
+                                                     if act == "archive" else ""))
+        print("Applied core/uncore/archive changes (trims are up to you)."
+              + (f" Skipped: {', '.join(sorted(skip))}." if skip else ""))
     mcp_runs = {}
     for r in ledger():
         if r.get("project") != slug or r.get("resumed"):
@@ -5382,7 +5403,7 @@ def build_parser():
     s.add_argument("--all", action="store_true", help="include archived cards")
     s.set_defaults(fn=cmd_cards)
     s = sub.add_parser("card", help="show/add/rm/core one card")
-    s.add_argument("action", choices=["show", "add", "rm", "core", "shorten"])
+    s.add_argument("action", choices=["show", "add", "rm", "core", "shorten", "unarchive", "protect"])
     s.add_argument("project")
     s.add_argument("id")
     s.add_argument("--save", action="store_true", help="shorten: save the proposal (only if nothing important is lost)")
@@ -5392,7 +5413,7 @@ def build_parser():
     s.add_argument("--text")
     s.add_argument("--file")
     s.add_argument("--core", action="store_true", help="add: mark as core")
-    s.add_argument("--off", action="store_true", help="core: unmark")
+    s.add_argument("--off", action="store_true", help="core/protect: unmark")
     s.set_defaults(fn=cmd_card)
     s = sub.add_parser("suggest", help="suggest cards for a task")
     s.add_argument("project")
@@ -5482,6 +5503,7 @@ def build_parser():
     s.add_argument("--accept", metavar="IDS", help="write these drafts (cards with card add, presets with mcp preset)")
     s.add_argument("--reject", metavar="IDS", help="stop proposing these drafts")
     s.add_argument("--ack", metavar="RUN_IDS", help="hide these runs' context gaps (already handled)")
+    s.add_argument("--skip", metavar="CARD_IDS", help="leave these cards out of the suggestions and --apply")
     s.set_defaults(fn=cmd_optimize)
 
     s = sub.add_parser("review", help="pre-PR review by a read-only reviewer (sonnet, high effort)")
