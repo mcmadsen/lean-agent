@@ -465,6 +465,39 @@ class CliTest(unittest.TestCase):
         self.assertEqual(found[0][0], 1)
         self.assertTrue(found[0][2].startswith("User Story states"), found)
 
+    def test_optimize_skip_protect_unarchive(self):
+        self.cli("learn", self.proj)
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        try:
+            slug = [x for x in L.projects()][0]
+            cards = L.load_cards(slug)
+            for c in cards:
+                c.update(offered=6, used=0, unneeded=6, core=False, core_types=[])
+            L.save_cards(slug, cards)
+        finally:
+            os.environ.pop("LEAN_AGENT_HOME", None)
+        out = self.cli("optimize", "proj").stdout
+        self.assertIn("archive style", out)
+        self.assertIn("archive testing", out)
+        self.assertIn("protected: optimize won't archive", self.cli("card", "protect", "proj", "testing").stdout)
+        out = self.cli("optimize", "proj", "--apply", "--skip", "style").stdout
+        self.assertIn("(protected: not suggesting archive for testing)", out)
+        self.assertIn("Skipped: style.", out)
+        listing = self.cli("cards", "proj").stdout
+        self.assertIn(" style ", listing)  # not archived
+        self.assertIn(" testing ", listing)
+        out = self.cli("optimize", "proj", "--apply").stdout
+        self.assertIn("applied: archive style  (undo: lean-agent card unarchive", out)
+        self.assertNotIn(" style ", self.cli("cards", "proj").stdout)
+        self.assertIn("unarchive style: ok", self.cli("card", "unarchive", "proj", "style").stdout)
+        self.assertIn(" style ", self.cli("cards", "proj").stdout)
+        self.cli("optimize", "proj", "--apply")
+        out = self.cli("card", "core", "proj", "style").stdout  # core on an archived card unarchives it
+        self.assertIn("unarchived it", out)
+        self.assertIn("*style ", self.cli("cards", "proj").stdout)  # core and live
+
     def test_run_requires_model_and_why(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "do it", check=False)

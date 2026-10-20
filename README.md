@@ -120,7 +120,7 @@ Other ways to run the orchestrator:
 | `lean-agent card shorten <project> <id> [--save]` | A shorter text for a card (one Haiku call); lists headings, `code`, paths, names and numbers that would be lost, and saves only if none are. |
 | `lean-agent runs --running` | Runs in progress. Every run prints `run <id> started` first, so a background launch is visible. |
 | `lean-agent run --resume <run-id> "<follow-up>"` | Continue a worker's session (cheap: its context is cached). |
-| `lean-agent card show\|add\|rm\|core <project> <id>` | Inspect or edit cards; `add` creates *note* cards from what workers had to discover. |
+| `lean-agent card show\|add\|rm\|core\|unarchive\|protect <project> <id>` | Inspect or edit cards; `add` creates *note* cards from what workers had to discover. `protect` (`--off` to undo) keeps `optimize` from archiving, demoting or trimming a card; `unarchive` brings one back (`core` on an archived card unarchives it too). `optimize --apply --skip a,b` leaves those cards out. |
 | `lean-agent optimize <project> [--apply] [--accept ids] [--reject ids]` | Promote/demote core cards, archive dead ones, flag big cards to trim, list recent context gaps, and draft new recipe cards and MCP presets from what workers actually did. |
 | `lean-agent runs [--last] [--tokens] [--show [id]]` | Recent runs; `--tokens` prints the latest run's run/tokens/context lines again, `--show` its whole summary (saved per run, so a `| tail` can't lose it). |
 | `lean-agent stats [--today] [--project p]` | Runs, success rate, avg/total weighted tokens and cost per model. |
