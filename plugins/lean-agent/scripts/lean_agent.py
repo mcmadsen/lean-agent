@@ -5012,6 +5012,8 @@ def cmd_up(a):
         env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(max(10, min(95, round(a.compact_at * 100 / window))))
     print(f"lean-agent: the orchestrator compacts at ~{int(env['CLAUDE_CODE_AUTO_COMPACT_WINDOW']) * int(env['CLAUDE_AUTOCOMPACT_PCT_OVERRIDE']) // 100:,} "
           "tokens of context (keeps goals, approvals, open runs and findings; `--compact-at N` to change)", flush=True)
+    for line in orchestrator_context_lines(h):
+        print("lean-agent: " + line, flush=True)
     if a.budget:
         env["LEAN_AGENT_BUDGET"] = str(a.budget)
         env["LEAN_AGENT_BUDGET_SET"] = "1"  # chosen by the user (not the old built-in default)
@@ -5048,6 +5050,33 @@ def cmd_up(a):
         except FileNotFoundError:
             die("'claude' not found on PATH")
     return remote_control(cmd, env, h)
+
+
+def orchestrator_context_lines(h):
+    """What the orchestrator's context holds: the guide's size now, and the last orchestrator session's start-up
+    context (system prompt, tools, guide) and growth, measured from its transcript."""
+    guide = os.path.join(h, "CLAUDE.md")
+    lines = [f"context: the guide (CLAUDE.md) is ~{est_tokens(read_text(guide)):,} tokens"
+             if os.path.exists(guide) else "context: no guide yet"]
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    found = []
+    for d in dict.fromkeys([h, os.path.realpath(h)]):
+        found += glob.glob(os.path.join(cfg, "projects", re.sub(r"[^A-Za-z0-9]", "-", d), "*.jsonl"))
+    series, path = [], None
+    for f in sorted(set(found), key=os.path.getmtime, reverse=True):
+        series = usage.context_series(f)
+        if series:
+            path = f
+            break
+    if not series:
+        lines[0] += "; the start-up context is measured after the first session (`lean-agent budget` in a session)"
+        return lines
+    ctx = [c for _, c in series]
+    when = datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%a %H:%M")
+    lines[0] += (f"; last session ({when}): started at ~{ctx[0]:,} (system prompt, tools, guide), "
+                 f"{len(ctx)} calls, ~{sum(ctx) // len(ctx):,} per call on average, ~{ctx[-1]:,} at the end, "
+                 f"peak ~{max(ctx):,}")
+    return lines
 
 
 STALE_SESSION_RE = re.compile(r"(?:worker registration failed|registerWorker)[\s\S]{0,300}?\b404\b", re.I)
