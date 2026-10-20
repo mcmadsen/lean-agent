@@ -1273,8 +1273,15 @@ def cmd_run(a):
         cmd += ["--effort", effort]
     if a.max_usd > 0:
         cmd += ["--max-budget-usd", str(a.max_usd)]
+    flag_settings = {}
     if attribution() == "off":  # Claude Code's own commit/PR attribution, switched off for this worker
-        cmd += ["--settings", json.dumps({"attribution": NO_ATTRIBUTION})]
+        flag_settings["attribution"] = NO_ATTRIBUTION
+    if mcp_specs:  # trim big MCP results before the model reads them
+        flag_settings["hooks"] = {"PostToolUse": [{"matcher": "mcp__.*", "hooks": [{
+            "type": "command", "timeout": 20,
+            "command": f"python3 {json.dumps(os.path.join(HERE, 'mcp_trim_hook.py'))}"}]}]}
+    if flag_settings:
+        cmd += ["--settings", json.dumps(flag_settings)]
     if prev:
         cmd += ["--resume", prev["session_id"]]
 
@@ -1282,6 +1289,8 @@ def cmd_run(a):
     env.pop("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", None)  # never pull in the project's CLAUDE.md
     env.setdefault("BASH_MAX_OUTPUT_LENGTH", os.environ.get("LEAN_AGENT_WORKER_BASH_OUTPUT") or "12000")
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"  # memory comes from lean-agent cards instead
+    if getattr(a, "fields", None):
+        env["LEAN_AGENT_MCP_FIELDS"] = a.fields
 
     print(f"run {run_id} started · {model} · {slug}" + (" (resumed)" if prev else "") +
           f" · see it later with `lean-agent runs --show {run_id}`", file=sys.stderr, flush=True)
@@ -2283,6 +2292,8 @@ def claude_account_email():
 
 
 def email_warning(conf):
+    if conf.get("email_ack"):
+        return None
     me = ((conf.get("discovered") or {}).get("me") or {}).get("email") or ""
     mine = claude_account_email()
     if me and mine and me.lower() != mine.lower():
@@ -2301,11 +2312,17 @@ def note_conflicts(conf):
     but says something else (e.g. a different state list, or a rule discovery marked unknown/false)."""
     out = []
     facts = tracker_facts_text(conf)
+    types = [t for t in ((conf.get("discovered") or {}).get("states") or {})]
     for i, n in enumerate(conf.get("notes") or [], 1):
         if n in (conf.get("superseded") or []):
             continue
         nw = {w for w in _words(n) if len(w) > 3}
-        for f in facts:
+        named = [t for t in types if t.lower() in n.lower()]
+        candidates = facts
+        if named:  # a note about one work item type is compared with that type's facts only
+            candidates = [f for f in facts if any(f.lower().startswith(t.lower() + " ") for t in named)] or \
+                [f for f in facts if not any(f.lower().startswith(t.lower() + " states") for t in types)]
+        for f in candidates:
             fw = {w for w in _words(f) if len(w) > 3}
             if nw and fw and len(nw & fw) >= 2 and _jaccard(nw, fw) >= 0.25 and not _similar(n, f, 0.8):
                 out.append((i, n, f))
@@ -2341,6 +2358,9 @@ def cmd_tracker(a):
         conf[k] = v.strip()
     if a.note:
         conf.setdefault("notes", []).append(a.note.strip())
+    if a.ack_email:
+        conf["email_ack"] = True
+        print("email mismatch acknowledged: not shown again")
     for n in a.supersede or []:
         notes = conf.get("notes") or []
         if not 1 <= n <= len(notes):
@@ -4196,6 +4216,7 @@ def _cmd_optimize(a):
 ORCHESTRATOR_ENV = {
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",   # memory lives in lean-agent; no MEMORY.md on every turn
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "100000",  # with 70%: compact at ~70K tokens, not at 70% of a 1M window
     "BASH_MAX_OUTPUT_LENGTH": "20000",
     "MAX_MCP_OUTPUT_TOKENS": "10000",
     "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
@@ -4380,13 +4401,15 @@ def orchestrator_settings(existing):
     if os.environ.get("LEAN_AGENT_ORCHESTRATOR_TRIM") == "0":  # full context: drop lean-agent's trimming keys
         perms.pop("deny", None)
         data["permissions"] = perms
-        for key in ("disableBundledSkills", "disableClaudeAiConnectors", "claudeMdExcludes", "enabledPlugins"):
+        for key in ("disableBundledSkills", "disableClaudeAiConnectors", "claudeMdExcludes", "enabledPlugins",
+                    "autoCompactWindow"):
             data.pop(key, None)
         return data
     servers = [n for n, v in lean_mcp.discover().items() if v["source"] in ("user", "desktop")]
     perms["deny"] = sorted(set(ORCHESTRATOR_DENY) | {lean_mcp.tool_prefix(n).rstrip("_") for n in servers})
     data["permissions"] = perms
     data["disableBundledSkills"] = True
+    data["autoCompactWindow"] = env_num("LEAN_AGENT_COMPACT_WINDOW", 100000)  # the orchestrator compacts early
     data["disableClaudeAiConnectors"] = True
     cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     excludes = [os.path.join(cfg, "CLAUDE.md")]
@@ -4753,6 +4776,12 @@ def cmd_up(a):
     env = dict(os.environ)
     for k, v in ORCHESTRATOR_ENV.items():
         env.setdefault(k, v)
+    if a.compact_at:  # Claude Code's window can't go below 100K: lower the percentage instead
+        window = max(100000, a.compact_at)
+        env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(window)
+        env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(max(10, min(95, round(a.compact_at * 100 / window))))
+    print(f"lean-agent: the orchestrator compacts at ~{int(env['CLAUDE_CODE_AUTO_COMPACT_WINDOW']) * int(env['CLAUDE_AUTOCOMPACT_PCT_OVERRIDE']) // 100:,} "
+          "tokens of context (keeps goals, approvals, open runs and findings; `--compact-at N` to change)", flush=True)
     if a.budget:
         env["LEAN_AGENT_BUDGET"] = str(a.budget)
         env["LEAN_AGENT_BUDGET_SET"] = "1"  # chosen by the user (not the old built-in default)
@@ -5156,7 +5185,7 @@ def cmd_do(a):
                             mcp=list(step.get("mcp") or r.get("mcp") or []), tools=None, allow_send=a.allow_send,
                             max_turns=r.get("max_turns") or 40, max_usd=r.get("max_usd") or 3.0, max_context=2000,
                             max_cards=4, ref=None, again=a.again, yes=a.yes,
-                            recipe=(a.name, "apply" if a.apply else "check"))
+                            recipe=(a.name, "apply" if a.apply else "check"), fields=r.get("fields"))
     rc = cmd_run(ns)
     if r.get("complete"):
         last = next((x for x in reversed(ledger()) if x.get("recipe") == a.name and x.get("project") == slug), None)
@@ -5170,6 +5199,11 @@ def cmd_do(a):
                   f"{last['id']} \"Cover the missing items too.\"")
             return 1
         print(f"complete: all {items.get('total')} items covered")
+        reads = sum((last.get("mcp_calls") or {}).values())
+        if items.get("total") and reads > 1.5 * items["total"]:
+            print(f"note: {reads} tracker calls for {items['total']} items (more than one per item). One query that "
+                  "returns the needed fields for all items (e.g. a query with a relations column, or a batch get) "
+                  "is much cheaper: put that in the recipe's task.")
     return rc
 
 
@@ -5249,6 +5283,8 @@ def build_parser():
                    help="orchestrator model, pinned in the home's settings (default: sonnet; 'default' = your own)")
     s.add_argument("--name", default="lean-agent", help="session name in the Claude app")
     s.add_argument("--budget", type=int, help="optional self-set cap per orchestrator session (sonnet-eq tokens)")
+    s.add_argument("--compact-at", type=int, metavar="TOKENS", help="compact the orchestrator's context at about this "
+                   "many tokens (default ~70,000)")
     s.add_argument("--budget-5h", type=int, help="lean-agent budget per 5-hour window (Sonnet-equivalent tokens)")
     s.add_argument("--budget-week", type=int, help="lean-agent budget per 7 days (Sonnet-equivalent tokens)")
     s.add_argument("--permission-mode", help="e.g. acceptEdits, auto")
@@ -5478,6 +5514,7 @@ def build_parser():
     s.add_argument("values", nargs="*", metavar="KEY=VALUE", help=", ".join(TRACKER_KEYS))
     s.add_argument("--note", help="a fact workers should know, e.g. \"User Story has no Removed state\"")
     s.add_argument("--rm-note", type=int, action="append", metavar="N", help="remove note N (repeatable)")
+    s.add_argument("--ack-email", action="store_true", help="stop warning that the tracker knows you by another email")
     s.add_argument("--supersede", type=int, action="append", metavar="N",
                    help="keep note N but stop giving it to workers (a discovered fact replaces it)")
     s.add_argument("--discover", action="store_true", help="find your identity id and the work item rules with a worker")
