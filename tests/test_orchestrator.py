@@ -375,6 +375,8 @@ class CliTest(unittest.TestCase):
         out = self.cli("card", "shorten", "proj", "testing", "--save", FAKE_SHORT=good).stdout
         self.assertIn("saved card testing", out)
         self.assertIn("never the real db", self.cli("card", "show", "proj", "testing").stdout)
+        out = self.cli("card", "shorten", "proj", "testing", FAKE_SHORT=good[:-3]).stdout  # barely shorter
+        self.assertIn("not worth it", out)
 
     def test_recipes_and_text_len(self):
         self.cli("learn", self.proj)
@@ -860,7 +862,9 @@ class CliTest(unittest.TestCase):
             json.dump(store, fh)
         out = self.cli("optimize", "proj", **env).stdout
         self.assertNotIn("= get_obs_metric,search_obs_metrics ", out)
-        self.assertIn("extend existing preset dash with create_obs_dashboard", out)
+        self.assertNotIn("extend existing preset dash with create_obs_dashboard", out)  # read-only stays read-only
+        self.assertIn("new preset dash-write: create_obs_dashboard; write tools: create_obs_dashboard", out)
+        self.assertEqual(out.count("-> --mcp plugin:obs:mcp:dash-write ="), 1)  # one proposal per preset
         names = [l.split("--mcp ")[1].split(" =")[0] for l in out.splitlines() if l.startswith("preset")]
         tools = [l.split(" = ")[1].split("  (")[0] for l in out.splitlines() if l.startswith("preset")]
         self.assertEqual(len(tools), len(set(tools)), out)  # never two drafts with the same tool set
@@ -1668,6 +1672,13 @@ class CliTest(unittest.TestCase):
         self.cli("tracker", "proj", "--note", "Voting on a PR needs the reviewer id")
         self.cli("tracker", "proj", "--note", "a wrong note")
         self.cli("tracker", "proj", "--note", "another wrong note")
+        self.cli("tracker", "proj", "--note", "Bug states are New, Active and Done only")
+        out = self.cli("tracker", "proj").stdout
+        self.assertIn("warning: note 4 may contradict what discovery found: \"Bug states: New, Done", out)
+        out = self.cli("tracker", "proj", "--supersede", "4").stdout
+        self.assertIn("note 4 superseded", out)
+        self.assertIn("4. Bug states are New, Active and Done only  (superseded)", out)
+        self.assertNotIn("may contradict", out)
         out = self.cli("tracker", "proj", "--rm-note", "2", "--rm-note", "3").stdout
         self.assertIn("removed note 3: another wrong note", out)
         self.assertIn("removed note 2: a wrong note", out)
