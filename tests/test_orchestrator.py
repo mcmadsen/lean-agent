@@ -271,13 +271,14 @@ class CliTest(unittest.TestCase):
         self.assertEqual(p.returncode, 2)
         self.assertIn("Ask the user once", p.stdout)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t")
-        self.assertNotIn("--settings", self.calls()[-1]["argv"])  # not set: Claude Code's defaults
+        argv = self.calls()[-1]["argv"]
+        self.assertNotIn("attribution", json.loads(argv[argv.index("--settings") + 1]))  # not set: Claude Code's defaults
         self.assertIn("attribution: off", self.cli("attribution", "off").stdout)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t")
         call = self.calls()[-1]
         argv = call["argv"]
-        self.assertEqual(json.loads(argv[argv.index("--settings") + 1]),
-                         {"attribution": {"commit": "", "pr": "", "sessionUrl": False}})
+        self.assertEqual(json.loads(argv[argv.index("--settings") + 1])["attribution"],
+                         {"commit": "", "pr": "", "sessionUrl": False})
         self.assertIn("Never add \"Co-Authored-By: Claude", call["append"])
         home = self.cli("home").stdout.strip()
         with open(os.path.join(home, ".claude", "settings.json")) as fh:
@@ -286,7 +287,8 @@ class CliTest(unittest.TestCase):
         with open(os.path.join(home, ".claude", "settings.json")) as fh:
             self.assertNotIn("attribution", json.load(fh))
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t")
-        self.assertNotIn("--settings", self.calls()[-1]["argv"])
+        argv = self.calls()[-1]["argv"]
+        self.assertNotIn("attribution", json.loads(argv[argv.index("--settings") + 1]))
 
     def test_duplicate_launch_guard_ref_and_extra_cost(self):
         self.cli("learn", self.proj)
@@ -2307,6 +2309,66 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(before, local)
         self.assertEqual(remote(), local)
         self.assertIn("nothing to push", self.cli("worktree", "push", "proj", "origin/feature").stdout)
+
+    def test_push_guards(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        origin = os.path.join(self.tmp.name, "origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+        g("remote", "add", "origin", origin)
+        g("branch", "-q", "release/r-1")
+        g("push", "-q", "origin", "main", "release/r-1")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        self.assertIn("proj: never pushes to release/*, develop, main, master (defaults)", self.cli("guard", "list").stdout)
+        self.assertIn("proj: never pushes to release/*, develop, main, master", self.cli("doctor", check=False).stdout)
+        # a local bugfix branch whose upstream is the release branch: the destination counts, not the name
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "origin/release/r-1", "--", "fix")
+        wt = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", "origin-release-r-1")
+        subprocess.run(["git", "-C", wt, "checkout", "-q", "-b", "bugfix/b-1", "--track", "origin/release/r-1"], check=True)
+        subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
+                        "-m", "fix"], check=True)
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        self.cli("review", "proj", "--head", "bugfix/b-1", "--base", "main", FAKE_REVIEW=approve)
+        p = self.cli("worktree", "push", "proj", "origin/release/r-1", "--allow-send", "push it", check=False)
+        self.assertEqual(p.returncode, 3)
+        self.assertIn("would be pushed to origin/release/r-1, which matches the push guard 'release/*'", p.stderr)
+        remote = lambda b: subprocess.run(["git", "-C", origin, "rev-parse", b], capture_output=True, text=True).stdout
+        before = remote("release/r-1")
+        # workers' git refuses it too (pre-push hook), and so does the orchestrator's Bash hook
+        sys.path.insert(0, os.path.dirname(CLI))
+        import push_guard
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        try:
+            env = push_guard.git_env(dict(os.environ))
+            p = subprocess.run(["git", "-C", wt, "push", "origin", "HEAD:release/r-1"], capture_output=True, text=True,
+                               env=env)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("lean-agent push guard: refusing to update release/r-1", p.stderr)
+            self.assertIn("would update release/r-1", push_guard.check(f"cd {wt} && git push --force", "/"))
+            self.assertIn("would update main", push_guard.check(f"git -C {wt} push origin +HEAD:refs/heads/main", "/"))
+            self.assertIn("--all/--mirror", push_guard.check(f"git -C {wt} push --mirror origin", "/"))
+            self.assertEqual(push_guard.check(f"git -C {wt} push origin HEAD:bugfix/b-1", "/"), "")
+            self.assertEqual(remote("release/r-1"), before)
+            # per-project list: rm and add; an explicit, logged override
+            self.cli("guard", "rm", "proj", "push-deny", "master")
+            self.assertIn("never pushes to release/*, develop, main\n", self.cli("guard", "list", "proj").stdout)
+            self.cli("guard", "add", "proj", "push-deny", "hotfix/*")
+            self.assertIn("hotfix/*", self.cli("guard", "list", "proj").stdout)
+            self.cli("learn", self.proj, "--name", "proj")  # re-learning (sync) keeps them
+            self.assertIn("hotfix/*", self.cli("guard", "list", "proj").stdout)
+            out = self.cli("worktree", "push", "proj", "origin/release/r-1", "--allow-send", "push it",
+                           "--override-guard", "user asked for exactly this").stdout
+            self.assertIn("overridden: user asked for exactly this", out)
+            self.assertNotEqual(remote("release/r-1"), before)
+            with open(os.path.join(self.env["LEAN_AGENT_HOME"], "pushes.jsonl")) as fh:
+                self.assertEqual(json.loads(fh.readlines()[-1])["guard_override"], "user asked for exactly this")
+        finally:
+            os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.update(LEAN_AGENT_HOME=old)
+        argv = self.calls()[-1]["argv"]
+        self.assertIn("push_guard.py", argv[argv.index("--settings") + 1])
 
     def test_worktree_writers_take_turns(self):
         self.git_project()

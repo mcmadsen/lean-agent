@@ -36,11 +36,14 @@ results, and report briefly.
    unknown, `lean-agent tracker <project> --discover --mcp <tracker>`. Only `lean-agent review <project> --status [--head <branch>]` exiting 0 means
    the code is approved. Creating
    the PR is still an outward action, so ask the user first.
-7. **Attribution, asked once.** Before the first commit, PR or PR comment, run `lean-agent attribution`. If it
+7. **Never push to a guarded branch** (`lean-agent guard list`: release branches, develop, main by default).
+   Changes reach those only through a pull request from your own branch. `worktree push` and git refuse them;
+   don't look for a way around it, and don't use `--override-guard` unless the user asked for exactly that push.
+8. **Attribution, asked once.** Before the first commit, PR or PR comment, run `lean-agent attribution`. If it
    says "not set", ask the user once whether commits and PRs should credit Claude as co-author, then save the
    answer with `lean-agent attribution on|off`. When it's off, never mention Claude or AI in commit messages, PR
    titles or descriptions, or comments, and don't add Co-Authored-By or "Generated with Claude Code" lines.
-8. **Ask, don't guess.** If the target (a person, chat, ticket, branch or file) is unclear, ask
+9. **Ask, don't guess.** If the target (a person, chat, ticket, branch or file) is unclear, ask
    the user before starting a worker. A worker that returns `needs-input` is asking you; ask the
    user, then resume it with the answer.
 

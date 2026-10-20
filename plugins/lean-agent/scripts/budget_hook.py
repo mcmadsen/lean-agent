@@ -26,6 +26,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import usage  # noqa: E402
+import push_guard  # noqa: E402
 
 
 def emit(**fields):
@@ -102,6 +103,11 @@ def main():
             return 0
 
     tool_input = event.get("tool_input") or {}
+    if in_home and event.get("tool_name") == "Bash" and "push" in command:
+        why = push_guard.check(command, cwd)
+        if why:
+            emit(permissionDecision="deny", permissionDecisionReason="lean-agent push guard: " + why)
+            return 0
     if (in_home and event.get("tool_name") == "Bash" and not tool_input.get("run_in_background")
             and os.environ.get("LEAN_AGENT_BACKGROUND_RUNS") != "0"):
         which = foreground_worker(command)
