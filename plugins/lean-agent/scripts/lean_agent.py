@@ -3661,6 +3661,16 @@ def cmd_mcp(a):
     servers = lean_mcp.discover(project)
     if a.server and a.server != CHROME:
         a.server = lean_mcp.resolve_name(a.server, servers) or a.server
+    if a.action == "ignore":
+        if a.server:
+            if a.server not in servers and not a.rm:
+                unknown_server(a.server, servers)
+            set_ignored(a.server, not a.rm)
+            print(f"{a.server}: " + ("checked again by doctor" if a.rm else
+                                     "ignored: doctor skips it, `mcp list` marks it; --mcp still works if you ask"))
+        names = sorted(ignored_servers())
+        print("ignored: " + (", ".join(names) if names else "none"))
+        return
     if a.action == "list":
         if not servers:
             print("No MCP servers configured (looked in ~/.claude.json, <project>/.mcp.json, Claude Desktop config).")
@@ -3675,6 +3685,8 @@ def cmd_mcp(a):
                 tools = server_tools(name, info["config"], refresh=True)
             n, tok = (len(tools), f"{sum(tools.values()):,}") if tools else ("?", "?")
             notes = []
+            if name in ignored_servers():
+                notes.append("ignored")
             if aliases.get(name):
                 notes.append(f"--mcp {aliases[name]}:...")
             st = cache.get(name, {}).get("status")
@@ -3774,6 +3786,18 @@ def align_with_claude(name, info):
                 f"from Claude Code's in {what}", "header values can be secrets, so lean-agent won't copy them; "
                 "compare `claude mcp get " + name + "` with the plugin's .mcp.json")
     return None
+
+
+def ignored_servers():
+    """MCP servers marked as not used (`lean-agent mcp ignore`): doctor doesn't check them and `mcp list` marks
+    them; a run that names one with --mcp still gets it."""
+    return set(load_json(home("mcp-ignored.json"), []))
+
+
+def set_ignored(name, on):
+    names = ignored_servers()
+    names = names | {name} if on else names - {name}
+    save_json(home("mcp-ignored.json"), sorted(names))
 
 
 def diagnose_plugin_server(name, info, claude_view, servers):
@@ -4981,7 +5005,13 @@ def cmd_doctor(a):
     claude_view = lean_mcp.claude_mcp_list() if plugin_srv else {}
     if claude_view:  # now that Claude Code's choice is known, pick the same copy of duplicated plugins
         plugin_srv = {n: v for n, v in lean_mcp.discover().items() if v["source"] == "plugin"}
+    for name in getattr(a, "ignore", None) or []:
+        set_ignored(lean_mcp.resolve_name(name, lean_mcp.discover()) or name, True)
+    ignored = ignored_servers()
     for name, info in sorted(plugin_srv.items()):
+        if name in ignored:
+            print(f"  plugin MCP server {name}: ignored (not used; `lean-agent mcp ignore --rm {name}` to check it again)")
+            continue
         report(*diagnose_plugin_server(name, info, claude_view, plugin_srv))
     budgets = usage.window_budgets()
     parts = [f"{k}={v:,}" for k, v in budgets.items() if v]
@@ -5960,11 +5990,11 @@ def build_parser():
     s.set_defaults(fn=cmd_chrome)
 
     s = sub.add_parser("mcp", help="MCP servers workers can use: list, tools <server>, preset <server> ...")
-    s.add_argument("action", choices=["list", "tools", "preset", "env"])
+    s.add_argument("action", choices=["list", "tools", "preset", "env", "ignore"])
     s.add_argument("server", nargs="?", help="a server; for env: the variable name")
     s.add_argument("preset_name", nargs="?", help="preset: name to set or remove")
     s.add_argument("preset_tools", nargs="?", help="preset: comma-separated tools")
-    s.add_argument("--rm", action="store_true", help="preset/env: remove it")
+    s.add_argument("--rm", action="store_true", help="preset/env/ignore: remove it")
     s.add_argument("--command", metavar="CMD", help="env: a command that prints the value (run per worker, not stored)")
     s.add_argument("--project", "-p", help="include this project's .mcp.json and local-scope servers")
     s.add_argument("--probe", action="store_true", help="list: query stdio servers for their tools")
@@ -6139,6 +6169,8 @@ def build_parser():
     s = sub.add_parser("doctor", help="check setup and which instructions load in a folder (default: here)")
     s.add_argument("path", nargs="?")
     s.add_argument("--fix", action="store_true", help="refresh guide and repo block, add precedence notes")
+    s.add_argument("--ignore", action="append", metavar="SERVER", help="mark an MCP server as not used, so doctor "
+                   "stops checking it (same as `lean-agent mcp ignore SERVER`; repeatable)")
     s.set_defaults(fn=cmd_doctor)
     return ap
 

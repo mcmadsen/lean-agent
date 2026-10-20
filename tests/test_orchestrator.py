@@ -1083,6 +1083,33 @@ class CliTest(unittest.TestCase):
         self.assertIn("OBS_DOMAIN: removed", self.cli("mcp", "env", "OBS_DOMAIN", "--rm").stdout)
         self.assertIn("OBS_DOMAIN: not set", self.cli("mcp", "env", "OBS_DOMAIN", "--rm").stdout)
 
+    def test_ignored_mcp_servers(self):
+        cfg = self.env["CLAUDE_CONFIG_DIR"]
+        root = os.path.join(cfg, "plugins", "cache", "mkt", "gh", "1")
+        os.makedirs(os.path.join(root, ".claude-plugin"))
+        with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w") as fh:
+            json.dump({"name": "gh"}, fh)
+        with open(os.path.join(root, ".mcp.json"), "w") as fh:
+            json.dump({"mcpServers": {"gh": {"type": "http", "url": "https://api.example.com/mcp",
+                                             "headers": {"Authorization": "Bearer ${GH_PAT}"}}}}, fh)
+        with open(os.path.join(cfg, "plugins", "installed_plugins.json"), "w") as fh:
+            json.dump({"version": 2, "plugins": {"gh@mkt": [{"installPath": root}]}}, fh)
+        with open(os.path.join(cfg, "settings.json"), "w") as fh:
+            json.dump({"enabledPlugins": {"gh@mkt": True}}, fh)
+        self.assertIn("✗ plugin MCP server plugin:gh:gh", self.cli("doctor", check=False).stdout)
+        out = self.cli("mcp", "ignore", "gh").stdout  # the alias works too
+        self.assertIn("plugin:gh:gh: ignored", out)
+        doc = self.cli("doctor", check=False).stdout
+        self.assertNotIn("✗ plugin MCP server plugin:gh:gh", doc)
+        self.assertIn("plugin MCP server plugin:gh:gh: ignored (not used", doc)
+        self.assertIn("ignored", self.cli("mcp", "list").stdout)
+        self.cli("learn", self.proj)  # still there when asked for explicitly
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "gh", "t", check=False)
+        self.assertIn("plugin:gh:gh", self.calls()[-1]["mcp"]["servers"])
+        self.assertIn("checked again", self.cli("mcp", "ignore", "--rm", "plugin:gh:gh").stdout)
+        self.assertIn("✗ plugin MCP server plugin:gh:gh", self.cli("doctor", check=False).stdout)
+        self.assertIn("ignored (not used", self.cli("doctor", "--ignore", "gh", check=False).stdout)
+
     def test_config_problems_name_the_cause(self):
         sys.path.insert(0, os.path.dirname(CLI))
         import lean_mcp
