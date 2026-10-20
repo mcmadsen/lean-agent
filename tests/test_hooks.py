@@ -29,7 +29,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.env = {"CLAUDE_PLUGIN_DATA": os.path.join(self.tmp.name, "data"),
-                    "LEAN_AGENT_HOME": os.path.join(self.tmp.name, "home")}
+                    "LEAN_AGENT_HOME": os.path.join(self.tmp.name, "home"), "LEAN_AGENT_CTX_NUDGE": "0"}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -249,6 +249,80 @@ class BudgetTest(Base):
         out = run_hook("budget_hook.py", dict(ev, cwd=self.tmp.name), LEAN_AGENT_BUDGET="5000",
                        LEAN_AGENT_BUDGET_SET="1", **self.env)
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_context_nudge_in_lean_home(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        with open(self.transcript, "a") as fh:
+            fh.write(assistant_line("big1", 10, 0, 140000, 50))
+        ev = dict(self.ev, cwd=home)
+        env = dict(self.env, LEAN_AGENT_CTX_NUDGE="100000")
+        out = run_hook("budget_hook.py", ev, **env)
+        note = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("re-reads ~140,010 tokens of context on every call", note)
+        self.assertIn("per 100 calls", note)
+        self.assertIn("/compact", note)
+        self.assertIn("restart it once with `lean-agent up`", note)  # no early-compaction env in this session
+        self.assertIsNone(run_hook("budget_hook.py", ev, **env))  # once per 50K more
+        self.assertIsNone(run_hook("budget_hook.py", dict(self.ev, session_id="s2", cwd=self.tmp.name), **env))
+        out = run_hook("budget_hook.py", dict(ev, session_id="s3"), CLAUDE_CODE_AUTO_COMPACT_WINDOW="100000", **env)
+        self.assertNotIn("restart it once", out["hookSpecificOutput"]["additionalContext"])
+
+    def test_long_run_file_reads_refused_in_lean_home(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        run = os.path.join(home, "work", "1020-101010-abcd")
+        os.makedirs(run)
+        with open(os.path.join(run, "summary-1.txt"), "w") as fh:
+            fh.write("line\n" * 120)
+        with open(os.path.join(run, "details-1.md"), "w") as fh:
+            fh.write("short\n")
+        ev = lambda cmd, cwd=home: dict(self.ev, cwd=cwd, tool_name="Bash", tool_input={"command": cmd})
+        out = run_hook("budget_hook.py", ev(f"cat {run}/summary-1.txt"), **self.env)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("runs --show <id> --details --grep", out["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIn("120 lines", out["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertEqual(run_hook("budget_hook.py", ev(f"tail -n 200 {run}/summary-1.txt"), **self.env)
+                         ["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIsNone(run_hook("budget_hook.py", ev(f"tail -n 20 {run}/summary-1.txt"), **self.env))
+        self.assertIsNone(run_hook("budget_hook.py", ev(f"cat {run}/details-1.md"), **self.env))  # short
+        self.assertIsNone(run_hook("budget_hook.py", ev(f"grep -n error {run}/summary-1.txt"), **self.env))
+        self.assertIsNone(run_hook("budget_hook.py", ev(f"cat {run}/summary-1.txt", cwd=self.tmp.name), **self.env))
+        self.assertIsNone(run_hook("budget_hook.py", ev(f"cat {run}/summary-1.txt"), LEAN_AGENT_READ_GUARD="0",
+                                   **self.env))
+
+    def test_handoff_on_new_session_and_compaction(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        start = {"session_id": "s9", "cwd": home, "source": "startup"}
+        self.assertIsNone(run_hook("compact_hook.py", start, **self.env))  # nothing recent: no note
+        import datetime
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        with open(os.path.join(home, "ledger.jsonl"), "w") as fh:
+            fh.write(json.dumps({"id": "1020-101010-abcd", "ts": now, "status": "done", "model": "haiku",
+                                 "project": "shop", "task": "Post the reply on PR 512 and move SHOP-77 to done",
+                                 "details": "/x/details-1.md"}) + "\n")
+        with open(os.path.join(home, "handoff-notes.json"), "w") as fh:
+            json.dump([{"text": "Ask the user whether to merge PR 512"}], fh)
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "compact_hook.py"), "post"], input=json.dumps(start),
+                           capture_output=True, text=True, env=dict(os.environ, **self.env), check=True)
+        note = json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("1. Ask the user whether to merge PR 512", note)
+        self.assertIn("1020-101010-abcd done haiku shop", note)
+        self.assertIn("[details: /x/details-1.md]", note)
+        self.assertIn("Items and branches touched: #512, SHOP-77", note)
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "compact_hook.py"), "post"],
+                           input=json.dumps(dict(start, source="resume")), capture_output=True, text=True,
+                           env=dict(os.environ, **self.env), check=True)
+        self.assertEqual(p.stdout.strip(), "")  # a resumed session still has its context
+
+    def test_report_shows_context_trend_and_compaction_saving(self):
+        with open(self.transcript, "w") as fh:
+            for i in range(12):
+                fh.write(assistant_line(f"t{i}", 10, 0, 20000 * (i + 1), 10))
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "usage.py"), "report", self.transcript],
+                           capture_output=True, text=True, env=dict(os.environ, **self.env), check=True)
+        self.assertIn("Context per call, by quarter of the session: 40,010 -> 100,010 -> 160,010 -> 220,010", p.stdout)
+        self.assertIn("Re-reading context above ~70K cost this session", p.stdout)
 
     def test_report(self):
         p = subprocess.run([sys.executable, os.path.join(ROOT, "usage.py"), "report", self.transcript],
