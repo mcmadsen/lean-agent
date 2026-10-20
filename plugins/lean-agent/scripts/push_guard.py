@@ -177,9 +177,49 @@ def ensure_hooks():
     return d
 
 
+def ensure_git_wrapper(path_value):
+    """A `git` that checks every `git push` against the guards before running the real git, so a push with
+    --no-verify (which skips the pre-push hook) is refused too. Returns its folder, or None without a git."""
+    import shutil
+    d = os.path.join(lean_home(), "git-bin")
+    search = os.pathsep.join(p for p in (path_value or "").split(os.pathsep) if p and os.path.realpath(p) != os.path.realpath(d))
+    real = shutil.which("git", path=search)
+    if not real:
+        return None
+    body = (f"#!/bin/sh\n# {HOOK_MARK}: checks pushes, then runs {real}\n"
+            f'case " $* " in *" push "*) exec {shlex.quote(sys.executable)} {shlex.quote(os.path.abspath(__file__))} '
+            f'git-wrapper {shlex.quote(real)} "$@" ;; esac\nexec {shlex.quote(real)} "$@"\n')
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "git")
+    try:
+        with open(path) as fh:
+            if fh.read() == body:
+                return d
+    except OSError:
+        pass
+    with open(path, "w") as fh:
+        fh.write(body)
+    os.chmod(path, 0o755)
+    return d
+
+
+def git_wrapper(real, args):
+    """`git <args>` through the guard: a push to a guarded branch is refused, --no-verify or not."""
+    if os.environ.get("LEAN_AGENT_PUSH_GUARD_OVERRIDE") != "1":
+        why = check(" ".join(shlex.quote(a) for a in ["git", *args]), os.getcwd())
+        if why:
+            sys.stderr.write("lean-agent push guard: " + why + "\n")
+            return 1
+    os.execv(real, [real, *args])
+
+
 def git_env(env):
-    """`env` plus the GIT_CONFIG_* entries that make git use lean-agent's hooks folder."""
+    """`env` plus the GIT_CONFIG_* entries that make git use lean-agent's hooks folder, and the guarded `git`
+    first on PATH."""
     env = dict(env)
+    wrapper = ensure_git_wrapper(env.get("PATH", ""))
+    if wrapper and env.get("PATH", "").split(os.pathsep)[0] != wrapper:
+        env["PATH"] = wrapper + os.pathsep + env.get("PATH", "")
     n = int(env.get("GIT_CONFIG_COUNT") or 0)
     for i in range(n):
         if env.get(f"GIT_CONFIG_KEY_{i}") == "core.hooksPath" and env.get(f"GIT_CONFIG_VALUE_{i}") == hooks_dir():
@@ -250,6 +290,8 @@ def main():
     """PreToolUse hook for workers: refuse a Bash `git push` to a guarded branch."""
     if len(sys.argv) > 2 and sys.argv[1] == "git-hook":
         return git_hook(sys.argv[2], sys.argv[3:])
+    if len(sys.argv) > 2 and sys.argv[1] == "git-wrapper":
+        return git_wrapper(sys.argv[2], sys.argv[3:])
     try:
         event = json.load(sys.stdin)
     except ValueError:
@@ -271,4 +313,4 @@ if __name__ == "__main__":
         sys.exit(main())
     except Exception as exc:  # never break a worker over the guard itself (but a push isn't let through)
         print(f"lean-agent push guard error: {exc}", file=sys.stderr)
-        sys.exit(1 if sys.argv[1:3] == ["git-hook", "pre-push"] else 0)
+        sys.exit(1 if sys.argv[1:3] == ["git-hook", "pre-push"] or sys.argv[1:2] == ["git-wrapper"] else 0)

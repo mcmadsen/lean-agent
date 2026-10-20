@@ -1059,7 +1059,7 @@ class CliTest(unittest.TestCase):
         self.cli("learn", self.proj)
         doc = self.cli("doctor", check=False, **env).stdout  # Claude Code's own list shows the broken copy
         self.assertIn("plugin MCP server plugin:obs:mcp: usable by workers", doc)
-        self.assertIn("still has the setup placeholder; workers use the installed copy", doc)
+        self.assertIn("(uses the installed copy; an unused synced copy isn't set up, which is fine)", doc)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "obs", "t", **env)
         self.assertEqual(self.calls()[-1]["mcp"]["servers"]["plugin:obs:mcp"]["url"], "https://mcp.example.eu/v1/mcp")
         self.assertIn("another copy isn't set up", self.cli("mcp", "list", **env).stdout)
@@ -1374,6 +1374,23 @@ class CliTest(unittest.TestCase):
             fh.write(f"#!{sys.executable}\nprint('Connected')\n")
         os.chmod(fake, 0o755)
         self.assertIn("context: also loaded on every call:", self.cli("up", LEAN_AGENT_CLAUDE=fake).stdout)
+
+    def test_up_switches_mcp_servers_off_for_the_home(self):
+        fake = os.path.join(self.tmp.name, "claude-ok")
+        with open(fake, "w") as fh:
+            fh.write(f"#!{sys.executable}\nprint('Connected')\n")
+        os.chmod(fake, 0o755)
+        out = self.cli("up", LEAN_AGENT_CLAUDE=fake).stdout
+        self.assertIn("MCP servers off for the orchestrator itself (workers still get them with --mcp): tickets", out)
+        home = self.cli("home").stdout.strip()
+        with open(os.path.join(self.env["CLAUDE_CONFIG_DIR"], ".claude.json")) as fh:
+            data = json.load(fh)
+        self.assertEqual(data["projects"][home]["disabledMcpServers"], ["tickets"])
+        self.assertIn("tickets", data["mcpServers"])  # the user's own config is untouched
+        self.assertNotIn("MCP servers off", self.cli("up", LEAN_AGENT_CLAUDE=fake).stdout)  # once
+        self.cli("learn", self.proj)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tickets", "t")
+        self.assertIn("tickets", self.calls()[-1]["mcp"]["servers"])
 
     def test_up_explains_a_folder_served_elsewhere(self):
         fake = os.path.join(self.tmp.name, "claude-busy")
@@ -2346,21 +2363,39 @@ class CliTest(unittest.TestCase):
             p = subprocess.run(["git", "-C", wt, "push", "origin", "HEAD:release/r-1"], capture_output=True, text=True,
                                env=env)
             self.assertNotEqual(p.returncode, 0)
-            self.assertIn("lean-agent push guard: refusing to update release/r-1", p.stderr)
+            self.assertRegex(p.stderr, r"lean-agent push guard: .*release/r-1")  # the guarded git, or else the hook
             self.assertIn("would update release/r-1", push_guard.check(f"cd {wt} && git push --force", "/"))
             self.assertIn("would update main", push_guard.check(f"git -C {wt} push origin +HEAD:refs/heads/main", "/"))
             self.assertIn("--all/--mirror", push_guard.check(f"git -C {wt} push --mirror origin", "/"))
             self.assertEqual(push_guard.check(f"git -C {wt} push origin HEAD:bugfix/b-1", "/"), "")
             self.assertEqual(remote("release/r-1"), before)
+            # --no-verify skips git's hooks, but not the guarded `git` first on the PATH
+            p = subprocess.run(["git", "-C", wt, "push", "--no-verify", "origin", "HEAD:release/r-1"],
+                               capture_output=True, text=True, env=env)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("lean-agent push guard", p.stderr)
+            p = subprocess.run(f"cd {wt} && git push -q --no-verify origin HEAD:refs/heads/bugfix/b-1", shell=True,
+                               capture_output=True, text=True, env=env)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(remote("release/r-1"), before)
+            # a second worker's uncommitted work: named, and --only-commits pushes what is committed
+            with open(os.path.join(wt, "api", "totals.py"), "a") as fh:
+                fh.write("# wip\n")
+            p = self.cli("worktree", "push", "proj", "origin/release/r-1", "--allow-send", "x", check=False)
+            self.assertIn("uncommitted changes in api/totals.py", p.stderr)
+            self.assertIn("--only-commits", p.stderr)
+            self.cli("guard", "add", "proj", "require-pr", "develop")
             # per-project list: rm and add; an explicit, logged override
             self.cli("guard", "rm", "proj", "push-deny", "master")
-            self.assertIn("never pushes to release/*, develop, main\n", self.cli("guard", "list", "proj").stdout)
+            self.assertIn("never pushes to release/*, develop, main: they change only through pull requests\n",
+                          self.cli("guard", "list", "proj").stdout)
             self.cli("guard", "add", "proj", "push-deny", "hotfix/*")
             self.assertIn("hotfix/*", self.cli("guard", "list", "proj").stdout)
             self.cli("learn", self.proj, "--name", "proj")  # re-learning (sync) keeps them
             self.assertIn("hotfix/*", self.cli("guard", "list", "proj").stdout)
-            out = self.cli("worktree", "push", "proj", "origin/release/r-1", "--allow-send", "push it",
+            out = self.cli("worktree", "push", "proj", "origin/release/r-1", "--allow-send", "push it", "--only-commits",
                            "--override-guard", "user asked for exactly this").stdout
+            self.assertIn("uncommitted change(s) stay in the worktree", out)
             self.assertIn("overridden: user asked for exactly this", out)
             self.assertNotEqual(remote("release/r-1"), before)
             with open(os.path.join(self.env["LEAN_AGENT_HOME"], "pushes.jsonl")) as fh:
