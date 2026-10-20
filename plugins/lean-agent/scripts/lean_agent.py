@@ -4688,8 +4688,10 @@ def orchestrator_settings(existing):
     cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     excludes = [os.path.join(cfg, "CLAUDE.md")]
     p = os.path.dirname(home("home"))
-    while True:  # CLAUDE.md files in folders above the home (e.g. ~/CLAUDE.md)
-        excludes += [os.path.join(p, "CLAUDE.md"), os.path.join(p, "CLAUDE.local.md")]
+    excludes.append(os.path.join(cfg, "rules", "**"))  # the user's own rules (~/.claude/rules) are for their sessions
+    while True:  # instruction files in folders above the home (e.g. ~/CLAUDE.md, ~/.claude/rules)
+        excludes += [os.path.join(p, "CLAUDE.md"), os.path.join(p, "CLAUDE.local.md"),
+                     os.path.join(p, ".claude", "CLAUDE.md"), os.path.join(p, ".claude", "rules", "**")]
         if os.path.dirname(p) == p:
             break
         p = os.path.dirname(p)
@@ -4742,6 +4744,9 @@ def prepare_home():
 
 
 def cmd_guide(a):
+    if a.cli:
+        print(cli_reference())
+        return
     print(render_guide(resolve_project(a.project)[0] if a.project else None))
 
 
@@ -4856,8 +4861,22 @@ def instruction_files(path):
     for d in reversed(chain):
         files += [os.path.join(d, "CLAUDE.md"), os.path.join(d, ".claude", "CLAUDE.md"),
                   os.path.join(d, "CLAUDE.local.md")]
-        files += sorted(glob.glob(os.path.join(d, ".claude", "rules", "*.md")))
+        files += sorted(glob.glob(os.path.join(d, ".claude", "rules", "**", "*.md"), recursive=True))
+    files += sorted(glob.glob(os.path.join(cfg, "rules", "**", "*.md"), recursive=True))  # the user's own rules
     return [f for f in dict.fromkeys(files) if os.path.isfile(f)]
+
+
+def home_instruction_files(h):
+    """[(path, ~tokens)] of the instruction files the orchestrator home really loads: those its settings'
+    claudeMdExcludes doesn't leave out."""
+    import fnmatch
+    excludes = load_json(os.path.join(h, ".claude", "settings.json"), {}).get("claudeMdExcludes") or []
+    out = []
+    for f in instruction_files(h):
+        if any(fnmatch.fnmatch(f, pat) or fnmatch.fnmatch(os.path.realpath(f), pat) for pat in excludes):
+            continue
+        out.append((f, est_tokens(read_text(f))))
+    return out
 
 
 def cmd_doctor(a):
@@ -4885,6 +4904,12 @@ def cmd_doctor(a):
     else:
         report(current.startswith(f"{GUIDE_MARK}{expected}"), "orchestrator guide is current",
                "lean-agent home  (or doctor --fix)")
+    loaded = home_instruction_files(h) if os.path.isdir(h) else []
+    if loaded:
+        total = sum(t for _, t in loaded)
+        report(None if len(loaded) > 1 else True, f"orchestrator loads ~{total:,} tokens of instructions on every call: "
+               + ", ".join(f"{os.path.basename(f)} ~{t:,}" for f, t in loaded),
+               "keep files other than lean-agent's guide out: lean-agent doctor --fix (refreshes the excludes)")
     report(is_trusted(h), "orchestrator home is trusted", "lean-agent trust")
 
     slug = default_project(path)
@@ -5110,6 +5135,10 @@ def orchestrator_context_lines(h):
     guide = os.path.join(h, "CLAUDE.md")
     lines = [f"context: the guide (CLAUDE.md) is ~{est_tokens(read_text(guide)):,} tokens"
              if os.path.exists(guide) else "context: no guide yet"]
+    others = [(f, t) for f, t in home_instruction_files(h) if f != guide]
+    if others:
+        lines.append(f"context: also loaded on every call: " + ", ".join(f"{f} ~{t:,}" for f, t in others)
+                     + " (keep them out: add them to claudeMdExcludes in " + os.path.join(h, ".claude", "settings.json") + ")")
     cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     found = []
     for d in dict.fromkeys([h, os.path.realpath(h)]):
@@ -6097,8 +6126,9 @@ def build_parser():
     s.add_argument("--grep", metavar="TEXT", help="only lines containing TEXT")
     s.set_defaults(fn=cmd_output)
 
-    s = sub.add_parser("guide", help="print the full orchestrator guide (rules, examples, CLI reference)")
+    s = sub.add_parser("guide", help="print the orchestrator guide (rules, examples); --cli: every command and flag")
     s.add_argument("project", nargs="?")
+    s.add_argument("--cli", action="store_true", help="the CLI reference instead")
     s.set_defaults(fn=cmd_guide)
 
     s = sub.add_parser("rules", help="write/refresh (or --off: remove) the lean-agent block in a repo")

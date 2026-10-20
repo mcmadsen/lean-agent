@@ -1320,6 +1320,32 @@ class CliTest(unittest.TestCase):
         self.assertIn("started at ~14,010 (system prompt, tools, guide), 3 calls, ~32,010 per call on average, "
                       "~52,010 at the end, peak ~52,010", out)
 
+    def test_orchestrator_loads_only_its_guide(self):
+        cfg = self.env["CLAUDE_CONFIG_DIR"]
+        os.makedirs(os.path.join(cfg, "rules", "team"))
+        with open(os.path.join(cfg, "rules", "team", "style.md"), "w") as fh:
+            fh.write("Personal coding rules. " * 200)
+        with open(os.path.join(self.tmp.name, "CLAUDE.md"), "w") as fh:  # ~/CLAUDE.md
+            fh.write("Spawn subagents. " * 200)
+        home = self.cli("home").stdout.strip()
+        guide = open(os.path.join(home, "CLAUDE.md")).read()
+        self.assertNotIn("usage: lean-agent", guide)  # the CLI reference isn't re-read on every call
+        self.assertIn("lean-agent guide --cli", guide)
+        self.assertIn("lean-agent run", self.cli("guide", "--cli").stdout)
+        doc = self.cli("doctor", home, check=False).stdout
+        self.assertRegex(doc, r"✓ orchestrator loads ~[\d,]+ tokens of instructions on every call: CLAUDE.md ~[\d,]+\n")
+        os.makedirs(os.path.join(home, ".claude", "rules"))
+        with open(os.path.join(home, ".claude", "rules", "extra.md"), "w") as fh:
+            fh.write("extra " * 100)
+        doc = self.cli("doctor", home, check=False).stdout
+        self.assertIn("! orchestrator loads", doc)
+        self.assertIn("extra.md ~", doc)
+        fake = os.path.join(self.tmp.name, "claude-ok")
+        with open(fake, "w") as fh:
+            fh.write(f"#!{sys.executable}\nprint('Connected')\n")
+        os.chmod(fake, 0o755)
+        self.assertIn("context: also loaded on every call:", self.cli("up", LEAN_AGENT_CLAUDE=fake).stdout)
+
     def test_up_explains_a_folder_served_elsewhere(self):
         fake = os.path.join(self.tmp.name, "claude-busy")
         with open(fake, "w") as fh:
@@ -1421,7 +1447,7 @@ class CliTest(unittest.TestCase):
             p = subprocess.run(["bash", "-e", "-c", code], capture_output=True, text=True, env=env,
                                cwd=self.tmp.name, stdin=subprocess.DEVNULL)
             self.assertEqual(p.returncode, 0, f"example failed:\n{code}\n--- stdout\n{p.stdout}\n--- stderr\n{p.stderr}")
-        self.assertIn("lean-agent run [--project PROJECT]", guide)  # generated reference
+        self.assertIn("lean-agent run [--project PROJECT]", self.cli("guide", "--cli").stdout)  # generated reference
         self.assertNotIn("{{", guide + block)
 
     def test_repo_block_is_idempotent_and_keeps_hand_written_text(self):

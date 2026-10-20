@@ -189,5 +189,6 @@ lean-agent sync
 lean-agent guide
 ```
 
-## CLI reference (generated from the CLI)
-{{CLI_REFERENCE}}
+## CLI reference
+Every command and flag: `lean-agent guide --cli` (or `lean-agent <command> --help`). It isn't in this file, so
+it isn't re-read on every call.
