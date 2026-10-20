@@ -309,6 +309,22 @@ class CliTest(unittest.TestCase):
                       "(renamed or removed)", fc["tests"])
         self.assertEqual(fc["params"], ["capturedAtMs = Date.now() (src/checks/runner.js:41)"])
         self.assertEqual([x.split(" ")[0] for x in fc["state"]], ["queuedScope", "hintShown"])  # `running` existed
+        self.assertEqual(fc["renamed"], [])  # the four flips changed what the title says: not pure renames
+        # a pure rename (title tweak, same body) needs no coverage entry
+        g = lambda *x: subprocess.run(["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t", *x],
+                                      check=True, capture_output=True)
+        g("checkout", "-qb", "rename", "main")
+        spec = os.path.join(root, "test", "runner.spec.js")
+        with open(spec) as fh:
+            text = fh.read()
+        with open(spec, "w") as fh:
+            fh.write(text.replace("shares an unscoped trigger with a running unscoped check",
+                                  "shares an unscoped trigger with the running unscoped check"))
+        g("commit", "-qam", "rename a test")
+        g("checkout", "-q", "main")
+        fr = L.change_focus(root, [L.git(root, "rev-parse", "main"), L.git(root, "rev-parse", "rename")])
+        self.assertEqual(fr["tests"], [])
+        self.assertEqual(len(fr["renamed"]), 1)
         self.cli("learn", root, "--name", "case")
         out = self.cli("review", "case", "--head", "fix-races", "--base", "main", "--second-opinion", "off",
                        check=False, FAKE_REVIEW=json.dumps({"verdict": "approve", "findings": [], "checks": [],
@@ -1390,7 +1406,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("api/totals.py", call["task"])
         self.assertEqual(self.cli("review", "proj", "--status", check=False).returncode, 1)
         approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
-        p = self.cli("review", "proj", "--resume", check=False, FAKE_REVIEW=approve)
+        p = self.cli("review", "proj", "--resume", "--same-session", check=False, FAKE_REVIEW=approve)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("Re-review the current diff", self.calls()[-1]["task"])
         self.assertIn("--resume", self.calls()[-1]["argv"])
@@ -1434,7 +1450,11 @@ class CliTest(unittest.TestCase):
         out = self.cli("review", "proj", "--resume", "--head", "feature", FAKE_REVIEW=approve).stdout
         self.assertIn("re-review of feature @ ", out)
         self.assertIn("recorded for feature @ ", out)
-        self.assertIn("feature is now at", self.calls()[-1]["task"])
+        self.assertIn("fresh re-review of what changed since", out)
+        call = self.calls()[-1]
+        self.assertNotIn("--resume", call["argv"])  # a fresh, small context instead of the whole old session
+        self.assertIn("since the last review", call["append"])
+        self.assertIn("Re-review after fixes", call["task"])
         self.assertEqual(self.cli("review", "proj", "--status", "--head", "feature").returncode, 0)
         p = self.cli("review", "proj", "--resume", "--head", "other", check=False)
         self.assertIn("no earlier review of other", p.stderr)
@@ -1502,7 +1522,7 @@ class CliTest(unittest.TestCase):
         second = next(c for c in calls if "search-only second opinion" in c["append"])
         main = next(c for c in calls if "Reuse and duplication. For every new file" in c["append"])
         follow = calls[-1]  # sent back once, same session, to finish the reuse pass
-        self.assertIn("Your reuse pass isn't complete", follow["task"])
+        self.assertIn("Your review isn't complete", follow["task"])
         self.assertIn("useOverlayOpen", follow["task"])
         self.assertIn("--resume", follow["argv"])
         self.assertIn("sending the reviewer back once", out)
@@ -1555,10 +1575,11 @@ class CliTest(unittest.TestCase):
         g("commit", "-qam", "fix")
         g("checkout", "-q", "main")
         self.cli("review", "proj", "--resume", "--head", "feature", check=False, FAKE_REVIEW=main_review)
-        task = self.calls()[-1]["task"]
-        self.assertIn("Re-check only (a) your earlier open findings", task)
-        self.assertIn("declined: [scope] src/dialogs/overlayStore.ts", task)
-        self.assertIn("deferOverlay (src/dialogs/overlayStore.ts)", task)
+        rr = next(c for c in reversed(self.calls()) if "Re-review after fixes" in c["task"])
+        self.assertIn("The earlier review's open items", rr["task"])
+        self.assertIn("declined: [scope] src/dialogs/overlayStore.ts", rr["task"])
+        self.assertIn("deferOverlay (src/dialogs/overlayStore.ts)", rr["append"])
+        self.assertIn("deferOverlay", self.calls()[-1]["task"])  # then sent back once for its reuse entry
 
     def test_review_learn_builds_checklist_cards(self):
         self.git_project()

@@ -460,6 +460,38 @@ def mcp_call_sequence(workdir, session_id, since_utc):
     return seq
 
 
+USAGE_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+
+
+def transcript_usage(workdir, session_id, since_utc):
+    """Token usage of a worker's API calls after `since_utc`, summed from its transcript (one count per message
+    id); {} when the transcript isn't there."""
+    path = session_id and transcript_for(workdir, session_id)
+    if not path:
+        return {}
+    totals, seen = dict.fromkeys(USAGE_FIELDS, 0), set()
+    try:
+        with open(path) as fh:
+            for line in fh:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                msg = e.get("message") if isinstance(e, dict) else None
+                if e.get("type") != "assistant" or not isinstance(msg, dict) or (e.get("timestamp") or "") < since_utc:
+                    continue
+                mid = msg.get("id") or e.get("uuid")
+                if mid in seen or not isinstance(msg.get("usage"), dict):
+                    continue
+                seen.add(mid)
+                for k in USAGE_FIELDS:
+                    v = msg["usage"].get(k) or 0
+                    totals[k] += int(v) if isinstance(v, (int, float)) else 0
+    except OSError:
+        return {}
+    return totals if any(totals.values()) else {}
+
+
 def count_mcp_calls(workdir, session_id, since_utc):
     """{tool: calls} for the MCP tools a worker called after `since_utc`."""
     counts = {}
