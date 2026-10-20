@@ -1003,6 +1003,11 @@ def server_tools(name, cfg, refresh=False, session=True):
             return None
         entry = session_probe_server(name, cfg)
     entry.update(probed=now_iso(), type=lean_mcp.server_type(cfg), key=config_key(cfg))
+    if entry.get("status") != "connected":  # say why, not only that it failed
+        reasons = lean_mcp.config_problems(cfg)
+        if not reasons and lean_mcp.server_type(cfg) in ("http", "sse") and os.environ.get("LEAN_AGENT_HTTP_CHECK") != "0":
+            reasons = [r for r in [lean_mcp.http_reason(cfg)] if r]
+        entry["error"] = "; ".join(reasons)
     cache = mcp_cache()
     cache[name] = entry
     save_json(home("mcp-tools.json"), cache)
@@ -1310,6 +1315,9 @@ def cmd_run(a):
 
     mcp_specs = prev.get("mcp") if prev else canonical_specs(project, a.mcp or [])
     mcp_servers, mcp_allowed, mcp_disallowed = resolve_mcp(project, mcp_specs) if mcp_specs else ({}, [], [])
+    for sname, scfg in mcp_servers.items():
+        for problem in lean_mcp.config_problems(scfg):
+            print(f"lean-agent: warning: {sname}: {problem} (lean-agent doctor says more)", file=sys.stderr)
     mcp_path = os.path.join(workdir, "mcp.json")
     chrome_allowed, chrome_disallowed, chrome_profile = resolve_chrome(chrome_spec, project) if chrome_spec else ([], [], None)
     if mcp_servers or chrome_spec:
@@ -3619,20 +3627,35 @@ def cmd_chrome(a):
 def cmd_mcp(a):
     if a.action == "env":
         store = load_json(home("mcp-env.json"), {})
-        if a.server and (a.command or a.rm):
-            if a.rm:
-                store.pop(a.server, None)
+        value = a.preset_name  # `mcp env VAR VALUE`
+        if a.server and a.rm:
+            if store.pop(a.server, None) is None:
+                print(f"{a.server}: not set")
             else:
-                store[a.server] = {"command": a.command}
+                print(f"{a.server}: removed")
             save_json(home("mcp-env.json"), store)
-        if a.server and a.command:
-            ok = lean_mcp.env_from_command(a.server) is not None
-            print(f"{a.server}: " + ("the command works; workers get the value when they start" if ok else
-                                      "the command printed nothing or failed; fix it and set it again"))
+        elif a.server and (a.command or value is not None):
+            store[a.server] = {"command": a.command} if a.command else {"value": value}
+            save_json(home("mcp-env.json"), store)
+            os.chmod(home("mcp-env.json"), 0o600)
+            lean_mcp._ENV_CACHE.pop(a.server, None)
+            if a.command:
+                ok = lean_mcp.env_from_command(a.server) is not None
+                print(f"{a.server}: " + ("the command works; workers get the value when they start" if ok else
+                                          "the command printed nothing or failed; fix it and set it again"))
+            else:
+                print(f"{a.server}: set (stored in {home('mcp-env.json')}, readable only by you; for a secret "
+                      "prefer --command so nothing is stored)")
+            used = [n for n, info in lean_mcp.discover().items() if "${" + a.server in json.dumps(
+                info.get("raw") or info["config"])]
+            print(f"{a.server}: used by " + (", ".join(used) if used else "no MCP server lean-agent knows of"))
+        elif a.server and a.server not in store:
+            print(f"{a.server}: not set. Set it: lean-agent mcp env {a.server} <value>  (or --command \"...\")")
         for k, v in sorted(store.items()):
-            print(f"{k:<32} from: {v['command']}")
+            print(f"{k:<32} " + (f"from: {v['command']}" if v.get("command") else "value set"))
         if not store:
-            print("No variables. For a plugin config that uses ${VAR}: lean-agent mcp env VAR --command \"...\"")
+            print("No variables. For a plugin config that uses ${VAR} or ${VAR:-default}: "
+                  "lean-agent mcp env VAR <value>, or --command \"<prints it>\"")
         return
     project = resolve_project(a.project)[1] if getattr(a, "project", None) else None
     servers = lean_mcp.discover(project)
@@ -3655,8 +3678,13 @@ def cmd_mcp(a):
             if aliases.get(name):
                 notes.append(f"--mcp {aliases[name]}:...")
             st = cache.get(name, {}).get("status")
+            why = cache.get(name, {}).get("error") or "; ".join(lean_mcp.config_problems(info["config"]))
             if st and st != "connected":
-                notes.append(f"{st} for workers")
+                notes.append(f"{st} for workers" + (f": {why}" if why else ""))
+            elif why:
+                notes.append(why)
+            if info.get("unset_copies") and info["path"] not in info["unset_copies"]:
+                notes.append(f"uses {info.get('copy', 'the')} copy; another copy isn't set up")
             print(f"{name:<{width}}{lean_mcp.server_type(info['config']):<7}{info['source']:<9}{n:>6}{tok:>8}"
                   + (f"  ({'; '.join(notes)})" if notes else ""))
         st = chrome_state()
@@ -3751,6 +3779,16 @@ def align_with_claude(name, info):
 def diagnose_plugin_server(name, info, claude_view, servers):
     """(ok, message, fix) for one plugin MCP server: can a worker use it, and if not, why."""
     label = f"plugin MCP server {name}"
+    copies_note = ""
+    if info.get("unset_copies") and info["path"] not in info["unset_copies"]:
+        copies_note = (f" [the plugin copy at {', '.join(info['unset_copies'])} still has the setup placeholder; "
+                       f"workers use the {info.get('copy', '')} copy at {info['path']}, which is set up]")
+    elif info.get("copies_differ"):
+        copies_note = f" [other copies differ: {', '.join(info.get('other_copies') or [])}; workers use {info['path']}]"
+    problems = lean_mcp.config_problems(info["config"])
+    if lean_mcp.placeholder_host(info["config"]):
+        return (False, f"{label}: {problems[0]} (every copy: {', '.join([info['path']] + (info.get('other_copies') or []))})",
+                "run the plugin's setup once in Claude Code (its setup skill or command), then: lean-agent doctor")
     missing = info.get("missing_options") or []
     env_missing = [m[4:] for m in missing if m.startswith("env:")]
     opt_missing = [m for m in missing if not m.startswith("env:")]
@@ -3774,7 +3812,16 @@ def diagnose_plugin_server(name, info, claude_view, servers):
     worker = c.get("status") or "unknown"
     alias = lean_mcp.display_names(servers).get(name)
     if worker == "connected" and c.get("tools"):
-        return True, f"{label}: usable by workers ({len(c['tools'])} tools; --mcp {alias or name}:<preset|tools>)", None
+        return (True, f"{label}: usable by workers ({len(c['tools'])} tools; --mcp {alias or name}:<preset|tools>)"
+                + copies_note, None)
+    if problems:
+        why = "; ".join(problems)
+        hint = ("set the variable for workers: lean-agent mcp env <VAR> <value> (or --command \"<prints it>\")"
+                if any("isn't set" in p or "no token" in p for p in problems) else
+                "check the token's value (no newline, no extra prefix); `lean-agent mcp env <VAR> --command ...` "
+                "sets it for workers" if any("line break" in p for p in problems) or "uthorization" in why else
+                f"see `claude mcp get {name}`; then: lean-agent mcp tools {name}")
+        return False, f"{label}: {worker} as a worker: {why}{copies_note}", hint
     mine = lean_mcp.server_target(info["config"])
     if claude_view and name not in claude_view:
         return (False, f"{label}: {worker} as a worker, and Claude Code doesn't list it (`claude mcp list`)",
@@ -3802,7 +3849,8 @@ def diagnose_plugin_server(name, info, claude_view, servers):
                 "the config (sign in once in Claude Code: /mcp)", "re-run `lean-agent mcp tools " + name + "`; if it stays, "
                 "add the server with `claude mcp add` and sign in once for workers")
     empty = [h for h, v in (info["config"].get("headers") or {}).items() if v == ""]
-    return (False, f"{label}: {worker} as a worker" + (f" (empty headers: {', '.join(empty)})" if empty else ""),
+    return (False, f"{label}: {worker} as a worker" + (f": {c['error']}" if c.get("error") else "")
+            + (f" (empty headers: {', '.join(empty)})" if empty else "") + copies_note,
             f"see why: lean-agent mcp tools {name} --measure, and lean-agent logs")
 
 
@@ -4647,7 +4695,11 @@ def orchestrator_settings(existing):
         p = os.path.dirname(p)
     data["claudeMdExcludes"] = excludes
     user = load_json(os.path.join(cfg, "settings.json"), {})
-    plugins = {k: False for k, v in (user.get("enabledPlugins") or {}).items() if v and k != PLUGIN_ID}
+    # the orchestrator carries no plugin tools (workers get plugin servers via --mcp): off also for synced
+    # plugins, which are on by default and so aren't in the user's enabledPlugins
+    on = [k for k, v in (user.get("enabledPlugins") or {}).items() if v]
+    on += [pid for pid, _ in lean_mcp.synced_plugins() if user.get("enabledPlugins", {}).get(pid, True)]
+    plugins = {k: False for k in on if k != PLUGIN_ID and not k.startswith(PLUGIN_ID.split("@")[0] + "@")}
     data["enabledPlugins"] = dict(data.get("enabledPlugins") or {}, **plugins)
     return data
 
