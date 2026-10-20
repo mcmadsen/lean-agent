@@ -48,7 +48,10 @@ results, and report briefly.
    extra cards. Core cards are always sent.
 3. Pick a model, required with `--why`. Default to `sonnet`. Use `haiku` for read-only search,
    summaries, and mechanical edits with exact instructions. Use `opus` only for hard design or
-   debugging, or after sonnet failed. `lean-agent stats` shows how each model has done.
+   debugging, or after sonnet failed. `lean-agent stats` shows how each model has done. Haiku first for
+   mechanical jobs (posting a prepared reply, state moves, metadata or comment reads): when unsure, pass
+   `--escalate haiku,sonnet` instead of `-m`, which re-runs on sonnet only if haiku fails. `suggest` shows how
+   similar tasks went on each model.
 4. Pick tools and limits:
    - `--read-only`: Read/Glob/Grep plus read-only git, written as
      `git -C <repo> show|log|grep|diff|blame|status|ls-files|ls-tree|cat-file|rev-parse|branch|fetch`.
@@ -72,10 +75,14 @@ results, and report briefly.
      with `--allow-send "<what the user approved>"`. If new worktrees need an install or build, save it once:
      `lean-agent worktree setup <project> --run "<command>"`.
    - `--max-usd`, `--max-turns`: size them to the task.
-5. Write a self-contained task (workers can't see this conversation): the goal, the files or
-   symbols you know about, and how to check it's done. Put anything longer than a line in a file
-   and pass `--task-file <file>`, or pipe it in with `-`.
-6. Read the result. If it's partial, resume rather than start over. Report to the user in a few lines.
+5. Write a short, self-contained task (workers can't see this conversation): the goal, the files or
+   symbols you know about, and how to check it's done, in a few lines. Long background belongs in a card
+   (`card add`) or a file the worker reads, not in your task text: what you write stays in your context.
+   Pass a task file with `--task-file <file>`, or pipe it in with `-`.
+6. Read the result. Workers answer in at most 25 lines and put the rest in a details file (`details: ...`);
+   read one part with `lean-agent runs --show <id> --details --grep TEXT`, or ask a haiku worker about it.
+   If it's partial, resume rather than start over. Report to the user in a few lines.
+   A run stopped by `--max-reads` re-read too much context: split the task into smaller workers.
 
 ## Examples (exact syntax; `{{P}}` is the project)
 ```sh
@@ -157,8 +164,17 @@ lean-agent card unarchive {{P}} checkout-notes
   share, and add `--yes` only after they agree.
 - When the user asks what lean-agent saves, run `lean-agent savings` (estimates; `--measure` once per project
   makes them closer).
-- Your context compacts at about 70K tokens. After a compaction you get a short state digest; for a run's full
-  answer use `lean-agent runs --show <id>` instead of asking the user again.
+- Stay small: everything in your context is re-read on every later call. Never `cat`, `less` or long-`tail` a
+  lean-agent run file (the hook refuses it) and never paste worker output into a reply. lean-agent commands
+  print one line per item here; `lean-agent output <command> --grep TEXT` shows one part of what was left
+  out, and `--full` prints a command in full only when you need all of it.
+- Your context compacts at about 70K tokens. After a compaction, and in a new session after recent work, you
+  get the hand-off note (open items, standing rules, recent runs, items touched); for a run's full answer use
+  `lean-agent runs --show <id>` instead of asking the user again. Keep open items and pending decisions in it:
+  `lean-agent handoff --note "..."` (close with `--done N`). When lean-agent says your context is large, add
+  the open items, then ask the user to send /compact, or to start a fresh session for the next topic.
+- Where tokens went: `lean-agent stats --top 10` (biggest runs) and `lean-agent budget --by-run` (this session:
+  your share, the context trend, its biggest runs).
 - When something seems off, run `lean-agent doctor`, and `lean-agent logs` for recent errors
   (`logs debug` for everything). A squeezed output's first line names the full output and an errors-only
   copy: read the errors file before the full one.

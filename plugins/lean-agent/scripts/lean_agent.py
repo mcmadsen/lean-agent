@@ -12,6 +12,7 @@ import contextlib
 import datetime
 import glob
 import hashlib
+import io
 import json
 import os
 import re
@@ -74,7 +75,7 @@ return status "needs-input" with your question and the candidates you found.
 
 {send_rule}
 {browser_rule}
-{role_rule}Start your reply with a one or two sentence summary of the outcome. Then give the result
+{role_rule}{answer_rule}Start your reply with a one or two sentence summary of the outcome. Then give the result
 (what you did, files changed, anything unresolved), then one final line exactly like this:
 "used" lists only cards whose content changed what you did, not cards you merely received.
 LEAN-FEEDBACK {{"status": "done|partial|failed|needs-input|awaiting-confirmation", "used": ["card-id"], "unneeded": ["card-id"], "missing": "context you had to discover that should have been given up front, or empty", "remember": []}}
@@ -83,6 +84,16 @@ LEAN-FEEDBACK {{"status": "done|partial|failed|needs-input|awaiting-confirmation
 only for a durable fact that can't be derived from the code or git history, such as a
 user correction, a decision, or where external info lives:
 {{"type": "feedback|project|reference|user", "text": "one or two sentences"}}
+"""
+
+DETAILS_MARK = "=== DETAILS ==="
+ANSWER_RULE = """\
+Your reply goes into the orchestrator's context, which is re-read on every later call, so keep the
+answer short: the summary, then at most {n} lines with what it needs for the next step (the result,
+the ids, paths and numbers it will use, anything unresolved or risky). Put everything else (full
+tables, long lists, evidence, logs, per-item detail) after a line that is exactly `{mark}`:
+lean-agent saves that part to a file and shows only its path. The LEAN-* lines still come last.
+
 """
 
 SHELL_RULE = "Run shell commands as `cd {project} && <command>`."
@@ -727,7 +738,7 @@ def suggest(slug, task, max_tokens, ttype=None, explain=False, strict=False, lim
         for w in words(c["title"]) | words(c["text"]):
             df[w] = df.get(w, 0) + 1
     idf = {w: math.log((n + 1) / (df.get(w, 0) + 1)) for w in tw}
-    picked = [c for c in cards if is_core(c, ttype)]
+    picked = [c for c in cards if is_core(c, ttype) and not (strict and often_unneeded(c, ttype))]
     reasons = {c["id"]: f"core for {ttype}" if ttype in (c.get("core_types") or []) else "core" for c in picked}
     budget = max_tokens - sum(c["tokens"] for c in picked)
     scored, closest = [], None
@@ -776,10 +787,49 @@ def suggest(slug, task, max_tokens, ttype=None, explain=False, strict=False, lim
     return picked
 
 
-def recommend_model(ttype):
-    """(model, why) for a task type: cheapest model that has done this type well, else a default."""
+def often_unneeded(card, ttype):
+    """A core card that workers of this task type called unneeded 3+ times and never used (and that isn't
+    protected): `--cards auto` leaves it out."""
+    bt = (card.get("by_type") or {}).get(ttype) or {}
+    return not card.get("protected") and bt.get("unneeded", 0) >= 3 and not bt.get("used")
+
+
+def similar_runs(task, runs=None):
+    """{model: [runs]} of earlier first runs whose task shares most of its distinctive words with this one."""
+    tw = words(task)
+    out = {}
+    if len(tw) < 2:
+        return out
+    for r in runs if runs is not None else ledger():
+        if r.get("resumed") or r.get("role"):
+            continue
+        rw = words(r.get("task") or "")
+        if rw and len(tw & rw) / len(tw | rw) >= 0.35:
+            out.setdefault(model_family(r["model"]), []).append(r)
+    return out
+
+
+def model_family(model):
+    m = (model or "").lower()
+    return next((f for f in ("haiku", "sonnet", "opus", "fable") if f in m), m)
+
+
+def done_ok(r):
+    return r.get("status") in ("done", "awaiting-confirmation", "needs-input")
+
+
+def recommend_model(ttype, task=None):
+    """(model, why) for a task: haiku first when similar tasks went well on it; else the cheapest model that has
+    done this task type well; else a default."""
     runs = [r for r in ledger() if not r.get("resumed")]
     best = None
+    for model, mine in sorted(similar_runs(task, runs).items() if task else [],
+                              key=lambda kv: ("haiku", "sonnet", "opus", "fable").index(kv[0])
+                              if kv[0] in ("haiku", "sonnet", "opus", "fable") else 9):
+        ok = sum(map(done_ok, mine))
+        if len(mine) >= 3 and ok / len(mine) >= 0.8:
+            avg = sum(r.get("units", 0) for r in mine) // len(mine)
+            return model, f"similar tasks ran on {model}: {ok}/{len(mine)} done, ~{avg:,} sonnet-eq avg"
     for model in ("haiku", "sonnet", "opus"):
         mine = [r for r in runs if r["model"] == model and
                 (r.get("type") or ("read" if r.get("read_only") else "change")) == ttype]
@@ -805,9 +855,16 @@ def cmd_suggest(a):
     ttype = task_type(a.task)
     picked, reasons, closest = suggest(slug, a.task, a.max_tokens, ttype, explain=True, strict=True,
                                        limit=a.max_cards)
-    model, why = recommend_model(ttype)
+    model, why = recommend_model(ttype, a.task)
     flags = f"-m {model}" + (" --read-only" if ttype == "read" else "") + (" --chrome" if ttype == "browser" else "")
+    if model != "haiku" and ttype != "browser":
+        flags += f" --escalate haiku,{model}"  # try haiku first; the next model only if it fails
     print(f"task type: {ttype} · recommended: {flags}  ({why})")
+    sim = similar_runs(a.task)
+    if sim:
+        print("similar tasks before: " + " · ".join(
+            f"{m} {sum(map(done_ok, rs))}/{len(rs)} done (~{sum(r.get('units', 0) for r in rs) // len(rs):,} sonnet-eq)"
+            for m, rs in sorted(sim.items())))
     tw = words(a.task)
     if tw & JUDGE_WORDS and tw & GATHER_WORDS:
         print("split: 1) -m haiku --read-only gathers the facts; 2) -m sonnet judges from those facts only "
@@ -912,8 +969,9 @@ def repo_identity_text(slug, path):
     return text
 
 
-def build_append(project, cards, read_only=False, allow_send=None, chrome=False, role_rule=""):
+def build_append(project, cards, read_only=False, allow_send=None, chrome=False, role_rule="", answer_lines=0):
     parts = [WORKER_PROTOCOL.format(
+        answer_rule=ANSWER_RULE.format(n=answer_lines, mark=DETAILS_MARK) if answer_lines else "",
         project=project, sq=os.path.join(PLUGIN_ROOT, "bin", "lean-sq"),
         shell_rule=(READONLY_SHELL_RULE if read_only else SHELL_RULE).format(project=project),
         send_rule=ALLOW_SEND_RULE.format(approved=allow_send) if allow_send else SEND_RULE,
@@ -1134,6 +1192,8 @@ def duplicate_launch_guard(a, model, task):
 
 
 def cmd_run(a):
+    if getattr(a, "escalate", None) and not a.resume:
+        return run_escalating(a)
     prev = None
     if a.resume:
         prev = next((r for r in reversed(ledger()) if r["id"] == a.resume), None)
@@ -1162,6 +1222,15 @@ def cmd_run(a):
     if not prev and not getattr(a, "role", None):
         expensive_run_check(a, model, task)
 
+    # a short answer for the orchestrator, details in a file (not for reviewers etc.: their output is parsed)
+    if getattr(a, "role", None) or (prev or {}).get("role"):
+        answer_lines = 0
+    elif getattr(a, "answer_lines", None) is not None:
+        answer_lines = max(0, a.answer_lines)
+    elif prev:
+        answer_lines = prev.get("answer_lines") or 0
+    else:
+        answer_lines = env_num("LEAN_AGENT_ANSWER_LINES", 0)
     wt = None
     if prev:
         slug, project = prev["project"], prev["project_path"]
@@ -1174,7 +1243,7 @@ def cmd_run(a):
         lib = {c["id"]: c for c in load_cards(slug)}
         with open(os.path.join(workdir, "append.md"), "w") as fh:  # same context, current send/browser rules
             fh.write(build_append(project, [lib[c] for c in prev.get("cards", []) if c in lib], read_only,
-                                  a.allow_send, bool(chrome_spec), role_rule))
+                                  a.allow_send, bool(chrome_spec), role_rule, answer_lines))
     else:
         slug, project = resolve_project(a.project)
         sync_memory(slug)
@@ -1236,7 +1305,7 @@ def cmd_run(a):
             with open(os.path.join(workdir, "role.md"), "w") as fh:
                 fh.write(role_rule)
         with open(os.path.join(workdir, "append.md"), "w") as fh:
-            fh.write(build_append(project, cards, read_only, a.allow_send, bool(chrome_spec), role_rule))
+            fh.write(build_append(project, cards, read_only, a.allow_send, bool(chrome_spec), role_rule, answer_lines))
         tools = a.tools or (READONLY_TOOLS + ",Bash" if read_only else WORKER_TOOLS)
 
     mcp_specs = prev.get("mcp") if prev else canonical_specs(project, a.mcp or [])
@@ -1298,7 +1367,7 @@ def cmd_run(a):
 
     env = dict(os.environ)
     env.pop("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", None)  # never pull in the project's CLAUDE.md
-    env.setdefault("BASH_MAX_OUTPUT_LENGTH", os.environ.get("LEAN_AGENT_WORKER_BASH_OUTPUT") or "12000")
+    env["BASH_MAX_OUTPUT_LENGTH"] = os.environ.get("LEAN_AGENT_WORKER_BASH_OUTPUT") or "8000"  # not the orchestrator's
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"  # memory comes from lean-agent cards instead
     if getattr(a, "fields", None):
         env["LEAN_AGENT_MCP_FIELDS"] = a.fields
@@ -1315,15 +1384,12 @@ def cmd_run(a):
     wt_lock = worktree_lock(slug, wt_name, read_only) if wt_name else contextlib.nullcontext()
     started = datetime.datetime.now()
     started_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    max_reads = 0 if role else (a.max_reads if getattr(a, "max_reads", None) is not None
+                                else env_num("LEAN_AGENT_RUN_MAX_READS", 6000000))
     try:
         with wt_lock:
-            proc = subprocess.run(cmd, input=today_line() + "\n\n" + task, capture_output=True, text=True,
-                                  cwd=workdir, env=env,
-                                  timeout=env_num("LEAN_AGENT_RUN_TIMEOUT", 1800))
-        raw, err = proc.stdout, proc.stderr
-    except subprocess.TimeoutExpired as exc:
-        raw, err = exc.stdout or "", "timed out"
-        raw = raw.decode() if isinstance(raw, bytes) else raw
+            raw, err, reads = stream_worker(cmd, today_line() + "\n\n" + task, workdir, env,
+                                            env_num("LEAN_AGENT_RUN_TIMEOUT", 1800), max_reads)
     except FileNotFoundError:
         die(f"'{claude}' not found on PATH")
     finally:
@@ -1363,6 +1429,12 @@ def cmd_run(a):
     elif role == "tracker-discover":
         summary, found = parse_marker(summary, "LEAN-TRACKER")
         save_json(os.path.join(workdir, "tracker.json"), found or {})
+    details_path, n_details, answer_cut = None, 0, False
+    if answer_lines and summary:
+        summary, details_path, n_details, answer_cut = split_answer(summary, answer_lines, workdir)
+    if reads.get("stopped") and not out.get("type"):  # stopped by lean-agent: no result event, so build one
+        out = {"subtype": "error_max_context_reads", "session_id": reads.get("session_id"),
+               "num_turns": reads["turns"], "usage": reads["usage"]}
     subtype = out.get("subtype") or "error"
     if subtype.startswith("error_max"):
         status = "stopped:" + subtype[len("error_"):]
@@ -1426,8 +1498,10 @@ def cmd_run(a):
         "recipe_step": (getattr(a, "recipe", None) or (None, None))[1],
         "estimate_usd": (getattr(a, "estimate", None) or (None, None))[0],
         "estimate_kind": (getattr(a, "estimate", None) or (None, None))[1],
+        "answer_lines": answer_lines, "details": details_path,
     }
     append_jsonl(home("ledger.jsonl"), entry)
+    LAST_RUN[:] = [entry]
     if launch_key:
         try:
             os.remove(home("running", launch_key + ".json"))
@@ -1445,7 +1519,7 @@ def cmd_run(a):
     cost = f"${entry['cost_usd']:.2f}" if isinstance(entry["cost_usd"], (int, float)) else "$?"
     print(f"run {run_id} · {model} · {status} · {entry['turns'] or '?'} turns · {seconds}s · "
           f"{entry['units']:,} sonnet-eq tok · {cost}")
-    print(f"  tokens: input {u.get('input_tokens', 0):,} · cache write {u.get('cache_creation_input_tokens', 0):,}"
+    detail(f"  tokens: input {u.get('input_tokens', 0):,} · cache write {u.get('cache_creation_input_tokens', 0):,}"
           f" · cache read {u.get('cache_read_input_tokens', 0):,} · output {u.get('output_tokens', 0):,}")
     ctx = u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0) + u.get("cache_read_input_tokens", 0)
     if ctx and entry["turns"]:
@@ -1454,10 +1528,10 @@ def cmd_run(a):
         ext = tools_overhead(mcp_specs, mcp_allowed, chrome_spec)
         n_off, n_used = sum(len(v) for v in offered.values()), len(set(mcp_seq))
         tools_note = f" ({n_off} offered, {n_used} used)" if offered else ""
-        print(f"  context per turn ~{per_turn:,}: lean-agent protocol + cards ~{own:,} · MCP/browser tools ~{ext:,}"
+        detail(f"  context per turn ~{per_turn:,}: lean-agent protocol + cards ~{own:,} · MCP/browser tools ~{ext:,}"
               f"{tools_note} · Claude Code system prompt, built-in tools, conversation ~{max(0, per_turn - own - ext):,}")
     for line in narrowing_hints(offered, mcp_seq):
-        print("  " + line)
+        detail("  " + line)
     sv = run_savings(entry)
     if sv["context"] or sv["model"]:
         base, measured = baseline_ctx(slug)
@@ -1465,20 +1539,35 @@ def cmd_run(a):
         model_part = (f"model choice saved ~{sv['model']:,}" if sv["model"] >= 0 else
                       f"{model} costs ~{-sv['model']:,} more than Sonnet would")
         head = f"saved ~{total:,} sonnet-eq" if total >= 0 else f"extra cost vs Sonnet ~{-total:,} sonnet-eq"
-        print(f"  {head} (estimate): context saved ~{sv['context']:,} vs a normal session's ~{base:,}/turn"
+        detail(f"  {head} (estimate): context saved ~{sv['context']:,} vs a normal session's ~{base:,}/turn"
               f"{'' if measured else ' (assumed)'} · {model_part}")
     line, low = budget_line()
     if line:
         print("  " + line)
     limit = env_num("LEAN_AGENT_RESULT_CHARS", 12000)
-    if summary:
+    if summary and role in ("reviewer", "reuse-check") and BRIEF:
+        detail(summary)  # the review's findings follow; the reviewer's prose is in `runs --show`
+    elif summary:
         print(summary if len(summary) <= limit else summary[:limit] + f"\n… [{len(summary) - limit} chars more in {workdir}/result.json]")
+    if details_path:
+        print(f"details: {n_details} more lines in {details_path}"
+              + (f" (the answer ran past {answer_lines} lines; the rest starts the file)" if answer_cut else "")
+              + f" · read one part: lean-agent runs --show {run_id} --details --grep TEXT")
     elif status == "error":
         print((err or raw)[-1500:].strip())
     if fb:
-        print(f"feedback: used={sorted(used)} unneeded={sorted(unneeded)}" + (f" missing={missing_note!r}" if missing_note else ""))
+        detail(f"feedback: used={sorted(used)} unneeded={sorted(unneeded)}" + (f" missing={missing_note!r}" if missing_note else ""))
     if remembered:
         print(f"remembered: {', '.join(remembered)}")
+    turns_n = entry.get("turns") or 0
+    if status == "stopped:max_context_reads":
+        print(f"STOPPED by lean-agent: the worker re-read {reads['ctx']:,} tokens of context over {turns_n} turns "
+              f"(~{reads['ctx'] // max(1, turns_n):,} per turn), past --max-reads {max_reads:,}. Split the task into "
+              "smaller workers (one per file, item or question; -m haiku to gather, one more to combine), or let it "
+              f"go on: lean-agent run --resume {run_id} --max-reads {max_reads * 2} \"continue\"")
+    elif status in ("done", "partial") and turns_n >= 40 and ctx // max(1, turns_n) >= 60000:
+        print(f"  heavy run: {turns_n} turns at ~{ctx // turns_n:,} context each. Next time split it into "
+              "smaller parallel workers and one that combines their answers.")
     if status == "needs-input":
         print("ACTION NEEDED: the worker needs an answer (see above). Ask the user, then: "
               f"lean-agent run --resume {run_id} \"<answer>\"")
@@ -1487,7 +1576,7 @@ def cmd_run(a):
               f"Only if they approve: lean-agent run --resume {run_id} --allow-send \"<what was approved>\" \"Do it now\"")
     if mcp_specs or chrome_spec:
         calls = entry["mcp_calls"]
-        print("mcp: " + (", ".join(f"{k} x{v}" for k, v in sorted(calls.items())) or "no MCP tool calls"))
+        detail("mcp: " + (", ".join(f"{k} x{v}" for k, v in sorted(calls.items())) or "no MCP tool calls"))
     print(f"resume: lean-agent run --resume {run_id} \"<follow-up>\"")
     if role == "reviewer" and (review_meta or {}).get("multi"):
         print(f"review pass {review_meta['multi']}: {len((review or {}).get('findings') or [])} findings "
@@ -1500,6 +1589,107 @@ def cmd_run(a):
         print(f"second opinion: {n} reuse candidates passed to the reviewer")
         return 0
     return 0 if status in ("done", "partial", "needs-input", "awaiting-confirmation") else 1
+
+
+def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0):
+    """Run a worker and read its stream-json as it comes, so a run that keeps re-reading a large context
+    can be stopped (after `max_reads` context tokens summed over its calls; 0 = never) and resumed later.
+    Returns (stdout, stderr, {"ctx", "turns", "usage", "session_id", "stopped"})."""
+    import tempfile
+    import threading
+    reads = {"ctx": 0, "turns": 0, "usage": {k: 0 for k in usage.FIELDS}, "session_id": None, "stopped": False}
+    seen, lines = set(), []
+    with tempfile.TemporaryFile("w+") as errf:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True,
+                                cwd=workdir, env=env)
+        timer = threading.Timer(timeout, proc.kill)
+        timer.start()
+        try:
+            try:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+            for line in proc.stdout:
+                lines.append(line)
+                if '"session_id"' in line or '"assistant"' in line:
+                    try:
+                        ev = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(ev, dict):
+                        continue
+                    reads["session_id"] = reads["session_id"] or ev.get("session_id")
+                    msg = ev.get("message") if ev.get("type") == "assistant" else None
+                    if not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict) or msg.get("id") in seen:
+                        continue
+                    seen.add(msg.get("id"))
+                    u = msg["usage"]
+                    reads["turns"] += 1
+                    for k in usage.FIELDS:
+                        reads["usage"][k] += int(u.get(k) or 0)
+                    reads["ctx"] += sum(int(u.get(k) or 0) for k in
+                                        ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+                    if max_reads and reads["ctx"] > max_reads:
+                        reads["stopped"] = True
+                        proc.terminate()
+                        break
+            try:
+                rest, _ = proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                rest, _ = proc.communicate()
+            lines.append(rest or "")
+        finally:
+            timer.cancel()
+        errf.seek(0)
+        err = errf.read()
+    if proc.returncode == -9 and not reads["stopped"]:  # killed by the timer
+        err = (err + "\ntimed out").strip()
+    return "".join(lines), err, reads
+
+
+LAST_RUN = []  # the entry of the run this process made last
+
+
+def run_escalating(a):
+    """--escalate haiku,sonnet: run on the first model; only if that run fails, run the task again (fresh) on
+    the next one."""
+    import copy
+    models = [m.strip() for m in a.escalate.split(",") if m.strip()]
+    if a.task == ["-"] or (not a.task and a.task_file is None and not sys.stdin.isatty()):
+        a.task, a.task_file = [sys.stdin.read().strip()], None  # read once, for every attempt
+    rc = 1
+    for i, model in enumerate(models):
+        b = copy.copy(a)
+        b.escalate, b.model, b.again = None, model, a.again or i > 0
+        b.why = a.why or f"escalation {'/'.join(models)}"
+        LAST_RUN[:] = []
+        rc = cmd_run(b)
+        last = LAST_RUN[0] if LAST_RUN else {}
+        if done_ok(last) or last.get("status") == "partial" or i == len(models) - 1:
+            return rc
+        print(f"escalating: {model} run {last.get('id')} ended {last.get('status')}; trying {models[i + 1]}",
+              flush=True)
+    return rc
+
+
+def split_answer(text, n, workdir):
+    """(answer, details file, detail lines, cut) for a reply written to the answer contract: what follows the
+    DETAILS line goes to a file. An answer far over n lines is cut there too (the rest opens the file), so
+    nothing is lost, only kept out of the orchestrator's context."""
+    head, _, rest = text.partition(DETAILS_MARK)
+    head, rest, cut = head.rstrip(), rest.strip("\n"), False
+    lines = head.splitlines()
+    if len(lines) > n + 5:  # some slack: the contract is the worker's, this is only the safety net
+        head, cut = "\n".join(lines[:n]), True
+        rest = "\n".join(lines[n:]) + ("\n\n" + rest if rest else "")
+    if not rest.strip():
+        return head, None, 0, False
+    path = os.path.join(workdir, f"details-{len(glob.glob(os.path.join(workdir, 'details-*.md'))) + 1}.md")
+    with open(path, "w") as fh:
+        fh.write(rest.rstrip() + "\n")
+    return head, path, len(rest.splitlines()), cut
 
 
 def today_line():
@@ -3045,40 +3235,44 @@ def report_review(slug, project, entry, review, meta):
         print(f"  [lean-agent] {n}")
     n_new = len(meta.get("new_symbols") or [])
     if n_new:
-        print(f"  reuse: {review.get('_covered', 0)} of {n_new} new symbols checked · "
-              f"{len(review.get('searches') or [])} searches")
+        detail(f"  reuse: {review.get('_covered', 0)} of {n_new} new symbols checked · "
+               f"{len(review.get('searches') or [])} searches")
     else:
-        print("  reuse: no new symbols (the change edits existing code)")
+        detail("  reuse: no new symbols (the change edits existing code)")
         reuse = []
     for r in reuse:
         cands = ", ".join(map(str, r.get("candidates") or [])) or "nothing found"
-        print(f"    {r.get('symbol', '?')} -> {cands[:160]} -> {r.get('verdict', '?')}")
+        detail(f"    {r.get('symbol', '?')} -> {cands[:160]} -> {r.get('verdict', '?')}")
     for c in review.get("coverage") or []:
         if isinstance(c, dict):
-            print(f"    test '{str(c.get('test', '?'))[:70]}': {c.get('verdict', '?')}"
-                  + (f" ({str(c.get('by'))[:80]})" if c.get("by") else ""))
+            detail(f"    test '{str(c.get('test', '?'))[:70]}': {c.get('verdict', '?')}"
+                   + (f" ({str(c.get('by'))[:80]})" if c.get("by") else ""))
     for x in (review.get("unverified") or [])[:6]:
-        print(f"    could not verify: {str(x)[:140]}")
+        detail(f"    could not verify: {str(x)[:140]}")
     for sb in review.get("siblings") or []:
         if isinstance(sb, dict):
-            print(f"    sibling {sb.get('checked', '?')}: {'needs the same fix' if sb.get('needs_fix') else 'fine'}")
+            detail(f"    sibling {sb.get('checked', '?')}: {'needs the same fix' if sb.get('needs_fix') else 'fine'}")
     findings.sort(key=lambda f: (order.get(f.get("severity"), 9), CATEGORY_ORDER.get(f.get("category"), 6)))
     for i, f in enumerate(findings, 1):
         loc = f"{f.get('file', '?')}:{f.get('line', '')}".rstrip(":")
         cat = f"/{f['category']}" if f.get("category") else ""
-        print(f"  {i}. [{f.get('severity', '?')}{cat}] {loc}: {f.get('issue', '')}")
+        issue = str(f.get("issue", ""))
+        say(f"  {i}. [{f.get('severity', '?')}{cat}] {loc}: {issue}",
+            f"  {i}. [{f.get('severity', '?')}{cat}] {loc}: {issue if len(issue) <= 140 else issue[:137] + '...'}")
         if f.get("suggestion"):
-            print(f"      fix: {f['suggestion']}")
+            detail(f"      fix: {f['suggestion']}")
     for c in checks:
         print(f"  [check] {c.get('what', '')}" + (f" ({c['why']})" if c.get("why") else ""))
     if review.get("_declined_shown"):
-        print("  declined earlier: " + "; ".join(f"{d.get('symbol') or d.get('file', '?')}: {str(d.get('issue', ''))[:60]}"
+        detail("  declined earlier: " + "; ".join(f"{d.get('symbol') or d.get('file', '?')}: {str(d.get('issue', ''))[:60]}"
                                                 for d in review["_declined_shown"]))
     runs = [r for r in ledger() if r.get("project") == slug and r.get("role") in ("reviewer", "reuse-check")
             and (r.get("review_meta") or {}).get("ref") == meta.get("ref")]
     cost = lambda rs: sum(r.get("cost_usd") or 0 for r in rs)
     print(f"  cost: this review ${entry.get('cost_usd') or 0:.2f} ({entry.get('units', 0):,} sonnet-eq) · "
           f"{meta.get('ref') or 'this change'} so far ${cost(runs):.2f} over {len(runs)} review run(s)")
+    if BRIEF:
+        print(f"  full review (reuse table, coverage, fixes): lean-agent runs --show {entry['id']}")
     blocking = [f for f in findings if f.get("severity") in ("blocker", "major")]
     if verdict == "approve" and not blocking:
         print("Approved: OK to prepare the PR (still an outward action: ask the user before creating it).")
@@ -3719,6 +3913,10 @@ def cmd_stats(a):
         print(f"{'model':<14}{'runs':>6}{'done':>7}{'avg sonnet-eq':>15}{'total sonnet-eq':>17}{'API $':>9}")
         for model, m in sorted(by.items(), key=lambda kv: -kv[1]["u"]):
             print(f"{model:<14}{m['n']:>6}{m['ok'] * 100 // m['n']:>6}%{m['u'] // m['n']:>15,}{m['u']:>17,}{'$%.2f' % m['usd']:>9}")
+    if runs and getattr(a, "top", None):
+        print(f"\nBiggest {min(a.top, len(runs))} runs:")
+        for line in top_runs_lines(runs, a.top):
+            print("  " + line)
     print()
     print_limits()
 
@@ -4241,6 +4439,8 @@ ORCHESTRATOR_ENV = {
     "BASH_MAX_OUTPUT_LENGTH": "20000",
     "MAX_MCP_OUTPUT_TOKENS": "10000",
     "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+    "LEAN_AGENT_BRIEF": "1",          # lean-agent commands print one line per item (details on request)
+    "LEAN_AGENT_ANSWER_LINES": "25",  # workers answer in <= 25 lines; the rest goes to a details file
 }
 
 
@@ -4554,12 +4754,21 @@ def cmd_runs(a):
             die(f"no run {rid!r}" if rid else "no runs yet")
         files = sorted(glob.glob(os.path.join(r["workdir"], "summary-*.txt")),
                        key=lambda f: int(re.sub(r"\D", "", os.path.basename(f)) or 0))
-        if not files:  # runs from before summaries were saved: rebuild the run line from the ledger
+        if not files and not a.details:  # runs from before summaries were saved: rebuild the run line from the ledger
             cost = f"${r['cost_usd']:.2f}" if isinstance(r.get("cost_usd"), (int, float)) else "$?"
             print(f"run {r['id']} · {r['model']} · {r['status']} · {r.get('turns') or '?'} turns · "
                   f"{r.get('units', 0):,} sonnet-eq tok · {cost}")
             return
+        if a.details:
+            det = sorted(glob.glob(os.path.join(r["workdir"], "details-*.md")),
+                         key=lambda f: int(re.sub(r"\D", "", os.path.basename(f)) or 0))
+            if not det:
+                die(f"run {r['id']} has no details file (its whole answer is in `lean-agent runs --show {r['id']}`)")
+            files = det
         text = read_text(files[-1])
+        if a.grep:
+            rx = re.compile(re.escape(a.grep), re.I)
+            text = "".join(l for l in text.splitlines(True) if rx.search(l)) or f"(no line matches {a.grep!r})\n"
         if a.tokens and not a.show:
             text = "".join(l for l in text.splitlines(True)
                            if l.startswith(("run ", "  tokens:", "  context per turn", "  mcp:", "  budget left")))
@@ -4983,15 +5192,25 @@ def cmd_env(a):
 
 
 def session_workers(session_id, first_ts, last_ts):
-    """[(model, runs, sonnet-eq)] for runs started from an orchestrator session: by recorded parent
-    session, or (older runs) by time within the session."""
+    """[(model, runs, sonnet-eq)] for runs started from an orchestrator session."""
+    rows = {}
+    for r in session_runs(session_id, first_ts, last_ts):
+        m = rows.setdefault(r["model"], [0, 0.0])
+        m[0] += 1
+        m[1] += r.get("units", r.get("weighted", 0) * usage.model_rate(r["model"]))
+    return [(m, n, u) for m, (n, u) in rows.items()]
+
+
+def session_runs(session_id, first_ts, last_ts):
+    """Runs started from an orchestrator session: by recorded parent session, or (older runs) by time
+    within the session."""
     def to_utc(local_iso):  # ledger times are local; transcript times are UTC
         try:
             return datetime.datetime.fromisoformat(local_iso).astimezone(datetime.timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%S")
         except ValueError:
             return ""
-    rows = {}
+    out = []
     for r in ledger():
         if r.get("parent_session"):
             mine = r["parent_session"] == session_id
@@ -4999,10 +5218,20 @@ def session_workers(session_id, first_ts, last_ts):
             ts = to_utc(r.get("ts", ""))
             mine = bool(first_ts and last_ts and ts and first_ts[:19] <= ts <= last_ts[:19])
         if mine:
-            m = rows.setdefault(r["model"], [0, 0.0])
-            m[0] += 1
-            m[1] += r.get("units", r.get("weighted", 0) * usage.model_rate(r["model"]))
-    return [(m, n, u) for m, (n, u) in rows.items()]
+            out.append(r)
+    return out
+
+
+def top_runs_lines(runs, n):
+    """The biggest runs: where the tokens went."""
+    out = []
+    for r in sorted(runs, key=lambda r: -(r.get("units") or 0))[:n]:
+        u, turns = r.get("usage") or {}, r.get("turns") or 0
+        ctx = sum(u.get(k, 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+        out.append(f"{r['id']}  {model_family(r['model']):<7}{r.get('units', 0):>11,} sonnet-eq  {turns:>3} turns  "
+                   f"~{ctx // max(1, turns):>7,} ctx/turn  {r['status']:<12} "
+                   + (f"[{r['role']}] " if r.get("role") else "") + str(r.get("task", ""))[:60].replace("\n", " "))
+    return out
 
 
 ASSUMED_BASELINE_CTX = 30000  # a normal Claude Code turn in a project: system prompt, tools, CLAUDE.md, skills, MCP
@@ -5286,7 +5515,32 @@ def cmd_budget(a):
         if a.session is None:
             return 0
     print_plan_line()
-    sys.exit(usage.report(a.session, workers=session_workers))
+    rc = usage.report(a.session, workers=session_workers)
+    path = usage.find_transcript(a.session) if a.by_run else None
+    if path:
+        runs = session_runs(os.path.basename(path)[:-6], *usage.transcript_span(path))
+        print(f"Biggest runs from this session ({len(runs)} in all):" if runs else "No runs from this session.")
+        for line in top_runs_lines(runs, a.by_run):
+            print("  " + line)
+    sys.exit(rc)
+
+
+def cmd_handoff(a):
+    import compact_hook
+    notes = compact_hook.load_notes()
+    if a.note or a.done:
+        if a.note:
+            notes.append({"ts": now_iso(), "text": " ".join(a.note.split())})
+        if a.done:
+            drop = set(range(1, len(notes) + 1)) if a.done == "all" else {
+                int(x) for x in a.done.split(",") if x.strip().isdigit()}
+            notes = [n for i, n in enumerate(notes, 1) if i not in drop]
+        save_json(compact_hook.notes_path(), notes)
+    text = compact_hook.handoff(a.hours)
+    with open(home("handoff.md"), "w") as fh:
+        fh.write(text + "\n")
+    print(text)
+    print(f"(saved {home('handoff.md')}; a new or compacted orchestrator session starts with this note)")
 
 
 def cmd_home(a):
@@ -5387,6 +5641,8 @@ def build_parser():
                    "sessions too (no restart); off = none")
     s.add_argument("--count", choices=["billed", "new"], help="what the cap counts: all billed tokens, or new "
                    "tokens only (no cache re-reads)")
+    s.add_argument("--by-run", type=int, nargs="?", const=10, metavar="N", help="also list this session's N biggest "
+                   "worker runs")
     s.set_defaults(fn=cmd_budget)
 
     s = sub.add_parser("learn", help="index a project's CLAUDE.md, rules and skills into context cards")
@@ -5448,6 +5704,12 @@ def build_parser():
                    help="the user approved this outward action (send/post/submit...); describe exactly what")
     s.add_argument("--mcp", action="append", metavar="SERVER[:TOOL,TOOL]",
                    help="give the worker this MCP server, optionally only these tools (repeatable)")
+    s.add_argument("--escalate", metavar="MODEL,MODEL", help="try the first model; if its run fails, run the task "
+                   "again on the next (e.g. haiku,sonnet). Replaces --model")
+    s.add_argument("--max-reads", type=int, metavar="TOKENS", help="stop the worker once it has re-read this many "
+                   "context tokens over all its calls (default LEAN_AGENT_RUN_MAX_READS, 6,000,000; 0 = no limit)")
+    s.add_argument("--answer-lines", type=int, metavar="N", help="the worker answers in at most N lines and puts "
+                   "the rest in a details file (0 = whole answer; default LEAN_AGENT_ANSWER_LINES, 25 in the orchestrator)")
     s.set_defaults(fn=cmd_run)
 
     s = sub.add_parser("chrome", help="Claude in Chrome for workers: check (once) | status")
@@ -5494,6 +5756,7 @@ def build_parser():
     s.add_argument("--project", "-p")
     s.add_argument("--today", action="store_true")
     s.add_argument("--days", type=int)
+    s.add_argument("--top", type=int, metavar="N", help="also list the N biggest runs (turns, context per turn, task)")
     s.set_defaults(fn=cmd_stats)
     s = sub.add_parser("optimize", help="tune a project's cards from worker feedback")
     s.add_argument("project")
@@ -5604,8 +5867,21 @@ def build_parser():
     s.add_argument("--tokens", action="store_true", help="print the latest (or --show) run's run/tokens/context lines again")
     s.add_argument("--show", nargs="?", const="last", metavar="RUN_ID",
                    help="print a run's whole summary again (default: the latest run)")
+    s.add_argument("--details", action="store_true", help="with --show: the run's details file instead")
+    s.add_argument("--grep", metavar="TEXT", help="with --show/--details: only lines containing TEXT")
     s.add_argument("-n", type=int, default=10)
     s.set_defaults(fn=cmd_runs)
+
+    s = sub.add_parser("handoff", help="the hand-off note a new or compacted orchestrator session starts from")
+    s.add_argument("--note", metavar="TEXT", help="add an open item or pending decision")
+    s.add_argument("--done", metavar="N,N|all", help="close open items by number")
+    s.add_argument("--hours", type=int, default=12, help="runs from the last N hours (default 12)")
+    s.set_defaults(fn=cmd_handoff)
+
+    s = sub.add_parser("output", help="the full output of a command that brief mode shortened")
+    s.add_argument("command", help="e.g. optimize, tracker, stats, cards")
+    s.add_argument("--grep", metavar="TEXT", help="only lines containing TEXT")
+    s.set_defaults(fn=cmd_output)
 
     s = sub.add_parser("guide", help="print the full orchestrator guide (rules, examples, CLI reference)")
     s.add_argument("project", nargs="?")
@@ -5631,6 +5907,10 @@ def main(argv=None):
     if (len(argv) > 2 and argv[0] == "run" and not argv[1].startswith("-")
             and not {"-p", "--project", "--resume"} & set(argv) and is_project_ref(argv[1])):
         argv = ["run", "-p", argv[1]] + argv[2:]  # `lean-agent run <project> ...` like `cards <project>`
+    global BRIEF
+    flags = {"--brief", "--full"} & set(argv[1:]) if argv[:1] != ["up"] else set()
+    argv = [x for i, x in enumerate(argv) if not (i and x in flags)]
+    BRIEF = "--brief" in flags or (os.environ.get("LEAN_AGENT_BRIEF") == "1" and "--full" not in flags)
     a, leftover = ap.parse_known_args(argv)
     if leftover:
         if a.cmd != "run" or any(x.startswith("-") for x in leftover):
@@ -5638,11 +5918,66 @@ def main(argv=None):
         a.task += leftover  # task words given after options
     if a.cmd == "run" and not a.resume and not a.project:
         ap.error("run needs --project (or --resume)")
+    capture = BRIEF and a.cmd in BRIEF_COMMANDS and not getattr(a, "show", None)
+    if capture:
+        real, sys.stdout = sys.stdout, io.StringIO()
     try:
         return a.fn(a) or 0
     finally:
         if isinstance(sys.stdout, Tee):
             sys.stdout.close()
+        if capture:
+            text, sys.stdout = sys.stdout.getvalue(), real
+            sys.stdout.write(brief_text(a.cmd, text))
+
+
+BRIEF = False  # set in main(): --brief, or LEAN_AGENT_BRIEF=1 (orchestrator sessions) unless --full
+BRIEF_COMMANDS = ("optimize", "tracker", "stats", "budget", "cards", "limits", "projects", "recipes", "savings")
+BRIEF_LINES = 20
+
+
+def detail(text=""):
+    """A line that only full mode prints; brief mode keeps it in the run's saved summary (`runs --show`)."""
+    if not BRIEF:
+        print(text)
+    elif isinstance(sys.stdout, Tee):
+        sys.stdout.fh.write(str(text) + "\n")
+
+
+def say(full, short):
+    """Print `full`, or in brief mode `short` (the saved summary still gets `full`)."""
+    if BRIEF and isinstance(sys.stdout, Tee):
+        sys.stdout.fh.write(full + "\n")
+        sys.stdout.stream.write(short + "\n")
+    else:
+        print(short if BRIEF else full)
+
+
+def brief_text(cmd, text):
+    """One line per item: item lines (indented 0-1 characters; a table's marker column counts as 0) up to
+    BRIEF_LINES, without their indented detail lines; the full text is saved for `lean-agent output`."""
+    lines = text.rstrip("\n").splitlines()
+    if len(lines) <= BRIEF_LINES:
+        return text
+    path = home("output", f"{cmd}.txt")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(text)
+    heads = [l for l in lines if l.strip() and len(l) - len(l.lstrip()) <= 1]
+    keep = heads[:BRIEF_LINES]
+    return "\n".join(keep) + (f"\n[brief: {len(keep)} of {len(lines)} lines. More: `lean-agent output {cmd} "
+                               f"--grep TEXT` (or all of it: `lean-agent output {cmd}`; --full prints it in full)]\n")
+
+
+def cmd_output(a):
+    path = home("output", f"{a.command}.txt")
+    if not os.path.exists(path):
+        die(f"no saved output for {a.command!r} (brief mode saves it when a command prints more than {BRIEF_LINES} lines)")
+    text = read_text(path)
+    if a.grep:
+        rx = re.compile(re.escape(a.grep), re.I)
+        text = "".join(l for l in text.splitlines(True) if rx.search(l)) or f"(no line matches {a.grep!r})\n"
+    sys.stdout.write(text)
 
 
 class Tee:

@@ -10,9 +10,16 @@ LEAN_AGENT_BUDGET_COUNT=new counts only new tokens (no cache re-reads). LEAN_AGE
 past it Claude gets a one-time note to spend less (and to hand off only if the context itself is large,
 LEAN_AGENT_HANDOFF_CONTEXT, default 150,000); past the cap every tool call is denied with an instruction
 to summarise and stop.
+
+In the lean-agent home (the orchestrator) it also keeps the context small: a Bash command that would print a
+long lean-agent run file (cat, less, a big tail ...) is refused with the command to use instead
+(LEAN_AGENT_READ_GUARD=0 turns that off, LEAN_AGENT_READ_LINES sets the limit, default 40), and once the
+context passes LEAN_AGENT_CTX_NUDGE tokens (default 100,000; again every 50,000 more) Claude gets a note
+with what compacting would save.
 """
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -21,6 +28,32 @@ import usage  # noqa: E402
 
 def emit(**fields):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", **fields}}))
+
+
+READERS = re.compile(r"(?:^|[;&|(]\s*|\s)(cat|less|more|bat|nl|tail|head|sed|awk|python3?|jq)\s")
+RUN_FILE = re.compile(r"[^\s'\"]*(?:summary-\d+\.txt|details-\d+\.md|result\.json|/work/\d{4}-\d{6}-[0-9a-f]{4}/[^\s'\"]*)")
+
+
+def long_run_read(command, lean_root):
+    """Why a command would print a long lean-agent run file into the context, or ''."""
+    if not READERS.search(command):
+        return ""
+    limit = int(os.environ.get("LEAN_AGENT_READ_LINES") or 40)
+    m = re.search(r"\b(?:head|tail)\s+(?:-n\s*|-)(\d+)", command)
+    if m and int(m.group(1)) <= limit and not re.search(r"\b(cat|less|more|bat|nl)\s", command):
+        return ""  # a short slice
+    for raw in RUN_FILE.findall(command):
+        path = os.path.expanduser(raw.replace("$LEAN_AGENT_HOME", lean_root).replace("${LEAN_AGENT_HOME}", lean_root))
+        if "/work/" not in path and not path.startswith(lean_root):
+            continue
+        try:
+            with open(path, errors="replace") as fh:
+                n = sum(1 for _ in fh)
+        except OSError:
+            continue
+        if n > limit:
+            return f"{path} has {n} lines"
+    return ""
 
 
 def main():
@@ -48,6 +81,16 @@ def main():
             emit(permissionDecision="deny",
                  permissionDecisionReason=usage.describe_exhausted(hit) + " Do not call more tools: tell the user "
                  "briefly what is done and what remains, then end your turn.")
+            return 0
+
+    if in_home and event.get("tool_name") == "Bash" and os.environ.get("LEAN_AGENT_READ_GUARD") != "0":
+        why = long_run_read(command, usage.lean_home())
+        if why:
+            emit(permissionDecision="deny", permissionDecisionReason=(
+                f"lean-agent: not printing a lean-agent run file into the orchestrator's context ({why}; it would "
+                "be re-read on every later call). Use the run's short answer: `lean-agent runs --show <id>`; one "
+                "part of its details: `lean-agent runs --show <id> --details --grep TEXT`; or have a -m haiku worker "
+                "read the file and answer the question. Never paste worker output into your reply."))
             return 0
 
     state = usage.load_state(session_id)
@@ -93,6 +136,24 @@ def main():
                 + (f" {ctx_note}." if ctx_note else "") + " " + advice
             )
         )
+        return 0
+
+    nudge_at = int(os.environ.get("LEAN_AGENT_CTX_NUDGE") or 100000)
+    if in_home and not checking and nudge_at and ctx >= nudge_at and ctx >= (state.get("nudged") or 0) + 50000:
+        state["nudged"] = ctx
+        usage.save_state(session_id, state)
+        calls = state["totals"].get("_calls") or 1
+        models = state.get("models") or {}
+        model = max(models, key=lambda m: usage.units(models[m], m)) if models else "sonnet"
+        per100 = int(usage.units({"cache_read_input_tokens": max(0, ctx - 20000) * 100}, model))
+        msg = (f"lean-agent: this session re-reads ~{ctx:,} tokens of context on every call (average "
+               f"{state['totals'].get('_ctx', 0) // calls:,} per call so far). Compacting to ~20K would save about "
+               f"{per100:,} sonnet-eq per 100 calls. Keep replies short, then ask the user to send /compact (lean-agent "
+               "tells the summary what to keep), or run `lean-agent handoff` and go on in a fresh session.")
+        if not os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"):
+            msg += (" This session was started without lean-agent's early compaction (an older `lean-agent up`): "
+                    "restart it once with `lean-agent up` to compact at ~70K automatically.")
+        emit(additionalContext=msg)
         return 0
 
     usage.save_state(session_id, state)

@@ -233,6 +233,48 @@ def transcript_span(path):
     return first, last
 
 
+def context_series(path):
+    """[(model, context tokens)] for each API call of the main conversation, in order."""
+    out, seen = [], set()
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        return out
+    with fh:
+        for raw in fh:
+            try:
+                e = json.loads(raw)
+            except ValueError:
+                continue
+            msg = e.get("message") if isinstance(e, dict) and e.get("type") == "assistant" else None
+            if not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict):
+                continue
+            mid = msg.get("id") or e.get("uuid")
+            if mid in seen:
+                continue
+            seen.add(mid)
+            u = msg["usage"]
+            out.append((msg.get("model") or "unknown", sum(int(u.get(k) or 0) for k in
+                        ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))))
+    return out
+
+
+def compact_saving(series, keep=70000):
+    """Sonnet-eq the session spent re-reading context above `keep` tokens (cache reads, 0.1x)."""
+    return int(sum(units({"cache_read_input_tokens": max(0, c - keep)}, m) for m, c in series))
+
+
+def trend_line(series):
+    if len(series) < 8:
+        return ""
+    q = len(series) / 4
+    parts = []
+    for i in range(4):
+        part = [c for _, c in series[int(i * q):int((i + 1) * q)]]
+        parts.append(fmt(sum(part) // max(1, len(part))))
+    return "Context per call, by quarter of the session: " + " -> ".join(parts)
+
+
 def report(arg=None, workers=None):
     """Print the session report. `workers(session_id, first_ts, last_ts)` returns
     [(model, runs, sonnet-eq)] for worker runs started from this session."""
@@ -249,6 +291,15 @@ def report(arg=None, workers=None):
         print(f"Calls:   {calls} API calls · first call context {fmt(totals['_first_ctx'])} tokens "
               f"(~ the fixed context: system prompt, tools, skills, CLAUDE.md) · "
               f"average context per call {fmt(totals['_ctx'] // calls)}")
+        series = context_series(path)
+        line = trend_line(series)
+        if line:
+            print(line)
+        extra = compact_saving(series)
+        if series and totals["_ctx"] // calls > 70000 and extra:
+            print(f"Re-reading context above ~70K cost this session ~{fmt(extra)} sonnet-eq; an orchestrator that "
+                  "compacts early (`lean-agent up` sets it; restart an older session) or hands off with "
+                  "`lean-agent handoff` saves most of it.")
     print()
     used = units_total(state)
     print(f"{'model':<28}{'input':>12}{'cache write':>14}{'cache read':>14}{'output':>12}{'sonnet-eq':>12}")
@@ -265,8 +316,9 @@ def report(arg=None, workers=None):
         print(f"Workers and reviewers started from this session ({sum(n for _, n, _ in rows)} runs):")
         for model, n, u in sorted(rows, key=lambda r: -r[2]):
             print(f"  {model:<26}{n:>4} runs{fmt(int(u)):>14} sonnet-eq")
-        print(f"Combined (this session + its workers): {fmt(used + int(w_total))} sonnet-eq "
-              f"(orchestrator {fmt(used)}, workers {fmt(int(w_total))})")
+        both = used + int(w_total)
+        print(f"Combined (this session + its workers): {fmt(both)} sonnet-eq "
+              f"(orchestrator {fmt(used)} = {used * 100 // max(1, both)}%, workers {fmt(int(w_total))})")
     elif workers:
         print("Workers started from this session: none")
     print()

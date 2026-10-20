@@ -74,18 +74,29 @@ FAKE_CLAUDE = textwrap.dedent("""\
         fh.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "task": task,
                              "append": open(append).read(), "mcp": mcp,
                              "automem": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+                             "bash_out": os.environ.get("BASH_MAX_OUTPUT_LENGTH"),
                              "addclaudemd": os.environ.get("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD")}) + "\\n")
     import time
     if os.environ.get("FAKE_FINISH_AT"):  # make parallel fake workers finish together
         time.sleep(max(0.0, float(os.environ["FAKE_FINISH_AT"]) - time.time()))
     fb = os.environ.get("FAKE_FEEDBACK", '{"status": "done", "used": [], "unneeded": [], "missing": ""}')
+    model = sys.argv[sys.argv.index("--model") + 1] if "--model" in sys.argv else ""
+    if os.environ.get("FAKE_FAIL_MODEL") and os.environ["FAKE_FAIL_MODEL"] in model:
+        fb = '{"status": "failed", "used": [], "unneeded": []}'
+    if os.environ.get("FAKE_TURNS"):  # stream assistant turns, each re-reading FAKE_TURN_CTX tokens
+        print(json.dumps({"type": "system", "subtype": "init", "session_id": "sess-1"}), flush=True)
+        for i in range(int(os.environ["FAKE_TURNS"])):
+            print(json.dumps({"type": "assistant", "session_id": "sess-1", "message": {"id": "msg-%d" % i, "usage": {
+                "input_tokens": 10, "cache_read_input_tokens": int(os.environ.get("FAKE_TURN_CTX", "1000"))}}}),
+                flush=True)
+            time.sleep(float(os.environ.get("FAKE_TURN_SLEEP", "0")))
     second = "search-only second opinion" in open(append).read()
     rv = os.environ.get("FAKE_REUSE") if second else os.environ.get("FAKE_REVIEW")
     if os.environ.get("FAKE_PLAN"):
         print(json.dumps({"type": "rate_limit_event", "rate_limit_info": json.loads(os.environ["FAKE_PLAN"])}))
     print(json.dumps({"type": "result", "subtype": os.environ.get("FAKE_SUBTYPE", "success"), "is_error": False,
                       "num_turns": 3, "session_id": "sess-1", "total_cost_usd": 0.05,
-                      "result": "Did the thing.\\n" + (("LEAN-REVIEW " + rv + "\\n") if rv else "") + "LEAN-FEEDBACK " + fb,
+                      "result": os.environ.get("FAKE_ANSWER", "Did the thing.") + "\\n" + (("LEAN-REVIEW " + rv + "\\n") if rv else "") + "LEAN-FEEDBACK " + fb,
                       "usage": {"input_tokens": 100, "cache_creation_input_tokens": 800,
                                 "cache_read_input_tokens": 5000, "output_tokens": 300}}))
 """)
@@ -1488,6 +1499,138 @@ class CliTest(unittest.TestCase):
         p = self.cli("review", "proj", "--status", check=False)
         self.assertEqual(p.returncode, 1)
         self.assertIn("stale", p.stdout)
+
+    def test_bounded_answer_and_details(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        long = "Checked 3 services: 2 healthy, 1 degraded.\n" + "\n".join(f"row {i}" for i in range(60))
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "lookup", "--answer-lines", "10", "check services",
+                     FAKE_ANSWER="Checked 3 services: 2 healthy, 1 degraded.\nsvc-c is degraded since 09:10.\n"
+                                 "=== DETAILS ===\n| svc | state |\n" + "\n".join(f"| svc-{i} | ok |" for i in range(40)))
+        call = self.calls()[-1]
+        self.assertIn("at most 10 lines", call["append"])
+        self.assertIn("=== DETAILS ===", call["append"])
+        self.assertIn("svc-c is degraded since 09:10.", p.stdout)
+        self.assertNotIn("| svc-3 | ok |", p.stdout)
+        self.assertRegex(p.stdout, r"details: 41 more lines in \S+details-1\.md")
+        rid = self.ledger()[-1]["id"]
+        det = self.cli("runs", "--show", rid, "--details", "--grep", "svc-3 ").stdout
+        self.assertEqual(det.strip(), "| svc-3 | ok |")
+        # a worker that ignores the contract: the answer is cut at N lines, nothing is lost
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "lookup", "--answer-lines", "10", "--again",
+                     "list rows", FAKE_ANSWER=long)
+        self.assertIn("row 8", p.stdout)
+        self.assertNotIn("row 30", p.stdout)
+        self.assertIn("the answer ran past 10 lines", p.stdout)
+        self.assertIn("row 30", self.cli("runs", "--show", "--details").stdout)
+        # the orchestrator's default (LEAN_AGENT_ANSWER_LINES) and --answer-lines 0 for the whole answer
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--again", "list rows", LEAN_AGENT_ANSWER_LINES="25")
+        self.assertIn("at most 25 lines", self.calls()[-1]["append"])
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--again", "--answer-lines", "0", "list rows",
+                     LEAN_AGENT_ANSWER_LINES="25", FAKE_ANSWER=long, BASH_MAX_OUTPUT_LENGTH="20000")
+        self.assertNotIn("=== DETAILS ===", self.calls()[-1]["append"])
+        self.assertIn("row 59", p.stdout)
+        self.assertEqual(self.calls()[-1]["bash_out"], "8000")  # not the orchestrator's 20000
+
+    def test_brief_mode(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        for i in range(30):
+            self.cli("card", "add", "proj", f"note-{i:02d}", "--title", f"Note {i}", "--text", f"Fact number {i}.")
+        full = self.cli("cards", "proj").stdout
+        brief = self.cli("cards", "proj", LEAN_AGENT_BRIEF="1").stdout
+        self.assertLess(len(brief.splitlines()), len(full.splitlines()))
+        self.assertIn("[brief: 20 of", brief)
+        self.assertIn("lean-agent output cards --grep TEXT", brief)
+        self.assertEqual(self.cli("cards", "proj", "--full", LEAN_AGENT_BRIEF="1").stdout, full)
+        self.assertIn("note-29", self.cli("output", "cards", "--grep", "note-29").stdout)
+        self.assertIn("[brief:", self.cli("cards", "proj", "--brief").stdout)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "look", LEAN_AGENT_BRIEF="1")
+        self.assertNotIn("  tokens: input", p.stdout)
+        self.assertIn("  tokens: input", self.cli("runs", "--show").stdout)  # kept for runs --show
+
+    def test_brief_review(self):
+        self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        review = json.dumps(dict(REUSE_CHECKED, verdict="changes-requested", findings=[
+            {"severity": "blocker", "file": "api/totals.py", "line": 2, "issue": "float money math " + "x" * 200,
+             "suggestion": "use integer cents"}], checks=[]))
+        p = self.cli("review", "proj", check=False, FAKE_REVIEW=review, FAKE_ANSWER="Long reviewer prose here.",
+                     LEAN_AGENT_BRIEF="1")
+        self.assertIn("REVIEW: CHANGES-REQUESTED · 1 findings", p.stdout)
+        self.assertIn("1. [blocker] api/totals.py:2: float money math", p.stdout)
+        self.assertIn("...", p.stdout)
+        self.assertNotIn("fix: use integer cents", p.stdout)
+        self.assertNotIn("Long reviewer prose", p.stdout)
+        self.assertIn("full review (reuse table, coverage, fixes): lean-agent runs --show", p.stdout)
+        shown = self.cli("runs", "--show").stdout
+        self.assertIn("fix: use integer cents", shown)
+        self.assertIn("Long reviewer prose", shown)
+
+    def test_run_stopped_after_too_many_context_reads(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "investigate", "--max-reads", "250000",
+                     "investigate the flaky test", check=False, FAKE_TURNS="20", FAKE_TURN_CTX="90000",
+                     FAKE_TURN_SLEEP="0.05")
+        self.assertEqual(p.returncode, 1)
+        r = self.ledger()[-1]
+        self.assertEqual(r["status"], "stopped:max_context_reads")
+        self.assertEqual(r["turns"], 3)
+        self.assertEqual(r["session_id"], "sess-1")
+        self.assertIn("STOPPED by lean-agent: the worker re-read 270,030 tokens", p.stdout)
+        self.assertIn(f"lean-agent run --resume {r['id']} --max-reads 500000", p.stdout)
+        p = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--again", "investigate the flaky test",
+                     FAKE_TURNS="5", FAKE_TURN_CTX="1000")
+        self.assertEqual(self.ledger()[-1]["status"], "done")
+
+    def test_escalate_and_similar_history(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("run", "-p", "proj", "--escalate", "haiku,sonnet", "--why", "try cheap first",
+                     "fix the totals rounding", FAKE_FAIL_MODEL="haiku")
+        self.assertIn("escalating: haiku run", p.stdout)
+        self.assertEqual([r["model"] for r in self.ledger()], ["haiku", "sonnet"])
+        self.assertEqual([r["status"] for r in self.ledger()], ["failed", "done"])
+        self.cli("run", "-p", "proj", "--escalate", "haiku,sonnet", "--why", "x", "--again", "fix the totals rounding")
+        self.assertEqual(self.ledger()[-1]["model"], "haiku")  # no escalation when haiku is done
+        for _ in range(3):
+            self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--again", "post the release notes reply")
+        out = self.cli("suggest", "proj", "post the release notes reply now").stdout
+        self.assertIn("similar tasks ran on haiku: 3/3 done", out)
+        self.assertIn("similar tasks before: haiku 3/3 done", out)
+        out = self.cli("suggest", "proj", "refactor the payment module").stdout
+        self.assertIn("--escalate haiku,sonnet", out)
+        top = self.cli("stats", "--top", "2").stdout
+        self.assertIn("Biggest 2 runs:", top)
+        self.assertRegex(top, r"ctx/turn\s+\w+")
+
+    def test_auto_cards_skip_core_cards_marked_unneeded(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        try:
+            cards = L.load_cards("proj")
+            for c in cards:
+                if c["id"] == "testing":
+                    c["core"] = True
+                    c["by_type"] = {"change": {"offered": 4, "used": 0, "unneeded": 4}}
+            L.save_cards("proj", cards)
+        finally:
+            os.environ.pop("LEAN_AGENT_HOME", None)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--cards", "auto", "change the totals")
+        self.assertNotIn("[testing]", self.calls()[-1]["append"])
+        self.cli("card", "protect", "proj", "testing")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--cards", "auto", "--again", "change the totals")
+        self.assertIn("[testing]", self.calls()[-1]["append"])
+
+    def test_handoff_command(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("memory", "add", "Never merge on Fridays.", "--type", "feedback")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "reply on PR 512")
+        out = self.cli("handoff", "--note", "Ask the user whether to merge PR 512").stdout
+        self.assertIn("1. Ask the user whether to merge PR 512", out)
+        self.assertIn("Never merge on Fridays.", out)
+        self.assertIn("Items and branches touched: #512", out)
+        self.assertTrue(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "handoff.md")))
+        self.assertNotIn("Open items", self.cli("handoff", "--done", "1").stdout)
 
     def test_review_a_ref_without_checkout(self):
         g = self.git_project()

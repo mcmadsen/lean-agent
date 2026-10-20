@@ -122,8 +122,14 @@ Other ways to run the orchestrator:
 | `lean-agent run --resume <run-id> "<follow-up>"` | Continue a worker's session (cheap: its context is cached). |
 | `lean-agent card show\|add\|rm\|core\|unarchive\|protect <project> <id>` | Inspect or edit cards; `add` creates *note* cards from what workers had to discover. `protect` (`--off` to undo) keeps `optimize` from archiving, demoting or trimming a card; `unarchive` brings one back (`core` on an archived card unarchives it too). `optimize --apply --skip a,b` leaves those cards out. |
 | `lean-agent optimize <project> [--apply] [--accept ids] [--reject ids]` | Promote/demote core cards, archive dead ones, flag big cards to trim, list recent context gaps, and draft new recipe cards and MCP presets from what workers actually did. |
-| `lean-agent runs [--last] [--tokens] [--show [id]]` | Recent runs; `--tokens` prints the latest run's run/tokens/context lines again, `--show` its whole summary (saved per run, so a `| tail` can't lose it). |
-| `lean-agent stats [--today] [--project p]` | Runs, success rate, avg/total weighted tokens and cost per model. |
+| `lean-agent runs [--last] [--tokens] [--show [id]] [--details] [--grep TEXT]` | Recent runs; `--tokens` prints the latest run's run/tokens/context lines again, `--show` its whole summary (saved per run, so a `| tail` can't lose it), `--details` its details file, `--grep` only matching lines. |
+| `lean-agent run ... --answer-lines N` | The worker answers in at most N lines (default 25 in the orchestrator, `LEAN_AGENT_ANSWER_LINES`) and puts tables, lists and evidence after a `=== DETAILS ===` line; lean-agent saves that part to a file and prints only its path. An answer far past N lines is cut there and the rest opens the file. `0` = whole answer. Reviewers and other roles are never cut. |
+| `lean-agent run ... --escalate haiku,sonnet` | Run on haiku; only if that run fails (or errors, or stops), run the task again on sonnet. `suggest` recommends it and shows how similar earlier tasks did per model ("similar tasks ran on haiku: 6/6 done"). |
+| `lean-agent run ... --max-reads TOKENS` | Stop a worker once it has re-read this much context over all its calls (default 6,000,000; 0 = off; not for reviewers). The run can be resumed; the message says how to split the task instead. |
+| `lean-agent stats [--today] [--project p] [--top N]` | Runs, success rate, avg/total weighted tokens and cost per model; `--top N` lists the biggest runs with turns, context per turn and task. |
+| `lean-agent budget [--by-run [N]]` | This orchestrator session: tokens, context per call by quarter, what re-reading context above ~70K cost, the orchestrator's share next to its workers, and with `--by-run` its biggest runs. |
+| `lean-agent handoff [--note TEXT] [--done N\|all]` | The hand-off note a compacted or new orchestrator session starts with (injected at SessionStart after a compaction, and at startup when there was work in the last 12 hours): open items and pending decisions, standing rules (feedback memories), recent runs with their details files, running runs, items and branches touched, latest reviews. |
+| `lean-agent output <command> [--grep TEXT]` | In brief mode (`LEAN_AGENT_BRIEF=1`, set for the orchestrator, or `--brief`), `optimize`, `tracker`, `stats`, `budget`, `cards`, `limits`, `projects`, `recipes` and `savings` print one line per item (at most 20); this prints what was left out. `--full` prints a command in full. Reviews in brief mode print the verdict and one line per finding; `runs --show <id>` has the rest. |
 | `lean-agent savings [--days 7] [-p project] [--measure]` | Estimated tokens saved: worker context (vs a normal Claude Code turn in that project: measured with `--measure`, one tiny Haiku call, else assumed 30,000), model choice (vs Sonnet for every worker), and output the squeezer shortened. Each run's summary also has a `saved ~N` line. |
 
 ## MCP servers in workers
@@ -205,9 +211,20 @@ Every orchestrator turn re-reads the whole conversation, so it's kept short:
 - **Keeps what matters:** a PreCompact hook (lean-agent's home only) tells the summary to keep the user's goals
   and open requests, every approval word for word, runs in progress, branches and PRs, unfixed findings and
   decisions, and to drop worker answers, command output, file contents and the guide: lean-agent stores those.
-- **Picks up cheaply:** after a compaction a SessionStart hook gives the orchestrator a short digest from
-  lean-agent's records (runs in progress, recent runs, latest review per branch), so it doesn't rebuild that
-  from memory. Any run's full answer is one `lean-agent runs --show <id>` away.
+- **Picks up cheaply:** after a compaction, and when a new session starts after recent work, a SessionStart
+  hook gives the orchestrator the hand-off note from lean-agent's records (open items, standing rules, runs in
+  progress, recent runs, items touched, latest review per branch), so it doesn't rebuild that from memory.
+  Any run's full answer is one `lean-agent runs --show <id>` away. `lean-agent handoff --note` adds open items,
+  so a topic can end with a fresh session instead of a long one.
+- **Short answers in:** workers answer in at most 25 lines and put the rest in a details file; lean-agent's
+  report commands print one line per item (brief mode); reviews print the verdict and one line per finding.
+- **No dumps:** reading a long lean-agent run file with `cat`, `less` or a long `tail` is refused with the
+  command to use instead.
+- **Told when it grows:** past 100,000 tokens of context the hook says what compacting would save per 100
+  calls, and whether the session predates lean-agent's early compaction (then restart `lean-agent up` once).
+  `lean-agent budget` shows the context per call by quarter and what re-reading above ~70K cost.
+- **Routing:** `lean-agent up --model haiku` runs a pure routing session on Haiku (switch up with `/model` when
+  a step needs judgement); `--escalate haiku,sonnet` does the same for workers.
 
 ## Attribution (asked once)
 
@@ -561,7 +578,12 @@ The session budget is in **weighted tokens**, input-token equivalents using the 
 | `LEAN_AGENT_RUN_MAX_USD` | `3.0` | Default `--max-usd` per worker (`claude --max-budget-usd`). |
 | `LEAN_AGENT_MAX_TURNS` | `40` | Default `--max-turns` per worker. |
 | `LEAN_AGENT_WORKER_PERMISSION_MODE` | `acceptEdits` | Worker permission mode. |
-| `LEAN_AGENT_WORKER_BASH_OUTPUT` | `12000` | `BASH_MAX_OUTPUT_LENGTH` for workers. |
+| `LEAN_AGENT_WORKER_BASH_OUTPUT` | `8000` | `BASH_MAX_OUTPUT_LENGTH` for workers (not the orchestrator's larger value). |
+| `LEAN_AGENT_ANSWER_LINES` | `0` (`25` in the orchestrator) | Lines a worker's answer may use; the rest goes to a details file. |
+| `LEAN_AGENT_BRIEF` | unset (`1` in the orchestrator) | One line per item from lean-agent's report commands. |
+| `LEAN_AGENT_RUN_MAX_READS` | `6000000` | Context tokens a worker may re-read over its calls before it is stopped. |
+| `LEAN_AGENT_CTX_NUDGE` | `100000` | Orchestrator context size at which the hook says what compacting would save (again every 50,000 more; 0 = off). |
+| `LEAN_AGENT_READ_GUARD` / `LEAN_AGENT_READ_LINES` | on / `40` | In the orchestrator, refuse `cat`/`less`/long `tail` of a lean-agent run file longer than this. |
 | `LEAN_AGENT_RESULT_CHARS` | `12000` | Max worker reply printed back to the orchestrator (workers lead with a summary; the full result is saved). |
 | `LEAN_AGENT_HOME` | `~/.lean-agent` | Where everything lives. |
 
