@@ -1218,8 +1218,22 @@ class CliTest(unittest.TestCase):
         p = self.cli("up", LEAN_AGENT_CLAUDE=fake)
         self.assertEqual(open(starts).read(), "xx")
         self.assertFalse(os.path.exists(pointer))
+        # the same error on stdout, with the colour codes a terminal UI adds
+        with open(pointer, "w") as fh:
+            fh.write("{}")
+        with open(fake) as fh:
+            body = fh.read().replace("sys.stderr.write('[11:26:01] Error:",
+                                     "sys.stdout.write('\\x1b[31m[11:26:01] Error:\\x1b[39m").replace(
+                                     "404\\n'); sys.stderr.flush()", "404\\n'); sys.stdout.flush()")
+        self.assertIn("sys.stdout.write", body)
+        with open(fake, "w") as fh:
+            fh.write(body)
+        p2 = self.cli("up", LEAN_AGENT_CLAUDE=fake)
+        self.assertEqual(open(starts).read(), "xxxx")
+        self.assertIn("the previous Remote Control session is gone", p2.stdout)
+        self.assertFalse(os.path.exists(pointer))
         self.assertIn("worker registration failed", p.stderr)  # claude's own output still shows
-        self.assertIn("the previous Remote Control session is gone", p.stderr)
+        self.assertIn("the previous Remote Control session is gone", p.stdout)
         self.assertIn("Connected", p.stdout)
 
     def test_chrome_check_and_run(self):
