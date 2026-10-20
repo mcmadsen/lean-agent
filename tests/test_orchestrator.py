@@ -1205,22 +1205,24 @@ class CliTest(unittest.TestCase):
         os.makedirs(d, exist_ok=True)
         pointer = os.path.join(d, "bridge-pointer.json")
         with open(pointer, "w") as fh:
-            fh.write('{"sessionId": "cse_gone"}')
+            json.dump({"sessionId": "cse_gone", "environmentId": "env_kept", "source": "standalone", "pid": 4242,
+                       "activeSessionIds": ["cse_gone"]}, fh)
         starts = os.path.join(self.tmp.name, "starts.txt")
         fake = os.path.join(self.tmp.name, "claude-rc")
         with open(fake, "w") as fh:  # like remote-control: the old session answers 404 and it keeps running
             fh.write(f"#!{sys.executable}\nimport os, sys, time\nopen({starts!r}, 'a').write('x')\n"
-                     f"if os.path.exists({pointer!r}):\n"
+                     f"import json\nif os.path.exists({pointer!r}) and json.load(open({pointer!r})).get('sessionId'):\n"
                      "    sys.stderr.write('[11:26:01] Error: CCR v2 worker registration failed for session cse_gone: "
                      "Request failed with status code 404\\n'); sys.stderr.flush(); time.sleep(30)\n"
                      "print('Connected')\n")
         os.chmod(fake, 0o755)
         p = self.cli("up", LEAN_AGENT_CLAUDE=fake)
         self.assertEqual(open(starts).read(), "xx")
-        self.assertFalse(os.path.exists(pointer))
+        with open(pointer) as fh:  # the old session forgotten, its environment kept (else: "already served")
+            self.assertEqual(json.load(fh), {"sessionId": "", "environmentId": "env_kept", "source": "standalone"})
         # the same error on stdout, with the colour codes a terminal UI adds
         with open(pointer, "w") as fh:
-            fh.write("{}")
+            json.dump({"sessionId": "cse_gone2", "environmentId": "env_kept"}, fh)
         with open(fake) as fh:
             body = fh.read().replace("sys.stderr.write('[11:26:01] Error:",
                                      "sys.stdout.write('\\x1b[31m[11:26:01] Error:\\x1b[39m").replace(
@@ -1231,10 +1233,20 @@ class CliTest(unittest.TestCase):
         p2 = self.cli("up", LEAN_AGENT_CLAUDE=fake)
         self.assertEqual(open(starts).read(), "xxxx")
         self.assertIn("the previous Remote Control session is gone", p2.stdout)
-        self.assertFalse(os.path.exists(pointer))
+        with open(pointer) as fh:
+            self.assertEqual(json.load(fh)["sessionId"], "")
         self.assertIn("worker registration failed", p.stderr)  # claude's own output still shows
         self.assertIn("the previous Remote Control session is gone", p.stdout)
         self.assertIn("Connected", p.stdout)
+
+    def test_up_explains_a_folder_served_elsewhere(self):
+        fake = os.path.join(self.tmp.name, "claude-busy")
+        with open(fake, "w") as fh:
+            fh.write(f"#!{sys.executable}\nimport sys\nprint('Error: This folder is already served by a terminal "
+                     "`claude remote-control` on this device. Stop it first.')\nsys.exit(1)\n")
+        os.chmod(fake, 0o755)
+        p = self.cli("up", LEAN_AGENT_CLAUDE=fake, check=False)
+        self.assertIn("often the Claude desktop app", p.stdout)
 
     def test_chrome_check_and_run(self):
         self.cli("learn", self.proj)
