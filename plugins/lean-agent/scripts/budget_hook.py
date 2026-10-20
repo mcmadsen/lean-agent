@@ -11,7 +11,9 @@ past it Claude gets a one-time note to spend less (and to hand off only if the c
 LEAN_AGENT_HANDOFF_CONTEXT, default 150,000); past the cap every tool call is denied with an instruction
 to summarise and stop.
 
-In the lean-agent home (the orchestrator) it also keeps the context small: a Bash command that would print a
+In the lean-agent home (the orchestrator) a command that starts a worker (`lean-agent run`, `review`, `do`,
+`tracker --discover`) must run in the background, so the session stays free for the user while it works
+(LEAN_AGENT_BACKGROUND_RUNS=0 turns that off). It also keeps the context small: a Bash command that would print a
 long lean-agent run file (cat, less, a big tail ...) is refused with the command to use instead
 (LEAN_AGENT_READ_GUARD=0 turns that off, LEAN_AGENT_READ_LINES sets the limit, default 40), and once the
 context passes LEAN_AGENT_CTX_NUDGE tokens (default 100,000; again every 50,000 more) Claude gets a note
@@ -28,6 +30,22 @@ import usage  # noqa: E402
 
 def emit(**fields):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", **fields}}))
+
+
+# commands that start a worker and can run for minutes
+WORKER_CMD = re.compile(r"(?:^|[;&|(]\s*|\s)lean-agent\s+(run|review|do|tracker)\b([^;&|]*)")
+
+
+def foreground_worker(command):
+    """The lean-agent command in `command` that would start a worker and hold the turn until it ends, or ''."""
+    for m in WORKER_CMD.finditer(command):
+        sub, rest = m.group(1), m.group(2)
+        if sub == "review" and re.search(r"--status\b|^\s*decline\b", rest):
+            continue  # instant
+        if sub == "tracker" and "--discover" not in rest:
+            continue
+        return f"lean-agent {sub}"
+    return ""
 
 
 READERS = re.compile(r"(?:^|[;&|(]\s*|\s)(cat|less|more|bat|nl|tail|head|sed|awk|python3?|jq)\s")
@@ -81,6 +99,18 @@ def main():
             emit(permissionDecision="deny",
                  permissionDecisionReason=usage.describe_exhausted(hit) + " Do not call more tools: tell the user "
                  "briefly what is done and what remains, then end your turn.")
+            return 0
+
+    tool_input = event.get("tool_input") or {}
+    if (in_home and event.get("tool_name") == "Bash" and not tool_input.get("run_in_background")
+            and os.environ.get("LEAN_AGENT_BACKGROUND_RUNS") != "0"):
+        which = foreground_worker(command)
+        if which:
+            emit(permissionDecision="deny", permissionDecisionReason=(
+                f"lean-agent: start `{which}` in the background (Bash with run_in_background: true), so you stay free "
+                "to answer the user while the worker runs. Tell the user in one line what you started, then end your "
+                "turn; you're notified when it finishes, and its answer is short (`lean-agent runs --show <id>` "
+                "prints it again)."))
             return 0
 
     if in_home and event.get("tool_name") == "Bash" and os.environ.get("LEAN_AGENT_READ_GUARD") != "0":
