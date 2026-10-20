@@ -32,6 +32,7 @@ import usage  # noqa: E402
 import lean_mcp  # noqa: E402
 import lean_log  # noqa: E402
 import lean_memory  # noqa: E402
+import push_guard  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -1364,10 +1365,13 @@ def cmd_run(a):
     flag_settings = {}
     if attribution() == "off":  # Claude Code's own commit/PR attribution, switched off for this worker
         flag_settings["attribution"] = NO_ATTRIBUTION
+    hooks = {"PreToolUse": [{"matcher": "Bash", "hooks": [{  # never a push to a guarded branch (lean-agent guard)
+        "type": "command", "timeout": 20, "command": f"python3 {json.dumps(os.path.join(HERE, 'push_guard.py'))}"}]}]}
     if mcp_specs:  # trim big MCP results before the model reads them
-        flag_settings["hooks"] = {"PostToolUse": [{"matcher": "mcp__.*", "hooks": [{
+        hooks["PostToolUse"] = [{"matcher": "mcp__.*", "hooks": [{
             "type": "command", "timeout": 20,
-            "command": f"python3 {json.dumps(os.path.join(HERE, 'mcp_trim_hook.py'))}"}]}]}
+            "command": f"python3 {json.dumps(os.path.join(HERE, 'mcp_trim_hook.py'))}"}]}]
+    flag_settings["hooks"] = hooks
     if flag_settings:
         cmd += ["--settings", json.dumps(flag_settings)]
     if prev:
@@ -1377,6 +1381,7 @@ def cmd_run(a):
     env.pop("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", None)  # never pull in the project's CLAUDE.md
     env["BASH_MAX_OUTPUT_LENGTH"] = os.environ.get("LEAN_AGENT_WORKER_BASH_OUTPUT") or "8000"  # not the orchestrator's
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"  # memory comes from lean-agent cards instead
+    env = push_guard.git_env(env)  # git refuses pushes to guarded branches (pre-push), whatever the worker runs
     if getattr(a, "fields", None):
         env["LEAN_AGENT_MCP_FIELDS"] = a.fields
 
@@ -3512,16 +3517,28 @@ def worktree_push(a):
         die(f"{branch} @ {sha[:12]} has no approving review. Run: lean-agent review {slug} --head {branch}"
             + (f" --base <base>" if not has_remote else ""), 2)
     target = remote_ref.split("/", 1)[1] if "/" in remote_ref else branch
+    hit = push_guard.guarded(target, push_guard.project_patterns(slug))
+    if hit and not a.override_guard:
+        die(f"refused: {branch} would be pushed to origin/{target}, which matches the push guard {hit!r} "
+            f"(lean-agent guard list {slug}). lean-agent never pushes to it, whatever was approved: push to your "
+            f"own branch and open a pull request (e.g. have a worker create a branch from {branch} and set its "
+            "upstream to a new remote branch).", 3)
+    if hit:
+        print(f"push guard {hit!r} overridden: {a.override_guard}")
     print(f"push {branch} @ {sha[:12]} to origin/{target}" + ("" if has_remote else " (a new remote branch)")
           + f", reviewed in {match['run']}:\n" + "\n".join("  " + c for c in commits.splitlines()))
     if not a.allow_send:
         print("ACTION NEEDED: pushing is an outward action and was NOT done. Show the user the commits above. Only if "
               f"they approve: lean-agent worktree push {slug} {a.ref} --allow-send \"<what the user approved>\"")
         return 2
+    push_env = push_guard.git_env(os.environ)
+    if hit:  # the user's explicit, logged override
+        push_env["LEAN_AGENT_PUSH_GUARD_OVERRIDE"] = "1"
     p = subprocess.run(["git", "-C", path, "push", "origin", f"HEAD:refs/heads/{target}"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=push_env)
     append_jsonl(home("pushes.jsonl"), {"ts": now_iso(), "project": slug, "branch": branch, "to": f"origin/{target}",
                                         "sha": sha, "review": match["run"], "approved": a.allow_send,
+                                        "guard_override": a.override_guard if hit else None,
                                         "ok": p.returncode == 0})
     if p.returncode != 0:
         die(f"git push failed: {(p.stderr or p.stdout).strip()[:400]}")
@@ -4719,7 +4736,8 @@ def orchestrator_settings(existing):
         if os.path.dirname(p) == p:
             break
         p = os.path.dirname(p)
-    data["claudeMdExcludes"] = excludes
+    # Claude Code matches resolved paths too: add the resolved form of each (e.g. macOS /var -> /private/var)
+    data["claudeMdExcludes"] = list(dict.fromkeys(excludes + [real_glob(x) for x in excludes]))
     user = load_json(os.path.join(cfg, "settings.json"), {})
     # the orchestrator carries no plugin tools (workers get plugin servers via --mcp): off also for synced
     # plugins, which are on by default and so aren't in the user's enabledPlugins
@@ -4890,6 +4908,13 @@ def instruction_files(path):
     return [f for f in dict.fromkeys(files) if os.path.isfile(f)]
 
 
+def real_glob(pattern):
+    """`pattern` with the folder before its first wildcard resolved through symlinks."""
+    head, sep, tail = pattern.partition("*")
+    d, base = os.path.split(head)
+    return os.path.join(os.path.realpath(d), base) + sep + tail
+
+
 def home_instruction_files(h):
     """[(path, ~tokens)] of the instruction files the orchestrator home really loads: those its settings'
     claudeMdExcludes doesn't leave out."""
@@ -4897,7 +4922,8 @@ def home_instruction_files(h):
     excludes = load_json(os.path.join(h, ".claude", "settings.json"), {}).get("claudeMdExcludes") or []
     out = []
     for f in instruction_files(h):
-        if any(fnmatch.fnmatch(f, pat) or fnmatch.fnmatch(os.path.realpath(f), pat) for pat in excludes):
+        if any(fnmatch.fnmatch(x, p) for p in excludes + [real_glob(p) for p in excludes]
+               for x in (f, os.path.realpath(f))):
             continue
         out.append((f, est_tokens(read_text(f))))
     return out
@@ -4997,6 +5023,9 @@ def cmd_doctor(a):
                "next tool call")
     st = chrome_state()
     print("  chrome for workers: " + ("verified" if st.get("ok") else "not verified (lean-agent chrome check)"))
+    for s_ in sorted(projects()):
+        print(f"  {s_}: never pushes to " + (", ".join(push_guard.project_patterns(s_)) or "(nothing guarded)")
+              + " (lean-agent guard)")
     for s_, v in projects().items():
         warn = email_warning(v.get("tracker") or {})
         if warn:
@@ -5131,6 +5160,7 @@ def cmd_up(a):
         if a.budget_week is not None:
             cur["week"] = a.budget_week
         save_json(usage.limits_path(), cur)
+    env = push_guard.git_env(env)  # the orchestrator's own git commands are guarded too
     bindir = os.path.join(PLUGIN_ROOT, "bin")
     env["PATH"] = bindir + os.pathsep + env.get("PATH", "")  # `lean-agent` works even without the plugin
     cmd = [os.environ.get("LEAN_AGENT_CLAUDE") or "claude"]
@@ -5794,6 +5824,37 @@ def cmd_budget(a):
     sys.exit(rc)
 
 
+def cmd_guard(a):
+    projs = projects()
+    if a.action in ("add", "rm"):
+        if not a.project:
+            die(f"lean-agent guard {a.action} <project> push-deny <pattern> ...")
+        slug, _ = resolve_project(a.project)
+        pats = list(a.patterns or [])
+        if pats and pats[0] == "push-deny":
+            pats = pats[1:]
+        if not pats:
+            die("which branches? e.g. lean-agent guard add <project> push-deny \"release/*\" develop main")
+        cur = push_guard.project_patterns(slug)
+        if a.action == "add":
+            cur += [p for p in pats if p not in cur]
+        else:
+            missing = [p for p in pats if p not in cur]
+            if missing:
+                die(f"{slug} has no push guard {', '.join(missing)} (lean-agent guard list {slug})")
+            cur = [p for p in cur if p not in pats]
+        projs[slug].setdefault("guards", {})["push-deny"] = cur
+        save_json(home("projects.json"), projs)
+    slugs = [resolve_project(a.project)[0]] if a.project else sorted(projs)
+    for slug in slugs:
+        pats = push_guard.project_patterns(slug)
+        own = "push-deny" in ((projs.get(slug) or {}).get("guards") or {})
+        print(f"{slug}: never pushes to " + (", ".join(pats) if pats else "(nothing guarded)")
+              + ("" if own else " (defaults)"))
+    if not slugs:
+        print("no projects; new ones never push to " + ", ".join(push_guard.DEFAULT_PUSH_DENY))
+
+
 def cmd_handoff(a):
     import compact_hook
     notes = compact_hook.load_notes()
@@ -6126,6 +6187,8 @@ def build_parser():
     s.add_argument("--off", action="store_true", help="setup: no setup command")
     s.add_argument("--allow-send", metavar="APPROVED", help="push: what the user approved (the push happens only with this)")
     s.add_argument("--no-fetch", action="store_true", help="push: don't fetch origin first")
+    s.add_argument("--override-guard", metavar="WHY", help="push: push to a guarded branch anyway (logged; only "
+                   "when the user explicitly asked for exactly this)")
     s.set_defaults(fn=cmd_worktree)
 
     s = sub.add_parser("logs", help="lean-agent's local logs: error (default), debug, or verbose (saved outputs)")
@@ -6144,6 +6207,13 @@ def build_parser():
     s.add_argument("--grep", metavar="TEXT", help="with --show/--details: only lines containing TEXT")
     s.add_argument("-n", type=int, default=10)
     s.set_defaults(fn=cmd_runs)
+
+    s = sub.add_parser("guard", help="branches lean-agent never pushes to: list | add | rm (globs; default release/*, "
+                       "develop, main, master)")
+    s.add_argument("action", choices=["list", "add", "rm"])
+    s.add_argument("project", nargs="?")
+    s.add_argument("patterns", nargs="*", metavar="push-deny PATTERN")
+    s.set_defaults(fn=cmd_guard)
 
     s = sub.add_parser("handoff", help="the hand-off note a new or compacted orchestrator session starts from")
     s.add_argument("--note", metavar="TEXT", help="add an open item or pending decision")
@@ -6188,6 +6258,15 @@ def main(argv=None):
     argv = [x for i, x in enumerate(argv) if not (i and x in flags)]
     BRIEF = "--brief" in flags or (os.environ.get("LEAN_AGENT_BRIEF") == "1" and "--full" not in flags)
     a, leftover = ap.parse_known_args(argv)
+    if leftover and a.cmd in ("mcp", "guard") and not any(x.startswith("-") for x in leftover):
+        # Python 3.9's argparse leaves positionals that follow an option (`mcp ignore --rm <server>`) unparsed
+        names = ["server", "preset_name", "preset_tools"] if a.cmd == "mcp" else ["project"]
+        for n in names:
+            if leftover and getattr(a, n, None) is None:
+                setattr(a, n, leftover.pop(0))
+        if a.cmd == "guard" and leftover:
+            a.patterns = list(a.patterns or []) + leftover
+            leftover = []
     if leftover:
         if a.cmd != "run" or any(x.startswith("-") for x in leftover):
             ap.error("unrecognized arguments: " + " ".join(leftover))
