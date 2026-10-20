@@ -5050,7 +5050,7 @@ def cmd_up(a):
     return remote_control(cmd, env, h)
 
 
-STALE_SESSION_RE = re.compile(r"worker registration failed.*\b404\b|registerWorker.*\b404\b", re.I)
+STALE_SESSION_RE = re.compile(r"(?:worker registration failed|registerWorker)[\s\S]{0,300}?\b404\b", re.I)
 
 
 def drop_bridge_pointers(h):
@@ -5064,62 +5064,95 @@ def drop_bridge_pointers(h):
 
 def remote_control(cmd, env, h):
     """Run `claude remote-control`, passing its output through. If it can't bring back the previous session
-    (deleted in the app, archived, expired: a 404 on worker registration), drop the pointer to it and start
-    once more with a new session, the same as `up --fresh`."""
+    (deleted in the app, archived, expired: a 404 on worker registration), stop it, drop the pointer to that
+    session and start once more with a new one, the same as `up --fresh`. Its output (stdout and stderr) goes
+    through a pseudo-terminal when this is a terminal, so it still draws for one; keys go to it directly."""
     import threading
     for attempt in (1, 2):
-        tty = None
-        if sys.stderr.isatty():  # a pseudo-terminal, so claude still draws for a terminal
-            try:
-                import pty
-                tty, err_out = pty.openpty()
-            except (ImportError, OSError):
-                tty = None
-        if tty is not None:
-            try:
-                import termios, struct
-                fcntl.ioctl(err_out, termios.TIOCSWINSZ,
-                            fcntl.ioctl(sys.stderr.fileno(), termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0)))
-            except (OSError, ImportError, AttributeError):
-                pass
-        try:
-            proc = subprocess.Popen(cmd, env=env, stderr=err_out if tty is not None else subprocess.PIPE)
-        except FileNotFoundError:
-            die("'claude' not found on PATH")
-        if tty is not None:
-            os.close(err_out)
         stale = threading.Event()
+        proc, sources = start_watched(cmd, env)
+        if proc is None:
+            die("'claude' not found on PATH")
 
-        def pump():
+        def pump(fd, out, _close):
             seen = ""
             while True:
                 try:
-                    raw = os.read(tty, 4096) if tty is not None else proc.stderr.read1(4096)
+                    raw = os.read(fd, 4096)
                 except OSError:  # the pseudo-terminal closes when claude exits
                     break
                 if not raw:
                     break
-                sys.stderr.buffer.write(raw)
-                sys.stderr.buffer.flush()
-                seen = (seen + raw.decode("utf-8", "replace"))[-4000:]
-                if attempt == 1 and not stale.is_set() and STALE_SESSION_RE.search(seen):
+                out.buffer.write(raw)
+                out.buffer.flush()
+                seen = (seen + ANSI_RE.sub("", raw.decode("utf-8", "replace")))[-4000:]
+                if not stale.is_set() and STALE_SESSION_RE.search(seen):
                     stale.set()
-                    proc.terminate()
-        t = threading.Thread(target=pump, daemon=True)
-        t.start()
+                    if attempt == 1:
+                        proc.terminate()
+                    else:  # the pointer wasn't where lean-agent looks: say what still works
+                        out.buffer.write(b"\nlean-agent: Remote Control still tries the old session. The server works; "
+                                         b"pick the new session in the app. If it keeps happening: claude update\n")
+                        out.buffer.flush()
+        threads = [threading.Thread(target=pump, args=src, daemon=True) for src in sources]
+        for t in threads:
+            t.start()
         try:
             rc = proc.wait()
         except KeyboardInterrupt:  # Ctrl-C reaches claude too; let it shut down
             rc = proc.wait()
-        t.join(timeout=2)
-        if tty is not None:
-            os.close(tty)
-        if not stale.is_set():
+        for t in threads:
+            t.join(timeout=2)
+        for _, _, close in sources:
+            try:
+                close()
+            except OSError:
+                pass
+        if not stale.is_set() or attempt == 2:
             return rc
-        print("lean-agent: the previous Remote Control session is gone (deleted, archived or expired); "
-              "starting a new one", file=sys.stderr, flush=True)
+        print("\nlean-agent: the previous Remote Control session is gone (deleted, archived or expired); "
+              "starting a new one", flush=True)
         drop_bridge_pointers(h)
     return rc
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|\r")
+
+
+def start_watched(cmd, env):
+    """(process, [(fd to read, stream to copy to, close)]): one pseudo-terminal for stdout and stderr when stdout
+    is a terminal (sized like it, and resized with it), else a pipe for each."""
+    if sys.stdout.isatty():
+        try:
+            import pty
+            import signal
+            import struct
+            import termios
+            master, slave = pty.openpty()
+
+            def resize(*_):
+                try:
+                    size = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0))
+                    fcntl.ioctl(master, termios.TIOCSWINSZ, size)
+                except OSError:
+                    pass
+            resize()
+            try:
+                proc = subprocess.Popen(cmd, env=env, stdout=slave, stderr=slave)
+            except FileNotFoundError:
+                return None, []
+            finally:
+                os.close(slave)  # only claude holds it now, so reading ends when claude exits
+            signal.signal(signal.SIGWINCH, lambda *_: (resize(), proc.send_signal(signal.SIGWINCH)))
+            return proc, [(master, sys.stdout, lambda: os.close(master))]
+        except (ImportError, OSError, AttributeError):
+            pass
+    try:
+        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except FileNotFoundError:
+        return None, []
+    return proc, [(proc.stdout.fileno(), sys.stdout, proc.stdout.close),
+                  (proc.stderr.fileno(), sys.stderr, proc.stderr.close)]
 
 
 FORWARD_MARK = "lean-agent: forwards to the clone"
