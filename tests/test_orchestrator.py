@@ -1198,6 +1198,30 @@ class CliTest(unittest.TestCase):
         self.assertFalse(os.path.exists(pointer))
         self.assertIn("starting a new Remote Control session", out)
 
+    def test_up_recovers_from_a_deleted_remote_session(self):
+        import re as _re
+        home = self.cli("home").stdout.strip()
+        d = os.path.join(self.env["CLAUDE_CONFIG_DIR"], "projects", _re.sub(r"[^A-Za-z0-9]", "-", home))
+        os.makedirs(d, exist_ok=True)
+        pointer = os.path.join(d, "bridge-pointer.json")
+        with open(pointer, "w") as fh:
+            fh.write('{"sessionId": "cse_gone"}')
+        starts = os.path.join(self.tmp.name, "starts.txt")
+        fake = os.path.join(self.tmp.name, "claude-rc")
+        with open(fake, "w") as fh:  # like remote-control: the old session answers 404 and it keeps running
+            fh.write(f"#!{sys.executable}\nimport os, sys, time\nopen({starts!r}, 'a').write('x')\n"
+                     f"if os.path.exists({pointer!r}):\n"
+                     "    sys.stderr.write('[11:26:01] Error: CCR v2 worker registration failed for session cse_gone: "
+                     "Request failed with status code 404\\n'); sys.stderr.flush(); time.sleep(30)\n"
+                     "print('Connected')\n")
+        os.chmod(fake, 0o755)
+        p = self.cli("up", LEAN_AGENT_CLAUDE=fake)
+        self.assertEqual(open(starts).read(), "xx")
+        self.assertFalse(os.path.exists(pointer))
+        self.assertIn("worker registration failed", p.stderr)  # claude's own output still shows
+        self.assertIn("the previous Remote Control session is gone", p.stderr)
+        self.assertIn("Connected", p.stdout)
+
     def test_chrome_check_and_run(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--chrome", "--", "draft it", check=False)

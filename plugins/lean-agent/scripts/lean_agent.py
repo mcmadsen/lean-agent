@@ -5000,12 +5000,7 @@ def cmd_up(a):
                                 "local": a.local})
     set_home_model(h, a.model)
     if a.fresh:
-        # remote-control keeps a pointer on exit so the next start can resume the old session; if that
-        # session was archived or expired, every start fails with "registerWorker ... 404". Start clean.
-        for path in dict.fromkeys([bridge_pointer(h), bridge_pointer(os.path.realpath(h))]):
-            if os.path.exists(path):
-                os.remove(path)
-                print(f"lean-agent: removed {path}; starting a new Remote Control session")
+        drop_bridge_pointers(h)
     if not is_trusted(h):
         print(f"lean-agent: warning: {TRUST_HINT}", file=sys.stderr)
     env = dict(os.environ)
@@ -5047,10 +5042,84 @@ def cmd_up(a):
     os.chdir(h)
     sys.stdout.flush()  # exec replaces the process; unflushed output would be lost when piped
     sys.stderr.flush()
-    try:
-        os.execvpe(cmd[0], cmd, env)
-    except FileNotFoundError:
-        die("'claude' not found on PATH")
+    if a.local:
+        try:
+            os.execvpe(cmd[0], cmd, env)
+        except FileNotFoundError:
+            die("'claude' not found on PATH")
+    return remote_control(cmd, env, h)
+
+
+STALE_SESSION_RE = re.compile(r"worker registration failed.*\b404\b|registerWorker.*\b404\b", re.I)
+
+
+def drop_bridge_pointers(h):
+    """remote-control keeps a pointer on exit so the next start can resume the old session; if that session
+    was deleted, archived or expired, every start fails with "worker registration failed ... 404"."""
+    for path in dict.fromkeys([bridge_pointer(h), bridge_pointer(os.path.realpath(h))]):
+        if os.path.exists(path):
+            os.remove(path)
+            print(f"lean-agent: removed {path}; starting a new Remote Control session", flush=True)
+
+
+def remote_control(cmd, env, h):
+    """Run `claude remote-control`, passing its output through. If it can't bring back the previous session
+    (deleted in the app, archived, expired: a 404 on worker registration), drop the pointer to it and start
+    once more with a new session, the same as `up --fresh`."""
+    import threading
+    for attempt in (1, 2):
+        tty = None
+        if sys.stderr.isatty():  # a pseudo-terminal, so claude still draws for a terminal
+            try:
+                import pty
+                tty, err_out = pty.openpty()
+            except (ImportError, OSError):
+                tty = None
+        if tty is not None:
+            try:
+                import termios, struct
+                fcntl.ioctl(err_out, termios.TIOCSWINSZ,
+                            fcntl.ioctl(sys.stderr.fileno(), termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0)))
+            except (OSError, ImportError, AttributeError):
+                pass
+        try:
+            proc = subprocess.Popen(cmd, env=env, stderr=err_out if tty is not None else subprocess.PIPE)
+        except FileNotFoundError:
+            die("'claude' not found on PATH")
+        if tty is not None:
+            os.close(err_out)
+        stale = threading.Event()
+
+        def pump():
+            seen = ""
+            while True:
+                try:
+                    raw = os.read(tty, 4096) if tty is not None else proc.stderr.read1(4096)
+                except OSError:  # the pseudo-terminal closes when claude exits
+                    break
+                if not raw:
+                    break
+                sys.stderr.buffer.write(raw)
+                sys.stderr.buffer.flush()
+                seen = (seen + raw.decode("utf-8", "replace"))[-4000:]
+                if attempt == 1 and not stale.is_set() and STALE_SESSION_RE.search(seen):
+                    stale.set()
+                    proc.terminate()
+        t = threading.Thread(target=pump, daemon=True)
+        t.start()
+        try:
+            rc = proc.wait()
+        except KeyboardInterrupt:  # Ctrl-C reaches claude too; let it shut down
+            rc = proc.wait()
+        t.join(timeout=2)
+        if tty is not None:
+            os.close(tty)
+        if not stale.is_set():
+            return rc
+        print("lean-agent: the previous Remote Control session is gone (deleted, archived or expired); "
+              "starting a new one", file=sys.stderr, flush=True)
+        drop_bridge_pointers(h)
+    return rc
 
 
 FORWARD_MARK = "lean-agent: forwards to the clone"
@@ -5579,7 +5648,7 @@ def build_parser():
     s.add_argument("--permission-mode", help="e.g. acceptEdits, auto")
     s.add_argument("--local", action="store_true", help="interactive terminal session instead of Remote Control")
     s.add_argument("--fresh", action="store_true",
-                   help="don't resume the previous Remote Control session (fixes 'registerWorker ... 404')")
+                   help="don't resume the previous Remote Control session (done for you when it answers 404)")
     s.add_argument("extra", nargs=argparse.REMAINDER,
                    help="after --: extra flags for claude / claude remote-control, e.g. -- --debug")
     s.set_defaults(fn=cmd_up)
