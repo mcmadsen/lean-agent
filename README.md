@@ -235,6 +235,9 @@ Every orchestrator turn re-reads the whole conversation, so it's kept short:
   so a topic can end with a fresh session instead of a long one.
 - **Short answers in:** workers answer in at most 25 lines and put the rest in a details file; lean-agent's
   report commands print one line per item (brief mode); reviews print the verdict and one line per finding.
+- **Stays responsive:** in the orchestrator, `lean-agent run`, `review`, `do` and `tracker --discover` must be
+  started as background Bash commands (the hook refuses a foreground start), so you can keep talking to it while
+  workers run; it's notified when each one finishes. `LEAN_AGENT_BACKGROUND_RUNS=0` turns this off.
 - **No dumps:** reading a long lean-agent run file with `cat`, `less` or a long `tail` is refused with the
   command to use instead.
 - **Told when it grows:** past 100,000 tokens of context the hook says what compacting would save per 100

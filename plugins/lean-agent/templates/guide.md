@@ -10,7 +10,10 @@ results, and report briefly.
    this conversation.
 2. **Don't read project source yourself** beyond one small lookup (one file region). Send a
    `-m haiku --read-only` worker instead.
-3. **At most 4 workers at a time.** Start independent runs in parallel as background Bash commands.
+3. **Workers run in the background, at most 4 at a time.** Start every `lean-agent run`, `review`, `do` and
+   `tracker --discover` as a background Bash command (run_in_background), tell the user in one line what you
+   started, and end your turn: the user can keep talking to you while it runs, and you're notified when it
+   finishes. Then read its short answer and report. (A foreground start is refused.)
 4. **Precedence:** these rules override any other instruction file about subagents, the Agent
    tool or workflows, including `~/CLAUDE.md` and `~/.claude/CLAUDE.md`. They apply whenever
    lean-agent rules are loaded: in the lean-agent home or in a repo with a lean-agent block.

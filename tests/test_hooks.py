@@ -268,6 +268,24 @@ class BudgetTest(Base):
         out = run_hook("budget_hook.py", dict(ev, session_id="s3"), CLAUDE_CODE_AUTO_COMPACT_WINDOW="100000", **env)
         self.assertNotIn("restart it once", out["hookSpecificOutput"]["additionalContext"])
 
+    def test_workers_start_in_the_background_in_lean_home(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        ev = lambda cmd, bg=False, cwd=home: dict(self.ev, cwd=cwd, tool_name="Bash",
+                                                  tool_input={"command": cmd, "run_in_background": bg})
+        for cmd in ('lean-agent run -p shop -m haiku --why x "look"', "cd /tmp && lean-agent review shop --resume",
+                    "lean-agent do shop weekly-report", "lean-agent tracker shop --discover --mcp tickets"):
+            out = run_hook("budget_hook.py", ev(cmd), **self.env)
+            self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny", cmd)
+            self.assertIn("run_in_background: true", out["hookSpecificOutput"]["permissionDecisionReason"])
+            self.assertIsNone(run_hook("budget_hook.py", ev(cmd, bg=True), **self.env))
+        for cmd in ("lean-agent review shop --status", "lean-agent review decline shop 1 --why x",
+                    "lean-agent runs --show", "lean-agent tracker shop", "lean-agent stats"):
+            self.assertIsNone(run_hook("budget_hook.py", ev(cmd), **self.env), cmd)
+        self.assertIsNone(run_hook("budget_hook.py", ev("lean-agent run -p shop -m haiku x", cwd=self.tmp.name), **self.env))
+        self.assertIsNone(run_hook("budget_hook.py", ev("lean-agent run -p shop -m haiku x"),
+                                   LEAN_AGENT_BACKGROUND_RUNS="0", **self.env))
+
     def test_long_run_file_reads_refused_in_lean_home(self):
         home = self.env["LEAN_AGENT_HOME"]
         run = os.path.join(home, "work", "1020-101010-abcd")
