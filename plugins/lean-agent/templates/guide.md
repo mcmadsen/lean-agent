@@ -154,6 +154,8 @@ lean-agent card core {{P}} checkout-notes
   share, and add `--yes` only after they agree.
 - When the user asks what lean-agent saves, run `lean-agent savings` (estimates; `--measure` once per project
   makes them closer).
+- Your context compacts at about 70K tokens. After a compaction you get a short state digest; for a run's full
+  answer use `lean-agent runs --show <id>` instead of asking the user again.
 - When something seems off, run `lean-agent doctor`, and `lean-agent logs` for recent errors
   (`logs debug` for everything). A squeezed output's first line names the full output and an errors-only
   copy: read the errors file before the full one.

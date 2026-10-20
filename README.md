@@ -166,7 +166,12 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   When Claude Code connects but a worker gets needs-auth, doctor compares lean-agent's copy with
   `claude mcp get`: a different `type` or URL is corrected and retried automatically, and a header difference is
   named but not copied (header values can be secrets).
-- **Big MCP results:** when a result is too big and Claude Code saves it to a file, workers are pointed at
+- **Big MCP results are trimmed before the model reads them:** every MCP worker gets a PostToolUse hook that
+  compacts results over 3,000 chars (links, URLs, avatars, descriptors and empty values dropped, identities as
+  names) and, for a recipe saved with `--fields`, keeps only those fields plus ids. The full result is saved
+  and its path is in the first line. Measured on a 30-item list: 26,193 -> 1,309 chars, the run 1,439 -> 287
+  sonnet-eq, same answer. A `--complete` recipe also says when it needed more than one tracker call per item.
+- **Results saved to a file:** when a result is too big and Claude Code saves it to a file, workers are pointed at
   `lean-json <file> [--fields a,b.c] [--grep TEXT] [--exclude TEXT]`, which prints a compact view (links, URLs,
   avatars and empty values dropped, identities as names, one line per item). Read-only workers may run it too.
 - **Exact identifiers for external systems:** every worker given `--mcp` gets the repository's identity from its
@@ -180,7 +185,8 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   or a Removed state, a description length limit): each `verified`, `false` or `unknown`, never guessed. A
   re-run replaces what discovery found and keeps your own notes; `tracker` and `doctor` warn when the tracker
   knows you by another email than your Claude account, and `tracker` warns when one of your notes contradicts a
-  discovered fact (`--supersede N` keeps the note but stops giving it to workers). Add your own with `--note "..."` or `me_id=... me_name=...`. Every MCP worker gets
+  discovered fact about the same work item type (`--supersede N` keeps the note but stops giving it to workers);
+  `--ack-email` silences the email warning once you've seen it. Add your own with `--note "..."` or `me_id=... me_name=...`. Every MCP worker gets
   them, so assigning, voting or closing doesn't have to fail first (`@me` often isn't accepted).
 - **Variables without a token on disk:** a plugin config that uses `${VAR}` (e.g. a GitHub token) can get it
   from a command run when a worker starts: `lean-agent mcp env GITHUB_PERSONAL_ACCESS_TOKEN --command "gh auth
@@ -188,6 +194,20 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   the value goes into the run's owner-only MCP config, which is deleted when the run ends. Options
   marked sensitive live in Claude Code's credentials store; lean-agent can't read them and doctor says so.
 - Not covered: claude.ai connectors (they aren't in a local config file).
+
+## The orchestrator's own context
+
+Every orchestrator turn re-reads the whole conversation, so it's kept short:
+
+- **Compacts early:** `lean-agent up` sets Claude Code's auto-compact window to 100,000 tokens at 70%, so the
+  orchestrator compacts at about 70,000 tokens instead of 70% of a 1M window (`up --compact-at N` to change;
+  the home's settings carry `autoCompactWindow` too).
+- **Keeps what matters:** a PreCompact hook (lean-agent's home only) tells the summary to keep the user's goals
+  and open requests, every approval word for word, runs in progress, branches and PRs, unfixed findings and
+  decisions, and to drop worker answers, command output, file contents and the guide: lean-agent stores those.
+- **Picks up cheaply:** after a compaction a SessionStart hook gives the orchestrator a short digest from
+  lean-agent's records (runs in progress, recent runs, latest review per branch), so it doesn't rebuild that
+  from memory. Any run's full answer is one `lean-agent runs --show <id>` away.
 
 ## Attribution (asked once)
 

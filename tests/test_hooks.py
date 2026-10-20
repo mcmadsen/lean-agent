@@ -136,6 +136,55 @@ class SqueezeTest(Base):
         self.assertIsNone(run_hook("squeeze_hook.py", self.event(big), LEAN_AGENT_SQUEEZE="0", **self.env))
 
 
+class CompactTest(Base):
+    def test_only_in_lean_home(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "compact_hook.py"), "pre"], capture_output=True,
+                           text=True, input=json.dumps({"cwd": self.tmp.name}), env=dict(os.environ, **self.env))
+        self.assertEqual(p.stdout, "")  # the user's other sessions compact as usual
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "compact_hook.py"), "pre"], capture_output=True,
+                           text=True, input=json.dumps({"cwd": home}), env=dict(os.environ, **self.env))
+        self.assertIn("every approval the user gave for an outward action", p.stdout)
+
+    def test_digest_after_compaction(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(os.path.join(home, "reviews"), exist_ok=True)
+        with open(os.path.join(home, "ledger.jsonl"), "w") as fh:
+            fh.write(json.dumps({"id": "1020-1", "status": "done", "model": "haiku", "project": "shop",
+                                 "task": "list the checkout tests"}) + "\n")
+        with open(os.path.join(home, "reviews", "shop.jsonl"), "w") as fh:
+            fh.write(json.dumps({"ref": "feature-x", "head": "abc123def456", "verdict": "changes-requested",
+                                 "findings": [{"severity": "major"}]}) + "\n")
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "compact_hook.py"), "post"], capture_output=True,
+                           text=True, input=json.dumps({"cwd": home, "source": "compact"}), env=dict(os.environ, **self.env))
+        ctx = json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("- 1020-1 done haiku shop: list the checkout tests", ctx)
+        self.assertIn("shop feature-x @ abc123def4 changes-requested (1 blocking)", ctx)
+
+
+class McpTrimTest(Base):
+    def event(self, payload):
+        return {"tool_name": "mcp__tracker__get_items", "tool_response": [{"type": "text", "text": json.dumps(payload)}]}
+
+    def test_trims_big_results_and_keeps_fields(self):
+        items = [{"id": i, "title": f"T{i}", "state": "Active", "_links": {"self": {"href": "https://x"}},
+                  "assignedTo": {"displayName": "Pat", "imageUrl": "u"}, "description": "x" * 300} for i in range(30)]
+        out = run_hook("mcp_trim_hook.py", self.event({"count": 30, "value": items}),
+                       LEAN_AGENT_MCP_FIELDS="title,state", **self.env)
+        blocks = out["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertIn("[lean-agent: trimmed", blocks[0]["text"])
+        data = json.loads(blocks[1]["text"])
+        self.assertEqual(data["count"], 30)
+        self.assertEqual(data["value"][3], {"title": "T3", "state": "Active", "id": 3})
+        out = run_hook("mcp_trim_hook.py", self.event({"value": items}), **self.env)  # no fields: noise only
+        data = json.loads(out["hookSpecificOutput"]["updatedToolOutput"][1]["text"])
+        self.assertNotIn("_links", data["value"][0])
+        self.assertEqual(data["value"][0]["assignedTo"], "Pat")
+        self.assertIsNone(run_hook("mcp_trim_hook.py", self.event({"value": items[:1]}), **self.env))  # small
+        self.assertIsNone(run_hook("mcp_trim_hook.py", dict(self.event({"value": items}), tool_name="Bash"), **self.env))
+
+
 class BudgetTest(Base):
     def setUp(self):
         super().setUp()

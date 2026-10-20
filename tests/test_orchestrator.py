@@ -452,6 +452,19 @@ class CliTest(unittest.TestCase):
         self.assertIn("4,200 characters", out)
         self.assertIn("over the 4,000-character limit", out)
 
+    def test_tracker_conflicts_pair_by_type(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        conf = {"notes": ["User Story states: New, Active, Completed, Closed (no Removed)", "Bugs go through review"],
+                "discovered": {"states": {"Bug": {"states": ["New", "Doing", "In Review", "Shipped", "Closed"],
+                                                  "source": "items"},
+                                          "User Story": {"states": ["Proposed", "Active", "Scheduled", "Completed", "Closed"],
+                                                         "source": "both"}}}}
+        found = L.note_conflicts(conf)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0][0], 1)
+        self.assertTrue(found[0][2].startswith("User Story states"), found)
+
     def test_run_requires_model_and_why(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "do it", check=False)
@@ -1711,6 +1724,9 @@ class CliTest(unittest.TestCase):
         self.assertIn("- work items can be deleted: unknown", out)
         self.assertIn("warning: the tracker knows you as pat@work.example, but Claude is signed in as pat@home.example", out)
         self.assertIn("tracker: the tracker knows you as", self.cli("doctor", check=False).stdout)
+        self.assertIn("email mismatch acknowledged", self.cli("tracker", "proj", "--ack-email").stdout)
+        self.assertNotIn("the tracker knows you as", self.cli("tracker", "proj").stdout)
+        self.assertNotIn("the tracker knows you as", self.cli("doctor", check=False).stdout)
         again = json.dumps({"me": {"id": "1a2b-3c", "name": "Pat"}, "states": {"Bug": {"states": ["New", "Done"]}}})
         out = self.cli("tracker", "proj", "--discover", "--mcp", "tracker", FAKE_FEEDBACK=fb + again).stdout
         self.assertIn("- Bug states: New, Done", out)
@@ -1721,6 +1737,7 @@ class CliTest(unittest.TestCase):
         self.cli("tracker", "proj", "--note", "Bug states are New, Active and Done only")
         out = self.cli("tracker", "proj").stdout
         self.assertIn("warning: note 4 may contradict what discovery found: \"Bug states: New, Done", out)
+
         out = self.cli("tracker", "proj", "--supersede", "4").stdout
         self.assertIn("note 4 superseded", out)
         self.assertIn("4. Bug states are New, Active and Done only  (superseded)", out)
