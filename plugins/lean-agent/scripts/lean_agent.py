@@ -1326,6 +1326,9 @@ def cmd_run(a):
     with open(os.path.join(workdir, "result.json"), "a") as fh:
         fh.write((result_line or json.dumps({"stderr": err[-4000:], "stdout_tail": raw[-2000:]})) + "\n")
 
+    tu = lean_mcp.transcript_usage(workdir, out.get("session_id"), started_utc)
+    if tu and sum(tu.values()) > sum((out.get("usage") or {}).get(k, 0) or 0 for k in usage.FIELDS):
+        out["usage"] = dict(out.get("usage") or {}, **tu)  # the result's usage can under-count; the transcript doesn't
     summary, fb = parse_feedback(out.get("result") or "")
     mcp_seq = (lean_mcp.mcp_call_sequence(workdir, out.get("session_id"), started_utc)
                if (mcp_specs or chrome_spec) else [])
@@ -1781,6 +1784,7 @@ def change_focus(path, rng_args):
     cur = old_line = new_line = None
     removed_titles, added_titles = {}, {}
     old_assert_lines = {}
+    hunks = []  # (file, [removed lines], [added lines]) to spot pure renames
     for line in diff.splitlines():
         if line.startswith("+++ "):
             cur = line[6:] if line.startswith("+++ b/") else None
@@ -1790,7 +1794,10 @@ def change_focus(path, rng_args):
         m = re.match(r"^@@ -(\d+)(?:,\d+)? \+(\d+)", line)
         if m:
             old_line, new_line = int(m.group(1)), int(m.group(2))
+            hunks.append((cur, [], []))
             continue
+        if hunks and line[:1] in "+-":
+            hunks[-1][1 if line[0] == "-" else 2].append(line[1:])
         if cur is None or old_line is None:
             continue
         is_test = bool(TEST_PATH_RE.search(cur))
@@ -1824,10 +1831,16 @@ def change_focus(path, rng_args):
                                      base_text, re.M):
                         state.append(f"{name} ({cur}:{new_line})")
             new_line += 1
+    renamed = {}  # a hunk that only swaps one test title for a similar one: same body, same assertions
+    for f, rem, add in hunks:
+        if f and TEST_PATH_RE.search(f) and len(rem) == 1 and len(add) == 1:
+            old_t, new_t = _test_title(rem[0]), _test_title(add[0])
+            if old_t and new_t and _jaccard(_words(old_t), _words(new_t)) >= 0.5:
+                renamed[(f, old_t)] = new_t
     for f, titles in removed_titles.items():
         added = set(added_titles.get(f, []))
         for t in titles:
-            if t not in added:
+            if t not in added and (f, t) not in renamed:
                 tests.setdefault(f, {})[t] = "renamed or removed"
     for f, lines in old_assert_lines.items():  # map removed assertion lines to the test they were in
         text = git(path, "show", f"{base}:{f}") if base else None
@@ -1841,12 +1854,20 @@ def change_focus(path, rng_args):
                     owner = title
             if owner:
                 tests.setdefault(f, {}).setdefault(owner, "assertions changed")
+    for (f, t) in renamed:
+        if tests.get(f, {}).get(t) == "assertions changed":
+            continue  # renamed AND its assertions changed: still needs a coverage entry
+        tests.get(f, {}).pop(t, None)
     return {"tests": [f"{f}: '{t}' ({why})" for f, d in tests.items() for t, why in d.items()][:25],
-            "params": list(dict.fromkeys(params))[:15], "state": list(dict.fromkeys(state))[:15]}
+            "params": list(dict.fromkeys(params))[:15], "state": list(dict.fromkeys(state))[:15],
+            "renamed": [f"{f}: '{o}' -> '{n}'" for (f, o), n in renamed.items()][:15]}
 
 
 def focus_text(fc):
     parts = []
+    if fc.get("renamed"):
+        parts.append("Tests only renamed (same body; no coverage entry needed):\n" +
+                     "\n".join(f"- {t}" for t in fc["renamed"]))
     if fc["tests"]:
         parts.append("Tests whose assertions this change edits (pass 4: what did each protect, is that still "
                      "protected elsewhere, or was it removed on purpose?):\n" + "\n".join(f"- {t}" for t in fc["tests"]))
@@ -2545,7 +2566,7 @@ def cmd_review(a):
                 + (f"; start one: lean-agent review {slug} --head {a.head}" if a.head else ""))
         old_head = (prev.get("review_meta") or {}).get("head")
         meta, where = refresh_review_meta(path, prev.get("review_meta") or {}, fetch=not a.no_fetch)
-        print(f"re-review of {meta.get('ref') or '?'} @ {meta['head'][:12]} (resuming reviewer {prev['id']})",
+        print(f"re-review of {meta.get('ref') or '?'} @ {meta['head'][:12]} (after reviewer {prev['id']})",
               flush=True)
         since = ([old_head, meta["head"]] if meta.get("mode") == "ref" else [old_head]) if old_head else []
         changed = (git(path, "diff", "--name-only", *since) or "").split() if since else []
@@ -2553,7 +2574,7 @@ def cmd_review(a):
             if since else {"files": [], "symbols": []}
         meta["new_symbols"] = ns_syms["files"] + ns_syms["symbols"]
         meta["resume"] = True
-        focus = change_focus(path, since) if since else {"tests": [], "params": [], "state": []}
+        focus = change_focus(path, since) if since else {"tests": [], "params": [], "state": [], "renamed": []}
         meta["edited_tests"] = focus["tests"]
         mb = meta.get("merge_base")
         if mb:
@@ -2566,13 +2587,44 @@ def cmd_review(a):
                   "symbols since then:" + symbols_text(ns_syms) + " " + focus_text(focus).replace("\n", " ") +
                   " Reply with a complete LEAN-REVIEW line again (open findings only, plus searches, reuse and "
                   "coverage for what's new).")
-        task = (f"The change was updated after your review. {where} Check whether each earlier finding is "
-                "resolved, and look for new problems. " + (a.focus or ""))
-        ns = argparse.Namespace(resume=prev["id"], task=[task], task_file=None, model=None, why=None, cards=None,
-                                project=None, read_only=True, chrome=None, mcp=None, tools=None, allow_send=None,
-                                max_turns=a.max_turns, max_usd=a.max_usd, max_context=4000, role="reviewer",
-                                effort=effort, review_meta=meta)
-        return cmd_run(ns)
+        if a.same_session or not since:  # the old way: continue the reviewer's whole session
+            task = (f"The change was updated after your review. {where} Check whether each earlier finding is "
+                    "resolved, and look for new problems. " + (a.focus or ""))
+            ns = argparse.Namespace(resume=prev["id"], task=[task], task_file=None, model=None, why=None, cards=None,
+                                    project=None, read_only=True, chrome=None, mcp=None, tools=None, allow_send=None,
+                                    max_turns=a.max_turns, max_usd=a.max_usd, max_context=4000, role="reviewer",
+                                    effort=effort, review_meta=meta)
+            rc = cmd_run(ns)
+            return reuse_follow_up(a, slug, meta, effort) if rc == 2 else rc
+        # a fresh reviewer with a small context: the open findings and only what changed since the last review
+        last = next((r for r in reversed(list(read_jsonl(reviews_path(slug)))) if r.get("run") == prev["id"]
+                     or (r.get("ref") == meta.get("ref") and r.get("head") == old_head)), None) or {}
+        open_items = [f"- [{f.get('severity')}/{f.get('category') or '?'}] {f.get('file')}:{f.get('line', '')} "
+                      f"{str(f.get('issue', ''))[:200]}" for f in last.get("findings") or []]
+        open_items += [f"- [check] {str(c.get('what', ''))[:200]}" for c in last.get("checks") or []]
+        scope = (f"the changes to {meta.get('ref') or 'the working tree'} since the last review "
+                 f"({old_head[:12]}..{meta['head'][:12]}): {len(changed)} files ({', '.join(changed[:15])})")
+        read_rule = (f"These files are NOT checked out. Read them at the reviewed commit with `git -C {path} show "
+                     f"{meta['head']}:<path>`, search with `git -C {path} grep -n <pattern> {meta['head']}`."
+                     if meta.get("mode") == "ref" else "")
+        task = ("Re-review after fixes. The earlier review's open items (say for each: fixed / still open, with "
+                "file:line):\n" + ("\n".join(open_items[:25]) or "- none") + "\n\nGive the changes since then the full "
+                "passes; don't re-review code that didn't change. " + decisions_text(slug, meta.get("ref"))
+                + (a.focus or ""))
+        cards = suggest(slug, " ".join(re.split(r"[/._-]+", " ".join(changed))), a.max_context, "review")
+        ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=prev.get("model") or model,
+                                why=f"re-review after fixes ({effort} effort, fresh context)", cards=None,
+                                card_list=cards, project=slug, read_only=True, chrome=None, mcp=None, tools=None,
+                                allow_send=None, max_turns=a.max_turns, max_usd=a.max_usd, max_context=a.max_context,
+                                ttype="review", role="reviewer", effort=effort, review_meta=meta,
+                                role_rule=REVIEWER_RULE.format(scope=scope, project=path, diff_range=" ".join(since),
+                                                               read_rule=read_rule, new_symbols=symbols_text(ns_syms),
+                                                               grep_ref=meta["head"] if meta.get("mode") == "ref" else "",
+                                                               base_ref=old_head, focus=focus_text(focus)))
+        print(f"review: fresh re-review of what changed since {old_head[:12]} ({len(changed)} files, "
+              f"{len(open_items)} open items); --same-session continues the old reviewer instead", flush=True)
+        rc = cmd_run(ns)
+        return reuse_follow_up(a, slug, meta, effort) if rc == 2 else rc
     base = a.base or default_base(path)
     if not base:
         die("no base branch found; pass --base <branch>")
@@ -2666,16 +2718,18 @@ def reuse_follow_up(a, slug, meta, effort):
     """Once per review: if the reviewer left symbols unchecked or a justified-new verdict wasn't accepted, send it
     back (same session, cached context) to finish the reuse pass before the result goes to the user."""
     last = (list(read_jsonl(reviews_path(slug))) or [None])[-1]
-    gaps = (last or {}).get("unchecked", []) + (last or {}).get("disputed", [])
+    gaps = (last or {}).get("unchecked", []) + (last or {}).get("disputed", []) + [
+        f"coverage entry for edited test {t}" for t in (last or {}).get("coverage_unchecked", [])]
     if not last or not gaps:
         return 2
     prev = next((r for r in reversed(ledger()) if r["id"] == last["run"]), None)
     if not prev:
         return 2
     print(f"review: sending the reviewer back once to finish the reuse pass ({len(gaps)} open)", flush=True)
-    task = ("Your reuse pass isn't complete. For each item below, search the repository (at least one search "
-            "each) and give it a reuse entry; for justified-new, say concretely why the existing code can't be "
-            "reused or extended, or change your verdict and add a major duplication finding:\n"
+    task = ("Your review isn't complete. For each item below: a reuse entry (search the repository, at least one "
+            "search each; for justified-new, say concretely why the existing code can't be reused or extended) or a "
+            "coverage entry (what the test protected, and whether that's still tested; a pure rename is "
+            "still-covered):\n"
             + "\n".join(f"- {g}" for g in gaps[:20]) + "\nThen reply with a complete LEAN-REVIEW line again "
             "(all findings, searches and reuse entries, not only the new ones).")
     ns = argparse.Namespace(resume=prev["id"], task=[task], task_file=None, model=None, why=None, cards=None,
@@ -2859,7 +2913,8 @@ def report_review(slug, project, entry, review, meta):
                                       "dirty": dirty, "ref": meta.get("ref"), "mode": meta.get("mode", "worktree"),
                                       "base": meta.get("base"), "findings": findings, "checks": checks,
                                       "reuse": review.get("reuse") or [], "new_symbols": meta.get("new_symbols") or [],
-                                      "unchecked": review.get("_missing") or [], "disputed": review.get("_disputed") or []})
+                                      "unchecked": review.get("_missing") or [], "disputed": review.get("_disputed") or [],
+                                      "coverage_unchecked": review.get("_no_cov") or []})
     order = {"blocker": 0, "major": 1, "minor": 2, "nit": 3}
     label = meta.get("ref") or "the working tree"
     reuse = [r for r in review.get("reuse") or [] if isinstance(r, dict)]
@@ -5250,7 +5305,9 @@ def build_parser():
                    "with --status: check that ref")
     s.add_argument("--no-fetch", action="store_true", help="don't `git fetch origin` for origin/* refs")
     s.add_argument("--focus", help="what the reviewer should look at closely")
-    s.add_argument("--resume", action="store_true", help="re-review after fixes, in the same reviewer session")
+    s.add_argument("--resume", action="store_true", help="re-review after fixes: a fresh reviewer gets the open findings "
+                   "and only what changed since (cheap); --same-session continues the old reviewer")
+    s.add_argument("--same-session", action="store_true", help="--resume: continue the earlier reviewer session")
     s.add_argument("--status", action="store_true", help="exit 0 only if the current code has an approve")
     s.add_argument("--independent", action="store_true", help="for comparison runs: no earlier findings, decisions, "
                    "second opinion or decline filtering")
