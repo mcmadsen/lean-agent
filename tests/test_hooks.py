@@ -309,7 +309,7 @@ class BudgetTest(Base):
         self.assertIn("1. Ask the user whether to merge PR 512", note)
         self.assertIn("1020-101010-abcd done haiku shop", note)
         self.assertIn("[details: /x/details-1.md]", note)
-        self.assertIn("Items and branches touched: #512, SHOP-77", note)
+        self.assertIn("Items and branches touched: PR 512, SHOP-77", note)
         p = subprocess.run([sys.executable, os.path.join(ROOT, "compact_hook.py"), "post"],
                            input=json.dumps(dict(start, source="resume")), capture_output=True, text=True,
                            env=dict(os.environ, **self.env), check=True)

@@ -494,7 +494,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("archive testing", out)
         self.assertIn("protected: optimize won't archive", self.cli("card", "protect", "proj", "testing").stdout)
         out = self.cli("optimize", "proj", "--apply", "--skip", "style").stdout
-        self.assertIn("(protected: not suggesting archive for testing)", out)
+        self.assertIn("(protected cards are not listed: archive testing", out)
         self.assertIn("Skipped: style.", out)
         listing = self.cli("cards", "proj").stdout
         self.assertIn(" style ", listing)  # not archived
@@ -1625,12 +1625,45 @@ class CliTest(unittest.TestCase):
         self.cli("learn", self.proj, "--name", "proj")
         self.cli("memory", "add", "Never merge on Fridays.", "--type", "feedback")
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "reply on PR 512")
-        out = self.cli("handoff", "--note", "Ask the user whether to merge PR 512").stdout
+        self.assertEqual(self.cli("handoff", "--note", "Ask the user whether to merge PR 512").stdout.strip(),
+                         "note 1 added; 1 open")
+        self.assertEqual(self.cli("handoff", "--note", "Second item").stdout.strip(), "note 2 added; 2 open")
+        out = self.cli("handoff").stdout
         self.assertIn("1. Ask the user whether to merge PR 512", out)
         self.assertIn("Never merge on Fridays.", out)
-        self.assertIn("Items and branches touched: #512", out)
+        self.assertIn("Items and branches touched: PR 512", out)
+        self.assertIn(": Did the thing.", out)  # the run's result, not its task text
         self.assertTrue(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "handoff.md")))
-        self.assertNotIn("Open items", self.cli("handoff", "--done", "1").stdout)
+        self.cli("handoff", "--done", "all")
+        self.assertNotIn("Open items", self.cli("handoff").stdout)
+
+    def test_handoff_rules_deduped_and_ranked(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("memory", "add", "A passive build is defined by two independent things: the flag and the env.",
+                 "--type", "feedback", "--name", "passive-build")
+        self.cli("memory", "add", "A passive build is defined by TWO independent things: the flag and the env!",
+                 "--type", "feedback", "--name", "passive-build-2")
+        for i in range(6):
+            self.cli("memory", "add", f"Old unrelated rule number {i} about widgets{i}.", "--type", "feedback",
+                     "--name", f"old-{i}")
+        self.cli("memory", "add", "Keep pull requests as draft until the user approves them.", "--type", "feedback",
+                 "--name", "draft-prs")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "sync memory")  # makes the mem-* cards
+        self.cli("card", "protect", "proj", "mem-feedback-draft-prs")
+        out = self.cli("handoff").stdout
+        rules = out.split("Standing rules (memory):")[1].split("Recent runs:")[0]
+        self.assertEqual(rules.count("passive build"), 1)
+        self.assertTrue(rules.strip().splitlines()[0].strip().startswith("- Keep pull requests as draft"))
+        self.assertLessEqual(len([l for l in rules.splitlines() if l.strip().startswith("- ")]), 10)
+
+    def test_version_and_small_messages(self):
+        out = self.cli("--version").stdout
+        self.assertRegex(out, r"^lean-agent \d+\.\d+\.\d+")
+        p = self.cli("output", "optimize", check=False)
+        self.assertIn("brief mode is off in this session", p.stderr)
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("run", "-p", "proj", "--escalate", "haiku,sonnet", "--why", "x", "look up totals")
+        self.assertIn("escalate: haiku -> sonnet (the next model only if a run fails)", p.stdout)
 
     def test_review_a_ref_without_checkout(self):
         g = self.git_project()

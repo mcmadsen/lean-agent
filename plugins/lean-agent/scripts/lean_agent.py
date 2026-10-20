@@ -1661,6 +1661,7 @@ def run_escalating(a):
     if a.task == ["-"] or (not a.task and a.task_file is None and not sys.stdin.isatty()):
         a.task, a.task_file = [sys.stdin.read().strip()], None  # read once, for every attempt
     rc = 1
+    print(f"escalate: {' -> '.join(models)} (the next model only if a run fails)", flush=True)
     for i, model in enumerate(models):
         b = copy.copy(a)
         b.escalate, b.model, b.again = None, model, a.again or i > 0
@@ -4347,8 +4348,11 @@ def _cmd_optimize(a):
                                 f"{c['id']}` proposes a shorter text and checks nothing important is lost", None))
     held = [x for x in actions if x[1].get("protected") and x[0] in ("archive", "uncore", "trim")]
     actions = [x for x in actions if x not in held]
-    for act, c, _, _ in held:
-        print(f"(protected: not suggesting {act} for {c['id']})")
+    if held:
+        print("(protected cards are not listed: " + ", ".join(f"{act} {c['id']}" for act, c, _, _ in held) + ")")
+    if skip and not a.apply:
+        print(f"(--skip leaves out {', '.join(sorted(skip))} for this run only; `lean-agent card protect {slug} <id>` "
+              "keeps a card out for good)")
     if not actions and not (a.accept or a.reject):
         print(f"Cards: nothing to promote, demote, archive or trim right now (that needs {a.min_runs}+ runs per card; "
               "earlier --apply changes are already in). New-card and preset drafts follow below, if any.")
@@ -5099,6 +5103,10 @@ def forward_old_hooks(dry=False):
     return changed
 
 
+def plugin_version():
+    return load_json(os.path.join(PLUGIN_ROOT, ".claude-plugin", "plugin.json"), {}).get("version") or "?"
+
+
 def cmd_sync(a):
     root = clone_root()
     if not root:
@@ -5171,6 +5179,7 @@ def cmd_sync(a):
               "the server keeps running). A session that's already open can re-read the rules with `lean-agent guide`.")
     else:
         print("Nothing changed for running sessions.")
+    print(f"lean-agent {plugin_version()}")
 
 
 def cmd_install(a):
@@ -5540,6 +5549,9 @@ def cmd_handoff(a):
     text = compact_hook.handoff(a.hours)
     with open(home("handoff.md"), "w") as fh:
         fh.write(text + "\n")
+    if a.note or a.done:
+        print((f"note {len(notes)} added" if a.note else f"closed {a.done}") + f"; {len(notes)} open")
+        return
     print(text)
     print(f"(saved {home('handoff.md')}; a new or compacted orchestrator session starts with this note)")
 
@@ -5552,6 +5564,7 @@ def cmd_home(a):
 
 def build_parser():
     ap = argparse.ArgumentParser(prog="lean-agent", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--version", action="version", version=f"lean-agent {plugin_version()}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("up", help="start the orchestrator (Remote Control by default)")
@@ -5973,6 +5986,9 @@ def brief_text(cmd, text):
 def cmd_output(a):
     path = home("output", f"{a.command}.txt")
     if not os.path.exists(path):
+        if not BRIEF:
+            die(f"no saved output for {a.command!r}: brief mode is off in this session (LEAN_AGENT_BRIEF isn't set; "
+                "a `lean-agent up` from v0.14 sets it), so commands print everything and nothing is saved")
         die(f"no saved output for {a.command!r} (brief mode saves it when a command prints more than {BRIEF_LINES} lines)")
     text = read_text(path)
     if a.grep:

@@ -76,26 +76,100 @@ def recent(runs, hours):
     return [r for r in runs if str(r.get("ts", "")) >= cutoff]
 
 
+SHA = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def run_branch(r, worktrees):
+    """The branch a run worked on: the reviewed ref, or its worktree's ref (not the worktree's folder name)."""
+    ref = (r.get("review_meta") or {}).get("ref")
+    if not ref and r.get("worktree"):
+        ref = ((worktrees.get(r.get("project")) or {}).get(r["worktree"]) or {}).get("ref") or r["worktree"]
+    ref = (ref or "").replace("origin/", "", 1)
+    return "" if SHA.match(ref) else ref  # a bare commit says nothing to the next session
+
+
 def touched_items(runs):
-    """Tracker items, PRs and branches that recent runs worked on, from their tasks and review refs."""
+    """Tracker items, PRs and branches that recent runs worked on: "PR 512 (feature/x)", "SHOP-77", "#40"."""
+    try:
+        with open(os.path.join(usage.lean_home(), "worktrees.json")) as fh:
+            worktrees = json.load(fh)
+    except (OSError, ValueError):
+        worktrees = {}
     found = []
     for r in runs:
         text = str(r.get("task", ""))
-        found += [f"#{n}" for n in REF_WORDS.findall(text) + REF_HASH.findall(text)] + REF_KEY.findall(text)
-        ref = (r.get("review_meta") or {}).get("ref") or r.get("worktree")
-        if ref:
-            found.append(ref)
-    return list(dict.fromkeys(found))
+        prs = REF_WORDS.findall(text)
+        branch = run_branch(r, worktrees)
+        if prs and branch:
+            found += [f"PR {n} ({branch})" for n in prs]
+        else:
+            found += [f"PR {n}" for n in prs] + ([branch] if branch else [])
+        found += [f"#{n}" for n in REF_HASH.findall(text) if n not in prs] + REF_KEY.findall(text)
+    # "PR 512" and the bare branch add nothing once "PR 512 (branch)" is there
+    return [x for x in dict.fromkeys(found)
+            if not any(y.startswith(x + " (") or y.endswith(f" ({x})") for y in found)]
 
 
-def standing_rules(limit=12):
-    """Global feedback and user memories: the rules every session follows."""
+def _slug(text, limit=40):  # as lean-agent names memory cards (mem-<slug>)
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    if len(slug) > limit:
+        cut = slug[:limit + 1].rfind("-")
+        slug = slug[:cut if cut > limit // 2 else limit]
+    return slug.strip("-") or "card"
+
+
+def _words(text):
+    return {w for w in re.findall(r"[a-z0-9]{4,}", text.lower())}
+
+
+def standing_rules(limit=10, runs=()):
+    """Feedback and user memories, without near-duplicates, best first: ones whose card is core or protected,
+    then ones about the current work (words shared with recent runs), then the most used, then the newest."""
+    home = usage.lean_home()
     try:
-        mems = lean_memory.read_all(lean_memory.store_dir(usage.lean_home()))
+        mems = lean_memory.read_all(lean_memory.store_dir(home))
     except OSError:
         return []
-    rules = [m for m in mems if m["type"] in ("feedback", "user") and m["scope"] == lean_memory.GLOBAL]
-    return [" ".join(m["body"].split())[:200] for m in rules[:limit]]
+    flagged, used = set(), {}
+    for f in glob.glob(os.path.join(home, "library", "*", "cards.json")):
+        try:
+            with open(f) as fh:
+                cards = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        for c in cards if isinstance(cards, list) else []:
+            if str(c.get("id", "")).startswith("mem-"):
+                if c.get("core") or c.get("protected") or c.get("core_types"):
+                    flagged.add(c["id"])
+                used[c["id"]] = used.get(c["id"], 0) + int(c.get("used") or 0)
+    work = set().union(*(_words(str(r.get("task", ""))) for r in runs)) if runs else set()
+    rules = [m for m in mems if m["type"] in ("feedback", "user")]
+    rules.sort(key=lambda m: m.get("modified") or "", reverse=True)
+    rules.sort(key=lambda m: (("mem-" + _slug(m["stem"])) not in flagged, -len(_words(m["body"]) & work),
+                              -used.get("mem-" + _slug(m["stem"]), 0)))
+    out, seen = [], []
+    for m in rules:
+        w = _words(m["body"])
+        if any(w and len(w & s) / len(w | s) >= 0.7 for s in seen):
+            continue  # the same rule saved twice (e.g. a "-2" copy)
+        seen.append(w)
+        out.append(" ".join(m["body"].split())[:200])
+        if len(out) >= limit:
+            break
+    return out
+
+
+GOAL = re.compile(r"(?im)^\s*(?:goal|task)\s*:\s*(.+)$")
+
+
+def run_line(r):
+    """What a run was about in one line: its result's first sentence, else the task's Goal line, else the task."""
+    head = " ".join(str(r.get("result_head") or "").split())
+    if head:
+        m = re.match(r"(.{20,160}?[.!?])(\s|$)", head)
+        return (m.group(1) if m else head[:120])
+    m = GOAL.search(str(r.get("task", "")))
+    return " ".join((m.group(1) if m else str(r.get("task", ""))).split())[:100]
 
 
 def handoff(hours=RECENT_HOURS):
@@ -108,7 +182,8 @@ def handoff(hours=RECENT_HOURS):
     if notes:
         lines.append("Open items and pending decisions:")
         lines += [f"  {i}. {n.get('text', '')}" for i, n in enumerate(notes, 1)]
-    rules = standing_rules()
+    runs = read_jsonl(os.path.join(home, "ledger.jsonl"))
+    rules = standing_rules(runs=recent(runs, hours))
     if rules:
         lines.append("Standing rules (memory):")
         lines += [f"  - {r}" for r in rules]
@@ -124,13 +199,12 @@ def handoff(hours=RECENT_HOURS):
             continue
     if running:
         lines.append("Running now: " + "; ".join(running))
-    runs = read_jsonl(os.path.join(home, "ledger.jsonl"))
     shown = recent(runs, hours)[-10:] or runs[-3:]
     if shown:
         lines.append("Recent runs:")
     for r in shown:
         lines.append(f"  - {r.get('id')} {r.get('status')} {r.get('model')} {r.get('project')}"
-                     + (f" ({r['role']})" if r.get("role") else "") + f": {' '.join(str(r.get('task', '')).split())[:90]}"
+                     + (f" ({r['role']})" if r.get("role") else "") + f": {run_line(r)}"
                      + (f" [details: {r['details']}]" if r.get("details") else ""))
     items = touched_items(recent(runs, hours))
     if items:
