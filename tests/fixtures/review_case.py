@@ -350,6 +350,17 @@ test('logout drops the queued follow-up', async () => {
   expect(d.markFullyChecked).not.toHaveBeenCalled();
 });
 
+test('a covered trigger after the requests are sent gets its own follow-up', async () => {
+  const d = deferredFetch();
+  runCheck(['a', 'b'], d);
+  d.calls[0].onSent();
+  runCheck(['b'], d);
+  d.calls[0].resolve();
+  await flush();
+  expect(d.fetch).toHaveBeenCalledTimes(2);
+  expect(d.calls[1].scope).toEqual(['b']);
+});
+
 test('a failed check still runs the queued follow-up', async () => {
   const d = deferredFetch();
   const first = runCheck(['a'], d); first.catch(() => {});

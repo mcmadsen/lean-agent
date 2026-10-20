@@ -1402,6 +1402,8 @@ def cmd_run(a):
         "result_head": (summary or "")[:600],
         "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
         "role": role, "effort": effort, "worktree": wt_name, "review_meta": review_meta, "launch_key": launch_key,
+        "recipe": (getattr(a, "recipe", None) or (None, None))[0],
+        "recipe_step": (getattr(a, "recipe", None) or (None, None))[1],
         "estimate_usd": (getattr(a, "estimate", None) or (None, None))[0],
         "estimate_kind": (getattr(a, "estimate", None) or (None, None))[1],
     }
@@ -1467,6 +1469,10 @@ def cmd_run(a):
         calls = entry["mcp_calls"]
         print("mcp: " + (", ".join(f"{k} x{v}" for k, v in sorted(calls.items())) or "no MCP tool calls"))
     print(f"resume: lean-agent run --resume {run_id} \"<follow-up>\"")
+    if role == "reviewer" and (review_meta or {}).get("multi"):
+        print(f"review pass {review_meta['multi']}: {len((review or {}).get('findings') or [])} findings "
+              f"(merged after the last pass)")
+        return 0
     if role == "reviewer":
         return report_review(slug, entry["project_path"], entry, review or {}, review_meta or {})
     if role == "reuse-check":
@@ -1609,7 +1615,8 @@ Do these passes in order. Report what you searched and found fine, and what you 
    test (search), lost, or removed on purpose (say why)? For each new or changed behaviour, is the complement
    tested (the case that must NOT change), and the scoped vs unscoped / empty / boundary variants? Read each new
    test against the code before the change: would it fail without the fix? Lost coverage of behaviour the
-   change says must stay is major.
+   change says must stay is major; a missing test for a boundary or complement case of new behaviour is minor
+   (list the cases), unless the code for that case is wrong.
 5. Defaults and state. For each new or changed parameter with a default (list above): do production callers
    always pass it? If so, the default only hides mistakes ("make it required", minor); if the default
    recomputes something the fix says must be captured earlier, it's a correctness finding. When the change
@@ -2612,6 +2619,8 @@ def cmd_review(a):
                 "passes; don't re-review code that didn't change. " + decisions_text(slug, meta.get("ref"))
                 + (a.focus or ""))
         cards = suggest(slug, " ".join(re.split(r"[/._-]+", " ".join(changed))), a.max_context, "review")
+        meta["since_hunks"] = changed_hunks(path, since)
+        meta["earlier"] = [str(f.get("issue", "")) for f in last.get("findings") or []]
         ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=prev.get("model") or model,
                                 why=f"re-review after fixes ({effort} effort, fresh context)", cards=None,
                                 card_list=cards, project=slug, read_only=True, chrome=None, mcp=None, tools=None,
@@ -2673,7 +2682,8 @@ def cmd_review(a):
     if risk and usage.model_rate(model) <= 1:
         strong = os.environ.get("LEAN_AGENT_STRONG_REVIEW_MODEL") or "opus"
         print(f"review: high-risk change ({'; '.join(risk)}). A stronger reviewer may find more: "
-              f"--reviewer-model {strong} (~${expected_review_cost(strong)[0]:.2f})", flush=True)
+              f"--reviewer-model {strong} (~${expected_review_cost(strong)[0]:.2f}), or --runs 2 "
+              f"(two independent passes, ~${2 * cost:.2f})", flush=True)
     print(f"review: {len(ns_syms['files'])} new files, {len(ns_syms['symbols'])} new symbols for the reuse pass · "
           f"{len(focus['tests'])} edited tests, {len(focus['params'])} defaults, {len(focus['state'])} module state",
           flush=True)
@@ -2710,7 +2720,74 @@ def cmd_review(a):
                                                            read_rule=read_rule, new_symbols=symbols_text(ns_syms),
                                                            grep_ref=grep_ref, base_ref=merge_base,
                                                            focus=focus_text(focus)))
+    if (a.runs or 1) > 1:
+        return multi_pass_review(a, slug, path, ns, meta, effort)
     rc = cmd_run(ns)
+    return reuse_follow_up(a, slug, meta, effort) if rc == 2 else rc
+
+
+SEVERITY_RANK = {"blocker": 0, "major": 1, "minor": 2, "nit": 3}
+
+
+def merge_reviews(reviews):
+    """One review from independent passes: findings matched by category, file and wording (counted per pass),
+    reuse/coverage/checks unioned, the strictest verdict kept."""
+    n = len(reviews)
+    findings = []
+    for rv in reviews:
+        for f in rv.get("findings") or []:
+            if not isinstance(f, dict):
+                continue
+            same = next((g for g in findings if g.get("category") == f.get("category")
+                         and os.path.basename(str(g.get("file"))) == os.path.basename(str(f.get("file")))
+                         and _jaccard(_words(g.get("issue", "")), _words(f.get("issue", ""))) >= 0.3), None)
+            if same:
+                same["_passes"] += 1
+                if SEVERITY_RANK.get(f.get("severity"), 9) < SEVERITY_RANK.get(same.get("severity"), 9):
+                    same["severity"] = f["severity"]
+            else:
+                findings.append(dict(f, _passes=1))
+    for f in findings:
+        f["issue"] = f"{f.get('issue', '')} [{f.pop('_passes')}/{n} passes]"
+
+    def union(key, ident, better=None):
+        out = {}
+        for rv in reviews:
+            for x in rv.get(key) or []:
+                if not isinstance(x, dict):
+                    continue
+                k = str(x.get(ident, ""))[:80]
+                if k not in out or (better and better(x, out[k])):
+                    out[k] = x
+        return list(out.values())
+    order = ["approve", "needs-checks", "changes-requested"]
+    verdict = max((rv.get("verdict") or "approve" for rv in reviews), key=lambda v: order.index(v) if v in order else 0)
+    lists = lambda key: list(dict.fromkeys(x for rv in reviews for x in rv.get(key) or [] if isinstance(x, str)))
+    return {"verdict": verdict, "findings": findings,
+            "reuse": union("reuse", "symbol", lambda x, y: x.get("verdict") == "duplicate"),
+            "coverage": union("coverage", "test", lambda x, y: x.get("verdict") == "lost"),
+            "checks": union("checks", "what"), "siblings": union("siblings", "checked", lambda x, y: x.get("needs_fix")),
+            "searches": [s_ for rv in reviews for s_ in rv.get("searches") or []],
+            "fine": lists("fine"), "unverified": lists("unverified")}
+
+
+def multi_pass_review(a, slug, path, ns, meta, effort):
+    """`review --runs N`: N independent passes of the same reviewer, merged into one recorded review."""
+    n = a.runs
+    started = now_iso()
+    print(f"review: {n} independent passes, merged (findings seen by more than one pass are marked)", flush=True)
+    for i in range(n):
+        one = argparse.Namespace(**vars(ns))
+        one.review_meta = dict(meta, multi=i + 1)
+        cmd_run(one)
+    passes = [r for r in ledger() if r.get("role") == "reviewer" and r.get("ts", "") >= started
+              and (r.get("review_meta") or {}).get("multi")][-n:]
+    reviews = [load_json(os.path.join(r["workdir"], "review.json"), {}) for r in passes]
+    if not passes:
+        die("no review pass finished")
+    entry = dict(passes[-1], cost_usd=sum(r.get("cost_usd") or 0 for r in passes),
+                 units=sum(r.get("units", 0) for r in passes))
+    rc = report_review(slug, path, entry, merge_reviews(reviews), meta)
     return reuse_follow_up(a, slug, meta, effort) if rc == 2 else rc
 
 
@@ -2877,6 +2954,19 @@ def enforce_review_rules(review, meta, declined=()):
                                                                 for c in lost[:6]),
                          "suggestion": "add tests for these back, or say why they no longer apply"})
     review["_no_cov"] = no_cov
+
+    if meta.get("resume") and meta.get("since_hunks") is not None:
+        # converge: on a re-review, a NEW major about code that didn't change since the last review is minor
+        for f in findings:
+            if f.get("severity") not in ("blocker", "major"):
+                continue
+            if any(_jaccard(_words(f.get("issue", "")), _words(e)) >= 0.3 for e in meta.get("earlier") or []):
+                continue  # an earlier open finding, still open: keeps its severity
+            loc = f"{f.get('file', '')}:{f.get('line') or 0}"
+            if not in_changed_lines(loc, meta["since_hunks"]):
+                f["severity"] = "minor"
+                notes.append(f"new on re-review, about code that didn't change since the last review: minor "
+                             f"({f.get('file', '?')}:{f.get('line', '')})")
 
     if declined:  # last, so nothing re-adds a declined finding
         kept = [f for f in findings if not is_declined(f, declined)]
@@ -4990,7 +5080,7 @@ def cmd_recipe(a):
         die("a recipe needs --task or --task-file, -m <model> and --why")
     r = {"model": a.model, "why": a.why, "read_only": a.read_only, "mcp": a.mcp or [], "cards": a.cards,
          "task": task.strip(), "evidence": a.evidence or [], "max_usd": a.max_usd, "max_turns": a.max_turns,
-         "updated": now_iso()}
+         "fields": a.fields, "complete": a.complete, "updated": now_iso()}
     if a.apply_task or a.apply_task_file:
         r["apply"] = {"task": (read_text(a.apply_task_file) if a.apply_task_file else a.apply_task).strip(),
                       "mcp": a.apply_mcp or a.mcp or [], "model": a.apply_model or a.model}
@@ -5040,7 +5130,22 @@ def cmd_do(a):
         text = text.replace("{" + k + "}", v)
     if r.get("evidence"):
         text += "\n\nEvidence, strongest first:\n" + "\n".join(f"{i}. {e}" for i, e in enumerate(r["evidence"], 1))
+    if r.get("fields"):
+        text += (f"\n\nFetch only what you need: ask tools for (or keep) just these fields: {r['fields']}. When a result "
+                 f"is saved to a file, read it with `{os.path.join(PLUGIN_ROOT, 'bin', 'lean-json')} <file> --fields "
+                 f"{r['fields']}`; don't expand more than you need per item.")
+    if r.get("complete"):
+        text += ("\n\nEvery item must be in your answer exactly once: OK, a change (from -> to, with the evidence), or "
+                 "unclear (with the reason). Don't skip items you didn't inspect: inspect them or mark them unclear. "
+                 'End with one line: LEAN-ITEMS {"total": <items in scope>, "listed": <items in your answer>, '
+                 '"missing": [<ids not listed>]}')
+    check = None
     if a.apply:
+        check = recipe_check_result(slug, a.name, a.from_run) if not a.fresh else None
+        if check:
+            text += (f"\n\nThe check (run {check[0]}) already produced this plan; use it, and re-read an item only to "
+                     f"apply its change:\n{check[1][:6000]}")
+            print(f"apply: using check run {check[0]} (--fresh to re-derive)", file=sys.stderr, flush=True)
         text += ("\n\nApply step: do only the changes listed in the check, one per item. "
                  + ("The user approved: " + a.allow_send if a.allow_send else
                     "Nothing is approved yet: list each change (item, from -> to, evidence) and stop with "
@@ -5050,8 +5155,48 @@ def cmd_do(a):
                             read_only=bool(r.get("read_only")) and not a.apply, chrome=None,
                             mcp=list(step.get("mcp") or r.get("mcp") or []), tools=None, allow_send=a.allow_send,
                             max_turns=r.get("max_turns") or 40, max_usd=r.get("max_usd") or 3.0, max_context=2000,
-                            max_cards=4, ref=None, again=a.again, yes=a.yes)
-    return cmd_run(ns)
+                            max_cards=4, ref=None, again=a.again, yes=a.yes,
+                            recipe=(a.name, "apply" if a.apply else "check"))
+    rc = cmd_run(ns)
+    if r.get("complete"):
+        last = next((x for x in reversed(ledger()) if x.get("recipe") == a.name and x.get("project") == slug), None)
+        _, items = parse_marker(run_result_text(last) if last else "", "LEAN-ITEMS")
+        if not items:
+            print("INCOMPLETE: the worker didn't report how many items it covered (no LEAN-ITEMS line)")
+            return 1
+        if items.get("missing") or (items.get("listed") or 0) < (items.get("total") or 0):
+            print(f"INCOMPLETE: {items.get('listed')} of {items.get('total')} items listed; missing: "
+                  f"{', '.join(map(str, items.get('missing') or [])) or '?'}. Resume it: lean-agent run --resume "
+                  f"{last['id']} \"Cover the missing items too.\"")
+            return 1
+        print(f"complete: all {items.get('total')} items covered")
+    return rc
+
+
+def run_result_text(entry):
+    """A finished run's full answer, from its result file."""
+    try:
+        with open(os.path.join(entry["workdir"], "result.json")) as fh:
+            lines = [l for l in fh if l.strip()]
+        return json.loads(lines[-1]).get("result") or ""
+    except (OSError, ValueError, IndexError, KeyError):
+        return ""
+
+
+def recipe_check_result(slug, name, run_id=None, max_age_hours=2):
+    """(run id, answer) of the recipe's latest check run (or the given one), if recent and done."""
+    for r in reversed(ledger()):
+        if r.get("project") != slug:
+            continue
+        if run_id and r["id"] != run_id:
+            continue
+        if not run_id and (r.get("recipe") != name or r.get("recipe_step") != "check" or r.get("status") != "done"):
+            continue
+        if not run_id and (datetime.datetime.now() - datetime.datetime.fromisoformat(r["ts"])).total_seconds() > max_age_hours * 3600:
+            return None
+        text, _ = parse_feedback(run_result_text(r))
+        return (r["id"], text) if text else None
+    return None
 
 
 def cmd_text_len(a):
@@ -5143,6 +5288,9 @@ def build_parser():
     s.add_argument("--apply-model")
     s.add_argument("--max-usd", type=float)
     s.add_argument("--max-turns", type=int)
+    s.add_argument("--fields", help="the fields workers should fetch/keep (e.g. id,title,state,relations)")
+    s.add_argument("--complete", action="store_true", help="every item must be listed (OK / change / unclear); "
+                   "`do` fails the run otherwise")
     s.set_defaults(fn=cmd_recipe)
 
     s = sub.add_parser("recipes", help="list saved recipes")
@@ -5155,6 +5303,8 @@ def build_parser():
     s.add_argument("values", nargs="*", metavar="KEY=VALUE")
     s.add_argument("--apply", action="store_true", help="run the recipe's apply step")
     s.add_argument("--allow-send", metavar="APPROVED", help="--apply: what the user approved (else it stops with the list)")
+    s.add_argument("--from", dest="from_run", metavar="RUN_ID", help="--apply: use this check run's result")
+    s.add_argument("--fresh", action="store_true", help="--apply: re-derive instead of using the last check")
     s.add_argument("--again", action="store_true")
     s.add_argument("--yes", action="store_true")
     s.set_defaults(fn=cmd_do)
@@ -5309,6 +5459,8 @@ def build_parser():
                    "and only what changed since (cheap); --same-session continues the old reviewer")
     s.add_argument("--same-session", action="store_true", help="--resume: continue the earlier reviewer session")
     s.add_argument("--status", action="store_true", help="exit 0 only if the current code has an approve")
+    s.add_argument("--runs", type=int, default=1, metavar="N", help="N independent passes merged into one review "
+                   "(variance is real: 2 cheap passes often beat 1 expensive one)")
     s.add_argument("--independent", action="store_true", help="for comparison runs: no earlier findings, decisions, "
                    "second opinion or decline filtering")
     s.add_argument("--reviewer-model", metavar="MODEL", help="model for this review (default sonnet; e.g. opus or fable "
