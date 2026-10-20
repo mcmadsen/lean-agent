@@ -355,6 +355,14 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("declined:", task)
         self.assertNotIn("left out", out)  # no decline filtering either
         self.assertIn("1. [major/correctness]", out)
+        # two independent passes merged: a finding seen by both is marked, the strictest verdict is kept
+        out = self.cli("review", "case", "--head", "fix-races", "--base", "main", "--independent", "--runs", "2",
+                       check=False, FAKE_REVIEW=prev).stdout
+        self.assertIn("review: 2 independent passes, merged", out)
+        self.assertIn("review pass 1: 1 findings", out)
+        self.assertIn("uses the request scope [2/2 passes]", out)
+        self.assertIn("cost: this review $0.10", out)
+        self.assertIn("or --runs 2 (two independent passes", out)
         # estimates learn from their misses: opus was estimated from Sonnet, then fable gets the correction
         self.cli("review", "case", "--head", "fix-races", "--base", "main", "--independent", "--reviewer-model", "opus",
                  check=False, FAKE_REVIEW=prev)
@@ -419,6 +427,23 @@ class CliTest(unittest.TestCase):
         self.assertIn("acceptEdits", call["argv"])  # the apply step may change things (after approval)
         self.cli("do", "proj", "item-states", "who=me", "--apply", "--allow-send", "move the 3 listed items")
         self.assertIn("The user approved: move the 3 listed items", self.calls()[-1]["task"])
+        self.assertIn("The check (run ", self.calls()[-1]["task"])  # the apply step reuses the check's answer
+        self.assertIn("Did the thing.", self.calls()[-1]["task"])
+        self.cli("do", "proj", "item-states", "who=me", "--apply", "--fresh")
+        self.assertNotIn("The check (run ", self.calls()[-1]["task"])
+        # a complete recipe: every item listed, or the run fails
+        self.cli("recipe", "add", "proj", "all-items", "-m", "haiku", "--why", "x", "--read-only", "--complete",
+                 "--fields", "id,title,state", "--task", "List the state of each open item.")
+        p = self.cli("do", "proj", "all-items", check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("INCOMPLETE: the worker didn't report", p.stdout)
+        self.assertIn("just these fields: id,title,state", self.calls()[-1]["task"])
+        fb = '{"status": "done", "used": [], "unneeded": [], "missing": ""}'
+        p = self.cli("do", "proj", "all-items", "--again", check=False,
+                     FAKE_FEEDBACK=fb + '\nLEAN-ITEMS {"total": 24, "listed": 20, "missing": ["7", "9"]}')
+        self.assertIn("INCOMPLETE: 20 of 24 items listed; missing: 7, 9", p.stdout)
+        p = self.cli("do", "proj", "all-items", "--again", FAKE_FEEDBACK=fb + '\nLEAN-ITEMS {"total": 24, "listed": 24}')
+        self.assertIn("complete: all 24 items covered", p.stdout)
         self.cli("tracker", "proj", "--note", "PR descriptions are limited to 4000 characters")
         f = os.path.join(self.tmp.name, "desc.md")
         with open(f, "w") as fh:

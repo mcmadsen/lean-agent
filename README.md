@@ -115,7 +115,7 @@ Other ways to run the orchestrator:
 | `lean-agent run <project> -m <model> --why "..." [--cards a,b \| auto] [--read-only] [--chrome[=tools]] [--mcp s:t] [--max-usd X] [--max-turns N] -- "<task>"` | Run an isolated worker. Model and reason are **required**. `--read-only` allows Read/Glob/Grep and read-only `git -C <project> show/log/grep/diff/blame/fetch`. |
 | `lean-agent run <project> ... --read-only --ref <branch>` | A read-only worker on a branch that isn't checked out: it's told to read with `git show <sha>:<path>` and search with `git grep ... <sha>`. Starting the same task again while it runs or right after it finished is refused (`--again` to run it anyway). |
 | `lean-agent recipe add <project> <name> -m <model> --why "..." --task-file F [--read-only] [--mcp s:p] [--evidence "..."] [--apply-task-file F2 --apply-mcp s:p]` | Save a named recipe: a stored run with `{placeholders}`, evidence hints (strongest first) and an optional apply step. `lean-agent recipes` lists them. |
-| `lean-agent do <project> <recipe> [key=value ...] [--apply [--allow-send "<approved>"]]` | Run a recipe in one command. `--apply` runs its apply step; outward changes stop with the list until the user approves them. |
+| `lean-agent do <project> <recipe> [key=value ...] [--apply [--allow-send "<approved>"]]` | Run a recipe in one command. `--apply` runs its apply step with the last check's answer as its plan (`--from <run-id>`, or `--fresh` to re-derive); outward changes stop with the list until the user approves them. A recipe saved with `--fields id,title,state` tells workers to fetch only those; with `--complete` every item must be listed (OK / change / unclear) or the run fails. |
 | `lean-agent text-len <file> [-p project]` | Characters, words, lines, checked against limits named in the project's tracker notes (e.g. a description limit). |
 | `lean-agent card shorten <project> <id> [--save]` | A shorter text for a card (one Haiku call); lists headings, `code`, paths, names and numbers that would be lost, and saves only if none are. |
 | `lean-agent runs --running` | Runs in progress. Every run prints `run <id> started` first, so a background launch is visible. |
@@ -179,7 +179,8 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
   definition, cross-checked with real items), and whether rules hold (voting needs you as a reviewer, delete
   or a Removed state, a description length limit): each `verified`, `false` or `unknown`, never guessed. A
   re-run replaces what discovery found and keeps your own notes; `tracker` and `doctor` warn when the tracker
-  knows you by another email than your Claude account. Add your own with `--note "..."` or `me_id=... me_name=...`. Every MCP worker gets
+  knows you by another email than your Claude account, and `tracker` warns when one of your notes contradicts a
+  discovered fact (`--supersede N` keeps the note but stops giving it to workers). Add your own with `--note "..."` or `me_id=... me_name=...`. Every MCP worker gets
   them, so assigning, voting or closing doesn't have to fail first (`@me` often isn't accepted).
 - **Variables without a token on disk:** a plugin config that uses `${VAR}` (e.g. a GitHub token) can get it
   from a command run when a worker starts: `lean-agent mcp env GITHUB_PERSONAL_ACCESS_TOKEN --command "gh auth
@@ -282,6 +283,9 @@ uncommitted changes and new untracked files.
 - **Expensive runs ask first:** `run -m opus|fable` prints the expected cost (from earlier runs on that model) and
   its share of your plan's session window; it needs `--yes` when that's 10% or more (`LEAN_AGENT_CONFIRM_PCT`) or
   the window is already over 50%. `lean-agent budget` shows the plan line too.
+- **Several passes:** `review --runs 2` runs two independent passes and merges them (findings matched by category,
+  file and wording, marked `[2/2 passes]` when both found them). Reviewers vary between runs; for high-risk
+  changes two cheap passes are an alternative to one expensive one, and the high-risk hint offers both.
 - **Model and cost:** `--reviewer-model opus` (or `fable`) for one review; the expected cost is printed first
   (from your earlier reviews on that model, else scaled from Sonnet's and corrected by how far such scaled
   estimates were off before; every estimate is stored with its run, so they improve). `--independent` gives a
@@ -304,8 +308,11 @@ uncommitted changes and new untracked files.
   the reason; `--apply` removes them. It checks `--head`, HEAD, the default branch and every base branch your
   reviews used, matches partial paths (relative to a package folder, in backticks, with `:line`), and keeps a
   line whose symbol is found even when its path is wrong.
-- **Re-review:** `review <project> --resume` continues the same reviewer session, which is cheap because its
-  context is cached, and checks earlier findings first. It also runs the reuse, scope and platform passes again
+- **Re-review:** `review <project> --resume` starts a fresh reviewer with a small context: the open findings and
+  checks of the last review, the declined decisions, and only the diff since then (with its own new symbols and
+  edited tests). That's cheaper than continuing a long session, and it converges: a new major about code that
+  didn't change since the last review is minor, earlier open findings keep their severity. `--same-session`
+  continues the earlier reviewer instead. It also runs the reuse, scope and platform passes again
   on the files changed since the last review and asks it to reconsider the design, not only the earlier findings. Add `--head <branch>` to resume the review of that
   branch; the review is recorded for the branch's new tip (also when the reviewer is resumed with `run --resume`).
   A fresh review of a branch that was reviewed before gets the earlier findings, so it says which are resolved
