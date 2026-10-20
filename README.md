@@ -206,6 +206,8 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
 
 Every orchestrator turn re-reads the whole conversation, so it's kept short:
 
+- **Shows its size at start:** `lean-agent up` prints the guide's size and the last orchestrator session's
+  start-up context (system prompt, tools, guide), calls, average and peak context per call.
 - **Compacts early:** `lean-agent up` sets Claude Code's auto-compact window to 100,000 tokens at 70%, so the
   orchestrator compacts at about 70,000 tokens instead of 70% of a 1M window (`up --compact-at N` to change;
   the home's settings carry `autoCompactWindow` too).

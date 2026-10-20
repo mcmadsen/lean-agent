@@ -1239,6 +1239,25 @@ class CliTest(unittest.TestCase):
         self.assertIn("the previous Remote Control session is gone", p.stdout)
         self.assertIn("Connected", p.stdout)
 
+    def test_up_lists_context_usage(self):
+        import re as _re
+        fake = os.path.join(self.tmp.name, "claude-ok")
+        with open(fake, "w") as fh:
+            fh.write(f"#!{sys.executable}\nprint('Connected')\n")
+        os.chmod(fake, 0o755)
+        out = self.cli("up", LEAN_AGENT_CLAUDE=fake).stdout
+        self.assertRegex(out, r"context: the guide \(CLAUDE\.md\) is ~[\d,]+ tokens; the start-up context is measured")
+        home = self.cli("home").stdout.strip()
+        d = os.path.join(self.env["CLAUDE_CONFIG_DIR"], "projects", _re.sub(r"[^A-Za-z0-9]", "-", home))
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "s1.jsonl"), "w") as fh:
+            for i, cr in enumerate((14000, 30000, 52000)):
+                fh.write(json.dumps({"type": "assistant", "message": {"id": f"m{i}", "model": "claude-sonnet",
+                         "usage": {"input_tokens": 10, "cache_read_input_tokens": cr}}}) + "\n")
+        out = self.cli("up", LEAN_AGENT_CLAUDE=fake).stdout
+        self.assertIn("started at ~14,010 (system prompt, tools, guide), 3 calls, ~32,010 per call on average, "
+                      "~52,010 at the end, peak ~52,010", out)
+
     def test_up_explains_a_folder_served_elsewhere(self):
         fake = os.path.join(self.tmp.name, "claude-busy")
         with open(fake, "w") as fh:
