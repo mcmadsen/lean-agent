@@ -5586,13 +5586,28 @@ def remote_control(cmd, env, h):
     (deleted in the app, archived, expired: a 404 on worker registration), stop it, drop the pointer to that
     session and start once more with a new one, the same as `up --fresh`. Its output (stdout and stderr) goes
     through a pseudo-terminal when this is a terminal, so it still draws for one; keys go to it directly."""
+    import signal
     import threading
     threading.Thread(target=schedule_timer, daemon=True).start()
+    current = {}
+
+    def stop(signum, _frame):  # the service (or anyone) stops `up`: stop claude too, promptly
+        proc = current.get("proc")
+        if proc and proc.poll() is None:
+            proc.send_signal(signum)
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        sys.exit(0)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop)
     for attempt in (1, 2):
         stale, served = threading.Event(), threading.Event()
         proc, sources = start_watched(cmd, env)
         if proc is None:
             die("'claude' not found on PATH")
+        current["proc"] = proc
 
         def pump(fd, out, _close):
             seen = ""
@@ -6441,10 +6456,17 @@ def cmd_service(a):
         os.environ.get("LEAN_AGENT_SYSTEMCTL") or "systemctl")
     uid = str(os.getuid()) if hasattr(os, "getuid") else "0"
 
-    def ctl(*args):
+    def ctl(*args, timeout=30):
         cmd = [tool, *args] if plat == "mac" else [tool, "--user", *args]
-        p = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return 124, f"{' '.join(cmd)} didn't finish within {timeout}s"
         return p.returncode, (p.stdout + p.stderr).strip()
+
+    def mac_running():
+        rc, out = ctl("print", f"gui/{uid}/{SERVICE_LABEL}", timeout=15)
+        return rc == 0 and bool(re.search(r"state = running", out)), rc == 0
     if a.action == "install":
         os.makedirs(os.path.dirname(path), exist_ok=True)
         os.makedirs(os.path.dirname(log), exist_ok=True)
@@ -6492,20 +6514,46 @@ def cmd_service(a):
         text = read_text(log) if os.path.exists(log) else ""
         sys.stdout.write("".join(text.splitlines(True)[-a.n:]) or "(no log yet)\n")
         return 0
-    if plat == "mac":
-        restart = ["kickstart", "-k", f"gui/{uid}/{SERVICE_LABEL}"]  # (re)starts it with the current settings
-        cmd = {"start": restart, "restart": restart, "stop": ["bootout", f"gui/{uid}/{SERVICE_LABEL}"],
-               "status": ["print", f"gui/{uid}/{SERVICE_LABEL}"]}[a.action]
-        if a.action in ("start", "restart"):
-            ctl("bootstrap", f"gui/{uid}", path)  # no-op when it's loaded already
-    else:
-        cmd = {"start": ["start", "lean-agent.service"], "restart": ["restart", "lean-agent.service"],
-               "stop": ["stop", "lean-agent.service"], "status": ["status", "lean-agent.service"]}[a.action]
     if a.action in ("restart", "stop"):
         running = [f for f in glob.glob(home("running", "*.json")) if dashboard_pid_alive(load_json(f, {}).get("pid"))]
         if running and not a.yes:
             die(f"{len(running)} worker(s) still running (lean-agent runs --running); they'd be stopped with it. "
                 f"Wait for them, or: lean-agent service {a.action} --yes")
+    if plat == "mac":
+        target = f"gui/{uid}/{SERVICE_LABEL}"
+        is_running, loaded = mac_running()
+        if a.action == "status":
+            print(f"service: {path}: " + ("running" if is_running else "loaded, not running" if loaded else "not loaded")
+                  + f" (log: lean-agent service logs)")
+            return 0 if is_running else 1
+        if a.action == "start" and is_running:
+            print("already running (lean-agent service restart restarts it with the current settings)")
+            return 0
+        if a.action == "stop":
+            print("stopping (the orchestrator session shuts down; this can take up to a minute)...", flush=True)
+            rc, out = ctl("bootout", target, timeout=90)
+            print("stopped" if rc == 0 or not mac_running()[1] else f"stop: {out[:200]}")
+            return 0
+        if not loaded:
+            rc, out = ctl("bootstrap", f"gui/{uid}", path)
+            if rc != 0 and not mac_running()[1]:
+                die(f"launchctl bootstrap failed: {out[:300]}")
+            is_running = mac_running()[0]
+        if a.action == "start":
+            if not is_running:
+                ctl("kickstart", target)
+            print("started" if mac_running()[0] else "starting... (lean-agent service status / logs)")
+            return 0
+        print("restarting (the orchestrator session shuts down first; this can take up to a minute)...", flush=True)
+        rc, out = ctl("kickstart", "-k", target, timeout=env_num("LEAN_AGENT_SERVICE_TIMEOUT", 90))
+        if rc == 124:  # launchd is still waiting for the old one: unload and load it again
+            ctl("bootout", target, timeout=60)
+            ctl("bootstrap", f"gui/{uid}", path)
+        time.sleep(1)
+        print("restarted" if mac_running()[0] else "restarting... (lean-agent service status / logs)")
+        return 0
+    cmd = {"start": ["start", "lean-agent.service"], "restart": ["restart", "lean-agent.service"],
+           "stop": ["stop", "lean-agent.service"], "status": ["status", "lean-agent.service"]}[a.action]
     rc, out = ctl(*cmd)
     if a.action == "status":
         state = re.search(r"state = (\w+)|Active: (\S+ \S+)", out)
