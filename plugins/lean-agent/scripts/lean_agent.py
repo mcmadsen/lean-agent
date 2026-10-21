@@ -2373,10 +2373,17 @@ def review_target(path, ref=None):
 def find_review(slug, path, ref=None):
     """The latest review covering exactly the current state of `ref` (or of the working tree)."""
     sha, dirty, label, mode = review_target(path, ref)
-    for r in reversed(list(read_jsonl(reviews_path(slug)))):
-        if r["head"] == sha and r.get("dirty", "") == dirty:
-            return r, (sha, label)
-    return None, (sha, label)
+    same = [r for r in read_jsonl(reviews_path(slug)) if r["head"] == sha and r.get("dirty", "") == dirty]
+    return decisive(same), (sha, label)
+
+
+def decisive(records):
+    """The review that counts among reviews of the same commit: the latest that decided (approve or
+    changes-requested); a later needs-checks run (a check, a --resume test) doesn't hide it. None if empty."""
+    if not records:
+        return None
+    decided = [r for r in records if r.get("verdict") in ("approve", "changes-requested")]
+    return (decided or records)[-1]
 
 
 def refresh_review_meta(path, meta, fetch=True):
@@ -6572,7 +6579,7 @@ def cmd_todo(a):
         save_json(home("todo.json"), data)
         print(f"added {todo_line(t)}")
         return 0
-    if a.action in ("start", "done", "note", "rm", "reopen"):
+    if a.action in ("start", "done", "note", "rm", "reopen", "edit"):
         if not a.args:
             die(f"which one? lean-agent todo {a.action} <number>")
         t = pick(a.args[0])
@@ -6587,6 +6594,13 @@ def cmd_todo(a):
                 t["result"] = " ".join(a.args[1:])  # the board's Done card shows it
         elif a.action == "note":
             t["notes"].append(" ".join(a.args[1:]))
+        elif a.action == "edit":
+            if len(a.args) < 2:
+                die('lean-agent todo edit N "<new text: a short title first>"')
+            t["text"] = " ".join(a.args[1:])
+            for k in ("ref", "prio", "due"):
+                if getattr(a, k, None):
+                    t[k] = getattr(a, k)
         else:
             data["items"].remove(t)
         save_json(home("todo.json"), data)
@@ -7028,7 +7042,7 @@ def cmd_handoff(a):
     notes = compact_hook.load_notes()
     if a.note or a.done:
         if a.note:
-            notes.append({"ts": now_iso(), "text": " ".join(a.note.split())})
+            notes.append(dict({"ts": now_iso(), "text": " ".join(a.note.split())}, **({"kind": a.kind} if a.kind else {})))
         if a.done:
             drop = set(range(1, len(notes) + 1)) if a.done == "all" else {
                 int(x) for x in a.done.split(",") if x.strip().isdigit()}
@@ -7408,7 +7422,7 @@ def build_parser():
 
     s = sub.add_parser("todo", help="the work queue across sessions: add | list | next | start | done | note | rm")
     s.add_argument("action", nargs="?", default="list",
-                   choices=["add", "list", "next", "start", "done", "note", "rm", "reopen"])
+                   choices=["add", "list", "next", "start", "done", "note", "rm", "reopen", "edit"])
     s.add_argument("args", nargs="*", help="add: the text; start/done/note/rm: the number (done/note: then text)")
     s.add_argument("--project", "-p")
     s.add_argument("--ref", help="the tracker item, PR or branch it's about")
@@ -7466,6 +7480,8 @@ def build_parser():
 
     s = sub.add_parser("handoff", help="the hand-off note a new or compacted orchestrator session starts from")
     s.add_argument("--note", metavar="TEXT", help="add an open item or pending decision")
+    s.add_argument("--kind", choices=["decision", "reminder", "fyi"], help="--note: decision = the user must "
+                   "decide or answer (shown under Waiting on you); reminder (default) or fyi go to the board's Notes")
     s.add_argument("--done", metavar="N,N|all", help="close open items by number")
     s.add_argument("--hours", type=int, default=12, help="runs from the last N hours (default 12)")
     s.set_defaults(fn=cmd_handoff)
