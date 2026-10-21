@@ -6547,9 +6547,14 @@ def cmd_dashboard(a):
         cfg["port"] = a.port
         save_json(home("dashboard.json"), cfg)
         os.chmod(home("dashboard.json"), 0o600)
-    if a.url:
-        print(dashboard.url() + ("" if dashboard_running() else
+    if a.url or a.open:
+        running = dashboard_running()
+        print(dashboard.url() + ("" if running else
                                  "  (not running: `lean-agent up` starts it, or `lean-agent dashboard`)"))
+        if a.open and running:
+            import webbrowser
+            if not webbrowser.open(dashboard.url()):
+                print("couldn't open a browser here; open the address above yourself")
         return 0
     if dashboard_running():
         print(f"lean-agent dashboard is already running: {dashboard.url()}")
@@ -6969,6 +6974,7 @@ def build_parser():
 
     s = sub.add_parser("dashboard", help="the local dashboard (runs, queue, schedule, pace, context): serve it, or --url")
     s.add_argument("--url", action="store_true", help="print its address (with its token)")
+    s.add_argument("--open", action="store_true", help="open it in your default browser")
     s.add_argument("--port", type=int, help="use this port from now on (default 8765)")
     s.set_defaults(fn=cmd_dashboard)
 

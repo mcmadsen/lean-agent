@@ -186,7 +186,10 @@ lean-agent card unarchive {{P}} checkout-notes
   You're told when a scheduled job finishes; mention it to the user if it matters. When lean-agent says you're
   ahead of pace for the week, prefer haiku and smaller steps. `lean-agent week` reports the week.
 - The user's dashboard: `lean-agent dashboard --url` prints its local address (runs, work queue, schedule, pace,
-  your context). Give it to the user when they ask where to see what's going on; don't read it yourself.
+  your context). When the user asks to see it: if you have the Claude desktop app's built-in browser (a
+  `Claude_Browser` `preview_start` tool, possibly behind ToolSearch), open the address with it in a new tab;
+  otherwise give the user the address to open in the built-in browser (Cmd+Shift+B), or run
+  `lean-agent dashboard --open` for their default browser. Don't read the page yourself: it's for the user.
 - Standing rule, before auto-compaction: when lean-agent says the context is near the compaction point, run
   `lean-agent context --no-probe` (what fills your messages, the biggest first), save anything still open with
   `lean-agent handoff --note "..."`, tell the user in one line, then go on with short replies.
