@@ -23,6 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import usage  # noqa: E402
 import lean_schedule  # noqa: E402
+import prs  # noqa: E402
 
 DEFAULT_PORT = 8765
 
@@ -124,8 +125,13 @@ def schedule_runner():
             + ": jobs run only while `lean-agent up` (or the service) runs, or at the orchestrator's next tool call")
 
 
-COLUMNS = ("Open", "In progress", "Waiting on you", "In review", "Done")
+COLUMNS = ("Waiting on you", "In review", "In progress", "Open", "Done", "Notes")
 WAITING = ("needs-input", "awaiting-confirmation")
+MEANING = {"done": "answered", "partial": "stopped early with a partial answer", "failed": "failed",
+           "needs-input": "asks you something", "awaiting-confirmation": "waits for your go-ahead",
+           "stopped": "was stopped"}
+DECISION_RE = re.compile(r"\b(decid\w*|decision|your (word|call|go|answer)|user'?s? (word|call|decision|go|answer)|"
+                         r"awaiting (the )?user|waiting on (the )?user|needs? (the )?user|ask (the )?user)\b", re.I)
 
 
 def _ref_key(ref):
@@ -164,6 +170,9 @@ def branch_state(path, ref, head, base=None):
             return subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, timeout=5).returncode == 0
         except (OSError, subprocess.SubprocessError):
             return None
+    if not git("rev-parse", "--git-dir"):
+        _BRANCH[key] = (time.time(), None)
+        return None  # not a git checkout (any more): nothing to say
     state = None
     names = [ref] + ([] if ref.startswith("origin/") else [f"origin/{ref}"])
     exists = [n for n in names if git("rev-parse", "--verify", "--quiet", n + "^{commit}")]
@@ -179,93 +188,283 @@ def branch_state(path, ref, head, base=None):
     return state
 
 
-def board(todo, ledger, running, reviews, now=None):
-    """The work queue as columns: each todo with the runs that worked on it (`run --todo N`), the runs working
-    on it now, and the latest review of its ref; reviews no open item covers get their own card, and so do
-    running runs no item names. View only: it says where things are, it changes nothing."""
+def short_title(text, limit=90):
+    """(title, rest): the first clause of a long item text as its title, the rest as detail."""
+    t = " ".join(str(text or "").split())
+    if len(t) <= limit:
+        return t, ""
+    m = next((m for m in re.finditer(r"(?<=\S)(: |; | - | — |\. )", t[:limit + 1]) if m.start() >= 12), None)
+    if m:
+        return t[:m.start()], t[m.end():]
+    cut = t.rfind(" ", 0, limit)
+    return t[:cut if cut > 30 else limit] + "…", t
+
+
+def _run_info(r):
+    if not r:
+        return None
+    st = str(r.get("status") or "").split(":")[0]
+    return {"id": r.get("id"), "status": st, "ts": r.get("ts"), "role": r.get("role"),
+            "meaning": MEANING.get(st, st)}
+
+
+def board(todo, ledger, running, reviews, now=None, prs=None, notes=()):
+    """What the user should look at, as columns. Waiting on you: things only the user can do (a PR that's ready
+    for their merge or vote, PR comments waiting on their reply, a run that asks or waits for a go-ahead, a
+    decision note), each with the action and where to do it. In review: one card per pull request (CI, review at
+    its tip, comments), and reviewed branches without a PR. In progress / Open: the work queue, with the runs on
+    it. Done: the last 7 days, items of one ref grouped. Notes: reminders. View only."""
     import hashlib
+    sys.path.insert(0, HERE)
+    import prs as prs_mod
     now = now or datetime.datetime.now()
     week_ago = (now - datetime.timedelta(days=7)).isoformat()
-    runs_of = {}
+    recent = (now - datetime.timedelta(days=3)).isoformat()
+    sig = lambda *x: hashlib.sha1(json.dumps(x, default=str, sort_keys=True).encode()).hexdigest()[:10]
+    latest = {}
     for r in ledger:
+        latest[r.get("id")] = r  # a resumed run: its last pass
+    runs_of = {}
+    for r in latest.values():
         if r.get("todo") is not None:
-            runs_of.setdefault(r["todo"], {})[r.get("id")] = {"id": r.get("id"), "status": r.get("status"),
-                                                              "ts": r.get("ts"), "role": r.get("role")}
-    live = {}
+            runs_of.setdefault(r["todo"], []).append(r)
     ids = {t.get("id") for t in todo}
+    live = {}
     for m in running:
         if m.get("todo") in ids:
             live.setdefault(m["todo"], []).append(m)
-    sig = lambda *x: hashlib.sha1(json.dumps(x, default=str).encode()).hexdigest()[:10]
-    cards, covered = [], set()
+    by_ref = {}
+    for r in reviews:
+        if r.get("ref") and r["ref"] != "working tree":
+            by_ref.setdefault((r["project"], r["ref"].replace("origin/", "", 1)), []).append(r)
+
+    def card(**kw):
+        c = {"kind": "item", "project": None, "ref": None, "prio": "normal", "due": None, "notes": 0, "why": None,
+             "action": None, "link": None, "result": None, "live": [], "runs": [], "last_run": None,
+             "done_at": None, "review": None, "pr": None, "items": [], "rest": ""}
+        c.update(kw)
+        c["title"], rest = (" ".join(str(c.get("text") or "").split()), "") if c["kind"] in ("run", "note") \
+            else short_title(c.get("text"))
+        c["rest"] = c["rest"] or rest
+        c["sig"] = sig({k: v for k, v in c.items() if k not in ("live", "sig")}, bool(c["live"]))
+        return c
+
+    def review_at(project, branch, head=None):
+        """The review that counts for a branch: at `head` (a PR's tip) if there is one there, else the latest."""
+        recs = sorted(by_ref.get((project, branch)) or [], key=lambda r: r.get("ts") or "")
+        if not recs:
+            return None
+        at = [r for r in recs if head and r.get("full_head", "").startswith(head[:10])] if head else []
+        pool = at or [r for r in recs if r.get("full_head") == recs[-1].get("full_head")]
+        decided = [r for r in pool if r.get("verdict") in ("approve", "changes-requested")]
+        r = (decided or pool)[-1]
+        return dict({k: r.get(k) for k in ("verdict", "gaps", "blocking", "ts", "ref", "branch", "run", "head")},
+                    stale=bool(head and not at))
+
+    cards, used_refs, pr_items = [], set(), {}
+    # pull requests
+    for key, pr in sorted((prs or {}).items()):
+        if not isinstance(pr, dict) or "#" not in key or not pr.get("number") or pr.get("error"):
+            continue
+        if pr.get("state") == "closed" or (pr.get("fetched") or "") < week_ago:
+            continue
+        slug, num = pr.get("project"), pr["number"]
+        branch = pr.get("branch") or ""
+        linked = [t for t in todo if t.get("project") in (slug, None) and t.get("ref") and
+                  (prs_mod.pr_number(t["ref"]) == num or (branch and _same_ref(t["ref"], branch)))]
+        for t in linked:
+            pr_items[t["id"]] = num
+        used_refs.add((slug, branch))
+        rv = review_at(slug, branch, pr.get("head"))
+        merged = pr.get("state") == "merged" or (rv and rv.get("branch") == "merged")
+        why = action = None
+        if merged:
+            col = "Done"
+        elif pr.get("waiting"):
+            w = pr["waiting"][-1]
+            col = "Waiting on you"
+            n = len(pr["waiting"])
+            why = (f"{n} comment{'s wait' if n > 1 else ' waits'} for your reply · "
+                   f"{w.get('author')}: {w.get('text')}")
+            action = "answer on the PR"
+        elif pr.get("ci") == "failing":
+            col, why = "In review", "CI is failing"
+        elif pr.get("draft"):
+            col, why = "In review", "draft"
+        elif rv and rv.get("verdict") == "approve" and not rv.get("gaps") and not rv.get("stale") \
+                and pr.get("ci") in ("passing", None) and not pr.get("my_vote"):
+            col = "Waiting on you"
+            why = "ready: review approved at the tip" + (", CI green" if pr.get("ci") == "passing" else "")
+            action = "merge or vote on the PR"
+        else:
+            col = "In review"
+            if rv and rv.get("gaps"):
+                why = f"{rv['gaps']} known gap{'s' if rv['gaps'] > 1 else ''} to answer"
+                action = f"lean-agent review --status {slug} --head {branch}"
+        cards.append(card(id=f"pr-{slug}-{num}", kind="pr", text=f"PR {num} · {pr.get('title') or branch}",
+                          project=slug, ref=branch, column=col, why=why, action=action, link=pr.get("url"),
+                          review=rv, items=[t["id"] for t in linked],
+                          done_at=pr.get("fetched") if merged else None, result="merged" if merged else None,
+                          pr={k: pr.get(k) for k in ("number", "state", "draft", "ci", "approval", "my_vote",
+                                                     "comments", "last_comment", "fetched")}))
+    # the work queue
+    done_groups = {}
     for t in todo:
         if t.get("status") == "done" and (t.get("done_at") or "") < week_ago:
             continue
         tid = t.get("id")
-        runs = sorted((runs_of.get(tid) or {}).values(), key=lambda r: r["ts"] or "")
-        last = runs[-1] if runs else None
+        runs = sorted(runs_of.get(tid) or [], key=lambda r: r.get("ts") or "")
+        last = _run_info(runs[-1]) if runs else None
         rv = None
-        if t.get("ref"):
-            hits = [r for r in reviews if _same_ref(t["ref"], r["ref"])
-                    and (not t.get("project") or r["project"] == t["project"])]
+        if t.get("ref") and tid not in pr_items and t.get("status") != "done":
+            hits = [(p, b) for (p, b) in by_ref if (not t.get("project") or p == t["project"]) and _same_ref(t["ref"], b)]
+            hits = [review_at(p, b) for p, b in hits]
+            hits = [h for h in hits if h and h.get("branch") != "gone"]
             rv = max(hits, key=lambda r: r["ts"] or "") if hits else None
-            if t.get("status") != "done":
-                covered.update((r["project"], r["ref"]) for r in hits)
-        status = str((last or {}).get("status") or "").split(":")[0]
-        why = None
+            if rv:
+                used_refs.add((t.get("project"), rv["ref"].replace("origin/", "", 1)))
+        result = t.get("result") or ((t.get("notes") or [None])[-1] if t.get("status") == "done" else None)
+        why = action = None
         if t.get("status") == "done":
             col = "Done"
         elif live.get(tid):
             col = "In progress"  # what runs now wins over how an earlier pass ended
-        elif status in WAITING:
-            col, why = "Waiting on you", "the run " + ("needs your input" if status == "needs-input"
-                                                       else "waits for your go-ahead")
+        elif last and last["status"] in WAITING and (last["ts"] or "") >= recent:
+            col, why = "Waiting on you", "the run " + last["meaning"]
+            action = f"answer it in the orchestrator (read it: lean-agent runs --show {last['id']})"
         elif rv and rv.get("branch") == "merged":
-            col, why = "Waiting on you", "merged: close the item (todo done)"
+            col, why = "Waiting on you", "merged: close the item"
+            action = f'lean-agent todo done {tid} "<result>"'
         elif rv and rv.get("gaps"):
             col, why = "Waiting on you", f"{rv['gaps']} known gap{'s' if rv['gaps'] > 1 else ''} to answer"
-        elif rv and rv.get("verdict") == "approve":
-            col, why = "Waiting on you", "approved: yours to merge or vote"
+            action = f"lean-agent review --status {t.get('project')} --head {rv['ref']}"
         elif rv:
             col = "In review"
         elif t.get("status") == "doing" or runs:
             col = "In progress"
         else:
             col = "Open"
-        result = t.get("result") or ((t.get("notes") or [None])[-1] if t.get("status") == "done" else None)
-        card = {"id": tid, "text": t.get("text"), "project": t.get("project"), "ref": t.get("ref"),
-                "prio": t.get("prio") or "normal", "due": t.get("due"), "notes": len(t.get("notes") or []),
-                "column": col, "why": why, "result": result, "live": live.get(tid) or [],
-                "runs": [r["id"] for r in runs][-4:], "last_run": last, "done_at": t.get("done_at"),
-                "review": {k: rv.get(k) for k in ("verdict", "gaps", "blocking", "ts", "ref", "branch")} if rv else None}
-        card["sig"] = sig(col, why, card["text"], result, card["prio"], card["due"], card["notes"], bool(card["live"]),
-                          last and [last["id"], last["status"]], card["review"])
-        cards.append(card)
-    for r in reviews:  # a review no open item covers: the PR still needs someone, so it gets a card
-        if (r["project"], r["ref"]) in covered or not r.get("ref") or r.get("branch") or (r.get("ts") or "") < week_ago:
+        c = card(id=tid, text=t.get("text"), project=t.get("project"), ref=t.get("ref"), prio=t.get("prio") or "normal",
+                 due=t.get("due"), notes=len(t.get("notes") or []), column=col, why=why, action=action, result=result,
+                 live=live.get(tid) or [], runs=[r.get("id") for r in runs][-4:], last_run=last,
+                 done_at=t.get("done_at"), review=rv if col != "Done" else None,
+                 pr=({"number": pr_items[tid]} if tid in pr_items else None))
+        if col == "Done":
+            gkey = (t.get("project"), pr_items.get(tid) or prs_mod.pr_number(t.get("ref")) or
+                    (re.findall(r"(?<!\d)\d{3,}(?!\d)", str(t.get("ref") or "")) or [_ref_key(t.get("ref"))])[0] or tid)
+            done_groups.setdefault(gkey, []).append(c)
+        else:
+            cards.append(c)
+    for gkey, group in done_groups.items():
+        group.sort(key=lambda c: c["done_at"] or "")
+        prc = next((c for c in cards if c["kind"] == "pr" and c["column"] == "Done" and c["project"] == gkey[0]
+                    and c["pr"]["number"] == gkey[1]), None)
+        if len(group) == 1 and not prc:
+            cards.append(group[0])
             continue
-        ok = r.get("verdict") == "approve"
-        col = "Waiting on you" if ok or r.get("gaps") else "In review"
-        why = (f"{r['gaps']} known gap{'s' if r['gaps'] > 1 else ''} to answer" if r.get("gaps")
-               else "approved: yours to merge or vote" if ok else None)
-        rv = {k: r.get(k) for k in ("verdict", "gaps", "blocking", "ts", "ref", "branch")}
-        cards.append({"id": f"v-{r['project']}-{r['ref']}", "review_only": True, "text": f"review of {r['ref']}",
-                      "project": r["project"], "ref": r["ref"], "prio": "normal", "due": None, "notes": 0,
-                      "column": col, "why": why, "result": None, "live": [], "runs": [r["run"]] if r.get("run") else [],
-                      "last_run": None, "done_at": None, "review": rv, "sig": sig(col, why, rv)})
-    for m in running:  # a run no item names (`--todo none`, or started outside the orchestrator): its own card
+        if prc:
+            cards.remove(prc)
+        label = prc["text"] if prc else (group[-1]["ref"] or f"#{group[-1]['id']}")
+        cards.append(card(id="g-" + "-".join(str(c["id"]) for c in group), kind="group",
+                          text=f"{label}: {len(group)} item{'s' if len(group) > 1 else ''} done"
+                               + (" · merged" if prc else ""),
+                          project=gkey[0], ref=group[-1]["ref"], column="Done", link=prc and prc["link"],
+                          done_at=max(c["done_at"] or "" for c in group + ([prc] if prc else [])),
+                          result=group[-1]["result"], items=[{"id": c["id"], "title": c["title"], "result": c["result"]}
+                                                              for c in reversed(group)]))
+    # reviewed branches without a PR or an item
+    for (slug, branch), recs in by_ref.items():
+        if (slug, branch) in used_refs or any(_same_ref(branch, b) for p, b in used_refs if p == slug):
+            continue
+        rv = review_at(slug, branch)
+        if not rv or rv.get("branch") or (rv.get("ts") or "") < week_ago:
+            continue
+        ok = rv.get("verdict") == "approve"
+        col = "Waiting on you" if ok or rv.get("gaps") else "In review"
+        why = (f"{rv['gaps']} known gap{'s' if rv['gaps'] > 1 else ''} to answer" if rv.get("gaps")
+               else "approved, no pull request yet" if ok else None)
+        cards.append(card(id=f"v-{slug}-{branch}", kind="review", text=f"branch {branch}", project=slug, ref=branch,
+                          column=col, why=why, action=("open a pull request, or merge" if ok and not rv.get("gaps")
+                                                       else f"lean-agent review --status {slug} --head {branch}"
+                                                       if rv.get("gaps") else None),
+                          review=rv, runs=[rv["run"]] if rv.get("run") else []))
+    # runs that stopped to ask, which no item card already shows
+    shown = {c["last_run"]["id"] for c in cards if c.get("last_run") and c["column"] == "Waiting on you"}
+    for r in latest.values():
+        st = str(r.get("status") or "").split(":")[0]
+        if st not in WAITING or (r.get("ts") or "") < recent or r.get("id") in shown:
+            continue
+        if r.get("todo") in ids and next((t for t in todo if t["id"] == r["todo"]), {}).get("status") == "done":
+            continue
+        if r.get("todo") in live:
+            continue
+        head = next((l.strip() for l in str(r.get("result_head") or r.get("task") or "").splitlines() if l.strip()), "")
+        cards.append(card(id=f"q-{r.get('id')}", kind="run", text=head[:300], project=r.get("project"),
+                          column="Waiting on you", why="the run " + MEANING[st],
+                          action=f"answer it in the orchestrator (read it: lean-agent runs --show {r.get('id')})",
+                          runs=[r.get("id")], last_run=_run_info(r)))
+    # running runs no item names
+    for m in running:
         if m.get("todo") not in ids:
-            cards.append({"id": f"r-{m.get('run')}", "lookup": True, "text": " ".join(str(m.get("task") or "").split())[:140],
-                          "project": m.get("project"), "ref": None, "prio": "normal", "due": None, "notes": 0,
-                          "column": "In progress", "why": None, "result": None, "live": [m], "runs": [m.get("run")],
-                          "last_run": None, "done_at": None, "review": None, "sig": str(m.get("run"))})
+            cards.append(card(id=f"r-{m.get('run')}", kind="lookup", text=str(m.get("task") or "").strip()[:300],
+                              project=m.get("project"), column="In progress", live=[m], runs=[m.get("run")]))
+    # hand-off notes
+    for i, n in enumerate(notes, 1):
+        kind = n.get("kind") or ("decision" if DECISION_RE.search(str(n.get("text") or "")) else "reminder")
+        cards.append(card(id=f"n{i}", kind="note", note=i, note_kind=kind, text=str(n.get("text") or ""),
+                          column="Waiting on you" if kind == "decision" else "Notes", done_at=n.get("ts"),
+                          why="decide or answer" if kind == "decision" else None,
+                          action=f"tell the orchestrator; it closes the note (lean-agent handoff --done {i})"))
     prio = {"high": 0, "low": 2}
-    done = sorted((c for c in cards if c["column"] == "Done"), key=lambda c: (c["done_at"] or "", c["id"]), reverse=True)
+    order = {"note": 2, "run": 1}
+    done = sorted((c for c in cards if c["column"] == "Done"), key=lambda c: (c["done_at"] or "", str(c["id"])),
+                  reverse=True)
     rest = sorted((c for c in cards if c["column"] != "Done"),
-                  key=lambda c: (prio.get(c["prio"], 1), c["due"] or "9999", str(c["id"]).zfill(8)))
+                  key=lambda c: (c["kind"] != "pr", order.get(c["kind"], 0), prio.get(c["prio"], 1), c["due"] or "9999",
+                                 str(c["id"]).zfill(8)))
     cards = rest + done
     return {"columns": list(COLUMNS), "cards": cards,
             "projects": sorted({c["project"] for c in cards if c["project"]})}
+
+def review_rows(week_ago):
+    """(every review of the last 300 per project, newest first, each with its branch's state; the review that
+    counts per branch). A branch's state ("merged", "gone") is looked up once, for its newest review."""
+    paths = {slug: (v or {}).get("path") for slug, v in _json(home("projects.json"), {}).items() if isinstance(v, dict)}
+    rows, newest = [], {}
+    for f in glob.glob(home("reviews", "*.jsonl")):
+        slug = os.path.basename(f)[:-6]
+        if "." in slug:
+            continue
+        for r in _jsonl(f, 300):
+            row = {"project": slug, "ref": r.get("ref") or "working tree", "verdict": r.get("verdict"),
+                   "ts": r.get("ts"), "run": r.get("run"), "head": str(r.get("head", ""))[:10],
+                   "full_head": r.get("head") or "", "gaps": open_gaps(slug, r), "branch": None,
+                   "blocking": sum(1 for x in r.get("findings") or [] if x.get("severity") in ("blocker", "major"))}
+            rows.append((row, r))
+            newest[(slug, row["ref"])] = (row, r)
+    for (slug, ref), (row, r) in newest.items():
+        if r.get("ref") and str(r.get("ts", "")) >= week_ago:
+            state = branch_state(paths.get(slug), r.get("ref"), r.get("head"), r.get("base"))
+            for other, _ in rows:
+                if other["project"] == slug and other["ref"] == ref:
+                    other["branch"] = state
+    rows = sorted((row for row, _ in rows), key=lambda r: r["ts"] or "", reverse=True)
+    counting = []
+    for key in newest:
+        same = [r for r in rows if (r["project"], r["ref"]) == key]
+        tip = [r for r in same if r["full_head"] == same[0]["full_head"]]
+        decided = [r for r in tip if r["verdict"] in ("approve", "changes-requested")]
+        counting.append((decided or tip)[0])
+    counting.sort(key=lambda r: r["ts"] or "", reverse=True)
+    return rows, counting
+
+
+def poll_inputs():
+    """What the PR poller needs: the work queue, the reviews (with branch states) and the project paths."""
+    week_ago = (datetime.datetime.now() - datetime.timedelta(days=7)).isoformat()
+    paths = {slug: (v or {}).get("path") for slug, v in _json(home("projects.json"), {}).items() if isinstance(v, dict)}
+    return _json(home("todo.json"), {}).get("items") or [], review_rows(week_ago)[1], paths
+
 
 def state():
     now = datetime.datetime.now()
@@ -305,21 +504,7 @@ def state():
         jobs.append({"id": j.get("id"), "when": j.get("when"), "cmd": " ".join(j.get("args") or []),
                      "next": nxt.isoformat(timespec="minutes") if nxt else None, "last": j.get("last"),
                      "enabled": j.get("enabled", True)})
-    reviews = {}
-    for f in glob.glob(home("reviews", "*.jsonl")):
-        slug = os.path.basename(f)[:-6]
-        if "." in slug:
-            continue
-        for r in _jsonl(f, 300):
-            reviews[(slug, r.get("ref") or "working tree")] = r
-    paths = {slug: (v or {}).get("path") for slug, v in _json(home("projects.json"), {}).items() if isinstance(v, dict)}
-    all_reviews = sorted(({"project": p, "ref": ref, "verdict": r.get("verdict"), "ts": r.get("ts"), "run": r.get("run"),
-                           "head": str(r.get("head", ""))[:10], "gaps": open_gaps(p, r),
-                           "blocking": sum(1 for x in r.get("findings") or [] if x.get("severity") in ("blocker", "major")),
-                           "branch": branch_state(paths.get(p), r.get("ref"), r.get("head"), r.get("base"))
-                           if r.get("ref") and str(r.get("ts", "")) >= week_ago else None}
-                          for (p, ref), r in reviews.items()), key=lambda r: r["ts"] or "", reverse=True)
-    latest_reviews = [r for r in all_reviews if not r["branch"]][:12]  # merged or deleted branches need nothing
+    all_reviews, latest_reviews = review_rows(week_ago)
     pushes = {}
     for p_ in _jsonl(home("pushes.jsonl"), 300):
         if p_.get("ts", "") < week_ago:
@@ -338,12 +523,19 @@ def state():
         "running": running, "runs": runs,
         "week": {"runs": len(week), "done": sum(r.get("status") == "done" for r in week),
                  "units": sum(r.get("units", 0) for r in week), "cost": round(sum(r.get("cost_usd") or 0 for r in week), 2)},
-        "board": board(todo, ledger, running, all_reviews, now),
+        "board": board(todo, ledger, running, all_reviews, now, prs.cache(), _json(home("handoff-notes.json"), [])),
+        "finished": [{"id": r.get("id"), "status": str(r.get("status") or "").split(":")[0], "ts": r.get("ts"),
+                      "model": r.get("model"), "project": r.get("project"), "todo": r.get("todo"),
+                      "task": " ".join(str(r.get("task") or "").split())[:160]}
+                     for r in ledger[-20:] if (r.get("ts") or "") >= (now - datetime.timedelta(minutes=3)).isoformat()],
+        "last_finished": (ledger[-1].get("ts") if ledger else None),
+        "pr_errors": sorted({f"{k}: {v if isinstance(v, str) else v.get('error')}" for k, v in prs.cache().items()
+                             if (isinstance(v, str)) or (isinstance(v, dict) and v.get("error"))})[:5],
         "todo": open_todo[:30], "todo_done_week": sum(1 for t in todo if t.get("status") == "done"
                                                       and (t.get("done_at") or "") >= week_ago),
         "schedule": jobs, "scheduled_results": lean_schedule.results_since(week_ago)[-10:][::-1],
         "schedule_runner": schedule_runner(),
-        "reviews": latest_reviews, "reviews_closed": sum(1 for r in all_reviews if r["branch"]),
+        "reviews": [r for r in latest_reviews if not r["branch"]][:12],
         "pushes": sorted(pushes.values(), key=lambda g: g["ts"] or "", reverse=True)[:10],
         "context": orchestrator_context(),
         "notes": _json(home("handoff-notes.json"), []),
@@ -420,20 +612,22 @@ pre{white-space:pre-wrap;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospa
 #view .bar{display:flex;justify-content:space-between;margin-bottom:8px}
 svg{display:block;width:100%;height:46px}
 td.id{white-space:nowrap}td.head{min-width:10em}.wide2{grid-column:span 2}
-.board{display:grid;grid-template-columns:repeat(5,minmax(190px,1fr));gap:10px;overflow-x:auto;padding-bottom:4px}
+.board{display:grid;grid-template-columns:repeat(var(--cols,5),minmax(200px,1fr));gap:10px;overflow-x:auto;padding-bottom:4px}
 .col{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;min-width:0}
 .col h3{font-size:12px;margin:0 0 8px;color:var(--mute);font-weight:600;display:flex;justify-content:space-between}
 .tc{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:6px;padding:7px 9px;margin-bottom:8px;font-size:13px}
 .tc.p-high{border-left-color:var(--bad)}.tc.note{border-left-style:dashed;border-left-color:var(--mute)}.tc.p-low{border-left-color:var(--line)}
 .tc.changed{box-shadow:0 0 0 2px var(--warn);background:color-mix(in srgb,var(--warn) 9%,var(--card))}
 .tc .title{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-.tc .why{font-size:12px;color:var(--warn);margin-top:4px}.tc .result{font-size:12px;margin-top:4px}
-.notes{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
-.nt{flex:1 1 260px;max-width:420px;border:1px dashed var(--line);border-radius:6px;padding:5px 8px;font-size:12px}
-.nt .title{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.tc .why{font-size:12px;color:var(--warn);margin-top:4px}.tc .act{font-size:12px;margin-top:3px;color:var(--mute)}
+.tc .act code{font-size:11px}.tc .rest{font-size:12px;color:var(--mute);margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.tc.k-pr{border-left-color:var(--s1)}.tc.k-note{border-left-style:dashed;border-left-color:var(--mute)}.tc.k-note .title{-webkit-line-clamp:unset;display:block}
+.tc.k-group details{font-size:12px;margin-top:4px}.tc.k-group li{margin:2px 0}.col.wait{border-color:var(--warn)}
+.live{display:flex;flex-direction:column;gap:4px;font-size:13px}.live .row{display:flex;gap:10px;flex-wrap:wrap;align-items:baseline}
+.live .task{flex:1 1 240px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tc .result{font-size:12px;margin-top:4px}
 .tc .meta{font-size:12px;color:var(--mute);margin-top:4px;display:flex;flex-wrap:wrap;gap:4px 8px}
 .badge{font-size:11px;border-radius:9px;padding:0 6px;border:1px solid currentColor;white-space:nowrap}
-.badge.live{color:var(--ok)}.badge.new{color:var(--warn)}
+.badge.live{color:var(--ok)}.tc .badge{white-space:normal;display:inline-block}.badge.new{color:var(--warn)}
 #bfilter{font:inherit;font-size:12px;margin-left:auto;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px}
 .plan{display:flex;gap:18px;align-items:flex-start}.plan .stats{flex:0 0 210px}.plan .chart{flex:1;min-width:0;position:relative}
 .legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px;color:var(--mute);margin-bottom:2px}
@@ -445,11 +639,10 @@ td.id{white-space:nowrap}td.head{min-width:10em}.wide2{grid-column:span 2}
 </style></head><body>
 <header><h1>lean-agent</h1><span class="mute" id="stamp"></span><button id="theme" type="button" title="switch theme"></button></header>
 <main>
- <details class="card full" id="c-board" open><summary><h2>Board <span class="count" id="n-board"></span></h2></summary><div style="display:flex;margin-bottom:8px"><select id="bfilter"><option value="">all projects</option></select></div><div id="notes"></div><div id="board"></div><div class="mute" id="bnote" style="margin-top:4px;font-size:12px"></div></details>
+ <details class="card full" id="c-live" open><summary><h2>Running now <span class="count" id="n-live"></span></h2></summary><div id="live"></div></details>
+ <details class="card full" id="c-board" open><summary><h2>Board <span class="count" id="n-board"></span></h2></summary><div style="display:flex;margin-bottom:8px"><select id="bfilter"><option value="">all projects</option></select></div><div id="board"></div><div class="mute" id="bnote" style="margin-top:4px;font-size:12px"></div></details>
  <details class="card full" id="c-plan" open><summary><h2>Plan usage</h2></summary><div class="plan"><div class="stats"><div id="pace"></div><div id="weekstats" class="mute" style="margin-top:6px"></div></div>
   <div class="chart"><div class="legend"><span><i style="border-color:var(--s1)"></i>week</span><span><i style="border-color:var(--s2)"></i>session</span><span><i class="band"></i>session window (5 h, ends at its right edge)</span><span><i style="border-top-style:dashed;border-color:var(--mute)"></i>on pace</span></div><div id="planchart"></div><div id="ptip"></div></div></div></details>
- <details class="card" id="c-reviews" open><summary><h2>Reviews to act on <span class="count" id="n-reviews"></span></h2></summary><div id="reviews"></div></details>
- <details class="card" id="c-approved-reviews" open><summary><h2>Approved reviews <span class="count" id="n-approved"></span></h2></summary><div id="approved"></div></details>
  <details class="card" id="c-ctx" open><summary><h2>Orchestrator context</h2></summary><div id="ctx"></div></details>
  <details class="card" id="c-sched" open><summary><h2>Scheduled <span class="count" id="n-sched"></span></h2></summary><div id="sched"></div></details>
  <details class="card" id="c-pushes" open><summary><h2>Pushes <span class="count" id="n-pushes"></span></h2></summary><div id="pushes"></div></details>
@@ -484,31 +677,49 @@ function seenMap(){try{return JSON.parse(localStorage.getItem("la-board-seen")||
 function saveSeen(m){try{localStorage.setItem("la-board-seen",JSON.stringify(m))}catch(e){}}
 let lastBoard=null;
 const verdict=v=>({approve:"approved","changes-requested":"changes requested","needs-checks":"needs checks"})[v]||v||"";
-function drawNotes(notes){
-  $("notes").innerHTML=notes&&notes.length?`<div class="notes">${notes.map((n,i)=>`<div class="nt" title="${esc(n.text)}"><div class="title"><span class="mute">note ${i+1}${n.ts?" · "+when(n.ts):""}:</span> ${esc(n.text)}</div></div>`).join("")}</div>`:"";
+const ago=t=>{if(!t)return"";const m=Math.max(0,Math.round((Date.now()-Date.parse(t))/60000));return m<60?m+" min":m<1440?Math.round(m/60)+" h":Math.round(m/1440)+" d"};
+function drawLive(s){
+  const rows=s.running.map(r=>`<div class="row"><a class="badge live" onclick="show('${esc(r.run)}')">running</a><b>${esc(r.model||"?")} / ${esc(r.effort||"default")}</b><span>${esc(r.project||"")}</span><span class="mute">${r.todo!=null?"#"+esc(r.todo):"lookup"}${r.role?" · "+esc(r.role):""}</span><span class="task" title="${esc(r.task)}">${esc(String(r.task||"").split("\n")[0])}</span><span class="mute">${ago(r.started)}${r.turns?" · "+r.turns+" turns":""}</span></div>`)
+   .concat((s.finished||[]).filter(f=>!s.running.some(r=>r.run===f.id)).map(f=>`<div class="row"><a class="badge" onclick="show('${esc(f.id)}')">${esc(f.status)}</a><b>${esc(f.model||"")}</b><span>${esc(f.project||"")}</span><span class="mute">${f.todo!=null?"#"+esc(f.todo):"lookup"}</span><span class="task">${esc(f.task)}</span><span class="mute">finished ${when(f.ts).slice(6)}</span></div>`));
+  $("live").innerHTML=rows.length?`<div class="live">${rows.join("")}</div>`:`<span class="mute">Nothing running${s.last_finished?" · the last run finished "+when(s.last_finished):""}.</span>`;
+  $("n-live").textContent=s.running.length?`· ${s.running.length}`:"";
+}
+function cardHtml(c,hi){
+  const lr=c.last_run,rv=c.review,pr=c.pr;
+  const badges=c.live.map(r=>`<a class="badge live" onclick="show('${esc(r.run)}')" title="run ${esc(r.run)}">running · ${esc(r.model||"?")} / ${esc(r.effort||"default")}${r.role?" · "+esc(r.role):""}${r.turns?" · "+r.turns+" turns":""}</a> `).join("")+(hi?`<span class="badge new">${esc(hi)}</span> `:"");
+  const label=c.kind==="note"?`note ${c.note}${c.note_kind&&c.note_kind!=="reminder"?" · "+c.note_kind:""}${c.done_at?" · "+ago(c.done_at)+" ago":""}:`:c.kind==="item"?"#"+c.id:c.kind==="lookup"?"lookup:":c.kind==="run"?"run asks:":"";
+  const title=c.link?`<a href="${esc(c.link)}" target="_blank" rel="noopener">${esc(c.title)}</a>`:esc(c.title);
+  let h=`<div class="tc p-${esc(c.prio)} k-${esc(c.kind)}${hi?" changed":""}"><div>${badges}<span class="title" title="${esc(c.text)}"><span class="mute">${esc(label)}</span> ${title}</span></div>`;
+  if(c.rest&&c.kind!=="note")h+=`<div class="rest" title="${esc(c.text)}">${esc(c.rest)}</div>`;
+  if(c.why)h+=`<div class="why">${esc(c.why)}</div>`;
+  if(c.action)h+=`<div class="act">→ ${/^lean-agent /.test(c.action)?`<code>${esc(c.action)}</code>`:esc(c.action)}</div>`;
+  if(c.result&&c.kind!=="group")h+=`<div class="result"><span class="ok">result:</span> ${esc(c.result.length>160?c.result.slice(0,160)+"…":c.result)}</div>`;
+  if(pr&&c.kind==="pr")h+=`<div class="meta">${pr.ci?`<span class="${pr.ci==="passing"?"ok":pr.ci==="failing"?"bad":"warn"}">CI ${esc(pr.ci)}</span>`:""}${pr.approval?`<span>${esc(pr.approval)}</span>`:""}${pr.my_vote?`<span>your vote: ${esc(pr.my_vote)}</span>`:""}${pr.comments?`<span>${pr.comments} thread${pr.comments>1?"s":""}${pr.last_comment?", last "+when(pr.last_comment):""}</span>`:""}<span title="checked ${esc(pr.fetched||"")}">checked ${ago(pr.fetched)} ago</span></div>`;
+  else if(pr)h+=`<div class="meta"><span>on PR ${esc(pr.number)}</span></div>`;
+  const m=[c.project,c.kind!=="pr"&&c.kind!=="review"?c.ref:"",c.prio!=="normal"?c.prio:"",c.due?"due "+c.due:"",c.notes?c.notes+" note"+(c.notes>1?"s":""):""].filter(Boolean);
+  if(m.length)h+=`<div class="meta">${m.map(x=>`<span class="${x==="high"?"bad":""}">${esc(x)}</span>`).join("")}</div>`;
+  if(c.runs.length&&c.kind!=="lookup")h+=`<div class="meta">${c.runs.map(id=>`<a onclick="show('${esc(id)}')">${esc(id)}</a>`).join(" ")}${lr&&!c.live.length?` <span class="${cls(lr.status)}" title="${esc(lr.meaning)}">${esc(lr.status)} · ${esc(when(lr.ts).slice(6))}</span>${c.column!=="Waiting on you"?` <span class="mute">${esc(lr.meaning)}</span>`:""}`:""}</div>`;
+  if(rv&&c.column!=="Done")h+=`<div class="meta"><span class="${rv.verdict==="approve"?(rv.gaps?"warn":"ok"):"bad"}">review: ${esc(verdict(rv.verdict))}</span>${rv.stale?`<span class="warn">older than the tip</span>`:""}${rv.blocking?`<span>${rv.blocking} blocking</span>`:""}<span class="mute">${esc(when(rv.ts))}</span></div>`;
+  if(c.kind==="group")h+=`<details><summary class="mute">${c.items.length} items · latest: ${esc(c.result||"")}</summary><ul style="padding-left:16px;margin:4px 0">${c.items.map(x=>`<li><span class="mute">#${esc(x.id)}</span> ${esc(x.title)}${x.result?` <span class="ok">→ ${esc(x.result)}</span>`:""}</li>`).join("")}</ul></details>`;
+  return h+"</div>";
 }
 function drawBoard(b){
   if(!b)return;lastBoard=b;
   const f=$("bfilter"),cur=f.value;
   f.innerHTML='<option value="">all projects</option>'+b.projects.map(p=>`<option${p===cur?" selected":""}>${esc(p)}</option>`).join("");
   let seen=seenMap();const first=!seen;seen=seen||{};const now=Date.now(),looking=document.visibilityState!=="hidden";
-  const cards=b.cards.filter(c=>!f.value||c.project===f.value);let changed=0;
-  const html=b.columns.map(col=>{const cs=cards.filter(c=>c.column===col);return `<div class="col"><h3><span>${esc(col==="Done"?"Done (7 days)":col)}</span><span>${cs.length||""}</span></h3>${cs.map(c=>{
+  const cards=b.cards.filter(c=>!f.value||!c.project||c.project===f.value);let changed=0;
+  const cols=b.columns.filter(col=>col==="Waiting on you"||cards.some(c=>c.column===col));
+  const html=cols.map(col=>{const cs=cards.filter(c=>c.column===col);return `<div class="col${col==="Waiting on you"&&cs.length?" wait":""}"><h3><span>${esc(col==="Done"?"Done (7 days)":col)}</span><span>${cs.length||""}</span></h3>${cs.map(c=>{
     const was=seen[c.id];let hi="";
     if(first||(was&&was.sig===c.sig)){seen[c.id]={sig:c.sig,col:c.column}}
     else{const since=(was&&was.since)||now;seen[c.id]=Object.assign({},was||{},{since});
       if(looking&&now-since>SEEN_FOR)seen[c.id]={sig:c.sig,col:c.column};else{hi=was?(was.col&&was.col!==c.column?"moved from "+was.col:"changed"):"new";changed++}}
-    const lr=c.last_run,rv=c.review;
-    return `<div class="tc p-${esc(c.prio)}${hi?" changed":""}"><div>${c.live.map(r=>`<a class="badge live" onclick="show('${esc(r.run)}')" title="run ${esc(r.run)} since ${esc(String(r.started||"").slice(11,16))}">running · ${esc(r.model||"?")} / ${esc(r.effort||"default")}${r.role?" · "+esc(r.role):""}${r.turns?" · "+r.turns+" turns":""}</a> `).join("")}${hi?`<span class="badge new">${esc(hi)}</span> `:""}<span class="title" title="${esc(c.text)}"><span class="mute">${c.lookup?"no item:":c.review_only?"no item:":"#"+c.id}</span> ${esc(c.text)}</span></div>
-      ${c.why?`<div class="why">${esc(c.why)}</div>`:""}${c.result?`<div class="result" title="${esc(c.result)}"><span class="ok">result:</span> ${esc(c.result.length>160?c.result.slice(0,160)+"…":c.result)}</div>`:""}
-      <div class="meta">${c.project?`<span>${esc(c.project)}</span>`:""}${c.ref?`<span>${esc(c.ref)}</span>`:""}${c.prio!=="normal"?`<span class="${c.prio==="high"?"bad":""}">${esc(c.prio)}</span>`:""}${c.due?`<span>due ${esc(c.due)}</span>`:""}${c.notes?`<span>${c.notes} note${c.notes>1?"s":""}</span>`:""}</div>
-      ${c.runs.length?`<div class="meta">${c.runs.map(id=>`<a onclick="show('${esc(id)}')">${esc(id)}</a>`).join(" ")}${lr&&!c.live.length?` <span class="${cls(lr.status)}">${esc(String(lr.status||"").split(":")[0])}</span>`:""}</div>`:""}
-      ${rv?`<div class="meta"><span class="${rv.branch?"mute":rv.verdict!=="approve"?"bad":rv.gaps?"warn":"ok"}">review: ${esc(verdict(rv.verdict))}${rv.branch?" · branch "+esc(rv.branch):""}</span>${rv.blocking?`<span>${rv.blocking} blocking</span>`:""}</div>`:""}</div>`}).join("")}</div>`}).join("");
+    return cardHtml(c,hi)}).join("")||(col==="Waiting on you"?'<span class="mute" style="font-size:12px">nothing waits on you</span>':"")}</div>`}).join("");
   for(const id of Object.keys(seen))if(!b.cards.some(c=>String(c.id)===id))delete seen[id];
   saveSeen(seen);
-  $("board").innerHTML=b.cards.length?`<div class="board">${html}</div>`:'<span class="mute">No work queued yet: items from <code>lean-agent todo</code> show here, with the runs (<code>run --todo N</code>) and reviews of their ref.</span>';
+  $("board").innerHTML=b.cards.length?`<div class="board" style="--cols:${cols.length}">${html}</div>`:'<span class="mute">No work queued yet: items from <code>lean-agent todo</code> show here, with the runs (<code>run --todo N</code>), pull requests and reviews of their ref.</span>';
   $("n-board").textContent=(cards.length?`· ${cards.length}`:"")+(changed?` · ${changed} changed`:"");
-  $("bnote").textContent=b.cards.length?"View only: cards move as the work moves (lean-agent todo, run --todo N, review). Hover a card for its full text. Highlighted: changed since you last looked.":"";
 }
 $("bfilter").addEventListener("change",()=>{try{localStorage.setItem("la-board-project",$("bfilter").value)}catch(e){};drawBoard(lastBoard)});
 // the plan's own numbers over the current week: the week % against the on-pace line, and each 5-hour session
@@ -581,19 +792,16 @@ async function load(){
   else $("ctx").innerHTML='<span class="mute">no orchestrator conversation yet</span>';
   if(lastBoard===null){try{const p=localStorage.getItem("la-board-project");if(p)$("bfilter").innerHTML=`<option value="">all projects</option><option selected>${esc(p)}</option>`}catch(e){}}
   drawBoard(s.board);
-  drawNotes(s.notes);
+  $("bnote").textContent="View only: cards follow the work queue (lean-agent todo, run --todo N), pull requests (polled with gh / az every few minutes), reviews and hand-off notes. Hover for full text. Highlighted: changed since you last looked."
+    +(s.pr_errors&&s.pr_errors.length?" PR polling: "+s.pr_errors.join("; "):"");
+  drawLive(s);
   $("runs").innerHTML=table(s.runs.map(r=>`<tr><td class="id"><a onclick="show('${esc(r.id)}')">${esc(r.id)}</a></td><td class="${cls(r.status)}" title="${esc(r.status)}">${esc((r.status||"").split(":")[0])}</td><td class="hide-s">${esc(r.model)}</td><td class="hide-s">${esc(r.project)}${r.role?` <span class="mute">${esc(r.role)}</span>`:""}</td><td class="head">${r.passes>1?`<span class="mute">${r.passes} passes</span> `:""}${esc(r.head)}</td><td class="n">${k(r.units)}</td><td class="n mute hide-s">${r.cost!=null?"$"+r.cost.toFixed(2):""}</td></tr>`));
   $("sched").innerHTML=table(s.schedule.map(j=>`<tr><td class="mute">#${j.id}</td><td>${esc(j.when)}</td><td><code>${esc(j.cmd)}</code></td><td class="n mute">${j.enabled?(j.next?"next "+when(j.next):""):"paused"}<br>${j.last?"last "+when(j.last):"never ran yet"}</td></tr>`))
     +`<div class="mute" style="margin-top:6px">${esc(s.schedule_runner||"")}</div>`
     +(s.scheduled_results.length?'<div class="mute" style="margin-top:8px">Recent results</div>'+table(s.scheduled_results.map(r=>`<tr><td class="mute">#${r.id}</td><td class="${r.rc?"bad":"ok"}">exit ${r.rc}</td><td>${esc(r.first)}</td><td class="n mute">${when(r.ts)}</td></tr>`)):"");
-  const rev=r=>`<tr><td>${esc(r.ref)} <span class="mute">${esc(r.project)}</span></td><td class="${r.verdict==="approve"?"ok":"bad"}">${esc(verdict(r.verdict))}</td><td class="n">${r.blocking?r.blocking+" blocking":""}${r.gaps?` ${r.gaps} gap${r.gaps>1?"s":""}`:""}</td><td class="n mute hide-s">${when(r.ts)}</td></tr>`;
-  const act=s.reviews.filter(r=>r.verdict!=="approve"||r.gaps), ok=s.reviews.filter(r=>r.verdict==="approve"&&!r.gaps);
-  $("reviews").innerHTML=table(act.map(rev),"nothing to act on")
-    +(s.reviews_closed?`<div class="mute" style="margin-top:6px">${s.reviews_closed} review${s.reviews_closed>1?"s":""} of merged or deleted branches not shown</div>`:"");
-  $("approved").innerHTML=table(ok.map(rev),"none open");
   const same=p=>String(p.to||"").replace(/^origin\//,"")===p.branch;
   $("pushes").innerHTML=table(s.pushes.map(p=>`<tr><td>${esc(p.branch)}${same(p)?"":" → "+esc(p.to)}</td><td class="n">${p.count} push${p.count>1?"es":""}${p.failed?` <span class="bad">${p.failed} failed</span>`:""}</td><td class="n mute">last ${when(p.ts)}</td></tr>`),"none this week");
-  const counts={reviews:act.length,runs:s.runs.length,sched:s.schedule.length,pushes:s.pushes.length,approved:ok.length};
+  const counts={runs:s.runs.length,sched:s.schedule.length,pushes:s.pushes.length};
   for(const [k2,n] of Object.entries(counts)) $("n-"+k2).textContent=n?`· ${n}`:"";
 }
 // each box remembers whether it's open, in this browser only (and works without storage)
@@ -630,7 +838,7 @@ def browser_same_origin(headers):
     return (headers.get("Sec-Fetch-Site") or "") in ("same-origin", "none")
 
 
-WATCHED = ("dashboard.py", "usage.py", "lean_schedule.py")
+WATCHED = ("dashboard.py", "usage.py", "lean_schedule.py", "prs.py")
 _LIVE = {"stamp": None, "mod": None}
 _LIVE_LOCK = threading.Lock()
 
@@ -652,6 +860,7 @@ def live():
             try:
                 importlib.reload(usage)
                 importlib.reload(lean_schedule)
+                importlib.reload(prs)
                 spec = importlib.util.spec_from_file_location(f"lean_agent_dashboard_{int(time.time())}",
                                                               os.path.join(HERE, "dashboard.py"))
                 mod = importlib.util.module_from_spec(spec)
@@ -736,11 +945,19 @@ def start_background(port=None):
     except OSError:
         return None
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    start_poller()
     return url()
+
+
+def start_poller():
+    """Poll the pull requests the board shows, in the background (LEAN_AGENT_PR_POLL minutes; 0 = off)."""
+    if prs.poll_every() > 0:
+        threading.Thread(target=prs.poller, args=(lambda: live().poll_inputs(),), daemon=True).start()
 
 
 def serve(port=None):
     server = make_server(port)
+    start_poller()
     print(f"lean-agent dashboard: {url()}  (Ctrl-C stops it)", flush=True)
     try:
         server.serve_forever()

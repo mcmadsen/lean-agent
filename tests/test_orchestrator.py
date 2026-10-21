@@ -1718,8 +1718,9 @@ class CliTest(unittest.TestCase):
         finally:
             os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.update(LEAN_AGENT_HOME=old)
         col = {c["id"]: c["column"] for c in b["cards"]}
-        self.assertEqual(col, {1: "In review", 2: "Waiting on you", 3: "Open", 4: "Done", 5: "Waiting on you"})
-        self.assertEqual(next(c for c in b["cards"] if c["id"] == 2)["why"], "the run needs your input")
+        self.assertEqual(col, {1: "In review", 2: "Waiting on you", 3: "Open", 4: "Done", 5: "Waiting on you",
+                               "n1": "Waiting on you"})  # a note that asks the user is a decision
+        self.assertEqual(next(c for c in b["cards"] if c["id"] == 2)["why"], "the run asks you something")
         card1 = next(c for c in b["cards"] if c["id"] == 1)
         self.assertEqual((card1["review"]["verdict"], card1["review"]["blocking"], len(card1["runs"])),
                          ("changes-requested", 1, 1))
@@ -1727,12 +1728,12 @@ class CliTest(unittest.TestCase):
         card3 = next(c for c in b2["cards"] if c["id"] == 3)
         self.assertEqual((card3["column"], [m["run"] for m in card3["live"]]), ("In progress", ["live1"]))
         self.assertEqual(card3["live"][0]["model"], "sonnet")  # the card says what runs: model / effort
-        lookup = next(c for c in b2["cards"] if c.get("lookup"))  # a run no item names gets its own card
-        self.assertEqual((lookup["column"], lookup["runs"], lookup["text"]), ("In progress", ["look2"], "check a log"))
+        lookup = next(c for c in b2["cards"] if c["kind"] == "lookup")  # a run no item names gets its own card
+        self.assertEqual((lookup["column"], lookup["runs"], lookup["title"]), ("In progress", ["look2"], "check a log"))
         self.assertNotIn('id="c-running"', dashboard.PAGE)  # running runs are on the board now
         self.assertNotEqual(card3["sig"], next(c for c in b["cards"] if c["id"] == 3)["sig"])  # it shows as changed
         self.assertEqual({c["id"]: c["sig"] for c in b["cards"] if c["id"] != 3},
-                         {c["id"]: c["sig"] for c in b2["cards"] if c["id"] != 3 and not c.get("lookup")})
+                         {c["id"]: c["sig"] for c in b2["cards"] if c["id"] != 3 and c["kind"] != "lookup"})
         self.assertIn('id="c-board"', dashboard.PAGE)
         self.assertNotIn("draggable", dashboard.PAGE)  # view only for now
 
@@ -1786,14 +1787,13 @@ class CliTest(unittest.TestCase):
         cards = {c["id"]: c for c in st["board"]["cards"]}
         # a work item number in the todo's ref finds the branch named after it; merged: close the item
         self.assertEqual((cards[1]["column"], cards[1]["review"]["branch"]), ("Waiting on you", "merged"))
-        self.assertIn("todo done", cards[1]["why"])
+        self.assertIn("lean-agent todo done 1", cards[1]["action"])
         # reviews no open item covers get cards; merged or deleted branches don't
         self.assertEqual(cards["v-proj-feature/open-thing"]["column"], "Waiting on you")
-        self.assertEqual(cards["v-proj-feature/open-thing"]["why"], "approved: yours to merge or vote")
+        self.assertEqual(cards["v-proj-feature/open-thing"]["why"], "approved, no pull request yet")
         self.assertEqual(cards["v-proj-feature/new-review"]["column"], "In review")
         self.assertNotIn("v-proj-feature/gone-branch", cards)
         self.assertEqual({r["ref"] for r in st["reviews"]}, {"feature/open-thing", "feature/new-review"})
-        self.assertEqual(st["reviews_closed"], 2)
         # Done: newest first, with the result
         done = [c["id"] for c in st["board"]["cards"] if c["column"] == "Done"]
         self.assertEqual(done, [3, 2])
@@ -1804,6 +1804,107 @@ class CliTest(unittest.TestCase):
         self.assertIn("lean-agent dashboard --url", dashboard.FORBIDDEN)
         r = self.cli("todo", "add", "Thing", "-p", "proj") and self.cli("todo", "done", "4", "merged", "as", "PR", "10")
         self.assertEqual(json.load(open(os.path.join(home, "todo.json")))["items"][-1]["result"], "merged as PR 10")
+
+    def test_pull_requests_on_the_board(self):
+        """PRs are read with gh / az (never an MCP server); the board turns them into what the user must do."""
+        t = self.tmp.name
+        bindir = os.path.join(t, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "gh"), "w") as fh:
+            fh.write("#!/usr/bin/env python3\nimport json, sys\na = sys.argv[1:]\n"
+                     "if a[:2] == ['api', 'user']: print('me'); sys.exit()\n"
+                     "n = int(a[2])\n"
+                     "base = {'number': n, 'title': 'Faster export', 'url': 'https://example.invalid/pull/%d' % n,\n"
+                     " 'headRefName': 'feature/export', 'headRefOid': 'a' * 40, 'state': 'OPEN', 'isDraft': False,\n"
+                     " 'reviewDecision': None, 'statusCheckRollup': [{'conclusion': 'SUCCESS'}], 'mergedAt': None,\n"
+                     " 'reviews': [], 'comments': [\n"
+                     "  {'createdAt': '2030-01-01T10:00:00Z', 'author': {'login': 'me'}, 'body': 'pushed a fix'},\n"
+                     "  {'createdAt': '2030-01-01T11:00:00Z', 'author': {'login': 'alex'}, 'body': 'Cap the retry loop?'}]}\n"
+                     "if n == 2: base.update(comments=[], headRefName='feature/ready', headRefOid='b' * 40)\n"
+                     "print(json.dumps(base))\n")
+        with open(os.path.join(bindir, "az"), "w") as fh:
+            fh.write("#!/usr/bin/env python3\nimport json, sys\na = ' '.join(sys.argv[1:])\n"
+                     "if a.startswith('account show'): print('me@example.com')\n"
+                     "elif a.startswith('repos pr list'): print(json.dumps([{'pullRequestId': 7}]))\n"
+                     "elif a.startswith('repos pr show'): print(json.dumps({'pullRequestId': 7, 'title': 'Signing',\n"
+                     " 'sourceRefName': 'refs/heads/feature/sign', 'status': 'active', 'isDraft': False,\n"
+                     " 'lastMergeSourceCommit': {'commitId': 'c' * 40},\n"
+                     " 'reviewers': [{'uniqueName': 'Other@example.com', 'vote': 10}]}))\n"
+                     "elif a.startswith('repos pr policy list'): print(json.dumps([{'status': 'rejected',\n"
+                     " 'configuration': {'type': {'displayName': 'Build'}}}]))\n"
+                     "elif a.startswith('devops invoke'): print(json.dumps({'value': [\n"
+                     " {'id': 1, 'status': 'active', 'comments': [{'commentType': 'text', 'content': 'Typo in deploy',\n"
+                     "  'publishedDate': '2030-01-01T12:00:00Z', 'author': {'uniqueName': 'other@example.com',\n"
+                     "  'displayName': 'Other'}}]},\n"
+                     " {'id': 2, 'status': 'fixed', 'comments': [{'commentType': 'text', 'content': 'done',\n"
+                     "  'publishedDate': '2030-01-01T09:00:00Z', 'author': {'uniqueName': 'other@example.com'}}]},\n"
+                     " {'id': 3, 'status': 'active', 'comments': [{'commentType': 'system', 'content': 'policy'}]}]}))\n"
+                     "else: sys.exit(1)\n")
+        for f in ("gh", "az"):
+            os.chmod(os.path.join(bindir, f), 0o755)
+        repos = {}
+        for name, url in (("gh-proj", "https://github.com/acme/shop.git"),
+                          ("az-proj", "https://acme@dev.azure.com/acme/Shop/_git/shop-web")):
+            repos[name] = os.path.join(t, name)
+            os.makedirs(repos[name])
+            subprocess.run(["git", "init", "-q", repos[name]], check=True)
+            subprocess.run(["git", "-C", repos[name], "remote", "add", "origin", url], check=True)
+            subprocess.run(["git", "-C", repos[name], "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q",
+                            "--allow-empty", "-m", "base"], check=True)
+            for b in ("feature/sign", "feature/ready"):  # the reviewed branches exist
+                subprocess.run(["git", "-C", repos[name], "branch", b], check=True)
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(os.path.join(home, "reviews"), exist_ok=True)
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        with open(os.path.join(home, "reviews", "gh-proj.jsonl"), "w") as fh:
+            for verdict in ("approve", "needs-checks"):  # a later check run at the same commit doesn't hide the approve
+                fh.write(json.dumps({"ref": "feature/ready", "verdict": verdict, "head": "b" * 40, "ts": now, "run": "rv1"}) + "\n")
+        with open(os.path.join(home, "reviews", "az-proj.jsonl"), "w") as fh:
+            fh.write(json.dumps({"ref": "feature/sign", "verdict": "approve", "head": "c" * 40, "ts": now, "run": "rv2"}) + "\n")
+        todo = [{"id": 1, "text": "Faster export", "project": "gh-proj", "ref": "PR 1", "status": "doing"},
+                {"id": 2, "text": "Ready one", "project": "gh-proj", "ref": "https://github.com/acme/shop/pull/2",
+                 "status": "doing"}]
+        json.dump({"next": 3, "items": todo}, open(os.path.join(home, "todo.json"), "w"))
+        json.dump({k: {"path": v} for k, v in repos.items()}, open(os.path.join(home, "projects.json"), "w"))
+        json.dump([{"ts": now, "text": "FYI: the staging cert renews on Friday", "kind": "fyi"}],
+                  open(os.path.join(home, "handoff-notes.json"), "w"))
+        sys.path.insert(0, os.path.dirname(CLI))
+        saved = {k: os.environ.get(k) for k in ("LEAN_AGENT_HOME", "PATH")}
+        os.environ.update(LEAN_AGENT_HOME=home, PATH=bindir + os.pathsep + os.environ["PATH"])
+        try:
+            import prs
+            import dashboard
+            prs._ME.clear()
+            data = prs.poll(*dashboard.poll_inputs())
+            st = dashboard.state()
+        finally:
+            for k, v in saved.items():
+                os.environ.pop(k) if v is None else os.environ.update({k: v})
+        self.assertEqual(sorted(k for k, v in data.items() if isinstance(v, dict)), ["az-proj#7", "gh-proj#1", "gh-proj#2"])
+        self.assertEqual(data["gh-proj#1"]["waiting"], [{"author": "alex", "text": "Cap the retry loop?",
+                                                         "ts": "2030-01-01T11:00:00"}])
+        az = data["az-proj#7"]
+        self.assertEqual((az["ci"], az["approval"], az["my_vote"], az["comments"], az["branch"]),
+                         ("failing", "approved", None, 2, "feature/sign"))
+        self.assertEqual([w["text"] for w in az["waiting"]], ["Typo in deploy"])
+        self.assertTrue(az["url"].endswith("/acme/Shop/_git/shop-web/pullrequest/7"))
+        cards = {c["id"]: c for c in st["board"]["cards"]}
+        one, two, seven = cards["pr-gh-proj-1"], cards["pr-gh-proj-2"], cards["pr-az-proj-7"]
+        self.assertEqual(one["column"], "Waiting on you")
+        self.assertIn("alex: Cap the retry loop?", one["why"])
+        self.assertEqual(one["items"], [1])
+        self.assertEqual((two["column"], two["action"]), ("Waiting on you", "merge or vote on the PR"))
+        self.assertEqual(two["review"]["verdict"], "approve")
+        self.assertEqual((seven["column"], seven["why"]), ("Waiting on you", "1 comment waits for your reply · Other: Typo in deploy"))
+        self.assertNotIn("v-gh-proj-feature/ready", cards)  # the PR card covers its branch's review
+        self.assertEqual(cards["n1"]["column"], "Notes")
+        self.assertEqual(cards[1]["pr"], {"number": 1})
+        import lean_agent as L  # review --status counts the same review the board does
+        self.assertEqual(L.decisive([{"verdict": "approve"}, {"verdict": "needs-checks"}])["verdict"], "approve")
+        self.assertEqual(L.decisive([{"verdict": "needs-checks"}])["verdict"], "needs-checks")
+        self.assertEqual(dashboard.short_title("Older: a digest check on production (baseline vs wait); feedback "
+                                               "files in downloads; trims offered; a vote needed")[0],
+                         "Older: a digest check on production (baseline vs wait)")
 
     def test_plan_history_feeds_the_dashboard_graph(self):
         sys.path.insert(0, os.path.dirname(CLI))

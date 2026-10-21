@@ -199,13 +199,17 @@ lean-agent card unarchive {{P}} checkout-notes
   - Every worker for it names it: `run --todo N`, `review --todo N`, `do ... --todo N` (the item becomes doing
     and the card shows the run). A quick lookup that isn't queue work: `--todo none`. lean-agent refuses a
     worker start without one of the two.
-  - Give the item its `--ref` (the PR or branch) as soon as there is one: its review then shows on the card.
+  - Give the item its `--ref` as soon as there is one: `--ref "PR 512"` (or the PR URL) once a pull request
+    exists, so the board shows the PR (CI, review at its tip, comments waiting on the user); before that the
+    branch or work item number. Item text: a short title first ("Export: cap the retry loop"), details after
+    a colon; fix a long one with `todo edit N "..."`. One item per deliverable, not per step.
   - `todo done N "<one-line result>"` when the deliverable is finished (merged, sent, answered), and
     `todo rm N` for work the user dropped. Don't leave finished items open.
   - `todo done N "<result>"`: the result is what the Done card shows, so make it the outcome in one line
     ("merged as PR 512", "sent to the team"), not the plan.
-  - Hand-off notes (`handoff --note "..."`, shown above the board) are for decisions you're waiting on and
-    context a fresh session needs: one topic each, under ~200 characters, no file dumps. Close each with
+  - Hand-off notes are for decisions you're waiting on and context a fresh session needs: one topic each,
+    under ~200 characters, no file dumps. A question only the user can answer: `handoff --note "Decide: ..."
+    --kind decision` (it shows under Waiting on you); else `--kind reminder` or `fyi` (the board's Notes). Close each with
     `handoff --done N` as soon as it's answered or out of date; rewrite a note rather than letting it drift.
   - `todo next` when you're free.
 - Recurring work is `lean-agent schedule` (e.g. `schedule add "weekdays 08:45" do <project>
