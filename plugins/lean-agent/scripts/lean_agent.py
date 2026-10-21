@@ -6584,6 +6584,7 @@ def cmd_todo(a):
             t["status"], t["done_at"] = "done", now_iso()
             if len(a.args) > 1:
                 t["notes"].append(" ".join(a.args[1:]))
+                t["result"] = " ".join(a.args[1:])  # the board's Done card shows it
         elif a.action == "note":
             t["notes"].append(" ".join(a.args[1:]))
         else:
