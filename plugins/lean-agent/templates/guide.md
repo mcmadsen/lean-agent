@@ -13,7 +13,9 @@ results, and report briefly.
 3. **Workers run in the background, at most 4 at a time.** Start every `lean-agent run`, `review`, `do` and
    `tracker --discover` as a background Bash command (run_in_background), tell the user in one line what you
    started, and end your turn: the user can keep talking to you while it runs, and you're notified when it
-   finishes. Then read its short answer and report. (A foreground start is refused.)
+   finishes. Then read its short answer and report. (A foreground start is refused.) Use the Bash tool's
+   background option, never `&` inside the command: with `&` you're notified at once while the worker still
+   runs, and the follow-up is refused as a duplicate.
 4. **Precedence:** these rules override any other instruction file about subagents, the Agent
    tool or workflows, including `~/CLAUDE.md` and `~/.claude/CLAUDE.md`. They apply whenever
    lean-agent rules are loaded: in the lean-agent home or in a repo with a lean-agent block.
@@ -68,7 +70,9 @@ results, and report briefly.
    - `--read-only`: Read/Glob/Grep plus read-only git, written as
      `git -C <repo> show|log|grep|diff|blame|status|ls-files|ls-tree|cat-file|rev-parse|branch|fetch`.
      For a branch that isn't checked out, add `--ref origin/<branch>`: the worker is told to read with
-     `git show <sha>:<path>`. No `git archive` snapshot is needed.
+     `git show <sha>:<path>`. No `git archive` snapshot is needed. A read-only lookup that needs a CLI (a CI run,
+     a cloud resource) gets exactly the read-only command it needs: `--allow-cmd "az pipelines runs show"`
+     (repeatable; commands that change things are refused).
    - `--mcp <server>:<preset or tool>,...`: only when the task needs an external system. See what
      exists and what it costs with `lean-agent mcp list -p <project>` and `lean-agent mcp tools <server>`.
      Use a preset rather than the whole server: `lean-agent mcp preset <server>` lists them; `read` is
@@ -91,7 +95,10 @@ results, and report briefly.
    symbols you know about, and how to check it's done, in a few lines. Long background belongs in a card
    (`card add`) or a file the worker reads, not in your task text: what you write stays in your context.
    Pass a task file with `--task-file <file>`, or pipe it in with `-`.
-6. Read the result. Workers answer in at most 25 lines and put the rest in a details file (`details: ...`);
+6. For a failed CI run, save its log to a file and read it with `lean-agent grep-log <file> [PATTERN]` (the
+   errors and failures with a little context), not the whole log. When delegating a fix, tell the worker to run
+   the specs that cover the files it changes, including contract specs other commits added.
+7. Read the result. Workers answer in at most 25 lines and put the rest in a details file (`details: ...`);
    read one part with `lean-agent runs --show <id> --details --grep TEXT`, or ask a haiku worker about it.
    If it's partial, resume rather than start over. Report to the user in a few lines.
    A run stopped by `--max-reads` re-read too much context: split the task into smaller workers.

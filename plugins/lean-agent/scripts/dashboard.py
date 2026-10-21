@@ -112,6 +112,18 @@ def open_gaps(slug, review):
     return sum(1 for g in gaps if not acked_gap(g))
 
 
+def schedule_runner():
+    """Who runs due scheduled jobs, and when it was last seen."""
+    try:
+        age = int((time.time() - os.path.getmtime(home("scheduled", ".timer"))) / 60)
+    except OSError:
+        age = None
+    if age is not None and age < 15:
+        return f"the `lean-agent up` timer (seen {age} min ago) runs due jobs every 5 minutes"
+    return ("no `lean-agent up` timer seen" + (f" for {age} min" if age is not None else "")
+            + ": jobs run only while `lean-agent up` (or the service) runs, or at the orchestrator's next tool call")
+
+
 def state():
     now = datetime.datetime.now()
     week_ago = (now - datetime.timedelta(days=7)).isoformat()
@@ -121,11 +133,19 @@ def state():
         m = _json(f, {})
         if _alive(m.get("pid")):
             running.append({k: m.get(k) for k in ("run", "started", "model", "project", "task")})
-    runs = [{"id": r.get("id"), "ts": r.get("ts"), "status": r.get("status"), "model": r.get("model"),
-             "project": r.get("project"), "role": r.get("role"), "units": r.get("units", 0),
-             "cost": r.get("cost_usd"), "turns": r.get("turns"),
-             "head": " ".join(str(r.get("result_head") or r.get("task") or "").split())[:160]}
-            for r in ledger[-25:]][::-1]
+    merged = {}  # one row per run: a resumed run (a follow-up, the reviewer sent back) adds a pass
+    for r in ledger[-200:]:
+        m = merged.get(r.get("id"))
+        if m:
+            m.update(ts=r.get("ts"), status=r.get("status"), passes=m["passes"] + 1,
+                     units=m["units"] + (r.get("units") or 0), cost=(m["cost"] or 0) + (r.get("cost_usd") or 0),
+                     head=" ".join(str(r.get("result_head") or m["head"]).split())[:160])
+        else:
+            merged[r.get("id")] = {"id": r.get("id"), "ts": r.get("ts"), "status": r.get("status"), "model": r.get("model"),
+                                   "project": r.get("project"), "role": r.get("role"), "units": r.get("units") or 0,
+                                   "cost": r.get("cost_usd"), "turns": r.get("turns"), "passes": 1,
+                                   "head": " ".join(str(r.get("result_head") or r.get("task") or "").split())[:160]}
+    runs = sorted(merged.values(), key=lambda r: r["ts"] or "", reverse=True)[:25]
     week = [r for r in ledger if str(r.get("ts", "")) >= week_ago]
     todo = _json(home("todo.json"), {}).get("items") or []
     open_todo = sorted([t for t in todo if t.get("status") != "done"],
@@ -163,6 +183,7 @@ def state():
         "todo": open_todo[:30], "todo_done_week": sum(1 for t in todo if t.get("status") == "done"
                                                       and (t.get("done_at") or "") >= week_ago),
         "schedule": jobs, "scheduled_results": lean_schedule.results_since(week_ago)[-10:][::-1],
+        "schedule_runner": schedule_runner(),
         "reviews": latest_reviews,
         "pushes": [p for p in _jsonl(home("pushes.jsonl"), 50) if p.get("ts", "") >= week_ago][-8:][::-1],
         "context": orchestrator_context(),
@@ -277,7 +298,9 @@ async function load(){
   const wk=s.plan.seven_day, ses=s.plan.five_hour;
   $("pace").innerHTML=(wk?`<div class="big">${Math.round(wk.pct)}%</div><div class="mute">of your weekly plan</div>${meter(wk.pct,70,90)}`:'<span class="mute">plan usage not seen yet (it comes with every worker run)</span>')
     +(s.pace?`<div class="${s.ahead?"warn":"ok"}">${esc(s.pace)}</div>`:"")
-    +(ses?`<div class="mute" style="margin-top:6px">session window ${Math.round(ses.pct)}%</div>${meter(ses.pct,70,90)}`:"");
+    +(ses?`<div class="${ses.pct>=70?"warn":"mute"}" style="margin-top:6px">session window ${Math.round(ses.pct)}%`
+      +(ses.pct>=70?` · prefer haiku and small steps until it resets${ses.resets_at?" at "+new Date(ses.resets_at*1000).toTimeString().slice(0,5):""}`:"")
+      +`</div>${meter(ses.pct,70,90)}`:"");
   $("weekstats").innerHTML=`${s.week.runs} runs (${s.week.done} done) · ${k(s.week.units)} sonnet-eq · $${s.week.cost} · ${s.todo_done_week} todos done`;
   const c=s.context;
   if(c&&c.calls){const p=Math.round(c.now*100/c.compact_at),max=Math.max(...c.trend,c.compact_at),w=c.trend.length;
@@ -291,8 +314,9 @@ async function load(){
     'Nothing open. Your requests and what is in progress go here: ask the orchestrator to keep your work in '
     +'the work queue, or add an item yourself with <code>lean-agent todo add "..." -p &lt;project&gt;</code>.'
     +(s.todo_done_week?` (${s.todo_done_week} done this week)`:""));
-  $("runs").innerHTML=table(s.runs.map(r=>`<tr><td class="id"><a onclick="show('${esc(r.id)}')">${esc(r.id)}</a></td><td class="${cls(r.status)}" title="${esc(r.status)}">${esc((r.status||"").split(":")[0])}</td><td class="hide-s">${esc(r.model)}</td><td class="hide-s">${esc(r.project)}${r.role?` <span class="mute">${esc(r.role)}</span>`:""}</td><td class="head">${esc(r.head)}</td><td class="n">${k(r.units)}</td><td class="n mute hide-s">${r.cost!=null?"$"+r.cost.toFixed(2):""}</td></tr>`));
-  $("sched").innerHTML=table(s.schedule.map(j=>`<tr><td class="mute">#${j.id}</td><td>${esc(j.when)}</td><td><code>${esc(j.cmd)}</code></td><td class="n mute">${j.enabled?(j.next?"next "+when(j.next):""):"paused"}</td></tr>`))
+  $("runs").innerHTML=table(s.runs.map(r=>`<tr><td class="id"><a onclick="show('${esc(r.id)}')">${esc(r.id)}</a></td><td class="${cls(r.status)}" title="${esc(r.status)}">${esc((r.status||"").split(":")[0])}</td><td class="hide-s">${esc(r.model)}</td><td class="hide-s">${esc(r.project)}${r.role?` <span class="mute">${esc(r.role)}</span>`:""}</td><td class="head">${r.passes>1?`<span class="mute">${r.passes} passes</span> `:""}${esc(r.head)}</td><td class="n">${k(r.units)}</td><td class="n mute hide-s">${r.cost!=null?"$"+r.cost.toFixed(2):""}</td></tr>`));
+  $("sched").innerHTML=table(s.schedule.map(j=>`<tr><td class="mute">#${j.id}</td><td>${esc(j.when)}</td><td><code>${esc(j.cmd)}</code></td><td class="n mute">${j.enabled?(j.next?"next "+when(j.next):""):"paused"}<br>${j.last?"last "+when(j.last):"never ran yet"}</td></tr>`))
+    +`<div class="mute" style="margin-top:6px">${esc(s.schedule_runner||"")}</div>`
     +(s.scheduled_results.length?'<div class="mute" style="margin-top:8px">Recent results</div>'+table(s.scheduled_results.map(r=>`<tr><td class="mute">#${r.id}</td><td class="${r.rc?"bad":"ok"}">exit ${r.rc}</td><td>${esc(r.first)}</td><td class="n mute">${when(r.ts)}</td></tr>`)):"");
   const rev=r=>`<tr><td>${esc(r.ref)} <span class="mute">${esc(r.project)}</span></td><td class="${r.verdict==="approve"?"ok":"bad"}" title="${esc(r.verdict)}">${esc((r.verdict||"").split("-")[0])}</td><td class="n">${r.blocking?r.blocking+" blocking":""}${r.gaps?` ${r.gaps} gap${r.gaps>1?"s":""}`:""}</td><td class="n mute hide-s">${when(r.ts)}</td></tr>`;
   const act=s.reviews.filter(r=>r.verdict!=="approve"||r.gaps), ok=s.reviews.filter(r=>r.verdict==="approve"&&!r.gaps);

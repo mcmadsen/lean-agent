@@ -2215,9 +2215,24 @@ class CliTest(unittest.TestCase):
         st = self.cli("review", "proj", "--status", check=False)
         self.assertEqual(st.returncode, 2)
         self.assertIn("known gap(s) not acknowledged", st.stdout)
-        n = len([l for l in st.stdout.splitlines() if l.strip().startswith("g")])
-        self.cli("review", "decline", "proj", *[f"g{i}" for i in range(1, n + 1)],
-                 "--why", "out of scope: hosting is a separate task")
+        self.cli("review", "decline", "proj", "--all-gaps", "--why", "out of scope: hosting is a separate task")
+        self.assertEqual(self.cli("review", "proj", "--status").returncode, 0)
+        # a new tip: a helper named after placeholders, a reworded gap and a nit don't bring the decided gaps back
+        with open(os.path.join(self.proj, "api", "totals.py"), "a") as fh:
+            fh.write("def fill_placeholders(t):\n    # replaces the placeholder in the template\n    return t\n")
+        checked["reuse"].append({"symbol": "fill_placeholders", "candidates": [], "verdict": "justified-new",
+                                 "why": "nothing fills templates in the repository yet"})
+        reworded = json.dumps(dict(checked, verdict="approve", checks=[],
+                                   findings=[{"severity": "nit", "category": "tests", "file": "api/totals.py", "line": 7,
+                                              "issue": "no spec covers the literal replacement"}],
+                                   gaps=[{"what": "the other browser: not done yet, it cannot be shipped today",
+                                          "file": "docs/DISTRIBUTION.md", "line": 5, "blocks_goal": False,
+                                          "scoped_out": "ask the user"},
+                                         {"what": "no spec covers the literal replacement", "file": "api/totals.py",
+                                          "line": 7, "blocks_goal": False, "scoped_out": ""}]))
+        p = self.cli("review", "proj", check=False, FAKE_REVIEW=reworded)
+        self.assertNotIn("known gaps:", p.stdout)
+        self.assertIn("1. [nit/tests]", p.stdout)  # still a finding, not a gap
         self.assertEqual(self.cli("review", "proj", "--status").returncode, 0)
         # a gap the reviewer says keeps the goal from working, not scoped out: a major finding
         with open(os.path.join(self.proj, "docs", "DISTRIBUTION.md"), "a") as fh:
@@ -2230,6 +2245,67 @@ class CliTest(unittest.TestCase):
         self.assertEqual(p.returncode, 2)
         self.assertIn("[major/completeness] docs/DISTRIBUTION.md:9: the change doesn't deliver: the second browser's package", p.stdout)
         self.assertIn("NOT approved", p.stdout)
+
+    def test_feedback_v021_small_things(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        # dashboard --json: the page's data; a resumed run is one row with its passes
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "look")
+        rid = self.ledger()[-1]["id"]
+        self.cli("run", "--resume", rid, "and more")
+        st = json.loads(self.cli("dashboard", "--json").stdout)
+        self.assertEqual([r["id"] for r in st["runs"]].count(rid), 1)
+        self.assertEqual(st["runs"][0]["passes"], 2)
+        self.assertIn("jobs run only while `lean-agent up`", st["schedule_runner"])
+        # read-only workers and CLIs
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "--again",
+                     "read the failed run with az pipelines runs show --id 7")
+        self.assertIn("names `az`", p.stderr)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "--again",
+                 "--allow-cmd", "az pipelines runs show", "read the failed run 7")
+        call = self.calls()[-1]
+        argv = call["argv"]
+        self.assertIn("Bash(az pipelines runs show:*)", argv[argv.index("--allowedTools") + 1])
+        self.assertIn("`az pipelines runs show ...`", call["append"])
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "--again",
+                     "--allow-cmd", "az pipelines runs delete", "x", check=False)
+        self.assertIn("delete changes something", p.stderr)
+        # grep-log on a CI log saved as JSON
+        log = os.path.join(self.tmp.name, "log.json")
+        with open(log, "w") as fh:
+            json.dump({"count": 4, "value": ["##[section]Starting", "PASS a.spec.ts", "FAIL infra.spec.ts",
+                                             "ENOENT: no such file, open 'infrastructure/main.bicep'"]}, fh)
+        out = self.cli("grep-log", log, "-C", "0").stdout
+        self.assertIn("3> FAIL infra.spec.ts", out)
+        self.assertIn("ENOENT", out)
+        self.assertNotIn("PASS a.spec.ts", out)
+        # schedule ... --help prints help and adds nothing
+        self.assertIn("usage: lean-agent schedule", self.cli("schedule", "defaults", "--help").stdout)
+        self.assertIn("No scheduled jobs", self.cli("schedule").stdout)
+
+    def test_review_ci_sparse_checkout_parity(self):
+        g = self.git_project()
+        os.makedirs(os.path.join(self.proj, "infrastructure"))
+        with open(os.path.join(self.proj, "infrastructure", "main.bicep"), "w") as fh:
+            fh.write("param x string\n")
+        with open(os.path.join(self.proj, "azure-pipelines.yml"), "w") as fh:
+            fh.write("steps:\n- checkout: self\n  sparseCheckoutDirectories: api web\n")
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "pipeline")
+        os.makedirs(os.path.join(self.proj, "api", "tests"))
+        with open(os.path.join(self.proj, "api", "tests", "test_infra.py"), "w") as fh:
+            fh.write("def test_bicep():\n    assert open('../infrastructure/main.bicep').read()\n"
+                     "def test_api():\n    assert open('api/totals.py')\n")
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "infra test")
+        self.cli("learn", self.proj, "--name", "proj")
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        p = self.cli("review", "proj", "--head", "feature", "--base", "main", check=False, FAKE_REVIEW=approve)
+        call = next(c for c in self.calls() if "0. Completeness" in c["append"])
+        self.assertIn("CI parity", call["append"])
+        self.assertIn("reads `../infrastructure/main.bicep`, outside the sparse checkout of azure-pipelines.yml (api web)",
+                      call["append"])
+        self.assertNotIn("`api/totals.py`", call["append"])
+        self.assertIn("[check] CI parity: api/tests/test_infra.py", p.stdout)
 
     def test_review_a_ref_without_checkout(self):
         g = self.git_project()
