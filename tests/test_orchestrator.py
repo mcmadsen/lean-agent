@@ -1592,10 +1592,47 @@ class CliTest(unittest.TestCase):
                 urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state?t=wrong")
             self.assertEqual(e.exception.code, 403)
             self.assertIn("already running", self.cli("dashboard").stdout)
+            out = self.cli("dashboard", "--open", BROWSER="true").stdout  # a "browser" that accepts the URL
+            self.assertTrue(out.startswith("opened in your default browser: http://127.0.0.1:")
+                            or out.startswith("couldn't open a browser from here"), out)
+            bare = f"http://localhost:{port}/api/state"
+            req = lambda site: urllib.request.urlopen(urllib.request.Request(
+                bare, headers={"Sec-Fetch-Site": site} if site else {}), timeout=3)
+            with self.assertRaises(urllib.error.HTTPError):
+                req("same-origin")  # not without --preview
         finally:
             p.terminate()
             p.wait()
+        out = self.cli("dashboard", "--preview").stdout
+        self.assertIn('"lean-agent dashboard" entry', out)
         home = self.cli("home").stdout.strip()
+        with open(os.path.join(home, ".claude", "launch.json")) as fh:
+            launch = json.load(fh)
+        self.assertEqual(launch["configurations"], [{"name": "lean-agent dashboard",
+                                                     "url": f"http://localhost:{port}", "port": port}])
+        p = subprocess.Popen([sys.executable, CLI, "dashboard"], env=self.env, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+        try:
+            import time as _t
+            for _ in range(50):
+                try:
+                    st = json.loads(req("same-origin").read())  # the page's own request, no token
+                    break
+                except (OSError, urllib.error.URLError):
+                    _t.sleep(0.1)
+            self.assertIn("runs", st)
+            self.assertEqual(urllib.request.urlopen(urllib.request.Request(
+                f"http://localhost:{port}/", headers={"Sec-Fetch-Site": "none"})).status, 200)  # typed address
+            for site in ("cross-site", None):  # another website, or a non-browser program without the token
+                with self.assertRaises(urllib.error.HTTPError):
+                    req(site)
+        finally:
+            p.terminate()
+            p.wait()
+        self.assertIn("Claude desktop preview entry in launch.json", self.cli("doctor", check=False).stdout)
+        self.cli("dashboard", "--preview", "off")
+        with open(os.path.join(home, ".claude", "launch.json")) as fh:
+            self.assertEqual(json.load(fh)["configurations"], [])
         with open(os.path.join(home, ".claude", "settings.json")) as fh:
             line = json.load(fh)["statusLine"]
         self.assertIn("statusline.py", line["command"])
