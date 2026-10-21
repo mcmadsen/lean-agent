@@ -155,9 +155,10 @@ def board(todo, ledger, running, reviews, now=None, notes=()):
             runs_of.setdefault(r["todo"], {})[r.get("id")] = {"id": r.get("id"), "status": r.get("status"),
                                                               "ts": r.get("ts"), "role": r.get("role")}
     live = {}
+    ids = {t.get("id") for t in todo}
     for m in running:
-        if m.get("todo") is not None:
-            live.setdefault(m["todo"], []).append(m.get("run"))
+        if m.get("todo") in ids:
+            live.setdefault(m["todo"], []).append(m)
     cards = []
     for t in todo:
         if t.get("status") == "done" and (t.get("done_at") or "") < week_ago:
@@ -196,6 +197,12 @@ def board(todo, ledger, running, reviews, now=None, notes=()):
     cards.sort(key=lambda c: ((c["done_at"] or "") if c["column"] == "Done" else "",
                               prio.get(c["prio"], 1), c["due"] or "9999", c["id"] or 0))
     done = [c for c in cards if c["column"] == "Done"][::-1]
+    for m in running:  # a run no item names (`--todo none`, or started outside the orchestrator): its own card
+        if m.get("todo") not in ids:
+            cards.append({"id": f"r-{m.get('run')}", "lookup": True, "text": " ".join(str(m.get("task") or "").split())[:140],
+                          "project": m.get("project"), "ref": None, "prio": "normal", "due": None, "notes": 0,
+                          "column": "In progress", "live": [m], "runs": [m.get("run")], "last_run": None,
+                          "done_at": None, "review": None, "sig": str(m.get("run"))})
     for i, n in enumerate(notes, 1):  # `lean-agent handoff --done N` closes one
         text = str(n.get("text") or "")
         cards.append({"id": f"n{i}", "note": i, "text": text, "project": None, "ref": None, "prio": "normal",
@@ -215,7 +222,9 @@ def state():
     for f in glob.glob(home("running", "*.json")):
         m = _json(f, {})
         if _alive(m.get("pid")):
-            running.append({k: m.get(k) for k in ("run", "started", "model", "project", "task", "todo")})
+            steps = _jsonl(os.path.join(m.get("workdir") or home("work", str(m.get("run"))), "progress.jsonl"), 1)
+            running.append(dict({k: m.get(k) for k in ("run", "started", "model", "effort", "role", "project", "task",
+                                                         "todo")}, turns=steps[-1].get("turn") if steps else 0))
     merged = {}  # one row per run: a resumed run (a follow-up, the reviewer sent back) adds a pass
     for r in ledger[-200:]:
         m = merged.get(r.get("id"))
@@ -367,7 +376,6 @@ td.id{white-space:nowrap}td.head{min-width:10em}.wide2{grid-column:span 2}
  <details class="card full" id="c-plan" open><summary><h2>Plan usage</h2></summary><div class="plan"><div class="stats"><div id="pace"></div><div id="weekstats" class="mute" style="margin-top:6px"></div></div>
   <div class="chart"><div class="legend"><span><i style="border-color:var(--s1)"></i>week</span><span><i style="border-color:var(--s2)"></i>session</span><span><i class="band"></i>session window (5 h, ends at its right edge)</span><span><i style="border-top-style:dashed;border-color:var(--mute)"></i>on pace</span></div><div id="planchart"></div><div id="ptip"></div></div></div></details>
  <details class="card" id="c-ctx" open><summary><h2>Orchestrator context</h2></summary><div id="ctx"></div></details>
- <details class="card" id="c-running" open><summary><h2>Running now <span class="count" id="n-running"></span></h2></summary><div id="running"></div></details>
  <details class="card wide2" id="c-todo" open><summary><h2>Work queue <span class="count" id="n-todo"></span></h2></summary><div id="todo"></div></details>
  <details class="card" id="c-reviews" open><summary><h2>Reviews to act on <span class="count" id="n-reviews"></span></h2></summary><div id="reviews"></div></details>
  <details class="card full" id="c-runs"><summary><h2>Recent runs <span class="count" id="n-runs"></span></h2></summary><div id="runs"></div></details>
@@ -411,7 +419,7 @@ function drawBoard(b){
     else{const since=(was&&was.since)||now;seen[c.id]=Object.assign({},was||{},{since});
       if(looking&&now-since>SEEN_FOR)seen[c.id]={sig:c.sig,col:c.column};else{hi=was?(was.col&&was.col!==c.column?"moved from "+was.col:"changed"):"new";changed++}}
     const lr=c.last_run,rv=c.review;
-    return `<div class="tc p-${esc(c.prio)}${c.note?" note":""}${hi?" changed":""}"><div>${c.live.length?'<span class="badge live">running</span> ':""}${hi?`<span class="badge new">${esc(hi)}</span> `:""}<span class="mute">${c.note?"hand-off note "+c.note+":":"#"+c.id}</span> ${esc(c.text)}</div>
+    return `<div class="tc p-${esc(c.prio)}${c.note?" note":""}${hi?" changed":""}"><div>${c.live.map(r=>`<a class="badge live" onclick="show('${esc(r.run)}')" title="run ${esc(r.run)} since ${esc(String(r.started||"").slice(11,16))}">running · ${esc(r.model||"?")} / ${esc(r.effort||"default")}${r.role?" · "+esc(r.role):""}${r.turns?" · "+r.turns+" turns":""}</a> `).join("")}${hi?`<span class="badge new">${esc(hi)}</span> `:""}<span class="mute">${c.note?"hand-off note "+c.note+":":c.lookup?"no item:":"#"+c.id}</span> ${esc(c.text)}</div>
       <div class="meta">${c.project?`<span>${esc(c.project)}</span>`:""}${c.ref?`<span>${esc(c.ref)}</span>`:""}${c.prio!=="normal"?`<span class="${c.prio==="high"?"bad":""}">${esc(c.prio)}</span>`:""}${c.due?`<span>due ${esc(c.due)}</span>`:""}${c.notes?`<span>${c.notes} note${c.notes>1?"s":""}</span>`:""}</div>
       ${c.runs.length?`<div class="meta">${c.runs.map(id=>`<a onclick="show('${esc(id)}')">${esc(id)}</a>`).join(" ")}${lr?` <span class="${cls(lr.status)}">${esc(String(lr.status||"").split(":")[0])}</span>`:""}</div>`:""}
       ${rv?`<div class="meta"><span class="${rv.verdict!=="approve"?"bad":rv.gaps?"warn":"ok"}">review ${esc((rv.verdict||"").split("-")[0])}</span>${rv.blocking?`<span>${rv.blocking} blocking</span>`:""}${rv.gaps?`<span class="warn">${rv.gaps} gap${rv.gaps>1?"s":""} to answer</span>`:""}</div>`:""}</div>`}).join("")}</div>`}).join("");
@@ -489,7 +497,6 @@ async function load(){
   else $("ctx").innerHTML='<span class="mute">no orchestrator conversation yet</span>';
   if(lastBoard===null){try{const p=localStorage.getItem("la-board-project");if(p)$("bfilter").innerHTML=`<option value="">all projects</option><option selected>${esc(p)}</option>`}catch(e){}}
   drawBoard(s.board);
-  $("running").innerHTML=table(s.running.map(r=>`<tr><td><a onclick="show('${esc(r.run)}')">${esc(r.run)}</a></td><td>${esc(r.model)}</td><td>${esc(r.project)}</td><td>${esc((r.task||"").slice(0,80))}</td></tr>`));
   $("todo").innerHTML=table(s.todo.map(t=>`<tr><td class="mute">#${t.id}</td><td>${t.status==="doing"?'<b class="warn">doing</b> ':""}${t.prio==="high"?'<b class="bad">high</b> ':""}${esc(t.text)}${t.ref?` <span class="mute">(${esc(t.ref)})</span>`:""}</td><td class="n mute">${esc(t.due||"")}</td></tr>`),
     'Nothing open. Your requests and what is in progress go here: ask the orchestrator to keep your work in '
     +'the work queue, or add an item yourself with <code>lean-agent todo add "..." -p &lt;project&gt;</code>.'
@@ -505,7 +512,7 @@ async function load(){
   $("pushes").innerHTML=table(s.pushes.map(p=>`<tr><td>${esc(p.branch)} → ${esc(p.to)}</td><td class="${p.ok?"ok":"bad"}">${p.ok?"pushed":"failed"}</td><td class="n mute">${when(p.ts)}</td></tr>`),"none this week");
   $("notes").innerHTML=table(s.notes.map((n,i)=>`<tr><td class="mute">${i+1}.</td><td>${esc(n.text)}</td></tr>`),
     'none (the orchestrator adds open items with <code>lean-agent handoff --note</code>)');
-  const counts={running:s.running.length,todo:s.todo.length,reviews:act.length,runs:s.runs.length,sched:s.schedule.length,
+  const counts={todo:s.todo.length,reviews:act.length,runs:s.runs.length,sched:s.schedule.length,
     pushes:s.pushes.length,notes:s.notes.length,approved:ok.length};
   for(const [k2,n] of Object.entries(counts)) $("n-"+k2).textContent=n?`· ${n}`:"";
 }

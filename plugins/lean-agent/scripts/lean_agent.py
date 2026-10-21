@@ -1435,7 +1435,7 @@ def cmd_run(a):
     running_key = launch_key or run_id  # every run is listed while it runs (the dashboard, the status line)
     save_json(home("running", running_key + ".json"), {"pid": os.getpid(), "started": now_iso(), "run": run_id,
                                                       "task": task[:2000], "model": model, "project": slug,
-                                                      "workdir": workdir, "todo": todo_id, "role": getattr(a, "role", None)
+                                                      "workdir": workdir, "todo": todo_id, "effort": effort, "role": getattr(a, "role", None)
                                                       or (prev or {}).get("role")})
     for line in mcp_cost_lines(mcp_specs, chrome_spec):
         print(line, flush=True)
