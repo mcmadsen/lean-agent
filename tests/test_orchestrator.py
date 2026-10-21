@@ -1536,6 +1536,19 @@ class CliTest(unittest.TestCase):
         self.assertIn("bootstrap", open(log).read())
         self.cli("service", "restart", **env)
         self.assertIn("kickstart -k", open(log).read())
+        hang = os.path.join(self.tmp.name, "ctl-hang")  # launchd still waiting for the old process
+        with open(hang, "w") as fh:
+            fh.write(f"#!/bin/sh\necho \"$@\" >> {log}\ncase \"$*\" in *kickstart*-k*) sleep 30;; esac\n")
+        os.chmod(hang, 0o755)
+        import time as _t
+        t0 = _t.time()
+        out = self.cli("service", "restart", LEAN_AGENT_SERVICE_PLATFORM="mac", LEAN_AGENT_LAUNCHCTL=hang,
+                       LEAN_AGENT_SERVICE_TIMEOUT="2").stdout
+        self.assertLess(_t.time() - t0, 20)
+        self.assertIn("restarting (the orchestrator session shuts down first", out)
+        after = open(log).read().split("kickstart -k")[-1]
+        self.assertIn("bootout", after)  # fell back to unloading and loading it again
+        self.assertIn("bootstrap", after)
         self.cli("service", "uninstall", **env)
         self.assertFalse(os.path.exists(plist))
         env = dict(LEAN_AGENT_SERVICE_PLATFORM="linux", LEAN_AGENT_SYSTEMCTL=fake)
