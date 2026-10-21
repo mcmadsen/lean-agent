@@ -142,9 +142,10 @@ def _same_ref(a, b):
     return a == b or (len(short) >= 4 and long_.endswith(short))
 
 
-def board(todo, ledger, running, reviews, now=None):
+def board(todo, ledger, running, reviews, now=None, notes=()):
     """The work queue as columns: each todo with the runs that worked on it (`run --todo N`), whether one of them
-    is running now, and the latest review of its ref. View only: it says where things are, it changes nothing."""
+    is running now, and the latest review of its ref; the open hand-off notes are Open cards too. View only: it
+    says where things are, it changes nothing."""
     import hashlib
     now = now or datetime.datetime.now()
     week_ago = (now - datetime.timedelta(days=7)).isoformat()
@@ -195,6 +196,12 @@ def board(todo, ledger, running, reviews, now=None):
     cards.sort(key=lambda c: ((c["done_at"] or "") if c["column"] == "Done" else "",
                               prio.get(c["prio"], 1), c["due"] or "9999", c["id"] or 0))
     done = [c for c in cards if c["column"] == "Done"][::-1]
+    for i, n in enumerate(notes, 1):  # `lean-agent handoff --done N` closes one
+        text = str(n.get("text") or "")
+        cards.append({"id": f"n{i}", "note": i, "text": text, "project": None, "ref": None, "prio": "normal",
+                      "due": None, "notes": 0, "column": "Open", "live": [], "runs": [], "last_run": None,
+                      "done_at": None, "review": None, "ts": n.get("ts"),
+                      "sig": hashlib.sha1(text.encode()).hexdigest()[:10]})
     cards = [c for c in cards if c["column"] != "Done"] + done
     return {"columns": list(COLUMNS), "cards": cards,
             "projects": sorted({c["project"] for c in cards if c["project"]})}
@@ -252,12 +259,12 @@ def state():
     pace, ahead = usage.week_pace()
     return {
         "now": now.isoformat(timespec="seconds"),
-        "pace": pace, "ahead": ahead,
+        "pace": pace, "ahead": ahead, "plan_history": usage.plan_history(8),
         "plan": {k: v for k, v in (real or {}).items() if k in ("five_hour", "seven_day")}, "plan_age_min": age,
         "running": running, "runs": runs,
         "week": {"runs": len(week), "done": sum(r.get("status") == "done" for r in week),
                  "units": sum(r.get("units", 0) for r in week), "cost": round(sum(r.get("cost_usd") or 0 for r in week), 2)},
-        "board": board(todo, ledger, running, all_reviews, now),
+        "board": board(todo, ledger, running, all_reviews, now, _json(home("handoff-notes.json"), [])),
         "todo": open_todo[:30], "todo_done_week": sum(1 for t in todo if t.get("status") == "done"
                                                       and (t.get("done_at") or "") >= week_ago),
         "schedule": jobs, "scheduled_results": lean_schedule.results_since(week_ago)[-10:][::-1],
@@ -309,8 +316,8 @@ PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>lean-agent</title>
 <style>
-:root{--bg:#f6f7f9;--card:#fff;--fg:#1d2127;--mute:#69717d;--line:#e3e6ea;--ok:#1f8f4e;--warn:#b26a00;--bad:#c4323b;--accent:#3559c7;--bar:#dfe4ec}
-@media (prefers-color-scheme:dark){:root{--bg:#14171c;--card:#1c2027;--fg:#e7eaee;--mute:#9aa3ae;--line:#2b313a;--ok:#4cc27e;--warn:#e0a03a;--bad:#ee6b72;--accent:#8aa6ff;--bar:#2b313a}}
+:root{--s1:#2a78d6;--s2:#eb6834;--bg:#f6f7f9;--card:#fff;--fg:#1d2127;--mute:#69717d;--line:#e3e6ea;--ok:#1f8f4e;--warn:#b26a00;--bad:#c4323b;--accent:#3559c7;--bar:#dfe4ec}
+@media (prefers-color-scheme:dark){:root{--s1:#3987e5;--s2:#d95926;--bg:#14171c;--card:#1c2027;--fg:#e7eaee;--mute:#9aa3ae;--line:#2b313a;--ok:#4cc27e;--warn:#e0a03a;--bad:#ee6b72;--accent:#8aa6ff;--bar:#2b313a}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;padding:16px 20px 4px}
 h1{font-size:18px;margin:0}header .mute{font-size:12px}
@@ -340,18 +347,25 @@ td.id{white-space:nowrap}td.head{min-width:10em}.wide2{grid-column:span 2}
 .col{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;min-width:0}
 .col h3{font-size:12px;margin:0 0 8px;color:var(--mute);font-weight:600;display:flex;justify-content:space-between}
 .tc{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:6px;padding:7px 9px;margin-bottom:8px;font-size:13px}
-.tc.p-high{border-left-color:var(--bad)}.tc.p-low{border-left-color:var(--line)}
+.tc.p-high{border-left-color:var(--bad)}.tc.note{border-left-style:dashed;border-left-color:var(--mute)}.tc.p-low{border-left-color:var(--line)}
 .tc.changed{box-shadow:0 0 0 2px var(--warn);background:color-mix(in srgb,var(--warn) 9%,var(--card))}
 .tc .meta{font-size:12px;color:var(--mute);margin-top:4px;display:flex;flex-wrap:wrap;gap:4px 8px}
 .badge{font-size:11px;border-radius:9px;padding:0 6px;border:1px solid currentColor;white-space:nowrap}
 .badge.live{color:var(--ok)}.badge.new{color:var(--warn)}
 #bfilter{font:inherit;font-size:12px;margin-left:auto;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px}
-@media (max-width:640px){.hide-s{display:none}.wide2{grid-column:auto}main{padding:10px 12px 20px;gap:10px}}
+.plan{display:flex;gap:18px;align-items:flex-start}.plan .stats{flex:0 0 210px}.plan .chart{flex:1;min-width:0;position:relative}
+.legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px;color:var(--mute);margin-bottom:2px}
+.legend i{display:inline-block;width:14px;height:0;border-top:2px solid;vertical-align:middle;margin-right:5px}
+.legend i.band{height:10px;border:none;background:var(--s2);opacity:.18}
+#planchart svg{height:auto}#planchart text{font-size:11px;fill:var(--mute)}#planchart text.lbl{fill:var(--fg);font-weight:600}
+#ptip{position:absolute;pointer-events:none;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:12px;display:none;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+@media (max-width:640px){.plan{flex-direction:column}.plan .stats{flex:none}.hide-s{display:none}.wide2{grid-column:auto}main{padding:10px 12px 20px;gap:10px}}
 </style></head><body>
 <header><h1>lean-agent</h1><span class="mute" id="stamp"></span></header>
 <main>
  <details class="card full" id="c-board" open><summary><h2>Board <span class="count" id="n-board"></span></h2></summary><div style="display:flex;margin-bottom:8px"><select id="bfilter"><option value="">all projects</option></select></div><div id="board"></div><div class="mute" id="bnote" style="margin-top:4px;font-size:12px"></div></details>
- <details class="card" id="c-week" open><summary><h2>Week</h2></summary><div id="pace"></div><div id="weekstats" class="mute"></div></details>
+ <details class="card full" id="c-plan" open><summary><h2>Plan usage</h2></summary><div class="plan"><div class="stats"><div id="pace"></div><div id="weekstats" class="mute" style="margin-top:6px"></div></div>
+  <div class="chart"><div class="legend"><span><i style="border-color:var(--s1)"></i>week</span><span><i style="border-color:var(--s2)"></i>session</span><span><i class="band"></i>session window (5 h, ends at its right edge)</span><span><i style="border-top-style:dashed;border-color:var(--mute)"></i>on pace</span></div><div id="planchart"></div><div id="ptip"></div></div></div></details>
  <details class="card" id="c-ctx" open><summary><h2>Orchestrator context</h2></summary><div id="ctx"></div></details>
  <details class="card" id="c-running" open><summary><h2>Running now <span class="count" id="n-running"></span></h2></summary><div id="running"></div></details>
  <details class="card wide2" id="c-todo" open><summary><h2>Work queue <span class="count" id="n-todo"></span></h2></summary><div id="todo"></div></details>
@@ -390,14 +404,14 @@ function drawBoard(b){
   const f=$("bfilter"),cur=f.value;
   f.innerHTML='<option value="">all projects</option>'+b.projects.map(p=>`<option${p===cur?" selected":""}>${esc(p)}</option>`).join("");
   let seen=seenMap();const first=!seen;seen=seen||{};const now=Date.now(),looking=document.visibilityState!=="hidden";
-  const cards=b.cards.filter(c=>!f.value||c.project===f.value);let changed=0;
+  const cards=b.cards.filter(c=>!f.value||c.note||c.project===f.value);let changed=0;
   const html=b.columns.map(col=>{const cs=cards.filter(c=>c.column===col);return `<div class="col"><h3><span>${esc(col==="Done"?"Done (7 days)":col)}</span><span>${cs.length||""}</span></h3>${cs.map(c=>{
     const was=seen[c.id];let hi="";
     if(first||(was&&was.sig===c.sig)){seen[c.id]={sig:c.sig,col:c.column}}
     else{const since=(was&&was.since)||now;seen[c.id]=Object.assign({},was||{},{since});
       if(looking&&now-since>SEEN_FOR)seen[c.id]={sig:c.sig,col:c.column};else{hi=was?(was.col&&was.col!==c.column?"moved from "+was.col:"changed"):"new";changed++}}
     const lr=c.last_run,rv=c.review;
-    return `<div class="tc p-${esc(c.prio)}${hi?" changed":""}"><div>${c.live.length?'<span class="badge live">running</span> ':""}${hi?`<span class="badge new">${esc(hi)}</span> `:""}<span class="mute">#${c.id}</span> ${esc(c.text)}</div>
+    return `<div class="tc p-${esc(c.prio)}${c.note?" note":""}${hi?" changed":""}"><div>${c.live.length?'<span class="badge live">running</span> ':""}${hi?`<span class="badge new">${esc(hi)}</span> `:""}<span class="mute">${c.note?"hand-off note "+c.note+":":"#"+c.id}</span> ${esc(c.text)}</div>
       <div class="meta">${c.project?`<span>${esc(c.project)}</span>`:""}${c.ref?`<span>${esc(c.ref)}</span>`:""}${c.prio!=="normal"?`<span class="${c.prio==="high"?"bad":""}">${esc(c.prio)}</span>`:""}${c.due?`<span>due ${esc(c.due)}</span>`:""}${c.notes?`<span>${c.notes} note${c.notes>1?"s":""}</span>`:""}</div>
       ${c.runs.length?`<div class="meta">${c.runs.map(id=>`<a onclick="show('${esc(id)}')">${esc(id)}</a>`).join(" ")}${lr?` <span class="${cls(lr.status)}">${esc(String(lr.status||"").split(":")[0])}</span>`:""}</div>`:""}
       ${rv?`<div class="meta"><span class="${rv.verdict!=="approve"?"bad":rv.gaps?"warn":"ok"}">review ${esc((rv.verdict||"").split("-")[0])}</span>${rv.blocking?`<span>${rv.blocking} blocking</span>`:""}${rv.gaps?`<span class="warn">${rv.gaps} gap${rv.gaps>1?"s":""} to answer</span>`:""}</div>`:""}</div>`}).join("")}</div>`}).join("");
@@ -405,21 +419,67 @@ function drawBoard(b){
   saveSeen(seen);
   $("board").innerHTML=b.cards.length?`<div class="board">${html}</div>`:'<span class="mute">No work queued yet: items from <code>lean-agent todo</code> show here, with the runs (<code>run --todo N</code>) and reviews of their ref.</span>';
   $("n-board").textContent=(cards.length?`· ${cards.length}`:"")+(changed?` · ${changed} changed`:"");
-  $("bnote").textContent=b.cards.length?"View only: cards move as the work moves (lean-agent todo, run --todo N, review). Highlighted: changed since you last looked.":"";
+  $("bnote").textContent=b.cards.length?"View only: cards move as the work moves (lean-agent todo, run --todo N, review; hand-off notes sit in Open until handoff --done N). Highlighted: changed since you last looked.":"";
 }
 $("bfilter").addEventListener("change",()=>{try{localStorage.setItem("la-board-project",$("bfilter").value)}catch(e){};drawBoard(lastBoard)});
+// the plan's own numbers over the current week: the week % against the on-pace line, and each 5-hour session
+// window (a band from its start to its end) with the session % inside it
+let lastPlan=null,planPts=[],planX=null;
+function drawPlan(s){
+  const box=$("planchart"),now=Date.now()/1000,H=190,W=Math.max(280,box.clientWidth||600),L=34,R=74,T=18,B=22;
+  const pts=(s.plan_history||[]).slice();const cur={t:now};
+  if(s.plan.five_hour)cur.five_hour=[s.plan.five_hour.pct,s.plan.five_hour.resets_at];
+  if(s.plan.seven_day)cur.seven_day=[s.plan.seven_day.pct,s.plan.seven_day.resets_at];
+  if(!pts.length&&(cur.five_hour||cur.seven_day))pts.push(cur);
+  if(!pts.length){box.innerHTML='<span class="mute">No plan numbers yet: they come with every worker run (or <code>lean-agent limits --refresh</code>), and the graph fills in from then on.</span>';return}
+  const wr=(cur.seven_day&&cur.seven_day[1])||Math.max(0,...pts.map(p=>p.seven_day?p.seven_day[1]||0:0));
+  const end=wr&&wr>now?wr:now,start=end-7*86400;
+  const x=t=>L+(Math.min(end,Math.max(start,t))-start)/(end-start)*(W-L-R),y=p=>T+(1-Math.min(100,p)/100)*(H-T-B);
+  let g="";
+  for(const p of [0,25,50,75,100])g+=`<line x1="${L}" x2="${W-R}" y1="${y(p)}" y2="${y(p)}" stroke="var(--line)"/><text x="${L-6}" y="${y(p)+4}" text-anchor="end">${p}%</text>`;
+  const d0=new Date(start*1000);d0.setHours(24,0,0,0);
+  for(let d=d0.getTime()/1000;d<end;d+=86400){const xd=x(d);g+=`<line x1="${xd}" x2="${xd}" y1="${T}" y2="${H-B}" stroke="var(--line)" stroke-dasharray="2 3"/>`;
+    if(x(d+43200)<W-R)g+=`<text x="${x(d+43200)}" y="${H-6}" text-anchor="middle">${new Date(d*1000).toLocaleDateString(undefined,{weekday:"short"})}</text>`}
+  const resets=[...new Set(pts.filter(p=>p.five_hour&&p.five_hour[1]).map(p=>p.five_hour[1]))];
+  for(const r of resets){if(r<start)continue;const a=x(r-5*3600),b=x(r),live=r>now;
+    g+=`<rect x="${a+1}" y="${T}" width="${Math.max(1,b-a-2)}" height="${H-T-B}" fill="var(--s2)" opacity="${live?.2:.09}"/>`;
+    if(live)g+=`<text x="${Math.min(b,W-R)}" y="${T-5}" text-anchor="middle">session ends ${hm(r)}</text>`}
+  g+=`<line x1="${x(start)}" y1="${y(0)}" x2="${x(end)}" y2="${y(100)}" stroke="var(--mute)" stroke-dasharray="4 4" stroke-opacity=".7"/>`;
+  const path=(list,key)=>list.length?`<polyline fill="none" stroke="var(--${key==="seven_day"?"s1":"s2"})" stroke-width="2" stroke-linejoin="round" points="${list.map(p=>x(p.t).toFixed(1)+","+y(p[key][0]).toFixed(1)).join(" ")}"/>`:"";
+  const sorted=pts.concat(pts.length&&pts[pts.length-1].t<now-60&&(cur.five_hour||cur.seven_day)?[cur]:[]).sort((a,b)=>a.t-b.t);
+  for(const r of resets)g+=path(sorted.filter(p=>p.five_hour&&p.five_hour[1]===r&&p.t>=r-5*3600),"five_hour");
+  g+=path(sorted.filter(p=>p.seven_day&&p.t>=start),"seven_day");
+  const xn=x(now);g+=`<line x1="${xn}" x2="${xn}" y1="${T}" y2="${H-B}" stroke="var(--fg)" stroke-opacity=".35"/>`;
+  const lastOf=key=>[...sorted].reverse().find(p=>p[key]&&(key!=="five_hour"||!p[key][1]||p[key][1]>now));
+  const labels=[["seven_day","week"],["five_hour","session"]].map(([key,name])=>{const p=lastOf(key);return p&&{key,name,v:p[key][0],px:x(p.t),py:y(p[key][0])}}).filter(Boolean);
+  if(labels.length===2&&Math.abs(labels[0].py-labels[1].py)<13){const [a,b]=labels[0].py<=labels[1].py?labels:[labels[1],labels[0]];b.ly=a.py+13;}
+  for(const l of labels)g+=`<circle cx="${l.px}" cy="${l.py}" r="4" fill="var(--${l.key==="seven_day"?"s1":"s2"})" stroke="var(--card)" stroke-width="2"/><text class="lbl" x="${l.px+8}" y="${(l.ly||l.py)+4}">${l.name} ${Math.round(l.v)}%</text>`;
+  g+=`<line id="pcross" y1="${T}" y2="${H-B}" stroke="var(--fg)" stroke-opacity=".5" visibility="hidden"/><rect id="phit" x="${L}" y="0" width="${W-L-R}" height="${H}" fill="transparent"/>`;
+  box.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Plan usage this week: week and session window percent over time">${g}</svg>`;
+  planPts=sorted;planX=x;
+  const hit=$("phit"),tip=$("ptip"),cross=$("pcross");
+  hit.addEventListener("mousemove",e=>{const r=box.getBoundingClientRect(),mx=e.clientX-r.left;
+    const p=planPts.reduce((a,b)=>Math.abs(planX(b.t)-mx)<Math.abs(planX(a.t)-mx)?b:a);
+    cross.setAttribute("x1",planX(p.t));cross.setAttribute("x2",planX(p.t));cross.setAttribute("visibility","visible");
+    tip.innerHTML=`<b>${dhm(p.t)}</b><br>${p.seven_day?`week ${p.seven_day[0]}%`:""}${p.five_hour?`${p.seven_day?" · ":""}session ${p.five_hour[0]}%${p.five_hour[1]?" (ends "+hm(p.five_hour[1])+")":""}`:""}`;
+    tip.style.display="block";tip.style.left=Math.min(planX(p.t)+10,W-tip.offsetWidth)+"px";tip.style.top=(box.offsetTop+8)+"px"});
+  hit.addEventListener("mouseleave",()=>{tip.style.display="none";cross.setAttribute("visibility","hidden")});
+}
+const hm=t=>new Date(t*1000).toTimeString().slice(0,5), dhm=t=>new Date(t*1000).toLocaleDateString(undefined,{weekday:"short"})+" "+hm(t);
+window.addEventListener("resize",()=>{if(lastPlan)drawPlan(lastPlan)});
 async function load(){
   let s;try{const r=await fetch(`/api/state?t=${T}`);if(!r.ok)throw new Error(r.status);s=await r.json()}
   catch(e){$("stamp").textContent="can't reach lean-agent ("+e.message+"): is `lean-agent up` or `lean-agent dashboard` running?";return}
   if(s.page_version&&s.page_version!==V){location.reload();return}
   $("stamp").textContent="updated "+s.now.slice(11,19)+" · refreshes every 15 s";
   const wk=s.plan.seven_day, ses=s.plan.five_hour;
-  $("pace").innerHTML=(wk?`<div class="big">${Math.round(wk.pct)}%</div><div class="mute">of your weekly plan</div>${meter(wk.pct,70,90)}`:'<span class="mute">plan usage not seen yet (it comes with every worker run)</span>')
+  $("pace").innerHTML=(wk?`<div class="big">${Math.round(wk.pct)}%</div><div class="mute">of your weekly plan${wk.resets_at?" · resets "+dhm(wk.resets_at):""}</div>${meter(wk.pct,70,90)}`:'<span class="mute">plan usage not seen yet (it comes with every worker run)</span>')
     +(s.pace?`<div class="${s.ahead?"warn":"ok"}">${esc(s.pace)}</div>`:"")
     +(ses?`<div class="${ses.pct>=70?"warn":"mute"}" style="margin-top:6px">session window ${Math.round(ses.pct)}%`
-      +(ses.pct>=70?` · prefer haiku and small steps until it resets${ses.resets_at?" at "+new Date(ses.resets_at*1000).toTimeString().slice(0,5):""}`:"")
+      +(ses.resets_at?` · ends ${hm(ses.resets_at)}`:"")+(ses.pct>=70?" · prefer haiku and small steps until then":"")
       +`</div>${meter(ses.pct,70,90)}`:"");
   $("weekstats").innerHTML=`${s.week.runs} runs (${s.week.done} done) · ${k(s.week.units)} sonnet-eq · $${s.week.cost} · ${s.todo_done_week} todos done`;
+  lastPlan=s;drawPlan(s);
   const c=s.context;
   if(c&&c.calls){const p=Math.round(c.now*100/c.compact_at),max=Math.max(...c.trend,c.compact_at),w=c.trend.length;
     const pts=c.trend.map((v,i)=>`${(i/(Math.max(1,w-1))*100).toFixed(1)},${(46-v/max*44).toFixed(1)}`).join(" ");

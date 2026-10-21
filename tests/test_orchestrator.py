@@ -1691,6 +1691,7 @@ class CliTest(unittest.TestCase):
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--todo", "2", "ask it",
                  FAKE_ANSWER="Should I?", FAKE_FEEDBACK='{"status": "needs-input", "used": [], "unneeded": []}')
         self.cli("todo", "done", "4")
+        self.cli("handoff", "--note", "Ask the user which cache size to keep")
         home = self.env["LEAN_AGENT_HOME"]
         ledger = [json.loads(l) for l in open(os.path.join(home, "ledger.jsonl"))]
         self.assertEqual([e.get("todo") for e in ledger], [1, 2])
@@ -1712,7 +1713,9 @@ class CliTest(unittest.TestCase):
         finally:
             os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.update(LEAN_AGENT_HOME=old)
         col = {c["id"]: c["column"] for c in b["cards"]}
-        self.assertEqual(col, {1: "In review", 2: "Waiting on you", 3: "Open", 4: "Done", 5: "Waiting on you"})
+        self.assertEqual(col, {1: "In review", 2: "Waiting on you", 3: "Open", 4: "Done", 5: "Waiting on you",
+                               "n1": "Open"})  # the open hand-off note is a card too
+        self.assertEqual(next(c for c in b["cards"] if c["id"] == "n1")["note"], 1)
         card1 = next(c for c in b["cards"] if c["id"] == 1)
         self.assertEqual((card1["review"]["verdict"], card1["review"]["blocking"], len(card1["runs"])),
                          ("changes-requested", 1, 1))
@@ -1724,6 +1727,30 @@ class CliTest(unittest.TestCase):
                          {c["id"]: c["sig"] for c in b2["cards"] if c["id"] != 3})
         self.assertIn('id="c-board"', dashboard.PAGE)
         self.assertNotIn("draggable", dashboard.PAGE)  # view only for now
+
+    def test_plan_history_feeds_the_dashboard_graph(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        try:
+            import usage
+            import dashboard
+            import time as _t
+            t0 = _t.time()
+            w = lambda s, wk: {"five_hour": {"pct": s, "resets_at": t0 + 3600}, "seven_day": {"pct": wk, "resets_at": t0 + 86400}}
+            usage.record_plan_history(w(10, 5), now=t0 - 3000)
+            usage.record_plan_history(w(10, 5), now=t0 - 2900)  # nothing changed, under 10 minutes: no point
+            usage.record_plan_history(w(12, 5), now=t0 - 2800)
+            usage.record_plan_history(w(12, 5), now=t0 - 2000)  # unchanged but 10 minutes later: a point
+            usage.record_plan_history({"seven_day": {"pct": 6, "resets_at": t0 + 86400}}, now=t0 - 1000)
+            usage.record_plan_history(w(1, 1), now=t0 - 9 * 86400)  # older than 8 days: not read back
+            hist = dashboard.state()["plan_history"]
+        finally:
+            os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.update(LEAN_AGENT_HOME=old)
+        self.assertEqual([h.get("five_hour", [None])[0] for h in hist], [10, 12, 12, None])
+        self.assertEqual(hist[-1]["seven_day"], [6, t0 + 86400])
+        self.assertIn('id="c-plan"', dashboard.PAGE)
+        self.assertNotIn('id="c-week"', dashboard.PAGE)  # the graph replaced the week box
 
     def test_dashboard_picks_up_new_code_without_restart(self):
         import shutil
