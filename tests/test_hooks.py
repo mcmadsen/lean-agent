@@ -280,7 +280,7 @@ class BudgetTest(Base):
             out = run_hook("budget_hook.py", ev(cmd), **self.env)
             self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny", cmd)
             self.assertIn("run_in_background: true", out["hookSpecificOutput"]["permissionDecisionReason"])
-            self.assertIsNone(run_hook("budget_hook.py", ev(cmd, bg=True), **self.env))
+            self.assertIsNone(run_hook("budget_hook.py", ev(cmd, bg=True), LEAN_AGENT_TODO_REMINDER="0", **self.env))
         for cmd in ("lean-agent review shop --status", "lean-agent review decline shop 1 --why x",
                     "lean-agent runs --show", "lean-agent tracker shop", "lean-agent stats",
                     "cat > /tmp/task.md <<'EOF'\nThen run lean-agent review shop --resume\nEOF",
@@ -288,7 +288,26 @@ class BudgetTest(Base):
             self.assertIsNone(run_hook("budget_hook.py", ev(cmd), **self.env), cmd)
         self.assertIsNone(run_hook("budget_hook.py", ev("lean-agent run -p shop -m haiku x", cwd=self.tmp.name), **self.env))
         self.assertIsNone(run_hook("budget_hook.py", ev("lean-agent run -p shop -m haiku x"),
-                                   LEAN_AGENT_BACKGROUND_RUNS="0", **self.env))
+                                   LEAN_AGENT_BACKGROUND_RUNS="0", LEAN_AGENT_TODO_REMINDER="0", **self.env))
+
+    def test_workers_name_their_work_queue_item(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        with open(os.path.join(home, "todo.json"), "w") as fh:
+            json.dump({"next": 3, "items": [{"id": 1, "text": "Fix the export", "status": "open"},
+                                            {"id": 2, "text": "Old thing", "status": "done"}]}, fh)
+        ev = lambda cmd: dict(self.ev, cwd=home, tool_name="Bash", tool_input={"command": cmd, "run_in_background": True})
+        for cmd in ('lean-agent run -p shop -m haiku --why x "fix it"', "lean-agent review shop --ref feature/x",
+                    "lean-agent do shop weekly-report"):
+            out = run_hook("budget_hook.py", ev(cmd), **self.env)["hookSpecificOutput"]
+            self.assertEqual(out["permissionDecision"], "deny", cmd)
+            self.assertIn("--todo N", out["permissionDecisionReason"])
+            self.assertIn("#1 Fix the export", out["permissionDecisionReason"])
+            self.assertNotIn("Old thing", out["permissionDecisionReason"])
+        for cmd in ('lean-agent run -p shop --todo 1 -m haiku --why x "fix it"', "lean-agent review shop --todo=#1",
+                    "lean-agent run -p shop --todo none -m haiku --why x look", "lean-agent run --resume 0101-x more",
+                    "lean-agent review shop --status", "lean-agent todo add x"):
+            self.assertIsNone(run_hook("budget_hook.py", ev(cmd), **self.env), cmd)
 
     def test_check_before_auto_compaction(self):
         home = self.env["LEAN_AGENT_HOME"]

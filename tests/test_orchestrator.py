@@ -1691,10 +1691,11 @@ class CliTest(unittest.TestCase):
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--todo", "2", "ask it",
                  FAKE_ANSWER="Should I?", FAKE_FEEDBACK='{"status": "needs-input", "used": [], "unneeded": []}')
         self.cli("todo", "done", "4")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--todo", "none", "quick look")
         self.cli("handoff", "--note", "Ask the user which cache size to keep")
         home = self.env["LEAN_AGENT_HOME"]
         ledger = [json.loads(l) for l in open(os.path.join(home, "ledger.jsonl"))]
-        self.assertEqual([e.get("todo") for e in ledger], [1, 2])
+        self.assertEqual([e.get("todo") for e in ledger], [1, 2, None])
         os.makedirs(os.path.join(home, "reviews"), exist_ok=True)
         with open(os.path.join(home, "reviews", "proj.jsonl"), "a") as fh:
             fh.write(json.dumps({"ts": "2030-01-01T10:00:00", "ref": "pr-42", "verdict": "changes-requested",

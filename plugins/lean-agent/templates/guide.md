@@ -192,9 +192,20 @@ lean-agent card unarchive {{P}} checkout-notes
   `lean-agent runs --show <id>` instead of asking the user again. Keep open items and pending decisions in it:
   `lean-agent handoff --note "..."` (close with `--done N`). When lean-agent says your context is large, add
   the open items, then ask the user to send /compact, or to start a fresh session for the next topic.
-- A week of work: keep the work queue in `lean-agent todo` (add what the user asks for, with `-p`, `--ref` and
-  `--prio`; give a worker the item it works on with `run --todo N` (it becomes doing, and the dashboard's board
-  shows the run on that card); `todo done N "<result>"` when it's finished; `todo next` when you're free). Recurring work is `lean-agent schedule` (e.g. `schedule add "weekdays 08:45" do <project>
+- Keep the user's board current (the dashboard shows the work queue as cards; it only knows what you record):
+  - Every piece of work the user asks for is a work-queue item: `lean-agent todo add "<what>" -p <project>
+    --ref "<PR, work item or branch>" --prio high|normal|low` before you start it. One item per deliverable;
+    a follow-up on the same deliverable is a note (`todo note N "..."`), not a new item.
+  - Every worker for it names it: `run --todo N`, `review --todo N`, `do ... --todo N` (the item becomes doing
+    and the card shows the run). A quick lookup that isn't queue work: `--todo none`. lean-agent refuses a
+    worker start without one of the two.
+  - Give the item its `--ref` (the PR or branch) as soon as there is one: its review then shows on the card.
+  - `todo done N "<one-line result>"` when the deliverable is finished (merged, sent, answered), and
+    `todo rm N` for work the user dropped. Don't leave finished items open.
+  - Decisions you're waiting on from the user go in a hand-off note (`handoff --note "..."`, shown in Open);
+    close it with `handoff --done N` once answered.
+  - `todo next` when you're free.
+- Recurring work is `lean-agent schedule` (e.g. `schedule add "weekdays 08:45" do <project>
   <recipe>`; `schedule defaults` adds an update check, weekly optimize reports and a Friday `week` report).
   You're told when a scheduled job finishes; mention it to the user if it matters. When lean-agent says you're
   ahead of pace for the week, prefer haiku and smaller steps. `lean-agent week` reports the week.
