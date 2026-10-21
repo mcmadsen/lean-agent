@@ -1644,6 +1644,39 @@ class CliTest(unittest.TestCase):
         self.assertIn("next job", out)
         self.assertIn(f"dashboard :{port}", out)
 
+    def test_running_run_shows_its_progress(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = subprocess.Popen([sys.executable, CLI, "run", "-p", "proj", "-m", "haiku", "--why", "x", "look around"],
+                             env=dict(self.env, FAKE_TURNS="4", FAKE_TURN_SLEEP="0.7", FAKE_TURN_CTX="2000"),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            sys.path.insert(0, os.path.dirname(CLI))
+            import importlib
+            old = os.environ.get("LEAN_AGENT_HOME")
+            os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+            try:
+                import dashboard
+                importlib.reload(dashboard.usage)
+                import time as _t
+                text = None
+                for _ in range(60):
+                    st = dashboard.state()
+                    if st["running"]:
+                        rid = st["running"][0]["run"]
+                        text = dashboard.run_text(rid)
+                        if text and "turns so far" in text:
+                            break
+                    _t.sleep(0.1)
+                self.assertIsNotNone(text, "the run never showed up as running")
+                self.assertIn("running since", text)
+                self.assertIn("look around", text)
+                self.assertIn("turns so far", text)
+            finally:
+                os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.update(LEAN_AGENT_HOME=old)
+        finally:
+            p.wait(timeout=60)
+        self.assertEqual(self.cli("runs", "--running").stdout.strip(), "No runs in progress.")
+
     def test_dashboard_picks_up_new_code_without_restart(self):
         import shutil
         import socket

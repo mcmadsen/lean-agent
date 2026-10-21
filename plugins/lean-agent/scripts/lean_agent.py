@@ -1396,9 +1396,11 @@ def cmd_run(a):
 
     print(f"run {run_id} started · {model} · {slug}" + (" (resumed)" if prev else "") +
           f" · see it later with `lean-agent runs --show {run_id}`", file=sys.stderr, flush=True)
-    if launch_key:
-        save_json(home("running", launch_key + ".json"), {"pid": os.getpid(), "started": now_iso(), "run": run_id,
-                                                         "task": task[:120], "model": model, "project": slug})
+    running_key = launch_key or run_id  # every run is listed while it runs (the dashboard, the status line)
+    save_json(home("running", running_key + ".json"), {"pid": os.getpid(), "started": now_iso(), "run": run_id,
+                                                      "task": task[:2000], "model": model, "project": slug,
+                                                      "workdir": workdir, "role": getattr(a, "role", None)
+                                                      or (prev or {}).get("role")})
     for line in mcp_cost_lines(mcp_specs, chrome_spec):
         print(line, flush=True)
 
@@ -1524,9 +1526,9 @@ def cmd_run(a):
     }
     append_jsonl(home("ledger.jsonl"), entry)
     LAST_RUN[:] = [entry]
-    if launch_key:
+    if running_key:
         try:
-            os.remove(home("running", launch_key + ".json"))
+            os.remove(home("running", running_key + ".json"))
         except OSError:
             pass
     if isinstance(sys.stdout, Tee):  # a second run in the same command (review after its second opinion)
@@ -1613,6 +1615,27 @@ def cmd_run(a):
     return 0 if status in ("done", "partial", "needs-input", "awaiting-confirmation") else 1
 
 
+def note_progress(workdir, turn, msg, u):
+    """One line per worker turn in progress.jsonl (what it did, its context), for watching a run while it runs."""
+    steps = []
+    for c in msg.get("content") or []:
+        if not isinstance(c, dict):
+            continue
+        if c.get("type") == "tool_use":
+            inp = c.get("input") or {}
+            what = next((str(inp[k]) for k in ("command", "file_path", "pattern", "url", "path", "query", "description")
+                         if inp.get(k)), "")
+            steps.append(f"{c.get('name')}: {' '.join(what.split())[:140]}")
+        elif c.get("type") == "text" and str(c.get("text") or "").strip():
+            steps.append("says: " + " ".join(str(c["text"]).split())[:140])
+    ctx = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    try:
+        with open(os.path.join(workdir, "progress.jsonl"), "a") as fh:
+            fh.write(json.dumps({"ts": now_iso(), "turn": turn, "ctx": ctx, "steps": steps}) + "\n")
+    except OSError:
+        pass
+
+
 def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0):
     """Run a worker and read its stream-json as it comes, so a run that keeps re-reading a large context
     can be stopped (after `max_reads` context tokens summed over its calls; 0 = never) and resumed later.
@@ -1648,6 +1671,7 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0):
                     seen.add(msg.get("id"))
                     u = msg["usage"]
                     reads["turns"] += 1
+                    note_progress(workdir, reads["turns"], msg, u)
                     for k in usage.FIELDS:
                         reads["usage"][k] += int(u.get(k) or 0)
                     reads["ctx"] += sum(int(u.get(k) or 0) for k in

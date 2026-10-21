@@ -170,10 +170,32 @@ def state():
     }
 
 
+def running_text(run_id):
+    """A run that's still running: its task and its progress so far (it isn't in the ledger until it ends)."""
+    m = next((x for x in (_json(f, {}) for f in glob.glob(home("running", "*.json"))) if x.get("run") == run_id), None)
+    if not m:
+        return None
+    workdir = m.get("workdir") or home("work", run_id)
+    steps = _jsonl(os.path.join(workdir, "progress.jsonl"), 400)
+    started = str(m.get("started", ""))[11:19]
+    head = (f"running since {started} · {m.get('model')} · {m.get('project')}"
+            + (f" · {m['role']}" if m.get("role") else "")
+            + (f" · {steps[-1]['turn']} turns so far, context now ~{steps[-1]['ctx']:,}" if steps else " · starting")
+            + ("" if _alive(m.get("pid")) else " · (its process is gone: it may have been stopped)"))
+    lines = [head, "", "Task:", str(m.get("task", ""))[:2000], "", f"Latest steps ({len(steps)} turns):" if steps else ""]
+    for st in steps[-40:]:
+        for x in st.get("steps") or ["(thinking)"]:
+            lines.append(f"  {st.get('turn'):>3}  {x}")
+    lines.append("\n(click the run again to refresh; its answer shows here when it's done)")
+    return "\n".join(lines)
+
+
 def run_text(run_id, details=False):
-    """A run's saved summary (or its details file), for the run view."""
+    """A run's saved summary (or its details file), for the run view; a running run shows its progress."""
     r = next((x for x in reversed(_jsonl(home("ledger.jsonl"))) if x.get("id") == run_id), None)
-    if not r or not r.get("workdir"):
+    if not r:
+        return running_text(run_id)
+    if not r.get("workdir"):
         return None
     pattern = "details-*.md" if details else "summary-*.txt"
     files = sorted(glob.glob(os.path.join(r["workdir"], pattern)),
