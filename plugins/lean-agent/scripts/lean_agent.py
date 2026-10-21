@@ -100,6 +100,9 @@ lean-agent saves that part to a file and shows only its path. The LEAN-* lines s
 """
 
 SHELL_RULE = "Run shell commands as `cd {project} && <command>`."
+MUTATING_WORDS = {"delete", "create", "update", "set", "apply", "push", "rm", "merge", "deploy", "remove", "add", "put",
+                  "post", "patch", "install", "exec", "write", "reset", "approve", "complete", "abandon", "queue"}
+CLI_RE = re.compile(r"(?<![\w/-])(az|gh|kubectl|aws|gcloud|curl|wget|docker|terraform|helm|psql|sqlcmd|glab|jq)(?=\s)")
 READONLY_SHELL_RULE = ("You are read-only. The only shell commands you can run are read-only git commands, written as\n"
                        "`git -C {project} <show|log|grep|diff|blame|status|ls-files|ls-tree|cat-file|rev-parse|branch|fetch> ...`\n"
                        "(no `cd`, no pipes to other programs). Everything else is refused.")
@@ -851,6 +854,9 @@ def recommend_model(ttype, task=None):
         best = ("haiku", best[1] + "; budget is low, so prefer haiku and smaller steps")
     elif pace_line()[1] and best[0] != "haiku":
         best = ("haiku", best[1] + "; ahead of pace for the week, so prefer haiku and smaller steps")
+    elif usage.session_pressure()[1] and best[0] != "haiku":
+        best = ("haiku", best[1] + f"; the session window is at {usage.session_pressure()[0]:.0f}%, so prefer haiku "
+                "and smaller steps until it resets")
     return best
 
 
@@ -1323,6 +1329,26 @@ def cmd_run(a):
             fh.write(build_append(project, cards, read_only, a.allow_send, bool(chrome_spec), role_rule, answer_lines))
         tools = a.tools or (READONLY_TOOLS + ",Bash" if read_only else WORKER_TOOLS)
 
+    allow_cmd = (prev or {}).get("allow_cmd") or [c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()]
+    if allow_cmd and not read_only:
+        die("--allow-cmd is for --read-only workers (other workers run any command)")
+    for c in allow_cmd:
+        bad = set(re.findall(r"[a-z]+", c.lower())) & MUTATING_WORDS
+        if bad:
+            die(f"--allow-cmd {c!r}: {', '.join(sorted(bad))} changes something; a read-only worker only gets "
+                "commands that read (show, list, get, view, log)")
+    if allow_cmd and not prev:  # tell the worker, now and on a resume (role.md is read again then)
+        note = ("\nBesides read-only git you may run exactly these read-only commands (and nothing else): "
+                + "; ".join(f"`{c} ...`" for c in allow_cmd) + "\n")
+        for f in ("append.md", "role.md"):
+            with open(os.path.join(workdir, f), "a") as fh:
+                fh.write(note)
+    if read_only and not allow_cmd and not prev:
+        named = CLI_RE.findall(task)
+        if named:
+            print(f"lean-agent: warning: a --read-only worker can only run read-only git, and this task names "
+                  f"`{named[0]}`. Allow exactly what it needs, e.g. --allow-cmd \"{named[0]} <read-only subcommand>\", "
+                  "or look it up yourself.", file=sys.stderr)
     mcp_specs = prev.get("mcp") if prev else canonical_specs(project, a.mcp or [])
     mcp_servers, mcp_allowed, mcp_disallowed = resolve_mcp(project, mcp_specs) if mcp_specs else ({}, [], [])
     for sname, scfg in mcp_servers.items():
@@ -1349,6 +1375,7 @@ def cmd_run(a):
     if read_only:
         allowed = READONLY_TOOLS.split(",") + [f"Bash(git -C {project} {sub}:*)" for sub in READONLY_GIT]
         allowed.append(f"Bash({lean_json}:*)")  # reads a file, prints a compact view
+        allowed += [f"Bash({c}:*)" for c in allow_cmd]  # read-only commands the orchestrator named
         permission_mode = "default"
     else:
         allowed = [tools]
@@ -1517,6 +1544,7 @@ def cmd_run(a):
         "mcp_seq": mcp_seq[:60], "mcp_offered": {k: len(v) for k, v in offered.items()},
         "result_head": (summary or "")[:600],
         "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
+        "allow_cmd": allow_cmd,
         "role": role, "effort": effort, "worktree": wt_name, "review_meta": review_meta, "launch_key": launch_key,
         "recipe": (getattr(a, "recipe", None) or (None, None))[0],
         "recipe_step": (getattr(a, "recipe", None) or (None, None))[1],
@@ -2145,6 +2173,33 @@ GAP_MARK_RE = re.compile(r"\b(TODO|FIXME|XXX|TBD)\b")
 DOC_PLACEHOLDER_RE = re.compile(r"<(?:your[-_ ]?)?[a-z][\w-]*(?:host|url|domain|token|tenant|org|server|bucket|endpoint)[\w-]*>",
                                 re.I)
 DOC_RE = re.compile(r"\.(md|mdx|rst|txt|adoc)$|(^|/)(docs?|README)[/.]", re.I)
+# in code only comments count, and not the words code uses for things (a placeholder, a stub, a follow-up call)
+CODE_GAP_RE = re.compile(
+    r"\bnot (?:done|implemented|supported|wired(?: up)?|hosted|signed|published|shipped|built|handled|ready)(?: yet)?\b"
+    r"|\bnot yet\b|\bno [\w-]+(?: [\w-]+)? yet\b|\bcan(?:not|'t) be (?:shipped|released|used|installed)\b"
+    r"|\binstalls nothing\b|\bdoes nothing yet\b|\buntil (?:one|it|this|that|they) (?:is|are)\b", re.I)
+NOT_IMPLEMENTED_RE = re.compile(r"not implemented|NotImplemented", re.I)
+SKIP_GAP_FILE_RE = re.compile(r"(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$|\.min\.\w+$|\.(png|jpe?g|gif|ico|pdf|zip|lock)$")
+COMMENT_STARTS = ("//", "#", "*", "/*", "<!--", "--", ";", '"' * 3, "'" * 3)
+
+
+def comment_part(body):
+    """The comment in a line of code ('' if none): a whole-line comment, or what follows // # /* <!-- after code."""
+    s = body.lstrip()
+    if s.startswith(COMMENT_STARTS):
+        return s
+    m = re.search(r"\s(?://|#|/\*|<!--)\s?(.*)$", body)
+    return m.group(1) if m else ""
+
+
+def gap_line(rel, body):
+    """Whether an added line says something isn't done: any line of a doc; the comments of code."""
+    if SKIP_GAP_FILE_RE.search(rel):
+        return False
+    if DOC_RE.search(rel):
+        return bool(GAP_RE.search(body) or GAP_MARK_RE.search(body) or DOC_PLACEHOLDER_RE.search(body))
+    note = comment_part(body)
+    return bool((note and (CODE_GAP_RE.search(note) or GAP_MARK_RE.search(note))) or NOT_IMPLEMENTED_RE.search(body))
 
 
 def self_declared_gaps(path, rng_args, new_files=()):
@@ -2162,27 +2217,70 @@ def self_declared_gaps(path, rng_args, new_files=()):
             continue
         if line.startswith("+") and cur:
             body = line[1:].strip()
-            if not re.search(r"(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|.*\.min\.\w+)$", cur) and (
-                    GAP_RE.search(body) or GAP_MARK_RE.search(body)
-                    or (DOC_RE.search(cur) and DOC_PLACEHOLDER_RE.search(body))):
+            if gap_line(cur, body):
                 out.append(f"{cur}:{line_no}: {body[:160]}")
             line_no += 1
     for rel in new_files:  # untracked files in a working-tree review: every line is new
-        if DOC_RE.search(rel) or not re.search(r"\.(png|jpe?g|gif|ico|pdf|zip|lock|min\.\w+)$", rel):
-            try:
-                with open(os.path.join(path, rel), errors="replace") as fh:
-                    for i, body in enumerate(fh.read(200000).splitlines(), 1):
-                        body = body.strip()
-                        if GAP_RE.search(body) or GAP_MARK_RE.search(body) or (
-                                DOC_RE.search(rel) and DOC_PLACEHOLDER_RE.search(body)):
-                            out.append(f"{rel}:{i}: {body[:160]}")
-            except (OSError, UnicodeDecodeError):
-                pass
+        try:
+            with open(os.path.join(path, rel), errors="replace") as fh:
+                for i, body in enumerate(fh.read(200000).splitlines(), 1):
+                    if gap_line(rel, body.strip()):
+                        out.append(f"{rel}:{i}: {body.strip()[:160]}")
+        except (OSError, UnicodeDecodeError):
+            pass
     rng = rng_args[0] + ".." + rng_args[1] if len(rng_args) == 2 else (rng_args[0] + "..HEAD" if rng_args else "")
     for msg in (git(path, "log", "--format=%s%n%b", rng) or "").splitlines() if rng else []:
         if GAP_RE.search(msg) or GAP_MARK_RE.search(msg):
             out.append(f"commit message: {msg.strip()[:160]}")
     return list(dict.fromkeys(out))[:25]
+
+
+def sparse_checkout_dirs(path, ref):
+    """{pipeline file: [dirs]} for CI pipelines in the repository that check out only some directories."""
+    out = {}
+    files = (git(path, "grep", "-l", "-E", "sparseCheckoutDirectories|sparse-checkout", ref, "--",
+                 "*.yml", "*.yaml") or "").splitlines()
+    for f in files:
+        f = f.split(":", 1)[1] if f.startswith(ref + ":") else f
+        text = git(path, "show", f"{ref}:{f}") or ""
+        dirs = []
+        for m in re.finditer(r"sparseCheckoutDirectories:\s*['\"]?([^'\"\n]+)", text):
+            dirs += m.group(1).split()
+        for m in re.finditer(r"sparse-checkout:\s*(\|[^\n]*\n((?:[ \t]+\S[^\n]*\n?)+)|['\"]?([^'\"\n|]+))", text):
+            dirs += (m.group(2) or m.group(3) or "").split()
+        dirs = [d.strip("/").strip() for d in dirs if d.strip("/").strip() and not d.startswith("#")]
+        if dirs:
+            out[f] = dirs
+    return out
+
+
+def ci_parity(path, rng_args, head="HEAD"):
+    """Paths the change's tests read in top-level folders a sparse CI checkout leaves out: green in a worker's full
+    worktree, red in CI."""
+    pipelines = sparse_checkout_dirs(path, head)
+    if not pipelines:
+        return []
+    covered = {d for ds in pipelines.values() for d in ds}
+    top = set((git(path, "ls-tree", "--name-only", "-d", head) or "").split())
+    out, cur, line_no = [], None, 0
+    for line in (git(path, "diff", "-U0", "--no-color", *rng_args) or "").splitlines():
+        if line.startswith("+++ "):
+            cur = line[6:] if line.startswith("+++ b/") else None
+            continue
+        m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)", line)
+        if m:
+            line_no = int(m.group(1))
+            continue
+        if line.startswith("+") and cur:
+            if TEST_PATH_RE.search(cur):
+                for lit in re.findall(r"['\"`]([^'\"`\s]{2,})['\"`]", line[1:]):
+                    seg = re.sub(r"^(\.\.?/)+", "", lit).split("/")[0]
+                    if seg in top and not any(d == seg or d.startswith(seg + "/") or seg.startswith(d + "/")
+                                              for d in covered):
+                        pipe = ", ".join(f"{f} ({' '.join(ds)})" for f, ds in pipelines.items())[:200]
+                        out.append(f"{cur}:{line_no}: reads `{lit}`, outside the sparse checkout of {pipe}")
+            line_no += 1
+    return list(dict.fromkeys(out))[:15]
 
 
 def focus_text(fc):
@@ -2197,6 +2295,9 @@ def focus_text(fc):
         parts.append("New or changed parameters with defaults (pass 5):\n" + "\n".join(f"- {p}" for p in fc["params"]))
     if fc["state"]:
         parts.append("New module-level state (pass 5: do the specs reset it?):\n" + "\n".join(f"- {x}" for x in fc["state"]))
+    if fc.get("ci_parity"):
+        parts.append("CI parity: tests that read folders the CI pipeline's sparse checkout leaves out (they pass in a "
+                     "full worktree and fail in CI; pass 4):\n" + "\n".join(f"- {x}" for x in fc["ci_parity"]))
     if fc.get("gaps"):
         parts.append("Self-declared gaps: added lines and commit messages that say something isn't done (pass 0: "
                      "does each keep the change from doing what it promises? Put every one in \"gaps\"):\n"
@@ -2327,14 +2428,22 @@ def finding_symbol(f):
     return m.group(1) if m else ""
 
 
+def _norm_gap(t):
+    return " ".join(re.findall(r"[a-z]{3,}", str(t).lower()))
+
+
 def gap_declined(g, declined):
-    """A known gap the user acknowledged (lean-agent review decline <project> g<n>)."""
-    text = str(g.get("what", ""))
+    """A known gap the user acknowledged (lean-agent review decline <project> g<n>), recognised on later tips by
+    file and normalised text, whatever number it gets and however the reviewer words it."""
+    text = _norm_gap(g.get("what", ""))
     for d in declined:
         if not d.get("gap"):
             continue
+        theirs = _norm_gap(d["gap"])
         same_file = os.path.basename(str(d.get("file") or "")) == os.path.basename(str(g.get("file") or ""))
-        if _jaccard(_words(text), _words(d["gap"])) >= (0.3 if same_file else 0.5):
+        if text and theirs and (text in theirs or theirs in text):
+            return True
+        if _jaccard(set(text.split()), set(theirs.split())) >= (0.25 if same_file else 0.45):
             return True
     return False
 
@@ -2489,6 +2598,13 @@ def cmd_review_decline(a):
     last = next((r for r in reversed(list(read_jsonl(reviews_path(slug)))) if not a.head or r.get("ref") == a.head), None)
     if not last:
         die(f"no review of {a.head or slug} yet")
+    if not a.numbers and not a.all_gaps:
+        die("which? finding numbers (1 2), known gaps (g1 g2), or --all-gaps")
+    if a.all_gaps:
+        a.numbers = [f"g{i}" for i in range(1, len(last.get("gaps") or []) + 1)] + list(a.numbers or [])
+        if not a.numbers:
+            print(f"review {last['run']} has no known gaps")
+            return 0
     for n in a.numbers:
         if str(n).lower().startswith("g"):
             gaps = last.get("gaps") or []
@@ -3044,6 +3160,8 @@ def cmd_review(a):
     focus = change_focus(path, [merge_base, sha] if mode == "ref" else [merge_base])
     focus["gaps"] = self_declared_gaps(path, [merge_base, sha] if mode == "ref" else [merge_base],
                                        untracked_files(path) if mode != "ref" else ())
+    focus["ci_parity"] = ci_parity(path, [merge_base, sha] if mode == "ref" else [merge_base],
+                                   sha if mode == "ref" else "HEAD")
     grep_ref = sha if mode == "ref" else ""
     a._decisions = "" if a.independent else decisions_text(slug, label)
     a._label = label
@@ -3088,7 +3206,7 @@ def cmd_review(a):
             "second_opinion": getattr(a, "_second", []),
             "hunks": changed_hunks(path, [merge_base, sha] if mode == "ref" else [merge_base]),
             "edited_tests": focus["tests"], "independent": bool(a.independent), "gaps": focus.get("gaps") or [],
-            "goal": getattr(a, "goal", None)}
+            "goal": getattr(a, "goal", None), "ci_parity": focus.get("ci_parity") or []}
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=model, estimate=getattr(a, "_estimate", None),
                             why=f"pre-PR review ({effort} effort)", cards=None, card_list=cards, project=slug,
                             read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=a.max_turns,
@@ -3339,6 +3457,9 @@ def enforce_review_rules(review, meta, declined=()):
 
     # completeness: every gap the change declares itself, and every one the reviewer found, until acknowledged
     gaps = [dict(g) for g in review.get("gaps") or [] if isinstance(g, dict) and g.get("what")]
+    small = [f for f in findings if f.get("severity") in ("minor", "nit")]
+    gaps = [g for g in gaps if g.get("blocks_goal") is True or not any(  # a nit is a finding, not a gap
+        _jaccard(_words(g.get("what", "")), _words(f.get("issue", ""))) >= 0.4 for f in small)]
     said = " ".join(f"{g.get('file', '')}:{g.get('line', '')} {g.get('what', '')}" for g in gaps)
     for hit in meta.get("gaps") or []:
         loc, _, text = hit.rpartition(": ") if hit.startswith("commit message") else hit.partition(": ")
@@ -3361,6 +3482,11 @@ def enforce_review_rules(review, meta, declined=()):
     if any(g.get("unaddressed") for g in gaps):
         notes.append(f"{sum(1 for g in gaps if g.get('unaddressed'))} self-declared gap(s) the reviewer didn't address")
     review["_gaps"] = gaps
+    for hit in meta.get("ci_parity") or []:
+        if not any(hit.split(":")[0] in str(c.get("what", "")) and "sparse" in str(c.get("what", "")) for c in checks):
+            checks.append({"what": f"CI parity: {hit}. Run that spec in a checkout limited to the pipeline's sparse "
+                                   "folders, or add the folder to the pipeline's sparse checkout",
+                           "why": "it passes in a full worktree and fails in CI"})
     review["_goal"] = review.get("goal") or meta.get("goal")
 
     if meta.get("resume") and meta.get("since_hunks") is not None:
@@ -3464,7 +3590,7 @@ def report_review(slug, project, entry, review, meta):
             print(f"  g{i}. {g.get('file', '?')}{':' + str(g['line']) if g.get('line') else ''}: "
                   f"{str(g.get('what', ''))[:140]} [{tag}]")
     if review.get("_declined_shown"):
-        detail("  declined earlier: " + "; ".join(f"{d.get('symbol') or d.get('file', '?')}: {str(d.get('issue', ''))[:60]}"
+        detail("  declined earlier: " + "; ".join(f"{d.get('symbol') or d.get('file', '?')}: {str(d.get('issue') or d.get('gap') or '')[:60]}"
                                                 for d in review["_declined_shown"]))
     runs = [r for r in ledger() if r.get("project") == slug and r.get("role") in ("reviewer", "reuse-check")
             and (r.get("review_meta") or {}).get("ref") == meta.get("ref")]
@@ -6476,6 +6602,9 @@ def cmd_todo(a):
 
 
 def cmd_schedule(a):
+    if a.when in ("-h", "--help") or any(x in ("-h", "--help") for x in a.args or []):
+        build_parser()._subparsers._group_actions[0].choices["schedule"].print_help()
+        return 0
     items = lean_schedule.jobs()
     if a.action == "run-due":
         lean_schedule.run_due()
@@ -6810,6 +6939,9 @@ def cmd_dashboard(a):
             if os.path.exists(path):
                 save_json(path, data)
             print("preview: off (the dashboard needs its token again after a restart)")
+    if a.json:  # the dashboard's data, for an agent (the page itself is drawn by its script)
+        print(json.dumps(dashboard.state(), indent=1))
+        return 0
     if a.url or a.open:
         running = dashboard_running()
         link = dashboard.url()
@@ -6828,6 +6960,49 @@ def cmd_dashboard(a):
         print(f"lean-agent dashboard is already running: {dashboard.url()}")
         return 0
     return dashboard.serve()
+
+
+LOG_ERROR_RE = re.compile(r"\b(error|errors|fail(ed|ure|ures|s)?|exception|traceback|panic|fatal|assert(ion)?|"
+                          r"not found|cannot|unable to|timed? ?out|denied|no such file|enoent)\b|##\[error\]|✗|✘|●", re.I)
+
+
+def log_lines(text):
+    """The lines of a saved log: plain text, or JSON that holds them (a list, or {"value": [...]} as CI APIs return)."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text.splitlines()
+    if isinstance(data, dict):
+        data = data.get("value") or data.get("lines") or data.get("log") or [json.dumps(data)]
+    if isinstance(data, str):
+        return data.splitlines()
+    out = []
+    for item in data if isinstance(data, list) else []:
+        out += (item if isinstance(item, str) else json.dumps(item)).splitlines()
+    return out
+
+
+def cmd_grep_log(a):
+    text = sys.stdin.read() if a.file == "-" else read_text(a.file)
+    lines = [re.sub(r"\x1b\[[0-9;]*m", "", l) for l in log_lines(text)]
+    rx = re.compile(a.pattern, re.I) if a.pattern else LOG_ERROR_RE
+    hits = [i for i, l in enumerate(lines) if rx.search(l)]
+    shown, last = 0, -1
+    for i in hits:
+        lo, hi = max(0, i - a.context), min(len(lines), i + a.context + 1)
+        if lo > last + 1 and last >= 0:
+            print("  ...")
+        for j in range(max(lo, last + 1), hi):
+            if shown >= a.max:
+                break
+            print(f"{j + 1:>6}{'>' if j == i else ' '} {lines[j][:300]}")
+            shown += 1
+        last = hi - 1
+        if shown >= a.max:
+            break
+    print(f"({len(hits)} matching line(s) in {len(lines):,}" + (f"; showed the first {a.max} lines, narrow it with a "
+          "PATTERN" if shown >= a.max else "") + ")")
+    return 0 if hits else 1
 
 
 def cmd_handoff(a):
@@ -7017,6 +7192,8 @@ def build_parser():
                    help="give the worker this MCP server, optionally only these tools (repeatable)")
     s.add_argument("--escalate", metavar="MODEL,MODEL", help="try the first model; if its run fails, run the task "
                    "again on the next (e.g. haiku,sonnet). Replaces --model")
+    s.add_argument("--allow-cmd", action="append", metavar="PREFIX", help="--read-only: also allow this read-only "
+                   "command prefix, e.g. \"az pipelines runs show\" (repeatable; commands that change things are refused)")
     s.add_argument("--max-reads", type=int, metavar="TOKENS", help="stop the worker once it has re-read this many "
                    "context tokens over all its calls (default LEAN_AGENT_RUN_MAX_READS, 6,000,000; 0 = no limit)")
     s.add_argument("--answer-lines", type=int, metavar="N", help="the worker answers in at most N lines and puts "
@@ -7125,8 +7302,9 @@ def build_parser():
     s = sub.add_parser("review-decline", help="findings of the latest review that were discussed and declined "
                        "(also: review decline <project> <n>...)")
     s.add_argument("project")
-    s.add_argument("numbers", nargs="+", metavar="N", help="finding numbers as the review printed them, or known "
+    s.add_argument("numbers", nargs="*", metavar="N", help="finding numbers as the review printed them, or known "
                    "gaps (g1, g2: the user's word that it's out of scope)")
+    s.add_argument("--all-gaps", action="store_true", help="acknowledge every known gap of the latest review")
     s.add_argument("--why", required=True, help="the decision, e.g. \"out of scope: separate ticket\"")
     s.add_argument("--head", metavar="REF", help="the branch whose latest review it is (default: the latest review)")
     s.add_argument("--all-branches", action="store_true", help="a project-wide decision, not just this branch")
@@ -7247,11 +7425,20 @@ def build_parser():
     s = sub.add_parser("dashboard", help="the local dashboard (runs, queue, schedule, pace, context): serve it, or --url")
     s.add_argument("--url", action="store_true", help="print its address (with its token)")
     s.add_argument("--open", action="store_true", help="open it in your default browser")
+    s.add_argument("--json", action="store_true", help="print its data as JSON (what the page shows), for agents")
     s.add_argument("--preview", type=lambda v: v.lower() not in ("off", "no", "0", "false"), nargs="?", const=True,
                    metavar="on|off", help="add it to the orchestrator home's .claude/launch.json (Claude desktop's "
                    "preview), and let its bare address work without the token for the browser's own requests")
     s.add_argument("--port", type=int, help="use this port from now on (default 8765)")
     s.set_defaults(fn=cmd_dashboard)
+
+    s = sub.add_parser("grep-log", help="the lines that matter in a saved CI or build log (text, or JSON like "
+                       "{\"value\": [lines]}): errors and failures, or a PATTERN")
+    s.add_argument("file", help="the log file, or - for stdin")
+    s.add_argument("pattern", nargs="?", help="a regular expression (default: errors and failures)")
+    s.add_argument("-C", "--context", type=int, default=2, help="lines around each match (default 2)")
+    s.add_argument("--max", type=int, default=80, help="lines to print at most (default 80)")
+    s.set_defaults(fn=cmd_grep_log)
 
     s = sub.add_parser("handoff", help="the hand-off note a new or compacted orchestrator session starts from")
     s.add_argument("--note", metavar="TEXT", help="add an open item or pending decision")

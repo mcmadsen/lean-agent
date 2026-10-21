@@ -653,6 +653,15 @@ def week_pace():
     return text + ": on pace", False
 
 
+def session_pressure(limit=70):
+    """(session window %, high?) from Claude's own numbers: past `limit`% lean-agent prefers haiku until it resets."""
+    real, _ = plan_usage()
+    w = (real or {}).get("five_hour")
+    if not w:
+        return None, False
+    return w["pct"], w["pct"] >= limit
+
+
 def plan_usage(max_age_minutes=PLAN_FRESH_MINUTES):
     """The last real plan utilization Claude reported, with its age in minutes; ({}, None) if none.
     Windows whose reset time has passed since are dropped (they've started over)."""
