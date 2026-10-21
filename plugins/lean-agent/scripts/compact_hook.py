@@ -178,6 +178,20 @@ def handoff(hours=RECENT_HOURS):
     now = datetime.datetime.now()
     lines = [f"lean-agent hand-off ({now:%Y-%m-%d %H:%M}; from lean-agent's records, not the transcript; "
              "any run again: `lean-agent runs --show <id>`)"]
+    pace, _ = usage.week_pace()
+    if pace:
+        lines.append(pace.capitalize())
+    try:
+        with open(os.path.join(home, "todo.json")) as fh:
+            todo = [t for t in json.load(fh).get("items") or [] if t.get("status") != "done"]
+    except (OSError, ValueError):
+        todo = []
+    if todo:
+        todo.sort(key=lambda t: (t.get("status") != "doing", {"high": 0, "low": 2}.get(t.get("prio"), 1),
+                                 t.get("due") or "9999", t.get("id", 0)))
+        lines.append(f"Work queue ({len(todo)} open; `lean-agent todo next` picks the next):")
+        lines += [f"  #{t['id']} {'[doing] ' if t.get('status') == 'doing' else ''}{t['text'][:100]}"
+                  + (f" ({t['ref']})" if t.get("ref") else "") for t in todo[:10]]
     notes = load_notes()
     if notes:
         lines.append("Open items and pending decisions:")
@@ -206,6 +220,12 @@ def handoff(hours=RECENT_HOURS):
         lines.append(f"  - {r.get('id')} {r.get('status')} {r.get('model')} {r.get('project')}"
                      + (f" ({r['role']})" if r.get("role") else "") + f": {run_line(r)}"
                      + (f" [details: {r['details']}]" if r.get("details") else ""))
+    sched = [r for r in read_jsonl(os.path.join(home, "scheduled.jsonl"), 50)
+             if str(r.get("ts", "")) >= (datetime.datetime.now() - datetime.timedelta(hours=hours)).isoformat()]
+    if sched:
+        lines.append("Scheduled jobs that ran:")
+        lines += [f"  #{r.get('id')} lean-agent {' '.join(r.get('args') or [])}: exit {r.get('rc')}: "
+                  f"{str(r.get('first', ''))[:100]} (full: {r.get('output')})" for r in sched[-6:]]
     items = touched_items(recent(runs, hours))
     if items:
         lines.append("Items and branches touched: " + ", ".join(items[:20]))
@@ -226,8 +246,27 @@ def handoff(hours=RECENT_HOURS):
 
 
 def has_recent_work(hours=RECENT_HOURS):
-    runs = read_jsonl(os.path.join(usage.lean_home(), "ledger.jsonl"), 50)
-    return bool(load_notes() or recent(runs, hours))
+    home = usage.lean_home()
+    runs = read_jsonl(os.path.join(home, "ledger.jsonl"), 50)
+    return bool(load_notes() or recent(runs, hours) or os.path.exists(os.path.join(home, "todo.json")))
+
+
+def count_compaction(session_id):
+    """How many times this conversation has compacted (counted at each SessionStart after a compaction)."""
+    path = os.path.join(usage.lean_home(), "compactions.json")
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    data[session_id] = data.get(session_id, 0) + 1
+    data = dict(list(data.items())[-50:])
+    try:
+        with open(path, "w") as fh:
+            json.dump(data, fh)
+    except OSError:
+        pass
+    return data[session_id]
 
 
 def main():
@@ -243,7 +282,13 @@ def main():
     elif mode == "post":
         source = event.get("source", "compact")
         if source == "compact" or (source in ("startup", "clear") and has_recent_work()):
-            print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": handoff()}}))
+            text = handoff()
+            if source == "compact" and count_compaction(event.get("session_id") or "?") >= 2:
+                text += ("\nThis conversation has now compacted more than once. At the next good stopping point "
+                         "(a topic done, no worker running), save open items with `lean-agent handoff --note` or "
+                         "`lean-agent todo add`, and suggest the user starts a fresh conversation (/clear): this "
+                         "note carries everything over, and a fresh one is cheaper on every call.")
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
     return 0
 
 

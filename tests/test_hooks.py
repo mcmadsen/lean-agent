@@ -300,6 +300,29 @@ class BudgetTest(Base):
         self.assertIn("lean-agent handoff --note", note)
         self.assertIsNone(run_hook("budget_hook.py", dict(self.ev, cwd=home), **env))  # once
 
+    def test_rotation_hint_after_two_compactions(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        ev = {"session_id": "s5", "cwd": home, "source": "compact"}
+        run = lambda: json.loads(subprocess.run([sys.executable, os.path.join(ROOT, "compact_hook.py"), "post"],
+                                                input=json.dumps(ev), capture_output=True, text=True,
+                                                env=dict(os.environ, **self.env), check=True).stdout)
+        self.assertNotIn("compacted more than once", run()["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("suggest the user starts a fresh conversation (/clear)",
+                      run()["hookSpecificOutput"]["additionalContext"])
+
+    def test_scheduled_results_reach_the_session(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        ev = dict(self.ev, cwd=home)
+        self.assertIsNone(run_hook("budget_hook.py", ev, **self.env))  # the session starts: nothing new
+        with open(os.path.join(home, "scheduled.jsonl"), "a") as fh:
+            fh.write(json.dumps({"ts": "2999-01-01T00:00:00", "id": 3, "args": ["do", "shop", "morning"], "rc": 0,
+                                 "output": "/x/3.txt", "first": "run 1021 · haiku · done"}) + "\n")
+        note = run_hook("budget_hook.py", ev, **self.env)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("#3 `lean-agent do shop morning` exit 0", note)
+        self.assertIsNone(run_hook("budget_hook.py", ev, **self.env))  # once
+
     def test_long_run_file_reads_refused_in_lean_home(self):
         home = self.env["LEAN_AGENT_HOME"]
         run = os.path.join(home, "work", "1020-101010-abcd")

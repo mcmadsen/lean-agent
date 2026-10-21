@@ -1438,6 +1438,110 @@ class CliTest(unittest.TestCase):
         with open(os.path.join(home, ".claude", "settings.json")) as fh:
             self.assertNotIn("NotebookEdit2", json.load(fh)["permissions"]["deny"])
 
+    def test_todo_queue(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.assertIn("added #1 [open] Fix the export timeout  (proj, PR 512)",
+                      self.cli("todo", "add", "Fix the export timeout", "-p", "proj", "--ref", "PR 512").stdout)
+        self.cli("todo", "add", "Reply to the release thread", "--prio", "high")
+        self.cli("todo", "add", "Tidy the docs", "--prio", "low")
+        self.assertTrue(self.cli("todo", "next").stdout.startswith("#2 [open] high Reply to the release thread"))
+        self.cli("todo", "start", "1")
+        self.assertTrue(self.cli("todo", "next").stdout.startswith("#1 [doing]"))  # what's in progress first
+        self.cli("todo", "done", "1", "fixed in the worker run")
+        out = self.cli("todo").stdout
+        self.assertNotIn("#1", out)
+        self.assertIn("(1 done in the last 7 days", out)
+        self.assertIn("#1 [done]", self.cli("todo", "list", "--all").stdout)
+        hand = self.cli("handoff").stdout
+        self.assertIn("Work queue (2 open", hand)
+        self.assertIn("#2 Reply to the release thread", hand)
+        self.cli("todo", "rm", "3")
+        self.assertNotIn("Tidy", self.cli("todo").stdout)
+        self.assertIn("Todos: 1 done, 1 open", self.cli("week").stdout)
+
+    def test_schedule(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        out = self.cli("schedule", "add", "weekdays 08:45", "stats").stdout
+        self.assertIn("scheduled #1: weekdays 08:45: lean-agent stats (next ", out)
+        self.assertIn("bad", self.cli("schedule", "add", "sometimes", "stats", check=False).stderr + "bad")
+        self.assertIn("not 'up'", self.cli("schedule", "add", "daily 09:00", "up", check=False).stderr)
+        self.cli("schedule", "add", "every 30m", "week")
+        path = os.path.join(self.env["LEAN_AGENT_HOME"], "schedule.json")
+        with open(path) as fh:
+            jobs = json.load(fh)
+        jobs[1]["created"] = "2020-01-01T00:00:00"  # long due
+        with open(path, "w") as fh:
+            json.dump(jobs, fh)
+        self.cli("schedule", "run-due")
+        out = self.cli("schedule").stdout
+        self.assertIn("ran #2", out)
+        self.assertIn("lean-agent, the last 7 days", out)
+        self.cli("schedule", "run-due")  # not due again yet
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "scheduled.jsonl")) as fh:
+            self.assertEqual(len(fh.readlines()), 1)
+        self.assertIn("Scheduled jobs that ran:", self.cli("handoff").stdout)
+        self.cli("schedule", "pause", "2")
+        self.assertIn("(paused", self.cli("schedule").stdout)
+        self.cli("schedule", "rm", "2")
+        out = self.cli("schedule", "defaults").stdout
+        self.assertIn("lean-agent sync --check", out)
+        self.assertIn("lean-agent optimize proj", out)
+        self.assertIn("lean-agent week", out)
+        self.assertNotIn("scheduled #", self.cli("schedule", "defaults").stdout)  # once
+
+    def test_schedule_due_times(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_schedule as S
+        import datetime as dt
+        job = {"id": 1, "when": "weekdays 08:45", "args": ["week"], "created": "2026-10-01T00:00:00"}
+        wed = dt.datetime(2026, 10, 21, 9, 0)  # a Wednesday
+        self.assertTrue(S.is_due(job, wed))
+        self.assertFalse(S.is_due(dict(job, last="2026-10-21T08:46:00"), wed))
+        self.assertFalse(S.is_due(job, dt.datetime(2026, 10, 21, 16, 0)))  # missed by > 6 h: wait for the next one
+        self.assertFalse(S.is_due(job, dt.datetime(2026, 10, 24, 9, 0)))  # Saturday
+        self.assertEqual(S.next_run(job, dt.datetime(2026, 10, 23, 9, 0)), dt.datetime(2026, 10, 26, 8, 45))
+        self.assertEqual(S.parse_when("mon,wed 10:00"), {"days": [0, 2], "at": "10:00"})
+        with self.assertRaises(ValueError):
+            S.parse_when("every 5m")
+
+    def test_pace_and_week(self):
+        import time as _t
+        path = os.path.join(self.env["LEAN_AGENT_HOME"], "plan-usage.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:  # 3.5 days left of the week, 80% used: ahead of pace
+            import datetime as _dt
+            json.dump({"at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+                       "windows": {"seven_day": {"pct": 80.0, "resets_at": _t.time() + 3.5 * 86400}}}, fh)
+        self.assertIn("week: 80% of your plan used, 50% of the week gone: 30 points ahead of pace",
+                      self.cli("limits").stdout)
+        self.cli("learn", self.proj, "--name", "proj")
+        self.assertIn("ahead of pace for the week, so prefer haiku", self.cli("suggest", "proj", "refactor the api").stdout)
+
+    def test_service_is_optional_and_installs(self):
+        fake = os.path.join(self.tmp.name, "ctl")
+        log = os.path.join(self.tmp.name, "ctl.log")
+        with open(fake, "w") as fh:
+            fh.write(f"#!/bin/sh\necho \"$@\" >> {log}\n")
+        os.chmod(fake, 0o755)
+        env = dict(LEAN_AGENT_SERVICE_PLATFORM="mac", LEAN_AGENT_LAUNCHCTL=fake)
+        self.assertIn("isn't installed (it's optional)", self.cli("service", "status", **env).stdout)
+        out = self.cli("service", "install", **env).stdout
+        plist = os.path.join(self.tmp.name, "Library", "LaunchAgents", "com.lean-agent.up.plist")
+        self.assertTrue(os.path.exists(plist))
+        import plistlib
+        with open(plist, "rb") as fh:
+            data = plistlib.load(fh)
+        self.assertEqual(data["ProgramArguments"][-3:], ["up", "--name", "lean-agent"])
+        self.assertTrue(data["KeepAlive"])
+        self.assertIn("bootstrap", open(log).read())
+        self.cli("service", "uninstall", **env)
+        self.assertFalse(os.path.exists(plist))
+        env = dict(LEAN_AGENT_SERVICE_PLATFORM="linux", LEAN_AGENT_SYSTEMCTL=fake)
+        self.cli("service", "install", **env)
+        unit = os.path.join(self.tmp.name, ".config", "systemd", "user", "lean-agent.service")
+        self.assertIn("Restart=always", open(unit).read())
+        self.assertIn("--user enable --now lean-agent.service", open(log).read())
+
     def test_up_explains_a_folder_served_elsewhere(self):
         fake = os.path.join(self.tmp.name, "claude-busy")
         with open(fake, "w") as fh:
