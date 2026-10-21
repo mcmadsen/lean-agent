@@ -1112,7 +1112,9 @@ def resolve_mcp(project, specs):
             if unknown:
                 presets = ", ".join(sorted(mcp_presets(name, known))) or "none"
                 die(f"{name} has no tool or preset {', '.join(unknown)}; presets: {presets}; "
-                    f"tools: {', '.join(sorted(known))}")
+                    f"tools: {', '.join(sorted(known))}"
+                    + (f" (several presets or tools of one server go after one colon: --mcp {name}:a,b; another "
+                       "server needs its own --mcp)" if any(":" in u for u in unknown) else ""))
             disallowed += [prefix + t for t in known if t not in wanted]
         else:
             print(f"lean-agent: tool list of {name} unknown (it didn't connect: `lean-agent mcp tools {name}`); "
@@ -1258,10 +1260,13 @@ def cmd_run(a):
         slug, project = resolve_project(a.project)
         sync_memory(slug)
         if getattr(a, "worktree", None):
-            wt = ensure_worktree(slug, project, a.worktree)
+            wt = ensure_worktree(slug, project, a.worktree, reset=getattr(a, "reset_worktree", False))
             project = wt["path"]
             print(f"worktree: {wt['ref']} at {wt['path']} ({'reused' if wt['reused'] else 'created'}"
-                  f"{', on branch ' + wt['branch'] if wt['branch'] else ', detached'})", flush=True)
+                  f"{', on branch ' + wt['branch'] if wt['branch'] else ', detached'}, HEAD {wt['head'][:10]})", flush=True)
+            if wt.get("moved"):
+                print(f"worktree: HEAD moved from {wt['moved'][0][:10]} to {wt['moved'][1][:10]} ({wt['ref']}'s tip)",
+                      flush=True)
         lib = {c["id"]: c for c in load_cards(slug)}
         wanted = [x for x in (a.cards or "").split(",") if x and x != "none"]
         if getattr(a, "card_list", None) is not None:  # chosen by the caller (e.g. `review`)
@@ -3315,7 +3320,7 @@ def worktree_index():
     return load_json(home("worktrees.json"), {})
 
 
-def ensure_worktree(slug, repo, ref):
+def ensure_worktree(slug, repo, ref, reset=False):
     """A shared worktree of `ref` for this project: reuse it (moved to the ref's tip when clean) or create it."""
     if ref.startswith("origin/"):
         git(repo, "fetch", "-q", "origin")
@@ -3326,12 +3331,24 @@ def ensure_worktree(slug, repo, ref):
     path = home("worktrees", slug, name)
     reused = os.path.isdir(path) and git(path, "rev-parse", "--git-dir") is not None
     remote_branch = ref[len("origin/"):] if ref.startswith("origin/") else None
+    moved = None
     if reused:
         branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
-        if git(path, "status", "--porcelain", "--untracked-files=no"):
+        head = git(path, "rev-parse", "HEAD") or ""
+        ahead = head and head != sha and git(path, "merge-base", "--is-ancestor", head, sha) is None
+        if ahead and not reset:
+            # commits a worker made here and nobody pushed yet (e.g. a merge): never throw them away silently
+            print(f"lean-agent: worktree {path} has commits that aren't on {ref} (HEAD {head[:10]}); keeping them "
+                  f"(--reset-worktree discards them)", file=sys.stderr)
+        elif git(path, "status", "--porcelain", "--untracked-files=no") and not reset:
             print(f"lean-agent: worktree {path} has uncommitted changes; using it as it is", file=sys.stderr)
         elif not branch:
-            git(path, "checkout", "-q", "--detach", sha)
+            if head != sha:
+                moved = (head, sha)
+            git(path, "checkout", "-q", *(["--force"] if reset else []), "--detach", sha)
+        elif reset:
+            moved = (head, sha) if head != sha else None
+            git(path, "reset", "-q", "--hard", sha)
         elif remote_branch and git(path, "merge", "-q", "--ff-only", sha) is None:
             print(f"lean-agent: branch {branch} in {path} has commits that aren't on {ref} (not pushed yet?); "
                   "leaving it as it is", file=sys.stderr)
@@ -3368,7 +3385,8 @@ def ensure_worktree(slug, repo, ref):
                    "pushes after review and the user's approval."
                    if branch else "It's a detached checkout: commits here are on no branch, so don't commit "
                    "unless the task asks you to.")
-    return {"path": path, "name": name, "ref": ref, "branch": branch, "reused": reused, "commit_rule": commit_rule}
+    return {"path": path, "name": name, "ref": ref, "branch": branch, "reused": reused, "commit_rule": commit_rule,
+            "head": git(path, "rev-parse", "HEAD") or "", "moved": moved}
 
 
 def run_worktree_setup(slug, name, path, command):
@@ -3481,6 +3499,30 @@ def worktree_setup_cmd(a):
     return 0
 
 
+def clean_merge_approval(slug, path):
+    """The approving review of HEAD's first parent, when HEAD is a merge that git made on its own (no conflict
+    edits: the same tree `git merge-tree` builds) and that touches none of the files the PR itself changed;
+    else None. Merging the base branch in again then needs no new review."""
+    parents = (git(path, "rev-list", "--parents", "-n", "1", "HEAD") or "").split()[1:]
+    if len(parents) != 2:
+        return None
+    first, second = parents
+    review = next((r for r in reversed(list(read_jsonl(reviews_path(slug))))
+                   if r.get("head") == first and r.get("verdict") == "approve" and not r.get("dirty")), None)
+    if not review:
+        return None
+    auto = git(path, "merge-tree", "--write-tree", first, second)
+    if not auto or auto.split()[0] != git(path, "rev-parse", "HEAD^{tree}"):
+        return None  # conflicts were resolved by hand, or git is too old to tell: review it
+    base = git(path, "merge-base", first, second) or ""
+    own = set((git(path, "diff", "--name-only", base, first) or "").split())
+    merged_in = set((git(path, "diff", "--name-only", first, "HEAD") or "").split())
+    if own & merged_in:
+        return None
+    label = git(path, "name-rev", "--name-only", "--refs=refs/remotes/*", second) or second[:10]
+    return dict(review, _merged=label)
+
+
 def worktree_push(a):
     """Push a worktree's branch to origin: an outward action, so it needs a review and the user's approval."""
     slug, repo = resolve_project(a.project)
@@ -3490,7 +3532,9 @@ def worktree_push(a):
     if not w or not os.path.isdir(w["path"]):
         die(f"no lean-agent worktree for {a.ref} in {slug} (see: lean-agent worktrees {slug})")
     path, branch = w["path"], git(w["path"], "symbolic-ref", "--quiet", "--short", "HEAD")
-    if not branch:
+    if not branch and w.get("ref", "").startswith("origin/"):
+        branch = w["ref"][len("origin/"):]  # a detached worktree of origin/<branch>: its commits go to <branch>
+    elif not branch:
         die(f"{path} is a detached checkout: there's no branch to push")
     dirty = git(path, "status", "--porcelain", "--untracked-files=no")
     if dirty and not a.only_commits:
@@ -3500,7 +3544,8 @@ def worktree_push(a):
             f"lean-agent worktree push {slug} {a.ref} --only-commits ...")
     if dirty:
         print(f"note: {len(dirty.splitlines())} uncommitted change(s) stay in the worktree; only commits are pushed")
-    upstream = git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    upstream = git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") or (
+        w["ref"] if w.get("ref", "").startswith("origin/") else None)
     remote_ref = upstream or f"origin/{branch}"
     if not a.no_fetch:
         git(path, "fetch", "-q", "origin")
@@ -3524,6 +3569,13 @@ def worktree_push(a):
                 "Have a worker reword them (git commit --amend / rebase -i is not available to workers: ask for "
                 "`git rebase` with an exec that rewrites the message), or turn attribution on.")
     match, _ = find_review(slug, path, "HEAD")
+    inherited = None
+    if not match or match["verdict"] != "approve":
+        inherited = clean_merge_approval(slug, path)
+        if inherited:
+            match = inherited
+            print(f"approval carried over from {match['run']}: HEAD is a clean merge of {match['_merged']} into the "
+                  f"reviewed {match['head'][:10]} and changes none of the PR's own files")
     if not match or match["verdict"] != "approve":
         die(f"{branch} @ {sha[:12]} has no approving review. Run: lean-agent review {slug} --head {branch}"
             + (f" --base <base>" if not has_remote else ""), 2)
@@ -3751,13 +3803,23 @@ def cmd_mcp(a):
                     die(f"{a.server} has no tool(s) {', '.join(bad)}")
                 mine[a.preset_name] = tools
             save_json(home("mcp-presets.json"), store)
+        notes = load_json(home("mcp-preset-notes.json"), {})
+        if a.preset_name and a.desc is not None:
+            notes.setdefault(a.server, {})[a.preset_name] = a.desc
+            save_json(home("mcp-preset-notes.json"), notes)
         presets = mcp_presets(a.server, known)
+        if a.grep:  # e.g. which presets can read pull requests: --grep pull
+            rx = re.compile(re.escape(a.grep), re.I)
+            presets = {n: t for n, t in presets.items() if rx.search(n) or rx.search(" ".join(t))
+                       or rx.search((notes.get(a.server) or {}).get(n, ""))}
         if not presets:
             print(f"No presets for {a.server}. Add one: lean-agent mcp preset {a.server} <name> <tool,tool>")
         for name, tools in sorted(presets.items()):
             cost = sum((known or {}).get(t, 0) for t in tools)
-            auto = " (automatic)" if name == "read" and name not in store.get(a.server, {}) else ""
-            print(f"{a.server}:{name}{auto}  {len(tools)} tools ~{cost:,} tok  {', '.join(tools)}")
+            auto = name == "read" and name not in store.get(a.server, {})
+            desc = (notes.get(a.server) or {}).get(name) or ("automatic: the get/list/search tools" if auto else "")
+            print(f"{a.server}:{name}  {len(tools)} tools ~{cost:,} tok" + (f"  {desc}" if desc else ""))
+            print(f"    {', '.join(tools)}")
         return
     if a.server == CHROME:
         return cmd_chrome(argparse.Namespace(action="status"))
@@ -6634,6 +6696,8 @@ def build_parser():
     s.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="model effort for the worker")
     s.add_argument("--worktree", metavar="REF", help="run in a shared lean-agent git worktree of this branch/ref "
                    "(your checkout is never touched; installed deps persist for the next worker)")
+    s.add_argument("--reset-worktree", action="store_true", help="--worktree: move it to the ref's tip even if it "
+                   "holds commits or changes that aren't there (they're discarded)")
     s.add_argument("--chrome", nargs="?", const="all", metavar="TOOL,TOOL",
                    help="give the worker the user's Chrome via Claude in Chrome (optionally only these tools)")
     s.add_argument("--allow-send", metavar="WHAT",
@@ -6662,6 +6726,8 @@ def build_parser():
     s.add_argument("--project", "-p", help="include this project's .mcp.json and local-scope servers")
     s.add_argument("--probe", action="store_true", help="list: query stdio servers for their tools")
     s.add_argument("--measure", action="store_true", help="tools: measure real per-turn cost with 2 Haiku calls")
+    s.add_argument("--desc", metavar="TEXT", help="preset: what it's for (shown in the list)")
+    s.add_argument("--grep", metavar="TEXT", help="preset: only presets whose name, description or tools contain TEXT")
     s.set_defaults(fn=cmd_mcp)
 
     s = sub.add_parser("memory", help="shared memory: where | import | list | add | edit | rm")
@@ -6788,7 +6854,9 @@ def build_parser():
     s.add_argument("--run", dest="command", metavar="COMMAND", help="setup: the command for new worktrees")
     s.add_argument("--force", action="store_true", help="rm: remove even with uncommitted changes")
     s.add_argument("--off", action="store_true", help="setup: no setup command")
-    s.add_argument("--allow-send", metavar="APPROVED", help="push: what the user approved (the push happens only with this)")
+    s.add_argument("--allow-send", metavar="APPROVED", help="push: what the user approved (the push happens only with this). "
+                   "A push needs an approving review of the commit (lean-agent review --head <branch>); a clean merge of "
+                   "the base branch that touches none of the PR's files keeps the earlier approval")
     s.add_argument("--no-fetch", action="store_true", help="push: don't fetch origin first")
     s.add_argument("--only-commits", action="store_true", help="push: push the commits even when the shared "
                    "worktree has uncommitted changes (they aren't pushed)")

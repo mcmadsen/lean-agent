@@ -834,7 +834,7 @@ class CliTest(unittest.TestCase):
         out = self.cli("mcp", "tools", "dd", **env).stdout
         self.assertIn("search_logs", out)
         self.assertIn("1,600 tok  total for 4 tools", out)
-        self.assertIn("read (automatic)  3 tools ~1,200 tok  get_monitor, query_metrics, search_logs", self.cli("mcp", "preset", "dd", **env).stdout)
+        self.assertIn("read  3 tools ~1,200 tok  automatic: the get/list/search tools\n    get_monitor, query_metrics, search_logs", self.cli("mcp", "preset", "dd", **env).stdout)
         self.cli("learn", self.proj)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "dd:read", "check logs", **env)
         call = self.calls()[-1]
@@ -1785,7 +1785,7 @@ class CliTest(unittest.TestCase):
         self.cli("learn", self.proj)
         self.cli("mcp", "tools", "tickets")  # probe and cache tool costs
         out = self.cli("mcp", "preset", "tickets").stdout
-        self.assertIn("tickets:read (automatic)  2 tools", out)  # get_ticket + search_tickets
+        self.assertIn("tickets:read  2 tools", out)  # get_ticket + search_tickets
         self.cli("mcp", "preset", "tickets", "lookup", "get_ticket")
         self.assertIn("tickets:lookup  1 tools", self.cli("mcp", "preset", "tickets").stdout)
         out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tickets:lookup", "t").stdout
@@ -2390,7 +2390,7 @@ class CliTest(unittest.TestCase):
         self.cli("learn", self.proj, "--name", "proj")
         out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feature", "--", "run the tests").stdout
         self.assertIn("worktree: feature at", out)
-        self.assertIn("(created, on branch feature)", out)
+        self.assertIn("(created, on branch feature, HEAD ", out)
         wt = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", "feature")
         self.assertTrue(os.path.isfile(os.path.join(wt, "api", "totals.py")))  # the branch's files
         call = self.calls()[-1]
@@ -2403,14 +2403,14 @@ class CliTest(unittest.TestCase):
         os.makedirs(os.path.join(wt, "node_modules"))  # deps a worker installed
         out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--read-only", "--worktree", "feature",
                        "--", "list test files").stdout
-        self.assertIn("(reused, on branch feature)", out)
+        self.assertIn("(reused, on branch feature, HEAD ", out)
         self.assertTrue(os.path.isdir(os.path.join(wt, "node_modules")))  # persisted for the next worker
         run_id = out.split("run ")[1].split()[0]
         self.cli("run", "--resume", run_id, "and the fixtures")
         self.assertEqual(self.calls()[-1]["argv"][self.calls()[-1]["argv"].index("--add-dir") + 1], wt)
         # the branch checked out in the user's repo can't be attached again: detached worktree
         out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "main", "--", "t").stdout
-        self.assertIn("(created, detached)", out)
+        self.assertIn("(created, detached, HEAD ", out)
         self.assertIn("detached checkout", self.calls()[-1]["append"])
         listing = self.cli("worktrees", "proj").stdout
         self.assertIn("feature", listing)
@@ -2476,6 +2476,53 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(before, local)
         self.assertEqual(remote(), local)
         self.assertIn("nothing to push", self.cli("worktree", "push", "proj", "origin/feature").stdout)
+
+    def test_detached_worktree_keeps_commits_and_clean_merge_keeps_approval(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        origin = os.path.join(self.tmp.name, "origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+        g("remote", "add", "origin", origin)
+        g("push", "-q", "origin", "main", "feature")
+        g("checkout", "-q", "main")
+        with open(os.path.join(self.proj, "NOTES.md"), "w") as fh:
+            fh.write("base change\n")
+        g("add", "NOTES.md")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base change")
+        g("push", "-q", "origin", "main")
+        g("checkout", "-q", "feature")  # the local branch is checked out here: the worktree has to be detached
+        self.cli("learn", self.proj, "--name", "proj")
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        self.cli("review", "proj", "--head", "origin/feature", "--base", "main", FAKE_REVIEW=approve)
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "origin/feature", "--", "merge").stdout
+        self.assertIn(", detached, HEAD ", out)
+        wt = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", "origin-feature")
+        tip = subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-edit",
+                        "origin/main"], check=True)  # what the worker did
+        merge = subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        p = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "origin/feature", "--again", "--", "check")
+        self.assertIn(f"has commits that aren't on origin/feature (HEAD {merge[:10]}); keeping them", p.stderr)
+        self.assertIn(f"HEAD {merge[:10]}", p.stdout)
+        head = lambda: subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(head(), merge)
+        # pushing the detached merge: the clean base merge keeps the feature tip's approval
+        out = self.cli("worktree", "push", "proj", "origin/feature", check=False).stdout
+        self.assertIn("approval carried over from", out)
+        self.assertIn("clean merge of", out)
+        self.assertIn("push feature @ " + merge[:12] + " to origin/feature", out)
+        # --reset-worktree throws it away on purpose
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "origin/feature", "--reset-worktree",
+                       "--again", "--", "start over").stdout
+        self.assertIn(f"HEAD moved from {merge[:10]} to {tip[:10]}", out)
+        self.assertEqual(head(), tip)
+
+    def test_mcp_spec_with_repeated_server(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_mcp
+        self.assertEqual(lean_mcp.parse_specs(["tickets:prs,tickets:states"]),
+                         [("tickets", ["prs", "states"])])
 
     def test_push_guards(self):
         g = self.git_project()

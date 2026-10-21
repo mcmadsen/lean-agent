@@ -274,13 +274,17 @@ class BudgetTest(Base):
         ev = lambda cmd, bg=False, cwd=home: dict(self.ev, cwd=cwd, tool_name="Bash",
                                                   tool_input={"command": cmd, "run_in_background": bg})
         for cmd in ('lean-agent run -p shop -m haiku --why x "look"', "cd /tmp && lean-agent review shop --resume",
+                    "cat > /tmp/t.md <<EOF\nx\nEOF\nlean-agent run -p shop --task-file /tmp/t.md -m haiku --why x",
+                    "LEAN_AGENT_X=1 timeout 600 lean-agent do shop weekly-report",
                     "lean-agent do shop weekly-report", "lean-agent tracker shop --discover --mcp tickets"):
             out = run_hook("budget_hook.py", ev(cmd), **self.env)
             self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny", cmd)
             self.assertIn("run_in_background: true", out["hookSpecificOutput"]["permissionDecisionReason"])
             self.assertIsNone(run_hook("budget_hook.py", ev(cmd, bg=True), **self.env))
         for cmd in ("lean-agent review shop --status", "lean-agent review decline shop 1 --why x",
-                    "lean-agent runs --show", "lean-agent tracker shop", "lean-agent stats"):
+                    "lean-agent runs --show", "lean-agent tracker shop", "lean-agent stats",
+                    "cat > /tmp/task.md <<'EOF'\nThen run lean-agent review shop --resume\nEOF",
+                    'echo "next: lean-agent run -p shop"', "git commit -m 'lean-agent do shop x'"):
             self.assertIsNone(run_hook("budget_hook.py", ev(cmd), **self.env), cmd)
         self.assertIsNone(run_hook("budget_hook.py", ev("lean-agent run -p shop -m haiku x", cwd=self.tmp.name), **self.env))
         self.assertIsNone(run_hook("budget_hook.py", ev("lean-agent run -p shop -m haiku x"),
