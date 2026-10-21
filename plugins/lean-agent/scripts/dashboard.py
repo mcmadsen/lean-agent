@@ -124,6 +124,82 @@ def schedule_runner():
             + ": jobs run only while `lean-agent up` (or the service) runs, or at the orchestrator's next tool call")
 
 
+COLUMNS = ("Open", "In progress", "Waiting on you", "In review", "Done")
+WAITING = ("needs-input", "awaiting-confirmation")
+
+
+def _ref_key(ref):
+    return re.sub(r"[^a-z0-9]", "", str(ref or "").lower())
+
+
+def _same_ref(a, b):
+    """A todo's ref and a review's ref name the same thing ("PR 512" and "pr-512", a branch with or without its
+    remote): equal once punctuation is gone, or one ends with the other."""
+    a, b = _ref_key(a), _ref_key(b)
+    if not a or not b:
+        return False
+    short, long_ = sorted((a, b), key=len)
+    return a == b or (len(short) >= 4 and long_.endswith(short))
+
+
+def board(todo, ledger, running, reviews, now=None):
+    """The work queue as columns: each todo with the runs that worked on it (`run --todo N`), whether one of them
+    is running now, and the latest review of its ref. View only: it says where things are, it changes nothing."""
+    import hashlib
+    now = now or datetime.datetime.now()
+    week_ago = (now - datetime.timedelta(days=7)).isoformat()
+    runs_of = {}
+    for r in ledger:
+        if r.get("todo") is not None:
+            runs_of.setdefault(r["todo"], {})[r.get("id")] = {"id": r.get("id"), "status": r.get("status"),
+                                                              "ts": r.get("ts"), "role": r.get("role")}
+    live = {}
+    for m in running:
+        if m.get("todo") is not None:
+            live.setdefault(m["todo"], []).append(m.get("run"))
+    cards = []
+    for t in todo:
+        if t.get("status") == "done" and (t.get("done_at") or "") < week_ago:
+            continue
+        tid = t.get("id")
+        runs = sorted((runs_of.get(tid) or {}).values(), key=lambda r: r["ts"] or "")
+        last = runs[-1] if runs else None
+        rv = None
+        if t.get("ref"):
+            hits = [r for r in reviews if _same_ref(t["ref"], r["ref"])
+                    and (not t.get("project") or r["project"] == t["project"])]
+            rv = max(hits, key=lambda r: r["ts"] or "") if hits else None
+        if t.get("status") == "done":
+            col = "Done"
+        elif live.get(tid):
+            col = "In progress"
+        elif (last and str(last["status"]).split(":")[0] in WAITING) or (rv and rv.get("gaps")):
+            col = "Waiting on you"
+        elif rv:
+            col = "In review"
+        elif t.get("status") == "doing" or runs:
+            col = "In progress"
+        else:
+            col = "Open"
+        card = {"id": tid, "text": t.get("text"), "project": t.get("project"), "ref": t.get("ref"),
+                "prio": t.get("prio") or "normal", "due": t.get("due"), "notes": len(t.get("notes") or []),
+                "column": col, "live": live.get(tid) or [], "runs": [r["id"] for r in runs][-4:],
+                "last_run": last, "done_at": t.get("done_at"),
+                "review": {k: rv.get(k) for k in ("verdict", "gaps", "blocking", "ts", "ref")} if rv else None}
+        seen = [col, card["text"], card["prio"], card["due"], card["notes"], bool(card["live"]),
+                last and [last["id"], last["status"]], rv and [rv.get("verdict"), rv.get("gaps"), rv.get("blocking"),
+                                                               rv.get("ts")]]
+        card["sig"] = hashlib.sha1(json.dumps(seen, default=str).encode()).hexdigest()[:10]
+        cards.append(card)
+    prio = {"high": 0, "low": 2}
+    cards.sort(key=lambda c: ((c["done_at"] or "") if c["column"] == "Done" else "",
+                              prio.get(c["prio"], 1), c["due"] or "9999", c["id"] or 0))
+    done = [c for c in cards if c["column"] == "Done"][::-1]
+    cards = [c for c in cards if c["column"] != "Done"] + done
+    return {"columns": list(COLUMNS), "cards": cards,
+            "projects": sorted({c["project"] for c in cards if c["project"]})}
+
+
 def state():
     now = datetime.datetime.now()
     week_ago = (now - datetime.timedelta(days=7)).isoformat()
@@ -132,7 +208,7 @@ def state():
     for f in glob.glob(home("running", "*.json")):
         m = _json(f, {})
         if _alive(m.get("pid")):
-            running.append({k: m.get(k) for k in ("run", "started", "model", "project", "task")})
+            running.append({k: m.get(k) for k in ("run", "started", "model", "project", "task", "todo")})
     merged = {}  # one row per run: a resumed run (a follow-up, the reviewer sent back) adds a pass
     for r in ledger[-200:]:
         m = merged.get(r.get("id"))
@@ -167,10 +243,11 @@ def state():
             continue
         for r in _jsonl(f, 300):
             reviews[(slug, r.get("ref") or "working tree")] = r
-    latest_reviews = sorted(({"project": p, "ref": ref, "verdict": r.get("verdict"), "ts": r.get("ts"),
-                              "head": str(r.get("head", ""))[:10], "gaps": open_gaps(p, r),
-                              "blocking": sum(1 for x in r.get("findings") or [] if x.get("severity") in ("blocker", "major"))}
-                             for (p, ref), r in reviews.items()), key=lambda r: r["ts"] or "", reverse=True)[:8]
+    all_reviews = sorted(({"project": p, "ref": ref, "verdict": r.get("verdict"), "ts": r.get("ts"),
+                           "head": str(r.get("head", ""))[:10], "gaps": open_gaps(p, r),
+                           "blocking": sum(1 for x in r.get("findings") or [] if x.get("severity") in ("blocker", "major"))}
+                          for (p, ref), r in reviews.items()), key=lambda r: r["ts"] or "", reverse=True)
+    latest_reviews = all_reviews[:8]
     real, age = usage.plan_usage()
     pace, ahead = usage.week_pace()
     return {
@@ -180,6 +257,7 @@ def state():
         "running": running, "runs": runs,
         "week": {"runs": len(week), "done": sum(r.get("status") == "done" for r in week),
                  "units": sum(r.get("units", 0) for r in week), "cost": round(sum(r.get("cost_usd") or 0 for r in week), 2)},
+        "board": board(todo, ledger, running, all_reviews, now),
         "todo": open_todo[:30], "todo_done_week": sum(1 for t in todo if t.get("status") == "done"
                                                       and (t.get("done_at") or "") >= week_ago),
         "schedule": jobs, "scheduled_results": lean_schedule.results_since(week_ago)[-10:][::-1],
@@ -258,10 +336,21 @@ pre{white-space:pre-wrap;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospa
 #view .bar{display:flex;justify-content:space-between;margin-bottom:8px}
 svg{display:block;width:100%;height:46px}
 td.id{white-space:nowrap}td.head{min-width:10em}.wide2{grid-column:span 2}
+.board{display:grid;grid-template-columns:repeat(5,minmax(190px,1fr));gap:10px;overflow-x:auto;padding-bottom:4px}
+.col{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;min-width:0}
+.col h3{font-size:12px;margin:0 0 8px;color:var(--mute);font-weight:600;display:flex;justify-content:space-between}
+.tc{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:6px;padding:7px 9px;margin-bottom:8px;font-size:13px}
+.tc.p-high{border-left-color:var(--bad)}.tc.p-low{border-left-color:var(--line)}
+.tc.changed{box-shadow:0 0 0 2px var(--warn);background:color-mix(in srgb,var(--warn) 9%,var(--card))}
+.tc .meta{font-size:12px;color:var(--mute);margin-top:4px;display:flex;flex-wrap:wrap;gap:4px 8px}
+.badge{font-size:11px;border-radius:9px;padding:0 6px;border:1px solid currentColor;white-space:nowrap}
+.badge.live{color:var(--ok)}.badge.new{color:var(--warn)}
+#bfilter{font:inherit;font-size:12px;margin-left:auto;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px}
 @media (max-width:640px){.hide-s{display:none}.wide2{grid-column:auto}main{padding:10px 12px 20px;gap:10px}}
 </style></head><body>
 <header><h1>lean-agent</h1><span class="mute" id="stamp"></span></header>
 <main>
+ <details class="card full" id="c-board" open><summary><h2>Board <span class="count" id="n-board"></span></h2></summary><div style="display:flex;margin-bottom:8px"><select id="bfilter"><option value="">all projects</option></select></div><div id="board"></div><div class="mute" id="bnote" style="margin-top:4px;font-size:12px"></div></details>
  <details class="card" id="c-week" open><summary><h2>Week</h2></summary><div id="pace"></div><div id="weekstats" class="mute"></div></details>
  <details class="card" id="c-ctx" open><summary><h2>Orchestrator context</h2></summary><div id="ctx"></div></details>
  <details class="card" id="c-running" open><summary><h2>Running now <span class="count" id="n-running"></span></h2></summary><div id="running"></div></details>
@@ -290,6 +379,35 @@ async function show(id,details){
   $("vdet").onclick=()=>show(id,!details);$("vdet").textContent=details?"answer":"details";$("view").style.display="block";}
 function closeView(){$("view").style.display="none"}
 document.addEventListener("keydown",e=>{if(e.key==="Escape")closeView()});
+// the board highlights cards that changed since you last looked (kept in this browser; a changed card stays
+// highlighted for 10 minutes of looking, then counts as seen)
+const SEEN_FOR=10*60*1000;
+function seenMap(){try{return JSON.parse(localStorage.getItem("la-board-seen")||"null")}catch(e){return null}}
+function saveSeen(m){try{localStorage.setItem("la-board-seen",JSON.stringify(m))}catch(e){}}
+let lastBoard=null;
+function drawBoard(b){
+  if(!b)return;lastBoard=b;
+  const f=$("bfilter"),cur=f.value;
+  f.innerHTML='<option value="">all projects</option>'+b.projects.map(p=>`<option${p===cur?" selected":""}>${esc(p)}</option>`).join("");
+  let seen=seenMap();const first=!seen;seen=seen||{};const now=Date.now(),looking=document.visibilityState!=="hidden";
+  const cards=b.cards.filter(c=>!f.value||c.project===f.value);let changed=0;
+  const html=b.columns.map(col=>{const cs=cards.filter(c=>c.column===col);return `<div class="col"><h3><span>${esc(col==="Done"?"Done (7 days)":col)}</span><span>${cs.length||""}</span></h3>${cs.map(c=>{
+    const was=seen[c.id];let hi="";
+    if(first||(was&&was.sig===c.sig)){seen[c.id]={sig:c.sig,col:c.column}}
+    else{const since=(was&&was.since)||now;seen[c.id]=Object.assign({},was||{},{since});
+      if(looking&&now-since>SEEN_FOR)seen[c.id]={sig:c.sig,col:c.column};else{hi=was?(was.col&&was.col!==c.column?"moved from "+was.col:"changed"):"new";changed++}}
+    const lr=c.last_run,rv=c.review;
+    return `<div class="tc p-${esc(c.prio)}${hi?" changed":""}"><div>${c.live.length?'<span class="badge live">running</span> ':""}${hi?`<span class="badge new">${esc(hi)}</span> `:""}<span class="mute">#${c.id}</span> ${esc(c.text)}</div>
+      <div class="meta">${c.project?`<span>${esc(c.project)}</span>`:""}${c.ref?`<span>${esc(c.ref)}</span>`:""}${c.prio!=="normal"?`<span class="${c.prio==="high"?"bad":""}">${esc(c.prio)}</span>`:""}${c.due?`<span>due ${esc(c.due)}</span>`:""}${c.notes?`<span>${c.notes} note${c.notes>1?"s":""}</span>`:""}</div>
+      ${c.runs.length?`<div class="meta">${c.runs.map(id=>`<a onclick="show('${esc(id)}')">${esc(id)}</a>`).join(" ")}${lr?` <span class="${cls(lr.status)}">${esc(String(lr.status||"").split(":")[0])}</span>`:""}</div>`:""}
+      ${rv?`<div class="meta"><span class="${rv.verdict!=="approve"?"bad":rv.gaps?"warn":"ok"}">review ${esc((rv.verdict||"").split("-")[0])}</span>${rv.blocking?`<span>${rv.blocking} blocking</span>`:""}${rv.gaps?`<span class="warn">${rv.gaps} gap${rv.gaps>1?"s":""} to answer</span>`:""}</div>`:""}</div>`}).join("")}</div>`}).join("");
+  for(const id of Object.keys(seen))if(!b.cards.some(c=>String(c.id)===id))delete seen[id];
+  saveSeen(seen);
+  $("board").innerHTML=b.cards.length?`<div class="board">${html}</div>`:'<span class="mute">No work queued yet: items from <code>lean-agent todo</code> show here, with the runs (<code>run --todo N</code>) and reviews of their ref.</span>';
+  $("n-board").textContent=(cards.length?`· ${cards.length}`:"")+(changed?` · ${changed} changed`:"");
+  $("bnote").textContent=b.cards.length?"View only: cards move as the work moves (lean-agent todo, run --todo N, review). Highlighted: changed since you last looked.":"";
+}
+$("bfilter").addEventListener("change",()=>{try{localStorage.setItem("la-board-project",$("bfilter").value)}catch(e){};drawBoard(lastBoard)});
 async function load(){
   let s;try{const r=await fetch(`/api/state?t=${T}`);if(!r.ok)throw new Error(r.status);s=await r.json()}
   catch(e){$("stamp").textContent="can't reach lean-agent ("+e.message+"): is `lean-agent up` or `lean-agent dashboard` running?";return}
@@ -309,6 +427,8 @@ async function load(){
       <svg viewBox="0 0 100 46" preserveAspectRatio="none"><line x1="0" x2="100" y1="${(46-c.compact_at/max*44).toFixed(1)}" y2="${(46-c.compact_at/max*44).toFixed(1)}" stroke="currentColor" stroke-opacity=".25" stroke-dasharray="2 2" vector-effect="non-scaling-stroke"/><polyline fill="none" stroke="var(--accent)" stroke-width="1.5" vector-effect="non-scaling-stroke" points="${pts}"/></svg>
       <div class="mute">${c.calls} calls in the latest conversation · last ${when(c.updated)}</div>`}
   else $("ctx").innerHTML='<span class="mute">no orchestrator conversation yet</span>';
+  if(lastBoard===null){try{const p=localStorage.getItem("la-board-project");if(p)$("bfilter").innerHTML=`<option value="">all projects</option><option selected>${esc(p)}</option>`}catch(e){}}
+  drawBoard(s.board);
   $("running").innerHTML=table(s.running.map(r=>`<tr><td><a onclick="show('${esc(r.run)}')">${esc(r.run)}</a></td><td>${esc(r.model)}</td><td>${esc(r.project)}</td><td>${esc((r.task||"").slice(0,80))}</td></tr>`));
   $("todo").innerHTML=table(s.todo.map(t=>`<tr><td class="mute">#${t.id}</td><td>${t.status==="doing"?'<b class="warn">doing</b> ':""}${t.prio==="high"?'<b class="bad">high</b> ':""}${esc(t.text)}${t.ref?` <span class="mute">(${esc(t.ref)})</span>`:""}</td><td class="n mute">${esc(t.due||"")}</td></tr>`),
     'Nothing open. Your requests and what is in progress go here: ask the orchestrator to keep your work in '
