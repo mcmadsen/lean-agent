@@ -1709,7 +1709,10 @@ class CliTest(unittest.TestCase):
             import dashboard
             b = dashboard.state()["board"]
             # a run with this item's number is running now: it's in progress whatever else it has
-            json.dump({"pid": os.getpid(), "run": "live1", "todo": 3}, open(os.path.join(home, "running", "live1.json"), "w"))
+            json.dump({"pid": os.getpid(), "run": "live1", "todo": 3, "model": "sonnet", "effort": "high"},
+                      open(os.path.join(home, "running", "live1.json"), "w"))
+            json.dump({"pid": os.getpid(), "run": "look2", "todo": None, "task": "check   a log", "model": "haiku"},
+                      open(os.path.join(home, "running", "look2.json"), "w"))
             b2 = dashboard.state()["board"]
         finally:
             os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.update(LEAN_AGENT_HOME=old)
@@ -1722,10 +1725,14 @@ class CliTest(unittest.TestCase):
                          ("changes-requested", 1, 1))
         self.assertEqual(b["projects"], ["proj"])
         card3 = next(c for c in b2["cards"] if c["id"] == 3)
-        self.assertEqual((card3["column"], card3["live"]), ("In progress", ["live1"]))
+        self.assertEqual((card3["column"], [m["run"] for m in card3["live"]]), ("In progress", ["live1"]))
+        self.assertEqual(card3["live"][0]["model"], "sonnet")  # the card says what runs: model / effort
+        lookup = next(c for c in b2["cards"] if c.get("lookup"))  # a run no item names gets its own card
+        self.assertEqual((lookup["column"], lookup["runs"], lookup["text"]), ("In progress", ["look2"], "check a log"))
+        self.assertNotIn('id="c-running"', dashboard.PAGE)  # running runs are on the board now
         self.assertNotEqual(card3["sig"], next(c for c in b["cards"] if c["id"] == 3)["sig"])  # it shows as changed
         self.assertEqual({c["id"]: c["sig"] for c in b["cards"] if c["id"] != 3},
-                         {c["id"]: c["sig"] for c in b2["cards"] if c["id"] != 3})
+                         {c["id"]: c["sig"] for c in b2["cards"] if c["id"] != 3 and not c.get("lookup")})
         self.assertIn('id="c-board"', dashboard.PAGE)
         self.assertNotIn("draggable", dashboard.PAGE)  # view only for now
 
