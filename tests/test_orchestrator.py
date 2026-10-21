@@ -130,7 +130,7 @@ class CliTest(unittest.TestCase):
         self.env = dict(os.environ, LEAN_AGENT_HOME=os.path.join(t, "home"), LEAN_AGENT_CLAUDE=fake,
                         FAKE_LOG=self.log, CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD="1",
                         HOME=t, CLAUDE_CONFIG_DIR=os.path.join(t, "cfg"), LEAN_AGENT_LAUNCH_GUARD="0",
-                        LEAN_AGENT_HTTP_CHECK="0")
+                        LEAN_AGENT_HTTP_CHECK="0", LEAN_AGENT_DASHBOARD="0")
         os.makedirs(os.path.join(t, "cfg"))
         fake_mcp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "fake_mcp.py")
         self.mcp_cfg = {"type": "stdio", "command": sys.executable, "args": [fake_mcp], "env": {"TOKEN": "s3cret"}}
@@ -1541,6 +1541,56 @@ class CliTest(unittest.TestCase):
         unit = os.path.join(self.tmp.name, ".config", "systemd", "user", "lean-agent.service")
         self.assertIn("Restart=always", open(unit).read())
         self.assertIn("--user enable --now lean-agent.service", open(log).read())
+
+    def test_dashboard_and_status_line(self):
+        import socket
+        import urllib.request
+        import urllib.error
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "check the services")
+        self.cli("todo", "add", "Fix the export timeout", "-p", "proj", "--prio", "high")
+        self.cli("schedule", "add", "weekdays 08:45", "week")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        url = self.cli("dashboard", "--url", "--port", str(port)).stdout.split()[0]
+        self.assertTrue(url.startswith(f"http://127.0.0.1:{port}/?t="))
+        p = subprocess.Popen([sys.executable, CLI, "dashboard"], env=self.env, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+        try:
+            for _ in range(50):
+                try:
+                    page = urllib.request.urlopen(url, timeout=2).read().decode()
+                    break
+                except OSError:
+                    import time as _t
+                    _t.sleep(0.1)
+            self.assertIn("<title>lean-agent</title>", page)
+            token = url.split("t=")[1]
+            st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state?t={token}").read())
+            self.assertEqual(st["runs"][0]["status"], "done")
+            self.assertEqual(st["todo"][0]["text"], "Fix the export timeout")
+            self.assertEqual(st["schedule"][0]["cmd"], "week")
+            text = urllib.request.urlopen(f"http://127.0.0.1:{port}/run/{st['runs'][0]['id']}?t={token}").read().decode()
+            self.assertIn("Did the thing.", text)
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state?t=wrong")
+            self.assertEqual(e.exception.code, 403)
+            self.assertIn("already running", self.cli("dashboard").stdout)
+        finally:
+            p.terminate()
+            p.wait()
+        home = self.cli("home").stdout.strip()
+        with open(os.path.join(home, ".claude", "settings.json")) as fh:
+            line = json.load(fh)["statusLine"]
+        self.assertIn("statusline.py", line["command"])
+        out = subprocess.run([sys.executable, os.path.join(os.path.dirname(CLI), "statusline.py")],
+                             input=json.dumps({"session_id": "x"}), capture_output=True, text=True,
+                             env=dict(self.env, CLAUDE_CODE_AUTO_COMPACT_WINDOW="100000",
+                                      CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="70")).stdout
+        self.assertIn("1 todo", out)
+        self.assertIn("next job", out)
+        self.assertIn(f"dashboard :{port}", out)
 
     def test_up_explains_a_folder_served_elsewhere(self):
         fake = os.path.join(self.tmp.name, "claude-busy")
