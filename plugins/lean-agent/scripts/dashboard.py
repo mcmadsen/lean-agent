@@ -217,7 +217,7 @@ const k=n=>n>=1e6?(n/1e6).toFixed(1)+"M":n>=1000?(n/1000).toFixed(n>=10000?0:1)+
 const when=s=>s?s.slice(5,16).replace("T"," "):"";
 const cls=st=>st==="done"?"ok":/fail|error|stopped/.test(st||"")?"bad":/needs|await|partial/.test(st||"")?"warn":"mute";
 function meter(p,warnAt,badAt){const c=p>=badAt?"bad":p>=warnAt?"warn":"";return `<div class="meter ${c}"><div style="width:${Math.min(100,p)}%"></div></div>`}
-function table(rows){return rows.length?`<table>${rows.join("")}</table>`:'<span class="mute">none</span>'}
+function table(rows,empty){return rows.length?`<table>${rows.join("")}</table>`:`<span class="mute">${empty||"none"}</span>`}
 async function show(id,details){
   const r=await fetch(`/run/${encodeURIComponent(id)}?t=${T}${details?"&details=1":""}`);
   $("vtitle").textContent=`run ${id}${details?" · details":""}`;$("vbody").textContent=await r.text();
@@ -241,7 +241,10 @@ async function load(){
       <div class="mute">${c.calls} calls in the latest conversation · last ${when(c.updated)}</div>`}
   else $("ctx").innerHTML='<span class="mute">no orchestrator conversation yet</span>';
   $("running").innerHTML=table(s.running.map(r=>`<tr><td><a onclick="show('${esc(r.run)}')">${esc(r.run)}</a></td><td>${esc(r.model)}</td><td>${esc(r.project)}</td><td>${esc((r.task||"").slice(0,80))}</td></tr>`));
-  $("todo").innerHTML=table(s.todo.map(t=>`<tr><td class="mute">#${t.id}</td><td>${t.status==="doing"?'<b class="warn">doing</b> ':""}${t.prio==="high"?'<b class="bad">high</b> ':""}${esc(t.text)}${t.ref?` <span class="mute">(${esc(t.ref)})</span>`:""}</td><td class="n mute">${esc(t.due||"")}</td></tr>`));
+  $("todo").innerHTML=table(s.todo.map(t=>`<tr><td class="mute">#${t.id}</td><td>${t.status==="doing"?'<b class="warn">doing</b> ':""}${t.prio==="high"?'<b class="bad">high</b> ':""}${esc(t.text)}${t.ref?` <span class="mute">(${esc(t.ref)})</span>`:""}</td><td class="n mute">${esc(t.due||"")}</td></tr>`),
+    'Nothing open. Your requests and what is in progress go here: ask the orchestrator to keep your work in '
+    +'the work queue, or add an item yourself with <code>lean-agent todo add "..." -p &lt;project&gt;</code>.'
+    +(s.todo_done_week?` (${s.todo_done_week} done this week)`:""));
   $("runs").innerHTML=table(s.runs.map(r=>`<tr><td class="id"><a onclick="show('${esc(r.id)}')">${esc(r.id)}</a></td><td class="${cls(r.status)}" title="${esc(r.status)}">${esc((r.status||"").split(":")[0])}</td><td class="hide-s">${esc(r.model)}</td><td class="hide-s">${esc(r.project)}${r.role?` <span class="mute">${esc(r.role)}</span>`:""}</td><td class="head">${esc(r.head)}</td><td class="n">${k(r.units)}</td><td class="n mute hide-s">${r.cost!=null?"$"+r.cost.toFixed(2):""}</td></tr>`));
   $("sched").innerHTML=table(s.schedule.map(j=>`<tr><td class="mute">#${j.id}</td><td>${esc(j.when)}</td><td><code>${esc(j.cmd)}</code></td><td class="n mute">${j.enabled?(j.next?"next "+when(j.next):""):"paused"}</td></tr>`))
     +(s.scheduled_results.length?'<div class="mute" style="margin-top:8px">Recent results</div>'+table(s.scheduled_results.map(r=>`<tr><td class="mute">#${r.id}</td><td class="${r.rc?"bad":"ok"}">exit ${r.rc}</td><td>${esc(r.first)}</td><td class="n mute">${when(r.ts)}</td></tr>`)):"");
