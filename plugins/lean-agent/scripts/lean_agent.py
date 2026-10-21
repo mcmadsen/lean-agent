@@ -1329,6 +1329,15 @@ def cmd_run(a):
             fh.write(build_append(project, cards, read_only, a.allow_send, bool(chrome_spec), role_rule, answer_lines))
         tools = a.tools or (READONLY_TOOLS + ",Bash" if read_only else WORKER_TOOLS)
 
+    todo_id = (prev or {}).get("todo") or getattr(a, "todo", None)
+    if todo_id is not None and not (prev or {}).get("todo"):
+        data = todos()
+        t = next((x for x in data["items"] if x["id"] == todo_id), None)
+        if not t:
+            die(f"no todo #{todo_id} (lean-agent todo list)")
+        if t["status"] == "open":  # working on it now: the board shows it in progress
+            t["status"] = "doing"
+            save_json(home("todo.json"), data)
     allow_cmd = (prev or {}).get("allow_cmd") or [c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()]
     if allow_cmd and not read_only:
         die("--allow-cmd is for --read-only workers (other workers run any command)")
@@ -1426,7 +1435,7 @@ def cmd_run(a):
     running_key = launch_key or run_id  # every run is listed while it runs (the dashboard, the status line)
     save_json(home("running", running_key + ".json"), {"pid": os.getpid(), "started": now_iso(), "run": run_id,
                                                       "task": task[:2000], "model": model, "project": slug,
-                                                      "workdir": workdir, "role": getattr(a, "role", None)
+                                                      "workdir": workdir, "todo": todo_id, "role": getattr(a, "role", None)
                                                       or (prev or {}).get("role")})
     for line in mcp_cost_lines(mcp_specs, chrome_spec):
         print(line, flush=True)
@@ -1544,7 +1553,7 @@ def cmd_run(a):
         "mcp_seq": mcp_seq[:60], "mcp_offered": {k: len(v) for k, v in offered.items()},
         "result_head": (summary or "")[:600],
         "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
-        "allow_cmd": allow_cmd,
+        "allow_cmd": allow_cmd, "todo": todo_id,
         "role": role, "effort": effort, "worktree": wt_name, "review_meta": review_meta, "launch_key": launch_key,
         "recipe": (getattr(a, "recipe", None) or (None, None))[0],
         "recipe_step": (getattr(a, "recipe", None) or (None, None))[1],
@@ -7192,6 +7201,8 @@ def build_parser():
                    help="give the worker this MCP server, optionally only these tools (repeatable)")
     s.add_argument("--escalate", metavar="MODEL,MODEL", help="try the first model; if its run fails, run the task "
                    "again on the next (e.g. haiku,sonnet). Replaces --model")
+    s.add_argument("--todo", type=lambda v: int(v.lstrip("#")), metavar="N", help="the work-queue item this run "
+                   "works on (it shows on that card in the dashboard's board; an open item becomes doing)")
     s.add_argument("--allow-cmd", action="append", metavar="PREFIX", help="--read-only: also allow this read-only "
                    "command prefix, e.g. \"az pipelines runs show\" (repeatable; commands that change things are refused)")
     s.add_argument("--max-reads", type=int, metavar="TOKENS", help="stop the worker once it has re-read this many "

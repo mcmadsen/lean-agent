@@ -1677,6 +1677,54 @@ class CliTest(unittest.TestCase):
             p.wait(timeout=60)
         self.assertEqual(self.cli("runs", "--running").stdout.strip(), "No runs in progress.")
 
+    def test_board_places_todos_by_their_runs_and_reviews(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        for text, ref in (("Fix the export", "PR 42"), ("Ask about the cache", None), ("Plain item", None),
+                          ("Old finished item", None), ("Waiting review", "feature/x")):
+            args = ["todo", "add", text, "-p", "proj"] + (["--ref", ref] if ref else [])
+            self.assertEqual(self.cli(*args).returncode, 0)
+        r = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--todo", "#1", "fix it")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("[doing]", self.cli("todo", "list").stdout.splitlines()[0])  # an open item became doing
+        r = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--todo", "99", "x", check=False)
+        self.assertIn("no todo #99", r.stderr)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--todo", "2", "ask it",
+                 FAKE_ANSWER="Should I?", FAKE_FEEDBACK='{"status": "needs-input", "used": [], "unneeded": []}')
+        self.cli("todo", "done", "4")
+        home = self.env["LEAN_AGENT_HOME"]
+        ledger = [json.loads(l) for l in open(os.path.join(home, "ledger.jsonl"))]
+        self.assertEqual([e.get("todo") for e in ledger], [1, 2])
+        os.makedirs(os.path.join(home, "reviews"), exist_ok=True)
+        with open(os.path.join(home, "reviews", "proj.jsonl"), "a") as fh:
+            fh.write(json.dumps({"ts": "2030-01-01T10:00:00", "ref": "pr-42", "verdict": "changes-requested",
+                                 "findings": [{"severity": "major"}]}) + "\n")
+            fh.write(json.dumps({"ts": "2030-01-01T11:00:00", "ref": "origin/feature/x", "verdict": "approve",
+                                 "gaps": [{"what": "the export isn't done yet"}]}) + "\n")
+        sys.path.insert(0, os.path.dirname(CLI))
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = home
+        try:
+            import dashboard
+            b = dashboard.state()["board"]
+            # a run with this item's number is running now: it's in progress whatever else it has
+            json.dump({"pid": os.getpid(), "run": "live1", "todo": 3}, open(os.path.join(home, "running", "live1.json"), "w"))
+            b2 = dashboard.state()["board"]
+        finally:
+            os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.update(LEAN_AGENT_HOME=old)
+        col = {c["id"]: c["column"] for c in b["cards"]}
+        self.assertEqual(col, {1: "In review", 2: "Waiting on you", 3: "Open", 4: "Done", 5: "Waiting on you"})
+        card1 = next(c for c in b["cards"] if c["id"] == 1)
+        self.assertEqual((card1["review"]["verdict"], card1["review"]["blocking"], len(card1["runs"])),
+                         ("changes-requested", 1, 1))
+        self.assertEqual(b["projects"], ["proj"])
+        card3 = next(c for c in b2["cards"] if c["id"] == 3)
+        self.assertEqual((card3["column"], card3["live"]), ("In progress", ["live1"]))
+        self.assertNotEqual(card3["sig"], next(c for c in b["cards"] if c["id"] == 3)["sig"])  # it shows as changed
+        self.assertEqual({c["id"]: c["sig"] for c in b["cards"] if c["id"] != 3},
+                         {c["id"]: c["sig"] for c in b2["cards"] if c["id"] != 3})
+        self.assertIn('id="c-board"', dashboard.PAGE)
+        self.assertNotIn("draggable", dashboard.PAGE)  # view only for now
+
     def test_dashboard_picks_up_new_code_without_restart(self):
         import shutil
         import socket

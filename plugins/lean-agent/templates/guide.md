@@ -193,8 +193,8 @@ lean-agent card unarchive {{P}} checkout-notes
   `lean-agent handoff --note "..."` (close with `--done N`). When lean-agent says your context is large, add
   the open items, then ask the user to send /compact, or to start a fresh session for the next topic.
 - A week of work: keep the work queue in `lean-agent todo` (add what the user asks for, with `-p`, `--ref` and
-  `--prio`; `todo start N` when a worker takes it; `todo done N "<result>"` when it's finished; `todo next` when
-  you're free). Recurring work is `lean-agent schedule` (e.g. `schedule add "weekdays 08:45" do <project>
+  `--prio`; give a worker the item it works on with `run --todo N` (it becomes doing, and the dashboard's board
+  shows the run on that card); `todo done N "<result>"` when it's finished; `todo next` when you're free). Recurring work is `lean-agent schedule` (e.g. `schedule add "weekdays 08:45" do <project>
   <recipe>`; `schedule defaults` adds an update check, weekly optimize reports and a Friday `week` report).
   You're told when a scheduled job finishes; mention it to the user if it matters. When lean-agent says you're
   ahead of pace for the week, prefer haiku and smaller steps. `lean-agent week` reports the week.
