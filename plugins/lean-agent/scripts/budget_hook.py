@@ -20,6 +20,7 @@ context reaches 80% of the session's compaction point (or LEAN_AGENT_CTX_NUDGE t
 isn't known; again every 50,000 more) Claude gets a note: check what fills the context and save open items
 before Claude Code compacts.
 """
+import datetime
 import json
 import os
 import re
@@ -28,6 +29,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import usage  # noqa: E402
 import push_guard  # noqa: E402
+import lean_schedule  # noqa: E402
 
 
 def compaction_point():
@@ -187,6 +189,20 @@ def main():
             )
         )
         return 0
+
+    if in_home and not lean_schedule.timer_alive() and lean_schedule.any_due():
+        lean_schedule.spawn_runner()  # no `lean-agent up` timer: run due scheduled jobs in the background
+    if in_home and not checking:
+        if not state.get("sched_seen"):  # a new session: only results from now on (older ones are in the hand-off)
+            state["sched_seen"] = datetime.datetime.now().isoformat(timespec="seconds")
+        new = lean_schedule.results_since(state["sched_seen"])
+        if new:
+            state["sched_seen"] = new[-1]["ts"]
+            usage.save_state(session_id, state)
+            emit(additionalContext="lean-agent: scheduled job(s) finished: " + "; ".join(
+                f"#{r['id']} `lean-agent {' '.join(r['args'])}` exit {r['rc']}: {r['first'][:120]} (full: {r['output']})"
+                for r in new[-5:]) + ". Tell the user in a line or two if it matters to them.")
+            return 0
 
     compact_at = compaction_point()
     # before Claude Code compacts: at 80% of its compaction point (sessions started without lean-agent's early

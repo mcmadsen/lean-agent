@@ -638,6 +638,21 @@ def record_plan_usage(info):
         pass
 
 
+def week_pace():
+    """('week: 48% of your plan used, 43% of the week gone: on pace', ahead?) from Claude's own numbers."""
+    import time
+    real, _ = plan_usage()
+    w = (real or {}).get("seven_day")
+    if not w or not w.get("resets_at"):
+        return "", False
+    gone = max(0.0, min(100.0, 100 - (w["resets_at"] - time.time()) * 100 / (7 * 24 * 3600)))
+    ahead = w["pct"] - gone
+    text = f"week: {w['pct']:.0f}% of your plan used, {gone:.0f}% of the week gone"
+    if ahead > 10:
+        return text + f": {ahead:.0f} points ahead of pace (prefer -m haiku and smaller steps)", True
+    return text + ": on pace", False
+
+
 def plan_usage(max_age_minutes=PLAN_FRESH_MINUTES):
     """The last real plan utilization Claude reported, with its age in minutes; ({}, None) if none.
     Windows whose reset time has passed since are dropped (they've started over)."""

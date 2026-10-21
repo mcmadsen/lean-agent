@@ -16,6 +16,7 @@ import io
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -33,6 +34,7 @@ import lean_mcp  # noqa: E402
 import lean_log  # noqa: E402
 import lean_memory  # noqa: E402
 import push_guard  # noqa: E402
+import lean_schedule  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -847,6 +849,8 @@ def recommend_model(ttype, task=None):
     line, low = budget_line()
     if low and best[0] != "haiku":
         best = ("haiku", best[1] + "; budget is low, so prefer haiku and smaller steps")
+    elif pace_line()[1] and best[0] != "haiku":
+        best = ("haiku", best[1] + "; ahead of pace for the week, so prefer haiku and smaller steps")
     return best
 
 
@@ -4041,6 +4045,9 @@ def print_plan_line():
 
 def print_limits():
     print_plan_line()
+    line, _ = pace_line()
+    if line:
+        print(line)
     w = usage.window_usage()
     budgets, pbud = usage.window_budgets(), usage.pct_budgets()
     cfg = usage.load_limits()
@@ -5482,12 +5489,30 @@ def drop_bridge_pointers(h):
             print(f"lean-agent: removed {path}; starting a new Remote Control session", flush=True)
 
 
+def schedule_timer(every=300):
+    """While `lean-agent up` runs: every few minutes, run the scheduled jobs that are due (and leave a heartbeat,
+    so the orchestrator's hook knows it needn't start them itself)."""
+    beat = home("scheduled", ".timer")
+    while True:
+        try:
+            os.makedirs(os.path.dirname(beat), exist_ok=True)
+            with open(beat, "w") as fh:
+                fh.write(now_iso())
+            if lean_schedule.any_due():
+                with open(home("logs", "schedule.log"), "a") as log:
+                    lean_schedule.run_due(log=lambda m: log.write(f"{now_iso()} {m}\n"))
+        except Exception as exc:  # the timer must never take `up` down
+            lean_log.log("error", "schedule", f"timer: {exc}")
+        time.sleep(every)
+
+
 def remote_control(cmd, env, h):
     """Run `claude remote-control`, passing its output through. If it can't bring back the previous session
     (deleted in the app, archived, expired: a 404 on worker registration), stop it, drop the pointer to that
     session and start once more with a new one, the same as `up --fresh`. Its output (stdout and stderr) goes
     through a pseudo-terminal when this is a terminal, so it still draws for one; keys go to it directly."""
     import threading
+    threading.Thread(target=schedule_timer, daemon=True).start()
     for attempt in (1, 2):
         stale, served = threading.Event(), threading.Event()
         proc, sources = start_watched(cmd, env)
@@ -5642,6 +5667,23 @@ def cmd_sync(a):
         die("this lean-agent isn't running from a git clone, so there's nothing to pull; "
             "update the plugin with: claude plugin update " + PLUGIN_ID)
     claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
+    if a.check:  # look, don't touch
+        git(root, "fetch", "-q", "origin")
+        upstream = git(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") or "origin/main"
+        behind = int(git(root, "rev-list", "--count", f"HEAD..{upstream}") or 0)
+        if not behind:
+            print(f"lean-agent {plugin_version()} is up to date")
+            return 0
+        theirs = git(root, "show", f"{upstream}:plugins/lean-agent/.claude-plugin/plugin.json") or "{}"
+        try:
+            new_version = json.loads(theirs).get("version", "?")
+        except ValueError:
+            new_version = "?"
+        print(f"update available: lean-agent {plugin_version()} -> {new_version} ({behind} commit(s)). "
+              "Install it: lean-agent sync")
+        for line in (git(root, "log", "--format=  %s", f"HEAD..{upstream}") or "").splitlines()[:6]:
+            print(line[:140])
+        return 0
     if not a.no_pull:
         old = git(root, "rev-parse", "HEAD")
         if git(root, "status", "--porcelain", "--untracked-files=no"):
@@ -6064,6 +6106,326 @@ def cmd_budget(a):
     sys.exit(rc)
 
 
+# ---------------------------------------------------------------- commands: a week of work
+
+PRIOS = {"high": 0, "normal": 1, "low": 2}
+
+
+def todos():
+    return load_json(home("todo.json"), {"next": 1, "items": []})
+
+
+def todo_line(t):
+    bits = [f"#{t['id']}", {"doing": "[doing]", "done": "[done]"}.get(t["status"], "[open]")]
+    if t.get("prio", "normal") != "normal":
+        bits.append(t["prio"])
+    bits.append(t["text"])
+    extra = [x for x in (t.get("project"), t.get("ref"), f"due {t['due']}" if t.get("due") else "") if x]
+    return " ".join(bits) + (f"  ({', '.join(extra)})" if extra else "")
+
+
+def open_todos(data=None):
+    items = [t for t in (data or todos())["items"] if t["status"] != "done"]
+    return sorted(items, key=lambda t: (t["status"] != "doing", PRIOS.get(t.get("prio", "normal"), 1),
+                                        t.get("due") or "9999", t["id"]))
+
+
+def cmd_todo(a):
+    data = todos()
+    by_id = {t["id"]: t for t in data["items"]}
+
+    def pick(n):
+        try:
+            t = by_id.get(int(str(n).lstrip("#")))
+        except ValueError:
+            t = None
+        if not t:
+            die(f"no todo #{n} (lean-agent todo list)")
+        return t
+    if a.action == "add":
+        text = " ".join(a.args).strip()
+        if not text:
+            die('what? lean-agent todo add "Fix the export timeout" -p <project> --ref "PR 512"')
+        project = resolve_project(a.project)[0] if a.project else None
+        t = {"id": data["next"], "text": text, "project": project, "ref": a.ref, "prio": a.prio or "normal",
+             "due": a.due, "status": "open", "created": now_iso(), "notes": []}
+        data["items"].append(t)
+        data["next"] += 1
+        save_json(home("todo.json"), data)
+        print(f"added {todo_line(t)}")
+        return 0
+    if a.action in ("start", "done", "note", "rm", "reopen"):
+        if not a.args:
+            die(f"which one? lean-agent todo {a.action} <number>")
+        t = pick(a.args[0])
+        if a.action == "start":
+            t["status"] = "doing"
+        elif a.action == "reopen":
+            t["status"] = "open"
+        elif a.action == "done":
+            t["status"], t["done_at"] = "done", now_iso()
+            if len(a.args) > 1:
+                t["notes"].append(" ".join(a.args[1:]))
+        elif a.action == "note":
+            t["notes"].append(" ".join(a.args[1:]))
+        else:
+            data["items"].remove(t)
+        save_json(home("todo.json"), data)
+        print(f"{a.action}: {todo_line(t)}")
+        return 0
+    if a.action == "next":
+        items = open_todos(data)
+        if not items:
+            print("Nothing open. Add work with: lean-agent todo add \"...\"")
+            return 0
+        t = items[0]
+        print(todo_line(t))
+        for n in t.get("notes") or []:
+            print(f"  note: {n}")
+        if t["status"] == "open":
+            print(f"(start it: lean-agent todo start {t['id']}; done: lean-agent todo done {t['id']} \"<result>\")")
+        return 0
+    items = data["items"] if a.all else open_todos(data)
+    if a.project:
+        slug = resolve_project(a.project)[0]
+        items = [t for t in items if t.get("project") == slug]
+    if not items:
+        print("No open todos." if not a.all else "No todos.")
+    for t in items:
+        print(todo_line(t))
+    done_week = [t for t in data["items"] if t["status"] == "done" and (t.get("done_at") or "") >= (
+        datetime.datetime.now() - datetime.timedelta(days=7)).isoformat()]
+    if not a.all and done_week:
+        print(f"({len(done_week)} done in the last 7 days: lean-agent todo list --all)")
+    return 0
+
+
+def cmd_schedule(a):
+    items = lean_schedule.jobs()
+    if a.action == "run-due":
+        lean_schedule.run_due()
+        return 0
+    if a.action == "defaults":
+        wanted = [("daily 07:30", ["sync", "--check"]), ("fri 16:00", ["week"])]
+        wanted += [("mon 07:45", ["optimize", slug]) for slug in sorted(projects())]
+        have = {(j["when"], tuple(j["args"])) for j in items}
+        for when, args in wanted:
+            if (when, tuple(args)) in have:
+                continue
+            items.append({"id": max([j["id"] for j in items] + [0]) + 1, "when": when, "args": args,
+                          "created": now_iso(), "enabled": True})
+            print(f"scheduled #{items[-1]['id']}: {when}: lean-agent {' '.join(args)}")
+        lean_schedule.save_jobs(items)
+        print("Maintenance jobs: an update check every morning (it doesn't install anything), a weekly optimize "
+              "report per project (no --apply), and a week report on Fridays. Pause one: lean-agent schedule pause <n>")
+        return 0
+    if a.action == "add":
+        if not a.when or not a.args:
+            die('lean-agent schedule add "weekdays 08:45" do <project> <recipe>')
+        try:
+            lean_schedule.parse_when(a.when)
+        except ValueError as e:
+            die(f"when: {e}")
+        args = list(a.args[1:] if a.args[:1] == ["--"] else a.args)
+        if args[0] in lean_schedule.NOT_SCHEDULABLE or args[0] not in build_parser()._subparsers._group_actions[0].choices:
+            die(f"a schedule runs a lean-agent command (do, run, review, week, ...), not {args[0]!r}")
+        if args[0] == "run" and "--why" not in args:
+            args += ["--why", f"scheduled: {a.when}"]
+        job = {"id": max([j["id"] for j in items] + [0]) + 1, "when": a.when, "args": args,
+               "created": now_iso(), "enabled": True}
+        items.append(job)
+        lean_schedule.save_jobs(items)
+        nxt = lean_schedule.next_run(job)
+        print(f"scheduled #{job['id']}: {a.when}: lean-agent {' '.join(args)} (next {nxt:%a %H:%M})")
+        print("Runs while `lean-agent up` is running (or from the orchestrator's next tool call); "
+              "`lean-agent service install` keeps it running across restarts (optional).")
+        return 0
+    if a.action in ("rm", "run", "pause", "resume"):
+        try:
+            job = next(j for j in items if j["id"] == int(str(a.when or "").lstrip("#")))
+        except (StopIteration, ValueError):
+            die(f"no scheduled job {a.when!r} (lean-agent schedule list)")
+        if a.action == "rm":
+            items.remove(job)
+        elif a.action in ("pause", "resume"):
+            job["enabled"] = a.action == "resume"
+        if a.action == "run":  # now, in the foreground; counts as its latest run
+            job["last"] = now_iso()
+            lean_schedule.save_jobs(items)
+            return subprocess.run([sys.executable, os.path.abspath(__file__), *job["args"]], text=True).returncode
+        lean_schedule.save_jobs(items)
+        print(f"{a.action}: #{job['id']}")
+        return 0
+    if not items:
+        print('No scheduled jobs. Add one: lean-agent schedule add "weekdays 08:45" do <project> <recipe>')
+    for j in items:
+        nxt = lean_schedule.next_run(j) if j.get("enabled", True) else None
+        print(f"#{j['id']}  {j['when']:<16} lean-agent {' '.join(j['args'])}"
+              + (f"  (next {nxt:%a %H:%M}" if nxt else "  (paused")
+              + (f", last {j['last'][5:16].replace('T', ' ')})" if j.get("last") else ")"))
+    recent = lean_schedule.results_since((datetime.datetime.now() - datetime.timedelta(days=2)).isoformat())
+    for r in recent[-5:]:
+        print(f"  ran #{r['id']} {r['ts'][5:16].replace('T', ' ')}: exit {r['rc']}: {r['first'][:90]}  ({r['output']})")
+    runner = ("the `lean-agent up` timer" if lean_schedule.timer_alive() else
+              "the orchestrator's next tool call (no `lean-agent up` timer seen in the last 15 minutes)")
+    if items:
+        print(f"Due jobs run from {runner}.")
+    return 0
+
+
+def pace_line():
+    """('week: 48% of your plan used, 43% of the week gone: on pace', ahead?) from Claude's own numbers."""
+    return usage.week_pace()
+
+
+def cmd_week(a):
+    days = a.days
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).isoformat()
+    runs = [r for r in ledger() if r.get("ts", "") >= cutoff]
+    if a.project:
+        slug = resolve_project(a.project)[0]
+        runs = [r for r in runs if r["project"] == slug]
+    print(f"lean-agent, the last {days} days" + (f" ({a.project})" if a.project else ""))
+    line, _ = pace_line()
+    if line:
+        print(line)
+    if runs:
+        ok = sum(r["status"] == "done" for r in runs)
+        units = sum(r.get("units", 0) for r in runs)
+        cost = sum(r.get("cost_usd") or 0 for r in runs)
+        print(f"Runs: {len(runs)} ({ok} done) · {units:,} sonnet-eq · ${cost:.2f} API price")
+        by = {}
+        for r in runs:
+            m = by.setdefault(model_family(r["model"]), [0, 0])
+            m[0] += 1
+            m[1] += r.get("units", 0)
+        print("  by model: " + ", ".join(f"{m} {n} runs {u:,}" for m, (n, u) in sorted(by.items(), key=lambda kv: -kv[1][1])))
+        byp = {}
+        for r in runs:
+            byp[r["project"]] = byp.get(r["project"], 0) + 1
+        print("  by project: " + ", ".join(f"{p_} {n}" for p_, n in sorted(byp.items(), key=lambda kv: -kv[1])))
+        saved = sum(run_savings(r)["context"] + run_savings(r)["model"] for r in runs)
+        if saved > 0:
+            print(f"  saved (estimate): ~{saved:,} sonnet-eq vs normal sessions on Sonnet")
+        print("  biggest: " + "; ".join(f"{r['id']} {r.get('units', 0):,} {str(r.get('task', ''))[:40]!r}"
+                                         for r in sorted(runs, key=lambda r: -r.get("units", 0))[:3]))
+    else:
+        print("Runs: none")
+    reviews = []
+    for f in glob.glob(home("reviews", "*.jsonl")):
+        reviews += [r for r in read_jsonl(f) if r.get("ts", "") >= cutoff]
+    if reviews:
+        verdicts = {}
+        for r in reviews:
+            verdicts[r.get("verdict")] = verdicts.get(r.get("verdict"), 0) + 1
+        print("Reviews: " + ", ".join(f"{v} {n}" for v, n in verdicts.items()))
+    pushes = [p_ for p_ in read_jsonl(home("pushes.jsonl")) if p_.get("ts", "") >= cutoff and p_.get("ok")]
+    if pushes:
+        print("Pushed: " + ", ".join(f"{p_['branch']} -> {p_['to']}" for p_ in pushes[-8:]))
+    data = todos()
+    done = [t for t in data["items"] if t["status"] == "done" and (t.get("done_at") or "") >= cutoff]
+    print(f"Todos: {len(done)} done, {len(open_todos(data))} open"
+          + (": " + "; ".join(t["text"][:50] for t in done[-6:]) if done else ""))
+    sched = lean_schedule.results_since(cutoff)
+    if sched:
+        print(f"Scheduled runs: {len(sched)} ({sum(r['rc'] != 0 for r in sched)} failed)")
+    return 0
+
+
+SERVICE_LABEL = "com.lean-agent.up"
+
+
+def service_platform():
+    return os.environ.get("LEAN_AGENT_SERVICE_PLATFORM") or ("mac" if sys.platform == "darwin" else
+                                                            "linux" if sys.platform.startswith("linux") else "")
+
+
+def service_file():
+    if service_platform() == "mac":
+        return os.path.expanduser(f"~/Library/LaunchAgents/{SERVICE_LABEL}.plist")
+    return os.path.expanduser("~/.config/systemd/user/lean-agent.service")
+
+
+def cmd_service(a):
+    """Optional: keep `lean-agent up` running across logins, restarts and closed terminals."""
+    plat = service_platform()
+    if not plat:
+        die("the background service is for macOS (launchd) and Linux (systemd --user)")
+    path = service_file()
+    bin_ = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
+    log = home("logs", "service.log")
+    tool = (os.environ.get("LEAN_AGENT_LAUNCHCTL") or "launchctl") if plat == "mac" else (
+        os.environ.get("LEAN_AGENT_SYSTEMCTL") or "systemctl")
+    uid = str(os.getuid()) if hasattr(os, "getuid") else "0"
+
+    def ctl(*args):
+        cmd = [tool, *args] if plat == "mac" else [tool, "--user", *args]
+        p = subprocess.run(cmd, capture_output=True, text=True)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    if a.action == "install":
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        args = [bin_, "up", "--name", a.name]
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": os.path.expanduser("~"), "LEAN_AGENT_NO_PROMPT": "1"}
+        if os.environ.get("LEAN_AGENT_HOME"):
+            env["LEAN_AGENT_HOME"] = os.environ["LEAN_AGENT_HOME"]
+        if plat == "mac":
+            import plistlib
+            with open(path, "wb") as fh:
+                plistlib.dump({"Label": SERVICE_LABEL, "ProgramArguments": args, "RunAtLoad": True,
+                               "KeepAlive": True, "ThrottleInterval": 60, "EnvironmentVariables": env,
+                               "StandardOutPath": log, "StandardErrorPath": log,
+                               "WorkingDirectory": home("home")}, fh)
+            ctl("bootout", f"gui/{uid}/{SERVICE_LABEL}")
+            rc, out = ctl("bootstrap", f"gui/{uid}", path)
+        else:
+            with open(path, "w") as fh:
+                fh.write("[Unit]\nDescription=lean-agent orchestrator (lean-agent up)\n\n[Service]\n"
+                         f"ExecStart={' '.join(shlex.quote(x) for x in args)}\nRestart=always\nRestartSec=60\n"
+                         + "".join(f"Environment={k}={shlex.quote(v)}\n" for k, v in env.items())
+                         + f"StandardOutput=append:{log}\nStandardError=append:{log}\n\n[Install]\n"
+                         "WantedBy=default.target\n")
+            ctl("daemon-reload")
+            rc, out = ctl("enable", "--now", "lean-agent.service")
+        print(f"installed {path}: `lean-agent up --name {a.name}` starts at login and restarts if it stops"
+              + ("" if rc == 0 else f" (but {tool} said: {out[:200]})"))
+        print(f"log: {log} · stop it: lean-agent service stop · remove it: lean-agent service uninstall")
+        return 0 if rc == 0 else 1
+    if not os.path.exists(path) and a.action != "uninstall":
+        print("The background service isn't installed (it's optional). Install it: lean-agent service install")
+        return 0
+    if a.action == "uninstall":
+        if plat == "mac":
+            ctl("bootout", f"gui/{uid}/{SERVICE_LABEL}")
+        else:
+            ctl("disable", "--now", "lean-agent.service")
+        if os.path.exists(path):
+            os.remove(path)
+            print(f"removed {path}")
+        else:
+            print("The background service isn't installed.")
+        return 0
+    if a.action == "logs":
+        text = read_text(log) if os.path.exists(log) else ""
+        sys.stdout.write("".join(text.splitlines(True)[-a.n:]) or "(no log yet)\n")
+        return 0
+    if plat == "mac":
+        cmd = {"start": ["kickstart", "-k", f"gui/{uid}/{SERVICE_LABEL}"], "stop": ["bootout", f"gui/{uid}/{SERVICE_LABEL}"],
+               "status": ["print", f"gui/{uid}/{SERVICE_LABEL}"]}[a.action]
+        if a.action == "start":
+            ctl("bootstrap", f"gui/{uid}", path)
+    else:
+        cmd = {"start": ["start", "lean-agent.service"], "stop": ["stop", "lean-agent.service"],
+               "status": ["status", "lean-agent.service"]}[a.action]
+    rc, out = ctl(*cmd)
+    if a.action == "status":
+        state = re.search(r"state = (\w+)|Active: (\S+ \S+)", out)
+        print(f"service: {path}: " + ((state.group(1) or state.group(2)) if state else ("running" if rc == 0 else "not running")))
+    else:
+        print(f"{a.action}: " + ("ok" if rc == 0 else out[:200]))
+    return rc
+
+
 def cmd_guard(a):
     projs = projects()
     if a.action in ("add", "rm"):
@@ -6412,6 +6774,7 @@ def build_parser():
     s = sub.add_parser("sync", help="pull lean-agent, update the plugin, refresh guide, settings, projects and repo blocks")
     s.add_argument("--no-pull", action="store_true", help="don't git pull; just refresh everything")
     s.add_argument("--no-learn", action="store_true", help="don't re-learn projects")
+    s.add_argument("--check", action="store_true", help="only say whether an update is available (installs nothing)")
     s.add_argument("--pulled", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(fn=cmd_sync)
 
@@ -6458,6 +6821,38 @@ def build_parser():
     s.add_argument("--top", type=int, default=8, help="how many of the biggest messages to list")
     s.add_argument("--no-probe", action="store_true", help="skip the start-up measurement (no Haiku call)")
     s.set_defaults(fn=cmd_context)
+
+    s = sub.add_parser("todo", help="the work queue across sessions: add | list | next | start | done | note | rm")
+    s.add_argument("action", nargs="?", default="list",
+                   choices=["add", "list", "next", "start", "done", "note", "rm", "reopen"])
+    s.add_argument("args", nargs="*", help="add: the text; start/done/note/rm: the number (done/note: then text)")
+    s.add_argument("--project", "-p")
+    s.add_argument("--ref", help="the tracker item, PR or branch it's about")
+    s.add_argument("--prio", choices=list(PRIOS))
+    s.add_argument("--due", metavar="YYYY-MM-DD")
+    s.add_argument("--all", action="store_true", help="list: include done ones")
+    s.set_defaults(fn=cmd_todo)
+
+    s = sub.add_parser("schedule", help="recurring lean-agent jobs: list | add WHEN CMD... | rm N | run N | pause N | "
+                       "resume N | defaults | run-due")
+    s.add_argument("action", nargs="?", default="list",
+                   choices=["list", "add", "rm", "run", "pause", "resume", "defaults", "run-due"])
+    s.add_argument("when", nargs="?", help='add: "hourly", "every 2h", "daily 09:00", "weekdays 08:45", "mon,wed 10:00"; '
+                   "rm/run/pause/resume: the job number")
+    s.add_argument("args", nargs=argparse.REMAINDER, help="add: the lean-agent command, e.g. do <project> <recipe>")
+    s.set_defaults(fn=cmd_schedule)
+
+    s = sub.add_parser("week", help="the last 7 days: pace, runs, reviews, pushes, todos, scheduled jobs")
+    s.add_argument("--days", type=int, default=7)
+    s.add_argument("--project", "-p")
+    s.set_defaults(fn=cmd_week)
+
+    s = sub.add_parser("service", help="optional: keep `lean-agent up` running across logins and restarts "
+                       "(install | status | start | stop | logs | uninstall)")
+    s.add_argument("action", choices=["install", "status", "start", "stop", "logs", "uninstall"])
+    s.add_argument("--name", default="lean-agent", help="install: the session name in the Claude app")
+    s.add_argument("-n", type=int, default=40, help="logs: last N lines")
+    s.set_defaults(fn=cmd_service)
 
     s = sub.add_parser("guard", help="branches lean-agent never pushes to: list | add | rm (globs; default release/*, "
                        "develop, main, master)")

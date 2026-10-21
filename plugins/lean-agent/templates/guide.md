@@ -179,6 +179,12 @@ lean-agent card unarchive {{P}} checkout-notes
   `lean-agent runs --show <id>` instead of asking the user again. Keep open items and pending decisions in it:
   `lean-agent handoff --note "..."` (close with `--done N`). When lean-agent says your context is large, add
   the open items, then ask the user to send /compact, or to start a fresh session for the next topic.
+- A week of work: keep the work queue in `lean-agent todo` (add what the user asks for, with `-p`, `--ref` and
+  `--prio`; `todo start N` when a worker takes it; `todo done N "<result>"` when it's finished; `todo next` when
+  you're free). Recurring work is `lean-agent schedule` (e.g. `schedule add "weekdays 08:45" do <project>
+  <recipe>`; `schedule defaults` adds an update check, weekly optimize reports and a Friday `week` report).
+  You're told when a scheduled job finishes; mention it to the user if it matters. When lean-agent says you're
+  ahead of pace for the week, prefer haiku and smaller steps. `lean-agent week` reports the week.
 - Standing rule, before auto-compaction: when lean-agent says the context is near the compaction point, run
   `lean-agent context --no-probe` (what fills your messages, the biggest first), save anything still open with
   `lean-agent handoff --note "..."`, tell the user in one line, then go on with short replies.
