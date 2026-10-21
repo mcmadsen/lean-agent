@@ -3120,6 +3120,7 @@ def cmd_review(a):
         meta["since_hunks"] = changed_hunks(path, since)
         meta["earlier"] = [str(f.get("issue", "")) for f in last.get("findings") or []]
         ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=prev.get("model") or model,
+                                todo=getattr(a, "todo", None) or prev.get("todo"),
                                 why=f"re-review after fixes ({effort} effort, fresh context)", cards=None,
                                 card_list=cards, project=slug, read_only=True, chrome=None, mcp=None, tools=None,
                                 allow_send=None, max_turns=a.max_turns, max_usd=a.max_usd, max_context=a.max_context,
@@ -3217,6 +3218,7 @@ def cmd_review(a):
             "edited_tests": focus["tests"], "independent": bool(a.independent), "gaps": focus.get("gaps") or [],
             "goal": getattr(a, "goal", None), "ci_parity": focus.get("ci_parity") or []}
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=model, estimate=getattr(a, "_estimate", None),
+                            todo=getattr(a, "todo", None),
                             why=f"pre-PR review ({effort} effort)", cards=None, card_list=cards, project=slug,
                             read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=a.max_turns,
                             max_usd=a.max_usd, max_context=a.max_context, ttype="review", role="reviewer",
@@ -6421,6 +6423,7 @@ def cmd_do(a):
                     "Nothing is approved yet: list each change (item, from -> to, evidence) and stop with "
                     "awaiting-confirmation."))
     ns = argparse.Namespace(resume=None, task=[text], task_file=None, model=step.get("model") or r["model"],
+                            todo=getattr(a, "todo", None),
                             why=f"recipe {a.name}: {r['why']}", cards=r.get("cards"), project=slug,
                             read_only=bool(r.get("read_only")) and not a.apply, chrome=None,
                             mcp=list(step.get("mcp") or r.get("mcp") or []), tools=None, allow_send=a.allow_send,
@@ -6519,6 +6522,11 @@ def cmd_budget(a):
 # ---------------------------------------------------------------- commands: a week of work
 
 PRIOS = {"high": 0, "normal": 1, "low": 2}
+
+
+def todo_arg(v):
+    """--todo N (or #N); `none` says the run isn't queue work (a quick lookup)."""
+    return None if str(v).lower() in ("none", "-") else int(str(v).lstrip("#"))
 
 
 def todos():
@@ -7111,6 +7119,8 @@ def build_parser():
     s.add_argument("--fresh", action="store_true", help="--apply: re-derive instead of using the last check")
     s.add_argument("--again", action="store_true")
     s.add_argument("--yes", action="store_true")
+    s.add_argument("--todo", type=todo_arg, metavar="N", help="the work-queue item this is for "
+                   "(shown on that card in the dashboard's board)")
     s.set_defaults(fn=cmd_do)
 
     s = sub.add_parser("text-len", help="characters/words/lines of a text, checked against limits in tracker notes")
@@ -7201,7 +7211,7 @@ def build_parser():
                    help="give the worker this MCP server, optionally only these tools (repeatable)")
     s.add_argument("--escalate", metavar="MODEL,MODEL", help="try the first model; if its run fails, run the task "
                    "again on the next (e.g. haiku,sonnet). Replaces --model")
-    s.add_argument("--todo", type=lambda v: int(v.lstrip("#")), metavar="N", help="the work-queue item this run "
+    s.add_argument("--todo", type=todo_arg, metavar="N", help="the work-queue item this run "
                    "works on (it shows on that card in the dashboard's board; an open item becomes doing)")
     s.add_argument("--allow-cmd", action="append", metavar="PREFIX", help="--read-only: also allow this read-only "
                    "command prefix, e.g. \"az pipelines runs show\" (repeatable; commands that change things are refused)")
@@ -7294,6 +7304,8 @@ def build_parser():
     s.add_argument("--max-usd", type=float, default=env_num("LEAN_AGENT_REVIEW_MAX_USD", 6.0, float))
     s.add_argument("--max-turns", type=int, default=env_num("LEAN_AGENT_REVIEW_MAX_TURNS", 80))
     s.add_argument("--max-context", type=int, default=4000, help="token cap for the review's cards")
+    s.add_argument("--todo", type=todo_arg, metavar="N", help="the work-queue item this is for "
+                   "(shown on that card in the dashboard's board)")
     s.set_defaults(fn=cmd_review)
 
     s = sub.add_parser("tracker", help="the project's tracker: identity (org/project/repo, who you are) and notes "

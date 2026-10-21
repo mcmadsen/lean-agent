@@ -88,6 +88,36 @@ def foreground_worker(command):
     return ""
 
 
+def unlinked_worker(command):
+    """The lean-agent command in `command` that starts a worker without `--todo N` (so the board can't show it), or ''."""
+    for words in commands_run(command):
+        if os.path.basename(words[0]) != "lean-agent" or len(words) < 2 or words[1] not in ("run", "review", "do"):
+            continue
+        rest = words[2:]
+        if words[1] == "review" and (rest[:1] == ["decline"] or "--status" in rest):
+            continue
+        if "--resume" in rest or any(w == "--todo" or w.startswith("--todo=") for w in rest):
+            continue  # a resumed run keeps its item
+        return f"lean-agent {words[1]}"
+    return ""
+
+
+def todo_reminder(which):
+    """What to tell the orchestrator when it starts a worker that no work-queue item names."""
+    try:
+        with open(os.path.join(usage.lean_home(), "todo.json")) as fh:
+            items = [t for t in json.load(fh).get("items") or [] if t.get("status") != "done"]
+    except (OSError, ValueError, AttributeError):
+        items = []
+    items.sort(key=lambda t: (t.get("status") != "doing", t.get("id", 0)))
+    listed = "; ".join(f"#{t.get('id')} {str(t.get('text', ''))[:50]}" for t in items[:6])
+    return (f"lean-agent: this `{which}` isn't linked to a work-queue item, so the user's board won't show it. If it "
+            "is work for the user, start it with `--todo N`"
+            + (f" (open: {listed})" if listed else "")
+            + ", or add the item first: `lean-agent todo add \"...\" -p <project> --ref <PR or branch>`. A quick "
+            "lookup that isn't queue work: add `--todo none`.")
+
+
 READERS = re.compile(r"(?:^|[;&|(]\s*|\s)(cat|less|more|bat|nl|tail|head|sed|awk|python3?|jq)\s")
 RUN_FILE = re.compile(r"[^\s'\"]*(?:summary-\d+\.txt|details-\d+\.md|result\.json|/work/\d{4}-\d{6}-[0-9a-f]{4}/[^\s'\"]*)")
 
@@ -156,6 +186,12 @@ def main():
                 "to answer the user while the worker runs. Tell the user in one line what you started, then end your "
                 "turn; you're notified when it finishes, and its answer is short (`lean-agent runs --show <id>` "
                 "prints it again)."))
+            return 0
+
+    if in_home and event.get("tool_name") == "Bash" and os.environ.get("LEAN_AGENT_TODO_REMINDER") != "0":
+        which = unlinked_worker(command)
+        if which:
+            emit(permissionDecision="deny", permissionDecisionReason=todo_reminder(which))
             return 0
 
     if in_home and event.get("tool_name") == "Bash" and os.environ.get("LEAN_AGENT_READ_GUARD") != "0":
