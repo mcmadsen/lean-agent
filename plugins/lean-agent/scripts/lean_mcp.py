@@ -490,7 +490,11 @@ def parse_specs(specs):
             out.append((name.strip(), [t.strip() for t in tools.split(",") if t.strip()] or None))
             continue
         name, _, tools = spec.partition(":")
-        out.append((name.strip(), [t.strip() for t in tools.split(",") if t.strip()] or None))
+        name = name.strip()
+        # "server:a,server:b" means "server:a,b": a repeated server prefix is the same server's next preset/tool
+        wanted = [t.strip()[len(name) + 1:] if t.strip().startswith(name + ":") else t.strip()
+                  for t in tools.split(",") if t.strip()]
+        out.append((name, wanted or None))
     return out
 
 

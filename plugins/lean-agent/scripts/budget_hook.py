@@ -49,15 +49,38 @@ def emit(**fields):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", **fields}}))
 
 
-# commands that start a worker and can run for minutes
-WORKER_CMD = re.compile(r"(?:^|[;&|(]\s*|\s)lean-agent\s+(run|review|do|tracker)\b([^;&|]*)")
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
+
+
+def commands_run(command):
+    """The word lists of the commands a shell line runs: heredoc bodies and quoted text are data, not
+    commands; `cd x &&`, VAR=value, nohup, timeout N and env in front are skipped."""
+    import shlex
+    text = HEREDOC.sub("<<DATA", command)
+    out = []
+    for segment in re.split(r"&&|\|\||;|\||\n|&", text):
+        try:
+            words = shlex.split(segment)
+        except ValueError:
+            words = segment.split()
+        while words and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]) or words[0] in ("nohup", "env", "exec")):
+            words = words[1:]
+        if words[:1] == ["timeout"] and len(words) > 2:
+            words = words[2:]
+        if words:
+            out.append(words)
+    return out
 
 
 def foreground_worker(command):
     """The lean-agent command in `command` that would start a worker and hold the turn until it ends, or ''."""
-    for m in WORKER_CMD.finditer(command):
-        sub, rest = m.group(1), m.group(2)
-        if sub == "review" and re.search(r"--status\b|^\s*decline\b", rest):
+    for words in commands_run(command):
+        if os.path.basename(words[0]) != "lean-agent" or len(words) < 2:
+            continue
+        sub, rest = words[1], words[2:]
+        if sub not in ("run", "review", "do", "tracker"):
+            continue
+        if sub == "review" and (rest[:1] == ["decline"] or "--status" in rest):
             continue  # instant
         if sub == "tracker" and "--discover" not in rest:
             continue

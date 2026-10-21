@@ -1,6 +1,6 @@
 {
   "name": "lean-agent",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "description": "Token-frugal orchestrator for Claude Code: isolated worker agents with learned, minimal context, explicit model choice, budgets, and noisy-output squeezing.",
   "author": {
     "name": "McMadsen",
