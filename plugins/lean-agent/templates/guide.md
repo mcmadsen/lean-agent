@@ -202,8 +202,11 @@ lean-agent card unarchive {{P}} checkout-notes
   - Give the item its `--ref` (the PR or branch) as soon as there is one: its review then shows on the card.
   - `todo done N "<one-line result>"` when the deliverable is finished (merged, sent, answered), and
     `todo rm N` for work the user dropped. Don't leave finished items open.
-  - Decisions you're waiting on from the user go in a hand-off note (`handoff --note "..."`, shown in Open);
-    close it with `handoff --done N` once answered.
+  - `todo done N "<result>"`: the result is what the Done card shows, so make it the outcome in one line
+    ("merged as PR 512", "sent to the team"), not the plan.
+  - Hand-off notes (`handoff --note "..."`, shown above the board) are for decisions you're waiting on and
+    context a fresh session needs: one topic each, under ~200 characters, no file dumps. Close each with
+    `handoff --done N` as soon as it's answered or out of date; rewrite a note rather than letting it drift.
   - `todo next` when you're free.
 - Recurring work is `lean-agent schedule` (e.g. `schedule add "weekdays 08:45" do <project>
   <recipe>`; `schedule defaults` adds an update check, weekly optimize reports and a Friday `week` report).

@@ -134,18 +134,55 @@ def _ref_key(ref):
 
 def _same_ref(a, b):
     """A todo's ref and a review's ref name the same thing ("PR 512" and "pr-512", a branch with or without its
-    remote): equal once punctuation is gone, or one ends with the other."""
-    a, b = _ref_key(a), _ref_key(b)
-    if not a or not b:
+    remote, a work item number and a branch named after it): equal once punctuation is gone, one ends with the
+    other, or they share a number of 3+ digits."""
+    ka, kb = _ref_key(a), _ref_key(b)
+    if not ka or not kb:
         return False
-    short, long_ = sorted((a, b), key=len)
-    return a == b or (len(short) >= 4 and long_.endswith(short))
+    short, long_ = sorted((ka, kb), key=len)
+    if ka == kb or (len(short) >= 4 and long_.endswith(short)):
+        return True
+    nums = lambda t: set(re.findall(r"(?<!\d)\d{3,}(?!\d)", str(t)))
+    return bool(nums(a) & nums(b))
 
 
-def board(todo, ledger, running, reviews, now=None, notes=()):
-    """The work queue as columns: each todo with the runs that worked on it (`run --todo N`), whether one of them
-    is running now, and the latest review of its ref; the open hand-off notes are Open cards too. View only: it
-    says where things are, it changes nothing."""
+_BRANCH = {}
+
+
+def branch_state(path, ref, head, base=None):
+    """"merged" (the reviewed commit is in the base branch), "gone" (no such branch any more) or None, from the
+    project's git as of its last fetch (nothing is fetched). Cached for 5 minutes."""
+    import subprocess
+    if not path or not ref or not os.path.isdir(path):
+        return None
+    key = (path, ref, head, base)
+    hit = _BRANCH.get(key)
+    if hit and time.time() - hit[0] < 300:
+        return hit[1]
+    def git(*args):
+        try:
+            return subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, timeout=5).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return None
+    state = None
+    names = [ref] + ([] if ref.startswith("origin/") else [f"origin/{ref}"])
+    exists = [n for n in names if git("rev-parse", "--verify", "--quiet", n + "^{commit}")]
+    bases = [b for b in [base, "origin/HEAD", "origin/main", "origin/master", "origin/develop"] if b]
+    if head and git("cat-file", "-e", f"{head}^{{commit}}"):
+        for b in bases:
+            if b.split("/")[-1] != ref.split("/")[-1] and git("merge-base", "--is-ancestor", head, b):
+                state = "merged"
+                break
+    if not state and not exists:
+        state = "gone"
+    _BRANCH[key] = (time.time(), state)
+    return state
+
+
+def board(todo, ledger, running, reviews, now=None):
+    """The work queue as columns: each todo with the runs that worked on it (`run --todo N`), the runs working
+    on it now, and the latest review of its ref; reviews no open item covers get their own card, and so do
+    running runs no item names. View only: it says where things are, it changes nothing."""
     import hashlib
     now = now or datetime.datetime.now()
     week_ago = (now - datetime.timedelta(days=7)).isoformat()
@@ -159,7 +196,8 @@ def board(todo, ledger, running, reviews, now=None, notes=()):
     for m in running:
         if m.get("todo") in ids:
             live.setdefault(m["todo"], []).append(m)
-    cards = []
+    sig = lambda *x: hashlib.sha1(json.dumps(x, default=str).encode()).hexdigest()[:10]
+    cards, covered = [], set()
     for t in todo:
         if t.get("status") == "done" and (t.get("done_at") or "") < week_ago:
             continue
@@ -171,48 +209,63 @@ def board(todo, ledger, running, reviews, now=None, notes=()):
             hits = [r for r in reviews if _same_ref(t["ref"], r["ref"])
                     and (not t.get("project") or r["project"] == t["project"])]
             rv = max(hits, key=lambda r: r["ts"] or "") if hits else None
+            if t.get("status") != "done":
+                covered.update((r["project"], r["ref"]) for r in hits)
+        status = str((last or {}).get("status") or "").split(":")[0]
+        why = None
         if t.get("status") == "done":
             col = "Done"
         elif live.get(tid):
-            col = "In progress"
-        elif (last and str(last["status"]).split(":")[0] in WAITING) or (rv and rv.get("gaps")):
-            col = "Waiting on you"
+            col = "In progress"  # what runs now wins over how an earlier pass ended
+        elif status in WAITING:
+            col, why = "Waiting on you", "the run " + ("needs your input" if status == "needs-input"
+                                                       else "waits for your go-ahead")
+        elif rv and rv.get("branch") == "merged":
+            col, why = "Waiting on you", "merged: close the item (todo done)"
+        elif rv and rv.get("gaps"):
+            col, why = "Waiting on you", f"{rv['gaps']} known gap{'s' if rv['gaps'] > 1 else ''} to answer"
+        elif rv and rv.get("verdict") == "approve":
+            col, why = "Waiting on you", "approved: yours to merge or vote"
         elif rv:
             col = "In review"
         elif t.get("status") == "doing" or runs:
             col = "In progress"
         else:
             col = "Open"
+        result = t.get("result") or ((t.get("notes") or [None])[-1] if t.get("status") == "done" else None)
         card = {"id": tid, "text": t.get("text"), "project": t.get("project"), "ref": t.get("ref"),
                 "prio": t.get("prio") or "normal", "due": t.get("due"), "notes": len(t.get("notes") or []),
-                "column": col, "live": live.get(tid) or [], "runs": [r["id"] for r in runs][-4:],
-                "last_run": last, "done_at": t.get("done_at"),
-                "review": {k: rv.get(k) for k in ("verdict", "gaps", "blocking", "ts", "ref")} if rv else None}
-        seen = [col, card["text"], card["prio"], card["due"], card["notes"], bool(card["live"]),
-                last and [last["id"], last["status"]], rv and [rv.get("verdict"), rv.get("gaps"), rv.get("blocking"),
-                                                               rv.get("ts")]]
-        card["sig"] = hashlib.sha1(json.dumps(seen, default=str).encode()).hexdigest()[:10]
+                "column": col, "why": why, "result": result, "live": live.get(tid) or [],
+                "runs": [r["id"] for r in runs][-4:], "last_run": last, "done_at": t.get("done_at"),
+                "review": {k: rv.get(k) for k in ("verdict", "gaps", "blocking", "ts", "ref", "branch")} if rv else None}
+        card["sig"] = sig(col, why, card["text"], result, card["prio"], card["due"], card["notes"], bool(card["live"]),
+                          last and [last["id"], last["status"]], card["review"])
         cards.append(card)
-    prio = {"high": 0, "low": 2}
-    cards.sort(key=lambda c: ((c["done_at"] or "") if c["column"] == "Done" else "",
-                              prio.get(c["prio"], 1), c["due"] or "9999", c["id"] or 0))
-    done = [c for c in cards if c["column"] == "Done"][::-1]
+    for r in reviews:  # a review no open item covers: the PR still needs someone, so it gets a card
+        if (r["project"], r["ref"]) in covered or not r.get("ref") or r.get("branch") or (r.get("ts") or "") < week_ago:
+            continue
+        ok = r.get("verdict") == "approve"
+        col = "Waiting on you" if ok or r.get("gaps") else "In review"
+        why = (f"{r['gaps']} known gap{'s' if r['gaps'] > 1 else ''} to answer" if r.get("gaps")
+               else "approved: yours to merge or vote" if ok else None)
+        rv = {k: r.get(k) for k in ("verdict", "gaps", "blocking", "ts", "ref", "branch")}
+        cards.append({"id": f"v-{r['project']}-{r['ref']}", "review_only": True, "text": f"review of {r['ref']}",
+                      "project": r["project"], "ref": r["ref"], "prio": "normal", "due": None, "notes": 0,
+                      "column": col, "why": why, "result": None, "live": [], "runs": [r["run"]] if r.get("run") else [],
+                      "last_run": None, "done_at": None, "review": rv, "sig": sig(col, why, rv)})
     for m in running:  # a run no item names (`--todo none`, or started outside the orchestrator): its own card
         if m.get("todo") not in ids:
             cards.append({"id": f"r-{m.get('run')}", "lookup": True, "text": " ".join(str(m.get("task") or "").split())[:140],
                           "project": m.get("project"), "ref": None, "prio": "normal", "due": None, "notes": 0,
-                          "column": "In progress", "live": [m], "runs": [m.get("run")], "last_run": None,
-                          "done_at": None, "review": None, "sig": str(m.get("run"))})
-    for i, n in enumerate(notes, 1):  # `lean-agent handoff --done N` closes one
-        text = str(n.get("text") or "")
-        cards.append({"id": f"n{i}", "note": i, "text": text, "project": None, "ref": None, "prio": "normal",
-                      "due": None, "notes": 0, "column": "Open", "live": [], "runs": [], "last_run": None,
-                      "done_at": None, "review": None, "ts": n.get("ts"),
-                      "sig": hashlib.sha1(text.encode()).hexdigest()[:10]})
-    cards = [c for c in cards if c["column"] != "Done"] + done
+                          "column": "In progress", "why": None, "result": None, "live": [m], "runs": [m.get("run")],
+                          "last_run": None, "done_at": None, "review": None, "sig": str(m.get("run"))})
+    prio = {"high": 0, "low": 2}
+    done = sorted((c for c in cards if c["column"] == "Done"), key=lambda c: (c["done_at"] or "", c["id"]), reverse=True)
+    rest = sorted((c for c in cards if c["column"] != "Done"),
+                  key=lambda c: (prio.get(c["prio"], 1), c["due"] or "9999", str(c["id"]).zfill(8)))
+    cards = rest + done
     return {"columns": list(COLUMNS), "cards": cards,
             "projects": sorted({c["project"] for c in cards if c["project"]})}
-
 
 def state():
     now = datetime.datetime.now()
@@ -259,11 +312,23 @@ def state():
             continue
         for r in _jsonl(f, 300):
             reviews[(slug, r.get("ref") or "working tree")] = r
-    all_reviews = sorted(({"project": p, "ref": ref, "verdict": r.get("verdict"), "ts": r.get("ts"),
+    paths = {slug: (v or {}).get("path") for slug, v in _json(home("projects.json"), {}).items() if isinstance(v, dict)}
+    all_reviews = sorted(({"project": p, "ref": ref, "verdict": r.get("verdict"), "ts": r.get("ts"), "run": r.get("run"),
                            "head": str(r.get("head", ""))[:10], "gaps": open_gaps(p, r),
-                           "blocking": sum(1 for x in r.get("findings") or [] if x.get("severity") in ("blocker", "major"))}
+                           "blocking": sum(1 for x in r.get("findings") or [] if x.get("severity") in ("blocker", "major")),
+                           "branch": branch_state(paths.get(p), r.get("ref"), r.get("head"), r.get("base"))
+                           if r.get("ref") and str(r.get("ts", "")) >= week_ago else None}
                           for (p, ref), r in reviews.items()), key=lambda r: r["ts"] or "", reverse=True)
-    latest_reviews = all_reviews[:8]
+    latest_reviews = [r for r in all_reviews if not r["branch"]][:12]  # merged or deleted branches need nothing
+    pushes = {}
+    for p_ in _jsonl(home("pushes.jsonl"), 300):
+        if p_.get("ts", "") < week_ago:
+            continue
+        g = pushes.setdefault((p_.get("branch"), p_.get("to")), {"branch": p_.get("branch"), "to": p_.get("to"),
+                                                                "count": 0, "failed": 0})
+        g["count"] += 1
+        g["failed"] += 0 if p_.get("ok") else 1
+        g.update(ts=p_.get("ts"), ok=p_.get("ok"))
     real, age = usage.plan_usage()
     pace, ahead = usage.week_pace()
     return {
@@ -273,13 +338,13 @@ def state():
         "running": running, "runs": runs,
         "week": {"runs": len(week), "done": sum(r.get("status") == "done" for r in week),
                  "units": sum(r.get("units", 0) for r in week), "cost": round(sum(r.get("cost_usd") or 0 for r in week), 2)},
-        "board": board(todo, ledger, running, all_reviews, now, _json(home("handoff-notes.json"), [])),
+        "board": board(todo, ledger, running, all_reviews, now),
         "todo": open_todo[:30], "todo_done_week": sum(1 for t in todo if t.get("status") == "done"
                                                       and (t.get("done_at") or "") >= week_ago),
         "schedule": jobs, "scheduled_results": lean_schedule.results_since(week_ago)[-10:][::-1],
         "schedule_runner": schedule_runner(),
-        "reviews": latest_reviews,
-        "pushes": [p for p in _jsonl(home("pushes.jsonl"), 50) if p.get("ts", "") >= week_ago][-8:][::-1],
+        "reviews": latest_reviews, "reviews_closed": sum(1 for r in all_reviews if r["branch"]),
+        "pushes": sorted(pushes.values(), key=lambda g: g["ts"] or "", reverse=True)[:10],
         "context": orchestrator_context(),
         "notes": _json(home("handoff-notes.json"), []),
     }
@@ -326,11 +391,14 @@ PAGE = r"""<!doctype html>
 <title>lean-agent</title>
 <style>
 :root{--s1:#2a78d6;--s2:#eb6834;--bg:#f6f7f9;--card:#fff;--fg:#1d2127;--mute:#69717d;--line:#e3e6ea;--ok:#1f8f4e;--warn:#b26a00;--bad:#c4323b;--accent:#3559c7;--bar:#dfe4ec}
-@media (prefers-color-scheme:dark){:root{--s1:#3987e5;--s2:#d95926;--bg:#14171c;--card:#1c2027;--fg:#e7eaee;--mute:#9aa3ae;--line:#2b313a;--ok:#4cc27e;--warn:#e0a03a;--bad:#ee6b72;--accent:#8aa6ff;--bar:#2b313a}}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--s1:#3987e5;--s2:#d95926;--bg:#14171c;--card:#1c2027;--fg:#e7eaee;--mute:#9aa3ae;--line:#2b313a;--ok:#4cc27e;--warn:#e0a03a;--bad:#ee6b72;--accent:#8aa6ff;--bar:#2b313a;color-scheme:dark}}
+:root[data-theme=dark]{--s1:#3987e5;--s2:#d95926;--bg:#14171c;--card:#1c2027;--fg:#e7eaee;--mute:#9aa3ae;--line:#2b313a;--ok:#4cc27e;--warn:#e0a03a;--bad:#ee6b72;--accent:#8aa6ff;--bar:#2b313a;color-scheme:dark}
+:root[data-theme=light]{color-scheme:light}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+#theme{margin-left:auto;font:inherit;font-size:12px;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:2px 10px;cursor:pointer}
 header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;padding:16px 20px 4px}
 h1{font-size:18px;margin:0}header .mute{font-size:12px}
-main{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px;padding:12px 20px 24px}
+main{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px;padding:12px 20px 24px}
 details.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0;overflow-x:auto}
 details.card>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:6px;user-select:none}
 details.card>summary::-webkit-details-marker{display:none}
@@ -358,6 +426,11 @@ td.id{white-space:nowrap}td.head{min-width:10em}.wide2{grid-column:span 2}
 .tc{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:6px;padding:7px 9px;margin-bottom:8px;font-size:13px}
 .tc.p-high{border-left-color:var(--bad)}.tc.note{border-left-style:dashed;border-left-color:var(--mute)}.tc.p-low{border-left-color:var(--line)}
 .tc.changed{box-shadow:0 0 0 2px var(--warn);background:color-mix(in srgb,var(--warn) 9%,var(--card))}
+.tc .title{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.tc .why{font-size:12px;color:var(--warn);margin-top:4px}.tc .result{font-size:12px;margin-top:4px}
+.notes{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.nt{flex:1 1 260px;max-width:420px;border:1px dashed var(--line);border-radius:6px;padding:5px 8px;font-size:12px}
+.nt .title{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .tc .meta{font-size:12px;color:var(--mute);margin-top:4px;display:flex;flex-wrap:wrap;gap:4px 8px}
 .badge{font-size:11px;border-radius:9px;padding:0 6px;border:1px solid currentColor;white-space:nowrap}
 .badge.live{color:var(--ok)}.badge.new{color:var(--warn)}
@@ -370,25 +443,28 @@ td.id{white-space:nowrap}td.head{min-width:10em}.wide2{grid-column:span 2}
 #ptip{position:absolute;pointer-events:none;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:12px;display:none;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12)}
 @media (max-width:640px){.plan{flex-direction:column}.plan .stats{flex:none}.hide-s{display:none}.wide2{grid-column:auto}main{padding:10px 12px 20px;gap:10px}}
 </style></head><body>
-<header><h1>lean-agent</h1><span class="mute" id="stamp"></span></header>
+<header><h1>lean-agent</h1><span class="mute" id="stamp"></span><button id="theme" type="button" title="switch theme"></button></header>
 <main>
- <details class="card full" id="c-board" open><summary><h2>Board <span class="count" id="n-board"></span></h2></summary><div style="display:flex;margin-bottom:8px"><select id="bfilter"><option value="">all projects</option></select></div><div id="board"></div><div class="mute" id="bnote" style="margin-top:4px;font-size:12px"></div></details>
+ <details class="card full" id="c-board" open><summary><h2>Board <span class="count" id="n-board"></span></h2></summary><div style="display:flex;margin-bottom:8px"><select id="bfilter"><option value="">all projects</option></select></div><div id="notes"></div><div id="board"></div><div class="mute" id="bnote" style="margin-top:4px;font-size:12px"></div></details>
  <details class="card full" id="c-plan" open><summary><h2>Plan usage</h2></summary><div class="plan"><div class="stats"><div id="pace"></div><div id="weekstats" class="mute" style="margin-top:6px"></div></div>
   <div class="chart"><div class="legend"><span><i style="border-color:var(--s1)"></i>week</span><span><i style="border-color:var(--s2)"></i>session</span><span><i class="band"></i>session window (5 h, ends at its right edge)</span><span><i style="border-top-style:dashed;border-color:var(--mute)"></i>on pace</span></div><div id="planchart"></div><div id="ptip"></div></div></div></details>
- <details class="card" id="c-ctx" open><summary><h2>Orchestrator context</h2></summary><div id="ctx"></div></details>
- <details class="card wide2" id="c-todo" open><summary><h2>Work queue <span class="count" id="n-todo"></span></h2></summary><div id="todo"></div></details>
  <details class="card" id="c-reviews" open><summary><h2>Reviews to act on <span class="count" id="n-reviews"></span></h2></summary><div id="reviews"></div></details>
- <details class="card full" id="c-runs"><summary><h2>Recent runs <span class="count" id="n-runs"></span></h2></summary><div id="runs"></div></details>
+ <details class="card" id="c-approved-reviews" open><summary><h2>Approved reviews <span class="count" id="n-approved"></span></h2></summary><div id="approved"></div></details>
+ <details class="card" id="c-ctx" open><summary><h2>Orchestrator context</h2></summary><div id="ctx"></div></details>
  <details class="card" id="c-sched" open><summary><h2>Scheduled <span class="count" id="n-sched"></span></h2></summary><div id="sched"></div></details>
  <details class="card" id="c-pushes" open><summary><h2>Pushes <span class="count" id="n-pushes"></span></h2></summary><div id="pushes"></div></details>
- <details class="card" id="c-notes" open><summary><h2>Hand-off notes <span class="count" id="n-notes"></span></h2></summary><div id="notes"></div></details>
- <details class="card full" id="c-approved"><summary><h2>Approved reviews <span class="count" id="n-approved"></span></h2></summary><div id="approved"></div></details>
+ <details class="card full" id="c-runs"><summary><h2>Recent runs <span class="count" id="n-runs"></span></h2></summary><div id="runs"></div></details>
 </main>
 <div id="view"><div class="bar"><b id="vtitle"></b><span><a id="vdet">details</a> · <a onclick="closeView()">close</a></span></div><pre id="vbody"></pre></div>
 <script>
 const T=new URLSearchParams(location.search).get("t")||"";
 const V="__PAGE_VERSION__";  // the server's page changed (lean-agent sync): load the new one
 const $=id=>document.getElementById(id);
+// theme: follows the system unless you pick light or dark (remembered in this browser)
+function setTheme(t){if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;else delete document.documentElement.dataset.theme;
+  $("theme").textContent="theme: "+(t||"auto");try{t?localStorage.setItem("la-theme",t):localStorage.removeItem("la-theme")}catch(e){}}
+{let t=null;try{t=localStorage.getItem("la-theme")}catch(e){}setTheme(t)}
+$("theme").onclick=()=>{const cur=document.documentElement.dataset.theme||"";setTheme({"":"light",light:"dark",dark:""}[cur])};
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const k=n=>n>=1e6?(n/1e6).toFixed(1)+"M":n>=1000?(n/1000).toFixed(n>=10000?0:1)+"k":String(n||0);
 const when=s=>s?s.slice(5,16).replace("T"," "):"";
@@ -407,27 +483,32 @@ const SEEN_FOR=10*60*1000;
 function seenMap(){try{return JSON.parse(localStorage.getItem("la-board-seen")||"null")}catch(e){return null}}
 function saveSeen(m){try{localStorage.setItem("la-board-seen",JSON.stringify(m))}catch(e){}}
 let lastBoard=null;
+const verdict=v=>({approve:"approved","changes-requested":"changes requested","needs-checks":"needs checks"})[v]||v||"";
+function drawNotes(notes){
+  $("notes").innerHTML=notes&&notes.length?`<div class="notes">${notes.map((n,i)=>`<div class="nt" title="${esc(n.text)}"><div class="title"><span class="mute">note ${i+1}${n.ts?" · "+when(n.ts):""}:</span> ${esc(n.text)}</div></div>`).join("")}</div>`:"";
+}
 function drawBoard(b){
   if(!b)return;lastBoard=b;
   const f=$("bfilter"),cur=f.value;
   f.innerHTML='<option value="">all projects</option>'+b.projects.map(p=>`<option${p===cur?" selected":""}>${esc(p)}</option>`).join("");
   let seen=seenMap();const first=!seen;seen=seen||{};const now=Date.now(),looking=document.visibilityState!=="hidden";
-  const cards=b.cards.filter(c=>!f.value||c.note||c.project===f.value);let changed=0;
+  const cards=b.cards.filter(c=>!f.value||c.project===f.value);let changed=0;
   const html=b.columns.map(col=>{const cs=cards.filter(c=>c.column===col);return `<div class="col"><h3><span>${esc(col==="Done"?"Done (7 days)":col)}</span><span>${cs.length||""}</span></h3>${cs.map(c=>{
     const was=seen[c.id];let hi="";
     if(first||(was&&was.sig===c.sig)){seen[c.id]={sig:c.sig,col:c.column}}
     else{const since=(was&&was.since)||now;seen[c.id]=Object.assign({},was||{},{since});
       if(looking&&now-since>SEEN_FOR)seen[c.id]={sig:c.sig,col:c.column};else{hi=was?(was.col&&was.col!==c.column?"moved from "+was.col:"changed"):"new";changed++}}
     const lr=c.last_run,rv=c.review;
-    return `<div class="tc p-${esc(c.prio)}${c.note?" note":""}${hi?" changed":""}"><div>${c.live.map(r=>`<a class="badge live" onclick="show('${esc(r.run)}')" title="run ${esc(r.run)} since ${esc(String(r.started||"").slice(11,16))}">running · ${esc(r.model||"?")} / ${esc(r.effort||"default")}${r.role?" · "+esc(r.role):""}${r.turns?" · "+r.turns+" turns":""}</a> `).join("")}${hi?`<span class="badge new">${esc(hi)}</span> `:""}<span class="mute">${c.note?"hand-off note "+c.note+":":c.lookup?"no item:":"#"+c.id}</span> ${esc(c.text)}</div>
+    return `<div class="tc p-${esc(c.prio)}${hi?" changed":""}"><div>${c.live.map(r=>`<a class="badge live" onclick="show('${esc(r.run)}')" title="run ${esc(r.run)} since ${esc(String(r.started||"").slice(11,16))}">running · ${esc(r.model||"?")} / ${esc(r.effort||"default")}${r.role?" · "+esc(r.role):""}${r.turns?" · "+r.turns+" turns":""}</a> `).join("")}${hi?`<span class="badge new">${esc(hi)}</span> `:""}<span class="title" title="${esc(c.text)}"><span class="mute">${c.lookup?"no item:":c.review_only?"no item:":"#"+c.id}</span> ${esc(c.text)}</span></div>
+      ${c.why?`<div class="why">${esc(c.why)}</div>`:""}${c.result?`<div class="result" title="${esc(c.result)}"><span class="ok">result:</span> ${esc(c.result.length>160?c.result.slice(0,160)+"…":c.result)}</div>`:""}
       <div class="meta">${c.project?`<span>${esc(c.project)}</span>`:""}${c.ref?`<span>${esc(c.ref)}</span>`:""}${c.prio!=="normal"?`<span class="${c.prio==="high"?"bad":""}">${esc(c.prio)}</span>`:""}${c.due?`<span>due ${esc(c.due)}</span>`:""}${c.notes?`<span>${c.notes} note${c.notes>1?"s":""}</span>`:""}</div>
-      ${c.runs.length?`<div class="meta">${c.runs.map(id=>`<a onclick="show('${esc(id)}')">${esc(id)}</a>`).join(" ")}${lr?` <span class="${cls(lr.status)}">${esc(String(lr.status||"").split(":")[0])}</span>`:""}</div>`:""}
-      ${rv?`<div class="meta"><span class="${rv.verdict!=="approve"?"bad":rv.gaps?"warn":"ok"}">review ${esc((rv.verdict||"").split("-")[0])}</span>${rv.blocking?`<span>${rv.blocking} blocking</span>`:""}${rv.gaps?`<span class="warn">${rv.gaps} gap${rv.gaps>1?"s":""} to answer</span>`:""}</div>`:""}</div>`}).join("")}</div>`}).join("");
+      ${c.runs.length?`<div class="meta">${c.runs.map(id=>`<a onclick="show('${esc(id)}')">${esc(id)}</a>`).join(" ")}${lr&&!c.live.length?` <span class="${cls(lr.status)}">${esc(String(lr.status||"").split(":")[0])}</span>`:""}</div>`:""}
+      ${rv?`<div class="meta"><span class="${rv.branch?"mute":rv.verdict!=="approve"?"bad":rv.gaps?"warn":"ok"}">review: ${esc(verdict(rv.verdict))}${rv.branch?" · branch "+esc(rv.branch):""}</span>${rv.blocking?`<span>${rv.blocking} blocking</span>`:""}</div>`:""}</div>`}).join("")}</div>`}).join("");
   for(const id of Object.keys(seen))if(!b.cards.some(c=>String(c.id)===id))delete seen[id];
   saveSeen(seen);
   $("board").innerHTML=b.cards.length?`<div class="board">${html}</div>`:'<span class="mute">No work queued yet: items from <code>lean-agent todo</code> show here, with the runs (<code>run --todo N</code>) and reviews of their ref.</span>';
   $("n-board").textContent=(cards.length?`· ${cards.length}`:"")+(changed?` · ${changed} changed`:"");
-  $("bnote").textContent=b.cards.length?"View only: cards move as the work moves (lean-agent todo, run --todo N, review; hand-off notes sit in Open until handoff --done N). Highlighted: changed since you last looked.":"";
+  $("bnote").textContent=b.cards.length?"View only: cards move as the work moves (lean-agent todo, run --todo N, review). Hover a card for its full text. Highlighted: changed since you last looked.":"";
 }
 $("bfilter").addEventListener("change",()=>{try{localStorage.setItem("la-board-project",$("bfilter").value)}catch(e){};drawBoard(lastBoard)});
 // the plan's own numbers over the current week: the week % against the on-pace line, and each 5-hour session
@@ -447,7 +528,8 @@ function drawPlan(s){
   for(const p of [0,25,50,75,100])g+=`<line x1="${L}" x2="${W-R}" y1="${y(p)}" y2="${y(p)}" stroke="var(--line)"/><text x="${L-6}" y="${y(p)+4}" text-anchor="end">${p}%</text>`;
   const d0=new Date(start*1000);d0.setHours(24,0,0,0);
   for(let d=d0.getTime()/1000;d<end;d+=86400){const xd=x(d);g+=`<line x1="${xd}" x2="${xd}" y1="${T}" y2="${H-B}" stroke="var(--line)" stroke-dasharray="2 3"/>`;
-    if(x(d+43200)<W-R)g+=`<text x="${x(d+43200)}" y="${H-6}" text-anchor="middle">${new Date(d*1000).toLocaleDateString(undefined,{weekday:"short"})}</text>`}
+    if(x(d+43200)<W-R-60&&x(d+43200)>L+60)g+=`<text x="${x(d+43200)}" y="${H-6}" text-anchor="middle">${new Date(d*1000).toLocaleDateString(undefined,{weekday:"short"})}</text>`}
+  g+=`<text x="${x(start)}" y="${H-6}">${dhm(start)}</text><text x="${x(end)}" y="${H-6}" text-anchor="end">${wr&&wr>now?"resets ":""}${dhm(end)}</text>`;
   const resets=[...new Set(pts.filter(p=>p.five_hour&&p.five_hour[1]).map(p=>p.five_hour[1]))];
   for(const r of resets){if(r<start)continue;const a=x(r-5*3600),b=x(r),live=r>now;
     g+=`<rect x="${a+1}" y="${T}" width="${Math.max(1,b-a-2)}" height="${H-T-B}" fill="var(--s2)" opacity="${live?.2:.09}"/>`;
@@ -463,7 +545,9 @@ function drawPlan(s){
   if(labels.length===2&&Math.abs(labels[0].py-labels[1].py)<13){const [a,b]=labels[0].py<=labels[1].py?labels:[labels[1],labels[0]];b.ly=a.py+13;}
   for(const l of labels)g+=`<circle cx="${l.px}" cy="${l.py}" r="4" fill="var(--${l.key==="seven_day"?"s1":"s2"})" stroke="var(--card)" stroke-width="2"/><text class="lbl" x="${l.px+8}" y="${(l.ly||l.py)+4}">${l.name} ${Math.round(l.v)}%</text>`;
   g+=`<line id="pcross" y1="${T}" y2="${H-B}" stroke="var(--fg)" stroke-opacity=".5" visibility="hidden"/><rect id="phit" x="${L}" y="0" width="${W-L-R}" height="${H}" fill="transparent"/>`;
-  box.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Plan usage this week: week and session window percent over time">${g}</svg>`;
+  const few=(s.plan_history||[]).length<6;
+  box.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Plan usage this week: week and session window percent over time">${g}</svg>`
+    +(few?`<div class="mute" style="font-size:12px">The history starts ${pts.length?dhm(pts[0].t):"now"}: each worker run adds the plan's numbers as Claude reports them, so the lines fill in as you work.</div>`:"");
   planPts=sorted;planX=x;
   const hit=$("phit"),tip=$("ptip"),cross=$("pcross");
   hit.addEventListener("mousemove",e=>{const r=box.getBoundingClientRect(),mx=e.clientX-r.left;
@@ -497,23 +581,19 @@ async function load(){
   else $("ctx").innerHTML='<span class="mute">no orchestrator conversation yet</span>';
   if(lastBoard===null){try{const p=localStorage.getItem("la-board-project");if(p)$("bfilter").innerHTML=`<option value="">all projects</option><option selected>${esc(p)}</option>`}catch(e){}}
   drawBoard(s.board);
-  $("todo").innerHTML=table(s.todo.map(t=>`<tr><td class="mute">#${t.id}</td><td>${t.status==="doing"?'<b class="warn">doing</b> ':""}${t.prio==="high"?'<b class="bad">high</b> ':""}${esc(t.text)}${t.ref?` <span class="mute">(${esc(t.ref)})</span>`:""}</td><td class="n mute">${esc(t.due||"")}</td></tr>`),
-    'Nothing open. Your requests and what is in progress go here: ask the orchestrator to keep your work in '
-    +'the work queue, or add an item yourself with <code>lean-agent todo add "..." -p &lt;project&gt;</code>.'
-    +(s.todo_done_week?` (${s.todo_done_week} done this week)`:""));
+  drawNotes(s.notes);
   $("runs").innerHTML=table(s.runs.map(r=>`<tr><td class="id"><a onclick="show('${esc(r.id)}')">${esc(r.id)}</a></td><td class="${cls(r.status)}" title="${esc(r.status)}">${esc((r.status||"").split(":")[0])}</td><td class="hide-s">${esc(r.model)}</td><td class="hide-s">${esc(r.project)}${r.role?` <span class="mute">${esc(r.role)}</span>`:""}</td><td class="head">${r.passes>1?`<span class="mute">${r.passes} passes</span> `:""}${esc(r.head)}</td><td class="n">${k(r.units)}</td><td class="n mute hide-s">${r.cost!=null?"$"+r.cost.toFixed(2):""}</td></tr>`));
   $("sched").innerHTML=table(s.schedule.map(j=>`<tr><td class="mute">#${j.id}</td><td>${esc(j.when)}</td><td><code>${esc(j.cmd)}</code></td><td class="n mute">${j.enabled?(j.next?"next "+when(j.next):""):"paused"}<br>${j.last?"last "+when(j.last):"never ran yet"}</td></tr>`))
     +`<div class="mute" style="margin-top:6px">${esc(s.schedule_runner||"")}</div>`
     +(s.scheduled_results.length?'<div class="mute" style="margin-top:8px">Recent results</div>'+table(s.scheduled_results.map(r=>`<tr><td class="mute">#${r.id}</td><td class="${r.rc?"bad":"ok"}">exit ${r.rc}</td><td>${esc(r.first)}</td><td class="n mute">${when(r.ts)}</td></tr>`)):"");
-  const rev=r=>`<tr><td>${esc(r.ref)} <span class="mute">${esc(r.project)}</span></td><td class="${r.verdict==="approve"?"ok":"bad"}" title="${esc(r.verdict)}">${esc((r.verdict||"").split("-")[0])}</td><td class="n">${r.blocking?r.blocking+" blocking":""}${r.gaps?` ${r.gaps} gap${r.gaps>1?"s":""}`:""}</td><td class="n mute hide-s">${when(r.ts)}</td></tr>`;
+  const rev=r=>`<tr><td>${esc(r.ref)} <span class="mute">${esc(r.project)}</span></td><td class="${r.verdict==="approve"?"ok":"bad"}">${esc(verdict(r.verdict))}</td><td class="n">${r.blocking?r.blocking+" blocking":""}${r.gaps?` ${r.gaps} gap${r.gaps>1?"s":""}`:""}</td><td class="n mute hide-s">${when(r.ts)}</td></tr>`;
   const act=s.reviews.filter(r=>r.verdict!=="approve"||r.gaps), ok=s.reviews.filter(r=>r.verdict==="approve"&&!r.gaps);
-  $("reviews").innerHTML=table(act.map(rev),"nothing to act on");
-  $("approved").innerHTML=table(ok.map(rev));
-  $("pushes").innerHTML=table(s.pushes.map(p=>`<tr><td>${esc(p.branch)} → ${esc(p.to)}</td><td class="${p.ok?"ok":"bad"}">${p.ok?"pushed":"failed"}</td><td class="n mute">${when(p.ts)}</td></tr>`),"none this week");
-  $("notes").innerHTML=table(s.notes.map((n,i)=>`<tr><td class="mute">${i+1}.</td><td>${esc(n.text)}</td></tr>`),
-    'none (the orchestrator adds open items with <code>lean-agent handoff --note</code>)');
-  const counts={todo:s.todo.length,reviews:act.length,runs:s.runs.length,sched:s.schedule.length,
-    pushes:s.pushes.length,notes:s.notes.length,approved:ok.length};
+  $("reviews").innerHTML=table(act.map(rev),"nothing to act on")
+    +(s.reviews_closed?`<div class="mute" style="margin-top:6px">${s.reviews_closed} review${s.reviews_closed>1?"s":""} of merged or deleted branches not shown</div>`:"");
+  $("approved").innerHTML=table(ok.map(rev),"none open");
+  const same=p=>String(p.to||"").replace(/^origin\//,"")===p.branch;
+  $("pushes").innerHTML=table(s.pushes.map(p=>`<tr><td>${esc(p.branch)}${same(p)?"":" → "+esc(p.to)}</td><td class="n">${p.count} push${p.count>1?"es":""}${p.failed?` <span class="bad">${p.failed} failed</span>`:""}</td><td class="n mute">last ${when(p.ts)}</td></tr>`),"none this week");
+  const counts={reviews:act.length,runs:s.runs.length,sched:s.schedule.length,pushes:s.pushes.length,approved:ok.length};
   for(const [k2,n] of Object.entries(counts)) $("n-"+k2).textContent=n?`· ${n}`:"";
 }
 // each box remembers whether it's open, in this browser only (and works without storage)
@@ -587,6 +667,16 @@ def page_version():
     return hashlib.sha1(PAGE.encode()).hexdigest()[:10]
 
 
+FORBIDDEN = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,
+initial-scale=1"><title>lean-agent dashboard</title><style>body{font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",
+sans-serif;max-width:560px;margin:12vh auto;padding:0 16px;color:#1d2127;background:#f6f7f9}code{background:#e3e6ea;
+padding:1px 5px;border-radius:4px}@media (prefers-color-scheme:dark){body{color:#e7eaee;background:#14171c}code{background:
+#2b313a}}</style></head><body><h1 style="font-size:20px">lean-agent dashboard</h1><p>This address needs the dashboard's
+token. Open the link that <code>lean-agent dashboard --url</code> prints (it ends in <code>?t=...</code>); it stays the
+same between restarts, so you can bookmark it.</p><p>For the Claude desktop app's preview, where a link can't carry the
+token: <code>lean-agent dashboard --preview on</code>.</p></body></html>"""
+
+
 class Handler(BaseHTTPRequestHandler):
     token = ""
     preview = False  # the preview's bare address: no token needed for the browser's own requests
@@ -612,7 +702,7 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(u.query)
         if not secrets.compare_digest((q.get("t") or [""])[0], self.token) and not (
                 self.preview and browser_same_origin(self.headers)):
-            return self._send(403, "lean-agent dashboard: open it with its address from `lean-agent dashboard --url`")
+            return self._send(403, getattr(live(), "FORBIDDEN", FORBIDDEN), "text/html; charset=utf-8")
         mod = live()
         if u.path == "/":
             return self._send(200, mod.PAGE.replace("__PAGE_VERSION__", mod.page_version()), "text/html; charset=utf-8")

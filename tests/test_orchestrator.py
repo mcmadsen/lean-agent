@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Tests for the lean-agent CLI using a fake `claude` binary. Run: python3 tests/test_orchestrator.py"""
+import datetime
 import json
 import os
 import subprocess
@@ -1717,9 +1718,8 @@ class CliTest(unittest.TestCase):
         finally:
             os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.update(LEAN_AGENT_HOME=old)
         col = {c["id"]: c["column"] for c in b["cards"]}
-        self.assertEqual(col, {1: "In review", 2: "Waiting on you", 3: "Open", 4: "Done", 5: "Waiting on you",
-                               "n1": "Open"})  # the open hand-off note is a card too
-        self.assertEqual(next(c for c in b["cards"] if c["id"] == "n1")["note"], 1)
+        self.assertEqual(col, {1: "In review", 2: "Waiting on you", 3: "Open", 4: "Done", 5: "Waiting on you"})
+        self.assertEqual(next(c for c in b["cards"] if c["id"] == 2)["why"], "the run needs your input")
         card1 = next(c for c in b["cards"] if c["id"] == 1)
         self.assertEqual((card1["review"]["verdict"], card1["review"]["blocking"], len(card1["runs"])),
                          ("changes-requested", 1, 1))
@@ -1735,6 +1735,75 @@ class CliTest(unittest.TestCase):
                          {c["id"]: c["sig"] for c in b2["cards"] if c["id"] != 3 and not c.get("lookup")})
         self.assertIn('id="c-board"', dashboard.PAGE)
         self.assertNotIn("draggable", dashboard.PAGE)  # view only for now
+
+    def test_board_follows_reviews_merges_and_results(self):
+        import shutil
+        import urllib.request
+        import urllib.error
+        repo = os.path.join(self.tmp.name, "repo")
+        os.makedirs(repo)
+        g = lambda *a: subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True, check=True).stdout.strip()
+        g("init", "-q", "-b", "main")
+        g("-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "--allow-empty", "-m", "base")
+        g("checkout", "-q", "-b", "feature/77123-merged")
+        g("-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "--allow-empty", "-m", "work")
+        merged_head = g("rev-parse", "HEAD")
+        g("checkout", "-q", "main")
+        g("merge", "-q", "--ff-only", "feature/77123-merged")
+        g("checkout", "-q", "-b", "feature/open-thing")
+        g("-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "--allow-empty", "-m", "open")
+        open_head = g("rev-parse", "HEAD")
+        g("branch", "feature/new-review")
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(os.path.join(home, "reviews"), exist_ok=True)
+        json.dump({"proj": {"path": repo}}, open(os.path.join(home, "projects.json"), "w"))
+        now = datetime.datetime.now()
+        ts = lambda h: (now - datetime.timedelta(hours=h)).isoformat(timespec="seconds")
+        with open(os.path.join(home, "reviews", "proj.jsonl"), "w") as fh:
+            for r in ({"ref": "feature/77123-merged", "verdict": "approve", "head": merged_head, "base": "main", "ts": ts(3)},
+                      {"ref": "feature/open-thing", "verdict": "approve", "head": open_head, "base": "main", "ts": ts(2)},
+                      {"ref": "feature/gone-branch", "verdict": "needs-checks", "head": "0" * 40, "ts": ts(1)},
+                      {"ref": "feature/new-review", "verdict": "changes-requested", "head": open_head, "base": "main",
+                       "ts": ts(1), "findings": [{"severity": "major"}]}):
+                fh.write(json.dumps(dict(r, run="rv-" + r["ref"][-5:])) + "\n")
+        json.dump({"next": 4, "items": [
+            {"id": 1, "text": "Ship it", "project": "proj", "ref": "77123", "status": "doing", "notes": []},
+            {"id": 2, "text": "Older finished", "project": "proj", "status": "done", "done_at": ts(5), "notes": ["x"],
+             "result": "merged as PR 9"},
+            {"id": 3, "text": "Newer finished", "project": "proj", "status": "done", "done_at": ts(1), "notes": ["shipped"]}]},
+            open(os.path.join(home, "todo.json"), "w"))
+        with open(os.path.join(home, "pushes.jsonl"), "w") as fh:
+            for h in (3, 2, 1):
+                fh.write(json.dumps({"ts": ts(h), "branch": "feature/x", "to": "origin/feature/x", "ok": True}) + "\n")
+        sys.path.insert(0, os.path.dirname(CLI))
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = home
+        try:
+            import dashboard
+            st = dashboard.state()
+        finally:
+            os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.update(LEAN_AGENT_HOME=old)
+        cards = {c["id"]: c for c in st["board"]["cards"]}
+        # a work item number in the todo's ref finds the branch named after it; merged: close the item
+        self.assertEqual((cards[1]["column"], cards[1]["review"]["branch"]), ("Waiting on you", "merged"))
+        self.assertIn("todo done", cards[1]["why"])
+        # reviews no open item covers get cards; merged or deleted branches don't
+        self.assertEqual(cards["v-proj-feature/open-thing"]["column"], "Waiting on you")
+        self.assertEqual(cards["v-proj-feature/open-thing"]["why"], "approved: yours to merge or vote")
+        self.assertEqual(cards["v-proj-feature/new-review"]["column"], "In review")
+        self.assertNotIn("v-proj-feature/gone-branch", cards)
+        self.assertEqual({r["ref"] for r in st["reviews"]}, {"feature/open-thing", "feature/new-review"})
+        self.assertEqual(st["reviews_closed"], 2)
+        # Done: newest first, with the result
+        done = [c["id"] for c in st["board"]["cards"] if c["column"] == "Done"]
+        self.assertEqual(done, [3, 2])
+        self.assertEqual((cards[2]["result"], cards[3]["result"]), ("merged as PR 9", "shipped"))
+        self.assertEqual([(p["branch"], p["count"]) for p in st["pushes"]], [("feature/x", 3)])
+        for gone in ('id="c-todo"', 'id="c-notes"', 'id="c-running"'):
+            self.assertNotIn(gone, dashboard.PAGE)
+        self.assertIn("lean-agent dashboard --url", dashboard.FORBIDDEN)
+        r = self.cli("todo", "add", "Thing", "-p", "proj") and self.cli("todo", "done", "4", "merged", "as", "PR", "10")
+        self.assertEqual(json.load(open(os.path.join(home, "todo.json")))["items"][-1]["result"], "merged as PR 10")
 
     def test_plan_history_feeds_the_dashboard_graph(self):
         sys.path.insert(0, os.path.dirname(CLI))
