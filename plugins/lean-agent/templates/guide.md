@@ -179,6 +179,10 @@ lean-agent card unarchive {{P}} checkout-notes
   `lean-agent runs --show <id>` instead of asking the user again. Keep open items and pending decisions in it:
   `lean-agent handoff --note "..."` (close with `--done N`). When lean-agent says your context is large, add
   the open items, then ask the user to send /compact, or to start a fresh session for the next topic.
+- Standing rule, before auto-compaction: when lean-agent says the context is near the compaction point, run
+  `lean-agent context --no-probe` (what fills your messages, the biggest first), save anything still open with
+  `lean-agent handoff --note "..."`, tell the user in one line, then go on with short replies.
+  `lean-agent context --apply` takes never-used tools and extra instruction files out for the next session.
 - Where tokens went: `lean-agent stats --top 10` (biggest runs) and `lean-agent budget --by-run` (this session:
   your share, the context trend, its biggest runs).
 - When something seems off, run `lean-agent doctor`, and `lean-agent logs` for recent errors
