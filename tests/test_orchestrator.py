@@ -2120,6 +2120,49 @@ class CliTest(unittest.TestCase):
         p = self.cli("run", "-p", "proj", "--escalate", "haiku,sonnet", "--why", "x", "look up totals")
         self.assertIn("escalate: haiku -> sonnet (the next model only if a run fails)", p.stdout)
 
+    def test_review_catches_self_declared_gaps(self):
+        self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        os.makedirs(os.path.join(self.proj, "docs"), exist_ok=True)
+        with open(os.path.join(self.proj, "docs", "DISTRIBUTION.md"), "w") as fh:
+            fh.write("# Passive install\n\nChrome: done.\n\nOther browser: not done yet, so it cannot be shipped today.\n"
+                     "Not yet wired: the package is not built or published by the release pipeline.\n"
+                     "Until one is, the policy above installs nothing. Policy URL: https://<your-host>/ext.xpi\n")
+        with open(os.path.join(self.proj, "api", "totals.py"), "a") as fh:
+            fh.write("def passive_policy():\n    return {'mode': 'passive'}\n")
+        checked = dict(REUSE_CHECKED, reuse=REUSE_CHECKED["reuse"] + [
+            {"symbol": s_, "candidates": [], "verdict": "justified-new", "why": "nothing like it in the repository yet"}
+            for s_ in ("docs/DISTRIBUTION.md", "passive_policy")])
+        approve = json.dumps(dict(checked, verdict="approve", findings=[], checks=[]))
+        p = self.cli("review", "proj", "--goal", "Passive build for both browsers", check=False, FAKE_REVIEW=approve)
+        call = next(c for c in self.calls() if "0. Completeness" in c["append"])
+        self.assertIn("Self-declared gaps", call["append"])
+        self.assertIn("docs/DISTRIBUTION.md:5: Other browser: not done yet", call["append"])
+        self.assertIn("docs/DISTRIBUTION.md:7: Until one is, the policy above installs nothing.", call["append"])
+        self.assertIn("The change's stated goal (task, work item or PR title): Passive build for both browsers", call["task"])
+        self.assertEqual(p.returncode, 2, p.stdout)
+        self.assertIn("known gaps: ", p.stdout)
+        self.assertIn("[not checked by the reviewer]", p.stdout)
+        self.assertIn("Approved, but with", p.stdout)
+        st = self.cli("review", "proj", "--status", check=False)
+        self.assertEqual(st.returncode, 2)
+        self.assertIn("known gap(s) not acknowledged", st.stdout)
+        n = len([l for l in st.stdout.splitlines() if l.strip().startswith("g")])
+        self.cli("review", "decline", "proj", *[f"g{i}" for i in range(1, n + 1)],
+                 "--why", "out of scope: hosting is a separate task")
+        self.assertEqual(self.cli("review", "proj", "--status").returncode, 0)
+        # a gap the reviewer says keeps the goal from working, not scoped out: a major finding
+        with open(os.path.join(self.proj, "docs", "DISTRIBUTION.md"), "a") as fh:
+            fh.write("The update URL is a placeholder for now.\n")
+        blocking = json.dumps(dict(checked, verdict="approve", findings=[], checks=[],
+                                   goal="passive build for both browsers",
+                                   gaps=[{"what": "the second browser's package is never hosted", "file": "docs/DISTRIBUTION.md",
+                                          "line": 9, "blocks_goal": True, "scoped_out": ""}]))
+        p = self.cli("review", "proj", check=False, FAKE_REVIEW=blocking)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("[major/completeness] docs/DISTRIBUTION.md:9: the change doesn't deliver: the second browser's package", p.stdout)
+        self.assertIn("NOT approved", p.stdout)
+
     def test_review_a_ref_without_checkout(self):
         g = self.git_project()
         g("add", "-A")

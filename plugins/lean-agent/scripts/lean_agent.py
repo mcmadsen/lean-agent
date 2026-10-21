@@ -1833,6 +1833,13 @@ New symbols and files in this change (found by lean-agent; check every one): {ne
 {focus}
 Do these passes in order. Report what you searched and found fine, and what you could not verify.
 
+0. Completeness: what the change promises versus what it delivers. In one line, state its goal (from the stated
+   goal below, the branch name, commit messages, docs). Then follow the whole chain the goal needs (for a feature:
+   code, config, build, signing, hosting/upload, update path, pipeline step, user-facing docs) and say which
+   parts the change makes work and which it doesn't. Every self-declared gap (listed above, or one you find:
+   "not done yet", TODO, placeholder, a doc saying it doesn't work yet) goes in "gaps". A gap that keeps the goal
+   from working is a major finding (category "completeness") unless the change says it's out of scope; when it
+   plausibly is out of scope, list it in "gaps" with "scoped_out" saying where that's stated or "ask the user".
 1. Correctness, tracing each changed path end to end: from its entry points (callers, events, timers) through
    the changed code to its effects (state, requests, callbacks, consumers). Concurrency, ordering, cleanup on
    logout/teardown, error paths, edge cases. Does the change do what it says?
@@ -1867,13 +1874,14 @@ with obvious siblings is major. If you'd call it optional, it is minor. A findin
 didn't verify goes under "checks" ("unverified: ..."), not as a major. Style never outranks the passes above.
 Reuse verdicts: "duplicate" (copies existing code outside this change: reuse it instead), "extends-existing" or
 "wraps-existing" (builds on existing code: good, no finding), "justified-new" (nothing existing fits; say why).
-Categories: correctness, duplication, scope, platform, tests, security, compatibility, performance, style.
+Categories: completeness, correctness, duplication, scope, platform, tests, security, compatibility, performance,
+style.
 Verdict: "approve" (no blockers or majors, every new symbol has a reuse entry, every edited test has a
 coverage entry), "changes-requested", or "needs-checks" (you can't judge without something being run).
 Be specific (file:line, what, why, a concrete suggestion). Don't pad: if the change is good, approve it.
 
 Before the LEAN-FEEDBACK line, add one line exactly like this (valid JSON, one line):
-LEAN-REVIEW {{"verdict": "approve|changes-requested|needs-checks", "searches": [{{"for": "what you searched", "found": "file:line, ... or nothing"}}], "reuse": [{{"symbol": "new symbol", "candidates": ["file:line existing symbol"], "verdict": "duplicate|extends-existing|wraps-existing|justified-new", "why": "..."}}], "siblings": [{{"checked": "sibling", "needs_fix": true}}], "coverage": [{{"test": "edited test", "protected": "behaviour it protected", "verdict": "still-covered|lost|intentional", "by": "other test or why"}}], "findings": [{{"severity": "blocker|major|minor|nit", "category": "correctness|duplication|scope|platform|tests|security|compatibility|performance|style", "file": "path", "line": 0, "issue": "...", "why": "...", "suggestion": "..."}}], "checks": [{{"what": "what to run or verify", "why": "..."}}], "fine": ["what you checked and found fine"], "unverified": ["what you could not verify"]}}
+LEAN-REVIEW {{"verdict": "approve|changes-requested|needs-checks", "searches": [{{"for": "what you searched", "found": "file:line, ... or nothing"}}], "reuse": [{{"symbol": "new symbol", "candidates": ["file:line existing symbol"], "verdict": "duplicate|extends-existing|wraps-existing|justified-new", "why": "..."}}], "siblings": [{{"checked": "sibling", "needs_fix": true}}], "coverage": [{{"test": "edited test", "protected": "behaviour it protected", "verdict": "still-covered|lost|intentional", "by": "other test or why"}}], "findings": [{{"severity": "blocker|major|minor|nit", "category": "completeness|correctness|duplication|scope|platform|tests|security|compatibility|performance|style", "file": "path", "line": 0, "issue": "...", "why": "...", "suggestion": "..."}}], "checks": [{{"what": "what to run or verify", "why": "..."}}], "fine": ["what you checked and found fine"], "unverified": ["what you could not verify"], "goal": "what the change promises, in one line", "gaps": [{{"what": "what isn't delivered", "file": "path or commit", "line": 0, "blocks_goal": true, "scoped_out": "where it says it's out of scope, or ask the user, or empty"}}]}}
 """
 
 REUSE_RULE = """\
@@ -2104,6 +2112,55 @@ def change_focus(path, rng_args):
             "renamed": [f"{f}: '{o}' -> '{n}'" for (f, o), n in renamed.items()][:15]}
 
 
+GAP_RE = re.compile(
+    r"\bnot (?:done|implemented|supported|wired(?: up)?|hosted|signed|published|shipped|built|handled|ready)(?: yet)?\b"
+    r"|\bnot yet\b|\bno [\w-]+(?: [\w-]+)? yet\b|\bcan(?:not|'t) be (?:shipped|released|used|installed)\b"
+    r"|\binstalls nothing\b|\bdoes nothing yet\b|\bplaceholder\b|\bstub(?:bed)?\b|\bfollow[- ]up\b"
+    r"|\bcoming soon\b|\buntil (?:one|it|this|that|they) (?:is|are)\b|\bwork in progress\b", re.I)
+GAP_MARK_RE = re.compile(r"\b(TODO|FIXME|XXX|TBD)\b")
+DOC_PLACEHOLDER_RE = re.compile(r"<(?:your[-_ ]?)?[a-z][\w-]*(?:host|url|domain|token|tenant|org|server|bucket|endpoint)[\w-]*>",
+                                re.I)
+DOC_RE = re.compile(r"\.(md|mdx|rst|txt|adoc)$|(^|/)(docs?|README)[/.]", re.I)
+
+
+def self_declared_gaps(path, rng_args, new_files=()):
+    """Lines the change adds (code, docs, comments) and its commit messages that say something isn't done:
+    "not done yet", "not yet wired", TODO, placeholder, stub, "<host>" in a doc, ... A change can document its own
+    gap; the reviewer has to say whether that gap keeps the change from doing what it promises."""
+    out, cur, line_no = [], None, 0
+    for line in (git(path, "diff", "-U0", "--no-color", *rng_args) or "").splitlines():
+        if line.startswith("+++ "):
+            cur = line[6:] if line.startswith("+++ b/") else None
+            continue
+        m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)", line)
+        if m:
+            line_no = int(m.group(1))
+            continue
+        if line.startswith("+") and cur:
+            body = line[1:].strip()
+            if not re.search(r"(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|.*\.min\.\w+)$", cur) and (
+                    GAP_RE.search(body) or GAP_MARK_RE.search(body)
+                    or (DOC_RE.search(cur) and DOC_PLACEHOLDER_RE.search(body))):
+                out.append(f"{cur}:{line_no}: {body[:160]}")
+            line_no += 1
+    for rel in new_files:  # untracked files in a working-tree review: every line is new
+        if DOC_RE.search(rel) or not re.search(r"\.(png|jpe?g|gif|ico|pdf|zip|lock|min\.\w+)$", rel):
+            try:
+                with open(os.path.join(path, rel), errors="replace") as fh:
+                    for i, body in enumerate(fh.read(200000).splitlines(), 1):
+                        body = body.strip()
+                        if GAP_RE.search(body) or GAP_MARK_RE.search(body) or (
+                                DOC_RE.search(rel) and DOC_PLACEHOLDER_RE.search(body)):
+                            out.append(f"{rel}:{i}: {body[:160]}")
+            except (OSError, UnicodeDecodeError):
+                pass
+    rng = rng_args[0] + ".." + rng_args[1] if len(rng_args) == 2 else (rng_args[0] + "..HEAD" if rng_args else "")
+    for msg in (git(path, "log", "--format=%s%n%b", rng) or "").splitlines() if rng else []:
+        if GAP_RE.search(msg) or GAP_MARK_RE.search(msg):
+            out.append(f"commit message: {msg.strip()[:160]}")
+    return list(dict.fromkeys(out))[:25]
+
+
 def focus_text(fc):
     parts = []
     if fc.get("renamed"):
@@ -2116,6 +2173,10 @@ def focus_text(fc):
         parts.append("New or changed parameters with defaults (pass 5):\n" + "\n".join(f"- {p}" for p in fc["params"]))
     if fc["state"]:
         parts.append("New module-level state (pass 5: do the specs reset it?):\n" + "\n".join(f"- {x}" for x in fc["state"]))
+    if fc.get("gaps"):
+        parts.append("Self-declared gaps: added lines and commit messages that say something isn't done (pass 0: "
+                     "does each keep the change from doing what it promises? Put every one in \"gaps\"):\n"
+                     + "\n".join(f"- {g}" for g in fc["gaps"]))
     return ("\n".join(parts) + "\n") if parts else ""
 
 
@@ -2219,8 +2280,10 @@ def declined_for(slug, ref):
 
 def decisions_text(slug, ref):
     """Earlier findings and declined ones for this branch, for the reviewers to respect."""
-    lines = [f"- declined: [{d.get('category') or '?'}] {d.get('file', '?')}: {d.get('issue', '')[:160]} "
-             f"(why: {d.get('why', '')[:160]})" for d in declined_for(slug, ref)][:15]
+    lines = [(f"- out of scope (the user's word): {d.get('file', '?')}: {d.get('gap', '')[:160]} (why: {d.get('why', '')[:160]})"
+              if d.get("gap") else
+              f"- declined: [{d.get('category') or '?'}] {d.get('file', '?')}: {d.get('issue', '')[:160]} "
+              f"(why: {d.get('why', '')[:160]})") for d in declined_for(slug, ref)][:15]
     if not lines:
         return ""
     return ("Decided with the author earlier (don't raise these again unless the change makes them newly "
@@ -2238,6 +2301,18 @@ def finding_symbol(f):
     text = " ".join(str(f.get(k, "")) for k in ("issue", "file"))
     m = re.search(r"`([A-Za-z_$][\w$.]{2,})`", text) or re.search(r"\b([a-z]+[A-Z][\w$]*|[A-Z][a-z]+[A-Z][\w$]*)\b", text)
     return m.group(1) if m else ""
+
+
+def gap_declined(g, declined):
+    """A known gap the user acknowledged (lean-agent review decline <project> g<n>)."""
+    text = str(g.get("what", ""))
+    for d in declined:
+        if not d.get("gap"):
+            continue
+        same_file = os.path.basename(str(d.get("file") or "")) == os.path.basename(str(g.get("file") or ""))
+        if _jaccard(_words(text), _words(d["gap"])) >= (0.3 if same_file else 0.5):
+            return True
+    return False
 
 
 def is_declined(f, declined):
@@ -2391,6 +2466,22 @@ def cmd_review_decline(a):
     if not last:
         die(f"no review of {a.head or slug} yet")
     for n in a.numbers:
+        if str(n).lower().startswith("g"):
+            gaps = last.get("gaps") or []
+            try:
+                g = gaps[int(str(n)[1:]) - 1]
+            except (ValueError, IndexError):
+                die(f"review {last['run']} has known gaps g1-g{len(gaps)}; got {n}" if gaps else
+                    f"review {last['run']} has no known gaps")
+            append_jsonl(declined_path(slug), {"ts": now_iso(), "ref": None if a.all_branches else last.get("ref"),
+                                               "file": g.get("file"), "gap": g.get("what", ""), "why": a.why,
+                                               "review": last["run"]})
+            print(f"acknowledged {n}: {g.get('file', '?')}: {str(g.get('what', ''))[:100]} ({a.why})")
+            continue
+        try:
+            n = int(n)
+        except ValueError:
+            die(f"{n!r}: a finding number (1, 2, ...) or a known gap (g1, g2, ...)")
         if not 1 <= n <= len(last["findings"]):
             die(f"review {last['run']} has findings 1-{len(last['findings'])}; got {n}")
         f = last["findings"][n - 1]
@@ -2786,7 +2877,13 @@ def cmd_review(a):
     if a.status:
         match, (sha, label) = find_review(slug, path, a.head)
         if match:
-            print(f"review {match['run']} of {label} @ {sha[:12]}: {match['verdict']}")
+            open_gaps = [g for g in match.get("gaps") or [] if not gap_declined(g, declined_for(slug, match.get("ref")))]
+            print(f"review {match['run']} of {label} @ {sha[:12]}: {match['verdict']}"
+                  + (f", {len(open_gaps)} known gap(s) not acknowledged" if open_gaps else ""))
+            for i, g in enumerate(open_gaps, 1):
+                print(f"  g{i}. {g.get('file', '?')}: {str(g.get('what', ''))[:140]}")
+            if match["verdict"] == "approve" and open_gaps:
+                return 2
             return 0 if match["verdict"] == "approve" else 1
         last = (list(read_jsonl(reviews_path(slug))) or [None])[-1]
         if not last:
@@ -2830,6 +2927,12 @@ def cmd_review(a):
         focus = change_focus(path, since) if since else {"tests": [], "params": [], "state": [], "renamed": []}
         meta["edited_tests"] = focus["tests"]
         mb = meta.get("merge_base")
+        if mb:  # gaps are about the whole change, not only what changed since the last review
+            meta["gaps"] = self_declared_gaps(path, [mb, meta["head"]] if meta.get("mode") == "ref" else [mb],
+                                              untracked_files(path) if meta.get("mode") != "ref" else ())
+            focus["gaps"] = meta["gaps"]
+        if getattr(a, "goal", None):
+            meta["goal"] = a.goal
         if mb:
             meta["hunks"] = changed_hunks(path, [mb, meta["head"]] if meta.get("mode") == "ref" else [mb])
         where += (" " + decisions_text(slug, meta.get("ref")).replace("\n", " ") if decisions_text(slug, meta.get("ref")) else "")
@@ -2915,6 +3018,8 @@ def cmd_review(a):
     cards = suggest(slug, path_words + " " + (a.focus or ""), a.max_context, "review")
     ns_syms = new_symbols(path, [merge_base, sha] if mode == "ref" else [merge_base], new)
     focus = change_focus(path, [merge_base, sha] if mode == "ref" else [merge_base])
+    focus["gaps"] = self_declared_gaps(path, [merge_base, sha] if mode == "ref" else [merge_base],
+                                       untracked_files(path) if mode != "ref" else ())
     grep_ref = sha if mode == "ref" else ""
     a._decisions = "" if a.independent else decisions_text(slug, label)
     a._label = label
@@ -2952,11 +3057,14 @@ def cmd_review(a):
         print(f"review: passing {len(lines)} earlier findings from review {earlier['run']} of {label}", flush=True)
     if a.focus:
         task += f"\nThe author asks you to look closely at: {a.focus}\n"
+    if getattr(a, "goal", None):
+        task += f"\nThe change's stated goal (task, work item or PR title): {a.goal}\n"
     meta = {"base": base, "merge_base": merge_base, "head": sha, "dirty": dirty, "ref": label, "mode": mode,
             "files": len(names), "new_symbols": ns_syms["files"] + ns_syms["symbols"],
             "second_opinion": getattr(a, "_second", []),
             "hunks": changed_hunks(path, [merge_base, sha] if mode == "ref" else [merge_base]),
-            "edited_tests": focus["tests"], "independent": bool(a.independent)}
+            "edited_tests": focus["tests"], "independent": bool(a.independent), "gaps": focus.get("gaps") or [],
+            "goal": getattr(a, "goal", None)}
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=model, estimate=getattr(a, "_estimate", None),
                             why=f"pre-PR review ({effort} effort)", cards=None, card_list=cards, project=slug,
                             read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=a.max_turns,
@@ -3042,7 +3150,10 @@ def reuse_follow_up(a, slug, meta, effort):
     back (same session, cached context) to finish the reuse pass before the result goes to the user."""
     last = (list(read_jsonl(reviews_path(slug))) or [None])[-1]
     gaps = (last or {}).get("unchecked", []) + (last or {}).get("disputed", []) + [
-        f"coverage entry for edited test {t}" for t in (last or {}).get("coverage_unchecked", [])]
+        f"coverage entry for edited test {t}" for t in (last or {}).get("coverage_unchecked", [])] + [
+        f"gap entry for {g.get('file', '?')}:{g.get('line') or ''} \"{str(g.get('what', ''))[:120]}\" (does it keep "
+        "the goal from working? is it out of scope, and where does it say so?)"
+        for g in (last or {}).get("gaps", []) if g.get("unaddressed")]
     if not last or not gaps:
         return 2
     prev = next((r for r in reversed(ledger()) if r["id"] == last["run"]), None)
@@ -3050,9 +3161,9 @@ def reuse_follow_up(a, slug, meta, effort):
         return 2
     print(f"review: sending the reviewer back once to finish the reuse pass ({len(gaps)} open)", flush=True)
     task = ("Your review isn't complete. For each item below: a reuse entry (search the repository, at least one "
-            "search each; for justified-new, say concretely why the existing code can't be reused or extended) or a "
+            "search each; for justified-new, say concretely why the existing code can't be reused or extended), a "
             "coverage entry (what the test protected, and whether that's still tested; a pure rename is "
-            "still-covered):\n"
+            "still-covered), or a gap entry (pass 0):\n"
             + "\n".join(f"- {g}" for g in gaps[:20]) + "\nThen reply with a complete LEAN-REVIEW line again "
             "(all findings, searches and reuse entries, not only the new ones).")
     ns = argparse.Namespace(resume=prev["id"], task=[task], task_file=None, model=None, why=None, cards=None,
@@ -3062,7 +3173,7 @@ def reuse_follow_up(a, slug, meta, effort):
     return cmd_run(ns)
 
 
-DESIGN_CATEGORIES = ("duplication", "scope", "platform")
+DESIGN_CATEGORIES = ("completeness", "duplication", "scope", "platform")
 CATEGORY_ORDER = {c: i for i, c in enumerate(DESIGN_CATEGORIES + ("correctness", "security", "compatibility",
                                                                    "performance", "tests", "style"))}
 
@@ -3117,7 +3228,8 @@ def enforce_review_rules(review, meta, declined=()):
             checks.append({"what": f"unverified -> delegate a read-only check: {f.get('file', '?')}: "
                                    f"{str(f.get('issue', ''))[:200]}", "why": "the reviewer didn't verify it"})
             notes.append(f"turned an unverified {f.get('severity')} into a check ({f.get('file', '?')})")
-        elif f.get("severity") in ("blocker", "major") and OPTIONAL_RE.search(judgement):
+        elif (f.get("severity") in ("blocker", "major") and OPTIONAL_RE.search(judgement)
+              and f.get("category") != "completeness"):  # "a follow-up will host it" is the gap, not a reason
             f["severity"] = "minor"
             notes.append(f"lowered a finding the reviewer calls optional/follow-up/pre-existing to minor "
                          f"({f.get('file', '?')})")
@@ -3201,6 +3313,32 @@ def enforce_review_rules(review, meta, declined=()):
                          "suggestion": "add tests for these back, or say why they no longer apply"})
     review["_no_cov"] = no_cov
 
+    # completeness: every gap the change declares itself, and every one the reviewer found, until acknowledged
+    gaps = [dict(g) for g in review.get("gaps") or [] if isinstance(g, dict) and g.get("what")]
+    said = " ".join(f"{g.get('file', '')}:{g.get('line', '')} {g.get('what', '')}" for g in gaps)
+    for hit in meta.get("gaps") or []:
+        loc, _, text = hit.rpartition(": ") if hit.startswith("commit message") else hit.partition(": ")
+        if hit.startswith("commit message"):
+            loc, text = "commit message", hit.split(": ", 1)[1]
+        file_ = loc.rsplit(":", 1)[0] if ":" in loc else loc
+        if (file_ and file_ in said) or _jaccard(_words(text), _words(said)) >= 0.5:
+            continue
+        gaps.append({"what": text, "file": file_, "line": loc.rsplit(":", 1)[-1] if ":" in loc else 0,
+                     "blocks_goal": None, "scoped_out": "", "unaddressed": True})
+    gaps = [g for g in gaps if not gap_declined(g, declined)]
+    for g in gaps:
+        if g.get("blocks_goal") is True and not str(g.get("scoped_out") or "").strip() and not any(
+                f.get("category") == "completeness" and os.path.basename(str(f.get("file", ""))) ==
+                os.path.basename(str(g.get("file", ""))) for f in findings):
+            findings.append({"severity": "major", "category": "completeness", "file": g.get("file", "?"),
+                             "line": g.get("line") or 0, "issue": f"the change doesn't deliver: {g['what']}",
+                             "suggestion": "deliver it, or have the user confirm it's out of scope "
+                                           "(lean-agent review decline <project> <gap> --why ...)"})
+    if any(g.get("unaddressed") for g in gaps):
+        notes.append(f"{sum(1 for g in gaps if g.get('unaddressed'))} self-declared gap(s) the reviewer didn't address")
+    review["_gaps"] = gaps
+    review["_goal"] = review.get("goal") or meta.get("goal")
+
     if meta.get("resume") and meta.get("since_hunks") is not None:
         # converge: on a re-review, a NEW major about code that didn't change since the last review is minor
         for f in findings:
@@ -3250,7 +3388,8 @@ def report_review(slug, project, entry, review, meta):
                                       "base": meta.get("base"), "findings": findings, "checks": checks,
                                       "reuse": review.get("reuse") or [], "new_symbols": meta.get("new_symbols") or [],
                                       "unchecked": review.get("_missing") or [], "disputed": review.get("_disputed") or [],
-                                      "coverage_unchecked": review.get("_no_cov") or []})
+                                      "coverage_unchecked": review.get("_no_cov") or [],
+                                      "gaps": review.get("_gaps") or [], "goal": review.get("_goal")})
     order = {"blocker": 0, "major": 1, "minor": 2, "nit": 3}
     label = meta.get("ref") or "the working tree"
     reuse = [r for r in review.get("reuse") or [] if isinstance(r, dict)]
@@ -3288,6 +3427,18 @@ def report_review(slug, project, entry, review, meta):
             detail(f"      fix: {f['suggestion']}")
     for c in checks:
         print(f"  [check] {c.get('what', '')}" + (f" ({c['why']})" if c.get("why") else ""))
+    gaps = review.get("_gaps") or []
+    if review.get("_goal"):
+        detail(f"  goal: {review['_goal']}")
+    if gaps:
+        print(f"  known gaps: {len(gaps)} (the user decides on each before a PR; acknowledge one: "
+              f"lean-agent review decline {slug} g<n> --why \"...\")")
+        for i, g in enumerate(gaps, 1):
+            tag = ("blocks the goal" if g.get("blocks_goal") is True else
+                   "not checked by the reviewer" if g.get("unaddressed") else
+                   f"out of scope? {g.get('scoped_out')}" if g.get("scoped_out") else "doesn't block the goal")
+            print(f"  g{i}. {g.get('file', '?')}{':' + str(g['line']) if g.get('line') else ''}: "
+                  f"{str(g.get('what', ''))[:140]} [{tag}]")
     if review.get("_declined_shown"):
         detail("  declined earlier: " + "; ".join(f"{d.get('symbol') or d.get('file', '?')}: {str(d.get('issue', ''))[:60]}"
                                                 for d in review["_declined_shown"]))
@@ -3299,6 +3450,10 @@ def report_review(slug, project, entry, review, meta):
     if BRIEF:
         print(f"  full review (reuse table, coverage, fixes): lean-agent runs --show {entry['id']}")
     blocking = [f for f in findings if f.get("severity") in ("blocker", "major")]
+    if verdict == "approve" and not blocking and gaps:
+        print(f"Approved, but with {len(gaps)} known gap(s): tell the user about each in one line and get their word "
+              f"(out of scope: lean-agent review decline {slug} g<n> --why \"...\") before calling it ready or opening a PR.")
+        return 2
     if verdict == "approve" and not blocking:
         print("Approved: OK to prepare the PR (still an outward action: ask the user before creating it).")
         return 0
@@ -6910,6 +7065,8 @@ def build_parser():
                    "with --status: check that ref")
     s.add_argument("--no-fetch", action="store_true", help="don't `git fetch origin` for origin/* refs")
     s.add_argument("--focus", help="what the reviewer should look at closely")
+    s.add_argument("--goal", metavar="TEXT", help="what the change promises (task, work item or PR title): the "
+                   "reviewer checks it's delivered end to end")
     s.add_argument("--resume", action="store_true", help="re-review after fixes: a fresh reviewer gets the open findings "
                    "and only what changed since (cheap); --same-session continues the old reviewer")
     s.add_argument("--same-session", action="store_true", help="--resume: continue the earlier reviewer session")
@@ -6944,7 +7101,8 @@ def build_parser():
     s = sub.add_parser("review-decline", help="findings of the latest review that were discussed and declined "
                        "(also: review decline <project> <n>...)")
     s.add_argument("project")
-    s.add_argument("numbers", nargs="+", type=int, metavar="N", help="finding numbers as the review printed them")
+    s.add_argument("numbers", nargs="+", metavar="N", help="finding numbers as the review printed them, or known "
+                   "gaps (g1, g2: the user's word that it's out of scope)")
     s.add_argument("--why", required=True, help="the decision, e.g. \"out of scope: separate ticket\"")
     s.add_argument("--head", metavar="REF", help="the branch whose latest review it is (default: the latest review)")
     s.add_argument("--all-branches", action="store_true", help="a project-wide decision, not just this branch")
