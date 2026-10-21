@@ -636,6 +636,56 @@ def record_plan_usage(info):
         os.replace(tmp, plan_usage_path())
     except OSError:
         pass
+    record_plan_history(windows)
+
+
+def plan_history_path():
+    return os.path.join(lean_home(), "plan-usage.jsonl")
+
+
+def record_plan_history(windows, now=None):
+    """Keep the session and week % over time for the dashboard's graph: a point when a value changed or 10 minutes
+    passed, and only the last 8 days."""
+    import time
+    now = now or time.time()
+    point = {k: [windows[k]["pct"], windows[k].get("resets_at")] for k in ("five_hour", "seven_day") if k in windows}
+    if not point:
+        return
+    path = plan_history_path()
+    hist = plan_history(days=8, now=now)
+    last = hist[-1] if hist else None
+    if last and now - last["t"] < 600 and all(last.get(k) == v for k, v in point.items()):
+        return
+    try:
+        os.makedirs(lean_home(), exist_ok=True)
+        if hist and hist[0]["t"] < now - 8 * 86400 + 3600 and len(hist) > 50 and os.path.getsize(path) > 100000:
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with open(tmp, "w") as fh:
+                fh.writelines(json.dumps(h) + "\n" for h in hist)
+            os.replace(tmp, path)
+        with open(path, "a") as fh:
+            fh.write(json.dumps(dict(point, t=int(now))) + "\n")
+    except OSError:
+        pass
+
+
+def plan_history(days=8, now=None):
+    """[{"t": epoch, "five_hour": [pct, resets_at], "seven_day": [pct, resets_at]}] of the last `days` days."""
+    import time
+    since = (now or time.time()) - days * 86400
+    out = []
+    try:
+        with open(plan_history_path()) as fh:
+            for line in fh:
+                try:
+                    h = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(h, dict) and h.get("t", 0) >= since:
+                    out.append(h)
+    except OSError:
+        pass
+    return out
 
 
 def week_pace():
