@@ -1644,6 +1644,41 @@ class CliTest(unittest.TestCase):
         self.assertIn("next job", out)
         self.assertIn(f"dashboard :{port}", out)
 
+    def test_dashboard_picks_up_new_code_without_restart(self):
+        import shutil
+        import socket
+        import urllib.request
+        scripts = os.path.join(self.tmp.name, "scripts")
+        shutil.copytree(os.path.dirname(CLI), scripts, ignore=shutil.ignore_patterns("__pycache__"))
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        p = subprocess.Popen([sys.executable, os.path.join(scripts, "dashboard.py"), str(port)], env=self.env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            import time as _t
+            for _ in range(50):
+                try:
+                    token = json.load(open(os.path.join(self.env["LEAN_AGENT_HOME"], "dashboard.json")))["token"]
+                    get = lambda path: urllib.request.urlopen(f"http://127.0.0.1:{port}{path}?t={token}", timeout=3).read().decode()
+                    v1 = json.loads(get("/api/state"))["page_version"]
+                    break
+                except (OSError, ValueError, KeyError):
+                    _t.sleep(0.1)
+            self.assertIn(f'const V="{v1}"', get("/"))
+            path = os.path.join(scripts, "dashboard.py")
+            with open(path) as fh:
+                code = fh.read()
+            with open(path, "w") as fh:  # what `lean-agent sync` does to the running server's files
+                fh.write(code.replace("<title>lean-agent</title>", "<title>lean-agent (new)</title>"))
+            os.utime(path, (_t.time() + 5, _t.time() + 5))
+            v2 = json.loads(get("/api/state"))["page_version"]
+            self.assertNotEqual(v1, v2)  # an open tab sees this and reloads itself
+            self.assertIn("<title>lean-agent (new)</title>", get("/"))
+        finally:
+            p.terminate()
+            p.wait()
+
     def test_up_explains_a_folder_served_elsewhere(self):
         fake = os.path.join(self.tmp.name, "claude-busy")
         with open(fake, "w") as fh:
