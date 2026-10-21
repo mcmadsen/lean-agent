@@ -5105,6 +5105,12 @@ def cmd_doctor(a):
                "next tool call")
     st = chrome_state()
     print("  chrome for workers: " + ("verified" if st.get("ok") else "not verified (lean-agent chrome check)"))
+    import dashboard as _dash
+    dcfg = _dash.settings()
+    print(f"  dashboard: {'running' if dashboard_running() else 'not running'} on port {dcfg['port']}"
+          + (" · Claude desktop preview entry in launch.json" if dcfg.get("preview") else
+             " · no Claude desktop preview entry (lean-agent dashboard --preview)")
+          + " · whether a session has the built-in browser tools can only be seen inside that session")
     for s_ in sorted(projects()):
         print(f"  {s_}: never pushes to " + (", ".join(push_guard.project_patterns(s_)) or "(nothing guarded)")
               + " (lean-agent guard)")
@@ -6604,19 +6610,40 @@ def dashboard_running():
 
 def cmd_dashboard(a):
     import dashboard
-    if a.port:
-        cfg = dashboard.settings()
-        cfg["port"] = a.port
+    cfg = dashboard.settings()
+    if a.port or a.preview is not None:
+        if a.port:
+            cfg["port"] = a.port
+        if a.preview is not None:
+            cfg["preview"] = a.preview
         save_json(home("dashboard.json"), cfg)
         os.chmod(home("dashboard.json"), 0o600)
+        path = home("home", ".claude", "launch.json")
+        if cfg.get("preview"):
+            path = dashboard.write_launch_config(cfg)
+            print(f"preview: {path} has a \"lean-agent dashboard\" entry (http://localhost:{cfg['port']}); a Claude "
+                  "desktop session in the orchestrator home can preview it. Its bare address works without the token "
+                  "for the browser's own requests (other websites are still refused); restart the dashboard "
+                  "(`lean-agent service restart` or `lean-agent up`) to apply. Undo: --preview off")
+        elif a.preview is False:
+            data = load_json(path, {})
+            data["configurations"] = [c for c in data.get("configurations") or [] if c.get("name") != "lean-agent dashboard"]
+            if os.path.exists(path):
+                save_json(path, data)
+            print("preview: off (the dashboard needs its token again after a restart)")
     if a.url or a.open:
         running = dashboard_running()
-        print(dashboard.url() + ("" if running else
-                                 "  (not running: `lean-agent up` starts it, or `lean-agent dashboard`)"))
-        if a.open and running:
+        link = dashboard.url()
+        if not running:
+            print(link + "  (not running: `lean-agent up` starts it, or `lean-agent dashboard`)")
+        elif a.open:
             import webbrowser
-            if not webbrowser.open(dashboard.url()):
-                print("couldn't open a browser here; open the address above yourself")
+            print(f"opened in your default browser: {link}" if webbrowser.open(link) else
+                  f"couldn't open a browser from here; open this address yourself: {link}")
+        else:
+            print(link)
+        return 0
+    if a.port or a.preview is not None:
         return 0
     if dashboard_running():
         print(f"lean-agent dashboard is already running: {dashboard.url()}")
@@ -7038,6 +7065,9 @@ def build_parser():
     s = sub.add_parser("dashboard", help="the local dashboard (runs, queue, schedule, pace, context): serve it, or --url")
     s.add_argument("--url", action="store_true", help="print its address (with its token)")
     s.add_argument("--open", action="store_true", help="open it in your default browser")
+    s.add_argument("--preview", type=lambda v: v.lower() not in ("off", "no", "0", "false"), nargs="?", const=True,
+                   metavar="on|off", help="add it to the orchestrator home's .claude/launch.json (Claude desktop's "
+                   "preview), and let its bare address work without the token for the browser's own requests")
     s.add_argument("--port", type=int, help="use this port from now on (default 8765)")
     s.set_defaults(fn=cmd_dashboard)
 

@@ -253,8 +253,34 @@ load();setInterval(load,15000);
 </script></body></html>"""
 
 
+def write_launch_config(cfg=None):
+    """The Claude desktop app's preview config in the orchestrator home (.claude/launch.json): an entry for the
+    already running dashboard (url and port only; a localhost preview URL can't carry the token). Other entries
+    are kept. Returns the file's path."""
+    cfg = cfg or settings()
+    path = home("home", ".claude", "launch.json")
+    data = _json(path, {})
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("version", "0.0.1")
+    entries = [c for c in data.get("configurations") or [] if isinstance(c, dict) and c.get("name") != "lean-agent dashboard"]
+    entries.append({"name": "lean-agent dashboard", "url": f"http://localhost:{cfg['port']}", "port": cfg["port"]})
+    data["configurations"] = entries
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump(data, fh, indent=2)
+    return path
+
+
+def browser_same_origin(headers):
+    """A request a browser made from the dashboard page itself, or typed into its address bar (Sec-Fetch-Site),
+    not from another website and not from a non-browser program."""
+    return (headers.get("Sec-Fetch-Site") or "") in ("same-origin", "none")
+
+
 class Handler(BaseHTTPRequestHandler):
     token = ""
+    preview = False  # the preview's bare address: no token needed for the browser's own requests
 
     def log_message(self, *args):  # quiet
         pass
@@ -275,7 +301,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, "lean-agent dashboard: local requests only")
         u = urlparse(self.path)
         q = parse_qs(u.query)
-        if not secrets.compare_digest((q.get("t") or [""])[0], self.token):
+        if not secrets.compare_digest((q.get("t") or [""])[0], self.token) and not (
+                self.preview and browser_same_origin(self.headers)):
             return self._send(403, "lean-agent dashboard: open it with its address from `lean-agent dashboard --url`")
         if u.path == "/":
             return self._send(200, PAGE, "text/html; charset=utf-8")
@@ -292,6 +319,7 @@ def make_server(port=None):
     cfg = settings()
     port = port or cfg["port"]
     Handler.token = cfg["token"]
+    Handler.preview = bool(cfg.get("preview"))
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.daemon_threads = True
     if port != cfg.get("port"):
