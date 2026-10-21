@@ -233,6 +233,7 @@ td.id{white-space:nowrap}td.head{min-width:10em}.wide2{grid-column:span 2}
 <div id="view"><div class="bar"><b id="vtitle"></b><span><a id="vdet">details</a> · <a onclick="closeView()">close</a></span></div><pre id="vbody"></pre></div>
 <script>
 const T=new URLSearchParams(location.search).get("t")||"";
+const V="__PAGE_VERSION__";  // the server's page changed (lean-agent sync): load the new one
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const k=n=>n>=1e6?(n/1e6).toFixed(1)+"M":n>=1000?(n/1000).toFixed(n>=10000?0:1)+"k":String(n||0);
@@ -249,6 +250,7 @@ document.addEventListener("keydown",e=>{if(e.key==="Escape")closeView()});
 async function load(){
   let s;try{const r=await fetch(`/api/state?t=${T}`);if(!r.ok)throw new Error(r.status);s=await r.json()}
   catch(e){$("stamp").textContent="can't reach lean-agent ("+e.message+"): is `lean-agent up` or `lean-agent dashboard` running?";return}
+  if(s.page_version&&s.page_version!==V){location.reload();return}
   $("stamp").textContent="updated "+s.now.slice(11,19)+" · refreshes every 15 s";
   const wk=s.plan.seven_day, ses=s.plan.five_hour;
   $("pace").innerHTML=(wk?`<div class="big">${Math.round(wk.pct)}%</div><div class="mute">of your weekly plan</div>${meter(wk.pct,70,90)}`:'<span class="mute">plan usage not seen yet (it comes with every worker run)</span>')
@@ -315,6 +317,43 @@ def browser_same_origin(headers):
     return (headers.get("Sec-Fetch-Site") or "") in ("same-origin", "none")
 
 
+WATCHED = ("dashboard.py", "usage.py", "lean_schedule.py")
+_LIVE = {"stamp": None, "mod": None}
+_LIVE_LOCK = threading.Lock()
+
+
+def code_stamp():
+    return tuple(os.path.getmtime(os.path.join(HERE, f)) for f in WATCHED if os.path.exists(os.path.join(HERE, f)))
+
+
+def live():
+    """This module as it is on disk now. `lean-agent sync` updates the files the running server was started from;
+    when they change, the page, the state and their helpers are loaded again, so no restart is needed."""
+    import importlib
+    import importlib.util
+    with _LIVE_LOCK:
+        stamp = code_stamp()
+        if _LIVE["mod"] is None:
+            _LIVE.update(stamp=stamp, mod=sys.modules[__name__])
+        elif stamp != _LIVE["stamp"]:
+            try:
+                importlib.reload(usage)
+                importlib.reload(lean_schedule)
+                spec = importlib.util.spec_from_file_location(f"lean_agent_dashboard_{int(time.time())}",
+                                                              os.path.join(HERE, "dashboard.py"))
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                _LIVE.update(stamp=stamp, mod=mod)
+            except Exception:  # a half-written file during a pull: keep serving what works, try again next time
+                pass
+        return _LIVE["mod"]
+
+
+def page_version():
+    import hashlib
+    return hashlib.sha1(PAGE.encode()).hexdigest()[:10]
+
+
 class Handler(BaseHTTPRequestHandler):
     token = ""
     preview = False  # the preview's bare address: no token needed for the browser's own requests
@@ -341,13 +380,14 @@ class Handler(BaseHTTPRequestHandler):
         if not secrets.compare_digest((q.get("t") or [""])[0], self.token) and not (
                 self.preview and browser_same_origin(self.headers)):
             return self._send(403, "lean-agent dashboard: open it with its address from `lean-agent dashboard --url`")
+        mod = live()
         if u.path == "/":
-            return self._send(200, PAGE, "text/html; charset=utf-8")
+            return self._send(200, mod.PAGE.replace("__PAGE_VERSION__", mod.page_version()), "text/html; charset=utf-8")
         if u.path == "/api/state":
-            return self._send(200, json.dumps(state()), "application/json")
+            return self._send(200, json.dumps(dict(mod.state(), page_version=mod.page_version())), "application/json")
         m = re.fullmatch(r"/run/([\w-]+)", u.path)
         if m:
-            text = run_text(m.group(1), details=bool(q.get("details")))
+            text = mod.run_text(m.group(1), details=bool(q.get("details")))
             return self._send(200 if text is not None else 404, text or "no such run")
         return self._send(404, "not found")
 
