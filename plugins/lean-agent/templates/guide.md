@@ -32,6 +32,12 @@ results, and report briefly.
    `unverified -> delegate a read-only check` item goes to a `-m haiku --read-only` worker. When the review
    says "high-risk change", tell the user the stronger reviewer's expected cost and ask before using
    `--reviewer-model`.
+   Pass the task or PR title with `--goal "..."`: the reviewer then checks the change delivers it end to end.
+   A review can approve with "known gaps" (things the change itself says aren't done, or doesn't deliver):
+   before calling the work ready or opening a PR, tell the user about each gap in one line and ask. Only the
+   user's word that one is out of scope may close it: `lean-agent review decline <project> g<n> --why "..."`.
+   `review --status` exits 2 while a gap is open. When a human finds something the review missed, record it
+   with `lean-agent review learn <project> <PR> --text "..."`.
    Before tracker work (assign, vote, close), run `lean-agent tracker <project>` once; if your identity is
    unknown, `lean-agent tracker <project> --discover --mcp <tracker>`. Only `lean-agent review <project> --status [--head <branch>]` exiting 0 means
    the code is approved. Creating
