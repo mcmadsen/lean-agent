@@ -980,6 +980,30 @@ def repo_identity_text(slug, path):
     return text
 
 
+def code_tools_note(project):
+    """For a JS/TS project: the cheap code tools a worker should use instead of reading files ('' otherwise)."""
+    if not os.path.exists(os.path.join(project, "package.json")):
+        return ""
+    slug = next((s for s, v in projects().items() if v.get("path") == project), None)
+    if not slug:
+        return ""
+    la = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
+    lines = ["# Cheap code tools (no model; prefer them to reading or grepping many files; in a worktree add --dir .)",
+             f"- `{la} map {slug} --who-uses X` | `--deps PATH` | `--route /x` | `--unused` | `--find Name`: the import "
+             "graph, answered in a few lines."]
+    if load_json(home("checks", slug, "config.json"), {}):
+        lines.append(f"- `{la} check {slug}`: type-check / lint / tests; only errors that are new against the baseline. "
+                     "Run it before you say you're done; don't read full tool output.")
+    if load_json(home("counts", slug + ".json"), {}):
+        lines.append(f"- `{la} count {slug}`: how much of each tracked legacy pattern is left (`--files` lists them).")
+    if load_json(home("parity", slug, "config.json"), {}).get("routes"):
+        lines.append(f"- `{la} parity {slug}`: per-route screenshots, page text and console errors against the baseline.")
+    lines.append(f'- `{la} codemod {slug} "<command>"` runs a codemod on a throwaway copy and summarises the change; '
+                 "`--apply` runs it for real. For the same mechanical edit in many files, write a codemod "
+                 "(jscodeshift, ts-morph or a script) instead of editing files one by one.")
+    return "\n".join(lines) + "\n"
+
+
 def build_append(project, cards, read_only=False, allow_send=None, chrome=False, role_rule="", answer_lines=0):
     parts = [WORKER_PROTOCOL.format(
         answer_rule=ANSWER_RULE.format(n=answer_lines, mark=DETAILS_MARK) if answer_lines else "",
@@ -988,6 +1012,9 @@ def build_append(project, cards, read_only=False, allow_send=None, chrome=False,
         send_rule=ALLOW_SEND_RULE.format(approved=allow_send) if allow_send else SEND_RULE,
         browser_rule=BROWSER_RULE if chrome else "",
         role_rule=role_rule)]
+    tools = code_tools_note(project)
+    if tools:
+        parts.append(tools)
     if cards:
         parts.append("# Project context (selected for this task)\n")
         for c in cards:
@@ -6572,8 +6599,17 @@ def cmd_todo(a):
         if not text:
             die('what? lean-agent todo add "Fix the export timeout" -p <project> --ref "PR 512"')
         project = resolve_project(a.project)[0] if a.project else None
+        after = [int(x.strip().lstrip("#")) for x in (a.after or "").split(",") if x.strip()]
+        missing = [x for x in after if x not in by_id]
+        if missing:
+            die(f"--after: no todo {', '.join('#' + str(x) for x in missing)}")
         t = {"id": data["next"], "text": text, "project": project, "ref": a.ref, "prio": a.prio or "normal",
              "due": a.due, "status": "open", "created": now_iso(), "notes": []}
+        if a.epic:
+            t["epic"], t["after"] = a.epic, after
+            data.setdefault("epics", {}).setdefault(a.epic, {"project": project, "counts": []})
+        elif after:
+            t["after"] = after
         data["items"].append(t)
         data["next"] += 1
         save_json(home("todo.json"), data)
@@ -6606,8 +6642,35 @@ def cmd_todo(a):
         save_json(home("todo.json"), data)
         print(f"{a.action}: {todo_line(t)}")
         return 0
+    if a.action == "epic":
+        if not a.args:
+            epics = sorted({t.get("epic") for t in data["items"] if t.get("epic")})
+            for e in epics:
+                items, done, ready, blocked = epic_status(data, e)
+                print(f"{e}: {len(done)}/{len(items)} done, {len(ready)} ready, {len(blocked)} waiting on others")
+            if not epics:
+                print('No epics. Add items with --epic NAME, or plan one: lean-agent slices <project> --create --epic NAME')
+            return 0
+        name = a.args[0]
+        meta = data.setdefault("epics", {}).setdefault(name, {"project": None, "counts": []})
+        if a.count:
+            meta["counts"] = sorted(set(meta.get("counts") or []) | set(a.count))
+            save_json(home("todo.json"), data)
+        items, done, ready, blocked = epic_status(data, name)
+        if not items:
+            die(f"no items in epic {name!r}")
+        print(f"{name}: {len(done)}/{len(items)} done, {len(ready)} ready, {len(blocked)} waiting on others"
+              + (f"; counters: {', '.join(meta['counts'])}" if meta.get("counts") else ""))
+        for t in sorted(ready, key=lambda t: (t["status"] != "doing", t["id"]))[:10]:
+            print("  ready: " + todo_line(t))
+        for t in blocked[:5]:
+            print("  waits: " + todo_line(t) + f"  (after {', '.join('#' + str(x) for x in t.get('after') or [])})")
+        return 0
     if a.action == "next":
         items = open_todos(data)
+        if a.epic:
+            ready = epic_status(data, a.epic)[2]
+            items = [t for t in items if t in ready]
         if not items:
             print("Nothing open. Add work with: lean-agent todo add \"...\"")
             return 0
@@ -6619,6 +6682,8 @@ def cmd_todo(a):
             print(f"(start it: lean-agent todo start {t['id']}; done: lean-agent todo done {t['id']} \"<result>\")")
         return 0
     items = data["items"] if a.all else open_todos(data)
+    if a.epic:
+        items = [t for t in items if t.get("epic") == a.epic]
     if a.project:
         slug = resolve_project(a.project)[0]
         items = [t for t in items if t.get("project") == slug]
@@ -6631,6 +6696,91 @@ def cmd_todo(a):
     if not a.all and done_week:
         print(f"({len(done_week)} done in the last 7 days: lean-agent todo list --all)")
     return 0
+
+
+def _fe(fn, a):
+    """Run a front-end tool (fe_tools) for a project; its errors become a short message."""
+    import fe_tools
+    slug, path = resolve_project(a.project)
+    try:
+        return fn(fe_tools)(slug, path, a)
+    except fe_tools.Fail as e:
+        die(str(e))
+
+
+def cmd_map(a):
+    def run(fe, slug, path, a):
+        root = fe.work_dir(slug, path, a.dir)
+        data = fe.load_map(slug, root, refresh=a.refresh, log=lambda m: print(m, file=sys.stderr))
+        if a.json:
+            print(json.dumps(data if not a.who_uses else fe.users_of(data), indent=1, default=sorted))
+        else:
+            print(fe.map_report(data, a))
+        return 0
+    return _fe(lambda fe: lambda slug, path, a: run(fe, slug, path, a), a)
+
+
+def cmd_count(a):
+    a.action = a.args.pop(0) if a.args and a.args[0] in ("add", "rm") else "show"
+    return _fe(lambda fe: fe.cmd_count, a)
+
+
+def cmd_check(a):
+    a.action = a.args.pop(0) if a.args and a.args[0] in ("add", "rm", "baseline") else "run"
+    return _fe(lambda fe: fe.cmd_check, a)
+
+
+def cmd_parity(a):
+    return _fe(lambda fe: fe.cmd_parity, a)
+
+
+def cmd_codemod(a):
+    return _fe(lambda fe: fe.cmd_codemod, a)
+
+
+def cmd_slices(a):
+    def run(fe, slug, path, a):
+        root = fe.work_dir(slug, path, a.dir)
+        data = fe.load_map(slug, root, log=lambda m: print(m, file=sys.stderr))
+        plan = fe.plan_slices(data, a.by, a.depth, a.src)
+        print(fe.slices_report(plan, a.max or 60))
+        if not a.create:
+            print(f"(create them as work-queue items: lean-agent slices {slug} --create --epic <name>)")
+            return 0
+        if not a.epic:
+            die("--create needs --epic NAME (the slices become that epic's items)")
+        data_t = todos()
+        ids = {}
+        for e in plan["enablers"]:
+            t = {"id": data_t["next"], "text": f"{a.epic}: shared {e['name']} ({len(e['files'])} files, {e['lines']:,} "
+                 f"lines; used by {len(e['used_by'])} slices)", "project": slug, "ref": None, "prio": "normal",
+                 "due": None, "status": "open", "created": now_iso(), "notes": [], "epic": a.epic, "after": []}
+            data_t["items"].append(t)
+            ids[e["name"]] = t["id"]
+            data_t["next"] += 1
+        for sl in plan["slices"]:
+            t = {"id": data_t["next"], "text": f"{a.epic}: {sl['name']} ({len(sl['files'])} own files, {sl['lines']:,} lines)",
+                 "project": slug, "ref": None, "prio": "normal", "due": None, "status": "open", "created": now_iso(),
+                 "notes": [], "epic": a.epic, "after": [ids[n] for n in sl["needs"] if n in ids]}
+            data_t["items"].append(t)
+            data_t["next"] += 1
+        data_t.setdefault("epics", {}).setdefault(a.epic, {"project": slug, "counts": []})
+        save_json(home("todo.json"), data_t)
+        print(f"created {len(plan['enablers']) + len(plan['slices'])} items in epic {a.epic}; "
+              f"the first ready one: lean-agent todo next --epic {a.epic}")
+        return 0
+    return _fe(lambda fe: lambda slug, path, a: run(fe, slug, path, a), a)
+
+
+def epic_status(data, name):
+    """(items, done, ready, blocked) of an epic: ready = open with everything it waits for done."""
+    items = [t for t in data["items"] if t.get("epic") == name]
+    status = {t["id"]: t["status"] for t in data["items"]}
+    done = [t for t in items if t["status"] == "done"]
+    open_ = [t for t in items if t["status"] != "done"]
+    ready = [t for t in open_ if all(status.get(x) == "done" for x in t.get("after") or [])]
+    blocked = [t for t in open_ if t not in ready]
+    return items, done, ready, blocked
 
 
 def cmd_schedule(a):
@@ -7422,14 +7572,90 @@ def build_parser():
 
     s = sub.add_parser("todo", help="the work queue across sessions: add | list | next | start | done | note | rm")
     s.add_argument("action", nargs="?", default="list",
-                   choices=["add", "list", "next", "start", "done", "note", "rm", "reopen", "edit"])
+                   choices=["add", "list", "next", "start", "done", "note", "rm", "reopen", "edit", "epic"])
     s.add_argument("args", nargs="*", help="add: the text; start/done/note/rm: the number (done/note: then text)")
     s.add_argument("--project", "-p")
     s.add_argument("--ref", help="the tracker item, PR or branch it's about")
     s.add_argument("--prio", choices=list(PRIOS))
     s.add_argument("--due", metavar="YYYY-MM-DD")
     s.add_argument("--all", action="store_true", help="list: include done ones")
+    s.add_argument("--epic", metavar="NAME", help="add: part of this epic; next/list: only this epic")
+    s.add_argument("--after", metavar="N,N", help="add: ready only once these items are done")
+    s.add_argument("--count", action="append", metavar="COUNTER", help="epic NAME: show this counter's progress "
+                   "(lean-agent count) on the epic's board card")
     s.set_defaults(fn=cmd_todo)
+
+    s = sub.add_parser("map", help="the code's import graph (no model): who uses what, deps, routes, unused files")
+    s.add_argument("project")
+    s.add_argument("--who-uses", metavar="X", help="a file, folder, file name or exported name")
+    s.add_argument("--deps", metavar="PATH", help="what a file or folder imports")
+    s.add_argument("--route", nargs="?", const="all", metavar="/PATH", help="a route's entry and size (no value: all)")
+    s.add_argument("--unused", action="store_true", help="files nothing imports")
+    s.add_argument("--find", metavar="NAME", help="where a name is exported")
+    s.add_argument("--dir", help="map this checkout (a worktree) instead of the project")
+    s.add_argument("--refresh", action="store_true", help="rebuild now (it rebuilds by itself when files change)")
+    s.add_argument("--max", type=int)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_map)
+
+    s = sub.add_parser("count", help="named regex counters with history: count <project> [add NAME REGEX | rm NAME | NAME...]")
+    s.add_argument("project")
+    s.add_argument("args", nargs="*")
+    s.add_argument("--glob", help='add: only files matching, e.g. "*.ts,*.tsx"')
+    s.add_argument("--path", help="add: only under this folder")
+    s.add_argument("--files", action="store_true", help="list the files that still match")
+    s.add_argument("--by-folder", action="store_true")
+    s.add_argument("--dir", help="count in this checkout (a worktree); history is kept for the project only")
+    s.add_argument("--max", type=int)
+    s.set_defaults(fn=cmd_count)
+
+    s = sub.add_parser("check", help="type-check/lint/test commands against a baseline, only new errors: "
+                       "check <project> [add NAME CMD | rm NAME | baseline [NAME] | NAME...]")
+    s.add_argument("project")
+    s.add_argument("args", nargs="*")
+    s.add_argument("--dir", help="run in this checkout (a worktree)")
+    s.add_argument("--max", type=int, help="new errors shown per check (default 15)")
+    s.add_argument("--warnings", action="store_true", help="count warnings too")
+    s.add_argument("--update", action="store_true", help="lower the baseline when errors were fixed and none are new")
+    s.add_argument("--timeout", type=int, help="seconds (default 1800)")
+    s.set_defaults(fn=cmd_check)
+
+    s = sub.add_parser("parity", help="per-route screenshots, text and console errors against a baseline (Playwright): "
+                       "parity <project> set|baseline|check")
+    s.add_argument("project")
+    s.add_argument("action", nargs="?", default="check", choices=["set", "baseline", "check"])
+    s.add_argument("--url", help="set: the running app, e.g. http://localhost:3000")
+    s.add_argument("--routes", help='set: "/,/settings,/billing"')
+    s.add_argument("--routes-from-map", action="store_true", help="set: every route the map found without parameters")
+    s.add_argument("--start", help='set: command that starts the app when nothing answers, e.g. "npm run dev"')
+    s.add_argument("--viewport", help="set: WIDTHxHEIGHT (default 1280x800)")
+    s.add_argument("--storage", help="set: a Playwright storageState file (a signed-in session)")
+    s.add_argument("--mask", help="set: CSS selectors hidden before the screenshot (clocks, avatars)")
+    s.add_argument("--wait", type=int, help="set: ms to wait after the page settles (default 300)")
+    s.add_argument("--threshold", type=float, help="set: %% of pixels that may differ (default 0.1)")
+    s.add_argument("--full", action="store_true", help="set: full-page screenshots")
+    s.add_argument("--route", help="baseline/check: only these routes (comma-separated)")
+    s.add_argument("--dir", help="run the app from this checkout (a worktree)")
+    s.set_defaults(fn=cmd_parity)
+
+    s = sub.add_parser("codemod", help="run a codemod on a throwaway copy (default) or --apply, and summarise the change")
+    s.add_argument("project")
+    s.add_argument("command", nargs="?", help='e.g. "npx jscodeshift -t mods/rename.js src"')
+    s.add_argument("--apply", action="store_true", help="run it on the checkout itself")
+    s.add_argument("--dir", help="the checkout (a worktree)")
+    s.add_argument("--timeout", type=int)
+    s.set_defaults(fn=cmd_codemod)
+
+    s = sub.add_parser("slices", help="a refactor plan from the map: shared parts first, then one slice per route/folder")
+    s.add_argument("project")
+    s.add_argument("--by", choices=["auto", "route", "folder"], default="auto")
+    s.add_argument("--depth", type=int, default=2, help="folder depth of a slice / shared part (default 2)")
+    s.add_argument("--src", help="only files under this folder")
+    s.add_argument("--create", action="store_true", help="add them to the work queue")
+    s.add_argument("--epic", help="--create: the epic they belong to")
+    s.add_argument("--dir")
+    s.add_argument("--max", type=int)
+    s.set_defaults(fn=cmd_slices)
 
     s = sub.add_parser("schedule", help="recurring lean-agent jobs: list | add WHEN CMD... | rm N | run N | pause N | "
                        "resume N | defaults | run-due")

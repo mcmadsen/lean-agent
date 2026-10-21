@@ -200,6 +200,13 @@ def short_title(text, limit=90):
     return t[:cut if cut > 30 else limit] + "…", t
 
 
+def _count_history(slug):
+    out = []
+    for h in _jsonl(home("counts", f"{slug}.jsonl"), 5000):
+        out.append(h)
+    return out
+
+
 def _run_info(r):
     if not r:
         return None
@@ -208,7 +215,7 @@ def _run_info(r):
             "meaning": MEANING.get(st, st)}
 
 
-def board(todo, ledger, running, reviews, now=None, prs=None, notes=()):
+def board(todo, ledger, running, reviews, now=None, prs=None, notes=(), epics=None):
     """What the user should look at, as columns. Waiting on you: things only the user can do (a PR that's ready
     for their merge or vote, PR comments waiting on their reply, a run that asks or waits for a go-ahead, a
     decision note), each with the action and where to do it. In review: one card per pull request (CI, review at
@@ -349,7 +356,11 @@ def board(todo, ledger, running, reviews, now=None, prs=None, notes=()):
                  live=live.get(tid) or [], runs=[r.get("id") for r in runs][-4:], last_run=last,
                  done_at=t.get("done_at"), review=rv if col != "Done" else None,
                  pr=({"number": pr_items[tid]} if tid in pr_items else None))
-        if col == "Done":
+        if t.get("epic") and col == "Open":
+            continue  # waiting its turn: the epic's card stands for it
+        if col == "Done" and t.get("epic"):
+            done_groups.setdefault((t.get("project"), "epic: " + t["epic"]), []).append(c)
+        elif col == "Done":
             gkey = (t.get("project"), pr_items.get(tid) or prs_mod.pr_number(t.get("ref")) or
                     (re.findall(r"(?<!\d)\d{3,}(?!\d)", str(t.get("ref") or "")) or [_ref_key(t.get("ref"))])[0] or tid)
             done_groups.setdefault(gkey, []).append(c)
@@ -364,7 +375,8 @@ def board(todo, ledger, running, reviews, now=None, prs=None, notes=()):
             continue
         if prc:
             cards.remove(prc)
-        label = prc["text"] if prc else (group[-1]["ref"] or f"#{group[-1]['id']}")
+        label = prc["text"] if prc else (str(gkey[1]) if str(gkey[1]).startswith("epic: ") else
+                                          group[-1]["ref"] or f"#{group[-1]['id']}")
         cards.append(card(id="g-" + "-".join(str(c["id"]) for c in group), kind="group",
                           text=f"{label}: {len(group)} item{'s' if len(group) > 1 else ''} done"
                                + (" · merged" if prc else ""),
@@ -372,6 +384,31 @@ def board(todo, ledger, running, reviews, now=None, prs=None, notes=()):
                           done_at=max(c["done_at"] or "" for c in group + ([prc] if prc else [])),
                           result=group[-1]["result"], items=[{"id": c["id"], "title": c["title"], "result": c["result"]}
                                                               for c in reversed(group)]))
+    # epics: one card each, with progress and what's next
+    for name in sorted({t["epic"] for t in todo if t.get("epic")}):
+        items = [t for t in todo if t.get("epic") == name]
+        status = {t["id"]: t["status"] for t in todo}
+        open_ = [t for t in items if t["status"] != "done"]
+        if not open_:
+            continue
+        ready = [t for t in open_ if all(status.get(x) == "done" for x in t.get("after") or [])]
+        busy = any(t["status"] == "doing" or live.get(t["id"]) for t in open_)
+        nxt = next((t for t in sorted(ready, key=lambda t: (t["status"] != "open", t["id"])) if t["status"] == "open"), None)
+        meta = (epics or {}).get(name) or {}
+        progress = []
+        for cname in meta.get("counts") or []:
+            hist = [h for h in _count_history(meta.get("project") or items[0].get("project")) if h.get("name") == cname]
+            if hist:
+                progress.append(f"{cname} {hist[0]['total']} → {hist[-1]['total']}" if hist[0]["total"] != hist[-1]["total"]
+                                else f"{cname} {hist[-1]['total']}")
+        done_n = len(items) - len(open_)
+        cards.append(card(id=f"e-{name}", kind="epic", text=f"Epic {name}: {done_n}/{len(items)} done",
+                          project=items[0].get("project"), column="In progress" if busy or done_n else "Open",
+                          why=None, rest=" · ".join([f"{len(ready)} ready", f"{len(open_) - len(ready)} waiting on others"]
+                                                    + progress),
+                          action=(f"next: #{nxt['id']} {short_title(nxt['text'])[0]} (lean-agent todo next --epic {name})"
+                                  if nxt else None),
+                          epic={"done": done_n, "total": len(items), "ready": len(ready), "progress": progress}))
     # reviewed branches without a PR or an item
     for (slug, branch), recs in by_ref.items():
         if (slug, branch) in used_refs or any(_same_ref(branch, b) for p, b in used_refs if p == slug):
@@ -523,7 +560,8 @@ def state():
         "running": running, "runs": runs,
         "week": {"runs": len(week), "done": sum(r.get("status") == "done" for r in week),
                  "units": sum(r.get("units", 0) for r in week), "cost": round(sum(r.get("cost_usd") or 0 for r in week), 2)},
-        "board": board(todo, ledger, running, all_reviews, now, prs.cache(), _json(home("handoff-notes.json"), [])),
+        "board": board(todo, ledger, running, all_reviews, now, prs.cache(), _json(home("handoff-notes.json"), []),
+                       _json(home("todo.json"), {}).get("epics") or {}),
         "finished": [{"id": r.get("id"), "status": str(r.get("status") or "").split(":")[0], "ts": r.get("ts"),
                       "model": r.get("model"), "project": r.get("project"), "todo": r.get("todo"),
                       "task": " ".join(str(r.get("task") or "").split())[:160]}
@@ -621,7 +659,7 @@ td.id{white-space:nowrap}td.head{min-width:10em}.wide2{grid-column:span 2}
 .tc .title{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .tc .why{font-size:12px;color:var(--warn);margin-top:4px}.tc .act{font-size:12px;margin-top:3px;color:var(--mute)}
 .tc .act code{font-size:11px}.tc .rest{font-size:12px;color:var(--mute);margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.tc.k-pr{border-left-color:var(--s1)}.tc.k-note{border-left-style:dashed;border-left-color:var(--mute)}.tc.k-note .title,.tc.k-run .title{-webkit-line-clamp:unset;display:block}
+.tc.k-pr{border-left-color:var(--s1)}.tc.k-epic{border-left-color:var(--ok)}.tc.k-epic .rest{-webkit-line-clamp:unset;display:block}.tc.k-note{border-left-style:dashed;border-left-color:var(--mute)}.tc.k-note .title,.tc.k-run .title{-webkit-line-clamp:unset;display:block}
 .tc.k-group details{font-size:12px;margin-top:4px}.tc.k-group li{margin:2px 0}.col.wait{border-color:var(--warn)}
 .live{display:flex;flex-direction:column;gap:4px;font-size:13px}.live .row{display:flex;gap:10px;flex-wrap:wrap;align-items:baseline}
 .live .task{flex:1 1 240px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tc .result{font-size:12px;margin-top:4px}
@@ -691,6 +729,7 @@ function cardHtml(c,hi){
   const title=c.link?`<a href="${esc(c.link)}" target="_blank" rel="noopener">${esc(c.title)}</a>`:esc(c.title);
   let h=`<div class="tc p-${esc(c.prio)} k-${esc(c.kind)}${hi?" changed":""}"><div>${badges}<span class="title" title="${esc(c.text)}"><span class="mute">${esc(label)}</span> ${title}</span></div>`;
   if(c.rest&&c.kind!=="note")h+=`<div class="rest" title="${esc(c.text)}">${esc(c.rest)}</div>`;
+  if(c.kind==="epic"&&c.epic)h+=meter(Math.round(c.epic.done*100/Math.max(1,c.epic.total)),101,101);
   if(c.why)h+=`<div class="why">${esc(c.why)}</div>`;
   if(c.action)h+=`<div class="act">→ ${/^lean-agent /.test(c.action)?`<code>${esc(c.action)}</code>`:esc(c.action)}</div>`;
   if(c.result&&c.kind!=="group")h+=`<div class="result"><span class="ok">result:</span> ${esc(c.result.length>160?c.result.slice(0,160)+"…":c.result)}</div>`;

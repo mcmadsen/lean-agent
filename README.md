@@ -268,6 +268,26 @@ Every orchestrator turn re-reads the whole conversation, so it's kept short:
 - **Routing:** `lean-agent up --model haiku` runs a pure routing session on Haiku (switch up with `/model` when
   a step needs judgement); `--escalate haiku,sonnet` does the same for workers.
 
+## Large front-end work: map, check, count, parity, codemod, slices
+
+For a refactor or migration of a JS/TS front end (many files, many PRs), lean-agent has tools that do the bulk
+reading and running themselves and hand the model a few lines. None of them calls a model; they're generic (any
+framework) and keep their data under `~/.lean-agent/`. Workers are told about the ones set up for the project.
+
+| Command | What it does |
+|---|---|
+| `lean-agent map <project> [--who-uses X] [--deps PATH] [--route [/x]] [--unused] [--find Name] [--dir DIR]` | An import graph of the code (ES imports, `require`, dynamic `import()`, CSS `@import`/`@use`; `tsconfig`/`jsconfig` path aliases), cached and rebuilt when a file changes. Without a question: files and lines per folder, packages, the most used modules, the biggest files no test imports. `--who-uses` takes a file, folder, file name or exported name and lists the importers with the names they use; `--deps` lists what a file or folder imports; `--route` finds routes (React Router / Vue Router style `path:` declarations, Next/Nuxt `pages/`, Next `app/`, SvelteKit `routes/`) and the size of each with its imports; `--unused` lists files nothing imports. A worker asks this instead of grepping and reading files. |
+| `lean-agent count <project> add NAME "REGEX" [--glob "*.ts,*.tsx"] [--path src]`, `count <project> [NAME] [--files] [--by-folder]` | Named counters for what a refactor removes (an old API, an old state library, inline styles). Each run shows the total, per folder, and the change since the first run ("legacy-api: 404 in 120 files (was 812 on 10-21, -50%)"); the history is kept for the project's checkout, so the dashboard can show progress. |
+| `lean-agent check <project> add NAME "COMMAND"`, `check <project> baseline`, `check <project> [NAME...] [--dir DIR]` | Type-check, lint and test commands compared against a baseline of what was broken before: only new errors are shown (tsc, eslint stylish and unix formats, `file:line:col` compilers, jest/vitest/pytest failures; line numbers are left out of the comparison, so moved code doesn't count as new). An unrecognised failure shows the end of its output. Exit 1 on new errors; `--update` lowers the baseline when errors were fixed. |
+| `lean-agent parity <project> set --url URL --routes "/,/settings" [--routes-from-map] [--start "npm run dev"] [--mask SELECTORS] [--storage FILE]`, `parity <project> baseline`, `parity <project> [--route /x] [--dir DIR]` | Per route: a screenshot, the page text and console errors, with Playwright from the project (or `LEAN_AGENT_PLAYWRIGHT_DIR`), against the baseline: "38/40 routes unchanged; /settings: 2.1% of pixels differ, rows 0-12% (top); text: 1 lines gone, 1 new: -Save \| +Save changes; 1 new console error: ...". Animations are switched off and masked selectors hidden; it starts the dev server with `--start` when nothing answers; `--storage` takes a signed-in Playwright session. Screenshots stay on disk. |
+| `lean-agent codemod <project> "COMMAND" [--apply] [--dir DIR]` | Runs a codemod command (jscodeshift, ts-morph, a script) on a throwaway git worktree of the checkout as it is (uncommitted and new files included, `node_modules` linked) and summarises the change: files and lines per folder, and a sample diff from three folders. `--apply` runs it on the checkout itself and reports the same way. |
+| `lean-agent slices <project> [--by route\|folder] [--depth N] [--src DIR] [--create --epic NAME]` | A plan from the map: units are routes (or folders), files more than one unit uses are shared parts grouped by folder and come first, then the slices, smallest first, each with the shared parts it needs. `--create` adds them to the work queue as an epic, each slice waiting for its shared parts. |
+| `lean-agent todo add ... --epic NAME --after N,N`, `todo next --epic NAME`, `todo epic [NAME] [--count COUNTER]` | Epics in the work queue: an item can wait for others (`--after`), `next --epic` picks one that's ready, `todo epic` shows done / ready / waiting. On the dashboard an epic is one card with a progress bar, what's ready next and its counters ("legacy-api 812 → 404"); its open slices wait behind it, and its done items are one group in Done. |
+
+A slice then runs cheap: the worker gets its context from `map`, makes mechanical changes with a codemod, and is
+done when `check` shows no new errors, `count` went down and `parity` is unchanged; then `review --goal` and a PR.
+The orchestrator's guide has the full sequence.
+
 ## Attribution (asked once)
 
 Whether commits and PRs credit Claude is your call, asked once: by `lean-agent up` in a terminal, or by the

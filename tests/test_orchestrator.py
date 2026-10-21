@@ -2,6 +2,7 @@
 """Tests for the lean-agent CLI using a fake `claude` binary. Run: python3 tests/test_orchestrator.py"""
 import datetime
 import json
+import shutil
 import os
 import subprocess
 import sys
@@ -1905,6 +1906,165 @@ class CliTest(unittest.TestCase):
         self.assertEqual(dashboard.short_title("Older: a digest check on production (baseline vs wait); feedback "
                                                "files in downloads; trims offered; a vote needed")[0],
                          "Older: a digest check on production (baseline vs wait)")
+
+    def _fe_fixture(self):
+        root = os.path.join(self.tmp.name, "shop-web")
+        files = {
+            "package.json": '{"dependencies": {"react": "18", "react-router-dom": "6"}}',
+            "tsconfig.json": '{\n // paths\n "compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]},},\n}',
+            "src/main.tsx": "import { createRoot } from 'react-dom/client';\nimport App from './App';\n",
+            "src/App.tsx": ("import { Routes, Route } from 'react-router-dom';\nimport Settings from '@/pages/Settings';\n"
+                            "import Billing from './pages/Billing';\nexport default function App() {\n  return <Routes>\n"
+                            "    <Route path=\"/settings\" element={<Settings />} />\n"
+                            "    <Route path=\"/billing\" element={<Billing />} />\n  </Routes>;\n}\n"),
+            "src/pages/Settings.tsx": ("import { Button } from '@/components/Button';\nimport { api } from '@/legacy/api';\n"
+                                       "import './settings.css';\nexport default function Settings() { return <Button />; }\n"),
+            "src/pages/Billing.tsx": ("import { Button } from '../components/Button';\nimport { api } from '../legacy/api';\n"
+                                      "export default function Billing() { return <Button />; }\n"),
+            "src/pages/settings.css": "@import '../styles/tokens.css';\n",
+            "src/styles/tokens.css": ":root{}\n",
+            "src/components/Button.tsx": "export function Button() { return null; }\n",
+            "src/components/Button.test.tsx": "import { Button } from './Button';\n",
+            "src/legacy/api.ts": "export const api = {};\n",
+            "src/utils/old.ts": "export const unusedHelper = 1;\n",
+            "types.sh": ("echo \"src/legacy/api.ts(1,14): error TS7006: Parameter 'u' implicitly has an 'any' type.\"\n"
+                         "[ -f NEWERR ] && echo \"src/pages/Billing.tsx(9,1): error TS2322: Type 'string' is not "
+                         "assignable to type 'number'.\"\nexit 2\n"),
+        }
+        for rel, text in files.items():
+            os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+            with open(os.path.join(root, rel), "w") as fh:
+                fh.write(text)
+        g = lambda *a: subprocess.run(["git", "-C", root, *a], capture_output=True, text=True, check=True)
+        g("init", "-q")
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@e", "commit", "-qm", "init")
+        self.cli("learn", root, "--name", "shop")
+        return root
+
+    def test_front_end_tools(self):
+        root = self._fe_fixture()
+        out = self.cli("map", "shop").stdout
+        self.assertIn("10 files (1 tests)", out)  # json/sh files aren't source; tests are counted apart
+        self.assertIn("2 routes", out)
+        who = self.cli("map", "shop", "--who-uses", "Button").stdout
+        self.assertIn("used by 3 files (1 tests)", who)  # through the @/ alias and a relative import
+        self.assertIn("src/pages/Settings.tsx  [Button]", who)
+        self.assertIn("src/pages/settings.css", self.cli("map", "shop", "--deps", "src/pages/Settings.tsx").stdout)
+        routes = self.cli("map", "shop", "--route").stdout
+        self.assertIn("/settings  src/pages/Settings.tsx", routes)
+        self.assertNotIn("\n/Settings ", "\n" + routes)  # a pages/ folder is file routing only in Next/Nuxt
+        self.assertIn("src/utils/old.ts", self.cli("map", "shop", "--unused").stdout)
+        self.assertEqual(self.cli("map", "shop", "--who-uses", "nothing-like-this", check=False).returncode, 1)
+        # count: how much legacy is left, with history
+        self.cli("count", "shop", "add", "legacy-api", r"from ['\"](@/|\.\./)legacy/api", "--glob", "*.ts,*.tsx")
+        self.assertIn("legacy-api: 2 in 2 files", self.cli("count", "shop").stdout)
+        with open(os.path.join(root, "src/pages/Billing.tsx"), "w") as fh:
+            fh.write("import { api } from '../services/api';\n")
+        c = self.cli("count", "shop", "legacy-api", "--files").stdout
+        self.assertIn("legacy-api: 1 in 1 file (was 2 on", c)
+        self.assertIn("-50%", c)
+        self.assertIn("src/pages/Settings.tsx", c)
+        # check: only errors that weren't there before
+        self.cli("check", "shop", "add", "types", "sh types.sh")
+        self.assertIn("types: baseline recorded: 1 error, exit 2", self.cli("check", "shop", "baseline").stdout)
+        self.assertIn("types: ok · 0 new, 0 fixed", self.cli("check", "shop").stdout)
+        open(os.path.join(root, "NEWERR"), "w").close()
+        r = self.cli("check", "shop", check=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("1 new", r.stdout)
+        self.assertIn("src/pages/Billing.tsx:9: Type 'string' is not assignable to type 'number'. [TS2322]", r.stdout)
+        os.remove(os.path.join(root, "NEWERR"))
+        # codemod: a dry run changes nothing and says what would change
+        cmd = "sed -i.bak 's/legacy\\/api/services\\/api/' src/pages/Settings.tsx && rm src/pages/Settings.tsx.bak"
+        before = open(os.path.join(root, "src/pages/Settings.tsx")).read()
+        dry = self.cli("codemod", "shop", cmd).stdout
+        self.assertIn("dry run", dry)
+        self.assertIn("1 file changed, 0 new, 0 deleted (+1 -1)", dry)
+        self.assertIn("+import { api } from '@/services/api';", dry)
+        self.assertEqual(open(os.path.join(root, "src/pages/Settings.tsx")).read(), before)
+        self.assertEqual(subprocess.run(["git", "-C", root, "worktree", "list"], capture_output=True, text=True)
+                         .stdout.count("\n"), 1)  # the throwaway copy is gone
+        applied = self.cli("codemod", "shop", cmd, "--apply").stdout
+        self.assertIn("applied", applied)
+        self.assertIn("services/api", open(os.path.join(root, "src/pages/Settings.tsx")).read())
+        # slices and the epic they become
+        subprocess.run(["git", "-C", root, "checkout", "-q", "--", "."], check=True)
+        plan = self.cli("slices", "shop").stdout
+        self.assertIn("S1. shared src/components", plan)
+        self.assertIn("/billing:", plan)
+        self.assertIn("created 4 items in epic fe2", self.cli("slices", "shop", "--create", "--epic", "fe2").stdout)
+        ep = self.cli("todo", "epic", "fe2", "--count", "legacy-api").stdout
+        self.assertIn("fe2: 0/4 done, 2 ready, 2 waiting on others; counters: legacy-api", ep)
+        self.assertIn("shared src/", self.cli("todo", "next", "--epic", "fe2").stdout)
+        self.cli("todo", "done", "1", "ok")
+        self.cli("todo", "done", "2", "ok")
+        self.assertIn("2/4 done, 2 ready, 0 waiting", self.cli("todo", "epic", "fe2").stdout)
+        self.assertEqual(self.cli("todo", "add", "x", "--after", "99", check=False).returncode, 1)
+        sys.path.insert(0, os.path.dirname(CLI))
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        try:
+            import dashboard
+            import lean_agent as L
+            cards = {c["id"]: c for c in dashboard.state()["board"]["cards"]}
+            note = L.code_tools_note(root)
+        finally:
+            os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.update(LEAN_AGENT_HOME=old)
+        epic = cards["e-fe2"]
+        self.assertEqual((epic["title"], epic["column"]), ("Epic fe2: 2/4 done", "In progress"))
+        self.assertIn("legacy-api 2 → 1", epic["rest"])
+        self.assertIn("lean-agent todo next --epic fe2", epic["action"])
+        self.assertNotIn(3, cards)  # open slices wait behind the epic's card
+        self.assertEqual(cards["g-1-2"]["title"], "epic: fe2: 2 items done")
+        for tool in ("map shop --who-uses", "check shop", "count shop", "codemod shop"):
+            self.assertIn(tool, note)  # workers are told about the tools set up for the project
+        self.assertNotIn("parity shop", note)
+
+    def test_parity_compares_screenshots(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import fe_tools
+        t = self.tmp.name
+        white = [bytes([255] * 30) for _ in range(10)]
+        top = [bytes([0] * 30) if y < 2 else bytes([255] * 30) for y in range(10)]
+        fe_tools.png_write(os.path.join(t, "a.png"), 10, 10, white)
+        fe_tools.png_write(os.path.join(t, "b.png"), 10, 10, top)
+        self.assertEqual(fe_tools.png_read(os.path.join(t, "a.png"))[:3], (10, 10, 3))
+        self.assertEqual(fe_tools.png_diff(os.path.join(t, "a.png"), os.path.join(t, "a.png"))[0], 0.0)
+        share, span, why = fe_tools.png_diff(os.path.join(t, "a.png"), os.path.join(t, "b.png"))
+        self.assertEqual((share, span, why), (0.2, (0.0, 0.2), None))
+        self.assertEqual(fe_tools._area(span), "rows 0-20% (top)")
+        if not (os.environ.get("LEAN_AGENT_PLAYWRIGHT_DIR") and shutil.which("node")):
+            return  # the browser part needs Playwright (local runs set LEAN_AGENT_PLAYWRIGHT_DIR)
+        import http.server
+        import threading
+        site = os.path.join(t, "site")
+        os.makedirs(os.path.join(site, "settings"))
+        page = lambda color, text: f'<body style="margin:0"><div style="height:200px;background:{color}"></div>{text}</body>'
+        with open(os.path.join(site, "index.html"), "w") as fh:
+            fh.write(page("#fff", "Home"))
+        with open(os.path.join(site, "settings", "index.html"), "w") as fh:
+            fh.write(page("#36c", "Save"))
+        handler = lambda *a, **k: http.server.SimpleHTTPRequestHandler(*a, directory=site, **k)
+        handler.log_message = lambda *a: None
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        root = self._fe_fixture()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}"
+            self.cli("parity", "shop", "set", "--url", url, "--routes", "/,/settings/")
+            self.assertIn("2 routes recorded", self.cli("parity", "shop", "baseline").stdout)
+            self.assertIn("2/2 routes unchanged", self.cli("parity", "shop").stdout)
+            with open(os.path.join(site, "settings", "index.html"), "w") as fh:
+                fh.write(page("#c33", "Save changes<script>console.error('boom')</script>"))
+            r = self.cli("parity", "shop", check=False)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("1/2 routes unchanged", r.stdout)
+            self.assertIn("(top)", r.stdout)
+            self.assertIn("+Save changes", r.stdout)
+            self.assertIn("1 new console error: boom", r.stdout)
+        finally:
+            server.shutdown()
 
     def test_plan_history_feeds_the_dashboard_graph(self):
         sys.path.insert(0, os.path.dirname(CLI))
