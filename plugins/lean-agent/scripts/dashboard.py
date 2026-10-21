@@ -99,6 +99,19 @@ def orchestrator_context():
             "updated": datetime.datetime.fromtimestamp(os.path.getmtime(path)).isoformat(timespec="seconds")}
 
 
+def open_gaps(slug, review):
+    """Known gaps of a review the user hasn't acknowledged yet (lean-agent review decline <project> g<n>)."""
+    gaps = review.get("gaps") or []
+    if not gaps:
+        return 0
+    acked = [d.get("gap", "") for d in _jsonl(home("reviews", slug + ".declined.jsonl")) if d.get("gap")]
+    words = lambda t: set(re.findall(r"[a-z0-9]{3,}", str(t).lower()))
+    def acked_gap(g):
+        w = words(g.get("what"))
+        return any(w and len(w & words(a)) / max(1, len(w | words(a))) >= 0.3 for a in acked)
+    return sum(1 for g in gaps if not acked_gap(g))
+
+
 def state():
     now = datetime.datetime.now()
     week_ago = (now - datetime.timedelta(days=7)).isoformat()
@@ -135,7 +148,7 @@ def state():
         for r in _jsonl(f, 300):
             reviews[(slug, r.get("ref") or "working tree")] = r
     latest_reviews = sorted(({"project": p, "ref": ref, "verdict": r.get("verdict"), "ts": r.get("ts"),
-                              "head": str(r.get("head", ""))[:10],
+                              "head": str(r.get("head", ""))[:10], "gaps": open_gaps(p, r),
                               "blocking": sum(1 for x in r.get("findings") or [] if x.get("severity") in ("blocker", "major"))}
                              for (p, ref), r in reviews.items()), key=lambda r: r["ts"] or "", reverse=True)[:8]
     real, age = usage.plan_usage()
@@ -181,8 +194,15 @@ PAGE = r"""<!doctype html>
 header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;padding:16px 20px 4px}
 h1{font-size:18px;margin:0}header .mute{font-size:12px}
 main{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px;padding:12px 20px 24px}
-section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
-h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute);margin:0 0 8px}
+details.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0;overflow-x:auto}
+details.card>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:6px;user-select:none}
+details.card>summary::-webkit-details-marker{display:none}
+details.card>summary::before{content:"\25B8";color:var(--mute);font-size:11px;transition:transform .15s}
+details.card[open]>summary::before{transform:rotate(90deg)}
+details.card[open]>summary{margin-bottom:8px}
+.count{color:var(--mute);font-weight:400;text-transform:none;letter-spacing:0}
+.full{grid-column:1/-1}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute);margin:0}
 .mute{color:var(--mute)}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
 table{width:100%;border-collapse:collapse;font-size:13px}td{padding:4px 6px 4px 0;border-top:1px solid var(--line);vertical-align:top}
 tr:first-child td{border-top:none}td.n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
@@ -194,19 +214,21 @@ pre{white-space:pre-wrap;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospa
 #view{position:fixed;inset:5vh 5vw;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;display:none;box-shadow:0 10px 40px rgba(0,0,0,.25)}
 #view .bar{display:flex;justify-content:space-between;margin-bottom:8px}
 svg{display:block;width:100%;height:46px}
-section{overflow-x:auto}td.id{white-space:nowrap}td.head{min-width:10em}.wide2{grid-column:span 2}
+td.id{white-space:nowrap}td.head{min-width:10em}.wide2{grid-column:span 2}
 @media (max-width:640px){.hide-s{display:none}.wide2{grid-column:auto}main{padding:10px 12px 20px;gap:10px}}
 </style></head><body>
 <header><h1>lean-agent</h1><span class="mute" id="stamp"></span></header>
 <main>
- <section><h2>Week</h2><div id="pace"></div><div id="weekstats" class="mute"></div></section>
- <section><h2>Orchestrator context</h2><div id="ctx"></div></section>
- <section><h2>Running now</h2><div id="running"></div></section>
- <section class="wide2"><h2>Work queue</h2><div id="todo"></div></section>
- <section style="grid-column:1/-1"><h2>Recent runs</h2><div id="runs"></div></section>
- <section><h2>Scheduled</h2><div id="sched"></div></section>
- <section><h2>Reviews</h2><div id="reviews"></div></section>
- <section><h2>Pushes and notes</h2><div id="pushes"></div></section>
+ <details class="card" id="c-week" open><summary><h2>Week</h2></summary><div id="pace"></div><div id="weekstats" class="mute"></div></details>
+ <details class="card" id="c-ctx" open><summary><h2>Orchestrator context</h2></summary><div id="ctx"></div></details>
+ <details class="card" id="c-running" open><summary><h2>Running now <span class="count" id="n-running"></span></h2></summary><div id="running"></div></details>
+ <details class="card wide2" id="c-todo" open><summary><h2>Work queue <span class="count" id="n-todo"></span></h2></summary><div id="todo"></div></details>
+ <details class="card" id="c-reviews" open><summary><h2>Reviews to act on <span class="count" id="n-reviews"></span></h2></summary><div id="reviews"></div></details>
+ <details class="card full" id="c-runs"><summary><h2>Recent runs <span class="count" id="n-runs"></span></h2></summary><div id="runs"></div></details>
+ <details class="card" id="c-sched" open><summary><h2>Scheduled <span class="count" id="n-sched"></span></h2></summary><div id="sched"></div></details>
+ <details class="card" id="c-pushes" open><summary><h2>Pushes <span class="count" id="n-pushes"></span></h2></summary><div id="pushes"></div></details>
+ <details class="card" id="c-notes" open><summary><h2>Hand-off notes <span class="count" id="n-notes"></span></h2></summary><div id="notes"></div></details>
+ <details class="card full" id="c-approved"><summary><h2>Approved reviews <span class="count" id="n-approved"></span></h2></summary><div id="approved"></div></details>
 </main>
 <div id="view"><div class="bar"><b id="vtitle"></b><span><a id="vdet">details</a> · <a onclick="closeView()">close</a></span></div><pre id="vbody"></pre></div>
 <script>
@@ -248,9 +270,21 @@ async function load(){
   $("runs").innerHTML=table(s.runs.map(r=>`<tr><td class="id"><a onclick="show('${esc(r.id)}')">${esc(r.id)}</a></td><td class="${cls(r.status)}" title="${esc(r.status)}">${esc((r.status||"").split(":")[0])}</td><td class="hide-s">${esc(r.model)}</td><td class="hide-s">${esc(r.project)}${r.role?` <span class="mute">${esc(r.role)}</span>`:""}</td><td class="head">${esc(r.head)}</td><td class="n">${k(r.units)}</td><td class="n mute hide-s">${r.cost!=null?"$"+r.cost.toFixed(2):""}</td></tr>`));
   $("sched").innerHTML=table(s.schedule.map(j=>`<tr><td class="mute">#${j.id}</td><td>${esc(j.when)}</td><td><code>${esc(j.cmd)}</code></td><td class="n mute">${j.enabled?(j.next?"next "+when(j.next):""):"paused"}</td></tr>`))
     +(s.scheduled_results.length?'<div class="mute" style="margin-top:8px">Recent results</div>'+table(s.scheduled_results.map(r=>`<tr><td class="mute">#${r.id}</td><td class="${r.rc?"bad":"ok"}">exit ${r.rc}</td><td>${esc(r.first)}</td><td class="n mute">${when(r.ts)}</td></tr>`)):"");
-  $("reviews").innerHTML=table(s.reviews.map(r=>`<tr><td>${esc(r.project)}</td><td>${esc(r.ref)}</td><td class="${r.verdict==="approve"?"ok":"bad"}">${esc(r.verdict)}</td><td class="n">${r.blocking?r.blocking+" blocking":""}</td><td class="n mute">${when(r.ts)}</td></tr>`));
-  $("pushes").innerHTML=table(s.pushes.map(p=>`<tr><td>${esc(p.branch)} → ${esc(p.to)}</td><td class="${p.ok?"ok":"bad"}">${p.ok?"pushed":"failed"}</td><td class="n mute">${when(p.ts)}</td></tr>`))
-    +(s.notes.length?'<div class="mute" style="margin-top:8px">Hand-off notes</div>'+table(s.notes.map((n,i)=>`<tr><td class="mute">${i+1}.</td><td>${esc(n.text)}</td></tr>`)):"");
+  const rev=r=>`<tr><td>${esc(r.ref)} <span class="mute">${esc(r.project)}</span></td><td class="${r.verdict==="approve"?"ok":"bad"}" title="${esc(r.verdict)}">${esc((r.verdict||"").split("-")[0])}</td><td class="n">${r.blocking?r.blocking+" blocking":""}${r.gaps?` ${r.gaps} gap${r.gaps>1?"s":""}`:""}</td><td class="n mute hide-s">${when(r.ts)}</td></tr>`;
+  const act=s.reviews.filter(r=>r.verdict!=="approve"||r.gaps), ok=s.reviews.filter(r=>r.verdict==="approve"&&!r.gaps);
+  $("reviews").innerHTML=table(act.map(rev),"nothing to act on");
+  $("approved").innerHTML=table(ok.map(rev));
+  $("pushes").innerHTML=table(s.pushes.map(p=>`<tr><td>${esc(p.branch)} → ${esc(p.to)}</td><td class="${p.ok?"ok":"bad"}">${p.ok?"pushed":"failed"}</td><td class="n mute">${when(p.ts)}</td></tr>`),"none this week");
+  $("notes").innerHTML=table(s.notes.map((n,i)=>`<tr><td class="mute">${i+1}.</td><td>${esc(n.text)}</td></tr>`),
+    'none (the orchestrator adds open items with <code>lean-agent handoff --note</code>)');
+  const counts={running:s.running.length,todo:s.todo.length,reviews:act.length,runs:s.runs.length,sched:s.schedule.length,
+    pushes:s.pushes.length,notes:s.notes.length,approved:ok.length};
+  for(const [k2,n] of Object.entries(counts)) $("n-"+k2).textContent=n?`· ${n}`:"";
+}
+// each box remembers whether it's open, in this browser only (and works without storage)
+for(const d of document.querySelectorAll("details.card")){
+  try{const v=localStorage.getItem("la-open-"+d.id);if(v!==null)d.open=v==="1"}catch(e){}
+  d.addEventListener("toggle",()=>{try{localStorage.setItem("la-open-"+d.id,d.open?"1":"0")}catch(e){}});
 }
 load();setInterval(load,15000);
 </script></body></html>"""
