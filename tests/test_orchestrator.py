@@ -1534,6 +1534,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(data["ProgramArguments"][-3:], ["up", "--name", "lean-agent"])
         self.assertTrue(data["KeepAlive"])
         self.assertIn("bootstrap", open(log).read())
+        self.cli("service", "restart", **env)
+        self.assertIn("kickstart -k", open(log).read())
         self.cli("service", "uninstall", **env)
         self.assertFalse(os.path.exists(plist))
         env = dict(LEAN_AGENT_SERVICE_PLATFORM="linux", LEAN_AGENT_SYSTEMCTL=fake)

@@ -6421,6 +6421,14 @@ def service_file():
     return os.path.expanduser("~/.config/systemd/user/lean-agent.service")
 
 
+def dashboard_pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def cmd_service(a):
     """Optional: keep `lean-agent up` running across logins, restarts and closed terminals."""
     plat = service_platform()
@@ -6485,13 +6493,19 @@ def cmd_service(a):
         sys.stdout.write("".join(text.splitlines(True)[-a.n:]) or "(no log yet)\n")
         return 0
     if plat == "mac":
-        cmd = {"start": ["kickstart", "-k", f"gui/{uid}/{SERVICE_LABEL}"], "stop": ["bootout", f"gui/{uid}/{SERVICE_LABEL}"],
+        restart = ["kickstart", "-k", f"gui/{uid}/{SERVICE_LABEL}"]  # (re)starts it with the current settings
+        cmd = {"start": restart, "restart": restart, "stop": ["bootout", f"gui/{uid}/{SERVICE_LABEL}"],
                "status": ["print", f"gui/{uid}/{SERVICE_LABEL}"]}[a.action]
-        if a.action == "start":
-            ctl("bootstrap", f"gui/{uid}", path)
+        if a.action in ("start", "restart"):
+            ctl("bootstrap", f"gui/{uid}", path)  # no-op when it's loaded already
     else:
-        cmd = {"start": ["start", "lean-agent.service"], "stop": ["stop", "lean-agent.service"],
-               "status": ["status", "lean-agent.service"]}[a.action]
+        cmd = {"start": ["start", "lean-agent.service"], "restart": ["restart", "lean-agent.service"],
+               "stop": ["stop", "lean-agent.service"], "status": ["status", "lean-agent.service"]}[a.action]
+    if a.action in ("restart", "stop"):
+        running = [f for f in glob.glob(home("running", "*.json")) if dashboard_pid_alive(load_json(f, {}).get("pid"))]
+        if running and not a.yes:
+            die(f"{len(running)} worker(s) still running (lean-agent runs --running); they'd be stopped with it. "
+                f"Wait for them, or: lean-agent service {a.action} --yes")
     rc, out = ctl(*cmd)
     if a.action == "status":
         state = re.search(r"state = (\w+)|Active: (\S+ \S+)", out)
@@ -6959,8 +6973,9 @@ def build_parser():
     s.set_defaults(fn=cmd_week)
 
     s = sub.add_parser("service", help="optional: keep `lean-agent up` running across logins and restarts "
-                       "(install | status | start | stop | logs | uninstall)")
-    s.add_argument("action", choices=["install", "status", "start", "stop", "logs", "uninstall"])
+                       "(install | status | start | restart | stop | logs | uninstall)")
+    s.add_argument("action", choices=["install", "status", "start", "restart", "stop", "logs", "uninstall"])
+    s.add_argument("--yes", action="store_true", help="restart/stop even while workers are running")
     s.add_argument("--name", default="lean-agent", help="install: the session name in the Claude app")
     s.add_argument("-n", type=int, default=40, help="logs: last N lines")
     s.set_defaults(fn=cmd_service)
