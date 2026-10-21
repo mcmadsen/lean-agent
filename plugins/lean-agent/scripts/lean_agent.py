@@ -4727,7 +4727,9 @@ def orchestrator_settings(existing):
             data.pop(key, None)
         return data
     servers = [n for n, v in lean_mcp.discover().items() if v["source"] in ("user", "desktop")]
-    perms["deny"] = sorted(set(ORCHESTRATOR_DENY) | {lean_mcp.tool_prefix(n).rstrip("_") for n in servers})
+    trim = load_json(home("context-trim.json"), {})  # what `lean-agent context --apply` took out
+    perms["deny"] = sorted(set(ORCHESTRATOR_DENY) | set(trim.get("deny") or [])
+                           | {lean_mcp.tool_prefix(n).rstrip("_") for n in servers})
     data["permissions"] = perms
     data["disableBundledSkills"] = True
     data["autoCompactWindow"] = env_num("LEAN_AGENT_COMPACT_WINDOW", 100000)  # the orchestrator compacts early
@@ -4743,6 +4745,7 @@ def orchestrator_settings(existing):
             break
         p = os.path.dirname(p)
     # Claude Code matches resolved paths too: add the resolved form of each (e.g. macOS /var -> /private/var)
+    excludes += load_json(home("context-trim.json"), {}).get("exclude") or []
     data["claudeMdExcludes"] = list(dict.fromkeys(excludes + [real_glob(x) for x in excludes]))
     user = load_json(os.path.join(cfg, "settings.json"), {})
     # the orchestrator carries no plugin tools (workers get plugin servers via --mcp): off also for synced
@@ -5225,13 +5228,214 @@ def cmd_up(a):
     return remote_control(cmd, env, h)
 
 
+KEEP_TOOLS = {"Bash", "Read", "BashOutput", "TaskOutput", "KillShell", "TaskStop", "AskUserQuestion", "ToolSearch"}
+
+
+def orchestrator_transcripts(h):
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    found = []
+    for d in dict.fromkeys([h, os.path.realpath(h)]):
+        found += glob.glob(os.path.join(cfg, "projects", re.sub(r"[^A-Za-z0-9]", "-", d), "*.jsonl"))
+    return sorted(set(found), key=os.path.getmtime, reverse=True)
+
+
+def transcript_entries(path):
+    try:
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(e, dict):
+                    yield e
+    except OSError:
+        return
+
+
+def tool_use_counts(paths):
+    """{tool name: calls} over orchestrator transcripts (MCP and lean-agent commands included)."""
+    used = {}
+    for path in paths:
+        for e in transcript_entries(path):
+            for c in ((e.get("message") or {}).get("content") or []) if e.get("type") == "assistant" else []:
+                if isinstance(c, dict) and c.get("type") == "tool_use":
+                    used[c.get("name")] = used.get(c.get("name"), 0) + 1
+    return used
+
+
+def _text_of(content):
+    if isinstance(content, str):
+        return content
+    out = []
+    for c in content or []:
+        if isinstance(c, dict):
+            out.append(c.get("text") or (_text_of(c.get("content")) if c.get("type") == "tool_result" else "")
+                       or (json.dumps(c.get("input")) if c.get("type") == "tool_use" else ""))
+    return "\n".join(x for x in out if x)
+
+
+def message_items(path):
+    """[(~tokens, kind, label)] for what the conversation holds now (after its last compaction)."""
+    items, uses = [], {}
+    for e in transcript_entries(path):
+        if e.get("isCompactSummary") or e.get("subtype") == "compact_boundary":
+            items = []  # earlier messages were replaced by the summary
+            if e.get("isCompactSummary"):
+                items.append((est_tokens(_text_of((e.get("message") or {}).get("content"))), "summary",
+                              "compaction summary"))
+            continue
+        msg = e.get("message") or {}
+        content = msg.get("content")
+        if e.get("type") == "assistant":
+            for c in content or []:
+                if not isinstance(c, dict):
+                    continue
+                if c.get("type") == "tool_use":
+                    inp = c.get("input") or {}
+                    uses[c.get("id")] = (c.get("name"), str(inp.get("command") or inp.get("file_path") or "")[:90])
+                    items.append((est_tokens(json.dumps(inp)), "tool call", f"{c.get('name')}: {uses[c.get('id')][1]}"))
+                elif c.get("type") == "text":
+                    items.append((est_tokens(c.get("text") or ""), "reply", (c.get("text") or "")[:70].replace("\n", " ")))
+        elif e.get("type") == "user":
+            if isinstance(content, str):
+                items.append((est_tokens(content), "user", content[:70].replace("\n", " ")))
+                continue
+            for c in content or []:
+                if isinstance(c, dict) and c.get("type") == "tool_result":
+                    name, what = uses.get(c.get("tool_use_id"), ("?", ""))
+                    items.append((est_tokens(_text_of(c.get("content"))), "output", f"{name}: {what}"))
+                elif isinstance(c, dict) and c.get("type") == "text":
+                    items.append((est_tokens(c.get("text") or ""), "user", (c.get("text") or "")[:70].replace("\n", " ")))
+    return items
+
+
+def message_advice(kind, label):
+    if kind == "output" and "lean-agent" in label and not os.environ.get("LEAN_AGENT_BRIEF"):
+        return "brief mode is off in this session: restart `lean-agent up` (it sets LEAN_AGENT_BRIEF)"
+    if kind == "output" and re.search(r"lean-agent (run|do|review)\b", label):
+        return "a worker answer: workers answer in <= 25 lines once `lean-agent up` sets LEAN_AGENT_ANSWER_LINES"
+    if kind == "output" and label.startswith("Read"):
+        return "a file read: have a -m haiku worker read it and answer the question instead"
+    if kind == "output":
+        return "command output: ask for less (--grep, head) or delegate it"
+    if kind == "reply":
+        return "a long reply: keep replies to a few lines"
+    if kind == "tool call":
+        return "a long task text: put long context in a card or a --task-file the worker reads"
+    if kind == "user":
+        return "pasted text: put long material in a file and give the path"
+    return ""
+
+
+def probe_home(h):
+    """(init event, start-up context tokens) of a one-turn Haiku session in the home, as the orchestrator starts."""
+    claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
+    env = dict(os.environ, **ORCHESTRATOR_ENV)
+    try:
+        out = subprocess.run([claude, "-p", "--output-format", "stream-json", "--verbose", "--model", "haiku",
+                              "--max-turns", "1"], input="Reply with just OK. Do not use tools.", capture_output=True,
+                             text=True, cwd=h, env=env, timeout=180).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return {}, 0
+    init, ctx = {}, 0
+    for line in out.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") == "system" and ev.get("subtype") == "init":
+            init = ev
+        elif ev.get("type") == "result":
+            u = ev.get("usage") or {}
+            ctx = sum(u.get(k, 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    return init, ctx
+
+
+def cmd_context(a):
+    """What the orchestrator's context holds, what of it goes unused, and (--apply) taking that out."""
+    h = prepare_home()
+    trim_path = home("context-trim.json")
+    trim = load_json(trim_path, {})
+    if a.undo:
+        save_json(trim_path, {})
+        prepare_home()
+        print("context: removed lean-agent context's denies and excludes; applies from the next session")
+        return 0
+    paths = orchestrator_transcripts(h)[:a.sessions]
+    used = tool_use_counts(paths)
+    calls = sum(used.values())
+    print(f"Orchestrator sessions looked at: {len(paths)} (the latest {a.sessions}), {calls} tool calls")
+
+    # what loads at start
+    init, ctx = ({}, 0) if a.no_probe else probe_home(h)
+    if ctx:
+        print(f"Start-up context: ~{ctx:,} tokens (system prompt, tools, instruction files; one small Haiku call)")
+    files = home_instruction_files(h)
+    guide = os.path.join(h, "CLAUDE.md")
+    extra = [(f, t) for f, t in files if os.path.realpath(f) != os.path.realpath(guide)]
+    print("Instruction files: " + ", ".join(f"{os.path.basename(f)} ~{t:,}" for f, t in files))
+    flagged_files = [f for f, _ in extra]
+    for f, t in extra:
+        print(f"  flag: {f} (~{t:,} tokens on every call) is not lean-agent's guide")
+    tools = [t for t in init.get("tools") or [] if not t.startswith("mcp__")]
+    keep = KEEP_TOOLS | set(a.keep or [])
+    unused = sorted(t for t in tools if t not in used and t not in keep) if paths else []
+    if tools:
+        print(f"Tools: {len(tools)} loaded; used: " + (", ".join(f"{t} x{n}" for t, n in sorted(
+            used.items(), key=lambda kv: -kv[1]) if t in tools) or "none"))
+        if unused:
+            print("  flag: never called in these sessions: " + ", ".join(unused))
+    mcp = [s_.get("name") for s_ in init.get("mcp_servers") or [] if isinstance(s_, dict)]
+    if mcp:
+        print("  flag: MCP servers still load here: " + ", ".join(mcp) + " (lean-agent up switches them off)")
+    for kind in ("agents", "skills"):
+        names = [x if isinstance(x, str) else x.get("name", "?") for x in init.get(kind) or []]
+        if names:
+            print(f"  flag: {len(names)} {kind} load here ({', '.join(names[:8])}); the orchestrator doesn't use them"
+                  + (" (Agent is denied); they come from your ~/.claude/agents" if kind == "agents" else ""))
+
+    # what the conversation holds
+    if paths:
+        items = message_items(paths[0])
+        total = sum(t for t, _, _ in items)
+        by = {}
+        for t, kind, _ in items:
+            by[kind] = by.get(kind, 0) + t
+        print(f"Messages now (latest session, since its last compaction): ~{total:,} tokens: "
+              + ", ".join(f"{k} ~{v:,}" for k, v in sorted(by.items(), key=lambda kv: -kv[1])))
+        for t, kind, label in sorted(items, key=lambda x: -x[0])[:a.top]:
+            if t < 300:
+                break
+            print(f"  ~{t:>6,}  {kind:<9} {label[:80]}")
+            tip = message_advice(kind, label)
+            if tip:
+                print(f"           -> {tip}")
+        if total > 20000:
+            print("  Messages can't be taken out of a running conversation: `lean-agent handoff --note` for what's "
+                  "open, then /compact or /clear.")
+
+    if not a.apply:
+        if unused or flagged_files:
+            print("Take the flagged tools and files out of the orchestrator's context: lean-agent context --apply "
+                  "(--keep TOOL to keep one; --undo reverts)")
+        return 0
+    trim["deny"] = sorted(set(trim.get("deny") or []) | set(unused))
+    trim["exclude"] = sorted(set(trim.get("exclude") or []) | set(flagged_files))
+    save_json(trim_path, trim)
+    prepare_home()
+    print(f"applied: denied {len(unused)} tool(s), excluded {len(flagged_files)} file(s) in {h}/.claude/settings.json; "
+          "applies from the next session (or /clear). Undo: lean-agent context --undo")
+    return 0
+
+
 def orchestrator_context_lines(h):
     """What the orchestrator's context holds: the guide's size now, and the last orchestrator session's start-up
     context (system prompt, tools, guide) and growth, measured from its transcript."""
     guide = os.path.join(h, "CLAUDE.md")
     lines = [f"context: the guide (CLAUDE.md) is ~{est_tokens(read_text(guide)):,} tokens"
              if os.path.exists(guide) else "context: no guide yet"]
-    others = [(f, t) for f, t in home_instruction_files(h) if f != guide]
+    others = [(f, t) for f, t in home_instruction_files(h) if os.path.realpath(f) != os.path.realpath(guide)]
     if others:
         lines.append(f"context: also loaded on every call: " + ", ".join(f"{f} ~{t:,}" for f, t in others)
                      + " (keep them out: add them to claudeMdExcludes in " + os.path.join(h, ".claude", "settings.json") + ")")
@@ -6245,6 +6449,15 @@ def build_parser():
     s.add_argument("--grep", metavar="TEXT", help="with --show/--details: only lines containing TEXT")
     s.add_argument("-n", type=int, default=10)
     s.set_defaults(fn=cmd_runs)
+
+    s = sub.add_parser("context", help="what fills the orchestrator's context and what goes unused; --apply removes it")
+    s.add_argument("--apply", action="store_true", help="deny the never-used tools and exclude extra instruction files")
+    s.add_argument("--keep", action="append", metavar="TOOL", help="never take this tool out (repeatable)")
+    s.add_argument("--undo", action="store_true", help="remove what --apply took out")
+    s.add_argument("--sessions", type=int, default=8, help="how many recent orchestrator sessions to look at")
+    s.add_argument("--top", type=int, default=8, help="how many of the biggest messages to list")
+    s.add_argument("--no-probe", action="store_true", help="skip the start-up measurement (no Haiku call)")
+    s.set_defaults(fn=cmd_context)
 
     s = sub.add_parser("guard", help="branches lean-agent never pushes to: list | add | rm (globs; default release/*, "
                        "develop, main, master)")

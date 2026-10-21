@@ -16,8 +16,9 @@ In the lean-agent home (the orchestrator) a command that starts a worker (`lean-
 (LEAN_AGENT_BACKGROUND_RUNS=0 turns that off). It also keeps the context small: a Bash command that would print a
 long lean-agent run file (cat, less, a big tail ...) is refused with the command to use instead
 (LEAN_AGENT_READ_GUARD=0 turns that off, LEAN_AGENT_READ_LINES sets the limit, default 40), and once the
-context passes LEAN_AGENT_CTX_NUDGE tokens (default 100,000; again every 50,000 more) Claude gets a note
-with what compacting would save.
+context reaches 80% of the session's compaction point (or LEAN_AGENT_CTX_NUDGE tokens; 100,000 when the point
+isn't known; again every 50,000 more) Claude gets a note: check what fills the context and save open items
+before Claude Code compacts.
 """
 import json
 import os
@@ -27,6 +28,19 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import usage  # noqa: E402
 import push_guard  # noqa: E402
+
+
+def compaction_point():
+    """Where Claude Code compacts this session, from its environment (`lean-agent up` sets both); 0 if unknown."""
+    try:
+        window = int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or 0)
+        pct = float(os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") or 0)
+    except ValueError:
+        return 0
+    if not window or not (0 < pct <= 100):
+        return 0
+    effective = window - 4000  # Claude Code keeps room for the reply
+    return int(min(effective * pct / 100, effective - 13000))
 
 
 def emit(**fields):
@@ -174,10 +188,20 @@ def main():
         )
         return 0
 
-    nudge_at = int(os.environ.get("LEAN_AGENT_CTX_NUDGE") or 100000)
+    compact_at = compaction_point()
+    # before Claude Code compacts: at 80% of its compaction point (sessions started without lean-agent's early
+    # compaction: at LEAN_AGENT_CTX_NUDGE, default 100,000), then every 50,000 more
+    nudge_at = int(os.environ.get("LEAN_AGENT_CTX_NUDGE") or (compact_at * 0.8 if compact_at else 100000))
     if in_home and not checking and nudge_at and ctx >= nudge_at and ctx >= (state.get("nudged") or 0) + 50000:
         state["nudged"] = ctx
         usage.save_state(session_id, state)
+        if compact_at and ctx < compact_at:
+            emit(additionalContext=(
+                f"lean-agent: the context is ~{ctx:,} tokens; Claude Code compacts at ~{compact_at:,}. Before that "
+                "(standing rule): run `lean-agent context --no-probe` to see what fills your messages, save anything "
+                "still open with `lean-agent handoff --note \"...\"`, tell the user in one line, then go on. Keep "
+                "replies and command output short from here."))
+            return 0
         calls = state["totals"].get("_calls") or 1
         models = state.get("models") or {}
         model = max(models, key=lambda m: usage.units(models[m], m)) if models else "sonnet"

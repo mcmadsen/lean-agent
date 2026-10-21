@@ -286,6 +286,20 @@ class BudgetTest(Base):
         self.assertIsNone(run_hook("budget_hook.py", ev("lean-agent run -p shop -m haiku x"),
                                    LEAN_AGENT_BACKGROUND_RUNS="0", **self.env))
 
+    def test_check_before_auto_compaction(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        with open(self.transcript, "a") as fh:
+            fh.write(assistant_line("near", 10, 0, 56000, 50))
+        env = dict(self.env, LEAN_AGENT_CTX_NUDGE="", CLAUDE_CODE_AUTO_COMPACT_WINDOW="100000",
+                   CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="70")
+        out = run_hook("budget_hook.py", dict(self.ev, cwd=home), **env)
+        note = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Claude Code compacts at ~67,200", note)
+        self.assertIn("lean-agent context --no-probe", note)
+        self.assertIn("lean-agent handoff --note", note)
+        self.assertIsNone(run_hook("budget_hook.py", dict(self.ev, cwd=home), **env))  # once
+
     def test_long_run_file_reads_refused_in_lean_home(self):
         home = self.env["LEAN_AGENT_HOME"]
         run = os.path.join(home, "work", "1020-101010-abcd")

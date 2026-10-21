@@ -49,7 +49,10 @@ FAKE_CLAUDE = textwrap.dedent("""\
                     pre = "mcp__" + "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in name) + "__"
                     tools += [pre + t for t in names]
                     extra += 400 * len(names)
-        print(json.dumps({"type": "system", "subtype": "init", "tools": tools, "mcp_servers": servers}))
+        if os.environ.get("FAKE_PROBE_TOOLS"):
+            tools = json.loads(os.environ["FAKE_PROBE_TOOLS"])
+        print(json.dumps({"type": "system", "subtype": "init", "tools": tools, "mcp_servers": servers,
+                          "agents": json.loads(os.environ.get("FAKE_PROBE_AGENTS") or "[]")}))
         if os.environ.get("FAKE_PLAN"):  # what Claude reports about the plan, as in real stream-json output
             print(json.dumps({"type": "rate_limit_event", "rate_limit_info": json.loads(os.environ["FAKE_PLAN"])}))
         print(json.dumps({"type": "result", "usage": {"input_tokens": 8000 + (3000 if chrome else 0) + extra}}))
@@ -1391,6 +1394,49 @@ class CliTest(unittest.TestCase):
         self.cli("learn", self.proj)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tickets", "t")
         self.assertIn("tickets", self.calls()[-1]["mcp"]["servers"])
+
+    def test_context_flags_and_removes_unused(self):
+        import re as _re
+        home = self.cli("home").stdout.strip()
+        d = os.path.join(self.env["CLAUDE_CONFIG_DIR"], "projects", _re.sub(r"[^A-Za-z0-9]", "-", home))
+        os.makedirs(d)
+        big = "| row | value |\n" * 2000
+        lines = [
+            {"type": "user", "message": {"content": "Check the services and report"}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                                                            "input": {"command": "lean-agent run -p shop -m haiku x"}}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": big}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "All good."}]}},
+        ]
+        with open(os.path.join(d, "s1.jsonl"), "w") as fh:
+            fh.write("".join(json.dumps(x) + "\n" for x in lines))
+        with open(os.path.join(home, ".claude", "rules.md"), "w") as fh:
+            fh.write("x")
+        os.makedirs(os.path.join(home, ".claude", "rules"))
+        with open(os.path.join(home, ".claude", "rules", "extra.md"), "w") as fh:
+            fh.write("extra rule " * 100)
+        env = dict(FAKE_PROBE_TOOLS=json.dumps(["Bash", "Read", "Monitor", "NotebookEdit2", "mcp__x__y"]),
+                   FAKE_PROBE_AGENTS=json.dumps(["reviewer", "planner"]))
+        out = self.cli("context", **env).stdout
+        self.assertIn("Start-up context: ~8,000 tokens", out)
+        self.assertIn("never called in these sessions: Monitor, NotebookEdit2", out)  # Read is always kept
+        self.assertIn("extra.md (~", out)
+        self.assertIn("2 agents load here (reviewer, planner)", out)
+        self.assertRegex(out, r"~\s*[\d,]+  output    Bash: lean-agent run -p shop -m haiku x")
+        self.assertIn("brief mode is off in this session", out)
+        out = self.cli("context", "--apply", "--keep", "Monitor", **env).stdout
+        self.assertIn("denied 1 tool(s), excluded 1 file(s)", out)
+        with open(os.path.join(home, ".claude", "settings.json")) as fh:
+            data = json.load(fh)
+        self.assertIn("NotebookEdit2", data["permissions"]["deny"])
+        self.assertNotIn("Monitor", data["permissions"]["deny"])
+        self.assertTrue(any(x.endswith("extra.md") for x in data["claudeMdExcludes"]))
+        self.cli("home")  # kept when the home is refreshed (sync)
+        with open(os.path.join(home, ".claude", "settings.json")) as fh:
+            self.assertIn("NotebookEdit2", json.load(fh)["permissions"]["deny"])
+        self.cli("context", "--undo")
+        with open(os.path.join(home, ".claude", "settings.json")) as fh:
+            self.assertNotIn("NotebookEdit2", json.load(fh)["permissions"]["deny"])
 
     def test_up_explains_a_folder_served_elsewhere(self):
         fake = os.path.join(self.tmp.name, "claude-busy")
