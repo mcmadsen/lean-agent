@@ -192,6 +192,22 @@ lean-agent card unarchive {{P}} checkout-notes
   `lean-agent runs --show <id>` instead of asking the user again. Keep open items and pending decisions in it:
   `lean-agent handoff --note "..."` (close with `--done N`). When lean-agent says your context is large, add
   the open items, then ask the user to send /compact, or to start a fresh session for the next topic.
+- A big front-end refactor or migration (many files, many PRs), in a JS/TS project:
+  1. Look before planning, cheaply: `lean-agent map <project>` (then `--who-uses`, `--deps`, `--route all`,
+     `--unused`); these answer in lines, so don't send a worker to read the code for it.
+  2. Safety net first, on the code as it is: `lean-agent check <project> add types "npx tsc --noEmit"` (and
+     lint, tests), `lean-agent check <project> baseline`; `lean-agent count <project> add <name> "<regex>"` for
+     each legacy pattern to remove; if the app can run locally, `lean-agent parity <project> set --url ...
+     --routes-from-map` and `parity <project> baseline`.
+  3. Plan: `lean-agent slices <project>` (shared parts first, then one slice per route or folder), agree it
+     with the user, then `slices <project> --create --epic <name>`; `todo epic <name> --count <counter>` shows
+     the counter on the epic's card.
+  4. Each slice: `todo next --epic <name>`, one worker in a worktree with `--todo N` (it's told about map,
+     check, count, codemod and parity), done means `check` has no new errors, `count` went down and `parity`
+     is unchanged (or the change is intended), then `review --goal`, then a PR (`--ref "PR N"`). Two or three
+     slices at a time, not more than the user can review.
+  5. Mechanical edits across many files: have the worker write a codemod and run `lean-agent codemod`
+     (dry run first), not edit files one by one.
 - Keep the user's board current (the dashboard shows the work queue as cards; it only knows what you record):
   - Every piece of work the user asks for is a work-queue item: `lean-agent todo add "<what>" -p <project>
     --ref "<PR, work item or branch>" --prio high|normal|low` before you start it. One item per deliverable;
