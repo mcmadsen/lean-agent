@@ -4803,6 +4803,10 @@ def orchestrator_settings(existing):
     data["disableBundledSkills"] = True
     data["autoCompactWindow"] = env_num("LEAN_AGENT_COMPACT_WINDOW", 100000)  # the orchestrator compacts early
     data["disableClaudeAiConnectors"] = True
+    line = data.get("statusLine")
+    if not line or "statusline.py" in str((line or {}).get("command", "")):  # a status line you set yourself stays
+        data["statusLine"] = {"type": "command", "padding": 0, "command":
+                              f"python3 {json.dumps(os.path.join(HERE, 'trampoline.py'))} statusline.py"}
     cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     excludes = [os.path.join(cfg, "CLAUDE.md")]
     p = os.path.dirname(home("home"))
@@ -5269,6 +5273,15 @@ def cmd_up(a):
             cur["week"] = a.budget_week
         save_json(usage.limits_path(), cur)
     env = push_guard.git_env(env)  # the orchestrator's own git commands are guarded too
+    if os.environ.get("LEAN_AGENT_DASHBOARD") != "0":
+        import dashboard
+        link = dashboard.start_background() if not a.local else None
+        if a.local and not dashboard_running():
+            subprocess.Popen([sys.executable, os.path.join(HERE, "dashboard.py")], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            link = dashboard.url()
+        print(f"lean-agent: dashboard {link or dashboard.url()}" + ("" if link else " (already running)")
+              + " (open it in a browser tab, e.g. Claude Desktop's built-in browser)", flush=True)
     bindir = os.path.join(PLUGIN_ROOT, "bin")
     env["PATH"] = bindir + os.pathsep + env.get("PATH", "")  # `lean-agent` works even without the plugin
     cmd = [os.environ.get("LEAN_AGENT_CLAUDE") or "claude"]
@@ -6519,6 +6532,31 @@ def cmd_guard(a):
         print("no projects; new ones never push to " + ", ".join(push_guard.DEFAULT_PUSH_DENY))
 
 
+def dashboard_running():
+    import socket
+    import dashboard
+    with socket.socket() as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex(("127.0.0.1", dashboard.settings()["port"])) == 0
+
+
+def cmd_dashboard(a):
+    import dashboard
+    if a.port:
+        cfg = dashboard.settings()
+        cfg["port"] = a.port
+        save_json(home("dashboard.json"), cfg)
+        os.chmod(home("dashboard.json"), 0o600)
+    if a.url:
+        print(dashboard.url() + ("" if dashboard_running() else
+                                 "  (not running: `lean-agent up` starts it, or `lean-agent dashboard`)"))
+        return 0
+    if dashboard_running():
+        print(f"lean-agent dashboard is already running: {dashboard.url()}")
+        return 0
+    return dashboard.serve()
+
+
 def cmd_handoff(a):
     import compact_hook
     notes = compact_hook.load_notes()
@@ -6928,6 +6966,11 @@ def build_parser():
     s.add_argument("project", nargs="?")
     s.add_argument("patterns", nargs="*", metavar="push-deny PATTERN")
     s.set_defaults(fn=cmd_guard)
+
+    s = sub.add_parser("dashboard", help="the local dashboard (runs, queue, schedule, pace, context): serve it, or --url")
+    s.add_argument("--url", action="store_true", help="print its address (with its token)")
+    s.add_argument("--port", type=int, help="use this port from now on (default 8765)")
+    s.set_defaults(fn=cmd_dashboard)
 
     s = sub.add_parser("handoff", help="the hand-off note a new or compacted orchestrator session starts from")
     s.add_argument("--note", metavar="TEXT", help="add an open item or pending decision")
