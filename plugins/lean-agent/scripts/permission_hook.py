@@ -72,7 +72,7 @@ def main():
             inp["answers"] = ans["answers"]
         if ans.get("answers") or ans.get("updatedInput"):
             decision["updatedInput"] = inp
-        if ans.get("always") and event.get("permission_suggestions"):
+        if ans.get("always") and ds.suggestion_rules(event.get("permission_suggestions")):
             decision["updatedPermissions"] = event["permission_suggestions"]
     else:
         decision = {"behavior": "deny", "message": ans.get("message") or "The user declined this in the dashboard."}

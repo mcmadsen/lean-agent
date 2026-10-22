@@ -21,8 +21,10 @@ import time
 
 MAX_EVENTS = 2000
 FRESH_SECS = 20  # a dashboard tab polled this recently counts as someone looking
+WORKING_SECS = 60  # no transcript change for this long and no tool running: not shown as working
 QUIET_SECS = 8   # a transcript untouched this long after an assistant text: the turn is over
 TAG_RE = re.compile(r'^About (#?[A-Za-z0-9_.-]+) "')
+ABOUT_REPLY_RE = re.compile(r'^\s*About #(\d+)\b')  # an untagged message answered "About #N: ..." belongs to task #N
 
 
 def lean_home(*parts):
@@ -289,10 +291,23 @@ class Model:
         sent = self.sends.get(text)
         key = sent.get("key") if sent and sent.get("key") != "main" else None
         self.turn = max(self.turns) + 1
-        self.turns[self.turn] = {"thread": key, "open": True, "ts": _epoch(rec.get("timestamp"))}
+        self.turns[self.turn] = {"thread": key, "open": True, "ts": _epoch(rec.get("timestamp")), "untagged": sent is None}
         self._add(kind="user", text=(sent or {}).get("shown") or text, raw=(sent or {}).get("raw"), thread=key,
                   from_app=sent is None, ts=self._ts(rec), at=self.turns[self.turn]["ts"])
         self.last_kind = "user"
+
+    def _attach_reply(self, text):
+        """The first assistant text after an untagged user turn starting `About #N` moves the pair to task #N's view."""
+        t = self.turns[self.turn]
+        if not t.pop("untagged", False) or t["thread"]:
+            return
+        m = ABOUT_REPLY_RE.match(text)
+        if not m:
+            return
+        t["thread"] = m.group(1)
+        for e in self.events:
+            if e["turn"] == self.turn:
+                self._update(e, thread=t["thread"] if e["kind"] == "user" else e.get("thread"))
 
     def _record(self, rec):
         if rec.get("isSidechain"):
@@ -324,6 +339,7 @@ class Model:
                 if not isinstance(b, dict):
                     continue
                 if b.get("type") == "text" and str(b.get("text") or "").strip():
+                    self._attach_reply(b["text"])
                     self._add(kind="assistant", text=b["text"], ts=self._ts(rec))
                     self.last_kind = "text"
                 elif b.get("type") == "tool_use":
@@ -359,9 +375,10 @@ class Model:
                 continue
             self.perms[rid] = self._add(
                 kind="permission", rid=rid, name=req.get("tool_name"), state="pending",
-                text=tool_summary(req.get("tool_name"), req.get("tool_input")), can_always=bool(req.get("permission_suggestions")),
+                text=tool_summary(req.get("tool_name"), req.get("tool_input")),
+                can_always=bool(suggestion_rules(req.get("permission_suggestions"))),  # no rule suggested: no button
                 always_rule=suggestion_rules(req.get("permission_suggestions")),
-                expires_at=float(req.get("ts") or time.time()) + float(req.get("wait") or 300),
+                deadline=float(req.get("ts") or time.time()) + float(req.get("wait") or 300),  # epoch seconds
                 description=None, questions=questions_of(req.get("tool_input")) if req.get("tool_name") == "AskUserQuestion" else None)
             self.perms[rid]["_req"] = req
         for rid, e in self.perms.items():
@@ -382,8 +399,9 @@ class Model:
         e = self.perms.get(rid)
         if not e or e["state"] != "pending":
             return {"ok": False, "error": "that prompt isn't waiting any more"}
+        always = bool(always and e.get("can_always"))
         write_json(os.path.join(perm_dir(), rid + ".answer.json"),
-                   {"allow": bool(allow), "always": bool(always), "message": message, "answers": answers or None})
+                   {"allow": bool(allow), "always": always, "message": message, "answers": answers or None})
         self._update(e, state=("answered" if answers else "always" if always else "allowed") if allow else "denied",
                      answers=answers or None, where="dashboard",
                      answered_at=datetime.datetime.now().isoformat(timespec="seconds"))
@@ -411,7 +429,7 @@ class Model:
                     c["text"] = e["raw"]
                 out.append(c)
         cursor = max([max(e["i"], e.get("changed", 0)) for e in evs] or [0])
-        return {"status": self.status(key), "session": self.sid, "events": out, "cursor": cursor, "alive": True,
+        return {"status": self.status(key), "work_since": self.work_since(key), "session": self.sid, "events": out, "cursor": cursor, "alive": True,
                 "service": True, "now": time.time()}
 
     def waiting(self, key):
@@ -425,16 +443,22 @@ class Model:
                                                 else e.get("text")) or "")[:160], "ts": e["ts"]}
 
     def status(self, key):
+        """"working" only when sure: the thread's turn has no final reply and the transcript changed (or a tool is
+        running) within WORKING_SECS. A turn that stopped without a reply is not shown as stuck."""
         t = self.turns.get(self.turn, {})
         if not t.get("open") or (key != "main" and t.get("thread") != key):
             return "idle"
-        if self.last_kind == "text" and not self.tools:  # old transcripts carry no stop reason: quiet means finished
-            try:
-                if time.time() - os.stat(self.path).st_mtime > QUIET_SECS:
-                    return "idle"
-            except OSError:
-                pass
-        return "working"
+        try:
+            age = time.time() - os.stat(self.path).st_mtime
+        except (OSError, TypeError, ValueError):
+            return "idle"
+        if self.last_kind == "text" and not self.tools and age > QUIET_SECS:
+            return "idle"  # old transcripts carry no stop reason: quiet means finished
+        return "working" if self.tools or age <= WORKING_SECS else "idle"
+
+    def work_since(self, key):
+        """Epoch seconds the working turn began (0 when nothing is working)."""
+        return self.turns.get(self.turn, {}).get("ts", 0) if self.status(key) == "working" else 0
 
 
 def _listdir(d):

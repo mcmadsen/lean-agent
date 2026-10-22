@@ -10,6 +10,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from unittest import mock
 
 # A review that did the reuse pass for the symbols the test repo's change adds.
 REUSE_CHECKED = {"searches": [{"for": "total", "found": "nothing"}],
@@ -2148,18 +2149,30 @@ class CliTest(unittest.TestCase):
                 out({"type": "control_request", "request_id": "q1", "request": {
                     "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
                         {"question": "Which environment?", "header": "Env", "multiSelect": False,
-                         "options": [{"label": "staging", "description": "safe"}, {"label": "production"}]}]}}})
+                         "options": [{"label": "staging", "description": "safe"}, {"label": "production"}]},
+                        {"question": "Which checks?", "header": "Checks", "multiSelect": True,
+                         "options": [{"label": "lint"}, {"label": "unit"}, {"label": "e2e"}]}]}}})
                 resp = json.loads(sys.stdin.readline())
                 log.write(json.dumps(resp) + "\\n")
                 log.flush()
-                chosen = resp["response"]["response"]["updatedInput"]["answers"]["Which environment?"]
+                got = resp["response"]["response"]["updatedInput"]
+                chosen = got["answers"]["Which environment?"] + " + " + got["answers"]["Which checks?"] + " of %d" % len(got["questions"])
                 out({"type": "assistant", "message": {"content": [{"type": "text", "text": "you chose " + chosen}]}})
+            elif "NOSUGGEST" in text:
+                out({"type": "control_request", "request_id": "r2", "request": {
+                    "subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "rm x"},
+                    "permission_suggestions": [{"type": "setMode", "mode": "acceptEdits"}]}})
+                resp = json.loads(sys.stdin.readline())
+                log.write(json.dumps(resp) + "\\n")
+                log.flush()
+                out({"type": "assistant", "message": {"content": [{"type": "text", "text": "sent " + json.dumps(resp["response"]["response"])}]}})
             elif "PERM" in text:
                 out({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash",
                                                                    "input": {"command": "touch x"}}]}})
                 out({"type": "control_request", "request_id": "r1", "request": {
                     "subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "touch x"},
-                    "description": "Create x", "permission_suggestions": [{"type": "addRules"}]}})
+                    "description": "Create x", "permission_suggestions": [
+                        {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "touch:*"}]}]}})
                 resp = json.loads(sys.stdin.readline())
                 log.write(json.dumps(resp) + "\\n")
                 log.flush()
@@ -2263,6 +2276,7 @@ class CliTest(unittest.TestCase):
             snap = wait(lambda s: any(e["kind"] == "permission" and e["state"] == "pending" for e in s["events"]), "a prompt")
             prompt = next(e for e in snap["events"] if e["kind"] == "permission")
             self.assertEqual((prompt["name"], prompt["text"], prompt["can_always"]), ("Bash", "touch x", True))
+            self.assertEqual(prompt["always_rule"], ["Bash(touch:*)"])
             self.assertTrue(call("/api/chat/answer", {"rid": prompt["rid"], "allow": True, "always": True})[1]["ok"])
             snap = wait(lambda s: "ran it" in [e.get("text") for e in s["events"]], "the tool run")
             tool = next(e for e in snap["events"] if e["kind"] == "tool")
@@ -2274,7 +2288,16 @@ class CliTest(unittest.TestCase):
             self.assertIsNone(sent[0]["session"])  # never tied to a parent Claude Code session
             allow = next(m for m in sent if m.get("type") == "control_response")
             self.assertEqual(allow["response"]["response"]["behavior"], "allow")
-            self.assertEqual(allow["response"]["response"]["updatedPermissions"], [{"type": "addRules"}])
+            self.assertEqual(allow["response"]["response"]["updatedPermissions"],
+                             [{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "touch:*"}]}])
+            # a suggestion without a rule: no "Always allow", and an always answer sends no permission update
+            call("/api/chat", {"text": "NOSUGGEST"})
+            snap = wait(lambda s: sum(e["kind"] == "permission" for e in s["events"]) == 2, "a prompt without a rule")
+            bare = [e for e in snap["events"] if e["kind"] == "permission"][-1]
+            self.assertEqual((bare["can_always"], bare["always_rule"]), (False, []))
+            call("/api/chat/answer", {"rid": bare["rid"], "allow": True, "always": True})
+            snap = wait(lambda s: any(str(e.get("text")).startswith("sent ") for e in s["events"]), "its answer")
+            self.assertNotIn("updatedPermissions", [e["text"] for e in snap["events"] if str(e.get("text")).startswith("sent ")][0])
             # a thread per task: its own session, with the task's context on the first message
             code, r = call("/api/chat", {"thread": "q-r-77", "text": "ASK me", "title": "Which env?",
                                          "context": "a run that asks: which env; runs r-77"})
@@ -2284,8 +2307,8 @@ class CliTest(unittest.TestCase):
             q = next(e for e in snap["events"] if e["kind"] == "permission")
             self.assertEqual([o["label"] for o in q["questions"][0]["options"]], ["staging", "production"])
             call("/api/chat/answer", {"thread": "q-r-77", "rid": q["rid"], "allow": True,
-                                      "answers": {"Which environment?": "production"}})
-            snap = tw(lambda s: "you chose production" in [e.get("text") for e in s["events"]], "the answer")
+                                      "answers": {"Which environment?": "production", "Which checks?": "lint, e2e"}})
+            snap = tw(lambda s: "you chose production + lint, e2e of 2" in [e.get("text") for e in s["events"]], "the answer")
             self.assertEqual(next(e for e in snap["events"] if e["kind"] == "permission")["state"], "answered")
             first = [json.loads(l) for l in open(chat_log) if 'ASK me' in l][0]
             self.assertTrue(first["message"]["content"].startswith("[Dashboard thread about: a run that asks: which env"))
@@ -2503,7 +2526,7 @@ class CliTest(unittest.TestCase):
         app = [e for e in main.snapshot()["events"] if e.get("text") == "typed in the app"][0]
         self.assertTrue(app["from_app"])
         st = main.snapshot()["service_status"]
-        self.assertEqual((st["up"], st["remote_control"]), (True, False))
+        self.assertEqual((st["up"], st["mode"], st["remote_control"]), (True, "service", False))
         self.assertEqual(dash_chat.chat("13").snapshot()["events"], [])
         self.assertNotIn("hello there", json.dumps(t12.snapshot()["events"]))
         # incremental: only what changed since the cursor
@@ -2537,7 +2560,10 @@ class CliTest(unittest.TestCase):
         p.wait(timeout=20)
         dash_chat._BRIDGE["at"] = 0
         self.assertFalse(dash_chat.service_up())
-        self.assertNotIn("service", dash_chat.Chat(key="main").snapshot())
+        fallback = dash_chat.Chat(key="main").snapshot()
+        self.assertNotIn("service", fallback)
+        self.assertEqual((fallback["service_status"]["up"], fallback["service_status"]["mode"]), (False, "fallback"))
+        self.assertIsNone(fallback["service_status"]["remote_control"])
 
     def test_permission_hook_round_trip_through_the_dashboard(self):
         p, log, ss, dash_chat, dash_service = self.service_chat("--dashboard-only")
@@ -2565,13 +2591,17 @@ class CliTest(unittest.TestCase):
 
         bash = {"hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_input": {"command": "make deploy"},
                 "permission_suggestions": [{"type": "addRules", "rules": [{"toolName": "Bash"}]}]}
+        bare = dict(bash, permission_suggestions=[{"type": "setMode", "mode": "acceptEdits"}])
         ev, out = ask(bash, allow=True)
         self.assertEqual((ev["name"], ev["text"], ev["can_always"]), ("Bash", "make deploy", True))
         self.assertEqual(ev["always_rule"], ["Bash"])
-        self.assertGreater(ev["expires_at"], time.time())
+        self.assertAlmostEqual(ev["deadline"], time.time() + 20, delta=5)  # created + LEAN_AGENT_DASH_PERMISSION_WAIT (20)
         settled = [e for e in main.snapshot()["events"] if e.get("rid") == ev["rid"]]
         self.assertEqual((settled[0]["state"], settled[0]["where"]), ("allowed", "dashboard"))
         self.assertEqual(out, {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}})
+        ev, out = ask(bare, allow=True, always=True)  # Claude Code suggested no rule: no button, nothing added
+        self.assertEqual((ev["can_always"], ev["always_rule"]), (False, []))
+        self.assertEqual(out["decision"], {"behavior": "allow"})
         _, out = ask(bash, allow=True, always=True)
         self.assertEqual(out["decision"]["updatedPermissions"], bash["permission_suggestions"])
         _, out = ask(bash, allow=False, message="not now")
@@ -2580,11 +2610,14 @@ class CliTest(unittest.TestCase):
         self.assertIn("declined", out["decision"]["message"])
         question = {"hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion", "tool_input": {"questions": [
             {"question": "Which layout?", "header": "Layout", "multiSelect": False,
-             "options": [{"label": "A", "description": "one"}, {"label": "B", "description": "two"}]}]}}
-        ev, out = ask(question, allow=True, answers={"Which layout?": "B"})
-        self.assertEqual(ev["questions"][0]["options"][1]["label"], "B")
+             "options": [{"label": "A", "description": "one"}, {"label": "B", "description": "two"}]},
+            {"question": "Which extras?", "header": "Extras", "multiSelect": True,
+             "options": [{"label": "x"}, {"label": "y"}, {"label": "z"}]}]}}
+        answers = {"Which layout?": "B", "Which extras?": "x, z"}
+        ev, out = ask(question, allow=True, answers=answers)
+        self.assertEqual([(q["multi"], len(q["options"])) for q in ev["questions"]], [(False, 2), (True, 3)])
         self.assertEqual(out["decision"]["behavior"], "allow")
-        self.assertEqual(out["decision"]["updatedInput"]["answers"], {"Which layout?": "B"})
+        self.assertEqual(out["decision"]["updatedInput"]["answers"], answers)
         self.assertEqual(out["decision"]["updatedInput"]["questions"], question["tool_input"]["questions"])
         self.assertEqual(os.listdir(dash_service.perm_dir()), [])
         # answered ones are done; a prompt nobody answers in time falls back to the normal prompt
@@ -2611,6 +2644,62 @@ class CliTest(unittest.TestCase):
         os.utime(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "dash-poll"), (1, 1))
         self.assertEqual(proc.communicate(data, timeout=15)[0], "")
         self.assertEqual(os.listdir(dash_service.perm_dir()), [])
+
+    def model_records(self):
+        """A dash_service.Model fed transcript records directly (no session), in this test's home."""
+        sys.path.insert(0, os.path.dirname(CLI))
+        import dash_service
+        patch = mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": self.env["LEAN_AGENT_HOME"]})
+        patch.start()
+        self.addCleanup(patch.stop)
+        m = dash_service.Model()
+        n = [0]
+
+        def rec(kind, content, **extra):
+            n[0] += 1
+            ts = "2026-01-01T10:00:%02dZ" % n[0]
+            m._record(dict({"type": kind, "timestamp": ts, "message": {"role": kind, "content": content}}, **extra))
+        return dash_service, m, rec
+
+    def test_untagged_message_joins_a_task_view_when_the_reply_starts_with_about(self):
+        ds, m, rec = self.model_records()
+        rec("user", "how far is it?")  # typed in the app, answered about task 7
+        rec("assistant", [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}])
+        rec("assistant", [{"type": "text", "text": "About #7: two slices are left."}])
+        rec("user", "unrelated")  # untagged, the reply does not start with About
+        rec("assistant", [{"type": "text", "text": "Fine. About #7 is fine too."}])
+        rec("user", "and the other one?")
+        rec("assistant", [{"type": "text", "text": "  About #8: nothing yet."}])
+        users = lambda key: [e["text"] for e in m.snapshot(key)["events"] if e["kind"] == "user"]
+        self.assertEqual(users("7"), ["how far is it?"])
+        self.assertEqual(users("8"), ["and the other one?"])
+        self.assertEqual(users("main"), ["how far is it?", "unrelated", "and the other one?"])
+        self.assertEqual([e["kind"] for e in m.snapshot("7")["events"]], ["user", "tool", "assistant"])
+        self.assertEqual([e.get("about") for e in m.snapshot("main")["events"] if e["kind"] == "user"], ["7", None, "8"])
+        # a client that saw the turn before the reply gets the user turn again, now with its task
+        self.assertEqual(m.snapshot("main", 0)["events"][0]["about"], "7")
+
+    def test_working_is_reported_only_when_the_transcript_is_recent(self):
+        ds, m, rec = self.model_records()
+        m.path = os.path.join(self.tmp.name, "t.jsonl")
+        open(m.path, "w").close()
+        rec("user", "go")
+        self.assertEqual((m.status("main"), m.snapshot("main")["status"]), ("working", "working"))
+        self.assertGreater(m.snapshot("main")["work_since"], 0)
+        old = time.time() - 120
+        os.utime(m.path, (old, old))  # no reply, nothing changed for two minutes: not shown as working
+        self.assertEqual((m.status("main"), m.snapshot("main")["work_since"]), ("idle", 0))
+        rec("assistant", [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "make"}}])
+        self.assertEqual(m.status("main"), "working")  # a running tool counts, however long it takes
+        rec("user", [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}])
+        self.assertEqual(m.status("main"), "idle")  # quiet for two minutes again
+        os.utime(m.path, None)
+        self.assertEqual(m.status("main"), "working")
+        rec("assistant", [{"type": "text", "text": "done"}], **{})
+        m._close({})
+        self.assertEqual(m.status("main"), "idle")
+        m.path = None
+        self.assertEqual(m.status("main"), "idle")
 
     def test_up_dashboard_only_hosts_the_session_without_remote_control(self):
         p, log, ss = self.start_up("--dashboard-only")

@@ -116,7 +116,7 @@ def service_status():
     up = service_up()
     info = _load(lean_home("up.json"), {})
     rc = info.get("remote_control")
-    return {"up": up, "configured": bool(info), "remote_control": bool(rc) if up and rc is not None else None}
+    return {"up": up, "mode": "service" if up else "fallback", "configured": bool(info), "remote_control": bool(rc) if up and rc is not None else None}
 
 
 def thread_dir(key):
@@ -304,7 +304,7 @@ class Chat:
                     e = self._add(kind="permission", rid=ev.get("request_id"), name=req.get("display_name")
                                   or req.get("tool_name"), text=tool_summary(req.get("tool_name"), req.get("input")),
                                   description=req.get("description") or req.get("title"), state="pending",
-                                  can_always=bool(req.get("permission_suggestions")),
+                                  can_always=bool(suggestion_rules(req.get("permission_suggestions"))),
                                   always_rule=suggestion_rules(req.get("permission_suggestions")),
                                   questions=_questions(req) if req.get("tool_name") == "AskUserQuestion" else None)
                     with self.lock:
@@ -392,7 +392,7 @@ class Chat:
         if allow:
             resp = {"behavior": "allow", "updatedInput": dict(req.get("input") or {},
                                                               **({"answers": answers} if answers else {}))}
-            if always and req.get("permission_suggestions"):
+            if always and suggestion_rules(req.get("permission_suggestions")):
                 resp["updatedPermissions"] = req["permission_suggestions"]
         else:
             resp = {"behavior": "deny", "message": message or "The user declined this in the dashboard."}

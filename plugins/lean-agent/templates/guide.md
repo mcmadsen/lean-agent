@@ -224,6 +224,8 @@ lean-agent card unarchive {{P}} checkout-notes
     (`lean-agent run --resume <id> "<answer>"`, in the background), then say what happens next.
   - `Decision for hand-off note N ("..."): <decision>`: act on it, then `lean-agent handoff --done N`.
   - `About #N "...": <question>` / `About PR ...: <question>`: about that card; answer briefly.
+  - A message with no tag (typed in the app or terminal) shows in the Whole session view only. When it is about one
+    task, start your reply with `About #N:` so the pair lands in that task's view too.
   - `Start the next ready item of epic <name> ...`: `lean-agent todo next --epic <name>`, then start it.
   The user can also change the work queue directly (add, start, done, notes); re-read `lean-agent todo list`
   rather than trusting what you remember. Keep replies short: the chat pane is narrow.
