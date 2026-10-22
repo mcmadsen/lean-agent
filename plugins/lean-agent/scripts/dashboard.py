@@ -866,9 +866,10 @@ def run_action(body):
             ids = ",".join(re.findall(r"[\w:.*-]+", str(body.get("ids") or "")))
             if do == "optimize-run":
                 return _optimize_start(slug)
-            flag = {"optimize-apply": "--apply", "optimize-accept": "--accept", "optimize-reject": "--reject"}.get(do)
-            if do == "optimize-apply-all":
-                args = ["optimize", slug, "--apply"]
+            flag = {"optimize-apply": "--apply", "optimize-accept": "--accept", "optimize-reject": "--reject",
+                    "optimize-unreject": "--unreject"}.get(do)
+            if do == "optimize-apply-all":  # every card change; ids, if any, are the drafts to accept with them
+                args = ["optimize", slug, "--apply"] + (["--accept", ids] if ids else [])
             elif flag and ids:
                 args = ["optimize", slug, flag, ids]
             else:
@@ -881,7 +882,7 @@ def run_action(body):
                        timeout=600 if do == "sync" else 60, stdin=subprocess.DEVNULL, env=dict(os.environ, LEAN_AGENT_BRIEF="1"))
     out = (p.stdout + p.stderr).strip()
     if str(do).startswith("optimize-"):  # the outcome lines, not the list of what is still open
-        out = "\n".join(l for l in out.splitlines() if re.match(r"(saved|applied|rejected|no open|Applied)", l)) or out
+        out = "\n".join(l for l in out.splitlines() if re.match(r"(saved|applied|rejected|unrejected|no open|Applied)", l)) or out
     res = {"ok": p.returncode == 0, "output": out[-1000:]}
     if do == "sync":  # look again and record it like a scheduled run: the newest sync record replaces the notice
         c = subprocess.run([sys.executable, os.path.join(HERE, "lean_agent.py"), "sync", "--check"], capture_output=True,
