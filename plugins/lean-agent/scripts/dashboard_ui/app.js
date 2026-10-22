@@ -114,15 +114,15 @@ function contextText(c){
 function drawHeader(){
   const c=selected(),service=!!(typeof chat!=="undefined"&&chat.service),rc=typeof rcState==="function"?rcState():"unknown",proj=$("bfilter").value;
   const task=ui.sel!=="main"&&c?c:null,tl=ui.task?aboutLabel(ui.task):"";
-  const shared=!service?"not shared":rc==="on"?"also open in the Claude app":rc==="off"?"dashboard only":"";
-  $("ttitle").textContent="Orchestrator session";
-  $("tsub").textContent=[task?(service?"Filtered to ":"Thread about ")+aboutLabel(ui.sel):"Whole session",shared].filter(Boolean).join(" · ");
+  const fb=inFallback(),shared=fb?"":!service?"not shared":rc==="on"?"also open in the Claude app":rc==="off"?"dashboard only":"";
+  $("ttitle").textContent=fb?(task?"Task thread":"Orchestrator thread"):"Orchestrator session";
+  $("tsub").textContent=[task?(service?"Filtered to ":"Thread about ")+aboutLabel(ui.sel):fb?"":"Whole session",shared].filter(Boolean).join(" · ");
   $("ttask").hidden=!task;
   if(task)$("ttask").textContent=[task.title,[task.kind==="item"?"#"+task.id:"",(task.runs||[])[0]?"run "+task.runs[0]:"",task.ref||"",task.project||""].filter(Boolean).join(" · ")].filter(Boolean).join(" — ");
-  $("scope").hidden=!ui.task;
+  $("scope").hidden=!ui.task||fb;
   $("scope").innerHTML=ui.task?`<button type="button" class="seg${task?" on":""}" data-act="scope" data-w="task" aria-pressed="${!!task}">About ${esc(tl)}</button><button type="button" class="seg${task?"":" on"}" data-act="scope" data-w="main" aria-pressed="${!task}">Whole session</button>`:"";
   const rcEl=$("rc"),svc=(typeof chat!=="undefined"&&chat.svc)||(S&&S.service)||null;
-  rcEl.hidden=!(service||(svc&&svc.configured));
+  rcEl.hidden=fb||!(service||(svc&&svc.configured));
   rcEl.textContent="Remote Control "+rc;rcEl.className="chip "+(rc==="on"?"tone-ok":rc==="off"?"tone-warn":"tone-mute");
   rcEl.title=rc==="on"?"This session is also open in the Claude app":rc==="off"?"Dashboard only: the Claude app does not see this session":"Can't tell whether Remote Control is on";
   $("handled").hidden=!c||c.kind==="thread"||c.kind==="note";
@@ -348,20 +348,28 @@ async function load(){
   catch(e){ui.offline=ui.offline||Date.now();drawBanners();$("stamp").innerHTML=`<span class="dot dot-bad" aria-hidden="true"></span>offline`;$("stamp").title="can't reach lean-agent: is `lean-agent up` or `lean-agent dashboard` running?";return}
   if(s.page_version&&s.page_version!==V){location.reload();return}
   S=Object.assign(S||{},s);lastBoard=s.board;ui.offline=0;ui.lastOk=new Date();ui.now=s.now.slice(11,16);
-  $("stamp").innerHTML=`<span class="dot dot-ok" aria-hidden="true"></span>live ${s.now.slice(11,16)}`;
+  drawStamp();
   const f=$("bfilter"),cur=f.value||store.get("la-board-project","");
   f.innerHTML='<option value="">All projects</option>'+s.board.projects.map(p=>`<option${p===cur?" selected":""}>${esc(p)}</option>`).join("");
   const changed=changedSet(s.board.cards);
   drawInbox(changed);drawHeader();drawBanners();if(typeof drawChat==="function")drawChat();drawBoard(s.board,changed);drawRuns(s);drawSchedule(s);drawPlanBox(s);
   if($("graph").open)drawPlan(s);
 }
+const inFallback=()=>typeof fallback==="function"&&fallback();  // chat.js loads after this file
 function drawBanners(){  // connection state at the top of the center pane
   const svc=(typeof chat!=="undefined"&&chat.svc)||(S&&S.service)||null,at=ui.lastOk?ui.lastOk.toTimeString().slice(0,8):"";
   let h="";
   if(ui.offline)h=`<div class="banner warn" role="status">Dashboard reconnecting. Showing data from ${at}.</div>`;
-  else if(svc&&!svc.up&&svc.configured)h=`<div class="banner bad" role="alert">lean-agent service not running. Start it with <code>lean-agent up</code>. Showing data from ${at}.</div>`;
+  else if(inFallback())h=`<div class="banner warn" role="status">lean-agent service not running: each task has its own thread. Start it with <code>lean-agent up</code>.</div>`;
   else if(svc&&svc.up&&svc.remote_control===false)h=`<div class="banner" role="status">Remote Control is off: dashboard only. Messages typed here will not appear in the Claude app.</div>`;
   if(h!==ui.bannerHtml){ui.bannerHtml=h;$("banners").innerHTML=h}
+  drawStamp();
+}
+function drawStamp(){  // the top-left dot: live, no service (the server's word) or offline (this page can't reach the server)
+  if(ui.offline||!ui.now)return;
+  const fb=inFallback();
+  $("stamp").innerHTML=`<span class="dot ${fb?"dot-warn":"dot-ok"}" aria-hidden="true"></span>${fb?"no service":"live "+ui.now}`;
+  $("stamp").title=fb?"lean-agent service not running: each task has its own thread":"";
 }
 setPane("chat");
 setTab(ui.tab);
