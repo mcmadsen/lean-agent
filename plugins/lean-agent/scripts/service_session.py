@@ -48,12 +48,16 @@ def lean_home(*parts):
 SOCK_MAX = 100  # AF_UNIX paths are limited to 104 bytes (macOS) / 108 (Linux)
 
 
+def fallback_dir():
+    return f"/tmp/lean-agent-{os.getuid()}"
+
+
 def sock_path():
     """<home>/session.sock, or a short private path when that is too long for AF_UNIX."""
     path = lean_home("session.sock")
     if len(os.fsencode(path)) <= SOCK_MAX:
         return path
-    d = f"/tmp/lean-agent-{os.getuid()}"
+    d = fallback_dir()
     try:
         os.mkdir(d, 0o700)
     except FileExistsError:
