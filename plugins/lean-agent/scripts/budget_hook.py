@@ -78,8 +78,8 @@ def foreground_worker(command):
         if os.path.basename(words[0]) != "lean-agent" or len(words) < 2:
             continue
         sub, rest = words[1], words[2:]
-        if sub not in ("run", "review", "do", "tracker"):
-            continue
+        if sub not in ("run", "review", "do", "tracker") or {"-h", "--help"} & set(rest):
+            continue  # help text starts nothing
         if sub == "review" and (rest[:1] == ["decline"] or "--status" in rest):
             continue  # instant
         if sub == "tracker" and "--discover" not in rest:
@@ -95,6 +95,8 @@ def unlinked_worker(command):
             continue
         rest = words[2:]
         if words[1] == "review" and (rest[:1] == ["decline"] or "--status" in rest):
+            continue
+        if {"-h", "--help"} & set(rest):
             continue
         if "--resume" in rest or any(w == "--todo" or w.startswith("--todo=") for w in rest):
             continue  # a resumed run keeps its item

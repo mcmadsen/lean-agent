@@ -1955,6 +1955,28 @@ class CliTest(unittest.TestCase):
         self.assertIn("/settings  src/pages/Settings.tsx", routes)
         self.assertNotIn("\n/Settings ", "\n" + routes)  # a pages/ folder is file routing only in Next/Nuxt
         self.assertIn("src/utils/old.ts", self.cli("map", "shop", "--unused").stdout)
+        os.makedirs(os.path.join(root, "builds-x"))
+        with open(os.path.join(root, "builds-x", "bundle.js"), "w") as fh:
+            fh.write("var a = 1;\n" * 500)
+        os.makedirs(os.path.join(root, "out-ignored"))
+        with open(os.path.join(root, "out-ignored", "gen.js"), "w") as fh:
+            fh.write("var b;\n")
+        with open(os.path.join(root, ".gitignore"), "w") as fh:
+            fh.write("out-ignored/\n")
+        self.assertIn("11 files", self.cli("map", "shop").stdout)  # builds-x counts, the ignored folder doesn't
+        self.assertIn("10 files", self.cli("map", "shop", "--exclude", "builds*/").stdout)
+        self.cli("map", "shop", "--no-exclude")
+        import shutil as _sh
+        _sh.rmtree(os.path.join(root, "builds-x"))
+        with open(os.path.join(root, "src", "routes.tsx"), "w") as fh:
+            fh.write("import { createBrowserRouter } from 'react-router-dom';\nimport Billing from './pages/Billing';\n"
+                     "export const router = createBrowserRouter([{ path: '/', children: [\n"
+                     "  { path: 'invoices', element: <Billing /> }, { path: ROUTES.x }, { path: '*' }]}]);\n")
+        rts = self.cli("map", "shop", "--route").stdout
+        self.assertIn("/invoices  src/pages/Billing.tsx", rts)
+        self.assertIn("1 more route paths are constants", rts)
+        os.remove(os.path.join(root, "src", "routes.tsx"))
+        os.remove(os.path.join(root, ".gitignore"))
         self.assertEqual(self.cli("map", "shop", "--who-uses", "nothing-like-this", check=False).returncode, 1)
         # count: how much legacy is left, with history
         self.cli("count", "shop", "add", "legacy-api", r"from ['\"](@/|\.\./)legacy/api", "--glob", "*.ts,*.tsx")
@@ -1988,6 +2010,11 @@ class CliTest(unittest.TestCase):
         applied = self.cli("codemod", "shop", cmd, "--apply").stdout
         self.assertIn("applied", applied)
         self.assertIn("services/api", open(os.path.join(root, "src/pages/Settings.tsx")).read())
+        with open(os.path.join(root, "src/new.ts"), "w") as fh:  # not committed yet: a codemod's change still counts
+            fh.write("import { api } from '@/legacy/api';\n")
+        self.assertIn("1 file changed, 0 new, 0 deleted (+1 -1)", self.cli(
+            "codemod", "shop", "sed -i.bak 's/legacy/services/' src/new.ts && rm src/new.ts.bak").stdout)
+        os.remove(os.path.join(root, "src/new.ts"))
         # slices and the epic they become
         subprocess.run(["git", "-C", root, "checkout", "-q", "--", "."], check=True)
         plan = self.cli("slices", "shop").stdout
@@ -2090,6 +2117,179 @@ class CliTest(unittest.TestCase):
         self.assertIn('id="c-plan"', dashboard.PAGE)
         self.assertNotIn('id="c-week"', dashboard.PAGE)  # the graph replaced the week box
 
+    FAKE_STREAM_CLAUDE = textwrap.dedent("""\
+        #!/usr/bin/env python3
+        import json, os, sys
+        log = open(os.environ["FAKE_CHAT_LOG"], "a")
+        log.write(json.dumps({"argv": sys.argv[1:], "session": os.environ.get("CLAUDE_CODE_SESSION_ID")}) + "\\n")
+        log.flush()
+        def out(o):
+            print(json.dumps(o), flush=True)
+        out({"type": "system", "subtype": "init", "session_id": "sess-chat"})
+        while True:
+            line = sys.stdin.readline()
+            if not line:
+                break
+            m = json.loads(line)
+            log.write(line)
+            log.flush()
+            if m.get("type") == "control_request":
+                out({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"],
+                                                             "response": {}}})
+                continue
+            text = m["message"]["content"]
+            if "ASK" in text:
+                out({"type": "control_request", "request_id": "q1", "request": {
+                    "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+                        {"question": "Which environment?", "header": "Env", "multiSelect": False,
+                         "options": [{"label": "staging", "description": "safe"}, {"label": "production"}]}]}}})
+                resp = json.loads(sys.stdin.readline())
+                log.write(json.dumps(resp) + "\\n")
+                log.flush()
+                chosen = resp["response"]["response"]["updatedInput"]["answers"]["Which environment?"]
+                out({"type": "assistant", "message": {"content": [{"type": "text", "text": "you chose " + chosen}]}})
+            elif "PERM" in text:
+                out({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                                                                   "input": {"command": "touch x"}}]}})
+                out({"type": "control_request", "request_id": "r1", "request": {
+                    "subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "touch x"},
+                    "description": "Create x", "permission_suggestions": [{"type": "addRules"}]}})
+                resp = json.loads(sys.stdin.readline())
+                log.write(json.dumps(resp) + "\\n")
+                log.flush()
+                ok = resp["response"]["response"]["behavior"] == "allow"
+                out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1",
+                                                              "content": "ok" if ok else "no", "is_error": not ok}]}})
+                out({"type": "assistant", "message": {"content": [{"type": "text", "text": "ran it" if ok else "not allowed"}]}})
+            else:
+                out({"type": "assistant", "message": {"content": [{"type": "text", "text": "echo: " + text}]}})
+            out({"type": "result", "subtype": "success", "session_id": "sess-chat", "total_cost_usd": 0.01,
+                 "num_turns": 1, "duration_ms": 1000})
+        """)
+
+    def test_dashboard_chat_and_actions(self):
+        import socket
+        import urllib.request
+        import urllib.error
+        t = self.tmp.name
+        fake = os.path.join(t, "claude-stream")
+        with open(fake, "w") as fh:
+            fh.write(self.FAKE_STREAM_CLAUDE)
+        os.chmod(fake, 0o755)
+        chat_log = os.path.join(t, "chat.log")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        env = dict(self.env, LEAN_AGENT_CLAUDE=fake, FAKE_CHAT_LOG=chat_log, LEAN_AGENT_PR_POLL="0",
+                   CLAUDE_CODE_SESSION_ID="parent-session")
+        p = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(CLI), "dashboard.py"), str(port)], env=env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        import time as _t
+        try:
+            token = None
+            for _ in range(50):
+                try:
+                    token = json.load(open(os.path.join(self.env["LEAN_AGENT_HOME"], "dashboard.json")))["token"]
+                    urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state?t={token}", timeout=3)
+                    break
+                except (OSError, ValueError, KeyError):
+                    _t.sleep(0.1)
+            base = f"http://127.0.0.1:{port}"
+
+            def call(path, body=None, headers=None):
+                h = {"Content-Type": "application/json", "X-Lean-Agent-Token": token}
+                h.update(headers or {})
+                req = urllib.request.Request(base + path, data=json.dumps(body or {}).encode() if body is not None else None,
+                                             headers={k: v for k, v in h.items() if v is not None})
+                try:
+                    r = urllib.request.urlopen(req, timeout=10)
+                    return r.status, json.loads(r.read())
+                except urllib.error.HTTPError as e:
+                    return e.code, e.read().decode()
+
+            # changes need the token in a header, and nothing from another site
+            self.assertEqual(call("/api/action", {"do": "todo-add", "text": "x"}, {"X-Lean-Agent-Token": None})[0], 403)
+            self.assertEqual(call("/api/action", {"do": "todo-add", "text": "x"}, {"Origin": "https://evil.example"})[0], 403)
+            self.assertEqual(call("/api/action", {"do": "todo-add", "text": "x"}, {"Sec-Fetch-Site": "cross-site"})[0], 403)
+            self.assertEqual(urllib.request.urlopen(base + "/ui/chat.js", timeout=3).status, 200)  # the page's code
+            # work-queue actions go through the CLI
+            code, r = call("/api/action", {"do": "todo-add", "text": "Ship the export", "prio": "high"})
+            self.assertEqual((code, r["ok"]), (200, True))
+            code, r = call("/api/action", {"do": "todo-done", "id": 1, "result": "merged as PR 9"})
+            self.assertTrue(r["ok"], r)
+            item = json.load(open(os.path.join(self.env["LEAN_AGENT_HOME"], "todo.json")))["items"][0]
+            self.assertEqual((item["status"], item["result"], item["prio"]), ("done", "merged as PR 9", "high"))
+            self.assertEqual(call("/api/action", {"do": "todo-done", "id": 99})[0], 400)
+            self.assertEqual(call("/api/action", {"do": "rm -rf"})[0], 400)
+            call("/api/action", {"do": "note-add", "text": "Pick a key layout", "kind": "decision"})
+            notes = json.load(open(os.path.join(self.env["LEAN_AGENT_HOME"], "handoff-notes.json")))
+            self.assertEqual((notes[0]["text"], notes[0]["kind"]), ("Pick a key layout", "decision"))
+            self.assertTrue(call("/api/action", {"do": "note-done", "n": 1})[1]["ok"])
+
+            def wait_t(thread, pred, what):
+                for _ in range(100):
+                    snap = json.loads(urllib.request.urlopen(f"{base}/api/chat?thread={thread}&t={token}", timeout=5).read())
+                    if pred(snap):
+                        return snap
+                    _t.sleep(0.1)
+                self.fail(f"chat never reached: {what}; last: {snap}")
+
+            def wait(pred, what):
+                for _ in range(100):
+                    snap = json.loads(urllib.request.urlopen(f"{base}/api/chat?t={token}", timeout=5).read())
+                    if pred(snap):
+                        return snap
+                    _t.sleep(0.1)
+                self.fail(f"chat never reached: {what}; last: {snap}")
+
+            # a conversation: a message in, the answer out
+            self.assertTrue(call("/api/chat", {"text": "hello"})[1]["ok"])
+            snap = wait(lambda s: s["status"] == "idle" and any(e["kind"] == "result" for e in s["events"]), "a result")
+            self.assertIn("echo: hello", [e.get("text") for e in snap["events"] if e["kind"] == "assistant"])
+            self.assertEqual(snap["session"], "sess-chat")
+            # a permission prompt answered from the page
+            call("/api/chat", {"text": "PERM please"})
+            snap = wait(lambda s: any(e["kind"] == "permission" and e["state"] == "pending" for e in s["events"]), "a prompt")
+            prompt = next(e for e in snap["events"] if e["kind"] == "permission")
+            self.assertEqual((prompt["name"], prompt["text"], prompt["can_always"]), ("Bash", "touch x", True))
+            self.assertTrue(call("/api/chat/answer", {"rid": prompt["rid"], "allow": True, "always": True})[1]["ok"])
+            snap = wait(lambda s: "ran it" in [e.get("text") for e in s["events"]], "the tool run")
+            tool = next(e for e in snap["events"] if e["kind"] == "tool")
+            self.assertEqual(tool["state"], "done")
+            self.assertFalse(call("/api/chat/answer", {"rid": prompt["rid"], "allow": True})[1]["ok"])  # answered already
+            sent = [json.loads(l) for l in open(chat_log)]
+            self.assertEqual(sent[0]["argv"][:7], ["-p", "--input-format", "stream-json", "--output-format",
+                                                   "stream-json", "--verbose", "--permission-prompt-tool"])
+            self.assertIsNone(sent[0]["session"])  # never tied to a parent Claude Code session
+            allow = next(m for m in sent if m.get("type") == "control_response")
+            self.assertEqual(allow["response"]["response"]["behavior"], "allow")
+            self.assertEqual(allow["response"]["response"]["updatedPermissions"], [{"type": "addRules"}])
+            # a thread per task: its own session, with the task's context on the first message
+            code, r = call("/api/chat", {"thread": "q-r-77", "text": "ASK me", "title": "Which env?",
+                                         "context": "a run that asks: which env; runs r-77"})
+            self.assertTrue(r["ok"], r)
+            tw = lambda pred, what: wait_t("q-r-77", pred, what)
+            snap = tw(lambda s: any(e["kind"] == "permission" for e in s["events"]), "a question")
+            q = next(e for e in snap["events"] if e["kind"] == "permission")
+            self.assertEqual([o["label"] for o in q["questions"][0]["options"]], ["staging", "production"])
+            call("/api/chat/answer", {"thread": "q-r-77", "rid": q["rid"], "allow": True,
+                                      "answers": {"Which environment?": "production"}})
+            snap = tw(lambda s: "you chose production" in [e.get("text") for e in s["events"]], "the answer")
+            self.assertEqual(next(e for e in snap["events"] if e["kind"] == "permission")["state"], "answered")
+            first = [json.loads(l) for l in open(chat_log) if 'ASK me' in l][0]
+            self.assertTrue(first["message"]["content"].startswith("[Dashboard thread about: a run that asks: which env"))
+            self.assertEqual([(t["key"], t["title"]) for t in snap["threads"]], [("main", "Orchestrator"), ("q-r-77", "Which env?")])
+            self.assertEqual(call("/api/chat", {"thread": "../x", "text": "hi"})[0], 400)
+            # "Mark handled" hides a card until it changes
+            self.assertTrue(call("/api/action", {"do": "dismiss", "id": "q-r-77", "sig": "abc"})[1]["ok"])
+            self.assertEqual(json.load(open(os.path.join(self.env["LEAN_AGENT_HOME"], "dismissed.json")))["q-r-77"]["sig"], "abc")
+            self.assertEqual(call("/api/action", {"do": "run-stop", "run": "nope"})[0], 400)
+            self.assertTrue(call("/api/chat/new", {})[1]["ok"])
+            self.assertIsNone(json.load(open(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "session.json")))["session_id"])
+        finally:
+            p.terminate()
+            p.wait(timeout=10)
+
     def test_dashboard_picks_up_new_code_without_restart(self):
         import shutil
         import socket
@@ -2111,8 +2311,9 @@ class CliTest(unittest.TestCase):
                     break
                 except (OSError, ValueError, KeyError):
                     _t.sleep(0.1)
-            self.assertIn(f'const V="{v1}"', get("/"))
-            path = os.path.join(scripts, "dashboard.py")
+            self.assertIn(f'app.js?v={v1}', get("/"))
+            self.assertIn(f'const V="{v1}"', get("/ui/app.js"))
+            path = os.path.join(scripts, "dashboard_ui", "index.html")
             with open(path) as fh:
                 code = fh.read()
             with open(path, "w") as fh:  # what `lean-agent sync` does to the running server's files
@@ -2719,6 +2920,54 @@ class CliTest(unittest.TestCase):
                       call["append"])
         self.assertNotIn("`api/totals.py`", call["append"])
         self.assertIn("[check] CI parity: api/tests/test_infra.py", p.stdout)
+
+    def test_review_resume_follows_the_branch(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        self.cli("review", "proj", "--head", "feature", "--base", "main", check=False, FAKE_REVIEW=approve)
+        g("checkout", "-q", "feature")  # a worker commits a fix on the PR branch
+        with open(os.path.join(self.proj, "api", "fix.py"), "w") as fh:
+            fh.write("X = 1\n")
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "fix")
+        new = subprocess.run(["git", "-C", self.proj, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        g("checkout", "-q", "main")
+        for head in ("feature", new):  # the branch, or the new commit itself
+            p = self.cli("review", "proj", "--resume", "--head", head, check=False, FAKE_REVIEW=approve)
+            self.assertNotIn("no earlier review", p.stderr)
+            self.assertIn(f"@ {new[:12]}", p.stdout)
+        self.assertEqual(self.cli("review", "proj", "--help").returncode, 0)
+
+    def test_feedback_v028(self):
+        # doc write: documents go to document folders only
+        target = os.path.join(self.tmp.name, "Downloads", "notes.md")
+        os.makedirs(os.path.dirname(target))
+        r = self.cli("doc", "write", target, "--text", "# Notes\nline two")
+        self.assertIn("wrote 2 lines", r.stdout)
+        self.assertEqual(open(target).read(), "# Notes\nline two\n")
+        bad = self.cli("doc", "write", "/usr/lean-agent-test.md", "--text", "x", check=False)
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("only writes under", bad.stderr)
+        # runs --dismiss: a run's question stops waiting on the dashboard
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--todo", "none", "ask",
+                 FAKE_FEEDBACK='{"status": "needs-input", "used": [], "unneeded": []}')
+        rid = self.cli("runs", "--last").stdout.strip()
+        self.assertIn("dismissed", self.cli("runs", "--dismiss", rid).stdout)
+        sys.path.insert(0, os.path.dirname(CLI))
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        try:
+            import dashboard
+            ids = [c["id"] for c in dashboard.state()["board"]["cards"]]
+        finally:
+            os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.update(LEAN_AGENT_HOME=old)
+        self.assertNotIn(f"q-{rid}", ids)
+        self.assertEqual(self.cli("runs", "--dismiss", "nope", check=False).returncode, 1)
 
     def test_review_a_ref_without_checkout(self):
         g = self.git_project()

@@ -79,18 +79,55 @@ def work_dir(slug, path, given=None):
     return path
 
 
-def walk(root, exts=CODE_EXT + STYLE_EXT, sub=None, globs=None):
-    """Relative paths of source files under root (or root/sub), skipping build output and dependencies."""
+def git_files(root):
+    """The files git knows in root (tracked, plus untracked ones .gitignore doesn't exclude), relative to root;
+    None when root isn't in a git checkout."""
+    try:
+        p = subprocess.run(["git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                           capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    return sorted({f for f in p.stdout.decode("utf-8", "replace").split("\0") if f})
+
+
+def excludes_for(slug):
+    return _load(lean_home("maps", slug, "excludes.json"), [])
+
+
+def walk(root, exts=CODE_EXT + STYLE_EXT, sub=None, globs=None, exclude=()):
+    """Relative paths of source files under root (or root/sub), skipping build output and dependencies: what
+    .gitignore excludes (in a git checkout), node_modules/dist/build/..., hidden folders and `exclude` globs.
+    exts=None: any file (the globs decide)."""
+    def keep(rel):
+        name = rel.rsplit("/", 1)[-1]
+        parts = rel.split("/")[:-1]
+        if any(p in SKIP_DIRS or p.startswith(".") for p in parts):
+            return False
+        if (exts and not name.endswith(exts)) or name.endswith(".min.js"):
+            return False
+        if any(fnmatch.fnmatch(rel, g) or fnmatch.fnmatch(rel, g.rstrip("/") + "/*") or
+               any(fnmatch.fnmatch("/".join(parts[:i + 1]), g.rstrip("/")) for i in range(len(parts)))
+               for g in exclude or ()):
+            return False
+        if globs and not any(fnmatch.fnmatch(rel, g) or fnmatch.fnmatch(name, g) for g in globs):
+            return False
+        return True
+    listed = git_files(root)
+    if listed is not None:
+        pre = (sub.strip("/") + "/") if sub else ""
+        for rel in listed:
+            if rel.startswith(pre) and os.path.isfile(os.path.join(root, rel)) and keep(rel):
+                yield rel
+        return
     base = os.path.join(root, sub) if sub else root
     for d, dirs, files in os.walk(base):
         dirs[:] = sorted(x for x in dirs if x not in SKIP_DIRS and not x.startswith("."))
         for f in sorted(files):
-            if not f.endswith(exts) or f.endswith(".min.js"):
-                continue
             rel = os.path.relpath(os.path.join(d, f), root).replace(os.sep, "/")
-            if globs and not any(fnmatch.fnmatch(rel, g) or fnmatch.fnmatch(f, g) for g in globs):
-                continue
-            yield rel
+            if keep(rel):
+                yield rel
 
 
 def _read(path):
@@ -111,6 +148,9 @@ EXPORT_DECL_RE = re.compile(r"\bexport\s+(?:default\s+)?(?:declare\s+)?(?:abstra
                             r"(?:function\*?|class|const|let|var|interface|type|enum)\s+([A-Za-z_$][\w$]*)")
 EXPORT_LIST_RE = re.compile(r"\bexport\s*\{([^}]*)\}(?!\s*from)")
 ROUTE_DECL_RE = re.compile(r"""\bpath\s*[:=]\s*\{?\s*['"`](/[^'"`\s]*)['"`]""")
+ROUTER_FILE_RE = re.compile(r"""from\s+['"](?:react-router(?:-dom)?|vue-router|@tanstack/react-router)['"]|createBrowserRouter|createHashRouter|<Routes\b|new\s+VueRouter""")
+ROUTE_REL_RE = re.compile(r"""\bpath\s*[:=]\s*\{?\s*['"`]((?:/|[A-Za-z0-9:*])[^'"`\s]*)['"`]""")
+ROUTE_CONST_RE = re.compile(r"""\bpath\s*=\s*\{\s*[A-Za-z_$][\w$.]*\s*\}|\bpath\s*:\s*[A-Za-z_$][\w$.]*\s*[,}]""")
 ROUTE_COMP_RE = re.compile(r"""(?:element\s*[:=]\s*\{?\s*<\s*|[cC]omponent\s*[:=]\s*\{?\s*)([A-Z][\w$]*)""")
 ROUTE_LAZY_RE = re.compile(r"""import\s*\(\s*['"]([^'"]+)['"]\s*\)""")
 COMMENT_RE = re.compile(r'("(?:\\.|[^"\\])*")|//[^\n]*|/\*.*?\*/', re.S)
@@ -216,11 +256,11 @@ def _fs_route(rel, fw=()):
     return None
 
 
-def build_map(root):
+def build_map(root, exclude=()):
     al, base = aliases(root)
     fw = frameworks(root)
-    files, routes = {}, []
-    for rel in walk(root):
+    files, routes, unread = {}, [], 0
+    for rel in walk(root, exclude=exclude):
         text = _read(os.path.join(root, rel))
         imports = {}
         regs = [(m.group(2), _names(m.group(1))) for m in IMPORT_RE.finditer(text)]
@@ -240,8 +280,11 @@ def build_map(root):
         fr = _fs_route(rel, fw)
         if fr is not None:
             routes.append({"route": fr, "file": rel, "declared_in": rel})
+        router = bool(ROUTER_FILE_RE.search(text))
+        if not files[rel]["test"] and router:
+            unread += len(ROUTE_CONST_RE.findall(text))
         if not files[rel]["test"]:
-            for m in ROUTE_DECL_RE.finditer(text):
+            for m in (ROUTE_REL_RE if router else ROUTE_DECL_RE).finditer(text):
                 near = text[m.end():m.end() + 400]
                 entry = None
                 lazy = ROUTE_LAZY_RE.search(near[:200])
@@ -253,7 +296,10 @@ def build_map(root):
                     entry = next((to for to, names in imports.items() if not to.startswith("pkg:") and (
                         name in names or ("default" in names and os.path.splitext(os.path.basename(to))[0] == name))),
                         None) or (rel if name in exports else None)
-                routes.append({"route": m.group(1), "file": entry if entry and not entry.startswith("pkg:") else None,
+                route = m.group(1) if m.group(1).startswith("/") else "/" + m.group(1)
+                if route == "/*" or route.endswith("*") and len(route) <= 2:
+                    continue  # a catch-all
+                routes.append({"route": route, "file": entry if entry and not entry.startswith("pkg:") else None,
                                "declared_in": rel})
     seen, uniq = set(), []
     for r in routes:
@@ -261,7 +307,8 @@ def build_map(root):
         if key not in seen:
             seen.add(key)
             uniq.append(r)
-    return {"root": root, "built": time.time(), "count": len(files), "files": files, "routes": uniq}
+    return {"root": root, "built": time.time(), "count": len(files), "files": files, "routes": uniq,
+            "routes_unread": unread}
 
 
 def map_path(slug, root):
@@ -269,12 +316,16 @@ def map_path(slug, root):
 
 
 def load_map(slug, root, refresh=False, log=None):
-    """The cached map, rebuilt when a source file changed (a stat walk, no reading) or on refresh."""
+    """The cached map, rebuilt when a source file changed (a stat walk, no reading), the excludes changed, or on
+    refresh."""
     path = map_path(slug, root)
+    exclude = excludes_for(slug)
     data = None if refresh else _load(path, None)
+    if data and data.get("exclude", []) != exclude:
+        data = None
     if data:
         n, newest = 0, 0.0
-        for rel in walk(root):
+        for rel in walk(root, exclude=exclude):
             n += 1
             try:
                 newest = max(newest, os.path.getmtime(os.path.join(root, rel)))
@@ -283,7 +334,8 @@ def load_map(slug, root, refresh=False, log=None):
         if n != data.get("count") or newest > data.get("built", 0):
             data = None
     if not data:
-        data = build_map(root)
+        data = build_map(root, exclude)
+        data["exclude"] = exclude
         _save(path, data)
         if log:
             log(f"(map built: {data['count']} files)")
@@ -397,7 +449,9 @@ def map_report(data, a):
         hits = [r for r in data["routes"] if a.route in ("", "all") or r["route"] == a.route
                 or r["route"].startswith(a.route.rstrip("/") + "/")]
         if not hits:
-            raise Fail(f"no route {a.route!r} in the map ({len(data['routes'])} routes; --route all lists them)")
+            raise Fail(f"no route {a.route!r} in the map ({len(data['routes'])} routes; --route all lists them)"
+                       + (f"; {data.get('routes_unread')} route paths are constants (path={{ROUTES.x}}) the map can't "
+                          "read" if data.get("routes_unread") else ""))
         for r in hits[:lim * 2]:
             if r["file"]:
                 c = closure(data, [r["file"]])
@@ -405,6 +459,9 @@ def map_report(data, a):
                            " with its imports)" + (f"  declared in {r['declared_in']}" if r["declared_in"] != r["file"] else ""))
             else:
                 out.append(f"{r['route']}  (component not found; declared in {r['declared_in']})")
+        if data.get("routes_unread"):
+            out.append(f"({data['routes_unread']} more route paths are constants, e.g. path={{ROUTES.x}}, which the map "
+                       "can't read; nested child paths are shown without their parent's prefix)")
     elif a.find:
         hits = [(f, i) for f, i in files.items() if a.find in i["exports"]]
         out.append(f"{a.find}: exported by {len(hits)} file{'s' if len(hits) != 1 else ''}")
@@ -462,7 +519,8 @@ def count_history(slug):
 def run_counter(root, c):
     rx = re.compile(c["regex"], re.M)
     per_file = {}
-    for rel in walk(root, sub=c.get("path"), globs=c.get("globs")):
+    exts = None if c.get("globs") else CODE_EXT + STYLE_EXT + (".html", ".htm")
+    for rel in walk(root, exts=exts, sub=c.get("path"), globs=c.get("globs"), exclude=c.get("exclude") or ()):
         n = len(rx.findall(_read(os.path.join(root, rel))))
         if n:
             per_file[rel] = n
@@ -500,7 +558,7 @@ def cmd_count(slug, path, a, log=print):
         c = conf.get(name)
         if not c:
             raise Fail(f"no counter {name!r} (lean-agent count {slug})")
-        per_file = run_counter(root, c)
+        per_file = run_counter(root, dict(c, exclude=excludes_for(slug)))
         total = sum(per_file.values())
         mine = [h for h in hist if h.get("name") == name]
         first = mine[0] if mine else None
@@ -540,7 +598,8 @@ ERR_PATTERNS = [
 ]
 STYLISH_FILE = re.compile(r"^(?:[A-Za-z]:)?[^\s]*[/\\][^\s]+\.[A-Za-z]{1,5}$|^[^\s/]+\.[A-Za-z]{1,5}$")
 STYLISH_ROW = re.compile(r"^\s+(?P<line>\d+):(?P<col>\d+)\s+(?P<sev>error|warning)\s+(?P<msg>.+?)(?:\s{2,}(?P<code>[@\w/-]+))?\s*$")
-TEST_FAIL = [re.compile(r"^\s*FAIL\s+(?P<file>\S+)"), re.compile(r"^\s*(?:✕|×|✗)\s+(?P<msg>.+?)(?:\s+\(\d+(?:\.\d+)?\s*m?s\))?\s*$"),
+TEST_FAIL = [re.compile(r"^(?:FAIL|ERROR): (?P<msg>\S+(?: \([\w.]+\))?)"),  # unittest
+             re.compile(r"^\s*FAIL\s+(?P<file>(?!\()\S+)"), re.compile(r"^\s*(?:✕|×|✗)\s+(?P<msg>.+?)(?:\s+\(\d+(?:\.\d+)?\s*m?s\))?\s*$"),
              re.compile(r"^FAILED\s+(?P<file>\S+?)(?:::(?P<msg>\S+))?(?:\s|$)")]
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -569,6 +628,8 @@ def parse_errors(text, root, warnings=False):
             m = p.match(line.strip())
             if m:
                 sev = (m.group("sev") or "error").lower()
+                if re.match(r"\w*Warning\b", m.group("msg") or ""):
+                    sev = "warning"  # Python's ResourceWarning / DeprecationWarning lines
                 f = m.group("file")
                 if sev == "warning" and not warnings:
                     hit = True
@@ -966,10 +1027,18 @@ def _git(d, *args, check=False):
     return p.stdout if p.returncode == 0 else None
 
 
-def _change_summary(d, since, created, skip=(), sample=3, sample_lines=25):
-    """Lines describing the working tree of `d` against commit `since` plus the files `created`."""
+def _change_summary(d, since, created, skip=(), sample=3, sample_lines=25, before=None):
+    """Lines describing the working tree of `d` against commit `since` plus the files `created`; `before` holds
+    the content of files git doesn't track yet, so changes to them count too."""
     num = _git(d, "diff", "--no-renames", "--numstat", since) or ""
-    changed = []
+    changed, local = [], {}
+    for f, old in (before or {}).items():
+        new_text = _read(os.path.join(d, f)) if os.path.exists(os.path.join(d, f)) else None
+        if new_text != old:
+            dl = list(difflib.unified_diff(old.splitlines(), (new_text or "").splitlines(), lineterm="", n=1))
+            local[f] = dl
+            changed.append((f, sum(1 for l in dl if l.startswith("+") and not l.startswith("+++")),
+                            sum(1 for l in dl if l.startswith("-") and not l.startswith("---"))))
     for line in num.splitlines():
         parts = line.split("\t")
         if len(parts) == 3:
@@ -1007,8 +1076,8 @@ def _change_summary(d, since, created, skip=(), sample=3, sample_lines=25):
         if len(picks) >= sample:
             break
     for f in picks:
-        diff = (_git(d, "diff", "--no-renames", "-U1", since, "--", f) or "").splitlines()
-        body = [l for l in diff if not l.startswith(("diff --git", "index ", "--- ", "+++ "))]
+        diff = local.get(f) or (_git(d, "diff", "--no-renames", "-U1", since, "--", f) or "").splitlines()
+        body = [l for l in diff if not l.startswith(("diff --git", "index ", "--- ", "+++ ", "---", "+++"))]
         out.append(f"sample {f}:")
         out += ["  " + l[:160] for l in body[:sample_lines]]
         if len(body) > sample_lines:
@@ -1026,6 +1095,11 @@ def cmd_codemod(slug, path, a, log=print):
     offset = os.path.relpath(os.path.realpath(d), os.path.realpath(top))  # /tmp may be a symlink (macOS)
     snap = (_git(top, "stash", "create") or "").strip() or (_git(top, "rev-parse", "HEAD") or "").strip()
     untracked = set((_git(top, "ls-files", "--others", "--exclude-standard") or "").split("\n")) - {""}
+    before = {}
+    for f in sorted(untracked)[:2000]:  # new files the checkout already has: a codemod may change them too
+        full = os.path.join(top, f)
+        if os.path.isfile(full) and os.path.getsize(full) < 1_000_000:
+            before[f] = _read(full)
     if a.apply:
         run_in, cleanup, links = d, None, set()
     else:
@@ -1062,7 +1136,7 @@ def cmd_codemod(slug, path, a, log=print):
         root = top if a.apply else cleanup
         now_untracked = set((_git(root, "ls-files", "--others", "--exclude-standard") or "").split("\n")) - {""}
         created = {f for f in now_untracked - untracked if not any(f == l or f.startswith(l + "/") for l in links)}
-        summary, n = _change_summary(root, snap, created, skip=links)
+        summary, n = _change_summary(root, snap, created, skip=links, before=before)
         log(f"codemod ({'applied' if a.apply else 'dry run, nothing changed in ' + d}): exit {rc}; " + summary[0])
         for l in summary[1:]:
             log(l)
