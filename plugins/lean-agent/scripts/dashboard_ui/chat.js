@@ -45,7 +45,7 @@ function permHtml(e){
   }
   if(e.state==="in_app")return `<div class="perm warn" role="group" aria-label="${esc(label)}"><div class="hd"><span class="chip tone-warn">waiting in the ${appName()}</span>${aboutOf(e)}</div><div class="pl">The dashboard did not answer in time. Now waiting in the ${appName()}.</div><pre>${esc(e.name)}: ${esc(e.text)}</pre></div>`;
   const ok=/^(allowed|always|answered)$/.test(e.state),word=e.state==="always"?"allowed":e.state==="denied"?"denied":e.state==="expired"?"expired":e.state;
-  return `<div class="perm settled compact" role="group" aria-label="${esc(label)}"><span class="chip ${ok?"tone-ok":e.state==="denied"?"tone-bad":"tone-mute"}">${esc(word)}</span>${aboutOf(e)}<span class="mono small perm-t">${esc(e.name)} · ${esc(e.text)}</span><span class="mono mute small">${e.state==="expired"?"No longer waiting (the conversation restarted)":esc(answeredIn(e))}</span></div>`;
+  return `<div class="perm settled compact" role="group" aria-label="${esc(label)}"><span class="chip ${ok?"tone-ok":e.state==="denied"?"tone-bad":"tone-mute"}">${esc(word)}</span>${aboutOf(e)}<span class="mono small perm-t">${esc(e.name)} · ${esc(e.text)}</span><span class="mono mute small">${e.state==="expired"?"No longer waiting":esc(answeredIn(e))}</span></div>`;
 }
 const secs=t=>(Date.now()-Date.parse(t))/1000;
 function drawChat(){

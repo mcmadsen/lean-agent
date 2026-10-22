@@ -659,7 +659,7 @@ class CliTest(unittest.TestCase):
         const post=async(path,body)=>{calls.push(body);if(fail)return {ok:false,error:fail};
           const ids=body.ids?body.ids.split(","):[];
           if(body.do==="optimize-unreject")ids.forEach(i=>done.delete(i));
-          else if(body.do==="optimize-apply-all")["archive:a","archive:b",...ids].forEach(i=>done.add(i));
+          else if(body.do==="optimize-apply-all")[...body.apply.split(",").filter(Boolean),...ids].forEach(i=>done.add(i));
           else ids.forEach(i=>done.add(i));
           return {ok:true}};
         """ + helpers + inbox + """
@@ -707,7 +707,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(out["undone"], ["optimize-unreject", True, False, "3 to answer · 3 items"])
         self.assertEqual(out["left"], [False, "2 to answer · 2 items"])
         self.assertEqual(out["reject_failed"], [True, False, "2 to answer · 2 items"])
-        self.assertEqual(out["all"][0], {"do": "optimize-apply-all", "project": "p1", "ids": "draft-x"})
+        self.assertEqual(out["all"][0], {"do": "optimize-apply-all", "project": "p1", "apply": "", "ids": "draft-x"})
         self.assertEqual(out["all"][1:], ["1 to answer · 1 item", False])
         self.assertEqual(out["phone"], [True, False, True])
         self.assertTrue(out["phone_open"])
@@ -2788,11 +2788,10 @@ class CliTest(unittest.TestCase):
     def test_request_returns_not_ok_when_the_tmp_socket_dir_is_bad(self):
         home = os.path.join(self.tmp.name, *["long-directory-name-for-the-socket"] * 3, "home")
         ss = self.with_home(home)
-        uid = 4000000000 + os.getpid()  # a uid of our own, so the real /tmp/lean-agent-<uid> is untouched
-        d = f"/tmp/lean-agent-{uid}"
-        open(d, "w").close()  # not a directory
-        self.addCleanup(os.remove, d)
-        with mock.patch.object(ss.os, "getuid", return_value=uid):
+        root = os.path.join(self.tmp.name, "fallback")
+        os.makedirs(root)
+        open(os.path.join(root, f"lean-agent-{os.getuid()}"), "w").close()  # not a directory
+        with mock.patch.object(ss, "FALLBACK_ROOT", root):
             r = ss.request({"ping": True})
         self.assertFalse(r["ok"])
         self.assertIn("error", r)
@@ -2804,8 +2803,7 @@ class CliTest(unittest.TestCase):
             home = "/x" + "a" * (n - len("/x/session.sock"))
             os.environ["LEAN_AGENT_HOME"] = home
             self.assertEqual(len(os.path.join(home, "session.sock")), n)
-            with mock.patch.object(ss, "fallback_dir", return_value=fb), \
-                    mock.patch.object(ss.os.path, "realpath", side_effect=lambda p: p):
+            with mock.patch.object(ss, "fallback_dir", return_value=fb):
                 got = ss.sock_path()
             if short:
                 self.assertEqual(got, os.path.join(home, "session.sock"))

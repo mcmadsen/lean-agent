@@ -5052,13 +5052,16 @@ def _unreject(a, slug):
         return
     path = home("library", slug, "drafts.json")
     state = load_json(path, {})
+    changed = False
     for rid in ids:
         if state.get(rid) == "rejected":
             del state[rid]
+            changed = True
             print(f"unrejected {rid}: proposed again if it still applies")
         else:
             print(f"{rid} was not rejected")
-    save_json(path, state)
+    if changed:
+        save_json(path, state)
 
 
 def _action_id(act, c, t):

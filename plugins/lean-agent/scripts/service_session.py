@@ -48,8 +48,11 @@ def lean_home(*parts):
 SOCK_MAX = 100  # AF_UNIX paths are limited to 104 bytes (macOS) / 108 (Linux)
 
 
+FALLBACK_ROOT = "/tmp"
+
+
 def fallback_dir():
-    return f"/tmp/lean-agent-{os.getuid()}"
+    return os.path.join(FALLBACK_ROOT, f"lean-agent-{os.getuid()}")
 
 
 def sock_path():

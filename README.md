@@ -100,7 +100,8 @@ a model, runs workers, and reports back briefly.
 `up` runs **one** interactive orchestrator session (in a pseudo-terminal it owns, also under launchd or systemd), and
 everything else shares it: the Claude app (Remote Control) and the dashboard's chat are two views of the same
 conversation. A restart of `up` continues the conversation (`--fresh` starts a new one). Other lean-agent processes
-type into it through a local socket (`~/.lean-agent/session.sock`, or `/tmp/lean-agent-<uid>/<digest>.sock` when that path is too long for a unix socket; mode 0600).
+type into it through a local socket (`~/.lean-agent/session.sock`, or `/tmp/lean-agent-<uid>/<digest>.sock` when
+that path is too long for a unix socket; mode 0600).
 
 Other ways to run the orchestrator:
 - `lean-agent up --dashboard-only`: the same session without Remote Control; you talk to lean-agent in the dashboard's chat
@@ -127,7 +128,7 @@ Other ways to run the orchestrator:
 | `lean-agent runs --running` | Runs in progress. Every run prints `run <id> started` first, so a background launch is visible. |
 | `lean-agent run --resume <run-id> "<follow-up>"` | Continue a worker's session (cheap: its context is cached). |
 | `lean-agent card show\|add\|rm\|core\|unarchive\|protect <project> <id>` | Inspect or edit cards; `add` creates *note* cards from what workers had to discover. `protect` (`--off` to undo) keeps `optimize` from archiving, demoting or trimming a card; `unarchive` brings one back (`core` on an archived card unarchives it too). `optimize --apply --skip a,b` leaves those cards out. |
-| `lean-agent optimize <project> [--apply] [--accept ids] [--reject ids]` | Promote/demote core cards, archive dead ones, flag big cards to trim, list recent context gaps, and draft new recipe cards and MCP presets from what workers actually did. |
+| `lean-agent optimize <project> [--apply [ids]] [--accept ids] [--reject ids] [--unreject ids]` | Promote/demote core cards, archive dead ones, flag big cards to trim, list recent context gaps, and draft new recipe cards and MCP presets from what workers actually did. |
 | `lean-agent runs [--last] [--tokens] [--show [id]] [--details] [--grep TEXT]` | Recent runs; `--tokens` prints the latest run's run/tokens/context lines again, `--show` its whole summary (saved per run, so a `| tail` can't lose it), `--details` its details file, `--grep` only matching lines. |
 | `lean-agent run ... --answer-lines N` | The worker answers in at most N lines (default 25 in the orchestrator, `LEAN_AGENT_ANSWER_LINES`) and puts tables, lists and evidence after a `=== DETAILS ===` line; lean-agent saves that part to a file and prints only its path. An answer far past N lines is cut there and the rest opens the file. `0` = whole answer. Reviewers and other roles are never cut. |
 | `lean-agent run ... --escalate haiku,sonnet` | Run on haiku; only if that run fails (or errors, or stops), run the task again on sonnet. `suggest` recommends it and shows how similar earlier tasks did per model ("similar tasks ran on haiku: 6/6 done"). |
@@ -617,7 +618,7 @@ exact-cent tests with 1-cent remainder cases.
    paths and "Goal:"-style labels removed), read-only and changing runs never share a draft, a read-only preset
    never contains a write tool (a separate `<name>-write` draft says which write tools it adds), and two drafts
    never get the same preset name. `optimize <project> --accept <id>` writes them (`card add`, `mcp
-   preset`), `--reject <id>` stops proposing one. The 5-run threshold only gates trim/core/archive.
+   preset`), `--reject <id>` stops proposing one (`--unreject <id>` brings it back). The 5-run threshold only gates trim/core/archive.
    Relevance in `suggest` and `--cards auto`: words are weighted by how rare they are across your cards. A card
    needs a distinctive title word, or (if it's small) three distinctive body words; cards over 800 tokens need a
    title match, and ranking divides by card size. Only cards scoring at least 40% of the best match are kept, at
