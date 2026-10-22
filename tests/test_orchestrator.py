@@ -10,6 +10,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -2832,6 +2833,133 @@ class CliTest(unittest.TestCase):
                 os.environ.pop("LEAN_AGENT_HOME", None)
             else:
                 os.environ["LEAN_AGENT_HOME"] = old
+
+    def _follow_env(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import dash_service
+        home, proj, tr = self._follow_home()
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = home
+        def restore():
+            if old is None:
+                os.environ.pop("LEAN_AGENT_HOME", None)
+            else:
+                os.environ["LEAN_AGENT_HOME"] = old
+        self.addCleanup(restore)
+        return dash_service, home, proj, tr, _load_json(os.path.join(home, "up.json"))
+
+    @staticmethod
+    def _write_sends(home, *rows):
+        with open(os.path.join(home, "chat", "service_sends.jsonl"), "w") as fh:
+            for sent, ts in rows:
+                fh.write(json.dumps({"sent": sent, "ts": ts}) + "\n")
+
+    def test_service_refresh_follows_a_clear_from_service_sends(self):
+        ds, home, proj, tr, up = self._follow_env()
+        now = time.time()
+        self._write_sends(home, ("/clear", now - 5))
+        new = os.path.join(proj, "new.jsonl")
+        self._user_file(new, "hello", now - 3)
+        m = ds.Model()
+        m.refresh()
+        self.assertEqual(m.path, new)
+        self.assertEqual(m.sid, "new")
+
+    def test_service_clear_window_boundary_with_patched_time(self):
+        ds, home, proj, tr, up = self._follow_env()
+        t = 1_800_000_000.0
+        m = ds.Model()
+        m.send_log = [{"sent": "/clear", "ts": t}]
+        inside, outside = os.path.join(proj, "in.jsonl"), os.path.join(proj, "out.jsonl")
+        self._user_file(outside, "hello", t + ds.CLEAR_SECS + 1)
+        with mock.patch.object(ds.time, "time", return_value=t + 100):
+            m._scan["at"] = 0
+            self.assertEqual(m._pick(up), tr)
+            os.remove(outside)
+            self._user_file(inside, "hello", t + ds.CLEAR_SECS)
+            m._scan["at"] = 0
+            m._first.clear()
+            self.assertEqual(m._pick(up), inside)
+
+    def test_service_two_successive_clears_each_claim_one_transcript(self):
+        ds, home, proj, tr, up = self._follow_env()
+        t = 1_800_000_000.0
+        m = ds.Model()
+        m.send_log = [{"sent": "/clear", "ts": t}, {"sent": "/clear", "ts": t + 100}]
+        a, b = os.path.join(proj, "a.jsonl"), os.path.join(proj, "b.jsonl")
+        self._user_file(a, "one", t + 1)
+        self._user_file(b, "two", t + 101)
+        os.utime(a, (t + 50, t + 50))
+        os.utime(b, (t + 150, t + 150))
+        with mock.patch.object(ds.time, "time", return_value=t + 200):
+            m._scan["at"] = 0
+            self.assertEqual(m._pick(up), b)
+            self.assertEqual({p for _, p in m._used_clears}, {a, b})
+            self.assertEqual(len(m._used_clears), 2)
+
+    def test_service_follows_a_lazily_created_transcript_by_our_message(self):
+        ds, home, proj, tr, up = self._follow_env()
+        t = 1_800_000_000.0
+        m = ds.Model()
+        m.send_log = [{"sent": "/clear", "ts": t}, {"sent": "what is up", "ts": t + 120}]
+        lazy, other = os.path.join(proj, "lazy.jsonl"), os.path.join(proj, "other.jsonl")
+        self._user_file(other, "something else", t + 121)
+        self._user_file(lazy, "what is up", t + 121)
+        with mock.patch.object(ds.time, "time", return_value=t + 200):
+            m._scan["at"] = 0
+            self.assertEqual(m._pick(up), lazy)
+            # too late after the /clear: not ours
+            m2 = ds.Model()
+            m2.send_log = [{"sent": "/clear", "ts": t - 1000}, {"sent": "what is up", "ts": t + 120}]
+            m2._scan["at"] = 0
+            self.assertEqual(m2._pick(up), tr)
+
+    def test_service_birth_time_fallback_and_miss_throttle(self):
+        ds, home, proj, tr, up = self._follow_env()
+        t = 1_800_000_000.0
+        m = ds.Model()
+        m.send_log = [{"sent": "/clear", "ts": t}]
+        n = os.path.join(proj, "n.jsonl")
+        with open(n, "w") as fh:
+            fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "no stamp"}}) + "\n")
+        real_stat = os.stat
+        def fake_stat(path, *a, **kw):
+            r = real_stat(path, *a, **kw)
+            if str(path) == n:
+                return types.SimpleNamespace(st_size=r.st_size, st_mtime=r.st_mtime, st_birthtime=t + 5)
+            return r
+        with mock.patch.object(ds.time, "time", return_value=t + 10), mock.patch.object(ds.os, "stat", fake_stat):
+            m._scan["at"] = 0
+            self.assertEqual(m._pick(up), n)
+        # MISS throttle: a transcript without a user record is read once per MISS_SECS
+        m = ds.Model()
+        e = os.path.join(proj, "e.jsonl")
+        with open(e, "w") as fh:
+            fh.write(json.dumps({"type": "summary"}) + "\n")
+        calls = []
+        real_info = ds._first_info
+        def counting(p):
+            calls.append(p)
+            return real_info(p)
+        with mock.patch.object(ds, "_first_info", counting):
+            with mock.patch.object(ds.time, "time", return_value=t):
+                m._look(e)
+                m._look(e)
+            self.assertEqual(len(calls), 1)
+            with mock.patch.object(ds.time, "time", return_value=t + ds.MISS_SECS + 1):
+                m._look(e)
+            self.assertEqual(len(calls), 2)
+
+    def test_trim_sends_below_the_limit_does_nothing(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import dash_chat
+        p = os.path.join(tempfile.mkdtemp(), "service_sends.jsonl")
+        with open(p, "w") as fh:
+            for i in range(900):
+                fh.write(json.dumps({"sent": f"m{i}", "pad": "x" * 100}) + "\n")
+        before = open(p).read()
+        dash_chat._trim_sends(p)
+        self.assertEqual(open(p).read(), before)
 
     def test_trim_sends_keeps_the_last_500_lines(self):
         sys.path.insert(0, os.path.dirname(CLI))
