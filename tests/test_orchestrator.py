@@ -2655,6 +2655,51 @@ class CliTest(unittest.TestCase):
         except OSError:
             return []
 
+    def with_home(self, home):
+        sys.path.insert(0, os.path.join(os.path.dirname(CLI)))
+        import service_session
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = home
+        def restore():
+            os.environ.pop("LEAN_AGENT_HOME", None) if old is None else os.environ.__setitem__("LEAN_AGENT_HOME", old)
+        self.addCleanup(restore)
+        return service_session
+
+    def test_client_sock_path_prefers_the_socket_up_recorded(self):
+        ss = self.with_home(self.tmp.name)
+        with open(os.path.join(self.tmp.name, "up.json"), "w") as fh:
+            json.dump({"socket": "/tmp/recorded.sock"}, fh)
+        self.assertEqual(ss.client_sock_path(), "/tmp/recorded.sock")
+
+    def test_request_returns_not_ok_when_the_tmp_socket_dir_is_bad(self):
+        home = os.path.join(self.tmp.name, *["long-directory-name-for-the-socket"] * 3, "home")
+        ss = self.with_home(home)
+        uid = 4000000000 + os.getpid()  # a uid of our own, so the real /tmp/lean-agent-<uid> is untouched
+        d = f"/tmp/lean-agent-{uid}"
+        open(d, "w").close()  # not a directory
+        self.addCleanup(os.remove, d)
+        old = ss.os.getuid
+        ss.os.getuid = lambda: uid
+        self.addCleanup(setattr, ss.os, "getuid", old)
+        r = ss.request({"op": "ping"})
+        self.assertFalse(r["ok"])
+        self.assertIn("error", r)
+
+    def test_sock_path_falls_back_only_above_100_bytes(self):
+        ss = self.with_home(self.tmp.name)
+        for n, short in ((100, True), (101, False)):
+            pad = n - len(os.path.join(self.tmp.name, "x", "session.sock"))
+            home = os.path.join(self.tmp.name, "x" * (1 + pad))
+            os.environ["LEAN_AGENT_HOME"] = home
+            self.assertEqual(len(os.path.join(home, "session.sock")), n)
+            if short:
+                self.assertEqual(ss.sock_path(), os.path.join(home, "session.sock"))
+            else:
+                d = f"/tmp/lean-agent-{os.getuid()}"
+                if os.path.lexists(d) and not os.path.isdir(d):
+                    self.skipTest(d + " is not a directory")
+                self.assertEqual(os.path.dirname(ss.sock_path()), d)
+
     def test_up_hosts_the_session_when_the_home_path_is_too_long_for_a_socket(self):
         home = os.path.join(self.tmp.name, *["long-directory-name-for-the-socket"] * 3, "home")
         os.makedirs(home)

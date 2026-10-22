@@ -100,7 +100,7 @@ a model, runs workers, and reports back briefly.
 `up` runs **one** interactive orchestrator session (in a pseudo-terminal it owns, also under launchd or systemd), and
 everything else shares it: the Claude app (Remote Control) and the dashboard's chat are two views of the same
 conversation. A restart of `up` continues the conversation (`--fresh` starts a new one). Other lean-agent processes
-type into it through a local socket (`~/.lean-agent/session.sock`, mode 0600).
+type into it through a local socket (`~/.lean-agent/session.sock`, or `/tmp/lean-agent-<uid>/<digest>.sock` when that path is too long for a unix socket; mode 0600).
 
 Other ways to run the orchestrator:
 - `lean-agent up --dashboard-only`: the same session without Remote Control; you talk to lean-agent in the dashboard's chat

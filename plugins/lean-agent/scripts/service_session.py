@@ -2,7 +2,8 @@
 """The one interactive orchestrator session that `lean-agent up` hosts, and the way to talk to it.
 
 `up` runs `claude` in a pseudo-terminal it owns (Host below) and serves a unix socket,
-~/.lean-agent/session.sock (mode 0600). Other lean-agent processes import this module:
+~/.lean-agent/session.sock (mode 0600), or /tmp/lean-agent-<uid>/<digest>.sock when that path is too
+long for a unix socket. Other lean-agent processes import this module:
 
     send(text)   type a message into the session (bracketed paste + Enter) -> (ok, error)
     keys(k)      send raw keys, e.g. "esc" (interrupt), "enter", "ctrl-c", or any string -> (ok, error)
@@ -133,7 +134,7 @@ def request(msg, timeout=5):
             buf += chunk
         reply = json.loads(buf.decode("utf-8", "replace") or "null")
         return reply if isinstance(reply, dict) else {"ok": False, "error": "bad reply"}
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         return {"ok": False, "error": f"no session bridge ({exc})"}
     finally:
         s.close()

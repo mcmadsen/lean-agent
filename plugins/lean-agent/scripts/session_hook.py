@@ -3,8 +3,8 @@
 
 Records which transcript the session writes now (chat/service.json), for every source (startup, resume, clear,
 compact): /clear starts a new transcript with a new id, and this is how the dashboard learns of it. Only when the
-hook runs under the service claude (its pid in up.json is an ancestor, with no other claude nearer). Prints nothing and never
-fails the session.
+hook runs under the service claude (its pid in up.json is an ancestor, with no other claude nearer). Prints nothing
+and never fails the session.
 """
 import json
 import os
