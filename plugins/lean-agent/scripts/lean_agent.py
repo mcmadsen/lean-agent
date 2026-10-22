@@ -5081,7 +5081,8 @@ def _card_actions(slug, cards, a, skip):
 
 def optimize_result(a, slug):
     """What is left to decide, as one JSON-able dict (also what the dashboard shows)."""
-    actions, _ = _card_actions(slug, load_cards(slug), a, set())
+    skip = {x for x in (getattr(a, "skip", None) or "").split(",") if x}
+    actions, _ = _card_actions(slug, load_cards(slug), a, skip)
     state = load_json(home("library", slug, "drafts.json"), {})
     drafts = [d for d in draft_proposals(slug) if state.get(d["id"]) not in ("accepted", "rejected")]
     return {"project": slug, "ts": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -5844,6 +5845,8 @@ def ask_attribution_once():
 
 
 def cmd_up(a):
+    if getattr(a, "dashboard_only", False) and not service_session.supported():
+        die("--dashboard-only needs a pty (macOS or Linux)")
     ask_attribution_once()
     h = prepare_home()
     refresh_blocks()

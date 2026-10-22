@@ -2943,6 +2943,38 @@ class CliTest(unittest.TestCase):
         p.wait(timeout=30)
         self.assertEqual(len(self.read_jsonl(log)), 3)
 
+    def test_wrapper_non_push_git_spawns_no_extra_git(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import push_guard
+        calls, execs = [], []
+        old = (push_guard._git, os.execv)
+        old_env = os.environ.pop("LEAN_AGENT_PUSH_GUARD_OVERRIDE", None)
+        push_guard._git = lambda *a, **k: calls.append(a)
+        os.execv = lambda real, argv: execs.append(argv)
+        try:
+            push_guard.git_wrapper("/bin/git", ["status", "-s"])
+            self.assertEqual(calls, [])
+            self.assertEqual(len(execs), 1)
+            self.assertNotIn("LEAN_AGENT_PUSH_GUARD_OVERRIDE", os.environ)
+        finally:
+            push_guard._git, os.execv = old
+            if old_env is not None:
+                os.environ["LEAN_AGENT_PUSH_GUARD_OVERRIDE"] = old_env
+
+    def test_up_dashboard_only_without_pty_dies(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        import service_session
+        import types
+        old = service_session.supported
+        service_session.supported = lambda: False
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                L.cmd_up(types.SimpleNamespace(dashboard_only=True))
+            self.assertEqual(cm.exception.code, 1)
+        finally:
+            service_session.supported = old
+
     def test_chrome_check_and_run(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--chrome", "--", "draft it", check=False)

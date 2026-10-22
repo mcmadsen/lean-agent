@@ -226,6 +226,8 @@ def skips_guard(dest):
 
 def wrapper_push_is_local(args):
     """True when the `git push` in `args` goes to a local path or file:// URL (explicit, or the remote's push URL)."""
+    if "push" not in args:
+        return False
     cwd, i = os.getcwd(), 0
     while i < len(args) and args[i] != "push":
         if args[i] == "-C" and i + 1 < len(args):

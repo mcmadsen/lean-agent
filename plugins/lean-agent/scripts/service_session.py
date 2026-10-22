@@ -163,7 +163,7 @@ class Host:
         self.tail = collections.deque()
         self.tail_len = 0
         self.lock = threading.Lock()   # the buffer
-        self.write_lock = threading.Lock()  # one message into the pty at a time
+        self.write_lock = threading.RLock()  # one message into the pty at a time
         self.stopping = threading.Event()
         self.reason = None
         self.server = None
@@ -218,9 +218,10 @@ class Host:
 
     def paste(self, text):
         text = text.replace(PASTE_END.decode(), "")
-        self.write(PASTE_START + text.encode() + PASTE_END)
-        time.sleep(0.15)  # let the input box take the paste before Enter
-        self.write(b"\r")
+        with self.write_lock:  # RLock: write() below takes it again
+            self.write(PASTE_START + text.encode() + PASTE_END)
+            time.sleep(0.15)  # let the input box take the paste before Enter
+            self.write(b"\r")
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None and self.master is not None
