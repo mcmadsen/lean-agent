@@ -526,6 +526,54 @@ class CliTest(unittest.TestCase):
         self.assertIn("unarchived it", out)
         self.assertIn("*style ", self.cli("cards", "proj").stdout)  # core and live
 
+    def _archivable(self):
+        self.cli("learn", self.proj)
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        try:
+            slug = [x for x in L.projects()][0]
+            cards = L.load_cards(slug)
+            for c in cards:
+                c.update(offered=6, used=0, unneeded=6, core=False, core_types=[])
+            L.save_cards(slug, cards)
+        finally:
+            os.environ.pop("LEAN_AGENT_HOME", None)
+
+    def test_optimize_json_and_apply_by_id(self):
+        self._archivable()
+        res = json.loads(self.cli("optimize", "proj", "--json").stdout)
+        self.assertTrue(res["project"].startswith("proj"))
+        saved_path = os.path.join(self.env["LEAN_AGENT_HOME"], "optimize", res["project"] + ".json")
+        sug = {x["id"]: x for x in res["suggestions"]}
+        self.assertIn("archive:style", sug)
+        self.assertEqual(sorted(sug["archive:style"]), ["card", "id", "kind", "reason"])
+        self.assertEqual((sug["archive:style"]["kind"], sug["archive:style"]["card"]), ("archive", "style"))
+        self.assertIn("unneeded", sug["archive:style"]["reason"])
+        self.assertIsInstance(res["drafts"], list)
+        saved = json.load(open(saved_path))
+        self.assertEqual(saved["suggestions"], res["suggestions"])
+        self.assertTrue(saved["ts"])
+        # a plain run saves too
+        os.remove(saved_path)
+        self.cli("optimize", "proj")
+        self.assertTrue(os.path.exists(saved_path))
+        # --apply <ids> applies only those
+        out = self.cli("optimize", "proj", "--apply", "archive:style,archive:nope").stdout
+        self.assertIn("applied: archive style", out)
+        self.assertIn("no open suggestion archive:nope", out)
+        listing = self.cli("cards", "proj").stdout
+        self.assertNotIn(" style ", listing)
+        self.assertIn(" testing ", listing)
+        left = json.loads(self.cli("optimize", "proj", "--json").stdout)
+        self.assertNotIn("archive:style", [x["id"] for x in left["suggestions"]])
+        self.assertIn("archive:testing", [x["id"] for x in left["suggestions"]])
+        # rejecting a suggestion hides it for good
+        self.cli("optimize", "proj", "--reject", "archive:testing")
+        left = json.loads(self.cli("optimize", "proj", "--json").stdout)
+        self.assertNotIn("archive:testing", [x["id"] for x in left["suggestions"]])
+        self.assertIn(" testing ", self.cli("cards", "proj").stdout)
+
     def test_run_requires_model_and_why(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "do it", check=False)
