@@ -201,9 +201,17 @@ function drawRuns(s){
     <div class="h">${esc(r.head)}</div></div>`).join("")||'<div class="empty">No runs yet.</div>';
   $("n-runs").textContent=s.runs.length||"";
 }
+function syncNotice(s){  // the newest sync record, if it says an update is available and this version isn't there yet
+  const verGE=(a,b)=>{const x=String(a).split(".").map(Number),y=String(b).split(".").map(Number);for(let i=0;i<3;i++){if((x[i]||0)!==(y[i]||0))return(x[i]||0)>(y[i]||0)}return true};
+  const last=(s.scheduled_results||[]).find(r=>/sync/.test((r.args||[]).join(" ")));
+  const m=last&&/(\d+\.\d+\.\d+)\s*(?:->|→)\s*(\d+\.\d+\.\d+)/.exec(last.first||"");
+  return m&&!(s.version&&verGE(s.version,m[2]))?last:null;
+}
 function drawSchedule(s){
-  const upd=(s.scheduled_results||[]).find(r=>/sync/.test((r.args||[]).join(" "))&&/(\d+\.\d+\.\d+)\s*(?:->|→)\s*(\d+\.\d+\.\d+)/.test(r.first||""));
-  $("sched").innerHTML=(upd?`<div class="update"><span>${esc(upd.first)}</span><button type="button" class="btn sm" data-act="sync">Sync</button></div>`:"")
+  const upd=syncNotice(s);
+  const kept=store.get("la-syncmsg","");if(kept){ui.syncMsg=kept;store.set("la-syncmsg","")}
+  $("sched").innerHTML=(upd?`<div class="update"><span>${esc(upd.first)}</span><button type="button" class="btn sm" data-act="sync"${ui.syncing?" disabled":""}>${ui.syncing?"Syncing…":"Sync"}</button></div>`:"")
+    +(ui.syncMsg?`<div class="mono mute small" role="status" style="padding:4px">${esc(ui.syncMsg)}</div>`:"")
     +s.schedule.map(j=>`<article class="card"><div class="t"><span class="mono">#${j.id} ${esc(j.cmd)}</span></div><div class="mt"><span class="chip tone-mute">${esc(j.when)}</span><span>${j.enabled?(j.next?"next "+when(j.next):""):"paused"} · ${j.last?"last "+when(j.last):"never ran yet"}</span></div></article>`).join("")
     +`<div class="mono mute small" style="padding:4px">${esc(s.schedule_runner||"")}</div>`
     +((s.scheduled_results||[]).length?`<div class="grp"><span>Recent results</span><span>${s.scheduled_results.length}</span></div>`+s.scheduled_results.slice(0,5).map(r=>`<div class="line"><span class="t">#${r.id} ${esc(r.first)}</span><span class="chip ${r.rc?"tone-bad":"tone-ok"}">exit ${r.rc}</span></div>`).join(""):"");
@@ -291,6 +299,17 @@ function askText(title,hint,value,extra){
     d.onclose=()=>res(d.returnValue==="ok"?{text:$("asktext").value.trim()}:null);d.returnValue="";d.showModal();$("asktext").focus()});
 }
 async function act(body){const r=await post("/api/action",body);if(!r.ok)alert(r.output||r.error||"didn't work");load();return r.ok}
+async function doSync(){
+  if(ui.syncing||!confirm("Update lean-agent now (lean-agent sync)?"))return;
+  ui.syncing=true;ui.syncMsg="";drawSchedule(S);
+  const before=S.version;let r;
+  try{r=await post("/api/action",{do:"sync"})}catch(e){r={ok:false,output:String(e)}}
+  ui.syncing=false;
+  const line=(r.output||r.error||"").split("\n").map(l=>l.trim()).filter(Boolean).pop()||"";
+  ui.syncMsg=r.ok?(r.version&&r.version!==before?`Updated to ${r.version}`:line||"Already up to date"):`Sync failed: ${line||"no output"}`;
+  if(r.page&&r.page!==V){store.set("la-syncmsg",ui.syncMsg);location.reload();return}
+  load();
+}
 async function onAct(el){
   const what=el.dataset.act,c=cardsBy().get(String(el.dataset.card))||{},title=c.title||"";
   if(what==="select")return select(el.dataset.card);
@@ -301,7 +320,7 @@ async function onAct(el){
   if(what==="dismiss")return act({do:"dismiss",id:String(c.id),sig:c.sig});
   if(what==="epic-next"){const name=title.split(":")[0].replace(/^Epic /,"");select(c.id);sendChat(`Start the next ready item of epic ${name} (lean-agent todo next --epic ${name}).`)}
   if(what==="run-stop"){if(confirm(`Stop run ${el.dataset.id}?`))act({do:"run-stop",run:el.dataset.id})}
-  if(what==="sync"){if(confirm("Update lean-agent now (lean-agent sync)?"))act({do:"sync"})}
+  if(what==="sync")return doSync();
   if(what==="scope")return select(el.dataset.w==="main"?"main":ui.task);
   if(what==="unscope"){ui.task=null;return select("main")}
   if(what==="clear-project"){$("bfilter").value="";$("bfilter").dispatchEvent(new Event("change"));return}

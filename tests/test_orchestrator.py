@@ -574,6 +574,58 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("archive:testing", [x["id"] for x in left["suggestions"]])
         self.assertIn(" testing ", self.cli("cards", "proj").stdout)
 
+    def _dashboard(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        self.addCleanup(lambda: os.environ.pop("LEAN_AGENT_HOME", None) if old is None
+                        else os.environ.__setitem__("LEAN_AGENT_HOME", old))
+        import dashboard
+        return dashboard
+
+    def test_dashboard_sync_records_a_fresh_check(self):
+        import unittest.mock as mock
+        dashboard = self._dashboard()
+        import lean_schedule
+        lean_schedule.record(7, ["sync", "--check"], 0, "update available: lean-agent 0.1.0 -> 0.2.0 (1 commit(s)).")
+        self.assertEqual(dashboard.state()["scheduled_results"][0]["first"][:16], "update available")
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd[2:])
+            out = "lean-agent 0.2.0 is up to date" if "--check" in cmd else "code: already up to date"
+            return subprocess.CompletedProcess(cmd, 0, out + "\n", "")
+        with mock.patch("subprocess.run", fake_run):
+            res = dashboard.run_action({"do": "sync"})
+        self.assertEqual([["sync"], ["sync", "--check"]], calls[:2])
+        newest = dashboard.state()["scheduled_results"][0]
+        self.assertEqual((newest["id"], newest["args"], newest["first"]), ("dashboard", ["sync", "--check"],
+                                                                          "lean-agent 0.2.0 is up to date"))
+        self.assertTrue(os.path.exists(newest["output"]))
+        self.assertTrue(dashboard.state()["version"])
+
+    def test_sync_notice_hidden_when_version_is_current(self):
+        import shutil
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node isn't installed")
+        js = open(os.path.join(os.path.dirname(CLI), "dashboard_ui", "app.js")).read()
+        fn = js[js.index("function syncNotice"):js.index("function drawSchedule")]
+        probe = fn + """
+        const rec=(first,args)=>({args:args||["sync","--check"],first});
+        const up=rec("update available: lean-agent 0.30.0 -> 0.31.0 (2 commit(s)). Install it: lean-agent sync");
+        const out=[
+          !!syncNotice({version:"0.30.0",scheduled_results:[up]}),
+          !!syncNotice({version:"0.31.0",scheduled_results:[up]}),
+          !!syncNotice({version:"0.32.1",scheduled_results:[up]}),
+          !!syncNotice({version:"0.30.0",scheduled_results:[rec("lean-agent 0.31.0 is up to date"),up]}),
+          !!syncNotice({version:"0.9.0",scheduled_results:[up]}),
+        ];
+        console.log(JSON.stringify(out));"""
+        p = subprocess.run([node, "-e", probe], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(json.loads(p.stdout), [True, False, False, False, True])
+
     def test_run_requires_model_and_why(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "do it", check=False)
