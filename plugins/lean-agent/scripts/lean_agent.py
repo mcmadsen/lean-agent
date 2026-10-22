@@ -35,6 +35,7 @@ import lean_log  # noqa: E402
 import lean_memory  # noqa: E402
 import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
+import service_session  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -5791,8 +5792,10 @@ def cmd_up(a):
     ask_attribution_once()
     h = prepare_home()
     refresh_blocks()
+    prev = load_json(home("up.json"), {})
     save_json(home("up.json"), {"started": now_iso(), "server_env": ORCHESTRATOR_ENV, "name": a.name,
-                                "local": a.local})
+                                "local": a.local,
+                                **({} if a.fresh else {k: prev[k] for k in ("session_id",) if prev.get(k)})})
     set_home_model(h, a.model)
     if a.fresh:
         drop_bridge_pointers(h)
@@ -5838,17 +5841,23 @@ def cmd_up(a):
             link = dashboard.url()
         print(f"lean-agent: dashboard {link or dashboard.url()}" + ("" if link else " (already running)")
               + " (open it in a browser tab, e.g. Claude Desktop's built-in browser)", flush=True)
-    if getattr(a, "dashboard_only", False):
-        return dashboard_only(link)
+    dash_only = getattr(a, "dashboard_only", False)
+    if dash_only and not link and os.environ.get("LEAN_AGENT_DASHBOARD") != "0":
+        die("the dashboard didn't start (its port is taken: is another `lean-agent up` running?)")
     bindir = os.path.join(PLUGIN_ROOT, "bin")
     env["PATH"] = bindir + os.pathsep + env.get("PATH", "")  # `lean-agent` works even without the plugin
     cmd = [os.environ.get("LEAN_AGENT_CLAUDE") or "claude"]
     if a.model:
         cmd += ["--model", a.model]
+    use_session = service_session.supported() and not a.local
     if a.local:
         print(f"lean-agent: orchestrator in {h} (model {a.model or 'default'})")
+    elif dash_only:
+        print(f"lean-agent: dashboard only: one interactive session in {h}, model {a.model or 'default'}; talk to it "
+              "in the dashboard (Ctrl-C or the service stops it)", flush=True)
     else:
-        cmd += ["remote-control", "--name", a.name]
+        if not use_session:
+            cmd += ["remote-control", "--name", a.name]
         if a.permission_mode:
             cmd += ["--permission-mode", a.permission_mode]
         cap = env.get("LEAN_AGENT_BUDGET")
@@ -5856,16 +5865,83 @@ def cmd_up(a):
               + (f", self-set session cap {int(cap):,} sonnet-eq" if cap else ""))
         print(f"lean-agent: open the Claude app (Code) and pick \"{a.name}\"")
     extra = a.extra[1:] if a.extra[:1] == ["--"] else a.extra
-    cmd += extra  # e.g. `lean-agent up -- --debug --debug-file /tmp/rc.log`
     os.chdir(h)
     sys.stdout.flush()  # exec replaces the process; unflushed output would be lost when piped
     sys.stderr.flush()
     if a.local:
         try:
-            os.execvpe(cmd[0], cmd, env)
+            os.execvpe(cmd[0], cmd + extra, env)  # e.g. `lean-agent up -- --debug --debug-file /tmp/rc.log`
         except FileNotFoundError:
             die("'claude' not found on PATH")
-    return remote_control(cmd, env, h)
+    if use_session:
+        return host_session(cmd, extra, env, h, a.name, dash_only, a.permission_mode if dash_only else None)
+    return remote_control(cmd + extra, env, h)
+
+
+def host_session(cmd, extra, env, h, name, dash_only, permission_mode):
+    """`up` hosts the one interactive orchestrator session in a pty it owns (so it also runs under launchd /
+    systemd, where there is no terminal), with Remote Control unless --dashboard-only, and serves the socket
+    the dashboard types into. A restart of `up` resumes the same conversation when its transcript exists."""
+    import signal
+    import threading
+    sid = (load_json(home("up.json"), {}).get("session_id")) or str(uuid.uuid4())
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", sid):
+        sid = str(uuid.uuid4())
+
+    def build():
+        resume = os.path.exists(service_session.transcript_path(h, sid))
+        argv = list(cmd)
+        if not dash_only:
+            argv += ["--remote-control", name]
+        if permission_mode:
+            argv += ["--permission-mode", permission_mode]
+        argv += ["--resume" if resume else "--session-id", sid] + extra
+        return argv, sid
+
+    state = {"seen": "", "stale": False}
+
+    def on_text(text, host):
+        state["seen"] = (state["seen"] + ANSI_RE.sub("", text))[-4000:]
+        seen = state["seen"]
+        if not state.get("served") and SERVED_RE.search(seen):
+            state["served"] = True
+            print("\nlean-agent: another Claude Code is serving this folder (often the Claude desktop app, or an "
+                  "older `lean-agent up` in another terminal). Close it, then run `lean-agent up` again.", flush=True)
+        if not state["stale"] and STALE_SESSION_RE.search(seen):
+            state["stale"] = True
+            if not state.get("retried"):
+                host.terminate_for("stale")
+            else:  # still the old session: say what still works
+                print("\nlean-agent: Remote Control still tries the old session. The session works; pick the new "
+                      "one in the app. If it keeps happening: claude update", flush=True)
+
+    def on_stale():
+        print("\nlean-agent: the previous Remote Control session is gone (deleted, archived or expired); "
+              "starting a new one", flush=True)
+        drop_bridge_pointers(h)
+        state.update(seen="", stale=False, retried=True)
+
+    host = service_session.Host(build, env, h, remote_control=not dash_only, on_text=on_text, on_stale=on_stale)
+    threading.Thread(target=schedule_timer, daemon=True).start()
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):  # the service (or anyone) stops `up`: stop claude too, promptly
+        signal.signal(sig, lambda *_: host.stop())
+    try:
+        rc = host.run()
+    except FileNotFoundError:
+        die("'claude' not found on PATH")
+    except RuntimeError as exc:
+        die(str(exc))
+    except KeyboardInterrupt:
+        host.stop()
+        rc = 0
+    if dash_only:
+        try:
+            import dash_chat
+            dash_chat.chat().stop()
+        except Exception:
+            pass
+    return rc
 
 
 KEEP_TOOLS = {"Bash", "Read", "BashOutput", "TaskOutput", "KillShell", "TaskStop", "AskUserQuestion", "ToolSearch"}
@@ -6120,31 +6196,6 @@ def drop_bridge_pointers(h):
         else:
             os.remove(path)
             print(f"lean-agent: removed {path}; starting a new Remote Control session", flush=True)
-
-
-def dashboard_only(link):
-    """`lean-agent up --dashboard-only`: no Remote Control session; the dashboard (with its own conversation with
-    the orchestrator) and the schedule timer run until stopped."""
-    import signal
-    import threading
-    if not link:
-        die("the dashboard didn't start (its port is taken: is another `lean-agent up` running?)")
-    print("lean-agent: dashboard only: talk to the orchestrator in the dashboard's chat; Ctrl-C (or the service) "
-          "stops it", flush=True)
-    threading.Thread(target=schedule_timer, daemon=True).start()
-    stop = threading.Event()
-    signal.signal(signal.SIGTERM, lambda *_: stop.set())
-    try:
-        while not stop.wait(3600):
-            pass
-    except KeyboardInterrupt:
-        pass
-    try:
-        import dash_chat
-        dash_chat.chat().stop()
-    except Exception:
-        pass
-    return 0
 
 
 def schedule_timer(every=300):
