@@ -104,6 +104,21 @@ def service_up():
     return _BRIDGE["up"]
 
 
+def suggestion_rules(suggestions):
+    sys.path.insert(0, HERE)
+    import dash_service
+    return dash_service.suggestion_rules(suggestions)
+
+
+def service_status():
+    """What the page needs to know about the shared session: is the bridge answering, is Remote Control on
+    (None when it can't be told), did `lean-agent up` ever run here (`configured`)."""
+    up = service_up()
+    info = _load(lean_home("up.json"), {})
+    rc = info.get("remote_control")
+    return {"up": up, "configured": bool(info), "remote_control": bool(rc) if up and rc is not None else None}
+
+
 def thread_dir(key):
     return lean_home("chat") if key == "main" else lean_home("chat", "threads", key)
 
@@ -202,7 +217,7 @@ class Chat:
         if ds:
             ds.touch_poll()
             with self.lock:
-                return ds.model().snapshot(self.key, since, self._fresh_at())
+                return dict(ds.model().snapshot(self.key, since, self._fresh_at()), service_status=service_status())
         with self.lock:
             seen = {}
             for e in self.events:  # an updated event appears again in the log: the newest copy wins
@@ -210,7 +225,7 @@ class Chat:
             evs = [e for e in seen.values() if max(e["i"], e.get("changed", 0)) > since]
             last = max([max(e["i"], e.get("changed", 0)) for e in seen.values()] or [0])
             return {"status": self.status, "session": self.session, "events": sorted(evs, key=lambda e: e["i"]),
-                    "cursor": last, "alive": bool(self.proc and self.proc.poll() is None)}
+                    "cursor": last, "alive": bool(self.proc and self.proc.poll() is None), "service_status": service_status()}
 
     # ----------------------------------------------------------------- process
     def _write(self, obj):
@@ -290,6 +305,7 @@ class Chat:
                                   or req.get("tool_name"), text=tool_summary(req.get("tool_name"), req.get("input")),
                                   description=req.get("description") or req.get("title"), state="pending",
                                   can_always=bool(req.get("permission_suggestions")),
+                                  always_rule=suggestion_rules(req.get("permission_suggestions")),
                                   questions=_questions(req) if req.get("tool_name") == "AskUserQuestion" else None)
                     with self.lock:
                         self.pending[ev.get("request_id")] = (e, req)
@@ -383,7 +399,7 @@ class Chat:
         ok = self._write({"type": "control_response", "response": {"subtype": "success", "request_id": rid,
                                                                      "response": resp}})
         self._update(e, state=("answered" if answers else "always" if always else "allowed") if allow else "denied",
-                     answers=answers or None)
+                     answers=answers or None, where="dashboard", answered_at=_now())
         return {"ok": ok}
 
     def interrupt(self):
