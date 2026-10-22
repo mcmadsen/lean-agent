@@ -5595,8 +5595,8 @@ def cmd_doctor(a):
     root = os.path.realpath(projs[slug]["path"]) if in_project else None
     is_home = path == os.path.realpath(h) or path.startswith(os.path.realpath(h) + os.sep)
     if not in_project and not is_home:
-        report(False, f"{path} is inside a learned project or the lean-agent home",
-               "lean-agent learn <repo root> --name <name>")
+        report(None, f"{path} isn't a learned project, so the per-project checks are skipped (run doctor in a "
+               "project's folder for them, or `lean-agent learn <repo root> --name <name>` if this should be one)")
     if in_project and a.fix and projs[slug].get("rules") != "off":
         install_block(slug)
 
