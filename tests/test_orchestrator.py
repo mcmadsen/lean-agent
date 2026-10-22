@@ -30,6 +30,8 @@ FAKE_CLAUDE = textwrap.dedent("""\
         with open(os.environ["FAKE_LOG"], "a") as fh:
             fh.write(json.dumps({"plugin": sys.argv[1:]}) + "\\n")
         sys.exit(0)
+    if os.environ.get("LEAN_AGENT_SERVICE_SESSION"):  # the interactive session `up` hosts: ends at once
+        sys.exit(0)
     task = sys.stdin.read()
     if "--append-system-prompt-file" not in sys.argv and task.startswith("Rewrite this context card"):
         print(json.dumps({"type": "result", "result": os.environ.get("FAKE_SHORT", "## Testing\\nRun pytest -q in api/.")}))
@@ -1278,7 +1280,8 @@ class CliTest(unittest.TestCase):
         self.cli("up", "--name", "la", "--", "--debug", "--debug-file", "/tmp/rc.log",
                  check=False, LEAN_AGENT_CLAUDE=argv_dumper)
         with open(fake_log) as fh:
-            self.assertEqual(fh.read(), "--model sonnet remote-control --name la --debug --debug-file /tmp/rc.log")
+            self.assertRegex(fh.read(), r"^--model sonnet --remote-control la --session-id [0-9a-f-]{36} "
+                                        r"--debug --debug-file /tmp/rc.log$")
 
     def test_up_fresh_removes_bridge_pointer(self):
         import re as _re
@@ -1331,9 +1334,11 @@ class CliTest(unittest.TestCase):
         self.assertIn("the previous Remote Control session is gone", p2.stdout)
         with open(pointer) as fh:
             self.assertEqual(json.load(fh)["sessionId"], "")
-        self.assertIn("worker registration failed", p.stderr)  # claude's own output still shows
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "logs", "session.log")) as fh:  # claude's own output
+            logged = fh.read()
+        self.assertIn("worker registration failed", logged)
         self.assertIn("the previous Remote Control session is gone", p.stdout)
-        self.assertIn("Connected", p.stdout)
+        self.assertIn("Connected", logged)
 
     def test_up_lists_context_usage(self):
         import re as _re
@@ -1705,6 +1710,7 @@ class CliTest(unittest.TestCase):
             fh.write(json.dumps({"ts": "2030-01-01T11:00:00", "ref": "origin/feature/x", "verdict": "approve",
                                  "gaps": [{"what": "the export isn't done yet"}]}) + "\n")
         sys.path.insert(0, os.path.dirname(CLI))
+        before = len(self.read_jsonl(log))
         old = os.environ.get("LEAN_AGENT_HOME")
         os.environ["LEAN_AGENT_HOME"] = home
         try:
@@ -2334,6 +2340,120 @@ class CliTest(unittest.TestCase):
         os.chmod(fake, 0o755)
         p = self.cli("up", LEAN_AGENT_CLAUDE=fake, check=False)
         self.assertIn("often the Claude desktop app", p.stdout)
+
+    def start_up(self, *args):
+        """`lean-agent up` with the fake interactive claude; returns (process, session log path) once the
+        session answers on the bridge."""
+        import time as _t
+        sys.path.insert(0, os.path.join(os.path.dirname(CLI)))
+        import service_session
+        fake = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "fake_interactive_claude.py")
+        log = os.path.join(self.tmp.name, "session-calls.jsonl")
+        before = len(self.read_jsonl(log))
+        env = dict(self.env, LEAN_AGENT_CLAUDE=fake, FAKE_SESSION_LOG=log, CLAUDECODE="1")
+        p = subprocess.Popen([sys.executable, CLI, "up", *args], env=env, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (p.poll() is None and p.kill(), p.communicate()))
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        self.addCleanup(lambda: os.environ.__setitem__("LEAN_AGENT_HOME", old) if old else
+                        os.environ.pop("LEAN_AGENT_HOME", None))
+        for _ in range(100):
+            if p.poll() is not None or (len(self.read_jsonl(log)) > before and service_session.alive()):
+                break
+            _t.sleep(0.1)
+        self.assertIsNone(p.poll(), "up exited")
+        self.assertTrue(service_session.alive())
+        return p, log, service_session
+
+    def wait_for(self, cond, what, secs=10):
+        import time as _t
+        end = _t.time() + secs
+        while _t.time() < end:
+            if cond():
+                return
+            _t.sleep(0.05)
+        self.fail("timed out waiting for " + what)
+
+    def read_jsonl(self, path):
+        try:
+            with open(path) as fh:
+                return [json.loads(l) for l in fh if l.strip()]
+        except OSError:
+            return []
+
+    def test_up_hosts_one_interactive_session_and_the_socket_types_into_it(self):
+        import stat
+        p, log, ss = self.start_up("--name", "la", "--model", "sonnet")
+        [call] = self.read_jsonl(log)
+        sid = call["argv"][call["argv"].index("--session-id") + 1]
+        self.assertEqual(call["argv"][:5], ["--model", "sonnet", "--remote-control", "la", "--session-id"])
+        self.assertEqual(call["service"], "1")        # the permission hook only acts in this session
+        self.assertIsNone(call["leaked"])              # the parent session's variables don't reach it
+        info = ss.info()
+        self.assertEqual((info["session_id"], info["pid"], info["remote_control"]), (sid, call["pid"], True))
+        home = self.cli("home").stdout.strip()
+        slug = "".join(c if c.isalnum() else "-" for c in os.path.realpath(home))
+        transcript = os.path.join(self.env["CLAUDE_CONFIG_DIR"], "projects", slug, sid + ".jsonl")
+        self.assertEqual(info["transcript"], transcript)
+        self.assertEqual(stat.S_IMODE(os.stat(ss.sock_path()).st_mode), 0o600)
+        self.assertEqual(os.path.realpath(call["cwd"]), os.path.realpath(home))
+        # the pty is drained into a log, and the bridge can show its tail
+        self.wait_for(lambda: "fake claude ready" in ss.tail(), "the session's output")
+        # a message arrives as a paste followed by Enter; multi-line text stays one message
+        self.assertEqual(ss.send("About #3 \"x\": hello\nsecond line"), (True, ""))
+        self.wait_for(lambda: len(self.read_jsonl(transcript)) >= 2, "the transcript")
+        user, asst = self.read_jsonl(transcript)
+        self.assertEqual(user["message"]["content"], "About #3 \"x\": hello\nsecond line")
+        self.assertEqual(asst["message"]["content"][0]["text"], "echo: About #3 \"x\": hello\nsecond line")
+        # keys: Escape interrupts
+        self.assertEqual(ss.keys("esc"), (True, ""))
+        self.wait_for(lambda: "interrupted" in json.dumps(self.read_jsonl(transcript)[2:]), "the interrupt")
+        # bad requests are refused, not fatal
+        self.assertFalse(ss.request({"nope": 1})["ok"])
+        self.assertTrue(ss.alive())
+        # stopping `up` stops the session and removes the socket
+        p.terminate()
+        p.wait(timeout=20)
+        self.assertFalse(os.path.exists(ss.sock_path()))
+        self.assertFalse(ss.alive())
+        self.assertEqual(ss.send("x")[0], False)
+        # a restart of `up` continues the same conversation
+        p2, log2, ss = self.start_up("--name", "la")
+        self.assertEqual(self.read_jsonl(log)[-1]["argv"][-2:], ["--resume", sid])
+        self.assertEqual(ss.info()["session_id"], sid)
+        p2.terminate()
+        p2.wait(timeout=20)
+        # --fresh starts a new conversation
+        p3, _, ss = self.start_up("--fresh")
+        self.assertIn("--session-id", self.read_jsonl(log)[-1]["argv"])
+        self.assertNotEqual(ss.info()["session_id"], sid)
+
+    def test_up_dashboard_only_hosts_the_session_without_remote_control(self):
+        p, log, ss = self.start_up("--dashboard-only")
+        argv = self.read_jsonl(log)[0]["argv"]
+        self.assertNotIn("--remote-control", argv)
+        self.assertIn("--session-id", argv)
+        self.assertFalse(ss.info()["remote_control"])
+        self.assertEqual(ss.send("hi"), (True, ""))
+
+    def test_up_restarts_a_session_that_dies_but_not_one_that_fails_at_once(self):
+        import signal as _sig
+        self.env["LEAN_AGENT_SESSION_QUICK_EXIT"] = "0"  # every death counts as "ran for a while"
+        p, log, ss = self.start_up()
+        pid = ss.info()["pid"]
+        os.kill(pid, _sig.SIGKILL)
+        self.wait_for(lambda: len(self.read_jsonl(log)) == 2 and ss.alive(), "the restart", secs=20)
+        self.assertNotEqual(ss.info()["pid"], pid)
+        self.assertEqual(self.read_jsonl(log)[1]["argv"][-2:], ["--session-id", self.read_jsonl(log)[0]["argv"][-1]])
+        p.terminate()
+        p.wait(timeout=20)
+        # a start that dies at once ends `up` (the service manager decides what to do)
+        self.env["LEAN_AGENT_SESSION_QUICK_EXIT"] = "20"
+        p, log, ss = self.start_up()
+        os.kill(ss.info()["pid"], _sig.SIGKILL)
+        p.wait(timeout=30)
+        self.assertEqual(len(self.read_jsonl(log)), 3)
 
     def test_chrome_check_and_run(self):
         self.cli("learn", self.proj)
