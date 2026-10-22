@@ -149,7 +149,8 @@ class Model:
             started = time.mktime(time.strptime(up.get("session_started", ""), "%Y-%m-%dT%H:%M:%S"))
         except ValueError:
             started = 0
-        if rec.get("ts", 0) < started:  # left by a previous run of the session
+        ts = rec.get("ts")
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool) or ts < started:  # corrupt, or left by a previous run
             return base
         path = rec.get("transcript_path")
         if rec.get("session_id") and rec.get("session_id") != up.get("session_id") and path and os.path.isfile(path):

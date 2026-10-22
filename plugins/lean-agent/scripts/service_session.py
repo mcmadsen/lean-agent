@@ -309,19 +309,19 @@ class Host:
         except OSError:
             size = None
         fcntl.ioctl(master, termios.TIOCSWINSZ, size or struct.pack("HHHH", 50, 200, 0, 0))
+        try:  # before the spawn, so a fast SessionStart hook of the new session is not deleted
+            os.remove(lean_home("chat", "service.json"))  # the previous session's record is stale
+        except OSError:
+            pass
+        update_up(pid=None, session_started=time.strftime("%Y-%m-%dT%H:%M:%S"))
         try:
             proc = subprocess.Popen(argv, env=self.env, cwd=self.cwd, stdin=slave, stdout=slave, stderr=slave,
                                     start_new_session=True)
         finally:
             os.close(slave)  # only the session holds it now, so reading ends when it exits
         self.proc, self.master = proc, master
-        try:
-            os.remove(lean_home("chat", "service.json"))  # the previous session's record is stale
-        except OSError:
-            pass
         update_up(session_id=sid, transcript=transcript_path(self.cwd, sid), pid=proc.pid, host_pid=os.getpid(),
-                  remote_control=self.remote_control, socket=sock_path(), session_started=time.strftime(
-                      "%Y-%m-%dT%H:%M:%S"))
+                  remote_control=self.remote_control, socket=sock_path())
         t = threading.Thread(target=self._pump, args=(master,), daemon=True)
         t.start()
         return t
