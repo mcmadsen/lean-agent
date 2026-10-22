@@ -167,16 +167,25 @@ def run_due(log=print):
             rc, text = p.returncode, p.stdout + (("\n" + p.stderr) if p.stderr.strip() else "")
         except subprocess.TimeoutExpired:
             rc, text = 124, "timed out after an hour"
-        with open(out_path, "w") as fh:
-            fh.write(text)
-        first = next((l.strip() for l in text.splitlines() if l.strip()), "")
-        rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"), "id": job["id"], "args": job["args"],
-               "rc": rc, "output": out_path, "first": first[:200]}
-        with open(lean_home("scheduled.jsonl"), "a") as fh:
-            fh.write(json.dumps(rec) + "\n")
+        rec = record(job["id"], job["args"], rc, text, out_path)
         log(f"scheduled job {job['id']} ({' '.join(job['args'])}): exit {rc}, output {out_path}")
         done.append(rec)
     return done
+
+
+def record(job_id, args, rc, text, out_path=None):
+    """Save a finished job's output and add it to scheduled.jsonl (what the next conversation and the dashboard read)."""
+    if out_path is None:
+        out_path = lean_home("scheduled", f"{job_id}-{datetime.datetime.now().strftime('%m%d-%H%M%S')}.txt")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w") as fh:
+        fh.write(text)
+    first = next((l.strip() for l in text.splitlines() if l.strip()), "")
+    rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"), "id": job_id, "args": args,
+           "rc": rc, "output": out_path, "first": first[:200]}
+    with open(lean_home("scheduled.jsonl"), "a") as fh:
+        fh.write(json.dumps(rec) + "\n")
+    return rec
 
 
 def results_since(ts):

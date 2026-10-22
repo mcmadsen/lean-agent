@@ -582,7 +582,7 @@ def state():
     real, age = usage.plan_usage()
     pace, ahead = usage.week_pace()
     return {
-        "now": now.isoformat(timespec="seconds"),
+        "now": now.isoformat(timespec="seconds"), "version": plugin_version(),
         "pace": pace, "ahead": ahead, "plan_history": usage.plan_history(8),
         "plan": {k: v for k, v in (real or {}).items() if k in ("five_hour", "seven_day")}, "plan_age_min": age,
         "running": running, "runs": runs,
@@ -717,6 +717,10 @@ def live():
         return _LIVE["mod"]
 
 
+def plugin_version():
+    return _json(os.path.join(os.path.dirname(HERE), ".claude-plugin", "plugin.json"), {}).get("version") or "?"
+
+
 def page_version():
     """Changes when the page or its script or style changes: open tabs reload then."""
     import hashlib
@@ -817,7 +821,14 @@ def run_action(body):
     p = subprocess.run([sys.executable, os.path.join(HERE, "lean_agent.py"), *args], capture_output=True, text=True,
                        timeout=600 if do == "sync" else 60, stdin=subprocess.DEVNULL, env=dict(os.environ, LEAN_AGENT_BRIEF="1"))
     out = (p.stdout + p.stderr).strip()
-    return _j(200 if p.returncode == 0 else 400, {"ok": p.returncode == 0, "output": out[-1000:]})
+    res = {"ok": p.returncode == 0, "output": out[-1000:]}
+    if do == "sync":  # look again and record it like a scheduled run: the newest sync record replaces the notice
+        c = subprocess.run([sys.executable, os.path.join(HERE, "lean_agent.py"), "sync", "--check"], capture_output=True,
+                           text=True, timeout=120, stdin=subprocess.DEVNULL, env=dict(os.environ, LEAN_AGENT_LAUNCH_GUARD="0"))
+        lean_schedule.record("dashboard", ["sync", "--check"], c.returncode,
+                             c.stdout + (("\n" + c.stderr) if c.stderr.strip() else ""))
+        res.update(version=plugin_version(), page=page_version())
+    return _j(200 if p.returncode == 0 else 400, res)
 
 
 def api_post(path, body):
