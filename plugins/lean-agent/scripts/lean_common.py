@@ -8,6 +8,8 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def compaction_point(window, pct):
     """Tokens at which Claude Code compacts: the percentage of the window, but never past the window minus its
     fixed autocompact buffer (LEAN_AGENT_COMPACT_BUFFER, default 33,000)."""
+    # Claude Code's /context panel shows a 33k autocompact buffer on a 100k window, i.e. compaction at ~67k
+    # (the percentage alone would say 70k).
     try:
         buffer = int(os.environ.get("LEAN_AGENT_COMPACT_BUFFER") or 33000)
     except ValueError:

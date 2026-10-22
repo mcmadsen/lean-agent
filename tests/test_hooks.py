@@ -400,7 +400,7 @@ class BudgetTest(Base):
         p = subprocess.run([sys.executable, os.path.join(ROOT, "usage.py"), "report", self.transcript],
                            capture_output=True, text=True, env=dict(os.environ, **self.env), check=True)
         self.assertIn("Context per call, by quarter of the session: 40,010 -> 100,010 -> 160,010 -> 220,010", p.stdout)
-        self.assertIn("Re-reading context above ~70K cost this session", p.stdout)
+        self.assertIn("Re-reading context above ~67K cost this session", p.stdout)
 
     def test_report(self):
         p = subprocess.run([sys.executable, os.path.join(ROOT, "usage.py"), "report", self.transcript],
