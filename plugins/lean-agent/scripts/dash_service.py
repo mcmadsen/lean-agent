@@ -14,14 +14,19 @@ newest transcript in the project folder written after the session started is fol
 chat/service.json.
 """
 import datetime
+import functools
 import json
 import os
 import re
+import threading
 import time
+
+from lean_common import pid_alive, questions_of, tool_summary  # noqa: F401
 
 MAX_EVENTS = 2000
 FRESH_SECS = 20  # a dashboard tab polled this recently counts as someone looking
 WORKING_SECS = 60  # no transcript change for this long and no tool running: not shown as working
+SCAN_SECS = 2  # the transcript folder is listed at most this often
 QUIET_SECS = 8   # a transcript untouched this long after an assistant text: the turn is over
 TAG_RE = re.compile(r'^About (#?[A-Za-z0-9_.-]+) "')
 ABOUT_REPLY_RE = re.compile(r'^\s*About #(\d+)\b')  # an untagged message answered "About #N: ..." belongs to task #N
@@ -73,19 +78,12 @@ def perm_dir():
 
 
 def write_json(path, obj):
+    # not lean_agent.save_json: that module is the whole CLI, and the permission hook must start fast
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(obj, fh)
     os.replace(tmp, path)
-
-
-def pid_alive(pid):
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, ValueError, TypeError):
-        return False
 
 
 def service_session_ids():
@@ -102,14 +100,6 @@ def service_session_ids():
 
 # ------------------------------------------------------------------ the transcript model
 
-def tool_summary(name, inp):
-    inp = inp if isinstance(inp, dict) else {}
-    for k in ("command", "file_path", "pattern", "url", "path", "query", "description", "prompt"):
-        if inp.get(k):
-            return " ".join(str(inp[k]).split())[:300]
-    return " ".join(json.dumps(inp)[:200].split())
-
-
 def suggestion_rules(suggestions):
     """What "Always allow" will allow, as rules like `Bash(git status:*)` (empty when the suggestion has no rule)."""
     out = []
@@ -120,20 +110,20 @@ def suggestion_rules(suggestions):
     return out[:5]
 
 
-def questions_of(inp):
-    out = []
-    for q in (inp or {}).get("questions") or []:
-        if isinstance(q, dict) and q.get("question"):
-            out.append({"question": q["question"], "header": q.get("header"), "multi": bool(q.get("multiSelect")),
-                        "options": [{"label": o.get("label"), "description": o.get("description")}
-                                    for o in q.get("options") or [] if isinstance(o, dict) and o.get("label")]})
-    return out
+def _locked(fn):
+    """Handler threads (and Chat.summary) call the model under different locks: serialise them on the model's own."""
+    @functools.wraps(fn)
+    def run(self, *a, **kw):
+        with self.lock:
+            return fn(self, *a, **kw)
+    return run
 
 
 class Model:
     """The events of the service session's transcript, as the page renders them."""
 
     def __init__(self):
+        self.lock = threading.RLock()
         self.events = []
         self.turns = {0: {"thread": None, "open": False, "ts": 0}}
         self.turn = 0
@@ -147,6 +137,8 @@ class Model:
         self.sends_size = -1
         self.last_kind = None  # what the transcript's last record was: "user", "tool", "text", "done"
         self.perms = {}
+        self._scan = {"at": 0.0, "dir": None, "files": []}
+        self._first = {}
 
     # --- following the right transcript
     def _pick(self, up):
@@ -158,24 +150,40 @@ class Model:
             started = time.mktime(time.strptime(up.get("session_started"), "%Y-%m-%dT%H:%M:%S")) - 2
         except (TypeError, ValueError):
             started = 0
-        mine = set()  # sessions the dashboard's own stream-json threads wrote in the same folder
-        for p in [chat_dir("session.json")] + [chat_dir("threads", k, "session.json") for k in _listdir(chat_dir("threads"))]:
-            sid = _load(p).get("session_id")
-            if sid:
-                mine.add(sid)
+        now = time.time()
+        if now - self._scan["at"] >= SCAN_SECS or self._scan["dir"] != d:  # the folder and the threads' sessions: stat at most every 2 s
+            mine = set()  # sessions the dashboard's own stream-json threads wrote in the same folder
+            for p in [chat_dir("session.json")] + [chat_dir("threads", k, "session.json") for k in _listdir(chat_dir("threads"))]:
+                sid = _load(p).get("session_id")
+                if sid:
+                    mine.add(sid)
+            files = []
+            for n in _listdir(d):
+                if n.endswith(".jsonl") and n[:-6] not in mine:
+                    try:
+                        st = os.stat(os.path.join(d, n))
+                    except OSError:
+                        continue
+                    if st.st_size > 0:
+                        files.append((os.path.join(d, n), st.st_mtime))
+            self._scan = {"at": now, "dir": d, "files": files}
+        clears = [float(s.get("ts") or 0) for s in self.send_log if str(s.get("sent")).strip() == "/clear"]
         best, best_m = base, -1.0
-        for n in _listdir(d):
-            p = os.path.join(d, n)
-            if not n.endswith(".jsonl") or n[:-6] in mine:
-                continue
-            try:
-                st = os.stat(p)
-            except OSError:
-                continue
-            if st.st_size > 0 and st.st_mtime >= started and st.st_mtime > best_m:
-                best, best_m = p, st.st_mtime
+        for p, mtime in self._scan["files"]:
+            if mtime >= started and mtime > best_m and (p == base or p == self.path or self._ours(p, clears, mtime)):
+                best, best_m = p, mtime
         return best
 
+    def _ours(self, p, clears, mtime):
+        """A new transcript is followed only when it starts like a /clear or a fresh session, or follows a /clear we sent."""
+        first = self._first.get(p) or _first_user_text(p)
+        if first:
+            self._first[p] = first  # a transcript with no user record yet is looked at again
+        if first and first.lstrip().startswith("/clear") or "<command-name>/clear" in (first or "") or "SessionStart" in (first or ""):
+            return True
+        return any(t - 2 <= mtime for t in clears)
+
+    @_locked
     def refresh(self):
         up = _load(lean_home("up.json"))
         path = self._pick(up)
@@ -396,6 +404,7 @@ class Model:
                 elif gone or not pid_alive(req.get("pid")) or time.time() - req.get("ts", 0) > req.get("wait", 300) + 30:
                     self._update(e, state="expired")
 
+    @_locked
     def answer(self, rid, allow, always=False, message=None, answers=None):
         e = self.perms.get(rid)
         if not e or e["state"] != "pending":
@@ -414,6 +423,7 @@ class Model:
             return list(self.events)
         return [e for e in self.events if self.turns.get(e["turn"], {}).get("thread") == key]
 
+    @_locked
     def snapshot(self, key, since=0, fresh_at=0):
         evs = self._mine(key)
         if fresh_at:
@@ -433,9 +443,11 @@ class Model:
         return {"status": self.status(key), "work_since": self.work_since(key), "session": self.sid, "events": out, "cursor": cursor, "alive": True,
                 "service": True, "now": time.time()}
 
+    @_locked
     def waiting(self, key):
         return any(e["kind"] == "permission" and e["state"] == "pending" for e in self._mine(key))
 
+    @_locked
     def last(self, key):
         e = next((e for e in reversed(self._mine(key)) if e["kind"] in ("assistant", "user")), None)
         if not e:
@@ -443,6 +455,7 @@ class Model:
         return {"kind": e["kind"], "text": str((e.get("raw") if key != "main" and e["kind"] == "user" and e.get("raw")
                                                 else e.get("text")) or "")[:160], "ts": e["ts"]}
 
+    @_locked
     def status(self, key):
         """"working" only when sure: the thread's turn has no final reply and the transcript changed (or a tool is
         running) within WORKING_SECS. A turn that stopped without a reply is not shown as stuck."""
@@ -462,6 +475,26 @@ class Model:
         return self.turns.get(self.turn, {}).get("ts", 0) if self.status(key) == "working" else 0
 
 
+def _first_user_text(p):
+    """The text of a transcript's first user record ("" when it has none yet, None when unreadable)."""
+    try:
+        with open(p, errors="replace") as fh:
+            for _ in range(50):
+                line = fh.readline()
+                if not line:
+                    break
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and rec.get("type") == "user":
+                    c = (rec.get("message") or {}).get("content")
+                    return c if isinstance(c, str) else json.dumps(c)
+    except OSError:
+        return None
+    return ""
+
+
 def _listdir(d):
     try:
         return os.listdir(d)
@@ -470,12 +503,14 @@ def _listdir(d):
 
 
 _MODEL = {}
+_MODEL_LOCK = threading.Lock()
 
 
 def model():
     """The transcript model for this lean-agent home, brought up to date."""
-    m = _MODEL.get(lean_home())
-    if m is None:
-        m = _MODEL[lean_home()] = Model()
+    with _MODEL_LOCK:
+        m = _MODEL.get(lean_home())
+        if m is None:
+            m = _MODEL[lean_home()] = Model()
     m.refresh()
     return m

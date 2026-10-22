@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import usage  # noqa: E402
+from lean_common import pid_alive, plugin_version  # noqa: E402
 import lean_schedule  # noqa: E402
 import prs  # noqa: E402
 
@@ -74,12 +75,7 @@ def url(cfg=None):
     return f"http://127.0.0.1:{cfg['port']}/?t={cfg['token']}"
 
 
-def _alive(pid):
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, ValueError, TypeError):
-        return False
+_alive = pid_alive
 
 
 def _service_status():
@@ -746,10 +742,6 @@ def live():
         return _LIVE["mod"]
 
 
-def plugin_version():
-    return _json(os.path.join(os.path.dirname(HERE), ".claude-plugin", "plugin.json"), {}).get("version") or "?"
-
-
 def page_version():
     """Changes when the page or its script or style changes: open tabs reload then."""
     import hashlib
@@ -845,8 +837,10 @@ def run_action(body):
             if not text("text") or not 1 <= n <= len(notes) or not isinstance(notes[n - 1], dict):
                 return _j(400, {"ok": False, "error": "no such note, or no text"})
             notes[n - 1]["text"] = text("text")
-            with open(home("handoff-notes.json"), "w") as fh:
+            tmp = home("handoff-notes.json") + f".{os.getpid()}.tmp"
+            with open(tmp, "w") as fh:
                 json.dump(notes, fh)
+            os.replace(tmp, home("handoff-notes.json"))
             return _j(200, {"ok": True, "output": f"note {n} updated"})
         elif do == "dismiss":  # "Mark handled": hidden until the card changes
             d = _json(home("dismissed.json"), {})
