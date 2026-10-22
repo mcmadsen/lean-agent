@@ -9,8 +9,9 @@ user turn; "main" shows everything.
 
 Permission prompts: the PermissionRequest hook (permission_hook.py) hands a request to the dashboard as a file in
 chat/perm/ while a dashboard tab is polling (chat/dash-poll is touched on every poll); the page's answer is written
-beside it and the hook returns it to Claude Code. /clear inside the session starts a new transcript with a new id: the SessionStart hook (session_hook.py) records the
-current one in chat/service.json (any source: startup, resume, clear, compact), and the dashboard follows it.
+beside it and the hook returns it to Claude Code. /clear inside the session starts a new transcript with a new id:
+the SessionStart hook (session_hook.py) records the current one in chat/service.json (any source: startup, resume,
+clear, compact), and the dashboard follows it (a record older than the session `up` started is ignored).
 """
 import datetime
 import functools
@@ -144,6 +145,12 @@ class Model:
         if not base:
             return None
         rec = _load(chat_dir("service.json"))
+        try:
+            started = time.mktime(time.strptime(up.get("session_started", ""), "%Y-%m-%dT%H:%M:%S"))
+        except ValueError:
+            started = 0
+        if rec.get("ts", 0) < started:  # left by a previous run of the session
+            return base
         path = rec.get("transcript_path")
         if rec.get("session_id") and rec.get("session_id") != up.get("session_id") and path and os.path.isfile(path):
             return path

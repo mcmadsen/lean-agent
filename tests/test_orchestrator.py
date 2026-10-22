@@ -2805,6 +2805,33 @@ class CliTest(unittest.TestCase):
         self.assertIn("new conversation", [e.get("text") for e in m.snapshot("main", 0)["events"] if e["kind"] == "note"])
         self.assertEqual([e["text"] for e in m.snapshot("main", 0)["events"] if e["kind"] == "user"], ["hello", "after the clear"])
 
+    def test_up_deletes_the_previous_sessions_service_record(self):
+        chat = os.path.join(self.env["LEAN_AGENT_HOME"], "chat")
+        os.makedirs(chat, exist_ok=True)
+        rec = os.path.join(chat, "service.json")
+        with open(rec, "w") as fh:
+            json.dump({"session_id": "old", "transcript_path": "/x", "ts": time.time()}, fh)
+        p, log, ss = self.start_up("--name", "la")
+        self.assertFalse(os.path.exists(rec))
+
+    def test_service_ignores_a_record_from_before_the_session_started(self):
+        ds, home, proj, tr, up = self._follow_env()
+        self._user_file(tr, "hello", time.time())
+        new = os.path.join(proj, "s2.jsonl")
+        self._user_file(new, "stale", time.time())
+        self._hook_record(home, "s2", new)
+        with open(os.path.join(home, "chat", "service.json")) as fh:
+            rec = json.load(fh)
+        rec["ts"] = time.mktime(time.strptime("2019-12-31T00:00:00", "%Y-%m-%dT%H:%M:%S"))  # before up's 2020 start
+        with open(os.path.join(home, "chat", "service.json"), "w") as fh:
+            json.dump(rec, fh)
+        m = ds.Model()
+        m.refresh()
+        self.assertEqual(m.path, tr)
+        self._hook_record(home, "s2", new)  # a fresh one is followed
+        m.refresh()
+        self.assertEqual(m.path, new)
+
     def test_service_ignores_foreign_transcripts_and_unusable_records(self):
         ds, home, proj, tr, up = self._follow_env()
         # newer files in the folder are not followed, whatever they contain
@@ -3513,6 +3540,18 @@ class CliTest(unittest.TestCase):
         self.cli("learn", self.proj, "--name", "proj")
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--again", "list rows", LEAN_AGENT_SERVICE_SESSION="1")
         self.assertIsNone(self.calls()[-1]["service"])  # the session hooks must not act in a worker
+
+    def test_cli_strips_the_service_session_variable_for_its_children(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent
+        os.environ["LEAN_AGENT_SERVICE_SESSION"] = "1"
+        try:
+            lean_agent.main(["--help"])
+        except SystemExit:
+            pass
+        finally:
+            leaked = os.environ.pop("LEAN_AGENT_SERVICE_SESSION", None)
+        self.assertIsNone(leaked)
 
     def test_brief_mode(self):
         self.cli("learn", self.proj, "--name", "proj")

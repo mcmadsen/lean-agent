@@ -8118,6 +8118,7 @@ def build_parser():
 
 
 def main(argv=None):
+    os.environ.pop("LEAN_AGENT_SERVICE_SESSION", None)  # the CLI is never the service session; its claude spawns must not inherit it
     ap = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:2] in (["review", "learn"], ["review", "decline"]):
