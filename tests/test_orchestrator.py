@@ -2655,6 +2655,22 @@ class CliTest(unittest.TestCase):
         except OSError:
             return []
 
+    def test_up_hosts_the_session_when_the_home_path_is_too_long_for_a_socket(self):
+        home = os.path.join(self.tmp.name, *["long-directory-name-for-the-socket"] * 3, "home")
+        os.makedirs(home)
+        self.env["LEAN_AGENT_HOME"] = home
+        p, log, ss = self.start_up("--name", "la")
+        sock = ss.info()["socket"]
+        self.assertGreater(len(os.path.join(home, "session.sock")), 104)
+        self.assertLessEqual(len(sock), 100)
+        self.assertEqual(os.path.dirname(sock), f"/tmp/lean-agent-{os.getuid()}")
+        self.assertEqual(ss.sock_path(), sock)
+        self.assertTrue(ss.alive())
+        self.assertEqual(ss.send("hi"), (True, ""))
+        p.terminate()
+        p.wait(timeout=20)
+        self.assertFalse(os.path.exists(sock))
+
     def test_up_hosts_one_interactive_session_and_the_socket_types_into_it(self):
         import stat
         p, log, ss = self.start_up("--name", "la", "--model", "sonnet")
