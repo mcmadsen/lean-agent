@@ -11,6 +11,9 @@ import subprocess
 import sys
 import tty
 
+if not os.environ.get("FAKE_NAMED_CLAUDE"):  # same pid, but named claude as the real one is: the hook looks for that
+    os.environ["FAKE_NAMED_CLAUDE"] = os.path.realpath(sys.executable)
+    os.execv(os.path.realpath(sys.executable), ["claude", os.path.abspath(__file__)] + sys.argv[1:])
 HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugins", "lean-agent", "scripts", "session_hook.py")
 argv = sys.argv[1:]
 sid = argv[argv.index("--session-id") + 1] if "--session-id" in argv else argv[argv.index("--resume") + 1]
@@ -49,7 +52,7 @@ while True:
             sid = os.urandom(8).hex() + "-fake-clear"
             transcript = os.path.join(tdir, sid + ".jsonl")
             # what Claude Code does on /clear: run the SessionStart hooks with the new session
-            subprocess.run([sys.executable, HOOK], input=json.dumps({"session_id": sid, "transcript_path": transcript,
+            subprocess.run([os.environ["FAKE_NAMED_CLAUDE"], HOOK], input=json.dumps({"session_id": sid, "transcript_path": transcript,
                            "source": "clear", "hook_event_name": "SessionStart", "cwd": os.getcwd()}), text=True, check=False)
             add({"type": "user", "isMeta": True, "message": {"role": "user", "content": "<command-name>/clear</command-name>"}})
             continue

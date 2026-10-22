@@ -3,7 +3,7 @@
 
 Records which transcript the session writes now (chat/service.json), for every source (startup, resume, clear,
 compact): /clear starts a new transcript with a new id, and this is how the dashboard learns of it. Only when the
-hook runs under the service claude (its pid in up.json is one of the hook's ancestors). Prints nothing and never
+hook runs under the service claude (its pid in up.json is the hook's nearest claude ancestor). Prints nothing and never
 fails the session.
 """
 import json
@@ -27,9 +27,34 @@ def parent_pid(pid):
         return 0
 
 
-def owned(home, ppid=parent_pid, wait=3.0):
-    """True when one of this process's ancestors (up to 4) is the service claude pid in up.json. `up` writes the pid
-    just after the spawn, so a hook that is faster than that waits briefly for it."""
+def argv_of(pid):
+    """The command line of `pid` as a list ([] when unknown)."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return [a.decode(errors="replace") for a in fh.read().split(b"\0") if a]
+    except OSError:
+        pass
+    try:
+        out = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True, timeout=5).stdout
+        return out.split()
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
+def is_claude(argv):
+    """True for a claude process: its executable's basename is claude, or it is an interpreter running the claude CLI
+    (node .../claude, node .../claude-code/cli.js)."""
+    if not argv:
+        return False
+    if os.path.basename(argv[0]) == "claude":
+        return True
+    return len(argv) > 1 and (os.path.basename(argv[1]) == "claude" or "claude-code" in argv[1])
+
+
+def owned(home, ppid=parent_pid, cmd=argv_of, wait=3.0):
+    """True when the NEAREST ancestor of this process (up to 8 hops) whose command is claude is the service claude pid
+    in up.json; a claude started from the service claude's Bash tool is nearer, so it does not count. `up` writes the
+    pid just after the spawn, so a hook that is faster than that waits briefly for it."""
     deadline = time.time() + wait
     while True:
         try:
@@ -43,23 +68,23 @@ def owned(home, ppid=parent_pid, wait=3.0):
             return False
         time.sleep(0.05)
     cur = os.getpid()
-    for _ in range(4):
+    for _ in range(8):
         cur = ppid(cur)
         if cur <= 1:
             return False
-        if cur == pid:
-            return True
+        if is_claude(cmd(cur)):
+            return cur == pid
     return False
 
 
-def main(ppid=parent_pid):
+def main(ppid=parent_pid, cmd=argv_of, wait=3.0):
     if os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1":
         return
     event = json.load(sys.stdin)
     if not isinstance(event, dict) or not event.get("session_id"):
         return
     home = os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent"))
-    if not owned(home, ppid):
+    if not owned(home, ppid, cmd, wait):
         return
     path = os.path.join(home, "chat", "service.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)

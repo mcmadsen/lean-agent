@@ -4,6 +4,7 @@ import io
 import json
 import os
 import subprocess
+import threading
 import sys
 import tempfile
 import unittest
@@ -174,16 +175,20 @@ class SessionHookTest(Base):
         with open(os.path.join(self.env["LEAN_AGENT_HOME"], "up.json"), "w") as fh:
             json.dump({"pid": pid}, fh)  # the hook's parent is this test process
 
-    def run_injected(self, chain, pid=500, event=None):
-        """Run session_hook.main() in-process with a fake pid chain {pid: parent}."""
+    def run_injected(self, chain, pid=500, event=None, claudes=None, wait=3.0, up=True):
+        """Run session_hook.main() in-process with a fake pid chain {pid: parent} and fake commands: pids in
+        `claudes` (default: just `pid`) run claude, the rest run sh."""
         sys.path.insert(0, ROOT)
         import session_hook
-        self.up(pid)
+        if up:
+            self.up(pid)
+        claudes = {pid} if claudes is None else set(claudes)
+        cmd = lambda p: ["/usr/bin/claude", "--x"] if p in claudes else ["sh", "-c", "x"]
         old = {k: os.environ.get(k) for k in ("LEAN_AGENT_SERVICE_SESSION", "LEAN_AGENT_HOME")}
         os.environ.update(LEAN_AGENT_SERVICE_SESSION="1", LEAN_AGENT_HOME=self.env["LEAN_AGENT_HOME"])
         real_stdin, sys.stdin = sys.stdin, io.StringIO(json.dumps(event or {"session_id": "s1"}))
         try:
-            session_hook.main(ppid=lambda p: chain.get(p, 0))
+            session_hook.main(ppid=lambda p: chain.get(p, 0), cmd=cmd, wait=wait)
         finally:
             sys.stdin = real_stdin
             for k, v in old.items():
@@ -194,19 +199,73 @@ class SessionHookTest(Base):
         self.run_injected({me: 900, 900: 500, 500: 1})  # hook <- sh <- claude(500)
         self.assertEqual(self.record()["session_id"], "s1")
 
+    def no_record(self):
+        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")))
+
+    def test_up_json_without_a_pid_records_nothing(self):
+        me = os.getpid()
+        os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "up.json"), "w") as fh:
+            json.dump({"session_id": "x"}, fh)
+        self.run_injected({me: 900, 900: 500, 500: 1}, wait=0.2, up=False)
+        self.no_record()
+
+    def test_a_pid_that_appears_late_is_recorded(self):
+        me = os.getpid()
+        os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
+        threading.Timer(0.3, self.up, args=(500,)).start()
+        self.run_injected({me: 900, 900: 500, 500: 1}, wait=5.0, up=False)
+        self.assertEqual(self.record()["session_id"], "s1")
+
+    def test_a_claude_nested_under_the_service_claude_is_ignored(self):
+        me = os.getpid()
+        # hook <- nested claude(700) <- Bash <- service claude(500): the nearest claude is not the service one
+        self.run_injected({me: 700, 700: 600, 600: 500, 500: 1}, claudes={500, 700})
+        self.no_record()
+
+    def test_the_nearest_claude_decides(self):
+        me = os.getpid()
+        self.run_injected({me: 900, 900: 500, 500: 400, 400: 1}, claudes={500, 400})  # an outer claude is not nearer
+        self.assertEqual(self.record()["session_id"], "s1")
+        os.remove(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json"))
+        self.run_injected({me: 900, 900: 800, 800: 400, 400: 1}, claudes={500, 400})  # nearest claude is 400, not 500
+        self.no_record()
+        chain = {me: 1}
+        prev = me
+        for p in range(901, 909):  # service claude is the 9th hop: too far
+            chain[prev] = p
+            prev = p
+        chain[prev] = 500
+        self.run_injected(chain)
+        self.no_record()
+
     def test_ignores_a_session_that_is_not_the_service_claude(self):
         me = os.getpid()
-        self.run_injected({me: 900, 900: 800, 800: 700, 700: 600, 600: 500})  # 500 is the 5th ancestor
+        self.run_injected({me: 900, 900: 800, 800: 700, 700: 600, 600: 500, 500: 1}, claudes=set())  # no claude ancestor
         self.run_injected({me: 900, 900: 800, 800: 1})  # another claude's tree
         self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")))
 
+    def hook_under_claude(self, event, **env):
+        """Run the hook as a child of a process whose executable is named claude, and that is the pid in up.json."""
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        fake = os.path.join(home, "claude")
+        with open(fake, "w") as fh:
+            fh.write("#!%s\nimport json, os, subprocess, sys\n"
+                     "json.dump({'pid': os.getpid()}, open(os.path.join(os.environ['LEAN_AGENT_HOME'], 'up.json'), 'w'))\n"
+                     "p = subprocess.run([sys.executable, sys.argv[1]], input=sys.argv[2], text=True, capture_output=True)\n"
+                     "sys.stdout.write(p.stdout)\n" % sys.executable)
+        os.chmod(fake, 0o755)
+        p = subprocess.run([fake, os.path.join(ROOT, "session_hook.py"), json.dumps(event)], capture_output=True,
+                           text=True, env=dict(os.environ, **self.env, **env), check=True)
+        return json.loads(p.stdout) if p.stdout.strip() else None
+
     def test_writes_service_json_only_in_the_service_session(self):
-        self.up(os.getpid())
         for source in ("startup", "resume", "clear", "compact"):
             event = {"session_id": "s-" + source, "transcript_path": "/x/s-%s.jsonl" % source, "source": source}
-            self.assertIsNone(run_hook("session_hook.py", event, LEAN_AGENT_SERVICE_SESSION="0", **self.env))
+            self.assertIsNone(self.hook_under_claude(event, LEAN_AGENT_SERVICE_SESSION="0"))
             self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")))
-            self.assertIsNone(run_hook("session_hook.py", event, LEAN_AGENT_SERVICE_SESSION="1", **self.env))  # prints nothing
+            self.assertIsNone(self.hook_under_claude(event, LEAN_AGENT_SERVICE_SESSION="1"))  # prints nothing
             rec = self.record()
             self.assertEqual((rec["session_id"], rec["transcript_path"], rec["source"]),
                              ("s-" + source, "/x/s-%s.jsonl" % source, source))
