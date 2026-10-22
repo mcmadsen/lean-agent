@@ -29,6 +29,7 @@ FRESH_SECS = 20  # a dashboard tab polled this recently counts as someone lookin
 WORKING_SECS = 60  # no transcript change for this long and no tool running: not shown as working
 SCAN_SECS = 2  # the transcript folder is listed at most this often
 MISS_SECS = 5  # a transcript with no user record yet is looked at again this often
+LAZY_SECS = 600  # ...or whose first message is one we sent this soon after that /clear (Claude Code may create the file lazily)
 CLEAR_SECS = 30  # a transcript created this soon after a /clear we sent is the one that /clear started
 QUIET_SECS = 8   # a transcript untouched this long after an assistant text: the turn is over
 TAG_RE = re.compile(r'^About (#?[A-Za-z0-9_.-]+) "')
@@ -175,42 +176,64 @@ class Model:
             names = {p for p, _ in files}
             self._first = {p: t for p, t in self._first.items() if p in names}
             self._miss = {p: t for p, t in self._miss.items() if p in names}
-        clears = [float(s.get("ts") or 0) for s in self.send_log if str(s.get("sent")).strip() == "/clear"]
+        clears = sorted(float(s.get("ts") or 0) for s in self.send_log if str(s.get("sent")).strip() == "/clear")
+        cands = [(p, m) for p, m in self._scan["files"] if m >= started]
+        self._claim([p for p, _ in cands if p != base and p != self.path], clears)
         best, best_m = base, -1.0
-        for p, mtime in self._scan["files"]:
-            if mtime >= started and mtime > best_m and (p == base or p == self.path or self._ours(p, clears)):
+        for p, mtime in cands:
+            if mtime > best_m and (p == base or p == self.path or self._ours(p)):
                 best, best_m = p, mtime
         return best
 
-    def _ours(self, p, clears):
-        """A new transcript is followed only when its first user record is the /clear command, or it was created
-        within CLEAR_SECS after a /clear we sent that no other transcript has claimed. "Created" is the first
-        record's timestamp (file times move with every append), the file's birth time when no record has one."""
+    def _look(self, p):
+        """(first user text, creation epoch or None) of a transcript. "Created" is the first record's timestamp
+        (file times move with every append), the file's birth time when no record has one."""
         info = self._first.get(p)
         if info is None and time.time() - self._miss.get(p, 0) >= MISS_SECS:
             info = _first_info(p)
-            if info and (info[0] or info[1]):
+            if info and info[0]:
                 self._first[p] = info
             else:
-                self._miss[p] = time.time()  # no user record yet: not looked at again for MISS_SECS
+                self._miss[p] = time.time()  # no user text yet: not looked at again for MISS_SECS
         first, born = info or ("", None)
-        first = first or ""
-        if first.lstrip().startswith("/clear") or "<command-name>/clear" in first:
-            return True
         if born is None:
             try:
                 born = getattr(os.stat(p), "st_birthtime", None)
             except OSError:
-                return False
-        if born is None:
-            return False
-        for t in clears:
-            if (t, p) in self._used_clears:
-                return True
-            if t not in {c for c, _ in self._used_clears} and t - 2 <= born <= t + CLEAR_SECS:
-                self._used_clears.add((t, p))
-                return True
-        return False
+                pass
+        return first or "", born
+
+    def _ours(self, p):
+        """A new transcript is followed when its first user record is the /clear command or it claimed one of our /clears."""
+        first, _ = self._look(p)
+        return first.lstrip().startswith("/clear") or "<command-name>/clear" in first or any(q == p for _, q in self._used_clears)
+
+    def _claim(self, paths, clears):
+        """Each /clear we sent is claimed by one transcript: the earliest-born one created within CLEAR_SECS after it,
+        or, since Claude Code may create the file lazily, one whose first user record is a message we sent within
+        LAZY_SECS after the /clear."""
+        while True:
+            taken = {c for c, _ in self._used_clears}
+            claimed = {q for _, q in self._used_clears}
+            found = []
+            for p in paths:
+                if p in claimed:
+                    continue
+                first, born = self._look(p)
+                if born is None or first.lstrip().startswith("/clear") or "<command-name>/clear" in first:
+                    continue
+                for t in clears:
+                    if t in taken:
+                        continue
+                    lazy = any(t < float(s.get("ts") or 0) <= t + LAZY_SECS and str(s.get("sent")).strip() == first.strip()
+                               for s in self.send_log) if first.strip() else False
+                    if t - 2 <= born <= t + CLEAR_SECS or (lazy and born >= t - 2):
+                        found.append((born, t, p))
+                        break
+            if not found:
+                return
+            _, t, p = min(found)
+            self._used_clears.add((t, p))
 
     @_locked
     def refresh(self):

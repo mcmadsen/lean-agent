@@ -14,6 +14,9 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import lean_common  # noqa: E402
+
 FIELDS = (
     "input_tokens",
     "cache_creation_input_tokens",
@@ -259,8 +262,12 @@ def context_series(path):
     return out
 
 
-def compact_saving(series, keep=67000):
+KEEP = lean_common.compaction_point(100000, 70)  # where `lean-agent up` makes the orchestrator compact
+
+
+def compact_saving(series, keep=None):
     """Sonnet-eq the session spent re-reading context above `keep` tokens (cache reads, 0.1x)."""
+    keep = KEEP if keep is None else keep
     return int(sum(units({"cache_read_input_tokens": max(0, c - keep)}, m) for m, c in series))
 
 
@@ -296,8 +303,8 @@ def report(arg=None, workers=None):
         if line:
             print(line)
         extra = compact_saving(series)
-        if series and totals["_ctx"] // calls > 67000 and extra:
-            print(f"Re-reading context above ~67K cost this session ~{fmt(extra)} sonnet-eq; an orchestrator that "
+        if series and totals["_ctx"] // calls > KEEP and extra:
+            print(f"Re-reading context above ~{KEEP // 1000}K cost this session ~{fmt(extra)} sonnet-eq; an orchestrator that "
                   "compacts early (`lean-agent up` sets it; restart an older session) or hands off with "
                   "`lean-agent handoff` saves most of it.")
     print()
