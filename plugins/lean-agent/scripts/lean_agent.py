@@ -1479,10 +1479,14 @@ def cmd_run(a):
     started_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     max_reads = 0 if role else (a.max_reads if getattr(a, "max_reads", None) is not None
                                 else env_num("LEAN_AGENT_RUN_MAX_READS", 6000000))
+    def note_session(sid):  # so `lean-agent run --resume <id>` works even if this process or the worker dies
+        rec = load_json(home("running", running_key + ".json"), None)
+        if isinstance(rec, dict):
+            save_json(home("running", running_key + ".json"), dict(rec, session_id=sid))
     try:
         with wt_lock:
             raw, err, reads = stream_worker(cmd, today_line() + "\n\n" + task, workdir, env,
-                                            env_num("LEAN_AGENT_RUN_TIMEOUT", 1800), max_reads)
+                                            env_num("LEAN_AGENT_RUN_TIMEOUT", 1800), max_reads, note_session)
     except FileNotFoundError:
         die(f"'{claude}' not found on PATH")
     finally:
@@ -1584,7 +1588,7 @@ def cmd_run(a):
         "status": status, "turns": out.get("num_turns"), "seconds": seconds,
         "usage": {k: u.get(k, 0) for k in usage.FIELDS}, "weighted": weighted,
         "units": int(usage.units(u, model)),
-        "cost_usd": out.get("total_cost_usd"), "session_id": out.get("session_id") or (prev and prev["session_id"]),
+        "cost_usd": out.get("total_cost_usd"), "session_id": out.get("session_id") or reads.get("session_id") or (prev and prev["session_id"]),
         "resumed": bool(prev), "task": task[:300], "missing": missing_note,
         "parent_session": os.environ.get("CLAUDE_CODE_SESSION_ID"),
         "mcp": mcp_specs, "mcp_calls": {t: mcp_seq.count(t) for t in dict.fromkeys(mcp_seq)},
@@ -1711,10 +1715,11 @@ def note_progress(workdir, turn, msg, u):
         pass
 
 
-def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0):
+def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0, on_session=None):
     """Run a worker and read its stream-json as it comes, so a run that keeps re-reading a large context
     can be stopped (after `max_reads` context tokens summed over its calls; 0 = never) and resumed later.
-    Returns (stdout, stderr, {"ctx", "turns", "usage", "session_id", "stopped"})."""
+    `on_session(id)` is called once, when the first event carries the session id. Returns
+    (stdout, stderr, {"ctx", "turns", "usage", "session_id", "stopped"})."""
     import tempfile
     import threading
     reads = {"ctx": 0, "turns": 0, "usage": {k: 0 for k in usage.FIELDS}, "session_id": None, "stopped": False}
@@ -1722,7 +1727,12 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0):
     with tempfile.TemporaryFile("w+") as errf:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True,
                                 cwd=workdir, env=env)
-        timer = threading.Timer(timeout, proc.kill)
+        timed_out = []
+
+        def on_timer():
+            timed_out.append(True)  # lean-agent's own timer fired: the only kill it may call a timeout
+            proc.kill()
+        timer = threading.Timer(timeout, on_timer)
         timer.start()
         try:
             try:
@@ -1739,7 +1749,10 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0):
                         continue
                     if not isinstance(ev, dict):
                         continue
-                    reads["session_id"] = reads["session_id"] or ev.get("session_id")
+                    if not reads["session_id"] and ev.get("session_id"):
+                        reads["session_id"] = ev["session_id"]
+                        if on_session:
+                            on_session(reads["session_id"])
                     msg = ev.get("message") if ev.get("type") == "assistant" else None
                     if not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict) or msg.get("id") in seen:
                         continue
@@ -1766,8 +1779,12 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0):
             timer.cancel()
         errf.seek(0)
         err = errf.read()
-    if proc.returncode == -9 and not reads["stopped"]:  # killed by the timer
-        err = (err + "\ntimed out").strip()
+    if timed_out:
+        err = (err + f"\ntimed out after {timeout:g} s").strip()
+    elif proc.returncode < 0 and not reads["stopped"]:
+        n = -proc.returncode
+        err = (err + f"\nkilled by signal {n}" + (" (outside lean-agent, e.g. out of memory)" if n == 9 else
+                                                    " (outside lean-agent)")).strip()
     return "".join(lines), err, reads
 
 
