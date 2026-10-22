@@ -16,6 +16,7 @@ clear, compact), and the dashboard follows it (a record older than the session `
 import datetime
 import functools
 import json
+import math
 import os
 import re
 import threading
@@ -150,7 +151,7 @@ class Model:
         except ValueError:
             started = 0
         ts = rec.get("ts")
-        if not isinstance(ts, (int, float)) or isinstance(ts, bool) or ts < started:  # corrupt, or left by a previous run
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool) or not math.isfinite(ts) or ts < started:  # corrupt, or left by a previous run
             return base
         path = rec.get("transcript_path")
         if rec.get("session_id") and rec.get("session_id") != up.get("session_id") and path and os.path.isfile(path):

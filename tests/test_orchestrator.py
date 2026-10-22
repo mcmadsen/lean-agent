@@ -2832,7 +2832,7 @@ class CliTest(unittest.TestCase):
         self._user_file(tr, "hello", time.time())
         new = os.path.join(proj, "s2.jsonl")
         self._user_file(new, "x", time.time())
-        for ts in ("soon", None, [1]):
+        for ts in ("soon", None, [1], float("nan"), float("inf"), float("-inf")):
             with open(os.path.join(home, "chat", "service.json"), "w") as fh:
                 json.dump({"session_id": "s2", "transcript_path": new, "ts": ts}, fh)
             m = ds.Model()
