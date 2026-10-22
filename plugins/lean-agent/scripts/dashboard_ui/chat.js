@@ -1,6 +1,6 @@
 // A thread with the orchestrator (dash_chat.py): one per task, plus "main". Messages, tool calls, permission prompts
 // and Claude's multiple-choice questions, answered right here.
-const chat={key:null,cursor:0,events:new Map(),status:"idle",alive:false,timer:null,choices:{},drafts:{},svc:null,skew:0,workStart:0,confirm:false,html:""};
+const chat={sentAt:0,key:null,cursor:0,events:new Map(),status:"idle",alive:false,timer:null,choices:{},drafts:{},svc:null,skew:0,workStart:0,confirm:false,html:""};
 // a little Markdown: code blocks, inline code, bold, links, lists, paragraphs (after escaping everything)
 function md(text){
   const parts=String(text||"").split(/```[\w-]*\n?/);
@@ -14,6 +14,8 @@ function md(text){
 }
 const hhmm=ts=>String(ts||"").slice(11,16);
 const svcNow=()=>chat.svc||(typeof S!=="undefined"&&S&&S.service)||null;
+const fallback=()=>{const v=svcNow();return !!(v&&!v.up)};  // the server says no service: each task has its own thread (not the page's reconnecting state)
+const appName=()=>rcState()==="off"?"terminal":"Claude app";
 const rcState=()=>{const v=svcNow();return v&&v.up?(v.remote_control===true?"on":v.remote_control===false?"off":"unknown"):"unknown"};
 const aboutChip=key=>`<span class="chip tone-run">About ${esc(aboutLabel(key))}</span>`;
 const aboutOf=e=>chat.key==="main"&&e.about?aboutChip(e.about):"";  // a task's own thread says it in the header
@@ -35,13 +37,13 @@ function permHtml(e){
   const label=`Permission request: ${e.name}`;
   if(e.state==="pending"){
     const rid=esc(e.rid),b=(extra,cls,t,title)=>`<button type="button" class="btn ${cls}" data-act="perm" data-rid="${rid}" ${extra}${title?` title="${esc(title)}"`:""}>${t}</button>`;
-    const rule=(e.always_rule||[]).join(", ");
-    return `<div class="perm" role="group" aria-label="${esc(label)}"><div class="hd"><span class="chip tone-warn">permission</span>${aboutOf(e)}${e.expires_at?`<span class="mono mute small" data-expires="${e.expires_at}"></span>`:""}</div>`
+    const rule=(e.always_rule||[]).map(r=>`<code>${esc(r)}</code>`).join(", "),always=e.can_always&&rule;  // only with a rule Claude Code suggested
+    return `<div class="perm" role="group" aria-label="${esc(label)}"><div class="hd"><span class="chip tone-warn">permission</span>${aboutOf(e)}${e.deadline?`<span class="mono mute small" data-deadline="${e.deadline}" data-wait="${e.wait||300}"></span>`:""}</div>${e.deadline?`<div class="pbar" aria-hidden="true"><i></i></div>`:""}`
       +`<div class="pl">${wants(e.name)}</div><pre>${esc(e.text)}</pre>${e.description?`<div class="small mute">${esc(e.description)}</div>`:""}`
-      +`<div class="acts">${b('data-allow="1"',"primary","Allow")}${e.can_always?b('data-allow="1" data-always="1"',"","Always allow",rule?"Will allow: "+rule:"Applies Claude Code's own suggestion"):""}${b('data-allow="0"',"","Deny")}</div>`
-      +(e.can_always&&rule?`<div class="mono mute small">Always allow: ${esc(rule)}</div>`:"")+"</div>";
+      +`<div class="acts">${b('data-allow="1"',"primary","Allow")}${always?b('data-allow="1" data-always="1"',"","Always allow"):""}${b('data-allow="0"',"","Deny")}</div>`
+      +(always?`<div class="small mute">Always allow adds the rule ${rule}</div>`:"")+"</div>";
   }
-  if(e.state==="in_app")return `<div class="perm warn" role="group" aria-label="${esc(label)}"><div class="hd"><span class="chip tone-warn">waiting in the app</span>${aboutOf(e)}</div><div class="pl">The dashboard did not answer in time. Now waiting in the Claude app.</div><pre>${esc(e.name)}: ${esc(e.text)}</pre></div>`;
+  if(e.state==="in_app")return `<div class="perm warn" role="group" aria-label="${esc(label)}"><div class="hd"><span class="chip tone-warn">waiting in the ${appName()}</span>${aboutOf(e)}</div><div class="pl">The dashboard did not answer in time. Now waiting in the ${appName()}.</div><pre>${esc(e.name)}: ${esc(e.text)}</pre></div>`;
   const ok=/^(allowed|always|answered)$/.test(e.state),word=e.state==="always"?"allowed":e.state==="denied"?"denied":e.state==="expired"?"expired":e.state;
   return `<div class="perm settled compact" role="group" aria-label="${esc(label)}"><span class="chip ${ok?"tone-ok":e.state==="denied"?"tone-bad":"tone-mute"}">${esc(word)}</span>${aboutOf(e)}<span class="mono small perm-t">${esc(e.name)} · ${esc(e.text)}</span><span class="mono mute small">${e.state==="expired"?"No longer waiting (the conversation restarted)":esc(answeredIn(e))}</span></div>`;
 }
@@ -64,7 +66,7 @@ function drawChat(){
       continue;
     }
     flush();
-    if(e.kind==="user")h+=`<div class="me"><div class="bub"><div class="who">You · ${esc(hhmm(e.ts))}${aboutOf(e)}${e.from_app&&chat.service?` <span class="chip tone-mute">${rcState()==="off"?"from the terminal":"from the app"}</span>`:""}</div><div class="md">${md(e.text)}</div></div></div>`;
+    if(e.kind==="user")h+=`<div class="me"><div class="bub"><div class="who">You · ${esc(hhmm(e.ts))}${aboutOf(e)}${e.from_app&&chat.service&&!fallback()?` <span class="chip tone-mute">${rcState()==="off"?"from the terminal":"from the app"}</span>`:""}</div><div class="md">${md(e.text)}</div></div></div>`;
     else if(e.kind==="result")h+=`<div class="sysl">${e.error?"stopped with an error":"done"}${e.seconds?" · "+e.seconds+" s":""}${e.cost!=null?" · $"+Number(e.cost).toFixed(2):""}</div>`;
     else h+=`<div class="sysl${e.kind==="error"?" bad":""}">${esc(e.text)}</div>`;
   }
@@ -82,7 +84,7 @@ function drawChat(){
   $("cstat").textContent=waiting?"waits for you":chat.status==="working"?"working…":chat.alive?"ready":"idle";
   $("cstat").className="chip "+(waiting?"tone-warn":chat.status==="working"?"tone-run":"tone-mute");
   drawWorking();drawClear();
-  if(typeof drawHeader==="function"&&chat.headSig!==chat.service+"|"+rcState()){chat.headSig=chat.service+"|"+rcState();drawHeader();if(S&&S.plan)drawPlanBox(S)}
+  if(typeof drawHeader==="function"&&chat.headSig!==chat.service+"|"+rcState()+"|"+fallback()){chat.headSig=chat.service+"|"+rcState()+"|"+fallback();drawHeader();if(S&&S.plan)drawPlanBox(S)}
   if(typeof drawBanners==="function")drawBanners();
   tick();
 }
@@ -96,18 +98,21 @@ function drawWorking(){
 }
 function drawClear(){
   const b=$("clearbox"),task=typeof taskLabel==="function"?taskLabel():"";
-  $("cnew").textContent=chat.service?"Clear session…":"New thread";
+  const fb=fallback();
+  $("cnew").textContent=fb?"Clear thread…":chat.service?"Clear session…":"New thread";
   if(!chat.confirm){b.hidden=true;b.innerHTML="";return}
   if(b.firstChild)return;
   b.hidden=false;
-  b.innerHTML=`<div class="clearbox" role="alert"><span>${chat.service?`Clear the whole session? This clears the conversation in the dashboard, the Claude app and the terminal${task?", not only "+esc(task):""}.`:"Start this thread over? The old conversation stays in Claude Code's history."}</span><span class="acts"><button type="button" class="btn sm danger" data-act="clear-yes">${chat.service?"Clear session":"Start over"}</button><button type="button" class="btn sm" data-act="clear-no" id="clear-no">Cancel</button></span></div>`;
+  b.innerHTML=`<div class="clearbox" role="alert"><span>${fb?`Clear this thread? Only ${chat.key==="main"?"the orchestrator":"this task's"} thread is cleared; nothing else is touched.`:chat.service?`Clear the whole session? This clears the conversation in the dashboard, the Claude app and the terminal${task?", not only "+esc(task):""}.`:"Start this thread over? The old conversation stays in Claude Code's history."}</span><span class="acts"><button type="button" class="btn sm danger" data-act="clear-yes">${fb?"Clear thread":chat.service?"Clear session":"Start over"}</button><button type="button" class="btn sm" data-act="clear-no" id="clear-no">Cancel</button></span></div>`;
   $("clear-no").focus();
 }
 function tick(){
   const now=Date.now();
   for(const el of document.querySelectorAll("[data-since]")){const s=Math.max(0,Math.round((now-el.dataset.since)/1000));el.textContent=dur(s)}
-  for(const el of document.querySelectorAll("[data-expires]")){const left=Math.max(0,Math.round(el.dataset.expires-(now-(chat.skew||0))/1000));
-    el.textContent=`moves to the ${rcState()==="off"?"terminal":"Claude app"} in ${Math.floor(left/60)}:${String(left%60).padStart(2,"0")}`}
+  for(const el of document.querySelectorAll("[data-deadline]")){  // the server's deadline on the server's clock; "waiting in the app" only when the server says so
+    const left=el.dataset.deadline-(now-(chat.skew||0))/1000,s=Math.max(0,Math.ceil(left)),bar=el.closest(".perm").querySelector(".pbar i");
+    el.textContent=left>0?`Moves to the ${appName()} in ${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`:`moving to the ${appName()}…`;
+    if(bar)bar.style.width=Math.max(0,Math.min(100,left/el.dataset.wait*100))+"%"}
 }
 setInterval(tick,1000);
 function openThread(key){
@@ -124,10 +129,11 @@ async function pollChat(){
     for(const e of s.events||[])chat.events.set(e.i,e);
     chat.cursor=Math.max(chat.cursor,s.cursor||0);chat.status=s.status;chat.alive=s.alive;chat.service=!!s.service;chat.svc=s.service_status||chat.svc;
     if(s.now)chat.skew=Date.now()-s.now*1000;
+    chat.workStart=s.work_since?s.work_since*1000+(chat.skew||0):0;
     if(typeof S!=="undefined"){S=S||{};S.threads=s.threads||[];if(lastBoard)drawInbox(new Set())}
     drawChat();
   }catch(e){ui.offline=ui.offline||Date.now();$("cstat").textContent="offline";if(typeof drawBanners==="function")drawBanners()}
-  const busy=chat.status==="working"||[...chat.events.values()].some(e=>e.kind==="permission"&&e.state==="pending")
+  const busy=chat.status==="working"||Date.now()-chat.sentAt<15000||[...chat.events.values()].some(e=>e.kind==="permission"&&e.state==="pending")
     ||((S&&S.threads)||[]).some(t=>t.status==="working");
   chat.timer=setTimeout(pollChat,busy?1200:5000);
 }
@@ -136,7 +142,7 @@ async function sendChat(text){
   const c=typeof selected==="function"?selected():null;
   const r=await post("/api/chat",{thread:chat.key,text,title:c?c.title:undefined,context:c&&typeof contextText==="function"?contextText(c):undefined});
   if(!r.ok)alert("Couldn't send: "+(r.error||"unknown error"));
-  chat.status="working";chat.workStart=Date.now();drawChat();pollChat();
+  chat.sentAt=Date.now();pollChat();  // "working" comes from the server, which knows when it is sure
 }
 const TEMPLATES={run:"Start a worker for: ",review:"Review the branch ",todo:"Add to the work queue: ",handoff:"Keep this for later: "};
 $("cmds").addEventListener("click",e=>{const b=e.target.closest("[data-cmd]");if(!b)return;const i=$("chatin");i.value=TEMPLATES[b.dataset.cmd]+i.value;i.focus()});

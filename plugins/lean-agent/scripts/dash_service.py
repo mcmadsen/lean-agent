@@ -378,6 +378,7 @@ class Model:
                 text=tool_summary(req.get("tool_name"), req.get("tool_input")),
                 can_always=bool(suggestion_rules(req.get("permission_suggestions"))),  # no rule suggested: no button
                 always_rule=suggestion_rules(req.get("permission_suggestions")),
+                wait=float(req.get("wait") or 300),
                 deadline=float(req.get("ts") or time.time()) + float(req.get("wait") or 300),  # epoch seconds
                 description=None, questions=questions_of(req.get("tool_input")) if req.get("tool_name") == "AskUserQuestion" else None)
             self.perms[rid]["_req"] = req
