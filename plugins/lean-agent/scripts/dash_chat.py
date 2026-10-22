@@ -100,7 +100,7 @@ def service_up():
     if time.time() - _BRIDGE["at"] > 3 or _BRIDGE.get("home") != lean_home():
         try:
             import service_session
-            _BRIDGE.update(up=bool(service_session.supported() and os.path.exists(service_session.sock_path())
+            _BRIDGE.update(up=bool(service_session.supported() and os.path.exists(service_session.client_sock_path())
                                    and service_session.alive()))
         except Exception:
             _BRIDGE["up"] = False

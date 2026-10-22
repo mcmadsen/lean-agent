@@ -17,11 +17,13 @@ Socket protocol: one JSON object per connection, newline-terminated; one JSON li
     anything wrong    -> {"ok": false, "error": "..."}
 """
 import collections
+import hashlib
 import json
 import os
 import re
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -42,8 +44,30 @@ def lean_home(*parts):
     return os.path.join(os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent")), *parts)
 
 
+SOCK_MAX = 100  # AF_UNIX paths are limited to 104 bytes (macOS) / 108 (Linux)
+
+
 def sock_path():
-    return lean_home("session.sock")
+    """<home>/session.sock, or a short private path when that is too long for AF_UNIX."""
+    path = lean_home("session.sock")
+    if len(os.fsencode(path)) <= SOCK_MAX:
+        return path
+    d = f"/tmp/lean-agent-{os.getuid()}"
+    try:
+        os.mkdir(d, 0o700)
+    except FileExistsError:
+        pass
+    st = os.lstat(d)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o700:
+        raise RuntimeError(f"{d} must be a directory owned by you with mode 0700; remove or fix it")
+    digest = hashlib.sha256(os.fsencode(os.path.realpath(lean_home()))).hexdigest()[:12]
+    return os.path.join(d, digest + ".sock")
+
+
+def client_sock_path():
+    """The socket `up` recorded in up.json, else sock_path()."""
+    rec = _load(up_path()).get("socket")
+    return rec if isinstance(rec, str) and rec else sock_path()
 
 
 def up_path():
@@ -98,7 +122,7 @@ def request(msg, timeout=5):
         return {"ok": False, "error": f"no session bridge ({exc})"}
     try:
         s.settimeout(timeout)
-        s.connect(sock_path())
+        s.connect(client_sock_path())
         s.sendall(json.dumps(msg).encode() + b"\n")
         s.shutdown(socket.SHUT_WR)
         buf = b""
