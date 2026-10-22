@@ -36,7 +36,7 @@ import lean_memory  # noqa: E402
 import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import service_session  # noqa: E402
-from lean_common import compaction_point, pid_alive as dashboard_pid_alive, plugin_version  # noqa: E402
+from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive as dashboard_pid_alive, plugin_version  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -1456,6 +1456,7 @@ def cmd_run(a):
 
     env = dict(os.environ)
     env.pop("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", None)  # never pull in the project's CLAUDE.md
+    env.pop("LEAN_AGENT_SERVICE_SESSION", None)  # the service session's hooks (session, permission) must not act in a worker
     env["BASH_MAX_OUTPUT_LENGTH"] = os.environ.get("LEAN_AGENT_WORKER_BASH_OUTPUT") or "8000"  # not the orchestrator's
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"  # memory comes from lean-agent cards instead
     env = push_guard.git_env(env)  # git refuses pushes to guarded branches (pre-push), whatever the worker runs
@@ -5195,8 +5196,8 @@ def _cmd_optimize(a):
 
 ORCHESTRATOR_ENV = {
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",   # memory lives in lean-agent; no MEMORY.md on every turn
-    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70",
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "100000",  # with 70%: compact at ~67K tokens, not at 70% of a 1M window
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": str(DEFAULT_COMPACT_PCT),
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": str(DEFAULT_COMPACT_WINDOW),  # with 70%: compact at ~67K tokens, not at 70% of a 1M window
     "BASH_MAX_OUTPUT_LENGTH": "20000",
     "MAX_MCP_OUTPUT_TOKENS": "10000",
     "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",

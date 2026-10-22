@@ -262,13 +262,12 @@ def context_series(path):
     return out
 
 
-KEEP = lean_common.compaction_point(100000, 70)  # where `lean-agent up` makes the orchestrator compact
+KEEP = lean_common.compaction_point(lean_common.DEFAULT_COMPACT_WINDOW, lean_common.DEFAULT_COMPACT_PCT)  # where `lean-agent up` makes the orchestrator compact
 
 
-def compact_saving(series, keep=None):
-    """Sonnet-eq the session spent re-reading context above `keep` tokens (cache reads, 0.1x)."""
-    keep = KEEP if keep is None else keep
-    return int(sum(units({"cache_read_input_tokens": max(0, c - keep)}, m) for m, c in series))
+def compact_saving(series):
+    """Sonnet-eq the session spent re-reading context above KEEP tokens (cache reads, 0.1x)."""
+    return int(sum(units({"cache_read_input_tokens": max(0, c - KEEP)}, m) for m, c in series))
 
 
 def trend_line(series):
