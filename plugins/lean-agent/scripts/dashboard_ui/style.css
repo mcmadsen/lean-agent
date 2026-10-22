@@ -121,7 +121,6 @@ h1,h2{margin:0}
 .lrun .hd{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font:400 12px/1 var(--mono);color:var(--muted)}
 .lrun p{margin:0;font-size:13px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .lrun .ft{display:flex;align-items:center;justify-content:space-between;gap:8px;font:400 12px/1 var(--mono);color:var(--muted)}
-.bar2{display:flex;flex-direction:column;gap:6px}.bar2 .l{display:flex;justify-content:space-between;font:400 12px/1 var(--mono);color:var(--muted)}
 .update{display:flex;align-items:center;justify-content:space-between;gap:10px;border:1px solid var(--line);background:var(--warn-soft);border-radius:10px;padding:10px 12px;color:var(--warn);font:500 13px/1.35 var(--sans)}
 
 /* dialogs and the run view */
@@ -142,7 +141,15 @@ dialog::backdrop{background:rgba(0,0,0,.35)}
 
 /* phone */
 .mtabs{display:none}
+.ustrip{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 24px;width:100%;padding:10px 28px 12px;border:0;border-bottom:1px solid var(--line);background:var(--surface);color:var(--muted);font:400 12px/1.2 var(--mono);text-align:left;cursor:pointer}
+.ustrip[hidden]{display:none}.ustrip:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.u-item{display:flex;flex-direction:column;gap:6px;flex:1 1 200px;min-width:0}.u-l{display:flex;justify-content:space-between;gap:8px;white-space:nowrap}
+.u-cmp{display:none}.u-pace{padding:1px 6px;border-radius:8px}.u-tot{flex:0 0 auto;white-space:nowrap}
+.u-bar{position:relative;display:block;height:4px;border-radius:2px;background:var(--sunken)}.u-bar>i{display:block;height:100%;border-radius:2px;background:var(--accent)}
+.u-bar.warn>i{background:var(--warn)}.u-bar.bad>i{background:var(--bad)}
+.u-bar>b{position:absolute;top:-3px;width:2px;height:10px;margin-left:-1px;background:var(--muted)}
 @media (max-width:900px){
+ .ustrip{padding:8px 16px 10px;gap:8px 16px}.u-tot,.u-full{display:none}.u-cmp{display:inline}.u-l .u-pace{display:none}
  .ws{grid-template-columns:minmax(0,1fr);height:calc(100vh - 56px)}
  .ws>*{display:none !important}
  body[data-pane=chat] #pane-chat,body[data-pane=inbox] #pane-inbox,body[data-pane=work] #pane-work{display:flex !important}

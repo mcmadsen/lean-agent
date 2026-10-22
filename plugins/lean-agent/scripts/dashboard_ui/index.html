@@ -25,6 +25,7 @@
   <div class="tmeta"><h1 id="ttitle">Conversation with the orchestrator</h1><div class="mono mute sub" id="tsub">Ask for work, answer questions, approve what it wants to run</div></div>
   <div class="tacts"><span id="cshared" class="chip tone-mute" title="Messages here go into the one session `lean-agent up` runs; it is the same conversation as in the Claude app" hidden>shared with the Claude app</span><span id="cstat" class="chip tone-mute">idle</span><button id="handled" type="button" class="btn" hidden>Mark handled</button><button id="cstop" type="button" class="btn" hidden>Stop</button><button id="cnew" type="button" class="btn">New thread</button></div>
  </header>
+ <button type="button" class="ustrip" id="ustrip" data-act="plan-graph" title="Show the week's graph" hidden></button>
  <div class="stream" id="msgs"></div>
  <div class="composer-wrap">
   <form class="composer" id="chatform">
@@ -49,8 +50,6 @@
  <section id="c-board" class="tab" aria-label="Board"><div id="board"></div></section>
  <section id="c-runs" class="tab" hidden aria-label="Recent runs"><div id="runs"></div></section>
  <section id="c-sched" class="tab" hidden aria-label="Schedule"><div id="sched"></div><div id="pushes"></div></section>
- <section class="box" id="c-plan" aria-label="Plan usage"><div class="bh"><h2>Plan usage</h2><span id="pacechip"></span></div><div id="pace"></div><div id="weekstats" class="mono mute small"></div>
-  <button type="button" class="more" data-act="plan-graph">Show the week's graph</button></section>
  <section class="box" id="c-ctx" aria-label="Orchestrator context" hidden><div id="ctx"></div></section>
 </aside>
 </div>
