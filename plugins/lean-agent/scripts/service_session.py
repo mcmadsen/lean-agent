@@ -315,6 +315,10 @@ class Host:
         finally:
             os.close(slave)  # only the session holds it now, so reading ends when it exits
         self.proc, self.master = proc, master
+        try:
+            os.remove(lean_home("chat", "service.json"))  # the previous session's record is stale
+        except OSError:
+            pass
         update_up(session_id=sid, transcript=transcript_path(self.cwd, sid), pid=proc.pid, host_pid=os.getpid(),
                   remote_control=self.remote_control, socket=sock_path(), session_started=time.strftime(
                       "%Y-%m-%dT%H:%M:%S"))
