@@ -97,8 +97,13 @@ Open the Claude app → Code → **lean-agent**, and ask for work: *"In shop, fi
 regression test."* The orchestrator follows its playbook (`~/.lean-agent/home/CLAUDE.md`): picks cards, picks
 a model, runs workers, and reports back briefly.
 
+`up` runs **one** interactive orchestrator session (in a pseudo-terminal it owns, also under launchd or systemd), and
+everything else shares it: the Claude app (Remote Control) and the dashboard's chat are two views of the same
+conversation. A restart of `up` continues the conversation (`--fresh` starts a new one). Other lean-agent processes
+type into it through a local socket (`~/.lean-agent/session.sock`, mode 0600).
+
 Other ways to run the orchestrator:
-- `lean-agent up --dashboard-only`: no Remote Control; you talk to lean-agent in the dashboard's chat
+- `lean-agent up --dashboard-only`: the same session without Remote Control; you talk to lean-agent in the dashboard's chat
 - `lean-agent up --local`: interactive in your terminal
 - Claude Desktop: open the folder `~/.lean-agent/home` in the Code tab (`lean-agent home` prints the path)
 
@@ -277,9 +282,9 @@ The dashboard is a workspace in three panes (and one pane at a time on a phone: 
   search (Cmd/Ctrl+K), a project picker and filters; the general **Orchestrator** thread on top, and other
   threads you started below.
 - **The thread** (center): pick anything and talk to the orchestrator about it. Every task (a work item, a run
-  that asks, a PR, a note) has its own thread: its own Claude Code session in the orchestrator home, with the same
-  settings and rules as `lean-agent up`, which starts with that task's context (so each stays small) and is
-  resumed by its session id later. The task's card sits on top with its buttons (Done…, Close note, Mark handled,
+  that asks, a PR, a note) has its own thread: a view of the one orchestrator session `lean-agent up` runs (see
+  below). Your messages in a task thread arrive tagged `About #N "title": ...`, the first one with the task's
+  context; the thread shows your messages about that task and what the orchestrator did after each. The task's card sits on top with its buttons (Done…, Close note, Mark handled,
   Start next). Replies, tool calls (click for output) and permission prompts show in the thread; answer prompts
   with **Allow**, **Always allow** or **Deny**, and Claude's multiple-choice questions (AskUserQuestion) with
   their option buttons. **Stop** interrupts a turn, **New thread** starts it over. The composer has quick starts
@@ -288,12 +293,21 @@ The dashboard is a workspace in three panes (and one pane at a time on a phone: 
   queue grouped by state with its buttons, recent runs, scheduled jobs, an update notice with Sync, pushes),
   and plan usage (week and session bars; the week's graph on request).
 
-Threads run on Claude Code's stream-json input and output (like the Agent SDK); only `LEAN_AGENT_CHAT_PROCS`
-(default 3) keep a process, the least recently used idle one is stopped and resumed when you return to it.
+**One session, shared with the Claude app.** While `lean-agent up` (or the service it installs) runs, the dashboard
+types into the orchestrator session through the socket and reads its transcript, so the Orchestrator thread shows
+the whole conversation, including what you typed in the Claude app, and the page marks it "shared with the Claude
+app". Task threads are tagged views of that conversation: your user turns tagged for the task and the replies and tool
+calls that follow, until the next turn. **Stop** sends Escape to the session; **New thread** on the Orchestrator
+sends `/clear` (a new conversation, in the app too; the dashboard follows the new transcript), on a task thread it only
+starts that thread's view over. Permission prompts and AskUserQuestion questions show in the page while a dashboard tab
+is open (a PermissionRequest hook hands them over; it acts only in that session and waits
+`LEAN_AGENT_DASH_PERMISSION_WAIT` seconds, default 300); with no tab open, or no answer, Claude Code asks in the app
+or terminal as usual. Without `up` (no socket), each thread is its own Claude Code session over stream-json
+input and output (like the Agent SDK) as before; only `LEAN_AGENT_CHAT_PROCS` (default 3) keep a process, the least
+recently used idle one is stopped and resumed when you return to it.
 Work-queue buttons (+ Add item, + Note, Start, Done…, Reopen, Close note) go through the CLI; **Mark handled**
 hides a card until it changes (`lean-agent runs --dismiss <id>` does the same for a run's question). Changes need
-the dashboard's token in a request header and the page's own origin. Threads are separate from a Remote Control
-session; `lean-agent up --dashboard-only` (and `lean-agent service install --dashboard-only`) runs the dashboard,
+the dashboard's token in a request header and the page's own origin. `lean-agent up --dashboard-only` (and `lean-agent service install --dashboard-only`) runs the dashboard,
 its threads and the scheduled jobs without one.
 
 ## Large front-end work: map, check, count, parity, codemod, slices
