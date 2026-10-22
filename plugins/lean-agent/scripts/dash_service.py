@@ -184,20 +184,25 @@ class Model:
 
     def _ours(self, p, clears):
         """A new transcript is followed only when its first user record is the /clear command, or it was created
-        within CLEAR_SECS after a /clear we sent that no other transcript has claimed."""
-        first = self._first.get(p)
-        if first is None and time.time() - self._miss.get(p, 0) >= MISS_SECS:
-            first = _first_user_text(p)
-            if first:
-                self._first[p] = first
+        within CLEAR_SECS after a /clear we sent that no other transcript has claimed. "Created" is the first
+        record's timestamp (file times move with every append), the file's birth time when no record has one."""
+        info = self._first.get(p)
+        if info is None and time.time() - self._miss.get(p, 0) >= MISS_SECS:
+            info = _first_info(p)
+            if info and (info[0] or info[1]):
+                self._first[p] = info
             else:
                 self._miss[p] = time.time()  # no user record yet: not looked at again for MISS_SECS
+        first, born = info or ("", None)
         first = first or ""
         if first.lstrip().startswith("/clear") or "<command-name>/clear" in first:
             return True
-        try:
-            born = os.stat(p).st_ctime if not hasattr(os.stat(p), "st_birthtime") else os.stat(p).st_birthtime
-        except OSError:
+        if born is None:
+            try:
+                born = getattr(os.stat(p), "st_birthtime", None)
+            except OSError:
+                return False
+        if born is None:
             return False
         for t in clears:
             if (t, p) in self._used_clears:
@@ -499,8 +504,9 @@ class Model:
         return self.turns.get(self.turn, {}).get("ts", 0) if self.status(key) == "working" else 0
 
 
-def _first_user_text(p):
-    """The text of a transcript's first user record ("" when it has none yet, None when unreadable)."""
+def _first_info(p):
+    """(text of a transcript's first user record or "", epoch of its first timestamped record or None); None when unreadable."""
+    text, stamp = "", None
     try:
         with open(p, errors="replace") as fh:
             for _ in range(50):
@@ -511,12 +517,20 @@ def _first_user_text(p):
                     rec = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(rec, dict) and rec.get("type") == "user":
+                if not isinstance(rec, dict):
+                    continue
+                if stamp is None and isinstance(rec.get("timestamp"), str):
+                    try:
+                        stamp = datetime.datetime.fromisoformat(rec["timestamp"].replace("Z", "+00:00")).timestamp()
+                    except ValueError:
+                        pass
+                if rec.get("type") == "user":
                     c = (rec.get("message") or {}).get("content")
-                    return c if isinstance(c, str) else json.dumps(c)
+                    text = c if isinstance(c, str) else json.dumps(c)
+                    break
     except OSError:
         return None
-    return ""
+    return text, stamp
 
 
 def _listdir(d):
