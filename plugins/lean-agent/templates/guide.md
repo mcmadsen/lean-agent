@@ -172,6 +172,7 @@ lean-agent card unarchive {{P}} checkout-notes
   about every 10 runs, run `lean-agent optimize <project>`. Review its drafts (recipe cards, MCP presets): fill in
   the ids, queries and time windows the worker found, then `--accept <id>`. `--apply` takes the core/archive
   changes; rewrite cards it marks `trim`.
+  Optimize results wait in the dashboard (Needs you); when asked to review them, let the user pick with AskUserQuestion.
 - Workers get today's date, time and time zone as the first line of every task: "last Monday" needs no brief.
 - If a run's summary was cut off, `lean-agent runs --last --tokens` (or `runs --show <id>`) prints it again.
 

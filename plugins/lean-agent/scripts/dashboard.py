@@ -231,6 +231,27 @@ def _run_info(r):
             "meaning": MEANING.get(st, st)}
 
 
+def optimize_results():
+    """What `lean-agent optimize <project>` last found, per project (saved by every run), with something left to decide."""
+    out = []
+    for f in sorted(glob.glob(home("optimize", "*.json"))):
+        r = _json(f, {})
+        if isinstance(r, dict) and r.get("project") and (r.get("suggestions") or r.get("drafts")):
+            out.append(r)
+    return out
+
+
+def optimize_status():
+    """Per learned project: when optimize last ran, how much is left to decide, and whether a run is going now."""
+    rows = []
+    for slug in sorted(k for k, v in _json(home("projects.json"), {}).items() if isinstance(v, dict)):
+        r = _json(home("optimize", f"{slug}.json"), {})
+        r = r if isinstance(r, dict) else {}
+        rows.append({"project": slug, "ts": r.get("ts"), "left": len(r.get("suggestions") or []) + len(r.get("drafts") or []),
+                     "running": _alive((_json(home("optimize", f"{slug}.running"), {}) or {}).get("pid"))})
+    return rows
+
+
 def board(todo, ledger, running, reviews, now=None, prs=None, notes=(), epics=None):
     """What the user should look at, as columns. Waiting on you: things only the user can do (a PR that's ready
     for their merge or vote, PR comments waiting on their reply, a run that asks or waits for a go-ahead, a
@@ -266,7 +287,7 @@ def board(todo, ledger, running, reviews, now=None, prs=None, notes=(), epics=No
              "action": None, "link": None, "result": None, "live": [], "runs": [], "last_run": None,
              "done_at": None, "review": None, "pr": None, "items": [], "rest": ""}
         c.update(kw)
-        c["title"], rest = (" ".join(str(c.get("text") or "").split()), "") if c["kind"] in ("run", "note") \
+        c["title"], rest = (" ".join(str(c.get("text") or "").split()), "") if c["kind"] in ("run", "note", "optimize") \
             else short_title(c.get("text"))
         c["rest"] = c["rest"] or rest
         c["sig"] = sig({k: v for k, v in c.items() if k not in ("live", "sig")}, bool(c["live"]))
@@ -461,6 +482,14 @@ def board(todo, ledger, running, reviews, now=None, prs=None, notes=(), epics=No
         if m.get("todo") not in ids:
             cards.append(card(id=f"r-{m.get('run')}", kind="lookup", text=str(m.get("task") or "").strip()[:300],
                               project=m.get("project"), column="In progress", live=[m], runs=[m.get("run")]))
+    # optimize results waiting for a decision: one entry per project
+    for r in optimize_results():
+        n = len(r.get("suggestions") or []) + len(r.get("drafts") or [])
+        cards.append(card(id=f"opt-{r['project']}", kind="optimize", project=r["project"], column="Waiting on you",
+                          text=f"Optimize: {n} suggestion{'s' if n != 1 else ''} for {r['project']}",
+                          why="apply, accept or reject each", done_at=r.get("ts"),
+                          optimize={"suggestions": r.get("suggestions") or [], "drafts": r.get("drafts") or []},
+                          action=f"lean-agent optimize {r['project']} (--apply / --accept / --reject <ids>)"))
     # hand-off notes
     for i, n in enumerate(notes, 1):
         kind = n.get("kind") or ("decision" if DECISION_RE.search(str(n.get("text") or "")) else "reminder")
@@ -469,7 +498,7 @@ def board(todo, ledger, running, reviews, now=None, prs=None, notes=(), epics=No
                           why="decide or answer" if kind == "decision" else None,
                           action=f"tell the orchestrator; it closes the note (lean-agent handoff --done {i})"))
     prio = {"high": 0, "low": 2}
-    order = {"note": 2, "run": 1}
+    order = {"note": 2, "optimize": 2, "run": 1}
     done = sorted((c for c in cards if c["column"] == "Done"), key=lambda c: (c["done_at"] or "", str(c["id"])),
                   reverse=True)
     rest = sorted((c for c in cards if c["column"] != "Done"),
@@ -582,7 +611,7 @@ def state():
     real, age = usage.plan_usage()
     pace, ahead = usage.week_pace()
     return {
-        "now": now.isoformat(timespec="seconds"), "version": plugin_version(),
+        "now": now.isoformat(timespec="seconds"), "version": plugin_version(), "optimize": optimize_status(),
         "pace": pace, "ahead": ahead, "plan_history": usage.plan_history(8),
         "plan": {k: v for k, v in (real or {}).items() if k in ("five_hour", "seven_day")}, "plan_age_min": age,
         "running": running, "runs": runs,
@@ -761,6 +790,28 @@ def api_get(path, q):
     return 404, "not found", "text/plain; charset=utf-8"
 
 
+def _optimize_start(slug):
+    """`lean-agent optimize <slug>` in the background; the page shows it as running until it ends."""
+    import subprocess
+    marker = home("optimize", f"{slug}.running")
+    if _alive((_json(marker, {}) or {}).get("pid")):
+        return _j(200, {"ok": True, "output": f"optimize for {slug} is already running"})
+    p = subprocess.Popen([sys.executable, os.path.join(HERE, "lean_agent.py"), "optimize", slug], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=dict(os.environ, LEAN_AGENT_LAUNCH_GUARD="0"))
+    os.makedirs(home("optimize"), exist_ok=True)
+    with open(marker, "w") as fh:
+        json.dump({"pid": p.pid, "ts": datetime.datetime.now().isoformat(timespec="seconds")}, fh)
+
+    def finish():
+        p.wait()
+        try:
+            os.remove(marker)
+        except OSError:
+            pass
+    threading.Thread(target=finish, daemon=True).start()
+    return _j(200, {"ok": True, "output": f"optimize for {slug} is running"})
+
+
 def run_action(body):
     """A work-queue or hand-off note change from the page, through the CLI (same rules as everywhere)."""
     import subprocess
@@ -814,6 +865,20 @@ def run_action(body):
             return _j(200, {"ok": True, "output": f"stopped run {run}"})
         elif do == "sync":
             args = ["sync"]
+        elif str(do).startswith("optimize-"):
+            slug = text("project")
+            if slug not in _json(home("projects.json"), {}):
+                return _j(400, {"ok": False, "error": f"no learned project {slug!r}"})
+            ids = ",".join(re.findall(r"[\w:.*-]+", str(body.get("ids") or "")))
+            if do == "optimize-run":
+                return _optimize_start(slug)
+            flag = {"optimize-apply": "--apply", "optimize-accept": "--accept", "optimize-reject": "--reject"}.get(do)
+            if do == "optimize-apply-all":
+                args = ["optimize", slug, "--apply"]
+            elif flag and ids:
+                args = ["optimize", slug, flag, ids]
+            else:
+                return _j(400, {"ok": False, "error": "which suggestion? (ids)" if flag else f"unknown action {do!r}"})
         else:
             return _j(400, {"ok": False, "error": f"unknown action {do!r}"})
     except (TypeError, ValueError):
@@ -821,6 +886,8 @@ def run_action(body):
     p = subprocess.run([sys.executable, os.path.join(HERE, "lean_agent.py"), *args], capture_output=True, text=True,
                        timeout=600 if do == "sync" else 60, stdin=subprocess.DEVNULL, env=dict(os.environ, LEAN_AGENT_BRIEF="1"))
     out = (p.stdout + p.stderr).strip()
+    if str(do).startswith("optimize-"):  # the outcome lines, not the list of what is still open
+        out = "\n".join(l for l in out.splitlines() if re.match(r"(saved|applied|rejected|no open|Applied)", l)) or out
     res = {"ok": p.returncode == 0, "output": out[-1000:]}
     if do == "sync":  # look again and record it like a scheduled run: the newest sync record replaces the notice
         c = subprocess.run([sys.executable, os.path.join(HERE, "lean_agent.py"), "sync", "--check"], capture_output=True,

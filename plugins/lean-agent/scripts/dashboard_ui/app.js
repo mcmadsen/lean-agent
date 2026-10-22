@@ -53,12 +53,13 @@ const matches=c=>{const f=$("bfilter").value;if(f&&c.project&&c.project!==f)retu
 // LEFT: needs you
 function groupOf(c){
   if(c.kind==="run"||(c.kind==="item"&&c.last_run&&/needs|await/.test(c.last_run.status)))return "runs";
-  if(c.kind==="note"||/gap/.test(c.why||""))return "decisions";
+  if(c.kind==="note"||c.kind==="optimize"||/gap/.test(c.why||""))return "decisions";
   return "prs";
 }
 function rowMeta(c){
   if(c.kind==="run")return `${(c.runs||[])[0]||""} · ${ago((c.last_run||{}).ts)}`;
   if(c.kind==="note")return `note ${c.note} · ${ago(c.done_at)} ago`;
+  if(c.kind==="optimize")return `optimize · ${ago(c.done_at)} ago`;
   if(c.kind==="item"&&c.last_run)return `#${c.id} · ${c.last_run.id} · ${ago(c.last_run.ts)}`;
   return c.why||c.ref||c.project||"";
 }
@@ -105,7 +106,7 @@ function selected(){const c=cardsBy().get(String(ui.sel));if(c)return c;
   if(ui.sel==="main")return null;const t=((S&&S.threads)||[]).find(t=>t.key===ui.sel);return t?{id:ui.sel,title:t.title,kind:"thread"}:null}
 function contextText(c){
   if(!c)return "";
-  const bits=[c.kind==="item"?`work item #${c.id} "${c.text}"`:c.kind==="run"?`a run that asks: "${c.text}"`:c.kind==="note"?`hand-off note ${c.note}: "${c.text}"`:`${c.title}`];
+  const bits=[c.kind==="item"?`work item #${c.id} "${c.text}"`:c.kind==="run"?`a run that asks: "${c.text}"`:c.kind==="note"?`hand-off note ${c.note}: "${c.text}"`:c.kind==="optimize"?`optimize suggestions for ${c.project}`:`${c.title}`];
   if(c.project)bits.push(`project ${c.project}`);if(c.ref)bits.push(`ref ${c.ref}`);
   if((c.runs||[]).length)bits.push(`runs ${c.runs.join(", ")}`);if(c.why)bits.push(`status: ${c.why}`);
   if(c.pr&&c.pr.number)bits.push(`PR ${c.pr.number}`);if(c.link)bits.push(c.link);
@@ -131,6 +132,15 @@ function drawHeader(){
   const x=(act,label,aria)=>`<span class="cpill"><span>${label}</span><button type="button" class="x" data-act="${act}" aria-label="${esc(aria)}">×</button></span>`;
   $("ctxpills").innerHTML=(task?x("unscope","About "+esc(aboutLabel(ui.sel)),"Remove context: About "+aboutLabel(ui.sel)):"")+(proj?x("clear-project",esc(proj),"Remove project: "+proj):"");
 }
+function optimizeCard(c){
+  const o=c.optimize||{},sg=o.suggestions||[],dr=o.drafts||[];
+  const btn=(act,label,id,primary)=>`<button type="button" class="btn sm${primary?" primary":""}" data-act="${act}" data-slug="${esc(c.project)}"${id?` data-id="${esc(id)}"`:""}>${label}</button>`;
+  const item=(title,why,btns)=>`<div class="optitem"><div><b>${esc(title)}</b></div><div class="mute small">${esc(why)}</div><div class="acts">${btns}</div></div>`;
+  const rows=sg.map(x=>item(`${x.kind} ${x.card}`,x.reason,(x.kind==="trim"?"":btn("opt-apply","Apply",x.id,true))+btn("opt-reject","Reject",x.id)))
+    .concat(dr.map(d=>item(`${d.kind==="card"?"New card":"Preset"}: ${d.title}`,d.summary,btn("opt-accept","Accept",d.id,true)+btn("opt-reject","Reject",d.id))));
+  return `<section class="qcard" aria-label="Optimize suggestions for ${esc(c.project)}"><div class="hd"><span class="chip tone-run">optimize</span><span class="chip tone-mute">${esc(c.project)}${c.done_at?" · "+ago(c.done_at)+" ago":""}</span></div><p>${esc(c.title)}</p>`
+    +rows.join("")+`<div class="acts">${sg.some(x=>x.kind!=="trim")?btn("opt-apply-all","Apply all"):""}${btn("opt-ask","Ask the orchestrator")}</div></section>`;
+}
 function contextCard(){
   const c=selected();if(!c||c.kind==="thread")return "";
   if(c.kind==="note"){
@@ -139,6 +149,7 @@ function contextCard(){
       +`<label class="sr" for="dec-${c.note}">Your ${dec?"decision":"reply"} for note ${c.note}</label><textarea class="dec" id="dec-${c.note}" rows="2" data-draft="${c.note}" placeholder="${dec?"Your decision":"Your reply"}">${esc(chat.drafts[c.note]||"")}</textarea>`
       +`<div class="acts"><button type="button" class="btn sm primary" data-act="note-decide">${dec?"Send decision":"Send reply"}</button><button type="button" class="btn sm" data-act="note-edit" data-card="${esc(c.id)}">Edit note</button><button type="button" class="btn sm" data-act="close-note" data-card="${esc(c.id)}">Close note</button></div><div class="mono mute small">Sends this as a message to the orchestrator</div></section>`;
   }
+  if(c.kind==="optimize")return optimizeCard(c);
   const chip=c.kind==="run"?["run asks","tone-warn"]:c.kind==="pr"?["pull request","tone-run"]:c.kind==="review"?["review","tone-run"]:c.kind==="epic"?["epic","tone-ok"]:[c.column||"item",tone(c.column==="Done"?"done":c.column==="Waiting on you"?"needs":"open")];
   const lr=c.last_run;
   const meta=[c.kind==="item"?"#"+c.id:"",lr?`${lr.status} · ${when(lr.ts)}`:"",c.ref||"",c.project||""].filter(Boolean).join(" · ");
@@ -155,7 +166,7 @@ function cardButtons(c,full){
   if(c.kind==="note")a.push(b("close-note","Close note"));
   if(full&&c.kind==="item")a.push(b("edit","Edit"));
   if(c.kind==="epic")a.push(b("epic-next","Start next",true));
-  if(c.kind==="run"||c.kind==="pr"||c.kind==="review"||c.column==="Waiting on you")a.push(b("dismiss","Mark handled"));
+  if(c.kind==="run"||c.kind==="pr"||c.kind==="review"||(c.column==="Waiting on you"&&c.kind!=="optimize"))a.push(b("dismiss","Mark handled"));
   return a.join("");
 }
 function cardActs(c){  // a board card's buttons, plus Stop run while a worker runs on it
@@ -212,6 +223,7 @@ function drawSchedule(s){
   const kept=store.get("la-syncmsg","");if(kept){ui.syncMsg=kept;store.set("la-syncmsg","")}
   $("sched").innerHTML=(upd?`<div class="update"><span>${esc(upd.first)}</span><button type="button" class="btn sm" data-act="sync"${ui.syncing?" disabled":""}>${ui.syncing?"Syncing…":"Sync"}</button></div>`:"")
     +(ui.syncMsg?`<div class="mono mute small" role="status" style="padding:4px">${esc(ui.syncMsg)}</div>`:"")
+    +((s.optimize||[]).length?`<div class="grp"><span>Optimize</span><span>${s.optimize.length}</span></div>`+s.optimize.map(o=>`<div class="line"><span class="t">${esc(o.project)}${o.ts?" · last "+when(o.ts):" · never ran"}${o.left?" · "+o.left+" to decide":""}</span><button type="button" class="btn sm" data-act="opt-run" data-slug="${esc(o.project)}"${o.running?" disabled":""}>${o.running?"running":"Run optimize"}</button></div>`).join(""):"")
     +s.schedule.map(j=>`<article class="card"><div class="t"><span class="mono">#${j.id} ${esc(j.cmd)}</span></div><div class="mt"><span class="chip tone-mute">${esc(j.when)}</span><span>${j.enabled?(j.next?"next "+when(j.next):""):"paused"} · ${j.last?"last "+when(j.last):"never ran yet"}</span></div></article>`).join("")
     +`<div class="mono mute small" style="padding:4px">${esc(s.schedule_runner||"")}</div>`
     +((s.scheduled_results||[]).length?`<div class="grp"><span>Recent results</span><span>${s.scheduled_results.length}</span></div>`+s.scheduled_results.slice(0,5).map(r=>`<div class="line"><span class="t">#${r.id} ${esc(r.first)}</span><span class="chip ${r.rc?"tone-bad":"tone-ok"}">exit ${r.rc}</span></div>`).join(""):"");
@@ -299,6 +311,11 @@ function askText(title,hint,value,extra){
     d.onclose=()=>res(d.returnValue==="ok"?{text:$("asktext").value.trim()}:null);d.returnValue="";d.showModal();$("asktext").focus()});
 }
 async function act(body){const r=await post("/api/action",body);if(!r.ok)alert(r.output||r.error||"didn't work");load();return r.ok}
+async function optRun(slug){
+  const r=await post("/api/action",{do:"optimize-run",project:slug});
+  if(!r.ok)alert(r.output||r.error||"didn't work");
+  load();
+}
 async function doSync(){
   if(ui.syncing||!confirm("Update lean-agent now (lean-agent sync)?"))return;
   ui.syncing=true;ui.syncMsg="";drawSchedule(S);
@@ -321,6 +338,12 @@ async function onAct(el){
   if(what==="epic-next"){const name=title.split(":")[0].replace(/^Epic /,"");select(c.id);sendChat(`Start the next ready item of epic ${name} (lean-agent todo next --epic ${name}).`)}
   if(what==="run-stop"){if(confirm(`Stop run ${el.dataset.id}?`))act({do:"run-stop",run:el.dataset.id})}
   if(what==="sync")return doSync();
+  if(what==="opt-run")return optRun(el.dataset.slug);
+  if(what==="opt-apply")return act({do:"optimize-apply",project:el.dataset.slug,ids:el.dataset.id});
+  if(what==="opt-accept")return act({do:"optimize-accept",project:el.dataset.slug,ids:el.dataset.id});
+  if(what==="opt-reject")return act({do:"optimize-reject",project:el.dataset.slug,ids:el.dataset.id});
+  if(what==="opt-apply-all"){if(confirm(`Apply every card change optimize suggests for ${el.dataset.slug}?`))act({do:"optimize-apply-all",project:el.dataset.slug})}
+  if(what==="opt-ask"){select(`opt-${el.dataset.slug}`);sendChat(`Review the optimize suggestions for ${el.dataset.slug} and tell me which to apply, using AskUserQuestion`)}
   if(what==="scope")return select(el.dataset.w==="main"?"main":ui.task);
   if(what==="unscope"){ui.task=null;return select("main")}
   if(what==="clear-project"){$("bfilter").value="";$("bfilter").dispatchEvent(new Event("change"));return}

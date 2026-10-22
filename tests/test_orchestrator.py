@@ -575,11 +575,11 @@ class CliTest(unittest.TestCase):
         self.assertIn(" testing ", self.cli("cards", "proj").stdout)
 
     def _dashboard(self):
+        import unittest.mock as mock
         sys.path.insert(0, os.path.dirname(CLI))
-        old = os.environ.get("LEAN_AGENT_HOME")
-        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
-        self.addCleanup(lambda: os.environ.pop("LEAN_AGENT_HOME", None) if old is None
-                        else os.environ.__setitem__("LEAN_AGENT_HOME", old))
+        patcher = mock.patch.dict(os.environ, self.env)  # run_action starts the CLI with this environment
+        patcher.start()
+        self.addCleanup(patcher.stop)
         import dashboard
         return dashboard
 
@@ -625,6 +625,60 @@ class CliTest(unittest.TestCase):
         p = subprocess.run([node, "-e", probe], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(json.loads(p.stdout), [True, False, False, False, True])
+
+    def test_dashboard_optimize_inbox_and_actions(self):
+        import time as _t
+        self._archivable()
+        dashboard = self._dashboard()
+        opt_dir = os.path.join(self.env["LEAN_AGENT_HOME"], "optimize")
+
+        def entries():
+            return [c for c in dashboard.state()["board"]["cards"] if c["kind"] == "optimize"]
+        self.assertEqual(entries(), [])
+        slug = json.loads(self.cli("optimize", "proj", "--json").stdout)["project"]
+        sug = lambda: [x["id"] for x in json.load(open(os.path.join(opt_dir, slug + ".json")))["suggestions"]]
+        self.assertEqual(len(sug()), 5)
+        e = entries()
+        self.assertEqual(len(e), 1)
+        self.assertEqual((e[0]["column"], e[0]["title"], e[0]["project"]),
+                         ("Waiting on you", f"Optimize: 5 suggestions for {slug}", slug))
+        self.assertEqual({x["id"] for x in e[0]["optimize"]["suggestions"]}, set(sug()))
+        self.assertTrue(all(x["reason"] for x in e[0]["optimize"]["suggestions"]))
+        self.assertEqual(next(o for o in dashboard.state()["optimize"] if o["project"] == slug)["left"], 5)
+        # reject one, apply another: handled suggestions disappear
+        code, body, _ = dashboard.run_action({"do": "optimize-reject", "project": slug, "ids": "archive:testing"})
+        self.assertEqual(code, 200, body)
+        self.assertNotIn("archive:testing", sug())
+        code, body, _ = dashboard.run_action({"do": "optimize-apply", "project": slug, "ids": "archive:style"})
+        self.assertEqual(code, 200, body)
+        self.assertNotIn(" style ", self.cli("cards", "proj").stdout)
+        self.assertIn(" web-frontend-build ", self.cli("cards", "proj").stdout)  # only the chosen one was applied
+        self.assertEqual(entries()[0]["title"], f"Optimize: 3 suggestions for {slug}")
+        # a bad project or missing ids are refused
+        self.assertEqual(dashboard.run_action({"do": "optimize-apply", "project": "nope", "ids": "x"})[0], 400)
+        self.assertEqual(dashboard.run_action({"do": "optimize-accept", "project": slug})[0], 400)
+        # apply all: the entry goes away when none are left
+        code, body, _ = dashboard.run_action({"do": "optimize-apply-all", "project": slug})
+        self.assertEqual(code, 200, body)
+        self.assertEqual(entries(), [])
+        with open(os.path.join(opt_dir, slug + ".json"), "w") as fh:  # a stale file: the background run replaces it
+            json.dump({"project": slug, "ts": "2030-01-01T00:00:00", "suggestions": [],
+                       "drafts": [{"id": "draft-card-x1", "kind": "card", "title": "How to: x", "summary": "from 1 run"}]}, fh)
+        e = entries()
+        self.assertEqual(e[0]["title"], f"Optimize: 1 suggestion for {slug}")
+        self.assertEqual(e[0]["optimize"]["drafts"][0]["summary"], "from 1 run")
+        # a run in the background shows as running, then its result replaces the file
+        code, body, _ = dashboard.run_action({"do": "optimize-run", "project": slug})
+        self.assertEqual(code, 200, body)
+        marker = os.path.join(opt_dir, slug + ".running")
+        for _ in range(100):
+            if not os.path.exists(marker):
+                break
+            _t.sleep(0.1)
+        self.assertFalse(os.path.exists(marker), "the background optimize never finished")
+        with open(os.path.join(opt_dir, slug + ".json")) as fh:
+            self.assertEqual(json.load(fh)["drafts"], [])
+        self.assertFalse(next(o for o in dashboard.state()["optimize"] if o["project"] == slug)["running"])
 
     def test_run_requires_model_and_why(self):
         self.cli("learn", self.proj)
@@ -1039,9 +1093,20 @@ class CliTest(unittest.TestCase):
         self.assertIn("--mcp plugin:obs:mcp:dashboards = search_obs_dashboards,get_obs_dashboard,get_obs_metric", out)
         ids = [l.split()[1] if l.startswith("preset") else l.split()[2] for l in out.splitlines()
                if l.startswith(("new card", "preset    "))]
-        out = self.cli("optimize", "proj", "--accept", ",".join(ids), **env).stdout
+        res = json.loads(self.cli("optimize", "proj", "--json", **env).stdout)
+        self.assertEqual(sorted(d["id"] for d in res["drafts"]), sorted(ids))
+        self.assertEqual(sorted(res["drafts"][0]), ["id", "kind", "summary", "title"])
+        dashboard = self._dashboard()
+        os.environ.update(env)
+        self.addCleanup(lambda: [os.environ.pop(k, None) for k in env])
+        preset_id = next(d["id"] for d in res["drafts"] if d["kind"] == "preset")
+        code, body, _ = dashboard.run_action({"do": "optimize-accept", "project": res["project"], "ids": preset_id})
+        self.assertEqual(code, 200, body)
+        self.assertIn("saved preset plugin:obs:mcp:dashboards", json.loads(body)["output"])
+        left = json.loads(self.cli("optimize", "proj", "--json", **env).stdout)
+        self.assertEqual([d["kind"] for d in left["drafts"]], ["card"])  # the accepted one is gone
+        out = self.cli("optimize", "proj", "--accept", ",".join(i for i in ids if i != preset_id), **env).stdout
         self.assertIn("saved card recipe-widget-value-now-vs-same", out)
-        self.assertIn("saved preset plugin:obs:mcp:dashboards", out)
         self.assertNotIn("Drafts from what workers did", self.cli("optimize", "proj", **env).stdout)
         self.assertIn("plugin:obs:mcp:dashboards", self.cli("mcp", "preset", "obs", **env).stdout)
         out = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--mcp", "obs:read", "another widget check",
