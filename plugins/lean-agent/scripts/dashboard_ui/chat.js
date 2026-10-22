@@ -45,7 +45,7 @@ function permHtml(e){
   const ok=/^(allowed|always|answered)$/.test(e.state),word=e.state==="always"?"allowed":e.state==="denied"?"denied":e.state==="expired"?"expired":e.state;
   return `<div class="perm settled compact" role="group" aria-label="${esc(label)}"><span class="chip ${ok?"tone-ok":e.state==="denied"?"tone-bad":"tone-mute"}">${esc(word)}</span>${aboutOf(e)}<span class="mono small perm-t">${esc(e.name)} · ${esc(e.text)}</span><span class="mono mute small">${e.state==="expired"?"No longer waiting (the conversation restarted)":esc(answeredIn(e))}</span></div>`;
 }
-const mins=t=>Math.max(0,Math.round((Date.now()-Date.parse(t))/60000));
+const secs=t=>(Date.now()-Date.parse(t))/1000;
 function drawChat(){
   const box=$("msgs"),atEnd=box.scrollHeight-box.scrollTop-box.clientHeight<80;
   const evs=[...chat.events.values()].sort((a,b)=>a.i-b.i);
@@ -71,7 +71,7 @@ function drawChat(){
   flush();
   if(!evs.length)h+=`<div class="sysl">${chat.key==="main"?"Talk to lean-agent here: ask for work, answer its questions, approve what it wants to run.":"This thread is about the task above; your first message brings that context along."}</div>`;
   for(const r of ((typeof S!=="undefined"&&S&&S.running)||[]).filter(r=>chat.key==="main"||String(r.todo)===String(chat.key)))  // one compact line per running worker
-    h+=`<div class="wline"><span class="dot dot-run" aria-hidden="true"></span><span class="mono">running · ${r.todo!=null?"#"+esc(r.todo):"lookup"} · ${esc(r.model||"?")} / ${esc(r.effort||"default")} · ${r.turns||0} turns · ${mins(r.started)||0} min</span><button type="button" class="btn sm" data-act="run-stop" data-id="${esc(r.run)}" aria-label="Stop run ${esc(r.run)}">Stop run</button></div>`;
+    h+=`<div class="wline"><span class="dot dot-run" aria-hidden="true"></span><span class="mono">running · ${r.todo!=null?"#"+esc(r.todo):"lookup"} · ${esc(r.model||"?")} / ${esc(r.effort||"default")} · ${r.turns||0} turns · ${dur(secs(r.started)||0)}</span><button type="button" class="btn sm" data-act="run-stop" data-id="${esc(r.run)}" aria-label="Stop run ${esc(r.run)}">Stop run</button></div>`;
   if(h!==chat.html){  // redraw only when something changed, keeping the focus and caret of a form in the stream
     const a=document.activeElement,fid=a&&box.contains(a)?a.id:"",sel=a&&a.selectionStart!=null?[a.selectionStart,a.selectionEnd]:null;
     chat.html=h;box.innerHTML=h;
@@ -105,7 +105,7 @@ function drawClear(){
 }
 function tick(){
   const now=Date.now();
-  for(const el of document.querySelectorAll("[data-since]")){const s=Math.max(0,Math.round((now-el.dataset.since)/1000));el.textContent=s<60?s+" s":Math.floor(s/60)+" min "+s%60+" s"}
+  for(const el of document.querySelectorAll("[data-since]")){const s=Math.max(0,Math.round((now-el.dataset.since)/1000));el.textContent=dur(s)}
   for(const el of document.querySelectorAll("[data-expires]")){const left=Math.max(0,Math.round(el.dataset.expires-(now-(chat.skew||0))/1000));
     el.textContent=`moves to the ${rcState()==="off"?"terminal":"Claude app"} in ${Math.floor(left/60)}:${String(left%60).padStart(2,"0")}`}
 }
