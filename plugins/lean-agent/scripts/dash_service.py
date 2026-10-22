@@ -9,10 +9,8 @@ user turn; "main" shows everything.
 
 Permission prompts: the PermissionRequest hook (permission_hook.py) hands a request to the dashboard as a file in
 chat/perm/ while a dashboard tab is polling (chat/dash-poll is touched on every poll); the page's answer is written
-beside it and the hook returns it to Claude Code. /clear inside the session starts a new transcript with a new id: the
-newest transcript in the project folder written after the session started is followed and recorded in
-chat/service.json, but only if it is ours: its first user record is the /clear command, or it was created within
-30 s after a /clear the dashboard sent that no transcript has claimed yet.
+beside it and the hook returns it to Claude Code. /clear inside the session starts a new transcript with a new id: the SessionStart hook (session_hook.py) records the
+current one in chat/service.json (any source: startup, resume, clear, compact), and the dashboard follows it.
 """
 import datetime
 import functools
@@ -27,10 +25,6 @@ from lean_common import pid_alive, questions_of, tool_summary  # noqa: F401
 MAX_EVENTS = 2000
 FRESH_SECS = 20  # a dashboard tab polled this recently counts as someone looking
 WORKING_SECS = 60  # no transcript change for this long and no tool running: not shown as working
-SCAN_SECS = 2  # the transcript folder is listed at most this often
-MISS_SECS = 5  # a transcript with no user record yet is looked at again this often
-LAZY_SECS = 600  # ...or whose first message is one we sent this soon after that /clear (Claude Code may create the file lazily)
-CLEAR_SECS = 30  # a transcript created this soon after a /clear we sent is the one that /clear started
 QUIET_SECS = 8   # a transcript untouched this long after an assistant text: the turn is over
 TAG_RE = re.compile(r'^About (#?[A-Za-z0-9_.-]+) "')
 ABOUT_REPLY_RE = re.compile(r'^\s*About #(\d+)\b')  # an untagged message answered "About #N: ..." belongs to task #N
@@ -141,99 +135,19 @@ class Model:
         self.sends_size = -1
         self.last_kind = None  # what the transcript's last record was: "user", "tool", "text", "done"
         self.perms = {}
-        self._scan = {"at": 0.0, "dir": None, "files": []}
-        self._first = {}  # transcript -> first user text, only for files in the current scan
-        self._miss = {}  # transcript -> when it had no user record yet (looked at again after MISS_SECS)
-        self._used_clears = set()
 
     # --- following the right transcript
     def _pick(self, up):
+        """The transcript the hook last recorded when it is another session than `up` started and its file exists
+        (a /clear started it); `up`'s transcript otherwise."""
         base = up.get("transcript")
         if not base:
             return None
-        d = os.path.dirname(base)
-        try:
-            started = time.mktime(time.strptime(up.get("session_started"), "%Y-%m-%dT%H:%M:%S")) - 2
-        except (TypeError, ValueError):
-            started = 0
-        now = time.time()
-        if now - self._scan["at"] >= SCAN_SECS or self._scan["dir"] != d:  # the folder and the threads' sessions: stat at most every 2 s
-            mine = set()  # sessions the dashboard's own stream-json threads wrote in the same folder
-            for p in [chat_dir("session.json")] + [chat_dir("threads", k, "session.json") for k in _listdir(chat_dir("threads"))]:
-                sid = _load(p).get("session_id")
-                if sid:
-                    mine.add(sid)
-            files = []
-            for n in _listdir(d):
-                if n.endswith(".jsonl") and n[:-6] not in mine:
-                    try:
-                        st = os.stat(os.path.join(d, n))
-                    except OSError:
-                        continue
-                    if st.st_size > 0:
-                        files.append((os.path.join(d, n), st.st_mtime))
-            self._scan = {"at": now, "dir": d, "files": files}
-            names = {p for p, _ in files}
-            self._first = {p: t for p, t in self._first.items() if p in names}
-            self._miss = {p: t for p, t in self._miss.items() if p in names}
-        clears = sorted(float(s.get("ts") or 0) for s in self.send_log if str(s.get("sent")).strip() == "/clear")
-        cands = [(p, m) for p, m in self._scan["files"] if m >= started]
-        self._claim([p for p, _ in cands if p != base and p != self.path], clears)
-        best, best_m = base, -1.0
-        for p, mtime in cands:
-            if mtime > best_m and (p == base or p == self.path or self._ours(p)):
-                best, best_m = p, mtime
-        return best
-
-    def _look(self, p):
-        """(first user text, creation epoch or None) of a transcript. "Created" is the first record's timestamp
-        (file times move with every append), the file's birth time when no record has one."""
-        info = self._first.get(p)
-        if info is None and time.time() - self._miss.get(p, 0) >= MISS_SECS:
-            info = _first_info(p)
-            if info and info[0]:
-                self._first[p] = info
-            else:
-                self._miss[p] = time.time()  # no user text yet: not looked at again for MISS_SECS
-        first, born = info or ("", None)
-        if born is None:
-            try:
-                born = getattr(os.stat(p), "st_birthtime", None)
-            except OSError:
-                pass
-        return first or "", born
-
-    def _ours(self, p):
-        """A new transcript is followed when its first user record is the /clear command or it claimed one of our /clears."""
-        first, _ = self._look(p)
-        return first.lstrip().startswith("/clear") or "<command-name>/clear" in first or any(q == p for _, q in self._used_clears)
-
-    def _claim(self, paths, clears):
-        """Each /clear we sent is claimed by one transcript: the earliest-born one created within CLEAR_SECS after it,
-        or, since Claude Code may create the file lazily, one whose first user record is a message we sent within
-        LAZY_SECS after the /clear."""
-        while True:
-            taken = {c for c, _ in self._used_clears}
-            claimed = {q for _, q in self._used_clears}
-            found = []
-            for p in paths:
-                if p in claimed:
-                    continue
-                first, born = self._look(p)
-                if born is None or first.lstrip().startswith("/clear") or "<command-name>/clear" in first:
-                    continue
-                for t in clears:
-                    if t in taken:
-                        continue
-                    lazy = any(t < float(s.get("ts") or 0) <= t + LAZY_SECS and str(s.get("sent")).strip() == first.strip()
-                               for s in self.send_log) if first.strip() else False
-                    if t - 2 <= born <= t + CLEAR_SECS or (lazy and born >= t - 2):
-                        found.append((born, t, p))
-                        break
-            if not found:
-                return
-            _, t, p = min(found)
-            self._used_clears.add((t, p))
+        rec = _load(chat_dir("service.json"))
+        path = rec.get("transcript_path")
+        if rec.get("session_id") and rec.get("session_id") != up.get("session_id") and path and os.path.isfile(path):
+            return path
+        return base
 
     @_locked
     def refresh(self):
@@ -246,10 +160,6 @@ class Model:
             first = self.path is None
             self.path, self.offset, self.tools = path, 0, {}
             self.sid = os.path.basename(path)[:-6]
-            try:
-                write_json(chat_dir("service.json"), {"transcript": path, "session_id": self.sid, "ts": time.time()})
-            except OSError:
-                pass
             if not first:
                 self._add(kind="note", text="new conversation")
                 self.turn = max(self.turns) + 1
@@ -525,35 +435,6 @@ class Model:
     def work_since(self, key):
         """Epoch seconds the working turn began (0 when nothing is working)."""
         return self.turns.get(self.turn, {}).get("ts", 0) if self.status(key) == "working" else 0
-
-
-def _first_info(p):
-    """(text of a transcript's first user record or "", epoch of its first timestamped record or None); None when unreadable."""
-    text, stamp = "", None
-    try:
-        with open(p, errors="replace") as fh:
-            for _ in range(50):
-                line = fh.readline()
-                if not line:
-                    break
-                try:
-                    rec = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(rec, dict):
-                    continue
-                if stamp is None and isinstance(rec.get("timestamp"), str):
-                    try:
-                        stamp = datetime.datetime.fromisoformat(rec["timestamp"].replace("Z", "+00:00")).timestamp()
-                    except ValueError:
-                        pass
-                if rec.get("type") == "user":
-                    c = (rec.get("message") or {}).get("content")
-                    text = c if isinstance(c, str) else json.dumps(c)
-                    break
-    except OSError:
-        return None
-    return text, stamp
 
 
 def _listdir(d):

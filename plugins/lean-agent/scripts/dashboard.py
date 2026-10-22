@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import usage  # noqa: E402
-from lean_common import compaction_point, pid_alive, plugin_version  # noqa: E402
+from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive, plugin_version  # noqa: E402
 import lean_schedule  # noqa: E402
 import prs  # noqa: E402
 
@@ -104,8 +104,8 @@ def orchestrator_context():
         return {}
     path = max(found, key=os.path.getmtime)
     series = usage.context_series(path)
-    window = int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or 100000)
-    pct = float(os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") or 70)
+    window = int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or DEFAULT_COMPACT_WINDOW)
+    pct = float(os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") or DEFAULT_COMPACT_PCT)
     compact_at = compaction_point(window, pct)
     return {"now": series[-1][1] if series else 0, "calls": len(series), "compact_at": compact_at,
             "trend": [c for _, c in series[-60:]],
