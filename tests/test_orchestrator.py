@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the lean-agent CLI using a fake `claude` binary. Run: python3 tests/test_orchestrator.py"""
 import datetime
+import glob
 import json
 import shutil
 import os
@@ -98,6 +99,11 @@ FAKE_CLAUDE = textwrap.dedent("""\
                 "input_tokens": 10, "cache_read_input_tokens": int(os.environ.get("FAKE_TURN_CTX", "1000"))}}}),
                 flush=True)
             time.sleep(float(os.environ.get("FAKE_TURN_SLEEP", "0")))
+    if os.environ.get("FAKE_SELF_KILL"):  # killed from outside, like the OOM killer
+        import signal
+        os.kill(os.getpid(), signal.SIGKILL)
+    if os.environ.get("FAKE_HANG"):
+        time.sleep(60)
     second = "search-only second opinion" in open(append).read()
     rv = os.environ.get("FAKE_REUSE") if second else os.environ.get("FAKE_REVIEW")
     if os.environ.get("FAKE_PLAN"):
@@ -1651,6 +1657,51 @@ class CliTest(unittest.TestCase):
         self.assertIn("1 todo", out)
         self.assertIn("next job", out)
         self.assertIn(f"dashboard :{port}", out)
+
+    def test_worker_killed_outside_is_not_a_timeout_and_keeps_its_session(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "look around", check=False,
+                     FAKE_TURNS="2", FAKE_SELF_KILL="1")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("killed by signal 9 (outside lean-agent, e.g. out of memory)", p.stdout)
+        self.assertNotIn("timed out", p.stdout)
+        entry = self.ledger()[-1]
+        self.assertEqual(entry["status"], "error")
+        self.assertEqual(entry["session_id"], "sess-1")  # from the init event: the run has no result event
+        p = self.cli("run", "--resume", entry["id"], "carry on", check=False)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("--resume", " ".join(self.calls()[-1]["argv"]))
+        self.assertIn("sess-1", self.calls()[-1]["argv"])
+
+    def test_worker_that_runs_out_of_time_says_so(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "look around", check=False,
+                     FAKE_TURNS="1", FAKE_HANG="1", LEAN_AGENT_RUN_TIMEOUT="2")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("timed out after 2 s", p.stdout)
+        self.assertNotIn("killed by signal", p.stdout)
+        self.assertEqual(self.ledger()[-1]["session_id"], "sess-1")
+
+    def test_running_record_gets_the_session_id_at_once(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = subprocess.Popen([sys.executable, CLI, "run", "-p", "proj", "-m", "haiku", "--why", "x", "look around"],
+                             env=dict(self.env, FAKE_TURNS="3", FAKE_TURN_SLEEP="0.7"),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            import time as _t
+            seen = None
+            for _ in range(100):
+                for f in glob.glob(os.path.join(self.env["LEAN_AGENT_HOME"], "running", "*.json")):
+                    try:
+                        seen = json.load(open(f)).get("session_id") or seen
+                    except ValueError:
+                        pass
+                if seen:
+                    break
+                _t.sleep(0.1)
+            self.assertEqual(seen, "sess-1")
+        finally:
+            p.communicate(timeout=60)
 
     def test_running_run_shows_its_progress(self):
         self.cli("learn", self.proj, "--name", "proj")
