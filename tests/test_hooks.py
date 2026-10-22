@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Smoke tests for the lean-agent hooks. Run: python3 tests/test_hooks.py"""
+import io
 import json
 import os
 import subprocess
@@ -168,7 +169,39 @@ class SessionHookTest(Base):
         with open(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")) as fh:
             return json.load(fh)
 
+    def up(self, pid):
+        os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "up.json"), "w") as fh:
+            json.dump({"pid": pid}, fh)  # the hook's parent is this test process
+
+    def run_injected(self, chain, pid=500, event=None):
+        """Run session_hook.main() in-process with a fake pid chain {pid: parent}."""
+        sys.path.insert(0, ROOT)
+        import session_hook
+        self.up(pid)
+        old = {k: os.environ.get(k) for k in ("LEAN_AGENT_SERVICE_SESSION", "LEAN_AGENT_HOME")}
+        os.environ.update(LEAN_AGENT_SERVICE_SESSION="1", LEAN_AGENT_HOME=self.env["LEAN_AGENT_HOME"])
+        real_stdin, sys.stdin = sys.stdin, io.StringIO(json.dumps(event or {"session_id": "s1"}))
+        try:
+            session_hook.main(ppid=lambda p: chain.get(p, 0))
+        finally:
+            sys.stdin = real_stdin
+            for k, v in old.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+    def test_records_when_the_service_claude_is_an_ancestor(self):
+        me = os.getpid()
+        self.run_injected({me: 900, 900: 500, 500: 1})  # hook <- sh <- claude(500)
+        self.assertEqual(self.record()["session_id"], "s1")
+
+    def test_ignores_a_session_that_is_not_the_service_claude(self):
+        me = os.getpid()
+        self.run_injected({me: 900, 900: 800, 800: 700, 700: 600, 600: 500})  # 500 is the 5th ancestor
+        self.run_injected({me: 900, 900: 800, 800: 1})  # another claude's tree
+        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")))
+
     def test_writes_service_json_only_in_the_service_session(self):
+        self.up(os.getpid())
         for source in ("startup", "resume", "clear", "compact"):
             event = {"session_id": "s-" + source, "transcript_path": "/x/s-%s.jsonl" % source, "source": source}
             self.assertIsNone(run_hook("session_hook.py", event, LEAN_AGENT_SERVICE_SESSION="0", **self.env))
@@ -186,13 +219,14 @@ class SessionHookTest(Base):
         self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")))
 
     def test_never_fails_the_session(self):
+        self.up(os.getpid())
         env = dict(os.environ, LEAN_AGENT_SERVICE_SESSION="1", **self.env)
         for bad in ("", "not json", "[1]", "{}"):
             p = subprocess.run([sys.executable, os.path.join(ROOT, "session_hook.py")], input=bad, text=True,
                                capture_output=True, env=env)
             self.assertEqual((p.returncode, p.stdout, p.stderr), (0, "", ""))
         self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")))
-        os.makedirs(self.env["LEAN_AGENT_HOME"])  # an unwritable chat dir
+        os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)  # an unwritable chat dir
         open(os.path.join(self.env["LEAN_AGENT_HOME"], "chat"), "w").close()
         p = subprocess.run([sys.executable, os.path.join(ROOT, "session_hook.py")], input=json.dumps({"session_id": "x"}),
                            text=True, capture_output=True, env=env)
