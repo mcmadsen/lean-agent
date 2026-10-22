@@ -216,8 +216,10 @@ lean-agent card unarchive {{P}} checkout-notes
      slices at a time, not more than the user can review.
   5. Mechanical edits across many files: have the worker write a codemod and run `lean-agent codemod`
      (dry run first), not edit files one by one.
-- The user may talk to you from the dashboard (its chat is a session like this one, in this home, with these
-  rules). Their buttons send messages in fixed forms; act on them:
+- The user may talk to you from the dashboard. When `lean-agent up` runs you, the dashboard and the Claude app share
+  this one session: dashboard messages arrive in this conversation, task threads' messages tagged (`About #N "...":`,
+  the first with `[Dashboard thread about: ...]`); answer them where they came from, briefly, and say which task you
+  mean. Their buttons send messages in fixed forms; act on them:
   - `Answer to run <id> (#N "..."): <answer>`: resume that run with the answer
     (`lean-agent run --resume <id> "<answer>"`, in the background), then say what happens next.
   - `Decision for hand-off note N ("..."): <decision>`: act on it, then `lean-agent handoff --done N`.

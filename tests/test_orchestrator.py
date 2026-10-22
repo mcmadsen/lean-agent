@@ -2428,6 +2428,137 @@ class CliTest(unittest.TestCase):
         self.assertIn("--session-id", self.read_jsonl(log)[-1]["argv"])
         self.assertNotEqual(ss.info()["session_id"], sid)
 
+    def service_chat(self, *args):
+        """`up` with the fake interactive claude, and dash_chat in this process pointed at the same home."""
+        p, log, ss = self.start_up(*args)
+        import dash_chat
+        import dash_service
+        dash_chat._CHAT.clear()
+        dash_chat._BRIDGE["at"] = 0
+        dash_service._MODEL.clear()
+        return p, log, ss, dash_chat, dash_service
+
+    def test_dashboard_threads_share_the_service_session(self):
+        p, log, ss, dash_chat, dash_service = self.service_chat("--dashboard-only")
+        self.assertTrue(dash_chat.service_up())
+        main = dash_chat.chat("main")
+        snap = main.snapshot()
+        self.assertEqual((snap["service"], snap["status"], snap["events"]), (True, "idle", []))
+        self.assertEqual(main.send("hello there"), {"ok": True})
+        self.wait_for(lambda: len(main.snapshot()["events"]) >= 2, "the reply")
+        user, asst, done = main.snapshot()["events"]
+        self.assertEqual((user["kind"], user["text"], asst["kind"], asst["text"], done["kind"]),
+                         ("user", "hello there", "assistant", "echo: hello there", "result"))
+        self.assertEqual(main.snapshot()["status"], "idle")
+        # a task thread: its message arrives tagged, with the task's context once
+        t12 = dash_chat.chat("12")
+        self.assertEqual(t12.send("is it done?", context='work item #12 "Fix x"', title="Fix x"), {"ok": True})
+        self.wait_for(lambda: len(t12.snapshot()["events"]) >= 3, "the task reply")
+        tagged = 'About #12 "Fix x": is it done?'
+        u, a, _ = t12.snapshot()["events"]
+        self.assertEqual((u["text"], a["text"]), ("is it done?", "echo: [Dashboard thread about: work item #12 \"Fix x\"]\n\n" + tagged))
+        t12.send("and now?")
+        self.wait_for(lambda: len(t12.snapshot()["events"]) >= 6, "the second task reply")
+        self.assertEqual(t12.snapshot()["events"][-2]["text"], 'echo: About #12 "Fix x": and now?')  # no context twice
+        # the main thread shows everything, the tagged turns with their tag; another task thread shows nothing
+        texts = [e["text"] for e in main.snapshot()["events"] if e["kind"] == "user"]
+        self.assertEqual(texts, ["hello there", tagged, 'About #12 "Fix x": and now?'])
+        self.assertEqual(dash_chat.chat("13").snapshot()["events"], [])
+        self.assertNotIn("hello there", json.dumps(t12.snapshot()["events"]))
+        # incremental: only what changed since the cursor
+        cur = main.snapshot()["cursor"]
+        self.assertEqual(main.snapshot(cur)["events"], [])
+        main.send("please use a tool")
+        self.wait_for(lambda: any(e["kind"] == "tool" and e["state"] == "done" for e in main.snapshot(cur)["events"]), "the tool")
+        tool = [e for e in main.snapshot(cur)["events"] if e["kind"] == "tool"][0]
+        self.assertEqual((tool["name"], tool["text"], tool["output"]), ("Bash", "echo tool-ran", "tool-ran"))
+        self.assertEqual([t["key"] for t in dash_chat.threads()], ["main", "12"])
+        # Stop sends Escape; the session records the interruption
+        self.assertTrue(main.interrupt()["ok"])
+        self.wait_for(lambda: any(e["kind"] == "note" and e["text"] == "stopped by you" for e in main.snapshot()["events"]), "the note")
+        # a task thread starts over without touching the session
+        self.assertTrue(t12.new()["ok"])
+        self.assertEqual(t12.snapshot()["events"], [])
+        # /clear in the session starts a new transcript with a new id: it is followed and recorded
+        old = ss.info()["transcript"]
+        self.assertTrue(main.new()["ok"])
+        self.wait_for(lambda: ss.tail().count("ready") >= 1 and len(os.listdir(os.path.dirname(old))) >= 2, "the new transcript")
+        main.send("after the clear")
+        self.wait_for(lambda: any(e.get("text") == "echo: after the clear" for e in main.snapshot()["events"]), "the new reply")
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")) as fh:
+            cur = json.load(fh)
+        self.assertNotEqual(cur["transcript"], old)
+        self.assertEqual(cur["session_id"], os.path.basename(cur["transcript"])[:-6])
+        self.assertIn("new conversation", [e.get("text") for e in main.snapshot()["events"] if e["kind"] == "note"])
+        self.assertEqual(ss.info()["transcript"], old)  # up.json keeps the id `up` started with
+        # without the bridge the per-thread stream-json sessions are used as before
+        p.terminate()
+        p.wait(timeout=20)
+        dash_chat._BRIDGE["at"] = 0
+        self.assertFalse(dash_chat.service_up())
+        self.assertNotIn("service", dash_chat.Chat(key="main").snapshot())
+
+    def test_permission_hook_round_trip_through_the_dashboard(self):
+        p, log, ss, dash_chat, dash_service = self.service_chat("--dashboard-only")
+        main = dash_chat.chat("main")
+        hook = os.path.join(os.path.dirname(CLI), "permission_hook.py")
+        sid = ss.info()["session_id"]
+        env = dict(self.env, LEAN_AGENT_SERVICE_SESSION="1", LEAN_AGENT_DASH_PERMISSION_WAIT="20")
+
+        def run(event, **over):
+            main.snapshot()  # a dashboard tab polling
+            return subprocess.Popen([sys.executable, hook], env=dict(env, **over), stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, text=True), json.dumps(dict({"session_id": sid}, **event))
+
+        def ask(event, **answer):
+            proc, data = run(event)
+            proc.stdin.write(data)
+            proc.stdin.close()
+            self.wait_for(lambda: any(e["kind"] == "permission" and e["state"] == "pending"
+                                      for e in main.snapshot()["events"]), "the prompt")
+            ev = [e for e in main.snapshot()["events"] if e["kind"] == "permission" and e["state"] == "pending"][-1]
+            self.assertTrue(main.answer(ev["rid"], **answer)["ok"])
+            out = proc.stdout.read()
+            proc.wait(timeout=10)
+            return ev, json.loads(out)["hookSpecificOutput"]
+
+        bash = {"hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_input": {"command": "make deploy"},
+                "permission_suggestions": [{"type": "addRules", "rules": [{"toolName": "Bash"}]}]}
+        ev, out = ask(bash, allow=True)
+        self.assertEqual((ev["name"], ev["text"], ev["can_always"]), ("Bash", "make deploy", True))
+        self.assertEqual(out, {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}})
+        _, out = ask(bash, allow=True, always=True)
+        self.assertEqual(out["decision"]["updatedPermissions"], bash["permission_suggestions"])
+        _, out = ask(bash, allow=False, message="not now")
+        self.assertEqual(out["decision"], {"behavior": "deny", "message": "not now"})
+        _, out = ask(bash, allow=False)
+        self.assertIn("declined", out["decision"]["message"])
+        question = {"hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion", "tool_input": {"questions": [
+            {"question": "Which layout?", "header": "Layout", "multiSelect": False,
+             "options": [{"label": "A", "description": "one"}, {"label": "B", "description": "two"}]}]}}
+        ev, out = ask(question, allow=True, answers={"Which layout?": "B"})
+        self.assertEqual(ev["questions"][0]["options"][1]["label"], "B")
+        self.assertEqual(out["decision"]["behavior"], "allow")
+        self.assertEqual(out["decision"]["updatedInput"]["answers"], {"Which layout?": "B"})
+        self.assertEqual(out["decision"]["updatedInput"]["questions"], question["tool_input"]["questions"])
+        self.assertEqual(os.listdir(dash_service.perm_dir()), [])
+        # answered ones are done; a prompt nobody answers in time falls back to the normal prompt
+        proc, data = run(bash, LEAN_AGENT_DASH_PERMISSION_WAIT="2")
+        proc.stdin.write(data)
+        proc.stdin.close()
+        self.wait_for(lambda: any(e["kind"] == "permission" and e["state"] == "pending" for e in main.snapshot()["events"]), "it")
+        self.assertEqual(proc.stdout.read(), "")
+        proc.wait(timeout=10)
+        self.wait_for(lambda: any(e.get("state") == "expired" for e in main.snapshot()["events"]), "the expired prompt")
+        # no output when it isn't the service session, another session, or no dashboard is looking
+        for kw, ev_ in ((dict(LEAN_AGENT_SERVICE_SESSION="0"), bash), ({}, dict(bash, session_id="someone-else"))):
+            proc, data = run(ev_, **kw)
+            self.assertEqual(proc.communicate(data, timeout=15)[0], "")
+        proc, data = run(bash)
+        os.utime(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "dash-poll"), (1, 1))
+        self.assertEqual(proc.communicate(data, timeout=15)[0], "")
+        self.assertEqual(os.listdir(dash_service.perm_dir()), [])
+
     def test_up_dashboard_only_hosts_the_session_without_remote_control(self):
         p, log, ss = self.start_up("--dashboard-only")
         argv = self.read_jsonl(log)[0]["argv"]

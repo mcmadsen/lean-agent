@@ -23,7 +23,7 @@
 <main class="thread" id="pane-chat" aria-label="Conversation">
  <header class="thead">
   <div class="tmeta"><h1 id="ttitle">Conversation with the orchestrator</h1><div class="mono mute sub" id="tsub">Ask for work, answer questions, approve what it wants to run</div></div>
-  <div class="tacts"><span id="cstat" class="chip tone-mute">idle</span><button id="handled" type="button" class="btn" hidden>Mark handled</button><button id="cstop" type="button" class="btn" hidden>Stop</button><button id="cnew" type="button" class="btn">New thread</button></div>
+  <div class="tacts"><span id="cshared" class="chip tone-mute" title="Messages here go into the one session `lean-agent up` runs; it is the same conversation as in the Claude app" hidden>shared with the Claude app</span><span id="cstat" class="chip tone-mute">idle</span><button id="handled" type="button" class="btn" hidden>Mark handled</button><button id="cstop" type="button" class="btn" hidden>Stop</button><button id="cnew" type="button" class="btn">New thread</button></div>
  </header>
  <div class="stream" id="msgs"></div>
  <div class="composer-wrap">

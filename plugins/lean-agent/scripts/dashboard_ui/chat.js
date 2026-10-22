@@ -53,6 +53,7 @@ function drawChat(){
   $("cstat").textContent=waiting?"waits for you":chat.status==="working"?"working…":chat.alive?"ready":"idle";
   $("cstat").className="chip "+(waiting?"tone-warn":chat.status==="working"?"tone-run":"tone-mute");
   $("cstop").hidden=chat.status!=="working";
+  $("cshared").hidden=!chat.service;
 }
 function openThread(key){
   if(chat.key===key)return drawChat();
@@ -65,7 +66,7 @@ async function pollChat(){
     const r=await fetch(`/api/chat?thread=${encodeURIComponent(key)}&since=${chat.cursor}&t=${T}`);const s=await r.json();
     if(key!==chat.key)return;
     for(const e of s.events||[])chat.events.set(e.i,e);
-    chat.cursor=Math.max(chat.cursor,s.cursor||0);chat.status=s.status;chat.alive=s.alive;
+    chat.cursor=Math.max(chat.cursor,s.cursor||0);chat.status=s.status;chat.alive=s.alive;chat.service=!!s.service;
     if(typeof S!=="undefined"){S=S||{};S.threads=s.threads||[];if(lastBoard)drawInbox(new Set())}
     drawChat();
   }catch(e){$("cstat").textContent="offline"}

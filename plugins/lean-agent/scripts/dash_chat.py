@@ -9,6 +9,10 @@ and events are kept (main: ~/.lean-agent/chat/; others: ~/.lean-agent/chat/threa
 dashboard resumes them; only LEAN_AGENT_CHAT_PROCS (default 3) keep a running process, the least recently used
 idle one is stopped and resumed by its session id when it's used again. This is separate from a Remote
 Control session started by `lean-agent up`: both run in the same orchestrator home, with the same rules.
+
+When `lean-agent up` hosts the one service session and its bridge answers (service_session.py), none of that is
+used: every thread types into that session and reads the shared transcript (dash_service.py), so the dashboard and
+the Claude app show the same conversation. Without the bridge, everything above stays as it is.
 """
 import datetime
 import itertools
@@ -30,6 +34,7 @@ DEFAULT_ENV = {
     "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet", "LEAN_AGENT_BRIEF": "1", "LEAN_AGENT_ANSWER_LINES": "25",
 }
 MAX_EVENTS = 600
+_BRIDGE = {"at": 0.0, "up": False}
 
 
 def lean_home(*parts):
@@ -83,6 +88,20 @@ def _questions(req):
                         "options": [{"label": o.get("label"), "description": o.get("description")}
                                     for o in q.get("options") or [] if isinstance(o, dict) and o.get("label")]})
     return out
+
+
+def service_up():
+    """True when `lean-agent up`'s bridge answers (checked at most every few seconds)."""
+    if time.time() - _BRIDGE["at"] > 3 or _BRIDGE.get("home") != lean_home():
+        try:
+            sys.path.insert(0, HERE)
+            import service_session
+            _BRIDGE.update(up=bool(service_session.supported() and os.path.exists(service_session.sock_path())
+                                   and service_session.alive()))
+        except Exception:
+            _BRIDGE["up"] = False
+        _BRIDGE.update(at=time.time(), home=lean_home())
+    return _BRIDGE["up"]
 
 
 def thread_dir(key):
@@ -148,7 +167,42 @@ class Chat:
             except OSError:
                 pass
 
+    # ----------------------------------------------------------- service mode (the shared session)
+    def _service(self):
+        """The transcript model when the bridge answers, else None (the stream-json threads below are used)."""
+        if not service_up():
+            return None
+        import dash_service
+        return dash_service
+
+    def _fresh_at(self):
+        return float(self.meta.get("fresh_at") or 0)
+
+    def _label(self):
+        title = " ".join(str(self.meta.get("title") or self.key).replace('"', "'").split())[:80]
+        return f'About {"#" + self.key if self.key.isdigit() else self.key} "{title}": '
+
+    def _service_send(self, ds, text, context):
+        import service_session
+        m = ds.model()
+        shown = text if self.key == "main" else self._label() + text
+        first = self.key != "main" and not any(
+            s.get("key") == self.key and s.get("sid") == m.sid and float(s.get("ts") or 0) >= self._fresh_at()
+            for s in m.send_log)
+        prompt = f"[Dashboard thread about: {context}]\n\n{shown}" if first and context else shown
+        os.makedirs(ds.chat_dir(), exist_ok=True)
+        with open(ds.chat_dir("service_sends.jsonl"), "a") as fh:
+            fh.write(json.dumps({"key": self.key, "sid": m.sid, "sent": prompt, "shown": shown, "raw": text,
+                                 "ts": time.time()}) + "\n")
+        ok, err = service_session.send(prompt)
+        return {"ok": ok, **({"error": err} if err else {})}
+
     def snapshot(self, since=0):
+        ds = self._service()
+        if ds:
+            ds.touch_poll()
+            with self.lock:
+                return ds.model().snapshot(self.key, since, self._fresh_at())
         with self.lock:
             seen = {}
             for e in self.events:  # an updated event appears again in the log: the newest copy wins
@@ -271,6 +325,10 @@ class Chat:
             os.makedirs(self.dir, exist_ok=True)
             with open(os.path.join(self.dir, "thread.json"), "w") as fh:
                 json.dump(self.meta, fh)
+        ds = self._service()
+        if ds:
+            with self.lock:
+                return self._service_send(ds, text, self.meta.get("context"))
         first = not any(e.get("kind") == "user" for e in self.events) or not self.session
         prompt = (f"[Dashboard thread about: {self.meta['context']}]\n\n{text}"
                   if first and self.meta.get("context") else text)  # the task's context, once per session
@@ -292,6 +350,13 @@ class Chat:
 
     def summary(self):
         """For the thread list: status, the last message, whether something waits for the user."""
+        ds = self._service()
+        if ds:
+            m = ds.model()
+            snap = m.snapshot(self.key, 1 << 60, self._fresh_at())
+            return {"key": self.key, "title": self.meta.get("title") or ("Orchestrator" if self.key == "main" else self.key),
+                    "status": snap["status"], "waiting": m.waiting(self.key), "alive": True, "last": m.last(self.key),
+                    "cursor": snap["cursor"]}
         with self.lock:
             last = next((e for e in reversed(self.events) if e.get("kind") in ("assistant", "user")), None)
             return {"key": self.key, "title": self.meta.get("title") or ("Orchestrator" if self.key == "main" else self.key),
@@ -300,6 +365,9 @@ class Chat:
                     "cursor": max([max(e["i"], e.get("changed", 0)) for e in self.events] or [0])}
 
     def answer(self, rid, allow, always=False, message=None, answers=None):
+        ds = self._service()
+        if ds:
+            return ds.model().answer(rid, allow, always, message, answers)
         with self.lock:
             got = self.pending.pop(rid, None)
         if not got:
@@ -319,6 +387,10 @@ class Chat:
         return {"ok": ok}
 
     def interrupt(self):
+        if self._service():
+            import service_session
+            ok, err = service_session.keys("esc")  # the session notes the interruption in its transcript
+            return {"ok": ok, **({"error": err} if err else {})}
         ok = self._write({"type": "control_request", "request_id": f"int-{time.time():.0f}",
                           "request": {"subtype": "interrupt"}})
         if ok:
@@ -326,6 +398,16 @@ class Chat:
         return {"ok": ok}
 
     def new(self):
+        if self._service():
+            if self.key == "main":  # the whole session starts over, in the app too
+                import service_session
+                ok, err = service_session.send("/clear")
+                return {"ok": ok, **({"error": err} if err else {})}
+            self.meta["fresh_at"] = time.time()  # a task thread shares the session: it just starts its view over
+            os.makedirs(self.dir, exist_ok=True)
+            with open(os.path.join(self.dir, "thread.json"), "w") as fh:
+                json.dump(self.meta, fh)
+            return {"ok": True}
         with self.lock:
             proc, self.proc = self.proc, None
             self.session = None
