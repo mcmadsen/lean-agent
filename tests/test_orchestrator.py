@@ -1710,7 +1710,6 @@ class CliTest(unittest.TestCase):
             fh.write(json.dumps({"ts": "2030-01-01T11:00:00", "ref": "origin/feature/x", "verdict": "approve",
                                  "gaps": [{"what": "the export isn't done yet"}]}) + "\n")
         sys.path.insert(0, os.path.dirname(CLI))
-        before = len(self.read_jsonl(log))
         old = os.environ.get("LEAN_AGENT_HOME")
         os.environ["LEAN_AGENT_HOME"] = home
         try:
