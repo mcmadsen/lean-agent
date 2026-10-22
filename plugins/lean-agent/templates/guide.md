@@ -196,7 +196,7 @@ lean-agent card unarchive {{P}} checkout-notes
   lean-agent run file (the hook refuses it) and never paste worker output into a reply. lean-agent commands
   print one line per item here; `lean-agent output <command> --grep TEXT` shows one part of what was left
   out, and `--full` prints a command in full only when you need all of it.
-- Your context compacts at about 70K tokens. After a compaction, and in a new session after recent work, you
+- Your context compacts at about 67K tokens. After a compaction, and in a new session after recent work, you
   get the hand-off note (open items, standing rules, recent runs, items touched); for a run's full answer use
   `lean-agent runs --show <id>` instead of asking the user again. Keep open items and pending decisions in it:
   `lean-agent handoff --note "..."` (close with `--done N`). When lean-agent says your context is large, add

@@ -5,6 +5,16 @@ import os
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def compaction_point(window, pct):
+    """Tokens at which Claude Code compacts: the percentage of the window, but never past the window minus its
+    fixed autocompact buffer (LEAN_AGENT_COMPACT_BUFFER, default 33,000)."""
+    try:
+        buffer = int(os.environ.get("LEAN_AGENT_COMPACT_BUFFER") or 33000)
+    except ValueError:
+        buffer = 33000
+    return int(min(window * pct / 100, window - buffer))
+
+
 def pid_alive(pid):
     try:
         os.kill(int(pid), 0)

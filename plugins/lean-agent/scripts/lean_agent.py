@@ -36,7 +36,7 @@ import lean_memory  # noqa: E402
 import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import service_session  # noqa: E402
-from lean_common import pid_alive as dashboard_pid_alive, plugin_version  # noqa: E402
+from lean_common import compaction_point, pid_alive as dashboard_pid_alive, plugin_version  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -5196,7 +5196,7 @@ def _cmd_optimize(a):
 ORCHESTRATOR_ENV = {
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",   # memory lives in lean-agent; no MEMORY.md on every turn
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70",
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "100000",  # with 70%: compact at ~70K tokens, not at 70% of a 1M window
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "100000",  # with 70%: compact at ~67K tokens, not at 70% of a 1M window
     "BASH_MAX_OUTPUT_LENGTH": "20000",
     "MAX_MCP_OUTPUT_TOKENS": "10000",
     "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
@@ -5871,7 +5871,7 @@ def cmd_up(a):
         window = max(100000, a.compact_at)
         env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(window)
         env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(max(10, min(95, round(a.compact_at * 100 / window))))
-    print(f"lean-agent: the orchestrator compacts at ~{int(env['CLAUDE_CODE_AUTO_COMPACT_WINDOW']) * int(env['CLAUDE_AUTOCOMPACT_PCT_OVERRIDE']) // 100:,} "
+    print(f"lean-agent: the orchestrator compacts at ~{compaction_point(int(env['CLAUDE_CODE_AUTO_COMPACT_WINDOW']), int(env['CLAUDE_AUTOCOMPACT_PCT_OVERRIDE'])):,} "
           "tokens of context (keeps goals, approvals, open runs and findings; `--compact-at N` to change)", flush=True)
     for line in orchestrator_context_lines(h):
         print("lean-agent: " + line, flush=True)
