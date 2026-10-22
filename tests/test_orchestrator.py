@@ -633,6 +633,89 @@ class CliTest(unittest.TestCase):
         self.assertTrue(os.path.exists(newest["output"]))
         self.assertTrue(dashboard.state()["version"])
 
+    def test_dashboard_suggestions_in_needs_you(self):
+        import shutil
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node isn't installed")
+        js = open(os.path.join(os.path.dirname(CLI), "dashboard_ui", "app.js")).read()
+        helpers = js[js.index("const esc="):js.index("const verdict=")]
+        inbox = js[js.index("function groupOf"):js.index("// CENTER")]
+        probe = """(async()=>{
+        const el={},$=id=>el[id]||(el[id]={textContent:"",innerHTML:"",value:""});
+        const timers=[],setTimeout=(f,ms)=>(timers.push({f,ms}),timers.length),clearTimeout=()=>{};
+        const calls=[],sent=[],done=new Set();let fail=null,phone=false;
+        const window={matchMedia:()=>({matches:phone})};
+        const ui={filter:"all",q:"",open:{},sg:{},sgConfirm:null,sel:"main"};
+        const threadKey=x=>x,matches=()=>true,S={threads:[]},select=()=>{},sendChat=t=>sent.push(t);
+        const sg=(id,card,meta)=>({id,kind:"archive",card,reason:"r",meta});
+        const build=()=>{const left=l=>l.filter(x=>!done.has(x.id));
+          return {cards:[{id:"opt-p1",kind:"optimize",column:"Waiting on you",project:"p1",optimize:{
+            suggestions:left([sg("archive:a","a","used in 0 of 6 runs"),sg("archive:b","b","used in 0 of 4 runs")]),
+            drafts:left([{id:"draft-x",kind:"preset",name:"n1",title:"Preset s:n1",summary:"from 2 runs"}])}},
+            {id:"n1",kind:"note",column:"Waiting on you",title:"Decide",text:"d",note:1}]}};
+        let lastBoard=build();
+        const load=async()=>{lastBoard=build();drawInbox(new Set())};
+        const post=async(path,body)=>{calls.push(body);if(fail)return {ok:false,error:fail};
+          const ids=body.ids?body.ids.split(","):[];
+          if(body.do==="optimize-unreject")ids.forEach(i=>done.delete(i));
+          else if(body.do==="optimize-apply-all")["archive:a","archive:b",...ids].forEach(i=>done.add(i));
+          else ids.forEach(i=>done.add(i));
+          return {ok:true}};
+        """ + helpers + inbox + """
+        const out={},html=()=>$("inbox").innerHTML,head=()=>$("n-inbox").textContent;
+        drawInbox(new Set());
+        out.start=[head(),String($("m-inbox").textContent),html().includes("3 from optimize"),html().includes("Archive card a"),
+          html().includes("used in 0 of 6 runs"),html().includes("Accept draft preset n1"),html().includes("Apply all 3"),
+          html().includes("Ask the orchestrator"),$("ifilters").innerHTML.includes("Suggestions 3")];
+        out.after_decisions=html().indexOf("Decide")<html().indexOf("Archive card a");
+        let pr=sugRun("p1","archive:a","apply");  // the row leaves at once and the count drops
+        out.hidden=[html().includes("Archive card a"),head()];
+        await pr;
+        fail="boom";pr=sugRun("p1","archive:b","apply");await pr;  // a failure brings it back with the error
+        out.failed=[html().includes("Archive card b"),html().includes("boom"),head()];
+        fail=null;
+        pr=sugRun("p1","archive:b","reject");  // Rejected, Undo for 10 s, then it leaves
+        out.rejected=[html().includes("Rejected ·"),html().includes("Undo"),head(),timers[timers.length-1].ms];
+        await pr;
+        await sugRun("p1","archive:b","undo");
+        out.undone=[calls[calls.length-1].do,html().includes("Archive card b"),html().includes("Rejected ·"),head()];
+        await sugRun("p1","archive:b","reject");timers[timers.length-1].f();
+        out.left=[html().includes("Archive card b"),head()];
+        fail="nope";await sugRun("p1","draft-x","reject");
+        out.reject_failed=[html().includes("nope"),html().includes("Rejected ·"),head()];
+        fail=null;
+        await sugApplyAll("p1");
+        out.all=[calls[calls.length-1],head(),html().includes("Suggestions")];
+        done.clear();ui.sg={};lastBoard=build();
+        phone=true;drawInbox(new Set());
+        out.phone=[html().includes("3 suggestions"),html().includes("Apply all"),html().includes('aria-expanded="false"')];
+        ui.open["sug|p1"]=true;drawInbox(new Set());out.phone_open=html().includes("Apply all 3");
+        done.add("draft-x");lastBoard=build();drawInbox(new Set());ui.open["sug|p1"]=false;drawInbox(new Set());out.kind=html().includes("2 archive suggestions");
+        phone=false;ui.sgConfirm="p1";drawInbox(new Set());out.confirm=[html().includes('data-act="opt-all-yes"'),html().includes("Apply all 2")];
+        sugAsk("p1");out.ask=[sent.length,sent[0].includes("AskUserQuestion"),sent[0].includes("Archive card a"),sent[0].includes("Archive card b")];
+        ui.filter="suggestions";ui.sgConfirm=null;drawInbox(new Set());out.filter=[html().includes("Archive card a"),html().includes("Decide")];
+        console.log(JSON.stringify(out));})().catch(e=>{console.error(e);process.exit(1)})"""
+        p = subprocess.run([node, "-e", probe], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        out = json.loads(p.stdout)
+        self.assertEqual(out["start"], ["4 to answer · 4 items", "4", True, True, True, True, True, True, True])
+        self.assertTrue(out["after_decisions"])
+        self.assertEqual(out["hidden"], [False, "3 to answer · 3 items"])
+        self.assertEqual(out["failed"], [True, True, "3 to answer · 3 items"])
+        self.assertEqual(out["rejected"], [True, True, "2 to answer · 2 items", 10000])
+        self.assertEqual(out["undone"], ["optimize-unreject", True, False, "3 to answer · 3 items"])
+        self.assertEqual(out["left"], [False, "2 to answer · 2 items"])
+        self.assertEqual(out["reject_failed"], [True, False, "2 to answer · 2 items"])
+        self.assertEqual(out["all"][0], {"do": "optimize-apply-all", "project": "p1", "ids": "draft-x"})
+        self.assertEqual(out["all"][1:], ["1 to answer · 1 item", False])
+        self.assertEqual(out["phone"], [True, False, True])
+        self.assertTrue(out["phone_open"])
+        self.assertTrue(out["kind"])
+        self.assertEqual(out["confirm"], [True, True])
+        self.assertEqual(out["ask"], [1, True, True, True])
+        self.assertEqual(out["filter"], [True, False])
+
     def test_sync_notice_hidden_when_version_is_current(self):
         import shutil
         node = shutil.which("node")
@@ -672,11 +755,18 @@ class CliTest(unittest.TestCase):
         self.assertEqual((e[0]["column"], e[0]["title"], e[0]["project"]),
                          ("Waiting on you", f"Optimize: 5 suggestions for {slug}", slug))
         self.assertEqual({x["id"] for x in e[0]["optimize"]["suggestions"]}, set(sug()))
-        self.assertTrue(all(x["reason"] for x in e[0]["optimize"]["suggestions"]))
+        self.assertTrue(all(x["reason"] and x["meta"] for x in e[0]["optimize"]["suggestions"]))
         self.assertEqual(next(o for o in dashboard.state()["optimize"] if o["project"] == slug)["left"], 5)
         # reject one, apply another: handled suggestions disappear
         code, body, _ = dashboard.run_action({"do": "optimize-reject", "project": slug, "ids": "archive:testing"})
         self.assertEqual(code, 200, body)
+        self.assertNotIn("archive:testing", sug())
+        code, body, _ = dashboard.run_action({"do": "optimize-unreject", "project": slug, "ids": "archive:testing"})  # Undo
+        self.assertEqual(code, 200, body)
+        self.assertIn("unrejected archive:testing", json.loads(body)["output"])
+        self.assertIn("archive:testing", sug())
+        self.assertEqual(dashboard.run_action({"do": "optimize-unreject", "project": slug})[0], 400)
+        dashboard.run_action({"do": "optimize-reject", "project": slug, "ids": "archive:testing"})
         self.assertNotIn("archive:testing", sug())
         code, body, _ = dashboard.run_action({"do": "optimize-apply", "project": slug, "ids": "archive:style"})
         self.assertEqual(code, 200, body)
@@ -1124,7 +1214,7 @@ class CliTest(unittest.TestCase):
                if l.startswith(("new card", "preset    "))]
         res = json.loads(self.cli("optimize", "proj", "--json", **env).stdout)
         self.assertEqual(sorted(d["id"] for d in res["drafts"]), sorted(ids))
-        self.assertEqual(sorted(res["drafts"][0]), ["id", "kind", "summary", "title"])
+        self.assertEqual(sorted(res["drafts"][0]), ["id", "kind", "name", "summary", "title"])
         dashboard = self._dashboard()
         os.environ.update(env)
         self.addCleanup(lambda: [os.environ.pop(k, None) for k in env])
@@ -1134,8 +1224,10 @@ class CliTest(unittest.TestCase):
         self.assertIn("saved preset plugin:obs:mcp:dashboards", json.loads(body)["output"])
         left = json.loads(self.cli("optimize", "proj", "--json", **env).stdout)
         self.assertEqual([d["kind"] for d in left["drafts"]], ["card"])  # the accepted one is gone
-        out = self.cli("optimize", "proj", "--accept", ",".join(i for i in ids if i != preset_id), **env).stdout
-        self.assertIn("saved card recipe-widget-value-now-vs-same", out)
+        code, body, _ = dashboard.run_action({"do": "optimize-apply-all", "project": res["project"],  # Apply all takes the drafts along
+                                              "ids": ",".join(i for i in ids if i != preset_id)})
+        self.assertEqual(code, 200, body)
+        self.assertIn("saved card recipe-widget-value-now-vs-same", json.loads(body)["output"])
         self.assertNotIn("Drafts from what workers did", self.cli("optimize", "proj", **env).stdout)
         self.assertIn("plugin:obs:mcp:dashboards", self.cli("mcp", "preset", "obs", **env).stdout)
         out = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--mcp", "obs:read", "another widget check",

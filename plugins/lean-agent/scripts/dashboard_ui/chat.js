@@ -81,6 +81,8 @@ function drawChat(){
     if(atEnd)box.scrollTop=box.scrollHeight;
   }
   const waiting=evs.some(e=>e.kind==="permission"&&e.state==="pending");
+  const np=evs.filter(e=>e.kind==="permission"&&e.state==="pending").length;  // the phone's Chat tab shows it while another tab is open
+  $("m-chat").textContent=np||"";$("m-chat").title=np?`${np} waiting for you in Chat`:"";
   $("cstat").textContent=waiting?"waits for you":chat.status==="working"?"working…":chat.alive?"ready":"idle";
   $("cstat").className="chip "+(waiting?"tone-warn":chat.status==="working"?"tone-run":"tone-mute");
   drawWorking();drawClear();
