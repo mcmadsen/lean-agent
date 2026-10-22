@@ -4816,8 +4816,14 @@ def cmd_optimize(a):
     slug, _ = resolve_project(a.project)
     sync_memory(slug)
     with library_lock(slug):
-        _cmd_optimize(a)
-        _draft_proposals(a, slug)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf) if a.json else contextlib.nullcontext():  # --json prints only the result
+            _cmd_optimize(a)
+            _draft_proposals(a, slug)
+        result = optimize_result(a, slug)
+        save_json(home("optimize", f"{slug}.json"), result)  # the dashboard's "Needs you" entry reads this
+    if a.json:
+        print(json.dumps(result))
 
 
 TOOL_VERBS = {"get", "list", "search", "read", "query", "fetch", "find", "view", "show", "describe", "count",
@@ -5000,7 +5006,8 @@ def _draft_proposals(a, slug):
     drafts = [d for d in draft_proposals(slug) if state.get(d["id"]) not in ("accepted", "rejected")]
     for rid in (a.reject or "").split(","):
         if rid:
-            known_ids = {d["id"] for d in draft_proposals(slug)}
+            known_ids = {d["id"] for d in draft_proposals(slug)} | {_action_id(act, c, t) for act, c, _, t in
+                                                                  _card_actions(slug, load_cards(slug), a, set())[0]}
             state[rid] = "rejected"
             print(f"rejected {rid}: won't be proposed again" if rid in known_ids else
                   f"rejected {rid} (no open draft has that id now; it won't be proposed if it comes up)")
@@ -5035,11 +5042,15 @@ def _draft_proposals(a, slug):
           f"To change a card's text first, accept it, then `lean-agent card add {slug} <card> --file <file>`.")
 
 
-def _cmd_optimize(a):
-    slug, _ = resolve_project(a.project)
-    cards = load_cards(slug)
+def _action_id(act, c, t):
+    return f"{act}:{c['id']}" + (f":{t}" if t else "")
+
+
+def _card_actions(slug, cards, a, skip):
+    """Card changes the numbers support: [(kind, card, reason, type)], and the protected ones held back.
+    Ones rejected before (in drafts.json) are left out."""
+    rejected = {k for k, v in load_json(home("library", slug, "drafts.json"), {}).items() if v == "rejected"}
     actions = []
-    skip = {x for x in (a.skip or "").split(",") if x}
     for c in cards:
         if c.get("archived") or c["id"] in skip:
             continue
@@ -5062,8 +5073,30 @@ def _cmd_optimize(a):
             if rate >= 0.5 and c["tokens"] > 600 and not recently:
                 actions.append(("trim", c, f"~{c['tokens']} tok and often used: `lean-agent card shorten {slug} "
                                 f"{c['id']}` proposes a shorter text and checks nothing important is lost", None))
+    actions = [x for x in actions if _action_id(x[0], x[1], x[3]) not in rejected]
     held = [x for x in actions if x[1].get("protected") and x[0] in ("archive", "uncore", "trim")]
     actions = [x for x in actions if x not in held]
+    return actions, held
+
+
+def optimize_result(a, slug):
+    """What is left to decide, as one JSON-able dict (also what the dashboard shows)."""
+    actions, _ = _card_actions(slug, load_cards(slug), a, set())
+    state = load_json(home("library", slug, "drafts.json"), {})
+    drafts = [d for d in draft_proposals(slug) if state.get(d["id"]) not in ("accepted", "rejected")]
+    return {"project": slug, "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+            "suggestions": [{"id": _action_id(act, c, t), "kind": act, "card": c["id"], "reason": why}
+                            for act, c, why, t in actions],
+            "drafts": [{"id": d["id"], "kind": d["kind"], "title": d["title"] if d["kind"] == "card" else
+                        f"Preset {d['server']}:{d['name']}",
+                        "summary": d["why"]} for d in drafts]}
+
+
+def _cmd_optimize(a):
+    slug, _ = resolve_project(a.project)
+    cards = load_cards(slug)
+    skip = {x for x in (a.skip or "").split(",") if x}
+    actions, held = _card_actions(slug, cards, a, skip)
     if held:
         print("(protected cards are not listed: " + ", ".join(f"{act} {c['id']}" for act, c, _, _ in held) + ")")
     if skip and not a.apply:
@@ -5075,6 +5108,11 @@ def _cmd_optimize(a):
     for act, c, why, _ in actions:
         print(f"{act:<8}{c['id']:<34}{why}")
     if a.apply:
+        wanted = None if a.apply == "all" else {x for x in a.apply.split(",") if x}
+        if wanted is not None:
+            for x in sorted(wanted - {_action_id(act, c, t) for act, c, _, t in actions}):
+                print(f"no open suggestion {x} (see: lean-agent optimize {slug})")
+            actions = [x for x in actions if _action_id(x[0], x[1], x[3]) in wanted]
         for act, c, _, t in actions:
             if act == "core":
                 c["core_types"] = sorted(set(c.get("core_types") or []) | {t})
@@ -7762,11 +7800,13 @@ def build_parser():
     s.set_defaults(fn=cmd_stats)
     s = sub.add_parser("optimize", help="tune a project's cards from worker feedback")
     s.add_argument("project")
-    s.add_argument("--apply", action="store_true")
+    s.add_argument("--apply", nargs="?", const="all", metavar="IDS",
+                   help="apply the card suggestions: all of them, or only these ids (see --json)")
+    s.add_argument("--json", action="store_true", help="print what is left to decide as JSON (suggestions with ids, drafts)")
     s.add_argument("--min-runs", type=int, default=5, help="runs of a task type before a card can become core for it")
     s.add_argument("--notes", type=int, default=10)
     s.add_argument("--accept", metavar="IDS", help="write these drafts (cards with card add, presets with mcp preset)")
-    s.add_argument("--reject", metavar="IDS", help="stop proposing these drafts")
+    s.add_argument("--reject", metavar="IDS", help="stop proposing these drafts or card suggestions")
     s.add_argument("--ack", metavar="RUN_IDS", help="hide these runs' context gaps (already handled)")
     s.add_argument("--skip", metavar="CARD_IDS", help="leave these cards out of the suggestions and --apply")
     s.set_defaults(fn=cmd_optimize)
