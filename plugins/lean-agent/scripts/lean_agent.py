@@ -1300,6 +1300,9 @@ def cmd_run(a):
             if wt.get("moved"):
                 print(f"worktree: HEAD moved from {wt['moved'][0][:10]} to {wt['moved'][1][:10]} ({wt['ref']}'s tip)",
                       flush=True)
+            if not a.read_only:
+                task += ("\n\n(You work in a lean-agent worktree. If the task has several items, commit each one when "
+                         "it's done, before the next, so a turn limit never leaves all of the work uncommitted.)")
         lib = {c["id"]: c for c in load_cards(slug)}
         wanted = [x for x in (a.cards or "").split(",") if x and x != "none"]
         if getattr(a, "card_list", None) is not None:  # chosen by the caller (e.g. `review`)
@@ -1525,6 +1528,11 @@ def cmd_run(a):
     subtype = out.get("subtype") or "error"
     if subtype.startswith("error_max"):
         status = "stopped:" + subtype[len("error_"):]
+        dirty = (git(project, "status", "--porcelain") or "").splitlines() if wt_name or (prev or {}).get("worktree") else []
+        if dirty:
+            print(f"lean-agent: run {run_id} stopped at its limit ({subtype[len('error_max_'):]}) with {len(dirty)} "
+                  f"uncommitted file(s) in {project}: resume it to commit what's done and go on "
+                  f"(lean-agent run --resume {run_id} \"commit what is finished, then continue\")", file=sys.stderr)
     elif out.get("is_error") or not out:
         status = "error"
     else:
@@ -3087,13 +3095,27 @@ def cmd_review(a):
         print(f"lean-agent: budget is low, but the reviewer stays on {model} (effort {effort}): quality gate.",
               file=sys.stderr)
     if a.resume:
-        def matches(r):
+        bare = lambda ref: re.sub(r"^(refs/heads/|refs/remotes/)?(origin/)?", "", str(ref or ""))
+        want = git(path, "rev-parse", "--verify", "--quiet", a.head + "^{commit}") if a.head else None
+        base = default_base(path)
+
+        def matches(r, loose=False):
             m = r.get("review_meta") or {}
-            if a.head:
-                return m.get("mode") == "ref" and m.get("ref") == a.head
-            return True
-        prev = next((r for r in reversed(ledger()) if r.get("role") == "reviewer" and r["project"] == slug
-                     and matches(r)), None)
+            if not a.head:
+                return True
+            if m.get("mode") != "ref":
+                return False
+            if bare(m.get("ref")) == bare(a.head):
+                return True  # the same branch, with or without its remote
+            if not loose or not want or not m.get("head"):
+                return False
+            # a commit on the same line of work: the reviewed tip is an ancestor of it and isn't merged yet
+            return (git(path, "merge-base", "--is-ancestor", m["head"], want) is not None
+                    and not (base and git(path, "merge-base", "--is-ancestor", m["head"], base) is not None))
+        reviews_ = [r for r in reversed(ledger()) if r.get("role") == "reviewer" and r["project"] == slug]
+        prev = next((r for r in reviews_ if matches(r)), None) or next((r for r in reviews_ if matches(r, True)), None)
+        if prev and a.head and bare((prev.get("review_meta") or {}).get("ref")) != bare(a.head):
+            prev = dict(prev, review_meta=dict(prev.get("review_meta") or {}, ref=a.head))  # review what was named
         if not prev:
             die(f"no earlier review of {a.head or slug} to resume"
                 + (f"; start one: lean-agent review {slug} --head {a.head}" if a.head else ""))
@@ -5265,6 +5287,17 @@ def cmd_logs(a):
 
 
 def cmd_runs(a):
+    if getattr(a, "dismiss", None):
+        known = {r.get("id") for r in ledger()}
+        d = load_json(home("dismissed.json"), {})
+        for rid in a.dismiss:
+            if rid not in known:
+                die(f"no run {rid} (lean-agent runs)")
+            d[f"run:{rid}"] = {"sig": "", "ts": now_iso()}
+            d[f"q-{rid}"] = {"sig": "", "ts": now_iso()}
+        save_json(home("dismissed.json"), d)
+        print(f"dismissed {', '.join(a.dismiss)}: its question no longer waits on the dashboard")
+        return 0
     runs = ledger()
     if a.project:
         slug, _ = resolve_project(a.project)
@@ -5628,7 +5661,12 @@ def cmd_up(a):
         if a.budget_week is not None:
             cur["week"] = a.budget_week
         save_json(usage.limits_path(), cur)
+    up_info = load_json(home("up.json"), {})  # the dashboard's own conversation gets the same settings
+    up_info["chat_env"] = {k: env[k] for k in list(ORCHESTRATOR_ENV) + ["LEAN_AGENT_BUDGET", "LEAN_AGENT_BUDGET_SET"]
+                           if k in env}
+    save_json(home("up.json"), up_info)
     env = push_guard.git_env(env)  # the orchestrator's own git commands are guarded too
+    link = None
     if os.environ.get("LEAN_AGENT_DASHBOARD") != "0":
         import dashboard
         link = dashboard.start_background() if not a.local else None
@@ -5638,6 +5676,8 @@ def cmd_up(a):
             link = dashboard.url()
         print(f"lean-agent: dashboard {link or dashboard.url()}" + ("" if link else " (already running)")
               + " (open it in a browser tab, e.g. Claude Desktop's built-in browser)", flush=True)
+    if getattr(a, "dashboard_only", False):
+        return dashboard_only(link)
     bindir = os.path.join(PLUGIN_ROOT, "bin")
     env["PATH"] = bindir + os.pathsep + env.get("PATH", "")  # `lean-agent` works even without the plugin
     cmd = [os.environ.get("LEAN_AGENT_CLAUDE") or "claude"]
@@ -5918,6 +5958,31 @@ def drop_bridge_pointers(h):
         else:
             os.remove(path)
             print(f"lean-agent: removed {path}; starting a new Remote Control session", flush=True)
+
+
+def dashboard_only(link):
+    """`lean-agent up --dashboard-only`: no Remote Control session; the dashboard (with its own conversation with
+    the orchestrator) and the schedule timer run until stopped."""
+    import signal
+    import threading
+    if not link:
+        die("the dashboard didn't start (its port is taken: is another `lean-agent up` running?)")
+    print("lean-agent: dashboard only: talk to the orchestrator in the dashboard's chat; Ctrl-C (or the service) "
+          "stops it", flush=True)
+    threading.Thread(target=schedule_timer, daemon=True).start()
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    try:
+        while not stop.wait(3600):
+            pass
+    except KeyboardInterrupt:
+        pass
+    try:
+        import dash_chat
+        dash_chat.chat().stop()
+    except Exception:
+        pass
+    return 0
 
 
 def schedule_timer(every=300):
@@ -6711,6 +6776,11 @@ def _fe(fn, a):
 def cmd_map(a):
     def run(fe, slug, path, a):
         root = fe.work_dir(slug, path, a.dir)
+        if a.exclude is not None or a.no_exclude:
+            ex = [] if a.no_exclude else sorted(set(fe.excludes_for(slug)) | set(a.exclude or []))
+            save_json(home("maps", slug, "excludes.json"), ex)
+            print(f"excluded from map, count and slices: {', '.join(ex) or 'nothing'} (and whatever .gitignore "
+                  "excludes)", file=sys.stderr)
         data = fe.load_map(slug, root, refresh=a.refresh, log=lambda m: print(m, file=sys.stderr))
         if a.json:
             print(json.dumps(data if not a.who_uses else fe.users_of(data), indent=1, default=sorted))
@@ -6781,6 +6851,30 @@ def epic_status(data, name):
     ready = [t for t in open_ if all(status.get(x) == "done" for x in t.get("after") or [])]
     blocked = [t for t in open_ if t not in ready]
     return items, done, ready, blocked
+
+
+def doc_dirs():
+    """Where `lean-agent doc write` may write: document folders, temp, lean-agent's docs, LEAN_AGENT_DOC_DIRS."""
+    import tempfile
+    dirs = [os.path.expanduser(d) for d in ("~/Downloads", "~/Documents", "~/Desktop")]
+    dirs += [tempfile.gettempdir(), "/tmp", home("docs")]
+    dirs += [os.path.expanduser(d) for d in (os.environ.get("LEAN_AGENT_DOC_DIRS") or "").split(os.pathsep) if d]
+    return [os.path.realpath(d) for d in dirs]
+
+
+def cmd_doc(a):
+    """Write a document (stdin) to a document folder: the orchestrator has no Write tool, and this needs none."""
+    target = os.path.realpath(os.path.expanduser(a.path))
+    allowed = doc_dirs()
+    if not any(target == d or target.startswith(d + os.sep) for d in allowed):
+        die(f"doc write only writes under {', '.join(allowed)} (add folders with LEAN_AGENT_DOC_DIRS)")
+    text = a.text if a.text is not None else sys.stdin.read()
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "a" if a.append else "w") as fh:
+        fh.write(text if text.endswith("\n") or not text else text + "\n")
+    print(f"{'appended' if a.append else 'wrote'} {text.count(chr(10)) + (0 if text.endswith(chr(10)) else 1)} lines "
+          f"({len(text.encode())} bytes) to {target}")
+    return 0
 
 
 def cmd_schedule(a):
@@ -6966,7 +7060,7 @@ def cmd_service(a):
     if a.action == "install":
         os.makedirs(os.path.dirname(path), exist_ok=True)
         os.makedirs(os.path.dirname(log), exist_ok=True)
-        args = [bin_, "up", "--name", a.name]
+        args = [bin_, "up", "--name", a.name] + (["--dashboard-only"] if getattr(a, "dashboard_only", False) else [])
         env = {"PATH": os.environ.get("PATH", ""), "HOME": os.path.expanduser("~"), "LEAN_AGENT_NO_PROMPT": "1"}
         if os.environ.get("LEAN_AGENT_HOME"):
             env["LEAN_AGENT_HOME"] = os.environ["LEAN_AGENT_HOME"]
@@ -7232,6 +7326,8 @@ def build_parser():
     s.add_argument("--local", action="store_true", help="interactive terminal session instead of Remote Control")
     s.add_argument("--fresh", action="store_true",
                    help="don't resume the previous Remote Control session (done for you when it answers 404)")
+    s.add_argument("--dashboard-only", action="store_true", help="no Remote Control: the dashboard (with its chat "
+                   "with the orchestrator) and scheduled jobs only")
     s.add_argument("extra", nargs=argparse.REMAINDER,
                    help="after --: extra flags for claude / claude remote-control, e.g. -- --debug")
     s.set_defaults(fn=cmd_up)
@@ -7553,6 +7649,8 @@ def build_parser():
     s.add_argument("--project", "-p")
     s.add_argument("--last", action="store_true", help="print only the id of the latest run")
     s.add_argument("--running", action="store_true", help="runs in progress right now")
+    s.add_argument("--dismiss", nargs="+", metavar="RUN_ID", help="the dashboard stops showing these runs' questions "
+                   "(a failed or outdated run that needs nothing from you)")
     s.add_argument("--tokens", action="store_true", help="print the latest (or --show) run's run/tokens/context lines again")
     s.add_argument("--show", nargs="?", const="last", metavar="RUN_ID",
                    help="print a run's whole summary again (default: the latest run)")
@@ -7585,6 +7683,14 @@ def build_parser():
                    "(lean-agent count) on the epic's board card")
     s.set_defaults(fn=cmd_todo)
 
+    s = sub.add_parser("doc", help="write a document (from stdin) to Downloads, Documents, Desktop, temp or "
+                       "~/.lean-agent/docs: doc write PATH [--append]")
+    s.add_argument("action", choices=["write"])
+    s.add_argument("path")
+    s.add_argument("--append", action="store_true")
+    s.add_argument("--text", help="the content (default: stdin)")
+    s.set_defaults(fn=cmd_doc)
+
     s = sub.add_parser("map", help="the code's import graph (no model): who uses what, deps, routes, unused files")
     s.add_argument("project")
     s.add_argument("--who-uses", metavar="X", help="a file, folder, file name or exported name")
@@ -7594,6 +7700,9 @@ def build_parser():
     s.add_argument("--find", metavar="NAME", help="where a name is exported")
     s.add_argument("--dir", help="map this checkout (a worktree) instead of the project")
     s.add_argument("--refresh", action="store_true", help="rebuild now (it rebuilds by itself when files change)")
+    s.add_argument("--exclude", action="append", metavar="GLOB", help="leave these paths out of map, count and slices "
+                   "from now on, e.g. \"builds*/\" (kept; .gitignore is always honoured in a git checkout)")
+    s.add_argument("--no-exclude", action="store_true", help="forget the saved --exclude list")
     s.add_argument("--max", type=int)
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_map)
@@ -7676,6 +7785,8 @@ def build_parser():
     s.add_argument("action", choices=["install", "status", "start", "restart", "stop", "logs", "uninstall"])
     s.add_argument("--yes", action="store_true", help="restart/stop even while workers are running")
     s.add_argument("--name", default="lean-agent", help="install: the session name in the Claude app")
+    s.add_argument("--dashboard-only", action="store_true", help="install: run `up --dashboard-only` (no Remote "
+                   "Control; you talk to lean-agent in the dashboard)")
     s.add_argument("-n", type=int, default=40, help="logs: last N lines")
     s.set_defaults(fn=cmd_service)
 

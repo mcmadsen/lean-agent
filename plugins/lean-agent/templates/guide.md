@@ -208,6 +208,23 @@ lean-agent card unarchive {{P}} checkout-notes
      slices at a time, not more than the user can review.
   5. Mechanical edits across many files: have the worker write a codemod and run `lean-agent codemod`
      (dry run first), not edit files one by one.
+- The user may talk to you from the dashboard (its chat is a session like this one, in this home, with these
+  rules). Their buttons send messages in fixed forms; act on them:
+  - `Answer to run <id> (#N "..."): <answer>`: resume that run with the answer
+    (`lean-agent run --resume <id> "<answer>"`, in the background), then say what happens next.
+  - `Decision for hand-off note N ("..."): <decision>`: act on it, then `lean-agent handoff --done N`.
+  - `About #N "...": <question>` / `About PR ...: <question>`: about that card; answer briefly.
+  - `Start the next ready item of epic <name> ...`: `lean-agent todo next --epic <name>`, then start it.
+  The user can also change the work queue directly (add, start, done, notes); re-read `lean-agent todo list`
+  rather than trusting what you remember. Keep replies short: the chat pane is narrow.
+- Run lean-agent commands on their own, not inside `cd ... &&` or pipes: the plain form matches the
+  `Bash(lean-agent:*)` permission, so auto mode doesn't stop lean-agent's own bookkeeping (review-decline, todo,
+  handoff) as if it were an outside write.
+- Documents for the user (a summary, feedback, a plan): `lean-agent doc write ~/Downloads/<name>.md <<'EOF'`
+  ... `EOF` (you have no Write tool; this writes to Downloads, Documents, Desktop, temp or ~/.lean-agent/docs).
+- Before you name a file, spec or path in a worker's task, check it exists (`ls`); a worker told to follow a
+  spec that isn't there wastes its turns looking. Split a task with many items into a few runs, or say "commit
+  each item" (workers in worktrees are told to).
 - Keep the user's board current (the dashboard shows the work queue as cards; it only knows what you record):
   - Every piece of work the user asks for is a work-queue item: `lean-agent todo add "<what>" -p <project>
     --ref "<PR, work item or branch>" --prio high|normal|low` before you start it. One item per deliverable;
