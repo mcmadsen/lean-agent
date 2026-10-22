@@ -239,9 +239,40 @@ class SessionHookTest(Base):
         self.run_injected(chain)
         self.no_record()
 
+    def test_the_service_pid_on_the_8th_hop_is_accepted(self):
+        me = os.getpid()
+        chain = {me: 901}
+        for p in range(901, 907):
+            chain[p] = p + 1
+        chain[907] = 500  # 8th ancestor
+        self.run_injected(chain)
+        self.assertEqual(self.record()["session_id"], "s1")
+
+    def test_a_service_pid_that_is_not_claude_like_is_accepted(self):
+        me = os.getpid()
+        self.run_injected({me: 900, 900: 500, 500: 1}, claudes=set())
+        self.assertEqual(self.record()["session_id"], "s1")
+
+    def test_a_nested_claude_before_the_service_pid_is_rejected(self):
+        me = os.getpid()
+        self.run_injected({me: 700, 700: 600, 600: 500, 500: 1}, claudes={700})
+        self.no_record()
+
+    def test_is_claude_matches_the_node_cli_by_path_segment(self):
+        import session_hook
+        self.assertTrue(session_hook.is_claude(["node", "/x/node_modules/@anthropic-ai/claude-code/cli.js"]))
+        self.assertTrue(session_hook.is_claude(["node", "/x/claude-code/cli.js", "--flag"]))
+        self.assertFalse(session_hook.is_claude(["node", "/home/claude-code-notes/server.js"]))
+        self.assertFalse(session_hook.is_claude(["node", "/x/claude-code/other.js"]))
+        self.assertFalse(session_hook.is_claude(["node", "/x/not-claude-code/cli.js"]))
+        pid = os.getpid()
+        real = session_hook.argv_of(pid)
+        self.assertIsInstance(real, list)
+        self.assertTrue(real)
+
     def test_ignores_a_session_that_is_not_the_service_claude(self):
         me = os.getpid()
-        self.run_injected({me: 900, 900: 800, 800: 700, 700: 600, 600: 500, 500: 1}, claudes=set())  # no claude ancestor
+        self.run_injected({me: 900, 900: 800, 800: 700, 700: 600, 600: 550, 550: 1}, claudes=set())  # the service pid is not an ancestor
         self.run_injected({me: 900, 900: 800, 800: 1})  # another claude's tree
         self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")))
 

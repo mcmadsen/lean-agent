@@ -151,7 +151,11 @@ class Model:
         except ValueError:
             started = 0
         ts = rec.get("ts")
-        if not isinstance(ts, (int, float)) or isinstance(ts, bool) or not math.isfinite(ts) or ts < started:  # corrupt, or left by a previous run
+        try:
+            stale = not isinstance(ts, (int, float)) or isinstance(ts, bool) or not math.isfinite(ts) or ts < started
+        except (OverflowError, TypeError, ValueError):
+            stale = True
+        if stale:  # corrupt, or left by a previous run
             return base
         path = rec.get("transcript_path")
         if rec.get("session_id") and rec.get("session_id") != up.get("session_id") and path and os.path.isfile(path):

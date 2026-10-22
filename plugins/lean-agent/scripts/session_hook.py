@@ -3,7 +3,7 @@
 
 Records which transcript the session writes now (chat/service.json), for every source (startup, resume, clear,
 compact): /clear starts a new transcript with a new id, and this is how the dashboard learns of it. Only when the
-hook runs under the service claude (its pid in up.json is the hook's nearest claude ancestor). Prints nothing and never
+hook runs under the service claude (its pid in up.json is an ancestor, with no other claude nearer). Prints nothing and never
 fails the session.
 """
 import json
@@ -48,13 +48,19 @@ def is_claude(argv):
         return False
     if os.path.basename(argv[0]) == "claude":
         return True
-    return len(argv) > 1 and (os.path.basename(argv[1]) == "claude" or "claude-code" in argv[1])
+    if len(argv) < 2:
+        return False
+    if os.path.basename(argv[1]) == "claude":
+        return True
+    parts = argv[1].replace("\\", "/").split("/")
+    return parts[-1] == "cli.js" and "claude-code" in parts[:-1]
 
 
 def owned(home, ppid=parent_pid, cmd=argv_of, wait=3.0):
-    """True when the NEAREST ancestor of this process (up to 8 hops) whose command is claude is the service claude pid
-    in up.json; a claude started from the service claude's Bash tool is nearer, so it does not count. `up` writes the
-    pid just after the spawn, so a hook that is faster than that waits briefly for it."""
+    """True when the service claude pid in up.json is among the first 8 ancestors of this process, whatever its command
+    (a custom name or a wrapper still works), with no other claude nearer: a claude started from the service claude's
+    Bash tool does not count. `up` writes the pid just after the spawn, so a hook that is faster than that waits
+    briefly for it."""
     deadline = time.time() + wait
     while True:
         try:
@@ -72,8 +78,10 @@ def owned(home, ppid=parent_pid, cmd=argv_of, wait=3.0):
         cur = ppid(cur)
         if cur <= 1:
             return False
+        if cur == pid:
+            return True
         if is_claude(cmd(cur)):
-            return cur == pid
+            return False
     return False
 
 
