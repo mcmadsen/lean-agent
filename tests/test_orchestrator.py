@@ -2230,6 +2230,11 @@ class CliTest(unittest.TestCase):
             call("/api/action", {"do": "note-add", "text": "Pick a key layout", "kind": "decision"})
             notes = json.load(open(os.path.join(self.env["LEAN_AGENT_HOME"], "handoff-notes.json")))
             self.assertEqual((notes[0]["text"], notes[0]["kind"]), ("Pick a key layout", "decision"))
+            self.assertTrue(call("/api/action", {"do": "note-edit", "n": 1, "text": "Pick the key layout now"})[1]["ok"])
+            notes = json.load(open(os.path.join(self.env["LEAN_AGENT_HOME"], "handoff-notes.json")))
+            self.assertEqual((notes[0]["text"], notes[0]["kind"]), ("Pick the key layout now", "decision"))
+            self.assertEqual(call("/api/action", {"do": "note-edit", "n": 7, "text": "x"})[0], 400)
+            self.assertFalse(json.loads(urllib.request.urlopen(f"{base}/api/state?t={token}", timeout=5).read())["service"]["up"])
             self.assertTrue(call("/api/action", {"do": "note-done", "n": 1})[1]["ok"])
 
             def wait_t(thread, pred, what):
@@ -2295,6 +2300,28 @@ class CliTest(unittest.TestCase):
         finally:
             p.terminate()
             p.wait(timeout=10)
+
+    def test_inbox_groups_runs_blocked_by_the_same_cause(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        try:
+            import dashboard
+            self.assertEqual(dashboard.cause_key("Authorization failed for project acme (run 1234)"),
+                             dashboard.cause_key("authorization failed for project Acme (run 98)"))
+            self.assertNotEqual(dashboard.cause_key("Authorization failed"), dashboard.cause_key("Which layout?"))
+            now = datetime.datetime.now()
+            ts = now.isoformat(timespec="seconds")
+            ledger = [{"id": "r1", "status": "needs-input", "ts": ts, "todo": 4, "result_head": "Authorization failed (id 11)"},
+                      {"id": "r2", "status": "needs-input", "ts": ts, "result_head": "Authorization failed (id 22)"},
+                      {"id": "r3", "status": "needs-input", "ts": ts, "result_head": "Which layout do you want?"}]
+            todo = [{"id": 4, "text": "Fix the export", "status": "doing"}]
+            cards = {c["id"]: c for c in dashboard.board(todo, ledger, [], [], now)["cards"]}
+            self.assertEqual(cards[4]["cause"], cards["q-r2"]["cause"])
+            self.assertNotEqual(cards[4]["cause"], cards["q-r3"]["cause"])
+            self.assertEqual((cards[4]["todo"], cards["q-r2"]["todo"]), (4, None))
+        finally:
+            os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.update(LEAN_AGENT_HOME=old)
 
     def test_dashboard_picks_up_new_code_without_restart(self):
         import shutil
@@ -2464,6 +2491,19 @@ class CliTest(unittest.TestCase):
         # the main thread shows everything, the tagged turns with their tag; another task thread shows nothing
         texts = [e["text"] for e in main.snapshot()["events"] if e["kind"] == "user"]
         self.assertEqual(texts, ["hello there", tagged, 'About #12 "Fix x": and now?'])
+        # what the dashboard sent is not "from the app"; a turn typed in the session is; task events carry `about`
+        users = [e for e in main.snapshot()["events"] if e["kind"] == "user"]
+        self.assertEqual([e["from_app"] for e in users], [False, False, False])
+        self.assertEqual([e.get("about") for e in users], [None, "12", "12"])
+        self.assertEqual(t12.snapshot()["events"][1]["about"], "12")
+        with open(ss.info()["transcript"], "a") as fh:
+            fh.write(json.dumps({"type": "user", "timestamp": "2026-01-01T10:00:00Z",
+                                 "message": {"role": "user", "content": "typed in the app"}}) + "\n")
+        self.wait_for(lambda: any(e.get("text") == "typed in the app" for e in main.snapshot()["events"]), "the app turn")
+        app = [e for e in main.snapshot()["events"] if e.get("text") == "typed in the app"][0]
+        self.assertTrue(app["from_app"])
+        st = main.snapshot()["service_status"]
+        self.assertEqual((st["up"], st["remote_control"]), (True, False))
         self.assertEqual(dash_chat.chat("13").snapshot()["events"], [])
         self.assertNotIn("hello there", json.dumps(t12.snapshot()["events"]))
         # incremental: only what changed since the cursor
@@ -2527,6 +2567,10 @@ class CliTest(unittest.TestCase):
                 "permission_suggestions": [{"type": "addRules", "rules": [{"toolName": "Bash"}]}]}
         ev, out = ask(bash, allow=True)
         self.assertEqual((ev["name"], ev["text"], ev["can_always"]), ("Bash", "make deploy", True))
+        self.assertEqual(ev["always_rule"], ["Bash"])
+        self.assertGreater(ev["expires_at"], time.time())
+        settled = [e for e in main.snapshot()["events"] if e.get("rid") == ev["rid"]]
+        self.assertEqual((settled[0]["state"], settled[0]["where"]), ("allowed", "dashboard"))
         self.assertEqual(out, {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}})
         _, out = ask(bash, allow=True, always=True)
         self.assertEqual(out["decision"]["updatedPermissions"], bash["permission_suggestions"])
@@ -2550,7 +2594,15 @@ class CliTest(unittest.TestCase):
         self.wait_for(lambda: any(e["kind"] == "permission" and e["state"] == "pending" for e in main.snapshot()["events"]), "it")
         self.assertEqual(proc.stdout.read(), "")
         proc.wait(timeout=10)
-        self.wait_for(lambda: any(e.get("state") == "expired" for e in main.snapshot()["events"]), "the expired prompt")
+        self.wait_for(lambda: any(e.get("state") == "in_app" for e in main.snapshot()["events"]), "the prompt moved to the app")
+        moved = [e for e in main.snapshot()["events"] if e.get("state") == "in_app"][-1]
+        self.assertEqual(moved["where"], "app")
+        # the tool then runs without the dashboard having answered: it was allowed in the app
+        with open(ss.info()["transcript"], "a") as fh:
+            fh.write(json.dumps({"type": "assistant", "timestamp": "2026-01-01T10:00:00Z", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "tu-app", "name": "Bash", "input": {"command": "make deploy"}}]}}) + "\n")
+        self.wait_for(lambda: any(e.get("state") == "allowed" and e.get("where") == "app" for e in main.snapshot()["events"]),
+                      "the prompt answered in the app")
         # no output when it isn't the service session, another session, or no dashboard is looking
         for kw, ev_ in ((dict(LEAN_AGENT_SERVICE_SESSION="0"), bash), ({}, dict(bash, session_id="someone-else"))):
             proc, data = run(ev_, **kw)

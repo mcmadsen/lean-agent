@@ -23,6 +23,7 @@ def decide(event, wait):
     ds.write_json(req_path, {"tool_name": event.get("tool_name"), "tool_input": event.get("tool_input"),
                              "permission_suggestions": event.get("permission_suggestions"),
                              "session_id": event.get("session_id"), "pid": os.getpid(), "ts": time.time(), "wait": wait})
+    moved = False
     try:
         end = time.time() + wait
         while time.time() < end:
@@ -30,10 +31,14 @@ def decide(event, wait):
                 with open(ans_path) as fh:
                     return json.load(fh)
             if not ds.dashboard_fresh(ds.FRESH_SECS * 3):  # the tab went away: let the app ask
+                moved = True
                 return None
             time.sleep(0.25)
+        moved = True  # nobody answered in time: the app asks now
         return None
     finally:
+        if moved:  # tells the dashboard the prompt moved to the app (it deletes this marker)
+            ds.write_json(os.path.join(d, rid + ".moved.json"), {"ts": time.time()})
         for p in (req_path, ans_path):
             try:
                 os.remove(p)

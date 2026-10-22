@@ -82,6 +82,21 @@ def _alive(pid):
         return False
 
 
+def _service_status():
+    sys.path.insert(0, HERE)
+    import dash_chat
+    return dash_chat.service_status()
+
+
+def cause_key(text):
+    """A run's reason with the parts that differ per run (ids, numbers, paths, quoted names) left out, so runs
+    blocked by the same thing (an authorization error, say) compare equal."""
+    t = " ".join(str(text or "").split()).lower()[:400]
+    t = re.sub(r"https?://\S+|(?:[a-z]:)?[\\/][\w.\-/\\]+|\b[0-9a-f]{7,}\b|\d+", " ", t)
+    t = re.sub(r"[`'\"]", "", t)
+    return " ".join(re.sub(r"[^a-z ]", " ", t).split())[:90]
+
+
 def orchestrator_context():
     """The latest orchestrator conversation: context now, the compaction point, calls."""
     cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
@@ -461,6 +476,14 @@ def board(todo, ledger, running, reviews, now=None, prs=None, notes=(), epics=No
                   key=lambda c: (c["kind"] != "pr", order.get(c["kind"], 0), prio.get(c["prio"], 1), c["due"] or "9999",
                                  str(c["id"]).zfill(8)))
     cards = rest + done
+    for c in cards:  # run questions blocked by the same thing share a cause (the inbox groups them)
+        lr = c.get("last_run")
+        if c["column"] == "Waiting on you" and lr and c["kind"] in ("run", "item") and lr.get("status") in WAITING:
+            head = c["text"] if c["kind"] == "run" else (latest.get(lr["id"]) or {}).get("result_head") or ""
+            line = next((l.strip() for l in str(head).splitlines() if l.strip()), "")
+            c["cause"] = cause_key(line)
+            c["cause_label"] = line[:110]
+            c["todo"] = c["id"] if c["kind"] == "item" else (latest.get(lr["id"]) or {}).get("todo")
     gone = _json(home("dismissed.json"), {})
     cards = [c for c in cards if not (str(c["id"]) in gone and gone[str(c["id"])].get("sig") in ("", c["sig"]))
              and not any(f"run:{r}" in gone for r in ([c["last_run"]["id"]] if c.get("last_run") and c["column"] ==
@@ -581,6 +604,7 @@ def state():
         "reviews": [r for r in latest_reviews if not r["branch"]][:12],
         "pushes": sorted(pushes.values(), key=lambda g: g["ts"] or "", reverse=True)[:10],
         "context": orchestrator_context(),
+        "service": _service_status(),
         "notes": _json(home("handoff-notes.json"), []),
     }
 
@@ -760,6 +784,15 @@ def run_action(body):
                                                           ("decision", "reminder", "fyi") else [])
         elif do == "note-done":
             args = ["handoff", "--done", num("n")]
+        elif do == "note-edit":  # the CLI has no edit: rewrite the note's text in place
+            notes = _json(home("handoff-notes.json"), [])
+            n = int(body.get("n"))
+            if not text("text") or not 1 <= n <= len(notes) or not isinstance(notes[n - 1], dict):
+                return _j(400, {"ok": False, "error": "no such note, or no text"})
+            notes[n - 1]["text"] = text("text")
+            with open(home("handoff-notes.json"), "w") as fh:
+                json.dump(notes, fh)
+            return _j(200, {"ok": True, "output": f"note {n} updated"})
         elif do == "dismiss":  # "Mark handled": hidden until the card changes
             d = _json(home("dismissed.json"), {})
             d[str(body.get("id"))[:200]] = {"sig": str(body.get("sig") or ""), "ts": datetime.datetime.now().isoformat(timespec="seconds")}

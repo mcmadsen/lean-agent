@@ -108,6 +108,16 @@ def tool_summary(name, inp):
     return " ".join(json.dumps(inp)[:200].split())
 
 
+def suggestion_rules(suggestions):
+    """What "Always allow" will allow, as rules like `Bash(git status:*)` (empty when the suggestion has no rule)."""
+    out = []
+    for s in suggestions or []:
+        for r in (s.get("rules") or []) if isinstance(s, dict) else []:
+            if isinstance(r, dict) and r.get("toolName"):
+                out.append(r["toolName"] + (f"({r['ruleContent']})" if r.get("ruleContent") else ""))
+    return out[:5]
+
+
 def questions_of(inp):
     out = []
     for q in (inp or {}).get("questions") or []:
@@ -281,7 +291,7 @@ class Model:
         self.turn = max(self.turns) + 1
         self.turns[self.turn] = {"thread": key, "open": True, "ts": _epoch(rec.get("timestamp"))}
         self._add(kind="user", text=(sent or {}).get("shown") or text, raw=(sent or {}).get("raw"), thread=key,
-                  ts=self._ts(rec), at=self.turns[self.turn]["ts"])
+                  from_app=sent is None, ts=self._ts(rec), at=self.turns[self.turn]["ts"])
         self.last_kind = "user"
 
     def _record(self, rec):
@@ -317,6 +327,7 @@ class Model:
                     self._add(kind="assistant", text=b["text"], ts=self._ts(rec))
                     self.last_kind = "text"
                 elif b.get("type") == "tool_use":
+                    self._ran_in_app(b.get("name"), tool_summary(b.get("name"), b.get("input")), self._ts(rec))
                     self.tools[b.get("id")] = self._add(kind="tool", name=b.get("name"), state="running", ts=self._ts(rec),
                                                         text=tool_summary(b.get("name"), b.get("input")))
                     self.last_kind = "tool"
@@ -328,10 +339,17 @@ class Model:
             self._add(kind="note", text="the conversation was compacted", ts=self._ts(rec))
 
     # --- permission requests from the hook
+    def _ran_in_app(self, name, text, ts):
+        """A prompt the dashboard didn't answer in time moved to the app; when its tool runs, it was allowed there."""
+        for e in self.perms.values():
+            if e["state"] == "in_app" and e["name"] == name and e["text"] == text:
+                self._update(e, state="allowed", where="app", answered_at=ts)
+                return
+
     def _scan_perms(self):
         d = perm_dir()
         for n in _listdir(d):
-            if not n.endswith(".json") or n.endswith(".answer.json"):
+            if not n.endswith(".json") or n.endswith((".answer.json", ".moved.json")):
                 continue
             rid = n[:-5]
             req = _load(os.path.join(d, n))
@@ -342,13 +360,22 @@ class Model:
             self.perms[rid] = self._add(
                 kind="permission", rid=rid, name=req.get("tool_name"), state="pending",
                 text=tool_summary(req.get("tool_name"), req.get("tool_input")), can_always=bool(req.get("permission_suggestions")),
+                always_rule=suggestion_rules(req.get("permission_suggestions")),
+                expires_at=float(req.get("ts") or time.time()) + float(req.get("wait") or 300),
                 description=None, questions=questions_of(req.get("tool_input")) if req.get("tool_name") == "AskUserQuestion" else None)
             self.perms[rid]["_req"] = req
         for rid, e in self.perms.items():
             if e["state"] == "pending":
                 req = e["_req"]
                 gone = not os.path.exists(os.path.join(d, rid + ".json"))
-                if gone or not pid_alive(req.get("pid")) or time.time() - req.get("ts", 0) > req.get("wait", 300) + 30:
+                moved = os.path.join(d, rid + ".moved.json")
+                if os.path.exists(moved):  # the hook gave up waiting: Claude Code asks in the app now
+                    self._update(e, state="in_app", where="app")
+                    try:
+                        os.remove(moved)
+                    except OSError:
+                        pass
+                elif gone or not pid_alive(req.get("pid")) or time.time() - req.get("ts", 0) > req.get("wait", 300) + 30:
                     self._update(e, state="expired")
 
     def answer(self, rid, allow, always=False, message=None, answers=None):
@@ -358,7 +385,8 @@ class Model:
         write_json(os.path.join(perm_dir(), rid + ".answer.json"),
                    {"allow": bool(allow), "always": bool(always), "message": message, "answers": answers or None})
         self._update(e, state=("answered" if answers else "always" if always else "allowed") if allow else "denied",
-                     answers=answers or None)
+                     answers=answers or None, where="dashboard",
+                     answered_at=datetime.datetime.now().isoformat(timespec="seconds"))
         return {"ok": True}
 
     # --- views
@@ -376,12 +404,15 @@ class Model:
         for e in evs:
             if max(e["i"], e.get("changed", 0)) > since:
                 c = {k: v for k, v in e.items() if k not in ("_req", "turn", "at", "raw")}
+                about = self.turns.get(e["turn"], {}).get("thread")
+                if about:
+                    c["about"] = about
                 if key != "main" and e["kind"] == "user" and e.get("raw"):
                     c["text"] = e["raw"]
                 out.append(c)
         cursor = max([max(e["i"], e.get("changed", 0)) for e in evs] or [0])
         return {"status": self.status(key), "session": self.sid, "events": out, "cursor": cursor, "alive": True,
-                "service": True}
+                "service": True, "now": time.time()}
 
     def waiting(self, key):
         return any(e["kind"] == "permission" and e["state"] == "pending" for e in self._mine(key))
