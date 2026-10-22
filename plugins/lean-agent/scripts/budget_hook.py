@@ -29,6 +29,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import usage  # noqa: E402
 import push_guard  # noqa: E402
+import lean_common  # noqa: E402
 import lean_schedule  # noqa: E402
 
 
@@ -41,8 +42,7 @@ def compaction_point():
         return 0
     if not window or not (0 < pct <= 100):
         return 0
-    effective = window - 4000  # Claude Code keeps room for the reply
-    return int(min(effective * pct / 100, effective - 13000))
+    return lean_common.compaction_point(window, pct)
 
 
 def emit(**fields):
@@ -289,7 +289,7 @@ def main():
                "tells the summary what to keep), or run `lean-agent handoff` and go on in a fresh session.")
         if not os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"):
             msg += (" This session was started without lean-agent's early compaction (an older `lean-agent up`): "
-                    "restart it once with `lean-agent up` to compact at ~70K automatically.")
+                    "restart it once with `lean-agent up` to compact at ~67K automatically.")
         emit(additionalContext=msg)
         return 0
 

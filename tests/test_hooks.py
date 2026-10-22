@@ -318,7 +318,7 @@ class BudgetTest(Base):
                    CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="70")
         out = run_hook("budget_hook.py", dict(self.ev, cwd=home), **env)
         note = out["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("Claude Code compacts at ~67,200", note)
+        self.assertIn("Claude Code compacts at ~67,000", note)
         self.assertIn("lean-agent context --no-probe", note)
         self.assertIn("lean-agent handoff --note", note)
         self.assertIsNone(run_hook("budget_hook.py", dict(self.ev, cwd=home), **env))  # once
