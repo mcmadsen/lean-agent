@@ -453,6 +453,20 @@ bug with a concrete failing input, missing tests (citing the project's memory ab
 risk (citing another memory). After a worker fixed them, the re-review confirmed the fixes and caught a new problem:
 the worker had committed `__pycache__/*.pyc`. Each review cost about $0.06 and 30 s.
 
+### The fix loop: one full review, then deltas
+
+Reviews follow the branch, not the commit. Once a branch has a review, `lean-agent review <project> --head
+<branch>` (or a commit on it) reviews only what changed since, plus whether the earlier findings are fixed: a fresh
+reviewer with a small context, on sonnet (`LEAN_AGENT_DELTA_REVIEW_MODEL`) unless the change since is high-risk, then
+on the earlier model. A commit counts as the same branch when it builds on the reviewed one, when the branch's reflog
+had the reviewed commit (an amend or rebase), or when it's on that branch; `--resume` uses the same lookup. Above
+`LEAN_AGENT_DELTA_MAX_LINES` (800) changed lines it's a full review again, unless `--delta-only`; `--full-review`
+always reviews the whole change. What the user declined (`review decline ... --head <branch or commit>`) is kept
+for the branch, so it isn't asked again on later commits, until the code it points at changes (then the reviewer
+is told it was declined but may raise it again). `review --status` on a newer commit says how much changed since the
+last review and gives the command for a delta review. `--for-push` is the gate before a push: it refuses while
+fix workers still run on the branch, and says to batch fixes into one worker and review once after it.
+
 ## A lean orchestrator
 
 The orchestrator's own fixed context is paid on every turn, so lean-agent writes `~/.lean-agent/home/.claude/settings.json`
