@@ -28,7 +28,7 @@ function closeView(){$("view").style.display="none"}
 
 // state
 let S=null,lastBoard=null;
-const ui={sel:store.get("la-thread","main"),tab:store.get("la-tab","board"),filter:"all",q:"",more:{},open:{},offline:0,lastOk:null,now:"",bannerHtml:null};
+const ui={sel:store.get("la-thread","main"),tab:store.get("la-tab","board"),filter:"all",q:"",more:{},open:{},sg:{},sgConfirm:null,offline:0,lastOk:null,now:"",bannerHtml:null};
 ui.task=ui.sel!=="main"?ui.sel:null;  // the task the thread was last filtered to: the About / Whole session toggle moves between it and main
 function aboutLabel(key){const c=cardsBy().get(String(key));
   if(c)return c.kind==="item"?"#"+c.id:c.kind==="run"?"run "+(c.runs||[])[0]:c.kind==="note"?"note "+c.note:c.title.slice(0,30);
@@ -53,20 +53,94 @@ const matches=c=>{const f=$("bfilter").value;if(f&&c.project&&c.project!==f)retu
 // LEFT: needs you
 function groupOf(c){
   if(c.kind==="run"||(c.kind==="item"&&c.last_run&&/needs|await/.test(c.last_run.status)))return "runs";
-  if(c.kind==="note"||c.kind==="optimize"||/gap/.test(c.why||""))return "decisions";
+  if(c.kind==="note"||/gap/.test(c.why||""))return "decisions";
   return "prs";
 }
 function rowMeta(c){
   if(c.kind==="run")return `${(c.runs||[])[0]||""} · ${ago((c.last_run||{}).ts)}`;
   if(c.kind==="note")return `note ${c.note} · ${ago(c.done_at)} ago`;
-  if(c.kind==="optimize")return `optimize · ${ago(c.done_at)} ago`;
   if(c.kind==="item"&&c.last_run)return `#${c.id} · ${c.last_run.id} · ${ago(c.last_run.ts)}`;
   return c.why||c.ref||c.project||"";
+}
+// optimize suggestions: one entry each at the bottom of Needs you. ui.sg keeps what you just did to one:
+// gone (hidden at once), rej (rejected, with Undo for 10 s) or err (it failed, so the row is back with the error)
+// <suggestions>
+const SUG_TITLE={archive:"Archive card",core:"Make core card",uncore:"Take out of core card",trim:"Shorten card"};
+function sugItems(c){
+  const o=c.optimize||{},it=(x,r)=>Object.assign({key:c.project+"|"+x.id,project:c.project,id:x.id},r);
+  return (o.suggestions||[]).map(x=>it(x,{kind:x.kind,title:`${SUG_TITLE[x.kind]||x.kind} ${x.card}`,meta:x.meta||x.reason||"",act:x.kind==="trim"?"":"apply"}))
+    .concat((o.drafts||[]).map(d=>it(d,{kind:"draft",title:`Accept draft ${d.kind==="card"?"card":"preset"} ${d.name||d.title}`,meta:d.summary||"",act:"accept"})));
+}
+function sugGroups(optCards,sg,match){  // per project: the rows to draw, and the ones still open (not hidden, not rejected)
+  const by=new Map(),all=[].concat(...optCards.map(sugItems)),have=new Set(all.map(x=>x.key));
+  for(const k of Object.keys(sg))if(sg[k].st==="rej"&&sg[k].item&&!have.has(k))all.push(sg[k].item);  // the server has dropped a rejected one: it stays until Undo runs out
+  for(const x of all)if(match(x)&&(sg[x.key]||{}).st!=="gone"){if(!by.has(x.project))by.set(x.project,[]);by.get(x.project).push(x)}
+  return [...by].map(([project,rows])=>({project,rows,open:rows.filter(x=>(sg[x.key]||{}).st!=="rej")}));
+}
+// </suggestions>
+const isPhone=()=>window.matchMedia("(max-width:900px)").matches;
+function sugRowHtml(x){
+  const s=ui.sg[x.key]||{},ids=`data-slug="${esc(x.project)}" data-id="${esc(x.id)}"`;
+  const err=s.err?`<div class="serr" role="alert">${esc(s.err)}</div>`:"";
+  if(s.st==="rej")return `<div class="srow rejd"><span class="t">${esc(x.title)}</span><span class="m">Rejected · <button type="button" class="undo" data-act="opt-undo" ${ids}>Undo</button></span>${err}</div>`;
+  return `<div class="srow"><span class="t">${esc(x.title)}</span><span class="m">${esc(x.meta)}</span><div class="acts">`
+    +(x.act?`<button type="button" class="btn sm primary" data-act="opt-${x.act}" ${ids}>${x.act==="accept"?"Accept":"Apply"}</button>`:"")
+    +`<button type="button" class="btn sm" data-act="opt-reject" ${ids}>Reject</button></div>${err}</div>`;
+}
+function sugGroupHtml(g,many){
+  const n=g.open.length,slug=esc(g.project),phone=isPhone(),key="sug|"+g.project,open=!phone||!!ui.open[key];
+  const kinds=[...new Set(g.open.map(x=>x.kind))],word=kinds.length===1?kinds[0]+" ":"";
+  const m=g.open.filter(x=>x.act).length;
+  let h=`<div class="grp"><span>Suggestions</span><span>${n} from optimize${many?" · "+slug:""}</span></div>`;
+  if(phone)h+=`<button type="button" class="row grow" aria-expanded="${open}" data-act="sug-toggle" data-key="${esc(key)}"><span class="t">${n} ${word}suggestion${n===1?"":"s"}</span><span class="m"><span>Apply or reject each, or apply all</span></span>`
+    +`<svg class="chev${open?" open":""}" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button>`;
+  if(!open)return h;
+  h+=`<div class="sugs${phone?" kids":""}" role="group" aria-label="Optimize suggestions for ${slug}">`+g.rows.map(sugRowHtml).join("");
+  if(ui.sgConfirm===g.project)h+=`<div class="clearbox" role="alert"><span>Apply all ${m} for ${slug}? Card changes are made now; archived cards can be restored with <code>card unarchive</code>.</span><span class="acts"><button type="button" class="btn sm primary" data-act="opt-all-yes" data-slug="${slug}">Apply all ${m}</button><button type="button" class="btn sm" data-act="opt-all-no" data-slug="${slug}">Cancel</button></span></div>`;
+  else if(n)h+=`<div class="acts sact">${m?`<button type="button" class="btn sm primary" data-act="opt-all-ask" data-slug="${slug}">Apply all ${m}</button>`:""}<button type="button" class="btn sm" data-act="opt-ask" data-slug="${slug}">Ask the orchestrator</button></div>`;
+  return h+"</div>";
+}
+const sugCard=slug=>((lastBoard&&lastBoard.cards)||[]).find(c=>c.kind==="optimize"&&c.project===slug);
+const sugLive=slug=>{const c=sugCard(slug);return c?sugItems(c).filter(x=>!["gone","rej"].includes((ui.sg[x.key]||{}).st)):[]};
+function sugRej(key,err){  // rejected: shown with Undo for 10 s, then the row leaves
+  const old=ui.sg[key]||{},item=old.item||sugItems(sugCard(key.split("|")[0])||{}).find(x=>x.key===key);
+  clearTimeout(old.timer);
+  ui.sg[key]={st:"rej",err,item,timer:setTimeout(()=>{if((ui.sg[key]||{}).st==="rej"){ui.sg[key]={st:"gone"};drawInbox(new Set())}},10000)};
+}
+async function sugRun(slug,id,what){  // what: apply, accept, reject or undo
+  const key=slug+"|"+id;clearTimeout((ui.sg[key]||{}).timer);
+  if(what==="reject")sugRej(key);else if(what!=="undo")ui.sg[key]={st:"gone"};
+  drawInbox(new Set());
+  const r=await post("/api/action",{do:what==="undo"?"optimize-unreject":"optimize-"+what,project:slug,ids:id}).catch(e=>({ok:false,error:String(e)}));
+  if(!r.ok){const err=r.output||r.error||"didn't work";if(what==="undo")sugRej(key,err);else{clearTimeout(ui.sg[key].timer);ui.sg[key]={st:"err",err}}drawInbox(new Set());return}
+  if(what==="undo"){delete ui.sg[key];return load()}
+  await load();if(what!=="reject"){delete ui.sg[key];drawInbox(new Set())}
+}
+async function sugApplyAll(slug){
+  const items=sugLive(slug).filter(x=>x.act);if(!items.length)return;
+  for(const x of items)ui.sg[x.key]={st:"gone"};
+  drawInbox(new Set());
+  const r=await post("/api/action",{do:"optimize-apply-all",project:slug,ids:items.filter(x=>x.act==="accept").map(x=>x.id).join(",")}).catch(e=>({ok:false,error:String(e)}));
+  if(!r.ok){const err=r.output||r.error||"didn't work";for(const x of items)ui.sg[x.key]={st:"err",err};drawInbox(new Set());return}
+  await load();for(const x of items)delete ui.sg[x.key];drawInbox(new Set());
+}
+function sugAsk(slug){
+  const items=sugLive(slug);if(!items.length)return;
+  select("main");
+  sendChat(`Optimize suggests ${items.length} change${items.length===1?"":"s"} for project ${slug}:\n`+items.map((x,i)=>`${i+1}. ${x.title} (${x.meta}) [${x.id}]`).join("\n")
+    +`\nAsk me which of these to apply, using AskUserQuestion. Then run lean-agent optimize ${slug} --apply <ids> for the card changes and --accept <ids> for the drafts, and --reject <ids> for the ones I turn down.`);
+}
+function sugPrune(cards){  // hidden rows the server no longer lists are done
+  const live=new Set(cards.filter(c=>c.kind==="optimize").flatMap(c=>sugItems(c).map(x=>x.key)));
+  for(const k of Object.keys(ui.sg))if(ui.sg[k].st==="gone"&&!live.has(k))delete ui.sg[k];
 }
 function sameItem(list){const t=list.map(c=>c.todo);return t[0]!=null&&t.every(x=>String(x)===String(t[0]))?t[0]:null}
 function drawInbox(changed){
   const thr=new Map(((S&&S.threads)||[]).map(t=>[t.key,t]));
-  const wait=((lastBoard&&lastBoard.cards)||[]).filter(c=>c.column==="Waiting on you"&&matches(c));
+  const cards=(lastBoard&&lastBoard.cards)||[],pf=$("bfilter").value;
+  const wait=cards.filter(c=>c.column==="Waiting on you"&&c.kind!=="optimize"&&matches(c));
+  const sgs=sugGroups(cards.filter(c=>c.kind==="optimize"&&c.column==="Waiting on you"&&(!pf||c.project===pf)),ui.sg,
+    x=>(!pf||x.project===pf)&&(!ui.q||[x.title,x.meta,x.project].join(" ").toLowerCase().includes(ui.q)));
   const groups={runs:[],decisions:[],prs:[]};for(const c of wait)groups[groupOf(c)].push(c);
   // runs blocked by the same cause (the same authorization error, say) are one thing to answer
   const byCause=new Map();for(const c of groups.runs)if(c.cause){if(!byCause.has(c.cause))byCause.set(c.cause,[]);byCause.get(c.cause).push(c)}
@@ -76,11 +150,11 @@ function drawInbox(changed){
   const rows={runs:runRows,decisions:groups.decisions.map(card=>({card})),prs:groups.prs.map(card=>({card}))};
   const shown=new Set(wait.map(c=>threadKey(c.id)));
   const other=[...thr.values()].filter(t=>t.key!=="main"&&!shown.has(t.key)&&t.last&&(!ui.q||(t.title||"").toLowerCase().includes(ui.q)));
-  const n={runs:rows.runs.length,decisions:rows.decisions.length,prs:rows.prs.length};n.all=n.runs+n.decisions+n.prs;
-  if(!["all","runs","decisions","prs"].includes(ui.filter))ui.filter="all";
-  $("ifilters").innerHTML=[["all","All"],["runs","Runs"],["decisions","Decisions"],["prs","PRs"]]
+  const n={runs:rows.runs.length,decisions:rows.decisions.length,prs:rows.prs.length,suggestions:sgs.reduce((a,g)=>a+g.open.length,0)};n.all=n.runs+n.decisions+n.prs+n.suggestions;
+  if(!["all","runs","decisions","prs","suggestions"].includes(ui.filter))ui.filter="all";
+  $("ifilters").innerHTML=[["all","All"],["runs","Runs"],["decisions","Decisions"],["prs","PRs"],["suggestions","Suggestions"]]
     .map(([f,l])=>`<button type="button" class="pill${ui.filter===f?" on":""}" data-act="ifilter" data-f="${f}" aria-pressed="${ui.filter===f}">${l} ${n[f]}</button>`).join("");
-  $("n-inbox").textContent=`${n.all} to answer · ${wait.length} item${wait.length===1?"":"s"}`;$("m-inbox").textContent=n.all||"";
+  $("n-inbox").textContent=`${n.all} to answer · ${wait.length+n.suggestions} item${wait.length+n.suggestions===1?"":"s"}`;$("m-inbox").textContent=n.all||"";
   const dot=(c,t)=>t&&t.waiting?"dot-warn":t&&t.status==="working"?"dot-run":c.kind==="pr"&&/ready/.test(c.why||"")?"dot-ok":c.kind==="note"?"dot-run":/merged|approved/.test(c.why||"")?"dot-ok":"dot-warn";
   const row=(id,title,meta,d,ch,cls)=>`<button type="button" class="row${threadKey(id)===ui.sel?" sel":""}${ch?" changed":""}${cls?" "+cls:""}" data-act="select" data-card="${esc(id)}"><span class="t">${esc(title)}</span><span class="m"><span class="dot ${d}" aria-hidden="true"></span><span>${esc(meta)}</span></span></button>`;
   const crow=(c,cls)=>row(c.id,c.title,rowMeta(c),dot(c,thr.get(threadKey(c.id))),changed.has(String(c.id)),cls);
@@ -94,10 +168,11 @@ function drawInbox(changed){
   const sec=(key,label)=>{const list=rows[key];if(!list.length||(ui.filter!=="all"&&ui.filter!==key))return"";
     return `<div class="grp"><span>${label}</span><span>${list.length}</span></div>`+list.map(r=>r.group?grow(r):crow(r.card)).join("")};
   h+=sec("runs","Run questions")+sec("decisions","Decisions")+sec("prs","PRs and reviews");
+  if(ui.filter==="all"||ui.filter==="suggestions")h+=sgs.map(g=>sugGroupHtml(g,sgs.length>1)).join("");
   if(other.length&&ui.filter==="all")h+=`<div class="grp"><span>Other threads</span><span>${other.length}</span></div>`
     +other.map(t=>row(t.key,t.title,`${t.status==="working"?"working · ":""}${ago(t.last.ts)}`,t.waiting?"dot-warn":t.status==="working"?"dot-run":"dot-mute",false)).join("");
-  if(!n.all&&ui.filter==="all")h+=ui.q?`<div class="empty">Nothing matches your search.</div>`:`<div class="empty2"><b>Nothing needs you</b><span>Run questions, decisions and PR comments that wait for your reply show up here.</span></div>`;
-  else if(!n[ui.filter])h+=`<div class="empty">Nothing in this filter.</div>`;
+  if(!n.all&&ui.filter==="all"&&!sgs.length)h+=ui.q?`<div class="empty">Nothing matches your search.</div>`:`<div class="empty2"><b>Nothing needs you</b><span>Run questions, decisions and PR comments that wait for your reply show up here.</span></div>`;
+  else if(!n[ui.filter]&&!(ui.filter==="suggestions"&&sgs.length))h+=`<div class="empty">Nothing in this filter.</div>`;
   $("inbox").innerHTML=h;
 }
 
@@ -106,7 +181,7 @@ function selected(){const c=cardsBy().get(String(ui.sel));if(c)return c;
   if(ui.sel==="main")return null;const t=((S&&S.threads)||[]).find(t=>t.key===ui.sel);return t?{id:ui.sel,title:t.title,kind:"thread"}:null}
 function contextText(c){
   if(!c)return "";
-  const bits=[c.kind==="item"?`work item #${c.id} "${c.text}"`:c.kind==="run"?`a run that asks: "${c.text}"`:c.kind==="note"?`hand-off note ${c.note}: "${c.text}"`:c.kind==="optimize"?`optimize suggestions for ${c.project}`:`${c.title}`];
+  const bits=[c.kind==="item"?`work item #${c.id} "${c.text}"`:c.kind==="run"?`a run that asks: "${c.text}"`:c.kind==="note"?`hand-off note ${c.note}: "${c.text}"`:`${c.title}`];
   if(c.project)bits.push(`project ${c.project}`);if(c.ref)bits.push(`ref ${c.ref}`);
   if((c.runs||[]).length)bits.push(`runs ${c.runs.join(", ")}`);if(c.why)bits.push(`status: ${c.why}`);
   if(c.pr&&c.pr.number)bits.push(`PR ${c.pr.number}`);if(c.link)bits.push(c.link);
@@ -132,15 +207,6 @@ function drawHeader(){
   const x=(act,label,aria)=>`<span class="cpill"><span>${label}</span><button type="button" class="x" data-act="${act}" aria-label="${esc(aria)}">×</button></span>`;
   $("ctxpills").innerHTML=(task?x("unscope","About "+esc(aboutLabel(ui.sel)),"Remove context: About "+aboutLabel(ui.sel)):"")+(proj?x("clear-project",esc(proj),"Remove project: "+proj):"");
 }
-function optimizeCard(c){
-  const o=c.optimize||{},sg=o.suggestions||[],dr=o.drafts||[];
-  const btn=(act,label,id,primary)=>`<button type="button" class="btn sm${primary?" primary":""}" data-act="${act}" data-slug="${esc(c.project)}"${id?` data-id="${esc(id)}"`:""}>${label}</button>`;
-  const item=(title,why,btns)=>`<div class="optitem"><div><b>${esc(title)}</b></div><div class="mute small">${esc(why)}</div><div class="acts">${btns}</div></div>`;
-  const rows=sg.map(x=>item(`${x.kind} ${x.card}`,x.reason,(x.kind==="trim"?"":btn("opt-apply","Apply",x.id,true))+btn("opt-reject","Reject",x.id)))
-    .concat(dr.map(d=>item(`${d.kind==="card"?"New card":"Preset"}: ${d.title}`,d.summary,btn("opt-accept","Accept",d.id,true)+btn("opt-reject","Reject",d.id))));
-  return `<section class="qcard" aria-label="Optimize suggestions for ${esc(c.project)}"><div class="hd"><span class="chip tone-run">optimize</span><span class="chip tone-mute">${esc(c.project)}${c.done_at?" · "+ago(c.done_at)+" ago":""}</span></div><p>${esc(c.title)}</p>`
-    +rows.join("")+`<div class="acts">${sg.some(x=>x.kind!=="trim")?btn("opt-apply-all","Apply all"):""}${btn("opt-ask","Ask the orchestrator")}</div></section>`;
-}
 function contextCard(){
   const c=selected();if(!c||c.kind==="thread")return "";
   if(c.kind==="note"){
@@ -149,7 +215,6 @@ function contextCard(){
       +`<label class="sr" for="dec-${c.note}">Your ${dec?"decision":"reply"} for note ${c.note}</label><textarea class="dec" id="dec-${c.note}" rows="2" data-draft="${c.note}" placeholder="${dec?"Your decision":"Your reply"}">${esc(chat.drafts[c.note]||"")}</textarea>`
       +`<div class="acts"><button type="button" class="btn sm primary" data-act="note-decide">${dec?"Send decision":"Send reply"}</button><button type="button" class="btn sm" data-act="note-edit" data-card="${esc(c.id)}">Edit note</button><button type="button" class="btn sm" data-act="close-note" data-card="${esc(c.id)}">Close note</button></div><div class="mono mute small">Sends this as a message to the orchestrator</div></section>`;
   }
-  if(c.kind==="optimize")return optimizeCard(c);
   const chip=c.kind==="run"?["run asks","tone-warn"]:c.kind==="pr"?["pull request","tone-run"]:c.kind==="review"?["review","tone-run"]:c.kind==="epic"?["epic","tone-ok"]:[c.column||"item",tone(c.column==="Done"?"done":c.column==="Waiting on you"?"needs":"open")];
   const lr=c.last_run;
   const meta=[c.kind==="item"?"#"+c.id:"",lr?`${lr.status} · ${when(lr.ts)}`:"",c.ref||"",c.project||""].filter(Boolean).join(" · ");
@@ -166,7 +231,7 @@ function cardButtons(c,full){
   if(c.kind==="note")a.push(b("close-note","Close note"));
   if(full&&c.kind==="item")a.push(b("edit","Edit"));
   if(c.kind==="epic")a.push(b("epic-next","Start next",true));
-  if(c.kind==="run"||c.kind==="pr"||c.kind==="review"||(c.column==="Waiting on you"&&c.kind!=="optimize"))a.push(b("dismiss","Mark handled"));
+  if(c.kind==="run"||c.kind==="pr"||c.kind==="review"||c.column==="Waiting on you")a.push(b("dismiss","Mark handled"));
   return a.join("");
 }
 function cardActs(c){  // a board card's buttons, plus Stop run while a worker runs on it
@@ -188,7 +253,7 @@ function drawBoard(b,changed){
   let h="";
   for(const [label,pick,style] of groups){
     const list=cards.filter(pick);if(!list.length)continue;
-    const lim=ui.more[label]?999:style==="card"?6:4;
+    const lim=ui.more[label]?999:style==="card"?6:isPhone()?2:4;
     h+=`<div class="grp"><span>${label}</span><span>${list.length}</span></div>`;
     for(const c of list.slice(0,lim)){
       const ch=changed.has(String(c.id));
@@ -207,9 +272,13 @@ function drawBoard(b,changed){
   const nb=cards.filter(c=>c.column!=="Done").length||"";$("n-board").textContent=nb;$("m-board").textContent=nb;
 }
 function drawRuns(s){
-  $("runs").innerHTML=s.runs.map(r=>`<div class="runrow" data-run="${esc(r.id)}"><div class="top"><span>${esc(r.id)}</span><span class="mute">${r.cost!=null?"$"+r.cost.toFixed(2):k(r.units)}</span></div>
+  const list=isPhone()&&!ui.more.runs?s.runs.slice(0,6):s.runs;
+  $("runs").innerHTML=list.map(r=>`<div class="runrow" data-run="${esc(r.id)}"><div class="top"><span>${esc(r.id)}</span><span class="mute">${r.cost!=null?"$"+r.cost.toFixed(2):k(r.units)}</span></div>
     <div class="acts"><span class="chip tone-mute">${esc(r.model||"")}</span><span class="chip ${tone(r.status)}">${esc((r.status||"").split(":")[0])}${r.passes>1?" · "+r.passes+" passes":""}</span>${r.role?`<span class="chip tone-mute">${esc(r.role)}</span>`:""}</div>
     <div class="h">${esc(r.head)}</div></div>`).join("")||'<div class="empty">No runs yet.</div>';
+  if(s.runs.length>list.length)$("runs").innerHTML+=`<button type="button" class="more" data-act="more" data-g="runs">Show all ${s.runs.length} runs</button>`;
+  const jobs=s.schedule||[],nx=jobs.filter(j=>j.enabled&&j.next).sort((a,b)=>a.next<b.next?-1:1)[0]||jobs[0];  // phone: the schedule is one row
+  if(nx)$("runs").innerHTML+=`<div class="grp phone-only"><span>Scheduled</span><span>${jobs.length}</span></div><button type="button" class="row phone-only" data-tab="schedule"><span class="t">#${nx.id} ${esc(nx.cmd)}</span><span class="m"><span>${esc(nx.when)}</span><span>${nx.enabled&&nx.next?"next "+esc(when(nx.next)):"paused"}</span></span></button>`;
   $("n-runs").textContent=s.runs.length||"";
 }
 function syncNotice(s){  // the newest sync record, if it says an update is available and this version isn't there yet
@@ -339,11 +408,12 @@ async function onAct(el){
   if(what==="run-stop"){if(confirm(`Stop run ${el.dataset.id}?`))act({do:"run-stop",run:el.dataset.id})}
   if(what==="sync")return doSync();
   if(what==="opt-run")return optRun(el.dataset.slug);
-  if(what==="opt-apply")return act({do:"optimize-apply",project:el.dataset.slug,ids:el.dataset.id});
-  if(what==="opt-accept")return act({do:"optimize-accept",project:el.dataset.slug,ids:el.dataset.id});
-  if(what==="opt-reject")return act({do:"optimize-reject",project:el.dataset.slug,ids:el.dataset.id});
-  if(what==="opt-apply-all"){if(confirm(`Apply every card change optimize suggests for ${el.dataset.slug}?`))act({do:"optimize-apply-all",project:el.dataset.slug})}
-  if(what==="opt-ask"){select(`opt-${el.dataset.slug}`);sendChat(`Review the optimize suggestions for ${el.dataset.slug} and tell me which to apply, using AskUserQuestion`)}
+  if(what==="opt-apply"||what==="opt-accept"||what==="opt-reject"||what==="opt-undo")return sugRun(el.dataset.slug,el.dataset.id,what.slice(4));
+  if(what==="opt-all-ask"){ui.sgConfirm=el.dataset.slug;return drawInbox(new Set())}
+  if(what==="opt-all-no"){ui.sgConfirm=null;return drawInbox(new Set())}
+  if(what==="opt-all-yes"){ui.sgConfirm=null;return sugApplyAll(el.dataset.slug)}
+  if(what==="opt-ask")return sugAsk(el.dataset.slug);
+  if(what==="sug-toggle"){ui.open[el.dataset.key]=!ui.open[el.dataset.key];return drawInbox(new Set())}
   if(what==="scope")return select(el.dataset.w==="main"?"main":ui.task);
   if(what==="unscope"){ui.task=null;return select("main")}
   if(what==="clear-project"){$("bfilter").value="";$("bfilter").dispatchEvent(new Event("change"));return}
@@ -351,7 +421,7 @@ async function onAct(el){
   if(what==="edit"){const r=await askText(`Edit #${c.id}`,"The item's text",c.text);if(r&&r.text)act({do:"todo-edit",id:c.id,text:r.text})}
   if(what==="note-edit"){const r=await askText(`Edit note ${c.note}`,"The note's text",c.text);if(r&&r.text)act({do:"note-edit",n:c.note,text:r.text})}
   if(what==="ifilter"){ui.filter=el.dataset.f;drawInbox(new Set())}
-  if(what==="more"){ui.more[el.dataset.g]=1;drawBoard(lastBoard,new Set())}
+  if(what==="more"){ui.more[el.dataset.g]=1;drawBoard(lastBoard,new Set());if(S)drawRuns(S)}
   if(what==="add")addItem();
   if(what==="add-note")addNote();
   if(what==="plan-graph"){$("graph").showModal();if(S)drawPlan(S)}
@@ -383,6 +453,7 @@ document.addEventListener("keydown",e=>{
 });
 $("q").addEventListener("input",()=>{ui.q=$("q").value.trim().toLowerCase();if(lastBoard){drawInbox(new Set());drawBoard(lastBoard,new Set())}});
 $("bfilter").addEventListener("change",()=>{store.set("la-board-project",$("bfilter").value);if(lastBoard){drawInbox(new Set());drawBoard(lastBoard,new Set());drawHeader()}});
+window.matchMedia("(max-width:900px)").addEventListener("change",()=>{if(lastBoard){drawInbox(new Set());drawBoard(lastBoard,new Set());if(S)drawRuns(S)}});
 window.addEventListener("resize",()=>{if(S&&$("graph").open)drawPlan(S)});
 
 async function load(){
@@ -393,7 +464,7 @@ async function load(){
   drawStamp();
   const f=$("bfilter"),cur=f.value||store.get("la-board-project","");
   f.innerHTML='<option value="">All projects</option>'+s.board.projects.map(p=>`<option${p===cur?" selected":""}>${esc(p)}</option>`).join("");
-  const changed=changedSet(s.board.cards);
+  const changed=changedSet(s.board.cards);sugPrune(s.board.cards);
   drawInbox(changed);drawHeader();drawBanners();if(typeof drawChat==="function")drawChat();drawBoard(s.board,changed);drawRuns(s);drawSchedule(s);drawPlanBox(s);
   if($("graph").open)drawPlan(s);
 }
