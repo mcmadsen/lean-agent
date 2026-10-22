@@ -868,8 +868,12 @@ def run_action(body):
                 return _optimize_start(slug)
             flag = {"optimize-apply": "--apply", "optimize-accept": "--accept", "optimize-reject": "--reject",
                     "optimize-unreject": "--unreject"}.get(do)
-            if do == "optimize-apply-all":  # every card change; ids, if any, are the drafts to accept with them
-                args = ["optimize", slug, "--apply"] + (["--accept", ids] if ids else [])
+            if do == "optimize-apply-all":  # "apply": the card changes (none named: all); ids: the drafts to accept with them
+                apply_ids = ",".join(re.findall(r"[\w:.*-]+", str(body.get("apply") or "")))
+                args = ["optimize", slug] + (["--apply"] + ([apply_ids] if apply_ids else []) if apply_ids or "apply" not in body else []) \
+                    + (["--accept", ids] if ids else [])
+                if len(args) == 2:
+                    return _j(400, {"ok": False, "error": "which suggestions? (apply / ids)"})
             elif flag and ids:
                 args = ["optimize", slug, flag, ids]
             else:

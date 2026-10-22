@@ -28,7 +28,7 @@ function closeView(){$("view").style.display="none"}
 
 // state
 let S=null,lastBoard=null;
-const ui={sel:store.get("la-thread","main"),tab:store.get("la-tab","board"),filter:"all",q:"",more:{},open:{},sg:{},sgConfirm:null,offline:0,lastOk:null,now:"",bannerHtml:null};
+const ui={sel:(t=>/^opt-/.test(t)?"main":t)(store.get("la-thread","main")),tab:store.get("la-tab","board"),filter:"all",q:"",more:{},open:{},sg:{},sgConfirm:null,offline:0,lastOk:null,now:"",bannerHtml:null};
 ui.task=ui.sel!=="main"?ui.sel:null;  // the task the thread was last filtered to: the About / Whole session toggle moves between it and main
 function aboutLabel(key){const c=cardsBy().get(String(key));
   if(c)return c.kind==="item"?"#"+c.id:c.kind==="run"?"run "+(c.runs||[])[0]:c.kind==="note"?"note "+c.note:c.title.slice(0,30);
@@ -90,7 +90,7 @@ function sugRowHtml(x){
 function sugGroupHtml(g,many){
   const n=g.open.length,slug=esc(g.project),phone=isPhone(),key="sug|"+g.project,open=!phone||!!ui.open[key];
   const kinds=[...new Set(g.open.map(x=>x.kind))],word=kinds.length===1?kinds[0]+" ":"";
-  const m=g.open.filter(x=>x.act).length;
+  const m=g.open.filter(x=>x.act).length;  // exactly the rows drawn, and what Apply all sends
   let h=`<div class="grp"><span>Suggestions</span><span>${n} from optimize${many?" · "+slug:""}</span></div>`;
   if(phone)h+=`<button type="button" class="row grow" aria-expanded="${open}" data-act="sug-toggle" data-key="${esc(key)}"><span class="t">${n} ${word}suggestion${n===1?"":"s"}</span><span class="m"><span>Apply or reject each, or apply all</span></span>`
     +`<svg class="chev${open?" open":""}" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button>`;
@@ -101,26 +101,32 @@ function sugGroupHtml(g,many){
   return h+"</div>";
 }
 const sugCard=slug=>((lastBoard&&lastBoard.cards)||[]).find(c=>c.kind==="optimize"&&c.project===slug);
+const sugMatch=x=>{const pf=$("bfilter").value;return(!pf||x.project===pf)&&(!ui.q||[x.title,x.meta,x.project].join(" ").toLowerCase().includes(ui.q))};
+const sugShown=slug=>{const g=sugGroups(((lastBoard&&lastBoard.cards)||[]).filter(c=>c.kind==="optimize"&&c.project===slug),ui.sg,sugMatch)[0];return g?g.open.filter(x=>x.act):[]};
 const sugLive=slug=>{const c=sugCard(slug);return c?sugItems(c).filter(x=>!["gone","rej"].includes((ui.sg[x.key]||{}).st)):[]};
 function sugRej(key,err){  // rejected: shown with Undo for 10 s, then the row leaves
   const old=ui.sg[key]||{},item=old.item||sugItems(sugCard(key.split("|")[0])||{}).find(x=>x.key===key);
   clearTimeout(old.timer);
   ui.sg[key]={st:"rej",err,item,timer:setTimeout(()=>{if((ui.sg[key]||{}).st==="rej"){ui.sg[key]={st:"gone"};drawInbox(new Set())}},10000)};
 }
+const sugPending={};  // key -> the reject POST still on its way: Undo queues behind it
 async function sugRun(slug,id,what){  // what: apply, accept, reject or undo
   const key=slug+"|"+id;clearTimeout((ui.sg[key]||{}).timer);
+  if(what==="undo"&&sugPending[key])await sugPending[key];
   if(what==="reject")sugRej(key);else if(what!=="undo")ui.sg[key]={st:"gone"};
   drawInbox(new Set());
-  const r=await post("/api/action",{do:what==="undo"?"optimize-unreject":"optimize-"+what,project:slug,ids:id}).catch(e=>({ok:false,error:String(e)}));
+  const req=post("/api/action",{do:what==="undo"?"optimize-unreject":"optimize-"+what,project:slug,ids:id}).catch(e=>({ok:false,error:String(e)}));
+  if(what==="reject")sugPending[key]=req.then(()=>{delete sugPending[key]});
+  const r=await req;
   if(!r.ok){const err=r.output||r.error||"didn't work";if(what==="undo")sugRej(key,err);else{clearTimeout(ui.sg[key].timer);ui.sg[key]={st:"err",err}}drawInbox(new Set());return}
   if(what==="undo"){delete ui.sg[key];return load()}
   await load();if(what!=="reject"){delete ui.sg[key];drawInbox(new Set())}
 }
 async function sugApplyAll(slug){
-  const items=sugLive(slug).filter(x=>x.act);if(!items.length)return;
+  const items=sugShown(slug);if(!items.length)return;
   for(const x of items)ui.sg[x.key]={st:"gone"};
   drawInbox(new Set());
-  const r=await post("/api/action",{do:"optimize-apply-all",project:slug,ids:items.filter(x=>x.act==="accept").map(x=>x.id).join(",")}).catch(e=>({ok:false,error:String(e)}));
+  const r=await post("/api/action",{do:"optimize-apply-all",project:slug,apply:items.filter(x=>x.act==="apply").map(x=>x.id).join(","),ids:items.filter(x=>x.act==="accept").map(x=>x.id).join(",")}).catch(e=>({ok:false,error:String(e)}));
   if(!r.ok){const err=r.output||r.error||"didn't work";for(const x of items)ui.sg[x.key]={st:"err",err};drawInbox(new Set());return}
   await load();for(const x of items)delete ui.sg[x.key];drawInbox(new Set());
 }
@@ -132,7 +138,7 @@ function sugAsk(slug){
 }
 function sugPrune(cards){  // hidden rows the server no longer lists are done
   const live=new Set(cards.filter(c=>c.kind==="optimize").flatMap(c=>sugItems(c).map(x=>x.key)));
-  for(const k of Object.keys(ui.sg))if(ui.sg[k].st==="gone"&&!live.has(k))delete ui.sg[k];
+  for(const k of Object.keys(ui.sg))if(["gone","err"].includes(ui.sg[k].st)&&!live.has(k))delete ui.sg[k];
 }
 function sameItem(list){const t=list.map(c=>c.todo);return t[0]!=null&&t.every(x=>String(x)===String(t[0]))?t[0]:null}
 function drawInbox(changed){
@@ -140,7 +146,7 @@ function drawInbox(changed){
   const cards=(lastBoard&&lastBoard.cards)||[],pf=$("bfilter").value;
   const wait=cards.filter(c=>c.column==="Waiting on you"&&c.kind!=="optimize"&&matches(c));
   const sgs=sugGroups(cards.filter(c=>c.kind==="optimize"&&c.column==="Waiting on you"&&(!pf||c.project===pf)),ui.sg,
-    x=>(!pf||x.project===pf)&&(!ui.q||[x.title,x.meta,x.project].join(" ").toLowerCase().includes(ui.q)));
+    sugMatch);
   const groups={runs:[],decisions:[],prs:[]};for(const c of wait)groups[groupOf(c)].push(c);
   // runs blocked by the same cause (the same authorization error, say) are one thing to answer
   const byCause=new Map();for(const c of groups.runs)if(c.cause){if(!byCause.has(c.cause))byCause.set(c.cause,[]);byCause.get(c.cause).push(c)}
