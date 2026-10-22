@@ -27,7 +27,12 @@ function closeView(){$("view").style.display="none"}
 
 // state
 let S=null,lastBoard=null;
-const ui={sel:store.get("la-thread","main"),tab:store.get("la-tab","board"),filter:"all",q:"",more:{}};
+const ui={sel:store.get("la-thread","main"),tab:store.get("la-tab","board"),filter:"all",q:"",more:{},open:{},offline:0,lastOk:null,now:"",bannerHtml:null};
+ui.task=ui.sel!=="main"?ui.sel:null;  // the task the thread was last filtered to: the About / Whole session toggle moves between it and main
+function aboutLabel(key){const c=cardsBy().get(String(key));
+  if(c)return c.kind==="item"?"#"+c.id:c.kind==="run"?"run "+(c.runs||[])[0]:c.kind==="note"?"note "+c.note:c.title.slice(0,30);
+  return /^\d+$/.test(String(key))?"#"+key:String(key)}
+const taskLabel=()=>ui.sel!=="main"?aboutLabel(ui.sel):"";
 const cardsBy=()=>new Map(((lastBoard&&lastBoard.cards)||[]).map(c=>[String(c.id),c]));
 const threadKey=id=>id==="main"?"main":String(id).replace(/[^A-Za-z0-9_.-]/g,"_").replace(/^[^A-Za-z0-9]/,"t").slice(0,80);
 // what changed since you last looked: kept per browser; a change stays marked for 10 minutes of looking
@@ -56,26 +61,41 @@ function rowMeta(c){
   if(c.kind==="item"&&c.last_run)return `#${c.id} · ${c.last_run.id} · ${ago(c.last_run.ts)}`;
   return c.why||c.ref||c.project||"";
 }
+function sameItem(list){const t=list.map(c=>c.todo);return t[0]!=null&&t.every(x=>String(x)===String(t[0]))?t[0]:null}
 function drawInbox(changed){
   const thr=new Map(((S&&S.threads)||[]).map(t=>[t.key,t]));
   const wait=((lastBoard&&lastBoard.cards)||[]).filter(c=>c.column==="Waiting on you"&&matches(c));
   const groups={runs:[],decisions:[],prs:[]};for(const c of wait)groups[groupOf(c)].push(c);
+  // runs blocked by the same cause (the same authorization error, say) are one thing to answer
+  const byCause=new Map();for(const c of groups.runs)if(c.cause){if(!byCause.has(c.cause))byCause.set(c.cause,[]);byCause.get(c.cause).push(c)}
+  const runRows=[],seen=new Set();
+  for(const c of groups.runs){const g=c.cause&&byCause.get(c.cause);
+    if(g&&g.length>1){if(!seen.has(c.cause)){seen.add(c.cause);runRows.push({group:g,cause:c.cause})}}else runRows.push({card:c})}
+  const rows={runs:runRows,decisions:groups.decisions.map(card=>({card})),prs:groups.prs.map(card=>({card}))};
   const shown=new Set(wait.map(c=>threadKey(c.id)));
   const other=[...thr.values()].filter(t=>t.key!=="main"&&!shown.has(t.key)&&t.last&&(!ui.q||(t.title||"").toLowerCase().includes(ui.q)));
-  const n={all:wait.length,runs:groups.runs.length,decisions:groups.decisions.length,prs:groups.prs.length,threads:other.length};
-  $("ifilters").innerHTML=[["all","All"],["runs","Runs"],["decisions","Decisions"],["prs","PRs"],["threads","Threads"]]
-    .filter(([f])=>f==="all"||n[f]).map(([f,l])=>`<button type="button" class="pill${ui.filter===f?" on":""}" data-act="ifilter" data-f="${f}">${l} ${n[f]}</button>`).join("");
-  $("n-inbox").textContent=`${wait.length} open`;$("m-inbox").textContent=wait.length||"";
+  const n={runs:rows.runs.length,decisions:rows.decisions.length,prs:rows.prs.length};n.all=n.runs+n.decisions+n.prs;
+  if(!["all","runs","decisions","prs"].includes(ui.filter))ui.filter="all";
+  $("ifilters").innerHTML=[["all","All"],["runs","Runs"],["decisions","Decisions"],["prs","PRs"]]
+    .map(([f,l])=>`<button type="button" class="pill${ui.filter===f?" on":""}" data-act="ifilter" data-f="${f}" aria-pressed="${ui.filter===f}">${l} ${n[f]}</button>`).join("");
+  $("n-inbox").textContent=`${n.all} to answer · ${wait.length} item${wait.length===1?"":"s"}`;$("m-inbox").textContent=n.all||"";
   const dot=(c,t)=>t&&t.waiting?"dot-warn":t&&t.status==="working"?"dot-run":c.kind==="pr"&&/ready/.test(c.why||"")?"dot-ok":c.kind==="note"?"dot-run":/merged|approved/.test(c.why||"")?"dot-ok":"dot-warn";
-  const row=(id,title,meta,d,ch)=>`<button type="button" class="row${threadKey(id)===ui.sel?" sel":""}${ch?" changed":""}" data-act="select" data-card="${esc(id)}"><span class="t">${esc(title)}</span><span class="m"><span class="dot ${d}" aria-hidden="true"></span><span>${esc(meta)}</span></span></button>`;
+  const row=(id,title,meta,d,ch,cls)=>`<button type="button" class="row${threadKey(id)===ui.sel?" sel":""}${ch?" changed":""}${cls?" "+cls:""}" data-act="select" data-card="${esc(id)}"><span class="t">${esc(title)}</span><span class="m"><span class="dot ${d}" aria-hidden="true"></span><span>${esc(meta)}</span></span></button>`;
+  const crow=(c,cls)=>row(c.id,c.title,rowMeta(c),dot(c,thr.get(threadKey(c.id))),changed.has(String(c.id)),cls);
+  const grow=r=>{const open=!!ui.open[r.cause],item=sameItem(r.group),newest=r.group.reduce((a,c)=>((c.last_run||{}).ts||"")>a?(c.last_run||{}).ts:a,""),label=r.group[0].cause_label||r.cause;
+    return `<button type="button" class="row grow" aria-expanded="${open}" data-act="cause" data-cause="${esc(r.cause)}"><span class="t">${r.group.length} runs blocked: ${esc(label)}</span>`
+      +`<span class="m"><span class="dot dot-warn" aria-hidden="true"></span>${item!=null?`<span class="chip tone-run">About #${esc(item)}</span>`:""}<span>${esc(ago(newest))}</span></span>`
+      +`<svg class="chev${open?" open":""}" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button>`
+      +(open?`<div class="kids" role="group" aria-label="Runs blocked: ${esc(label)}">${r.group.map(c=>crow(c,"kid")).join("")}</div>`:"")};
   const main=thr.get("main");
-  let h=row("main","Orchestrator",main&&main.last?`${main.waiting?"waits for your OK · ":main.status==="working"?"working · ":""}${ago(main.last.ts)}`:"the general thread",main&&main.waiting?"dot-warn":main&&main.status==="working"?"dot-run":"dot-mute");
-  const sec=(key,label,list)=>{if(!list.length||(ui.filter!=="all"&&ui.filter!==key))return"";
-    return `<div class="grp"><span>${label}</span><span>${list.length}</span></div>`+list.map(c=>row(c.id,c.title,rowMeta(c),dot(c,thr.get(threadKey(c.id))),changed.has(String(c.id)))).join("")};
-  h+=sec("runs","Run questions",groups.runs)+sec("decisions","Decisions",groups.decisions)+sec("prs","PRs and reviews",groups.prs);
-  if(other.length&&(ui.filter==="all"||ui.filter==="threads"))h+=`<div class="grp"><span>Other threads</span><span>${other.length}</span></div>`
+  let h=row("main","Orchestrator session",main&&main.last?`${main.waiting?"waits for your OK · ":main.status==="working"?"working · ":""}${ago(main.last.ts)}`:"the whole session",main&&main.waiting?"dot-warn":main&&main.status==="working"?"dot-run":"dot-mute");
+  const sec=(key,label)=>{const list=rows[key];if(!list.length||(ui.filter!=="all"&&ui.filter!==key))return"";
+    return `<div class="grp"><span>${label}</span><span>${list.length}</span></div>`+list.map(r=>r.group?grow(r):crow(r.card)).join("")};
+  h+=sec("runs","Run questions")+sec("decisions","Decisions")+sec("prs","PRs and reviews");
+  if(other.length&&ui.filter==="all")h+=`<div class="grp"><span>Other threads</span><span>${other.length}</span></div>`
     +other.map(t=>row(t.key,t.title,`${t.status==="working"?"working · ":""}${ago(t.last.ts)}`,t.waiting?"dot-warn":t.status==="working"?"dot-run":"dot-mute",false)).join("");
-  if(!wait.length&&ui.filter==="all")h+=`<div class="empty">Nothing waits on you.</div>`;
+  if(!n.all&&ui.filter==="all")h+=ui.q?`<div class="empty">Nothing matches your search.</div>`:`<div class="empty2"><b>Nothing needs you</b><span>Run questions, decisions and PR comments that wait for your reply show up here.</span></div>`;
+  else if(!n[ui.filter])h+=`<div class="empty">Nothing in this filter.</div>`;
   $("inbox").innerHTML=h;
 }
 
@@ -91,49 +111,64 @@ function contextText(c){
   return bits.join("; ");
 }
 function drawHeader(){
-  const c=selected();
-  $("ttitle").textContent=c?c.title:"Conversation with the orchestrator";
-  $("tsub").textContent=c?`Thread with the orchestrator · context: ${[c.kind==="item"?"#"+c.id:"",(c.runs||[])[0]?"run "+c.runs[0]:"",c.ref||"",c.project||""].filter(Boolean).join(" · ")||c.kind}`:"The general thread: ask for work, answer questions, approve what it wants to run";
-  $("handled").hidden=!c||c.kind==="thread";
-  $("handled").textContent=c&&c.kind==="item"&&c.column!=="Done"?"Done…":c&&c.kind==="note"?"Close note":"Mark handled";
-  $("ctxpills").innerHTML=(c?`<button type="button" class="pill" data-act="select" data-card="main" aria-label="Back to the general thread">${esc(c.kind==="item"?"#"+c.id:c.kind==="run"?"run "+(c.runs||[])[0]:c.kind==="note"?"note "+c.note:c.title.slice(0,30))} ×</button>`:"")
-    +($("bfilter").value?`<span class="pill">${esc($("bfilter").value)}</span>`:"");
+  const c=selected(),service=!!(typeof chat!=="undefined"&&chat.service),rc=typeof rcState==="function"?rcState():"unknown",proj=$("bfilter").value;
+  const task=ui.sel!=="main"&&c?c:null,tl=ui.task?aboutLabel(ui.task):"";
+  const shared=!service?"not shared":rc==="on"?"also open in the Claude app":rc==="off"?"dashboard only":"";
+  $("ttitle").textContent="Orchestrator session";
+  $("tsub").textContent=[task?(service?"Filtered to ":"Thread about ")+aboutLabel(ui.sel):"Whole session",shared].filter(Boolean).join(" · ");
+  $("ttask").hidden=!task;
+  if(task)$("ttask").textContent=[task.title,[task.kind==="item"?"#"+task.id:"",(task.runs||[])[0]?"run "+task.runs[0]:"",task.ref||"",task.project||""].filter(Boolean).join(" · ")].filter(Boolean).join(" — ");
+  $("scope").hidden=!ui.task;
+  $("scope").innerHTML=ui.task?`<button type="button" class="seg${task?" on":""}" data-act="scope" data-w="task" aria-pressed="${!!task}">About ${esc(tl)}</button><button type="button" class="seg${task?"":" on"}" data-act="scope" data-w="main" aria-pressed="${!task}">Whole session</button>`:"";
+  const rcEl=$("rc"),svc=(typeof chat!=="undefined"&&chat.svc)||(S&&S.service)||null;
+  rcEl.hidden=!(service||(svc&&svc.configured));
+  rcEl.textContent="Remote Control "+rc;rcEl.className="chip "+(rc==="on"?"tone-ok":rc==="off"?"tone-warn":"tone-mute");
+  rcEl.title=rc==="on"?"This session is also open in the Claude app":rc==="off"?"Dashboard only: the Claude app does not see this session":"Can't tell whether Remote Control is on";
+  $("handled").hidden=!c||c.kind==="thread"||c.kind==="note";
+  $("handled").textContent=c&&c.kind==="item"&&c.column!=="Done"?"Done…":"Mark handled";
+  $("mlive").textContent=`live ${ui.now} · ${proj||"all projects"}`;
+  const x=(act,label,aria)=>`<span class="cpill"><span>${label}</span><button type="button" class="x" data-act="${act}" aria-label="${esc(aria)}">×</button></span>`;
+  $("ctxpills").innerHTML=(task?x("unscope","About "+esc(aboutLabel(ui.sel)),"Remove context: About "+aboutLabel(ui.sel)):"")+(proj?x("clear-project",esc(proj),"Remove project: "+proj):"");
 }
 function contextCard(){
   const c=selected();if(!c||c.kind==="thread")return "";
-  const chip=c.kind==="run"?["run asks","tone-warn"]:c.kind==="note"?[c.note_kind==="decision"?"decision":"note","tone-run"]:c.kind==="pr"?["pull request","tone-run"]:c.kind==="review"?["review","tone-run"]:c.kind==="epic"?["epic","tone-ok"]:[c.column||"item",tone(c.column==="Done"?"done":c.column==="Waiting on you"?"needs":"open")];
+  if(c.kind==="note"){
+    const dec=c.note_kind==="decision",age=ago(c.done_at);
+    return `<section class="qcard" aria-label="Hand-off note ${c.note}"><div class="hd"><span class="chip tone-run">hand-off · ${esc(c.note_kind||"note")}</span><span class="chip tone-mute">note ${c.note}${age?" · "+(age==="now"?age:age+" ago"):""}</span></div><p>${esc(c.text)}</p>`
+      +`<label class="sr" for="dec-${c.note}">Your ${dec?"decision":"reply"} for note ${c.note}</label><textarea class="dec" id="dec-${c.note}" rows="2" data-draft="${c.note}" placeholder="${dec?"Your decision":"Your reply"}">${esc(chat.drafts[c.note]||"")}</textarea>`
+      +`<div class="acts"><button type="button" class="btn sm primary" data-act="note-decide">${dec?"Send decision":"Send reply"}</button><button type="button" class="btn sm" data-act="note-edit" data-card="${esc(c.id)}">Edit note</button><button type="button" class="btn sm" data-act="close-note" data-card="${esc(c.id)}">Close note</button></div><div class="mono mute small">Sends this as a message to the orchestrator</div></section>`;
+  }
+  const chip=c.kind==="run"?["run asks","tone-warn"]:c.kind==="pr"?["pull request","tone-run"]:c.kind==="review"?["review","tone-run"]:c.kind==="epic"?["epic","tone-ok"]:[c.column||"item",tone(c.column==="Done"?"done":c.column==="Waiting on you"?"needs":"open")];
   const lr=c.last_run;
   const meta=[c.kind==="item"?"#"+c.id:"",lr?`${lr.status} · ${when(lr.ts)}`:"",c.ref||"",c.project||""].filter(Boolean).join(" · ");
-  const body=c.kind==="run"||c.kind==="note"?c.text:[c.rest||(c.title!==c.text?c.text:""),c.why,c.result?"result: "+c.result:""].filter(Boolean).join("\n");
+  const body=c.kind==="run"?c.text:[c.rest||(c.title!==c.text?c.text:""),c.why,c.result?"result: "+c.result:""].filter(Boolean).join("\n");
   const runs=(c.runs||[]).map(id=>`<a data-run="${esc(id)}" href="#">${esc(id)}</a>`).join(" ");
   return `<section class="qcard" aria-label="What this thread is about"><div class="hd"><span class="chip ${chip[1]}">${esc(chip[0])}</span>${c.link?`<a href="${esc(c.link)}" target="_blank" rel="noopener" class="mono">open ↗</a>`:""}<span class="mono mute">${esc(meta)}</span></div>`
-    +(body?`<p>${esc(body)}</p>`:"")+(runs?`<div class="mono small">${runs}</div>`:"")+`<div class="acts">${cardButtons(c)}</div></section>`;
+    +(body?`<p>${esc(body)}</p>`:"")+(runs?`<div class="mono small">${runs}</div>`:"")+`<div class="acts">${cardButtons(c,true)}</div></section>`;
 }
-function cardButtons(c){
+function cardButtons(c,full){
   const b=(act,label,primary)=>`<button type="button" class="btn sm${primary?" primary":""}" data-act="${act}" data-card="${esc(c.id)}">${label}</button>`;
   const a=[];
   if(c.kind==="item"&&c.column!=="Done"){if(c.column==="Open")a.push(b("start","Start"));a.push(b("done","Done…"))}
   else if(c.kind==="item")a.push(b("reopen","Reopen"));
   if(c.kind==="note")a.push(b("close-note","Close note"));
+  if(full&&c.kind==="item")a.push(b("edit","Edit"));
   if(c.kind==="epic")a.push(b("epic-next","Start next",true));
   if(c.kind==="run"||c.kind==="pr"||c.kind==="review"||c.column==="Waiting on you")a.push(b("dismiss","Mark handled"));
   return a.join("");
 }
+function cardActs(c){  // a board card's buttons, plus Stop run while a worker runs on it
+  const stop=c.live&&c.live.length?`<button type="button" class="btn sm" data-act="run-stop" data-id="${esc(c.live[0].run)}" aria-label="Stop run ${esc(c.live[0].run)}">Stop run</button>`:"";
+  const h=(c.kind!=="lookup"?cardButtons(c):"")+stop;return h?`<div class="acts">${h}</div>`:"";
+}
 function select(id){
   ui.sel=threadKey(id);store.set("la-thread",ui.sel);
-  document.body.dataset.pane="chat";
+  if(ui.sel!=="main")ui.task=ui.sel;
+  setPane("chat");
   drawHeader();drawInbox(new Set());if(typeof openThread==="function")openThread(ui.sel);
 }
 
-// RIGHT: running now, board / runs / schedule, plan usage
-function drawLive(s){
-  const rows=s.running.map(r=>`<div class="lrun"><div class="hd"><span class="chip tone-run">running</span><b class="mono">${esc(r.model||"?")} / ${esc(r.effort||"default")}</b><span>${r.todo!=null?"#"+esc(r.todo):"lookup"} · ${esc(r.project||"")}${r.role?" · "+esc(r.role):""}</span></div>
-    <p title="${esc(r.task)}">${esc(String(r.task||"").split("\n")[0])}</p>
-    <div class="ft"><span>${ago(r.started)}${r.turns?" · "+r.turns+" turns":""}</span><span class="acts"><button type="button" class="btn sm" data-run="${esc(r.run)}">Open</button><button type="button" class="btn sm" data-act="run-stop" data-id="${esc(r.run)}">Stop</button></span></div></div>`)
-   .concat((s.finished||[]).filter(f=>!s.running.some(r=>r.run===f.id)).map(f=>`<div class="lrun"><div class="hd"><span class="chip ${tone(f.status)}">${esc(f.status)}</span><b class="mono">${esc(f.model||"")}</b><span>${f.todo!=null?"#"+esc(f.todo):"lookup"} · finished ${when(f.ts).slice(6)}</span></div><p>${esc(f.task)}</p></div>`));
-  $("live").innerHTML=rows.length?rows.join(""):`<span class="mute small">Nothing running${s.last_finished?" · the last run finished "+when(s.last_finished):""}.</span>`;
-  $("n-live").textContent=s.running.length||"";
-}
+// RIGHT: board / runs / schedule, plan usage
 function drawBoard(b,changed){
   const cards=b.cards.filter(matches);
   const groups=[["In progress",c=>c.column==="In progress","card"],["Open",c=>c.column==="Open","card"],["In review",c=>c.column==="In review","line"],
@@ -151,13 +186,13 @@ function drawBoard(b,changed){
         const meta=[c.prio!=="normal"?c.prio:"",c.last_run&&!(c.live&&c.live.length)?"last run "+c.last_run.status:c.runs&&c.runs.length?c.runs.length+" run"+(c.runs.length>1?"s":""):"",c.notes?c.notes+" note"+(c.notes>1?"s":""):"",c.project||""].filter(Boolean).join(" · ");
         h+=`<article class="card${ch?" changed":""}"><div class="t"><span class="id">${c.kind==="item"?"#"+esc(c.id):""}</span><a data-act="select" data-card="${esc(c.id)}" href="#">${esc(c.title)}</a></div>
           ${c.kind==="epic"?meter(Math.round(c.epic.done*100/Math.max(1,c.epic.total)),101,101)+`<div class="mt">${esc(c.rest)}</div>`:""}
-          <div class="mt"><span class="chip ${tone(st)}">${esc(st)}</span><span>${esc(meta)}</span></div>${c.kind!=="lookup"?`<div class="acts">${cardButtons(c)}</div>`:""}</article>`;
+          <div class="mt"><span class="chip ${tone(st)}">${esc(st)}</span><span>${esc(meta)}</span></div>${cardActs(c)}</article>`;
       }else h+=`<div class="line clickable" data-act="select" data-card="${esc(c.id)}"><span class="t">${esc(c.kind==="item"?"#"+c.id+" ":"")}${esc(c.title)}</span><span class="chip ${tone(st)}">${esc(st)}</span></div>`;
     }
     if(list.length>lim)h+=`<button type="button" class="more" data-act="more" data-g="${esc(label)}">${list.length-lim} more</button>`;
   }
-  $("board").innerHTML=h||'<div class="empty">No work queued yet. Add an item, or ask the orchestrator to keep your work in the queue.</div>';
-  $("n-board").textContent=cards.filter(c=>c.column!=="Done").length||"";
+  $("board").innerHTML=h||(ui.q?'<div class="empty">Nothing matches your search.</div>':'<div class="empty2"><b>No tasks on the board yet</b><span>Add one with /todo in the session and it appears here.</span></div>');
+  const nb=cards.filter(c=>c.column!=="Done").length||"";$("n-board").textContent=nb;$("m-board").textContent=nb;
 }
 function drawRuns(s){
   $("runs").innerHTML=s.runs.map(r=>`<div class="runrow" data-run="${esc(r.id)}"><div class="top"><span>${esc(r.id)}</span><span class="mute">${r.cost!=null?"$"+r.cost.toFixed(2):k(r.units)}</span></div>
@@ -191,11 +226,15 @@ function drawPlanBox(s){
   if(h&&w)h+=`<span class="u-tot">${w.runs} runs · $${w.cost} · ${s.todo_done_week} todos done</span>`;
   $("ustrip").innerHTML=h;$("ustrip").hidden=!h;
   const c=s.context;
-  $("ctxmeter").innerHTML=c&&c.calls?`<div class="meter" role="img" aria-label="Orchestrator context ${k(c.now)} of ${k(c.compact_at)} before compaction"><div style="width:${Math.min(100,c.now*100/c.compact_at)}%"></div></div>${k(c.now)} / ${k(c.compact_at)}`:"";
+  const whole=typeof chat!=="undefined"&&chat.service?" · whole session":"";
+  $("ctxmeter").innerHTML=c&&c.calls?`<span>Orchestrator context${whole} · compacts at ${k(c.compact_at)}</span><div class="meter thin${c.now>=c.compact_at*.9?" warn":""}" role="img" aria-label="Orchestrator context${whole}: ${k(c.now)} of ${k(c.compact_at)} before compaction"><div style="width:${Math.min(100,c.now*100/c.compact_at)}%"></div></div>`:"";
 }
+function setPane(p,t){document.body.dataset.pane=p;if(t)setTab(t);
+  for(const b of document.querySelectorAll("#mtabs .seg")){const on=b.dataset.pane===p&&(p!=="work"||b.dataset.wtab===ui.tab);b.classList.toggle("on",on);b.setAttribute("aria-pressed",on)}}
 function setTab(t){ui.tab=t;store.set("la-tab",t);
   for(const b of document.querySelectorAll("#tabs .seg")){const on=b.dataset.tab===t;b.classList.toggle("on",on);b.setAttribute("aria-pressed",on)}
-  $("c-board").hidden=t!=="board";$("c-runs").hidden=t!=="runs";$("c-sched").hidden=t!=="schedule";}
+  $("c-board").hidden=t!=="board";$("c-runs").hidden=t!=="runs";$("c-sched").hidden=t!=="schedule";
+  for(const b of document.querySelectorAll("#mtabs .seg[data-wtab]")){const on=document.body.dataset.pane==="work"&&b.dataset.wtab===t;b.classList.toggle("on",on);b.setAttribute("aria-pressed",on)}}
 
 // the week's graph (the plan's own numbers: week % against on-pace, 5-hour session windows)
 let lastPlan=null,planPts=[],planX=null;
@@ -262,6 +301,12 @@ async function onAct(el){
   if(what==="epic-next"){const name=title.split(":")[0].replace(/^Epic /,"");select(c.id);sendChat(`Start the next ready item of epic ${name} (lean-agent todo next --epic ${name}).`)}
   if(what==="run-stop"){if(confirm(`Stop run ${el.dataset.id}?`))act({do:"run-stop",run:el.dataset.id})}
   if(what==="sync"){if(confirm("Update lean-agent now (lean-agent sync)?"))act({do:"sync"})}
+  if(what==="scope")return select(el.dataset.w==="main"?"main":ui.task);
+  if(what==="unscope"){ui.task=null;return select("main")}
+  if(what==="clear-project"){$("bfilter").value="";$("bfilter").dispatchEvent(new Event("change"));return}
+  if(what==="cause"){ui.open[el.dataset.cause]=!ui.open[el.dataset.cause];return drawInbox(new Set())}
+  if(what==="edit"){const r=await askText(`Edit #${c.id}`,"The item's text",c.text);if(r&&r.text)act({do:"todo-edit",id:c.id,text:r.text})}
+  if(what==="note-edit"){const r=await askText(`Edit note ${c.note}`,"The note's text",c.text);if(r&&r.text)act({do:"note-edit",n:c.note,text:r.text})}
   if(what==="ifilter"){ui.filter=el.dataset.f;drawInbox(new Set())}
   if(what==="more"){ui.more[el.dataset.g]=1;drawBoard(lastBoard,new Set())}
   if(what==="add")addItem();
@@ -287,7 +332,7 @@ document.addEventListener("click",e=>{
   const run=e.target.closest("[data-run]");if(run){e.preventDefault();show(run.dataset.run);return}
   const a=e.target.closest("[data-act]");if(a){e.preventDefault();onAct(a);return}
   const tab=e.target.closest("[data-tab]");if(tab)return setTab(tab.dataset.tab);
-  const pane=e.target.closest("[data-pane]");if(pane){document.body.dataset.pane=pane.dataset.pane;for(const b of document.querySelectorAll("#mtabs .seg"))b.classList.toggle("on",b===pane)}
+  const pane=e.target.closest("[data-pane]");if(pane)setPane(pane.dataset.pane,pane.dataset.wtab)
 });
 document.addEventListener("keydown",e=>{
   if(e.key==="Escape")closeView();
@@ -299,16 +344,24 @@ window.addEventListener("resize",()=>{if(S&&$("graph").open)drawPlan(S)});
 
 async function load(){
   let s;try{const r=await fetch(`/api/state?t=${T}`);if(!r.ok)throw new Error(r.status);s=await r.json()}
-  catch(e){$("stamp").innerHTML=`<span class="dot dot-bad" aria-hidden="true"></span>offline`;$("stamp").title="can't reach lean-agent: is `lean-agent up` or `lean-agent dashboard` running?";return}
+  catch(e){ui.offline=ui.offline||Date.now();drawBanners();$("stamp").innerHTML=`<span class="dot dot-bad" aria-hidden="true"></span>offline`;$("stamp").title="can't reach lean-agent: is `lean-agent up` or `lean-agent dashboard` running?";return}
   if(s.page_version&&s.page_version!==V){location.reload();return}
-  S=Object.assign(S||{},s);lastBoard=s.board;
+  S=Object.assign(S||{},s);lastBoard=s.board;ui.offline=0;ui.lastOk=new Date();ui.now=s.now.slice(11,16);
   $("stamp").innerHTML=`<span class="dot dot-ok" aria-hidden="true"></span>live ${s.now.slice(11,16)}`;
   const f=$("bfilter"),cur=f.value||store.get("la-board-project","");
   f.innerHTML='<option value="">All projects</option>'+s.board.projects.map(p=>`<option${p===cur?" selected":""}>${esc(p)}</option>`).join("");
   const changed=changedSet(s.board.cards);
-  drawInbox(changed);drawHeader();drawLive(s);drawBoard(s.board,changed);drawRuns(s);drawSchedule(s);drawPlanBox(s);
+  drawInbox(changed);drawHeader();drawBanners();if(typeof drawChat==="function")drawChat();drawBoard(s.board,changed);drawRuns(s);drawSchedule(s);drawPlanBox(s);
   if($("graph").open)drawPlan(s);
 }
-document.body.dataset.pane="chat";
+function drawBanners(){  // connection state at the top of the center pane
+  const svc=(typeof chat!=="undefined"&&chat.svc)||(S&&S.service)||null,at=ui.lastOk?ui.lastOk.toTimeString().slice(0,8):"";
+  let h="";
+  if(ui.offline)h=`<div class="banner warn" role="status">Dashboard reconnecting. Showing data from ${at}.</div>`;
+  else if(svc&&!svc.up&&svc.configured)h=`<div class="banner bad" role="alert">lean-agent service not running. Start it with <code>lean-agent up</code>. Showing data from ${at}.</div>`;
+  else if(svc&&svc.up&&svc.remote_control===false)h=`<div class="banner" role="status">Remote Control is off: dashboard only. Messages typed here will not appear in the Claude app.</div>`;
+  if(h!==ui.bannerHtml){ui.bannerHtml=h;$("banners").innerHTML=h}
+}
+setPane("chat");
 setTab(ui.tab);
 load();setInterval(load,15000);
