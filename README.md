@@ -281,6 +281,8 @@ The dashboard is a workspace in three panes (and one pane at a time on a phone: 
 - **Needs you** (left): what waits on you, grouped into run questions, decisions and PRs and reviews, with
   search (Cmd/Ctrl+K), a project picker and filters; the general **Orchestrator** thread on top, and other
   threads you started below.
+  Optimize's suggestions are a **Suggestions** group at the bottom, one row each (Apply or Accept, Reject with a 10 s Undo, via
+  `optimize <project> --unreject`), with Apply all and Ask the orchestrator under them; on a phone the group is one row that expands.
 - **The thread** (center): pick anything and talk to the orchestrator about it. Every task (a work item, a run
   that asks, a PR, a note) has its own thread: a view of the one orchestrator session `lean-agent up` runs (see
   below). Your messages in a task thread arrive tagged `About #N "title": ...`, the first one with the task's
