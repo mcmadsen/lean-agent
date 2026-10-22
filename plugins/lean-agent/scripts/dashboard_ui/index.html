@@ -13,7 +13,7 @@
  <div class="pad"><label class="search"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
   <input type="search" id="q" aria-label="Search runs, PRs and notes" placeholder="Search runs, PRs, notes"><span class="mono kbd">⌘K</span></label></div>
  <div class="pad"><label class="picker"><span class="sr">Project</span><select id="bfilter" aria-label="Project"><option value="">All projects</option></select></label></div>
- <div class="inbox-head"><h2>Needs you</h2><span class="mono mute" id="n-inbox"></span></div>
+ <div class="inbox-head"><h2>Needs you</h2><span class="mono mute" id="n-inbox" aria-live="polite"></span></div>
  <div class="pills" id="ifilters" role="group" aria-label="Show"></div>
  <div class="rows" id="inbox"></div>
  <div class="inbox-foot"><button type="button" class="btn sm" data-act="add">+ Add item</button><button type="button" class="btn sm" data-act="add-note">+ Note</button><button id="theme" type="button" class="btn sm" title="switch theme"></button></div>
@@ -22,18 +22,22 @@
 <!-- CENTER: the conversation with the orchestrator -->
 <main class="thread" id="pane-chat" aria-label="Conversation">
  <header class="thead">
-  <div class="tmeta"><h1 id="ttitle">Conversation with the orchestrator</h1><div class="mono mute sub" id="tsub">Ask for work, answer questions, approve what it wants to run</div></div>
-  <div class="tacts"><span id="cshared" class="chip tone-mute" title="Messages here go into the one session `lean-agent up` runs; it is the same conversation as in the Claude app" hidden>shared with the Claude app</span><span id="cstat" class="chip tone-mute">idle</span><button id="handled" type="button" class="btn" hidden>Mark handled</button><button id="cstop" type="button" class="btn" hidden>Stop</button><button id="cnew" type="button" class="btn">New thread</button></div>
+  <div class="tmeta"><h1 id="ttitle">Orchestrator session</h1><div class="mono mute sub" id="tsub"></div><div class="mute sub" id="ttask" hidden></div><div class="mono mute sub mlive" id="mlive"></div></div>
+  <div class="tacts"><div class="seg-group scope" role="group" aria-label="Show messages" id="scope" hidden></div><span id="rc" class="chip tone-mute" hidden></span><span id="cstat" class="chip tone-mute">idle</span><button id="handled" type="button" class="btn" hidden>Mark handled</button><button id="cnew" type="button" class="btn" data-act="clear-ask">Clear session…</button></div>
  </header>
+ <div id="clearbox" hidden></div>
+ <div class="banners" id="banners"></div>
  <button type="button" class="ustrip" id="ustrip" data-act="plan-graph" title="Show the week's graph" hidden></button>
  <div class="stream" id="msgs"></div>
  <div class="composer-wrap">
+  <div class="working" id="working" hidden></div>
   <form class="composer" id="chatform">
    <div class="ctx" id="ctxpills"></div>
+   <div class="ctxmeter mono" id="ctxmeter"></div>
    <textarea id="chatin" rows="2" aria-label="Message the orchestrator" placeholder="Message the orchestrator (Enter sends, Shift+Enter: new line)"></textarea>
    <div class="cbar">
     <div class="pills" id="cmds"><button type="button" class="pill mono" data-cmd="run">/run</button><button type="button" class="pill mono" data-cmd="review">/review</button><button type="button" class="pill mono" data-cmd="todo">/todo</button><button type="button" class="pill mono" data-cmd="handoff">/handoff</button></div>
-    <div class="send"><div class="ctxmeter mono" id="ctxmeter"></div><button type="submit" class="btn primary">Send <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4"/></svg></button></div>
+    <div class="send"><button type="submit" class="btn primary">Send <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4"/></svg></button></div>
    </div>
   </form>
  </div>
@@ -41,7 +45,6 @@
 
 <!-- RIGHT: live work -->
 <aside class="work" id="pane-work" aria-label="Work">
- <section class="box" id="c-live" aria-label="Running now"><div class="bh"><h2>Running now</h2><span class="mono mute" id="n-live"></span></div><div id="live"></div></section>
  <div class="seg-group" role="group" aria-label="Work views" id="tabs">
   <button type="button" class="seg on" data-tab="board" aria-pressed="true">Board <span id="n-board"></span></button>
   <button type="button" class="seg" data-tab="runs" aria-pressed="false">Runs <span id="n-runs"></span></button>
@@ -56,7 +59,7 @@
 
 <!-- phone: one pane at a time -->
 <nav class="mtabs" role="group" aria-label="Views" id="mtabs">
- <button type="button" class="seg on" data-pane="chat">Chat</button><button type="button" class="seg" data-pane="inbox">Inbox <span id="m-inbox"></span></button><button type="button" class="seg" data-pane="work">Board</button>
+ <button type="button" class="seg on" data-pane="chat" aria-pressed="true">Chat</button><button type="button" class="seg" data-pane="inbox" aria-pressed="false">Inbox <span id="m-inbox"></span></button><button type="button" class="seg" data-pane="work" data-wtab="board" aria-pressed="false">Board <span id="m-board"></span></button><button type="button" class="seg" data-pane="work" data-wtab="runs" aria-pressed="false">Runs</button>
 </nav>
 
 <dialog id="ask"><form method="dialog"><b id="asktitle"></b><div id="askhint" class="mute small"></div><div id="askextra"></div><textarea id="asktext" rows="3"></textarea>
