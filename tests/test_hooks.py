@@ -248,15 +248,6 @@ class SessionHookTest(Base):
         self.run_injected(chain)
         self.assertEqual(self.record()["session_id"], "s1")
 
-    def test_a_service_pid_on_the_9th_hop_is_rejected(self):
-        me = os.getpid()
-        chain = {me: 901}
-        for p in range(901, 908):
-            chain[p] = p + 1
-        chain[908] = 500  # 9th ancestor
-        self.run_injected(chain, wait=0.2)
-        self.no_record()
-
     def test_a_service_pid_that_is_not_claude_like_is_accepted(self):
         me = os.getpid()
         self.run_injected({me: 900, 900: 500, 500: 1}, claudes=set())

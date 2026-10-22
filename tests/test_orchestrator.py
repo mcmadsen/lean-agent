@@ -2678,27 +2678,26 @@ class CliTest(unittest.TestCase):
         d = f"/tmp/lean-agent-{uid}"
         open(d, "w").close()  # not a directory
         self.addCleanup(os.remove, d)
-        old = ss.os.getuid
-        ss.os.getuid = lambda: uid
-        self.addCleanup(setattr, ss.os, "getuid", old)
-        r = ss.request({"op": "ping"})
+        with mock.patch.object(ss.os, "getuid", return_value=uid):
+            r = ss.request({"ping": True})
         self.assertFalse(r["ok"])
         self.assertIn("error", r)
 
     def test_sock_path_falls_back_only_above_100_bytes(self):
-        ss = self.with_home(self.tmp.name)
+        ss = self.with_home("/x")
+        fb = os.path.join(self.tmp.name, "fb")
         for n, short in ((100, True), (101, False)):
-            pad = n - len(os.path.join(self.tmp.name, "x", "session.sock"))
-            home = os.path.join(self.tmp.name, "x" * (1 + pad))
+            home = "/x" + "a" * (n - len("/x/session.sock"))
             os.environ["LEAN_AGENT_HOME"] = home
             self.assertEqual(len(os.path.join(home, "session.sock")), n)
+            with mock.patch.object(ss, "fallback_dir", return_value=fb), \
+                    mock.patch.object(ss.os.path, "realpath", side_effect=lambda p: p):
+                got = ss.sock_path()
             if short:
-                self.assertEqual(ss.sock_path(), os.path.join(home, "session.sock"))
+                self.assertEqual(got, os.path.join(home, "session.sock"))
             else:
-                d = f"/tmp/lean-agent-{os.getuid()}"
-                if os.path.lexists(d) and not os.path.isdir(d):
-                    self.skipTest(d + " is not a directory")
-                self.assertEqual(os.path.dirname(ss.sock_path()), d)
+                self.assertEqual(os.path.dirname(got), fb)
+                self.assertTrue(got.endswith(".sock"))
 
     def test_up_hosts_the_session_when_the_home_path_is_too_long_for_a_socket(self):
         home = os.path.join(self.tmp.name, *["long-directory-name-for-the-socket"] * 3, "home")
