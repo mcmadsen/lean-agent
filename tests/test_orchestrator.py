@@ -2969,6 +2969,58 @@ class CliTest(unittest.TestCase):
         self.assertNotIn(f"q-{rid}", ids)
         self.assertEqual(self.cli("runs", "--dismiss", "nope", check=False).returncode, 1)
 
+    def test_review_fix_loop_is_incremental(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        model = lambda c: c["argv"][c["argv"].index("--model") + 1]
+        sha = lambda: subprocess.run(["git", "-C", self.proj, "rev-parse", "feature"], capture_output=True,
+                                     text=True).stdout.strip()
+
+        def commit(rel, text, amend=False):
+            g("checkout", "-q", "feature")
+            os.makedirs(os.path.dirname(os.path.join(self.proj, rel)), exist_ok=True)
+            with open(os.path.join(self.proj, rel), "a") as fh:
+                fh.write(text)
+            g("add", "-A")
+            g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", *(["--amend", "--no-edit"] if amend else ["-m", "fix"]))
+            g("checkout", "-q", "main")
+        minor = json.dumps(dict(REUSE_CHECKED, verdict="approve", checks=[], findings=[
+            {"severity": "minor", "category": "style", "file": "api/totals.py", "line": 1, "issue": "rename total_sum"}]))
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        # 1. the whole change, once (opus, as the user chose)
+        self.cli("review", "proj", "--head", "feature", "--base", "main", "--reviewer-model", "opus", check=False,
+                 FAKE_REVIEW=minor)
+        first = sha()
+        self.assertIn("declined 1.", self.cli("review", "decline", "proj", "1", "--head", first, "--why", "left on purpose").stdout)
+        # 2. a fix worker commits elsewhere: review by commit sha finds the branch and reviews only the delta, on sonnet
+        commit("CLAUDE.md", "One more rule.\n")
+        out = self.cli("review", "proj", "--head", sha(), check=False, FAKE_REVIEW=minor).stdout
+        self.assertIn("reviewing only what changed since", out)
+        delta = [c for c in self.calls() if "Re-review after fixes" in c["task"]][-1]
+        self.assertEqual(model(delta), "sonnet")
+        self.assertIn("declined: [style] api/totals.py: rename total_sum", delta["task"])
+        self.assertIn("left out 1 finding(s) declined earlier", out)  # the decision followed the branch
+        self.assertEqual(self.cli("review", "proj", "--status", "--head", "feature").returncode, 0)
+        # 3. an amend: the old tip is gone from the history but in the branch's reflog
+        commit("CLAUDE.md", "And another.\n", amend=True)
+        self.assertIn("reviewing only what changed since", self.cli("review", "proj", "--head", "feature", check=False,
+                                                                     FAKE_REVIEW=approve).stdout)
+        # 4. a large delta gets a full review; --for-push refuses while a fix worker runs on the branch
+        commit("api/big.py", "x = 1\n" * 900)
+        st = self.cli("review", "proj", "--status", "--head", "feature", check=False).stdout
+        self.assertIn("lines changed since", st)
+        out = self.cli("review", "proj", "--head", "feature", "--base", "main", check=False, FAKE_REVIEW=approve).stdout
+        self.assertIn("a full review", out)
+        os.makedirs(os.path.join(self.env["LEAN_AGENT_HOME"], "running"), exist_ok=True)
+        json.dump({"pid": os.getpid(), "run": "fix1", "project": "proj", "branch": "feature", "role": None},
+                  open(os.path.join(self.env["LEAN_AGENT_HOME"], "running", "fix1.json"), "w"))
+        r = self.cli("review", "proj", "--head", "feature", "--for-push", check=False, FAKE_REVIEW=approve)
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("still running on feature (fix1): review once, after all of them", r.stderr)
+
     def test_review_a_ref_without_checkout(self):
         g = self.git_project()
         g("add", "-A")
@@ -2997,7 +3049,8 @@ class CliTest(unittest.TestCase):
         g("checkout", "-q", "main")
         p = self.cli("review", "proj", "--status", "--head", "feature", check=False)
         self.assertEqual(p.returncode, 1)
-        self.assertIn("new commits since", p.stdout)
+        self.assertIn("feature was reviewed at", p.stdout)  # points at the cheap way: a delta review
+        self.assertIn("lines changed since. Review just that: lean-agent review proj --head feature", p.stdout)
         out = self.cli("review", "proj", "--resume", "--head", "feature", FAKE_REVIEW=approve).stdout
         self.assertIn("re-review of feature @ ", out)
         self.assertIn("recorded for feature @ ", out)
@@ -3027,7 +3080,7 @@ class CliTest(unittest.TestCase):
             {"severity": "major", "file": "api/totals.py", "line": 3, "issue": "rounding drops cents"}]))
         self.cli("review", "proj", "--head", "feature", "--base", "main", check=False, FAKE_REVIEW=bad)
         commit_fix("# fix 4\n")
-        out = self.cli("review", "proj", "--head", "feature", "--base", "main", FAKE_REVIEW=approve).stdout
+        out = self.cli("review", "proj", "--head", "feature", "--base", "main", "--full-review", FAKE_REVIEW=approve).stdout
         self.assertIn("passing 1 earlier findings", out)
         self.assertIn("[major] api/totals.py:3 rounding drops cents", self.calls()[-1]["task"])
 
@@ -3129,6 +3182,7 @@ class CliTest(unittest.TestCase):
         rr = next(c for c in reversed(self.calls()) if "Re-review after fixes" in c["task"])
         self.assertIn("The earlier review's open items", rr["task"])
         self.assertIn("declined: [scope] src/dialogs/overlayStore.ts", rr["task"])
+        self.assertIn("the code it points at changed since", rr["task"])  # the fix rewrote that line
         self.assertIn("deferOverlay (src/dialogs/overlayStore.ts)", rr["append"])
         self.assertIn("deferOverlay", self.calls()[-1]["task"])  # then sent back once for its reuse entry
 

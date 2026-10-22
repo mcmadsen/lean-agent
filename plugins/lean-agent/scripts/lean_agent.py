@@ -1465,7 +1465,9 @@ def cmd_run(a):
     running_key = launch_key or run_id  # every run is listed while it runs (the dashboard, the status line)
     save_json(home("running", running_key + ".json"), {"pid": os.getpid(), "started": now_iso(), "run": run_id,
                                                       "task": task[:2000], "model": model, "project": slug,
-                                                      "workdir": workdir, "todo": todo_id, "effort": effort, "role": getattr(a, "role", None)
+                                                      "workdir": workdir, "todo": todo_id, "effort": effort,
+                                                      "branch": (wt or {}).get("branch") if isinstance(wt, dict) else None,
+                                                      "role": getattr(a, "role", None)
                                                       or (prev or {}).get("role")})
     for line in mcp_cost_lines(mcp_specs, chrome_spec):
         print(line, flush=True)
@@ -2450,16 +2452,89 @@ def declined_path(slug):
     return home("reviews", slug + ".declined.jsonl")
 
 
-def declined_for(slug, ref):
-    return [d for d in read_jsonl(declined_path(slug)) if d.get("ref") in (ref, None)]
+def bare_ref(ref):
+    return re.sub(r"^(refs/heads/|refs/remotes/)?(origin/)?", "", str(ref or ""))
 
 
-def decisions_text(slug, ref):
+_BRANCH_OF = {}
+
+
+def branch_of(path, ref):
+    """The branch a review of `ref` belongs to, so reviews and decisions follow the branch, not the commit: the
+    branch's own name, or the one branch (other than the base branches) whose history holds that commit; ''."""
+    if not path or not ref or ref == "working tree":
+        return ""
+    key = (path, ref)
+    if key in _BRANCH_OF:
+        return _BRANCH_OF[key]
+    b = bare_ref(ref)
+    out = ""
+    if any(git(path, "show-ref", "--verify", "--quiet", r) is not None for r in (f"refs/heads/{b}", f"refs/remotes/origin/{b}")):
+        out = b
+    else:
+        sha = git(path, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
+        if sha:
+            bases = {"HEAD", "main", "master", "develop", "origin", bare_ref(default_base(path) or "")}
+            names = {bare_ref(n) for n in (git(path, "for-each-ref", "--contains", sha, "--format=%(refname:short)",
+                                               "refs/heads", "refs/remotes") or "").split()} - bases
+            out = next(iter(names)) if len(names) == 1 else ""
+    _BRANCH_OF[key] = out
+    return out
+
+
+def same_line(path, old, new, branch=""):
+    """Whether commit `new` continues the work reviewed at `old`: `old` is in its history, or it was amended or
+    rebased away on the same branch (the branch's reflog had it)."""
+    if not old or not new:
+        return False
+    if old == new or git(path, "merge-base", "--is-ancestor", old, new) is not None:
+        return True
+    for r in ([branch, f"origin/{branch}"] if branch else []):
+        if old in (git(path, "log", "-g", "--format=%H", r) or "").split():
+            return True
+    return False
+
+
+def code_moved(path, old, new, file, line, around=3):
+    """Whether the lines around `file:line` (at commit `old`) changed by commit `new`."""
+    try:
+        line = int(line)
+    except (TypeError, ValueError):
+        return False
+    if not line or not old or not new or old == new:
+        return False
+    diff = git(path, "diff", "-U0", "--no-color", old, new, "--", str(file)) or ""
+    for m in re.finditer(r"^@@ -(\d+)(?:,(\d+))? ", diff, re.M):
+        start, n = int(m.group(1)), int(m.group(2) or 1)
+        if start - around <= line <= start + max(n, 1) + around:
+            return True
+    return False
+
+
+def declined_for(slug, ref, path=None, head=None, include_moved=False):
+    """What the user declined for this branch (or for every branch): recognised on later commits of the same
+    branch; one whose code changed since no longer applies by itself (include_moved: listed, marked "moved")."""
+    br = branch_of(path, ref) if path else ""
+    out = []
+    for d in read_jsonl(declined_path(slug)):
+        if not (d.get("ref") in (ref, None) or (br and (d.get("branch") == br or bare_ref(d.get("ref")) == br))):
+            continue
+        if path and head and d.get("head") and d.get("file") and code_moved(path, d["head"], head, d["file"], d.get("line")):
+            if include_moved:
+                out.append(dict(d, moved=True))
+            continue  # the code it was about changed: it may come up again
+        out.append(d)
+    return out
+
+
+def decisions_text(slug, ref, path=None, head=None):
     """Earlier findings and declined ones for this branch, for the reviewers to respect."""
     lines = [(f"- out of scope (the user's word): {d.get('file', '?')}: {d.get('gap', '')[:160]} (why: {d.get('why', '')[:160]})"
               if d.get("gap") else
               f"- declined: [{d.get('category') or '?'}] {d.get('file', '?')}: {d.get('issue', '')[:160]} "
-              f"(why: {d.get('why', '')[:160]})") for d in declined_for(slug, ref)][:15]
+              f"(why: {d.get('why', '')[:160]})") + (" [the code it points at changed since: raise it only if it "
+                                                     "still applies]" if d.get("moved") else "")
+             for d in declined_for(slug, ref, path, head, include_moved=True)][:15]
     if not lines:
         return ""
     return ("Decided with the author earlier (don't raise these again unless the change makes them newly "
@@ -2645,8 +2720,10 @@ def add_to_review_cards(slug, checklist=(), helpers=(), replace=()):
 
 def cmd_review_decline(a):
     """Record that findings of the latest review were discussed and declined, so later reviews leave them out."""
-    slug, _ = resolve_project(a.project)
-    last = next((r for r in reversed(list(read_jsonl(reviews_path(slug)))) if not a.head or r.get("ref") == a.head), None)
+    slug, path = resolve_project(a.project)
+    br = branch_of(path, a.head) if a.head else ""
+    last = next((r for r in reversed(list(read_jsonl(reviews_path(slug)))) if not a.head or r.get("ref") == a.head
+                 or (br and (r.get("branch") or branch_of(path, r.get("ref"))) == br)), None)
     if not last:
         die(f"no review of {a.head or slug} yet")
     if not a.numbers and not a.all_gaps:
@@ -2665,6 +2742,8 @@ def cmd_review_decline(a):
                 die(f"review {last['run']} has known gaps g1-g{len(gaps)}; got {n}" if gaps else
                     f"review {last['run']} has no known gaps")
             append_jsonl(declined_path(slug), {"ts": now_iso(), "ref": None if a.all_branches else last.get("ref"),
+                                               "branch": last.get("branch") or branch_of(path, last.get("ref")),
+                                               "head": last.get("head"), "line": g.get("line"),
                                                "file": g.get("file"), "gap": g.get("what", ""), "why": a.why,
                                                "review": last["run"]})
             print(f"acknowledged {n}: {g.get('file', '?')}: {str(g.get('what', ''))[:100]} ({a.why})")
@@ -2677,11 +2756,14 @@ def cmd_review_decline(a):
             die(f"review {last['run']} has findings 1-{len(last['findings'])}; got {n}")
         f = last["findings"][n - 1]
         append_jsonl(declined_path(slug), {"ts": now_iso(), "ref": None if a.all_branches else last.get("ref"),
+                                           "branch": last.get("branch") or branch_of(path, last.get("ref")),
+                                           "head": last.get("head"), "line": f.get("line"),
                                            "file": f.get("file"), "category": f.get("category"),
                                            "symbol": finding_symbol(f),
                                            "issue": f.get("issue", ""), "why": a.why, "review": last["run"]})
         print(f"declined {n}. [{f.get('severity')}/{f.get('category') or '?'}] {f.get('file')}: {f.get('issue', '')[:100]}")
-    print(f"Later reviews of {'every branch' if a.all_branches else last.get('ref')} are told about it and leave it out.")
+    print(f"Later reviews of {'every branch' if a.all_branches else (last.get('branch') or last.get('ref'))} are told "
+          "about it and leave it out, on later commits too, until the code it points at changes.")
     return 0
 
 
@@ -3061,14 +3143,65 @@ def high_risk(path, rng_args, names):
     return why
 
 
+def earlier_review(slug, path, head):
+    """The latest reviewer run this review continues: of the same branch (with or without origin/), or of a commit
+    the new one builds on (an ancestor, or amended away on the same branch) that isn't merged into the base."""
+    want = git(path, "rev-parse", "--verify", "--quiet", head + "^{commit}") if head else None
+    br = branch_of(path, head) if head else ""
+    base = default_base(path)
+    runs = [r for r in reversed(ledger()) if r.get("role") == "reviewer" and r.get("project") == slug]
+
+    def matches(r, loose=False):
+        m = r.get("review_meta") or {}
+        if not head:
+            return True
+        if m.get("mode") != "ref":
+            return False
+        if bare_ref(m.get("ref")) == bare_ref(head) or (br and branch_of(path, m.get("ref")) == br):
+            return True  # the same branch, with or without its remote
+        if not loose or not want or not m.get("head"):
+            return False
+        return (same_line(path, m["head"], want, br)
+                and not (base and git(path, "merge-base", "--is-ancestor", m["head"], base) is not None))
+    prev = next((r for r in runs if matches(r)), None) or next((r for r in runs if matches(r, True)), None)
+    if prev and head and bare_ref((prev.get("review_meta") or {}).get("ref")) != bare_ref(head):
+        prev = dict(prev, review_meta=dict(prev.get("review_meta") or {}, ref=head))  # review what was named
+    return prev
+
+
+def workers_on(slug, path, head):
+    """Workers running right now on the branch a review is about (fixes still coming)."""
+    br = branch_of(path, head) or bare_ref(head)
+    out = []
+    for f in glob.glob(home("running", "*.json")):
+        m = load_json(f, {})
+        try:
+            os.kill(int(m.get("pid", 0)), 0)
+        except (OSError, ValueError, TypeError):
+            continue
+        if m.get("project") == slug and m.get("role") != "reviewer" and br and bare_ref(m.get("branch")) == br:
+            out.append(m.get("run"))
+    return out
+
+
 def cmd_review(a):
+    rc = review_main(a)
+    if getattr(a, "for_push", False) and not a.status:
+        print("Before the push: fix everything this review found in ONE worker (or one worktree session), then run "
+              f"`lean-agent review {a.project}" + (f" --head {a.head}" if a.head else "") + "` once: it reviews only "
+              "what changed since (sonnet unless that's high-risk) and checks the earlier findings, and declined "
+              "findings and gaps stay declined on the new commits. Then `review --status` is the push gate.")
+    return rc
+
+
+def review_main(a):
     slug, path = resolve_project(a.project)
     if a.head and a.head.startswith("origin/") and not a.no_fetch:
         git(path, "fetch", "-q", "origin")  # updates remote refs only; the working tree isn't touched
     if a.status:
         match, (sha, label) = find_review(slug, path, a.head)
         if match:
-            open_gaps = [g for g in match.get("gaps") or [] if not gap_declined(g, declined_for(slug, match.get("ref")))]
+            open_gaps = [g for g in match.get("gaps") or [] if not gap_declined(g, declined_for(slug, match.get("ref"), path, sha))]
             print(f"review {match['run']} of {label} @ {sha[:12]}: {match['verdict']}"
                   + (f", {len(open_gaps)} known gap(s) not acknowledged" if open_gaps else ""))
             for i, g in enumerate(open_gaps, 1):
@@ -3076,6 +3209,16 @@ def cmd_review(a):
             if match["verdict"] == "approve" and open_gaps:
                 return 2
             return 0 if match["verdict"] == "approve" else 1
+        prev_ = earlier_review(slug, path, a.head) if a.head else None
+        old = ((prev_ or {}).get("review_meta") or {}).get("head")
+        if old and old != sha:
+            stat = git(path, "diff", "--numstat", old, sha) or ""
+            size = sum(int(x) for l in stat.splitlines() for x in l.split("\t")[:2] if x.isdigit())
+            was = next((r.get("verdict") for r in reversed(list(read_jsonl(reviews_path(slug)))) if r.get("head") == old), "?")
+            print(f"not reviewed yet at {sha[:12]}: {branch_of(path, a.head) or a.head} was reviewed at {old[:12]} "
+                  f"({was}); {size} lines changed since. Review just that: lean-agent review {slug} --head {a.head} "
+                  f"(a delta review{', sonnet' if size <= env_num('LEAN_AGENT_DELTA_MAX_LINES', 800) else ''}).")
+            return 1
         last = (list(read_jsonl(reviews_path(slug))) or [None])[-1]
         if not last:
             print(f"No review yet. Run: lean-agent review {slug}" + (f" --head {a.head}" if a.head else ""))
@@ -3094,28 +3237,33 @@ def cmd_review(a):
     if low:
         print(f"lean-agent: budget is low, but the reviewer stays on {model} (effort {effort}): quality gate.",
               file=sys.stderr)
+    if a.head and not a.status:
+        busy = workers_on(slug, path, a.head)
+        if busy:
+            msg = (f"{len(busy)} worker(s) still running on {branch_of(path, a.head) or a.head} ({', '.join(busy)}): "
+                   "review once, after all of them")
+            if getattr(a, "for_push", False) and not getattr(a, "yes", False):
+                die(msg + " (or --yes to review now)", code=3)
+            print(f"lean-agent: note: {msg}.", file=sys.stderr)
+    delta_max = env_num("LEAN_AGENT_DELTA_MAX_LINES", 800)
+    if (not a.resume and not getattr(a, "full_review", False) and a.head and not a.independent and a.runs == 1
+            and not a.status):
+        prev_ = earlier_review(slug, path, a.head)
+        old = ((prev_ or {}).get("review_meta") or {}).get("head")
+        new = git(path, "rev-parse", "--verify", "--quiet", a.head + "^{commit}")
+        if prev_ and old and new and old != new:
+            stat = git(path, "diff", "--numstat", old, new) or ""
+            size = sum(int(x) for l in stat.splitlines() for x in l.split("\t")[:2] if x.isdigit())
+            if size <= delta_max or getattr(a, "delta_only", False):
+                print(f"review: {branch_of(path, a.head) or a.head} was reviewed at {old[:12]} (run {prev_['id']}); "
+                      f"reviewing only what changed since ({size} lines) and whether the earlier findings are fixed. "
+                      "--full-review reviews the whole change again.", flush=True)
+                a.resume = True
+            else:
+                print(f"review: {size} changed lines since the review at {old[:12]} (over {delta_max}, "
+                      "LEAN_AGENT_DELTA_MAX_LINES): a full review", flush=True)
     if a.resume:
-        bare = lambda ref: re.sub(r"^(refs/heads/|refs/remotes/)?(origin/)?", "", str(ref or ""))
-        want = git(path, "rev-parse", "--verify", "--quiet", a.head + "^{commit}") if a.head else None
-        base = default_base(path)
-
-        def matches(r, loose=False):
-            m = r.get("review_meta") or {}
-            if not a.head:
-                return True
-            if m.get("mode") != "ref":
-                return False
-            if bare(m.get("ref")) == bare(a.head):
-                return True  # the same branch, with or without its remote
-            if not loose or not want or not m.get("head"):
-                return False
-            # a commit on the same line of work: the reviewed tip is an ancestor of it and isn't merged yet
-            return (git(path, "merge-base", "--is-ancestor", m["head"], want) is not None
-                    and not (base and git(path, "merge-base", "--is-ancestor", m["head"], base) is not None))
-        reviews_ = [r for r in reversed(ledger()) if r.get("role") == "reviewer" and r["project"] == slug]
-        prev = next((r for r in reviews_ if matches(r)), None) or next((r for r in reviews_ if matches(r, True)), None)
-        if prev and a.head and bare((prev.get("review_meta") or {}).get("ref")) != bare(a.head):
-            prev = dict(prev, review_meta=dict(prev.get("review_meta") or {}, ref=a.head))  # review what was named
+        prev = earlier_review(slug, path, a.head)
         if not prev:
             die(f"no earlier review of {a.head or slug} to resume"
                 + (f"; start one: lean-agent review {slug} --head {a.head}" if a.head else ""))
@@ -3140,7 +3288,8 @@ def cmd_review(a):
             meta["goal"] = a.goal
         if mb:
             meta["hunks"] = changed_hunks(path, [mb, meta["head"]] if meta.get("mode") == "ref" else [mb])
-        where += (" " + decisions_text(slug, meta.get("ref")).replace("\n", " ") if decisions_text(slug, meta.get("ref")) else "")
+        dt = decisions_text(slug, meta.get("ref"), path, meta.get("head"))
+        where += (" " + dt.replace("\n", " ") if dt else "")
         where += (f" Since your last review these files changed: {', '.join(changed[:30]) or 'none'}. Re-check only "
                   "(a) your earlier open findings against the new code (say for each: fixed / still open) and (b) "
                   "the changed files above, with the reuse, scope and platform passes limited to them. Don't "
@@ -3170,12 +3319,18 @@ def cmd_review(a):
                      if meta.get("mode") == "ref" else "")
         task = ("Re-review after fixes. The earlier review's open items (say for each: fixed / still open, with "
                 "file:line):\n" + ("\n".join(open_items[:25]) or "- none") + "\n\nGive the changes since then the full "
-                "passes; don't re-review code that didn't change. " + decisions_text(slug, meta.get("ref"))
+                "passes; don't re-review code that didn't change. " + decisions_text(slug, meta.get("ref"), path, meta["head"])
                 + (a.focus or ""))
         cards = suggest(slug, " ".join(re.split(r"[/._-]+", " ".join(changed))), a.max_context, "review")
         meta["since_hunks"] = changed_hunks(path, since)
         meta["earlier"] = [str(f.get("issue", "")) for f in last.get("findings") or []]
-        ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=prev.get("model") or model,
+        risk = high_risk(path, since, changed) if since else []
+        delta_model = (getattr(a, "reviewer_model", None)
+                       or ((prev.get("model") or model) if risk else os.environ.get("LEAN_AGENT_DELTA_REVIEW_MODEL") or "sonnet"))
+        if risk and not getattr(a, "reviewer_model", None):
+            print(f"review: the changes since are high-risk ({'; '.join(risk)}): {delta_model} again", flush=True)
+        meta["after"] = {"run": prev["id"], "head": old_head}
+        ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=delta_model,
                                 todo=getattr(a, "todo", None) or prev.get("todo"),
                                 why=f"re-review after fixes ({effort} effort, fresh context)", cards=None,
                                 card_list=cards, project=slug, read_only=True, chrome=None, mcp=None, tools=None,
@@ -3186,7 +3341,8 @@ def cmd_review(a):
                                                                grep_ref=meta["head"] if meta.get("mode") == "ref" else "",
                                                                base_ref=old_head, focus=focus_text(focus)))
         print(f"review: fresh re-review of what changed since {old_head[:12]} ({len(changed)} files, "
-              f"{len(open_items)} open items); --same-session continues the old reviewer instead", flush=True)
+              f"{len(open_items)} open items, {delta_model}); --same-session continues the old reviewer instead",
+              flush=True)
         rc = cmd_run(ns)
         return reuse_follow_up(a, slug, meta, effort) if rc == 2 else rc
     base = a.base or default_base(path)
@@ -3229,7 +3385,7 @@ def cmd_review(a):
     focus["ci_parity"] = ci_parity(path, [merge_base, sha] if mode == "ref" else [merge_base],
                                    sha if mode == "ref" else "HEAD")
     grep_ref = sha if mode == "ref" else ""
-    a._decisions = "" if a.independent else decisions_text(slug, label)
+    a._decisions = "" if a.independent else decisions_text(slug, label, path, sha)
     a._label = label
     if a.independent:
         a.second_opinion = "off"
@@ -3537,7 +3693,10 @@ def enforce_review_rules(review, meta, declined=()):
             continue
         gaps.append({"what": text, "file": file_, "line": loc.rsplit(":", 1)[-1] if ":" in loc else 0,
                      "blocks_goal": None, "scoped_out": "", "unaddressed": True})
-    gaps = [g for g in gaps if not gap_declined(g, declined)]
+    kept = [g for g in gaps if not gap_declined(g, declined)]
+    if len(kept) < len(gaps):
+        notes.append(f"{len(gaps) - len(kept)} gap(s) declined earlier on this branch still apply (not asked again)")
+    gaps = kept
     for g in gaps:
         if g.get("blocks_goal") is True and not str(g.get("scoped_out") or "").strip() and not any(
                 f.get("category") == "completeness" and os.path.basename(str(f.get("file", ""))) ==
@@ -3592,8 +3751,9 @@ def enforce_review_rules(review, meta, declined=()):
 
 
 def report_review(slug, project, entry, review, meta):
-    verdict, findings, checks, notes = enforce_review_rules(
-        review, meta, () if meta.get("independent") else declined_for(slug, meta.get("ref")))
+    root = (projects().get(slug) or {}).get("path") or project
+    declined = () if meta.get("independent") else declined_for(slug, meta.get("ref"), root, meta.get("head"))
+    verdict, findings, checks, notes = enforce_review_rules(review, meta, declined)
     order = {"blocker": 0, "major": 1, "minor": 2, "nit": 3}
     findings.sort(key=lambda f: (order.get(f.get("severity"), 9), CATEGORY_ORDER.get(f.get("category"), 6)))
     if meta.get("mode") == "ref":
@@ -3606,7 +3766,9 @@ def report_review(slug, project, entry, review, meta):
                                       "reuse": review.get("reuse") or [], "new_symbols": meta.get("new_symbols") or [],
                                       "unchecked": review.get("_missing") or [], "disputed": review.get("_disputed") or [],
                                       "coverage_unchecked": review.get("_no_cov") or [],
-                                      "gaps": review.get("_gaps") or [], "goal": review.get("_goal")})
+                                      "gaps": review.get("_gaps") or [], "goal": review.get("_goal"),
+                                      "branch": branch_of(root, meta.get("ref")) if meta.get("mode") == "ref" else "",
+                                      "after": meta.get("after"), "delta": bool(meta.get("resume"))})
     order = {"blocker": 0, "major": 1, "minor": 2, "nit": 3}
     label = meta.get("ref") or "the working tree"
     reuse = [r for r in review.get("reuse") or [] if isinstance(r, dict)]
@@ -7553,6 +7715,13 @@ def build_parser():
     s.add_argument("--resume", action="store_true", help="re-review after fixes: a fresh reviewer gets the open findings "
                    "and only what changed since (cheap); --same-session continues the old reviewer")
     s.add_argument("--same-session", action="store_true", help="--resume: continue the earlier reviewer session")
+    s.add_argument("--full-review", action="store_true", help="review the whole change again, even when an earlier review of "
+                   "the branch exists (by default only what changed since it is reviewed)")
+    s.add_argument("--delta-only", action="store_true", help="review only what changed since the earlier review, "
+                   "however large (default: a full review above LEAN_AGENT_DELTA_MAX_LINES, 800 lines)")
+    s.add_argument("--for-push", action="store_true", help="the push gate: refuses while fix workers still run on the "
+                   "branch, and says how to batch fixes before the next review")
+    s.add_argument("--yes", action="store_true", help="--for-push: review even though workers still run")
     s.add_argument("--status", action="store_true", help="exit 0 only if the current code has an approve")
     s.add_argument("--runs", type=int, default=1, metavar="N", help="N independent passes merged into one review "
                    "(variance is real: 2 cheap passes often beat 1 expensive one)")

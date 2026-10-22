@@ -26,6 +26,13 @@ results, and report briefly.
    ready to merge, run `lean-agent review <project>`. It's a read-only Sonnet reviewer at high effort,
    and the one place where spending tokens on quality is intended. Fix its blockers and majors with
    workers, delegate its `checks` (tests, behaviour) to workers, then `lean-agent review <project> --resume`.
+   The fix loop is cheap if you batch: one full review of the whole change, then fix EVERYTHING it found in
+   one worker (or one worktree session), then `lean-agent review <project> --head <branch>` once. Once a
+   branch has a review, that reviews only what changed since (sonnet, unless the change is high-risk), checks
+   the earlier findings, and keeps what the user declined (on later commits and after amends too, until the
+   code it points at changes); `--full-review` reviews everything again. Never review after each fix worker.
+   Before a push: `lean-agent review <project> --head <branch> --for-push` (it refuses while fix workers still
+   run on the branch), then `review --status --head <branch>` is the gate.
    Review a PR branch straight from git with `--head <branch>`: never check it out (that changes the
    user's working tree). The reviewer must search for existing code that each new symbol duplicates;
    a duplicate or a too-narrow fix blocks approval. When a human reviewer later finds something it
@@ -132,6 +139,7 @@ lean-agent run {{P}} -m haiku --why "reviewer's check" --worktree origin/feature
 lean-agent review {{P}} --focus "the new retry logic"
 lean-agent review {{P}} --resume              # re-review after fixes, same reviewer session
 lean-agent review {{P}} --resume --head origin/feature-x                # re-review that branch's new tip
+lean-agent review {{P}} --head origin/feature-x --for-push              # the push gate: only what changed since the last review
 lean-agent review {{P}} --status              # exit 0 only if the current code is approved
 ```
 
