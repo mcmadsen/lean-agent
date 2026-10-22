@@ -38,6 +38,7 @@ DEFAULT_ENV = {
     "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet", "LEAN_AGENT_BRIEF": "1", "LEAN_AGENT_ANSWER_LINES": "25",
 }
 MAX_EVENTS = 600
+_SENDS_LOCK = threading.Lock()  # appends to service_sends.jsonl and its trimming never interleave
 _BRIDGE = {"at": 0.0, "up": False}
 
 
@@ -66,7 +67,6 @@ def orchestrator_env():
         env.setdefault(k, v) if k not in saved else env.__setitem__(k, v)
     env["PATH"] = os.path.join(os.path.dirname(HERE), "bin") + os.pathsep + env.get("PATH", "")
     try:
-        sys.path.insert(0, HERE)
         import push_guard
         env = push_guard.git_env(env)
     except Exception:  # the guard is a safety net; the chat still works without it
@@ -80,25 +80,25 @@ def _questions(req):
 
 def _trim_sends(path, keep=500, limit=1000):
     """Keep the last `keep` lines once the log has grown past `limit`."""
-    try:
-        if os.path.getsize(path) < limit * 80:  # cheap check before counting lines
-            return
-        with open(path) as fh:
-            lines = fh.readlines()
-        if len(lines) > limit:
-            tmp = path + ".tmp"
-            with open(tmp, "w") as fh:
-                fh.writelines(lines[-keep:])
-            os.replace(tmp, path)
-    except OSError:
-        pass
+    with _SENDS_LOCK:
+        try:
+            if os.path.getsize(path) < limit * 80:  # cheap check before counting lines
+                return
+            with open(path) as fh:
+                lines = fh.readlines()
+            if len(lines) > limit:
+                tmp = path + ".tmp"
+                with open(tmp, "w") as fh:
+                    fh.writelines(lines[-keep:])
+                os.replace(tmp, path)
+        except OSError:
+            pass
 
 
 def service_up():
     """True when `lean-agent up`'s bridge answers (checked at most every few seconds)."""
     if time.time() - _BRIDGE["at"] > 3 or _BRIDGE.get("home") != lean_home():
         try:
-            sys.path.insert(0, HERE)
             import service_session
             _BRIDGE.update(up=bool(service_session.supported() and os.path.exists(service_session.sock_path())
                                    and service_session.alive()))
@@ -106,11 +106,6 @@ def service_up():
             _BRIDGE["up"] = False
         _BRIDGE.update(at=time.time(), home=lean_home())
     return _BRIDGE["up"]
-
-
-def suggestion_rules(suggestions):
-    sys.path.insert(0, HERE)
-    return dash_service.suggestion_rules(suggestions)
 
 
 def service_status():
@@ -209,9 +204,10 @@ class Chat:
         prompt = f"[Dashboard thread about: {context}]\n\n{shown}" if first and context else shown
         os.makedirs(ds.chat_dir(), exist_ok=True)
         log = ds.chat_dir("service_sends.jsonl")
-        with open(log, "a") as fh:
-            fh.write(json.dumps({"key": self.key, "sid": m.sid, "sent": prompt, "shown": shown, "raw": text,
-                                 "ts": time.time()}) + "\n")
+        with _SENDS_LOCK:
+            with open(log, "a") as fh:
+                fh.write(json.dumps({"key": self.key, "sid": m.sid, "sent": prompt, "shown": shown, "raw": text,
+                                     "ts": time.time()}) + "\n")
         _trim_sends(log)
         ok, err = service_session.send(prompt)
         return {"ok": ok, **({"error": err} if err else {})}
@@ -308,8 +304,8 @@ class Chat:
                     e = self._add(kind="permission", rid=ev.get("request_id"), name=req.get("display_name")
                                   or req.get("tool_name"), text=tool_summary(req.get("tool_name"), req.get("input")),
                                   description=req.get("description") or req.get("title"), state="pending",
-                                  can_always=bool(suggestion_rules(req.get("permission_suggestions"))),
-                                  always_rule=suggestion_rules(req.get("permission_suggestions")),
+                                  can_always=bool(dash_service.suggestion_rules(req.get("permission_suggestions"))),
+                                  always_rule=dash_service.suggestion_rules(req.get("permission_suggestions")),
                                   questions=_questions(req) if req.get("tool_name") == "AskUserQuestion" else None)
                     with self.lock:
                         self.pending[ev.get("request_id")] = (e, req)
@@ -396,7 +392,7 @@ class Chat:
         if allow:
             resp = {"behavior": "allow", "updatedInput": dict(req.get("input") or {},
                                                               **({"answers": answers} if answers else {}))}
-            if always and suggestion_rules(req.get("permission_suggestions")):
+            if always and dash_service.suggestion_rules(req.get("permission_suggestions")):
                 resp["updatedPermissions"] = req["permission_suggestions"]
         else:
             resp = {"behavior": "deny", "message": message or "The user declined this in the dashboard."}
@@ -424,7 +420,7 @@ class Chat:
                 ok, err = service_session.send("/clear")
                 if ok:  # remembered so the new transcript is known to be ours
                     os.makedirs(dash_service.chat_dir(), exist_ok=True)
-                    with open(dash_service.chat_dir("service_sends.jsonl"), "a") as fh:
+                    with _SENDS_LOCK, open(dash_service.chat_dir("service_sends.jsonl"), "a") as fh:
                         fh.write(json.dumps({"key": "main", "sid": None, "sent": "/clear", "shown": "/clear", "raw": "/clear",
                                              "ts": time.time()}) + "\n")
                 return {"ok": ok, **({"error": err} if err else {})}

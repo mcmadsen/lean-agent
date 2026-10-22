@@ -7579,7 +7579,7 @@ def build_parser():
     s.add_argument("--name", default="lean-agent", help="session name in the Claude app")
     s.add_argument("--budget", type=int, help="optional self-set cap per orchestrator session (sonnet-eq tokens)")
     s.add_argument("--compact-at", type=int, metavar="TOKENS", help="compact the orchestrator's context at about this "
-                   "many tokens (default ~70,000)")
+                   "many tokens (default ~67,000)")
     s.add_argument("--budget-5h", type=int, help="lean-agent budget per 5-hour window (Sonnet-equivalent tokens)")
     s.add_argument("--budget-week", type=int, help="lean-agent budget per 7 days (Sonnet-equivalent tokens)")
     s.add_argument("--permission-mode", help="e.g. acceptEdits, auto")

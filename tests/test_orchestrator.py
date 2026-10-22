@@ -116,6 +116,11 @@ FAKE_CLAUDE = textwrap.dedent("""\
 """)
 
 
+def _load_json(p):
+    with open(p) as fh:
+        return json.load(fh)
+
+
 class CliTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -2756,6 +2761,124 @@ class CliTest(unittest.TestCase):
                 os.environ.pop("LEAN_AGENT_HOME", None)
             else:
                 os.environ["LEAN_AGENT_HOME"] = old
+
+    def _follow_home(self):
+        home = tempfile.mkdtemp()
+        proj = os.path.join(home, "proj")
+        os.makedirs(proj)
+        os.makedirs(os.path.join(home, "chat"))
+        tr = os.path.join(proj, "s1.jsonl")
+        open(tr, "w").close()
+        with open(os.path.join(home, "up.json"), "w") as fh:
+            json.dump({"transcript": tr, "session_id": "s1", "session_started": "2020-01-01T00:00:00"}, fh)
+        return home, proj, tr
+
+    @staticmethod
+    def _user_file(path, text):
+        with open(path, "w") as fh:
+            fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n")
+
+    def test_service_follows_only_clear_transcripts(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import dash_service
+        home, proj, tr = self._follow_home()
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = home
+        try:
+            m = dash_service.Model()
+            self._user_file(os.path.join(proj, "foreign.jsonl"), "SessionStart hook: hello")
+            self.assertEqual(m._pick(_load_json(os.path.join(home, "up.json"))), tr)
+            clr = os.path.join(proj, "clr.jsonl")
+            self._user_file(clr, "<command-name>/clear</command-name>")
+            m._scan["at"] = 0
+            self.assertEqual(m._pick(_load_json(os.path.join(home, "up.json"))), clr)
+        finally:
+            if old is None:
+                os.environ.pop("LEAN_AGENT_HOME", None)
+            else:
+                os.environ["LEAN_AGENT_HOME"] = old
+
+    def test_service_follows_a_transcript_born_after_our_clear_once(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import dash_service
+        home, proj, tr = self._follow_home()
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = home
+        try:
+            m = dash_service.Model()
+            m.send_log = [{"sent": "/clear", "ts": time.time() - 1}]
+            up = _load_json(os.path.join(home, "up.json"))
+            a, b = os.path.join(proj, "a.jsonl"), os.path.join(proj, "b.jsonl")
+            self._user_file(a, "hello there")
+            m._scan["at"] = 0
+            self.assertEqual(m._pick(up), a)
+            self._user_file(b, "another fresh session")
+            os.utime(b, (time.time() + 5, time.time() + 5))
+            m._scan["at"] = 0
+            self.assertEqual(m._pick(up), a)  # the /clear is used up: b is foreign
+        finally:
+            if old is None:
+                os.environ.pop("LEAN_AGENT_HOME", None)
+            else:
+                os.environ["LEAN_AGENT_HOME"] = old
+
+    def test_trim_sends_keeps_the_last_500_lines(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import dash_chat
+        p = os.path.join(tempfile.mkdtemp(), "service_sends.jsonl")
+        with open(p, "w") as fh:
+            for i in range(1200):
+                fh.write(json.dumps({"sent": f"m{i}", "pad": "x" * 80}) + "\n")
+        dash_chat._trim_sends(p)
+        lines = open(p).read().splitlines()
+        self.assertEqual(len(lines), 500)
+        self.assertEqual(json.loads(lines[0])["sent"], "m700")
+        self.assertEqual(json.loads(lines[-1])["sent"], "m1199")
+
+    def test_permission_marker_prune_and_gating(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import dash_service
+        import permission_hook
+        home = tempfile.mkdtemp()
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = home
+        try:
+            d = dash_service.perm_dir()
+            os.makedirs(d)
+            stale, young = os.path.join(d, "p1.moved.json"), os.path.join(d, "p2.moved.json")
+            for p in (stale, young):
+                open(p, "w").write("{}")
+            os.utime(stale, (time.time() - 2 * 86400,) * 2)
+            permission_hook._prune(d)
+            self.assertFalse(os.path.exists(stale))
+            self.assertTrue(os.path.exists(young))
+            os.remove(young)
+            # no polling tab: nothing is written, the app asks
+            event = {"tool_name": "Bash", "tool_input": {}, "session_id": "s1"}
+            self.assertIsNone(permission_hook.decide(event, 0.2))
+            self.assertEqual([n for n in os.listdir(d)], [])
+        finally:
+            if old is None:
+                os.environ.pop("LEAN_AGENT_HOME", None)
+            else:
+                os.environ["LEAN_AGENT_HOME"] = old
+
+    def test_compaction_point_buffer(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_common
+        old = os.environ.get("LEAN_AGENT_COMPACT_BUFFER")
+        try:
+            os.environ.pop("LEAN_AGENT_COMPACT_BUFFER", None)
+            self.assertEqual(lean_common.compaction_point(100000, 70), 67000)
+            os.environ["LEAN_AGENT_COMPACT_BUFFER"] = "50000"
+            self.assertEqual(lean_common.compaction_point(100000, 70), 50000)
+            os.environ["LEAN_AGENT_COMPACT_BUFFER"] = "lots"
+            self.assertEqual(lean_common.compaction_point(100000, 70), 67000)
+        finally:
+            if old is None:
+                os.environ.pop("LEAN_AGENT_COMPACT_BUFFER", None)
+            else:
+                os.environ["LEAN_AGENT_COMPACT_BUFFER"] = old
 
     def test_dashboard_threads_share_the_service_session(self):
         p, log, ss, dash_chat, dash_service = self.service_chat("--dashboard-only")

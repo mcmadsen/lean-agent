@@ -259,7 +259,7 @@ def context_series(path):
     return out
 
 
-def compact_saving(series, keep=70000):
+def compact_saving(series, keep=67000):
     """Sonnet-eq the session spent re-reading context above `keep` tokens (cache reads, 0.1x)."""
     return int(sum(units({"cache_read_input_tokens": max(0, c - keep)}, m) for m, c in series))
 
@@ -296,8 +296,8 @@ def report(arg=None, workers=None):
         if line:
             print(line)
         extra = compact_saving(series)
-        if series and totals["_ctx"] // calls > 70000 and extra:
-            print(f"Re-reading context above ~70K cost this session ~{fmt(extra)} sonnet-eq; an orchestrator that "
+        if series and totals["_ctx"] // calls > 67000 and extra:
+            print(f"Re-reading context above ~67K cost this session ~{fmt(extra)} sonnet-eq; an orchestrator that "
                   "compacts early (`lean-agent up` sets it; restart an older session) or hands off with "
                   "`lean-agent handoff` saves most of it.")
     print()
