@@ -2814,6 +2814,31 @@ class CliTest(unittest.TestCase):
         p, log, ss = self.start_up("--name", "la")
         self.assertFalse(os.path.exists(rec))
 
+    def test_service_follows_a_valid_record_without_session_started(self):
+        ds, home, proj, tr, up = self._follow_env()
+        self._user_file(tr, "hello", time.time())
+        new = os.path.join(proj, "s2.jsonl")
+        self._user_file(new, "after the clear", time.time())
+        self._hook_record(home, "s2", new)
+        up.pop("session_started", None)
+        with open(os.path.join(home, "up.json"), "w") as fh:
+            json.dump(up, fh)
+        m = ds.Model()
+        m.refresh()
+        self.assertEqual(m.path, new)
+
+    def test_service_treats_a_corrupt_record_as_stale(self):
+        ds, home, proj, tr, up = self._follow_env()
+        self._user_file(tr, "hello", time.time())
+        new = os.path.join(proj, "s2.jsonl")
+        self._user_file(new, "x", time.time())
+        for ts in ("soon", None, [1]):
+            with open(os.path.join(home, "chat", "service.json"), "w") as fh:
+                json.dump({"session_id": "s2", "transcript_path": new, "ts": ts}, fh)
+            m = ds.Model()
+            m.refresh()
+            self.assertEqual(m.path, tr)
+
     def test_service_ignores_a_record_from_before_the_session_started(self):
         ds, home, proj, tr, up = self._follow_env()
         self._user_file(tr, "hello", time.time())
