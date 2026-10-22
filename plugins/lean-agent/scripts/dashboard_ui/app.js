@@ -177,12 +177,19 @@ function drawSchedule(s){
 }
 function drawPlanBox(s){
   const wk=s.plan.seven_day,ses=s.plan.five_hour,hm=t=>new Date(t*1000).toTimeString().slice(0,5),dhm=t=>new Date(t*1000).toLocaleDateString(undefined,{weekday:"short"})+" "+hm(t);
+  const ok=p=>p&&Number.isFinite(p.pct),tone=p=>p>95?" bad":p>80?" warn":"";
   const gone=wk&&wk.resets_at?Math.max(0,Math.min(100,100-(wk.resets_at-Date.now()/1000)*100/(7*86400))):null;
-  $("pacechip").innerHTML=s.pace?`<span class="chip ${s.ahead?"tone-warn":"tone-ok"}">${s.ahead?"ahead of pace":"on pace"}</span>`:"";
-  $("pace").innerHTML=(wk?`<div class="bar2"><div class="l"><span>Week ${Math.round(wk.pct)}%${wk.resets_at?" · resets "+dhm(wk.resets_at):""}</span><span>${gone!=null?Math.round(gone)+"% of week gone":""}</span></div>${meter(wk.pct,70,90)}</div>`:'<span class="mute small">Plan usage comes with every worker run.</span>')
-    +(ses?`<div class="bar2"><div class="l"><span>Session ${Math.round(ses.pct)}%${ses.resets_at?" · ends "+hm(ses.resets_at):""}</span><span>5 h window</span></div>${meter(ses.pct,70,90)}</div>`:"")
-    +(ses&&ses.pct>=70?`<div class="warn small">Past 70%: haiku and small steps until it resets.</div>`:"");
-  $("weekstats").textContent=`${s.week.runs} runs (${s.week.done} done) · ${k(s.week.units)} sonnet-eq · $${s.week.cost} · ${s.todo_done_week} todos done`;
+  const item=(cls,full,cmp,right,pct,tick,aria)=>`<span class="u-item ${cls}"><span class="u-l"><span><span class="u-full">${full}</span><span class="u-cmp">${cmp}</span></span>${right}</span><span class="u-bar${tone(pct)}" role="img" aria-label="${aria}"><i style="width:${Math.min(100,Math.max(0,pct))}%"></i>${tick!=null?`<b style="left:${tick}%"></b>`:""}</span></span>`;
+  let h="";
+  if(ok(wk)){const p=Math.round(wk.pct),g=gone!=null?Math.round(gone):null;
+    h+=item("u-wk",`Week ${p}%${wk.resets_at?" · resets "+dhm(wk.resets_at):""}`,`Week ${p}%${wk.resets_at?" · "+dhm(wk.resets_at):""}`,
+      s.pace?`<span class="u-pace ${s.ahead?"tone-warn":"tone-ok"}">${s.ahead?"ahead of pace":"on pace"}</span>`:"",wk.pct,g,
+      `Week: ${p} percent of plan used${g!=null?`, ${g} percent of the week gone`:""}`)}
+  if(ok(ses)){const p=Math.round(ses.pct);
+    h+=item("u-ses",`Session ${p}%${ses.resets_at?" · ends "+hm(ses.resets_at):""}`,`Session ${p}%${ses.resets_at?" · "+hm(ses.resets_at):""}`,'<span class="u-full">5 h window</span>',ses.pct,null,`Session: ${p} percent of the 5 hour window used`)}
+  const w=s.week;
+  if(h&&w)h+=`<span class="u-tot">${w.runs} runs · $${w.cost} · ${s.todo_done_week} todos done</span>`;
+  $("ustrip").innerHTML=h;$("ustrip").hidden=!h;
   const c=s.context;
   $("ctxmeter").innerHTML=c&&c.calls?`<div class="meter" role="img" aria-label="Orchestrator context ${k(c.now)} of ${k(c.compact_at)} before compaction"><div style="width:${Math.min(100,c.now*100/c.compact_at)}%"></div></div>${k(c.now)} / ${k(c.compact_at)}`:"";
 }

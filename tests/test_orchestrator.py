@@ -2119,7 +2119,8 @@ class CliTest(unittest.TestCase):
             os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.update(LEAN_AGENT_HOME=old)
         self.assertEqual([h.get("five_hour", [None])[0] for h in hist], [10, 12, 12, None])
         self.assertEqual(hist[-1]["seven_day"], [6, t0 + 86400])
-        self.assertIn('id="c-plan"', dashboard.PAGE)
+        self.assertIn('id="ustrip"', dashboard.PAGE)
+        self.assertNotIn('id="c-plan"', dashboard.PAGE)
         self.assertNotIn('id="c-week"', dashboard.PAGE)  # the graph replaced the week box
 
     FAKE_STREAM_CLAUDE = textwrap.dedent("""\
