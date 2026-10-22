@@ -12,9 +12,16 @@ import fnmatch
 import json
 import os
 import re
+import select
 import shlex
 import subprocess
 import sys
+
+# No wait in a git hook is unbounded: the guard's own waits (reading git's ref list, asking git) give up after
+# HOOK_WAIT seconds and refuse; the repository's own hook gets OWN_HOOK_WAIT (it may run tests).
+HOOK_WAIT = float(os.environ.get("LEAN_AGENT_HOOK_WAIT") or 30)
+OWN_HOOK_WAIT = 600
+MAX_HOOK_DEPTH = 3
 
 DEFAULT_PUSH_DENY = ["release/*", "develop", "main", "master"]
 
@@ -203,8 +210,52 @@ def ensure_git_wrapper(path_value):
     return d
 
 
+def is_local_destination(dest):
+    """True for a local path or file:// URL (not host:path, user@host:path or any other scheme)."""
+    if not dest:
+        return False
+    if dest.startswith("file://"):
+        return True
+    return "://" not in dest and not re.match(r"^([^/@]+@)?[^/:]+:", dest)
+
+
+def skips_guard(dest):
+    """A push to a local path or file:// URL is not checked (LEAN_AGENT_PUSH_GUARD_LOCAL=1 checks it anyway)."""
+    return is_local_destination(dest) and os.environ.get("LEAN_AGENT_PUSH_GUARD_LOCAL") != "1"
+
+
+def wrapper_push_is_local(args):
+    """True when the `git push` in `args` goes to a local path or file:// URL (explicit, or the remote's push URL)."""
+    cwd, i = os.getcwd(), 0
+    while i < len(args) and args[i] != "push":
+        if args[i] == "-C" and i + 1 < len(args):
+            cwd = os.path.join(cwd, args[i + 1])
+            i += 1
+        i += 1
+    rest, skip = [], False
+    for x in args[i + 1:]:
+        if skip:
+            skip = False
+        elif x in ("-o", "--push-option", "--receive-pack", "--exec"):
+            skip = True
+        elif x.startswith("--repo="):
+            rest.insert(0, x[7:])
+        elif not x.startswith("-"):
+            rest.append(x)
+    remote = rest[0] if rest else None
+    if remote is None:
+        branch = _git(cwd, "symbolic-ref", "--quiet", "--short", "HEAD")
+        remote = (branch and _git(cwd, "config", f"branch.{branch}.pushRemote")) or \
+                 (branch and _git(cwd, "config", f"branch.{branch}.remote")) or "origin"
+    url = _git(cwd, "remote", "get-url", "--push", remote)  # a remote's name; else `remote` is itself a URL or path
+    return skips_guard(url if url is not None else remote)
+
+
 def git_wrapper(real, args):
-    """`git <args>` through the guard: a push to a guarded branch is refused, --no-verify or not."""
+    """`git <args>` through the guard: a push to a guarded branch is refused, --no-verify or not.
+    A push to a local path or file:// URL runs unguarded."""
+    if os.environ.get("LEAN_AGENT_PUSH_GUARD_OVERRIDE") != "1" and wrapper_push_is_local(args):
+        os.environ["LEAN_AGENT_PUSH_GUARD_OVERRIDE"] = "1"  # the pre-push hook too
     if os.environ.get("LEAN_AGENT_PUSH_GUARD_OVERRIDE") != "1":
         why = check(" ".join(shlex.quote(a) for a in ["git", *args]), os.getcwd())
         if why:
@@ -252,7 +303,11 @@ def run_own_hook(name, args, stdin_data=None):
     env = _own_hooks_env()
 
     def git_out(*a):
-        p = subprocess.run(["git", *a], capture_output=True, text=True, env=env)
+        try:
+            p = subprocess.run(["git", *a], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
+                               timeout=HOOK_WAIT)
+        except subprocess.TimeoutExpired:
+            raise HookTimeout(f"`git {' '.join(a)}` did not answer within {HOOK_WAIT} s")
         return p.stdout.strip() if p.returncode == 0 else ""
     d = git_out("config", "--get", "core.hooksPath")
     if d:
@@ -262,18 +317,74 @@ def run_own_hook(name, args, stdin_data=None):
     else:
         d = os.path.join(git_out("rev-parse", "--git-common-dir") or ".git", "hooks")
     hook = os.path.join(d, name)
-    if os.path.realpath(d) == os.path.realpath(hooks_dir()) or not os.access(hook, os.X_OK):
+    if os.path.realpath(d) == os.path.realpath(hooks_dir()) or not os.access(hook, os.X_OK) or is_our_hook(hook):
         return 0
-    return subprocess.run([hook, *args], input=stdin_data, text=True, env=env).returncode
+    env["LEAN_AGENT_HOOK_DEPTH"] = str(hook_depth() + 1)
+    try:
+        return subprocess.run([hook, *args], input=stdin_data, text=True, env=env, timeout=OWN_HOOK_WAIT).returncode
+    except subprocess.TimeoutExpired:
+        raise HookTimeout(f"the repository's {name} hook did not finish within {OWN_HOOK_WAIT} s")
+
+
+class HookTimeout(Exception):
+    pass
+
+
+def hook_depth():
+    try:
+        return int(os.environ.get("LEAN_AGENT_HOOK_DEPTH") or 0)
+    except ValueError:
+        return MAX_HOOK_DEPTH
+
+
+def is_our_hook(path):
+    """True for a hook written by ensure_hooks(), whichever lean-agent home it sits in: running it as the
+    repository's "own" hook would start the guard again, which finds the same hook again, and so on."""
+    try:
+        with open(path, errors="replace") as fh:
+            return HOOK_MARK in fh.read(512)
+    except OSError:
+        return False
+
+
+def read_refs():
+    """git's ref list on stdin, or HookTimeout if git does not close the pipe within HOOK_WAIT seconds."""
+    chunks = []
+    while True:
+        ready, _, _ = select.select([sys.stdin], [], [], HOOK_WAIT)
+        if not ready:
+            raise HookTimeout(f"git sent no ref list within {HOOK_WAIT} s")
+        data = os.read(sys.stdin.fileno(), 65536)
+        if not data:
+            return b"".join(chunks).decode(errors="replace")
+        chunks.append(data)
 
 
 def git_hook(name, args):
-    """lean-agent's hooks folder: pre-push checks the guards; then the repository's own hook runs."""
+    """lean-agent's hooks folder: pre-push checks the guards; then the repository's own hook runs. Never waits
+    without a bound: a wait that runs out refuses the push (exit 1) with a message."""
+    try:
+        if hook_depth() >= MAX_HOOK_DEPTH:
+            raise HookTimeout(f"git hooks started each other {hook_depth()} levels deep (a hooks path that points "
+                              "back at lean-agent's hooks?)")
+        return _git_hook(name, args)
+    except HookTimeout as exc:
+        sys.stderr.write(f"lean-agent push guard: {name} hook gave up: {exc}. Nothing was pushed.\n")
+        return 1
+
+
+def _git_hook(name, args):
     if name != "pre-push":
         return run_own_hook(name, args)  # stdin passes straight through
-    refs = sys.stdin.read()  # "<local ref> <local sha> <remote ref> <remote sha>" per ref git would update
-    if os.environ.get("LEAN_AGENT_PUSH_GUARD_OVERRIDE") != "1":
-        top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip()
+    refs = read_refs()  # "<local ref> <local sha> <remote ref> <remote sha>" per ref git would update
+    # args = [remote name, remote URL]; a push to a local path or file:// URL is not checked
+    local = len(args) > 1 and skips_guard(args[1])
+    if os.environ.get("LEAN_AGENT_PUSH_GUARD_OVERRIDE") != "1" and not local:
+        try:
+            top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True,
+                                 stdin=subprocess.DEVNULL, timeout=HOOK_WAIT).stdout.strip()
+        except subprocess.TimeoutExpired:
+            raise HookTimeout(f"`git rev-parse` did not answer within {HOOK_WAIT} s")
         pats = patterns_for(top or os.getcwd())
         for line in refs.splitlines():
             parts = line.split()

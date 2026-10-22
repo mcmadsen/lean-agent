@@ -3921,6 +3921,94 @@ class CliTest(unittest.TestCase):
         self.assertEqual(lean_mcp.parse_specs(["tickets:prs,tickets:states"]),
                          [("tickets", ["prs", "states"])])
 
+    def test_wrapper_lets_local_pushes_through(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        origin = os.path.join(self.tmp.name, "local-origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+        g("remote", "add", "origin", origin)
+        g("remote", "add", "web", "https://example.invalid/x.git")
+        sys.path.insert(0, os.path.dirname(CLI))
+        import push_guard
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        try:
+            env = push_guard.git_env(dict(os.environ))
+        finally:
+            if old is None:
+                os.environ.pop("LEAN_AGENT_HOME", None)
+            else:
+                os.environ["LEAN_AGENT_HOME"] = old
+        run = lambda *a: subprocess.run(["git", "-C", self.proj, *a], capture_output=True, text=True, env=env)
+        for dest in ("origin", origin, "file://" + origin):
+            p = run("push", "-q", dest, "main")  # main is guarded, but a local repository is not checked
+            self.assertEqual(p.returncode, 0, p.stderr)
+        p = run("push", "web", "main")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("lean-agent push guard", p.stderr)
+
+    def test_pre_push_hook_never_hangs_in_a_worker_env(self):
+        import fcntl
+        import time
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        origin = os.path.join(self.tmp.name, "hang-origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+        g("remote", "add", "origin", origin)
+        sys.path.insert(0, os.path.dirname(CLI))
+        import push_guard
+        # a worker's env: git already points at the hooks folder of the lean-agent home that started it
+        outer = os.path.join(self.tmp.name, "outer-home")
+        os.makedirs(outer)
+        base = dict(os.environ, LEAN_AGENT_HOME=outer)
+        worker = push_guard.git_env(base)
+        env = push_guard.git_env(dict(worker, LEAN_AGENT_HOME=self.env["LEAN_AGENT_HOME"]))
+        env.pop("LEAN_AGENT_PUSH_GUARD_OVERRIDE", None)
+        # ... while this run holds its locks
+        held = []
+        for path in (os.path.join(self.env["LEAN_AGENT_HOME"], "library", "proj", ".lock"),
+                     os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", ".main.lock")):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            fh = open(path, "w")
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            held.append(fh)
+        self.addCleanup(lambda: [fh.close() for fh in held])
+        for dest in (origin, "file://" + origin):
+            start = time.time()
+            p = subprocess.run(["git", "-C", self.proj, "push", "-q", dest, "main"], capture_output=True, text=True,
+                               env=env, timeout=60, stdin=subprocess.DEVNULL)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertLess(time.time() - start, 30)
+        # git never closes the hook's stdin: the hook gives up with a message instead of waiting for ever
+        hook = os.path.join(os.path.dirname(CLI), "push_guard.py")
+        start = time.time()
+        proc = subprocess.Popen([sys.executable, hook, "git-hook", "pre-push", "origin", "https://example.invalid/x.git"],
+                                stdin=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=self.proj,
+                                env=dict(env, LEAN_AGENT_HOOK_WAIT="1"))
+        try:
+            self.assertEqual(proc.wait(timeout=20), 1)  # stdin stays open
+            err = proc.stderr.read()
+        finally:
+            proc.kill()
+            proc.wait()
+            proc.stdin.close()
+            proc.stderr.close()
+        self.assertIn("gave up", err)
+        self.assertLess(time.time() - start, 20)
+        # a hooks path that leads back to lean-agent's own hook folder cannot start hooks for ever
+        p = subprocess.run([sys.executable, hook, "git-hook", "pre-push", "origin", "https://example.invalid/x.git"],
+                           input="refs/heads/f 1 refs/heads/main 2\n", capture_output=True, text=True, cwd=self.proj,
+                           env=env, timeout=60)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("lean-agent push guard", p.stderr)
+        p = subprocess.run([sys.executable, hook, "git-hook", "pre-push", "origin", "https://example.invalid/x.git"],
+                           input="refs/heads/f 1 refs/heads/main 2\n", capture_output=True, text=True, cwd=self.proj,
+                           env=dict(env, LEAN_AGENT_HOOK_DEPTH="3"), timeout=60)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("gave up", p.stderr)
+
     def test_push_guards(self):
         g = self.git_project()
         g("add", "-A")
@@ -3952,6 +4040,8 @@ class CliTest(unittest.TestCase):
         import push_guard
         old = os.environ.get("LEAN_AGENT_HOME")
         os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        os.environ["LEAN_AGENT_PUSH_GUARD_LOCAL"] = "1"  # origin is a local path here, which is not checked otherwise
+        self.addCleanup(os.environ.pop, "LEAN_AGENT_PUSH_GUARD_LOCAL", None)
         try:
             env = push_guard.git_env(dict(os.environ))
             p = subprocess.run(["git", "-C", wt, "push", "origin", "HEAD:release/r-1"], capture_output=True, text=True,
