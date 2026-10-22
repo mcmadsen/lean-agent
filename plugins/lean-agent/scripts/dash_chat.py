@@ -25,6 +25,10 @@ import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import dash_service  # noqa: E402
+from lean_common import questions_of, tool_summary  # noqa: E402
 PARENT_SESSION_VARS = re.compile(r"^(CLAUDECODE|CLAUDE_PID|CLAUDE_CODE_(SESSION_ID|ENTRYPOINT|CHILD_SESSION|REMOTE\w*|"
                                  r"MESSAGING_\w+|SSE_PORT|WORKER_EPOCH|TEE_SDK_STDOUT|SESSION_ATTENDED|"
                                  r"SESSION_ACCESS_TOKEN|CONTAINER_ID))$")
@@ -53,15 +57,6 @@ def _load(path, default):
         return default
 
 
-def tool_summary(name, inp):
-    """One line for a tool call: the command, the file, the pattern ..."""
-    inp = inp if isinstance(inp, dict) else {}
-    for k in ("command", "file_path", "pattern", "url", "path", "query", "description", "prompt"):
-        if inp.get(k):
-            return " ".join(str(inp[k]).split())[:300]
-    return " ".join(json.dumps(inp)[:200].split())
-
-
 def orchestrator_env():
     """The environment `lean-agent up` gives the orchestrator (its saved values win), without anything that would
     tie the session to a parent Claude Code session."""
@@ -80,14 +75,23 @@ def orchestrator_env():
 
 
 def _questions(req):
-    """A multiple-choice question from Claude (AskUserQuestion), for the page to show as buttons."""
-    out = []
-    for q in (req.get("input") or {}).get("questions") or []:
-        if isinstance(q, dict) and q.get("question"):
-            out.append({"question": q["question"], "header": q.get("header"), "multi": bool(q.get("multiSelect")),
-                        "options": [{"label": o.get("label"), "description": o.get("description")}
-                                    for o in q.get("options") or [] if isinstance(o, dict) and o.get("label")]})
-    return out
+    return questions_of(req.get("input"))
+
+
+def _trim_sends(path, keep=500, limit=1000):
+    """Keep the last `keep` lines once the log has grown past `limit`."""
+    try:
+        if os.path.getsize(path) < limit * 80:  # cheap check before counting lines
+            return
+        with open(path) as fh:
+            lines = fh.readlines()
+        if len(lines) > limit:
+            tmp = path + ".tmp"
+            with open(tmp, "w") as fh:
+                fh.writelines(lines[-keep:])
+            os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def service_up():
@@ -106,7 +110,6 @@ def service_up():
 
 def suggestion_rules(suggestions):
     sys.path.insert(0, HERE)
-    import dash_service
     return dash_service.suggestion_rules(suggestions)
 
 
@@ -187,7 +190,6 @@ class Chat:
         """The transcript model when the bridge answers, else None (the stream-json threads below are used)."""
         if not service_up():
             return None
-        import dash_service
         return dash_service
 
     def _fresh_at(self):
@@ -206,9 +208,11 @@ class Chat:
             for s in m.send_log)
         prompt = f"[Dashboard thread about: {context}]\n\n{shown}" if first and context else shown
         os.makedirs(ds.chat_dir(), exist_ok=True)
-        with open(ds.chat_dir("service_sends.jsonl"), "a") as fh:
+        log = ds.chat_dir("service_sends.jsonl")
+        with open(log, "a") as fh:
             fh.write(json.dumps({"key": self.key, "sid": m.sid, "sent": prompt, "shown": shown, "raw": text,
                                  "ts": time.time()}) + "\n")
+        _trim_sends(log)
         ok, err = service_session.send(prompt)
         return {"ok": ok, **({"error": err} if err else {})}
 
@@ -418,6 +422,11 @@ class Chat:
             if self.key == "main":  # the whole session starts over, in the app too
                 import service_session
                 ok, err = service_session.send("/clear")
+                if ok:  # remembered so the new transcript is known to be ours
+                    os.makedirs(dash_service.chat_dir(), exist_ok=True)
+                    with open(dash_service.chat_dir("service_sends.jsonl"), "a") as fh:
+                        fh.write(json.dumps({"key": "main", "sid": None, "sent": "/clear", "shown": "/clear", "raw": "/clear",
+                                             "ts": time.time()}) + "\n")
                 return {"ok": ok, **({"error": err} if err else {})}
             self.meta["fresh_at"] = time.time()  # a task thread shares the session: it just starts its view over
             os.makedirs(self.dir, exist_ok=True)

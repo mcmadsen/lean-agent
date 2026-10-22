@@ -36,6 +36,7 @@ import lean_memory  # noqa: E402
 import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import service_session  # noqa: E402
+from lean_common import pid_alive as dashboard_pid_alive, plugin_version  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -6439,10 +6440,6 @@ def forward_old_hooks(dry=False):
     return changed
 
 
-def plugin_version():
-    return load_json(os.path.join(PLUGIN_ROOT, ".claude-plugin", "plugin.json"), {}).get("version") or "?"
-
-
 def cmd_sync(a):
     root = clone_root()
     if not root:
@@ -7295,14 +7292,6 @@ def service_file():
     if service_platform() == "mac":
         return os.path.expanduser(f"~/Library/LaunchAgents/{SERVICE_LABEL}.plist")
     return os.path.expanduser("~/.config/systemd/user/lean-agent.service")
-
-
-def dashboard_pid_alive(pid):
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, ValueError, TypeError):
-        return False
 
 
 def cmd_service(a):

@@ -2705,6 +2705,58 @@ class CliTest(unittest.TestCase):
         dash_service._MODEL.clear()
         return p, log, ss, dash_chat, dash_service
 
+    def test_service_model_is_safe_across_handler_threads(self):
+        import threading
+        sys.path.insert(0, os.path.dirname(CLI))
+        import dash_service
+        home = tempfile.mkdtemp()
+        proj = os.path.join(home, "proj")
+        os.makedirs(proj)
+        tr = os.path.join(proj, "s1.jsonl")
+        open(tr, "w").close()
+        os.makedirs(os.path.join(home, "chat"))
+        with open(os.path.join(home, "up.json"), "w") as fh:
+            json.dump({"transcript": tr, "session_id": "s1", "session_started": "2020-01-01T00:00:00"}, fh)
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = home
+        try:
+            m = dash_service.Model()
+            errors, stop = [], threading.Event()
+
+            def reader():
+                last = 0
+                try:
+                    while not stop.is_set():
+                        m.refresh()
+                        snap = m.snapshot("main", 0)
+                        ids = [e["i"] for e in snap["events"]]
+                        assert ids == sorted(ids) and len(set(ids)) == len(ids), ids
+                        assert snap["cursor"] >= last and (not ids or snap["cursor"] >= max(ids))
+                        last = snap["cursor"]
+                        m.status("main"), m.waiting("main"), m.last("main")
+                except Exception as e:  # noqa: BLE001
+                    errors.append(repr(e))
+
+            threads = [threading.Thread(target=reader) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for n in range(150):
+                with open(tr, "a") as fh:
+                    fh.write(json.dumps({"type": "user", "timestamp": "2026-01-01T10:00:00Z",
+                                         "message": {"role": "user", "content": f"msg {n}"}}) + "\n")
+            time.sleep(0.5)
+            stop.set()
+            for t in threads:
+                t.join(10)
+            self.assertEqual(errors, [])
+            m.refresh()
+            self.assertEqual(len([e for e in m.snapshot("main", 0)["events"] if e["kind"] == "user"]), 150)
+        finally:
+            if old is None:
+                os.environ.pop("LEAN_AGENT_HOME", None)
+            else:
+                os.environ["LEAN_AGENT_HOME"] = old
+
     def test_dashboard_threads_share_the_service_session(self):
         p, log, ss, dash_chat, dash_service = self.service_chat("--dashboard-only")
         self.assertTrue(dash_chat.service_up())

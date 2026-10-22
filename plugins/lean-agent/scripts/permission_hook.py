@@ -37,13 +37,24 @@ def decide(event, wait):
         moved = True  # nobody answered in time: the app asks now
         return None
     finally:
-        if moved:  # tells the dashboard the prompt moved to the app (it deletes this marker)
+        if moved and ds.dashboard_fresh(ds.FRESH_SECS * 3):  # tells a polling dashboard the prompt moved to the app (it deletes this marker)
             ds.write_json(os.path.join(d, rid + ".moved.json"), {"ts": time.time()})
+        _prune(d)
         for p in (req_path, ans_path):
             try:
                 os.remove(p)
             except OSError:
                 pass
+
+
+def _prune(d, age=86400):
+    """Markers nobody collected (the dashboard was closed) are removed after a day."""
+    try:
+        for n in os.listdir(d):
+            if n.endswith(".moved.json") and time.time() - os.stat(os.path.join(d, n)).st_mtime > age:
+                os.remove(os.path.join(d, n))
+    except OSError:
+        pass
 
 
 def main():
