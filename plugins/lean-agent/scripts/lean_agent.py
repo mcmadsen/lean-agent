@@ -4820,6 +4820,7 @@ def cmd_optimize(a):
     with library_lock(slug):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf) if a.json else contextlib.nullcontext():  # --json prints only the result
+            _unreject(a, slug)
             _cmd_optimize(a)
             _draft_proposals(a, slug)
         result = optimize_result(a, slug)
@@ -5044,6 +5045,22 @@ def _draft_proposals(a, slug):
           f"To change a card's text first, accept it, then `lean-agent card add {slug} <card> --file <file>`.")
 
 
+def _unreject(a, slug):
+    """--unreject <ids>: propose these drafts or card suggestions again (undoes --reject)."""
+    ids = [x for x in (getattr(a, "unreject", None) or "").split(",") if x]
+    if not ids:
+        return
+    path = home("library", slug, "drafts.json")
+    state = load_json(path, {})
+    for rid in ids:
+        if state.get(rid) == "rejected":
+            del state[rid]
+            print(f"unrejected {rid}: proposed again if it still applies")
+        else:
+            print(f"{rid} was not rejected")
+    save_json(path, state)
+
+
 def _action_id(act, c, t):
     return f"{act}:{c['id']}" + (f":{t}" if t else "")
 
@@ -5081,6 +5098,13 @@ def _card_actions(slug, cards, a, skip):
     return actions, held
 
 
+def _suggestion_meta(c, t):
+    """One line on what a card suggestion rests on: how often workers used the card (per task type when it is one)."""
+    bt = (c.get("by_type") or {}).get(t) if t and t != "*" else None
+    used, offered = (bt["used"], bt["offered"]) if bt else (c["used"], c["offered"])
+    return f"used in {used} of {offered} {t + ' ' if bt else ''}runs"
+
+
 def optimize_result(a, slug):
     """What is left to decide, as one JSON-able dict (also what the dashboard shows)."""
     skip = {x for x in (getattr(a, "skip", None) or "").split(",") if x}
@@ -5088,10 +5112,12 @@ def optimize_result(a, slug):
     state = load_json(home("library", slug, "drafts.json"), {})
     drafts = [d for d in draft_proposals(slug) if state.get(d["id"]) not in ("accepted", "rejected")]
     return {"project": slug, "ts": datetime.datetime.now().isoformat(timespec="seconds"),
-            "suggestions": [{"id": _action_id(act, c, t), "kind": act, "card": c["id"], "reason": why}
+            "suggestions": [{"id": _action_id(act, c, t), "kind": act, "card": c["id"], "reason": why,
+                             "used": c["used"], "offered": c["offered"], "meta": _suggestion_meta(c, t)}
                             for act, c, why, t in actions],
             "drafts": [{"id": d["id"], "kind": d["kind"], "title": d["title"] if d["kind"] == "card" else
                         f"Preset {d['server']}:{d['name']}",
+                        "name": d["card_id"] if d["kind"] == "card" else d["name"],
                         "summary": d["why"]} for d in drafts]}
 
 
@@ -7800,6 +7826,7 @@ def build_parser():
     s.add_argument("--notes", type=int, default=10)
     s.add_argument("--accept", metavar="IDS", help="write these drafts (cards with card add, presets with mcp preset)")
     s.add_argument("--reject", metavar="IDS", help="stop proposing these drafts or card suggestions")
+    s.add_argument("--unreject", metavar="IDS", help="propose these rejected drafts or card suggestions again")
     s.add_argument("--ack", metavar="RUN_IDS", help="hide these runs' context gaps (already handled)")
     s.add_argument("--skip", metavar="CARD_IDS", help="leave these cards out of the suggestions and --apply")
     s.set_defaults(fn=cmd_optimize)

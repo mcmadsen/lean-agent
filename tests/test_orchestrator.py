@@ -554,7 +554,9 @@ class CliTest(unittest.TestCase):
         saved_path = os.path.join(self.env["LEAN_AGENT_HOME"], "optimize", res["project"] + ".json")
         sug = {x["id"]: x for x in res["suggestions"]}
         self.assertIn("archive:style", sug)
-        self.assertEqual(sorted(sug["archive:style"]), ["card", "id", "kind", "reason"])
+        self.assertEqual(sorted(sug["archive:style"]), ["card", "id", "kind", "meta", "offered", "reason", "used"])
+        self.assertEqual((sug["archive:style"]["used"], sug["archive:style"]["offered"], sug["archive:style"]["meta"]),
+                         (0, 6, "used in 0 of 6 runs"))
         self.assertEqual((sug["archive:style"]["kind"], sug["archive:style"]["card"]), ("archive", "style"))
         self.assertIn("unneeded", sug["archive:style"]["reason"])
         self.assertIsInstance(res["drafts"], list)
@@ -580,6 +582,26 @@ class CliTest(unittest.TestCase):
         left = json.loads(self.cli("optimize", "proj", "--json").stdout)
         self.assertNotIn("archive:testing", [x["id"] for x in left["suggestions"]])
         self.assertIn(" testing ", self.cli("cards", "proj").stdout)
+
+    def test_optimize_rejected_card_suggestion_stays_hidden_and_unreject_brings_it_back(self):
+        self._archivable()
+        ids = lambda *args: [x["id"] for x in json.loads(self.cli("optimize", "proj", "--json", *args).stdout)["suggestions"]]
+        self.assertIn("archive:testing", ids())
+        out = self.cli("optimize", "proj", "--reject", "archive:testing").stdout
+        self.assertIn("rejected archive:testing: won't be proposed again", out)
+        for _ in range(2):  # later runs, with or without --json, leave it out
+            self.assertNotIn("archive:testing", ids())
+            self.assertNotIn("archive testing", self.cli("optimize", "proj").stdout)
+        self.assertNotIn("archive:testing", ids("--min-runs", "1"))
+        # --unreject proposes it again; what was never rejected is said so
+        out = self.cli("optimize", "proj", "--unreject", "archive:testing,archive:style").stdout
+        self.assertIn("unrejected archive:testing", out)
+        self.assertIn("archive:style was not rejected", out)
+        self.assertIn("archive:testing", ids())
+        self.assertIn("archive testing", self.cli("optimize", "proj").stdout)
+        # with --json the result is still only JSON
+        res = json.loads(self.cli("optimize", "proj", "--unreject", "archive:testing", "--json").stdout)
+        self.assertIn("archive:testing", [x["id"] for x in res["suggestions"]])
 
     def _dashboard(self):
         import unittest.mock as mock
