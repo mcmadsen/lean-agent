@@ -2774,9 +2774,12 @@ class CliTest(unittest.TestCase):
         return home, proj, tr
 
     @staticmethod
-    def _user_file(path, text):
+    def _user_file(path, text, ts=None):
+        rec = {"type": "user", "message": {"role": "user", "content": text}}
+        if ts is not None:
+            rec["timestamp"] = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
         with open(path, "w") as fh:
-            fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n")
+            fh.write(json.dumps(rec) + "\n")
 
     def test_service_follows_only_clear_transcripts(self):
         sys.path.insert(0, os.path.dirname(CLI))
@@ -2788,6 +2791,14 @@ class CliTest(unittest.TestCase):
             m = dash_service.Model()
             self._user_file(os.path.join(proj, "foreign.jsonl"), "SessionStart hook: hello")
             self.assertEqual(m._pick(_load_json(os.path.join(home, "up.json"))), tr)
+            # still being written after our /clear, but its first record is older: ignored
+            m.send_log = [{"sent": "/clear", "ts": time.time() - 1}]
+            old_s = os.path.join(proj, "old.jsonl")
+            self._user_file(old_s, "an older session", time.time() - 600)
+            os.utime(old_s, (time.time() + 1, time.time() + 1))
+            m._scan["at"] = 0
+            self.assertEqual(m._pick(_load_json(os.path.join(home, "up.json"))), tr)
+            m.send_log = []
             clr = os.path.join(proj, "clr.jsonl")
             self._user_file(clr, "<command-name>/clear</command-name>")
             m._scan["at"] = 0
@@ -2809,10 +2820,10 @@ class CliTest(unittest.TestCase):
             m.send_log = [{"sent": "/clear", "ts": time.time() - 1}]
             up = _load_json(os.path.join(home, "up.json"))
             a, b = os.path.join(proj, "a.jsonl"), os.path.join(proj, "b.jsonl")
-            self._user_file(a, "hello there")
+            self._user_file(a, "hello there", time.time())
             m._scan["at"] = 0
             self.assertEqual(m._pick(up), a)
-            self._user_file(b, "another fresh session")
+            self._user_file(b, "another fresh session", time.time() + 5)
             os.utime(b, (time.time() + 5, time.time() + 5))
             m._scan["at"] = 0
             self.assertEqual(m._pick(up), a)  # the /clear is used up: b is foreign
