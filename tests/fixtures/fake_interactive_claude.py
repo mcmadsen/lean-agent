@@ -2,14 +2,16 @@
 """A stand-in for an interactive `claude` session: reads its terminal, and for every bracketed-paste message
 followed by Enter appends a user and an assistant record to the session's transcript JSONL (the real format).
 A message with "use a tool" in it also makes a Bash tool call with its result; "/clear" starts a new transcript
-with a new session id (as Claude Code does); a lone Escape appends the interruption record."""
+with a new session id (as Claude Code does) and runs the SessionStart hook for it; a lone Escape appends the interruption record."""
 import datetime
 import json
 import os
 import re
+import subprocess
 import sys
 import tty
 
+HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugins", "lean-agent", "scripts", "session_hook.py")
 argv = sys.argv[1:]
 sid = argv[argv.index("--session-id") + 1] if "--session-id" in argv else argv[argv.index("--resume") + 1]
 cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
@@ -46,6 +48,9 @@ while True:
         if text.strip() == "/clear":
             sid = os.urandom(8).hex() + "-fake-clear"
             transcript = os.path.join(tdir, sid + ".jsonl")
+            # what Claude Code does on /clear: run the SessionStart hooks with the new session
+            subprocess.run([sys.executable, HOOK], input=json.dumps({"session_id": sid, "transcript_path": transcript,
+                           "source": "clear", "hook_event_name": "SessionStart", "cwd": os.getcwd()}), text=True, check=False)
             add({"type": "user", "isMeta": True, "message": {"role": "user", "content": "<command-name>/clear</command-name>"}})
             continue
         add({"type": "user", "message": {"role": "user", "content": text}})

@@ -163,6 +163,42 @@ class CompactTest(Base):
         self.assertIn("shop feature-x @ abc123def4 changes-requested (1 blocking)", ctx)
 
 
+class SessionHookTest(Base):
+    def record(self):
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")) as fh:
+            return json.load(fh)
+
+    def test_writes_service_json_only_in_the_service_session(self):
+        for source in ("startup", "resume", "clear", "compact"):
+            event = {"session_id": "s-" + source, "transcript_path": "/x/s-%s.jsonl" % source, "source": source}
+            self.assertIsNone(run_hook("session_hook.py", event, LEAN_AGENT_SERVICE_SESSION="0", **self.env))
+            self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")))
+            self.assertIsNone(run_hook("session_hook.py", event, LEAN_AGENT_SERVICE_SESSION="1", **self.env))  # prints nothing
+            rec = self.record()
+            self.assertEqual((rec["session_id"], rec["transcript_path"], rec["source"]),
+                             ("s-" + source, "/x/s-%s.jsonl" % source, source))
+            self.assertIsInstance(rec["ts"], float)
+            os.remove(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json"))
+        env = dict(os.environ, **self.env)
+        env.pop("LEAN_AGENT_SERVICE_SESSION", None)
+        subprocess.run([sys.executable, os.path.join(ROOT, "session_hook.py")], input=json.dumps({"session_id": "x"}),
+                       text=True, env=env, check=True)
+        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")))
+
+    def test_never_fails_the_session(self):
+        env = dict(os.environ, LEAN_AGENT_SERVICE_SESSION="1", **self.env)
+        for bad in ("", "not json", "[1]", "{}"):
+            p = subprocess.run([sys.executable, os.path.join(ROOT, "session_hook.py")], input=bad, text=True,
+                               capture_output=True, env=env)
+            self.assertEqual((p.returncode, p.stdout, p.stderr), (0, "", ""))
+        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")))
+        os.makedirs(self.env["LEAN_AGENT_HOME"])  # an unwritable chat dir
+        open(os.path.join(self.env["LEAN_AGENT_HOME"], "chat"), "w").close()
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "session_hook.py")], input=json.dumps({"session_id": "x"}),
+                           text=True, capture_output=True, env=env)
+        self.assertEqual((p.returncode, p.stdout, p.stderr), (0, "", ""))
+
+
 class McpTrimTest(Base):
     def event(self, payload):
         return {"tool_name": "mcp__tracker__get_items", "tool_response": [{"type": "text", "text": json.dumps(payload)}]}
