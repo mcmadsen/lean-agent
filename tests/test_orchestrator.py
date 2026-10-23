@@ -2917,6 +2917,35 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.ledger()[-1]["thread"], "t1")  # the current thread follows
         self.assertEqual(self.cli("thread", "move", "t1", check=False).returncode, 1)  # already there
 
+    def test_thread_move_errors_alias_targets_and_review_and_push_overrides(self):
+        lt = self.threads_home()
+        r = self.cli("thread", "move", "t1", check=False)  # nothing was ever routed
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no current thread", r.stdout + r.stderr)
+        lt.route("Publish the report via docs", "s1")  # t1
+        lt.route("Fix the export timeout in billing", "s1")  # t2
+        lt.new("Elsewhere")  # t3
+        r = self.cli("thread", "move", "t9", check=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(lt.current(), "t2")  # nothing changed
+        self.assertEqual(len(lt.load()["threads"]["t2"]["requests"]), 1)
+        lt.merge("t3", "t1")  # t3 shows under t1
+        h = self.env["LEAN_AGENT_HOME"]
+        ts = (datetime.datetime.now() + datetime.timedelta(seconds=5)).isoformat(timespec="seconds")
+        os.makedirs(os.path.join(h, "reviews"), exist_ok=True)
+        with open(os.path.join(h, "reviews", "proj.jsonl"), "w") as fh:
+            fh.write(json.dumps({"run": "r77", "ts": ts, "thread": "t2", "verdict": "ok", "findings": []}) + "\n")
+        with open(os.path.join(h, "pushes.jsonl"), "w") as fh:
+            fh.write(json.dumps({"ts": ts, "project": "proj", "branch": "feat-x", "to": "main", "sha": "abcdef1234", "thread": "t2"}) + "\n")
+        self.assertIn("moved from t2 to t1", self.cli("thread", "move", "t3").stdout)  # the alias goes to its target
+        self.assertEqual(lt.current(), "t1")
+        shown = self.cli("thread", "show", "t1").stdout
+        self.assertIn("r77 proj ok", shown)
+        self.assertIn("proj feat-x -> main abcdef12", shown)
+        old = self.cli("thread", "show", "t2").stdout
+        self.assertNotIn("r77", old)
+        self.assertNotIn("feat-x", old)
+
     def test_thread_move_is_scoped_to_one_session_and_to_a_recent_request(self):
         lt = self.threads_home()
         lt.route("Publish the report via docs", "s1")  # t1
