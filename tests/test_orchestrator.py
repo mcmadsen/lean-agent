@@ -2964,6 +2964,29 @@ class CliTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("nothing recent to move", r.stdout + r.stderr)
 
+    def test_thread_move_uses_the_up_json_session_and_falls_back_for_an_unknown_one(self):
+        lt = self.threads_home()
+        lt.route("Publish the report via docs", "s1")  # t1
+        lt.route("Fix the export timeout in billing", "s2")  # t2
+        up = os.path.join(self.env["LEAN_AGENT_HOME"], "up.json")
+        env = {k: v for k, v in self.env.items() if k != "LEAN_AGENT_SESSION"}
+        self.env.clear()
+        self.env.update(env)
+        with open(up, "w") as fh:
+            json.dump({"session_id": "s1"}, fh)
+        r = self.cli("thread", "move", "t2")  # s1's request, though s2's is the latest
+        self.assertIn("moved from t1 to t2", r.stdout)
+        with open(up, "w") as fh:
+            json.dump({"session_id": "nope"}, fh)
+        r = self.cli("thread", "move", "t1")  # unknown session: the latest request of any session
+        self.assertIn("moved from t2 to t1", r.stdout)
+
+    def test_thread_move_needs_exactly_one_argument(self):
+        for args in ((), ("t1", "t2")):
+            r = self.cli("thread", "move", *args, check=False)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("usage: lean-agent thread move tN", r.stdout + r.stderr)
+
     def test_thread_expiry_counts_merged_threads_last_message(self):
         lt = self.threads_home()
         lt.new("A")

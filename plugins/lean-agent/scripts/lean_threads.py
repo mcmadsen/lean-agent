@@ -642,7 +642,7 @@ def move_latest(tid, session=None):
     rec = ((st.get("sessions") or {}).get(session or "") or st.get("latest") or {}) if isinstance(st, dict) else {}
     if not rec.get("thread"):
         raise ValueError("no current thread to move a request out of")
-    if time.time() - _epoch(rec.get("ts")) > 24 * 3600:
+    if rec.get("ts") and time.time() - _epoch(rec["ts"]) > 24 * 3600:
         raise ValueError("nothing recent to move (the latest request is over 24 h old)")
     with _locked() as data:
         old, tid = resolve(rec["thread"], data["aliases"]), resolve(tid, data["aliases"])
