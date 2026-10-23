@@ -360,6 +360,56 @@ class BudgetTest(Base):
             fh.write(assistant_line("m2", 50, 0, 0, 10, model="claude-small"))
         # weighted: 100 + 1250 + 1000 + 1000 = 3350 ; subagent: 50 + 50 = 100 -> 3450
         self.ev = {"session_id": "s1", "transcript_path": self.transcript, "tool_name": "Read"}
+        self.set_strict("off")  # the older tests run other commands in the home; the strict tests turn it on
+
+    def set_strict(self, value):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        with open(os.path.join(home, "config.json"), "w") as fh:
+            json.dump({"strict": value}, fh)
+
+    def test_strict_orchestrator_allows_only_lean_agent_commands_and_own_files(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        self.set_strict("on")
+        plugin = os.path.realpath(os.path.join(ROOT, ".."))
+        ev = lambda tool, cwd=home, **inp: dict(self.ev, cwd=cwd, tool_name=tool, tool_input=inp)
+        bash = lambda cmd, cwd=home, **env: run_hook("budget_hook.py", ev("Bash", cwd, command=cmd, run_in_background=True),
+                                                     LEAN_AGENT_TODO_REMINDER="0", **dict(self.env, **env))
+        read = lambda path, cwd=home, tool="Read", **env: run_hook(
+            "budget_hook.py", ev(tool, cwd, **{"file_path" if tool == "Read" else "path": path}), **dict(self.env, **env))
+        denied = lambda out: out and out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        for cmd in ("npm test", "git status", "cat src/app.py", "lean-agent runs; rm -rf x", "lean-agent runs $(cat x)",
+                    "ls | lean-agent runs"):
+            out = bash(cmd)
+            self.assertTrue(denied(out), cmd)
+            self.assertIn("Delegate it: lean-agent run <project> --cards auto -m <model> --why",
+                          out["hookSpecificOutput"]["permissionDecisionReason"])
+            self.assertIn("--read-only", out["hookSpecificOutput"]["permissionDecisionReason"])
+        for cmd in ("lean-agent runs", "lean-agent runs --show 3", "cd /tmp && lean-agent review shop --status",
+                    plugin + "/bin/lean-agent stats", "lean-agent run shop --cards auto -m haiku --why x -- 'look'"):
+            self.assertIsNone(bash(cmd), cmd)
+        out = read("/srv/shop/src/app.py")
+        self.assertTrue(denied(out))
+        self.assertIn("Delegate it:", out["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertTrue(denied(read("/srv/shop", tool="Grep")))
+        for path in (os.path.join(home, "work", "1020-101010-abcd", "summary-1.txt"), os.path.join(home, "docs", "a.md"),
+                     os.path.join(plugin, "templates", "guide.md")):
+            self.assertIsNone(read(path), path)
+        self.assertIsNone(run_hook("budget_hook.py", ev("AskUserQuestion", questions=[]), **self.env))
+        self.assertIsNone(run_hook("budget_hook.py", ev("Artifact", content="x"), **self.env))
+        # the service session counts as the orchestrator too
+        self.assertTrue(denied(bash("npm test", cwd=self.tmp.name, LEAN_AGENT_SERVICE_SESSION="1")))
+        # workers are unaffected: their folder is outside the home (or is a run folder in it), and has no service marker
+        self.assertIsNone(bash("npm test", cwd=self.tmp.name))
+        self.assertIsNone(read("/srv/shop/src/app.py", cwd=self.tmp.name))
+        run_dir = os.path.join(home, "work", "1020-101010-abcd")
+        os.makedirs(run_dir)
+        self.assertIsNone(bash("npm test", cwd=run_dir))
+        self.assertIsNone(read("/srv/shop/src/app.py", cwd=run_dir))
+        # strict off: today's behaviour
+        self.set_strict("off")
+        self.assertIsNone(bash("npm test"))
+        self.assertIsNone(read("/srv/shop/src/app.py"))
 
     def test_no_budget_tracks_only(self):
         self.assertIsNone(run_hook("budget_hook.py", self.ev, **self.env))

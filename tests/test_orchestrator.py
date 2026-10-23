@@ -312,6 +312,16 @@ class CliTest(unittest.TestCase):
         argv = self.calls()[-1]["argv"]
         self.assertNotIn("attribution", json.loads(argv[argv.index("--settings") + 1]))
 
+    def test_strict_setting_stored_and_shown_by_doctor(self):
+        self.cli("learn", self.proj)
+        self.assertIn("strict: on", self.cli("config", "strict").stdout)  # on by default
+        self.assertIn("strict orchestrator: on", self.cli("doctor", check=False).stdout)
+        self.assertIn("strict: off", self.cli("config", "strict", "off").stdout)
+        self.assertIn("strict orchestrator: off", self.cli("doctor", check=False).stdout)
+        with open(os.path.join(self.cli("home").stdout.strip(), "config.json")) as fh:
+            self.assertEqual(json.load(fh)["strict"], "off")
+        self.assertIn("strict: on", self.cli("config", "strict", "on").stdout)
+
     def test_artifacts_setting_in_home_settings_guide_and_doctor(self):
         self.cli("learn", self.proj)
         home = self.cli("home").stdout.strip()

@@ -11,6 +11,10 @@ past it Claude gets a one-time note to spend less (and to hand off only if the c
 LEAN_AGENT_HANDOFF_CONTEXT, default 150,000); past the cap every tool call is denied with an instruction
 to summarise and stop.
 
+Strict orchestrator (`lean-agent config strict on|off`, default on): in the orchestrator (the lean-agent home or the
+service session) Bash may run only lean-agent commands and Read/Grep/Glob only lean-agent's own files; the denial names
+the worker command to use instead. Workers are never affected.
+
 In the lean-agent home (the orchestrator) a command that starts a worker (`lean-agent run`, `review`, `do`,
 `tracker --discover`) must run in the background, so the session stays free for the user while it works
 (LEAN_AGENT_BACKGROUND_RUNS=0 turns that off). It also keeps the context small: a Bash command that would print a
@@ -146,6 +150,48 @@ def long_run_read(command, lean_root):
     return ""
 
 
+PLUGIN_ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+DELEGATE = ("Delegate it: lean-agent run <project> --cards auto -m <model> --why '…' -- '<task>' "
+            "(--read-only for lookups).")
+
+
+def strict_on(lean_root):
+    try:
+        with open(os.path.join(lean_root, "config.json")) as fh:
+            return json.load(fh).get("strict", "on") != "off"
+    except (OSError, ValueError, AttributeError):
+        return True
+
+
+def lean_agent_only(command):
+    """True when every command in `command` is a lean-agent command (bare, or the plugin's bin path); `cd` is fine."""
+    if "$(" in command or "`" in command:
+        return False
+    bin_dir = os.path.join(PLUGIN_ROOT, "bin") + os.sep
+    return all(w[0] in ("lean-agent", "cd") or os.path.realpath(os.path.expanduser(w[0])).startswith(bin_dir)
+               for w in commands_run(command))
+
+
+def own_path(path, cwd, lean_root):
+    """Is `path` lean-agent's own (its home, which holds the docs folder and run files, or the plugin)?"""
+    full = os.path.realpath(os.path.join(cwd, os.path.expanduser(path)))
+    return any(full == r or full.startswith(r + os.sep) for r in (os.path.realpath(lean_root), PLUGIN_ROOT))
+
+
+def strict_denial(event, cwd, lean_root):
+    """Why the strict orchestrator may not make this call, or ''."""
+    tool, tool_input = event.get("tool_name"), event.get("tool_input") or {}
+    if tool == "Bash":
+        command = str(tool_input.get("command") or "")
+        if not lean_agent_only(command):
+            return f"strict mode: the orchestrator runs only lean-agent commands, not `{command.strip()[:60]}`. " + DELEGATE
+    elif tool in ("Read", "Grep", "Glob"):
+        path = tool_input.get("file_path") if tool == "Read" else tool_input.get("path")
+        if path and not own_path(str(path), cwd, lean_root):
+            return f"strict mode: the orchestrator doesn't read project files ({str(path)[:80]}). " + DELEGATE
+    return ""
+
+
 def main():
     try:
         event = json.load(sys.stdin)
@@ -174,6 +220,13 @@ def main():
             return 0
 
     tool_input = event.get("tool_input") or {}
+    worker_dir = cwd.startswith(os.path.join(home, "work") + os.sep)  # a worker's run folder is never the orchestrator
+    if ((in_home or os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1") and not worker_dir
+            and strict_on(usage.lean_home())):
+        why = strict_denial(event, cwd, usage.lean_home())
+        if why:
+            emit(permissionDecision="deny", permissionDecisionReason="lean-agent: " + why)
+            return 0
     if in_home and event.get("tool_name") == "Bash" and "push" in command:
         why = push_guard.check(command, cwd)
         if why:
