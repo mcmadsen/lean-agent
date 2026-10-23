@@ -1239,10 +1239,15 @@ def duplicate_launch_guard(a, model, task):
     return key
 
 
+def latest_run_id(runs=None):
+    """The id of the latest run in `runs` (default: the whole ledger); dies when there is none."""
+    runs = ledger() if runs is None else runs
+    return runs[-1]["id"] if runs else die("no runs yet")
+
+
 def cmd_run(a):
     if a.resume == "last":  # the latest run, so the command needs no `$(lean-agent runs --last)`
-        runs = ledger()
-        a.resume = runs[-1]["id"] if runs else die("no runs yet")
+        a.resume = latest_run_id()
     if getattr(a, "escalate", None) and not a.resume:
         return run_escalating(a)
     prev = None
@@ -5703,9 +5708,7 @@ def cmd_runs(a):
             print(f"({len(files)} turns of this run; this is the latest: {files[-1]})")
         return
     if a.last:
-        if not runs:
-            die("no runs yet")
-        print(runs[-1]["id"])
+        print(latest_run_id(runs))
         return
     for r in runs[-a.n:]:
         print(f"{r['id']}  {r['status']:<22} {r['model']:<7} {r['project']:<16} {r['task'][:70]}")

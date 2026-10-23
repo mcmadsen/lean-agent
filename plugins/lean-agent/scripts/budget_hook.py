@@ -53,17 +53,13 @@ def emit(**fields):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", **fields}}))
 
 
-HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1([^\n]*)\n.*?\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
-HEREDOC_SUB = r"<<DATA\3"  # the body is data; the rest of the `<<EOF` line stays, to be checked as commands
-
-
 HEREDOC_OPEN = re.compile(r"<<(-?)[ \t]*(?:'(\w+)'|\"(\w+)\"|(\w+))")
 
 
 def split_heredocs(command):
     """`command` with each heredoc body and its delimiter line cut out and `<<DATA` left at the redirect, or None
     when it holds a command substitution (`$(` or a backtick) outside a heredoc body and outside single quotes,
-    or a heredoc this can't read (odd delimiter, no closing line). A body ends at the first line that is exactly
+    an unquoted `#` that starts a word (a comment), or a heredoc this can't read (odd delimiter, no closing line). A body ends at the first line that is exactly
     the delimiter (after leading tabs for <<-). The body of a quoted delimiter is data; an unquoted one expands
     `$(` and backticks, so those are refused there too."""
     out, pending, quote, i, n = [], [], None, 0, len(command)
@@ -77,6 +73,8 @@ def split_heredocs(command):
             continue
         elif c == "`" or command.startswith("$(", i):
             return None
+        elif c == "#" and quote is None and (i == 0 or command[i - 1] in " \t\n;&|()<>"):
+            return None  # a shell comment
         elif quote == '"':
             quote = None if c == '"' else quote
         elif c in "'\"":
@@ -115,7 +113,9 @@ def commands_run(command):
     """The word lists of the commands a shell line runs: heredoc bodies and quoted text are data, not
     commands; `cd x &&`, VAR=value, nohup, timeout N and env in front are skipped."""
     import shlex
-    text = HEREDOC.sub(HEREDOC_SUB, command)
+    text = split_heredocs(command)
+    if text is None:  # the strict check refuses it; read it as written
+        text = command
     out = []
     for segment in re.split(r"&&|\|\||;|\||\n|&", text):
         try:
@@ -251,6 +251,9 @@ def lean_agent_only(command):
     commands; a pipe may only feed head, tail, grep or wc reading stdin (a few read-only options, one grep pattern,
     no files). A heredoc (`<<'X'`, `<<X`, `<<-X`) on a command is allowed: its body is data, up to the first line
     that is exactly X. A command substitution (`$(` or a backtick) anywhere else, outside single quotes, is refused."""
+    # Strict mode is a guardrail that keeps a cooperating orchestrator from doing project work itself. It errs on the
+    # side of denying unusual shell; it is not a sandbox against a hostile model. That is also why it denies comments,
+    # command substitution and unknown pipe stages outright rather than parsing them.
     import shlex
     command = split_heredocs(command)
     if command is None:
