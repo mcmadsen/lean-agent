@@ -3320,6 +3320,250 @@ class CliTest(unittest.TestCase):
         # a client that saw the turn before the reply gets the user turn again, now with its task
         self.assertEqual(m.snapshot("main", 0)["events"][0]["about"], "7")
 
+    def threads_home(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_threads
+        patch = mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": self.env["LEAN_AGENT_HOME"]})
+        patch.start()
+        self.addCleanup(patch.stop)
+        return lean_threads
+
+    def test_thread_registry_new_merge_unmerge_move_and_expiry(self):
+        lt = self.threads_home()
+        self.assertEqual((lt.new("Pricing page"), lt.new("Billing")), ("t1", "t2"))
+        self.assertEqual(lt.new("Third"), "t3")
+        lt.merge("t2", "t1")
+        self.assertEqual(lt.resolve("t2"), "t1")
+        with open(lt.path()) as fh:
+            self.assertEqual(json.load(fh)["aliases"], {"t2": "t1"})  # kept in the registry file
+        self.assertEqual(sorted(t["id"] for t in lt.threads()), ["optimize", "t1", "t3"])  # t2 shows under t1
+        for src, dst in (("t1", "t2"), ("t1", "t1")):  # a cycle, itself
+            with self.assertRaises(ValueError):
+                lt.merge(src, dst)
+        lt.merge("t3", "t2")  # chains follow to the end
+        self.assertEqual(lt.resolve("t3"), "t1")
+        with self.assertRaises(ValueError):
+            lt.merge("t1", "t3")
+        with self.assertRaises(ValueError):
+            lt.merge("t1", "t9")  # no such thread
+        lt.unmerge("t2")
+        self.assertEqual(lt.resolve("t2"), "t2")
+        lt.merge("#10", "t1")  # task threads take part too
+        lt.move("msg-1", "#10")
+        self.assertEqual(lt.load()["moves"], {"msg-1": "#10"})
+        # expiry is a filter: 7 days after the todo is done, 7 days without a message for a free thread
+        day = 86400
+        stamp = lambda ago: datetime.datetime.fromtimestamp(time.time() - ago * day).isoformat(timespec="seconds")
+        data = lt.load()
+        data["threads"]["t1"]["last_message"] = stamp(8)
+        data["threads"].update({f"#{n}": {"id": f"#{n}", "title": f"task {n}", "created": stamp(30), "last_message": stamp(20),
+                                          "kind": "task"} for n in (1, 2, 3)})
+        with open(lt.path(), "w") as fh:
+            json.dump(data, fh)
+        with open(os.path.join(os.environ["LEAN_AGENT_HOME"], "todo.json"), "w") as fh:
+            json.dump({"next": 4, "items": [{"id": 1, "status": "done", "done_at": stamp(8)},
+                                            {"id": 2, "status": "done", "done_at": stamp(2)}, {"id": 3, "status": "doing"}]}, fh)
+        shown = [t["id"] for t in lt.threads()]
+        self.assertNotIn("t1", shown)
+        self.assertNotIn("#1", shown)
+        self.assertTrue({"t2", "#2", "#3", "optimize"} <= set(shown), shown)
+        self.assertIn("t1", [t["id"] for t in lt.threads(include_expired=True)])  # nothing was deleted
+
+    def test_thread_cli(self):
+        self.assertEqual(self.cli("thread", "new", "Pricing page").stdout.strip(), "t1")
+        self.assertEqual(self.cli("thread", "new", "Billing").stdout.strip(), "t2")
+        self.cli("thread", "merge", "t2", "t1")
+        self.assertEqual(self.cli("thread", "merge", "t1", "t2", check=False).returncode, 1)
+        self.assertEqual(self.cli("thread", "merge", "t1", "t1", check=False).returncode, 1)
+        self.cli("thread", "move", "abc", "#4")
+        listed = json.loads(self.cli("thread", "list", "--json").stdout)
+        self.assertEqual([(t["id"], t["kind"]) for t in listed if t["id"] != "optimize"], [("t1", "free"), ("#4", "task")])
+        self.assertIn("t1", self.cli("thread", "list").stdout)
+        self.cli("thread", "unmerge", "t2")
+        self.assertIn("t2", self.cli("thread", "list").stdout)
+        self.assertEqual(self.cli("thread", "unmerge", "t2", check=False).returncode, 1)
+
+    def test_thread_tags_aliases_routing_lines_and_attribution(self):
+        ds, m, rec = self.model_records()
+        import lean_threads
+        lean_threads.new("Pricing page")
+        lean_threads.new("Billing")
+        text = lambda e: e["text"]
+        rec("user", 'Thread t1 "Pricing page": is it live?', uuid="u1")
+        rec("assistant", [{"type": "text", "text": 'Thread t1: not yet.'}])
+        rec("user", 'About #7 "Fix x": status?', uuid="u2")
+        rec("assistant", [{"type": "text", "text": "About #7: green."}])
+        users = lambda key: [text(e) for e in m.snapshot(key)["events"] if e["kind"] == "user"]
+        self.assertEqual(users("t1"), ['Thread t1 "Pricing page": is it live?'])
+        self.assertEqual(users("7"), ['About #7 "Fix x": status?'])
+        self.assertEqual(users("#7"), users("7"))
+        snap = m.snapshot("main")["events"]
+        self.assertEqual([(e["thread"], e.get("about")) for e in snap if e["kind"] == "user"], [("t1", "t1"), ("#7", "7")])
+        # an untagged user turn takes the first tag in the reply that follows
+        rec("user", "and billing?", uuid="u3")
+        rec("assistant", [{"type": "text", "text": "Thread t2: later today."}])
+        self.assertEqual(users("t2"), ["and billing?"])
+        # merged: t2's events show under t1, asked for either id
+        lean_threads.merge("t2", "t1")
+        self.assertEqual(users("t1"), ['Thread t1 "Pricing page": is it live?', "and billing?"])
+        self.assertEqual(users("t2"), users("t1"))
+        self.assertEqual(m.snapshot("main")["events"][-2]["thread"], "t1")
+        lean_threads.unmerge("t2")
+        self.assertEqual(users("t2"), ["and billing?"])
+        # a per-message override
+        lean_threads.move("u3", "#7")
+        self.assertEqual(users("7"), ['About #7 "Fix x": status?', "and billing?"])
+        self.assertEqual(users("t2"), [])
+        # routing lines: the three forms, lifted from the reply and attached to the user event
+        routes = {}
+        for i, (line, want) in enumerate([
+                ("Routed to #7.", {"target": "#7", "also": []}),
+                ("Routed to t1. Also close: #7.", {"target": "t1", "also": ["#7"]}),
+                ("Started a new thread: Pricing page copy.", {"target": "t3", "also": []})]):
+            rec("user", f"question {i}", uuid=f"r{i}")
+            tag = "About #7" if i == 0 else "Thread t1" if i == 1 else "Thread t3"
+            rec("assistant", [{"type": "text", "text": f"{tag}: {line}\nThe answer is {i}."}])
+        evs = m.snapshot("main")["events"]
+        got = [e["routing"] for e in evs if e["kind"] == "user" and e.get("routing")]
+        self.assertEqual([(r["target"], r["also"]) for r in got], [("#7", []), ("t1", ["#7"]), ("t3", [])])
+        self.assertEqual([r["text"] for r in got], ["Routed to #7.", "Routed to t1. Also close: #7.", "Started a new thread: Pricing page copy."])
+        replies = [e["text"] for e in evs if e["kind"] == "assistant"][-3:]
+        self.assertEqual(replies, ["About #7:\nThe answer is 0.", "Thread t1:\nThe answer is 1.", "Thread t3:\nThe answer is 2."])
+        # the tag alone on its line, then the routing line; only an exact first line counts
+        rec("user", "question 3", uuid="r3")
+        rec("assistant", [{"type": "text", "text": "Thread t1\nRouted to t1.\nDone."}])
+        rec("user", "question 4", uuid="r4")
+        rec("assistant", [{"type": "text", "text": "Thread t1: Routed to t1. and more"}])
+        evs = m.snapshot("main")["events"]
+        self.assertEqual([e["text"] for e in evs if e["kind"] == "assistant"][-2:], ["Thread t1\nDone.", "Thread t1: Routed to t1. and more"])
+        self.assertEqual([bool(e.get("routing")) for e in evs if e["kind"] == "user"][-2:], [True, False])
+        # a tagged user turn doesn't take a routing line
+        rec("user", 'Thread t1 "Pricing page": again', uuid="r5")
+        rec("assistant", [{"type": "text", "text": "Thread t1: Routed to #7."}])
+        self.assertEqual(m.snapshot("main")["events"][-2]["thread"], "t1")
+
+    def test_thread_operations_from_the_dashboard_become_events_and_update_the_registry(self):
+        ds, m, rec = self.model_records()
+        import lean_threads
+        lean_threads.new("A")
+        lean_threads.new("B")
+        rec("user", 'Thread t2 "B": hello', uuid="m1")
+        rec("assistant", [{"type": "text", "text": "Thread t2: hi"}])
+        rec("user", "Move message to t1 (m1): \"hello\"", uuid="o1")
+        rec("assistant", [{"type": "text", "text": "Thread t1: moved"}])
+        self.assertEqual(lean_threads.load()["moves"], {"m1": "t1"})
+        ev = [e for e in m.snapshot("t1")["events"] if e.get("op")]
+        self.assertEqual([e["op"] for e in ev], [{"type": "move", "to": "t1", "message": "m1"}])
+        rec("user", "Merge thread t2 into t1", uuid="o2")
+        rec("assistant", [{"type": "text", "text": "Thread t1: merged"}])
+        self.assertEqual(lean_threads.load()["aliases"], {"t2": "t1"})
+        self.assertEqual([e["op"]["type"] for e in m.snapshot("t2")["events"] if e.get("op")], ["move", "merge"])
+        rec("user", "Unmerge thread t2", uuid="o3")
+        self.assertEqual(lean_threads.load()["aliases"], {})
+        # replaying the same records (a restart) doesn't redo what was undone
+        m2 = ds.Model()
+        m2._record({"type": "user", "uuid": "o2", "timestamp": "2026-01-01T10:00:09Z", "message": {"role": "user", "content": "Merge thread t2 into t1"}})
+        self.assertEqual(lean_threads.load()["aliases"], {})
+        # summaries: id, title, kind, waiting, last message, count; merged threads are not listed
+        m._flush_touched()
+        by = {t["id"]: t for t in m.thread_summaries()}
+        self.assertEqual((by["t1"]["title"], by["t1"]["kind"], by["t1"]["waiting"]), ("A", "free", False))
+        self.assertGreaterEqual(by["t1"]["messages"], 2)
+        self.assertTrue(by["t1"]["last_message"])
+        m._add(kind="permission", rid="p", state="pending")  # in the last turn, which is t2's (unmerged)
+        self.assertTrue({t["id"]: t for t in m.thread_summaries()}["t2"]["waiting"] or {t["id"]: t for t in m.thread_summaries()}["t1"]["waiting"])
+
+    def test_thread_api_with_the_service_session(self):
+        p, log, ss, dash_chat, dash_service = self.service_chat("--dashboard-only")
+        import dashboard
+        import lean_threads
+        post = lambda path, body: dashboard.api_post(path, body)
+        reply = lambda code_body: (code_body[0], json.loads(code_body[1]))
+        texts = lambda: [e["text"] for e in dash_chat.chat("main").snapshot()["events"] if e["kind"] == "assistant"]
+        self.assertIn("optimize", [t["id"] for t in reply(dashboard.api_get("/api/threads", {}))[1]["threads"]])
+        t1 = lean_threads.new("Pricing page")
+        t2 = lean_threads.new("Billing")
+        self.assertEqual(reply(post("/api/chat", {"thread": "t1", "text": "hi", "context": "pricing"}))[0], 200)
+        self.wait_for(lambda: texts(), "the tagged reply")
+        self.assertEqual(texts()[-1], 'echo: [Dashboard thread about: pricing]\n\nThread t1 "Pricing page": hi')  # context once
+        post("/api/chat", {"thread": "t1", "text": "again"})
+        self.wait_for(lambda: len(texts()) >= 2, "the second reply")
+        self.assertEqual(texts()[-1], 'echo: Thread t1 "Pricing page": again')
+        post("/api/chat", {"thread": "#10", "text": "status?", "title": "Fix x"})
+        self.wait_for(lambda: len(texts()) >= 3, "the task reply")
+        self.assertEqual(texts()[-1], 'echo: About #10 "Fix x": status?')
+        post("/api/chat", {"thread": None, "text": "Ask anything"})  # no thread: untagged
+        self.wait_for(lambda: len(texts()) >= 4, "the untagged reply")
+        self.assertEqual(texts()[-1], "echo: Ask anything")
+        self.assertEqual(reply(post("/api/chat", {"thread": "t9", "text": "x"}))[0], 400)  # no such thread
+        listed = {t["id"]: t for t in reply(dashboard.api_get("/api/threads", {}))[1]["threads"]}
+        self.assertEqual((listed["t1"]["messages"] >= 2, listed["#10"]["title"], listed["t1"]["kind"]), (True, "Fix x", "free"))
+        # merge, move, unmerge: sent as the fixed messages and recorded in the registry
+        self.assertEqual(reply(post("/api/thread/merge", {"from": "t2", "into": "t1"}))[0], 200)
+        self.assertEqual(lean_threads.load()["aliases"], {t2: t1})
+        self.wait_for(lambda: texts()[-1] == "echo: Merge thread t2 into t1", "the merge message")
+        self.assertEqual(reply(post("/api/thread/merge", {"from": "t1", "into": "t2"}))[0], 400)  # a cycle
+        self.assertEqual(reply(post("/api/thread/merge", {"from": "t1", "into": "t1"}))[0], 400)
+        self.assertNotIn("t2", [t["id"] for t in reply(dashboard.api_get("/api/threads", {}))[1]["threads"]])
+        mid = [e for e in dash_chat.chat("main").snapshot()["events"] if e["kind"] == "user" and e["text"] == "Ask anything"][0]["mid"]
+        self.assertEqual(reply(post("/api/thread/move", {"message": mid, "to": "#10"}))[0], 200)
+        self.assertEqual(lean_threads.load()["moves"], {mid: "#10"})
+        self.wait_for(lambda: texts()[-1].startswith(f"echo: Move message to #10 ({mid})"), "the move message")
+        self.assertEqual(reply(post("/api/thread/move", {"message": mid, "to": "tx"}))[0], 400)
+        self.assertEqual(reply(post("/api/thread/unmerge", {"from": "t2"}))[0], 200)
+        self.assertEqual(lean_threads.load()["aliases"], {})
+        self.wait_for(lambda: texts()[-1] == "echo: Unmerge thread t2", "the unmerge message")
+        self.assertEqual(reply(post("/api/thread/unmerge", {"from": "t2"}))[0], 400)
+        self.assertEqual(post("/api/thread/nothing", {})[0], 404)
+
+    def test_thread_api_falls_back_to_the_main_stream_thread(self):
+        lt = self.threads_home()
+        import dash_chat
+        import dashboard
+        fake = os.path.join(self.tmp.name, "claude-stream")
+        with open(fake, "w") as fh:
+            fh.write(self.FAKE_STREAM_CLAUDE)
+        os.chmod(fake, 0o755)
+        patch = mock.patch.dict(os.environ, {"LEAN_AGENT_CLAUDE": fake, "FAKE_CHAT_LOG": os.path.join(self.tmp.name, "chat.log")})
+        patch.start()
+        self.addCleanup(patch.stop)
+        dash_chat._CHAT.clear()
+        dash_chat._BRIDGE.update(up=False, at=time.time() + 3600, home=dash_chat.lean_home())
+        self.addCleanup(lambda: [c.stop() for c in dash_chat._CHAT.values()])
+        self.addCleanup(lambda: dash_chat._BRIDGE.update(at=0))
+        code, body, _ = dashboard.api_post("/api/chat", {"thread": None, "text": "hello"})
+        self.assertEqual((code, json.loads(body)["ok"]), (200, True))
+        self.wait_for(lambda: any(e["kind"] == "user" and e["text"] == "hello" for e in dash_chat.chat("main").snapshot()["events"]), "main thread")
+        chat_log = os.path.join(self.tmp.name, "chat.log")
+        self.wait_for(lambda: os.path.exists(chat_log) and '"hello"' in open(chat_log).read(), "the message at the stream-json claude")
+        with open(chat_log) as fh:
+            sent = [json.loads(l) for l in fh if l.startswith('{"type": "user"')]
+        self.assertEqual(sent[0]["message"]["content"], "hello")  # untagged, to the main stream-json thread
+        code, body, _ = dashboard.api_get("/api/threads", {})
+        self.assertEqual((code, json.loads(body)["threads"][0]["id"]), (200, "optimize"))
+
+    def test_guide_has_the_thread_rules(self):
+        with open(os.path.join(os.path.dirname(CLI), "..", "templates", "guide.md")) as fh:
+            guide = fh.read()
+        rules = {
+            "1": ['Every message belongs to one thread', '`About #N "title":`', '`Thread tN "title":`'],
+            "2": ["Always reply into the thread", "first words of every reply are that thread's tag", "permission prompt or a question",
+                  "run results", "Never reply untagged"],
+            "3": ["no thread (typed in the app, the terminal, or the dashboard's \"Ask Claude anything\")", "work item, PR, run id, branch",
+                  "`Routed to #N.`", "`Routed to #N. Also close: #M.`", 'lean-agent thread new "<title of six words or fewer>"',
+                  "`Started a new thread: <title>.`", 'a bare answer such as "yes"', "that has waited longest"],
+            "4": ["`Move message to <thread>", "acknowledge in the new thread"],
+            "5": ["`Merge thread tB into tA`", "one-line recap of B", "open run question, hand-off note", "tag B's topic with A's tag",
+                  "Don't rewrite the old transcript"],
+            "6": ["One thread per reply", "one tagged reply in each"],
+            "7": ['`Thread optimize "Optimize":`'],
+            "8": ["fixed forms below are unchanged", "each still gets a tagged reply"],
+        }
+        flat = " ".join(guide.split())
+        for rule, needles in rules.items():
+            for n in needles:
+                self.assertIn(" ".join(n.split()), flat, f"rule {rule}: {n}")
+
     def test_working_is_reported_only_when_the_transcript_is_recent(self):
         ds, m, rec = self.model_records()
         m.path = os.path.join(self.tmp.name, "t.jsonl")
