@@ -156,6 +156,7 @@ def _note_op(data, op):
 
 
 def merge(src, dst, op=None):
+    """True when applied, False when this op id was seen already."""
     src, dst = norm(src), norm(dst)
     if src == dst:
         raise ValueError("can't merge a thread into itself")
@@ -163,7 +164,7 @@ def merge(src, dst, op=None):
         raise ValueError(f"{src} is reserved and can't be merged away")
     with _locked() as data:
         if _seen_op(data, op):
-            return resolve(dst, data["aliases"])
+            return False
         _ensure(data, src)
         _ensure(data, dst)
         if resolve(dst, data["aliases"]) == src:
@@ -172,14 +173,14 @@ def merge(src, dst, op=None):
         data["threads"][src]["merged_into"] = dst
         data["threads"][src]["merged_at"] = now_iso()
         _note_op(data, op)
-    return resolve(dst, data["aliases"])
+    return True
 
 
 def unmerge(src, op=None):
     src = norm(src)
     with _locked() as data:
         if _seen_op(data, op):
-            return
+            return False
         if src not in data["aliases"]:
             raise ValueError(f"{src} isn't merged into anything")
         del data["aliases"][src]
@@ -187,6 +188,7 @@ def unmerge(src, op=None):
             data["threads"][src].pop("merged_into", None)
             data["threads"][src].pop("merged_at", None)
         _note_op(data, op)
+    return True
 
 
 def move(message_id, thread, op=None):
@@ -196,10 +198,11 @@ def move(message_id, thread, op=None):
         raise ValueError("a message id is needed")
     with _locked() as data:
         if _seen_op(data, op):
-            return
+            return False
         _ensure(data, thread)
         data["moves"][message_id] = thread
         _note_op(data, op)
+    return True
 
 
 def mark_once(key):
@@ -273,7 +276,8 @@ def cli(action, args, as_json=False, out=print):
             raise ValueError({"merge": "usage: lean-agent thread merge tB tA", "move": "usage: lean-agent thread move <message-id> <thread>",
                               "unmerge": "usage: lean-agent thread unmerge tB"}[action])
         elif action == "merge":
-            out(f"{norm(args[0])} -> {merge(*args)}")
+            merge(*args)
+            out(f"{norm(args[0])} -> {resolve(args[1])}")
         elif action == "unmerge":
             unmerge(args[0])
             out(f"{norm(args[0])} is its own thread again")
