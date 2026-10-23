@@ -29,7 +29,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import dash_service  # noqa: E402
 import lean_threads  # noqa: E402
-from lean_common import questions_of, tool_summary  # noqa: E402
+from lean_common import questions_of, thread_key as _thread_key, tool_summary  # noqa: E402
 PARENT_SESSION_VARS = re.compile(r"^(CLAUDECODE|CLAUDE_PID|CLAUDE_CODE_(SESSION_ID|ENTRYPOINT|CHILD_SESSION|REMOTE\w*|"
                                  r"MESSAGING_\w+|SSE_PORT|WORKER_EPOCH|TEE_SDK_STDOUT|SESSION_ATTENDED|"
                                  r"SESSION_ACCESS_TOKEN|CONTAINER_ID))$")
@@ -39,6 +39,7 @@ DEFAULT_ENV = {
     "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet", "LEAN_AGENT_BRIEF": "1", "LEAN_AGENT_ANSWER_LINES": "25",
 }
 MAX_EVENTS = 600
+MESSAGE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _SENDS_LOCK = threading.Lock()  # appends to service_sends.jsonl and its trimming never interleave
 _BRIDGE = {"at": 0.0, "up": False}
 
@@ -118,6 +119,16 @@ def service_status():
     return {"up": up, "mode": "service" if up else "fallback", "configured": bool(info), "remote_control": bool(rc) if up and rc is not None else None}
 
 
+def _log_send(entry):
+    """Append one entry to the sends log and trim it."""
+    log = dash_service.chat_dir("service_sends.jsonl")
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    with _SENDS_LOCK:
+        with open(log, "a") as fh:
+            fh.write(json.dumps(dict(entry, ts=time.time())) + "\n")
+    _trim_sends(log)
+
+
 def thread_id(key):
     """The registry's id for a chat key: `12` -> `#12`, `t3` stays."""
     return "#" + key if str(key).isdigit() else str(key)
@@ -126,7 +137,7 @@ def thread_id(key):
 def thread_key(tid):
     """The chat key for a thread id from the page: `#12` -> `12`, `t3` stays; ValueError for anything else."""
     tid = lean_threads.norm(tid)
-    return tid[1:] if tid.startswith("#") else tid
+    return _thread_key(tid)
 
 
 def fixed_send(text):
@@ -136,13 +147,7 @@ def fixed_send(text):
     if not ds:
         return {"ok": True, "sent": False}
     import service_session
-    os.makedirs(ds.chat_dir(), exist_ok=True)
-    log = ds.chat_dir("service_sends.jsonl")
-    with _SENDS_LOCK:
-        with open(log, "a") as fh:
-            fh.write(json.dumps({"key": "main", "sid": ds.model().sid, "sent": text, "shown": text, "raw": text, "applied": True,
-                                 "ts": time.time()}) + "\n")
-    _trim_sends(log)
+    _log_send({"key": "main", "sid": ds.model().sid, "sent": text, "shown": text, "raw": text, "applied": True})
     ok, err = service_session.send(text)
     return {"ok": ok, "sent": ok, **({"error": err} if err else {})}
 
@@ -151,11 +156,15 @@ def thread_move(message, to):
     try:
         to = lean_threads.norm(to)
         mid = str(message or "").strip()
+        if not MESSAGE_ID_RE.fullmatch(mid):
+            raise ValueError("not a valid message id")
+        if not re.fullmatch(r"#\d+|t\d+|optimize", to):
+            raise ValueError("not a valid thread id")
         lean_threads.move(mid, to)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     ev = next((e for e in dash_service.model().events if e.get("mid") == mid and e["kind"] == "user"), None) if service_up() else None
-    excerpt = " ".join(str((ev or {}).get("raw") or (ev or {}).get("text") or "").replace('"', "'").split())[:60]
+    excerpt = " ".join(str((ev or {}).get("raw") or (ev or {}).get("text") or "").replace('"', "'").split())[:60]  # split() drops newlines
     return fixed_send(f"Move message to {to} ({mid})" + (f': "{excerpt}"' if excerpt else ""))
 
 
@@ -309,13 +318,7 @@ class Chat:
             s.get("key") == self.key and s.get("sid") == m.sid and float(s.get("ts") or 0) >= self._fresh_at()
             for s in m.send_log)
         prompt = f"[Dashboard thread about: {context}]\n\n{shown}" if first and context else shown
-        os.makedirs(ds.chat_dir(), exist_ok=True)
-        log = ds.chat_dir("service_sends.jsonl")
-        with _SENDS_LOCK:
-            with open(log, "a") as fh:
-                fh.write(json.dumps({"key": self.key, "sid": m.sid, "sent": prompt, "shown": shown, "raw": text,
-                                     "ts": time.time()}) + "\n")
-        _trim_sends(log)
+        _log_send({"key": self.key, "sid": m.sid, "sent": prompt, "shown": shown, "raw": text})
         ok, err = service_session.send(prompt)
         return {"ok": ok, **({"error": err} if err else {})}
 
@@ -531,10 +534,7 @@ class Chat:
                 import service_session
                 ok, err = service_session.send("/clear")
                 if ok:  # remembered so the new transcript is known to be ours
-                    os.makedirs(dash_service.chat_dir(), exist_ok=True)
-                    with _SENDS_LOCK, open(dash_service.chat_dir("service_sends.jsonl"), "a") as fh:
-                        fh.write(json.dumps({"key": "main", "sid": None, "sent": "/clear", "shown": "/clear", "raw": "/clear",
-                                             "ts": time.time()}) + "\n")
+                    _log_send({"key": "main", "sid": None, "sent": "/clear", "shown": "/clear", "raw": "/clear"})
                 return {"ok": ok, **({"error": err} if err else {})}
             self.meta["fresh_at"] = time.time()  # a task thread shares the session: it just starts its view over
             os.makedirs(self.dir, exist_ok=True)

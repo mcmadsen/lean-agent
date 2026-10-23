@@ -153,7 +153,7 @@ def merge(src, dst):
         data["aliases"][src] = dst
         data["threads"][src]["merged_into"] = dst
         data["threads"][src]["merged_at"] = now_iso()
-    return resolve(dst)
+    return resolve(dst, data["aliases"])
 
 
 def unmerge(src):
@@ -219,16 +219,13 @@ def threads(now=None, include_expired=False):
     if "optimize" not in data["threads"]:
         data["threads"]["optimize"] = {"id": "optimize", "title": RESERVED["optimize"], "created": None,
                                        "last_message": None, "kind": "free"}
-    out = []
-    for t in data["threads"].values():
-        if t["id"] in data["aliases"] or (not include_expired and expired(t, now)):
-            continue
-        out.append(dict(t))
-    for src, dst in data["aliases"].items():  # the target's last message counts its merged threads' too
-        tgt = next((t for t in out if t["id"] == resolve(dst, data["aliases"])), None)
+    tops = {k: dict(t) for k, t in data["threads"].items() if k not in data["aliases"]}
+    for src, dst in data["aliases"].items():  # the target's last message counts its merged threads' too (before expiry)
+        tgt = tops.get(resolve(dst, data["aliases"]))
         s = data["threads"].get(src) or {}
         if tgt and s.get("last_message") and (not tgt.get("last_message") or _epoch(s["last_message"]) > _epoch(tgt["last_message"])):
             tgt["last_message"] = s["last_message"]
+    out = [t for t in tops.values() if include_expired or not expired(t, now)]
     return sorted(out, key=lambda t: (t.get("last_message") or "", t["id"]), reverse=True)
 
 

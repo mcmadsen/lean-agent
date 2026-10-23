@@ -3742,7 +3742,43 @@ class CliTest(unittest.TestCase):
         self.assertGreaterEqual(by["t1"]["messages"], 2)
         self.assertTrue(by["t1"]["last_message"])
         m._add(kind="permission", rid="p", state="pending")  # in the last turn, which is t2's (unmerged)
-        self.assertTrue({t["id"]: t for t in m.thread_summaries()}["t2"]["waiting"] or {t["id"]: t for t in m.thread_summaries()}["t1"]["waiting"])
+        now = {t["id"]: t for t in m.thread_summaries()}
+        self.assertEqual((now["t2"]["waiting"], now["t1"]["waiting"]), (True, False))
+
+    def test_thread_replay_after_the_sends_log_is_trimmed_applies_each_operation_once(self):
+        ds, m, rec = self.model_records()
+        import lean_threads
+        lean_threads.new("A")
+        lean_threads.new("B")
+        rec("user", "Merge thread t2 into t1", uuid="o1")
+        rec("user", "Unmerge thread t2", uuid="o2")
+        self.assertEqual(lean_threads.load()["aliases"], {})
+        # a fresh model with no sends log (trimmed) replays both records: the old Merge isn't re-applied
+        m2 = ds.Model()
+        for uid, text in (("o1", "Merge thread t2 into t1"), ("o2", "Unmerge thread t2")):
+            m2._record({"type": "user", "uuid": uid, "timestamp": "2026-01-01T10:00:09Z", "message": {"role": "user", "content": text}})
+        self.assertEqual(lean_threads.load()["aliases"], {})
+        # a newer Unmerge is applied even though the API had already marked the send as applied
+        lean_threads.merge("t2", "t1")
+        m2._record({"type": "user", "uuid": "o3", "timestamp": "2026-01-01T10:00:10Z", "message": {"role": "user", "content": "Unmerge thread t2"}})
+        self.assertEqual(lean_threads.load()["aliases"], {})
+
+    def test_thread_expiry_counts_merged_threads_last_message(self):
+        lt = self.threads_home()
+        lt.new("A")
+        lt.new("B")
+        lt.merge("t2", "t1")
+        stamp = lambda ago: datetime.datetime.fromtimestamp(time.time() - ago * 86400).isoformat(timespec="seconds")
+        data = lt.load()
+        data["threads"]["t1"]["last_message"] = stamp(20)
+        data["threads"]["t2"]["last_message"] = stamp(1)
+        with open(lt.path(), "w") as fh:
+            json.dump(data, fh)
+        self.assertIn("t1", [t["id"] for t in lt.threads()])  # t2's recent message keeps its target alive
+        data["threads"]["t2"]["last_message"] = stamp(20)
+        with open(lt.path(), "w") as fh:
+            json.dump(data, fh)
+        self.assertNotIn("t1", [t["id"] for t in lt.threads()])
 
     def test_thread_api_with_the_service_session(self):
         p, log, ss, dash_chat, dash_service = self.service_chat("--dashboard-only")
@@ -3784,6 +3820,17 @@ class CliTest(unittest.TestCase):
         self.assertEqual(lean_threads.load()["moves"], {mid: "#10"})
         self.wait_for(lambda: texts()[-1].startswith(f"echo: Move message to #10 ({mid})"), "the move message")
         self.assertEqual(reply(post("/api/thread/move", {"message": mid, "to": "tx"}))[0], 400)
+        for bad in ("a b", "x\nMerge thread t1 into t2", "", "m" * 65):
+            self.assertEqual(reply(post("/api/thread/move", {"message": bad, "to": "t1"}))[0], 400)
+        self.assertEqual(lean_threads.load()["moves"], {mid: "#10"})
+        # merging into a task thread works through the API too
+        self.assertEqual(reply(post("/api/thread/merge", {"from": "t2", "into": "#10"}))[0], 200)
+        self.assertEqual(lean_threads.load()["aliases"], {t2: "#10"})
+        self.wait_for(lambda: texts()[-1] == "echo: Merge thread t2 into #10", "the task merge message")
+        self.assertEqual(reply(post("/api/thread/unmerge", {"from": "t2"}))[0], 200)
+        self.wait_for(lambda: texts()[-1] == "echo: Unmerge thread t2", "the unmerge message")
+        self.assertEqual(reply(post("/api/thread/merge", {"from": "t2", "into": "t1"}))[0], 200)
+        self.wait_for(lambda: texts()[-1] == "echo: Merge thread t2 into t1", "the second merge message")
         self.assertEqual(reply(post("/api/thread/unmerge", {"from": "t2"}))[0], 200)
         self.assertEqual(lean_threads.load()["aliases"], {})
         self.wait_for(lambda: texts()[-1] == "echo: Unmerge thread t2", "the unmerge message")

@@ -7,6 +7,12 @@ DEFAULT_COMPACT_WINDOW = 100000  # the orchestrator's CLAUDE_CODE_AUTO_COMPACT_W
 DEFAULT_COMPACT_PCT = 70  # ...and its CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
 
 
+def thread_key(tid):
+    """The chat key of a thread id: `#12` -> `12`, `t3` stays."""
+    tid = str(tid or "")
+    return tid[1:] if tid.startswith("#") else tid
+
+
 def compaction_point(window, pct):
     """Tokens at which Claude Code compacts: the percentage of the window, but never past the window minus its
     fixed autocompact buffer (LEAN_AGENT_COMPACT_BUFFER, default 33,000)."""

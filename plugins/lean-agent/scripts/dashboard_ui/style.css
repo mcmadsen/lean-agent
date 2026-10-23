@@ -155,7 +155,7 @@ h1,h2{margin:0}
 .srow.rejd{background:var(--sunken)}.undo{border:0;background:transparent;padding:0;color:var(--accent);font:inherit;text-decoration:underline;cursor:pointer}
 .sugs .sact{padding:4px 10px 8px}.sugs .clearbox{margin:4px 0;padding:8px 10px;border-radius:8px}.phone-only{display:none}
 .badge{display:inline-block;min-width:16px;padding:1px 5px;border-radius:8px;background:var(--warn-soft);color:var(--warn);font:600 11px/1.3 var(--mono);text-align:center}
-.badge:empty,body[data-pane=chat] #m-chat{display:none}
+.badge:empty{display:none}
 
 /* dialogs and the run view */
 dialog{border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--ink);padding:16px}
