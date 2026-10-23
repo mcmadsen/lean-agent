@@ -157,10 +157,6 @@ def _op_id():
     return uuid.uuid4().hex[:12]
 
 
-def _op_seen(op):
-    return op in lean_threads.load().get("ops", [])
-
-
 def thread_move(message, to):
     try:
         to = lean_threads.norm(to)
@@ -168,11 +164,11 @@ def thread_move(message, to):
         if not MESSAGE_ID_RE.fullmatch(mid):
             raise ValueError("not a valid message id")
         op = _op_id()
-        if _op_seen(op):
-            return {"ok": True, "skipped": "seen"}
-        lean_threads.move(mid, to, op)
+        applied = lean_threads.move(mid, to, op)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
+    if not applied:
+        return {"ok": True, "skipped": "seen"}
     ev = next((e for e in dash_service.model().events if e.get("mid") == mid and e["kind"] == "user"), None) if service_up() else None
     excerpt = " ".join(str((ev or {}).get("raw") or (ev or {}).get("text") or "").replace('"', "'").split())[:60]  # split() drops newlines
     return fixed_send(f"Move message to {to} ({mid})" + (f': "{excerpt}"' if excerpt else "") + f" [op {op}]")
@@ -180,23 +176,23 @@ def thread_move(message, to):
 
 def thread_merge(src, into):
     op = _op_id()
-    if _op_seen(op):
-        return {"ok": True, "skipped": "seen"}
     try:
-        lean_threads.merge(src, into, op)
+        applied = lean_threads.merge(src, into, op)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
+    if not applied:
+        return {"ok": True, "skipped": "seen"}
     return fixed_send(f"Merge thread {lean_threads.norm(src)} into {lean_threads.norm(into)} [op {op}]")
 
 
 def thread_unmerge(src):
     op = _op_id()
-    if _op_seen(op):
-        return {"ok": True, "skipped": "seen"}
     try:
-        lean_threads.unmerge(src, op)
+        applied = lean_threads.unmerge(src, op)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
+    if not applied:
+        return {"ok": True, "skipped": "seen"}
     return fixed_send(f"Unmerge thread {lean_threads.norm(src)} [op {op}]")
 
 

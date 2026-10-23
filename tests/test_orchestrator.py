@@ -751,13 +751,13 @@ class CliTest(unittest.TestCase):
         ui.sel="#10";
         drawLeft(new Set());
         const h=$("threads").innerHTML;
-        out.rows=(h.match(/class="row/g)||[]).length;
+        out.rows=(h.match(/class="row[ "]/g)||[]).length;
         out.tag=[h.includes('<span class="id mono">#10</span> Sample todo'),h.includes("Free chat"),h.includes("t1</span>")];
         out.meta=[h.includes("12 messages · 1 min ago"),h.includes("1 message · 20 min ago"),h.includes("no messages yet")];
         out.dots=[(h.match(/dot-warn/g)||[]).length,h.indexOf("dot-warn")<h.indexOf("Sample todo"),String($("n-chat").textContent)];
         out.sel=/class="row sel"[^>]*data-thread="#10"/.test(h);
         out.tabs=[$("n-inbox").textContent,$("n-todos").textContent].map(String);
-        ui.threads=[];put("threads",threadListHtml());out.empty=[($("threads").innerHTML.match(/class="row/g)||[]).length,$("threads").innerHTML.includes('data-thread="main"')];  // Main is always listed
+        ui.threads=[];put("threads",threadListHtml());out.empty=[($("threads").innerHTML.match(/class="row[ "]/g)||[]).length,$("threads").innerHTML.includes('data-thread="main"')];  // Main is always listed
         out.ask=askHtml("ask-s").includes('placeholder="Ask Claude anything"')&&askHtml("ask-s").includes("data-ask");
         openSheet("move","m1","#10");
         """.replace('openSheet("move","m1","#10");', 'ui.threads=[{id:"main",title:"Main"},{id:"#10",title:"A"},{id:"#11",title:"B"},{id:"t1",title:"C"}];'
@@ -904,7 +904,7 @@ class CliTest(unittest.TestCase):
         out.fallbackList=[h.includes('data-thread="main"'),h.includes(">Main<"),h.includes('data-thread="optimize"')];
         ui.threads=[{id:"main",title:"Main",kind:"main",messages:2,last_message:mins(3)},{id:"#12",title:"Task twelve",kind:"task",messages:5,last_message:mins(9)},
           {id:"optimize",title:"Optimize",kind:"free",messages:0}];
-        h=threadListHtml();out.rows=(h.match(/class="row/g)||[]).length;out.noOpt=!h.includes("optimize");
+        h=threadListHtml();out.rows=(h.match(/class="row[ "]/g)||[]).length;out.noOpt=!h.includes("optimize");
         const sg=(id,card)=>({id,kind:"archive",card,reason:"r",meta:"m"});
         lastBoard={cards:[{id:"opt-p1",kind:"optimize",column:"Waiting on you",project:"p1",optimize:{suggestions:[sg("archive:a","a"),sg("archive:b","b")],drafts:[]}}]};
         h=threadListHtml();out.withSug=[h.includes('data-thread="optimize"'),h.includes("2 suggestions"),h.includes("no messages yet")];
@@ -3802,7 +3802,6 @@ class CliTest(unittest.TestCase):
         self.assertFalse(lt.mark_once("k600"))  # op ids can't push a once-key out
 
     def _strip_op(self, text):
-        import shutil
         node = shutil.which("node")
         if not node:
             self.skipTest("node isn't installed")
@@ -3831,8 +3830,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self._strip_op(text), 'Move message to t1 (m1): "see [op abc] here"')
 
     def test_thread_colliding_op_id_is_reported_as_skipped(self):
+        lean_threads = self.threads_home()
         import dash_chat
-        import lean_threads
         lean_threads.new("A")
         lean_threads.new("B")
         lean_threads.merge("t2", "t1", "feedfacecafe")
@@ -3850,7 +3849,7 @@ class CliTest(unittest.TestCase):
           {id:"main",title:"Main",kind:"main",waiting:false,last_message:null,messages:0},
           {id:"t1",title:"Pricing page",kind:"free",waiting:false,last_message:null,messages:0}]})});
         await loadThreads();
-        out.rows=($("threads").innerHTML.match(/class="row/g)||[]).length;
+        out.rows=($("threads").innerHTML.match(/class="row[ "]/g)||[]).length;
         out.title=$("threads").innerHTML.includes("Pricing page");
         let closed=0;$("sheet").open=true;$("sheet").close=()=>{closed++;$("sheet").open=false};
         ui.sheet={mode:"switch"};
