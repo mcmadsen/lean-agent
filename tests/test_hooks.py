@@ -292,12 +292,39 @@ class SessionHookTest(Base):
                            text=True, env=dict(os.environ, **self.env, **env), check=True)
         return json.loads(p.stdout) if p.stdout.strip() else None
 
+    def test_clear_adds_the_brief_with_the_checkpoint_first(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        with open(os.path.join(home, "handoff-notes.json"), "w") as fh:
+            json.dump([{"ts": "2026-10-23T09:00:00", "text": "promised the user a summary by noon [thread:billing]",
+                        "kind": "checkpoint"}, {"ts": "2026-10-23T09:01:00", "text": "an open item"}], fh)
+        event = {"session_id": "c1", "transcript_path": "/x/c1.jsonl", "source": "clear"}
+        out = self.hook_under_claude(event, LEAN_AGENT_SERVICE_SESSION="1")["hookSpecificOutput"]
+        text = out["additionalContext"]
+        self.assertEqual(out["hookEventName"], "SessionStart")
+        self.assertTrue(text.startswith("Checkpoint of 2026-10-23 09:00"))
+        self.assertIn("promised the user a summary by noon [thread:billing]", text)
+        self.assertIn("an open item", text)
+        self.assertLessEqual(len(text), 3100)
+        for source in ("startup", "resume"):
+            event = {"session_id": "c2", "transcript_path": "/x/c2.jsonl", "source": source}
+            self.assertIsNone(self.hook_under_claude(event, LEAN_AGENT_SERVICE_SESSION="1"))
+        with open(os.path.join(home, "handoff-notes.json"), "w") as fh:
+            json.dump([{"ts": "2026-10-23T09:00:00", "text": "x" * 6000, "kind": "checkpoint"}], fh)
+        text = self.hook_under_claude(event | {"source": "clear"}, LEAN_AGENT_SERVICE_SESSION="1")[
+            "hookSpecificOutput"]["additionalContext"]
+        self.assertLessEqual(len(text), 3100)
+
     def test_writes_service_json_only_in_the_service_session(self):
         for source in ("startup", "resume", "clear", "compact"):
             event = {"session_id": "s-" + source, "transcript_path": "/x/s-%s.jsonl" % source, "source": source}
             self.assertIsNone(self.hook_under_claude(event, LEAN_AGENT_SERVICE_SESSION="0"))
             self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")))
-            self.assertIsNone(self.hook_under_claude(event, LEAN_AGENT_SERVICE_SESSION="1"))  # prints nothing
+            out = self.hook_under_claude(event, LEAN_AGENT_SERVICE_SESSION="1")
+            if source == "clear":  # only a clear adds the brief
+                self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "SessionStart")
+            else:
+                self.assertIsNone(out)
             rec = self.record()
             self.assertEqual((rec["session_id"], rec["transcript_path"], rec["source"]),
                              ("s-" + source, "/x/s-%s.jsonl" % source, source))

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """SessionStart hook for the session `lean-agent up` hosts (LEAN_AGENT_SERVICE_SESSION=1); no effect anywhere else.
 
-Records which transcript the session writes now (chat/service.json), for every source (startup, resume, clear,
+After a /clear it also prints the brief (`lean-agent brief`, the last checkpoint first) as additionalContext, so
+the orchestrator continues from it. Records which transcript the session writes now (chat/service.json), for every source (startup, resume, clear,
 compact): /clear starts a new transcript with a new id, and this is how the dashboard learns of it. Only when the
-hook runs under the service claude (its pid in up.json is an ancestor, with no other claude nearer). Prints nothing
+hook runs under the service claude (its pid in up.json is an ancestor, with no other claude nearer). Prints nothing else
 and never fails the session.
 """
 import json
@@ -11,6 +12,8 @@ import os
 import subprocess
 import sys
 import time
+
+BRIEF_CAP = 3000  # characters of brief added to a cleared session
 
 
 def parent_pid(pid):
@@ -101,6 +104,11 @@ def main(ppid=parent_pid, cmd=argv_of, wait=3.0):
         json.dump({"session_id": event["session_id"], "transcript_path": event.get("transcript_path"),
                    "source": event.get("source"), "ts": time.time()}, fh)
     os.replace(tmp, path)
+    if event.get("source") == "clear":
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import compact_hook
+        text = compact_hook.brief(BRIEF_CAP)
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
 
 
 if __name__ == "__main__":

@@ -298,6 +298,10 @@ lean-agent card unarchive {{P}} checkout-notes
   `lean-agent context --no-probe` (what fills your messages, the biggest first), save anything still open with
   `lean-agent handoff --note "..."`, tell the user in one line, then go on with short replies.
   `lean-agent context --apply` takes never-used tools and extra instruction files out for the next session.
+- Standing rule, checkpoint: when asked "Checkpoint now", run `lean-agent checkpoint` with your soft state
+  (what you promised the user, decisions made in chat, next steps, open threads with their tags), in 15 lines
+  or fewer, then reply `checkpointed`. After a clear, continue from the brief you start with, and keep using
+  the same thread tags.
 - Where tokens went: `lean-agent stats --top 10` (biggest runs) and `lean-agent budget --by-run` (this session:
   your share, the context trend, its biggest runs).
 - When something seems off, run `lean-agent doctor`, and `lean-agent logs` for recent errors

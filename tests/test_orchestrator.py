@@ -4483,6 +4483,113 @@ class CliTest(unittest.TestCase):
         self.assertIn("Short answer.", short)
         self.assertNotIn("full report:", short)
 
+    def test_checkpoint_and_brief(self):
+        self.assertEqual(self.cli("brief").stdout.count("Checkpoint of"), 0)
+        self.cli("checkpoint", "promised the user a status at noon [thread:billing]")
+        self.cli("handoff", "--note", "an open item")
+        out = self.cli("brief").stdout
+        self.assertTrue(out.startswith("Checkpoint of "), out)
+        self.assertIn("promised the user a status at noon [thread:billing]", out.split("lean-agent hand-off")[0])
+        self.assertNotIn("promised the user", out.split("lean-agent hand-off")[1])  # not repeated as an open item
+        self.assertIn("an open item", out)
+        for i in range(4):
+            self.cli("checkpoint", f"state {i}")
+        p = subprocess.run([sys.executable, CLI, "checkpoint", "--file", "-"], input="from stdin\nsecond line\n",
+                           capture_output=True, text=True, env=self.env, check=True)
+        self.assertIn("2 lines", p.stdout)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "handoff-notes.json")) as fh:
+            notes = json.load(fh)
+        cps = [n for n in notes if n.get("kind") == "checkpoint"]
+        self.assertEqual([n["text"] for n in cps], ["state 2", "state 3", "from stdin\nsecond line"])
+        self.assertEqual(len(notes), 4)  # the open item stays
+        out = self.cli("brief").stdout
+        self.assertTrue(out.startswith("Checkpoint of "))
+        self.assertIn("from stdin\nsecond line", out)
+        self.assertNotIn("state 2", out)
+        self.assertEqual(self.cli("checkpoint", check=False).returncode, 1)
+
+    def test_config_clear_at(self):
+        self.assertIn("40,000", self.cli("config", "clear-at").stdout)
+        self.assertIn("55,000", self.cli("config", "clear-at", "55000").stdout)
+        self.assertIn("55,000", self.cli("config", "clear-at").stdout)
+        self.assertIn("off", self.cli("config", "clear-at", "0").stdout)
+        self.assertIn("12,000", self.cli("config", "clear-at", LEAN_AGENT_CLEAR_AT="12000").stdout)
+        self.assertEqual(self.cli("config", "clear-at", "x", check=False).returncode, 1)
+
+    def auto_clear_up(self, ctx, **env):
+        """`up` with the fake session whose turns leave `ctx` tokens of context; fast clocks for the auto clear."""
+        self.env.update(dict(FAKE_CTX=str(ctx), LEAN_AGENT_CLEAR_POLL="0.1", LEAN_AGENT_CLEAR_IDLE="0",
+                             LEAN_AGENT_CLEAR_AT="40000"), **env)
+        return self.start_up("--name", "la")
+
+    def clears(self, log):
+        return [r for r in self.read_jsonl(log) if "clear_hook" in r]
+
+    def test_up_auto_clears_after_a_checkpoint(self):
+        p, log, ss = self.auto_clear_up(50000)
+        ss.send("hello")
+        self.wait_for(lambda: self.clears(log), "the clear")
+        [clear] = self.clears(log)
+        hook = json.loads(clear["clear_hook"])["hookSpecificOutput"]
+        self.assertEqual(hook["hookEventName"], "SessionStart")
+        self.assertIn("lean-agent hand-off", hook["additionalContext"])
+        home = self.env["LEAN_AGENT_HOME"]
+        slug = "".join(c if c.isalnum() else "-" for c in os.path.realpath(self.cli("home").stdout.strip()))
+        first = [f for f in os.listdir(os.path.join(self.env["CLAUDE_CONFIG_DIR"], "projects", slug)) if "fake-clear" not in f]
+        records = self.read_jsonl(os.path.join(self.env["CLAUDE_CONFIG_DIR"], "projects", slug, first[0]))
+        texts = [r["message"]["content"] if isinstance(r["message"]["content"], str) else r["message"]["content"][0].get("text")
+                 for r in records if r.get("message")]
+        self.assertEqual(texts[-2:], ["Checkpoint now: run lean-agent checkpoint with your soft state, then reply "
+                                      "'checkpointed'", "checkpointed"])
+        with open(os.path.join(home, "logs", "session.log"), "rb") as fh:
+            self.assertIn(b"auto-clear: /clear sent (checkpointed)", fh.read())
+        # a second long turn straight after: not cleared again within 10 minutes
+        ss.send("again")
+        self.wait_for(lambda: "echo: again" in json.dumps(self.read_jsonl(os.path.join(
+            self.env["CLAUDE_CONFIG_DIR"], "projects", slug, clear["sid"] + ".jsonl"))), "the second turn")
+        import time as _t
+        _t.sleep(1.0)
+        self.assertEqual(len(self.clears(log)), 1)
+
+    def test_up_auto_clear_waits_for_the_checkpoint_up_to_a_limit(self):
+        p, log, ss = self.auto_clear_up(50000, FAKE_NO_CHECKPOINT="1", LEAN_AGENT_CLEAR_WAIT="1.5")
+        ss.send("hello")
+        self.wait_for(lambda: self.clears(log), "the clear after the wait", secs=20)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "logs", "session.log"), "rb") as fh:
+            self.assertIn(b"no reply in time", fh.read())
+
+    def test_up_auto_clear_not_while_a_permission_is_pending_nor_below_nor_off(self):
+        import time as _t
+        perm = os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "perm")
+        os.makedirs(perm)
+        with open(os.path.join(perm, "req1.json"), "w") as fh:
+            json.dump({"tool_name": "Bash", "tool_input": {"command": "ls"}}, fh)
+        p, log, ss = self.auto_clear_up(50000)
+        ss.send("hello")
+        _t.sleep(1.5)
+        self.assertEqual(self.clears(log), [])
+        with open(os.path.join(perm, "req1.answer.json"), "w") as fh:  # answered: the clear goes ahead
+            json.dump({"decision": "allow"}, fh)
+        self.wait_for(lambda: self.clears(log), "the clear once the permission is answered")
+
+    def no_clear_for(self, ctx, at):
+        import time as _t
+        p, log, ss = self.auto_clear_up(ctx, LEAN_AGENT_CLEAR_AT=at)
+        ss.send("hello")
+        self.wait_for(lambda: "echo: hello" in json.dumps(self.read_jsonl(log)) or ss.tail().count("ready"), "the turn")
+        _t.sleep(1.5)
+        self.assertEqual(self.clears(log), [])
+        said = "".join(open(os.path.join(d, f)).read() for d, _, fs in os.walk(self.env["CLAUDE_CONFIG_DIR"])
+                       for f in fs if f.endswith(".jsonl"))
+        self.assertIn("echo: hello", said)
+        self.assertNotIn("Checkpoint now", said)
+
+    def test_up_auto_clear_not_below_the_threshold(self):
+        self.no_clear_for(30000, "40000")
+
+    def test_up_auto_clear_off_at_zero(self):
+        self.no_clear_for(90000, "0")
+
     def test_brief_review(self):
         self.git_project()
         self.cli("learn", self.proj, "--name", "proj")

@@ -6127,6 +6127,7 @@ def host_session(cmd, extra, env, h, name, dash_only, permission_mode):
 
     host = service_session.Host(build, env, h, remote_control=not dash_only, on_text=on_text, on_stale=on_stale)
     threading.Thread(target=schedule_timer, daemon=True).start()
+    threading.Thread(target=service_session.AutoClear(host).run, daemon=True).start()
 
     for sig in (signal.SIGTERM, signal.SIGHUP):  # the service (or anyone) stops `up`: stop claude too, promptly
         signal.signal(sig, lambda *_: host.stop())
@@ -6847,6 +6848,19 @@ def cmd_attribution(a):
 
 
 def cmd_config(a):
+    if a.name == "clear-at":
+        if a.value is not None:
+            if not a.value.isdigit():
+                die("clear-at takes a number of tokens (0 = off)")
+            cfg = load_json(home("config.json"), {})
+            cfg["clear_at"] = int(a.value)
+            save_json(home("config.json"), cfg)
+        n = service_session.clear_at()
+        print(f"clear-at: {f'{n:,} tokens' if n else 'off'} · `up` has the orchestrator checkpoint, then clears its context, "
+              "when a finished turn leaves it above this" + (" (LEAN_AGENT_CLEAR_AT is set and wins)" if os.environ.get("LEAN_AGENT_CLEAR_AT") else ""))
+        return 0
+    if a.value not in (None, "on", "off"):
+        die(f"{a.name} takes on or off")
     if a.name == "strict":
         if a.value:
             cfg = load_json(home("config.json"), {})
@@ -7735,6 +7749,27 @@ def cmd_handoff(a):
     print(f"(saved {home('handoff.md')}; a new or compacted orchestrator session starts with this note)")
 
 
+def cmd_checkpoint(a):
+    """Save the orchestrator's soft state as a hand-off note of kind "checkpoint"; the last 3 are kept."""
+    import compact_hook
+    text = sys.stdin.read() if a.file == "-" else read_text(a.file) if a.file else " ".join(a.text)
+    text = "\n".join(l.rstrip() for l in text.strip().splitlines())[:4000]
+    if not text:
+        die('checkpoint needs the soft state: lean-agent checkpoint "<promises, decisions, next steps>" (or --file -)')
+    notes = compact_hook.load_notes()
+    notes.append({"ts": now_iso(), "text": text, "kind": "checkpoint"})
+    old = [i for i, n in enumerate(notes) if n.get("kind") == "checkpoint"][:-3]
+    save_json(compact_hook.notes_path(), [n for i, n in enumerate(notes) if i not in old])
+    print(f"checkpoint saved ({len(text.splitlines())} lines); `lean-agent brief` shows it first")
+    return 0
+
+
+def cmd_brief(a):
+    import compact_hook
+    print(compact_hook.brief())
+    return 0
+
+
 def cmd_home(a):
     print(prepare_home())
 
@@ -7822,10 +7857,19 @@ def build_parser():
     s.add_argument("--project", "-p")
     s.set_defaults(fn=cmd_text_len)
 
+    s = sub.add_parser("checkpoint", help="save your soft state (promises, decisions, next steps) for after a /clear")
+    s.add_argument("text", nargs="*", help="the soft state, 15 lines or fewer")
+    s.add_argument("--file", help="read it from a file (- = stdin)")
+    s.set_defaults(fn=cmd_checkpoint)
+
+    s = sub.add_parser("brief", help="what a fresh session starts from: the latest checkpoint, then the hand-off")
+    s.set_defaults(fn=cmd_brief)
+
     s = sub.add_parser("config", help="switches: artifacts on|off (may the orchestrator publish artifacts; default on), "
-                       "strict on|off (the orchestrator only runs lean-agent commands; default on)")
-    s.add_argument("name", choices=["artifacts", "strict"])
-    s.add_argument("value", nargs="?", choices=["on", "off"])
+                       "strict on|off (the orchestrator only runs lean-agent commands; default on), "
+                       "clear-at N (clear the orchestrator's context above N tokens after a checkpoint; default 40000, 0 = off)")
+    s.add_argument("name", choices=["artifacts", "strict", "clear-at"])
+    s.add_argument("value", nargs="?", help="on|off, or a number for clear-at")
     s.set_defaults(fn=cmd_config)
 
     s = sub.add_parser("attribution", help="should commits and PRs credit Claude? ask the user once, then set on|off")
