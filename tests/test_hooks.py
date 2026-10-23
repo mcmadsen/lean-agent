@@ -200,6 +200,18 @@ class SessionHookTest(Base):
         self.run_injected({me: 900, 900: 500, 500: 1})  # hook <- sh <- claude(500)
         self.assertEqual(self.record()["session_id"], "s1")
 
+    def test_the_brief_is_printed_even_when_follow_up_raises(self):
+        sys.path.insert(0, ROOT)
+        import session_hook
+        me = os.getpid()
+        out = io.StringIO()
+        with mock.patch.object(session_hook, "follow_up", side_effect=RuntimeError("boom")), \
+                mock.patch("sys.stdout", out):
+            self.run_injected({me: 900, 900: 500, 500: 1},
+                              event={"session_id": "c9", "transcript_path": "/x/c9.jsonl", "source": "clear"})
+        self.assertEqual(json.loads(out.getvalue())["hookSpecificOutput"]["hookEventName"], "SessionStart")
+        self.assertEqual(self.record()["session_id"], "c9")
+
     def test_keeps_a_chain_of_the_transcripts_in_order_and_the_last_20(self):
         me = os.getpid()
         for n in range(23):

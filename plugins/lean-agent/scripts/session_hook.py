@@ -120,9 +120,15 @@ def follow_up(home, event):
     if event.get("transcript_path"):
         up["transcript"] = event["transcript_path"]
     tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w") as fh:
-        json.dump(up, fh, indent=2)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w") as fh:
+            json.dump(up, fh, indent=2)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def main(ppid=parent_pid, cmd=argv_of, wait=3.0):
@@ -150,12 +156,16 @@ def main(ppid=parent_pid, cmd=argv_of, wait=3.0):
         json.dump({"session_id": event["session_id"], "transcript_path": event.get("transcript_path"),
                    "source": event.get("source"), "ts": now, "chain": chain, "chain_meta": meta}, fh)
     os.replace(tmp, path)
-    follow_up(home, event)
     if event.get("source") == "clear":
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import compact_hook
         text = compact_hook.brief(BRIEF_CAP)
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}),
+              flush=True)
+    try:  # after the brief, so a failure here can never skip it
+        follow_up(home, event)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
