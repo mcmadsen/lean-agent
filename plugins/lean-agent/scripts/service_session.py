@@ -254,6 +254,7 @@ CLEAR_AT = 0          # tokens of context after a finished turn above which the 
 CLEAR_MARGIN = 8000    # "auto" clears this far below the compaction point
 CLEAR_HARD = 3000      # within this of the compaction point the clear no longer waits for running workers
 CLEAR_PROMPT = "Checkpoint now: run lean-agent checkpoint with your soft state, then reply 'checkpointed'"
+CLEAR_PENDING = "clear requested: waiting for the turn to end"
 CLEAR_WAIT = 120       # seconds to wait for the checkpoint before clearing anyway
 CLEAR_GAP = 600        # seconds between two clears
 CLEAR_IDLE = 30        # seconds since the user last typed
@@ -445,17 +446,23 @@ class AutoClear:
         if self.waiting:
             offset, since = self.waiting
             st = transcript_state(path, offset)
+            if self.manual:
+                self.hold(CLEAR_PENDING)
             if permission_pending(self.session_id()) or (
                     not self.manual and now - self.host.last_input < _knob("LEAN_AGENT_CLEAR_IDLE", CLEAR_IDLE)):
                 return
             answered = st["ended"] and "checkpointed" in st["text"].lower()
             timed_out = now - since >= _knob("LEAN_AGENT_CLEAR_WAIT", CLEAR_WAIT)
-            if timed_out and not answered and not st["ended"] and not self.manual:
-                self.waiting = self.started = None  # a turn is still running: /clear would land in it; ask again at a turn end
-                self.log("no reply in time and a turn is running: giving up this round")
+            if timed_out and not answered and not st["ended"]:
+                # a turn is still running: /clear would land in it. A manual clear keeps waiting for the turn to
+                # end; an automatic one gives up and asks again at a turn end
+                if not self.manual:
+                    self.waiting = self.started = None
+                    self.log("no reply in time and a turn is running: giving up this round")
                 return
             if answered or timed_out:
                 self.waiting = None
+                self.hold(None)
                 self.log(f"/clear sent ({'checkpointed' if answered else 'no reply in time'})")
                 self.host.paste("/clear")
             return
@@ -464,14 +471,16 @@ class AutoClear:
             # and survive); waits for a turn end however long it takes, and for a pending permission prompt
             st = transcript_state(path)
             if not st["ended"] or permission_pending(self.session_id()):
+                self.hold(CLEAR_PENDING)
                 asked = _load(up_path()).get("clear_requested")
                 if not os.path.exists(path) and isinstance(asked, (int, float)) \
                         and now - asked >= _knob("LEAN_AGENT_CLEAR_WAIT", CLEAR_WAIT):
                     update_up(clear_requested=None, clear_status="clear not done: the transcript was not found")
+                    self.hold(None)
                     self.log("clear not done: the transcript was not found")
                 return
             update_up(clear_requested=None, clear_status=None)
-            self.hold(None)
+            self.hold(CLEAR_PENDING)
             self.manual = True
             self.started = now
             self.waiting = (st["size"], now)
