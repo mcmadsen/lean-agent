@@ -13,6 +13,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import usage  # noqa: E402
+
 
 def last_context(transcript):
     """The context size of the latest API call, from the end of the transcript."""
@@ -33,7 +35,6 @@ def last_context(transcript):
             continue
         u = (e.get("message") or {}).get("usage") if e.get("type") == "assistant" else None
         if isinstance(u, dict):
-            import usage
             return usage.context_tokens(u)
     return 0
 
@@ -43,7 +44,6 @@ def k(n):
 
 
 def line(event):
-    import usage
     import lean_schedule
     import budget_hook
     home = usage.lean_home()
