@@ -469,6 +469,68 @@ class CliTest(unittest.TestCase):
         self.assertEqual([r["todo"] for r in self.ledger()], [1, 1])
         self.assertEqual(self.cli("todo", "list").stdout.count("Export: cap the retry loop"), 1)
 
+    def todo_count(self, text):
+        return self.cli("todo", "list", "--all").stdout.count(text)
+
+    def test_todo_new_makes_one_item_for_review_do_decide_gaps_and_the_re_review(self):
+        g = self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        bad = json.dumps(dict(REUSE_CHECKED, verdict="changes-requested", checks=[], findings=[
+            {"severity": "major", "file": "api/totals.py", "line": 3, "issue": "rounding drops cents"}]))
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        self.cli("review", "proj", "--head", "feature", "--base", "main", "--todo", "new", check=False, FAKE_REVIEW=bad)
+        self.assertEqual(self.todo_count("pre-PR review"), 1)
+        g("checkout", "-q", "feature")
+        with open(os.path.join(self.proj, "api", "totals.py"), "a") as fh:
+            fh.write("# fix\n")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "fix")
+        g("checkout", "-q", "main")
+        self.cli("review", "proj", "--head", "feature", "--base", "main", "--todo", "new", check=False, FAKE_REVIEW=approve)
+        self.assertEqual(self.todo_count("pre-PR review"), 1)
+        self.assertEqual(self.todo_count("re-review after fixes"), 0)
+        self.assertEqual({r["todo"] for r in self.ledger() if r.get("role") == "reviewer"}, {1})
+        gaps = [{"what": "Retry the upload once", "file": "api/totals.py", "line": 3, "blocks_goal": False, "scoped_out": ""}]
+        with_gaps = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[], gaps=gaps))
+        g("checkout", "-q", "feature")
+        with open(os.path.join(self.proj, "api", "totals.py"), "a") as fh:
+            fh.write("# more\n")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "more")
+        g("checkout", "-q", "main")
+        self.cli("review", "proj", "--head", "feature", "--base", "main", "--full-review", check=False, FAKE_REVIEW=with_gaps)
+        fb = '{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-GAPS ' + json.dumps({"decisions": [
+            {"gap": "g1", "action": "decline", "why": "later"}]})
+        self.cli("review", "proj", "--head", "feature", "--base", "main", "--decide-gaps", "--todo", "new", check=False,
+                 FAKE_FEEDBACK=fb)
+        self.assertEqual(self.todo_count("decide the known gaps"), 1)
+        self.assertEqual(self.ledger()[-1]["todo"], 2)
+        self.cli("recipe", "add", "proj", "item-states", "-m", "sonnet", "--why", "state check", "--read-only",
+                 "--task", "Say which state each item should be in.")
+        self.cli("do", "proj", "item-states", "--todo", "new")
+        self.assertEqual(self.todo_count("recipe item-states"), 1)
+
+    def test_a_refused_todo_new_launch_leaves_no_item_and_advise_publish_have_their_own_run(self):
+        self.cli("learn", self.proj)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--todo", "new", "t", check=False)  # no --why: refused
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(self.todo_count("#1"), 0)
+        self.cli("advise", "Fix the export retry loop", FAKE_ANSWER="Here.\nADVICE\nline 1")
+        self.cli("publish", "Weekly plan", "--task-file", "-", input="plan text", FAKE_ANSWER="ARTIFACT https://a.example/1")
+        self.assertEqual([r.get("role") for r in self.ledger()], ["advisor", "publisher"])
+        self.assertEqual(self.todo_count("#1"), 0)
+
+    def test_resume_last_skips_reviewer_runs_and_says_when_only_role_runs_exist(self):
+        g = self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        self.cli("review", "proj", "--head", "feature", "--base", "main", check=False, FAKE_REVIEW=approve)
+        p = self.cli("run", "--resume", "last", "x", check=False)
+        self.assertIn("no ordinary runs yet", p.stderr)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "look")
+        self.cli("review", "proj", "--head", "feature", "--base", "main", "--full-review", check=False, FAKE_REVIEW=approve)
+        self.cli("run", "--resume", "last", "and then y")
+        ordinary = [r for r in self.ledger() if not r.get("role")][0]
+        self.assertEqual(self.calls()[-1]["argv"][self.calls()[-1]["argv"].index("--resume") + 1], ordinary["session_id"])
+
     def test_role_runs_are_not_resumable_and_never_leave_their_commands_in_the_record(self):
         self.cli("learn", self.proj)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "look at it")

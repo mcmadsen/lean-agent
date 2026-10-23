@@ -104,7 +104,7 @@ word, or `lean-agent run … -- 'memory add …'` is not affected: the hook read
 
 | Built-in | Class | Handling |
 | --- | --- | --- |
-| `#` memory message | c | the UserPromptSubmit hook adds a redirect to `lean-agent remember` (one line starting with `#`; multi-line text is a normal prompt). Claude Code auto memory is off, so it has nowhere to write |
+| `#` memory message | c | the UserPromptSubmit hook adds a redirect to `lean-agent remember` (a prompt that starts with `# ` followed by text; `#12 is failing` and multi-line text are normal prompts). Claude Code auto memory is off, so it has nowhere to write |
 | `/memory`, `/init` | c | Claude Code runs them locally. The UserPromptSubmit hook blocks them if Claude Code passes them to it; otherwise this is a **known limit**: they edit the user's own CLAUDE.md files, are typed by the user, and the orchestrator doesn't load those files (`claudeMdExcludes`) |
 | `/config`, `/mcp`, `/plugin` | c | **known limit**: local user commands that change Claude Code's settings; the hook can't block them. The home settings keep their own keys (`lean-agent home` rewrites them) |
 | Other slash commands | b | bundled skills are off; the rest are the user's own commands |

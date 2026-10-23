@@ -87,9 +87,9 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      (repeatable; commands that change things are refused).
    - `--mcp <server>:<preset or tool>,...`: only for an external system. You neither list nor run MCP servers:
      "which servers do we have", "what does tool X return" is a small read-only worker (`--read-only --allow-cmd
-     "lean-agent mcp"`, `--mcp <server>` to call it). That worker uses (worker: `lean-agent mcp list -p <project>`) `mcp tools <server>`
-     and a preset, not the whole server (tens of thousands of tokens per turn; `run` prints the cost): `mcp preset
-     <server>` lists them; `read` is automatic. Plugin servers (`plugin:<plugin>:<server>`) work too.
+     "lean-agent mcp"`, `--mcp <server>` to call it). Its commands are (worker: `lean-agent mcp list -p <project>`),
+     (worker: `lean-agent mcp tools <server>`) and (worker: `lean-agent mcp preset <server>`); it picks a preset, not the
+     whole server (tens of thousands of tokens per turn; `run` prints the cost); `read` is automatic. Plugin servers (`plugin:<plugin>:<server>`) work too.
    - `--chrome=<tool>,<tool>`: the user's real Chrome (Teams, Gmail ...); a worker checks the connection once (worker:
      `lean-agent chrome check`; it is refused for you, `lean-agent chrome status` is not).
    - `--worktree <branch>`: shared lean-agent git worktree of that branch (e.g. a reviewer's checks on a PR branch);
