@@ -519,7 +519,7 @@ def prompt_hook(event):
     if not prompt.startswith("/"):  # slash commands are not requests
         try:
             lines.append(lean_threads.route(prompt, event.get("session_id"))[2])
-        except (OSError, ValueError):
+        except Exception:  # never break the prompt
             pass
     if strict and re.match(MEMORY_MESSAGE_RE, prompt) and "\n" not in prompt and len(prompt) < 500:
         lines.append(MEMORY_REDIRECT)
