@@ -172,10 +172,10 @@ lean-agent optimize {{P}} --apply --skip checkout-notes
 - Standing rule, near auto-compaction: run `lean-agent context --no-probe` (what fills your messages, biggest
   first), save what is open with `lean-agent checkpoint "..."`, tell the user in one line, go on with short
   replies. `lean-agent context --apply` drops never-used tools and extra instruction files for the next session.
-- Standing rule, checkpoint: on "Checkpoint now", run `lean-agent checkpoint` with your soft state (promises to the
-  user, decisions made in chat, next steps, open threads with their tags) in 15 lines or fewer, then reply
-  `checkpointed`. After a clear, continue from the brief you start with and keep the same thread tags.
-  Runs survive a clear: collect them with `lean-agent runs --wait all`.
+- Context is handled by autocompact. Clear only when the user asks (command or prompt like "clear the session" /
+  "start fresh"): run `lean-agent clear`. After a clear, collect earlier runs with `lean-agent runs --wait all`.
+  On "Checkpoint now" (the clear asks for it): run `lean-agent checkpoint` with your soft state (promises, decisions,
+  next steps, open threads with their tags) in 15 lines or fewer, then reply `checkpointed`; keep the thread tags after.
 - Big JS/TS front-end refactor or migration: look first with `lean-agent map <project>` (`--who-uses`, `--deps`,
   `--route all`, `--unused`), not a worker. Safety net on the code as it is: `lean-agent check <project> add types
   "npx tsc --noEmit"` (and lint, tests), `lean-agent check <project> baseline`, a counter per legacy pattern (worker:
