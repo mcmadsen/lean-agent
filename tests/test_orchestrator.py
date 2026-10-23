@@ -6,6 +6,7 @@ import datetime
 import glob
 import io
 import json
+from unittest import mock
 import shutil
 import os
 import subprocess
@@ -5150,15 +5151,16 @@ class CliTest(unittest.TestCase):
 
     def test_config_clear_at(self):
         out = self.cli("config", "clear-at").stdout
-        self.assertIn("auto = 59,000 tokens", out)
+        self.assertIn("auto clear: off (clear with `lean-agent clear`)", out)
         self.assertIn("compacts at ~67,000", out)
         self.assertIn("auto = 52,000", self.cli("config", "clear-at", CLAUDE_CODE_AUTO_COMPACT_WINDOW="100000",
-                                                 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="60").stdout)
+                                                 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="60", LEAN_AGENT_CLEAR_AT="auto").stdout)
         self.assertIn("auto = 59,000", self.cli("config", "clear-at", "auto").stdout)
         self.assertIn("auto = 59,000", self.cli("doctor", check=False).stdout)
         self.assertIn("55,000", self.cli("config", "clear-at", "55000").stdout)
         self.assertIn("55,000", self.cli("config", "clear-at").stdout)
-        self.assertIn("off", self.cli("config", "clear-at", "0").stdout)
+        self.assertIn("auto clear: off", self.cli("config", "clear-at", "off").stdout)
+        self.assertIn("auto clear: off", self.cli("config", "clear-at", "0").stdout)
         self.assertIn("12,000", self.cli("config", "clear-at", LEAN_AGENT_CLEAR_AT="12000").stdout)
         self.assertEqual(self.cli("config", "clear-at", "x", check=False).returncode, 1)
 
@@ -5166,7 +5168,7 @@ class CliTest(unittest.TestCase):
         os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
         with open(os.path.join(self.env["LEAN_AGENT_HOME"], "up.json"), "w") as fh:
             json.dump({"compact_at": 80000}, fh)
-        out = self.cli("config", "clear-at").stdout
+        out = self.cli("config", "clear-at", LEAN_AGENT_CLEAR_AT="auto").stdout
         self.assertIn("auto = 72,000 tokens", out)
         self.assertIn("compacts at ~80,000", out)
 
@@ -5600,7 +5602,7 @@ class CliTest(unittest.TestCase):
 
     def test_auto_clear_holds_while_a_run_is_alive_until_compaction_is_near(self):
         ac, host, clock, turn, home = self.auto_clear_unit()
-        os.environ.pop("LEAN_AGENT_CLEAR_AT")  # auto: 59,000 of the default 67,000
+        os.environ["LEAN_AGENT_CLEAR_AT"] = "auto"  # 59,000 of the default 67,000
         os.makedirs(os.path.join(home, "running"))
         marker = os.path.join(home, "running", "r1.json")
         with open(marker, "w") as fh:
@@ -5626,7 +5628,7 @@ class CliTest(unittest.TestCase):
 
     def test_auto_clear_names_three_of_many_runs_in_the_hold_and_six_in_the_checkpoint(self):
         ac, host, clock, turn, home = self.auto_clear_unit()
-        os.environ.pop("LEAN_AGENT_CLEAR_AT")
+        os.environ["LEAN_AGENT_CLEAR_AT"] = "auto"
         self.alive_runs(home, 7)
         turn("done", ctx=60000)
         ac.tick()
@@ -5640,7 +5642,7 @@ class CliTest(unittest.TestCase):
 
     def test_auto_clear_goes_ahead_exactly_3000_below_compaction_despite_runs(self):
         ac, host, clock, turn, home = self.auto_clear_unit()
-        os.environ.pop("LEAN_AGENT_CLEAR_AT")
+        os.environ["LEAN_AGENT_CLEAR_AT"] = "auto"
         self.alive_runs(home, 1)
         turn("done", ctx=63998)  # the turn adds 1 input token: 63,999 in all
         ac.tick()
@@ -5651,7 +5653,7 @@ class CliTest(unittest.TestCase):
 
     def test_auto_clear_hold_is_cleared_when_the_clear_is_turned_off(self):
         ac, host, clock, turn, home = self.auto_clear_unit()
-        os.environ.pop("LEAN_AGENT_CLEAR_AT")
+        os.environ["LEAN_AGENT_CLEAR_AT"] = "auto"
         self.alive_runs(home, 1)
         turn("done", ctx=60000)
         ac.tick()
@@ -5661,8 +5663,8 @@ class CliTest(unittest.TestCase):
         self.assertIsNone(json.load(open(os.path.join(home, "up.json")))["clear_hold"])
         self.assertEqual(host.pasted, [])
 
-    def test_auto_clear_at_auto_and_an_invalid_value_both_mean_just_before_compaction(self):
-        for value in ("auto", "AUTO", "lots", "-5", "1e5"):
+    def test_auto_clear_at_auto_means_just_before_compaction(self):
+        for value in ("auto", "AUTO"):
             with self.subTest(value=value):
                 ac, host, clock, turn, home = self.auto_clear_unit()
                 os.environ["LEAN_AGENT_CLEAR_AT"] = value
@@ -5673,9 +5675,86 @@ class CliTest(unittest.TestCase):
                 ac.tick()
                 self.assertEqual(len(host.pasted), 1)
 
-    def test_auto_clear_goes_ahead_when_the_runs_are_gone(self):
+    def test_auto_clear_is_off_by_default_at_any_context_size(self):
+        for value in (None, "off", "0", "lots", "-5", "1e5"):
+            with self.subTest(value=value):
+                ac, host, clock, turn, home = self.auto_clear_unit()
+                os.environ.pop("LEAN_AGENT_CLEAR_AT")
+                if value is not None:
+                    os.environ["LEAN_AGENT_CLEAR_AT"] = value
+                for ctx in (60000, 66000, 500000):
+                    turn("done", ctx=ctx)
+                    clock[0] += 3600
+                    ac.tick()
+                self.assertEqual(host.pasted, [])
+
+    def queue_clear(self, home):
+        import service_session
+        with open(os.path.join(home, "up.json"), "w") as fh:
+            json.dump({}, fh)
+        with mock.patch.object(service_session, "alive", return_value=True):
+            self.assertTrue(service_session.request_clear())
+
+    def test_clear_request_clears_at_turn_end_ignoring_threshold_cooldown_and_live_runs(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        os.environ.pop("LEAN_AGENT_CLEAR_AT")  # off
+        self.alive_runs(home, 2)
+        host.last_input = clock[0] - 1  # the user just typed
+        with open(os.path.join(home, "chat", "service.json"), "w") as fh:  # a clear 10 s ago: inside the cooldown
+            json.dump({"session_id": "s1", "transcript_path": os.path.join(home, "s1.jsonl"), "source": "clear",
+                       "ts": clock[0] - 10}, fh)
+        self.queue_clear(home)
+        with open(os.path.join(home, "s1.jsonl"), "a") as fh:  # the turn is still running (a tool call)
+            fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "id": "t", "stop_reason": "tool_use",
+                     "content": [{"type": "tool_use", "id": "x", "name": "Bash", "input": {}}],
+                     "usage": {"input_tokens": 1, "cache_read_input_tokens": 5000}}}) + "\n")
+        ac.tick()
+        self.assertEqual(host.pasted, [])
+        turn("done", ctx=5000)  # the turn ends, far below any threshold
+        ac.tick()
+        self.assertEqual(len(host.pasted), 1)
+        self.assertIn("Checkpoint now", host.pasted[0])
+        self.assertIsNone(json.load(open(os.path.join(home, "up.json"))).get("clear_requested"))
+        turn("checkpointed", ctx=5000)
+        ac.tick()
+        self.assertEqual(host.pasted[-1], "/clear")
+        ac.tick()
+        self.assertEqual(len(host.pasted), 2)  # once
+
+    def test_clear_request_waits_while_a_permission_prompt_is_pending(self):
         ac, host, clock, turn, home = self.auto_clear_unit()
         os.environ.pop("LEAN_AGENT_CLEAR_AT")
+        perm = os.path.join(home, "chat", "perm")
+        os.makedirs(perm)
+        with open(os.path.join(perm, "req1.json"), "w") as fh:
+            json.dump({"tool_name": "Bash", "tool_input": {"command": "ls"}}, fh)
+        self.queue_clear(home)
+        turn("done", ctx=5000)
+        ac.tick()
+        self.assertEqual(host.pasted, [])
+        self.assertTrue(json.load(open(os.path.join(home, "up.json"))).get("clear_requested"))
+        with open(os.path.join(perm, "req1.answer.json"), "w") as fh:
+            json.dump({"decision": "allow"}, fh)
+        ac.tick()
+        self.assertEqual(len(host.pasted), 1)
+
+    def test_clear_command_queues_and_without_a_service_session_fails(self):
+        r = self.cli("clear", check=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no service session", r.stderr)
+
+    def test_up_clear_command_makes_the_host_clear_a_small_context(self):
+        p, log, ss = self.auto_clear_up(5000, LEAN_AGENT_CLEAR_AT="off")
+        ss.send("hello")
+        self.wait_for(lambda: "echo: hello" in json.dumps(self.read_jsonl(log)) or ss.tail().count("ready"), "the turn")
+        out = self.cli("clear").stdout
+        self.assertIn("clear queued: runs at the end of this turn", out)
+        self.assertIn("lean-agent runs --wait all", out)
+        self.wait_for(lambda: self.clears(log), "the clear")
+
+    def test_auto_clear_goes_ahead_when_the_runs_are_gone(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        os.environ["LEAN_AGENT_CLEAR_AT"] = "auto"
         os.makedirs(os.path.join(home, "running"))
         marker = os.path.join(home, "running", "r1.json")
         with open(marker, "w") as fh:
