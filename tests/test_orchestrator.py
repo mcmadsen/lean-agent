@@ -350,7 +350,7 @@ class CliTest(unittest.TestCase):
         with open(os.path.join(os.path.dirname(CLI), "..", "templates", "guide.md")) as fh:
             guide = fh.read()
         for text in ("lean-agent publish", "never with your own tools", "private by default",
-                     "Never put secrets, tokens or credentials", "`lean-agent doc write` stays for local files"):
+                     "Never put secrets, tokens or credentials", "A local file is a worker task"):
             self.assertIn(text, guide)
 
     def test_publish_runs_a_worker_with_the_artifact_tool_and_reuses_the_url_by_title(self):
@@ -376,11 +376,47 @@ class CliTest(unittest.TestCase):
         self.cli("config", "artifacts", "off")
         self.assertNotEqual(self.cli("publish", "Weekly plan", "--task-file", "-", input="x", check=False).returncode, 0)
 
+    def test_remember_runs_a_librarian_and_prints_what_it_filed(self):
+        self.cli("learn", self.proj)
+        out = self.cli("remember", "Never merge on Fridays.", FAKE_ANSWER="Filed.\nREMEMBERED feedback no-friday-merges").stdout
+        self.assertEqual(out.strip(), "REMEMBERED feedback no-friday-merges")
+        call = self.calls()[-1]
+        argv = call["argv"]
+        self.assertIn("Never merge on Fridays.", call["task"])
+        self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
+        tools = argv[argv.index("--tools") + 1].split(",")
+        self.assertNotIn("Write", tools)
+        self.assertNotIn("Edit", tools)
+        allowed = argv[argv.index("--allowedTools") + 1]
+        lean = os.path.join(os.path.dirname(CLI), "..", "bin", "lean-agent")
+        for sub in ("memory", "card", "cards", "todo", "handoff"):
+            self.assertIn(f"Bash({os.path.realpath(lean)} {sub}:*)", allowed)
+        self.assertNotIn("rm:", allowed)
+        # filed before: the librarian reports it unchanged (no duplicate), --task-file - and --project work
+        out = self.cli("remember", "--task-file", "-", "--project", "proj", input="Never merge on Fridays.",
+                       FAKE_ANSWER="UNCHANGED feedback no-friday-merges").stdout
+        self.assertEqual(out.strip(), "UNCHANGED feedback no-friday-merges")
+        p = self.cli("remember", "Deploy on Fridays", check=False, FAKE_ANSWER="CONFLICT memory no-friday-merges: never merge on Fridays")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("CONFLICT memory no-friday-merges", p.stdout)
+        p = self.cli("remember", "x", check=False, FAKE_ANSWER="I could not decide.")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("didn't report what it filed", p.stderr)
+        self.assertNotEqual(self.cli("remember", check=False).returncode, 0)
+
+    def test_run_todo_new_makes_the_queue_item_from_why(self):
+        self.cli("learn", self.proj)
+        out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "Export: cap the retry loop", "--todo", "new", "t").stdout
+        self.assertIn("todo #1: Export: cap the retry loop", out)
+        listed = self.cli("todo", "list").stdout
+        self.assertIn("#1 [doing] Export: cap the retry loop", listed)
+
     def test_guide_has_the_strict_orchestrator_rules(self):
         with open(os.path.join(os.path.dirname(CLI), "..", "templates", "guide.md")) as fh:
             guide = fh.read()
         flat = " ".join(guide.split())
-        for text in ("The orchestrator only orchestrates", "never read project files or run project commands yourself",
+        for text in ("The orchestrator only orchestrates", "Every user request becomes a worker task",
+                     "You never read project files, run project commands", "`lean-agent remember", "`#` memory message", "list/run MCP servers",
                      "--cards auto", "lean-agent review <project> --decide-gaps", "show the user only its summary",
                      "AskUserQuestion, one question per gap", "blocked-run triage", "delegate the decision"):
             self.assertIn(text, flat)
@@ -2031,12 +2067,18 @@ class CliTest(unittest.TestCase):
         with open(fake, "w") as fh:
             fh.write(f"#!{sys.executable}\nprint('Connected')\n")
         os.chmod(fake, 0o755)
-        out = self.cli("up", LEAN_AGENT_CLAUDE=fake).stdout
-        self.assertIn("MCP servers off for the orchestrator itself (workers still get them with --mcp): tickets", out)
         home = self.cli("home").stdout.strip()
+        with open(os.path.join(home, ".mcp.json"), "w") as fh:  # a project server declared where the orchestrator runs
+            json.dump({"mcpServers": {"homedb": {"type": "http", "url": "http://localhost:2"}}}, fh)
+        out = self.cli("up", LEAN_AGENT_CLAUDE=fake).stdout
+        self.assertIn("MCP servers off for the orchestrator itself (workers still get them with --mcp): tickets, homedb", out)
         with open(os.path.join(self.env["CLAUDE_CONFIG_DIR"], ".claude.json")) as fh:
             data = json.load(fh)
         self.assertEqual(data["projects"][home]["disabledMcpServers"], ["tickets"])
+        self.assertEqual(data["projects"][home]["disabledMcpjsonServers"], ["homedb"])
+        self.assertEqual(data["projects"][home]["enabledMcpjsonServers"], [])
+        with open(os.path.join(home, ".claude", "settings.json")) as fh:
+            self.assertIs(json.load(fh)["enableAllProjectMcpServers"], False)
         self.assertIn("tickets", data["mcpServers"])  # the user's own config is untouched
         self.assertNotIn("MCP servers off", self.cli("up", LEAN_AGENT_CLAUDE=fake).stdout)  # once
         self.cli("learn", self.proj)
@@ -4332,7 +4374,7 @@ class CliTest(unittest.TestCase):
         with open(os.path.join(shop, "CLAUDE.md"), "w") as fh:
             fh.write("# Shop\nA shop.\n\n## Testing\nRun pytest -q. Checkout tests live in tests/test_checkout.py.\n")
         self.cli("learn", shop, "--name", "shop")
-        env = dict(self.env, PATH=self.lean_path())
+        env = dict(self.env, PATH=self.lean_path(), FAKE_ANSWER="REMEMBERED memory example")  # the librarian's report
         guide = self.cli("guide", "shop").stdout
         block = read = open(os.path.join(shop, "CLAUDE.local.md")).read()
         blocks = self.sh_blocks(guide) + self.sh_blocks(block)
@@ -4454,12 +4496,17 @@ class CliTest(unittest.TestCase):
             d = json.load(fh)
         self.assertEqual(d["model"], "sonnet")  # other keys survive
         self.assertIn("Workflow", d["permissions"]["deny"])
+        for tool in ("ListMcpResourcesTool", "ReadMcpResourceTool"):
+            self.assertIn(tool, d["permissions"]["deny"])
+        self.assertIs(d["enableAllProjectMcpServers"], False)  # no .mcp.json server connects in the home
+        self.assertIs(d["autoMemoryEnabled"], False)
         self.cli("home", LEAN_AGENT_ORCHESTRATOR_TRIM="0")
         with open(os.path.join(h, ".claude", "settings.json")) as fh:
             d = json.load(fh)
         self.assertIn("Bash(lean-agent:*)", d["permissions"]["allow"])
         self.assertNotIn("deny", d["permissions"])
         self.assertNotIn("disableBundledSkills", d)
+        self.assertNotIn("enableAllProjectMcpServers", d)
         self.assertEqual(d["model"], "sonnet")
 
     def test_run_reports_breakdown_overhead_and_budget(self):

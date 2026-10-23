@@ -179,8 +179,7 @@ def todo_reminder(which):
     return (f"lean-agent: this `{which}` isn't linked to a work-queue item, so the user's board won't show it. If it "
             "is work for the user, start it with `--todo N`"
             + (f" (open: {listed})" if listed else "")
-            + ", or add the item first: `lean-agent todo add \"...\" -p <project> --ref <PR or branch>`. A quick "
-            "lookup that isn't queue work: add `--todo none`.")
+            + ", or `--todo new` (the item is made from --why). A quick lookup that isn't queue work: add `--todo none`.")
 
 
 READERS = re.compile(r"(?:^|[;&|(]\s*|\s)(cat|less|more|bat|nl|tail|head|sed|awk|python3?|jq)\s")
@@ -326,30 +325,69 @@ def lean_agent_only(command):
     return True
 
 
-# The lean-agent subcommands the strict orchestrator may not run because they change a project repo, a branch, a
-# remote or a tracker (read from the CLI's subcommands in lean_agent.py; the orchestrator never changes anything
-# itself). Workers are not affected: they start with `lean-agent run <p> --cards auto ... -- "<task>"`.
-#   worktree rm|setup|push|reset  removes/sets up a repo worktree, pushes a branch to the remote (reset: --reset-worktree
-#                                 moved a worktree's branch; kept in case it becomes a subcommand)
-#   rules                         writes (or with --off removes) lean-agent's block in the repo's rules file
-#   codemod --apply               runs the codemod on the checkout itself (without --apply: a throwaway copy)
-# PR and tracker writes have no lean-agent subcommand of their own: they are done by a worker with the tracker's MCP
-# server (`run --mcp`), or `worktree push`. Bookkeeping stays allowed: todo, handoff, thread, checkpoint, brief, runs,
-# review (it starts its own worker), publish, sync, doctor, config, card, optimize and the like.
+# The lean-agent subcommands the strict orchestrator may not run. docs/orchestrator-surface.md lists every one with
+# its class; workers are not affected (they start with `lean-agent run <p> --cards auto ... -- "<task>"`).
+#   "change"  changes a project repo, branch, remote or tracker: worktree rm|setup|push|reset (reset: kept in case it
+#             becomes a subcommand), rules (writes or with --off removes lean-agent's block in the repo's rules file),
+#             codemod --apply (runs on the checkout itself; without --apply: a throwaway copy), tracker with a value,
+#             --note, --rm-note, --supersede or --ack-email (--discover alone starts a worker). PR and tracker writes
+#             have no subcommand: a worker does them with the tracker's MCP server (`run --mcp`) or `worktree push`.
+#   "keep"    writes knowledge or settings the user asked for: memory add|edit|rm|import, card (everything but show),
+#             recipe, doc, schedule add|rm|defaults, guard add|rm, count add|rm, todo add|note|rm|edit|epic|reopen,
+#             handoff --note unless --kind checkpoint|fyi, config strict off. Where one subcommand serves both the
+#             orchestrator's bookkeeping and the user's content (todo add, handoff --note), it is denied; the
+#             orchestrator links a run with `--todo new` and keeps its own state with checkpoint / handoff --kind fyi.
+#   "mcp"     lists or runs MCP servers or presets: the whole `mcp` subcommand, `chrome check`.
+# Bookkeeping stays allowed: todo list|next|start|done, handoff (read, --done, --kind checkpoint|fyi), thread,
+# checkpoint, brief, runs, review (it starts its own worker), publish, sync, doctor, optimize and the like.
 CHANGING_ACTIONS = {"worktree": {"rm", "setup", "push", "reset"}}
 CHANGING_ALWAYS = {"rules"}
-CHANGING_FLAGS = {"codemod": {"--apply"}}
+CHANGING_FLAGS = {"codemod": {"--apply"}, "tracker": {"--note", "--rm-note", "--supersede", "--ack-email"}}
+KEEP_ACTIONS = {
+    "memory": ({"where", "import", "list", "add", "edit", "rm"}, {"import", "add", "edit", "rm"}),
+    "card": ({"show", "add", "rm", "core", "shorten", "unarchive", "protect"}, {"add", "rm", "core", "shorten",
+                                                                               "unarchive", "protect"}),
+    "todo": ({"add", "list", "next", "start", "done", "note", "rm", "reopen", "edit", "epic"},
+             {"add", "note", "rm", "edit", "epic", "reopen"}),
+    "schedule": ({"list", "add", "rm", "run", "pause", "resume", "defaults", "run-due"}, {"add", "rm", "defaults"}),
+    "guard": ({"list", "add", "rm"}, {"add", "rm"}),
+}
+KEEP_ALWAYS = {"recipe", "doc"}
+MCP_ALWAYS = {"mcp"}
+MCP_ACTIONS = {"chrome": ({"check", "status"}, {"check"})}
+KEEP_NOTE_KINDS = ("checkpoint", "fyi")
+MCP_RESOURCE_TOOLS = ("ListMcpResources", "ListMcpResourcesTool", "ReadMcpResource", "ReadMcpResourceTool",
+                      "ReadMcpResourceDir", "ReadMcpResourceDirTool")
 DELEGATE_CHANGE = ("A worker makes the change and reads the project's cards: lean-agent run <project> --cards auto "
                    "-m <model> --why '…' -- '<push/PR/tracker task>' (a push also needs the user's approval and a "
                    "review: see the guide).")
+DELEGATE_KEEP = ("Keep it with a worker: lean-agent remember \"<what to keep>\" [--project <p>] (memory, card, todo, "
+                 "feedback rule or note, filed once), or lean-agent run <project> --cards auto -m <model> --why '…' -- "
+                 "'<task>'.")
+DELEGATE_MCP = ("MCP servers are for workers: lean-agent run <project> --read-only --cards auto -m haiku --why '…' "
+                "[--mcp <server>:<tools>] [--allow-cmd 'lean-agent mcp'] -- '<which servers / what tool X returns>'.")
 
 
-def changing_command(command):
-    """`lean-agent <subcommand>` in `command` that changes a project repo, branch, remote or tracker (see
-    CHANGING_*), or ''."""
+def flag_value(words, flag):
+    """The value of `--flag X` or `--flag=X` among `words`, or None."""
+    for i, w in enumerate(words):
+        if w == flag:
+            return words[i + 1] if i + 1 < len(words) else ""
+        if w.startswith(flag + "="):
+            return w[len(flag) + 1:]
+    return None
+
+
+def first_action(args, names):
+    return next((w for w in args[1:] if w in names), "")
+
+
+def restricted_command(command):
+    """(kind, `subcommand`) of a `lean-agent <subcommand>` in `command` the strict orchestrator may not run (see
+    CHANGING_* and KEEP_*; kind is change, keep or mcp), or ('', '')."""
     split = split_stages(command)
     if split is None:
-        return ""
+        return "", ""
     first = True
     for words in split[0]:
         if words is None:
@@ -362,14 +400,34 @@ def changing_command(command):
         if first and words and os.path.basename(words[0]) == "lean-agent":
             args = [w for w in words[1:] if not w.startswith("-")]
             name = args[0] if args else ""
+            flags = set(words[1:])
             if name in CHANGING_ALWAYS:
-                return name
+                return "change", name
             if name in CHANGING_ACTIONS and len(args) > 1 and args[1] in CHANGING_ACTIONS[name]:
-                return f"{name} {args[1]}"
-            if CHANGING_FLAGS.get(name, set()) & set(words[1:]):
-                return f"{name} {' '.join(sorted(CHANGING_FLAGS[name] & set(words[1:])))}"
+                return "change", f"{name} {args[1]}"
+            if CHANGING_FLAGS.get(name, set()) & flags:
+                return "change", f"{name} {' '.join(sorted(CHANGING_FLAGS[name] & flags))}"
+            if name == "tracker" and any("=" in w for w in args[2:]):
+                return "change", "tracker KEY=VALUE"
+            if name in KEEP_ALWAYS:
+                return "keep", name
+            if name in KEEP_ACTIONS:
+                action = first_action(args, KEEP_ACTIONS[name][0])
+                if action in KEEP_ACTIONS[name][1]:
+                    return "keep", f"{name} {action}"
+            if name == "count" and any(w in ("add", "rm") for w in args[2:3]):
+                return "keep", f"count {args[2]}"
+            if name == "handoff" and (flag_value(words, "--note") is not None
+                                      and flag_value(words, "--kind") not in KEEP_NOTE_KINDS):
+                return "keep", "handoff --note"
+            if name == "config" and args[1:2] == ["strict"] and "off" in args[2:3]:
+                return "keep", "config strict off"
+            if name in MCP_ALWAYS:
+                return "mcp", name
+            if name in MCP_ACTIONS and first_action(args, MCP_ACTIONS[name][0]) in MCP_ACTIONS[name][1]:
+                return "mcp", f"{name} {first_action(args, MCP_ACTIONS[name][0])}"
         first = False
-    return ""
+    return "", ""
 
 
 def own_path(path, cwd, lean_root):
@@ -385,10 +443,17 @@ def strict_denial(event, cwd, lean_root):
         command = str(tool_input.get("command") or "")
         if not lean_agent_only(command):
             return f"strict mode: the orchestrator runs only lean-agent commands, not `{command.strip()[:60]}`. " + DELEGATE
-        changing = changing_command(command)
-        if changing:
+        kind, what = restricted_command(command)
+        if kind == "change":
             return (f"strict mode: the orchestrator never changes a repo, branch, remote or tracker itself "
-                    f"(`lean-agent {changing}`). " + DELEGATE_CHANGE)
+                    f"(`lean-agent {what}`). " + DELEGATE_CHANGE)
+        if kind == "keep":
+            return (f"strict mode: the orchestrator never writes memory, cards, rules, presets, todos or notes "
+                    f"itself (`lean-agent {what}`). " + DELEGATE_KEEP)
+        if kind == "mcp":
+            return f"strict mode: the orchestrator neither lists nor runs MCP servers (`lean-agent {what}`). " + DELEGATE_MCP
+    elif tool and (tool.startswith("mcp__") or tool in MCP_RESOURCE_TOOLS):
+        return f"strict mode: the orchestrator uses no MCP tool ({tool[:60]}). " + DELEGATE_MCP
     elif tool in ("Read", "Grep", "Glob"):
         path = tool_input.get("file_path") if tool == "Read" else tool_input.get("path")
         pattern = str(tool_input.get("pattern") or "")
@@ -399,10 +464,36 @@ def strict_denial(event, cwd, lean_root):
     return ""
 
 
+MEMORY_REDIRECT = ("lean-agent: this is a request to keep something (a '#' memory message). Don't save it yourself: "
+                   "start `lean-agent remember \"<the text without the #>\"` in the background (add --project <p> if it is "
+                   "about one project) and tell the user in one line what you started.")
+
+
+def prompt_hook(event):
+    """UserPromptSubmit in the strict orchestrator: a one-line '#' memory message is redirected to
+    `lean-agent remember`; /memory and /init (Claude Code's own memory editors) are refused when the hook sees them."""
+    prompt = str(event.get("prompt") or "").strip()
+    reply = None
+    if re.match(r"^/(memory|init)(\s|$)", prompt):
+        reply = {"decision": "block", "reason": "lean-agent: the orchestrator's memory lives in lean-agent, not in "
+                 "Claude Code's memory files. Say what to keep and a worker files it (`lean-agent remember`)."}
+    elif prompt.startswith("#") and "\n" not in prompt and len(prompt) < 500:
+        reply = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": MEMORY_REDIRECT}}
+    if reply:
+        print(json.dumps(reply))
+
+
 def main():
     try:
         event = json.load(sys.stdin)
     except ValueError:
+        return 0
+    if event.get("hook_event_name") == "UserPromptSubmit":
+        cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+        home = os.path.realpath(usage.lean_home())
+        if ((cwd == home or cwd.startswith(home + os.sep) or os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1")
+                and not cwd.startswith(os.path.join(home, "work") + os.sep) and strict_on(usage.lean_home())):
+            prompt_hook(event)
         return 0
     transcript = event.get("transcript_path")
     session_id = event.get("session_id")
@@ -536,7 +627,7 @@ def main():
             emit(additionalContext=(
                 f"lean-agent: the context is ~{ctx:,} tokens; Claude Code compacts at ~{compact_at:,}. Before that "
                 "(standing rule): run `lean-agent context --no-probe` to see what fills your messages, save anything "
-                "still open with `lean-agent handoff --note \"...\"`, tell the user in one line, then go on. Keep "
+                "still open with `lean-agent handoff --note \"...\" --kind fyi`, tell the user in one line, then go on. Keep "
                 "replies and command output short from here."))
             return 0
         calls = state["totals"].get("_calls") or 1

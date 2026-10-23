@@ -523,7 +523,6 @@ class BudgetTest(Base):
                     "lean-agent run p -- 'a & b > c'", "lean-agent runs | grep -c x", "lean-agent runs | head -n 5",
                     "lean-agent runs | wc -l", "lean-agent runs 2>&1", "lean-agent runs | grep -ic word",
                     "lean-agent runs &&\nlean-agent todo list", "lean-agent runs;\nlean-agent todo list",
-                    "lean-agent doc write ~/Downloads/x.md <<'EOF'\nbody\nEOF",
                     "lean-agent run p -- \"t\" <<'EOF' 2>&1\nbody\nEOF",
                     "lean-agent runs | head -n 5>/dev/null",
                     "lean-agent runs | grep -nw foo", "lean-agent runs | grep -m 5 -A2 -B 3 foo", "lean-agent runs | grep -oxH x",
@@ -580,7 +579,7 @@ class BudgetTest(Base):
         bookkeeping = ("lean-agent todo list", "lean-agent handoff --note 'x' --kind fyi", "lean-agent thread list",
                        "lean-agent checkpoint 'x'", "lean-agent brief", "lean-agent runs --last", "lean-agent review proj --head b",
                        "lean-agent publish 'T' --task-file - <<'EOF'\ntext\nEOF", "lean-agent sync", "lean-agent doctor",
-                       "lean-agent config strict on", "lean-agent card proj add x", "lean-agent optimize proj",
+                       "lean-agent config strict on", "lean-agent card proj show x", "lean-agent optimize proj",
                        "lean-agent codemod proj 'npx jscodeshift src'", "lean-agent worktrees", "lean-agent guard list",
                        "lean-agent run proj --cards auto -m sonnet --why x -- 'worktree push the branch'",
                        "lean-agent run proj --worktree feat --reset-worktree -m sonnet --why x -- 'fix'")
@@ -592,6 +591,78 @@ class BudgetTest(Base):
             self.assertFalse(denied(bash(cmd, self.tmp.name if hasattr(self, "tmp") else "/tmp")), cmd)
         self.set_strict("off")
         self.assertFalse(denied(bash(changing[0])))
+
+    def test_strict_orchestrator_denies_writing_knowledge_and_mcp_but_a_worker_may(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        self.set_strict("on")
+        ev = lambda cwd, tool, inp: dict(self.ev, cwd=cwd, tool_name=tool, tool_input=inp)
+        call = lambda tool, inp, cwd=home: run_hook("budget_hook.py", ev(cwd, tool, inp), LEAN_AGENT_TODO_REMINDER="0", **self.env)
+        bash = lambda cmd, cwd=home: call("Bash", {"command": cmd, "run_in_background": True}, cwd)
+        denied = lambda out: out and out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        reason = lambda out: out["hookSpecificOutput"]["permissionDecisionReason"]
+        keep = ("lean-agent memory add 'x' --type feedback", "lean-agent memory edit n 'y'", "lean-agent memory rm n",
+                "lean-agent memory import", "lean-agent memory -p proj add 'x'", "lean-agent card proj add c --text x",
+                "lean-agent card proj rm c", "lean-agent card proj core c", "lean-agent card proj protect c",
+                "lean-agent card proj shorten c --save", "lean-agent card proj unarchive c", "lean-agent recipe add p r --task x",
+                "lean-agent recipe rm p r", "lean-agent doc write ~/Documents/a.md --text x", "lean-agent todo add 'x' -p proj",
+                "lean-agent todo note 3 'x'", "lean-agent todo rm 3", "lean-agent todo edit 3 'y'", "lean-agent todo reopen 3",
+                "lean-agent todo epic e", "lean-agent handoff --note 'remember x'", "lean-agent handoff --note 'x' --kind reminder",
+                "lean-agent handoff --note 'x' --kind decision", "lean-agent schedule add 'daily 09:00' do p r",
+                "lean-agent schedule rm 2", "lean-agent guard add p push-deny 'x/*'", "lean-agent count proj add n 'x'",
+                "lean-agent config strict off")
+        for cmd in keep:
+            out = bash(cmd)
+            self.assertTrue(denied(out), cmd)
+            self.assertIn("never writes memory, cards, rules, presets, todos or notes itself", reason(out))
+            self.assertIn("lean-agent remember", reason(out))
+        for cmd in ("lean-agent tracker proj org=acme", "lean-agent tracker proj --note 'x'"):
+            self.assertIn("never changes a repo, branch, remote or tracker", reason(bash(cmd)))
+        mcp = ("lean-agent mcp list", "lean-agent mcp tools tickets", "lean-agent mcp preset tickets", "lean-agent mcp env X",
+               "lean-agent mcp list --probe -p proj", "lean-agent chrome check")
+        for cmd in mcp:
+            out = bash(cmd)
+            self.assertTrue(denied(out), cmd)
+            self.assertIn("neither lists nor runs MCP servers", reason(out))
+        for tool in ("mcp__tickets__list", "mcp__plugin_x_y__z", "ListMcpResourcesTool", "ReadMcpResourceTool"):
+            out = call(tool, {})
+            self.assertTrue(denied(out), tool)
+            self.assertIn("no MCP tool", reason(out))
+        allowed = ("lean-agent memory list -p proj", "lean-agent memory where", "lean-agent cards proj", "lean-agent card proj show c",
+                   "lean-agent todo list", "lean-agent todo next", "lean-agent todo start 3", "lean-agent todo done 3 'merged as PR 5'",
+                   "lean-agent handoff", "lean-agent handoff --done 2", "lean-agent handoff --note 'x' --kind fyi",
+                   "lean-agent handoff --note=x --kind=checkpoint", "lean-agent thread new 'T'", "lean-agent checkpoint 'x'",
+                   "lean-agent remember 'Never merge on Fridays'", "lean-agent remember --task-file - <<'EOF'\nx\nEOF",
+                   "lean-agent run proj --cards auto -m haiku --why x --todo new -- 'look'", "lean-agent tracker proj",
+                   "lean-agent tracker proj --discover --mcp tickets", "lean-agent chrome status", "lean-agent schedule list",
+                   "lean-agent guard list", "lean-agent count proj", "lean-agent config strict on", "lean-agent runs")
+        for cmd in allowed:
+            self.assertFalse(denied(bash(cmd)), cmd)
+        # a worker (its run folder, or a folder outside the home) may use all of them
+        for cmd in keep + mcp + ("lean-agent tracker proj org=acme",):
+            self.assertFalse(denied(bash(cmd, os.path.join(home, "work", "run1"))), cmd)
+            self.assertFalse(denied(bash(cmd, self.tmp.name)), cmd)
+        for tool in ("mcp__tickets__list", "ListMcpResourcesTool", "ReadMcpResourceTool"):
+            self.assertFalse(denied(call(tool, {}, os.path.join(home, "work", "run1"))), tool)
+            self.assertFalse(denied(call(tool, {}, self.tmp.name)), tool)
+        self.set_strict("off")
+        self.assertFalse(denied(bash(keep[0])))
+        self.assertFalse(denied(call("mcp__tickets__list", {})))
+
+    def test_prompt_hook_redirects_hash_memory_messages_in_the_orchestrator(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        self.set_strict("on")
+        prompt = lambda text, cwd=home: run_hook("budget_hook.py", {"hook_event_name": "UserPromptSubmit", "cwd": cwd,
+                                                                     "session_id": "s1", "prompt": text}, **self.env)
+        out = prompt("# always answer in Danish")
+        self.assertIn("lean-agent remember", out["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(prompt("/memory")["decision"], "block")
+        self.assertEqual(prompt("/init")["decision"], "block")
+        self.assertIsNone(prompt("# Plan\n- one\n- two"))  # a markdown heading, not a memory message
+        self.assertIsNone(prompt("note that the sky is blue"))
+        self.assertIsNone(prompt("# always answer in Danish", self.tmp.name))  # a normal session
+        self.assertIsNone(prompt("/memory", os.path.join(home, "work", "run1")))  # a worker
+        self.set_strict("off")
+        self.assertIsNone(prompt("# always answer in Danish"))
 
     def test_strict_check_command_substitution_and_heredocs(self):
         sys.path.insert(0, ROOT)

@@ -240,8 +240,9 @@ def handoff(hours=RECENT_HOURS):
             f"{p} {ref or 'working tree'} @ {str(r.get('head', ''))[:10]} {r.get('verdict')}"
             f" ({sum(1 for x in r.get('findings') or [] if x.get('severity') in ('blocker', 'major'))} blocking)"
             for (p, ref), r in list(latest.items())[-5:]))
-    lines.append("The orchestrator rules are unchanged: `lean-agent guide` if unsure. Add open items with "
-                 "`lean-agent handoff --note TEXT`, close them with `--done N`.")
+    lines.append("The orchestrator rules are unchanged: `lean-agent guide` if unsure. Keep your own state with "
+                 "`lean-agent handoff --note TEXT --kind fyi` (close with `--done N`); anything the user wants kept is "
+                 "`lean-agent remember`.")
     return "\n".join(lines)
 
 
@@ -321,8 +322,8 @@ def main():
             text = handoff()
             if source == "compact" and count_compaction(event.get("session_id") or "?") >= 2:
                 text += ("\nThis conversation has now compacted more than once. At the next good stopping point "
-                         "(a topic done, no worker running), save open items with `lean-agent handoff --note` or "
-                         "`lean-agent todo add`, and suggest the user starts a fresh conversation (/clear): this "
+                         "(a topic done, no worker running), save open items with `lean-agent checkpoint` or "
+                         "`lean-agent remember`, and suggest the user starts a fresh conversation (/clear): this "
                          "note carries everything over, and a fresh one is cheaper on every call.")
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
     return 0
