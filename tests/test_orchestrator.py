@@ -5540,6 +5540,19 @@ class CliTest(unittest.TestCase):
         self.assertEqual(again.stdout.strip(), "Nothing to collect.")
         self.assertNotIn("not collected", self.cli("brief").stdout)
 
+    def test_stopping_up_kills_the_hosted_claude_but_not_a_detached_run(self):
+        # KillMode=process / AbandonProcessGroup: the service signals only `up`'s own pid
+        p, log, ss = self.start_up("--name", "la")
+        claude = ss.info()["pid"]
+        self.assertTrue(service_alive(claude))
+        run = self.start_run(turns="20", sleep="1")
+        [m] = self.running_markers()
+        os.kill(p.pid, signal.SIGTERM)
+        p.wait(timeout=40)
+        self.wait_for(lambda: not service_alive(claude), "the hosted claude to stop", 20)
+        self.assertTrue(service_alive(m["pid"]))
+        self.assertEqual([x["run"] for x in self.running_markers()], [m["run"]])
+
     def test_runs_wait_exits_nonzero_for_a_failed_run_and_on_timeout(self):
         p = self.start_run(turns="3", sleep="0.5", FAKE_FAIL_MODEL="haiku")
         w = self.cli("runs", "--wait", "last", check=False, LEAN_AGENT_WAIT_POLL="0.2")
