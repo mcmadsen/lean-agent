@@ -111,7 +111,7 @@ def drop_stale_record(cwd, sid):
     SessionStart hook of the new session is not deleted. A restart after a /clear, before the new transcript exists,
     keeps it: it goes only when no transcript of its chain exists at all (`up --fresh` removes it itself).
     The same holds when `up` starts a brand-new session id without --fresh (e.g. `up --clear`, or an up.json that
-    was lost): the record stays as long as any transcript of its chain exists, so the thread history stays."""
+    was lost): the record stays as long as any transcript of its chain exists, so the record of earlier clears stays."""
     if os.path.exists(transcript_path(cwd, sid)):
         return
     rec = _load(lean_home("chat", "service.json"))
@@ -178,7 +178,7 @@ def go_fresh(restart_host=False, wait=None, now=time.time, sleep=time.sleep):
 
 
 def update_up(**fields):
-    """Merge fields into up.json (written by `up`; the dashboard and hooks read it)."""
+    """Merge fields into up.json (written by `up`; the hooks read it)."""
     os.makedirs(os.path.dirname(up_path()), exist_ok=True)
     with lean_common.file_lock(up_path()):
         data = _load(up_path())
@@ -370,33 +370,10 @@ def transcript_state(path, offset=0):
     return state
 
 
-def permission_pending(session_id):
-    """True while a permission prompt (or AskUserQuestion) of this session waits for an answer."""
-    d = lean_home("chat", "perm")
-    try:
-        names = os.listdir(d)
-    except OSError:
-        return False
-    for n in names:
-        if not n.endswith(".json") or n.endswith((".answer.json", ".moved.json")):
-            continue
-        base = os.path.join(d, n[:-5])
-        if os.path.exists(base + ".answer.json") or os.path.exists(base + ".moved.json"):
-            continue
-        req = _load(base + ".json")
-        try:
-            fresh = time.time() - os.path.getmtime(base + ".json") < _knob("LEAN_AGENT_DASH_PERMISSION_WAIT", 300) + 60
-        except OSError:
-            continue
-        if fresh and (not req.get("session_id") or not session_id or req["session_id"] == session_id):
-            return True
-    return False
-
-
 class AutoClear:
     """Keeps the orchestrator's context small: after a finished turn that left the context above `clear_at()`, asks
     the session for a checkpoint, then types /clear (after its 'checkpointed' reply, or CLEAR_WAIT seconds). Never
-    while a permission prompt waits, within CLEAR_IDLE seconds of the user typing, within CLEAR_GAP of the last one,
+    within CLEAR_IDLE seconds of the user typing, within CLEAR_GAP of the last one,
     or while a lean-agent run is alive (runs are detached and survive a clear, but the new session would only meet
     them in the brief) unless the context is within CLEAR_HARD of compaction."""
 
@@ -432,7 +409,7 @@ class AutoClear:
     def blocked(self, st):
         idle = _knob("LEAN_AGENT_CLEAR_IDLE", CLEAR_IDLE)
         now = self.now()
-        return (permission_pending(self.session_id()) or now - self.host.last_input < idle
+        return (now - self.host.last_input < idle
                 or (st["user_ts"] and now - st["user_ts"] < idle and not self.waiting))
 
     def tick(self):
@@ -448,8 +425,7 @@ class AutoClear:
             st = transcript_state(path, offset)
             if self.manual:
                 self.hold(CLEAR_PENDING)
-            if permission_pending(self.session_id()) or (
-                    not self.manual and now - self.host.last_input < _knob("LEAN_AGENT_CLEAR_IDLE", CLEAR_IDLE)):
+            if not self.manual and now - self.host.last_input < _knob("LEAN_AGENT_CLEAR_IDLE", CLEAR_IDLE):
                 return
             answered = st["ended"] and "checkpointed" in st["text"].lower()
             timed_out = now - since >= _knob("LEAN_AGENT_CLEAR_WAIT", CLEAR_WAIT)
@@ -468,9 +444,9 @@ class AutoClear:
             return
         if _load(up_path()).get("clear_requested"):
             # asked for by the user: ignores the threshold, the gap, the idle time and live runs (they are detached
-            # and survive); waits for a turn end however long it takes, and for a pending permission prompt
+            # and survive); waits for a turn end however long it takes
             st = transcript_state(path)
-            if not st["ended"] or permission_pending(self.session_id()):
+            if not st["ended"]:
                 self.hold(CLEAR_PENDING)
                 asked = _load(up_path()).get("clear_requested")
                 if not os.path.exists(path) and isinstance(asked, (int, float)) \

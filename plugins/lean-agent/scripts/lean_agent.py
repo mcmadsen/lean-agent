@@ -41,7 +41,7 @@ import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
 import service_session  # noqa: E402
-from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive as dashboard_pid_alive, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, _now as now_iso  # noqa: E402
+from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, now_iso  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -1637,7 +1637,7 @@ def _cmd_run(a):
     print(f"run {run_id} started · {model} · {slug}" + (" (resumed)" if prev else "") +
           f" · see it later with `lean-agent runs --show {run_id}`", file=sys.stderr, flush=True)
     seed_collected(home())  # runs recorded from here on can be told apart from a ledger older than collected.json
-    running_key = launch_key or run_id  # every run is listed while it runs (the dashboard, the status line)
+    running_key = launch_key or run_id  # every run is listed while it runs (the status line)
     save_json(home("running", running_key + ".json"), {"pid": os.getpid(), "started": now_iso(), "run": run_id,
                                                       "task": task[:2000], "model": model, "project": slug,
                                                       "workdir": workdir, "todo": todo_id, "effort": effort, "detached": bool(SUPERVISOR),
@@ -5109,7 +5109,6 @@ def cmd_optimize(a):
             _cmd_optimize(a)
             _draft_proposals(a, slug)
         result = optimize_result(a, slug)
-        save_json(home("optimize", f"{slug}.json"), result)  # the dashboard's "Needs you" entry reads this
     if a.json:
         print(json.dumps(result))
 
@@ -5394,7 +5393,7 @@ def _suggestion_meta(c, t):
 
 
 def optimize_result(a, slug):
-    """What is left to decide, as one JSON-able dict (also what the dashboard shows)."""
+    """What is left to decide, as one JSON-able dict."""
     skip = {x for x in (getattr(a, "skip", None) or "").split(",") if x}
     actions, _ = _card_actions(slug, load_cards(slug), a, skip)
     state = load_json(home("library", slug, "drafts.json"), {})
@@ -5929,17 +5928,6 @@ def wait_for_runs(target, timeout):
 def cmd_runs(a):
     if getattr(a, "wait", None):
         return wait_for_runs(a.wait, a.timeout)
-    if getattr(a, "dismiss", None):
-        known = {r.get("id") for r in ledger()}
-        d = load_json(home("dismissed.json"), {})
-        for rid in a.dismiss:
-            if rid not in known:
-                die(f"no run {rid} (lean-agent runs)")
-            d[f"run:{rid}"] = {"sig": "", "ts": now_iso()}
-            d[f"q-{rid}"] = {"sig": "", "ts": now_iso()}
-        save_json(home("dismissed.json"), d)
-        print(f"dismissed {', '.join(a.dismiss)}: its question no longer waits on the dashboard")
-        return 0
     runs = ledger()
     if a.project:
         slug, _ = resolve_project(a.project)
@@ -6128,12 +6116,6 @@ def cmd_doctor(a):
                "next tool call")
     st = chrome_state()
     print("  chrome for workers: " + ("verified" if st.get("ok") else "not verified (lean-agent chrome check)"))
-    import dashboard as _dash
-    dcfg = _dash.settings()
-    print(f"  dashboard: {'running' if dashboard_running() else 'not running'} on port {dcfg['port']}"
-          + (" · Claude desktop preview entry in launch.json" if dcfg.get("preview") else
-             " · no Claude desktop preview entry (lean-agent dashboard --preview)")
-          + " · whether a session has the built-in browser tools can only be seen inside that session")
     for s_ in sorted(projects()):
         print(f"  {s_}: never pushes to " + (", ".join(push_guard.project_patterns(s_)) or "(nothing guarded)")
               + " (lean-agent guard)")
@@ -6284,7 +6266,7 @@ def ask_attribution_once():
 
 def fresh_start():
     """`up --clear` / `service restart --clear`: the live session checkpoints (up to 120 s), then the next session
-    is a new one; the dashboard's transcript chain is kept."""
+    is a new one; the transcript chain is kept."""
     print("lean-agent: asking the orchestrator to checkpoint, then starting it with a clean context...", flush=True)
     sid, checkpointed = service_session.go_fresh()
     print(f"lean-agent: new session {sid}" + ("" if checkpointed is None else
@@ -6292,8 +6274,6 @@ def fresh_start():
 
 
 def cmd_up(a):
-    if getattr(a, "dashboard_only", False) and not service_session.supported():
-        die("--dashboard-only needs a pty (macOS or Linux)")
     ask_attribution_once()
     h = prepare_home()
     refresh_blocks()
@@ -6337,25 +6317,10 @@ def cmd_up(a):
         if a.budget_week is not None:
             cur["week"] = a.budget_week
         save_json(usage.limits_path(), cur)
-    up_info = load_json(home("up.json"), {})  # the dashboard's own conversation gets the same settings
-    up_info["chat_env"] = {k: env[k] for k in list(ORCHESTRATOR_ENV) + ["LEAN_AGENT_BUDGET", "LEAN_AGENT_BUDGET_SET"]
-                           if k in env}
-    up_info["compact_at"] = service_session.compact_at(env)  # what the clear threshold and the dashboard read
+    up_info = load_json(home("up.json"), {})
+    up_info["compact_at"] = service_session.compact_at(env)  # what the clear threshold reads
     save_json(home("up.json"), up_info)
     env = push_guard.git_env(env)  # the orchestrator's own git commands are guarded too
-    link = None
-    if os.environ.get("LEAN_AGENT_DASHBOARD") != "0":
-        import dashboard
-        link = dashboard.start_background() if not a.local else None
-        if a.local and not dashboard_running():
-            subprocess.Popen([sys.executable, os.path.join(HERE, "dashboard.py")], stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-            link = dashboard.url()
-        print(f"lean-agent: dashboard {link or dashboard.url()}" + ("" if link else " (already running)")
-              + " (open it in a browser tab, e.g. Claude Desktop's built-in browser)", flush=True)
-    dash_only = getattr(a, "dashboard_only", False)
-    if dash_only and not link and os.environ.get("LEAN_AGENT_DASHBOARD") != "0":
-        die("the dashboard didn't start (its port is taken: is another `lean-agent up` running?)")
     bindir = os.path.join(PLUGIN_ROOT, "bin")
     env["PATH"] = bindir + os.pathsep + env.get("PATH", "")  # `lean-agent` works even without the plugin
     cmd = [os.environ.get("LEAN_AGENT_CLAUDE") or "claude"]
@@ -6364,9 +6329,6 @@ def cmd_up(a):
     use_session = service_session.supported() and not a.local
     if a.local:
         print(f"lean-agent: orchestrator in {h} (model {a.model or 'default'})")
-    elif dash_only:
-        print(f"lean-agent: dashboard only: one interactive session in {h}, model {a.model or 'default'}; talk to it "
-              "in the dashboard (Ctrl-C or the service stops it)", flush=True)
     else:
         if not use_session:
             cmd += ["remote-control", "--name", a.name]
@@ -6386,14 +6348,14 @@ def cmd_up(a):
         except FileNotFoundError:
             die("'claude' not found on PATH")
     if use_session:
-        return host_session(cmd, extra, env, h, a.name, dash_only, a.permission_mode if dash_only else None)
+        return host_session(cmd, extra, env, h, a.name)
     return remote_control(cmd + extra, env, h)
 
 
-def host_session(cmd, extra, env, h, name, dash_only, permission_mode):
+def host_session(cmd, extra, env, h, name):
     """`up` hosts the one interactive orchestrator session in a pty it owns (so it also runs under launchd /
-    systemd, where there is no terminal), with Remote Control unless --dashboard-only, and serves the socket
-    the dashboard types into. A restart of `up` resumes the same conversation when its transcript exists."""
+    systemd, where there is no terminal), with Remote Control, and serves the socket
+    the Claude app talks to the orchestrator through. A restart of `up` resumes the same conversation when its transcript exists."""
     import signal
     import threading
     def build():
@@ -6403,10 +6365,7 @@ def host_session(cmd, extra, env, h, name, dash_only, permission_mode):
             sid = str(uuid.uuid4())
         resume = os.path.exists(service_session.transcript_path(h, sid))
         argv = list(cmd)
-        if not dash_only:
-            argv += ["--remote-control", name]
-        if permission_mode:
-            argv += ["--permission-mode", permission_mode]
+        argv += ["--remote-control", name]
         argv += ["--resume" if resume else "--session-id", sid] + extra
         return argv, sid
 
@@ -6433,7 +6392,7 @@ def host_session(cmd, extra, env, h, name, dash_only, permission_mode):
         drop_bridge_pointers(h)
         state.update(seen="", stale=False, retried=True)
 
-    host = service_session.Host(build, env, h, remote_control=not dash_only, on_text=on_text, on_stale=on_stale)
+    host = service_session.Host(build, env, h, remote_control=True, on_text=on_text, on_stale=on_stale)
     threading.Thread(target=schedule_timer, daemon=True).start()
     threading.Thread(target=service_session.AutoClear(host).run, daemon=True).start()
 
@@ -6448,12 +6407,6 @@ def host_session(cmd, extra, env, h, name, dash_only, permission_mode):
     except KeyboardInterrupt:
         host.stop()
         rc = 0
-    if dash_only:
-        try:
-            import dash_chat
-            dash_chat.chat().stop()
-        except Exception:
-            pass
     return rc
 
 
@@ -7837,7 +7790,7 @@ def cmd_service(a):
     if a.action == "install":
         os.makedirs(os.path.dirname(path), exist_ok=True)
         os.makedirs(os.path.dirname(log), exist_ok=True)
-        args = [bin_, "up", "--name", a.name] + (["--dashboard-only"] if getattr(a, "dashboard_only", False) else [])
+        args = [bin_, "up", "--name", a.name]
         env = {"PATH": os.environ.get("PATH", ""), "HOME": os.path.expanduser("~"), "LEAN_AGENT_NO_PROMPT": "1"}
         if os.environ.get("LEAN_AGENT_HOME"):
             env["LEAN_AGENT_HOME"] = os.environ["LEAN_AGENT_HOME"]
@@ -7885,7 +7838,7 @@ def cmd_service(a):
         # detached runs (own session, recorded by their own process) carry on through a restart; only a run an older
         # lean-agent started in the orchestrator's process group would be stopped with it
         running = [f for f in glob.glob(home("running", "*.json"))
-                   if dashboard_pid_alive(load_json(f, {}).get("pid")) and not load_json(f, {}).get("detached")]
+                   if pid_alive(load_json(f, {}).get("pid")) and not load_json(f, {}).get("detached")]
         if running and not a.yes:
             die(f"{len(running)} worker(s) still running (lean-agent runs --running) that are not detached; they'd be "
                 f"stopped with it. Wait for them, or: lean-agent service {a.action} --yes")
@@ -7966,60 +7919,6 @@ def cmd_guard(a):
               + ("" if own else " (defaults)") + (": they change only through pull requests" if pats else ""))
     if not slugs:
         print("no projects; new ones never push to " + ", ".join(push_guard.DEFAULT_PUSH_DENY))
-
-
-def dashboard_running():
-    import socket
-    import dashboard
-    with socket.socket() as sock:
-        sock.settimeout(0.5)
-        return sock.connect_ex(("127.0.0.1", dashboard.settings()["port"])) == 0
-
-
-def cmd_dashboard(a):
-    import dashboard
-    cfg = dashboard.settings()
-    if a.port or a.preview is not None:
-        if a.port:
-            cfg["port"] = a.port
-        if a.preview is not None:
-            cfg["preview"] = a.preview
-        save_json(home("dashboard.json"), cfg)
-        os.chmod(home("dashboard.json"), 0o600)
-        path = home("home", ".claude", "launch.json")
-        if cfg.get("preview"):
-            path = dashboard.write_launch_config(cfg)
-            print(f"preview: {path} has a \"lean-agent dashboard\" entry (http://localhost:{cfg['port']}); a Claude "
-                  "desktop session in the orchestrator home can preview it. Its bare address works without the token "
-                  "for the browser's own requests (other websites are still refused); restart the dashboard "
-                  "(`lean-agent service restart` or `lean-agent up`) to apply. Undo: --preview off")
-        elif a.preview is False:
-            data = load_json(path, {})
-            data["configurations"] = [c for c in data.get("configurations") or [] if c.get("name") != "lean-agent dashboard"]
-            if os.path.exists(path):
-                save_json(path, data)
-            print("preview: off (the dashboard needs its token again after a restart)")
-    if a.json:  # the dashboard's data, for an agent (the page itself is drawn by its script)
-        print(json.dumps(dashboard.state(), indent=1))
-        return 0
-    if a.url or a.open:
-        running = dashboard_running()
-        link = dashboard.url()
-        if not running:
-            print(link + "  (not running: `lean-agent up` starts it, or `lean-agent dashboard`)")
-        elif a.open:
-            import webbrowser
-            print(f"opened in your default browser: {link}" if webbrowser.open(link) else
-                  f"couldn't open a browser from here; open this address yourself: {link}")
-        else:
-            print(link)
-        return 0
-    if a.port or a.preview is not None:
-        return 0
-    if dashboard_running():
-        print(f"lean-agent dashboard is already running: {dashboard.url()}")
-        return 0
-    return dashboard.serve()
 
 
 LOG_ERROR_RE = re.compile(r"\b(error|errors|fail(ed|ure|ures|s)?|exception|traceback|panic|fatal|assert(ion)?|"
@@ -8454,10 +8353,8 @@ def build_parser():
     s.add_argument("--local", action="store_true", help="interactive terminal session instead of Remote Control")
     s.add_argument("--fresh", action="store_true",
                    help="don't resume the previous Remote Control session (done for you when it answers 404)")
-    s.add_argument("--dashboard-only", action="store_true", help="no Remote Control: the dashboard (with its chat "
-                   "with the orchestrator) and scheduled jobs only")
     s.add_argument("--clear", action="store_true", help="start a new session with a clean context (a running one "
-                   "checkpoints first, up to 120 s); it starts from the brief and the dashboard's thread history stays")
+                   "checkpoints first, up to 120 s); it starts from the brief")
     s.add_argument("extra", nargs=argparse.REMAINDER,
                    help="after --: extra flags for claude / claude remote-control, e.g. -- --debug")
     s.set_defaults(fn=cmd_up)
@@ -8510,8 +8407,7 @@ def build_parser():
     s.add_argument("--fresh", action="store_true", help="--apply: re-derive instead of using the last check")
     s.add_argument("--again", action="store_true")
     s.add_argument("--yes", action="store_true")
-    s.add_argument("--todo", type=todo_arg, metavar="N", help="the work-queue item this is for "
-                   "(shown on that card in the dashboard's board)")
+    s.add_argument("--todo", type=todo_arg, metavar="N", help="the work-queue item this is for")
     s.set_defaults(fn=cmd_do)
 
     s = sub.add_parser("text-len", help="characters/words/lines of a text, checked against limits in tracker notes")
@@ -8552,7 +8448,7 @@ def build_parser():
     s = sub.add_parser("advise", help="before acting on a NEW user request: a cheap read-only worker reads the memories, "
                        "cards, todos, hand-off notes, checkpoint, recent runs and latest review, and answers in <= 15 "
                        "lines (ADVICE: known, project and cards, suggested command, risks, ask the user first?). "
-                       "Stored in ~/.lean-agent/advice (last 50); the dashboard shows it under the message")
+                       "Stored in ~/.lean-agent/advice (last 50)")
     s.add_argument("text", nargs="*", help="the user's request")
     s.add_argument("--task-file", help="read it from a file ('-' = stdin)")
     s.add_argument("--project", "-p", help="the project it is about (default: the latest run's)")
@@ -8651,7 +8547,7 @@ def build_parser():
     s.add_argument("--escalate", metavar="MODEL,MODEL", help="try the first model; if its run fails, run the task "
                    "again on the next (e.g. haiku,sonnet). Replaces --model")
     s.add_argument("--todo", type=todo_arg, metavar="N", help="the work-queue item this run "
-                   "works on (it shows on that card in the dashboard's board; an open item becomes doing)")
+                   "works on (an open item becomes doing)")
     s.add_argument("--allow-cmd", action="append", metavar="PREFIX", help="--read-only: also allow this read-only "
                    "command prefix, e.g. \"az pipelines runs show\" (repeatable; commands that change things are refused)")
     s.add_argument("--max-reads", type=int, metavar="TOKENS", help="stop the worker once it has re-read this many "
@@ -8756,8 +8652,7 @@ def build_parser():
     s.add_argument("--max-usd", type=float, default=env_num("LEAN_AGENT_REVIEW_MAX_USD", 6.0, float))
     s.add_argument("--max-turns", type=int, default=env_num("LEAN_AGENT_REVIEW_MAX_TURNS", 80))
     s.add_argument("--max-context", type=int, default=4000, help="token cap for the review's cards")
-    s.add_argument("--todo", type=todo_arg, metavar="N", help="the work-queue item this is for "
-                   "(shown on that card in the dashboard's board)")
+    s.add_argument("--todo", type=todo_arg, metavar="N", help="the work-queue item this is for")
     s.set_defaults(fn=cmd_review)
 
     s = sub.add_parser("tracker", help="the project's tracker: identity (org/project/repo, who you are) and notes "
@@ -8843,8 +8738,6 @@ def build_parser():
     s.add_argument("--wait", metavar="RUN_ID|all|last", help="block until those runs are recorded, then print each result "
                    "as `run` printed it (exit 1 if one failed, 124 on --timeout)")
     s.add_argument("--timeout", type=float, default=0, metavar="SECONDS", help="with --wait: give up after this long")
-    s.add_argument("--dismiss", nargs="+", metavar="RUN_ID", help="the dashboard stops showing these runs' questions "
-                   "(a failed or outdated run that needs nothing from you)")
     s.add_argument("--tokens", action="store_true", help="print the latest (or --show) run's run/tokens/context lines again")
     s.add_argument("--show", nargs="?", const="last", metavar="RUN_ID",
                    help="print a run's whole summary again (default: the latest run)")
@@ -8969,7 +8862,7 @@ def build_parser():
     s.add_argument("args", nargs=argparse.REMAINDER, help="add: the lean-agent command, e.g. do <project> <recipe>")
     s.set_defaults(fn=cmd_schedule)
 
-    s = sub.add_parser("thread", help="dashboard threads: new \"title\" | list | merge tB tA | unmerge tB | move MESSAGE THREAD")
+    s = sub.add_parser("thread", help="threads: new \"title\" | list | merge tB tA | unmerge tB | move MESSAGE THREAD")
     s.add_argument("action", choices=["new", "list", "merge", "unmerge", "move"])
     s.add_argument("args", nargs="*")
     s.add_argument("--json", action="store_true", help="list: as JSON")
@@ -8987,8 +8880,6 @@ def build_parser():
     s.add_argument("--clear", action="store_true", help="restart: the orchestrator checkpoints first (up to 120 s), "
                    "then restarts with a clean context (a new session that starts from the brief)")
     s.add_argument("--name", default="lean-agent", help="install: the session name in the Claude app")
-    s.add_argument("--dashboard-only", action="store_true", help="install: run `up --dashboard-only` (no Remote "
-                   "Control; you talk to lean-agent in the dashboard)")
     s.add_argument("-n", type=int, default=40, help="logs: last N lines")
     s.set_defaults(fn=cmd_service)
 
@@ -8998,16 +8889,6 @@ def build_parser():
     s.add_argument("project", nargs="?")
     s.add_argument("patterns", nargs="*", metavar="push-deny PATTERN")
     s.set_defaults(fn=cmd_guard)
-
-    s = sub.add_parser("dashboard", help="the local dashboard (runs, queue, schedule, pace, context): serve it, or --url")
-    s.add_argument("--url", action="store_true", help="print its address (with its token)")
-    s.add_argument("--open", action="store_true", help="open it in your default browser")
-    s.add_argument("--json", action="store_true", help="print its data as JSON (what the page shows), for agents")
-    s.add_argument("--preview", type=lambda v: v.lower() not in ("off", "no", "0", "false"), nargs="?", const=True,
-                   metavar="on|off", help="add it to the orchestrator home's .claude/launch.json (Claude desktop's "
-                   "preview), and let its bare address work without the token for the browser's own requests")
-    s.add_argument("--port", type=int, help="use this port from now on (default 8765)")
-    s.set_defaults(fn=cmd_dashboard)
 
     s = sub.add_parser("grep-log", help="the lines that matter in a saved CI or build log (text, or JSON like "
                        "{\"value\": [lines]}): errors and failures, or a PATTERN")

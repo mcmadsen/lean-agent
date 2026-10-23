@@ -3,9 +3,8 @@
 
 After a /clear it also prints the brief (`lean-agent brief`, the last checkpoint first) as additionalContext, so
 the orchestrator continues from it. Records which transcript the session writes now (chat/service.json), for every source (startup, resume, clear,
-compact): /clear starts a new transcript with a new id, and this is how the dashboard learns of it. The record also
-keeps the chain of transcripts the session has used, oldest first (the last CHAIN_KEEP), so the dashboard can show a
-thread's history across clears. Only when the
+compact): /clear starts a new transcript with a new id, and AutoClear and `lean-agent clear` follow it from this record. The record also
+keeps the chain of transcripts the session has used, oldest first (the last CHAIN_KEEP), with when and why each started. Only when the
 hook runs under the service claude (its pid in up.json is an ancestor, with no other claude nearer). Prints nothing else
 and never fails the session.
 """
@@ -20,8 +19,7 @@ CHAIN_KEEP = 20   # transcripts kept in the record's chain
 
 
 def restarted_fresh(home, event):
-    """True for the startup of the session `up --clear` / `service restart --clear` / the dashboard's Restart fresh
-    asked for: up.json names its id as fresh_sid."""
+    """True for the startup of the session `up --clear` / `service restart --clear` asked for: up.json names its id as fresh_sid."""
     if event.get("source") != "startup":
         return False
     try:

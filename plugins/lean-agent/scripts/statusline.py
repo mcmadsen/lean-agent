@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The orchestrator's status line in Claude Code (statusLine in the lean-agent home's settings).
 
-    ctx 34k/67k · week 48% on pace · 2 running · 3 todo · next Mon 08:45 · dashboard :8765
+    ctx 34k/67k · week 48% on pace · 2 running · 3 todo · next Mon 08:45
 
 Claude Code runs it after each message with the session as JSON on stdin; it reads only small files and the end
 of the transcript, so it stays fast. Any error prints a plain "lean-agent" instead of breaking the line.
@@ -81,13 +81,6 @@ def line(event):
         nexts = []
     if nexts:
         parts.append(f"next job {min(nexts):%a %H:%M}")
-    try:
-        with open(os.path.join(home, "dashboard.json")) as fh:
-            port = json.load(fh).get("port")
-        if port:
-            parts.append(f"dashboard :{port}")
-    except (OSError, ValueError):
-        pass
     return "lean-agent · " + " · ".join(parts) if parts else "lean-agent"
 
 
