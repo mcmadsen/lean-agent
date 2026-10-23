@@ -52,6 +52,20 @@ def uncollected_ids(lean_home, live_ids=()):
     return out
 
 
+def running_runs(lean_home):
+    """[(run id, marker)] of the runs in progress, oldest first: running/*.json whose process is alive."""
+    out = []
+    for f in glob.glob(os.path.join(lean_home, "running", "*.json")):
+        try:
+            with open(f) as fh:
+                m = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(m, dict) and m.get("pid") and pid_alive(m["pid"]):
+            out.append((m.get("run") or os.path.basename(f)[:-5], m))
+    return sorted(out, key=lambda x: (x[1].get("started") or "", x[0]))
+
+
 def pid_alive(pid):
     try:
         os.kill(int(pid), 0)

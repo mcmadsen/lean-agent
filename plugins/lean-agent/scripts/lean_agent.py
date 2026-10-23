@@ -41,7 +41,7 @@ import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
 import service_session  # noqa: E402
-from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive as dashboard_pid_alive, plugin_version, thread_key, uncollected_ids  # noqa: E402
+from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive as dashboard_pid_alive, plugin_version, thread_key, running_runs, uncollected_ids  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -5846,12 +5846,7 @@ def cmd_logs(a):
 
 def live_runs():
     """[(run id, marker)] of the runs in progress, oldest first (running/*.json whose process is alive)."""
-    out = []
-    for f in glob.glob(home("running", "*.json")):
-        m = load_json(f, {})
-        if isinstance(m, dict) and m.get("run") and dashboard_pid_alive(m.get("pid")):
-            out.append((m["run"], m))
-    return sorted(out, key=lambda x: x[1].get("started") or "")
+    return running_runs(home())
 
 
 def mark_collected(*run_ids):
@@ -5868,16 +5863,26 @@ def uncollected_runs(live_ids=()):
     return uncollected_ids(home(), live_ids)
 
 
+def run_summary_files(r, prefix="summary", ext="txt"):
+    """The saved summary (or details) files of a run, oldest turn first (the latest is last)."""
+    files = sorted(glob.glob(os.path.join(r.get("workdir") or "", f"{prefix}-*.{ext}")),
+                   key=lambda f: int(re.sub(r"\D", "", os.path.basename(f)) or 0))
+    return files
+
+
+def run_line_from_ledger(r):
+    cost = f"${r['cost_usd']:.2f}" if isinstance(r.get("cost_usd"), (int, float)) else "$?"
+    return (f"run {r['id']} · {r['model']} · {r['status']} · {r.get('turns') or '?'} turns · "
+            f"{r.get('units', 0):,} sonnet-eq tok · {cost}")
+
+
 def print_finished_run(r):
     """A finished run's result as `run` printed it (its saved summary), else the one line from the ledger."""
-    files = sorted(glob.glob(os.path.join(r.get("workdir") or "", "summary-*.txt")),
-                   key=lambda f: int(re.sub(r"\D", "", os.path.basename(f)) or 0))
+    files = run_summary_files(r)
     if files:
         sys.stdout.write(read_text(files[-1]))
-        return
-    cost = f"${r['cost_usd']:.2f}" if isinstance(r.get("cost_usd"), (int, float)) else "$?"
-    print(f"run {r['id']} · {r['model']} · {r['status']} · {r.get('turns') or '?'} turns · "
-          f"{r.get('units', 0):,} sonnet-eq tok · {cost}")
+    else:
+        print(run_line_from_ledger(r))
 
 
 def wait_for_runs(target, timeout):
@@ -5960,17 +5965,13 @@ def cmd_runs(a):
         r = next((x for x in reversed(runs) if x["id"] == rid), None)
         if not r:
             die(f"no run {rid!r}" if rid else "no runs yet")
-        files = sorted(glob.glob(os.path.join(r["workdir"], "summary-*.txt")),
-                       key=lambda f: int(re.sub(r"\D", "", os.path.basename(f)) or 0))
+        files = run_summary_files(r)
         if not files and not a.details:  # runs from before summaries were saved: rebuild the run line from the ledger
-            cost = f"${r['cost_usd']:.2f}" if isinstance(r.get("cost_usd"), (int, float)) else "$?"
-            print(f"run {r['id']} · {r['model']} · {r['status']} · {r.get('turns') or '?'} turns · "
-                  f"{r.get('units', 0):,} sonnet-eq tok · {cost}")
+            print(run_line_from_ledger(r))
             mark_collected(r["id"])
             return
         if a.details:
-            det = sorted(glob.glob(os.path.join(r["workdir"], "details-*.md")),
-                         key=lambda f: int(re.sub(r"\D", "", os.path.basename(f)) or 0))
+            det = run_summary_files(r, "details", "md")
             if not det:
                 die(f"run {r['id']} has no details file (its whole answer is in `lean-agent runs --show {r['id']}`)")
             files = det

@@ -202,16 +202,8 @@ def handoff(hours=RECENT_HOURS):
     if rules:
         lines.append("Standing rules (memory):")
         lines += [f"  - {r}" for r in rules]
-    running = []
-    rdir = os.path.join(home, "running")
-    for f in sorted(os.listdir(rdir)) if os.path.isdir(rdir) else []:
-        try:
-            with open(os.path.join(rdir, f)) as fh:
-                m = json.load(fh)
-            os.kill(int(m.get("pid", 0)), 0)
-            running.append(f"{m.get('run', '?')} {m.get('model', '')} {m.get('project', '')}: {m.get('task', '')[:80]}")
-        except (OSError, ValueError, TypeError):
-            continue
+    running = [f"{rid} {m.get('model', '')} {m.get('project', '')}: {m.get('task', '')[:80]}"
+               for rid, m in lean_common.running_runs(home)]
     live_ids = {s.split()[0] for s in running}
     waiting = lean_common.uncollected_ids(home, live_ids)
     if running or waiting:
