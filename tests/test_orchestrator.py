@@ -3036,7 +3036,6 @@ class CliTest(unittest.TestCase):
     def start_up(self, *args):
         """`lean-agent up` with the fake interactive claude; returns (process, session log path) once the
         session answers on the bridge."""
-        import time as _t
         sys.path.insert(0, os.path.join(os.path.dirname(CLI)))
         import service_session
         fake = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "fake_interactive_claude.py")
@@ -3050,10 +3049,8 @@ class CliTest(unittest.TestCase):
         os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
         self.addCleanup(lambda: os.environ.__setitem__("LEAN_AGENT_HOME", old) if old else
                         os.environ.pop("LEAN_AGENT_HOME", None))
-        for _ in range(100):
-            if p.poll() is not None or (len(self.read_jsonl(log)) > before and service_session.alive()):
-                break
-            _t.sleep(0.1)
+        self.wait_for(lambda: p.poll() is not None or (len(self.read_jsonl(log)) > before and service_session.alive()),
+                      "the session to answer on the bridge", secs=30)
         self.assertIsNone(p.poll(), "up exited")
         self.assertTrue(service_session.alive())
         return p, log, service_session
