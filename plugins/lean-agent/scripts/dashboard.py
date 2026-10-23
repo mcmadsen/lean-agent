@@ -906,6 +906,12 @@ def api_post(path, body):
         return run_action(body)
     if path.startswith("/api/thread/"):
         import dash_chat
+        if path == "/api/thread/new":
+            try:
+                tid = lean_threads.new(body.get("title"))
+            except ValueError as e:
+                return _j(400, {"ok": False, "error": str(e)})
+            return _j(200, {"ok": True, "id": tid})
         if path == "/api/thread/move":
             res = dash_chat.thread_move(body.get("message"), body.get("to"))
         elif path == "/api/thread/merge":

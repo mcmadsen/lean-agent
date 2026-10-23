@@ -13,11 +13,10 @@ a{color:var(--accent);text-decoration:none;cursor:pointer}a:hover{text-decoratio
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 h1,h2{margin:0}
 
-/* three panes */
-.ws{display:grid;grid-template-columns:300px minmax(0,1fr) minmax(340px,420px);height:100vh}
+/* two panes: Chat / Inbox / Todos on the left, the open thread on the right */
+.ws{display:grid;grid-template-columns:340px minmax(0,1fr);height:100vh}
 .inbox{display:flex;flex-direction:column;background:var(--surface);border-right:1px solid var(--line);min-width:0;overflow:hidden}
 .thread{display:flex;flex-direction:column;min-width:0;height:100vh}
-.work{display:flex;flex-direction:column;gap:14px;padding:16px;border-left:1px solid var(--line);overflow-y:auto;min-width:0}
 
 /* left */
 .brand{display:flex;align-items:center;gap:10px;padding:16px 16px 12px}
@@ -25,14 +24,8 @@ h1,h2{margin:0}
 .name{font:600 15px/1 var(--sans)}
 .live{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
 .pad{padding:0 16px 8px}
-.search{display:flex;align-items:center;gap:8px;height:40px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--muted)}
-.search input{flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--ink);font:400 13px/1 var(--sans)}
-.kbd{font-size:11px}
 .picker select{width:100%;height:40px;border:1px solid var(--line);border-radius:8px;background:var(--surface);padding:0 10px;font:500 13px/1 var(--sans)}
-.inbox-head{display:flex;align-items:baseline;justify-content:space-between;padding:14px 16px 0}
-.inbox-head h2{font:600 15px/1.2 var(--sans)}
 .pills{display:flex;flex-wrap:wrap;gap:6px}
-#ifilters{padding:10px 16px 6px}
 .pill{height:28px;padding:0 10px;border-radius:14px;border:1px solid var(--line);background:transparent;color:var(--muted);font:500 12px/1 var(--sans);cursor:pointer}
 .pill:hover{border-color:var(--muted)}.pill.on{background:var(--ink);border-color:var(--ink);color:var(--surface)}
 .rows{display:flex;flex-direction:column;gap:2px;padding:0 8px 12px;flex:1;overflow-y:auto}
@@ -44,6 +37,20 @@ h1,h2{margin:0}
 .row .m span:last-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .row.changed .t::after{content:"new";margin-left:6px;font:500 10px/1 var(--sans);color:var(--warn);background:var(--warn-soft);border-radius:8px;padding:1px 6px}
 .empty{padding:10px 10px;color:var(--muted);font-size:13px}
+.ltabs{margin:0 16px 10px}.ltabs .seg{min-height:34px}
+.ltab{display:flex;flex-direction:column;flex:1;min-height:0}.ltab[hidden]{display:none}#l-chat .rows,.ltab>.rows{flex:1;overflow-y:auto}
+.thr-top{display:flex;gap:6px;padding:2px 16px 8px}.ask{display:flex;gap:6px;flex:1;min-width:0}
+.ask input{flex:1;min-width:0;height:40px;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:0 12px;font:400 13px/1 var(--sans);color:var(--ink)}
+.ask input:focus-visible{outline:2px solid var(--accent);outline-offset:-1px}.ask .btn,.tnew{height:40px}.tnew{width:40px;padding:0;justify-content:center;font-size:18px}
+.row .id{color:var(--muted);font-family:var(--mono);font-size:12px}.row .m .dot:last-child{margin-left:auto}.inrow .t .dot{margin-right:8px;vertical-align:1px}
+.row .m .chip{flex:0 0 auto}.empty2{display:flex;flex-direction:column;gap:4px;padding:14px 12px;color:var(--muted);font-size:13px}.empty2 b{color:var(--ink)}
+.inbox .ustrip{flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:8px;padding:8px 16px 12px}.inbox .u-item{flex:0 0 auto}.inbox .u-tot,.inbox .u-full{display:none}.inbox .u-cmp{display:inline}
+.tbar{display:none;gap:6px;width:100%}.tsw{flex:1;min-width:0;min-height:44px;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);font:600 15px/1.2 var(--sans);text-align:left;cursor:pointer}
+.tsw span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tbar .tnew{height:44px;width:44px}
+.me{flex-direction:column;align-items:flex-end}.route{display:flex;align-items:center;gap:8px;margin-top:4px;font-size:11px;color:var(--muted);max-width:520px}.route .btn{height:28px;min-width:44px}
+.qcard.sugs{padding:10px 8px}.qcard.sugs .hd{padding:0 8px}
+#sheet,#panel{width:min(520px,94vw);max-height:80vh;overflow:auto}#sheet .rows,#panel .rows{padding:0}#sheet .thr-top{padding:8px 0}
+.badge:not(:empty){display:inline-block;min-width:18px;padding:0 5px;border-radius:9px;background:var(--warn-soft);color:var(--warn);font:600 11px/18px var(--mono)}
 .inbox-foot{display:flex;gap:6px;padding:10px 16px;border-top:1px solid var(--line);flex-wrap:wrap}
 
 /* shared bits */
@@ -183,15 +190,18 @@ dialog::backdrop{background:rgba(0,0,0,.35)}
  .ustrip{padding:8px 16px 10px;gap:8px 16px}.u-tot,.u-full{display:none}.u-cmp{display:inline}.u-l .u-pace{display:none}
  .ws{grid-template-columns:minmax(0,1fr);height:calc(100vh - 56px)}
  .ws>*{display:none !important}
- body[data-pane=chat] #pane-chat,body[data-pane=inbox] #pane-inbox,body[data-pane=work] #pane-work{display:flex !important}
+ body:not([data-tab=inbox]):not([data-tab=todos]) #pane-chat,body[data-tab=inbox] #pane-inbox,body[data-tab=todos] #pane-inbox{display:flex !important}
+ .ltabs,#l-chat{display:none !important}.tbar{display:flex}.tmeta{display:none}.tnew,.ask input,.ask .btn{min-height:44px}
+ #sheet{margin:auto auto 0;width:100vw;max-width:100vw;border-radius:12px 12px 0 0}.route .btn{min-height:44px}.inbox-foot .btn{min-height:44px}
  .thread,.inbox{height:calc(100vh - 56px)}
  .mtabs{display:flex;position:fixed;left:0;right:0;bottom:0;height:56px;gap:4px;padding:6px 10px;background:var(--surface);border-top:1px solid var(--line)}
  .mtabs .seg{min-height:44px}
- .thead{padding:10px 16px}.stream{padding:16px}.composer-wrap{padding:8px 12px 12px}.work{border-left:0}
+ .thead{padding:10px 16px}.stream{padding:16px}.composer-wrap{padding:8px 12px 12px}
  .tacts{width:100%;justify-content:flex-start}.scope{width:100%}.scope .seg{flex:1}.mlive{display:block}
  .thead .tacts .btn,.btn.sm,.pill,.scope .seg{min-height:44px}.row{min-height:44px}.cpill{height:36px}.cpill .x{width:36px;height:36px}
- .banner,.clearbox{padding:8px 16px} #ifilters{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}#ifilters .pill{flex:0 0 auto;white-space:nowrap}
+ .banner,.clearbox{padding:8px 16px}
  .phone-only{display:flex}
  .perm,.stream .perm{max-width:none;width:100%}.perm .acts .btn,.perm .opt{min-height:48px;flex:1 1 auto}.optl{min-height:48px;align-items:center}
  .working{padding:0 4px}.composer-wrap{padding-bottom:calc(12px + env(safe-area-inset-bottom))}
 }
+.inrow .m span+span::before{content:"· "}

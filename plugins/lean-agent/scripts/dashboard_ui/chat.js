@@ -1,4 +1,4 @@
-// A thread with the orchestrator (dash_chat.py): one per task, plus "main". Messages, tool calls, permission prompts
+// A thread with the orchestrator (dash_chat.py): "main", the optimize thread, one per todo and free ones. Messages, tool calls, permission prompts
 // and Claude's multiple-choice questions, answered right here.
 const chat={sentAt:0,key:null,cursor:0,events:new Map(),status:"idle",alive:false,timer:null,choices:{},drafts:{},svc:null,skew:0,workStart:0,confirm:false,html:""};
 // a little Markdown: code blocks, inline code, bold, links, lists, paragraphs (after escaping everything)
@@ -18,7 +18,7 @@ const fallback=()=>{const v=svcNow();return !!(v&&!v.up)};  // the server says n
 const appName=()=>rcState()==="off"?"terminal":"Claude app";
 const rcState=()=>{const v=svcNow();return v&&v.up?(v.remote_control===true?"on":v.remote_control===false?"off":"unknown"):"unknown"};
 const aboutChip=key=>`<span class="chip tone-run">About ${esc(aboutLabel(key))}</span>`;
-const aboutOf=e=>chat.key==="main"&&e.about?aboutChip(e.about):"";  // a task's own thread says it in the header
+const aboutOf=e=>chat.key==="main"&&e.about?aboutChip(e.about):"";  // another thread's own header says it
 const WANTS={Bash:"run a command",Read:"read a file",Glob:"read a file",Grep:"read a file",NotebookRead:"read a file",Edit:"edit a file",MultiEdit:"edit a file",Write:"edit a file",NotebookEdit:"edit a file"};
 const wants=n=>"The orchestrator wants to "+(WANTS[n]||"use "+esc(n));
 const answeredIn=e=>`Answered in the ${e.where==="app"?"Claude app":"dashboard"} · ${hhmm(e.answered_at||e.ts)}`;
@@ -66,12 +66,12 @@ function drawChat(){
       continue;
     }
     flush();
-    if(e.kind==="user")h+=`<div class="me"><div class="bub"><div class="who">You · ${esc(hhmm(e.ts))}${aboutOf(e)}${e.from_app&&chat.service&&!fallback()?` <span class="chip tone-mute">${rcState()==="off"?"from the terminal":"from the app"}</span>`:""}</div><div class="md">${md(e.text)}</div></div></div>`;
+    if(e.kind==="user")h+=`<div class="me"><div class="bub"><div class="who">You · ${esc(hhmm(e.ts))}${aboutOf(e)}${e.from_app&&chat.service&&!fallback()?` <span class="chip tone-mute">${rcState()==="off"?"from the terminal":"from the app"}</span>`:""}</div><div class="md">${md(e.text)}</div></div>${routeHtml(e)}</div>`;
     else if(e.kind==="result")h+=`<div class="sysl">${e.error?"stopped with an error":"done"}${e.seconds?" · "+e.seconds+" s":""}${e.cost!=null?" · $"+Number(e.cost).toFixed(2):""}</div>`;
     else h+=`<div class="sysl${e.kind==="error"?" bad":""}">${esc(e.text)}</div>`;
   }
   flush();
-  if(!evs.length)h+=`<div class="sysl">${chat.key==="main"?"Talk to lean-agent here: ask for work, answer its questions, approve what it wants to run.":"This thread is about the task above; your first message brings that context along."}</div>`;
+  if(!evs.length)h+=`<div class="sysl">${chat.key==="main"?"Talk to lean-agent here: ask for work, answer its questions, approve what it wants to run.":chat.key==="optimize"?"Optimize suggestions for your projects show up here.":"Nothing in this thread yet; your first message brings its context along."}</div>`;
   for(const r of ((typeof S!=="undefined"&&S&&S.running)||[]).filter(r=>chat.key==="main"||String(r.todo)===String(chat.key)))  // one compact line per running worker
     h+=`<div class="wline"><span class="dot dot-run" aria-hidden="true"></span><span class="mono">running · ${r.todo!=null?"#"+esc(r.todo):"lookup"} · ${esc(r.model||"?")} / ${esc(r.effort||"default")} · ${r.turns||0} turns · ${dur(secs(r.started)||0)}</span><button type="button" class="btn sm" data-act="run-stop" data-id="${esc(r.run)}" aria-label="Stop run ${esc(r.run)}">Stop run</button></div>`;
   if(h!==chat.html){  // redraw only when something changed, keeping the focus and caret of a form in the stream
@@ -81,8 +81,6 @@ function drawChat(){
     if(atEnd)box.scrollTop=box.scrollHeight;
   }
   const waiting=evs.some(e=>e.kind==="permission"&&e.state==="pending");
-  const np=evs.filter(e=>e.kind==="permission"&&e.state==="pending").length;  // the phone's Chat tab shows it while another tab is open
-  $("m-chat").textContent=np||"";$("m-chat").title=np?`${np} waiting for you in Chat`:"";
   $("cstat").textContent=waiting?"waits for you":chat.status==="working"?"working…":chat.alive?"ready":"idle";
   $("cstat").className="chip "+(waiting?"tone-warn":chat.status==="working"?"tone-run":"tone-mute");
   drawWorking();drawClear();
@@ -132,17 +130,15 @@ async function pollChat(){
     chat.cursor=Math.max(chat.cursor,s.cursor||0);chat.status=s.status;chat.alive=s.alive;chat.service=!!s.service;chat.svc=s.service_status||chat.svc;
     if(s.now)chat.skew=Date.now()-s.now*1000;
     chat.workStart=s.work_since?s.work_since*1000+(chat.skew||0):0;
-    if(typeof S!=="undefined"){S=S||{};S.threads=s.threads||[];if(lastBoard)drawInbox(new Set())}
-    drawChat();
+    drawChat();loadThreads();
   }catch(e){ui.offline=ui.offline||Date.now();$("cstat").textContent="offline";if(typeof drawBanners==="function")drawBanners()}
-  const busy=chat.status==="working"||Date.now()-chat.sentAt<15000||[...chat.events.values()].some(e=>e.kind==="permission"&&e.state==="pending")
-    ||((S&&S.threads)||[]).some(t=>t.status==="working");
+  const busy=chat.status==="working"||Date.now()-chat.sentAt<15000||[...chat.events.values()].some(e=>e.kind==="permission"&&e.state==="pending");
   chat.timer=setTimeout(pollChat,busy?1200:5000);
 }
-async function sendChat(text){
+async function sendChat(text,thread){  // thread: undefined = the open one, null = no thread (Claude routes it)
   text=String(text||"").trim();if(!text)return;
-  const c=typeof selected==="function"?selected():null;
-  const r=await post("/api/chat",{thread:chat.key,text,title:c?c.title:undefined,context:c&&typeof contextText==="function"?contextText(c):undefined});
+  const c=thread===null?null:typeof selected==="function"?selected():null;
+  const r=await post("/api/chat",{thread:thread===undefined?chat.key:thread,text,title:c?c.title:undefined,context:c&&typeof contextText==="function"?contextText(c):undefined});
   if(!r.ok)alert("Couldn't send: "+(r.error||"unknown error"));
   chat.sentAt=Date.now();pollChat();  // "working" comes from the server, which knows when it is sure
 }
@@ -178,4 +174,4 @@ document.addEventListener("change",e=>{
   chat.html="";
 });
 document.addEventListener("input",e=>{const i=e.target.closest("[data-draft]");if(i){chat.drafts[i.dataset.draft]=i.value;chat.html=""}});
-openThread(ui.sel);
+openThread(threadKey(ui.sel));
