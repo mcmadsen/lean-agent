@@ -182,14 +182,14 @@ def _todo_map():
 
 def idle(tid, t, last, todos, days, now):
     """The one idle rule, for `list` and `now`: a task whose todo is open is never idle, one whose todo is done is idle
-    `days` after it was done; any other thread `days` after its last activity (`last`, an epoch; 0 when it has none)."""
+    `days` after the later of its done_at and its last activity (a done todo without done_at: its last activity); any other thread `days` after its last activity (`last`, an epoch; 0 when it has none)."""
     if tid in RESERVED:
         return False
     item = todos.get(tid) if t.get("kind") == "task" else None
     if item:
         if item.get("status") != "done":
             return False
-        last = _epoch(item.get("done_at"))
+        last = max(_epoch(item.get("done_at")), last)
     return bool(last) and now - last > days * 86400
 
 
