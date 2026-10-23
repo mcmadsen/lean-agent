@@ -248,27 +248,22 @@ def pipe_stage_ok(words):
     return False
 
 
-def lean_agent_only(command):
-    """True when every command in `command` is a lean-agent command (any first word with basename `lean-agent`,
-    or the plugin's bin path); `cd` is fine. Quoted text is data, and an unparsable command is refused. Only
-    2>&1, >&2, >/dev/null, 2>/dev/null and &>/dev/null redirect; &&, ||, ;, a lone & and newlines separate
-    commands; a pipe may only feed head, tail, grep or wc reading stdin (a few read-only options, one grep pattern,
-    no files). A heredoc (`<<'X'`, `<<X`, `<<-X`) on a command is allowed: its body is data, up to the first line
-    that is exactly X. A command substitution (`$(` or a backtick) anywhere else, outside single quotes, is refused."""
+def split_stages(command):
+    """(stages, glued) of a shell command, or None when it can't be parsed or redirects/substitutes in a way strict
+    mode refuses: stages are word lists, None marks a break between commands (see lean_agent_only)."""
     # Strict mode is a guardrail that keeps a cooperating orchestrator from doing project work itself. It errs on the
     # side of denying unusual shell; it is not a sandbox against a hostile model. That is also why it denies comments,
     # command substitution and unknown pipe stages outright rather than parsing them.
     import shlex
     command = split_heredocs(command)
     if command is None:
-        return False
-    bin_dir = os.path.join(PLUGIN_ROOT, "bin") + os.sep
+        return None
     lex = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()\n")
     lex.whitespace_split, lex.whitespace, lex.commenters = True, " \t\r", ""
     try:
         tokens = list(lex)
     except ValueError:
-        return False
+        return None
     glued = []
     stages, words, i = [], [], 0  # stages: word lists; None marks a break between commands
     while i < len(tokens):
@@ -288,13 +283,28 @@ def lean_agent_only(command):
                     fd = words.pop()  # the fd number of 2>/dev/null
                     glued.append((len(stages), fd))  # or the last argument of `head -n 5>/dev/null`
                 if (tok, tokens[i] if i < len(tokens) else None) not in REDIRECT_OK:
-                    return False
+                    return None
                 i += 1
             else:
-                return False
+                return None
         else:
             words.append(tok)
     stages.append(words)
+    return stages, glued
+
+
+def lean_agent_only(command):
+    """True when every command in `command` is a lean-agent command (any first word with basename `lean-agent`,
+    or the plugin's bin path); `cd` is fine. Quoted text is data, and an unparsable command is refused. Only
+    2>&1, >&2, >/dev/null, 2>/dev/null and &>/dev/null redirect; &&, ||, ;, a lone & and newlines separate
+    commands; a pipe may only feed head, tail, grep or wc reading stdin (a few read-only options, one grep pattern,
+    no files). A heredoc (`<<'X'`, `<<X`, `<<-X`) on a command is allowed: its body is data, up to the first line
+    that is exactly X. A command substitution (`$(` or a backtick) anywhere else, outside single quotes, is refused."""
+    split = split_stages(command)
+    if split is None:
+        return False
+    stages, glued = split
+    bin_dir = os.path.join(PLUGIN_ROOT, "bin") + os.sep
     first = True
     for n, words in enumerate(stages):
         if words is None:
@@ -316,6 +326,52 @@ def lean_agent_only(command):
     return True
 
 
+# The lean-agent subcommands the strict orchestrator may not run because they change a project repo, a branch, a
+# remote or a tracker (read from the CLI's subcommands in lean_agent.py; the orchestrator never changes anything
+# itself). Workers are not affected: they start with `lean-agent run <p> --cards auto ... -- "<task>"`.
+#   worktree rm|setup|push|reset  removes/sets up a repo worktree, pushes a branch to the remote (reset: --reset-worktree
+#                                 moved a worktree's branch; kept in case it becomes a subcommand)
+#   rules                         writes (or with --off removes) lean-agent's block in the repo's rules file
+#   codemod --apply               runs the codemod on the checkout itself (without --apply: a throwaway copy)
+# PR and tracker writes have no lean-agent subcommand of their own: they are done by a worker with the tracker's MCP
+# server (`run --mcp`), or `worktree push`. Bookkeeping stays allowed: todo, handoff, thread, checkpoint, brief, runs,
+# review (it starts its own worker), publish, sync, doctor, config, card, optimize and the like.
+CHANGING_ACTIONS = {"worktree": {"rm", "setup", "push", "reset"}}
+CHANGING_ALWAYS = {"rules"}
+CHANGING_FLAGS = {"codemod": {"--apply"}}
+DELEGATE_CHANGE = ("A worker makes the change and reads the project's cards: lean-agent run <project> --cards auto "
+                   "-m <model> --why '…' -- '<push/PR/tracker task>' (a push also needs the user's approval and a "
+                   "review: see the guide).")
+
+
+def changing_command(command):
+    """`lean-agent <subcommand>` in `command` that changes a project repo, branch, remote or tracker (see
+    CHANGING_*), or ''."""
+    split = split_stages(command)
+    if split is None:
+        return ""
+    first = True
+    for words in split[0]:
+        if words is None:
+            first = True
+            continue
+        while words and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]) or words[0] in ("nohup", "env", "exec")):
+            words = words[1:]
+        if words[:1] == ["timeout"] and len(words) > 2:
+            words = words[2:]
+        if first and words and os.path.basename(words[0]) == "lean-agent":
+            args = [w for w in words[1:] if not w.startswith("-")]
+            name = args[0] if args else ""
+            if name in CHANGING_ALWAYS:
+                return name
+            if name in CHANGING_ACTIONS and len(args) > 1 and args[1] in CHANGING_ACTIONS[name]:
+                return f"{name} {args[1]}"
+            if CHANGING_FLAGS.get(name, set()) & set(words[1:]):
+                return f"{name} {' '.join(sorted(CHANGING_FLAGS[name] & set(words[1:])))}"
+        first = False
+    return ""
+
+
 def own_path(path, cwd, lean_root):
     """Is `path` lean-agent's own (its home, which holds the docs folder and run files, or the plugin)?"""
     full = os.path.realpath(os.path.join(cwd, os.path.expanduser(path)))
@@ -329,6 +385,10 @@ def strict_denial(event, cwd, lean_root):
         command = str(tool_input.get("command") or "")
         if not lean_agent_only(command):
             return f"strict mode: the orchestrator runs only lean-agent commands, not `{command.strip()[:60]}`. " + DELEGATE
+        changing = changing_command(command)
+        if changing:
+            return (f"strict mode: the orchestrator never changes a repo, branch, remote or tracker itself "
+                    f"(`lean-agent {changing}`). " + DELEGATE_CHANGE)
     elif tool in ("Read", "Grep", "Glob"):
         path = tool_input.get("file_path") if tool == "Read" else tool_input.get("path")
         pattern = str(tool_input.get("pattern") or "")

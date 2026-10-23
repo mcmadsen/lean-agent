@@ -559,6 +559,40 @@ class BudgetTest(Base):
         self.assertIsNone(read("/srv/shop/src/app.py"))
 
 
+    def test_strict_orchestrator_denies_lean_agent_subcommands_that_change_a_repo_or_tracker(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        self.set_strict("on")
+        ev = lambda cwd, cmd: dict(self.ev, cwd=cwd, tool_name="Bash", tool_input={"command": cmd, "run_in_background": True})
+        bash = lambda cmd, cwd=home: run_hook("budget_hook.py", ev(cwd, cmd), LEAN_AGENT_TODO_REMINDER="0", **self.env)
+        denied = lambda out: out and out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        changing = ("lean-agent worktree push proj feat --allow-send 'push feat'", "lean-agent worktree reset proj feat",
+                    "lean-agent worktree setup proj feat --run 'npm ci'", "lean-agent worktree rm proj feat",
+                    "lean-agent worktree --force rm proj feat", "lean-agent rules proj", "lean-agent rules proj --off",
+                    "lean-agent codemod proj 'npx jscodeshift src' --apply", "cd /srv && lean-agent worktree push p b",
+                    "lean-agent runs && FOO=1 lean-agent worktree push p b", "timeout 60 lean-agent worktree push p b",
+                    "/x/plugins/lean-agent/bin/lean-agent worktree push p b")
+        for cmd in changing:
+            out = bash(cmd)
+            self.assertTrue(denied(out), cmd)
+            reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+            self.assertIn("never changes a repo, branch, remote or tracker", reason)
+            self.assertIn("lean-agent run <project> --cards auto", reason)
+        bookkeeping = ("lean-agent todo list", "lean-agent handoff --note 'x' --kind fyi", "lean-agent thread list",
+                       "lean-agent checkpoint 'x'", "lean-agent brief", "lean-agent runs --last", "lean-agent review proj --head b",
+                       "lean-agent publish 'T' --task-file - <<'EOF'\ntext\nEOF", "lean-agent sync", "lean-agent doctor",
+                       "lean-agent config strict on", "lean-agent card proj add x", "lean-agent optimize proj",
+                       "lean-agent codemod proj 'npx jscodeshift src'", "lean-agent worktrees", "lean-agent guard list",
+                       "lean-agent run proj --cards auto -m sonnet --why x -- 'worktree push the branch'",
+                       "lean-agent run proj --worktree feat --reset-worktree -m sonnet --why x -- 'fix'")
+        for cmd in bookkeeping:
+            self.assertFalse(denied(bash(cmd)), cmd)
+        # a worker (its run folder, or any folder outside the home) may use them all
+        for cmd in changing:
+            self.assertFalse(denied(bash(cmd, os.path.join(home, "work", "run1"))), cmd)
+            self.assertFalse(denied(bash(cmd, self.tmp.name if hasattr(self, "tmp") else "/tmp")), cmd)
+        self.set_strict("off")
+        self.assertFalse(denied(bash(changing[0])))
+
     def test_strict_check_command_substitution_and_heredocs(self):
         sys.path.insert(0, ROOT)
         import budget_hook
