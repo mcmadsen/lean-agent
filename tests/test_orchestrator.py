@@ -318,7 +318,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("strict orchestrator: on", self.cli("doctor", check=False).stdout)
         self.assertIn("strict: off", self.cli("config", "strict", "off").stdout)
         self.assertIn("strict orchestrator: off", self.cli("doctor", check=False).stdout)
-        with open(os.path.join(self.cli("home").stdout.strip(), "config.json")) as fh:
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "config.json")) as fh:
             self.assertEqual(json.load(fh)["strict"], "off")
         self.assertIn("strict: on", self.cli("config", "strict", "on").stdout)
 
