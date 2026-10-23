@@ -2796,6 +2796,26 @@ class CliTest(unittest.TestCase):
         self.assertTrue({"t2", "#2", "#3", "optimize"} <= set(shown), shown)
         self.assertIn("t1", [t["id"] for t in lt.threads(include_expired=True)])  # nothing was deleted
 
+    def test_a_done_task_with_a_fresh_request_stays_open(self):
+        lt = self.threads_home()
+        lt.new("anchor")  # creates the registry
+        day = 86400
+        stamp = lambda ago: datetime.datetime.fromtimestamp(time.time() - ago * day).isoformat(timespec="seconds")
+        data = lt.load()
+        data["threads"].update({f"#{n}": {"id": f"#{n}", "title": f"task {n}", "created": stamp(30), "last_message": stamp(fresh),
+                                          "kind": "task"} for n, fresh in ((1, 0), (2, 20))})
+        with open(lt.path(), "w") as fh:
+            json.dump(data, fh)
+        with open(os.path.join(os.environ["LEAN_AGENT_HOME"], "todo.json"), "w") as fh:
+            json.dump({"next": 4, "items": [{"id": 1, "status": "done", "done_at": stamp(10)},
+                                            {"id": 2, "status": "done"}]}, fh)  # #2: no done_at, so its last activity counts
+        shown = [t["id"] for t in lt.threads()]
+        self.assertIn("#1", shown)
+        self.assertNotIn("#2", shown)
+        out = self.cli("now").stdout
+        self.assertIn("Closed as idle (> 7 days): #2", out)
+        self.assertIn("#1 ", out.split("Closed as idle")[0])  # still open after `now`
+
     def test_thread_cli(self):
         self.assertEqual(self.cli("thread", "new", "Pricing page").stdout.strip(), "t1")
         self.assertEqual(self.cli("thread", "new", "Billing").stdout.strip(), "t2")
