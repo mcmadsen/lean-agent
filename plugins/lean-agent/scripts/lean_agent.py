@@ -41,7 +41,7 @@ import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
 import service_session  # noqa: E402
-from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, now_iso, stem  # noqa: E402
+from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -1256,12 +1256,13 @@ def latest_run_id(runs=None, ordinary=False):
 
 def new_todo(slug, title):
     """Add a queue item named `title` for project `slug`; returns its number."""
-    data = todos()
     title = " ".join(title.split())[:200]
-    data["items"].append({"id": data["next"], "text": title, "project": slug, "ref": None, "prio": "normal",
-                          "due": None, "status": "open", "created": now_iso(), "notes": []})
-    data["next"] += 1
-    save_json(home("todo.json"), data)
+    with file_lock(home("todo.json")):
+        data = todos()
+        data["items"].append({"id": data["next"], "text": title, "project": slug, "ref": None, "prio": "normal",
+                              "due": None, "status": "open", "created": now_iso(), "notes": []})
+        data["next"] += 1
+        save_json(home("todo.json"), data)
     print(f"todo #{data['next'] - 1}: {title}", flush=True)
     return data["next"] - 1
 
@@ -1504,13 +1505,14 @@ def _cmd_run(a):
 
     todo_id = (prev or {}).get("todo") or getattr(a, "todo", None)
     if todo_id is not None and todo_id != "new" and not (prev or {}).get("todo"):
-        data = todos()
-        t = next((x for x in data["items"] if x["id"] == todo_id), None)
-        if not t:
-            die(f"no todo #{todo_id} (lean-agent todo list)")
-        if t["status"] == "open":  # working on it now: the board shows it in progress
-            t["status"] = "doing"
-            save_json(home("todo.json"), data)
+        with file_lock(home("todo.json")):
+            data = todos()
+            t = next((x for x in data["items"] if x["id"] == todo_id), None)
+            if not t:
+                die(f"no todo #{todo_id} (lean-agent todo list)")
+            if t["status"] == "open":  # working on it now: the board shows it in progress
+                t["status"] = "doing"
+                save_json(home("todo.json"), data)
     allow_cmd = (prev or {}).get("allow_cmd") or [c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()]
     if allow_cmd and not read_only:
         die("--allow-cmd is for --read-only workers (other workers run any command)")
@@ -1621,11 +1623,12 @@ def _cmd_run(a):
     if todo_id == "new":  # the run's own queue item, named after its --why; made only once nothing can refuse the launch
         todo_id = new_todo(slug, getattr(a, "why", None) or task.splitlines()[0])
         a.todo = todo_id
-        data = todos()
-        for t in data["items"]:
-            if t["id"] == todo_id and t["status"] == "open":
-                t["status"] = "doing"
-        save_json(home("todo.json"), data)
+        with file_lock(home("todo.json")):
+            data = todos()
+            for t in data["items"]:
+                if t["id"] == todo_id and t["status"] == "open":
+                    t["status"] = "doing"
+            save_json(home("todo.json"), data)
     rc = detach_run(workdir, run_id)
     if rc is not None:
         return rc
@@ -7377,6 +7380,11 @@ def open_todos(data=None):
 
 
 def cmd_todo(a):
+    with file_lock(home("todo.json")):  # every action reads, changes and rewrites todo.json (thread move retags it too)
+        return _cmd_todo(a)
+
+
+def _cmd_todo(a):
     data = todos()
     by_id = {t["id"]: t for t in data["items"]}
 
@@ -7548,23 +7556,24 @@ def cmd_slices(a):
             return 0
         if not a.epic:
             die("--create needs --epic NAME (the slices become that epic's items)")
-        data_t = todos()
-        ids = {}
-        for e in plan["enablers"]:
-            t = {"id": data_t["next"], "text": f"{a.epic}: shared {e['name']} ({len(e['files'])} files, {e['lines']:,} "
-                 f"lines; used by {len(e['used_by'])} slices)", "project": slug, "ref": None, "prio": "normal",
-                 "due": None, "status": "open", "created": now_iso(), "notes": [], "epic": a.epic, "after": []}
-            data_t["items"].append(t)
-            ids[e["name"]] = t["id"]
-            data_t["next"] += 1
-        for sl in plan["slices"]:
-            t = {"id": data_t["next"], "text": f"{a.epic}: {sl['name']} ({len(sl['files'])} own files, {sl['lines']:,} lines)",
-                 "project": slug, "ref": None, "prio": "normal", "due": None, "status": "open", "created": now_iso(),
-                 "notes": [], "epic": a.epic, "after": [ids[n] for n in sl["needs"] if n in ids]}
-            data_t["items"].append(t)
-            data_t["next"] += 1
-        data_t.setdefault("epics", {}).setdefault(a.epic, {"project": slug, "counts": []})
-        save_json(home("todo.json"), data_t)
+        with file_lock(home("todo.json")):
+            data_t = todos()
+            ids = {}
+            for e in plan["enablers"]:
+                t = {"id": data_t["next"], "text": f"{a.epic}: shared {e['name']} ({len(e['files'])} files, {e['lines']:,} "
+                     f"lines; used by {len(e['used_by'])} slices)", "project": slug, "ref": None, "prio": "normal",
+                     "due": None, "status": "open", "created": now_iso(), "notes": [], "epic": a.epic, "after": []}
+                data_t["items"].append(t)
+                ids[e["name"]] = t["id"]
+                data_t["next"] += 1
+            for sl in plan["slices"]:
+                t = {"id": data_t["next"], "text": f"{a.epic}: {sl['name']} ({len(sl['files'])} own files, {sl['lines']:,} lines)",
+                     "project": slug, "ref": None, "prio": "normal", "due": None, "status": "open", "created": now_iso(),
+                     "notes": [], "epic": a.epic, "after": [ids[n] for n in sl["needs"] if n in ids]}
+                data_t["items"].append(t)
+                data_t["next"] += 1
+            data_t.setdefault("epics", {}).setdefault(a.epic, {"project": slug, "counts": []})
+            save_json(home("todo.json"), data_t)
         print(f"created {len(plan['enablers']) + len(plan['slices'])} items in epic {a.epic}; "
               f"the first ready one: lean-agent todo next --epic {a.epic}")
         return 0
@@ -8279,14 +8288,16 @@ def cmd_handoff(a):
     import compact_hook
     notes = compact_hook.load_notes()
     if a.note or a.done:
-        if a.note:
-            notes.append(dict({"ts": now_iso(), "text": " ".join(a.note.split())}, **({"kind": a.kind} if a.kind else {}),
-                              **({"thread": tag} if (tag := lean_threads.resolve_tag()) else {})))
-        if a.done:
-            drop = set(range(1, len(notes) + 1)) if a.done == "all" else {
-                int(x) for x in a.done.split(",") if x.strip().isdigit()}
-            notes = [n for i, n in enumerate(notes, 1) if i not in drop]
-        save_json(compact_hook.notes_path(), notes)
+        with file_lock(compact_hook.notes_path()):
+            notes = compact_hook.load_notes()
+            if a.note:
+                notes.append(dict({"ts": now_iso(), "text": " ".join(a.note.split())}, **({"kind": a.kind} if a.kind else {}),
+                                  **({"thread": tag} if (tag := lean_threads.resolve_tag()) else {})))
+            if a.done:
+                drop = set(range(1, len(notes) + 1)) if a.done == "all" else {
+                    int(x) for x in a.done.split(",") if x.strip().isdigit()}
+                notes = [n for i, n in enumerate(notes, 1) if i not in drop]
+            save_json(compact_hook.notes_path(), notes)
     text = compact_hook.handoff(a.hours)
     with open(home("handoff.md"), "w") as fh:
         fh.write(text + "\n")
@@ -8313,10 +8324,11 @@ def cmd_checkpoint(a):
     text = "\n".join(l.rstrip() for l in text.strip().splitlines())[:4000]
     if not text:
         die('checkpoint needs the soft state: lean-agent checkpoint "<promises, decisions, next steps>" (or --file -)')
-    notes = compact_hook.load_notes()
-    notes.append({"ts": now_iso(), "text": text, "kind": "checkpoint", "thread": lean_threads.resolve_tag()})
-    old = [i for i, n in enumerate(notes) if n.get("kind") == "checkpoint"][:-3]
-    save_json(compact_hook.notes_path(), [n for i, n in enumerate(notes) if i not in old])
+    with file_lock(compact_hook.notes_path()):
+        notes = compact_hook.load_notes()
+        notes.append({"ts": now_iso(), "text": text, "kind": "checkpoint", "thread": lean_threads.resolve_tag()})
+        old = [i for i, n in enumerate(notes) if n.get("kind") == "checkpoint"][:-3]
+        save_json(compact_hook.notes_path(), [n for i, n in enumerate(notes) if i not in old])
     print(f"checkpoint saved ({len(text.splitlines())} lines); `lean-agent brief` shows it first")
     return 0
 
