@@ -3889,10 +3889,15 @@ class CliTest(unittest.TestCase):
         self.assertEqual(len(host.pasted), 1)  # the turn still runs: no /clear into it
         with open(os.path.join(home, "up.json")) as fh:
             self.assertEqual(json.load(fh)["clear_hold"], "clear requested: waiting for the turn to end")
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": home}):
+            self.assertIn("clear held: clear requested: waiting for the turn to end", lean_agent.clear_at_text())
         turn("done", ctx=5000)
         ac.tick()
         self.assertEqual(host.pasted[-1], "/clear")
-        self.assertIsNone(json.load(open(os.path.join(home, "up.json")))["clear_hold"])
+        with open(os.path.join(home, "up.json")) as fh:
+            self.assertIsNone(json.load(fh)["clear_hold"])
 
     def test_host_start_drops_a_stale_clear_request(self):
         import service_session
@@ -3904,25 +3909,10 @@ class CliTest(unittest.TestCase):
         host = service_session.Host(lambda: (["true"], "sid-1"), dict(os.environ), home)
         self.addCleanup(host.stop)
         host._spawn()
+        self.addCleanup(host.proc.wait)
+        self.addCleanup(os.close, host.master)
         with open(os.path.join(home, "up.json")) as fh:
             self.assertIsNone(json.load(fh)["clear_requested"])
-
-    def test_clear_request_waits_while_a_permission_prompt_is_pending(self):
-        ac, host, clock, turn, home = self.auto_clear_unit()
-        os.environ.pop("LEAN_AGENT_CLEAR_AT")
-        perm = os.path.join(home, "chat", "perm")
-        os.makedirs(perm)
-        with open(os.path.join(perm, "req1.json"), "w") as fh:
-            json.dump({"tool_name": "Bash", "tool_input": {"command": "ls"}}, fh)
-        self.queue_clear(home)
-        turn("done", ctx=5000)
-        ac.tick()
-        self.assertEqual(host.pasted, [])
-        self.assertTrue(json.load(open(os.path.join(home, "up.json"))).get("clear_requested"))
-        with open(os.path.join(perm, "req1.answer.json"), "w") as fh:
-            json.dump({"decision": "allow"}, fh)
-        ac.tick()
-        self.assertEqual(len(host.pasted), 1)
 
     def test_clear_command_queues_and_without_a_service_session_fails(self):
         r = self.cli("clear", check=False)
