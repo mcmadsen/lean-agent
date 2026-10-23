@@ -2722,8 +2722,19 @@ class CliTest(unittest.TestCase):
         self.assertIn("parser", self.cli("thread", "show", "t1").stdout)
         self.cli("thread", "reopen", "t1")
         self.assertNotIn("Closed as idle", self.cli("now").stdout)
-        self.assertIn("Closed as idle (> 0.5 days): t1, t2", self.cli("now", LEAN_AGENT_THREAD_IDLE_DAYS="0.0000001").stdout.replace(
-            "1e-07", "0.5"))  # configurable
+        # the knob: env (or thread_idle_days in config.json); t2 is a day old, t1 was just reopened
+        data = lt.load()
+        data["threads"]["t2"]["last_message"] = data["threads"]["t2"]["requests"][0]["ts"] = (
+            datetime.datetime.now() - datetime.timedelta(days=1)).isoformat(timespec="seconds")
+        with open(reg, "w") as fh:
+            json.dump(data, fh)
+        out = self.cli("now", LEAN_AGENT_THREAD_IDLE_DAYS="0.5").stdout
+        self.assertIn("Closed as idle (> 0.5 days): t2", out)
+        self.assertNotIn("Closed as idle (> 0.5 days): t1", out)
+        self.cli("thread", "reopen", "t2")
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "config.json"), "w") as fh:
+            json.dump({"thread_idle_days": 0}, fh)  # not a positive number: the default
+        self.assertNotIn("Closed as idle", self.cli("now").stdout)
 
     def test_thread_registry_new_merge_unmerge_move_and_expiry(self):
         lt = self.threads_home()
