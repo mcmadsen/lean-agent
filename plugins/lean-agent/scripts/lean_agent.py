@@ -7380,8 +7380,10 @@ def open_todos(data=None):
 
 
 def cmd_todo(a):
-    with file_lock(home("todo.json")):  # every action reads, changes and rewrites todo.json (thread move retags it too)
-        return _cmd_todo(a)
+    if a.action in ("add", "start", "done", "note", "rm", "reopen", "edit") or (a.action == "epic" and a.count):
+        with file_lock(home("todo.json")):  # these read, change and rewrite todo.json (thread move retags it too)
+            return _cmd_todo(a)
+    return _cmd_todo(a)
 
 
 def _cmd_todo(a):
@@ -8286,7 +8288,6 @@ def cmd_publish(a):
 
 def cmd_handoff(a):
     import compact_hook
-    notes = compact_hook.load_notes()
     if a.note or a.done:
         with file_lock(compact_hook.notes_path()):
             notes = compact_hook.load_notes()
