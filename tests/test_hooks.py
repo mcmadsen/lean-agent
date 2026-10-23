@@ -579,6 +579,9 @@ class BudgetTest(Base):
             self.assertIn("never changes a repo, branch, remote or tracker", reason)
             self.assertIn("lean-agent run <project> --cards auto", reason)
         bookkeeping = ("lean-agent todo list", "lean-agent handoff --note 'x' --kind fyi", "lean-agent handoff --note 'q?' --kind decision", "lean-agent thread list",
+                       "lean-agent now", "lean-agent thread show t1 --all", "lean-agent thread close t1", "lean-agent thread reopen t1",
+                       "lean-agent thread move t2", "lean-agent checkpoint 'x' --thread t1", "lean-agent review proj --head b --thread none",
+                       "lean-agent handoff --note 'x' --kind fyi --thread t1",
                        "lean-agent checkpoint 'x'", "lean-agent brief", "lean-agent runs --last", "lean-agent review proj --head b",
                        "lean-agent publish 'T' --task-file - <<'EOF'\ntext\nEOF", "lean-agent sync", "lean-agent doctor",
                        "lean-agent config strict on", "lean-agent card proj show x", "lean-agent optimize proj",
@@ -700,6 +703,16 @@ class BudgetTest(Base):
             with lean_threads._locked() as data:
                 data["threads"]["t1"]["closed"] = "2026-01-01T00:00:00"
             self.assertEqual(lean_threads.score_threads("quarterly report chart docs"), [])
+            # naming a closed thread brings it back; an exception in routing never breaks the prompt
+            self.assertTrue(ctx("the quarterly report is t1 again").startswith('Thread t1 "Publish'))
+            self.assertNotIn("closed", lean_threads.load()["threads"]["t1"])
+            with open(lean_threads.path()) as fh:
+                good = fh.read()
+            with open(lean_threads.path(), "w") as fh:
+                json.dump({"threads": {"t1": 5}}, fh)  # a registry that makes route() raise
+            self.assertEqual(ctx("another request entirely"), "")
+            with open(lean_threads.path(), "w") as fh:
+                fh.write(good)
 
     def test_thread_registry_moves_out_of_the_chat_dir(self):
         home = self.env["LEAN_AGENT_HOME"]
