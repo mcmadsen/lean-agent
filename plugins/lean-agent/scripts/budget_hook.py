@@ -163,13 +163,28 @@ def strict_on(lean_root):
         return True
 
 
+PIPE_OK = ("head", "tail", "grep")
+
+
 def lean_agent_only(command):
-    """True when every command in `command` is a lean-agent command (bare, or the plugin's bin path); `cd` is fine."""
+    """True when every command in `command` is a lean-agent command (any first word with basename `lean-agent`,
+    or the plugin's bin path); `cd` is fine. Redirections (2>&1, >&2, &>f, >/dev/null) belong to their command;
+    only &&, ||, ;, a lone & and newlines separate commands. A pipe may only feed head, tail or grep."""
     if "$(" in command or "`" in command:
         return False
     bin_dir = os.path.join(PLUGIN_ROOT, "bin") + os.sep
-    return all(w[0] in ("lean-agent", "cd") or os.path.realpath(os.path.expanduser(w[0])).startswith(bin_dir)
-               for w in commands_run(command))
+    text = HEREDOC.sub("<<DATA", command)
+    text = re.sub(r"\d*>&\d*-?|&>>?", " ", text)  # fd duplications and &>file are not separators
+    for part in re.split(r"&&|\|\||;|\n|&", text):
+        stages = part.split("|")
+        for i, stage in enumerate(stages):
+            for words in commands_run(stage):
+                if i and words[0] in PIPE_OK:
+                    continue
+                if not (words[0] == "cd" or os.path.basename(words[0]) == "lean-agent"
+                        or os.path.realpath(os.path.expanduser(words[0])).startswith(bin_dir)):
+                    return False
+    return True
 
 
 def own_path(path, cwd, lean_root):
@@ -187,6 +202,9 @@ def strict_denial(event, cwd, lean_root):
             return f"strict mode: the orchestrator runs only lean-agent commands, not `{command.strip()[:60]}`. " + DELEGATE
     elif tool in ("Read", "Grep", "Glob"):
         path = tool_input.get("file_path") if tool == "Read" else tool_input.get("path")
+        pattern = str(tool_input.get("pattern") or "")
+        if not path and tool == "Glob" and os.path.isabs(os.path.expanduser(pattern)):
+            path = pattern
         if path and not own_path(str(path), cwd, lean_root):
             return f"strict mode: the orchestrator doesn't read project files ({str(path)[:80]}). " + DELEGATE
     return ""

@@ -2742,7 +2742,7 @@ def add_to_review_cards(slug, checklist=(), helpers=(), replace=()):
     return added
 
 
-def latest_review(slug, path, head=None):
+def latest_review(slug, path, head):
     """The latest review recorded for the project, or for the branch `head` when given."""
     br = branch_of(path, head) if head else ""
     return next((r for r in reversed(list(read_jsonl(reviews_path(slug)))) if not head or r.get("ref") == head
@@ -3253,9 +3253,10 @@ def decide_gaps(a):
                             allow_send=None, max_turns=30, max_usd=1.5, max_context=a.max_context, max_cards=6,
                             ttype="read", role="gap-decider", effort="medium",
                             role_rule=GAP_RULE.format(project=path, gaps=listing))
+    LAST_RUN[:] = []
     rc = cmd_run(ns)
-    run = next((r for r in reversed(ledger()) if r.get("role") == "gap-decider" and r["project"] == slug), None)
-    got = load_json(os.path.join(run["workdir"], "gaps.json"), {}) if run else {}
+    run = LAST_RUN[0] if LAST_RUN else None  # this command's own worker, never an older gap-decider run
+    got = load_json(os.path.join(run["workdir"], "gaps.json"), {}) if run and run.get("workdir") else {}
     by_id = {d.get("gap"): d for d in got.get("decisions") or [] if isinstance(d, dict)}
     if not by_id:
         print(f"the worker gave no gap decisions{' (exit %d)' % rc if rc else ''}; see: lean-agent runs --show "
