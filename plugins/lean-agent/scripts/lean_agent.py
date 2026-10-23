@@ -1304,6 +1304,8 @@ def cmd_run(a):
         raise
     finally:
         if SUPERVISOR:
+            if isinstance(sys.stdout, Tee):
+                sys.stdout.close()  # the summary file is complete, then the running marker goes
             for f in (sys.stdout, sys.stderr):
                 try:
                     f.flush()
@@ -1792,16 +1794,21 @@ def _cmd_run(a):
         "estimate_kind": (getattr(a, "estimate", None) or (None, None))[1],
         "answer_lines": answer_lines, "details": details_path, "init_stop": reads.get("init_stop"),
     }
-    append_jsonl(home("ledger.jsonl"), entry)
+    append_jsonl(home("ledger.jsonl"), entry)  # the budget line below counts this run
     LAST_RUN[:] = [entry]
-    if running_key:
-        try:
-            os.remove(home("running", running_key + ".json"))
-        except OSError:
-            pass
+
+    def finish():  # once the whole summary is on disk: the run stops being "running" (what `runs --wait` waits for)
+        if running_key:
+            try:
+                os.remove(home("running", running_key + ".json"))
+            except OSError:
+                pass
+        if not SUPERVISOR:  # printed here, to the caller
+            mark_collected(run_id)
     if isinstance(sys.stdout, Tee):  # a second run in the same command (review after its second opinion)
         sys.stdout.close()
-    sys.stdout = Tee(sys.stdout, os.path.join(workdir, f"summary-{len(glob.glob(os.path.join(workdir, 'summary-*.txt'))) + 1}.txt"))
+    sys.stdout = Tee(sys.stdout, os.path.join(workdir, f"summary-{len(glob.glob(os.path.join(workdir, 'summary-*.txt'))) + 1}.txt"),
+                     on_close=finish)
     lean_log.log("error" if entry["status"] in ("failed", "error") or entry["status"].startswith("stopped") else "debug",
                  "run", f"{run_id} {slug} {model} {entry['status']} {entry.get('turns') or '?'} turns "
                  f"{entry.get('units', 0):,} sonnet-eq ${entry.get('cost_usd') or 0:.2f}"
@@ -5912,6 +5919,10 @@ def wait_for_runs(target, timeout):
             recorded = {r["id"]: r for r in ledger() if r["id"] in gone}
             for rid in gone:
                 if rid in recorded:
+                    for _ in range(30 if rid in ids and not run_summary_files(recorded[rid]) else 0):
+                        time.sleep(0.1)  # recorded, but its summary file is still being written
+                        if run_summary_files(recorded[rid]):
+                            break
                     print_finished_run(recorded[rid])
                     bad = bad or recorded[rid]["status"] not in ("done", "partial", "needs-input", "awaiting-confirmation")
                     mark_collected(rid)
@@ -9160,8 +9171,8 @@ class Tee:
     """Copy everything printed to a file too: a run's summary can be shown again with `runs --show`
     even when the caller cut its output short (e.g. `| tail`)."""
 
-    def __init__(self, stream, path):
-        self.stream, self.fh = stream, open(path, "w", encoding="utf-8")
+    def __init__(self, stream, path, on_close=None):
+        self.stream, self.fh, self.on_close = stream, open(path, "w", encoding="utf-8"), on_close
 
     def write(self, text):
         self.fh.write(text)
@@ -9172,8 +9183,10 @@ class Tee:
         self.stream.flush()
 
     def close(self):
-        self.fh.close()
+        self.fh.close()  # flushes the summary file first
         sys.stdout = self.stream
+        if self.on_close:
+            self.on_close()
 
     def __getattr__(self, name):
         return getattr(self.stream, name)
