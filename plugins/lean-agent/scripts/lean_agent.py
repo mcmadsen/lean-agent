@@ -7882,16 +7882,6 @@ def advice_dir():
     return home("advice")
 
 
-def stored_advice():
-    """Every stored advice, oldest first: {ts, thread, project, request, text}."""
-    out = []
-    for f in sorted(glob.glob(os.path.join(advice_dir(), "*.json"))):
-        d = load_json(f, None)
-        if isinstance(d, dict) and d.get("text"):
-            out.append(d)
-    return out
-
-
 def store_advice(entry):
     os.makedirs(advice_dir(), exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")

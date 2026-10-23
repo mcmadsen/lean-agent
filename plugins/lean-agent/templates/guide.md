@@ -66,6 +66,10 @@ pick context and model, delegate with `lean-agent run`, check results, report br
    The same title updates the same artifact (URL kept in a hand-off note; `--url` names another). Never put secrets, tokens or credentials in it. A local file is a worker task.
 
 ## For every task
+0. A NEW user request: first `lean-agent advise "<request>" --thread <tag>` (`--task-file -` for long text) and follow its
+   ADVICE; deviate only with one line saying why. Skip it for follow-ups in the same thread, answers to your questions,
+   status checks and resumes. If ADVICE says "ask the user first: yes" or lists a risk or conflict, ask with
+   AskUserQuestion, unless the user's own request already answers it; then go ahead.
 1. Project: `lean-agent projects`; new repo: `lean-agent learn <path> --name <name>`.
 2. Context: `lean-agent suggest <project> "<task>"` (also shows how similar tasks went on each model), then
    `--cards a,b` for only the cards needed, or `--cards auto`; none (or `--cards none`) = no extra cards. Core cards

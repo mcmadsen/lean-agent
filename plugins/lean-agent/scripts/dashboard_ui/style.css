@@ -97,6 +97,7 @@ h1,h2{margin:0}
 .opt:hover{background:var(--sunken)}.opt.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
 .opt small{display:block;font-weight:400;opacity:.8;margin-top:2px}
 .opts{display:flex;flex-direction:column;gap:8px}
+.advice{max-width:520px;margin-top:4px}.advice summary{cursor:pointer}.advice pre{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}
 .sysl{display:flex;align-items:center;gap:8px;justify-content:center;min-width:0;text-align:center;overflow-wrap:anywhere;font:400 12px/1.4 var(--mono);color:var(--muted)}
 .sysl.bad{color:var(--bad)}
 .composer-wrap{padding:12px 28px 20px;background:var(--bg)}

@@ -454,7 +454,9 @@ class CliTest(unittest.TestCase):
         for text in ("The orchestrator only orchestrates", "Every user request becomes a worker task",
                      "You never read project files, run project commands", "`lean-agent remember", "`#` memory message", "list/run MCP servers",
                      "--cards auto", "lean-agent review <project> --decide-gaps", "show the user only its summary",
-                     "AskUserQuestion, one question per gap", "blocked-run triage", "delegate the decision"):
+                     "AskUserQuestion, one question per gap", "blocked-run triage", "delegate the decision",
+                     'A NEW user request: first `lean-agent advise "<request>"', "deviate only with one line saying why",
+                     "unless the user's own request already answers it"):
             self.assertIn(text, flat)
 
     def test_duplicate_launch_guard_ref_and_extra_cost(self):
@@ -897,6 +899,31 @@ class CliTest(unittest.TestCase):
         self.assertTrue(out["ask"])
         self.assertEqual(out["picker"], [True, True, False, False])  # not the thread it is in, not main
         self.assertEqual(out["sheet"], [True, True])
+
+    def test_dashboard_shows_the_advice_under_the_message_it_followed(self):
+        import shutil
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node isn't installed")
+        with open(os.path.join(os.path.dirname(CLI), "dashboard_ui", "chat.js")) as fh:
+            js = fh.read()
+        fn = js[js.index("function adviceHtml"):js.index("function drawChat")]
+        probe = """const esc=s=>String(s).replace(/</g,"&lt;");
+        const chat={advice:[{ts:"2026-10-23T10:00:05",text:"ADVICE\\nsuggested: <run>"},{ts:"2026-10-23T10:05:00",text:"ADVICE\\nsecond"}]};
+        """ + fn + """
+        const m1={ts:"2026-10-23T10:00:00"},m2={ts:"2026-10-23T10:04:00"},m3={ts:"2026-10-23T10:09:00"};
+        const out=[adviceHtml(m1,m2),adviceHtml(m2,m3),adviceHtml(m3,null)];
+        chat.advice=[];out.push(adviceHtml(m1,m2));
+        console.log(JSON.stringify(out));"""
+        p = subprocess.run([node, "-e", probe], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        first, second, none, empty = json.loads(p.stdout)
+        self.assertIn("<summary", first)
+        self.assertIn("Advice", first)
+        self.assertIn("suggested: &lt;run>", first)
+        self.assertNotIn("second", first)  # after the next message: it belongs to that one
+        self.assertIn("second", second)
+        self.assertEqual((none, empty), ("", ""))
 
     def test_dashboard_cleared_marker_and_the_context_sheet_threshold(self):
         out = self._page_probe("""
@@ -3013,6 +3040,15 @@ class CliTest(unittest.TestCase):
             self.assertEqual(call("/api/action", {"do": "note-edit", "n": 7, "text": "x"})[0], 400)
             self.assertFalse(json.loads(urllib.request.urlopen(f"{base}/api/state?t={token}", timeout=5).read())["service"]["up"])
             self.assertTrue(call("/api/action", {"do": "note-done", "n": 1})[1]["ok"])
+            adv = os.path.join(self.env["LEAN_AGENT_HOME"], "advice")  # what `lean-agent advise` stored: shown per thread
+            os.makedirs(adv)
+            for name, thread, ts in (("a", "main", "2026-10-23T10:00:05"), ("b", "7", "2026-10-23T10:01:00")):
+                with open(os.path.join(adv, name + ".json"), "w") as fh:
+                    json.dump({"ts": ts, "thread": thread, "text": "ADVICE\nsuggested: " + name}, fh)
+            self.assertEqual(json.loads(urllib.request.urlopen(f"{base}/api/chat?t={token}", timeout=5).read())["advice"],
+                             [{"ts": "2026-10-23T10:00:05", "text": "ADVICE\nsuggested: a"}])
+            self.assertEqual([a["text"][-1] for a in json.loads(urllib.request.urlopen(
+                f"{base}/api/chat?thread=7&t={token}", timeout=5).read())["advice"]], ["b"])
 
             def wait_t(thread, pred, what):
                 for _ in range(100):

@@ -1,4 +1,5 @@
 """Small helpers shared by lean_agent, dashboard, dash_chat and dash_service (stdlib only, so any of them can import it)."""
+import glob
 import json
 import os
 
@@ -58,4 +59,19 @@ def questions_of(inp):
             out.append({"question": q["question"], "header": q.get("header"), "multi": bool(q.get("multiSelect")),
                         "options": [{"label": o.get("label"), "description": o.get("description")}
                                     for o in q.get("options") or [] if isinstance(o, dict) and o.get("label")]})
+    return out
+
+
+def stored_advice(directory, thread=None):
+    """The advice `lean-agent advise` stored in `directory`, oldest first: {ts, thread, project, request, text}
+    (only those of the chat thread `thread` when given)."""
+    out = []
+    for f in sorted(glob.glob(os.path.join(directory, "*.json"))):
+        try:
+            with open(f) as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict) and d.get("text") and (thread is None or d.get("thread") == thread):
+            out.append(d)
     return out
