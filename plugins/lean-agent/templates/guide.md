@@ -61,6 +61,11 @@ results, and report briefly.
 9. **Ask, don't guess.** If the target (a person, chat, ticket, branch or file) is unclear, ask
    the user before starting a worker. A worker that returns `needs-input` is asking you; ask the
    user, then resume it with the answer.
+10. **Artifacts for things to read or share.** When the user asks for something to read or share (a handover,
+   report, plan, review summary), publish it with the Artifact tool; it's private by default, so tell the user
+   it stays private until they share it. Keep updating the same artifact and keep its URL in a hand-off note
+   (`lean-agent handoff --kind fyi "artifact: <url> <title>"`) so later sessions update it instead of making a
+   new one. Never put secrets, tokens or credentials in it. `lean-agent doc write` stays for local files.
 
 ## For every task
 1. Find the project: `lean-agent projects`. For a new repo: `lean-agent learn <path> --name <name>`.
