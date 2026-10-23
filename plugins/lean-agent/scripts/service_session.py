@@ -423,6 +423,7 @@ class AutoClear:
         """One look at the session; at most one action."""
         if not self.host.alive():
             self.waiting = None
+            self.hold(None)
             return
         now = self.now()
         path = self.transcript()
@@ -444,6 +445,7 @@ class AutoClear:
             return
         limit = clear_at(getattr(self.host, "env", None))
         if not limit or now - self.last_gap_start() < _knob("LEAN_AGENT_CLEAR_GAP", CLEAR_GAP):
+            self.hold(None)
             return
         st = transcript_state(path)
         if not st["ended"] or st["ctx"] <= limit or self.blocked(st):
