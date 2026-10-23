@@ -7,9 +7,11 @@ import shutil
 import os
 import subprocess
 import re
+import signal
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import types
 import unittest
@@ -4629,14 +4631,14 @@ class CliTest(unittest.TestCase):
         self.assertIn("lean-agent hand-off", hook["additionalContext"])
         home = self.env["LEAN_AGENT_HOME"]
         slug = "".join(c if c.isalnum() else "-" for c in os.path.realpath(self.cli("home").stdout.strip()))
-        first = [f for f in os.listdir(os.path.join(self.env["CLAUDE_CONFIG_DIR"], "projects", slug)) if "fake-clear" not in f]
+        first = [f for f in os.listdir(os.path.join(self.env["CLAUDE_CONFIG_DIR"], "projects", slug)) if f != clear["sid"] + ".jsonl"]
         records = self.read_jsonl(os.path.join(self.env["CLAUDE_CONFIG_DIR"], "projects", slug, first[0]))
         texts = [r["message"]["content"] if isinstance(r["message"]["content"], str) else r["message"]["content"][0].get("text")
                  for r in records if r.get("message")]
         self.assertEqual(texts[-2:], ["Checkpoint now: run lean-agent checkpoint with your soft state, then reply "
                                       "'checkpointed'", "checkpointed"])
-        with open(os.path.join(home, "logs", "session.log"), "rb") as fh:
-            self.assertIn(b"auto-clear: /clear sent (checkpointed)", fh.read())
+        with open(os.path.join(home, "logs", "debug.log"), "rb") as fh:
+            self.assertIn(b"DEBUG auto-clear: /clear sent (checkpointed)", fh.read())
         # a second long turn straight after: not cleared again within 10 minutes
         ss.send("again")
         self.wait_for(lambda: "echo: again" in json.dumps(self.read_jsonl(os.path.join(
@@ -4649,7 +4651,7 @@ class CliTest(unittest.TestCase):
         p, log, ss = self.auto_clear_up(50000, FAKE_NO_CHECKPOINT="1", LEAN_AGENT_CLEAR_WAIT="1.5")
         ss.send("hello")
         self.wait_for(lambda: self.clears(log), "the clear after the wait", secs=20)
-        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "logs", "session.log"), "rb") as fh:
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "logs", "debug.log"), "rb") as fh:
             self.assertIn(b"no reply in time", fh.read())
 
     def test_up_auto_clear_not_while_a_permission_is_pending_nor_below_nor_off(self):
@@ -4683,6 +4685,190 @@ class CliTest(unittest.TestCase):
 
     def test_up_auto_clear_off_at_zero(self):
         self.no_clear_for(90000, "0")
+
+    def cleared_up(self, **env):
+        """`up` with the fake session, after one auto clear; returns (process, log, bridge, new session id)."""
+        p, log, ss = self.auto_clear_up(50000, **env)
+        ss.send("hello")
+        self.wait_for(lambda: self.clears(log), "the clear")
+        sid = self.clears(log)[0]["sid"]
+        self.wait_for(lambda: ss.info().get("session_id") == sid, "up.json to follow the clear")
+        self.assertTrue(ss.info()["transcript"].endswith(sid + ".jsonl"))
+        return p, log, ss, sid
+
+    def service_record(self):
+        return _load_json(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json"))
+
+    def test_up_restart_after_an_auto_clear_resumes_the_post_clear_session(self):
+        p, log, ss, sid = self.cleared_up()
+        first = self.service_record()["chain"][0]
+        p.terminate()
+        p.wait(timeout=20)
+        p2, log2, ss = self.start_up("--name", "la")
+        self.assertEqual(self.read_jsonl(log)[-1]["argv"][-2:], ["--resume", sid])
+        self.assertEqual(ss.info()["session_id"], sid)
+        # the transcript chain survives the restart
+        chain = self.service_record()["chain"]
+        self.assertEqual(chain[0], first)
+        self.assertTrue(chain[-1].endswith(sid + ".jsonl"))
+        self.assertEqual(len(self.clears(log)), 1)
+        # and the persisted gap stops a second clear right after the restart
+        ss.send("again")
+        self.wait_for(lambda: "echo: again" in json.dumps(self.read_jsonl(os.path.join(
+            self.env["CLAUDE_CONFIG_DIR"], "projects", "".join(c if c.isalnum() else "-" for c in os.path.realpath(
+                self.cli("home").stdout.strip())), sid + ".jsonl"))), "the turn after the restart")
+        time.sleep(1.0)
+        self.assertEqual(len(self.clears(log)), 1)
+        self.assertNotIn("Checkpoint now", json.dumps(self.read_jsonl(log)[2:]))
+
+    def test_up_respawn_after_an_auto_clear_resumes_the_post_clear_session(self):
+        p, log, ss, sid = self.cleared_up(LEAN_AGENT_SESSION_QUICK_EXIT="0")
+        n = len(self.read_jsonl(log))
+        os.kill(ss.info()["pid"], signal.SIGKILL)  # the session dies; up starts it again in the same process
+        self.wait_for(lambda: any("argv" in r for r in self.read_jsonl(log)[n:]), "the respawn", secs=30)
+        argv = [r for r in self.read_jsonl(log)[n:] if "argv" in r][0]["argv"]
+        self.assertEqual(argv[-2:], ["--resume", sid])
+
+    def test_up_fresh_resets_the_chain(self):
+        p, log, ss, sid = self.cleared_up()
+        self.assertTrue(self.service_record()["chain"])
+        p.terminate()
+        p.wait(timeout=20)
+        p2, _, ss = self.start_up("--name", "la", "--fresh")
+        self.assertIn("--session-id", self.read_jsonl(log)[-1]["argv"])
+        self.assertNotEqual(ss.info()["session_id"], sid)
+        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")))
+
+    class FakeHost:
+        def __init__(self):
+            self.last_input, self.pasted, self.stopping = 0, [], threading.Event()
+
+        def alive(self):
+            return True
+
+        def paste(self, text):
+            self.pasted.append(text)
+
+    def auto_clear_unit(self):
+        """An AutoClear on a stand-in host, a transcript this test writes and a clock it sets."""
+        sys.path.insert(0, os.path.dirname(CLI))
+        import service_session
+        home = tempfile.mkdtemp()
+        os.makedirs(os.path.join(home, "chat"))
+        old = {k: os.environ.get(k) for k in ("LEAN_AGENT_HOME", "LEAN_AGENT_CLEAR_AT", "LEAN_AGENT_CLEAR_GAP",
+                                              "LEAN_AGENT_CLEAR_IDLE", "LEAN_AGENT_LOG_DIR")}
+        os.environ.update(LEAN_AGENT_HOME=home, LEAN_AGENT_CLEAR_AT="40000", LEAN_AGENT_LOG_DIR=os.path.join(home, "logs"))
+        for k in ("LEAN_AGENT_CLEAR_GAP", "LEAN_AGENT_CLEAR_IDLE"):
+            os.environ.pop(k, None)
+        self.addCleanup(lambda: [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+                                 for k, v in old.items()])
+        tr = os.path.join(home, "s1.jsonl")
+        with open(os.path.join(home, "chat", "service.json"), "w") as fh:
+            json.dump({"session_id": "s1", "transcript_path": tr, "source": "startup", "ts": 1}, fh)
+        clock = [1_000_000.0]
+        host = self.FakeHost()
+        ac = service_session.AutoClear(host, now=lambda: clock[0])
+
+        def turn(text, ctx=50000):
+            with open(tr, "a") as fh:
+                fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "id": os.urandom(4).hex(),
+                         "content": [{"type": "text", "text": text}], "stop_reason": "end_turn",
+                         "usage": {"input_tokens": 1, "cache_read_input_tokens": ctx}}}) + "\n")
+        return ac, host, clock, turn, home
+
+    def test_auto_clear_waits_for_typing_to_stop_and_keeps_ten_minutes_between_clears(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        turn("done")
+        host.last_input = clock[0] - 5  # the user typed 5 s ago: leave the session alone
+        ac.tick()
+        self.assertEqual(host.pasted, [])
+        clock[0] += 60
+        ac.tick()
+        self.assertEqual(len(host.pasted), 1)
+        self.assertIn("Checkpoint now", host.pasted[0])
+        turn("checkpointed")
+        ac.tick()
+        self.assertEqual(host.pasted[-1], "/clear")
+        # the hook records the clear; a long turn in the new session does not clear again for 10 minutes
+        with open(os.path.join(home, "chat", "service.json"), "w") as fh:
+            json.dump({"session_id": "s2", "transcript_path": os.path.join(home, "s1.jsonl"), "source": "clear",
+                       "ts": clock[0]}, fh)
+        turn("another long turn")
+        clock[0] += 10
+        ac2 = type(ac)(host, now=lambda: clock[0])  # a restart of up sees the same gap
+        ac2.tick()
+        self.assertEqual(len(host.pasted), 2)
+        for step in (20, 270, 299):  # 30 s, 300 s, 599 s after the clear
+            clock[0] += step
+            ac.tick()
+            self.assertEqual(len(host.pasted), 2, step)
+        clock[0] += 2
+        ac.tick()
+        self.assertEqual(len(host.pasted), 3)
+
+    def test_auto_clear_gives_up_a_round_while_the_turn_still_runs(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        turn("done")
+        ac.tick()
+        self.assertIn("Checkpoint now", host.pasted[0])
+        with open(os.path.join(home, "s1.jsonl"), "a") as fh:  # the checkpoint turn is still running a tool
+            fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "id": "t1", "content": [
+                {"type": "tool_use", "id": "x", "name": "Bash", "input": {}}], "stop_reason": "tool_use"}}) + "\n")
+        clock[0] += 500
+        ac.tick()
+        self.assertEqual(len(host.pasted), 1)  # no /clear in the middle of the turn
+        self.assertIsNone(ac.waiting)
+        turn("done again")  # at the next turn end it asks again
+        ac.tick()
+        self.assertEqual(len(host.pasted), 2)
+        self.assertIn("Checkpoint now", host.pasted[1])
+
+    def test_permission_pending_ignores_requests_older_than_the_hooks_wait(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import service_session
+        home = tempfile.mkdtemp()
+        perm = os.path.join(home, "chat", "perm")
+        os.makedirs(perm)
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = home
+        self.addCleanup(lambda: os.environ.pop("LEAN_AGENT_HOME", None) if old is None else
+                        os.environ.__setitem__("LEAN_AGENT_HOME", old))
+        req = os.path.join(perm, "r1.json")
+        with open(req, "w") as fh:
+            json.dump({"tool_name": "Bash"}, fh)
+        self.assertTrue(service_session.permission_pending("s1"))
+        gone = time.time() - 300 - 61  # the hook gave up after 300 s: nobody is waiting any more
+        os.utime(req, (gone, gone))
+        self.assertFalse(service_session.permission_pending("s1"))
+        os.environ["LEAN_AGENT_DASH_PERMISSION_WAIT"] = "1000"
+        self.addCleanup(lambda: os.environ.pop("LEAN_AGENT_DASH_PERMISSION_WAIT", None))
+        self.assertTrue(service_session.permission_pending("s1"))
+
+    def test_service_note_new_conversation_when_the_switch_is_not_a_clear(self):
+        ds, home, proj, tr, up = self._follow_env()
+        self._user_file(tr, "first", time.time())
+        new = os.path.join(proj, "s2.jsonl")
+        self._user_file(new, "second", time.time())
+        self._chain_record(home, [tr, new], sources={new: "compact"})
+        m = ds.Model()
+        m.refresh()
+        evs = m.snapshot("main", 0)["events"]
+        self.assertEqual([e["kind"] for e in evs if e["kind"] in ("user", "cleared", "note")], ["user", "note", "user"])
+        self.assertEqual([e["text"] for e in evs if e["kind"] == "note"], ["new conversation"])
+
+    def test_brief_run_keeps_the_low_budget_warning(self):
+        self.cli("learn", self.proj)
+        self.cli("limits", "--5h", "4000")
+        self.write_usage(self.lean_project_dir("-work-0101-000000-abcd"), 0.2, "claude-sonnet-5-5", 3500, "z")
+        out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", LEAN_AGENT_BRIEF="1").stdout
+        self.assertIn("low: prefer -m haiku", out)
+        self.assertNotIn("tokens: input", out)  # the rest of the detail stays out of brief mode
+
+    def test_brief_run_without_a_low_budget_has_no_budget_line(self):
+        self.cli("learn", self.proj)
+        self.cli("limits", "--5h", "400000")
+        out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", LEAN_AGENT_BRIEF="1").stdout
+        self.assertNotIn("budget left", out)
 
     def test_brief_review(self):
         self.git_project()

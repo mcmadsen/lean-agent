@@ -1660,7 +1660,7 @@ def cmd_run(a):
               f"{'' if measured else ' (assumed)'} · {model_part}")
     line, low = budget_line()
     if line:
-        detail("  " + line)
+        (print if low else detail)("  " + line)  # brief mode keeps the low-budget warning
     limit = env_num("LEAN_AGENT_RESULT_CHARS", 12000)
     if summary and role in ("reviewer", "reuse-check") and BRIEF:
         detail(summary)  # the review's findings follow; the reviewer's prose is in `runs --show`
@@ -6003,6 +6003,10 @@ def cmd_up(a):
     set_home_model(h, a.model)
     if a.fresh:
         drop_bridge_pointers(h)
+        try:
+            os.remove(home("chat", "service.json"))  # the transcript chain starts over with the new conversation
+        except OSError:
+            pass
     if not is_trusted(h):
         print(f"lean-agent: warning: {TRUST_HINT}", file=sys.stderr)
     off = disable_home_mcp(h)
@@ -6088,11 +6092,11 @@ def host_session(cmd, extra, env, h, name, dash_only, permission_mode):
     the dashboard types into. A restart of `up` resumes the same conversation when its transcript exists."""
     import signal
     import threading
-    sid = (load_json(home("up.json"), {}).get("session_id")) or str(uuid.uuid4())
-    if not re.fullmatch(r"[0-9a-fA-F-]{36}", sid):
-        sid = str(uuid.uuid4())
-
     def build():
+        # up.json names the session to resume, and the SessionStart hook moves it on a /clear: read it at every spawn
+        sid = load_json(home("up.json"), {}).get("session_id") or str(uuid.uuid4())
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", sid):
+            sid = str(uuid.uuid4())
         resume = os.path.exists(service_session.transcript_path(h, sid))
         argv = list(cmd)
         if not dash_only:

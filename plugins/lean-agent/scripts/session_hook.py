@@ -105,6 +105,26 @@ def owned(home, ppid=parent_pid, cmd=argv_of, wait=3.0):
     return False
 
 
+def follow_up(home, event):
+    """up.json names the session a restart of `up` resumes: when this event starts a new session id (a /clear, or a
+    compaction that starts a new id), it records that id and its transcript, atomically."""
+    path = os.path.join(home, "up.json")
+    try:
+        with open(path) as fh:
+            up = json.load(fh)
+    except (OSError, ValueError):
+        return
+    if not isinstance(up, dict) or up.get("session_id") == event["session_id"]:
+        return
+    up["session_id"] = event["session_id"]
+    if event.get("transcript_path"):
+        up["transcript"] = event["transcript_path"]
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(up, fh, indent=2)
+    os.replace(tmp, path)
+
+
 def main(ppid=parent_pid, cmd=argv_of, wait=3.0):
     if os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1":
         return
@@ -130,6 +150,7 @@ def main(ppid=parent_pid, cmd=argv_of, wait=3.0):
         json.dump({"session_id": event["session_id"], "transcript_path": event.get("transcript_path"),
                    "source": event.get("source"), "ts": now, "chain": chain, "chain_meta": meta}, fh)
     os.replace(tmp, path)
+    follow_up(home, event)
     if event.get("source") == "clear":
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import compact_hook
