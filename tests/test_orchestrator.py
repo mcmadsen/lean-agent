@@ -5562,6 +5562,69 @@ class CliTest(unittest.TestCase):
         self.assertIn("failed", w.stdout)
         p.communicate(timeout=30)
 
+    def write_ledger(self, *entries):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        with open(os.path.join(home, "ledger.jsonl"), "a") as fh:
+            for e in entries:
+                fh.write(json.dumps(dict({"project": "proj", "model": "haiku", "status": "done"}, **e)) + "\n")
+
+    def test_runs_wait_last_skips_a_running_role_run(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(os.path.join(home, "running"))
+        for rid, role, started in (("ord1", None, "2026-01-01T00:00:01"), ("rev1", "reviewer", "2026-01-01T00:00:02")):
+            with open(os.path.join(home, "running", rid + ".json"), "w") as fh:
+                json.dump({"pid": os.getpid(), "run": rid, "role": role, "started": started, "model": "haiku",
+                           "project": "proj", "task": "t"}, fh)
+        t = self.cli("runs", "--wait", "last", "--timeout", "1", check=False, LEAN_AGENT_WAIT_POLL="0.2")
+        self.assertEqual(t.returncode, 124)
+        self.assertIn("still running: ord1", t.stdout)
+        self.assertNotIn("rev1", t.stdout)
+
+    def test_runs_wait_retries_while_the_summary_file_is_written(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        wd = os.path.join(home, "work", "r9")
+        os.makedirs(wd)
+        self.write_ledger({"id": "r9", "ts": "2999-01-01T00:00:00", "workdir": wd})
+
+        def late():
+            time.sleep(0.6)
+            with open(os.path.join(wd, "summary-1.txt"), "w") as fh:
+                fh.write("run r9 · the late summary\n")
+        th = threading.Thread(target=late)
+        th.start()
+        w = self.cli("runs", "--wait", "r9", LEAN_AGENT_WAIT_POLL="0.2")
+        th.join()
+        self.assertIn("the late summary", w.stdout)
+
+    def test_runs_show_marks_the_run_collected(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        wd = os.path.join(home, "work", "r8")
+        os.makedirs(wd)
+        with open(os.path.join(wd, "summary-1.txt"), "w") as fh:
+            fh.write("run r8 · shown\n")
+        self.write_ledger({"id": "r8", "ts": "2999-01-01T00:00:00", "workdir": wd})
+        self.assertEqual(self.cli("runs", "--wait", "all").stdout.count("shown"), 1)  # waiting collects it once
+        self.write_ledger({"id": "r7", "ts": "2999-01-01T00:00:01", "workdir": wd})
+        self.cli("runs", "--show", "r7")
+        self.assertIn("Nothing to collect.", self.cli("runs", "--wait", "all").stdout)
+        self.assertIn("r7", json.load(open(os.path.join(home, "collected.json"))))
+
+    def test_a_ledger_older_than_collected_json_has_nothing_to_collect(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_common
+        home = self.env["LEAN_AGENT_HOME"]
+        self.write_ledger({"id": "old1", "ts": "2020-01-01T00:00:00"}, {"id": "old2", "ts": "2020-01-02T00:00:00"},
+                          {"id": "old2", "ts": "2020-01-03T00:00:00"})
+        self.assertEqual(lean_common.uncollected_ids(home), [])
+        self.assertTrue(os.path.exists(os.path.join(home, "collected.json")))
+        self.assertEqual(json.load(open(os.path.join(home, "collected.json"))).keys(), {"_cutoff"})  # no old ids written
+        self.assertIn("Nothing to collect.", self.cli("runs", "--wait", "all").stdout)
+        self.write_ledger({"id": "new1", "ts": "2999-01-01T00:00:00"}, {"id": "new1", "ts": "2999-01-02T00:00:00"})
+        self.assertEqual(lean_common.uncollected_ids(home), ["new1"])  # a resumed run counts once
+        lean_common.mark_collected_ids(home, ["new1"])
+        self.assertEqual(lean_common.uncollected_ids(home), [])
+
     def test_runs_wait_times_out_with_a_nonzero_exit(self):
         p = self.start_run(turns="8", sleep="1")
         [m] = self.running_markers()
@@ -5720,6 +5783,29 @@ class CliTest(unittest.TestCase):
         self.assertEqual(host.pasted[-1], "/clear")
         ac.tick()
         self.assertEqual(len(host.pasted), 2)  # once
+
+    def test_a_clear_request_with_a_missing_transcript_gives_up_after_one_requeue(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        os.environ.pop("LEAN_AGENT_CLEAR_AT")
+        # the transcript s1.jsonl is never written: nothing ever "ends"
+        self.queue_clear(home)
+        up = lambda: json.load(open(os.path.join(home, "up.json")))
+        asked = up()["clear_requested"]
+        clock[0] = asked  # the request is stamped with the wall clock; run this test on it
+        ac.tick()
+        self.assertEqual(host.pasted, [])
+        self.assertEqual(up()["clear_requested"], asked)
+        clock[0] = asked + 121  # past the checkpoint wait: queued once more
+        ac.tick()
+        again = up()["clear_requested"]
+        self.assertGreater(again, asked)
+        self.assertIsNone(up().get("clear_status"))
+        clock[0] = again + 121  # and again past it: reported, not queued forever
+        ac.tick()
+        self.assertIsNone(up().get("clear_requested"))
+        self.assertRegex(up()["clear_status"], r"^clear not done: the transcript was not found")
+        ac.tick()
+        self.assertEqual(host.pasted, [])
 
     def test_clear_request_waits_while_a_permission_prompt_is_pending(self):
         ac, host, clock, turn, home = self.auto_clear_unit()

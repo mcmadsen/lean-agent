@@ -41,7 +41,7 @@ import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
 import service_session  # noqa: E402
-from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive as dashboard_pid_alive, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids  # noqa: E402
+from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive as dashboard_pid_alive, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -1647,6 +1647,7 @@ def _cmd_run(a):
         return rc
     print(f"run {run_id} started · {model} · {slug}" + (" (resumed)" if prev else "") +
           f" · see it later with `lean-agent runs --show {run_id}`", file=sys.stderr, flush=True)
+    seed_collected(home())  # runs recorded from here on can be told apart from a ledger older than collected.json
     running_key = launch_key or run_id  # every run is listed while it runs (the dashboard, the status line)
     save_json(home("running", running_key + ".json"), {"pid": os.getpid(), "started": now_iso(), "run": run_id,
                                                       "task": task[:2000], "model": model, "project": slug,
@@ -5900,7 +5901,8 @@ def wait_for_runs(target, timeout):
             print("Nothing to collect.")
             return 0
     elif target == "last":
-        ids = [live[-1][0]] if live else [latest_run_id(ordinary=True)]
+        mine = [rid for rid, m in live if not m.get("role")]  # the orchestrator's own work, not reviewer/helper runs
+        ids = [mine[-1]] if mine else [latest_run_id(ordinary=True)]
     else:
         ids = [target]
         if target not in {rid for rid, _ in live} and not any(r["id"] == target for r in ledger()):
@@ -7172,8 +7174,9 @@ def clear_at_text():
     else:
         text = "off (clear with `lean-agent clear`)"
     text += f" (the orchestrator compacts at ~{point:,})"
-    hold = load_json(home("up.json"), {}).get("clear_hold")
-    return text + (f" · clear held: {hold}" if hold else "")
+    up = load_json(home("up.json"), {})
+    return text + (f" · clear held: {up['clear_hold']}" if up.get("clear_hold") else "") \
+        + (f" · {up['clear_status']}" if up.get("clear_status") else "")
 
 
 def cmd_config(a):
