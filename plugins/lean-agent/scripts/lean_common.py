@@ -70,16 +70,29 @@ def _now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+def seed_collected(lean_home):
+    """The collected.json of this home: created on first use with a cutoff (now), so ledger entries from before it
+    (a ledger older than collected.json) count as collected without writing all their ids."""
+    path = os.path.join(lean_home, "collected.json")
+    done = read_json(path, None)
+    if not isinstance(done, dict):
+        with file_lock(path):
+            done = read_json(path, None)
+            if not isinstance(done, dict):
+                done = {COLLECTED_CUTOFF: _now()}
+                write_json_atomic(path, done)
+    return done
+
+
 def mark_collected_ids(lean_home, run_ids):
-    """Record in collected.json that these runs' results were shown to someone; seeds the cutoff on first use."""
+    """Record in collected.json that these runs' results were shown to someone."""
     ids = [r for r in run_ids if r]
     if not ids:
         return
+    seed_collected(lean_home)
     path = os.path.join(lean_home, "collected.json")
     with file_lock(path):
-        done = read_json(path, None)
-        if not isinstance(done, dict):
-            done = {COLLECTED_CUTOFF: _now()}
+        done = read_json(path, {})
         done.update({r: _now() for r in ids})
         write_json_atomic(path, done)
 
@@ -89,14 +102,7 @@ def uncollected_ids(lean_home, live_ids=()):
     (not in collected.json, recorded after its cutoff), oldest first. The first call without a collected.json seeds
     the cutoff, so a ledger from before this existed isn't reported as waiting. A resumed run counts once, by its
     latest ledger entry."""
-    path = os.path.join(lean_home, "collected.json")
-    done = read_json(path, None)
-    if not isinstance(done, dict):
-        with file_lock(path):
-            done = read_json(path, None)
-            if not isinstance(done, dict):
-                done = {COLLECTED_CUTOFF: _now()}
-                write_json_atomic(path, done)
+    done = seed_collected(lean_home)
     cutoff = done.get(COLLECTED_CUTOFF) or ""
     latest = {}
     try:
