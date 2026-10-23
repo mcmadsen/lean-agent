@@ -404,6 +404,42 @@ class CliTest(unittest.TestCase):
         self.assertIn("didn't report what it filed", p.stderr)
         self.assertNotEqual(self.cli("remember", check=False).returncode, 0)
 
+    def test_advise_runs_a_read_only_advisor_stores_and_caps_the_advice(self):
+        self.cli("learn", self.proj)
+        adv = os.path.join(self.env["LEAN_AGENT_HOME"], "advice")
+        block = "ADVICE\n" + "\n".join(f"line {i}" for i in range(1, 21))  # 21 lines: the command keeps 15
+        out = self.cli("advise", "Fix the export retry loop", "--thread", "#7", FAKE_ANSWER="Here.\n" + block).stdout
+        lines = out.strip().splitlines()
+        self.assertEqual((len(lines), lines[0], lines[-1]), (15, "ADVICE", "line 14"))
+        call = self.calls()[-1]
+        argv = call["argv"]
+        self.assertIn("Fix the export retry loop", call["task"])
+        self.assertIn("Last runs of this project", call["task"])
+        self.assertEqual(argv[argv.index("--model") + 1], "haiku")
+        self.assertNotIn("Write", argv[argv.index("--tools") + 1].split(","))
+        allowed = argv[argv.index("--allowedTools") + 1]
+        lean = os.path.realpath(os.path.join(os.path.dirname(CLI), "..", "bin", "lean-agent"))
+        for sub in ("memory list", "cards", "todo list", "brief"):
+            self.assertIn(f"Bash({lean} {sub}:*)", allowed)
+        self.assertNotIn("handoff", allowed)
+        files = sorted(glob.glob(os.path.join(adv, "*.json")))
+        self.assertEqual(len(files), 1)
+        with open(files[0]) as fh:
+            kept = json.load(fh)
+        self.assertEqual((kept["thread"], kept["text"]), ("7", out.strip()))
+        self.assertTrue(kept["project"].startswith("proj"))
+        self.assertEqual(self.cli("advise", "--task-file", "-", input="again", FAKE_ANSWER="ADVICE\nsuggested: answer from state").stdout.strip(),
+                         "ADVICE\nsuggested: answer from state")
+        with open(sorted(glob.glob(os.path.join(adv, "*.json")))[-1]) as fh:
+            self.assertEqual(json.load(fh)["thread"], "main")
+        p = self.cli("advise", "x", check=False, FAKE_ANSWER="No idea.")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("ADVICE block", p.stderr)
+        self.assertNotEqual(self.cli("advise", check=False).returncode, 0)
+        for i in range(55):  # the last 50 are kept
+            self.cli("advise", f"r{i}", FAKE_ANSWER="ADVICE\nknown: none")
+        self.assertEqual(len(glob.glob(os.path.join(adv, "*.json"))), 50)
+
     def test_run_todo_new_makes_the_queue_item_from_why(self):
         self.cli("learn", self.proj)
         out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "Export: cap the retry loop", "--todo", "new", "t").stdout
