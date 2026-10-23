@@ -202,9 +202,9 @@ def handoff(hours=RECENT_HOURS):
     if rules:
         lines.append("Standing rules (memory):")
         lines += [f"  - {r}" for r in rules]
-    running = [f"{rid} {m.get('model', '')} {m.get('project', '')}: {m.get('task', '')[:80]}"
-               for rid, m in lean_common.running_runs(home)]
-    live_ids = {s.split()[0] for s in running}
+    live = lean_common.running_runs(home)
+    running = [f"{rid} {m.get('model', '')} {m.get('project', '')}: {m.get('task', '')[:80]}" for rid, m in live]
+    live_ids = {rid for rid, _ in live}
     waiting = lean_common.uncollected_ids(home, live_ids)
     if running or waiting:
         lines.append("Running now: " + ("; ".join(running) if running else "none")
