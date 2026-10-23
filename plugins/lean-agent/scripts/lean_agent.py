@@ -1240,6 +1240,9 @@ def duplicate_launch_guard(a, model, task):
 
 
 def cmd_run(a):
+    if a.resume == "last":  # the latest run, so the command needs no `$(lean-agent runs --last)`
+        runs = ledger()
+        a.resume = runs[-1]["id"] if runs else die("no runs yet")
     if getattr(a, "escalate", None) and not a.resume:
         return run_escalating(a)
     prev = None
@@ -1248,7 +1251,7 @@ def cmd_run(a):
         if not prev or not prev.get("session_id"):
             die(f"no resumable run {a.resume!r}")
     task = " ".join(a.task).strip()
-    if task == "-" or (not task and a.task_file is None and not sys.stdin.isatty()):
+    if task == "-" or a.task_file == "-" or (not task and a.task_file is None and not sys.stdin.isatty()):
         task = sys.stdin.read().strip()
     elif a.task_file:
         task = read_text(a.task_file).strip()
@@ -1802,7 +1805,7 @@ def run_escalating(a):
     the next one."""
     import copy
     models = [m.strip() for m in a.escalate.split(",") if m.strip()]
-    if a.task == ["-"] or (not a.task and a.task_file is None and not sys.stdin.isatty()):
+    if a.task == ["-"] or a.task_file == "-" or (not a.task and a.task_file is None and not sys.stdin.isatty()):
         a.task, a.task_file = [sys.stdin.read().strip()], None  # read once, for every attempt
     rc = 1
     print(f"escalate: {' -> '.join(models)} (the next model only if a run fails)", flush=True)
@@ -7888,7 +7891,7 @@ def build_parser():
     s.add_argument("--max-turns", type=int, default=env_num("LEAN_AGENT_MAX_TURNS", 40))
     s.add_argument("--max-usd", type=float, default=env_num("LEAN_AGENT_RUN_MAX_USD", 3.0, float))
     s.add_argument("--task-file")
-    s.add_argument("--resume", metavar="RUN_ID", help="continue a previous run's session")
+    s.add_argument("--resume", metavar="RUN_ID", help="continue a previous run's session (`last` = the latest run)")
     s.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="model effort for the worker")
     s.add_argument("--worktree", metavar="REF", help="run in a shared lean-agent git worktree of this branch/ref "
                    "(your checkout is never touched; installed deps persist for the next worker)")

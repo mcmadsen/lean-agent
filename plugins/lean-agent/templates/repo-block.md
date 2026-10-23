@@ -16,6 +16,6 @@ Exact syntax (project `{{P}}`):
 ```sh
 lean-agent suggest {{P}} "which tests cover checkout"
 lean-agent run {{P}} -m haiku --why "read-only lookup" --read-only -- "Which tests cover checkout? List file paths only."
-lean-agent run --resume "$(lean-agent runs --last)" -- "Also list the fixtures those tests use."
+lean-agent run --resume last -- "Also list the fixtures those tests use."
 ```
 Use `--task-file <file>` for tasks longer than a line. Leave out `--cards` for no extra cards.

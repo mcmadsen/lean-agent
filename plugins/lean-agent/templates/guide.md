@@ -110,7 +110,7 @@ results, and report briefly.
 5. Write a short, self-contained task (workers can't see this conversation): the goal, the files or
    symbols you know about, and how to check it's done, in a few lines. Long background belongs in a card
    (`card add`) or a file the worker reads, not in your task text: what you write stays in your context.
-   Pass a task file with `--task-file <file>`, or pipe it in with `-`.
+   Pass a task file with `--task-file <file>`, or put it on stdin with `--task-file -` and a heredoc (see the examples).
 6. For a failed CI run, save its log to a file and read it with `lean-agent grep-log <file> [PATTERN]` (the
    errors and failures with a little context), not the whole log. When delegating a fix, tell the worker to run
    the specs that cover the files it changes, including contract specs other commits added.
@@ -125,18 +125,17 @@ lean-agent projects
 lean-agent suggest {{P}} "which tests cover checkout"
 lean-agent cards {{P}} test
 lean-agent run {{P}} -m haiku --why "read-only lookup" --read-only -- "Which tests cover checkout? List file paths only."
-lean-agent run --resume "$(lean-agent runs --last)" -- "Also list the fixtures those tests use."
+lean-agent run --resume last -- "Also list the fixtures those tests use."
 lean-agent runs
 ```
 
-A longer task goes in a file:
+A long task goes on stdin like this (a heredoc; the only way to pass text without a file):
 ```sh
-cat > /tmp/lean-task.md <<'EOF'
+lean-agent run {{P}} -m sonnet --why "small fix with a test" --cards auto --max-usd 1 --task-file - <<'EOF'
 Goal: make the checkout total test pass.
 Known: the test is tests/test_checkout.py; totals are integer cents.
 Done when: the project's test command passes.
 EOF
-lean-agent run {{P}} -m sonnet --why "small fix with a test" --cards auto --max-usd 1 --task-file /tmp/lean-task.md
 ```
 
 Before a pull request (needs a git repo with changes against its base branch):
@@ -261,7 +260,7 @@ lean-agent card unarchive {{P}} checkout-notes
   handoff) as if it were an outside write.
 - Documents for the user (a summary, feedback, a plan): `lean-agent doc write ~/Downloads/<name>.md <<'EOF'`
   ... `EOF` (you have no Write tool; this writes to Downloads, Documents, Desktop, temp or ~/.lean-agent/docs).
-- Before you name a file, spec or path in a worker's task, check it exists (`ls`); a worker told to follow a
+- Before you name a file, spec or path in a worker's task, check it exists (`lean-agent suggest`, or a haiku worker); a worker told to follow a
   spec that isn't there wastes its turns looking. Split a task with many items into a few runs, or say "commit
   each item" (workers in worktrees are told to).
 - Keep the user's board current (the dashboard shows the work queue as cards; it only knows what you record):
