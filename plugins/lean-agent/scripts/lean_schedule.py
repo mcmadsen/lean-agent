@@ -160,7 +160,9 @@ def run_due(log=print):
         stamp = datetime.datetime.now().strftime("%m%d-%H%M")
         out_path = lean_home("scheduled", f"{job['id']}-{stamp}.txt")
         cmd = [sys.executable, os.path.join(HERE, "lean_agent.py"), *job["args"]]
-        env = dict(os.environ, LEAN_AGENT_LAUNCH_GUARD="0", LEAN_AGENT_SCHEDULED=str(job["id"]))
+        # a scheduled job is no part of the orchestrator's current topic: untagged unless the entry names a thread
+        env = dict(os.environ, LEAN_AGENT_LAUNCH_GUARD="0", LEAN_AGENT_SCHEDULED=str(job["id"]),
+                   LEAN_AGENT_THREAD=str(job.get("thread") or "none"))
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=env,
                                stdin=subprocess.DEVNULL)
