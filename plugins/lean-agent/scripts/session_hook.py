@@ -31,7 +31,7 @@ def restarted_fresh(home, event):
         return False
 
 
-def chain_of(old, event, now, fresh=False):
+def chain_of(old, event, now, fresh):
     """The record's chain after this event: `old`'s paths with the event's transcript last (moved there when it was
     already in), with when and why each one started."""
     chain = [p for p in (old.get("chain") or []) if isinstance(p, str)]

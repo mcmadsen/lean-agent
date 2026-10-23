@@ -102,16 +102,19 @@ function drawWorking(){
   if(!w.firstChild)w.innerHTML=`<span class="dot dot-run" aria-hidden="true"></span><span>Orchestrator is working</span><span class="mono mute" aria-hidden="true">· <span data-since="${chat.workStart}"></span></span><span class="hspace"></span><button type="button" class="btn sm" data-act="interrupt">Interrupt</button>`;
   else w.querySelector("[data-since]").dataset.since=chat.workStart;
 }
+function confirmBox(text,yes,act){  // the inline confirm of the Context sheet: act "x" gives data-act x-yes / x-no (id x-no)
+  return `<div class="clearbox" role="alert"><span>${text}</span><span class="acts"><button type="button" class="btn sm danger" data-act="${act}-yes">${yes}</button><button type="button" class="btn sm" data-act="${act}-no" id="${act}-no">Cancel</button></span></div>`;
+}
 function freshHtml(){  // in the Context sheet: Restart fresh (checkpoint, then a new session), with its inline confirm
   if(!chat.service)return "";
   if(chat.fresh==="busy")return `<span class="mono small mute" role="status">Restarting fresh… the orchestrator is checkpointing</span>`;
   if(!chat.fresh)return `<button type="button" class="btn sm" data-act="fresh-ask">Restart fresh…</button>`;
-  return `<div class="clearbox" role="alert"><span>Restart the session with a clean context? It checkpoints first (up to two minutes), then a new session starts from the brief. The thread history stays.</span><span class="acts"><button type="button" class="btn sm danger" data-act="fresh-yes">Restart fresh</button><button type="button" class="btn sm" data-act="fresh-no" id="fresh-no">Cancel</button></span></div>`;
+  return confirmBox("Restart the session with a clean context? It checkpoints first (up to two minutes), then a new session starts from the brief. The thread history stays.","Restart fresh","fresh");
 }
 function clearHtml(){  // in the Context sheet: the button, or its inline confirm
   const task=typeof taskLabel==="function"?taskLabel():"",fb=fallback();
   if(!chat.confirm)return `<button type="button" class="btn sm" data-act="clear-ask">${fb?"Clear thread…":chat.service?"Clear session…":"Start thread over…"}</button>`;
-  return `<div class="clearbox" role="alert"><span>${fb?`Clear this thread? Only ${chat.key==="main"?"the orchestrator":"this task's"} thread is cleared; nothing else is touched.`:chat.service?`Clear the whole session? This clears the conversation in the dashboard, the Claude app and the terminal${task?", not only "+esc(task):""}.`:"Start this thread over? The old conversation stays in Claude Code's history."}</span><span class="acts"><button type="button" class="btn sm danger" data-act="clear-yes">${fb?"Clear thread":chat.service?"Clear session":"Start over"}</button><button type="button" class="btn sm" data-act="clear-no" id="clear-no">Cancel</button></span></div>`;
+  return confirmBox(fb?`Clear this thread? Only ${chat.key==="main"?"the orchestrator":"this task's"} thread is cleared; nothing else is touched.`:chat.service?`Clear the whole session? This clears the conversation in the dashboard, the Claude app and the terminal${task?", not only "+esc(task):""}.`:"Start this thread over? The old conversation stays in Claude Code's history.",fb?"Clear thread":chat.service?"Clear session":"Start over","clear");
 }
 function drawClear(focus){
   if(typeof drawSheet==="function")drawSheet();

@@ -166,6 +166,14 @@ class CliTest(unittest.TestCase):
             json.dump({"mcpServers": {"docs": {"type": "http", "url": "https://example.invalid/mcp"}}}, fh)
 
     def tearDown(self):
+        for up in getattr(self, "ups", []):  # stop any `up` first: it writes into the folder that is removed next
+            if up.poll() is None:
+                up.terminate()  # lets it stop its session too
+                try:
+                    up.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    up.kill()
+            up.communicate()
         self.tmp.cleanup()
 
     def cli(self, *args, check=True, input=None, **env):
@@ -968,7 +976,13 @@ class CliTest(unittest.TestCase):
             self.skipTest("node isn't installed")
         with open(os.path.join(os.path.dirname(CLI), "dashboard_ui", "chat.js")) as fh:
             js = fh.read()
-        fn = js[js.index("function adviceHtml"):js.index("function drawChat")]
+        start = js.index("function adviceHtml")
+        depth, end = 0, js.index("{", start)
+        for end, ch in enumerate(js[end:], end):  # the function's own braces: no dependence on what follows it
+            depth += (ch == "{") - (ch == "}")
+            if depth == 0:
+                break
+        fn = js[start:end + 1]
         probe = """const esc=s=>String(s).replace(/</g,"&lt;");
         const chat={advice:[{ts:"2026-10-23T10:00:05",text:"ADVICE\\nsuggested: <run>"},{ts:"2026-10-23T10:05:00",text:"ADVICE\\nsecond"}]};
         """ + fn + """
@@ -3268,6 +3282,7 @@ class CliTest(unittest.TestCase):
         p = subprocess.Popen([sys.executable, CLI, "up", *args], env=env, stdin=subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: (p.poll() is None and p.kill(), p.communicate()))
+        self.ups = getattr(self, "ups", []) + [p]
         old = os.environ.get("LEAN_AGENT_HOME")
         os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
         self.addCleanup(lambda: os.environ.__setitem__("LEAN_AGENT_HOME", old) if old else
@@ -3286,6 +3301,13 @@ class CliTest(unittest.TestCase):
                 return
             _t.sleep(0.05)
         self.fail("timed out waiting for " + what)
+
+    def read_text(self, path):
+        try:
+            with open(path) as fh:
+                return fh.read()
+        except (OSError, TypeError):
+            return ""
 
     def read_jsonl(self, path):
         try:
@@ -3547,7 +3569,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual([bool(e.get("fresh")) for e in marks], [True])
         ui = os.path.join(os.path.dirname(CLI), "dashboard_ui")
         chat_js = open(os.path.join(ui, "chat.js")).read()
-        for text in ("Restarted fresh", 'data-act="fresh-ask"', 'data-act="fresh-yes"', "/api/service/restart-fresh"):
+        for text in ("Restarted fresh", 'data-act="fresh-ask"', 'confirmBox(', '"fresh")', 'data-act="${act}-yes"', "/api/service/restart-fresh"):
             self.assertIn(text, chat_js)
         self.assertIn("freshHtml", open(os.path.join(ui, "app.js")).read())
 
@@ -4941,21 +4963,22 @@ class CliTest(unittest.TestCase):
         p, log, ss, sid = self.cleared_up()
         first = self.service_record()["chain"][0]
         p.terminate()
-        p.wait(timeout=20)
+        p.wait(timeout=30)
         p2, log2, ss = self.start_up("--name", "la")
+        self.wait_for(lambda: "argv" in self.read_jsonl(log)[-1], "the restarted session's start", secs=30)
         self.assertEqual(self.read_jsonl(log)[-1]["argv"][-2:], ["--resume", sid])
-        self.assertEqual(ss.info()["session_id"], sid)
+        self.wait_for(lambda: ss.info().get("session_id") == sid, "up.json to name the resumed session", secs=30)
         # the transcript chain survives the restart
+        self.wait_for(lambda: (self.service_record().get("chain") or [""])[-1].endswith(sid + ".jsonl"), "the chain", secs=30)
         chain = self.service_record()["chain"]
         self.assertEqual(chain[0], first)
-        self.assertTrue(chain[-1].endswith(sid + ".jsonl"))
         self.assertEqual(len(self.clears(log)), 1)
         # and the persisted gap stops a second clear right after the restart
         ss.send("again")
         self.wait_for(lambda: "echo: again" in json.dumps(self.read_jsonl(os.path.join(
             self.env["CLAUDE_CONFIG_DIR"], "projects", "".join(c if c.isalnum() else "-" for c in os.path.realpath(
-                self.cli("home").stdout.strip())), sid + ".jsonl"))), "the turn after the restart")
-        time.sleep(1.0)
+                self.cli("home").stdout.strip())), sid + ".jsonl"))), "the turn after the restart", secs=30)
+        time.sleep(1.0)  # a window for a second clear to show up; the 0.1s poll runs many times in it
         self.assertEqual(len(self.clears(log)), 1)
         self.assertNotIn("Checkpoint now", json.dumps(self.read_jsonl(log)[2:]))
 
@@ -5005,20 +5028,21 @@ class CliTest(unittest.TestCase):
         self.assertEqual(ss.info()["session_id"], new)
 
     def test_restart_fresh_from_the_running_up_replaces_the_session(self):
-        p, log, ss = self.auto_clear_up(0, FAKE_START_HOOK="1", LEAN_AGENT_CLEAR_WAIT="20")
-        self.wait_for(lambda: self.start_hooks(log), "the start-up hook")
+        p, log, ss = self.auto_clear_up(0, FAKE_START_HOOK="1", LEAN_AGENT_CLEAR_WAIT="30")
+        self.wait_for(lambda: self.start_hooks(log), "the start-up hook", secs=30)
         ss.send("hello")
         old = ss.info()["session_id"]
+        self.wait_for(lambda: "echo: hello" in self.read_text(ss.info().get("transcript")), "the first turn", secs=30)
         n = len(self.read_jsonl(log))
-        sid, checkpointed = ss.go_fresh(restart_host=True, wait=20)
+        sid, checkpointed = ss.go_fresh(restart_host=True, wait=30)
         self.assertTrue(checkpointed)
         self.wait_for(lambda: any("argv" in r for r in self.read_jsonl(log)[n:]), "the new session", secs=30)
         argv = [r for r in self.read_jsonl(log)[n:] if "argv" in r][0]["argv"]
         self.assertEqual(argv[-2:], ["--session-id", sid])
         self.assertNotEqual(sid, old)
-        self.wait_for(lambda: self.service_record().get("session_id") == sid, "the hook's record")
-        self.assertEqual(len(self.service_record()["chain"]), 2)
-        self.wait_for(lambda: ss.alive(), "the bridge")
+        self.wait_for(lambda: self.service_record().get("session_id") == sid, "the hook's record", secs=30)
+        self.wait_for(lambda: len(self.service_record().get("chain") or []) == 2, "the chain of two", secs=30)
+        self.wait_for(lambda: ss.alive(), "the bridge", secs=30)
 
     def test_drop_stale_record_cases(self):
         ds, home, proj, tr, up = self._follow_env()

@@ -27,9 +27,9 @@ import socket
 import stat
 import subprocess
 import sys
-import uuid
 import threading
 import time
+import uuid
 
 import lean_log
 import usage
