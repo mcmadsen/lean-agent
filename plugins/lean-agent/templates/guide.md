@@ -143,7 +143,7 @@ lean-agent optimize {{P}} --apply --skip checkout-notes
   librarian) uses them. `optimize --apply --skip <card>` applies all but the named cards.
 - Save recurring "missing" context as a card (remember it with `--project`). After a costly exploring run (many turns
   or MCP calls), and about every 10 runs, run `lean-agent optimize <project>`: the worker's drafts (recipe cards, MCP
-  presets) wait in the dashboard (Needs you); let the user pick with AskUserQuestion, then `--accept <id>`;
+  presets) wait for the user; let them pick with AskUserQuestion, then `--accept <id>`;
   `--apply` takes the core/archive changes.
 
 ## Your own tokens
@@ -185,49 +185,24 @@ lean-agent optimize {{P}} --apply --skip checkout-notes
   <name>`, one worktree worker with `--todo N`; done = no new `check` errors, `count` down, `parity` unchanged (or
   intended), then `review --goal`, then a PR (`--ref "PR N"`); two or three slices at a time. Mechanical edits
   across many files: the worker writes a codemod and runs `lean-agent codemod` (dry run first).
-- Dashboard threads: when `lean-agent up` runs you, the dashboard and the Claude app share this one session.
-  1. Every message belongs to one thread. Dashboard messages arrive tagged `About #N "title":` (a task; the first
-     with `[Dashboard thread about: ...]`) or `Thread tN "title":` (another topic).
-  2. Always reply into the thread: the first words of every reply are that thread's tag (`About #N:` or `Thread tN:`),
-     also after tool calls, for replies that raise a permission prompt or a question, and run results. Never reply untagged.
-  3. A message with no thread (typed in the app, the terminal, or the dashboard's "Ask Claude anything"): pick the
-     thread by work item, PR, run id, branch or the last topic.
-     - One clear match: tag the reply, with `Routed to #N.` as the rest of the first line.
-     - Two close matches: pick the likelier and write `Routed to #N. Also close: #M.`
-     - No match: run `lean-agent thread new "<title of six words or fewer>"`, tag the reply with the new id and start
-       with `Started a new thread: <title>.`
-     - Exception: a bare answer such as "yes" while several threads wait for the user: ask which one, in the thread
-       that has waited longest, and name the other.
-  4. `Move message to <thread> (<id>): ...`: acknowledge in the new thread, and follow it from then on.
-  5. `Merge thread tB into tA`: reply under tA with a one-line recap of B, naming any open run question, hand-off note
-     or permission prompt it carried; from then on tag B's topic with A's tag. Don't rewrite the old transcript.
-     `Unmerge thread tB`: tag B's topic with B's own tag again.
-  6. One thread per reply. A message that touches two threads gets one tagged reply in each.
-  7. Optimize suggestions belong to the thread `Thread optimize "Optimize":`.
-  8. The fixed forms below are unchanged, and each still gets a tagged reply.
-  Dashboard buttons send fixed forms; act on them briefly (narrow chat pane):
-  - `Answer to run <id> (#N "..."): <answer>`: resume that run with the answer
-    (`lean-agent run --resume <id> "<answer>"`, in the background), then say what happens next.
-  - `Decision for hand-off note N ("..."): <decision>`: act on it, then `lean-agent handoff --done N`.
-  - `About #N "...": <question>` / `About PR ...: <question>`: about that card; answer briefly.
-  - `Start the next ready item of epic <name> ...`: `lean-agent todo next --epic <name>`, then start it.
+- Hand-off and run questions: `Answer to run <id>: <answer>` resumes that run with the answer
+  (`lean-agent run --resume <id> "<answer>"`, in the background), then say what happens next;
+  `Decision for hand-off note N: <decision>`: act on it, then `lean-agent handoff --done N`.
   The user can edit the work queue directly; re-read `lean-agent todo list`, don't trust memory.
-- Keep the board current (the dashboard shows only what you record):
+- Keep the work queue current:
   - Each piece of work the user asks for is a work-queue item. You don't run `todo add|note|edit|rm`: start the
     worker with `--todo new` (the item is made from `--why`: a short title first, "Export: cap the retry loop", details
     after a colon), or `--todo N` for an item that exists. One per deliverable, not per step. A todo the user wants
     for later is `lean-agent remember "todo: ..."`.
   - Every worker for it names it: `run --todo new|N`, `review --todo N`, `do ... --todo N`. A quick lookup that isn't
     queue work: `--todo none`. lean-agent refuses a worker start without one of them.
-  - Set `--ref "PR 512"` (or the PR URL) once a pull request exists (the board then shows CI, review, comments);
+  - Set `--ref "PR 512"` (or the PR URL) once a pull request exists;
     before that the branch or work item.
   - `todo done N "<one-line result>"` when finished (merged, sent, answered): the Done card shows the result, so give
     the outcome ("merged as PR 512"), not the plan. `todo next` when you're free.
 - Local documents: a worker writes them (`doc` is refused for you).
 - Recurring work: `lean-agent schedule list|run|pause|resume`; a worker adds or removes jobs (`schedule add "weekdays
   08:45" do <project> <recipe>`, `schedule defaults`). Mention a finished job if it matters.
-- Dashboard: `lean-agent dashboard --url` prints its address. To show it, use a `Claude_Browser` tool such as
-  `preview_start` if ToolSearch finds one, else give the address or run `lean-agent dashboard --open`. Don't read the page.
 - Something off: `lean-agent doctor`, `lean-agent logs` for recent errors (`logs debug` for everything). A squeezed
   output's first line names the full output and an errors-only copy: read the errors file first.
 
