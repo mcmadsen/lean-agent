@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A stand-in for an interactive `claude` session: reads its terminal, and for every bracketed-paste message
 followed by Enter appends a user and an assistant record to the session's transcript JSONL (the real format).
-A message "Checkpoint now..." is answered with "checkpointed" (not with FAKE_NO_CHECKPOINT); assistant records carry
+A message "Checkpoint now..." is answered with "checkpointed" (with FAKE_NO_CHECKPOINT: a turn that ends without it); assistant records carry
 usage with FAKE_CTX tokens read from cache. A message with "use a tool" in it also makes a Bash tool call with its result; "/clear" starts a new transcript
 with a new session id (as Claude Code does) and runs the SessionStart hook for it; a lone Escape appends the interruption record."""
 import datetime
@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import tty
+import uuid
 
 if not os.environ.get("FAKE_NAMED_CLAUDE"):  # same pid, but named claude as the real one is: the hook looks for that
     os.environ["FAKE_NAMED_CLAUDE"] = os.path.realpath(sys.executable)
@@ -50,7 +51,7 @@ while True:
         text = m.group(1).decode()
         buf = buf[m.end():]
         if text.strip() == "/clear":
-            sid = os.urandom(8).hex() + "-fake-clear"
+            sid = str(uuid.uuid4())
             transcript = os.path.join(tdir, sid + ".jsonl")
             # what Claude Code does on /clear: run the SessionStart hooks with the new session
             hook = subprocess.run([os.environ["FAKE_NAMED_CLAUDE"], HOOK], input=json.dumps({"session_id": sid, "transcript_path": transcript,
@@ -70,7 +71,7 @@ while True:
                 {"type": "tool_result", "tool_use_id": tid, "content": "tool-ran", "is_error": False}]}})
         reply = "echo: " + text
         if text.startswith("Checkpoint now"):  # asked to checkpoint: answer as the orchestrator would
-            reply = "" if os.environ.get("FAKE_NO_CHECKPOINT") else "checkpointed"
+            reply = "no checkpoint today" if os.environ.get("FAKE_NO_CHECKPOINT") else "checkpointed"
         if reply:
             add({"type": "assistant", "message": {"role": "assistant", "id": "msg_" + os.urandom(4).hex(),
                  "content": [{"type": "text", "text": reply}], "stop_reason": "end_turn",

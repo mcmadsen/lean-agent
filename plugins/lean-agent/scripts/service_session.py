@@ -30,6 +30,9 @@ import sys
 import threading
 import time
 
+import lean_log
+import usage
+
 PASTE_START, PASTE_END = b"\x1b[200~", b"\x1b[201~"
 KEY_NAMES = {"esc": "\x1b", "escape": "\x1b", "enter": "\r", "return": "\r", "tab": "\t", "ctrl-c": "\x03",
              "ctrl-d": "\x04", "up": "\x1b[A", "down": "\x1b[B", "right": "\x1b[C", "left": "\x1b[D",
@@ -107,6 +110,25 @@ def _load(path):
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def chain_meta(rec):
+    """The when-and-why of each transcript in the hook's record `rec` (chat/service.json), the current one included."""
+    meta = dict(rec["chain_meta"]) if isinstance(rec.get("chain_meta"), dict) else {}
+    if rec.get("transcript_path") and rec["transcript_path"] not in meta:
+        meta[rec["transcript_path"]] = {"source": rec.get("source"), "ts": rec.get("ts")}
+    return meta
+
+
+def last_clear(rec):
+    """When the session of the record `rec` was last cleared (epoch seconds, None when it never was)."""
+    times = [m["ts"] for m in chain_meta(rec).values() if isinstance(m, dict) and m.get("source") == "clear"
+             and _num(m.get("ts"))]
+    return max(times) if times else None
 
 
 def update_up(**fields):
@@ -230,8 +252,7 @@ def transcript_state(path, offset=0):
         kind = rec.get("type")
         if kind == "assistant":
             u = msg.get("usage") if isinstance(msg.get("usage"), dict) else {}
-            ctx = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
-                                                  "cache_read_input_tokens"))
+            ctx = usage.context_tokens(u)
             if ctx:
                 state["ctx"] = ctx
             last = rec
@@ -272,7 +293,7 @@ def permission_pending(session_id):
             continue
         req = _load(base + ".json")
         try:
-            fresh = time.time() - os.path.getmtime(base + ".json") < 3600
+            fresh = time.time() - os.path.getmtime(base + ".json") < _knob("LEAN_AGENT_DASH_PERMISSION_WAIT", 300) + 60
         except OSError:
             continue
         if fresh and (not req.get("session_id") or not session_id or req["session_id"] == session_id):
@@ -297,12 +318,12 @@ class AutoClear:
     def session_id(self):
         return _load(lean_home("chat", "service.json")).get("session_id") or info().get("session_id")
 
-    def log(self, msg):
-        try:
-            with open(lean_home("logs", "session.log"), "ab") as fh:
-                fh.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] lean-agent: auto-clear: {msg}\n".encode())
-        except OSError:
-            pass
+    def log(self, msg, level="debug"):
+        lean_log.log(level, "auto-clear", msg)
+
+    def last_gap_start(self):
+        """When the last clear (or checkpoint request) happened: the record survives a restart of `up`."""
+        return max(self.started or 0, last_clear(_load(lean_home("chat", "service.json"))) or 0)
 
     def blocked(self, st):
         idle = _knob("LEAN_AGENT_CLEAR_IDLE", CLEAR_IDLE)
@@ -323,13 +344,18 @@ class AutoClear:
             if permission_pending(self.session_id()) or now - self.host.last_input < _knob("LEAN_AGENT_CLEAR_IDLE", CLEAR_IDLE):
                 return
             answered = st["ended"] and "checkpointed" in st["text"].lower()
-            if answered or now - since >= _knob("LEAN_AGENT_CLEAR_WAIT", CLEAR_WAIT):
+            timed_out = now - since >= _knob("LEAN_AGENT_CLEAR_WAIT", CLEAR_WAIT)
+            if timed_out and not answered and not st["ended"]:
+                self.waiting = self.started = None  # a turn is still running: /clear would land in it; ask again at a turn end
+                self.log("no reply in time and a turn is running: giving up this round")
+                return
+            if answered or timed_out:
                 self.waiting = None
                 self.log(f"/clear sent ({'checkpointed' if answered else 'no reply in time'})")
                 self.host.paste("/clear")
             return
         limit = clear_at()
-        if not limit or (self.started and now - self.started < _knob("LEAN_AGENT_CLEAR_GAP", CLEAR_GAP)):
+        if not limit or now - self.last_gap_start() < _knob("LEAN_AGENT_CLEAR_GAP", CLEAR_GAP):
             return
         st = transcript_state(path)
         if not st["ended"] or st["ctx"] <= limit or self.blocked(st):
@@ -345,7 +371,7 @@ class AutoClear:
             try:
                 self.tick()
             except Exception as exc:  # never take the session down
-                self.log(f"error: {exc}")
+                self.log(f"error: {exc}", "error")
             self.host.stopping.wait(poll)
 
 
@@ -520,10 +546,11 @@ class Host:
         except OSError:
             size = None
         fcntl.ioctl(master, termios.TIOCSWINSZ, size or struct.pack("HHHH", 50, 200, 0, 0))
-        try:  # before the spawn, so a fast SessionStart hook of the new session is not deleted
-            os.remove(lean_home("chat", "service.json"))  # the previous session's record is stale
-        except OSError:
-            pass
+        if not os.path.exists(transcript_path(self.cwd, sid)):
+            try:  # a new conversation: the old record and its chain are stale (removed before the spawn, so a fast
+                os.remove(lean_home("chat", "service.json"))  # SessionStart hook of the new session is not deleted)
+            except OSError:
+                pass
         update_up(pid=None, session_started=time.strftime("%Y-%m-%dT%H:%M:%S"))
         try:
             proc = subprocess.Popen(argv, env=self.env, cwd=self.cwd, stdin=slave, stdout=slave, stderr=slave,

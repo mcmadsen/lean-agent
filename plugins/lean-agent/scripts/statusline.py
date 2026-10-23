@@ -33,7 +33,8 @@ def last_context(transcript):
             continue
         u = (e.get("message") or {}).get("usage") if e.get("type") == "assistant" else None
         if isinstance(u, dict):
-            return sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+            import usage
+            return usage.context_tokens(u)
     return 0
 
 

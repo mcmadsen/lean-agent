@@ -211,6 +211,35 @@ class SessionHookTest(Base):
         self.assertEqual(rec["chain_meta"]["/t/s22.jsonl"]["source"], "clear")  # the same transcript again: not a new entry
         self.assertEqual(set(rec["chain_meta"]), set(rec["chain"]))
 
+    def test_a_new_session_id_moves_up_json_on_and_the_same_one_leaves_it(self):
+        me = os.getpid()
+        chain = {me: 900, 900: 500, 500: 1}
+        up_path = os.path.join(self.env["LEAN_AGENT_HOME"], "up.json")
+        self.up(500)
+        with open(up_path, "w") as fh:
+            json.dump({"pid": 500, "session_id": "s1", "transcript": "/t/s1.jsonl", "name": "la"}, fh)
+        self.run_injected(chain, event={"session_id": "s1", "transcript_path": "/t/s1.jsonl", "source": "resume"}, up=False)
+        with open(up_path) as fh:
+            self.assertEqual(json.load(fh)["session_id"], "s1")
+        self.run_injected(chain, event={"session_id": "s2", "transcript_path": "/t/s2.jsonl", "source": "clear"}, up=False)
+        with open(up_path) as fh:
+            up = json.load(fh)
+        self.assertEqual((up["session_id"], up["transcript"], up["pid"], up["name"]), ("s2", "/t/s2.jsonl", 500, "la"))
+        self.run_injected(chain, event={"session_id": "s3", "transcript_path": "/t/s3.jsonl", "source": "compact"}, up=False)
+        with open(up_path) as fh:
+            self.assertEqual(json.load(fh)["session_id"], "s3")
+
+    def test_up_json_is_left_alone_when_the_hook_is_not_under_the_service_claude(self):
+        me = os.getpid()
+        self.up(500)
+        up_path = os.path.join(self.env["LEAN_AGENT_HOME"], "up.json")
+        with open(up_path, "w") as fh:
+            json.dump({"pid": 500, "session_id": "s1"}, fh)
+        self.run_injected({me: 900, 900: 700, 700: 500, 500: 1}, claudes={700, 500}, up=False, wait=0.2,
+                          event={"session_id": "other", "source": "clear"})  # a claude nearer than the service one
+        with open(up_path) as fh:
+            self.assertEqual(json.load(fh)["session_id"], "s1")
+
     def no_record(self):
         self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")))
 
@@ -325,6 +354,32 @@ class SessionHookTest(Base):
         text = self.hook_under_claude(event | {"source": "clear"}, LEAN_AGENT_SERVICE_SESSION="1")[
             "hookSpecificOutput"]["additionalContext"]
         self.assertLessEqual(len(text), 3100)
+
+    def test_capped_brief_keeps_the_checkpoint_and_the_handoff_notes(self):
+        sys.path.insert(0, ROOT)
+        import compact_hook
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        long_cp = "\n".join(f"soft state line {i:03d} " + "x" * 40 for i in range(200))
+        with open(os.path.join(home, "handoff-notes.json"), "w") as fh:
+            json.dump([{"ts": "2026-10-23T09:00:00", "text": long_cp, "kind": "checkpoint"},
+                       {"ts": "2026-10-23T09:01:00", "text": "keep this open item in the hand-off"}], fh)
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = home
+        try:
+            text = compact_hook.brief(3000)
+        finally:
+            os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.__setitem__("LEAN_AGENT_HOME", old)
+        self.assertLessEqual(len(text), 3000)
+        self.assertIn("soft state line 000", text)
+        self.assertNotIn("soft state line 199", text)
+        self.assertIn("keep this open item in the hand-off", text)
+        self.assertTrue(text.endswith("… (more: lean-agent brief)"))
+        cp_part = text.split("\n\n")[0]
+        self.assertLessEqual(len(cp_part), 2200)
+        self.assertRegex(cp_part.splitlines()[-1], r"^soft state line \d{3} x{40}$")  # cut at a line boundary
+        self.assertEqual(compact_hook.brief(), compact_hook.brief(None))
+        self.assertNotIn("more: lean-agent brief", compact_hook.brief())
 
     def test_writes_service_json_only_in_the_service_session(self):
         for source in ("startup", "resume", "clear", "compact"):

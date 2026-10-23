@@ -245,16 +245,38 @@ def handoff(hours=RECENT_HOURS):
     return "\n".join(lines)
 
 
+BRIEF_MORE = "… (more: lean-agent brief)"
+CHECKPOINT_CAP = 2000  # characters of the checkpoint kept in a capped brief; the rest of the cap is the hand-off
+
+
+def cut_lines(text, limit):
+    """`text` cut to at most `limit` characters at a line boundary (a single longer line is cut mid-line)."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    nl = cut.rfind("\n")
+    return (cut[:nl] if nl > 0 else cut).rstrip()
+
+
 def brief(cap=None):
-    """What a fresh orchestrator session starts from: the latest checkpoint (its soft state), then the hand-off."""
+    """What a fresh orchestrator session starts from: the latest checkpoint (its soft state), then the hand-off.
+    With `cap`, the checkpoint gets up to CHECKPOINT_CAP characters and the hand-off the rest."""
     cps = [n for n in load_notes() if n.get("kind") == "checkpoint"]
-    head = ""
+    head, more = "", False
     if cps:
-        head = f"Checkpoint of {str(cps[-1].get('ts', ''))[:16].replace('T', ' ')} (your own soft state before the clear; continue from it):\n{cps[-1].get('text', '')}\n\n"
-    text = head + handoff()
-    if cap and len(text) > cap:
-        text = text[:cap].rstrip() + "\n… (cut; the rest: `lean-agent brief`)"
-    return text
+        body = str(cps[-1].get("text", ""))
+        if cap:
+            shown = cut_lines(body, CHECKPOINT_CAP)
+            more = shown != body
+            body = shown
+        head = f"Checkpoint of {str(cps[-1].get('ts', ''))[:16].replace('T', ' ')} (your own soft state before the clear; continue from it):\n{body}\n\n"
+    rest = handoff()
+    if cap:
+        room = max(0, cap - len(head) - len(BRIEF_MORE) - 1)
+        shown = cut_lines(rest, room)
+        more = more or shown != rest
+        rest = shown
+    return head + rest + (("\n" + BRIEF_MORE) if more else "")
 
 
 def has_recent_work(hours=RECENT_HOURS):

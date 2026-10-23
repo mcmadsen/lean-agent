@@ -236,6 +236,11 @@ def transcript_span(path):
     return first, last
 
 
+def context_tokens(u):
+    """The context size of one API call from its usage record: input plus cache creation and cache reads."""
+    return sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+
+
 def context_series(path):
     """[(model, context tokens)] for each API call of the main conversation, in order."""
     out, seen = [], set()
@@ -256,9 +261,7 @@ def context_series(path):
             if mid in seen:
                 continue
             seen.add(mid)
-            u = msg["usage"]
-            out.append((msg.get("model") or "unknown", sum(int(u.get(k) or 0) for k in
-                        ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))))
+            out.append((msg.get("model") or "unknown", context_tokens(msg["usage"])))
     return out
 
 

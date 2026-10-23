@@ -28,6 +28,7 @@ import threading
 import time
 
 import lean_threads
+import service_session
 from lean_common import pid_alive, questions_of, thread_key, tool_summary  # noqa: F401
 
 MAX_EVENTS = 2000
@@ -140,13 +141,7 @@ def write_json(path, obj):
 def last_clear():
     """When the service session was last cleared (epoch seconds, None when it never was since `up` started), from the
     hook's chain in chat/service.json."""
-    rec = _load(chat_dir("service.json"))
-    meta = rec.get("chain_meta") if isinstance(rec.get("chain_meta"), dict) else {}
-    times = [m["ts"] for m in meta.values() if isinstance(m, dict) and m.get("source") == "clear"
-             and isinstance(m.get("ts"), (int, float)) and not isinstance(m.get("ts"), bool)]
-    if rec.get("source") == "clear" and isinstance(rec.get("ts"), (int, float)) and not isinstance(rec.get("ts"), bool):
-        times.append(rec["ts"])
-    return max(times) if times else None
+    return service_session.last_clear(_load(chat_dir("service.json")))
 
 
 def service_session_ids():
@@ -338,9 +333,7 @@ class Model:
         if not path:
             return
         rec = _load(chat_dir("service.json"))
-        meta = dict(rec["chain_meta"]) if isinstance(rec.get("chain_meta"), dict) else {}
-        if rec.get("transcript_path") and rec["transcript_path"] not in meta:
-            meta[rec["transcript_path"]] = {"source": rec.get("source"), "ts": rec.get("ts")}
+        meta = service_session.chain_meta(rec)
         for p in self._chain(up, path):
             if p in self.done:
                 continue
