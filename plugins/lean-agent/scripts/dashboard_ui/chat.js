@@ -71,6 +71,7 @@ function drawChat(){
     flush();
     if(e.kind==="user")h+=`<div class="me"><div class="bub"><div class="who">You · ${esc(hhmm(e.ts))}${aboutOf(e)}${e.from_app&&chat.service&&!fallback()?` <span class="chip tone-mute">${rcState()==="off"?"from the terminal":"from the app"}</span>`:""}</div><div class="md">${md(stripOp(e.text))}</div></div>${routeHtml(e)}</div>`;
     else if(e.kind==="result")h+=`<div class="sysl">${e.error?"stopped with an error":"done"}${e.seconds?" · "+e.seconds+" s":""}${e.cost!=null?" · $"+Number(e.cost).toFixed(2):""}</div>`;
+    else if(e.kind==="cleared")h+=clearedHtml(e);
     else h+=`<div class="sysl${e.kind==="error"?" bad":""}">${esc(e.text)}</div>`;
   }
   flush();putMarks();
@@ -111,6 +112,7 @@ const mergedMarks=()=>{
   const t=ui.threads.find(t=>threadKey(t.id)===chat.key);
   return ((t&&t.merged)||[]).slice().sort((a,b)=>(a.at||"").localeCompare(b.at||""));
 };
+const clearedHtml=e=>`<div class="merged mono"><span class="ln"></span><span>Context cleared${e.ts?" · "+esc(hhmm(e.ts)):""} · continued from a checkpoint</span><span class="ln"></span></div>`;  // where the session was cleared, like the merged line
 const mergedHtml=m=>`<div class="merged mono"><span class="ln"></span><span>Merged ${esc(m.title&&!/^#/.test(m.id)?m.title:m.id)} into this thread${m.at?" · "+esc(hhmm(m.at)):""}</span><button type="button" class="link" data-act="unmerge" data-from="${esc(m.id)}" aria-label="Unmerge ${esc(m.id)}">Unmerge</button><span class="ln"></span></div>`;
 function tick(){
   const now=Date.now();

@@ -281,6 +281,12 @@ Every orchestrator turn re-reads the whole conversation, so it's kept short:
 - **Routing:** `lean-agent up --model haiku` runs a pure routing session on Haiku (switch up with `/model` when
   a step needs judgement); `--escalate haiku,sonnet` does the same for workers.
 
+In short: `lean-agent run` hands the orchestrator a compact result, `lean-agent checkpoint` saves its soft state, and
+`up` clears the session by itself when the context passes the clear-at threshold, so the orchestrator rarely carries
+more than a few tens of thousands of tokens. The dashboard keeps each thread's history across those clears: it reads
+the chain of transcripts the session has used (the last 20, kept in `chat/service.json`) and puts a thin "Context
+cleared" line where each clear happened. The Context sheet shows the threshold and the time of the last clear.
+
 ## The dashboard: a workspace of threads
 
 The dashboard has three views (one at a time on a phone): **Chat**, **Inbox** and **Todos**.

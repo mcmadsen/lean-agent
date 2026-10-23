@@ -3,7 +3,9 @@
 
 After a /clear it also prints the brief (`lean-agent brief`, the last checkpoint first) as additionalContext, so
 the orchestrator continues from it. Records which transcript the session writes now (chat/service.json), for every source (startup, resume, clear,
-compact): /clear starts a new transcript with a new id, and this is how the dashboard learns of it. Only when the
+compact): /clear starts a new transcript with a new id, and this is how the dashboard learns of it. The record also
+keeps the chain of transcripts the session has used, oldest first (the last CHAIN_KEEP), so the dashboard can show a
+thread's history across clears. Only when the
 hook runs under the service claude (its pid in up.json is an ancestor, with no other claude nearer). Prints nothing else
 and never fails the session.
 """
@@ -14,6 +16,21 @@ import sys
 import time
 
 BRIEF_CAP = 3000  # characters of brief added to a cleared session
+CHAIN_KEEP = 20   # transcripts kept in the record's chain
+
+
+def chain_of(old, event, now):
+    """The record's chain after this event: `old`'s paths with the event's transcript last (moved there when it was
+    already in), with when and why each one started."""
+    chain = [p for p in (old.get("chain") or []) if isinstance(p, str)]
+    meta = old.get("chain_meta") if isinstance(old.get("chain_meta"), dict) else {}
+    path = event.get("transcript_path")
+    if isinstance(path, str) and path:
+        if not (chain and chain[-1] == path and path in meta):
+            meta[path] = {"ts": now, "source": event.get("source")}
+        chain = [p for p in chain if p != path] + [path]
+    chain = chain[-CHAIN_KEEP:]
+    return chain, {p: meta[p] for p in chain if isinstance(meta.get(p), dict)}
 
 
 def parent_pid(pid):
@@ -100,9 +117,18 @@ def main(ppid=parent_pid, cmd=argv_of, wait=3.0):
     path = os.path.join(home, "chat", "service.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(path) as fh:
+            old = json.load(fh)
+    except (OSError, ValueError):
+        old = {}
+    if not isinstance(old, dict):
+        old = {}
+    now = time.time()
+    chain, meta = chain_of(old, event, now)
     with open(tmp, "w") as fh:
         json.dump({"session_id": event["session_id"], "transcript_path": event.get("transcript_path"),
-                   "source": event.get("source"), "ts": time.time()}, fh)
+                   "source": event.get("source"), "ts": now, "chain": chain, "chain_meta": meta}, fh)
     os.replace(tmp, path)
     if event.get("source") == "clear":
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

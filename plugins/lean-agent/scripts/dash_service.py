@@ -13,7 +13,10 @@ Permission prompts: the PermissionRequest hook (permission_hook.py) hands a requ
 chat/perm/ while a dashboard tab is polling (chat/dash-poll is touched on every poll); the page's answer is written
 beside it and the hook returns it to Claude Code. /clear inside the session starts a new transcript with a new id:
 the SessionStart hook (session_hook.py) records the current one in chat/service.json (any source: startup, resume,
-clear, compact), and the dashboard follows it (a record older than the session `up` started is ignored).
+clear, compact), and the dashboard follows it (a record older than the session `up` started is ignored). The record
+also keeps the chain of transcripts the session has used (oldest first): the model reads the whole chain, each older
+transcript once (then it is only cached), and tails the current one, so a thread's history survives a /clear. Event ids
+come from one counter across the chain, and a thin "cleared" marker sits where a /clear happened.
 """
 import datetime
 import functools
@@ -134,6 +137,18 @@ def write_json(path, obj):
     os.replace(tmp, path)
 
 
+def last_clear():
+    """When the service session was last cleared (epoch seconds, None when it never was since `up` started), from the
+    hook's chain in chat/service.json."""
+    rec = _load(chat_dir("service.json"))
+    meta = rec.get("chain_meta") if isinstance(rec.get("chain_meta"), dict) else {}
+    times = [m["ts"] for m in meta.values() if isinstance(m, dict) and m.get("source") == "clear"
+             and isinstance(m.get("ts"), (int, float)) and not isinstance(m.get("ts"), bool)]
+    if rec.get("source") == "clear" and isinstance(rec.get("ts"), (int, float)) and not isinstance(rec.get("ts"), bool):
+        times.append(rec["ts"])
+    return max(times) if times else None
+
+
 def service_session_ids():
     """The ids the hook accepts as the service session: the one `up` started and the one the dashboard follows."""
     ids = set()
@@ -177,7 +192,10 @@ class Model:
         self.turn = 0
         self.counter = 0
         self.path = None
-        self.offset = 0
+        self.offsets = {}  # transcript path -> bytes read
+        self.done = set()  # older transcripts of the chain, read to their end: not opened again
+        self.seg = 0       # which transcript of the chain an event came from, counting from 0
+        self.marks = []    # where a /clear happened: {"i", "seg" (the transcript that began there), "ts"}
         self.sid = None
         self.tools = {}
         self.sends = {}
@@ -212,6 +230,68 @@ class Model:
         if rec.get("session_id") and rec.get("session_id") != up.get("session_id") and path and os.path.isfile(path):
             return path
         return base
+
+    def _chain(self, up, current):
+        """The transcripts to read, oldest first, ending with `current`: the hook's chain (those still on disk), and the
+        one `up` started when the chain does not hold it."""
+        rec = _load(chat_dir("service.json"))
+        chain = [p for p in (rec.get("chain") or []) if isinstance(p, str) and os.path.isfile(p)] if isinstance(rec.get("chain"), list) else []
+        base = up.get("transcript")
+        if base and base not in chain and base != current:
+            chain.insert(0, base)
+        return [p for p in dict.fromkeys(chain) if p != current] + [current]
+
+    def _enter(self, path, meta):
+        """Start reading another transcript of the chain: the one before it is over, a /clear leaves its marker."""
+        first = self.path is None
+        if not first:
+            t = self.turns[self.turn]
+            t["open"] = False
+            for e in list(self.tools.values()):
+                self._update(e, state="stopped")
+            self.seg += 1
+        self.path, self.tools = path, {}
+        self.sid = os.path.basename(path)[:-6]
+        self.offsets.setdefault(path, 0)
+        if first:
+            return
+        if meta.get("source") == "clear":
+            self.counter += 1
+            ts = meta.get("ts")
+            ts = datetime.datetime.fromtimestamp(ts).isoformat(timespec="seconds") if isinstance(ts, (int, float)) \
+                and not isinstance(ts, bool) else datetime.datetime.now().isoformat(timespec="seconds")
+            self.marks.append({"i": self.counter, "seg": self.seg, "ts": ts})
+            del self.marks[:-20]
+        else:
+            self._add(kind="note", text="new conversation")
+        self.turn = max(self.turns) + 1
+        self.turns[self.turn] = {"thread": None, "open": False, "ts": time.time()}
+
+    def _read(self, path):
+        """Feed the records written to `path` since the last read to the model."""
+        try:
+            size = os.path.getsize(path)
+        except OSError:  # not written yet
+            size = 0
+        off = self.offsets.get(path, 0)
+        if size < off:  # rewritten: read it again
+            off = self.offsets[path] = 0
+            self.events = [e for e in self.events if e.get("seg") != self.seg]
+            self.tools = {}
+        if size > off:
+            with open(path, "rb") as fh:
+                fh.seek(off)
+                data = fh.read(size - off)
+            end = data.rfind(b"\n") + 1  # a half-written last line waits for the next read
+            self.offsets[path] = off + end
+            for line in data[:end].splitlines():
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    self._record(rec)
+            del self.events[:-MAX_EVENTS]
 
     def _registry(self):
         """The registry's aliases and moves; a change re-sends the events, as their threads may differ now."""
@@ -257,34 +337,19 @@ class Model:
         path = self._pick(up)
         if not path:
             return
-        if path != self.path:
-            first = self.path is None
-            self.path, self.offset, self.tools = path, 0, {}
-            self.sid = os.path.basename(path)[:-6]
-            if not first:
-                self._add(kind="note", text="new conversation")
-                self.turn = max(self.turns) + 1
-                self.turns[self.turn] = {"thread": None, "open": False, "ts": time.time()}
-        try:
-            size = os.path.getsize(path)
-        except OSError:  # not written yet
-            size = 0
-        if size < self.offset:  # rewritten: read it again
-            self.offset, self.events, self.tools = 0, [], {}
-        if size > self.offset:
-            with open(path, "rb") as fh:
-                fh.seek(self.offset)
-                data = fh.read(size - self.offset)
-            end = data.rfind(b"\n") + 1  # a half-written last line waits for the next read
-            self.offset += end
-            for line in data[:end].splitlines():
-                try:
-                    rec = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(rec, dict):
-                    self._record(rec)
-            del self.events[:-MAX_EVENTS]
+        rec = _load(chat_dir("service.json"))
+        meta = dict(rec["chain_meta"]) if isinstance(rec.get("chain_meta"), dict) else {}
+        if rec.get("transcript_path") and rec["transcript_path"] not in meta:
+            meta[rec["transcript_path"]] = {"source": rec.get("source"), "ts": rec.get("ts")}
+        for p in self._chain(up, path):
+            if p in self.done:
+                continue
+            if p != self.path:
+                m = meta.get(p)
+                self._enter(p, m if isinstance(m, dict) else {})
+            self._read(p)
+            if p != path:
+                self.done.add(p)
         self._scan_perms()
         if self.touched:
             self._flush_touched()
@@ -315,7 +380,7 @@ class Model:
     # --- records to events
     def _add(self, **e):
         self.counter += 1
-        e = dict(e, i=self.counter, turn=self.turn)
+        e = dict(e, i=self.counter, turn=self.turn, seg=self.seg)
         e.setdefault("ts", datetime.datetime.now().isoformat(timespec="seconds"))
         self.events.append(e)
         return e
@@ -547,10 +612,15 @@ class Model:
         if fresh_at:
             evs = [e for e in evs if self.turns.get(e["turn"], {}).get("ts", 0) >= fresh_at]
         evs = evs[-600:]
+        segs = {e["seg"] for e in evs}
+        marks = [m for m in self.marks if evs and m["i"] > evs[0]["i"] and (key == "main" or {m["seg"] - 1, m["seg"]} & segs)]
         out = []
-        for e in evs:
+        for e in sorted(evs + [dict(m, kind="cleared", turn=None) for m in marks], key=lambda e: e["i"]):
             if max(e["i"], e.get("changed", 0)) > since:
-                c = {k: v for k, v in e.items() if k not in ("_req", "turn", "at", "raw")}
+                c = {k: v for k, v in e.items() if k not in ("_req", "turn", "at", "raw", "seg")}
+                if e["kind"] == "cleared":
+                    out.append(c)
+                    continue
                 th = self._thread(e["turn"])
                 c["thread"] = th
                 if th:
@@ -558,7 +628,7 @@ class Model:
                 if key != "main" and e["kind"] == "user" and e.get("raw"):
                     c["text"] = e["raw"]
                 out.append(c)
-        cursor = max([max(e["i"], e.get("changed", 0)) for e in evs] or [0])
+        cursor = max([max(e["i"], e.get("changed", 0)) for e in evs + marks] or [0])
         return {"status": self.status(key), "work_since": self.work_since(key), "session": self.sid, "events": out, "cursor": cursor, "alive": True,
                 "service": True, "now": time.time()}
 

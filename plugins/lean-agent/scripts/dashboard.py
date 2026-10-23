@@ -95,7 +95,17 @@ def cause_key(text):
 
 
 def orchestrator_context():
-    """The latest orchestrator conversation: context now, the compaction point, calls."""
+    """The latest orchestrator conversation: context now, the compaction point, calls; and when `up` clears the session
+    (`clear_at`, 0 = never) and when it last did (`last_clear`)."""
+    import dash_service
+    import service_session
+    last = dash_service.last_clear()
+    extra = {"clear_at": service_session.clear_at(),
+             "last_clear": datetime.datetime.fromtimestamp(last).isoformat(timespec="seconds") if last else None}
+    return dict(_orchestrator_context(), **extra)
+
+
+def _orchestrator_context():
     cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     h = home("home")
     found = []
