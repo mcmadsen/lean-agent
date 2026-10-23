@@ -2669,6 +2669,62 @@ class CliTest(unittest.TestCase):
         self.addCleanup(patch.stop)
         return lean_threads
 
+    def test_now_and_thread_show_list_the_work_of_a_topic(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        lt = self.threads_home()
+        lt.route("Publish the report via docs", "s1")
+        lt.route("Fix the export timeout in billing", "s1")
+        self.cli("run", "-p", "proj", "look at the export", "--model", "haiku", "--why", "t")
+        self.cli("todo", "add", "Fix export", "--thread", "t1")
+        self.cli("todo", "add", "Fix billing", "--thread", "t2")
+        self.cli("handoff", "--note", "export is slow on big files", "--kind", "fyi")
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "pushes.jsonl"), "a") as fh:
+            fh.write(json.dumps({"ts": lt.now_iso(), "thread": "t2", "project": "proj", "branch": "fix-export",
+                                 "to": "origin/main", "sha": "abcdef123456", "ok": True}) + "\n")
+        out = self.cli("now").stdout
+        self.assertLessEqual(len(out.splitlines()), 25)
+        lines = out.splitlines()
+        self.assertTrue(lines[1].startswith("t2 "), out)  # latest activity first
+        self.assertIn("1 todo open", lines[1])
+        self.assertIn("push: proj fix-export", lines[1])
+        self.assertIn("t1 ", lines[2])
+        shown = self.cli("thread", "show", "t2").stdout
+        kinds = [l[17:].split()[0] for l in shown.splitlines()[1:]]
+        self.assertEqual(kinds, ["request", "run", "todo", "note", "push"])
+        self.assertIn('t2 "Fix export timeout billing"', shown)
+        self.assertIn("haiku", shown)
+        self.assertNotIn("Publish the report", shown)
+        # close hides it from now; reopen brings it back; show still works
+        self.assertIn("t1 closed", self.cli("thread", "close", "t1").stdout)
+        self.assertNotIn("t1 ", self.cli("now").stdout.split("\n", 1)[1])
+        self.assertIn("[closed]", self.cli("thread", "show", "t1").stdout)
+        self.cli("thread", "reopen", "t1")
+        self.assertIn("t1 ", self.cli("now").stdout)
+        self.assertNotEqual(self.cli("thread", "show", "t99", check=False).returncode, 0)
+
+    def test_now_closes_idle_threads_after_a_week_and_never_deletes(self):
+        lt = self.threads_home()
+        lt.route("Old topic about the parser", "s1")
+        lt.route("Fresh topic about deployments pipeline", "s1")
+        reg = lt.path()
+        with open(reg) as fh:
+            data = json.load(fh)
+        old = (datetime.datetime.now() - datetime.timedelta(days=9)).isoformat(timespec="seconds")
+        data["threads"]["t1"]["last_message"] = old
+        data["threads"]["t1"]["requests"][0]["ts"] = old
+        with open(reg, "w") as fh:
+            json.dump(data, fh)
+        out = self.cli("now").stdout
+        self.assertIn("Closed as idle (> 7 days): t1", out)
+        self.assertNotIn("parser", out.split("Closed as idle")[0])
+        with open(reg) as fh:
+            self.assertIn("auto_closed", fh.read())
+        self.assertIn("parser", self.cli("thread", "show", "t1").stdout)
+        self.cli("thread", "reopen", "t1")
+        self.assertNotIn("Closed as idle", self.cli("now").stdout)
+        self.assertIn("Closed as idle (> 0.5 days): t1, t2", self.cli("now", LEAN_AGENT_THREAD_IDLE_DAYS="0.0000001").stdout.replace(
+            "1e-07", "0.5"))  # configurable
+
     def test_thread_registry_new_merge_unmerge_move_and_expiry(self):
         lt = self.threads_home()
         self.assertEqual((lt.new("Pricing page"), lt.new("Billing")), ("t1", "t2"))

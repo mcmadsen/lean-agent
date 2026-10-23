@@ -9,6 +9,7 @@ Expiry is a filter in `list`, nothing is deleted: a task thread leaves the list 
 thread after 7 days without a message. The id `optimize` is reserved for the optimize suggestions.
 """
 import contextlib
+import glob
 import datetime
 import json
 import math
@@ -445,6 +446,228 @@ def route(prompt, session=None, now=None):
     return tid, how, line
 
 
+# ------------------------------------------------------------------ show the work (`now`, `thread show`)
+
+IDLE_DAYS = 7  # `now` closes an open thread with no activity for this long (LEAN_AGENT_THREAD_IDLE_DAYS or config thread_idle_days)
+NOW_LINES = 25
+KINDS = ['request', 'run', 'review', 'todo', 'note', 'doc', 'push']
+
+
+def idle_days():
+    for v in (os.environ.get("LEAN_AGENT_THREAD_IDLE_DAYS"), _config().get("thread_idle_days")):
+        try:
+            if v is not None and float(v) > 0:
+                return float(v)
+        except (TypeError, ValueError):
+            pass
+    return IDLE_DAYS
+
+
+def _config():
+    try:
+        with open(lean_home("config.json")) as fh:
+            c = json.load(fh)
+        return c if isinstance(c, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _jsonl(p):
+    out = []
+    try:
+        with open(p) as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict):
+                    out.append(r)
+    except OSError:
+        pass
+    return out
+
+
+def _json(p, default):
+    try:
+        with open(p) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def one_line(text, n=90):
+    t = " ".join(str(text or "").split())
+    return t if len(t) <= n else t[:n - 1] + "…"
+
+
+def events(data=None):
+    """{thread id: [(epoch, ts, kind, text)]} in time order: requests, runs, reviews, todos, notes, documents, pushes.
+    A record's thread follows merges; records without a thread are left out."""
+    data = data or load()
+    out = {}
+
+    def add(tid, ts, kind, text):
+        if not tid or not ts:
+            return
+        try:
+            tid = resolve(norm(tid), data["aliases"])
+        except ValueError:
+            return
+        out.setdefault(tid, []).append((_epoch(ts), str(ts), kind, one_line(text, 160)))
+
+    for tid, t in data["threads"].items():
+        for r in t.get("requests") or []:
+            add(tid, r.get("ts"), "request", r.get("text"))
+    for r in _jsonl(lean_home("ledger.jsonl")):
+        what = (r.get("result_head") or "").strip().splitlines()
+        add(r.get("thread"), r.get("ts"), "run",
+            f"{r.get('id')} {r.get('model') or '?'} {r.get('status') or '?'} {r.get('project') or ''}: "
+            f"{one_line(what[0] if what else r.get('task'), 90)}")
+    rdir = lean_home("reviews")
+    for f in sorted(os.listdir(rdir)) if os.path.isdir(rdir) else []:
+        if f.endswith(".jsonl"):
+            for r in _jsonl(os.path.join(rdir, f)):
+                add(r.get("thread"), r.get("ts"), "review",
+                    f"{r.get('run')} {f[:-6]} {r.get('verdict')}, {len(r.get('findings') or [])} findings"
+                    + (f", {len(r.get('gaps') or [])} gaps" if r.get("gaps") else ""))
+    items = _json(lean_home("todo.json"), {}).get("items") if isinstance(_json(lean_home("todo.json"), {}), dict) else []
+    for t in items or []:
+        if isinstance(t, dict):
+            add(t.get("thread"), t.get("created"), "todo", f"#{t.get('id')} {t.get('status')} {t.get('text')}")
+    notes = _json(lean_home("handoff-notes.json"), [])
+    for n in notes if isinstance(notes, list) else []:
+        if isinstance(n, dict):
+            m = re.match(r"^artifact: (\S+) (.*)$", n.get("text") or "")
+            if m:
+                add(n.get("thread"), n.get("ts"), "doc", f"{m.group(2)} {m.group(1)}")
+            else:
+                add(n.get("thread"), n.get("ts"), "note", f"{n.get('kind') or 'note'}: {n.get('text')}")
+    for r in _jsonl(lean_home("pushes.jsonl")):
+        add(r.get("thread"), r.get("ts"), "push",
+            f"{r.get('project')} {r.get('branch')} -> {r.get('to')} {str(r.get('sha') or '')[:8]}" + ("" if r.get("ok", True) else " FAILED"))
+    for v in out.values():
+        v.sort(key=lambda e: (e[0], KINDS.index(e[2])))  # same second: the order the work happens in
+    return out
+
+
+def age(ts, now=None):
+    s = max(0, (time.time() if now is None else now) - _epoch(ts))
+    return f"{int(s // 86400)}d" if s >= 86400 * 2 else f"{int(s // 3600)}h" if s >= 3600 else f"{int(s // 60)}m"
+
+
+def _running_by_thread(data):
+    out = {}
+    home = lean_home()
+    for f in glob.glob(os.path.join(home, "running", "*.json")):
+        m = _json(f, {})
+        try:
+            os.kill(int(m.get("pid")), 0)
+        except (OSError, ValueError, TypeError):
+            continue
+        if m.get("thread"):
+            tid = resolve(m["thread"], data["aliases"])
+            out[tid] = out.get(tid, 0) + 1
+    return out
+
+
+def _state(tid, evs, running, data):
+    parts = []
+    if running.get(tid):
+        parts.append(f"{running[tid]} running")
+    latest = {}
+    for _, _, kind, text in evs:
+        if kind == "review":
+            latest[text.split()[1]] = text
+    gaps = sum(1 for t in latest.values() if t.split()[2].rstrip(",") != "approve")
+    if gaps:
+        parts.append(f"{gaps} review open")
+    todos = {}
+    for _, _, kind, text in evs:
+        if kind == "todo":
+            todos[text.split()[0]] = text.split()[1]
+    n = sum(1 for s in todos.values() if s != "done")
+    if n:
+        parts.append(f"{n} todo open")
+    return ", ".join(parts) or "idle"
+
+
+def autoclose(data, evs, running, now=None):
+    """Close (never delete) the open threads idle longer than idle_days(); returns their ids. Caller saves."""
+    now = time.time() if now is None else now
+    gone = []
+    for tid, t in data["threads"].items():
+        if t.get("closed") or tid in data["aliases"] or tid in RESERVED or running.get(tid):
+            continue
+        last = max([_epoch(t.get("last_message") or t.get("created"))] + [e[0] for e in evs.get(tid, [])])
+        if now - last > idle_days() * 86400:
+            t["closed"], t["auto_closed"] = now_iso(), True
+            gone.append(tid)
+    return gone
+
+
+def now_text(now=None, close_idle=True, max_lines=NOW_LINES):
+    """Open threads by last activity: id, title, state, last action and age (<= max_lines lines)."""
+    with _locked() as data:
+        evs = events(data)
+        running = _running_by_thread(data)
+        closed = autoclose(data, evs, running, now) if close_idle else []
+        rows = []
+        for tid, t in data["threads"].items():
+            if t.get("closed") or tid in data["aliases"] or tid in RESERVED:
+                continue
+            ev = evs.get(tid, [])
+            last_ts = max([t.get("last_message") or t.get("created") or ""] + [e[1] for e in ev])
+            act = next((e for e in reversed(ev) if e[2] != "request"), None) or (ev[-1] if ev else None)
+            rows.append((_epoch(last_ts), last_ts, tid, t, act, _state(tid, ev, running, data)))
+    rows.sort(key=lambda r: (r[0], r[2]), reverse=True)
+    lines = [f"Open threads ({len(rows)}), latest first:"] if rows else ["No open threads."]
+    for _, last_ts, tid, t, act, state in rows[:max_lines - 2]:
+        lines.append(f"{tid:<4} {one_line(t['title'], 40):<40} {state:<22} {age(last_ts, now):>4}  "
+                     + (f"{act[2]}: {one_line(act[3].split(' ', 1)[-1] if act[2] in ('run', 'review') else act[3], 60)}" if act else "-"))
+    if len(rows) > max_lines - 2:
+        lines.append(f"... and {len(rows) - max_lines + 2} older (lean-agent thread list)")
+    if closed:
+        lines.append(f"Closed as idle (> {idle_days():g} days): {', '.join(closed)} (lean-agent thread reopen tN)")
+    return "\n".join(lines)
+
+
+def show_text(tid, all_=False, limit=40):
+    tid = resolve(norm(tid))
+    data = load()
+    t = data["threads"].get(tid)
+    if t is None:
+        raise ValueError(f"no such thread {tid}")
+    ev = events(data).get(tid, [])
+    head = f'{tid} "{t.get("title")}"' + (" [closed]" if t.get("closed") else "")
+    merged = sorted(s for s, d in data["aliases"].items() if resolve(d, data["aliases"]) == tid)
+    if merged:
+        head += f" (includes {', '.join(merged)})"
+    lines = [head]
+    shown = ev if all_ or len(ev) <= limit else ev[-limit:]
+    if len(shown) < len(ev):
+        lines.append(f"... {len(ev) - len(shown)} earlier (lean-agent thread show {tid} --all)")
+    lines += [f"{ts[:16].replace('T', ' ')}  {kind:<8} {text}" for _, ts, kind, text in shown]
+    if not ev:
+        lines.append("(nothing recorded yet)")
+    return "\n".join(lines)
+
+
+def set_closed(tid, closed):
+    tid = resolve(norm(tid))
+    with _locked() as data:
+        t = data["threads"].get(tid)
+        if t is None:
+            raise ValueError(f"no such thread {tid}")
+        if closed:
+            t["closed"] = now_iso()
+        else:
+            t.pop("closed", None)
+            t.pop("auto_closed", None)
+            t["last_message"] = now_iso()  # reopened: counts as activity, or the next `now` would close it again
+    return tid
+
+
 # ------------------------------------------------------------------ the CLI
 
 def cli(action, args, as_json=False, out=print):
@@ -459,7 +682,16 @@ def cli(action, args, as_json=False, out=print):
             if as_json:
                 out(json.dumps(items, indent=1))
             for t in ([] if as_json else items):
-                out(f"{t['id']:<9}{t['kind']:<6}{(t.get('last_message') or '-'):<21}{t['title']}")
+                out(f"{t['id']:<9}{t['kind']:<6}{(t.get('last_message') or '-'):<21}{t['title']}" + (" [closed]" if t.get("closed") else ""))
+        elif action == "show":
+            ids = [a for a in args if not a.startswith("--")]
+            if len(ids) != 1:
+                raise ValueError("usage: lean-agent thread show tN [--all]")
+            out(show_text(ids[0], "--all" in args))
+        elif action in ("close", "reopen"):
+            if len(args) != 1:
+                raise ValueError(f"usage: lean-agent thread {action} tN")
+            out(f"{set_closed(args[0], action == 'close')} {'closed' if action == 'close' else 'open again'}")
         elif action in ("merge", "move") and len(args) != 2 or action == "unmerge" and len(args) != 1:
             raise ValueError({"merge": "usage: lean-agent thread merge tB tA", "move": "usage: lean-agent thread move <message-id> <thread>",
                               "unmerge": "usage: lean-agent thread unmerge tB"}[action])
@@ -473,7 +705,7 @@ def cli(action, args, as_json=False, out=print):
             move(*args)
             out(f"{args[0]} -> {norm(args[1])}")
         else:
-            raise ValueError("usage: lean-agent thread new|list|merge|unmerge|move")
+            raise ValueError("usage: lean-agent thread new|list|show|close|reopen|merge|unmerge|move")
     except ValueError as e:
         out(f"lean-agent: {e}")
         return 1
