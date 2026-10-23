@@ -605,7 +605,8 @@ class BudgetTest(Base):
                 "lean-agent memory import", "lean-agent memory -p proj add 'x'", "lean-agent card proj add c --text x",
                 "lean-agent card proj rm c", "lean-agent card proj core c", "lean-agent card proj protect c",
                 "lean-agent card proj shorten c --save", "lean-agent card proj unarchive c", "lean-agent recipe add p r --task x",
-                "lean-agent recipe rm p r", "lean-agent doc write ~/Documents/a.md --text x", "lean-agent todo add 'x' -p proj",
+                "lean-agent recipe rm p r", "lean-agent doc write ~/Documents/a.md --text x",
+                "lean-agent doc write ~/Downloads/x.md <<'EOF'\nbody\nEOF", "lean-agent doc list", "lean-agent todo add 'x' -p proj",
                 "lean-agent todo note 3 'x'", "lean-agent todo rm 3", "lean-agent todo edit 3 'y'", "lean-agent todo reopen 3",
                 "lean-agent todo epic e", "lean-agent handoff --note 'remember x'", "lean-agent handoff --note 'x' --kind reminder",
                 "lean-agent schedule add 'daily 09:00' do p r",
@@ -763,6 +764,55 @@ class BudgetTest(Base):
             self.assertEqual(budget_hook.strict_denial(bash_event(ex), "/home", "/home"), "", ex)  # strict mode allows it
         for ex in skipped:  # the marker is only for what strict mode really denies
             self.assertTrue(budget_hook.strict_denial(bash_event(re.sub(r"\|\w+", "", ex)), "/home", "/home"), ex)
+
+    def surface_commands(self):
+        """(allowed, denied): the `lean-agent` commands section 2 of docs/orchestrator-surface.md lists, as word lists."""
+        import itertools
+        import re
+        path = os.path.join(ROOT, "..", "..", "..", "docs", "orchestrator-surface.md")
+        with open(path, encoding="utf-8") as fh:
+            section = fh.read().split("## 2.")[1].split("\n## 3.")[0]
+        allowed, denied = [], []
+        for line in section.splitlines():
+            cols = [c.strip() for c in re.split(r"(?<!\\)\|", line)[1:-1]]
+            if len(cols) != 3 or cols[1] in ("Class", "---"):
+                continue
+            status = denied if "**denied**" in cols[2] else allowed if cols[2].startswith("allowed") else None
+            self.assertIsNotNone(status, line)
+            base = ""
+            for span in re.findall(r"`([^`]+)`", cols[0].replace("\\|", "\x00")):
+                span = re.sub(r"\[[^\]]*\]", "", span).replace("\u2026", "x")
+                span = re.sub(r"<[^>]*>", "x", span)
+                if span.startswith("-"):  # a flag of the previous command in the row
+                    span = f"{base} {span}"
+                else:
+                    base = " ".join(itertools.takewhile(lambda w: not w.startswith("-"), span.split()))
+                words = [w.split("\x00") for w in span.split()]
+                for combo in itertools.product(*words):
+                    status.append(["lean-agent", *combo])
+        return allowed, denied
+
+    def test_orchestrator_surface_doc_matches_the_strict_hook(self):
+        sys.path.insert(0, ROOT)
+        import budget_hook
+        allowed, denied = self.surface_commands()
+        self.assertGreater(len(allowed), 60)
+        self.assertGreater(len(denied), 40)
+        event = lambda words: {"tool_name": "Bash", "tool_input": {"command": " ".join(words)}}
+        for words in allowed:
+            self.assertEqual(budget_hook.strict_denial(event(words), "/home", "/home"), "", " ".join(words))
+        for words in denied:
+            self.assertTrue(budget_hook.strict_denial(event(words), "/home", "/home"), " ".join(words))
+        # and the other way: everything the hook lists as denied is in the doc as denied
+        listed = {(n, a) for n, acts in budget_hook.CHANGING_ACTIONS.items() for a in acts}
+        listed |= {(n, "") for n in budget_hook.CHANGING_ALWAYS | budget_hook.KEEP_ALWAYS | budget_hook.MCP_ALWAYS}
+        listed |= {(n, f) for n, flags in budget_hook.CHANGING_FLAGS.items() for f in flags}
+        listed |= {(n, a) for n, (_, acts) in budget_hook.KEEP_ACTIONS.items() for a in acts}
+        listed |= {(n, a) for n, (_, acts) in budget_hook.MCP_ACTIONS.items() for a in acts}
+        listed |= {("config", "strict off")}
+        for name, what in sorted(listed):
+            self.assertTrue(any(w[1] == name and (not what or all(x in w[2:] for x in what.split())) for w in denied),
+                            f"{name} {what} is denied by the hook but not listed as denied in the doc")
 
     def test_no_budget_tracks_only(self):
         self.assertIsNone(run_hook("budget_hook.py", self.ev, **self.env))

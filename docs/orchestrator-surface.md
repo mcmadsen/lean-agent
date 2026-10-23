@@ -45,7 +45,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `thread new\|list\|merge\|unmerge\|move` | b | allowed |
 | `checkpoint`, `brief` | b | allowed |
 | `handoff` (read), `handoff --done N`, `handoff --note … --kind checkpoint\|fyi\|decision` | b | allowed: the orchestrator's own state; a `decision` note is how it asks the user something asynchronously |
-| `handoff --note …` with no `--kind` or `--kind reminder` | c | **denied**: user content; `remember` |
+| `handoff --note …` with no kind, or kind reminder | c | **denied**: user content; `remember` |
 | `todo list\|next\|start\|done` | b | allowed: status that follows a run it started |
 | `todo add\|note\|edit\|rm\|reopen\|epic` | c | **denied** (`todo add` serves both; a run gets its item from `run --todo new`, which names it after `--why`) |
 | `memory list\|where` | a | allowed |
@@ -56,7 +56,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `recipe add\|rm` | c | **denied** (stored runs are presets) |
 | `mcp list\|tools\|preset\|env\|ignore` (all of `mcp`), `chrome check` | c | **denied**: the orchestrator neither lists nor runs MCP servers or presets; a read-only worker with `--allow-cmd 'lean-agent mcp'` does |
 | `chrome status` | a | allowed |
-| `doc write` | c | **denied** (files); a worker writes documents |
+| `doc` (every subcommand: write, list, ...) | c | **denied** (files); a worker writes documents |
 | `schedule list\|run\|pause\|resume\|run-due` | b | allowed |
 | `schedule add\|rm\|defaults` | c | **denied** (a job later runs lean-agent commands) |
 | `guard list` | a | allowed |
