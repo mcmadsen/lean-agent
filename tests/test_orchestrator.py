@@ -2102,6 +2102,27 @@ class CliTest(unittest.TestCase):
         self.assertIn("lean-agent week", out)
         self.assertNotIn("scheduled #", self.cli("schedule", "defaults").stdout)  # once
 
+    def test_scheduled_jobs_are_untagged_unless_the_entry_names_a_thread(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        lt = self.threads_home()
+        lt.route("Fix the export timeout in billing", "s1")  # the orchestrator's current thread: t1
+        self.cli("schedule", "add", "every 30m", "run", "-p", "proj", "look at it", "--model", "haiku", "--why", "t")
+        path = os.path.join(self.env["LEAN_AGENT_HOME"], "schedule.json")
+        with open(path) as fh:
+            jobs = json.load(fh)
+        jobs[0]["created"] = "2020-01-01T00:00:00"
+        with open(path, "w") as fh:
+            json.dump(jobs, fh)
+        self.cli("schedule", "run-due")
+        self.assertEqual(self.calls()[-1]["thread"], "none")
+        self.assertIsNone(self.ledger()[-1]["thread"])
+        jobs[0].update(thread="t1", last=None)
+        with open(path, "w") as fh:
+            json.dump(jobs, fh)
+        self.cli("schedule", "run-due")
+        self.assertEqual(self.calls()[-1]["thread"], "t1")
+        self.assertEqual(self.ledger()[-1]["thread"], "t1")
+
     def test_schedule_due_times(self):
         sys.path.insert(0, os.path.dirname(CLI))
         import lean_schedule as S
