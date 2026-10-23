@@ -5412,6 +5412,10 @@ def artifacts_on():
     return load_json(home("config.json"), {}).get("artifacts", "on") != "off"
 
 
+def strict_on():
+    return load_json(home("config.json"), {}).get("strict", "on") != "off"
+
+
 def orchestrator_settings(existing):
     """lean-agent's keys for the home's .claude/settings.json; other keys (e.g. model) are kept."""
     data = dict(existing)
@@ -5691,6 +5695,7 @@ def cmd_doctor(a):
                "keep files other than lean-agent's guide out: lean-agent doctor --fix (refreshes the excludes)")
     report(is_trusted(h), "orchestrator home is trusted", "lean-agent trust")
     report(True, f"artifacts: {'on' if artifacts_on() else 'off'} (lean-agent config artifacts on|off)")
+    report(True, f"strict orchestrator: {'on' if strict_on() else 'off'} (lean-agent config strict on|off)")
 
     slug = default_project(path)
     projs = projects()
@@ -6747,6 +6752,15 @@ def cmd_attribution(a):
 
 
 def cmd_config(a):
+    if a.name == "strict":
+        if a.value:
+            cfg = load_json(home("config.json"), {})
+            cfg["strict"] = a.value
+            save_json(home("config.json"), cfg)
+        print(f"strict: {'on' if strict_on() else 'off'} · the orchestrator "
+              + ("may only run lean-agent commands and read lean-agent's own files; project work goes to workers"
+                 if strict_on() else "may also run other commands and read project files"))
+        return 0
     if a.name == "artifacts" and a.value:
         cfg = load_json(home("config.json"), {})
         cfg["artifacts"] = a.value
@@ -7713,8 +7727,9 @@ def build_parser():
     s.add_argument("--project", "-p")
     s.set_defaults(fn=cmd_text_len)
 
-    s = sub.add_parser("config", help="switches: artifacts on|off (may the orchestrator publish artifacts; default on)")
-    s.add_argument("name", choices=["artifacts"])
+    s = sub.add_parser("config", help="switches: artifacts on|off (may the orchestrator publish artifacts; default on), "
+                       "strict on|off (the orchestrator only runs lean-agent commands; default on)")
+    s.add_argument("name", choices=["artifacts", "strict"])
     s.add_argument("value", nargs="?", choices=["on", "off"])
     s.set_defaults(fn=cmd_config)
 
