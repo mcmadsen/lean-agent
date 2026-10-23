@@ -30,8 +30,7 @@ RESERVED = {"optimize": "Optimize"}
 ID_RE = re.compile(r"^(#\d+|t\d+|optimize)$")
 
 
-def lean_home(*parts):
-    return os.path.join(os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent")), *parts)
+lean_home = lean_common.lean_home
 
 
 def path():
@@ -177,7 +176,7 @@ def unmerge(src):
 
 def _todo_map():
     """{"#N": todo item} from todo.json (read once per call by the callers)."""
-    doc = _json(lean_home("todo.json"), {})
+    doc = lean_common.read_json(lean_home("todo.json"), {})
     return {f"#{t.get('id')}": t for t in (doc.get("items") if isinstance(doc, dict) else None) or [] if isinstance(t, dict)}
 
 
@@ -421,14 +420,6 @@ def _jsonl(p):
     return out
 
 
-def _json(p, default):
-    try:
-        with open(p) as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return default
-
-
 def one_line(text, n=90):
     t = " ".join(str(text or "").split())
     return t if len(t) <= n else t[:n - 1] + "…"
@@ -481,7 +472,7 @@ def events(data=None, todos=None):
         add(r.get("thread"), r.get("ts"), kind, text, key)
     for t in todos.values():
         add(t.get("thread"), t.get("created"), "todo", f"#{t.get('id')} {t.get('status')} {t.get('text')}")
-    notes = _json(lean_home("handoff-notes.json"), [])
+    notes = lean_common.read_json(lean_home("handoff-notes.json"), [])
     for n in notes if isinstance(notes, list) else []:
         if isinstance(n, dict):
             m = re.match(r"^artifact: (\S+) (.*)$", n.get("text") or "")
@@ -503,7 +494,7 @@ def _running_by_thread(data):
     out = {}
     home = lean_home()
     for f in glob.glob(os.path.join(home, "running", "*.json")):
-        m = _json(f, {})
+        m = lean_common.read_json(f, {})
         try:
             os.kill(int(m.get("pid")), 0)
         except (OSError, ValueError, TypeError):
@@ -622,7 +613,7 @@ def _tagged(tag, thread, aliases):
 def _retag(path, items_of, thread, new, since, aliases, ts_key):
     """Rewrite, under the file's lock, the thread of the entries of `thread` from `since` on."""
     with lean_common.file_lock(path):
-        doc = _json(path, None)
+        doc = lean_common.read_json(path, None)
         items = items_of(doc)
         hit = [e for e in items if isinstance(e, dict) and _tagged(e.get("thread"), thread, aliases) and _epoch(e.get(ts_key)) >= since]
         for e in hit:
@@ -636,7 +627,7 @@ def move_latest(tid, session=None):
     thread recorded since that request is re-homed: the append-only logs through the overrides, todo.json and the hand-off
     notes in place. Returns (old thread, new thread)."""
     tid = norm(tid)
-    st = _json(state_path(), {})
+    st = lean_common.read_json(state_path(), {})
     rec = ((st.get("sessions") or {}).get(session or "") or st.get("latest") or {}) if isinstance(st, dict) else {}
     if not rec.get("thread"):
         raise ValueError("no current thread to move a request out of")

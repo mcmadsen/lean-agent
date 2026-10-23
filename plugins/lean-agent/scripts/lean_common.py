@@ -34,6 +34,11 @@ def compaction_point(window, pct):
     return int(min(window * pct / 100, window - buffer))
 
 
+def lean_home(*parts):
+    """~/.lean-agent (or $LEAN_AGENT_HOME), absolute, with `parts` joined on."""
+    return os.path.join(os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent")), *parts)
+
+
 def read_json(path, default):
     try:
         with open(path) as fh:
