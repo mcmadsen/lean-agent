@@ -634,7 +634,7 @@ class BudgetTest(Base):
                    "lean-agent todo list", "lean-agent todo next", "lean-agent todo start 3", "lean-agent todo done 3 'merged as PR 5'",
                    "lean-agent handoff", "lean-agent handoff --done 2", "lean-agent handoff --note 'x' --kind fyi",
                    "lean-agent handoff --note=x --kind=checkpoint", "lean-agent thread new 'T'", "lean-agent checkpoint 'x'",
-                   "lean-agent remember 'Never merge on Fridays'", "lean-agent advise 'Fix the export retry' --thread t2",
+                   "lean-agent clear", "lean-agent remember 'Never merge on Fridays'", "lean-agent advise 'Fix the export retry' --thread t2",
                    "lean-agent advise --task-file - <<'EOF'\nx\nEOF", "lean-agent remember --task-file - <<'EOF'\nx\nEOF",
                    "lean-agent run proj --cards auto -m haiku --why x --todo new -- 'look'", "lean-agent tracker proj",
                    "lean-agent tracker proj --discover --mcp tickets", "lean-agent chrome status", "lean-agent schedule list",
