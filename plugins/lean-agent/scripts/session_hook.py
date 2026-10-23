@@ -19,7 +19,19 @@ BRIEF_CAP = 3000  # characters of brief added to a cleared session
 CHAIN_KEEP = 20   # transcripts kept in the record's chain
 
 
-def chain_of(old, event, now):
+def restarted_fresh(home, event):
+    """True for the startup of the session `up --clear` / `service restart --clear` / the dashboard's Restart fresh
+    asked for: up.json names its id as fresh_sid."""
+    if event.get("source") != "startup":
+        return False
+    try:
+        with open(os.path.join(home, "up.json")) as fh:
+            return json.load(fh).get("fresh_sid") == event["session_id"]
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def chain_of(old, event, now, fresh=False):
     """The record's chain after this event: `old`'s paths with the event's transcript last (moved there when it was
     already in), with when and why each one started."""
     chain = [p for p in (old.get("chain") or []) if isinstance(p, str)]
@@ -27,7 +39,7 @@ def chain_of(old, event, now):
     path = event.get("transcript_path")
     if isinstance(path, str) and path:
         if not (chain and chain[-1] == path and path in meta):
-            meta[path] = {"ts": now, "source": event.get("source")}
+            meta[path] = {"ts": now, "source": event.get("source"), **({"fresh": True} if fresh else {})}
         chain = [p for p in chain if p != path] + [path]
     chain = chain[-CHAIN_KEEP:]
     return chain, {p: meta[p] for p in chain if isinstance(meta.get(p), dict)}
@@ -151,12 +163,13 @@ def main(ppid=parent_pid, cmd=argv_of, wait=3.0):
     if not isinstance(old, dict):
         old = {}
     now = time.time()
-    chain, meta = chain_of(old, event, now)
+    fresh = restarted_fresh(home, event)
+    chain, meta = chain_of(old, event, now, fresh)
     with open(tmp, "w") as fh:
         json.dump({"session_id": event["session_id"], "transcript_path": event.get("transcript_path"),
                    "source": event.get("source"), "ts": now, "chain": chain, "chain_meta": meta}, fh)
     os.replace(tmp, path)
-    if event.get("source") == "clear":
+    if event.get("source") == "clear" or fresh:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import compact_hook
         text = compact_hook.brief(BRIEF_CAP)

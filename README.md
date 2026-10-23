@@ -262,6 +262,11 @@ Every orchestrator turn re-reads the whole conversation, so it's kept short:
   the orchestrator save its soft state with `lean-agent checkpoint`, then clears the session; the new session starts
   with `lean-agent brief` (the checkpoint first). Never while a permission prompt waits, within 30 s of typing, or
   twice in 10 minutes; each clear is logged in `logs/debug.log` (component `auto-clear`).
+- **Restart with a clean context:** `lean-agent service restart --clear` and `lean-agent up --clear` have a live
+  session checkpoint first (the same prompt as the auto clear, up to 120 s for 'checkpointed'), then the next session
+  is a new one (a new session id in `up.json`) that starts from the brief, like after a clear. The dashboard keeps
+  the thread history across it and shows a "Restarted fresh" line; its Context sheet has a "Restart fresh…" button
+  (with an inline confirm) that does the same without restarting `up`.
 - **Short answers in:** workers answer in at most 25 lines and put the rest in a details file; lean-agent's
   report commands print one line per item (brief mode); reviews print the verdict and one line per finding.
 - **No MCP servers of its own:** `lean-agent up` switches your user-scope and plugin MCP servers off for the

@@ -3,7 +3,7 @@
 followed by Enter appends a user and an assistant record to the session's transcript JSONL (the real format).
 A message "Checkpoint now..." is answered with "checkpointed" (with FAKE_NO_CHECKPOINT: a turn that ends without it); assistant records carry
 usage with FAKE_CTX tokens read from cache. A message with "use a tool" in it also makes a Bash tool call with its result; "/clear" starts a new transcript
-with a new session id (as Claude Code does) and runs the SessionStart hook for it; a lone Escape appends the interruption record."""
+with a new session id (as Claude Code does) and runs the SessionStart hook for it (with FAKE_START_HOOK, also at start-up); a lone Escape appends the interruption record."""
 import datetime
 import json
 import os
@@ -35,6 +35,12 @@ def add(rec):
         fh.write(json.dumps(rec) + "\n")
 
 
+if os.environ.get("FAKE_START_HOOK"):  # what Claude Code does when a session starts: the SessionStart hook
+    hook = subprocess.run([os.environ["FAKE_NAMED_CLAUDE"], HOOK], input=json.dumps({
+        "session_id": sid, "transcript_path": transcript, "hook_event_name": "SessionStart", "cwd": os.getcwd(),
+        "source": "resume" if "--resume" in argv else "startup"}), text=True, capture_output=True, check=False)
+    with open(os.environ["FAKE_SESSION_LOG"], "a") as fh:
+        fh.write(json.dumps({"start_hook": hook.stdout, "sid": sid}) + "\n")
 tty.setraw(0)
 sys.stdout.write("fake claude ready\r\n")
 sys.stdout.flush()

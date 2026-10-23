@@ -336,7 +336,7 @@ class SessionHookTest(Base):
         fake = os.path.join(home, "claude")
         with open(fake, "w") as fh:
             fh.write("#!%s\nimport json, os, subprocess, sys\n"
-                     "json.dump({'pid': os.getpid()}, open(os.path.join(os.environ['LEAN_AGENT_HOME'], 'up.json'), 'w'))\n"
+                     "json.dump(dict({'pid': os.getpid()}, **({'fresh_sid': os.environ['FAKE_FRESH_SID']} if os.environ.get('FAKE_FRESH_SID') else {})), open(os.path.join(os.environ['LEAN_AGENT_HOME'], 'up.json'), 'w'))\n"
                      "p = subprocess.run([sys.executable, sys.argv[1]], input=sys.argv[2], text=True, capture_output=True)\n"
                      "sys.stdout.write(p.stdout)\n" % sys.executable)
         os.chmod(fake, 0o755)
@@ -366,6 +366,22 @@ class SessionHookTest(Base):
         text = self.hook_under_claude(event | {"source": "clear"}, LEAN_AGENT_SERVICE_SESSION="1")[
             "hookSpecificOutput"]["additionalContext"]
         self.assertLessEqual(len(text), 3100)
+
+    def test_startup_of_a_restart_fresh_session_gets_the_brief_and_is_marked(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        with open(os.path.join(home, "handoff-notes.json"), "w") as fh:
+            json.dump([{"ts": "2026-10-23T09:00:00", "text": "an open item"}], fh)
+        event = {"session_id": "f1", "transcript_path": "/x/f1.jsonl", "source": "startup"}
+        env = dict(LEAN_AGENT_SERVICE_SESSION="1", FAKE_FRESH_SID="f1")
+        out = self.hook_under_claude(event, **env)["hookSpecificOutput"]
+        self.assertIn("an open item", out["additionalContext"])
+        with open(os.path.join(home, "chat", "service.json")) as fh:
+            rec = json.load(fh)
+        self.assertTrue(rec["chain_meta"]["/x/f1.jsonl"]["fresh"])
+        # a resume of that session later, or another session's startup, is not a fresh restart
+        self.assertIsNone(self.hook_under_claude(event | {"source": "resume"}, **env))
+        self.assertIsNone(self.hook_under_claude(event | {"session_id": "f2"}, **env))
 
     def test_capped_brief_keeps_the_checkpoint_and_the_handoff_notes(self):
         sys.path.insert(0, ROOT)

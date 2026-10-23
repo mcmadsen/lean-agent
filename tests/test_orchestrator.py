@@ -15,6 +15,7 @@ import threading
 import time
 import types
 import unittest
+import uuid
 from unittest import mock
 
 # A review that did the reuse pass for the symbols the test repo's change adds.
@@ -3358,6 +3359,22 @@ class CliTest(unittest.TestCase):
         self.assertEqual([t["messages"] for t in m.thread_summaries() if t["id"] == "#5"], [2])
         self.assertEqual(m.sid, "s2")
 
+    def test_service_chain_marks_a_restart_fresh_and_the_ui_has_its_button(self):
+        ds, home, tr, new = self._chain_two()
+        rec = _load_json(os.path.join(home, "chat", "service.json"))
+        rec["chain_meta"][new] = {"ts": time.time(), "source": "startup", "fresh": True}
+        with open(os.path.join(home, "chat", "service.json"), "w") as fh:
+            json.dump(rec, fh)
+        m = ds.Model()
+        m.refresh()
+        marks = [e for e in m.snapshot("main", 0)["events"] if e["kind"] == "cleared"]
+        self.assertEqual([bool(e.get("fresh")) for e in marks], [True])
+        ui = os.path.join(os.path.dirname(CLI), "dashboard_ui")
+        chat_js = open(os.path.join(ui, "chat.js")).read()
+        for text in ("Restarted fresh", 'data-act="fresh-ask"', 'data-act="fresh-yes"', "/api/service/restart-fresh"):
+            self.assertIn(text, chat_js)
+        self.assertIn("freshHtml", open(os.path.join(ui, "app.js")).read())
+
     def test_service_chain_cursor_polling_across_the_switch(self):
         ds, home, tr, new = self._chain_two()
         os.remove(new)
@@ -4768,6 +4785,84 @@ class CliTest(unittest.TestCase):
         self.wait_for(lambda: any("argv" in r for r in self.read_jsonl(log)[n:]), "the respawn", secs=30)
         argv = [r for r in self.read_jsonl(log)[n:] if "argv" in r][0]["argv"]
         self.assertEqual(argv[-2:], ["--resume", sid])
+
+    def start_hooks(self, log):
+        return [r for r in self.read_jsonl(log) if "start_hook" in r]
+
+    def test_restart_clear_starts_a_new_session_with_the_brief_and_keeps_the_chain(self):
+        self.cli("handoff", "--note", "carry on with the plan")
+        p, log, ss = self.auto_clear_up(0, FAKE_START_HOOK="1")
+        self.wait_for(lambda: self.start_hooks(log), "the start-up hook")
+        sid = ss.info()["session_id"]
+        ss.send("hello")
+        first = self.service_record()["chain"][0]
+        fake = os.path.join(self.tmp.name, "systemctl")
+        with open(fake, "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(fake, 0o755)
+        env = dict(LEAN_AGENT_SERVICE_PLATFORM="linux", LEAN_AGENT_SYSTEMCTL=fake, LEAN_AGENT_CLEAR_WAIT="20")
+        self.cli("service", "install", **env)
+        out = self.cli("service", "restart", "--clear", **env).stdout
+        self.assertIn("(checkpointed)", out)
+        new = ss.info()["session_id"]
+        self.assertNotIn(new, (sid, ""))
+        self.assertEqual(_load_json(os.path.join(self.env["LEAN_AGENT_HOME"], "up.json"))["fresh_sid"], new)
+        p.terminate()
+        p.wait(timeout=20)
+        p2, log2, ss = self.start_up("--name", "la")  # the service starts `up` again
+        argv = [r for r in self.read_jsonl(log) if "argv" in r][-1]["argv"]
+        self.assertEqual(argv[-2:], ["--session-id", new])
+        self.wait_for(lambda: [h for h in self.start_hooks(log) if h["sid"] == new], "the new session's start-up hook")
+        [hook] = [h for h in self.start_hooks(log) if h["sid"] == new]
+        text = json.loads(hook["start_hook"])["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("carry on with the plan", text)
+        rec = self.service_record()
+        self.assertEqual(rec["chain"][0], first)  # thread history stays
+        self.assertTrue(rec["chain"][-1].endswith(new + ".jsonl"))
+        self.assertTrue(rec["chain_meta"][rec["chain"][-1]]["fresh"])
+        self.assertEqual(rec["source"], "startup")
+        self.assertEqual(ss.info()["session_id"], new)
+
+    def test_restart_fresh_from_the_running_up_replaces_the_session(self):
+        p, log, ss = self.auto_clear_up(0, FAKE_START_HOOK="1", LEAN_AGENT_CLEAR_WAIT="20")
+        self.wait_for(lambda: self.start_hooks(log), "the start-up hook")
+        ss.send("hello")
+        old = ss.info()["session_id"]
+        n = len(self.read_jsonl(log))
+        sid, checkpointed = ss.go_fresh(restart_host=True, wait=20)
+        self.assertTrue(checkpointed)
+        self.wait_for(lambda: any("argv" in r for r in self.read_jsonl(log)[n:]), "the new session", secs=30)
+        argv = [r for r in self.read_jsonl(log)[n:] if "argv" in r][0]["argv"]
+        self.assertEqual(argv[-2:], ["--session-id", sid])
+        self.assertNotEqual(sid, old)
+        self.wait_for(lambda: self.service_record().get("session_id") == sid, "the hook's record")
+        self.assertEqual(len(self.service_record()["chain"]), 2)
+        self.wait_for(lambda: ss.alive(), "the bridge")
+
+    def test_drop_stale_record_cases(self):
+        ds, home, proj, tr, up = self._follow_env()
+        import service_session
+        rec = os.path.join(home, "chat", "service.json")
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": os.path.join(home, "cfg")}):
+            service_session.drop_stale_record(proj, "s9")  # no service.json: nothing to do, no error
+            self.assertFalse(os.path.exists(rec))
+            gone = os.path.join(proj, "s2.jsonl")
+            with open(rec, "w") as fh:
+                json.dump({"session_id": "s2", "transcript_path": gone, "chain": [gone]}, fh)
+            own = service_session.transcript_path(proj, "s1")
+            os.makedirs(os.path.dirname(own))
+            open(own, "w").close()
+            service_session.drop_stale_record(proj, "s1")  # the sid's own transcript exists: returns early
+            self.assertTrue(os.path.exists(rec))  # although nothing in the record's chain exists
+            os.remove(own)
+            with open(rec, "w") as fh:
+                json.dump({"session_id": "s1", "transcript_path": tr, "chain": [tr]}, fh)
+            new = str(uuid.uuid4())  # a new uuid without --fresh: the chain still has a transcript, so it stays
+            service_session.drop_stale_record(proj, new)
+            self.assertTrue(os.path.exists(rec))
+            os.remove(tr)
+            service_session.drop_stale_record(proj, new)
+            self.assertFalse(os.path.exists(rec))
 
     def test_up_fresh_resets_the_chain(self):
         p, log, ss, sid = self.cleared_up()

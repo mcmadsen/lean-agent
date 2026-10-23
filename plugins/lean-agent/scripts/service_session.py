@@ -27,6 +27,7 @@ import socket
 import stat
 import subprocess
 import sys
+import uuid
 import threading
 import time
 
@@ -106,7 +107,9 @@ def transcript_path(cwd, session_id):
 def drop_stale_record(cwd, sid):
     """A new conversation makes the old service.json and its chain stale: removed before the spawn, so a fast
     SessionStart hook of the new session is not deleted. A restart after a /clear, before the new transcript exists,
-    keeps it: it goes only when no transcript of its chain exists at all (`up --fresh` removes it itself)."""
+    keeps it: it goes only when no transcript of its chain exists at all (`up --fresh` removes it itself).
+    The same holds when `up` starts a brand-new session id without --fresh (e.g. `up --clear`, or an up.json that
+    was lost): the record stays as long as any transcript of its chain exists, so the thread history stays."""
     if os.path.exists(transcript_path(cwd, sid)):
         return
     rec = _load(lean_home("chat", "service.json"))
@@ -146,6 +149,30 @@ def last_clear(rec):
     times = [m["ts"] for m in chain_meta(rec).values() if isinstance(m, dict) and m.get("source") == "clear"
              and _num(m.get("ts"))]
     return max(times) if times else None
+
+
+def go_fresh(restart_host=False, wait=None, now=time.time, sleep=time.sleep):
+    """Restart with a clean context: ask a live session to checkpoint (waiting up to `wait` seconds, default
+    CLEAR_WAIT, for 'checkpointed'), then point up.json at a new session id; `up` starts that one next, and the
+    SessionStart hook gives it the brief. With `restart_host` the running `up` also ends the old session now and
+    starts the new one itself. Returns the new session id."""
+    checkpointed = None
+    if alive():
+        path = _load(lean_home("chat", "service.json")).get("transcript_path") or info().get("transcript") or ""
+        offset = transcript_state(path)["size"]
+        sent, _ = send(CLEAR_PROMPT)
+        limit = now() + (CLEAR_WAIT if wait is None else wait)
+        checkpointed = False
+        while sent and now() < limit and not checkpointed:
+            st = transcript_state(path, offset)
+            checkpointed = st["ended"] and "checkpointed" in st["text"].lower()
+            if not checkpointed:
+                sleep(0.5)
+    sid = str(uuid.uuid4())
+    update_up(session_id=sid, transcript=transcript_path(lean_home("home"), sid), fresh_sid=sid)
+    if restart_host and alive():
+        request({"restart": True})
+    return sid, checkpointed
 
 
 def update_up(**fields):
@@ -508,6 +535,9 @@ class Host:
                 return {"ok": True, "alive": self.alive(), "pid": self.proc.pid if self.proc else None}
             if msg.get("tail"):
                 return {"ok": True, "text": self.tail_text()}
+            if msg.get("restart"):  # end the session; run() starts the one up.json names now
+                self.terminate_for("restart")
+                return {"ok": True}
             if isinstance(msg.get("text"), str):
                 self.last_input = time.time()
                 self.paste(msg["text"])
@@ -659,6 +689,8 @@ class Host:
                 self.master = None
                 if self.stopping.is_set():
                     return 0
+                if self.reason == "restart":
+                    continue
                 if self.reason == "stale" and not stale_done:
                     stale_done = True
                     if self.on_stale:
