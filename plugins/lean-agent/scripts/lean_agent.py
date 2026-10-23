@@ -3852,7 +3852,9 @@ def report_review(slug, project, entry, review, meta):
     blocking = [f for f in findings if f.get("severity") in ("blocker", "major")]
     if verdict == "approve" and not blocking and gaps:
         print(f"Approved, but with {len(gaps)} known gap(s): tell the user about each in one line and get their word "
-              f"(out of scope: lean-agent review decline {slug} g<n> --why \"...\") before calling it ready or opening a PR.")
+              f"(out of scope: lean-agent review decline {slug} g<n> --why \"...\") before calling it ready or opening a PR.\n"
+              f"approved: {len(gaps)} known gap(s) wait for your decision (exit 2 until each is declined or fixed; "
+              "`review --status` exits 2 as well until then)")
         return 2
     if verdict == "approve" and not blocking:
         print("Approved: OK to prepare the PR (still an outward action: ask the user before creating it).")
@@ -4115,8 +4117,12 @@ def worktree_push(a):
         return 0
     sha = git(path, "rev-parse", "HEAD")
     if attribution() == "off":
-        rng = f"{remote_ref}..HEAD" if has_remote else "HEAD~20..HEAD"
-        bodies = git(path, "log", "--format=%H%n%B%n--END--", rng) or ""
+        # only commits unique to this branch: anything on a remote-tracking branch is already published
+        unique = (git(path, "rev-list", "HEAD", "--not", "--remotes") if git(path, "remote")
+                  else git(path, "rev-list", "HEAD", "--not", w.get("ref") or "HEAD~20")) or ""
+        rng = None
+        bodies = git(path, "log", "--no-walk=unsorted", "--format=%H%n%B%n--END--", *unique.split()) if unique.strip() else ""
+        bodies = bodies or ""
         credited = [sha_[:12] for sha_, body in re.findall(r"(?s)([0-9a-f]{40})\n(.*?)--END--", bodies)
                     if CLAUDE_CREDIT_RE.search(body)]
         if credited:
@@ -5402,6 +5408,10 @@ def attribution():
     return load_json(home("config.json"), {}).get("attribution")
 
 
+def artifacts_on():
+    return load_json(home("config.json"), {}).get("artifacts", "on") != "off"
+
+
 def orchestrator_settings(existing):
     """lean-agent's keys for the home's .claude/settings.json; other keys (e.g. model) are kept."""
     data = dict(existing)
@@ -5420,7 +5430,10 @@ def orchestrator_settings(existing):
         return data
     servers = [n for n, v in lean_mcp.discover().items() if v["source"] in ("user", "desktop")]
     trim = load_json(home("context-trim.json"), {})  # what `lean-agent context --apply` took out
-    perms["deny"] = sorted(set(ORCHESTRATOR_DENY) | set(trim.get("deny") or [])
+    deny = set(ORCHESTRATOR_DENY)
+    if artifacts_on():
+        deny -= {"Artifact", "ArtifactComments"}  # ArtifactData stays denied
+    perms["deny"] = sorted(deny | set(trim.get("deny") or [])
                            | {lean_mcp.tool_prefix(n).rstrip("_") for n in servers})
     data["permissions"] = perms
     data["disableBundledSkills"] = True
@@ -5677,6 +5690,7 @@ def cmd_doctor(a):
                + ", ".join(f"{os.path.basename(f)} ~{t:,}" for f, t in loaded),
                "keep files other than lean-agent's guide out: lean-agent doctor --fix (refreshes the excludes)")
     report(is_trusted(h), "orchestrator home is trusted", "lean-agent trust")
+    report(True, f"artifacts: {'on' if artifacts_on() else 'off'} (lean-agent config artifacts on|off)")
 
     slug = default_project(path)
     projs = projects()
@@ -6732,6 +6746,21 @@ def cmd_attribution(a):
     return 0
 
 
+def cmd_config(a):
+    if a.name == "artifacts" and a.value:
+        cfg = load_json(home("config.json"), {})
+        cfg["artifacts"] = a.value
+        save_json(home("config.json"), cfg)
+        h = home("home")
+        settings = os.path.join(h, ".claude", "settings.json")
+        if os.path.isdir(os.path.join(h, ".claude")):
+            save_json(settings, orchestrator_settings(load_json(settings, {})))
+    print(f"artifacts: {'on' if artifacts_on() else 'off'} · the orchestrator "
+          + ("may create and comment on artifacts (private until the user shares them)" if artifacts_on() else
+             "can't use the Artifact tools"))
+    return 0
+
+
 def recipes_path(slug):
     return home("recipes", slug + ".json")
 
@@ -7683,6 +7712,11 @@ def build_parser():
     s.add_argument("file", help="a file, or - for stdin")
     s.add_argument("--project", "-p")
     s.set_defaults(fn=cmd_text_len)
+
+    s = sub.add_parser("config", help="switches: artifacts on|off (may the orchestrator publish artifacts; default on)")
+    s.add_argument("name", choices=["artifacts"])
+    s.add_argument("value", nargs="?", choices=["on", "off"])
+    s.set_defaults(fn=cmd_config)
 
     s = sub.add_parser("attribution", help="should commits and PRs credit Claude? ask the user once, then set on|off")
     s.add_argument("value", nargs="?", choices=["on", "off"])

@@ -311,6 +311,28 @@ class CliTest(unittest.TestCase):
         argv = self.calls()[-1]["argv"]
         self.assertNotIn("attribution", json.loads(argv[argv.index("--settings") + 1]))
 
+    def test_artifacts_setting_in_home_settings_guide_and_doctor(self):
+        self.cli("learn", self.proj)
+        home = self.cli("home").stdout.strip()
+        deny = lambda: json.load(open(os.path.join(home, ".claude", "settings.json")))["permissions"]["deny"]
+        self.assertNotIn("Artifact", deny())
+        self.assertNotIn("ArtifactComments", deny())
+        self.assertIn("ArtifactData", deny())
+        self.assertIn("artifacts: on", self.cli("doctor", check=False).stdout)
+        self.assertIn("artifacts: off", self.cli("config", "artifacts", "off").stdout)
+        self.assertIn("Artifact", deny())
+        self.assertIn("ArtifactComments", deny())
+        self.assertIn("ArtifactData", deny())
+        self.assertIn("artifacts: off", self.cli("doctor", check=False).stdout)
+        self.cli("config", "artifacts", "on")
+        self.assertNotIn("Artifact", deny())
+        self.assertIn("ArtifactData", deny())
+        with open(os.path.join(os.path.dirname(CLI), "..", "templates", "guide.md")) as fh:
+            guide = fh.read()
+        for text in ("Artifact tool", "private by default", 'lean-agent handoff --kind fyi "artifact: <url> <title>"',
+                     "Never put secrets, tokens or credentials", "`lean-agent doc write` stays for local files"):
+            self.assertIn(text, guide)
+
     def test_duplicate_launch_guard_ref_and_extra_cost(self):
         self.cli("learn", self.proj)
         on = dict(LEAN_AGENT_LAUNCH_GUARD="1")
@@ -4404,6 +4426,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("known gaps: ", p.stdout)
         self.assertIn("[not checked by the reviewer]", p.stdout)
         self.assertIn("Approved, but with", p.stdout)
+        self.assertRegex(p.stdout.rstrip().splitlines()[-1], r"^approved: \d+ known gap\(s\) wait for your decision \(exit 2 until")
         st = self.cli("review", "proj", "--status", check=False)
         self.assertEqual(st.returncode, 2)
         self.assertIn("known gap(s) not acknowledged", st.stdout)
@@ -5043,6 +5066,9 @@ class CliTest(unittest.TestCase):
         self.cli("review", "proj", "--head", "feature", "--base", "main", FAKE_REVIEW=approve)
         p = self.cli("worktree", "push", "proj", "origin/feature", check=False)
         self.assertIn("credit Claude, but attribution is off", p.stderr)
+        subprocess.run(["git", "-C", wt, "push", "-q", "origin", "HEAD:refs/heads/published"], check=True)
+        p = self.cli("worktree", "push", "proj", "origin/feature", check=False)  # now published elsewhere: not ours to block
+        self.assertNotIn("credit Claude", p.stderr)
         subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--amend", "-m",
                         "fix"], check=True)
         self.cli("review", "proj", "--head", "feature", "--base", "main", FAKE_REVIEW=approve)
