@@ -8,8 +8,10 @@ only the context cards and tools the orchestrator picked. Workers report back
 which context they used, and the context library improves from that.
 """
 import argparse
+import collections
 import contextlib
 import datetime
+import functools
 import glob
 import hashlib
 import io
@@ -66,11 +68,14 @@ PUBLISH_ISOLATION = ["--setting-sources", "", "--disallowedTools", ",".join(s + 
 PUBLISH_SETTINGS = {"disableAllHooks": True}  # no Bash to guard, and no hook of any plugin or setting runs in it
 
 
+PublisherParts = collections.namedtuple("PublisherParts", "isolation tools allowed permission_mode settings")
+
+
 def publisher_parts():
-    """(isolation, tools, allowed, permission mode, settings) of the publisher: the one place its launch flags are
+    """The publisher's launch flags (isolation, tools, allowed, permission mode, settings): the one place they are
     built, for `publish` (via cmd_run) and the doctor probe."""
-    return (list(PUBLISH_ISOLATION), PUBLISH_TOOLS, PUBLISH_TOOLS.split(",") + DOCS_ALLOWED, "default",
-            dict(PUBLISH_SETTINGS))
+    return PublisherParts(list(PUBLISH_ISOLATION), PUBLISH_TOOLS, PUBLISH_TOOLS.split(",") + DOCS_ALLOWED, "default",
+                          dict(PUBLISH_SETTINGS))
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target", "__pycache__", ".next", "vendor"}
 STOPWORDS = set("the and for with that this from into have has are was were will would should could "
                 "you your our their not but all any can use using used make add fix get set run".split())
@@ -1445,7 +1450,7 @@ def cmd_run(a):
     chrome_allowed, chrome_disallowed, chrome_profile = resolve_chrome(chrome_spec, project) if chrome_spec else ([], [], None)
     publisher = (getattr(a, "role", None) or (prev or {}).get("role")) == "publisher"
     if publisher:
-        isolation = publisher_parts()[0]
+        isolation = publisher_parts().isolation
     elif mcp_servers or chrome_spec:
         if mcp_servers:
             lean_mcp.write_config(mcp_path, mcp_servers)
@@ -1463,7 +1468,8 @@ def cmd_run(a):
         isolation = ["--safe-mode"]
     lean_json = os.path.join(PLUGIN_ROOT, "bin", "lean-json")
     if publisher:
-        _, _, allowed, permission_mode, _ = publisher_parts()
+        parts = publisher_parts()
+        allowed, permission_mode = parts.allowed, parts.permission_mode
     elif read_only:
         allowed = READONLY_TOOLS.split(",") + [f"Bash(git -C {project} {sub}:*)" for sub in READONLY_GIT]
         allowed.append(f"Bash({lean_json}:*)")  # reads a file, prints a compact view
@@ -1500,7 +1506,7 @@ def cmd_run(a):
             "type": "command", "timeout": 20,
             "command": f"python3 {json.dumps(os.path.join(HERE, 'mcp_trim_hook.py'))}"}]}]
     if publisher:
-        flag_settings.update(publisher_parts()[4])
+        flag_settings.update(publisher_parts().settings)
     else:
         flag_settings["hooks"] = hooks
     if flag_settings:
@@ -7865,7 +7871,8 @@ PUBLISH_UPDATE = ("Update the existing doc {url}: read it first, then change it 
                   "don't create a new one.")
 DOC_LINK_RE = re.compile(r"https://claude\.ai/artifact/[\w\-./?=&#%]+")
 PUBLISH_MISSING = ("Claude Docs connector not available to workers (check that claude.ai connectors are on and "
-                   "Claude Docs is connected); publish this file from the Claude app")
+                   "Claude Docs is connected; after connecting Claude Docs, run `lean-agent doctor` to re-check); "
+                   "publish this file from the Claude app")
 ARTIFACT_NOTE_RE = re.compile(r"^artifact: (\S+) (.*)$")
 
 
@@ -7874,7 +7881,7 @@ def docs_tools(tools):
 
 
 DOCS_SERVER_RE = re.compile(r"claude[ _.]?docs", re.I)  # "claude.ai Claude Docs", "Claude_Docs", ...
-PUBLISH_CACHE_AGE = 86400
+PUBLISH_CACHE_AGE = 600  # doctor re-probes on every run and refreshes the cache
 
 
 def docs_server_alive(servers):
@@ -7884,6 +7891,7 @@ def docs_server_alive(servers):
                and str(s.get("status") or "").lower() in ("connected", "pending", "connecting") for s in servers or [])
 
 
+@functools.lru_cache(maxsize=None)
 def claude_version():
     try:
         r = subprocess.run([os.environ.get("LEAN_AGENT_CLAUDE") or "claude", "--version"], capture_output=True,
@@ -7905,7 +7913,7 @@ def publish_init_check(ev):
 
 
 def publish_cached():
-    """The last init outcome ('available'|'pending'|'missing'), unless it is older than a day or was taken with
+    """The last init outcome ('available'|'pending'|'missing'), unless it is older than 10 minutes or was taken with
     another `claude --version`."""
     last = load_json(home("publish-check.json"), None)
     if not isinstance(last, dict) or last.get("docs") not in ("available", "pending", "missing"):
@@ -7937,9 +7945,10 @@ def publish_check():
     return load_json(home("publish-check.json"), {}).get("docs", "unknown") if seen else "unknown"
 
 
-def publish_fallback(slug, title, content, as_is):
+def publish_fallback(slug, title, content, as_is, update=False):
     """The local file for the user to publish from the Claude app, when the connector is missing. Without --as-is
-    `content` is the request, not the document: a compose-only worker (no connector, --safe-mode) writes it."""
+    `content` is the request, not the document: a compose-only worker (no connector, --safe-mode) writes it. The file
+    is always a fresh document: --url / the recorded link of the title are not updated."""
     if not as_is:
         ns = argparse.Namespace(resume=None, task=["Write the document the request below describes, as Markdown, "
                                                    "in your reply only.\n\n" + content], task_file=None,
@@ -7957,7 +7966,8 @@ def publish_fallback(slug, title, content, as_is):
     with open(path, "w") as fh:
         fh.write(f"# {title}\n\n{content}\n")
     print(path)
-    die(PUBLISH_MISSING, 2)
+    die(PUBLISH_MISSING + "; the local file is a fresh document, not an update of the linked doc" if update else
+        PUBLISH_MISSING, 2)
 
 
 def artifact_note_url(title):
@@ -8142,11 +8152,13 @@ def cmd_publish(a):
                             allow_send=None, max_turns=20, max_usd=1.0, max_context=2000, max_cards=4, ttype="write",
                             role="publisher", effort="low", role_rule=rule)
     if publish_cached() == "missing":  # a recent init event said so: no launch
-        publish_fallback(slug, title, content, a.as_is)
+        publish_fallback(slug, title, content, a.as_is, bool(url))
     rc, _, run = run_role(ns)
     if run and run.get("init_stop"):  # the worker had no Claude Docs tool: stopped before its first turn
-        publish_fallback(slug, title, content, a.as_is)
+        publish_fallback(slug, title, content, a.as_is, bool(url))
     links = DOC_LINK_RE.findall(parse_feedback(run_result_text(run))[0] if run else "")
+    if not links and load_json(home("publish-check.json"), {}).get("docs") == "pending":
+        publish_fallback(slug, title, content, a.as_is, bool(url))  # the server stayed pending: no Docs tool was seen
     if not links:
         die("publish failed: the worker's reply has no Claude Docs link (https://claude.ai/artifact/...); "
             "see its reply above", rc or 1)
@@ -8301,8 +8313,8 @@ def build_parser():
 
     s = sub.add_parser("publish", help="publish (or update) a private Claude Docs doc through a small worker that has "
                        "the claude.ai Claude Docs connector; prints its link and records it as a hand-off note, so a "
-                       "later call with the same title updates it. Without the connector it writes a local file and "
-                       "exits non-zero. The content or what to publish comes on stdin: --task-file -")
+                       "later call with the same title updates it. Without the connector it writes a local file (always a "
+                       "fresh document, not an update of --url's doc) and exits non-zero. The content or what to publish comes on stdin: --task-file -")
     s.add_argument("title")
     s.add_argument("--url", help="update this existing doc (a claude.ai artifact link) instead of making a new one")
     s.add_argument("--project", "-p", help="the project the worker runs in (default: the latest run's)")

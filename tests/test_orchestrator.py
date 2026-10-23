@@ -499,11 +499,67 @@ class CliTest(unittest.TestCase):
         path = os.path.join(self.env["LEAN_AGENT_HOME"], "publish-check.json")
         with open(path) as fh:
             rec = json.load(fh)
-        rec.update(docs="missing", at=rec["at"] - 90000)
+        rec.update(docs="missing", at=rec["at"] - 700)
         with open(path, "w") as fh:
             json.dump(rec, fh)
         out = self.cli("publish", "T2", "--as-is", "--task-file", "-", input="x", FAKE_VERSION="2.0.0", **env).stdout
-        self.assertIn("doc: https://claude.ai/artifact/c1", out)  # older than a day: launched again
+        self.assertIn("doc: https://claude.ai/artifact/c1", out)  # older than 10 minutes: launched again
+
+    def test_publish_treats_failed_or_unrelated_servers_as_missing(self):
+        self.cli("learn", self.proj)
+        for servers in ([{"name": "claude.ai Claude Docs", "status": "failed"}],
+                        [{"name": "claude.ai Claude Docs", "status": "needs-auth"}],
+                        [{"name": "other_server", "status": "connected"}]):
+            p = self.cli("publish", "T", "--as-is", "--task-file", "-", input="x", check=False,
+                         FAKE_WORKER_TOOLS=json.dumps(["Read"]), FAKE_WORKER_SERVERS=json.dumps(servers),
+                         FAKE_INIT_SLEEP="2", FAKE_ANSWER="https://claude.ai/artifact/never")
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("Claude Docs connector not available", p.stderr)
+            self.assertIn("lean-agent doctor", p.stderr)
+            with open(os.path.join(self.env["LEAN_AGENT_HOME"], "publish-check.json")) as fh:
+                self.assertEqual(json.load(fh)["docs"], "missing")
+        self.assertFalse(os.path.exists(self.log) and self.calls())
+
+    def test_publish_falls_back_when_the_server_stayed_pending_and_no_link_came(self):
+        self.cli("learn", self.proj)
+        p = self.cli("publish", "Plan", "--as-is", "--task-file", "-", input="plan", check=False,
+                     FAKE_WORKER_TOOLS=json.dumps(["Read", "ToolSearch"]), FAKE_ANSWER="I could not find the tool.",
+                     FAKE_WORKER_SERVERS=json.dumps([{"name": "claude.ai Claude Docs", "status": "pending"}]))
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Claude Docs connector not available", p.stderr)
+        self.assertNotIn("has no Claude Docs link", p.stderr)
+        with open(p.stdout.strip().splitlines()[-1]) as fh:
+            self.assertEqual(fh.read(), "# Plan\n\nplan\n")
+
+    def test_publish_fallback_with_a_url_says_the_file_is_a_fresh_document(self):
+        self.cli("learn", self.proj)
+        p = self.cli("publish", "Plan", "--as-is", "--url", "https://claude.ai/artifact/a1", "--task-file", "-",
+                     input="plan", check=False, FAKE_WORKER_TOOLS=json.dumps(["Read"]), FAKE_INIT_SLEEP="2")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("fresh document, not an update", p.stderr)
+
+    def test_publish_composer_with_an_empty_reply_writes_no_file(self):
+        self.cli("learn", self.proj)
+        p = self.cli("publish", "Empty one", "--task-file", "-", input="request", check=False,
+                     FAKE_WORKER_TOOLS=json.dumps(["Read"]), FAKE_INIT_SLEEP="2", FAKE_ANSWER="")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("the compose worker returned no document", p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], self.ledger()[-1]["project"],
+                                                     "publish", "empty-one.md")))
+
+    def test_publish_cache_pending_and_unknown_do_not_block_a_launch(self):
+        self.cli("learn", self.proj)
+        env = dict(FAKE_WORKER_TOOLS=self.DOCS_TOOLS, FAKE_ANSWER="ok\nhttps://claude.ai/artifact/c1")
+        path = os.path.join(self.env["LEAN_AGENT_HOME"], "publish-check.json")
+        self.cli("doctor", check=False, FAKE_PROBE_TOOLS=json.dumps(["Read"]))  # writes a record
+        with open(path) as fh:
+            rec = json.load(fh)
+        for docs in ("pending", "unknown"):
+            rec.update(docs=docs, at=time.time())
+            with open(path, "w") as fh:
+                json.dump(rec, fh)
+            out = self.cli("publish", "T" + docs, "--as-is", "--task-file", "-", input="x", **env).stdout
+            self.assertIn("doc: https://claude.ai/artifact/c1", out)
 
     def test_doctor_checks_the_publisher_path_without_a_turn(self):
         out = self.cli("doctor", check=False, FAKE_PROBE_TOOLS=json.dumps(["Read", "mcp__Claude_Docs__guide"])).stdout
