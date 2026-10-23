@@ -42,7 +42,8 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `remember "<what>" [--project P] [--task-file -]` | b | allowed: starts the librarian worker; the only way to keep something |
 | `advise "<request>" [--project P] [--thread TAG] [--task-file -]` | b | allowed: starts a read-only haiku advisor worker; stores its short answer in `advice/` |
 | `run`, `review`, `do`, `tracker --discover` (all flags, `--mcp`, `--allow-cmd`, `--todo new\|N\|none`) | b | allowed, in the background; they start workers |
-| `thread new\|list\|merge\|unmerge\|move` | b | allowed |
+| `now`, `thread list`, `thread show tN [--all]` | b | allowed: read-only |
+| `thread new\|close\|reopen\|merge\|unmerge\|move` | b | allowed: they only change the thread registry |
 | `checkpoint`, `brief` | b | allowed |
 | `clear` | b | allowed: queues a checkpoint and /clear of the service session at the end of the turn; only when the user asks |
 | `handoff` (read), `handoff --done N`, `handoff --note … --kind checkpoint\|fyi\|decision` | b | allowed: the orchestrator's own state; a `decision` note is how it asks the user something asynchronously |

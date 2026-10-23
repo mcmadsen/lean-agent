@@ -297,14 +297,24 @@ with the opt-in `clear-at`).
 
 ## Threads
 
-`lean-agent thread` keeps the orchestrator's threads from the terminal:
+Every request to the orchestrator gets a thread without a model call: the prompt hook scores it against the open
+threads (title, aliases and recent requests; rare words weigh more, recent threads get a small boost, a score of 0.4 or
+more matches) or opens a new one titled from the prompt. An explicit `t7` or `#7` in the prompt wins. The hook adds one
+context line (`Thread t7 "..."`, or `New thread`, or `guessed` with the command to fix it). The thread is stored in the
+state of every run, review, todo, note, publish and push that follows; `--thread tN|none` overrides it, workers inherit it
+through `LEAN_AGENT_THREAD`.
 
 | Command | What it does |
 |---|---|
-| `lean-agent thread new "<title>"` | Start a free thread `tN` |
-| `lean-agent thread list` | Threads with their ids and titles |
+| `lean-agent now` | Open threads by last activity (at most 25 lines): state (running, open review, open todos, idle), last action, age. Closes threads idle for 7 days (`LEAN_AGENT_THREAD_IDLE_DAYS` or `thread_idle_days` in config.json); nothing is deleted |
+| `lean-agent thread show tN [--all]` | Everything for the topic in time order: requests, runs, reviews, todos, notes, published docs, pushes |
+| `lean-agent thread close tN` / `reopen tN` | Hide a finished topic from `now` and from matching / bring it back |
+| `lean-agent thread new "<title>"` / `list` | Start a free thread / list them |
 | `lean-agent thread merge tB tA` / `unmerge tB` | Fold thread B into A / give B its own tag back |
 | `lean-agent thread move <message> <thread>` | Move a message to another thread |
+
+The brief after a `/clear` starts with the same open threads. Strict mode allows all of these: they only read or change
+the registry.
 
 ## Large front-end work: map, check, count, parity, codemod, slices
 

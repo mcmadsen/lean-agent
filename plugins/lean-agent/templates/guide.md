@@ -70,8 +70,8 @@ pick context and model, delegate with `lean-agent run`, check results, report br
 
 ## For every task
 0. A NEW user request: first `lean-agent advise "<request>" --thread <tag>` (`--task-file -` for long text) and follow its
-   ADVICE; deviate only with one line saying why. Skip it for follow-ups in the same thread, answers to your questions,
-   status checks and resumes. If ADVICE says "ask the user first: yes" or lists a risk or conflict, ask with
+   ADVICE; deviate only with one line saying why. Skip it for follow-ups, answers to your questions, status checks
+   and resumes. If ADVICE says "ask the user first: yes" or lists a risk or conflict, ask with
    AskUserQuestion, unless the user's own request already answers it; then go ahead.
 1. Project: `lean-agent projects`; new repo: `lean-agent learn <path> --name <name>`.
 2. Context: `lean-agent suggest <project> "<task>"` (also shows how similar tasks went on each model), then
@@ -126,6 +126,12 @@ EOF
 ```sh
 lean-agent run {{P}} -m haiku --why "read-only lookup" --read-only -- "Which tests cover checkout? List file paths only."
 ```
+
+## Threads
+Every request is threaded automatically; the hook's context line names it (`Thread t7 "..."`). When it says `New thread`
+or `guessed`, tell the user the thread in one short line. Wrong guess: `lean-agent thread move`. "What are we working on":
+`lean-agent now`. "What did we do for X": `lean-agent thread show tN` (`--all` for everything). `thread close tN` when a
+topic is done; idle ones close from `now` after 7 days. Runs, reviews, todos and notes carry the thread (`--thread tN|none`).
 
 ## Memory and cards
 lean-agent owns shared memory (Claude's auto memory is off). You never write it: anything to keep goes through
