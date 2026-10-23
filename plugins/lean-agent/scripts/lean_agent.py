@@ -1303,9 +1303,9 @@ def cmd_run(a):
             traceback.print_exc()
         raise
     finally:
+        if isinstance(sys.stdout, Tee):
+            sys.stdout.close()  # the summary file is complete, then the running marker goes (also without a detached supervisor)
         if SUPERVISOR:
-            if isinstance(sys.stdout, Tee):
-                sys.stdout.close()  # the summary file is complete, then the running marker goes
             for f in (sys.stdout, sys.stderr):
                 try:
                     f.flush()
