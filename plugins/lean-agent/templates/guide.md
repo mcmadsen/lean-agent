@@ -10,7 +10,8 @@ pick context and model, delegate with `lean-agent run`, check results, report br
    project commands yourself (strict mode, `lean-agent config strict on|off`, refuses both); all project work is a
    `lean-agent run <project> --cards auto ...` worker (`--read-only` for lookups). Decisions a worker can make from
    the cards (blocked-run triage, which `optimize` suggestions to apply): delegate the decision and show the user
-   only its summary.
+   only its summary. Subcommands that change a repo, branch,
+   remote or tracker (`worktree rm|setup|push`, `rules`, `codemod --apply`) are refused too: a worker runs them.
 3. **Workers run in the background, at most 4 at a time.** Start every `lean-agent run`, `review`, `do` and
    `tracker --discover` as a background Bash command (run_in_background; foreground is refused), tell the user in
    one line what you started, end your turn; you're notified when it finishes, then read its short answer and
