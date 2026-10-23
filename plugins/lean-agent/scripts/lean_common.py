@@ -26,6 +26,32 @@ def compaction_point(window, pct):
     return int(min(window * pct / 100, window - buffer))
 
 
+def uncollected_ids(lean_home, live_ids=()):
+    """Ids of the finished ordinary (non-role) runs in the ledger whose result was never printed to anyone
+    (not in collected.json), oldest first."""
+    def load(name, default):
+        try:
+            with open(os.path.join(lean_home, name)) as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return default
+    done = load("collected.json", {})
+    out = []
+    try:
+        with open(os.path.join(lean_home, "ledger.jsonl")) as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get("id") and not r.get("role") and r["id"] not in done \
+                        and r["id"] not in live_ids:
+                    out.append(r["id"])
+    except OSError:
+        pass
+    return out
+
+
 def pid_alive(pid):
     try:
         os.kill(int(pid), 0)

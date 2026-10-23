@@ -41,7 +41,7 @@ import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
 import service_session  # noqa: E402
-from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive as dashboard_pid_alive, plugin_version, thread_key  # noqa: E402
+from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive as dashboard_pid_alive, plugin_version, thread_key, uncollected_ids  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -1385,6 +1385,7 @@ def detach_run(workdir, run_id):
     entry = next((r for r in reversed(ledger()) if r["id"] == run_id), None)
     if entry:
         LAST_RUN[:] = [entry]  # what the callers of cmd_run read after it
+        mark_collected(run_id)  # relayed above: the caller has seen the result
     rc = os.waitstatus_to_exitcode(status)
     return rc if rc >= 0 else 128 - rc
 
@@ -5853,6 +5854,20 @@ def live_runs():
     return sorted(out, key=lambda x: x[1].get("started") or "")
 
 
+def mark_collected(*run_ids):
+    """Record that these runs' results were printed to someone (the foreground that started them, `runs --wait/--show`)."""
+    ids = [r for r in run_ids if r]
+    if ids:
+        done = load_json(home("collected.json"), {})
+        done.update({r: now_iso() for r in ids})
+        save_json(home("collected.json"), done)
+
+
+def uncollected_runs(live_ids=()):
+    """Ids of finished ordinary (non-role) runs whose result nobody has been shown yet."""
+    return uncollected_ids(home(), live_ids)
+
+
 def print_finished_run(r):
     """A finished run's result as `run` printed it (its saved summary), else the one line from the ledger."""
     files = sorted(glob.glob(os.path.join(r.get("workdir") or "", "summary-*.txt")),
@@ -5866,16 +5881,18 @@ def print_finished_run(r):
 
 
 def wait_for_runs(target, timeout):
-    """`runs --wait <id|all|last>`: blocks until those runs are recorded, prints each result as `run` printed it.
+    """`runs --wait <id|all|last>`: blocks until those runs are recorded, prints each result as `run` printed it
+    and marks it collected. `all` is every run in progress plus every finished ordinary run nobody was shown yet.
     Exit 0 when every one ended well, 1 when one failed or vanished, 124 on the timeout."""
     live = live_runs()
     if target == "all":
-        ids = [rid for rid, _ in live]
+        live_ids = [rid for rid, _ in live]
+        ids = uncollected_runs(live_ids) + live_ids
         if not ids:
-            print("No runs in progress.")
+            print("Nothing to collect.")
             return 0
     elif target == "last":
-        ids = [live[-1][0]] if live else [latest_run_id()]
+        ids = [live[-1][0]] if live else [latest_run_id(ordinary=True)]
     else:
         ids = [target]
         if target not in {rid for rid, _ in live} and not any(r["id"] == target for r in ledger()):
@@ -5892,6 +5909,7 @@ def wait_for_runs(target, timeout):
                 if rid in recorded:
                     print_finished_run(recorded[rid])
                     bad = bad or recorded[rid]["status"] not in ("done", "partial", "needs-input", "awaiting-confirmation")
+                    mark_collected(rid)
                 else:
                     print(f"run {rid} · ended without a result (its process is gone; see lean-agent logs)")
                     bad = True
@@ -5948,6 +5966,7 @@ def cmd_runs(a):
             cost = f"${r['cost_usd']:.2f}" if isinstance(r.get("cost_usd"), (int, float)) else "$?"
             print(f"run {r['id']} · {r['model']} · {r['status']} · {r.get('turns') or '?'} turns · "
                   f"{r.get('units', 0):,} sonnet-eq tok · {cost}")
+            mark_collected(r["id"])
             return
         if a.details:
             det = sorted(glob.glob(os.path.join(r["workdir"], "details-*.md")),
@@ -5956,6 +5975,7 @@ def cmd_runs(a):
                 die(f"run {r['id']} has no details file (its whole answer is in `lean-agent runs --show {r['id']}`)")
             files = det
         text = read_text(files[-1])
+        mark_collected(r["id"])
         if a.grep:
             rx = re.compile(re.escape(a.grep), re.I)
             text = "".join(l for l in text.splitlines(True) if rx.search(l)) or f"(no line matches {a.grep!r})\n"
