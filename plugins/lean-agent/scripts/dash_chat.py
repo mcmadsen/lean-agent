@@ -157,15 +157,19 @@ def _op_id():
     return uuid.uuid4().hex[:12]
 
 
+def _op_seen(op):
+    return op in lean_threads.load().get("ops", [])
+
+
 def thread_move(message, to):
     try:
         to = lean_threads.norm(to)
         mid = str(message or "").strip()
         if not MESSAGE_ID_RE.fullmatch(mid):
             raise ValueError("not a valid message id")
-        if not lean_threads.ID_RE.match(to):
-            raise ValueError("not a valid thread id")
         op = _op_id()
+        if _op_seen(op):
+            return {"ok": True, "skipped": "seen"}
         lean_threads.move(mid, to, op)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
@@ -176,6 +180,8 @@ def thread_move(message, to):
 
 def thread_merge(src, into):
     op = _op_id()
+    if _op_seen(op):
+        return {"ok": True, "skipped": "seen"}
     try:
         lean_threads.merge(src, into, op)
     except ValueError as e:
@@ -185,6 +191,8 @@ def thread_merge(src, into):
 
 def thread_unmerge(src):
     op = _op_id()
+    if _op_seen(op):
+        return {"ok": True, "skipped": "seen"}
     try:
         lean_threads.unmerge(src, op)
     except ValueError as e:
