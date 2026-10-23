@@ -5605,6 +5605,61 @@ class CliTest(unittest.TestCase):
         self.assertIn("r1", host.pasted[0])
         os.remove(marker)
 
+    def alive_runs(self, home, n):
+        os.makedirs(os.path.join(home, "running"), exist_ok=True)
+        for i in range(1, n + 1):
+            with open(os.path.join(home, "running", f"r{i}.json"), "w") as fh:
+                json.dump({"pid": os.getpid(), "run": f"r{i}", "started": f"2026-10-23T10:00:0{i}"}, fh)
+
+    def test_auto_clear_names_three_of_many_runs_in_the_hold_and_six_in_the_checkpoint(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        os.environ.pop("LEAN_AGENT_CLEAR_AT")
+        self.alive_runs(home, 7)
+        turn("done", ctx=60000)
+        ac.tick()
+        self.assertEqual(host.pasted, [])
+        hold = json.load(open(os.path.join(home, "up.json")))["clear_hold"]
+        self.assertIn("7 run(s) alive (r1, r2, r3, ...)", hold)
+        turn("done", ctx=64500)
+        ac.tick()
+        self.assertIn("r1, r2, r3, r4, r5, r6", host.pasted[0])
+        self.assertNotIn("r7", host.pasted[0])
+
+    def test_auto_clear_goes_ahead_exactly_3000_below_compaction_despite_runs(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        os.environ.pop("LEAN_AGENT_CLEAR_AT")
+        self.alive_runs(home, 1)
+        turn("done", ctx=63998)  # the turn adds 1 input token: 63,999 in all
+        ac.tick()
+        self.assertEqual(host.pasted, [])
+        turn("done", ctx=63999)  # 64,000 in all: exactly CLEAR_HARD below compaction
+        ac.tick()
+        self.assertEqual(len(host.pasted), 1)
+
+    def test_auto_clear_hold_is_cleared_when_the_clear_is_turned_off(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        os.environ.pop("LEAN_AGENT_CLEAR_AT")
+        self.alive_runs(home, 1)
+        turn("done", ctx=60000)
+        ac.tick()
+        self.assertIn("alive", json.load(open(os.path.join(home, "up.json")))["clear_hold"])
+        os.environ["LEAN_AGENT_CLEAR_AT"] = "0"
+        ac.tick()
+        self.assertIsNone(json.load(open(os.path.join(home, "up.json")))["clear_hold"])
+        self.assertEqual(host.pasted, [])
+
+    def test_auto_clear_at_auto_and_an_invalid_value_both_mean_just_before_compaction(self):
+        for value in ("auto", "AUTO", "lots", "-5", "1e5"):
+            with self.subTest(value=value):
+                ac, host, clock, turn, home = self.auto_clear_unit()
+                os.environ["LEAN_AGENT_CLEAR_AT"] = value
+                turn("done", ctx=58000)  # auto = 67,000 - 8,000 = 59,000
+                ac.tick()
+                self.assertEqual(host.pasted, [])
+                turn("done", ctx=60000)
+                ac.tick()
+                self.assertEqual(len(host.pasted), 1)
+
     def test_auto_clear_goes_ahead_when_the_runs_are_gone(self):
         ac, host, clock, turn, home = self.auto_clear_unit()
         os.environ.pop("LEAN_AGENT_CLEAR_AT")
