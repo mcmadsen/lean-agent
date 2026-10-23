@@ -1638,7 +1638,7 @@ def cmd_run(a):
           f"{entry['units']:,} sonnet-eq tok · {cost}")
     detail(f"  tokens: input {u.get('input_tokens', 0):,} · cache write {u.get('cache_creation_input_tokens', 0):,}"
           f" · cache read {u.get('cache_read_input_tokens', 0):,} · output {u.get('output_tokens', 0):,}")
-    ctx = u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0) + u.get("cache_read_input_tokens", 0)
+    ctx = usage.context_tokens(u)
     if ctx and entry["turns"]:
         per_turn = ctx // max(1, entry["turns"])
         own = est_tokens(read_text(os.path.join(workdir, "append.md")))
@@ -1724,7 +1724,7 @@ def note_progress(workdir, turn, msg, u):
             steps.append(f"{c.get('name')}: {' '.join(what.split())[:140]}")
         elif c.get("type") == "text" and str(c.get("text") or "").strip():
             steps.append("says: " + " ".join(str(c["text"]).split())[:140])
-    ctx = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    ctx = usage.context_tokens(u)
     try:
         with open(os.path.join(workdir, "progress.jsonl"), "a") as fh:
             fh.write(json.dumps({"ts": now_iso(), "turn": turn, "ctx": ctx, "steps": steps}) + "\n")
@@ -1779,8 +1779,7 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0, on_session=No
                     note_progress(workdir, reads["turns"], msg, u)
                     for k in usage.FIELDS:
                         reads["usage"][k] += int(u.get(k) or 0)
-                    reads["ctx"] += sum(int(u.get(k) or 0) for k in
-                                        ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+                    reads["ctx"] += usage.context_tokens(u)
                     if max_reads and reads["ctx"] > max_reads:
                         reads["stopped"] = True
                         proc.terminate()
@@ -4316,7 +4315,7 @@ def _probe_session(extra, cwd):
             usage.record_plan_usage(ev.get("rate_limit_info"))
         elif ev.get("type") == "result":
             u = ev.get("usage") or {}
-            ctx = sum(u.get(k, 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+            ctx = usage.context_tokens(u)
     return tools, servers, ctx
 
 
@@ -4640,7 +4639,7 @@ def measure_server(name, cfg):
                                   "--max-turns", "1"], input="Reply with just OK. Do not use tools.",
                                  capture_output=True, text=True, cwd=d, timeout=180)
             u = (json.loads(out.stdout.strip().splitlines()[-1]) if out.stdout.strip() else {}).get("usage") or {}
-            sizes.append(sum(u.get(k, 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")))
+            sizes.append(usage.context_tokens(u))
     finally:
         os.remove(path)
     print(f"{name}: ~{sizes[1] - sizes[0]:,} tokens of context per worker turn (baseline {sizes[0]:,})")
@@ -6273,7 +6272,7 @@ def probe_home(h):
             init = ev
         elif ev.get("type") == "result":
             u = ev.get("usage") or {}
-            ctx = sum(u.get(k, 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+            ctx = usage.context_tokens(u)
     return init, ctx
 
 
@@ -6737,7 +6736,7 @@ def top_runs_lines(runs, n):
     out = []
     for r in sorted(runs, key=lambda r: -(r.get("units") or 0))[:n]:
         u, turns = r.get("usage") or {}, r.get("turns") or 0
-        ctx = sum(u.get(k, 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+        ctx = usage.context_tokens(u)
         out.append(f"{r['id']}  {model_family(r['model']):<7}{r.get('units', 0):>11,} sonnet-eq  {turns:>3} turns  "
                    f"~{ctx // max(1, turns):>7,} ctx/turn  {r['status']:<12} "
                    + (f"[{r['role']}] " if r.get("role") else "") + str(r.get("task", ""))[:60].replace("\n", " "))
@@ -6772,7 +6771,7 @@ def measure_baseline(slug, path):
             usage.record_plan_usage(ev.get("rate_limit_info"))
         elif ev.get("type") == "result":
             u = ev.get("usage") or {}
-            ctx = sum(u.get(k, 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+            ctx = usage.context_tokens(u)
     if ctx:
         b = load_json(home("baselines.json"), {})
         b[slug] = {"ctx": ctx, "measured": now_iso()}
@@ -6784,7 +6783,7 @@ def run_savings(r):
     """{"context": sonnet-eq saved by the lean worker context, "model": saved by the model choice} for a run."""
     u = r.get("usage") or {}
     turns = max(1, r.get("turns") or 1)
-    ctx = sum(u.get(k, 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    ctx = usage.context_tokens(u)
     base, _ = baseline_ctx(r.get("project"))
     extra = max(0, base - ctx / turns)
     rate = usage.model_rate(r.get("model"))
