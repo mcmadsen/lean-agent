@@ -30,6 +30,34 @@ import os
 import re
 import sys
 
+MEMORY_MESSAGE_RE = r"^#[ \t]+\S"  # '# keep this', not '#12 is failing' or '#tag'
+COMMAND_PROMPT_RE = r"^/(memory|init)(\s|$)"
+
+
+def prompt_needs_hook(event):
+    """Could the UserPromptSubmit hook act on this prompt here? Only the orchestrator home or the service session,
+    and only a '# ' memory message or /memory, /init."""
+    import re
+    prompt = str(event.get("prompt") or "").strip()
+    if not (re.match(MEMORY_MESSAGE_RE, prompt) or re.match(COMMAND_PROMPT_RE, prompt)):
+        return False
+    if os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1":
+        return True
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    home = os.path.realpath(os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent")))
+    return cwd == home or cwd.startswith(home + os.sep)
+
+
+STDIN = None
+if __name__ == "__main__":  # a prompt in any other session leaves here, before the heavy imports below
+    STDIN = sys.stdin.read()
+    if '"UserPromptSubmit"' in STDIN:
+        try:
+            if not prompt_needs_hook(json.loads(STDIN)):
+                sys.exit(0)
+        except ValueError:
+            sys.exit(0)
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import usage  # noqa: E402
 import push_guard  # noqa: E402
@@ -334,7 +362,7 @@ def lean_agent_only(command):
 #             have no subcommand: a worker does them with the tracker's MCP server (`run --mcp`) or `worktree push`.
 #   "keep"    writes knowledge or settings the user asked for: memory add|edit|rm|import, card (everything but show),
 #             recipe, doc, schedule add|rm|defaults, guard add|rm, count add|rm, todo add|note|rm|edit|epic|reopen,
-#             handoff --note unless --kind checkpoint|fyi|decision, config strict off. Where one subcommand serves both the
+#             handoff --note unless --kind checkpoint|fyi|decision, review learn --text|--helper, config strict off. Where one subcommand serves both the
 #             orchestrator's bookkeeping and the user's content (todo add, handoff --note), it is denied; the
 #             orchestrator links a run with `--todo new` and keeps its own state with checkpoint / handoff --kind fyi.
 #   "mcp"     lists or runs MCP servers or presets: the whole `mcp` subcommand, `chrome check`.
@@ -420,6 +448,10 @@ def restricted_command(command):
             if name == "handoff" and (flag_value(words, "--note") is not None
                                       and flag_value(words, "--kind") not in KEEP_NOTE_KINDS):
                 return "keep", "handoff --note"
+            if name == "review-learn" or (name == "review" and args[1:2] == ["learn"]):
+                given = [f for f in ("--text", "--helper") if flag_value(words, f) is not None]
+                if given:  # text the orchestrator supplies is knowledge, like `memory add`
+                    return "keep", f"review learn {given[0]}"
             if name == "config" and args[1:2] == ["strict"] and "off" in args[2:3]:
                 return "keep", "config strict off"
             if name in MCP_ALWAYS:
@@ -474,10 +506,10 @@ def prompt_hook(event):
     `lean-agent remember`; /memory and /init (Claude Code's own memory editors) are refused when the hook sees them."""
     prompt = str(event.get("prompt") or "").strip()
     reply = None
-    if re.match(r"^/(memory|init)(\s|$)", prompt):
+    if re.match(COMMAND_PROMPT_RE, prompt):
         reply = {"decision": "block", "reason": "lean-agent: the orchestrator's memory lives in lean-agent, not in "
                  "Claude Code's memory files. Say what to keep and a worker files it (`lean-agent remember`)."}
-    elif prompt.startswith("#") and "\n" not in prompt and len(prompt) < 500:
+    elif re.match(MEMORY_MESSAGE_RE, prompt) and "\n" not in prompt and len(prompt) < 500:
         reply = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": MEMORY_REDIRECT}}
     if reply:
         print(json.dumps(reply))
@@ -485,7 +517,7 @@ def prompt_hook(event):
 
 def main():
     try:
-        event = json.load(sys.stdin)
+        event = json.loads(STDIN) if STDIN is not None else json.load(sys.stdin)
     except ValueError:
         return 0
     if event.get("hook_event_name") == "UserPromptSubmit":
