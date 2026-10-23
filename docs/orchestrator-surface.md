@@ -1,6 +1,6 @@
 # What the orchestrator session can still do
 
-Audit of the orchestrator (the lean-agent home, or the service session behind the dashboard chat) with strict mode on
+Audit of the orchestrator (the lean-agent home, or the service session the Claude app talks to) with strict mode on
 (`lean-agent config strict on`, the default). Workers are never restricted by any of this.
 
 Classes:
@@ -40,7 +40,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | Subcommand and flags | Class | Strict mode |
 | --- | --- | --- |
 | `remember "<what>" [--project P] [--task-file -]` | b | allowed: starts the librarian worker; the only way to keep something |
-| `advise "<request>" [--project P] [--thread TAG] [--task-file -]` | b | allowed: starts a read-only haiku advisor worker; stores its short answer in `advice/` (the dashboard shows it under the message) |
+| `advise "<request>" [--project P] [--thread TAG] [--task-file -]` | b | allowed: starts a read-only haiku advisor worker; stores its short answer in `advice/` |
 | `run`, `review`, `do`, `tracker --discover` (all flags, `--mcp`, `--allow-cmd`, `--todo new\|N\|none`) | b | allowed, in the background; they start workers |
 | `thread new\|list\|merge\|unmerge\|move` | b | allowed |
 | `checkpoint`, `brief` | b | allowed |
@@ -69,13 +69,13 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `worktree rm\|setup\|push\|reset`, `rules`, `codemod --apply` | c | **denied** (repo, branch, remote) |
 | `worktrees`, `codemod` (throwaway copy), `map`, `slices`, `check`, `parity`, `grep-log`, `text-len` | a | allowed |
 | `slices --create`, `learn` | b | allowed: todos, cards and lean-agent's own repo rules block derived from the code by lean-agent, with no text from the user |
-| `optimize` (also `--apply`, `--accept`, `--reject`) | b | allowed: applies drafts a worker made from run feedback; no orchestrator text is stored. The user can also use the dashboard buttons |
+| `optimize` (also `--apply`, `--accept`, `--reject`) | b | allowed: applies drafts a worker made from run feedback; no orchestrator text is stored. |
 | `review decline <p> <n>…` (also `review-decline`), `review learn <p> <PR> --mcp <tracker>` (also `review-learn`) | b | allowed: review state, and lessons a worker derives from human reviews |
 | `review learn <p> --text "…"` / `--helper "…"` | c | **denied**: text the orchestrator supplies is knowledge; `remember` (or a worker) |
 | `publish` | b | allowed: a worker makes a Claude Docs doc (or a local file without the connector) |
 | `config strict on`, `config artifacts …`, `attribution`, `limits`, `budget`, `context` | b | allowed: switches and limits |
 | `config strict off` | c | **denied**: the orchestrator doesn't lift its own guardrail |
-| `runs` (also `runs --wait <id\|all\|last>`, which blocks until those runs are recorded and prints their results), `logs`, `output`, `stats`, `savings`, `week`, `guide`, `doctor`, `dashboard` | a | allowed |
+| `runs` (also `runs --wait <id\|all\|last>`, which blocks until those runs are recorded and prints their results), `logs`, `output`, `stats`, `savings`, `week`, `guide`, `doctor` | a | allowed |
 | `up`, `install`, `trust`, `home`, `env`, `sync`, `service` | b | allowed: lean-agent's own setup and updates |
 
 A lean-agent command with the same name as a denied one but another first word, a quoted text that merely contains the
@@ -89,19 +89,9 @@ word, or `lean-agent run … -- 'memory add …'` is not affected: the hook read
 | PostToolUse `squeeze_hook.py` | a | shortens long Bash output |
 | PreCompact / SessionStart `compact_hook.py` | a | prints the hand-off note and brief |
 | SessionStart `session_hook.py` | b | records the session id in lean-agent's own runtime files |
-| PermissionRequest `permission_hook.py` | b | routes an approval to the dashboard |
 | UserPromptSubmit `budget_hook.py` | b | strict mode only: a one-line `#` memory message is redirected to `lean-agent remember`; `/memory` and `/init` are blocked when Claude Code passes them to the hook |
 
-## 4. Dashboard actions
-
-| Action | Who runs it | Class | Status |
-| --- | --- | --- | --- |
-| Chat message (`/api/chat`) | the user, to the orchestrator | b | the orchestrator turns it into a worker task; section 2 applies |
-| Fixed forms from buttons: `Answer to run …` (`run --resume`), `Decision for hand-off note N` (`handoff --done N`), `Start the next ready item …` (`todo next`, `run`), `About #N …` | the orchestrator | b | all allowed subcommands |
-| Thread buttons (`/api/thread/*`) | the dashboard, directly | b | not a model call |
-| Todo, note, dismiss, stop-run, sync, optimize buttons (`/api/action`) | the dashboard, directly, as the user | c | the user's own edit through the CLI; the orchestrator session is not involved, so strict mode doesn't apply |
-
-## 5. Claude Code built-ins in an interactive session
+## 4. Claude Code built-ins in an interactive session
 
 | Built-in | Class | Handling |
 | --- | --- | --- |
