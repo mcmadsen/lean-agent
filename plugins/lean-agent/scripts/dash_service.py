@@ -370,7 +370,7 @@ class Model:
             m = TAG_RE.match(text)
             if m:
                 key, title = m.group(1) or m.group(2), m.group(3)
-            op, key = self._thread_op(text, rec, sent) or (None, key)
+            op, key = self._thread_op(text, rec) or (None, key)
         self.turn = max(self.turns) + 1
         self.turns[self.turn] = {"thread": key, "open": True, "ts": _epoch(rec.get("timestamp")), "untagged": key is None,
                                  "mid": rec.get("uuid")}
@@ -379,7 +379,7 @@ class Model:
                   from_app=sent is None, ts=self._ts(rec), at=self.turns[self.turn]["ts"], **({"op": op} if op else {}))
         self.last_kind = "user"
 
-    def _thread_op(self, text, rec, sent):
+    def _thread_op(self, text, rec):
         """The dashboard's `Move message to`, `Merge thread` and `Unmerge thread` messages: (op, thread they show
         under), each applied to the registry once, in transcript order, keyed by its op id, else its record id (the API applies
         them too, so an op id already applied is skipped)."""
