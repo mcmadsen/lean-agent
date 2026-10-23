@@ -259,16 +259,19 @@ Every orchestrator turn re-reads the whole conversation, so it's kept short:
   progress, recent runs, items touched, latest review per branch), so it doesn't rebuild that from memory.
   Any run's full answer is one `lean-agent runs --show <id>` away. `lean-agent handoff --note` adds open items,
   so a topic can end with a fresh session instead of a long one.
-- **Clears itself:** `lean-agent run` prints a short result (about 1,200 characters of the answer, questions kept,
-  a pointer to `runs --show <id>`; `--verbose` adds the token lines, `--full` everything). When `up` sees the
-  orchestrator's context above `clear-at` after a finished turn (default `auto`: 8,000 tokens below where Claude Code
-  compacts, ~59,000 of the default ~67,000; `lean-agent config clear-at auto|N`, 0 = off; `doctor` shows both), it has
-  the orchestrator save its soft state with `lean-agent checkpoint`, then clears the session; the new session starts
-  with `lean-agent brief` (the checkpoint first). Never while a permission prompt waits, within 30 s of typing, or
-  twice in 10 minutes, and not while a worker runs unless the context is within 3,000 tokens of compaction (`doctor` and
-  `service status` say why it waits); runs are detached and survive a clear; each clear is logged in `logs/debug.log` (component `auto-clear`).
+- **Short results, clear on request:** `lean-agent run` prints a short result (about 1,200 characters of the answer,
+  questions kept, a pointer to `runs --show <id>`; `--verbose` adds the token lines, `--full` everything). Context is
+  handled by Claude Code's autocompact, so the session stays the same session in the Claude app. The orchestrator clears
+  only when you ask ("clear the session", "start fresh"): it runs `lean-agent clear`, which queues a clear for the end
+  of the turn (the orchestrator saves its soft state with `lean-agent checkpoint`, then `up` clears the session; the new
+  session starts with `lean-agent brief`, the checkpoint first). It waits only for a pending permission prompt; running
+  workers are detached and survive (collect them with `lean-agent runs --wait all`). Opt-in automatic clearing:
+  `lean-agent config clear-at auto|N` (`auto` = 8,000 tokens below where Claude Code compacts; default `off`;
+  `doctor` and `service status` show it): above it, after a finished turn, never within 30 s of typing or twice in
+  10 minutes, and not while a worker runs unless the context is within 3,000 tokens of compaction. Each clear is
+  logged in `logs/debug.log` (component `auto-clear`).
 - **Restart with a clean context:** `lean-agent service restart --clear` and `lean-agent up --clear` have a live
-  session checkpoint first (the same prompt as the auto clear, up to 120 s for 'checkpointed'), then the next session
+  session checkpoint first (the same prompt as `lean-agent clear`, up to 120 s for 'checkpointed'), then the next session
   is a new one (a new session id in `up.json`) that starts from the brief, like after a clear. The dashboard keeps
   the thread history across it and shows a "Restarted fresh" line; its Context sheet has a "Restart fresh…" button
   (with an inline confirm) that does the same without restarting `up`.
@@ -293,8 +296,8 @@ Every orchestrator turn re-reads the whole conversation, so it's kept short:
   a step needs judgement); `--escalate haiku,sonnet` does the same for workers.
 
 In short: `lean-agent run` hands the orchestrator a compact result, `lean-agent checkpoint` saves its soft state, and
-`up` clears the session by itself when the context passes the clear-at threshold, so the orchestrator rarely carries
-more than a few tens of thousands of tokens. The dashboard keeps each thread's history across those clears: it reads
+Claude Code compacts the orchestrator's context at ~67K tokens; the session is cleared only on `lean-agent clear` (or
+with the opt-in `clear-at`). The dashboard keeps each thread's history across those clears: it reads
 the chain of transcripts the session has used (the last 20, kept in `chat/service.json`) and puts a thin "Context
 cleared" line where each clear happened. The Context sheet shows the threshold and the time of the last clear.
 
