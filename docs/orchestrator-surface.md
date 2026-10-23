@@ -43,8 +43,8 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `run`, `review`, `do`, `tracker --discover` (all flags, `--mcp`, `--allow-cmd`, `--todo new\|N\|none`) | b | allowed, in the background; they start workers |
 | `thread new\|list\|merge\|unmerge\|move` | b | allowed |
 | `checkpoint`, `brief` | b | allowed |
-| `handoff` (read), `handoff --done N`, `handoff --note … --kind checkpoint\|fyi` | b | allowed: the orchestrator's own state |
-| `handoff --note …` with no `--kind`, `--kind reminder` or `decision` | c | **denied**: user content; `remember`. (`decision` is denied too: the question goes to the user in the chat) |
+| `handoff` (read), `handoff --done N`, `handoff --note … --kind checkpoint\|fyi\|decision` | b | allowed: the orchestrator's own state; a `decision` note is how it asks the user something asynchronously |
+| `handoff --note …` with no `--kind` or `--kind reminder` | c | **denied**: user content; `remember` |
 | `todo list\|next\|start\|done` | b | allowed: status that follows a run it started |
 | `todo add\|note\|edit\|rm\|reopen\|epic` | c | **denied** (`todo add` serves both; a run gets its item from `run --todo new`, which names it after `--why`) |
 | `memory list\|where` | a | allowed |

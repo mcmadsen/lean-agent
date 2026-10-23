@@ -576,7 +576,7 @@ class BudgetTest(Base):
             reason = out["hookSpecificOutput"]["permissionDecisionReason"]
             self.assertIn("never changes a repo, branch, remote or tracker", reason)
             self.assertIn("lean-agent run <project> --cards auto", reason)
-        bookkeeping = ("lean-agent todo list", "lean-agent handoff --note 'x' --kind fyi", "lean-agent thread list",
+        bookkeeping = ("lean-agent todo list", "lean-agent handoff --note 'x' --kind fyi", "lean-agent handoff --note 'q?' --kind decision", "lean-agent thread list",
                        "lean-agent checkpoint 'x'", "lean-agent brief", "lean-agent runs --last", "lean-agent review proj --head b",
                        "lean-agent publish 'T' --task-file - <<'EOF'\ntext\nEOF", "lean-agent sync", "lean-agent doctor",
                        "lean-agent config strict on", "lean-agent card proj show x", "lean-agent optimize proj",
@@ -607,7 +607,7 @@ class BudgetTest(Base):
                 "lean-agent recipe rm p r", "lean-agent doc write ~/Documents/a.md --text x", "lean-agent todo add 'x' -p proj",
                 "lean-agent todo note 3 'x'", "lean-agent todo rm 3", "lean-agent todo edit 3 'y'", "lean-agent todo reopen 3",
                 "lean-agent todo epic e", "lean-agent handoff --note 'remember x'", "lean-agent handoff --note 'x' --kind reminder",
-                "lean-agent handoff --note 'x' --kind decision", "lean-agent schedule add 'daily 09:00' do p r",
+                "lean-agent schedule add 'daily 09:00' do p r",
                 "lean-agent schedule rm 2", "lean-agent guard add p push-deny 'x/*'", "lean-agent count proj add n 'x'",
                 "lean-agent config strict off")
         for cmd in keep:

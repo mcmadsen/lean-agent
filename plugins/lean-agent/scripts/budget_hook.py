@@ -334,11 +334,11 @@ def lean_agent_only(command):
 #             have no subcommand: a worker does them with the tracker's MCP server (`run --mcp`) or `worktree push`.
 #   "keep"    writes knowledge or settings the user asked for: memory add|edit|rm|import, card (everything but show),
 #             recipe, doc, schedule add|rm|defaults, guard add|rm, count add|rm, todo add|note|rm|edit|epic|reopen,
-#             handoff --note unless --kind checkpoint|fyi, config strict off. Where one subcommand serves both the
+#             handoff --note unless --kind checkpoint|fyi|decision, config strict off. Where one subcommand serves both the
 #             orchestrator's bookkeeping and the user's content (todo add, handoff --note), it is denied; the
 #             orchestrator links a run with `--todo new` and keeps its own state with checkpoint / handoff --kind fyi.
 #   "mcp"     lists or runs MCP servers or presets: the whole `mcp` subcommand, `chrome check`.
-# Bookkeeping stays allowed: todo list|next|start|done, handoff (read, --done, --kind checkpoint|fyi), thread,
+# Bookkeeping stays allowed: todo list|next|start|done, handoff (read, --done, --kind checkpoint|fyi|decision), thread,
 # checkpoint, brief, runs, review (it starts its own worker), publish, sync, doctor, optimize and the like.
 CHANGING_ACTIONS = {"worktree": {"rm", "setup", "push", "reset"}}
 CHANGING_ALWAYS = {"rules"}
@@ -355,7 +355,7 @@ KEEP_ACTIONS = {
 KEEP_ALWAYS = {"recipe", "doc"}
 MCP_ALWAYS = {"mcp"}
 MCP_ACTIONS = {"chrome": ({"check", "status"}, {"check"})}
-KEEP_NOTE_KINDS = ("checkpoint", "fyi")
+KEEP_NOTE_KINDS = ("checkpoint", "fyi", "decision")
 MCP_RESOURCE_TOOLS = ("ListMcpResources", "ListMcpResourcesTool", "ReadMcpResource", "ReadMcpResourceTool",
                       "ReadMcpResourceDir", "ReadMcpResourceDirTool")
 DELEGATE_CHANGE = ("A worker makes the change and reads the project's cards: lean-agent run <project> --cards auto "
