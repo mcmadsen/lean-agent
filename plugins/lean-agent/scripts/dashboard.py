@@ -25,6 +25,7 @@ sys.path.insert(0, HERE)
 import usage  # noqa: E402
 from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive, plugin_version  # noqa: E402
 import lean_schedule  # noqa: E402
+import lean_threads  # noqa: E402
 import prs  # noqa: E402
 
 DEFAULT_PORT = 8765
@@ -767,6 +768,9 @@ def api_get(path, q):
     """(status, body, content type) for the page's GET requests (token already checked)."""
     if path == "/api/state":
         return _j(200, dict(state(), page_version=page_version()))
+    if path == "/api/threads":
+        import dash_chat
+        return _j(200, dash_chat.thread_list())
     if path == "/api/chat":
         import dash_chat
         try:
@@ -900,10 +904,26 @@ def run_action(body):
 def api_post(path, body):
     if path == "/api/action":
         return run_action(body)
+    if path.startswith("/api/thread/"):
+        import dash_chat
+        if path == "/api/thread/move":
+            res = dash_chat.thread_move(body.get("message"), body.get("to"))
+        elif path == "/api/thread/merge":
+            res = dash_chat.thread_merge(body.get("from"), body.get("into"))
+        elif path == "/api/thread/unmerge":
+            res = dash_chat.thread_unmerge(body.get("from"))
+        else:
+            return _j(404, {"ok": False, "error": "not found"})
+        return _j(200 if res.get("ok") else 400, res)
     if path.startswith("/api/chat"):
         import dash_chat
         try:
-            c = dash_chat.chat(body.get("thread") or "main")
+            thread = body.get("thread")
+            if thread and thread != "main":  # `#12` / `t3` from the page (a bare card id still works)
+                thread = dash_chat.thread_key(thread) if re.fullmatch(r"#?\d+|[tT]\d+|optimize", str(thread)) else thread
+                if re.fullmatch(r"t\d+", thread) and thread not in lean_threads.load()["threads"]:
+                    return _j(400, {"ok": False, "error": f"no such thread {thread}"})
+            c = dash_chat.chat(thread or "main")
         except ValueError as e:
             return _j(400, {"ok": False, "error": str(e)})
         if path == "/api/chat":

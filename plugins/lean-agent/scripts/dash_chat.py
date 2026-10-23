@@ -28,6 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import dash_service  # noqa: E402
+import lean_threads  # noqa: E402
 from lean_common import questions_of, tool_summary  # noqa: E402
 PARENT_SESSION_VARS = re.compile(r"^(CLAUDECODE|CLAUDE_PID|CLAUDE_CODE_(SESSION_ID|ENTRYPOINT|CHILD_SESSION|REMOTE\w*|"
                                  r"MESSAGING_\w+|SSE_PORT|WORKER_EPOCH|TEE_SDK_STDOUT|SESSION_ATTENDED|"
@@ -117,6 +118,76 @@ def service_status():
     return {"up": up, "mode": "service" if up else "fallback", "configured": bool(info), "remote_control": bool(rc) if up and rc is not None else None}
 
 
+def thread_id(key):
+    """The registry's id for a chat key: `12` -> `#12`, `t3` stays."""
+    return "#" + key if str(key).isdigit() else str(key)
+
+
+def thread_key(tid):
+    """The chat key for a thread id from the page: `#12` -> `12`, `t3` stays; ValueError for anything else."""
+    tid = lean_threads.norm(tid)
+    return tid[1:] if tid.startswith("#") else tid
+
+
+def fixed_send(text):
+    """Send one of the dashboard's fixed messages (move, merge, unmerge) into the session; the registry has been updated
+    already, so the transcript's copy is marked as applied."""
+    ds = service_up() and dash_service
+    if not ds:
+        return {"ok": True, "sent": False}
+    import service_session
+    os.makedirs(ds.chat_dir(), exist_ok=True)
+    log = ds.chat_dir("service_sends.jsonl")
+    with _SENDS_LOCK:
+        with open(log, "a") as fh:
+            fh.write(json.dumps({"key": "main", "sid": ds.model().sid, "sent": text, "shown": text, "raw": text, "applied": True,
+                                 "ts": time.time()}) + "\n")
+    _trim_sends(log)
+    ok, err = service_session.send(text)
+    return {"ok": ok, "sent": ok, **({"error": err} if err else {})}
+
+
+def thread_move(message, to):
+    try:
+        to = lean_threads.norm(to)
+        mid = str(message or "").strip()
+        lean_threads.move(mid, to)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    ev = next((e for e in dash_service.model().events if e.get("mid") == mid and e["kind"] == "user"), None) if service_up() else None
+    excerpt = " ".join(str((ev or {}).get("raw") or (ev or {}).get("text") or "").replace('"', "'").split())[:60]
+    return fixed_send(f"Move message to {to} ({mid})" + (f': "{excerpt}"' if excerpt else ""))
+
+
+def thread_merge(src, into):
+    try:
+        lean_threads.merge(src, into)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    return fixed_send(f"Merge thread {lean_threads.norm(src)} into {lean_threads.norm(into)}")
+
+
+def thread_unmerge(src):
+    try:
+        lean_threads.unmerge(src)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    return fixed_send(f"Unmerge thread {lean_threads.norm(src)}")
+
+
+def thread_list():
+    """The threads (aliases and expiry applied): from the transcript model when the bridge answers, else the registry."""
+    if service_up():
+        return {"threads": dash_service.model().thread_summaries(), "service_status": service_status()}
+    out = []
+    for t in lean_threads.threads():
+        c = _CHAT.get((lean_home(), thread_key(t["id"])))
+        out.append({"id": t["id"], "title": t["title"], "kind": t["kind"], "waiting": bool(c and c.pending),
+                    "last_message": t.get("last_message"),
+                    "messages": len([e for e in c.events if e.get("kind") in ("user", "assistant")]) if c else 0})
+    return {"threads": out, "service_status": service_status()}
+
+
 def thread_dir(key):
     return lean_home("chat") if key == "main" else lean_home("chat", "threads", key)
 
@@ -191,8 +262,13 @@ class Chat:
         return float(self.meta.get("fresh_at") or 0)
 
     def _label(self):
-        title = " ".join(str(self.meta.get("title") or self.key).replace('"', "'").split())[:80]
-        return f'About {"#" + self.key if self.key.isdigit() else self.key} "{title}": '
+        """The tag a dashboard message carries: `About #N "title": ` for a task, `Thread tN "title": ` for another topic."""
+        tid = thread_id(self.key)
+        reg = lean_threads.load()["threads"].get(tid) or {}
+        title = " ".join(str(self.meta.get("title") or reg.get("title") or self.key).replace('"', "'").split())[:80]
+        if re.fullmatch(r"t\d+|optimize", self.key):
+            return f'Thread {self.key} "{title}": '
+        return f'About {tid if self.key.isdigit() else self.key} "{title}": '
 
     def _service_send(self, ds, text, context):
         import service_session
@@ -335,6 +411,11 @@ class Chat:
         if not text:
             return {"ok": False, "error": "empty message"}
         self.used = time.time()
+        if self.key != "main" and lean_threads.ID_RE.match(thread_id(self.key)):
+            try:
+                lean_threads.touch(thread_id(self.key), title)  # the thread exists from its first message on
+            except (OSError, ValueError):
+                pass
         if title or context:
             self.meta.update({k: v for k, v in (("title", title), ("context", context)) if v})
             self.meta.setdefault("created", _now())
