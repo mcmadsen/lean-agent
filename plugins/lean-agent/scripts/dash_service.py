@@ -250,12 +250,12 @@ class Model:
         self.offsets.setdefault(path, 0)
         if first:
             return
-        if meta.get("source") == "clear":
+        if meta.get("source") == "clear" or meta.get("fresh"):
             self.counter += 1
             ts = meta.get("ts")
             ts = datetime.datetime.fromtimestamp(ts).isoformat(timespec="seconds") if isinstance(ts, (int, float)) \
                 and not isinstance(ts, bool) else datetime.datetime.now().isoformat(timespec="seconds")
-            self.marks.append({"i": self.counter, "seg": self.seg, "ts": ts})
+            self.marks.append({"i": self.counter, "seg": self.seg, "ts": ts, **({"fresh": True} if meta.get("fresh") else {})})
             del self.marks[:-20]
         else:
             self._add(kind="note", text="new conversation")

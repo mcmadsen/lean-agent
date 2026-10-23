@@ -5995,16 +5995,27 @@ def ask_attribution_once():
     cmd_attribution(argparse.Namespace(value="on" if ans in ("y", "yes") else "off"))
 
 
+def fresh_start():
+    """`up --clear` / `service restart --clear`: the live session checkpoints (up to 120 s), then the next session
+    is a new one; the dashboard's transcript chain is kept."""
+    print("lean-agent: asking the orchestrator to checkpoint, then starting it with a clean context...", flush=True)
+    sid, checkpointed = service_session.go_fresh()
+    print(f"lean-agent: new session {sid}" + ("" if checkpointed is None else
+          " (checkpointed)" if checkpointed else " (no checkpoint reply in time)"), flush=True)
+
+
 def cmd_up(a):
     if getattr(a, "dashboard_only", False) and not service_session.supported():
         die("--dashboard-only needs a pty (macOS or Linux)")
     ask_attribution_once()
     h = prepare_home()
     refresh_blocks()
+    if getattr(a, "clear", False) and not a.fresh:
+        fresh_start()
     prev = load_json(home("up.json"), {})
     save_json(home("up.json"), {"started": now_iso(), "server_env": ORCHESTRATOR_ENV, "name": a.name,
                                 "local": a.local,
-                                **({} if a.fresh else {k: prev[k] for k in ("session_id",) if prev.get(k)})})
+                                **({} if a.fresh else {k: prev[k] for k in ("session_id", "fresh_sid") if prev.get(k)})})
     set_home_model(h, a.model)
     if a.fresh:
         drop_bridge_pointers(h)
@@ -7574,6 +7585,8 @@ def cmd_service(a):
         if running and not a.yes:
             die(f"{len(running)} worker(s) still running (lean-agent runs --running); they'd be stopped with it. "
                 f"Wait for them, or: lean-agent service {a.action} --yes")
+    if a.action == "restart" and getattr(a, "clear", False):
+        fresh_start()
     if plat == "mac":
         target = f"gui/{uid}/{SERVICE_LABEL}"
         is_running, loaded = mac_running()
@@ -7873,6 +7886,8 @@ def build_parser():
                    help="don't resume the previous Remote Control session (done for you when it answers 404)")
     s.add_argument("--dashboard-only", action="store_true", help="no Remote Control: the dashboard (with its chat "
                    "with the orchestrator) and scheduled jobs only")
+    s.add_argument("--clear", action="store_true", help="start a new session with a clean context (a running one "
+                   "checkpoints first, up to 120 s); it starts from the brief and the dashboard's thread history stays")
     s.add_argument("extra", nargs=argparse.REMAINDER,
                    help="after --: extra flags for claude / claude remote-control, e.g. -- --debug")
     s.set_defaults(fn=cmd_up)
@@ -8374,6 +8389,8 @@ def build_parser():
                        "(install | status | start | restart | stop | logs | uninstall)")
     s.add_argument("action", choices=["install", "status", "start", "restart", "stop", "logs", "uninstall"])
     s.add_argument("--yes", action="store_true", help="restart/stop even while workers are running")
+    s.add_argument("--clear", action="store_true", help="restart: the orchestrator checkpoints first (up to 120 s), "
+                   "then restarts with a clean context (a new session that starts from the brief)")
     s.add_argument("--name", default="lean-agent", help="install: the session name in the Claude app")
     s.add_argument("--dashboard-only", action="store_true", help="install: run `up --dashboard-only` (no Remote "
                    "Control; you talk to lean-agent in the dashboard)")

@@ -931,6 +931,10 @@ def api_post(path, body):
         else:
             return _j(404, {"ok": False, "error": "not found"})
         return _j(200 if res.get("ok") else 400, res)
+    if path == "/api/service/restart-fresh":
+        import service_session
+        sid, checkpointed = service_session.go_fresh(restart_host=True)
+        return _j(200, {"ok": True, "session": sid, "checkpointed": bool(checkpointed)})
     if path.startswith("/api/chat"):
         import dash_chat
         try:

@@ -97,6 +97,12 @@ function drawWorking(){
   if(!w.firstChild)w.innerHTML=`<span class="dot dot-run" aria-hidden="true"></span><span>Orchestrator is working</span><span class="mono mute" aria-hidden="true">· <span data-since="${chat.workStart}"></span></span><span class="hspace"></span><button type="button" class="btn sm" data-act="interrupt">Interrupt</button>`;
   else w.querySelector("[data-since]").dataset.since=chat.workStart;
 }
+function freshHtml(){  // in the Context sheet: Restart fresh (checkpoint, then a new session), with its inline confirm
+  if(!chat.service)return "";
+  if(chat.fresh==="busy")return `<span class="mono small mute" role="status">Restarting fresh… the orchestrator is checkpointing</span>`;
+  if(!chat.fresh)return `<button type="button" class="btn sm" data-act="fresh-ask">Restart fresh…</button>`;
+  return `<div class="clearbox" role="alert"><span>Restart the session with a clean context? It checkpoints first (up to two minutes), then a new session starts from the brief. The thread history stays.</span><span class="acts"><button type="button" class="btn sm danger" data-act="fresh-yes">Restart fresh</button><button type="button" class="btn sm" data-act="fresh-no" id="fresh-no">Cancel</button></span></div>`;
+}
 function clearHtml(){  // in the Context sheet: the button, or its inline confirm
   const task=typeof taskLabel==="function"?taskLabel():"",fb=fallback();
   if(!chat.confirm)return `<button type="button" class="btn sm" data-act="clear-ask">${fb?"Clear thread…":chat.service?"Clear session…":"Start thread over…"}</button>`;
@@ -112,7 +118,7 @@ const mergedMarks=()=>{
   const t=ui.threads.find(t=>threadKey(t.id)===chat.key);
   return ((t&&t.merged)||[]).slice().sort((a,b)=>(a.at||"").localeCompare(b.at||""));
 };
-const clearedHtml=e=>`<div class="merged mono"><span class="ln"></span><span>Context cleared${e.ts?" · "+esc(hhmm(e.ts)):""} · continued from a checkpoint</span><span class="ln"></span></div>`;  // where the session was cleared, like the merged line
+const clearedHtml=e=>`<div class="merged mono"><span class="ln"></span><span>${e.fresh?"Restarted fresh":"Context cleared"}${e.ts?" · "+esc(hhmm(e.ts)):""} · continued from a checkpoint</span><span class="ln"></span></div>`;  // where the session was cleared, like the merged line
 const mergedHtml=m=>`<div class="merged mono"><span class="ln"></span><span>Merged ${esc(m.title&&!/^#/.test(m.id)?m.title:m.id)} into this thread${m.at?" · "+esc(hhmm(m.at)):""}</span><button type="button" class="link" data-act="unmerge" data-from="${esc(m.id)}" aria-label="Unmerge ${esc(m.id)}">Unmerge</button><span class="ln"></span></div>`;
 function tick(){
   const now=Date.now();
@@ -165,6 +171,10 @@ document.addEventListener("click",e=>{
     post("/api/chat/answer",{thread:chat.key,rid:a.dataset.rid,allow:true,answers}).then(pollChat)}
   else if(act==="skip"){done();post("/api/chat/answer",{thread:chat.key,rid:a.dataset.rid,allow:false,message:"skipped"}).then(pollChat)}
   else if(act==="interrupt"){done();post("/api/chat/stop",{thread:chat.key}).then(pollChat)}
+  else if(act==="fresh-ask"){done();chat.fresh="ask";drawClear("fresh-no")}
+  else if(act==="fresh-no"){done();chat.fresh=null;drawClear()}
+  else if(act==="fresh-yes"){done();chat.fresh="busy";drawClear();
+    post("/api/service/restart-fresh",{}).then(()=>{chat.fresh=null;drawClear();refresh()},()=>{chat.fresh=null;drawClear()})}
   else if(act==="clear-ask"){done();chat.confirm=true;drawClear("clear-no")}
   else if(act==="clear-no"){done();chat.confirm=false;drawClear();const b=document.querySelector('[data-act="clear-ask"]');if(b)b.focus()}
   else if(act==="clear-yes"){done();chat.confirm=false;drawClear();

@@ -357,7 +357,7 @@ function contextHtml(){
   return (c&&c.calls?`<div class="ctxmeter mono"><span>Orchestrator context · compacts at about ${k(c.compact_at)}${whole?` <span class="mute">${esc(whole.slice(3))}</span>`:""}</span><div class="meter thin${c.now>=c.compact_at*.9?" warn":""}" role="img" aria-label="Orchestrator context${whole}: ${k(c.now)} of ${k(c.compact_at)} before compaction"><div style="width:${Math.min(100,c.now*100/c.compact_at)}%"></div></div></div>`
     :'<div class="empty">No context numbers yet.</div>')
     +(c&&c.clear_at?`<div class="ctxmeter mono small mute">Clears at about ${k(c.clear_at)} · ${c.last_clear?"last clear "+esc(String(c.last_clear).slice(11,16)):"not cleared yet"}</div>`:'')
-    +`<div class="bact">${typeof clearHtml==="function"?clearHtml():""}</div>`
+    +`<div class="bact">${typeof clearHtml==="function"?clearHtml():""}${typeof freshHtml==="function"?freshHtml():""}</div>`
     +`<div class="bact"><button type="button" class="btn sm" data-act="theme">Theme: ${esc(themeNow||"auto")}</button><button type="button" class="btn sm" data-act="add">+ Add item</button></div>`;
 }
 const BADGE_TITLE={runs:"Runs",schedule:"Schedule",notes:"Notes",context:"Context"};
