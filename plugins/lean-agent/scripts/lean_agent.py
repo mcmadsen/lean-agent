@@ -1418,7 +1418,7 @@ def cmd_run(a):
                 "commands that read (show, list, get, view, log)")
     internal_cmd = list(getattr(a, "internal_cmd", None) or []) if not prev and read_only else []
     if (allow_cmd or internal_cmd) and not prev:  # tell the worker, now and on a resume (role.md is read again then)
-        note = ("\nBesides read-only git you may run exactly these read-only commands (and nothing else): "
+        note = ("\nBesides read-only git you may run exactly these commands (and nothing else): "
                 + "; ".join(f"`{c} ...`" for c in allow_cmd + internal_cmd) + "\n")
         for f in ("append.md", "role.md"):
             with open(os.path.join(workdir, f), "a") as fh:

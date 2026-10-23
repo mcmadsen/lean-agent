@@ -62,9 +62,9 @@ def questions_of(inp):
     return out
 
 
-def stored_advice(directory, thread=None):
+def stored_advice(directory, thread):
     """The advice `lean-agent advise` stored in `directory`, oldest first: {ts, thread, project, request, text}
-    (only those of the chat thread `thread` when given)."""
+    (only those of the chat thread `thread`)."""
     out = []
     for f in sorted(glob.glob(os.path.join(directory, "*.json"))):
         try:
@@ -72,6 +72,6 @@ def stored_advice(directory, thread=None):
                 d = json.load(fh)
         except (OSError, ValueError):
             continue
-        if isinstance(d, dict) and d.get("text") and (thread is None or d.get("thread") == thread):
+        if isinstance(d, dict) and d.get("text") and d.get("thread") == thread:
             out.append(d)
     return out
