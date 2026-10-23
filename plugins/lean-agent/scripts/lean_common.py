@@ -76,11 +76,14 @@ def seed_collected(lean_home):
     path = os.path.join(lean_home, "collected.json")
     done = read_json(path, None)
     if not isinstance(done, dict):
-        with file_lock(path):
-            done = read_json(path, None)
-            if not isinstance(done, dict):
-                done = {COLLECTED_CUTOFF: _now()}
-                write_json_atomic(path, done)
+        try:
+            with file_lock(path):
+                done = read_json(path, None)
+                if not isinstance(done, dict):
+                    done = {COLLECTED_CUTOFF: _now()}
+                    write_json_atomic(path, done)
+        except OSError:  # unwritable home: an in-memory cutoff of now
+            done = {COLLECTED_CUTOFF: _now()}
     return done
 
 
@@ -91,10 +94,13 @@ def mark_collected_ids(lean_home, run_ids):
         return
     seed_collected(lean_home)
     path = os.path.join(lean_home, "collected.json")
-    with file_lock(path):
-        done = read_json(path, {})
-        done.update({r: _now() for r in ids})
-        write_json_atomic(path, done)
+    try:
+        with file_lock(path):
+            done = read_json(path, {})
+            done.update({r: _now() for r in ids})
+            write_json_atomic(path, done)
+    except OSError:
+        pass
 
 
 def uncollected_ids(lean_home, live_ids=()):
