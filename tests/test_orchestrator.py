@@ -3613,7 +3613,10 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(cur["transcript_path"], old)
         self.assertEqual((cur["source"], cur["session_id"]), ("clear", os.path.basename(cur["transcript_path"])[:-6]))
         self.assertIn("cleared", [e["kind"] for e in main.snapshot()["events"]])
-        self.assertEqual(ss.info()["transcript"], old)  # up.json keeps the id `up` started with
+        # the SessionStart hook moves up.json to the new session, so a restart resumes the current conversation
+        info = ss.info()
+        self.assertEqual(info["transcript"], cur["transcript_path"])
+        self.assertEqual(info["session_id"], cur["session_id"])
         # without the bridge the per-thread stream-json sessions are used as before
         p.terminate()
         p.wait(timeout=20)
