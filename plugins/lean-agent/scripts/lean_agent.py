@@ -1660,10 +1660,13 @@ def cmd_run(a):
               f"{'' if measured else ' (assumed)'} · {model_part}")
     line, low = budget_line()
     if line:
-        print("  " + line)
+        detail("  " + line)
     limit = env_num("LEAN_AGENT_RESULT_CHARS", 12000)
     if summary and role in ("reviewer", "reuse-check") and BRIEF:
         detail(summary)  # the review's findings follow; the reviewer's prose is in `runs --show`
+    elif summary and BRIEF:
+        say(summary if len(summary) <= limit else summary[:limit] + f"\n… [{len(summary) - limit} chars more in {workdir}/result.json]",
+            compact_answer(summary, run_id))
     elif summary:
         print(summary if len(summary) <= limit else summary[:limit] + f"\n… [{len(summary) - limit} chars more in {workdir}/result.json]")
     if details_path:
@@ -8313,8 +8316,10 @@ def main(argv=None):
             and not {"-p", "--project", "--resume"} & set(argv) and is_project_ref(argv[1])):
         argv = ["run", "-p", argv[1]] + argv[2:]  # `lean-agent run <project> ...` like `cards <project>`
     global BRIEF
-    flags = {"--brief", "--full"} & set(argv[1:]) if argv[:1] != ["up"] else set()
+    global VERBOSE
+    flags = {"--brief", "--full", "--verbose"} & set(argv[1:]) if argv[:1] != ["up"] else set()
     argv = [x for i, x in enumerate(argv) if not (i and x in flags)]
+    VERBOSE = "--verbose" in flags
     BRIEF = "--brief" in flags or (os.environ.get("LEAN_AGENT_BRIEF") == "1" and "--full" not in flags)
     a, leftover = ap.parse_known_args(argv)
     if leftover and a.cmd in ("mcp", "guard") and not any(x.startswith("-") for x in leftover):
@@ -8345,14 +8350,34 @@ def main(argv=None):
             sys.stdout.write(brief_text(a.cmd, text))
 
 
+VERBOSE = False  # set in main(): --verbose keeps brief mode but prints the detail lines
 BRIEF = False  # set in main(): --brief, or LEAN_AGENT_BRIEF=1 (orchestrator sessions) unless --full
 BRIEF_COMMANDS = ("optimize", "tracker", "stats", "budget", "cards", "limits", "projects", "recipes", "savings")
 BRIEF_LINES = 20
 
 
+ANSWER_CHARS = 1200  # a worker's answer in brief mode; the rest is in `runs --show`
+KEEP_LINE = re.compile(r"^[\W_]*(needs you|needs-input|question|open|blocked|decision needed|please (confirm|answer))\b"
+                       r"|\?\s*$", re.I)
+
+
+def compact_answer(text, run_id, limit=ANSWER_CHARS):
+    """`text` cut to ~`limit` characters at a line boundary, then the lines past the cut that ask something or are
+    still open (kept in full), then a pointer to the whole report."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    if text[limit] != "\n" and "\n" in cut:
+        cut = cut[:cut.rindex("\n")]
+    cut = cut.rstrip()
+    kept = [l for l in text[len(cut):].splitlines() if l.strip() and KEEP_LINE.search(l)]
+    return "\n".join([cut] + kept + [f"… full report: lean-agent runs --show {run_id}"])
+
+
 def detail(text=""):
-    """A line that only full mode prints; brief mode keeps it in the run's saved summary (`runs --show`)."""
-    if not BRIEF:
+    """A line that only full mode (or --verbose) prints; brief mode keeps it in the run's saved summary
+    (`runs --show`)."""
+    if not BRIEF or VERBOSE:
         print(text)
     elif isinstance(sys.stdout, Tee):
         sys.stdout.fh.write(str(text) + "\n")
