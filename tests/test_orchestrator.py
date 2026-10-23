@@ -2746,8 +2746,6 @@ class CliTest(unittest.TestCase):
         lt.unmerge("t2")
         self.assertEqual(lt.resolve("t2"), "t2")
         lt.merge("#10", "t1")  # task threads take part too
-        lt.move("msg-1", "#10")
-        self.assertEqual(lt.load()["moves"], {"msg-1": "#10"})
         # expiry is a filter: 7 days after the todo is done, 7 days without a message for a free thread
         day = 86400
         stamp = lambda ago: datetime.datetime.fromtimestamp(time.time() - ago * day).isoformat(timespec="seconds")
@@ -2772,30 +2770,57 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.cli("thread", "merge", "t2", "T1").stdout.strip(), "t2 -> t1")  # prints the normalized id
         self.assertEqual(self.cli("thread", "merge", "t1", "t2", check=False).returncode, 1)
         self.assertEqual(self.cli("thread", "merge", "t1", "t1", check=False).returncode, 1)
-        self.cli("thread", "move", "abc", "#4")
+        self.cli("thread", "new", "Four")
+        self.cli("thread", "merge", "t3", "#4")
         listed = json.loads(self.cli("thread", "list", "--json").stdout)
-        self.assertEqual([(t["id"], t["kind"]) for t in listed if t["id"] != "optimize"], [("t1", "free"), ("#4", "task")])
+        self.assertEqual(sorted((t["id"], t["kind"]) for t in listed if t["id"] != "optimize"), [("#4", "task"), ("t1", "free")])
         self.assertIn("t1", self.cli("thread", "list").stdout)
         self.cli("thread", "unmerge", "t2")
         self.assertIn("t2", self.cli("thread", "list").stdout)
         self.assertEqual(self.cli("thread", "unmerge", "t2", check=False).returncode, 1)
 
-    def test_thread_op_ids_and_once_keys_are_evicted_separately(self):
+    def test_thread_move_rehomes_the_latest_request_and_the_work_since(self):
+        self.cli("learn", self.proj, "--name", "proj")
         lt = self.threads_home()
-        lt.new("A")
-        lt.move("m", "t1", "0123456789ab")
-        self.assertTrue(lt.mark_once("k0"))
-        for i in range(600):
-            self.assertTrue(lt.mark_once(f"k{i + 1}"))
+        lt.route("Publish the report via docs", "s1")
+        lt.route("Fix the export timeout in billing", "s1")  # t2
+        old = (datetime.datetime.now() - datetime.timedelta(hours=1)).isoformat(timespec="seconds")
+        self.cli("run", "-p", "proj", "before the request", "--model", "haiku", "--why", "t", "--thread", "t2")
+        led = os.path.join(self.env["LEAN_AGENT_HOME"], "ledger.jsonl")
+        with open(led) as fh:
+            rows = [json.loads(l) for l in fh]
+        rows[-1]["ts"] = old  # a run from before the request stays
+        with open(led, "w") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in rows))
         data = lt.load()
-        self.assertEqual(len(data["applied"]), 500)
-        self.assertIn("0123456789ab", data["ops"])  # once-keys can't push an op id out
-        for i in range(2100):
-            lt.move("m", "t1", f"x{i}")
-        data = lt.load()
-        self.assertEqual(len(data["ops"]), 2000)
-        self.assertEqual(len(data["applied"]), 500)
-        self.assertFalse(lt.mark_once("k600"))  # op ids can't push a once-key out
+        data["threads"]["t2"]["requests"][-1]["ts"] = (datetime.datetime.now() - datetime.timedelta(seconds=30)).isoformat(timespec="seconds")
+        data["threads"]["t1"]["closed"] = "2026-01-01T00:00:00"
+        with open(lt.path(), "w") as fh:
+            json.dump(data, fh)
+        self.cli("run", "-p", "proj", "after the request", "--model", "haiku", "--why", "t")  # current thread t2
+        self.cli("todo", "add", "Fix export", "--thread", "t2")
+        self.cli("handoff", "--note", "slow on big files", "--kind", "fyi")
+        with open(led) as fh:
+            before = fh.read()
+        self.assertIn("moved from t2 to t1", self.cli("thread", "move", "t1").stdout)
+        with open(led) as fh:
+            self.assertEqual(fh.read(), before)  # append-only logs are untouched
+        self.assertEqual(lt.current(), "t1")
+        reg = lt.load()
+        self.assertNotIn("closed", reg["threads"]["t1"])  # it was reopened
+        self.assertEqual(len(reg["threads"]["t1"]["requests"]), 2)
+        self.assertEqual(len(reg["threads"]["t2"]["requests"]), 0)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "todo.json")) as fh:
+            self.assertEqual(json.load(fh)["items"][0]["thread"], "t1")
+        shown = self.cli("thread", "show", "t1").stdout
+        runs = lambda out: [l for l in out.splitlines() if " run " in l]
+        self.assertEqual(len(runs(shown)), 1)  # the one after the request
+        self.assertEqual(len(runs(self.cli("thread", "show", "t2").stdout)), 1)  # the one before stays
+        self.assertIn("slow on big files", shown)
+        self.assertTrue(self.cli("now").stdout.splitlines()[1].startswith("t1 "))
+        self.cli("run", "-p", "proj", "later", "--model", "haiku", "--why", "t")
+        self.assertEqual(self.ledger()[-1]["thread"], "t1")  # the current thread follows
+        self.assertEqual(self.cli("thread", "move", "t1", check=False).returncode, 1)  # already there
 
     def test_thread_expiry_counts_merged_threads_last_message(self):
         lt = self.threads_home()

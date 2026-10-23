@@ -129,7 +129,7 @@ lean-agent run {{P}} -m haiku --why "read-only lookup" --read-only -- "Which tes
 
 ## Threads
 Every request is threaded automatically; the hook's context line names it (`Thread t7 "..."`). When it says `New thread`
-or `guessed`, tell the user the thread in one short line. Wrong guess: `lean-agent thread move`. "What are we working on":
+or `guessed`, tell the user the thread in one short line. Wrong guess: `lean-agent thread move tN` (moves the latest request, the current thread and the work since to tN). "What are we working on":
 `lean-agent now`. "What did we do for X": `lean-agent thread show tN` (`--all` for everything). `thread close tN` when a
 topic is done; idle ones close from `now` after 7 days. Runs, reviews, todos and notes carry the thread (`--thread tN|none`).
 

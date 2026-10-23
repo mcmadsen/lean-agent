@@ -2,7 +2,8 @@
 
 Task threads are tagged `About #N "title":`, free threads `Thread tN "title":`. The registry lives in
 ~/.lean-agent/threads.json (written atomically under a lock): the threads, the aliases left by merges (merged id ->
-target id) and per-message moves. Aliases and moves are kept here, never in the transcript, so they survive /clear,
+target id) and the overrides left by `thread move` (record kind+id -> thread; the ledger, review and push logs are
+append-only, so a re-homed record is overridden here). Kept here, never in the transcript, so they survive /clear,
 restarts and compaction.
 
 Expiry is a filter in `list`, nothing is deleted: a task thread leaves the list 7 days after its todo is Done, a free
@@ -17,6 +18,8 @@ import os
 import re
 import time
 
+import lean_common
+
 try:
     import fcntl
 except ImportError:  # not on Windows: no lock, the write is still atomic
@@ -24,7 +27,6 @@ except ImportError:  # not on Windows: no lock, the write is still atomic
 
 EXPIRE_DAYS = 7
 RESERVED = {"optimize": "Optimize"}
-OPS_KEPT = 2000  # applied op ids kept (mark_once keys have their own, shorter list)
 ID_RE = re.compile(r"^(#\d+|t\d+|optimize)$")
 
 
@@ -80,7 +82,7 @@ def _epoch(ts):
 
 
 def _empty():
-    return {"threads": {}, "aliases": {}, "moves": {}}
+    return {"threads": {}, "aliases": {}, "overrides": {}}
 
 
 def load():
@@ -92,7 +94,7 @@ def load():
         data = None
     if not isinstance(data, dict):
         data = _empty()
-    for k in ("threads", "aliases", "moves"):
+    for k in ("threads", "aliases", "overrides"):
         if not isinstance(data.get(k), dict):
             data[k] = {}
     return data
@@ -110,7 +112,7 @@ def _locked():
         before = json.dumps(data, sort_keys=True)
         yield data
         if json.dumps(data, sort_keys=True) == before:
-            return  # nothing changed (an op already seen): no write
+            return  # nothing changed: no write
         tmp = f"{path()}.{os.getpid()}.tmp"
         with open(tmp, "w") as fh:
             json.dump(data, fh, indent=1)
@@ -150,38 +152,13 @@ def new(title):
     return tid
 
 
-def touch(tid, title=None, ts=None):
-    """A message was seen in `tid` (registered if the registry doesn't know it yet); returns the thread."""
-    tid = norm(tid)
-    with _locked() as data:
-        t = _ensure(data, tid, title, ts, create=True)
-        if not ts or not t.get("last_message") or _epoch(ts) >= _epoch(t["last_message"]):
-            t["last_message"] = ts or now_iso()
-        return dict(t)
-
-
-def _seen_op(data, op):
-    """Whether the operation with this op id was applied already (ops without an id are never 'seen')."""
-    return bool(op) and op in data.get("ops", [])
-
-
-def _note_op(data, op):
-    if op:
-        seen = data.setdefault("ops", [])
-        seen.append(op)
-        del seen[:-OPS_KEPT]
-
-
-def merge(src, dst, op=None):
-    """True when applied, False when this op id was seen already."""
+def merge(src, dst):
     src, dst = norm(src), norm(dst)
     if src == dst:
         raise ValueError("can't merge a thread into itself")
     if src in RESERVED:
         raise ValueError(f"{src} is reserved and can't be merged away")
     with _locked() as data:
-        if _seen_op(data, op):
-            return False
         _ensure(data, src)
         _ensure(data, dst)
         if resolve(dst, data["aliases"]) == src:
@@ -189,48 +166,17 @@ def merge(src, dst, op=None):
         data["aliases"][src] = dst
         data["threads"][src]["merged_into"] = dst
         data["threads"][src]["merged_at"] = now_iso()
-        _note_op(data, op)
-    return True
 
 
-def unmerge(src, op=None):
+def unmerge(src):
     src = norm(src)
     with _locked() as data:
-        if _seen_op(data, op):
-            return False
         if src not in data["aliases"]:
             raise ValueError(f"{src} isn't merged into anything")
         del data["aliases"][src]
         if src in data["threads"]:
             data["threads"][src].pop("merged_into", None)
             data["threads"][src].pop("merged_at", None)
-        _note_op(data, op)
-    return True
-
-
-def move(message_id, thread, op=None):
-    thread = norm(thread)
-    message_id = str(message_id or "").strip()
-    if not message_id:
-        raise ValueError("a message id is needed")
-    with _locked() as data:
-        if _seen_op(data, op):
-            return False
-        _ensure(data, thread)
-        data["moves"][message_id] = thread
-        _note_op(data, op)
-    return True
-
-
-def mark_once(key):
-    """True the first time `key` is seen (a transcript record whose thread operation was applied); False after."""
-    with _locked() as data:
-        seen = data.setdefault("applied", [])
-        if key in seen:
-            return False
-        seen.append(key)
-        del seen[:-500]
-        return True
 
 
 def _todo_state(tid):
@@ -440,7 +386,7 @@ def route(prompt, session=None, now=None):
     if how == "new":
         line = f'New thread {tid} "{title}"'
     elif how == "guessed":
-        line = f'Thread {tid} "{title}" (guessed; wrong? lean-agent thread move {tid} tN)'
+        line = f'Thread {tid} "{title}" (guessed; wrong? lean-agent thread move tN)'
     else:
         line = f'Thread {tid} "{title}"'
     return tid, how, line
@@ -501,13 +447,27 @@ def one_line(text, n=90):
     return t if len(t) <= n else t[:n - 1] + "…"
 
 
+def _log_records():
+    """(kind, key, record) of the append-only logs: runs, reviews, pushes. The key names the record in the overrides."""
+    for r in _jsonl(lean_home("ledger.jsonl")):
+        yield "run", f"run:{r.get('id')}", r
+    rdir = lean_home("reviews")
+    for f in sorted(os.listdir(rdir)) if os.path.isdir(rdir) else []:
+        if f.endswith(".jsonl"):
+            for r in _jsonl(os.path.join(rdir, f)):
+                yield "review", f"review:{f[:-6]}:{r.get('run')}:{r.get('ts')}", dict(r, _slug=f[:-6])
+    for r in _jsonl(lean_home("pushes.jsonl")):
+        yield "push", f"push:{r.get('ts')}:{r.get('branch')}", r
+
+
 def events(data=None):
     """{thread id: [(epoch, ts, kind, text)]} in time order: requests, runs, reviews, todos, notes, documents, pushes.
-    A record's thread follows merges; records without a thread are left out."""
+    A record's thread follows `thread move` overrides, then merges; records without a thread are left out."""
     data = data or load()
     out = {}
 
-    def add(tid, ts, kind, text):
+    def add(tid, ts, kind, text, key=None):
+        tid = data["overrides"].get(key) or tid
         if not tid or not ts:
             return
         try:
@@ -519,20 +479,20 @@ def events(data=None):
     for tid, t in data["threads"].items():
         for r in t.get("requests") or []:
             add(tid, r.get("ts"), "request", r.get("text"))
-    for r in _jsonl(lean_home("ledger.jsonl")):
-        what = (r.get("result_head") or "").strip().splitlines()
-        add(r.get("thread"), r.get("ts"), "run",
-            f"{r.get('id')} {r.get('model') or '?'} {r.get('status') or '?'} {r.get('project') or ''}: "
-            f"{one_line(what[0] if what else r.get('task'), 90)}")
-    rdir = lean_home("reviews")
-    for f in sorted(os.listdir(rdir)) if os.path.isdir(rdir) else []:
-        if f.endswith(".jsonl"):
-            for r in _jsonl(os.path.join(rdir, f)):
-                add(r.get("thread"), r.get("ts"), "review",
-                    f"{r.get('run')} {f[:-6]} {r.get('verdict')}, {len(r.get('findings') or [])} findings"
+    for kind, key, r in _log_records():
+        if kind == "run":
+            what = (r.get("result_head") or "").strip().splitlines()
+            text = (f"{r.get('id')} {r.get('model') or '?'} {r.get('status') or '?'} {r.get('project') or ''}: "
+                    f"{one_line(what[0] if what else r.get('task'), 90)}")
+        elif kind == "review":
+            text = (f"{r.get('run')} {r['_slug']} {r.get('verdict')}, {len(r.get('findings') or [])} findings"
                     + (f", {len(r.get('gaps') or [])} gaps" if r.get("gaps") else ""))
-    items = _json(lean_home("todo.json"), {}).get("items") if isinstance(_json(lean_home("todo.json"), {}), dict) else []
-    for t in items or []:
+        else:
+            text = (f"{r.get('project')} {r.get('branch')} -> {r.get('to')} {str(r.get('sha') or '')[:8]}"
+                    + ("" if r.get("ok", True) else " FAILED"))
+        add(r.get("thread"), r.get("ts"), kind, text, key)
+    todo = _json(lean_home("todo.json"), {})
+    for t in (todo.get("items") if isinstance(todo, dict) else None) or []:
         if isinstance(t, dict):
             add(t.get("thread"), t.get("created"), "todo", f"#{t.get('id')} {t.get('status')} {t.get('text')}")
     notes = _json(lean_home("handoff-notes.json"), [])
@@ -543,9 +503,6 @@ def events(data=None):
                 add(n.get("thread"), n.get("ts"), "doc", f"{m.group(2)} {m.group(1)}")
             else:
                 add(n.get("thread"), n.get("ts"), "note", f"{n.get('kind') or 'note'}: {n.get('text')}")
-    for r in _jsonl(lean_home("pushes.jsonl")):
-        add(r.get("thread"), r.get("ts"), "push",
-            f"{r.get('project')} {r.get('branch')} -> {r.get('to')} {str(r.get('sha') or '')[:8]}" + ("" if r.get("ok", True) else " FAILED"))
     for v in out.values():
         v.sort(key=lambda e: (e[0], KINDS.index(e[2])))  # same second: the order the work happens in
     return out
@@ -668,6 +625,63 @@ def set_closed(tid, closed):
     return tid
 
 
+def _tagged(tag, thread, aliases):
+    try:
+        return bool(tag) and resolve(norm(tag), aliases) == thread
+    except ValueError:
+        return False
+
+
+def _retag(path, items_of, thread, new, since, aliases, ts_key):
+    """Rewrite, under the file's lock, the thread of the entries of `thread` from `since` on."""
+    with lean_common.file_lock(path):
+        doc = _json(path, None)
+        items = items_of(doc)
+        hit = [e for e in items if isinstance(e, dict) and _tagged(e.get("thread"), thread, aliases) and _epoch(e.get(ts_key)) >= since]
+        for e in hit:
+            e["thread"] = new
+        if hit:
+            lean_common.write_json_atomic(path, doc)
+
+
+def move_latest(tid, session=None):
+    """Wrong thread: the latest request of this session goes to `tid`, `tid` becomes the current thread, and what the old
+    thread recorded since that request is re-homed: the append-only logs through the overrides, todo.json and the hand-off
+    notes in place. Returns (old thread, new thread)."""
+    tid = norm(tid)
+    st = _json(state_path(), {})
+    rec = ((st.get("sessions") or {}).get(session or "") or st.get("latest") or {}) if isinstance(st, dict) else {}
+    if not rec.get("thread"):
+        raise ValueError("no current thread to move a request out of")
+    with _locked() as data:
+        old, tid = resolve(rec["thread"], data["aliases"]), resolve(tid, data["aliases"])
+        if old == tid:
+            raise ValueError(f"the latest request is in {tid} already")
+        reqs = (data["threads"].get(old) or {}).get("requests") or []
+        if not reqs:
+            raise ValueError(f"{old} has no request to move")
+        req = reqs.pop()
+        since = _epoch(req["ts"])
+        dst = _ensure(data, tid, title_from(req["text"]))
+        dst.pop("closed", None)
+        dst.pop("auto_closed", None)
+        dst.setdefault("requests", []).append(req)
+        dst["requests"].sort(key=lambda r: _epoch(r.get("ts")))
+        dst["last_message"] = max([dst.get("last_message") or "", req["ts"]], key=_epoch)
+        src = data["threads"][old]
+        src["last_message"] = reqs[-1]["ts"] if reqs else src.get("created")
+        for kind, key, r in _log_records():
+            if data["overrides"].get(key) is None and _tagged(r.get("thread"), old, data["aliases"]) and _epoch(r.get("ts")) >= since:
+                data["overrides"][key] = tid
+            elif data["overrides"].get(key) == old and _epoch(r.get("ts")) >= since:
+                data["overrides"][key] = tid
+        _retag(lean_home("todo.json"), lambda d: (d.get("items") if isinstance(d, dict) else None) or [], old, tid, since,
+               data["aliases"], "created")
+        _retag(lean_home("handoff-notes.json"), lambda d: d if isinstance(d, list) else [], old, tid, since, data["aliases"], "ts")
+    set_current(tid, session)
+    return old, tid
+
+
 # ------------------------------------------------------------------ the CLI
 
 def cli(action, args, as_json=False, out=print):
@@ -692,8 +706,8 @@ def cli(action, args, as_json=False, out=print):
             if len(args) != 1:
                 raise ValueError(f"usage: lean-agent thread {action} tN")
             out(f"{set_closed(args[0], action == 'close')} {'closed' if action == 'close' else 'open again'}")
-        elif action in ("merge", "move") and len(args) != 2 or action == "unmerge" and len(args) != 1:
-            raise ValueError({"merge": "usage: lean-agent thread merge tB tA", "move": "usage: lean-agent thread move <message-id> <thread>",
+        elif action == "merge" and len(args) != 2 or action in ("unmerge", "move") and len(args) != 1:
+            raise ValueError({"merge": "usage: lean-agent thread merge tB tA", "move": "usage: lean-agent thread move tN",
                               "unmerge": "usage: lean-agent thread unmerge tB"}[action])
         elif action == "merge":
             merge(*args)
@@ -702,8 +716,8 @@ def cli(action, args, as_json=False, out=print):
             unmerge(args[0])
             out(f"{norm(args[0])} is its own thread again")
         elif action == "move":
-            move(*args)
-            out(f"{args[0]} -> {norm(args[1])}")
+            old, new_ = move_latest(args[0])
+            out(f"the latest request moved from {old} to {new_}")
         else:
             raise ValueError("usage: lean-agent thread new|list|show|close|reopen|merge|unmerge|move")
     except ValueError as e:
