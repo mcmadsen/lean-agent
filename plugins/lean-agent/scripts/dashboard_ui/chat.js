@@ -49,9 +49,14 @@ function permHtml(e){
   return `<div class="perm settled compact" role="group" aria-label="${esc(label)}"><span class="chip ${ok?"tone-ok":e.state==="denied"?"tone-bad":"tone-mute"}">${esc(word)}</span>${aboutOf(e)}<span class="mono small perm-t">${esc(e.name)} · ${esc(e.text)}</span><span class="mono mute small">${e.state==="expired"?"No longer waiting":esc(answeredIn(e))}</span></div>`;
 }
 const secs=t=>(Date.now()-Date.parse(t))/1000;
+function adviceHtml(e,next){  // the `lean-agent advise` answer stored after this message and before the next one
+  const d=(chat.advice||[]).find(d=>d.ts>=e.ts&&(!next||d.ts<next.ts));
+  return d?`<details class="advice mono small"><summary class="mute">Advice</summary><pre>${esc(d.text)}</pre></details>`:"";
+}
 function drawChat(){
   const box=$("msgs"),atEnd=box.scrollHeight-box.scrollTop-box.clientHeight<80;
   const evs=[...chat.events.values()].sort((a,b)=>a.i-b.i);
+  const users=evs.filter(e=>e.kind==="user");
   let h=typeof contextCard==="function"?contextCard():"",ai=null;  // consecutive replies and tool calls share one block
   const marks=mergedMarks(),putMarks=until=>{while(marks.length&&(until==null||(marks[0].at||"")<=until))h+=mergedHtml(marks.shift())};
   const flush=()=>{if(ai){h+=`<div class="ai"><div class="av" aria-hidden="true">O</div><div class="body"><div class="who">Orchestrator · ${esc(hhmm(ai.ts))}${ai.about?" "+aboutChip(ai.about):""}</div>${ai.parts.join("")}</div></div>`;ai=null}};
@@ -69,7 +74,7 @@ function drawChat(){
       continue;
     }
     flush();
-    if(e.kind==="user")h+=`<div class="me"><div class="bub"><div class="who">You · ${esc(hhmm(e.ts))}${aboutOf(e)}${e.from_app&&chat.service&&!fallback()?` <span class="chip tone-mute">${rcState()==="off"?"from the terminal":"from the app"}</span>`:""}</div><div class="md">${md(stripOp(e.text))}</div></div>${routeHtml(e)}</div>`;
+    if(e.kind==="user")h+=`<div class="me"><div class="bub"><div class="who">You · ${esc(hhmm(e.ts))}${aboutOf(e)}${e.from_app&&chat.service&&!fallback()?` <span class="chip tone-mute">${rcState()==="off"?"from the terminal":"from the app"}</span>`:""}</div><div class="md">${md(stripOp(e.text))}</div></div>${routeHtml(e)}${adviceHtml(e,users[users.indexOf(e)+1])}</div>`;
     else if(e.kind==="result")h+=`<div class="sysl">${e.error?"stopped with an error":"done"}${e.seconds?" · "+e.seconds+" s":""}${e.cost!=null?" · $"+Number(e.cost).toFixed(2):""}</div>`;
     else if(e.kind==="cleared")h+=clearedHtml(e);
     else h+=`<div class="sysl${e.kind==="error"?" bad":""}">${esc(e.text)}</div>`;
@@ -131,7 +136,7 @@ function tick(){
 setInterval(tick,1000);
 function openThread(key){
   if(chat.key===key)return drawChat();
-  chat.key=key;chat.cursor=0;chat.events.clear();chat.status="idle";chat.html="";chat.confirm=false;chat.workStart=0;drawChat();pollChat();
+  chat.key=key;chat.cursor=0;chat.advice=[];chat.events.clear();chat.status="idle";chat.html="";chat.confirm=false;chat.workStart=0;drawChat();pollChat();
 }
 async function pollChat(){
   clearTimeout(chat.timer);
@@ -141,7 +146,7 @@ async function pollChat(){
     if(key!==chat.key)return;
     ui.offline=0;ui.lastOk=new Date();
     for(const e of s.events||[])chat.events.set(e.i,e);
-    chat.cursor=Math.max(chat.cursor,s.cursor||0);chat.status=s.status;chat.alive=s.alive;chat.service=!!s.service;chat.svc=s.service_status||chat.svc;
+    chat.advice=s.advice||[];chat.cursor=Math.max(chat.cursor,s.cursor||0);chat.status=s.status;chat.alive=s.alive;chat.service=!!s.service;chat.svc=s.service_status||chat.svc;
     if(s.now)chat.skew=Date.now()-s.now*1000;
     chat.workStart=s.work_since?s.work_since*1000+(chat.skew||0):0;
     drawChat();loadThreads();

@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import usage  # noqa: E402
-from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive, plugin_version  # noqa: E402
+from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive, plugin_version, stored_advice  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
 import prs  # noqa: E402
@@ -786,7 +786,11 @@ def api_get(path, q):
         import dash_chat
         try:
             since = int((q.get("since") or ["0"])[0])
-            return _j(200, dash_chat.chat((q.get("thread") or ["main"])[0]).snapshot(since))
+            key = (q.get("thread") or ["main"])[0]
+            snap = dash_chat.chat(key).snapshot(since)
+            snap["advice"] = [{"ts": d["ts"], "text": d["text"]}  # `lean-agent advise` answers, shown under the message they follow
+                              for d in stored_advice(os.path.join(usage.lean_home(), "advice"), key)]
+            return _j(200, snap)
         except ValueError as e:
             return _j(400, {"ok": False, "error": str(e)})
     m = re.fullmatch(r"/run/([\w-]+)", path)

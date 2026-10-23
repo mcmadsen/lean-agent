@@ -40,6 +40,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | Subcommand and flags | Class | Strict mode |
 | --- | --- | --- |
 | `remember "<what>" [--project P] [--task-file -]` | b | allowed: starts the librarian worker; the only way to keep something |
+| `advise "<request>" [--project P] [--thread TAG] [--task-file -]` | b | allowed: starts a read-only haiku advisor worker; stores its short answer in `advice/` (the dashboard shows it under the message) |
 | `run`, `review`, `do`, `tracker --discover` (all flags, `--mcp`, `--allow-cmd`, `--todo new\|N\|none`) | b | allowed, in the background; they start workers |
 | `thread new\|list\|merge\|unmerge\|move` | b | allowed |
 | `checkpoint`, `brief` | b | allowed |
