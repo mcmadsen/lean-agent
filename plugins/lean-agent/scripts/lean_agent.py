@@ -8414,7 +8414,7 @@ def cmd_clear(a):
     if not service_session.request_clear():
         print("no service session is up (start it with `lean-agent up` or `lean-agent service start`)", file=sys.stderr)
         return 1
-    print("clear queued: runs at the end of this turn; running workers keep going (collect with `lean-agent runs --wait all`)")
+    print("clear queued: runs at the end of this turn; running workers keep going (collect with `lean-agent runs --wait all`); check with `lean-agent service status`")
     return 0
 
 
