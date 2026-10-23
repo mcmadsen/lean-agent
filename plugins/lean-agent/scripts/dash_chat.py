@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -152,6 +153,10 @@ def fixed_send(text):
     return {"ok": ok, "sent": ok, **({"error": err} if err else {})}
 
 
+def _op_id():
+    return uuid.uuid4().hex[:6]
+
+
 def thread_move(message, to):
     try:
         to = lean_threads.norm(to)
@@ -160,28 +165,31 @@ def thread_move(message, to):
             raise ValueError("not a valid message id")
         if not re.fullmatch(r"#\d+|t\d+|optimize", to):
             raise ValueError("not a valid thread id")
-        lean_threads.move(mid, to)
+        op = _op_id()
+        lean_threads.move(mid, to, op)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     ev = next((e for e in dash_service.model().events if e.get("mid") == mid and e["kind"] == "user"), None) if service_up() else None
     excerpt = " ".join(str((ev or {}).get("raw") or (ev or {}).get("text") or "").replace('"', "'").split())[:60]  # split() drops newlines
-    return fixed_send(f"Move message to {to} ({mid})" + (f': "{excerpt}"' if excerpt else ""))
+    return fixed_send(f"Move message to {to} ({mid})" + (f': "{excerpt}"' if excerpt else "") + f" [op {op}]")
 
 
 def thread_merge(src, into):
+    op = _op_id()
     try:
-        lean_threads.merge(src, into)
+        lean_threads.merge(src, into, op)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
-    return fixed_send(f"Merge thread {lean_threads.norm(src)} into {lean_threads.norm(into)}")
+    return fixed_send(f"Merge thread {lean_threads.norm(src)} into {lean_threads.norm(into)} [op {op}]")
 
 
 def thread_unmerge(src):
+    op = _op_id()
     try:
-        lean_threads.unmerge(src)
+        lean_threads.unmerge(src, op)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
-    return fixed_send(f"Unmerge thread {lean_threads.norm(src)}")
+    return fixed_send(f"Unmerge thread {lean_threads.norm(src)} [op {op}]")
 
 
 def thread_list():

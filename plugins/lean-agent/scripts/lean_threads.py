@@ -139,13 +139,27 @@ def touch(tid, title=None, ts=None):
         return dict(t)
 
 
-def merge(src, dst):
+def _seen_op(data, op):
+    """Whether the operation with this op id was applied already (ops without an id are never 'seen')."""
+    return bool(op) and ("op:" + op) in data.get("applied", [])
+
+
+def _note_op(data, op):
+    if op:
+        seen = data.setdefault("applied", [])
+        seen.append("op:" + op)
+        del seen[:-500]
+
+
+def merge(src, dst, op=None):
     src, dst = norm(src), norm(dst)
     if src == dst:
         raise ValueError("can't merge a thread into itself")
     if src in RESERVED:
         raise ValueError(f"{src} is reserved and can't be merged away")
     with _locked() as data:
+        if _seen_op(data, op):
+            return resolve(dst, data["aliases"])
         _ensure(data, src)
         _ensure(data, dst)
         if resolve(dst, data["aliases"]) == src:
@@ -153,28 +167,35 @@ def merge(src, dst):
         data["aliases"][src] = dst
         data["threads"][src]["merged_into"] = dst
         data["threads"][src]["merged_at"] = now_iso()
+        _note_op(data, op)
     return resolve(dst, data["aliases"])
 
 
-def unmerge(src):
+def unmerge(src, op=None):
     src = norm(src)
     with _locked() as data:
+        if _seen_op(data, op):
+            return
         if src not in data["aliases"]:
             raise ValueError(f"{src} isn't merged into anything")
         del data["aliases"][src]
         if src in data["threads"]:
             data["threads"][src].pop("merged_into", None)
             data["threads"][src].pop("merged_at", None)
+        _note_op(data, op)
 
 
-def move(message_id, thread):
+def move(message_id, thread, op=None):
     thread = norm(thread)
     message_id = str(message_id or "").strip()
     if not message_id:
         raise ValueError("a message id is needed")
     with _locked() as data:
+        if _seen_op(data, op):
+            return
         _ensure(data, thread)
         data["moves"][message_id] = thread
+        _note_op(data, op)
 
 
 def mark_once(key):
