@@ -4645,7 +4645,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(p.stdout.count("1) Out of scope: decline it"), 3)
         self.assertEqual(p.stdout.count("2) Fix it in this change"), 3)
         self.assertNotIn("only one", p.stdout)
-        # --head picks the review of that branch, and latest_review needs the head argument
+        # --head picks the review of that branch
         p = self.cli("review", "proj", "--decide-gaps", "--head", "nowhere", check=False)
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("no review of nowhere yet", p.stderr)

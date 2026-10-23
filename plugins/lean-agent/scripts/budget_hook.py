@@ -53,14 +53,15 @@ def emit(**fields):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", **fields}}))
 
 
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
+HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1([^\n]*)\n.*?\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
+HEREDOC_SUB = r"<<DATA\3"  # the body is data; the rest of the `<<EOF` line stays, to be checked as commands
 
 
 def commands_run(command):
     """The word lists of the commands a shell line runs: heredoc bodies and quoted text are data, not
     commands; `cd x &&`, VAR=value, nohup, timeout N and env in front are skipped."""
     import shlex
-    text = HEREDOC.sub("<<DATA", command)
+    text = HEREDOC.sub(HEREDOC_SUB, command)
     out = []
     for segment in re.split(r"&&|\|\||;|\||\n|&", text):
         try:
@@ -163,39 +164,25 @@ def strict_on(lean_root):
         return True
 
 
-PIPE_OK = ("head", "tail", "grep", "wc")
-PIPE_VALUE_OPTS = {"head": "nc", "tail": "nc", "grep": "emABC", "wc": ""}
-PIPE_BAD_LONG = ("--include", "--exclude", "--file", "--recursive", "--dereference", "--directories", "--devices",
-                 "--follow", "--files0-from")
 BREAKS = {";", "&&", "||", "&"}
 REDIRECT_OK = {(">&", "1"), (">&", "2"), (">", "/dev/null"), ("&>", "/dev/null"), ("<<", "DATA")}
 
 
 def pipe_stage_ok(words):
-    """A pipe stage after a lean-agent command: head, tail, grep or wc reading stdin, with no file or path
-    arguments and no recursive or file-reading options."""
+    """A pipe stage after a lean-agent command, allowlisted: head or tail with no options, -n N, -N or -nN;
+    wc with no options or -l; grep with single-letter options from -ivcEF and exactly one pattern."""
     cmd, args = words[0], words[1:]
-    values, positionals, i = PIPE_VALUE_OPTS.get(cmd), 0, 0
-    if values is None:
-        return False
-    while i < len(args):
-        arg = args[i]
-        i += 1
-        if arg.startswith("--"):
-            if arg.startswith(PIPE_BAD_LONG):
-                return False
-        elif arg.startswith("-") and len(arg) > 1:
-            if any(c in "rRf" for c in arg[1:]) or (cmd == "grep" and "e" in arg[1:] and arg[-1] != "e"):
-                return False
-            if arg[-1] in values:
-                if arg[-1] == "e":
-                    positionals -= 1  # the pattern is given by -e
-                i += 1  # the option's value
-        elif cmd == "grep":
-            positionals += 1
-        elif not re.match(r"^[+-]?\d+[kKmMbB]?$", arg):
-            return False
-    return positionals <= 1 if cmd == "grep" else True
+    if cmd in ("head", "tail"):
+        return (not args or re.fullmatch(r"-\d+", args[0]) is not None and len(args) == 1
+                or args[0] == "-n" and len(args) == 2 and args[1].isdigit()
+                or re.fullmatch(r"-n\d+", args[0]) is not None and len(args) == 1)
+    if cmd == "wc":
+        return args in ([], ["-l"])
+    if cmd == "grep":
+        while args and re.fullmatch(r"-[ivcEF]+", args[0]):
+            args = args[1:]
+        return len(args) == 1 and not args[0].startswith("-")
+    return False
 
 
 def lean_agent_only(command):
@@ -207,7 +194,7 @@ def lean_agent_only(command):
     if "$(" in command or "`" in command:
         return False
     bin_dir = os.path.join(PLUGIN_ROOT, "bin") + os.sep
-    lex = shlex.shlex(HEREDOC.sub("<<DATA", command), posix=True, punctuation_chars=";&|<>()\n")
+    lex = shlex.shlex(HEREDOC.sub(HEREDOC_SUB, command), posix=True, punctuation_chars=";&|<>()\n")
     lex.whitespace_split, lex.whitespace, lex.commenters = True, " \t\r", ""
     try:
         tokens = list(lex)
@@ -218,10 +205,11 @@ def lean_agent_only(command):
         tok = tokens[i]
         i += 1
         if re.fullmatch(r"[;&|<>()\n]+", tok):
-            if tok == "|":
+            core = tok.strip("\n")
+            if core == "|":
                 stages.append(words)
                 words = []
-            elif tok.strip("\n") == "" or tok in BREAKS:
+            elif core == "" or core in BREAKS:
                 stages.append(words)
                 stages.append(None)
                 words = []
