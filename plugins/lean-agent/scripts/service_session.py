@@ -264,6 +264,12 @@ def compact_at(env=None):
     return lean_common.compaction_point(window, pct)
 
 
+def up_compact_at():
+    """The compaction point `up` recorded at its start (up.json), else computed from this process's environment."""
+    point = _load(up_path()).get("compact_at")
+    return point if isinstance(point, int) and point > 0 else compact_at()
+
+
 def clear_setting():
     """What is set: LEAN_AGENT_CLEAR_AT, else `lean-agent config clear-at`, else "auto" (or a number of tokens)."""
     for raw in (os.environ.get("LEAN_AGENT_CLEAR_AT"), _load(lean_home("config.json")).get("clear_at")):
@@ -276,7 +282,8 @@ def clear_setting():
 def clear_at(env=None):
     """The threshold in tokens (0 = off): a number as set, or for "auto" the compaction point less CLEAR_MARGIN."""
     setting = clear_setting()
-    return max(0, compact_at(env) - CLEAR_MARGIN) if setting == "auto" else setting
+    point = compact_at(env) if env is not None else up_compact_at()  # outside `up`: the point `up` recorded
+    return max(0, point - CLEAR_MARGIN) if setting == "auto" else setting
 
 
 def checkpoint_prompt():
