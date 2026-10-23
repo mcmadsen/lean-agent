@@ -8,6 +8,7 @@ import threading
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins", "lean-agent", "scripts")
 
@@ -468,6 +469,17 @@ class BudgetTest(Base):
             self.assertTrue(ok(cmd), cmd)
         self.assertFalse(ok("lean-agent run p <<'EOF'\nx\nEOF\nrm x"))
 
+    def test_commands_run_unparseable_command_reads_first_line_only(self):
+        sys.path.insert(0, ROOT)
+        import budget_hook
+        cmd = "lean-agent run p <<'EOF'\nlean-agent run q -- x\n$(boom)\nrm x"  # no closing line
+        self.set_strict("on")
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": self.env["LEAN_AGENT_HOME"]}):
+            self.assertEqual(budget_hook.commands_run(cmd), [])
+            self.set_strict("off")
+            self.assertEqual(budget_hook.commands_run(cmd), [["lean-agent", "run", "p"]])
+            self.assertEqual(budget_hook.commands_run("lean-agent runs `x`\nrm y"), [["lean-agent", "runs"]])
+
     def test_guide_examples_pass_the_strict_check(self):
         import re
         sys.path.insert(0, ROOT)
@@ -477,11 +489,9 @@ class BudgetTest(Base):
         examples = []
         for m in re.finditer(r"^```(\w*)\n(.*?)^```", guide, re.S | re.M):
             if m.group(1) == "sh":
-                # a trailing `# comment` in the guide isn't part of the command (strict mode denies comments)
-                examples.append("\n".join(re.sub(r"\s+#\s.*$", "", l) if l.startswith("lean-agent ") else l
-                                          for l in m.group(2).splitlines()))
-            elif m.group(1) == "text":  # lines with a trailing `# comment`: the comment isn't part of the command
-                examples += [re.sub(r"\s+#.*$", "", l) for l in m.group(2).splitlines() if l.startswith("lean-agent ")]
+                examples.append(m.group(2))
+            elif m.group(1) == "text":
+                examples += [l for l in m.group(2).splitlines() if l.startswith("lean-agent ")]
         text = re.sub(r"^```.*?^```", "", guide, flags=re.S | re.M)
         examples += [c for c in re.findall(r"`(lean-agent [^`\n]+)`", text)]
         self.assertGreater(len(examples), 20)

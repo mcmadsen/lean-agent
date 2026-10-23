@@ -59,8 +59,8 @@ HEREDOC_OPEN = re.compile(r"<<(-?)[ \t]*(?:'(\w+)'|\"(\w+)\"|(\w+))")
 def split_heredocs(command):
     """`command` with each heredoc body and its delimiter line cut out and `<<DATA` left at the redirect, or None
     when it holds a command substitution (`$(` or a backtick) outside a heredoc body and outside single quotes,
-    an unquoted `#` that starts a word (a comment), or a heredoc this can't read (odd delimiter, no closing line). A body ends at the first line that is exactly
-    the delimiter (after leading tabs for <<-). The body of a quoted delimiter is data; an unquoted one expands
+    an unquoted `#` that starts a word (a comment), or a heredoc this can't read (odd delimiter, no closing line).
+    A body ends at the first line that is exactly the delimiter (after leading tabs for <<-). The body of a quoted delimiter is data; an unquoted one expands
     `$(` and backticks, so those are refused there too."""
     out, pending, quote, i, n = [], [], None, 0, len(command)
     while i < n:
@@ -114,8 +114,12 @@ def commands_run(command):
     commands; `cd x &&`, VAR=value, nohup, timeout N and env in front are skipped."""
     import shlex
     text = split_heredocs(command)
-    if text is None:  # the strict check refuses it; read it as written
-        text = command
+    if text is None:  # unparseable: heredoc bodies could pass as commands, so read the first line only
+        if strict_on(usage.lean_home()):
+            return []
+        text = command.split("\n", 1)[0]
+        if "<<" in text or "`" in text or "$(" in text:
+            text = re.split(r"<<|`|\$\(", text, maxsplit=1)[0]
     out = []
     for segment in re.split(r"&&|\|\||;|\||\n|&", text):
         try:

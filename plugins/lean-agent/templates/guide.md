@@ -138,17 +138,17 @@ Done when: the project's test command passes.
 EOF
 ```
 
-Before a pull request (needs a git repo with changes against its base branch):
+Before a pull request (needs a git repo with changes against its base branch). `review` exits 0 on approve, 2 when changes are requested or checks are needed. `--head`/`--base` review a branch or PR without a checkout. `--status` asks whether the current code (or the `--head` tip) is approved, exit 0 only if so. `--resume` re-reviews after fixes in the same reviewer session (with `--head`, that branch's new tip). `--for-push` is the push gate: only what changed since the last review.
 ```text
-lean-agent review {{P}}                       # exit 0 approve, 2 changes requested or checks needed
-lean-agent review {{P}} --head origin/feature-x --base origin/develop   # a branch/PR, no checkout needed
-lean-agent review {{P}} --status --head origin/feature-x                # is that branch's tip approved?
+lean-agent review {{P}}
+lean-agent review {{P}} --head origin/feature-x --base origin/develop
+lean-agent review {{P}} --status --head origin/feature-x
 lean-agent run {{P}} -m haiku --why "reviewer's check" --worktree origin/feature-x -- "Run the tests the reviewer listed; report pass/fail."
 lean-agent review {{P}} --focus "the new retry logic"
-lean-agent review {{P}} --resume              # re-review after fixes, same reviewer session
-lean-agent review {{P}} --resume --head origin/feature-x                # re-review that branch's new tip
-lean-agent review {{P}} --head origin/feature-x --for-push              # the push gate: only what changed since the last review
-lean-agent review {{P}} --status              # exit 0 only if the current code is approved
+lean-agent review {{P}} --resume
+lean-agent review {{P}} --resume --head origin/feature-x
+lean-agent review {{P}} --head origin/feature-x --for-push
+lean-agent review {{P}} --status
 ```
 
 These patterns need approval or setup first, so they are not run as examples:
@@ -166,10 +166,11 @@ lean-agent memory edit no-friday-merges "Never merge, deploy or release on Frida
 lean-agent memory list -p {{P}}
 lean-agent card add {{P}} checkout-notes --title "Checkout notes" --text "Totals are integer cents; tax is added last."
 lean-agent card core {{P}} checkout-notes
-lean-agent card protect {{P}} checkout-notes      # optimize never archives, demotes or trims it
-lean-agent optimize {{P}} --apply --skip checkout-notes   # apply the suggestions except for these cards
+lean-agent card protect {{P}} checkout-notes
+lean-agent optimize {{P}} --apply --skip checkout-notes
 lean-agent card unarchive {{P}} checkout-notes
 ```
+- `card protect` keeps `optimize` from archiving, demoting or trimming the card; `optimize --apply --skip <card>` applies the suggestions except for the cards named.
 - `--name` is the plain name; lean-agent adds the type itself (`feedback_no-friday-merges`).
 - Change a memory with `memory edit`; `memory add` with the same text answers "already remembered".
   `card add` on a `mem-*` card also edits the memory, so the change persists and the card keeps

@@ -5679,7 +5679,7 @@ def cmd_runs(a):
             print("No runs in progress.")
         return
     if a.show or a.tokens:
-        rid = a.show if a.show and a.show != "last" else (runs[-1]["id"] if runs else None)
+        rid = a.show if a.show and a.show != "last" else latest_run_id(runs)
         r = next((x for x in reversed(runs) if x["id"] == rid), None)
         if not r:
             die(f"no run {rid!r}" if rid else "no runs yet")
