@@ -776,8 +776,7 @@ def api_get(path, q):
         import dash_chat
         try:
             since = int((q.get("since") or ["0"])[0])
-            return _j(200, dict(dash_chat.chat((q.get("thread") or ["main"])[0]).snapshot(since),
-                                threads=dash_chat.threads()))
+            return _j(200, dash_chat.chat((q.get("thread") or ["main"])[0]).snapshot(since))
         except ValueError as e:
             return _j(400, {"ok": False, "error": str(e)})
     m = re.fullmatch(r"/run/([\w-]+)", path)

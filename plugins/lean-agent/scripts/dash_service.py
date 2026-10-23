@@ -25,7 +25,7 @@ import threading
 import time
 
 import lean_threads
-from lean_common import pid_alive, questions_of, tool_summary  # noqa: F401
+from lean_common import pid_alive, questions_of, thread_key, tool_summary  # noqa: F401
 
 MAX_EVENTS = 2000
 FRESH_SECS = 20  # a dashboard tab polled this recently counts as someone looking
@@ -52,7 +52,7 @@ def canon(key):
 
 def legacy_key(tid):
     """What the page's `about` carries: the task number without `#`, or the thread id."""
-    return tid[1:] if tid and tid.startswith("#") else tid
+    return thread_key(tid)
 
 
 def parse_reply(text):
@@ -380,7 +380,8 @@ class Model:
 
     def _thread_op(self, text, rec, sent):
         """The dashboard's `Move message to`, `Merge thread` and `Unmerge thread` messages: (op, thread they show
-        under), applied to the registry once (the API applies them too and marks the send)."""
+        under), each applied to the registry once, in transcript order, keyed by its own record id (the API applies them
+        too, which is harmless: they replay in the same order)."""
         op = None
         if m := MOVE_RE.match(text):
             op = {"type": "move", "to": canon(m.group(1)), "message": m.group(2)}
@@ -394,7 +395,7 @@ class Model:
         else:
             return None
         once = rec.get("uuid") or f"{rec.get('timestamp')}:{text}"
-        if not (sent or {}).get("applied") and lean_threads.mark_once(once):
+        if lean_threads.mark_once(once):
             try:
                 if op["type"] == "move" and op["message"]:
                     lean_threads.move(op["message"], op["to"])

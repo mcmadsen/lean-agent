@@ -30,7 +30,7 @@ function closeView(){$("view").style.display="none"}
 let S=null,lastBoard=null;
 const ui={sel:(t=>/^\d+$/.test(t)?"#"+t:/^(main|optimize|t\d+|#\d+)$/.test(t)?t:"main")(store.get("la-thread","main")),cardId:null,tab:store.get("la-ltab","chat"),
   open:{},sg:{},sgConfirm:null,offline:0,lastOk:null,now:"",bannerHtml:null,threads:[],doneOpen:false,changed:new Set(),html:{},sheet:null,badge:null,runsAll:false,merge:null,picks:[],target:null};
-const threadKey=id=>id==="main"?"main":String(id).replace(/^#/,"");  // the chat key of a thread id: `#12` -> `12`, `t3` stays
+const threadKey=id=>id==="main"?"main":String(id).replace(/^#/,"");  // mirrors lean_common.thread_key; the chat key of a thread id: `#12` -> `12`, `t3` stays
 function aboutLabel(key){const c=cardsBy().get(String(key));
   if(c)return c.kind==="item"?"#"+c.id:c.kind==="run"?"run "+(c.runs||[])[0]:c.kind==="note"?"note "+c.note:c.title.slice(0,30);
   return /^\d+$/.test(String(key))?"#"+key:String(key)}
