@@ -6,8 +6,8 @@ target id) and the overrides left by `thread move` (record kind+id -> thread; th
 append-only, so a re-homed record is overridden here). Kept here, never in the transcript, so they survive /clear,
 restarts and compaction.
 
-Expiry is a filter in `list`, nothing is deleted: a task thread leaves the list 7 days after its todo is Done, a free
-thread after 7 days without a message. The id `optimize` is reserved for the optimize suggestions.
+Expiry is a filter in `list`, nothing is deleted: the one idle rule (idle()) applies to `list` and `now`.
+The id `optimize` is reserved.
 """
 import contextlib
 import glob
@@ -19,13 +19,13 @@ import re
 import time
 
 import lean_common
+from lean_common import now_iso
 
 try:
     import fcntl
 except ImportError:  # not on Windows: no lock, the write is still atomic
     fcntl = None
 
-EXPIRE_DAYS = 7
 RESERVED = {"optimize": "Optimize"}
 ID_RE = re.compile(r"^(#\d+|t\d+|optimize)$")
 
@@ -49,10 +49,6 @@ def _migrate():
                 os.remove(old + ".lock")
         except OSError:
             pass
-
-
-def now_iso():
-    return datetime.datetime.now().isoformat(timespec="seconds")
 
 
 def norm(tid):
@@ -179,34 +175,29 @@ def unmerge(src):
             data["threads"][src].pop("merged_at", None)
 
 
-def _todo_state(tid):
-    """("done", epoch) | ("open", 0) for the todo `#N`; None when there is no such todo."""
-    try:
-        with open(lean_home("todo.json")) as fh:
-            items = json.load(fh).get("items") or []
-    except (OSError, ValueError, AttributeError):
-        return None
-    for t in items:
-        if isinstance(t, dict) and f"#{t.get('id')}" == tid:
-            return ("done", _epoch(t.get("done_at"))) if t.get("status") == "done" else ("open", 0)
-    return None
+def _todo_map():
+    """{"#N": todo item} from todo.json (read once per call by the callers)."""
+    doc = _json(lean_home("todo.json"), {})
+    return {f"#{t.get('id')}": t for t in (doc.get("items") if isinstance(doc, dict) else None) or [] if isinstance(t, dict)}
 
 
-def expired(t, now=None):
-    """A task thread 7 days after its todo is Done, a free one (or a task without a todo) after 7 days without a message."""
-    now = time.time() if now is None else now
-    limit = EXPIRE_DAYS * 86400
-    if t["id"] in RESERVED:
+def idle(tid, t, last, todos, days, now):
+    """The one idle rule, for `list` and `now`: a task whose todo is open is never idle, one whose todo is done is idle
+    `days` after it was done; any other thread `days` after its last activity (`last`, an epoch; 0 when it has none)."""
+    if tid in RESERVED:
         return False
-    state = _todo_state(t["id"]) if t.get("kind") == "task" else None
-    if state:
-        return state[0] == "done" and now - state[1] > limit
-    return bool(t.get("last_message")) and now - _epoch(t["last_message"]) > limit
+    item = todos.get(tid) if t.get("kind") == "task" else None
+    if item:
+        if item.get("status") != "done":
+            return False
+        last = _epoch(item.get("done_at"))
+    return bool(last) and now - last > days * 86400
 
 
 def threads(now=None, include_expired=False):
     """The threads to show: merged ones are left out (they show under their target), expired ones filtered."""
-    data = load()
+    data, todos, days = load(), _todo_map(), idle_days()
+    now = time.time() if now is None else now
     if "optimize" not in data["threads"]:
         data["threads"]["optimize"] = {"id": "optimize", "title": RESERVED["optimize"], "created": None,
                                        "last_message": None, "kind": "free"}
@@ -216,7 +207,8 @@ def threads(now=None, include_expired=False):
         s = data["threads"].get(src) or {}
         if tgt and s.get("last_message") and (not tgt.get("last_message") or _epoch(s["last_message"]) > _epoch(tgt["last_message"])):
             tgt["last_message"] = s["last_message"]
-    out = [t for t in tops.values() if include_expired or not expired(t, now)]
+    out = [t for t in tops.values()
+           if include_expired or not idle(t["id"], t, _epoch(t.get("last_message")), todos, days, now)]
     return sorted(out, key=lambda t: (t.get("last_message") or "", t["id"]), reverse=True)
 
 
@@ -350,7 +342,7 @@ def route(prompt, session=None, now=None):
     """Assign a user prompt to a thread without any model call; stores the request and the current-thread state.
     Returns (thread id, how, context line) with how in explicit|guessed|new."""
     text = " ".join(str(prompt or "").split())
-    now_s = now_iso()
+    now_s = now_iso() if now is None else datetime.datetime.fromtimestamp(now).isoformat(timespec="seconds")
     m = EXPLICIT_RE.search(text)
     with _locked() as data:
         tid, how = None, None
@@ -462,10 +454,11 @@ def _log_records():
         yield "push", f"push:{r.get('ts')}:{r.get('branch')}", r
 
 
-def events(data=None):
+def events(data=None, todos=None):
     """{thread id: [(epoch, ts, kind, text)]} in time order: requests, runs, reviews, todos, notes, documents, pushes.
     A record's thread follows `thread move` overrides, then merges; records without a thread are left out."""
     data = data or load()
+    todos = _todo_map() if todos is None else todos
     out = {}
 
     def add(tid, ts, kind, text, key=None):
@@ -493,10 +486,8 @@ def events(data=None):
             text = (f"{r.get('project')} {r.get('branch')} -> {r.get('to')} {str(r.get('sha') or '')[:8]}"
                     + ("" if r.get("ok", True) else " FAILED"))
         add(r.get("thread"), r.get("ts"), kind, text, key)
-    todo = _json(lean_home("todo.json"), {})
-    for t in (todo.get("items") if isinstance(todo, dict) else None) or []:
-        if isinstance(t, dict):
-            add(t.get("thread"), t.get("created"), "todo", f"#{t.get('id')} {t.get('status')} {t.get('text')}")
+    for t in todos.values():
+        add(t.get("thread"), t.get("created"), "todo", f"#{t.get('id')} {t.get('status')} {t.get('text')}")
     notes = _json(lean_home("handoff-notes.json"), [])
     for n in notes if isinstance(notes, list) else []:
         if isinstance(n, dict):
@@ -551,15 +542,14 @@ def _state(tid, evs, running, data):
     return ", ".join(parts) or "idle"
 
 
-def autoclose(data, evs, running, now=None):
-    """Close (never delete) the open threads idle longer than idle_days(); returns their ids. Caller saves."""
-    now = time.time() if now is None else now
+def autoclose(data, evs, running, todos, days, now):
+    """Close (never delete) the open threads that are idle (see idle()); returns their ids. Caller saves."""
     gone = []
     for tid, t in data["threads"].items():
-        if t.get("closed") or tid in data["aliases"] or tid in RESERVED or running.get(tid):
+        if t.get("closed") or tid in data["aliases"] or running.get(tid):
             continue
         last = max([_epoch(t.get("last_message") or t.get("created"))] + [e[0] for e in evs.get(tid, [])])
-        if now - last > idle_days() * 86400:
+        if idle(tid, t, last, todos, days, now):
             t["closed"], t["auto_closed"] = now_iso(), True
             gone.append(tid)
     return gone
@@ -567,10 +557,12 @@ def autoclose(data, evs, running, now=None):
 
 def now_text(now=None, close_idle=True, max_lines=NOW_LINES):
     """Open threads by last activity: id, title, state, last action and age (<= max_lines lines)."""
+    now = time.time() if now is None else now
+    days, todos = idle_days(), _todo_map()
     with _locked() as data:
-        evs = events(data)
+        evs = events(data, todos)
         running = _running_by_thread(data)
-        closed = autoclose(data, evs, running, now) if close_idle else []
+        closed = autoclose(data, evs, running, todos, days, now) if close_idle else []
         rows = []
         for tid, t in data["threads"].items():
             if t.get("closed") or tid in data["aliases"] or tid in RESERVED:
@@ -587,7 +579,7 @@ def now_text(now=None, close_idle=True, max_lines=NOW_LINES):
     if len(rows) > max_lines - 2:
         lines.append(f"... and {len(rows) - max_lines + 2} older (lean-agent thread list)")
     if closed:
-        lines.append(f"Closed as idle (> {idle_days():g} days): {', '.join(closed)} (lean-agent thread reopen tN)")
+        lines.append(f"Closed as idle (> {days:g} days): {', '.join(closed)} (lean-agent thread reopen tN)")
     return "\n".join(lines)
 
 
