@@ -385,7 +385,12 @@ class BudgetTest(Base):
                     "lean-agent runs <(cat f)", "lean-agent runs >(cat)", "lean-agent run p --why \"unbalanced",
                     "lean-agent runs | grep --include=x y", "lean-agent runs | tail -f x", "lean-agent runs | cat",
                     "lean-agent runs | grep -e x /srv/f", "lean-agent runs | grep --rec x",
-                    "lean-agent runs <<EOF; rm x\nbody\nEOF"):
+                    "lean-agent runs <<EOF; rm x\nbody\nEOF",
+                    "lean-agent run p -- \"$(cat <<'EOF'\nx\nEOF\nrm -rf ~\n)\"",
+                    "lean-agent run p -- \"$(cat <<EOF\nx\nEOF\n)\"", "lean-agent run p -- \"$(sh <<'EOF'\nx\nEOF\n)\"",
+                    "lean-agent run p -- \"$(cat <<'EOF'\nx\nEOFX\n)\"",
+                    "lean-agent runs | grep -r x", "lean-agent runs | grep -m 5 x /srv/f", "lean-agent runs | grep -f x y",
+                    "lean-agent runs | tail -n +x", "lean-agent runs | head -n +5", "lean-agent runs | wc -L"):
             out = bash(cmd)
             self.assertTrue(denied(out), cmd)
             self.assertIn("Delegate it: lean-agent run <project> --cards auto -m <model> --why",
@@ -402,7 +407,11 @@ class BudgetTest(Base):
                     "lean-agent run p -m sonnet --why 'x' -- \"$(cat <<'EOF'\nmulti-line task; with | pipes\nEOF\n)\"",
                     "lean-agent doc write ~/Downloads/x.md <<'EOF'\nbody\nEOF",
                     "lean-agent run p -- \"t\" <<'EOF' 2>&1\nbody\nEOF",
-                    "lean-agent runs | head -n 5>/dev/null"):
+                    "lean-agent runs | head -n 5>/dev/null",
+                    "lean-agent run p -- \"$(cat <<'EOF'\nx\n EOF\nEOFX\nEOF\n  )\"",
+                    "lean-agent runs | grep -nw foo", "lean-agent runs | grep -m 5 -A2 -B 3 foo", "lean-agent runs | grep -oxH x",
+                    "lean-agent runs | tail -n +5", "lean-agent runs | tail -20", "lean-agent runs | tail -c 100",
+                    "lean-agent runs | head -c 10", "lean-agent runs | wc -w", "lean-agent runs | wc -m"):
             self.assertIsNone(bash(cmd), cmd)
         out = read("/srv/shop/src/app.py")
         self.assertTrue(denied(out))

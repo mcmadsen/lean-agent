@@ -54,7 +54,7 @@ def emit(**fields):
 
 
 HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1([^\n]*)\n.*?\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
-CAT_HEREDOC = re.compile(r"\$\(\s*cat\s+<<-?[ \t]*(['\"])(\w+)\1[ \t]*\n.*?\n[ \t]*\2[ \t]*\n\s*\)", re.S)  # "$(cat <<'EOF' ... EOF )": quoted text
+CAT_HEREDOC = re.compile(r"\$\(\s*cat[ \t]+<<[ \t]*(['\"])(\w+)\1[ \t]*\n(?:(?!\2\n)[^\n]*\n)*\2\n\s*\)")  # "$(cat <<'EOF' ... EOF )": ends at the first line that is the delimiter
 HEREDOC_SUB = r"<<DATA\3"  # the body is data; the rest of the `<<EOF` line stays, to be checked as commands
 
 
@@ -170,18 +170,23 @@ REDIRECT_OK = {(">&", "1"), (">&", "2"), (">", "/dev/null"), ("&>", "/dev/null")
 
 
 def pipe_stage_ok(words):
-    """A pipe stage after a lean-agent command, allowlisted: head or tail with no options, -n N, -N or -nN;
-    wc with no options or -l; grep with single-letter options from -ivcEF and exactly one pattern."""
+    """A pipe stage after a lean-agent command, allowlisted, reading stdin only: head -n N, -N, -c N; tail also
+    -n +N; wc with -l -w -c -m; grep with -nwolciv EFxhHq, -m/-A/-B/-C N and exactly one pattern, no files."""
     cmd, args = words[0], words[1:]
     if cmd in ("head", "tail"):
-        return (not args or re.fullmatch(r"-\d+", args[0]) is not None and len(args) == 1
-                or args[0] == "-n" and len(args) == 2 and args[1].isdigit()
-                or re.fullmatch(r"-n\d+", args[0]) is not None and len(args) == 1)
+        num = r"\+?\d+" if cmd == "tail" else r"\d+"
+        return (not args or len(args) == 1 and re.fullmatch(rf"-\d+|-[nc]{num}", args[0]) is not None
+                or len(args) == 2 and args[0] in ("-n", "-c") and re.fullmatch(num, args[1]) is not None)
     if cmd == "wc":
-        return args in ([], ["-l"])
+        return all(re.fullmatch(r"-[lwcm]+", a) for a in args)
     if cmd == "grep":
-        while args and re.fullmatch(r"-[ivcEF]+", args[0]):
-            args = args[1:]
+        while args:
+            if re.fullmatch(r"-[nwolcivEFxhHq]+|-[mABC]\d+", args[0]):
+                args = args[1:]
+            elif args[0] in ("-m", "-A", "-B", "-C") and len(args) > 1 and args[1].isdigit():
+                args = args[2:]
+            else:
+                break
         return len(args) == 1 and not args[0].startswith("-")
     return False
 
@@ -190,7 +195,9 @@ def lean_agent_only(command):
     """True when every command in `command` is a lean-agent command (any first word with basename `lean-agent`,
     or the plugin's bin path); `cd` is fine. Quoted text is data, and an unparsable command is refused. Only
     2>&1, >&2, >/dev/null, 2>/dev/null and &>/dev/null redirect; &&, ||, ;, a lone & and newlines separate
-    commands; a pipe may only feed head, tail, grep or wc reading stdin."""
+    commands; a pipe may only feed head, tail, grep or wc reading stdin (a few read-only options, one grep pattern,
+    no files). The one `$(`: `$(cat <<'X' ... X)` with a quoted delimiter, ended by the first line that is exactly
+    X and followed only by `)`; its body is data. Any other `$(` or backtick is refused."""
     import shlex
     command = CAT_HEREDOC.sub("DATA", command)  # a quoted heredoc is text, whatever the shell would not expand in it
     if "$(" in command or "`" in command:
