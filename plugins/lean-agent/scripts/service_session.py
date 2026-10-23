@@ -103,6 +103,23 @@ def transcript_path(cwd, session_id):
     return os.path.join(cfg, "projects", project_slug(os.path.realpath(cwd)), session_id + ".jsonl")
 
 
+def drop_stale_record(cwd, sid):
+    """A new conversation makes the old service.json and its chain stale: removed before the spawn, so a fast
+    SessionStart hook of the new session is not deleted. A restart after a /clear, before the new transcript exists,
+    keeps it: it goes only when no transcript of its chain exists at all (`up --fresh` removes it itself)."""
+    if os.path.exists(transcript_path(cwd, sid)):
+        return
+    rec = _load(lean_home("chat", "service.json"))
+    chain = rec.get("chain") if isinstance(rec.get("chain"), list) else []
+    known = [p for p in [rec.get("transcript_path"), *chain] if isinstance(p, str) and p]
+    if any(os.path.exists(p) for p in known):
+        return
+    try:
+        os.remove(lean_home("chat", "service.json"))
+    except OSError:
+        pass
+
+
 def _load(path):
     try:
         with open(path) as fh:
@@ -546,11 +563,7 @@ class Host:
         except OSError:
             size = None
         fcntl.ioctl(master, termios.TIOCSWINSZ, size or struct.pack("HHHH", 50, 200, 0, 0))
-        if not os.path.exists(transcript_path(self.cwd, sid)):
-            try:  # a new conversation: the old record and its chain are stale (removed before the spawn, so a fast
-                os.remove(lean_home("chat", "service.json"))  # SessionStart hook of the new session is not deleted)
-            except OSError:
-                pass
+        drop_stale_record(self.cwd, sid)
         update_up(pid=None, session_started=time.strftime("%Y-%m-%dT%H:%M:%S"))
         try:
             proc = subprocess.Popen(argv, env=self.env, cwd=self.cwd, stdin=slave, stdout=slave, stderr=slave,
