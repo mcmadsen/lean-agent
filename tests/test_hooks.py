@@ -379,7 +379,11 @@ class BudgetTest(Base):
             "budget_hook.py", ev(tool, cwd, **{"file_path" if tool == "Read" else "path": path}), **dict(self.env, **env))
         denied = lambda out: out and out["hookSpecificOutput"]["permissionDecision"] == "deny"
         for cmd in ("npm test", "git status", "cat src/app.py", "lean-agent runs; rm -rf x", "lean-agent runs $(cat x)",
-                    "ls | lean-agent runs", "cat x; lean-agent runs", "lean-agent runs | cat x", "lean-agent runs & rm x"):
+                    "ls | lean-agent runs", "cat x; lean-agent runs", "lean-agent runs | cat x", "lean-agent runs & rm x",
+                    "lean-agent runs | grep -r x /srv", "lean-agent runs | head /srv/f", "lean-agent runs | grep -c x /srv/f",
+                    "lean-agent runs > /tmp/x", "lean-agent runs 2>/tmp/x", "lean-agent runs < /etc/passwd",
+                    "lean-agent runs <(cat f)", "lean-agent runs >(cat)", "lean-agent run p --why \"unbalanced",
+                    "lean-agent runs | grep --include=x y", "lean-agent runs | tail -f x", "lean-agent runs | cat"):
             out = bash(cmd)
             self.assertTrue(denied(out), cmd)
             self.assertIn("Delegate it: lean-agent run <project> --cards auto -m <model> --why",
@@ -388,8 +392,10 @@ class BudgetTest(Base):
         for cmd in ("lean-agent runs", "lean-agent runs --show 3", "cd /tmp && lean-agent review shop --status",
                     plugin + "/bin/lean-agent stats", "lean-agent run shop --cards auto -m haiku --why x -- 'look'",
                     "lean-agent run p -- \"x\" 2>&1", "lean-agent runs >/dev/null 2>&1", "lean-agent todo list 2>&1 | head",
-                    "lean-agent runs 2>/dev/null", "lean-agent runs >&2", "lean-agent runs &>/tmp/o", "/opt/x/lean-agent runs",
-                    "lean-agent runs 2>&1 | grep -i x | tail -3"):
+                    "lean-agent runs 2>/dev/null", "lean-agent runs >&2", "lean-agent runs &>/dev/null", "/opt/x/lean-agent runs",
+                    "lean-agent runs 2>&1 | grep -i x | tail -3", "lean-agent run p --why \"a; b\" -- \"x | y\"",
+                    "lean-agent run p -- 'a & b > c'", "lean-agent runs | grep -c x", "lean-agent runs | head -n 5",
+                    "lean-agent runs | wc -l", "lean-agent runs 2>&1"):
             self.assertIsNone(bash(cmd), cmd)
         out = read("/srv/shop/src/app.py")
         self.assertTrue(denied(out))
@@ -398,6 +404,8 @@ class BudgetTest(Base):
         self.assertTrue(denied(run_hook("budget_hook.py", ev("Glob", pattern="/srv/shop/**/*.py"), **self.env)))
         self.assertIsNone(run_hook("budget_hook.py", ev("Glob", pattern=home + "/docs/*.md"), **self.env))
         self.assertIsNone(run_hook("budget_hook.py", ev("Glob", pattern="**/*.py"), **self.env))
+        self.assertTrue(denied(run_hook("budget_hook.py", ev("Glob", pattern="../../x/**"), **self.env)))
+        self.assertIsNone(run_hook("budget_hook.py", ev("Glob", pattern="docs/../docs/*.md"), **self.env))
         for path in (os.path.join(home, "work", "1020-101010-abcd", "summary-1.txt"), os.path.join(home, "docs", "a.md"),
                      os.path.join(plugin, "templates", "guide.md")):
             self.assertIsNone(read(path), path)

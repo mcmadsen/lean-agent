@@ -4649,14 +4649,16 @@ class CliTest(unittest.TestCase):
         p = self.cli("review", "proj", "--decide-gaps", "--head", "nowhere", check=False)
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("no review of nowhere yet", p.stderr)
+        p = self.cli("review", "proj", "--decide-gaps", "--head", "feature", check=False, FAKE_FEEDBACK=ok + head + '{"decisions": []}')
+        self.assertNotIn("no review of", p.stderr)
+        self.assertIn("the worker gave no gap decisions", p.stdout)
         sys.path.insert(0, os.path.dirname(CLI))
         import lean_agent as L
         os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
         try:
             self.assertEqual(L.latest_review("proj", self.proj, None)["verdict"], "approve")
             self.assertIsNone(L.latest_review("proj", self.proj, "nowhere"))
-            with self.assertRaises(TypeError):
-                L.latest_review("proj", self.proj)
+            self.assertEqual(L.latest_review("proj", self.proj, "feature")["verdict"], "approve")
         finally:
             del os.environ["LEAN_AGENT_HOME"]
 

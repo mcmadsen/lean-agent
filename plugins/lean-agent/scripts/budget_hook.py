@@ -163,27 +163,97 @@ def strict_on(lean_root):
         return True
 
 
-PIPE_OK = ("head", "tail", "grep")
+PIPE_OK = ("head", "tail", "grep", "wc")
+PIPE_VALUE_OPTS = {"head": "nc", "tail": "nc", "grep": "emABC", "wc": ""}
+PIPE_BAD_LONG = ("--include", "--exclude", "--file", "--recursive", "--dereference", "--directories", "--devices",
+                 "--follow", "--files0-from")
+BREAKS = {";", "&&", "||", "&"}
+REDIRECT_OK = {(">&", "1"), (">&", "2"), (">", "/dev/null"), ("&>", "/dev/null"), ("<<", "DATA")}
+
+
+def pipe_stage_ok(words):
+    """A pipe stage after a lean-agent command: head, tail, grep or wc reading stdin, with no file or path
+    arguments and no recursive or file-reading options."""
+    cmd, args = words[0], words[1:]
+    values, positionals, i = PIPE_VALUE_OPTS.get(cmd), 0, 0
+    if values is None:
+        return False
+    while i < len(args):
+        arg = args[i]
+        i += 1
+        if arg.startswith("--"):
+            if arg.startswith(PIPE_BAD_LONG):
+                return False
+        elif arg.startswith("-") and len(arg) > 1:
+            if any(c in "rRf" for c in arg[1:]) or (cmd == "grep" and "e" in arg[1:] and arg[-1] != "e"):
+                return False
+            if arg[-1] in values:
+                if arg[-1] == "e":
+                    positionals -= 1  # the pattern is given by -e
+                i += 1  # the option's value
+        elif cmd == "grep":
+            positionals += 1
+        elif not re.match(r"^[+-]?\d+[kKmMbB]?$", arg):
+            return False
+    return positionals <= 1 if cmd == "grep" else True
 
 
 def lean_agent_only(command):
     """True when every command in `command` is a lean-agent command (any first word with basename `lean-agent`,
-    or the plugin's bin path); `cd` is fine. Redirections (2>&1, >&2, &>f, >/dev/null) belong to their command;
-    only &&, ||, ;, a lone & and newlines separate commands. A pipe may only feed head, tail or grep."""
+    or the plugin's bin path); `cd` is fine. Quoted text is data, and an unparsable command is refused. Only
+    2>&1, >&2, >/dev/null, 2>/dev/null and &>/dev/null redirect; &&, ||, ;, a lone & and newlines separate
+    commands; a pipe may only feed head, tail, grep or wc reading stdin."""
+    import shlex
     if "$(" in command or "`" in command:
         return False
     bin_dir = os.path.join(PLUGIN_ROOT, "bin") + os.sep
-    text = HEREDOC.sub("<<DATA", command)
-    text = re.sub(r"\d*>&\d*-?|&>>?", " ", text)  # fd duplications and &>file are not separators
-    for part in re.split(r"&&|\|\||;|\n|&", text):
-        stages = part.split("|")
-        for i, stage in enumerate(stages):
-            for words in commands_run(stage):
-                if i and words[0] in PIPE_OK:
-                    continue
-                if not (words[0] == "cd" or os.path.basename(words[0]) == "lean-agent"
-                        or os.path.realpath(os.path.expanduser(words[0])).startswith(bin_dir)):
+    lex = shlex.shlex(HEREDOC.sub("<<DATA", command), posix=True, punctuation_chars=";&|<>()\n")
+    lex.whitespace_split, lex.whitespace, lex.commenters = True, " \t\r", ""
+    try:
+        tokens = list(lex)
+    except ValueError:
+        return False
+    stages, words, i = [], [], 0  # stages: word lists; None marks a break between commands
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        if re.fullmatch(r"[;&|<>()\n]+", tok):
+            if tok == "|":
+                stages.append(words)
+                words = []
+            elif tok.strip("\n") == "" or tok in BREAKS:
+                stages.append(words)
+                stages.append(None)
+                words = []
+            elif re.search(r"[<>]", tok) and "(" not in tok and ")" not in tok:
+                if tok != "<<" and words and re.fullmatch(r"\d", words[-1]):
+                    words.pop()  # the fd number of 2>/dev/null
+                if (tok, tokens[i] if i < len(tokens) else None) not in REDIRECT_OK:
                     return False
+                i += 1
+            else:
+                return False
+        else:
+            words.append(tok)
+    stages.append(words)
+    first = True
+    for words in stages:
+        if words is None:
+            first = True
+            continue
+        while words and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]) or words[0] in ("nohup", "env", "exec")):
+            words = words[1:]
+        if words[:1] == ["timeout"] and len(words) > 2:
+            words = words[2:]
+        if not words:
+            continue
+        if not first:
+            if not pipe_stage_ok(words):
+                return False
+        elif not (words[0] == "cd" or os.path.basename(words[0]) == "lean-agent"
+                  or os.path.realpath(os.path.expanduser(words[0])).startswith(bin_dir)):
+            return False
+        first = False
     return True
 
 
@@ -203,7 +273,7 @@ def strict_denial(event, cwd, lean_root):
     elif tool in ("Read", "Grep", "Glob"):
         path = tool_input.get("file_path") if tool == "Read" else tool_input.get("path")
         pattern = str(tool_input.get("pattern") or "")
-        if not path and tool == "Glob" and os.path.isabs(os.path.expanduser(pattern)):
+        if not path and tool == "Glob" and (os.path.isabs(os.path.expanduser(pattern)) or ".." in pattern.split("/")):
             path = pattern
         if path and not own_path(str(path), cwd, lean_root):
             return f"strict mode: the orchestrator doesn't read project files ({str(path)[:80]}). " + DELEGATE
