@@ -729,24 +729,40 @@ class BudgetTest(Base):
         import re
         sys.path.insert(0, ROOT)
         import budget_hook
-        with open(os.path.join(ROOT, "..", "templates", "guide.md"), encoding="utf-8") as fh:
+        templates = os.path.join(ROOT, "..", "templates")
+        with open(os.path.join(templates, "guide.md"), encoding="utf-8") as fh:
             guide = fh.read().replace("{{P}}", "shop")
+        with open(os.path.join(templates, "repo-block.md"), encoding="utf-8") as fh:
+            block = fh.read().replace("{{P}}", "shop")
         examples = []
         for m in re.finditer(r"^```(\w*)\n(.*?)^```", guide, re.S | re.M):
             if m.group(1) == "sh":
                 examples.append(m.group(2))
             elif m.group(1) == "text":
                 examples += [l for l in m.group(2).splitlines() if l.startswith("lean-agent ")]
-        text = re.sub(r"^```.*?^```", "", guide, flags=re.S | re.M)
-        examples += [c for c in re.findall(r"`(lean-agent [^`\n]+)`", text)]
+        bash_event = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}}
+        skipped = []
+        for doc in (guide, block):
+            text = re.sub(r"^```.*?^```", "", doc, flags=re.S | re.M)
+            for m in re.finditer(r"`(lean-agent [^`]+)`", text):
+                span = " ".join(m.group(1).split())  # a span may wrap over lines
+                if re.search(r"worker:\s*$", text[:m.start()]):  # the explicit marker: meant for a worker, not the orchestrator
+                    skipped.append(span)
+                else:
+                    examples.append(span)
         self.assertGreater(len(examples), 20)
         self.assertTrue(any("<<'EOF'" in e and "--task-file -" in e for e in examples))
+        self.assertTrue(any("worktree" in e and e.startswith("lean-agent run") for e in examples))
+        self.assertGreaterEqual(len(skipped), 3)
         for ex in examples:
             ex = re.sub(r"<[A-Za-z][\w -]*>", "x", ex)  # <placeholders>
             opened = re.search(r"<<-?(['\"]?)(\w+)\1$", ex)  # a heredoc whose body the prose gives separately
             ex += f"\nbody\n{opened.group(2)}" if opened else ""
             ex = re.sub(r"(?<=\w)\|(?=\w)", "/", ex.replace("...", "x"))  # on|off: alternatives
             self.assertTrue(budget_hook.lean_agent_only(ex), ex)
+            self.assertEqual(budget_hook.strict_denial(bash_event(ex), "/home", "/home"), "", ex)  # strict mode allows it
+        for ex in skipped:  # the marker is only for what strict mode really denies
+            self.assertTrue(budget_hook.strict_denial(bash_event(re.sub(r"\|\w+", "", ex)), "/home", "/home"), ex)
 
     def test_no_budget_tracks_only(self):
         self.assertIsNone(run_hook("budget_hook.py", self.ev, **self.env))

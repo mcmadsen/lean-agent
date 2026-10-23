@@ -87,17 +87,20 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      (repeatable; commands that change things are refused).
    - `--mcp <server>:<preset or tool>,...`: only for an external system. You neither list nor run MCP servers:
      "which servers do we have", "what does tool X return" is a small read-only worker (`--read-only --allow-cmd
-     "lean-agent mcp"`, `--mcp <server>` to call it). It uses `lean-agent mcp list -p <project>`, `mcp tools <server>`
+     "lean-agent mcp"`, `--mcp <server>` to call it). That worker uses (worker: `lean-agent mcp list -p <project>`) `mcp tools <server>`
      and a preset, not the whole server (tens of thousands of tokens per turn; `run` prints the cost): `mcp preset
      <server>` lists them; `read` is automatic. Plugin servers (`plugin:<plugin>:<server>`) work too.
-   - `--chrome=<tool>,<tool>`: the user's real Chrome (Teams, Gmail ...); needs `lean-agent chrome check` once.
+   - `--chrome=<tool>,<tool>`: the user's real Chrome (Teams, Gmail ...); a worker checks the connection once (worker:
+     `lean-agent chrome check`; it is refused for you, `lean-agent chrome status` is not).
    - `--worktree <branch>`: shared lean-agent git worktree of that branch (e.g. a reviewer's checks on a PR branch);
      the user's checkout is untouched. Reuse the name for the next worker (dependencies and builds stay). Read-only
-     workers share one; file-changing workers take turns. `lean-agent worktrees` lists them, `lean-agent worktree rm
-     <project> <branch>` removes one. Fixes on an existing PR: `--worktree origin/<branch>` (a local branch tracking
-     it), review with `--head <branch>`, then `lean-agent worktree push <project> origin/<branch>` (shows the
-     commits; push only with `--allow-send "<what the user approved>"`). Save an install/build once:
-     `lean-agent worktree setup <project> --run "<command>"`.
+     workers share one; file-changing workers take turns. `lean-agent worktrees` lists them; removing one, pushing
+     and saving an install/build are worker tasks (worker: `lean-agent worktree rm|push|setup`). Fixes on an existing
+     PR: `--worktree origin/<branch>` (a local branch tracking it), review with `--head <branch>`, then
+     `lean-agent run <p> --worktree origin/<branch> --cards auto -m sonnet --why "push the fixes" -- "push the branch
+     with worktree push (show me the commits first); send only with --allow-send '<what the user approved>'"`.
+     Save an install/build once the same way: `lean-agent run <p> --worktree <branch> --cards auto -m haiku --why
+     "save the install" -- "run worktree setup with --run '<command>'"`.
    - `--max-usd`, `--max-turns`: size them to the task.
 5. Task text: short, self-contained (workers can't see this conversation): goal, known files or symbols, how to
    check it's done; long background goes in a file, or a card via `remember`. Pass `--task-file <file>` or `--task-file -`
@@ -172,10 +175,10 @@ lean-agent optimize {{P}} --apply --skip checkout-notes
   `checkpointed`. After a clear, continue from the brief you start with and keep the same thread tags.
 - Big JS/TS front-end refactor or migration: look first with `lean-agent map <project>` (`--who-uses`, `--deps`,
   `--route all`, `--unused`), not a worker. Safety net on the code as it is: `lean-agent check <project> add types
-  "npx tsc --noEmit"` (and lint, tests), `lean-agent check <project> baseline`, `lean-agent count <project> add
-  <name> "<regex>"` per legacy pattern, `lean-agent parity <project> set --url ... --routes-from-map` and
+  "npx tsc --noEmit"` (and lint, tests), `lean-agent check <project> baseline`, a counter per legacy pattern (worker:
+  `lean-agent count <project> add <name> "<regex>"`), `lean-agent parity <project> set --url ... --routes-from-map` and
   `parity <project> baseline` if the app runs locally. Plan: `lean-agent slices <project>`, agree it with the user,
-  `slices <project> --create --epic <name>` (`todo epic <name> --count <counter>`). Each slice: `todo next --epic
+  `slices <project> --create --epic <name>` (a worker sets `todo epic <name> --count <counter>`). Each slice: `todo next --epic
   <name>`, one worktree worker with `--todo N`; done = no new `check` errors, `count` down, `parity` unchanged (or
   intended), then `review --goal`, then a PR (`--ref "PR N"`); two or three slices at a time. Mechanical edits
   across many files: the worker writes a codemod and runs `lean-agent codemod` (dry run first).
@@ -217,7 +220,7 @@ lean-agent optimize {{P}} --apply --skip checkout-notes
     before that the branch or work item.
   - `todo done N "<one-line result>"` when finished (merged, sent, answered): the Done card shows the result, so give
     the outcome ("merged as PR 512"), not the plan. `todo next` when you're free.
-- Local documents: a worker writes them (`lean-agent doc write` is refused for you).
+- Local documents: a worker writes them (`doc` is refused for you).
 - Recurring work: `lean-agent schedule list|run|pause|resume`; a worker adds or removes jobs (`schedule add "weekdays
   08:45" do <project> <recipe>`, `schedule defaults`). Mention a finished job if it matters.
 - Dashboard: `lean-agent dashboard --url` prints its address. To show it, use a `Claude_Browser` tool such as
