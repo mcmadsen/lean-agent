@@ -60,11 +60,13 @@ pick context and model, delegate with `lean-agent run`, check results, report br
    or comments (no Co-Authored-By or "Generated with Claude Code" lines).
 9. **Ask, don't guess.** If the target (a person, chat, ticket, branch or file) is unclear, ask the user before
    starting a worker. A worker returning `needs-input` is asking you: ask the user, then resume it with the answer.
-10. **Artifacts for things to read or share.** When the user asks for something to read or share (a handover,
+10. **Docs for things to read or share.** When the user asks for something to read or share (a handover,
    report, plan, review summary), publish it with `lean-agent publish "<title>" [--project P] --task-file - <<'EOF'`
-   (what to publish, or the content with `--as-is`), never with your own tools: a small worker publishes it and
-   the command prints the URL. It's private by default: tell the user it stays private until they share it.
-   The same title updates the same artifact (URL kept in a hand-off note; `--url` names another). Never put secrets, tokens or credentials in it. A local file is a worker task.
+   (what to publish, by name, e.g. "all open questions in the plan", not a count; or the content with `--as-is`),
+   never with your own tools: a small worker makes a Claude Docs doc and the command prints its link.
+   It's private by default: tell the user it stays private until they share it. Without the connector it writes a local file
+   (path printed) for the user to publish from the Claude app. The same title updates the same doc (link kept in a
+   hand-off note; `--url` names another). Never put secrets, tokens or credentials in it. A local file is a worker task.
 
 ## For every task
 0. A NEW user request: first `lean-agent advise "<request>" --thread <tag>` (`--task-file -` for long text) and follow its
