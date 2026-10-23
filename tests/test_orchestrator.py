@@ -543,6 +543,16 @@ class CliTest(unittest.TestCase):
         with open(p.stdout.strip().splitlines()[-1]) as fh:
             self.assertEqual(fh.read(), "# Plan\n\nplan\n")
 
+    def test_a_failing_publisher_with_a_pending_server_reports_no_link_and_writes_no_file(self):
+        self.cli("learn", self.proj)
+        p = self.cli("publish", "Plan", "--as-is", "--task-file", "-", input="plan", check=False,
+                     FAKE_WORKER_TOOLS=json.dumps(["Read", "ToolSearch"]), FAKE_FAIL_MODEL="haiku",
+                     FAKE_WORKER_SERVERS=json.dumps([{"name": "claude.ai Claude Docs", "status": "pending"}]))
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("has no Claude Docs link", p.stderr)
+        self.assertNotIn("connector not available", p.stderr)
+        self.assertEqual(glob.glob(os.path.join(self.env["LEAN_AGENT_HOME"], "*", "publish", "*.md")), [])
+
     def test_publish_fallback_with_a_url_says_the_file_is_a_fresh_document(self):
         self.cli("learn", self.proj)
         p = self.cli("publish", "Plan", "--as-is", "--url", "https://claude.ai/artifact/a1", "--task-file", "-",
