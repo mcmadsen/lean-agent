@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Smoke tests for the lean-agent hooks. Run: python3 tests/test_hooks.py"""
+import contextlib
 import io
 import json
 import os
@@ -660,10 +661,27 @@ class BudgetTest(Base):
         self.assertEqual(prompt("/init")["decision"], "block")
         self.assertIsNone(prompt("# Plan\n- one\n- two"))  # a markdown heading, not a memory message
         self.assertIsNone(prompt("note that the sky is blue"))
+        self.assertIsNone(prompt("#12 is failing"))  # a thread number
+        self.assertIsNone(prompt("#bug in the export"))  # a tag
         self.assertIsNone(prompt("# always answer in Danish", self.tmp.name))  # a normal session
         self.assertIsNone(prompt("/memory", os.path.join(home, "work", "run1")))  # a worker
         self.set_strict("off")
         self.assertIsNone(prompt("# always answer in Danish"))
+
+    def test_strict_denies_review_learn_text_and_abbreviated_flags_do_not_exist(self):
+        sys.path.insert(0, ROOT)
+        import budget_hook
+        for cmd in ('lean-agent review learn shop --text "check the counter"', 'lean-agent review-learn shop --text=x',
+                    'lean-agent review learn shop --helper "a | b | c"'):
+            self.assertEqual(budget_hook.restricted_command(cmd)[0], "keep", cmd)
+        for cmd in ("lean-agent review learn shop 12 --mcp tickets", "lean-agent review decline shop 1 --why x"):
+            self.assertEqual(budget_hook.restricted_command(cmd)[0], "", cmd)
+        import lean_agent
+        ap = lean_agent.build_parser()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            ap.parse_args(["tracker", "shop", "--not", "x"])  # not an abbreviation of --note
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            ap.parse_args(["codemod", "--appl"])
 
     def test_strict_check_command_substitution_and_heredocs(self):
         sys.path.insert(0, ROOT)

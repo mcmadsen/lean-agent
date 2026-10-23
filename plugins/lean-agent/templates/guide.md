@@ -41,7 +41,8 @@ pick context and model, delegate with `lean-agent run`, check results, report br
    - The reviewer must search for existing code each new symbol duplicates; a duplicate or too-narrow fix blocks
      approval. False positive: `lean-agent review decline <project> <n> --head <branch> --why "..."`, then
      `--resume`. An `unverified -> delegate a read-only check` item goes to a `-m haiku --read-only` worker. A human
-     found what it missed: `lean-agent review learn <project> <PR> --mcp <tracker>` (or `--text "..."`).
+     found what it missed: `lean-agent review learn <project> <PR> --mcp <tracker>`; a lesson you were told in words goes to
+     `lean-agent remember "..."`, never `review learn --text`.
    - Approval with "known gaps" (things the change says aren't done or doesn't deliver): before calling the work
      ready or opening a PR run `lean-agent review <project> --decide-gaps` (a worker declines what cards and code
      settle, returns fix tasks, lists what needs the user) and show the user only its summary. Ask about each "needs

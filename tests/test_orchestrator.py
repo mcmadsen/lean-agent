@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Tests for the lean-agent CLI using a fake `claude` binary. Run: python3 tests/test_orchestrator.py"""
+import argparse
+import contextlib
 import datetime
 import glob
+import io
 import json
 import shutil
 import os
@@ -361,6 +364,8 @@ class CliTest(unittest.TestCase):
         call = self.calls()[-1]
         argv = call["argv"]
         self.assertIn("Artifact", argv[argv.index("--allowedTools") + 1].split(","))
+        self.assertEqual(sorted(argv[argv.index("--tools") + 1].split(",")), ["Artifact", "Glob", "Grep", "Read"])
+        self.assertTrue(self.ledger()[-1]["read_only"])
         self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
         self.assertIn("plan text", call["task"])
         self.assertNotIn("existing artifact", call["task"])
@@ -446,6 +451,62 @@ class CliTest(unittest.TestCase):
         self.assertIn("todo #1: Export: cap the retry loop", out)
         listed = self.cli("todo", "list").stdout
         self.assertIn("#1 [doing] Export: cap the retry loop", listed)
+
+    def test_run_todo_new_makes_one_item_for_all_escalation_attempts(self):
+        self.cli("learn", self.proj)
+        out = self.cli("run", "-p", "proj", "--escalate", "haiku,sonnet", "--why", "Export: cap the retry loop",
+                       "--todo", "new", "t", FAKE_FAIL_MODEL="haiku").stdout
+        self.assertEqual(out.count("todo #"), 1)
+        self.assertEqual([r["model"] for r in self.ledger()], ["haiku", "sonnet"])
+        self.assertEqual([r["todo"] for r in self.ledger()], [1, 1])
+        self.assertEqual(self.cli("todo", "list").stdout.count("Export: cap the retry loop"), 1)
+
+    def test_role_runs_are_not_resumable_and_never_leave_their_commands_in_the_record(self):
+        self.cli("learn", self.proj)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "look at it")
+        self.cli("remember", "Never merge on Fridays.", FAKE_ANSWER="REMEMBERED feedback no-friday-merges")
+        ordinary, librarian = self.ledger()
+        self.assertEqual(librarian["role"], "librarian")
+        self.assertEqual(librarian["allow_cmd"], [])
+        p = self.cli("run", "--resume", librarian["id"], "and now write", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("can't be resumed", p.stderr)
+        self.cli("run", "--resume", "last", "and then y")  # the ordinary run, not the librarian run after it
+        argv = self.calls()[-1]["argv"]
+        self.assertEqual(argv[argv.index("--resume") + 1], ordinary["session_id"])
+        resumed = self.ledger()[-1]
+        self.assertEqual((resumed["resumed"], resumed["allow_cmd"]), (True, []))
+        for sub in ("memory", "card", "todo", "handoff"):
+            self.assertNotIn(f" {sub}:*", argv[argv.index("--allowedTools") + 1])
+
+    def test_role_commands_use_their_own_run_not_the_latest_one_of_the_role(self):
+        self.cli("learn", self.proj)
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        wd = self.tmp.name
+
+        def worker(n, answer):
+            d = os.path.join(wd, f"w{n}")
+            os.makedirs(d)
+            with open(os.path.join(d, "result.json"), "w") as fh:
+                fh.write(json.dumps({"result": answer}) + "\n")
+            return {"id": f"r{n}", "role": "librarian", "project": "proj", "workdir": d, "status": "done"}
+
+        def interleaved(ns):  # another call's librarian run is written after this call's own
+            own, other = worker(1, "REMEMBERED memory mine"), worker(2, "REMEMBERED memory theirs")
+            with open(os.path.join(wd, "ledger.jsonl"), "w") as fh:
+                fh.write(json.dumps(own) + "\n" + json.dumps(other) + "\n")
+            L.LAST_RUN[:] = [own]
+            return 0
+        open(os.path.join(wd, "ledger.jsonl"), "w").close()
+        a = argparse.Namespace(text=["x"], task_file=None, project="proj")
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": self.env["LEAN_AGENT_HOME"]}), \
+                mock.patch.object(L, "cmd_run", interleaved), \
+                mock.patch.object(L, "ledger", lambda: [json.loads(l) for l in open(os.path.join(wd, "ledger.jsonl"))]), \
+                contextlib.redirect_stdout(out):
+            L.cmd_remember(a)
+        self.assertEqual(out.getvalue().strip(), "REMEMBERED memory mine")
 
     def test_guide_has_the_strict_orchestrator_rules(self):
         with open(os.path.join(os.path.dirname(CLI), "..", "templates", "guide.md")) as fh:
