@@ -19,7 +19,7 @@ import re
 import time
 
 import lean_common
-from lean_common import now_iso
+from lean_common import now_iso, stem
 
 try:
     import fcntl
@@ -223,13 +223,6 @@ can could would should will shall may might must not no yes ok okay please just 
 what which who whom how why when where than too lets let get got make made use using new need want like again still
 now thanks thank hello hey hi""".split())
 EXPLICIT_RE = re.compile(r"(?<![\w/&])(?:#(\d+)|[tT](\d+))\b")
-
-
-def stem(w):
-    for suffix in ("ing", "ed", "es", "s"):
-        if len(w) > len(suffix) + 3 and w.endswith(suffix):
-            return w[:-len(suffix)]
-    return w
 
 
 def words(text):
