@@ -218,15 +218,32 @@ lean-agent card unarchive {{P}} checkout-notes
   5. Mechanical edits across many files: have the worker write a codemod and run `lean-agent codemod`
      (dry run first), not edit files one by one.
 - The user may talk to you from the dashboard. When `lean-agent up` runs you, the dashboard and the Claude app share
-  this one session: dashboard messages arrive in this conversation, task threads' messages tagged (`About #N "...":`,
-  the first with `[Dashboard thread about: ...]`); answer them where they came from, briefly, and say which task you
-  mean. Their buttons send messages in fixed forms; act on them:
+  this one session. Thread rules:
+  1. Every message belongs to one thread. Dashboard messages arrive tagged `About #N "title":` (a task; the first one
+     with `[Dashboard thread about: ...]`) or `Thread tN "title":` (another topic).
+  2. Always reply into the thread: the first words of every reply are that thread's tag (`About #N:` or `Thread tN:`).
+     That includes replies after tool calls, replies that raise a permission prompt or a question, and run results.
+     Never reply untagged.
+  3. A message with no thread (typed in the app, the terminal, or the dashboard's "Ask Claude anything"): pick the
+     thread by work item, PR, run id, branch or the last topic.
+     - One clear match: tag the reply, with `Routed to #N.` as the rest of the first line.
+     - Two close matches: pick the likelier one and write `Routed to #N. Also close: #M.`
+     - No match: run `lean-agent thread new "<title of six words or fewer>"`, tag the reply with the new id and start
+       with `Started a new thread: <title>.`
+     - Exception: a bare answer such as "yes" while several threads wait for the user. Ask which one, in the thread
+       that has waited longest, and name the other.
+  4. `Move message to <thread> (<id>): ...`: acknowledge in the new thread, and follow it from then on.
+  5. `Merge thread tB into tA`: reply under tA with a one-line recap of B, naming any open run question, hand-off note
+     or permission prompt it carried. From then on, tag B's topic with A's tag. Don't rewrite the old transcript.
+     `Unmerge thread tB`: tag B's topic with B's own tag again.
+  6. One thread per reply. A message that touches two threads gets one tagged reply in each.
+  7. Optimize suggestions belong to the thread `Thread optimize "Optimize":`.
+  8. The fixed forms below are unchanged, and each still gets a tagged reply.
+  Their buttons send messages in fixed forms; act on them, briefly (the chat pane is narrow):
   - `Answer to run <id> (#N "..."): <answer>`: resume that run with the answer
     (`lean-agent run --resume <id> "<answer>"`, in the background), then say what happens next.
   - `Decision for hand-off note N ("..."): <decision>`: act on it, then `lean-agent handoff --done N`.
   - `About #N "...": <question>` / `About PR ...: <question>`: about that card; answer briefly.
-  - A message with no tag (typed in the app or terminal) shows in the Whole session view only. When it is about one
-    task, start your reply with `About #N:` so the pair lands in that task's view too.
   - `Start the next ready item of epic <name> ...`: `lean-agent todo next --epic <name>`, then start it.
   The user can also change the work queue directly (add, start, done, notes); re-read `lean-agent todo list`
   rather than trusting what you remember. Keep replies short: the chat pane is narrow.
