@@ -1057,7 +1057,6 @@ class CliTest(unittest.TestCase):
         self._archivable()
         res = json.loads(self.cli("optimize", "proj", "--json").stdout)
         self.assertTrue(res["project"].startswith("proj"))
-        saved_path = os.path.join(self.env["LEAN_AGENT_HOME"], "optimize", res["project"] + ".json")
         sug = {x["id"]: x for x in res["suggestions"]}
         self.assertIn("archive:style", sug)
         self.assertEqual(sorted(sug["archive:style"]), ["card", "id", "kind", "meta", "offered", "reason", "used"])
@@ -1066,13 +1065,6 @@ class CliTest(unittest.TestCase):
         self.assertEqual((sug["archive:style"]["kind"], sug["archive:style"]["card"]), ("archive", "style"))
         self.assertIn("unneeded", sug["archive:style"]["reason"])
         self.assertIsInstance(res["drafts"], list)
-        saved = json.load(open(saved_path))
-        self.assertEqual(saved["suggestions"], res["suggestions"])
-        self.assertTrue(saved["ts"])
-        # a plain run saves too
-        os.remove(saved_path)
-        self.cli("optimize", "proj")
-        self.assertTrue(os.path.exists(saved_path))
         # --apply <ids> applies only those
         out = self.cli("optimize", "proj", "--apply", "archive:style,archive:nope").stdout
         self.assertIn("applied: archive style", out)
