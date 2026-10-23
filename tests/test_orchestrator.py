@@ -1144,6 +1144,17 @@ class CliTest(unittest.TestCase):
             self.assertIn(f"git -C {self.proj}", call["append"])
         self.assertEqual(second["argv"][second["argv"].index("--resume") + 1], "sess-1")
 
+    def test_task_file_dash_reads_stdin_and_resume_last(self):
+        self.cli("learn", self.proj)
+        env = dict(self.env)
+        p = subprocess.run([sys.executable, CLI, "run", "-p", "proj", "-m", "haiku", "--why", "stdin task", "--read-only",
+                            "--task-file", "-"], input="find the stdin marker\n", capture_output=True, text=True, env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("find the stdin marker", self.calls()[-1]["task"])
+        self.cli("run", "--resume", "last", "and then y")
+        self.assertEqual(self.calls()[-1]["argv"][self.calls()[-1]["argv"].index("--resume") + 1], "sess-1")
+        self.assertEqual(self.cli("run", "--resume", "nope", "x", check=False).returncode, 1)
+
     def test_optimize_promotes_core_per_task_type(self):
         self.cli("learn", self.proj)
         fb = json.dumps({"status": "done", "used": ["testing"], "unneeded": ["style"], "missing": ""})

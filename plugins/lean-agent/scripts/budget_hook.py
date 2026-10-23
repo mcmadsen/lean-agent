@@ -54,8 +54,61 @@ def emit(**fields):
 
 
 HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1([^\n]*)\n.*?\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
-CAT_HEREDOC = re.compile(r"\$\(\s*cat[ \t]+<<[ \t]*(['\"])(\w+)\1[ \t]*\n(?:(?!\2\n)[^\n]*\n)*\2\n\s*\)")  # "$(cat <<'EOF' ... EOF )": ends at the first line that is the delimiter
 HEREDOC_SUB = r"<<DATA\3"  # the body is data; the rest of the `<<EOF` line stays, to be checked as commands
+
+
+HEREDOC_OPEN = re.compile(r"<<(-?)[ \t]*(?:'(\w+)'|\"(\w+)\"|(\w+))")
+
+
+def split_heredocs(command):
+    """`command` with each heredoc body and its delimiter line cut out and `<<DATA` left at the redirect, or None
+    when it holds a command substitution (`$(` or a backtick) outside a heredoc body and outside single quotes,
+    or a heredoc this can't read (odd delimiter, no closing line). A body ends at the first line that is exactly
+    the delimiter (after leading tabs for <<-). The body of a quoted delimiter is data; an unquoted one expands
+    `$(` and backticks, so those are refused there too."""
+    out, pending, quote, i, n = [], [], None, 0, len(command)
+    while i < n:
+        c = command[i]
+        if quote == "'":
+            quote = None if c == "'" else quote
+        elif c == "\\":
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        elif c == "`" or command.startswith("$(", i):
+            return None
+        elif quote == '"':
+            quote = None if c == '"' else quote
+        elif c in "'\"":
+            quote = c
+        elif command.startswith("<<", i):
+            m = HEREDOC_OPEN.match(command, i)
+            if not m:
+                return None
+            pending.append((m.group(1) == "-", m.group(2) or m.group(3) or m.group(4), bool(m.group(4))))
+            out.append("<<DATA")
+            i = m.end()
+            continue
+        elif c == "\n" and pending:
+            out.append(c)
+            i += 1
+            for dash, delim, expands in pending:
+                while True:
+                    if i >= n:
+                        return None
+                    end = command.find("\n", i)
+                    end = n if end < 0 else end
+                    line = command[i:end]
+                    i = min(end + 1, n)
+                    if (line.lstrip("\t") if dash else line) == delim:
+                        break
+                    if expands and ("`" in line or "$(" in line):
+                        return None
+            pending = []
+            continue
+        out.append(c)
+        i += 1
+    return None if pending else "".join(out)
 
 
 def commands_run(command):
@@ -196,14 +249,14 @@ def lean_agent_only(command):
     or the plugin's bin path); `cd` is fine. Quoted text is data, and an unparsable command is refused. Only
     2>&1, >&2, >/dev/null, 2>/dev/null and &>/dev/null redirect; &&, ||, ;, a lone & and newlines separate
     commands; a pipe may only feed head, tail, grep or wc reading stdin (a few read-only options, one grep pattern,
-    no files). The one `$(`: `$(cat <<'X' ... X)` with a quoted delimiter, ended by the first line that is exactly
-    X and followed only by `)`; its body is data. Any other `$(` or backtick is refused."""
+    no files). A heredoc (`<<'X'`, `<<X`, `<<-X`) on a command is allowed: its body is data, up to the first line
+    that is exactly X. A command substitution (`$(` or a backtick) anywhere else, outside single quotes, is refused."""
     import shlex
-    command = CAT_HEREDOC.sub("DATA", command)  # a quoted heredoc is text, whatever the shell would not expand in it
-    if "$(" in command or "`" in command:
+    command = split_heredocs(command)
+    if command is None:
         return False
     bin_dir = os.path.join(PLUGIN_ROOT, "bin") + os.sep
-    lex = shlex.shlex(HEREDOC.sub(HEREDOC_SUB, command), posix=True, punctuation_chars=";&|<>()\n")
+    lex = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()\n")
     lex.whitespace_split, lex.whitespace, lex.commenters = True, " \t\r", ""
     try:
         tokens = list(lex)

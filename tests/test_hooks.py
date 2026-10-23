@@ -386,9 +386,6 @@ class BudgetTest(Base):
                     "lean-agent runs | grep --include=x y", "lean-agent runs | tail -f x", "lean-agent runs | cat",
                     "lean-agent runs | grep -e x /srv/f", "lean-agent runs | grep --rec x",
                     "lean-agent runs <<EOF; rm x\nbody\nEOF",
-                    "lean-agent run p -- \"$(cat <<'EOF'\nx\nEOF\nrm -rf ~\n)\"",
-                    "lean-agent run p -- \"$(cat <<EOF\nx\nEOF\n)\"", "lean-agent run p -- \"$(sh <<'EOF'\nx\nEOF\n)\"",
-                    "lean-agent run p -- \"$(cat <<'EOF'\nx\nEOFX\n)\"",
                     "lean-agent runs | grep -r x", "lean-agent runs | grep -m 5 x /srv/f", "lean-agent runs | grep -f x y",
                     "lean-agent runs | tail -n +x", "lean-agent runs | head -n +5", "lean-agent runs | wc -L"):
             out = bash(cmd)
@@ -404,11 +401,9 @@ class BudgetTest(Base):
                     "lean-agent run p -- 'a & b > c'", "lean-agent runs | grep -c x", "lean-agent runs | head -n 5",
                     "lean-agent runs | wc -l", "lean-agent runs 2>&1", "lean-agent runs | grep -ic word",
                     "lean-agent runs &&\nlean-agent todo list", "lean-agent runs;\nlean-agent todo list",
-                    "lean-agent run p -m sonnet --why 'x' -- \"$(cat <<'EOF'\nmulti-line task; with | pipes\nEOF\n)\"",
                     "lean-agent doc write ~/Downloads/x.md <<'EOF'\nbody\nEOF",
                     "lean-agent run p -- \"t\" <<'EOF' 2>&1\nbody\nEOF",
                     "lean-agent runs | head -n 5>/dev/null",
-                    "lean-agent run p -- \"$(cat <<'EOF'\nx\n EOF\nEOFX\nEOF\n  )\"",
                     "lean-agent runs | grep -nw foo", "lean-agent runs | grep -m 5 -A2 -B 3 foo", "lean-agent runs | grep -oxH x",
                     "lean-agent runs | tail -n +5", "lean-agent runs | tail -20", "lean-agent runs | tail -c 100",
                     "lean-agent runs | head -c 10", "lean-agent runs | wc -w", "lean-agent runs | wc -m"):
@@ -440,6 +435,57 @@ class BudgetTest(Base):
         self.set_strict("off")
         self.assertIsNone(bash("npm test"))
         self.assertIsNone(read("/srv/shop/src/app.py"))
+
+
+    def test_strict_check_command_substitution_and_heredocs(self):
+        sys.path.insert(0, ROOT)
+        import budget_hook
+        ok = budget_hook.lean_agent_only
+        for cmd in ("lean-agent run p -- \"$(cat <<'EOF'\nx\nEOF\n)\"", "lean-agent run p -- \"$(cat <<\"EOF\"\nx\nEOF\n)\"",
+                    "lean-agent run p -- \"$(cat <<EOF\nx\nEOF\n)\"", "lean-agent run p -- $(cat <<'EOF'\nx\nEOF\n)",
+                    "lean-agent run p -- \"$(cat <<-'EOF'\nx\nEOF\n)\"",
+                    "lean-agent run p -- \"$(cat <<\\EOF\nx\nEOF\n)\"", "lean-agent run p -- \"$(sh <<'EOF'\nx\nEOF\n)\"",
+                    "lean-agent run p -- \"$(cat <<'EOF'\nx\nEOF\nrm -rf ~\n)\"",
+                    "lean-agent runs `date`", "lean-agent run p -- \"`date`\"", "lean-agent run p -- \"a $(date)\"",
+                    "lean-agent run --resume \"$(lean-agent runs --last)\" -- x", "lean-agent runs $((1+1))",
+                    "lean-agent run p -- \"t <<'EOF'\n$(rm x)\nEOF\n\"", "lean-agent run p <<'EOF'\nx\n",
+                    "lean-agent run p <<EOF\n$(rm x)\nEOF", "lean-agent run p <<EOF\n`rm x`\nEOF",
+                    "lean-agent run p <<'EOF'\nx\nEOF2\n", "lean-agent run p <<'EOF'\nx\n EOF\n",
+                    "lean-agent run p <<'EOF'\nx\nEOF\n$(rm x)", "lean-agent run p <<-'EOF'\nx\n  EOF\n",
+                    "lean-agent run p <<'EOF' $(rm x)\nx\nEOF", "lean-agent run p <<<x"):
+            self.assertFalse(ok(cmd), cmd)
+        for cmd in ("lean-agent run p -m sonnet --task-file - <<'EOF'\nGoal: x\n$(rm y) `z`\nEOF",
+                    "lean-agent run p --task-file - <<EOF\nGoal: x\nEOF", "lean-agent run p --task-file - <<\"EOF\"\n$(x)\nEOF\n",
+                    "lean-agent run p --task-file - <<-'EOF'\n\tbody $(x)\n\tEOF\n",
+                    "lean-agent run p --task-file - <<-EOF\n\tbody\nEOF", "lean-agent run p -- 'a $(b) `c`'",
+                    "lean-agent run p -- \"a \\$(b) \\`c\"", "lean-agent run p --task-file - <<'EOF' 2>&1\nx\nEOF",
+                    "lean-agent run p --task-file - <<'EOF' && lean-agent runs\nx\nEOF\n",
+                    "lean-agent run p --task-file - <<'A'\nx\nA\nlean-agent runs"):
+            self.assertTrue(ok(cmd), cmd)
+        self.assertFalse(ok("lean-agent run p <<'EOF'\nx\nEOF\nrm x"))
+
+    def test_guide_examples_pass_the_strict_check(self):
+        import re
+        sys.path.insert(0, ROOT)
+        import budget_hook
+        with open(os.path.join(ROOT, "..", "templates", "guide.md"), encoding="utf-8") as fh:
+            guide = fh.read().replace("{{P}}", "shop")
+        examples = []
+        for m in re.finditer(r"^```(\w*)\n(.*?)^```", guide, re.S | re.M):
+            if m.group(1) == "sh":
+                examples.append(m.group(2))
+            elif m.group(1) == "text":  # lines with a trailing `# comment`: the comment isn't part of the command
+                examples += [re.sub(r"\s+#.*$", "", l) for l in m.group(2).splitlines() if l.startswith("lean-agent ")]
+        text = re.sub(r"^```.*?^```", "", guide, flags=re.S | re.M)
+        examples += [c for c in re.findall(r"`(lean-agent [^`\n]+)`", text)]
+        self.assertGreater(len(examples), 20)
+        self.assertTrue(any("<<'EOF'" in e and "--task-file -" in e for e in examples))
+        for ex in examples:
+            ex = re.sub(r"<[A-Za-z][\w -]*>", "x", ex)  # <placeholders>
+            opened = re.search(r"<<-?(['\"]?)(\w+)\1$", ex)  # a heredoc whose body the prose gives separately
+            ex += f"\nbody\n{opened.group(2)}" if opened else ""
+            ex = re.sub(r"(?<=\w)\|(?=\w)", "/", ex.replace("...", "x"))  # on|off: alternatives
+            self.assertTrue(budget_hook.lean_agent_only(ex), ex)
 
     def test_no_budget_tracks_only(self):
         self.assertIsNone(run_hook("budget_hook.py", self.ev, **self.env))
