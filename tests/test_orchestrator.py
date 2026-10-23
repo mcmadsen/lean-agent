@@ -3801,8 +3801,20 @@ class CliTest(unittest.TestCase):
         self.assertEqual(len(data["applied"]), 500)
         self.assertFalse(lt.mark_once("k600"))  # op ids can't push a once-key out
 
-    def test_thread_op_id_round_trip_and_bubble_hides_the_suffix(self):
+    def _strip_op(self, text):
         import shutil
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node isn't installed")
+        js = open(os.path.join(os.path.dirname(CLI), "dashboard_ui", "chat.js")).read()
+        start = js.index("function stripOp")
+        fn = js[start:js.index("}", start) + 1]  # the body has no inner braces
+        p = subprocess.run([node, "-e", fn + "\nconsole.log(JSON.stringify(stripOp(process.argv[1])))", text],
+                           capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def test_thread_op_id_round_trip_and_bubble_hides_the_suffix(self):
         ds, m, rec = self.model_records()
         import lean_threads
         lean_threads.new("A")
@@ -3812,15 +3824,43 @@ class CliTest(unittest.TestCase):
         self.assertEqual(ev["op"]["id"], "0123456789ab")
         self.assertIn("[op 0123456789ab]", ev["text"])  # the transcript keeps it
         self.assertIn("0123456789ab", lean_threads.load()["ops"])
-        node = shutil.which("node")
-        if not node:
-            self.skipTest("node isn't installed")
-        js = open(os.path.join(os.path.dirname(CLI), "dashboard_ui", "chat.js")).read()
-        fn = js[js.index("function stripOp"):js.index("\n", js.index("function stripOp"))]
-        p = subprocess.run([node, "-e", fn + "\nconsole.log(JSON.stringify(stripOp(process.argv[1])))", ev["text"]],
-                           capture_output=True, text=True)
-        self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual(json.loads(p.stdout), "Merge thread t2 into t1")
+        self.assertEqual(self._strip_op(ev["text"]), "Merge thread t2 into t1")
+
+    def test_thread_excerpt_with_an_op_marker_mid_text_keeps_it(self):
+        text = 'Move message to t1 (m1): "see [op abc] here" [op 0123456789ab]'
+        self.assertEqual(self._strip_op(text), 'Move message to t1 (m1): "see [op abc] here"')
+
+    def test_thread_colliding_op_id_is_reported_as_skipped(self):
+        import dash_chat
+        import lean_threads
+        lean_threads.new("A")
+        lean_threads.new("B")
+        lean_threads.merge("t2", "t1", "feedfacecafe")
+        for call in (lambda: dash_chat.thread_move("m1", "t1"), lambda: dash_chat.thread_merge("t2", "t1"),
+                     lambda: dash_chat.thread_unmerge("t2")):
+            with mock.patch.object(dash_chat, "_op_id", return_value="feedfacecafe"):
+                self.assertEqual(call(), {"ok": True, "skipped": "seen"})
+        self.assertEqual(lean_threads.load()["moves"], {})
+        self.assertEqual(lean_threads.load()["aliases"], {"t2": "t1"})  # nothing was redone or undone
+
+    def test_dashboard_load_threads_renders_rows_and_escape_closes_the_sheet(self):
+        out = self._page_probe("""
+        const T="";function drawHeader(){}  // the header needs the board; not under test here
+        globalThis.fetch=async u=>(out.url=u,{ok:true,json:async()=>({threads:[
+          {id:"main",title:"Main",kind:"main",waiting:false,last_message:null,messages:0},
+          {id:"t1",title:"Pricing page",kind:"free",waiting:false,last_message:null,messages:0}]})});
+        await loadThreads();
+        out.rows=($("threads").innerHTML.match(/class="row/g)||[]).length;
+        out.title=$("threads").innerHTML.includes("Pricing page");
+        let closed=0;$("sheet").open=true;$("sheet").close=()=>{closed++;$("sheet").open=false};
+        ui.sheet={mode:"switch"};
+        closeSheet();
+        out.closed=[closed,ui.sheet];
+        """)
+        self.assertTrue(out["url"].startswith("/api/threads"))
+        self.assertEqual(out["rows"], 2)
+        self.assertTrue(out["title"])
+        self.assertEqual(out["closed"], [1, None])
 
     def test_thread_expiry_counts_merged_threads_last_message(self):
         lt = self.threads_home()
