@@ -3450,6 +3450,20 @@ class CliTest(unittest.TestCase):
         m.refresh()
         self.assertEqual(m.path, tr)
 
+    def test_up_restart_keeps_the_record_until_no_transcript_of_its_chain_exists(self):
+        ds, home, proj, tr, up = self._follow_env()
+        import service_session
+        rec = os.path.join(home, "chat", "service.json")
+        missing = os.path.join(proj, "s2.jsonl")  # after a /clear, before the new transcript is written
+        with open(rec, "w") as fh:
+            json.dump({"session_id": "s2", "transcript_path": missing, "chain": [tr, missing]}, fh)
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": os.path.join(home, "cfg")}):
+            service_session.drop_stale_record(proj, "s2")
+            self.assertTrue(os.path.exists(rec))  # s1.jsonl of the chain exists
+            os.remove(tr)
+            service_session.drop_stale_record(proj, "s2")
+            self.assertFalse(os.path.exists(rec))
+
     def _follow_env(self):
         sys.path.insert(0, os.path.dirname(CLI))
         import dash_service
