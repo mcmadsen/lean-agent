@@ -71,7 +71,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `optimize` (also `--apply`, `--accept`, `--reject`) | b | allowed: applies drafts a worker made from run feedback; no orchestrator text is stored. The user can also use the dashboard buttons |
 | `review decline <p> <n>…` (also `review-decline`), `review learn <p> <PR> --mcp <tracker>` (also `review-learn`) | b | allowed: review state, and lessons a worker derives from human reviews |
 | `review learn <p> --text "…"` / `--helper "…"` | c | **denied**: text the orchestrator supplies is knowledge; `remember` (or a worker) |
-| `publish` | b | allowed: a worker publishes the content |
+| `publish` | b | allowed: a worker makes a Claude Docs doc (or a local file without the connector) |
 | `config strict on`, `config artifacts …`, `attribution`, `limits`, `budget`, `context` | b | allowed: switches and limits |
 | `config strict off` | c | **denied**: the orchestrator doesn't lift its own guardrail |
 | `runs`, `logs`, `output`, `stats`, `savings`, `week`, `guide`, `doctor`, `dashboard` | a | allowed |
