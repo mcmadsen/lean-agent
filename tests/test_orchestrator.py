@@ -87,6 +87,11 @@ FAKE_CLAUDE = textwrap.dedent("""\
             for i, name in enumerate(os.environ["FAKE_MCP_CALL"].split(",")):  # several calls, in order
                 fh.write(json.dumps({"type": "assistant", "timestamp": ts, "message": {"content": [
                     {"type": "tool_use", "id": "tu-%d-%d" % (os.getpid(), i), "name": name, "input": {}}]}}) + "\\n")
+    if os.environ.get("FAKE_WORKER_TOOLS"):  # the worker's init event; a worker stopped there never logs a turn
+        import time
+        print(json.dumps({"type": "system", "subtype": "init", "session_id": "sess-1",
+                          "tools": json.loads(os.environ["FAKE_WORKER_TOOLS"])}), flush=True)
+        time.sleep(float(os.environ.get("FAKE_INIT_SLEEP", "0")))
     with open(log, "a") as fh:
         fh.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "task": task,
                              "append": open(append).read(), "mcp": mcp,
@@ -364,30 +369,79 @@ class CliTest(unittest.TestCase):
                      "Never put secrets, tokens or credentials", "A local file is a worker task"):
             self.assertIn(text, guide)
 
-    def test_publish_runs_a_worker_with_the_artifact_tool_and_reuses_the_url_by_title(self):
+    DOCS_TOOLS = json.dumps(["Read", "Glob", "Grep", "ToolSearch", "mcp__claude_ai_Claude_Docs__batch",
+                             "mcp__claude_ai_Claude_Docs__create", "mcp__claude_ai_Claude_Docs__delete"])
+
+    def test_publish_runs_a_docs_worker_and_reuses_the_link_by_title(self):
         self.cli("learn", self.proj)
-        env = dict(FAKE_ANSWER="Published.\nARTIFACT https://artifacts.example/a1")
+        env = dict(FAKE_WORKER_TOOLS=self.DOCS_TOOLS, FAKE_ANSWER="Published.\nhttps://claude.ai/artifact/a1")
         out = self.cli("publish", "Weekly plan", "--task-file", "-", input="plan text", **env).stdout
-        self.assertIn("artifact: https://artifacts.example/a1", out)
+        self.assertIn("doc: https://claude.ai/artifact/a1", out)
         call = self.calls()[-1]
         argv = call["argv"]
-        self.assertIn("Artifact", argv[argv.index("--allowedTools") + 1].split(","))
-        self.assertEqual(sorted(argv[argv.index("--tools") + 1].split(",")), ["Artifact", "Glob", "Grep", "Read"])
-        self.assertTrue(self.ledger()[-1]["read_only"])
+        self.assertNotIn("--safe-mode", argv)
+        self.assertNotIn("--strict-mcp-config", argv)  # it drops claude.ai connectors in -p
+        self.assertIn("--disable-slash-commands", argv)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Glob,Grep,ToolSearch")
+        allowed = argv[argv.index("--allowedTools") + 1].split(",")
+        self.assertEqual(sorted(allowed), sorted(["Read", "Glob", "Grep", "ToolSearch", "mcp__claude_ai_Claude_Docs",
+                                                  "mcp__Claude_Docs"]))
+        self.assertEqual(argv[argv.index("--disallowedTools") + 1].split(","),
+                         ["mcp__claude_ai_Claude_Docs__delete", "mcp__Claude_Docs__delete"])
+        self.assertTrue(json.loads(argv[argv.index("--settings") + 1])["disableAllHooks"])
+        self.assertIn("Never delete a doc", call["append"])
+        self.assertIn("one `batch` call", call["append"])
+        self.assertEqual(self.ledger()[-1]["role"], "publisher")
         self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
         self.assertIn("plan text", call["task"])
-        self.assertNotIn("existing artifact", call["task"])
-        self.assertIn("artifact: https://artifacts.example/a1 Weekly plan", self.cli("handoff").stdout)
-        env["FAKE_ANSWER"] = "Updated.\nARTIFACT https://artifacts.example/a1"
+        self.assertNotIn("existing doc", call["task"])
+        self.assertIn("artifact: https://claude.ai/artifact/a1 Weekly plan", self.cli("handoff").stdout)
+        self.assertIn("publish: Claude Docs connector available", self.cli("doctor", check=False).stdout)
+        env["FAKE_ANSWER"] = "Updated.\nhttps://claude.ai/artifact/a1"
         self.cli("publish", "Weekly plan", "--as-is", "--task-file", "-", input="new text", **env)
         call = self.calls()[-1]
-        self.assertIn("Update the existing artifact https://artifacts.example/a1", call["task"])
+        self.assertIn("Update the existing doc https://claude.ai/artifact/a1", call["task"])
+        self.assertIn("don't create a new one", call["append"])
         self.assertEqual(call["argv"][call["argv"].index("--model") + 1], "haiku")
-        self.assertEqual(self.cli("handoff").stdout.count("artifact: https://artifacts.example/a1"), 1)
-        self.cli("publish", "Other", "--task-file", "-", input="x", **env)  # another title: no URL reused
-        self.assertNotIn("existing artifact", self.calls()[-1]["task"])
+        self.assertEqual(self.cli("handoff").stdout.count("artifact: https://claude.ai/artifact/a1"), 1)
+        self.cli("publish", "Other", "--task-file", "-", input="x", **env)  # another title: no link reused
+        self.assertNotIn("existing doc", self.calls()[-1]["task"])
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "w", "t")  # every other worker keeps --safe-mode
+        self.assertIn("--safe-mode", self.calls()[-1]["argv"])
         self.cli("config", "artifacts", "off")
         self.assertNotEqual(self.cli("publish", "Weekly plan", "--task-file", "-", input="x", check=False).returncode, 0)
+
+    def test_publish_without_docs_tools_writes_a_local_file_and_runs_no_turn(self):
+        self.cli("learn", self.proj)
+        p = self.cli("publish", "Open questions", "--as-is", "--task-file", "-", input="- which db?", check=False,
+                     FAKE_WORKER_TOOLS=json.dumps(["Read", "Glob", "Grep", "ToolSearch", "mcp__other__thing"]),
+                     FAKE_INIT_SLEEP="5", FAKE_ANSWER="https://claude.ai/artifact/never")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Claude Docs connector not available to workers", p.stderr)
+        path = p.stdout.strip().splitlines()[-1]
+        self.assertEqual(path, os.path.join(self.env["LEAN_AGENT_HOME"], self.ledger()[-1]["project"], "publish",
+                                            "open-questions.md"))
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "# Open questions\n\n- which db?\n")
+        self.assertFalse(os.path.exists(self.log) and self.calls())  # stopped at its init event: no turn
+        self.assertNotIn("artifact/never", p.stdout)
+        self.assertEqual((self.ledger()[-1]["role"], self.ledger()[-1]["status"]), ("publisher", "error"))
+        self.assertIn("publish: Claude Docs connector missing", self.cli("doctor", check=False).stdout)
+
+    def test_publish_reply_without_a_link_fails(self):
+        self.cli("learn", self.proj)
+        p = self.cli("publish", "Weekly plan", "--task-file", "-", input="plan", check=False,
+                     FAKE_WORKER_TOOLS=self.DOCS_TOOLS, FAKE_ANSWER="I made it, see https://claude.ai/chat/1")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("publish failed: the worker's reply has no Claude Docs link", p.stderr)
+        self.assertNotIn("doc:", p.stdout)
+        self.assertNotIn("artifact:", self.cli("handoff").stdout)
+
+    def test_doctor_checks_the_publisher_path_without_a_turn(self):
+        out = self.cli("doctor", check=False, FAKE_PROBE_TOOLS=json.dumps(["Read", "mcp__Claude_Docs__guide"])).stdout
+        self.assertIn("publish: Claude Docs connector available", out)
+        self.assertFalse(os.path.exists(self.log) and self.calls())  # a launch stopped at init, not a worker turn
 
     def test_remember_runs_a_librarian_and_prints_what_it_filed(self):
         self.cli("learn", self.proj)
@@ -537,7 +591,7 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertEqual(self.todo_count("#1"), 0)
         self.cli("advise", "Fix the export retry loop", FAKE_ANSWER="Here.\nADVICE\nline 1")
-        self.cli("publish", "Weekly plan", "--task-file", "-", input="plan text", FAKE_ANSWER="ARTIFACT https://a.example/1")
+        self.cli("publish", "Weekly plan", "--task-file", "-", input="plan text", FAKE_ANSWER="https://claude.ai/artifact/1")
         self.assertEqual([r.get("role") for r in self.ledger()], ["advisor", "publisher"])
         self.assertEqual(self.todo_count("#1"), 0)
 

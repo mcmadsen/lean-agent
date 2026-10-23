@@ -55,6 +55,13 @@ CONFLICT_RE = re.compile(r"(?i)\b(sub-?agents?|agent tool|task tool|workflow too
 
 WORKER_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
 READONLY_TOOLS = "Read,Glob,Grep"
+# The publisher writes Claude Docs docs through the claude.ai connector. --safe-mode, --strict-mcp-config and --bare
+# all drop claude.ai connectors in -p, so this role keeps only what leaves them on: no settings files, no hooks,
+# no slash commands, and default permissions, so only these tools run (other MCP tools are denied, never asked).
+PUBLISH_TOOLS = READONLY_TOOLS + ",ToolSearch"
+DOCS_SERVERS = ("mcp__claude_ai_Claude_Docs", "mcp__Claude_Docs")  # the connector's name differs by environment
+DOCS_TOOL_RE = re.compile(r"^mcp__(claude_ai_)?Claude_Docs__")
+PUBLISH_ISOLATION = ["--setting-sources", "", "--disallowedTools", ",".join(s + "__delete" for s in DOCS_SERVERS)]
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target", "__pycache__", ".next", "vendor"}
 STOPWORDS = set("the and for with that this from into have has are was were will would should could "
                 "you your our their not but all any can use using used make add fix get set run".split())
@@ -1427,7 +1434,10 @@ def cmd_run(a):
             print(f"lean-agent: warning: {sname}: {problem} (lean-agent doctor says more)", file=sys.stderr)
     mcp_path = os.path.join(workdir, "mcp.json")
     chrome_allowed, chrome_disallowed, chrome_profile = resolve_chrome(chrome_spec, project) if chrome_spec else ([], [], None)
-    if mcp_servers or chrome_spec:
+    publisher = (getattr(a, "role", None) or (prev or {}).get("role")) == "publisher"
+    if publisher:
+        isolation = list(PUBLISH_ISOLATION)
+    elif mcp_servers or chrome_spec:
         if mcp_servers:
             lean_mcp.write_config(mcp_path, mcp_servers)
         # --safe-mode disables MCP and Chrome; this keeps the same isolation but admits exactly these servers
@@ -1443,11 +1453,13 @@ def cmd_run(a):
     else:
         isolation = ["--safe-mode"]
     lean_json = os.path.join(PLUGIN_ROOT, "bin", "lean-json")
-    if read_only:
+    if publisher:
+        allowed = PUBLISH_TOOLS.split(",") + list(DOCS_SERVERS)
+        permission_mode = "default"
+    elif read_only:
         allowed = READONLY_TOOLS.split(",") + [f"Bash(git -C {project} {sub}:*)" for sub in READONLY_GIT]
         allowed.append(f"Bash({lean_json}:*)")  # reads a file, prints a compact view
-        allowed += [t for t in tools.split(",") if t.startswith("Artifact")]  # the publisher's own tools
-        allowed += [f"Bash({c}:*)" for c in allow_cmd + internal_cmd]  # read-only commands the orchestrator named, and the role's own
+        allowed +=[f"Bash({c}:*)" for c in allow_cmd + internal_cmd]  # read-only commands the orchestrator named, and the role's own
         permission_mode = "default"
     else:
         allowed = [tools]
@@ -1479,7 +1491,10 @@ def cmd_run(a):
         hooks["PostToolUse"] = [{"matcher": "mcp__.*", "hooks": [{
             "type": "command", "timeout": 20,
             "command": f"python3 {json.dumps(os.path.join(HERE, 'mcp_trim_hook.py'))}"}]}]
-    flag_settings["hooks"] = hooks
+    if publisher:  # no Bash to guard, and no hook of any plugin or setting runs in it
+        flag_settings["disableAllHooks"] = True
+    else:
+        flag_settings["hooks"] = hooks
     if flag_settings:
         cmd += ["--settings", json.dumps(flag_settings)]
     if prev:
@@ -1529,7 +1544,8 @@ def cmd_run(a):
     try:
         with wt_lock:
             raw, err, reads = stream_worker(cmd, today_line() + "\n\n" + task, workdir, env,
-                                            env_num("LEAN_AGENT_RUN_TIMEOUT", 1800), max_reads, note_session)
+                                            env_num("LEAN_AGENT_RUN_TIMEOUT", 1800), max_reads, note_session,
+                                            publish_init_check if publisher else None)
     except FileNotFoundError:
         die(f"'{claude}' not found on PATH")
     finally:
@@ -1575,7 +1591,10 @@ def cmd_run(a):
     details_path, n_details, answer_cut = None, 0, False
     if answer_lines and summary:
         summary, details_path, n_details, answer_cut = split_answer(summary, answer_lines, workdir)
-    if reads.get("stopped") and not out.get("type"):  # stopped by lean-agent: no result event, so build one
+    if reads.get("init_stop"):  # stopped at its init event (a tool it needs is missing): no turn ran
+        out = {"subtype": "init_stop", "is_error": True, "session_id": reads.get("session_id"), "num_turns": 0}
+        err, raw = reads["init_stop"], ""
+    elif reads.get("stopped") and not out.get("type"):  # stopped by lean-agent: no result event, so build one
         out = {"subtype": "error_max_context_reads", "session_id": reads.get("session_id"),
                "num_turns": reads["turns"], "usage": reads["usage"]}
     subtype = out.get("subtype") or "error"
@@ -1647,7 +1666,7 @@ def cmd_run(a):
         "recipe_step": (getattr(a, "recipe", None) or (None, None))[1],
         "estimate_usd": (getattr(a, "estimate", None) or (None, None))[0],
         "estimate_kind": (getattr(a, "estimate", None) or (None, None))[1],
-        "answer_lines": answer_lines, "details": details_path,
+        "answer_lines": answer_lines, "details": details_path, "init_stop": reads.get("init_stop"),
     }
     append_jsonl(home("ledger.jsonl"), entry)
     LAST_RUN[:] = [entry]
@@ -1764,14 +1783,16 @@ def note_progress(workdir, turn, msg, u):
         pass
 
 
-def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0, on_session=None):
+def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0, on_session=None, on_init=None):
     """Run a worker and read its stream-json as it comes, so a run that keeps re-reading a large context
     can be stopped (after `max_reads` context tokens summed over its calls; 0 = never) and resumed later.
-    `on_session(id)` is called once, when the first event carries the session id. Returns
-    (stdout, stderr, {"ctx", "turns", "usage", "session_id", "stopped"})."""
+    `on_session(id)` is called once, when the first event carries the session id. `on_init(event)` sees the
+    system/init event; a reason it returns stops the worker there, before its first turn (in "init_stop").
+    Returns (stdout, stderr, {"ctx", "turns", "usage", "session_id", "stopped", "init_stop"})."""
     import tempfile
     import threading
-    reads = {"ctx": 0, "turns": 0, "usage": {k: 0 for k in usage.FIELDS}, "session_id": None, "stopped": False}
+    reads = {"ctx": 0, "turns": 0, "usage": {k: 0 for k in usage.FIELDS}, "session_id": None, "stopped": False,
+             "init_stop": None}
     seen, lines = set(), []
     with tempfile.TemporaryFile("w+") as errf:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True,
@@ -1791,7 +1812,7 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0, on_session=No
                 pass
             for line in proc.stdout:
                 lines.append(line)
-                if '"session_id"' in line or '"assistant"' in line:
+                if '"session_id"' in line or '"assistant"' in line or (on_init and '"init"' in line):
                     try:
                         ev = json.loads(line)
                     except ValueError:
@@ -1802,6 +1823,12 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0, on_session=No
                         reads["session_id"] = ev["session_id"]
                         if on_session:
                             on_session(reads["session_id"])
+                    if on_init and ev.get("type") == "system" and ev.get("subtype") == "init":
+                        reads["init_stop"] = on_init(ev)
+                        if reads["init_stop"]:
+                            reads["stopped"] = True
+                            proc.kill()  # nothing to finish: no turn has started
+                            break
                     msg = ev.get("message") if ev.get("type") == "assistant" else None
                     if not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict) or msg.get("id") in seen:
                         continue
@@ -5543,7 +5570,7 @@ ARTIFACT_MODES = ("off", "worker", "direct")
 
 
 def artifacts_mode():
-    """off | worker (default: `lean-agent publish` starts a worker that has the Artifact tool) | direct (the
+    """off | worker (default: `lean-agent publish` starts a worker that makes a Claude Docs doc) | direct (the
     orchestrator has the Artifact tools itself, which adds ~17k tokens to every turn). The old value "on" is direct."""
     v = load_json(home("config.json"), {}).get("artifacts", "worker")
     return "direct" if v == "on" else v if v in ARTIFACT_MODES else "worker"
@@ -5832,6 +5859,10 @@ def cmd_doctor(a):
                "keep files other than lean-agent's guide out: lean-agent doctor --fix (refreshes the excludes)")
     report(is_trusted(h), "orchestrator home is trusted", "lean-agent trust")
     report(True, f"artifacts: {artifacts_mode()} (lean-agent config artifacts off|worker|direct)")
+    if artifacts_mode() == "worker":
+        docs = publish_check()
+        report(True if docs == "available" else None, f"publish: Claude Docs connector {docs}",
+               "turn claude.ai connectors on and connect Claude Docs; until then `publish` writes a local file")
     report(True, f"strict orchestrator: {'on' if strict_on() else 'off'} (lean-agent config strict on|off)")
 
     slug = default_project(path)
@@ -6959,8 +6990,8 @@ def cmd_config(a):
             save_json(settings, orchestrator_settings(load_json(settings, {})))
     mode = artifacts_mode()
     print(f"artifacts: {mode} · " + {
-        "worker": "the orchestrator publishes through `lean-agent publish` (a worker has the Artifact tool; private "
-                  "until the user shares them)",
+        "worker": "the orchestrator publishes through `lean-agent publish` (a worker makes a Claude Docs doc; "
+                  "private until the user shares it)",
         "direct": "the orchestrator has the Artifact tools itself (private until the user shares them; adds ~17k "
                   "tokens to every turn)",
         "off": "no artifacts: the orchestrator can't use the Artifact tools and `publish` refuses"}[mode])
@@ -7814,11 +7845,52 @@ def cmd_grep_log(a):
 
 
 PUBLISH_RULE = """\
-You publish one artifact for the orchestrator, with the Artifact tool. Publish a new private artifact{update}.
-Never put secrets, tokens or credentials in it. {content}
-End your answer with one line `ARTIFACT <url>` (the artifact's URL), and nothing after it.
+You publish one document for the orchestrator as a Claude Docs doc, with the Claude Docs tools
+(mcp__claude_ai_Claude_Docs__* or mcp__Claude_Docs__*; load a deferred one with ToolSearch, query "select:<name>").
+{action}
+Never delete a doc. Never put secrets, tokens or credentials in it. {content}
+End your answer with the doc's link (https://claude.ai/artifact/...) on its own line, and nothing after it.
 """
+PUBLISH_NEW = ("Create a new doc titled exactly as the task's Title: one `batch` call that creates the container and "
+               "writes the body as markdown (read `guide` first if you don't know the call's shape).")
+PUBLISH_UPDATE = ("Update the existing doc {url}: read it first, then change it with `update` (or `batch`); "
+                  "don't create a new one.")
+DOC_LINK_RE = re.compile(r"https://claude\.ai/artifact/[\w\-./?=&#%]+")
+PUBLISH_MISSING = ("Claude Docs connector not available to workers (check that claude.ai connectors are on and "
+                   "Claude Docs is connected); publish this file from the Claude app")
 ARTIFACT_NOTE_RE = re.compile(r"^artifact: (\S+) (.*)$")
+
+
+def docs_tools(tools):
+    return [t for t in tools or [] if isinstance(t, str) and DOCS_TOOL_RE.match(t)]
+
+
+def publish_init_check(ev):
+    """The publisher's on_init: stops it before its first turn when its tools have no Claude Docs tool. The
+    outcome is kept for `lean-agent doctor`."""
+    found = docs_tools(ev.get("tools"))
+    save_json(home("publish-check.json"), {"ts": now_iso(), "docs": bool(found)})
+    return None if found else "no Claude Docs tool (mcp__claude_ai_Claude_Docs__*, mcp__Claude_Docs__*) in the worker's tools"
+
+
+def publish_check():
+    """'available' | 'missing': the last publish's init event, else a launch with the publisher's flags that is
+    stopped at its init event (no turn)."""
+    import tempfile
+    last = load_json(home("publish-check.json"), None)
+    if not isinstance(last, dict):
+        cmd = [os.environ.get("LEAN_AGENT_CLAUDE") or "claude", "-p", "--output-format", "stream-json", "--verbose",
+               "--model", "haiku", *PUBLISH_ISOLATION, "--disable-slash-commands", "--tools", PUBLISH_TOOLS,
+               "--allowedTools", ",".join(PUBLISH_TOOLS.split(",") + list(DOCS_SERVERS)),
+               "--permission-mode", "default", "--max-turns", "1", "--settings", json.dumps({"disableAllHooks": True})]
+        with tempfile.TemporaryDirectory() as d:
+            try:
+                stream_worker(cmd, "Reply ok.", d, dict(os.environ), 60,
+                              on_init=lambda ev: publish_init_check(ev) or "checked")
+            except OSError:
+                return "missing"
+        last = load_json(home("publish-check.json"), {})
+    return "available" if last.get("docs") else "missing"
 
 
 def artifact_note_url(title):
@@ -7979,7 +8051,8 @@ def cmd_advise(a):
 
 
 def cmd_publish(a):
-    """Publish (or update) an artifact through a worker, so the orchestrator never loads the Artifact tools."""
+    """Publish (or update) a Claude Docs doc through a worker, so the orchestrator never loads the doc tools. Without
+    the connector the content goes to a local file instead, for the user to publish from the Claude app."""
     mode = artifacts_mode()
     if mode == "off":
         die("artifacts are off (lean-agent config artifacts worker)")
@@ -7990,23 +8063,31 @@ def cmd_publish(a):
     url = a.url or artifact_note_url(title)
     slug, _ = role_project(a, "worker")
     task = (f"Title: {title}\n"
-            + (f"Update the existing artifact {url}: read it first, then change it.\n" if url else "")
+            + (f"Update the existing doc {url}: read it first, then change it.\n" if url else "")
             + ("The content, to publish as it is:\n" if a.as_is else "What to publish:\n") + content)
     rule = PUBLISH_RULE.format(
-        update=f", or update the artifact at {url} (read it first with the Artifact tool)" if url else "",
+        action=PUBLISH_UPDATE.format(url=url) if url else PUBLISH_NEW,
         content="Publish the content exactly as given." if a.as_is else
         "Read what you need in the project to write it, then publish it.")
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model="haiku" if a.as_is else "sonnet",
-                            why="publish an artifact for the orchestrator", cards="none", card_list=None, project=slug,
-                            read_only=True, chrome=None, mcp=None, tools=READONLY_TOOLS + ",Artifact",
+                            why="publish a Claude Docs doc for the orchestrator", cards="none", card_list=None,
+                            project=slug, read_only=True, chrome=None, mcp=None, tools=PUBLISH_TOOLS,
                             allow_send=None, max_turns=20, max_usd=1.0, max_context=2000, max_cards=4, ttype="write",
                             role="publisher", effort="low", role_rule=rule)
     rc, _, run = run_role(ns)
-    m = re.search(r"(?m)^ARTIFACT (\S+)\s*$", parse_feedback(run_result_text(run))[0] if run else "")
-    if not m:
-        die("the worker didn't report an artifact URL; see its reply above", rc or 1)
-    new = m.group(1)
-    print(f"artifact: {new}")
+    if run and run.get("init_stop"):  # the worker had no Claude Docs tool: stopped before its first turn
+        path = home(slug, "publish", slugify(title) + ".md")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(f"# {title}\n\n{content}\n")
+        print(path)
+        die(PUBLISH_MISSING, 2)
+    links = DOC_LINK_RE.findall(parse_feedback(run_result_text(run))[0] if run else "")
+    if not links:
+        die("publish failed: the worker's reply has no Claude Docs link (https://claude.ai/artifact/...); "
+            "see its reply above", rc or 1)
+    new = links[-1].rstrip(".,)")
+    print(f"doc: {new}")
     if artifact_note_url(title) != new:
         a2 = argparse.Namespace(note=f"artifact: {new} {title}", kind="fyi", done=None, hours=24)
         cmd_handoff(a2)
@@ -8154,11 +8235,12 @@ def build_parser():
     s = sub.add_parser("brief", help="what a fresh session starts from: the latest checkpoint, then the hand-off")
     s.set_defaults(fn=cmd_brief)
 
-    s = sub.add_parser("publish", help="publish (or update) a private artifact through a small worker that has the "
-                       "Artifact tool; prints its URL and records it as a hand-off note, so a later call with the same "
-                       "title updates it. The content or what to publish comes on stdin: --task-file -")
+    s = sub.add_parser("publish", help="publish (or update) a private Claude Docs doc through a small worker that has "
+                       "the claude.ai Claude Docs connector; prints its link and records it as a hand-off note, so a "
+                       "later call with the same title updates it. Without the connector it writes a local file and "
+                       "exits non-zero. The content or what to publish comes on stdin: --task-file -")
     s.add_argument("title")
-    s.add_argument("--url", help="update this existing artifact instead of making a new one")
+    s.add_argument("--url", help="update this existing doc (a claude.ai artifact link) instead of making a new one")
     s.add_argument("--project", "-p", help="the project the worker runs in (default: the latest run's)")
     s.add_argument("--task-file", help="what to publish, or the content ('-' = stdin)")
     s.add_argument("--as-is", action="store_true", help="the input is the content itself: publish it unchanged (haiku)")
