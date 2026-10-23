@@ -179,13 +179,11 @@ def go_fresh(restart_host=False, wait=None, now=time.time, sleep=time.sleep):
 
 def update_up(**fields):
     """Merge fields into up.json (written by `up`; the dashboard and hooks read it)."""
-    data = _load(up_path())
-    data.update(fields)
     os.makedirs(os.path.dirname(up_path()), exist_ok=True)
-    tmp = up_path() + ".tmp"
-    with open(tmp, "w") as fh:
-        json.dump(data, fh, indent=2)
-    os.replace(tmp, up_path())
+    with lean_common.file_lock(up_path()):
+        data = _load(up_path())
+        data.update(fields)
+        lean_common.write_json_atomic(up_path(), data)
 
 
 def request_clear():
@@ -682,7 +680,7 @@ class Host:
             size = None
         fcntl.ioctl(master, termios.TIOCSWINSZ, size or struct.pack("HHHH", 50, 200, 0, 0))
         drop_stale_record(self.cwd, sid)
-        update_up(pid=None, session_started=time.strftime("%Y-%m-%dT%H:%M:%S"))
+        update_up(pid=None, session_started=time.strftime("%Y-%m-%dT%H:%M:%S"), clear_requested=None, clear_hold=None)
         try:
             proc = subprocess.Popen(argv, env=self.env, cwd=self.cwd, stdin=slave, stdout=slave, stderr=slave,
                                     start_new_session=True)
