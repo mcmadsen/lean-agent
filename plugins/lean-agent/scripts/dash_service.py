@@ -2,10 +2,12 @@
 
 Instead of its own Claude Code processes, the dashboard types into the orchestrator session through the bridge and
 reads what happened from that session's transcript JSONL (incrementally, by byte offset), so the Claude app and the
-dashboard show the same conversation. Dashboard messages arrive tagged (`About #N "title": ...` for a task thread);
-the sends are remembered (chat/service_sends.jsonl) so the transcript's user turns can be matched back to the thread
-they came from. A thread's view is its own user turns plus the assistant and tool events that follow, until the next
-user turn; "main" shows everything.
+dashboard show the same conversation. Every message belongs to a thread: dashboard messages arrive tagged (`About #N
+"title": ...` for a task thread, `Thread tN "title": ...` for another topic); the sends are remembered
+(chat/service_sends.jsonl) so the transcript's user turns can be matched back to the thread they came from. An untagged
+turn takes the thread of the first tag in the reply that follows (and the reply may lift a routing line, see
+`parse_reply`). A thread's view is its own user turns plus the assistant and tool events that follow, until the next
+user turn; merges (aliases) and per-message moves come from the registry (lean_threads.py); "main" shows everything.
 
 Permission prompts: the PermissionRequest hook (permission_hook.py) hands a request to the dashboard as a file in
 chat/perm/ while a dashboard tab is polling (chat/dash-poll is touched on every poll); the page's answer is written
@@ -22,14 +24,59 @@ import re
 import threading
 import time
 
+import lean_threads
 from lean_common import pid_alive, questions_of, tool_summary  # noqa: F401
 
 MAX_EVENTS = 2000
 FRESH_SECS = 20  # a dashboard tab polled this recently counts as someone looking
 WORKING_SECS = 60  # no transcript change for this long and no tool running: not shown as working
 QUIET_SECS = 8   # a transcript untouched this long after an assistant text: the turn is over
-TAG_RE = re.compile(r'^About (#?[A-Za-z0-9_.-]+) "')
-ABOUT_REPLY_RE = re.compile(r'^\s*About #(\d+)\b')  # an untagged message answered "About #N: ..." belongs to task #N
+TAG_RE = re.compile(r'^\s*(?:About\s+(#\d+)|Thread\s+(t\d+|optimize))\b(?:\s*"([^"\n]*)")?\s*:?')  # the thread tag a text starts with
+_ID = r"(?:#\d+|t\d+)"
+ROUTED_RE = re.compile(rf"Routed to ({_ID})\.(?: Also close: ({_ID}(?:, {_ID})*)\.)?")
+STARTED_RE = re.compile(r"Started a new thread: (.+)\.")
+MOVE_RE = re.compile(r"^Move message to (#?\d+|[tT]\d+|optimize)\b(?: \(([^)]+)\))?")
+MERGE_RE = re.compile(r"^Merge thread (\S+) into ([^\s.]+)\.?$")
+UNMERGE_RE = re.compile(r"^Unmerge thread ([^\s.]+)\.?$")
+
+
+def canon(key):
+    """A thread key as the registry spells it (`12` -> `#12`); "main", None and keys of other forms stay as they are."""
+    if key in (None, "main"):
+        return key
+    try:
+        return lean_threads.norm(key)
+    except ValueError:
+        return str(key)
+
+
+def legacy_key(tid):
+    """What the page's `about` carries: the task number without `#`, or the thread id."""
+    return tid[1:] if tid and tid.startswith("#") else tid
+
+
+def parse_reply(text):
+    """(thread, title, routing, shown) of an assistant text: the thread tag it starts with, and the routing line
+    (`Routed to #N.`, `Routed to #N. Also close: #M.`, `Started a new thread: <title>.`) when that is exactly its first
+    line after the tag; `shown` is the text without that line."""
+    m = TAG_RE.match(text)
+    tid = (m.group(1) or m.group(2)) if m else None
+    prefix = text[:m.end()] if m else ""
+    rest = text[m.end():] if m else text
+    body = rest.lstrip()
+    line, _, after = body.partition("\n")
+    line = line.strip()
+    routing = None
+    r = ROUTED_RE.fullmatch(line)
+    if r:
+        routing = {"text": line, "target": r.group(1), "also": r.group(2).split(", ") if r.group(2) else []}
+    elif STARTED_RE.fullmatch(line):
+        routing = {"text": line, "target": tid, "also": [], "title": STARTED_RE.fullmatch(line).group(1)}
+    if not routing:
+        return tid, (m.group(3) if m else None), None, text
+    after = after.strip()
+    shown = (prefix.rstrip() + ("\n" if after else "") + after).strip() if prefix.strip() else after
+    return tid, (m.group(3) if m else None), routing, shown
 
 
 def lean_home(*parts):
@@ -137,6 +184,9 @@ class Model:
         self.sends_size = -1
         self.last_kind = None  # what the transcript's last record was: "user", "tool", "text", "done"
         self.perms = {}
+        self.reg = {"aliases": {}, "moves": {}}
+        self.reg_stamp = None
+        self.touched = {}  # thread id -> (title, last message time), written to the registry after a refresh
 
     # --- following the right transcript
     def _pick(self, up):
@@ -162,10 +212,47 @@ class Model:
             return path
         return base
 
+    def _registry(self):
+        """The registry's aliases and moves; a change re-sends the events, as their threads may differ now."""
+        try:
+            st = os.stat(lean_threads.path())
+            stamp = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            stamp = None
+        if stamp == self.reg_stamp:
+            return
+        self.reg_stamp = stamp
+        data = lean_threads.load()
+        reg = {"aliases": data["aliases"], "moves": data["moves"]}
+        if reg != self.reg:
+            self.reg = reg
+            for e in self.events:
+                self._update(e)
+
+    def _thread(self, turn):
+        """The thread a turn is shown under: its per-message move, else its tag, followed through the merges."""
+        t = self.turns.get(turn) or {}
+        raw = self.reg["moves"].get(t.get("mid")) or t.get("thread")
+        return lean_threads.resolve(raw, self.reg["aliases"]) if raw else None
+
+    def _touch(self, tid, title, ts):
+        if tid and tid != "main" and lean_threads.ID_RE.match(tid):
+            old = self.touched.get(tid, (None, 0))
+            self.touched[tid] = (title or old[0], max(old[1], ts or 0))
+
+    def _flush_touched(self):
+        todo, self.touched = self.touched, {}
+        for tid, (title, ts) in todo.items():
+            try:
+                lean_threads.touch(tid, title, datetime.datetime.fromtimestamp(ts).isoformat(timespec="seconds") if ts else None)
+            except (OSError, ValueError):
+                pass
+
     @_locked
     def refresh(self):
         up = _load(lean_home("up.json"))
         self._sends()
+        self._registry()
         path = self._pick(up)
         if not path:
             return
@@ -198,6 +285,9 @@ class Model:
                     self._record(rec)
             del self.events[:-MAX_EVENTS]
         self._scan_perms()
+        if self.touched:
+            self._flush_touched()
+            self._registry()
 
     def _sends(self):
         p = chat_dir("service_sends.jsonl")
@@ -272,25 +362,69 @@ class Model:
         if text.startswith(("<command-", "<local-command", "Caveat: The messages below")):
             return  # slash-command bookkeeping, not something anyone typed
         sent = self.sends.get(text)
-        key = sent.get("key") if sent and sent.get("key") != "main" else None
+        key = canon(sent.get("key")) if sent and sent.get("key") != "main" else None
+        title = None
+        op = None
+        if not key:
+            m = TAG_RE.match(text)
+            if m:
+                key, title = m.group(1) or m.group(2), m.group(3)
+            op, key = self._thread_op(text, rec, sent) or (None, key)
         self.turn = max(self.turns) + 1
-        self.turns[self.turn] = {"thread": key, "open": True, "ts": _epoch(rec.get("timestamp")), "untagged": sent is None}
-        self._add(kind="user", text=(sent or {}).get("shown") or text, raw=(sent or {}).get("raw"), thread=key,
-                  from_app=sent is None, ts=self._ts(rec), at=self.turns[self.turn]["ts"])
+        self.turns[self.turn] = {"thread": key, "open": True, "ts": _epoch(rec.get("timestamp")), "untagged": key is None,
+                                 "mid": rec.get("uuid")}
+        self._touch(key, title, self.turns[self.turn]["ts"])
+        self._add(kind="user", text=(sent or {}).get("shown") or text, raw=(sent or {}).get("raw"), mid=rec.get("uuid"),
+                  from_app=sent is None, ts=self._ts(rec), at=self.turns[self.turn]["ts"], **({"op": op} if op else {}))
         self.last_kind = "user"
 
+    def _thread_op(self, text, rec, sent):
+        """The dashboard's `Move message to`, `Merge thread` and `Unmerge thread` messages: (op, thread they show
+        under), applied to the registry once (the API applies them too and marks the send)."""
+        op = None
+        if m := MOVE_RE.match(text):
+            op = {"type": "move", "to": canon(m.group(1)), "message": m.group(2)}
+            thread = op["to"]
+        elif m := MERGE_RE.match(text):
+            op = {"type": "merge", "from": canon(m.group(1)), "into": canon(m.group(2))}
+            thread = op["into"]
+        elif m := UNMERGE_RE.match(text):
+            op = {"type": "unmerge", "from": canon(m.group(1))}
+            thread = op["from"]
+        else:
+            return None
+        once = rec.get("uuid") or f"{rec.get('timestamp')}:{text}"
+        if not (sent or {}).get("applied") and lean_threads.mark_once(once):
+            try:
+                if op["type"] == "move" and op["message"]:
+                    lean_threads.move(op["message"], op["to"])
+                elif op["type"] == "merge":
+                    lean_threads.merge(op["from"], op["into"])
+                elif op["type"] == "unmerge":
+                    lean_threads.unmerge(op["from"])
+            except ValueError:
+                pass
+            self.reg_stamp = None
+            self._registry()
+        return op, thread
+
     def _attach_reply(self, text):
-        """The first assistant text after an untagged user turn starting `About #N` moves the pair to task #N's view."""
+        """The first assistant text after an untagged user turn that starts with a thread tag (or carries a routing line)
+        moves the pair to that thread; returns the text to show, without the routing line."""
         t = self.turns[self.turn]
-        if not t.pop("untagged", False) or t["thread"]:
-            return
-        m = ABOUT_REPLY_RE.match(text)
-        if not m:
-            return
-        t["thread"] = m.group(1)
+        if not t.get("untagged") or t["thread"]:
+            return text
+        tid, title, routing, shown = parse_reply(text)
+        tid = tid or (routing and routing["target"])
+        if not tid:
+            return text
+        t.pop("untagged", None)
+        t["thread"] = tid
+        self._touch(tid, title or (routing or {}).get("title"), t["ts"])
         for e in self.events:
-            if e["turn"] == self.turn:
-                self._update(e, thread=t["thread"] if e["kind"] == "user" else e.get("thread"))
+            if e["turn"] == self.turn and e["kind"] == "user":
+                self._update(e, **({"routing": dict(routing, target=lean_threads.resolve(routing["target"], self.reg["aliases"]) if routing["target"] else None)} if routing else {}))
+        return shown
 
     def _record(self, rec):
         if rec.get("isSidechain"):
@@ -322,8 +456,9 @@ class Model:
                 if not isinstance(b, dict):
                     continue
                 if b.get("type") == "text" and str(b.get("text") or "").strip():
-                    self._attach_reply(b["text"])
-                    self._add(kind="assistant", text=b["text"], ts=self._ts(rec))
+                    shown = self._attach_reply(b["text"])
+                    if shown.strip():
+                        self._add(kind="assistant", text=shown, ts=self._ts(rec))
                     self.last_kind = "text"
                 elif b.get("type") == "tool_use":
                     self._ran_in_app(b.get("name"), tool_summary(b.get("name"), b.get("input")), self._ts(rec))
@@ -393,13 +528,18 @@ class Model:
         return {"ok": True}
 
     # --- views
+    def _want(self, key):
+        return lean_threads.resolve(canon(key), self.reg["aliases"])
+
     def _mine(self, key):
         if key == "main":
             return list(self.events)
-        return [e for e in self.events if self.turns.get(e["turn"], {}).get("thread") == key]
+        want = self._want(key)
+        return [e for e in self.events if self._thread(e["turn"]) == want]
 
     @_locked
     def snapshot(self, key, since=0, fresh_at=0):
+        self._registry()
         evs = self._mine(key)
         if fresh_at:
             evs = [e for e in evs if self.turns.get(e["turn"], {}).get("ts", 0) >= fresh_at]
@@ -408,9 +548,10 @@ class Model:
         for e in evs:
             if max(e["i"], e.get("changed", 0)) > since:
                 c = {k: v for k, v in e.items() if k not in ("_req", "turn", "at", "raw")}
-                about = self.turns.get(e["turn"], {}).get("thread")
-                if about:
-                    c["about"] = about
+                th = self._thread(e["turn"])
+                c["thread"] = th
+                if th:
+                    c["about"] = legacy_key(th)
                 if key != "main" and e["kind"] == "user" and e.get("raw"):
                     c["text"] = e["raw"]
                 out.append(c)
@@ -435,7 +576,7 @@ class Model:
         """"working" only when sure: the thread's turn has no final reply and the transcript changed (or a tool is
         running) within WORKING_SECS. A turn that stopped without a reply is not shown as stuck."""
         t = self.turns.get(self.turn, {})
-        if not t.get("open") or (key != "main" and t.get("thread") != key):
+        if not t.get("open") or (key != "main" and self._thread(self.turn) != self._want(key)):
             return "idle"
         try:
             age = time.time() - os.stat(self.path).st_mtime
@@ -444,6 +585,19 @@ class Model:
         if self.last_kind == "text" and not self.tools and age > QUIET_SECS:
             return "idle"  # old transcripts carry no stop reason: quiet means finished
         return "working" if self.tools or age <= WORKING_SECS else "idle"
+
+    @_locked
+    def thread_summaries(self):
+        """The threads to list (merges and expiry applied): id, title, kind, whether something waits for the user, the
+        last message time and the number of messages."""
+        self._registry()
+        out = []
+        for t in lean_threads.threads():
+            evs = [e for e in self._mine(t["id"]) if e["kind"] in ("user", "assistant")]
+            last = max([t.get("last_message") or ""] + [e["ts"] for e in evs])
+            out.append({"id": t["id"], "title": t["title"], "kind": t["kind"], "waiting": self.waiting(t["id"]),
+                        "last_message": last or None, "messages": len(evs)})
+        return sorted(out, key=lambda t: (t["last_message"] or "", t["id"]), reverse=True)
 
     def work_since(self, key):
         """Epoch seconds the working turn began (0 when nothing is working)."""

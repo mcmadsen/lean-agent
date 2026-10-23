@@ -106,10 +106,10 @@ def resolve(tid, aliases=None):
     return tid
 
 
-def _ensure(data, tid, title=None, ts=None):
+def _ensure(data, tid, title=None, ts=None, create=False):
     t = data["threads"].get(tid)
     if t is None:
-        if kind_of(tid) == "free" and tid not in RESERVED:
+        if kind_of(tid) == "free" and tid not in RESERVED and not create:
             raise ValueError(f"no such thread {tid} (create it with: lean-agent thread new \"title\")")
         t = data["threads"][tid] = {"id": tid, "title": title or RESERVED.get(tid) or tid, "created": ts or now_iso(),
                                     "last_message": None, "kind": kind_of(tid)}
@@ -130,10 +130,10 @@ def new(title):
 
 
 def touch(tid, title=None, ts=None):
-    """A message was seen in `tid` (registered when it is a task thread or a reserved one); returns the thread."""
+    """A message was seen in `tid` (registered if the registry doesn't know it yet); returns the thread."""
     tid = norm(tid)
     with _locked() as data:
-        t = _ensure(data, tid, title, ts)
+        t = _ensure(data, tid, title, ts, create=True)
         if not ts or not t.get("last_message") or _epoch(ts) >= _epoch(t["last_message"]):
             t["last_message"] = ts or now_iso()
         return dict(t)
@@ -175,27 +175,39 @@ def move(message_id, thread):
         data["moves"][message_id] = thread
 
 
-def _done_at(tid, home_todo=None):
-    """When the todo `#N` was marked done (epoch), or None."""
+def mark_once(key):
+    """True the first time `key` is seen (a transcript record whose thread operation was applied); False after."""
+    with _locked() as data:
+        seen = data.setdefault("applied", [])
+        if key in seen:
+            return False
+        seen.append(key)
+        del seen[:-500]
+        return True
+
+
+def _todo_state(tid):
+    """("done", epoch) | ("open", 0) for the todo `#N`; None when there is no such todo."""
     try:
-        with open(home_todo or lean_home("todo.json")) as fh:
+        with open(lean_home("todo.json")) as fh:
             items = json.load(fh).get("items") or []
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         return None
     for t in items:
-        if f"#{t.get('id')}" == tid and t.get("status") == "done":
-            return _epoch(t.get("done_at")) or None
+        if isinstance(t, dict) and f"#{t.get('id')}" == tid:
+            return ("done", _epoch(t.get("done_at"))) if t.get("status") == "done" else ("open", 0)
     return None
 
 
 def expired(t, now=None):
+    """A task thread 7 days after its todo is Done, a free one (or a task without a todo) after 7 days without a message."""
     now = time.time() if now is None else now
     limit = EXPIRE_DAYS * 86400
     if t["id"] in RESERVED:
         return False
-    if t.get("kind") == "task":
-        done = _done_at(t["id"])
-        return bool(done) and now - done > limit
+    state = _todo_state(t["id"]) if t.get("kind") == "task" else None
+    if state:
+        return state[0] == "done" and now - state[1] > limit
     return bool(t.get("last_message")) and now - _epoch(t["last_message"]) > limit
 
 
