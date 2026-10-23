@@ -2921,7 +2921,11 @@ class CliTest(unittest.TestCase):
             self.assertEqual(next(e for e in snap["events"] if e["kind"] == "permission")["state"], "answered")
             first = [json.loads(l) for l in open(chat_log) if 'ASK me' in l][0]
             self.assertTrue(first["message"]["content"].startswith("[Dashboard thread about: a run that asks: which env"))
-            self.assertEqual([(t["key"], t["title"]) for t in snap["threads"]], [("main", "Orchestrator"), ("q-r-77", "Which env?")])
+            sys.path.insert(0, os.path.dirname(CLI))
+            import dash_chat
+            with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": self.env["LEAN_AGENT_HOME"]}):
+                listed = dash_chat.threads()
+            self.assertEqual([(t["key"], t["title"]) for t in listed], [("main", "Orchestrator"), ("q-r-77", "Which env?")])
             self.assertEqual(call("/api/chat", {"thread": "../x", "text": "hi"})[0], 400)
             # "Mark handled" hides a card until it changes
             self.assertTrue(call("/api/action", {"do": "dismiss", "id": "q-r-77", "sig": "abc"})[1]["ok"])
