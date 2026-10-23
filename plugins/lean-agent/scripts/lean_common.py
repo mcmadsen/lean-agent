@@ -70,6 +70,14 @@ def now_iso():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+def stem(w):
+    """A crude stem for matching words (task types, thread routing): drops ing/ies/es/ed/s, keeping 4+ letters."""
+    for suffix in ("ing", "ies", "es", "ed", "s"):
+        if w.endswith(suffix) and len(w) - len(suffix) >= 4:
+            return w[: -len(suffix)] + ("y" if suffix == "ies" else "")
+    return w
+
+
 def seed_collected(lean_home):
     """The collected.json of this home: created on first use with a cutoff (now), so ledger entries from before it
     (a ledger older than collected.json) count as collected without writing all their ids."""
