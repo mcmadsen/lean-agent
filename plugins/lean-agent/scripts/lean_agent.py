@@ -41,7 +41,7 @@ import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
 import service_session  # noqa: E402
-from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive as dashboard_pid_alive, plugin_version, thread_key, running_runs, uncollected_ids  # noqa: E402
+from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive as dashboard_pid_alive, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -5858,11 +5858,7 @@ def live_runs():
 
 def mark_collected(*run_ids):
     """Record that these runs' results were printed to someone (the foreground that started them, `runs --wait/--show`)."""
-    ids = [r for r in run_ids if r]
-    if ids:
-        done = load_json(home("collected.json"), {})
-        done.update({r: now_iso() for r in ids})
-        save_json(home("collected.json"), done)
+    mark_collected_ids(home(), run_ids)
 
 
 def uncollected_runs(live_ids=()):
@@ -5959,12 +5955,7 @@ def cmd_runs(a):
         runs = [r for r in runs if r["project"] == slug]
     if a.running:
         found = False
-        for f in sorted(glob.glob(home("running", "*.json"))):
-            m = load_json(f, {})
-            try:
-                os.kill(m.get("pid", 0), 0)
-            except (OSError, TypeError):
-                continue
+        for _, m in live_runs():
             found = True
             print(f"{m.get('run', '?')}  running since {m.get('started', '?')[11:19]}  {m.get('model', '?'):<7} "
                   f"{m.get('project', '?'):<16} {m.get('task', '')[:70]}")
