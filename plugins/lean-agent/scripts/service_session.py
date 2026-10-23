@@ -173,6 +173,182 @@ def info():
                                "session_started") if k in up}
 
 
+# ---------------------------------------------------------------- auto clear (inside `up`)
+
+CLEAR_AT = 40000       # tokens of context after a finished turn above which the session is cleared (0 = off)
+CLEAR_PROMPT = "Checkpoint now: run lean-agent checkpoint with your soft state, then reply 'checkpointed'"
+CLEAR_WAIT = 120       # seconds to wait for the checkpoint before clearing anyway
+CLEAR_GAP = 600        # seconds between two clears
+CLEAR_IDLE = 30        # seconds since the user last typed
+TAIL_READ = 512 * 1024  # how much of the transcript's end is read
+
+
+def clear_at():
+    """The threshold: LEAN_AGENT_CLEAR_AT, else `lean-agent config clear-at N`, else 40000."""
+    raw = os.environ.get("LEAN_AGENT_CLEAR_AT")
+    if raw is None or not raw.strip().isdigit():
+        raw = _load(lean_home("config.json")).get("clear_at")
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return CLEAR_AT
+
+
+def _knob(name, default):
+    try:
+        return float(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
+def transcript_state(path, offset=0):
+    """What the transcript at `path` (read from byte `offset`, else its last 512 KB) shows now:
+    {"ended": the last message is the assistant's final one (no tool running), "ctx": tokens in the last usage
+    record, "text": that final message's text, "user_ts": epoch of the last user record, "size": file size}."""
+    state = {"ended": False, "ctx": 0, "text": "", "user_ts": 0.0, "size": 0}
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            state["size"] = size = fh.tell()
+            start = offset if offset else max(0, size - TAIL_READ)
+            fh.seek(start)
+            data = fh.read()
+    except OSError:
+        return state
+    lines = data.split(b"\n")
+    if start and not offset:
+        lines = lines[1:]  # the first line is probably cut
+    last = None
+    for raw in lines:
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        msg = rec.get("message") if isinstance(rec.get("message"), dict) else {}
+        kind = rec.get("type")
+        if kind == "assistant":
+            u = msg.get("usage") if isinstance(msg.get("usage"), dict) else {}
+            ctx = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
+                                                  "cache_read_input_tokens"))
+            if ctx:
+                state["ctx"] = ctx
+            last = rec
+        elif kind == "user" and not rec.get("isMeta"):
+            last = rec
+            body = msg.get("content")
+            if not isinstance(body, str) and not any(isinstance(c, dict) and c.get("type") == "text" for c in body or []):
+                continue  # a tool result is not someone typing
+            try:
+                import datetime
+                state["user_ts"] = datetime.datetime.fromisoformat(
+                    str(rec.get("timestamp")).replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                pass
+        elif kind == "system" and rec.get("subtype") == "turn_duration" and last and last.get("type") == "assistant":
+            last = dict(last, _ended=True)
+    if last and last.get("type") == "assistant":
+        msg = last.get("message") or {}
+        content = msg.get("content") if isinstance(msg.get("content"), list) else []
+        tools = any(isinstance(c, dict) and c.get("type") == "tool_use" for c in content)
+        state["ended"] = not tools and (msg.get("stop_reason") == "end_turn" or bool(last.get("_ended")))
+        state["text"] = "\n".join(c.get("text") or "" for c in content if isinstance(c, dict) and c.get("type") == "text")
+    return state
+
+
+def permission_pending(session_id):
+    """True while a permission prompt (or AskUserQuestion) of this session waits for an answer."""
+    d = lean_home("chat", "perm")
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return False
+    for n in names:
+        if not n.endswith(".json") or n.endswith((".answer.json", ".moved.json")):
+            continue
+        base = os.path.join(d, n[:-5])
+        if os.path.exists(base + ".answer.json") or os.path.exists(base + ".moved.json"):
+            continue
+        req = _load(base + ".json")
+        try:
+            fresh = time.time() - os.path.getmtime(base + ".json") < 3600
+        except OSError:
+            continue
+        if fresh and (not req.get("session_id") or not session_id or req["session_id"] == session_id):
+            return True
+    return False
+
+
+class AutoClear:
+    """Keeps the orchestrator's context small: after a finished turn that left the context above `clear_at()`, asks
+    the session for a checkpoint, then types /clear (after its 'checkpointed' reply, or CLEAR_WAIT seconds). Never
+    while a permission prompt waits, within CLEAR_IDLE seconds of the user typing, or within CLEAR_GAP of the last one."""
+
+    def __init__(self, host, now=time.time):
+        self.host, self.now = host, now
+        self.started = None   # when the last checkpoint prompt went out
+        self.waiting = None   # (transcript offset, when) once the prompt is out
+
+    def transcript(self):
+        rec = _load(lean_home("chat", "service.json"))
+        return rec.get("transcript_path") or info().get("transcript") or ""
+
+    def session_id(self):
+        return _load(lean_home("chat", "service.json")).get("session_id") or info().get("session_id")
+
+    def log(self, msg):
+        try:
+            with open(lean_home("logs", "session.log"), "ab") as fh:
+                fh.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] lean-agent: auto-clear: {msg}\n".encode())
+        except OSError:
+            pass
+
+    def blocked(self, st):
+        idle = _knob("LEAN_AGENT_CLEAR_IDLE", CLEAR_IDLE)
+        now = self.now()
+        return (permission_pending(self.session_id()) or now - self.host.last_input < idle
+                or (st["user_ts"] and now - st["user_ts"] < idle and not self.waiting))
+
+    def tick(self):
+        """One look at the session; at most one action."""
+        if not self.host.alive():
+            self.waiting = None
+            return
+        now = self.now()
+        path = self.transcript()
+        if self.waiting:
+            offset, since = self.waiting
+            st = transcript_state(path, offset)
+            if permission_pending(self.session_id()) or now - self.host.last_input < _knob("LEAN_AGENT_CLEAR_IDLE", CLEAR_IDLE):
+                return
+            answered = st["ended"] and "checkpointed" in st["text"].lower()
+            if answered or now - since >= _knob("LEAN_AGENT_CLEAR_WAIT", CLEAR_WAIT):
+                self.waiting = None
+                self.log(f"/clear sent ({'checkpointed' if answered else 'no reply in time'})")
+                self.host.paste("/clear")
+            return
+        limit = clear_at()
+        if not limit or (self.started and now - self.started < _knob("LEAN_AGENT_CLEAR_GAP", CLEAR_GAP)):
+            return
+        st = transcript_state(path)
+        if not st["ended"] or st["ctx"] <= limit or self.blocked(st):
+            return
+        self.started = now
+        self.waiting = (st["size"], now)
+        self.log(f"context {st['ctx']:,} tokens is above {limit:,}: asking for a checkpoint")
+        self.host.paste(CLEAR_PROMPT)
+
+    def run(self):
+        poll = _knob("LEAN_AGENT_CLEAR_POLL", 2)
+        while not self.host.stopping.is_set():
+            try:
+                self.tick()
+            except Exception as exc:  # never take the session down
+                self.log(f"error: {exc}")
+            self.host.stopping.wait(poll)
+
+
 # ---------------------------------------------------------------- host (inside `up`)
 
 def child_env(env):
@@ -201,6 +377,7 @@ class Host:
         self.server = None
         self.mirror = sys.stdout.isatty() and sys.stdin.isatty()
         self.log = None
+        self.last_input = 0.0  # when someone last typed into the session (the terminal, or a message sent to the bridge)
 
     # -- output
     def _remember(self, raw):
@@ -289,9 +466,11 @@ class Host:
             if msg.get("tail"):
                 return {"ok": True, "text": self.tail_text()}
             if isinstance(msg.get("text"), str):
+                self.last_input = time.time()
                 self.paste(msg["text"])
                 return {"ok": True}
             if isinstance(msg.get("keys"), str):
+                self.last_input = time.time()
                 k = msg["keys"]
                 self.write(KEY_NAMES.get(k.lower(), k).encode())
                 return {"ok": True}
@@ -368,6 +547,7 @@ class Host:
                     data = os.read(sys.stdin.fileno(), 4096)
                     if not data:
                         break
+                    self.last_input = time.time()
                     if self.alive():
                         with self.write_lock:
                             os.write(self.master, data)

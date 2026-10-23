@@ -193,9 +193,9 @@ def handoff(hours=RECENT_HOURS):
         lines += [f"  #{t['id']} {'[doing] ' if t.get('status') == 'doing' else ''}{t['text'][:100]}"
                   + (f" ({t['ref']})" if t.get("ref") else "") for t in todo[:10]]
     notes = load_notes()
-    if notes:
+    if any(n.get("kind") != "checkpoint" for n in notes):  # checkpoints show in `brief`, not here; numbers stay
         lines.append("Open items and pending decisions:")
-        lines += [f"  {i}. {n.get('text', '')}" for i, n in enumerate(notes, 1)]
+        lines += [f"  {i}. {n.get('text', '')}" for i, n in enumerate(notes, 1) if n.get("kind") != "checkpoint"]
     runs = read_jsonl(os.path.join(home, "ledger.jsonl"))
     rules = standing_rules(runs=recent(runs, hours))
     if rules:
@@ -245,6 +245,18 @@ def handoff(hours=RECENT_HOURS):
     return "\n".join(lines)
 
 
+def brief(cap=None):
+    """What a fresh orchestrator session starts from: the latest checkpoint (its soft state), then the hand-off."""
+    cps = [n for n in load_notes() if n.get("kind") == "checkpoint"]
+    head = ""
+    if cps:
+        head = f"Checkpoint of {str(cps[-1].get('ts', ''))[:16].replace('T', ' ')} (your own soft state before the clear; continue from it):\n{cps[-1].get('text', '')}\n\n"
+    text = head + handoff()
+    if cap and len(text) > cap:
+        text = text[:cap].rstrip() + "\n… (cut; the rest: `lean-agent brief`)"
+    return text
+
+
 def has_recent_work(hours=RECENT_HOURS):
     home = usage.lean_home()
     runs = read_jsonl(os.path.join(home, "ledger.jsonl"), 50)
@@ -281,6 +293,8 @@ def main():
         sys.stdout.write(KEEP)
     elif mode == "post":
         source = event.get("source", "compact")
+        if source == "clear" and os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1":
+            return 0  # session_hook adds the brief (checkpoint first) there
         if source == "compact" or (source in ("startup", "clear") and has_recent_work()):
             text = handoff()
             if source == "compact" and count_compaction(event.get("session_id") or "?") >= 2:

@@ -255,6 +255,12 @@ Every orchestrator turn re-reads the whole conversation, so it's kept short:
   progress, recent runs, items touched, latest review per branch), so it doesn't rebuild that from memory.
   Any run's full answer is one `lean-agent runs --show <id>` away. `lean-agent handoff --note` adds open items,
   so a topic can end with a fresh session instead of a long one.
+- **Clears itself:** `lean-agent run` prints a short result (about 1,200 characters of the answer, questions kept,
+  a pointer to `runs --show <id>`; `--verbose` adds the token lines, `--full` everything). When `up` sees the
+  orchestrator's context above 40,000 tokens after a finished turn (`lean-agent config clear-at N`, 0 = off), it has
+  the orchestrator save its soft state with `lean-agent checkpoint`, then clears the session; the new session starts
+  with `lean-agent brief` (the checkpoint first). Never while a permission prompt waits, within 30 s of typing, or
+  twice in 10 minutes; each clear is logged in `logs/session.log`.
 - **Short answers in:** workers answer in at most 25 lines and put the rest in a details file; lean-agent's
   report commands print one line per item (brief mode); reviews print the verdict and one line per finding.
 - **No MCP servers of its own:** `lean-agent up` switches your user-scope and plugin MCP servers off for the

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """A stand-in for an interactive `claude` session: reads its terminal, and for every bracketed-paste message
 followed by Enter appends a user and an assistant record to the session's transcript JSONL (the real format).
-A message with "use a tool" in it also makes a Bash tool call with its result; "/clear" starts a new transcript
+A message "Checkpoint now..." is answered with "checkpointed" (not with FAKE_NO_CHECKPOINT); assistant records carry
+usage with FAKE_CTX tokens read from cache. A message with "use a tool" in it also makes a Bash tool call with its result; "/clear" starts a new transcript
 with a new session id (as Claude Code does) and runs the SessionStart hook for it; a lone Escape appends the interruption record."""
 import datetime
 import json
@@ -52,8 +53,11 @@ while True:
             sid = os.urandom(8).hex() + "-fake-clear"
             transcript = os.path.join(tdir, sid + ".jsonl")
             # what Claude Code does on /clear: run the SessionStart hooks with the new session
-            subprocess.run([os.environ["FAKE_NAMED_CLAUDE"], HOOK], input=json.dumps({"session_id": sid, "transcript_path": transcript,
-                           "source": "clear", "hook_event_name": "SessionStart", "cwd": os.getcwd()}), text=True, check=False)
+            hook = subprocess.run([os.environ["FAKE_NAMED_CLAUDE"], HOOK], input=json.dumps({"session_id": sid, "transcript_path": transcript,
+                                  "source": "clear", "hook_event_name": "SessionStart", "cwd": os.getcwd()}), text=True,
+                                  capture_output=True, check=False)
+            with open(os.environ["FAKE_SESSION_LOG"], "a") as fh:
+                fh.write(json.dumps({"clear_hook": hook.stdout, "sid": sid}) + "\n")
             add({"type": "user", "isMeta": True, "message": {"role": "user", "content": "<command-name>/clear</command-name>"}})
             continue
         add({"type": "user", "message": {"role": "user", "content": text}})
@@ -64,8 +68,14 @@ while True:
                  "stop_reason": "tool_use"}})
             add({"type": "user", "message": {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": tid, "content": "tool-ran", "is_error": False}]}})
-        add({"type": "assistant", "message": {"role": "assistant", "id": "msg_" + os.urandom(4).hex(),
-             "content": [{"type": "text", "text": "echo: " + text}], "stop_reason": "end_turn"}})
+        reply = "echo: " + text
+        if text.startswith("Checkpoint now"):  # asked to checkpoint: answer as the orchestrator would
+            reply = "" if os.environ.get("FAKE_NO_CHECKPOINT") else "checkpointed"
+        if reply:
+            add({"type": "assistant", "message": {"role": "assistant", "id": "msg_" + os.urandom(4).hex(),
+                 "content": [{"type": "text", "text": reply}], "stop_reason": "end_turn",
+                 "usage": {"input_tokens": 3, "cache_creation_input_tokens": 0,
+                           "cache_read_input_tokens": int(os.environ.get("FAKE_CTX") or 0), "output_tokens": 5}}})
     if buf.endswith(b"\x1b"):  # a lone Escape is an interrupt
         add({"type": "user", "message": {"role": "user", "content": "[Request interrupted by user]"}})
         buf = b""
