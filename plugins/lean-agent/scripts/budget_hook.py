@@ -46,6 +46,7 @@ def prompt_needs_hook(event):
     if not (re.match(MEMORY_MESSAGE_RE, prompt) or re.match(COMMAND_PROMPT_RE, prompt)):
         return False
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    # computed inline: the hook must stay cheap, and importing usage here would defeat that
     home = os.path.realpath(os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent")))
     return in_home_or_service(cwd, home)
 

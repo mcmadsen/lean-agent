@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -1390,10 +1391,7 @@ def cmd_run(a):
         tools = a.tools or (READONLY_TOOLS + ",Bash" if read_only else WORKER_TOOLS)
 
     todo_id = (prev or {}).get("todo") or getattr(a, "todo", None)
-    if todo_id == "new":  # the run's own queue item, named after its --why: the orchestrator never runs `todo add`
-        todo_id = new_todo(slug, getattr(a, "why", None) or task.splitlines()[0])
-        a.todo = todo_id
-    if todo_id is not None and not (prev or {}).get("todo"):
+    if todo_id is not None and todo_id != "new" and not (prev or {}).get("todo"):
         data = todos()
         t = next((x for x in data["items"] if x["id"] == todo_id), None)
         if not t:
@@ -1496,6 +1494,16 @@ def cmd_run(a):
     if getattr(a, "fields", None):
         env["LEAN_AGENT_MCP_FIELDS"] = a.fields
 
+    if shutil.which(claude) is None:
+        die(f"'{claude}' not found on PATH")
+    if todo_id == "new":  # the run's own queue item, named after its --why; made only once nothing can refuse the launch
+        todo_id = new_todo(slug, getattr(a, "why", None) or task.splitlines()[0])
+        a.todo = todo_id
+        data = todos()
+        for t in data["items"]:
+            if t["id"] == todo_id and t["status"] == "open":
+                t["status"] = "doing"
+        save_json(home("todo.json"), data)
     print(f"run {run_id} started · {model} · {slug}" + (" (resumed)" if prev else "") +
           f" · see it later with `lean-agent runs --show {run_id}`", file=sys.stderr, flush=True)
     running_key = launch_key or run_id  # every run is listed while it runs (the dashboard, the status line)
@@ -3473,7 +3481,8 @@ def review_main(a):
             print(f"review: the changes since are high-risk ({'; '.join(risk)}): {delta_model} again", flush=True)
         meta["after"] = {"run": prev["id"], "head": old_head}
         ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=delta_model,
-                                todo=prev.get("todo") or getattr(a, "todo", None),
+                                todo=(getattr(a, "todo", None) if getattr(a, "todo", None) not in (None, "new")
+                                      else prev.get("todo") or getattr(a, "todo", None)),
                                 why=f"re-review after fixes ({effort} effort, fresh context)", cards=None,
                                 card_list=cards, project=slug, read_only=True, chrome=None, mcp=None, tools=None,
                                 allow_send=None, max_turns=a.max_turns, max_usd=a.max_usd, max_context=a.max_context,
