@@ -108,6 +108,10 @@ FAKE_CLAUDE = textwrap.dedent("""\
                              "service": os.environ.get("LEAN_AGENT_SERVICE_SESSION"),
                              "addclaudemd": os.environ.get("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD")}) + "\\n")
     import time
+    if os.environ.get("FAKE_RELEASE_FILE"):  # hold until the test says go
+        end = time.time() + 30
+        while not os.path.exists(os.environ["FAKE_RELEASE_FILE"]) and time.time() < end:
+            time.sleep(0.05)
     if os.environ.get("FAKE_FINISH_AT"):  # make parallel fake workers finish together
         time.sleep(max(0.0, float(os.environ["FAKE_FINISH_AT"]) - time.time()))
     fb = os.environ.get("FAKE_FEEDBACK", '{"status": "done", "used": [], "unneeded": [], "missing": ""}')
@@ -5741,7 +5745,8 @@ class CliTest(unittest.TestCase):
         self.assertIn("alive", json.load(open(os.path.join(home, "up.json")))["clear_hold"])
         os.environ["LEAN_AGENT_CLEAR_AT"] = "0"
         ac.tick()
-        self.assertIsNone(json.load(open(os.path.join(home, "up.json")))["clear_hold"])
+        with open(os.path.join(home, "up.json")) as fh:
+            self.assertIsNone(json.load(fh)["clear_hold"])
         self.assertEqual(host.pasted, [])
 
     def test_auto_clear_at_auto_means_just_before_compaction(self):
@@ -5859,7 +5864,13 @@ class CliTest(unittest.TestCase):
         self.assertEqual(len(host.pasted), 1)
         clock[0] += 121
         ac.tick()
+        self.assertEqual(len(host.pasted), 1)  # the turn still runs: no /clear into it
+        with open(os.path.join(home, "up.json")) as fh:
+            self.assertEqual(json.load(fh)["clear_hold"], "clear requested: waiting for the turn to end")
+        turn("done", ctx=5000)
+        ac.tick()
         self.assertEqual(host.pasted[-1], "/clear")
+        self.assertIsNone(json.load(open(os.path.join(home, "up.json")))["clear_hold"])
 
     def test_host_start_drops_a_stale_clear_request(self):
         import service_session
@@ -5868,8 +5879,11 @@ class CliTest(unittest.TestCase):
         self.addCleanup(os.environ.pop, "LEAN_AGENT_HOME", None)
         with open(os.path.join(home, "up.json"), "w") as fh:
             json.dump({"clear_requested": 5.0}, fh)
-        service_session.update_up(pid=None, clear_requested=None, clear_hold=None)  # what the host does on start
-        self.assertIsNone(json.load(open(os.path.join(home, "up.json")))["clear_requested"])
+        host = service_session.Host(lambda: (["true"], "sid-1"), dict(os.environ), home)
+        self.addCleanup(host.stop)
+        host._spawn()
+        with open(os.path.join(home, "up.json")) as fh:
+            self.assertIsNone(json.load(fh)["clear_requested"])
 
     def test_clear_request_waits_while_a_permission_prompt_is_pending(self):
         ac, host, clock, turn, home = self.auto_clear_unit()
@@ -7081,14 +7095,33 @@ class CliTest(unittest.TestCase):
     def test_worktree_writers_take_turns(self):
         self.git_project()
         self.cli("learn", self.proj, "--name", "proj")
-        env = dict(self.env, FAKE_FINISH_AT=str(time.time() + 1.0))
+        release = os.path.join(self.tmp.name, "release")
+        env = dict(self.env, FAKE_RELEASE_FILE=release)
         cmd = [sys.executable, CLI, "run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feature", "--", "t"]
         self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feature", "--", "create it first")
-        procs = [subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                  stdin=subprocess.DEVNULL) for _ in range(2)]
-        outs = [p.communicate() for p in procs]
+        errs = [os.path.join(self.tmp.name, f"err{i}") for i in range(2)]
+        procs = []
+        for e in errs:
+            with open(e, "w") as fh:
+                procs.append(subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=fh, text=True,
+                                              stdin=subprocess.DEVNULL))
+
+        def waited():
+            for e in errs:
+                with open(e) as fh:
+                    if "waiting for another worker" in fh.read():
+                        return True
+            return False
+        end = time.time() + 30
+        while not waited() and time.time() < end and all(p.poll() is None for p in procs):
+            time.sleep(0.05)
+        saw_wait = waited()
+        with open(release, "w"):
+            pass
+        for p in procs:
+            p.wait(timeout=60)
         self.assertEqual([p.returncode for p in procs], [0, 0])
-        self.assertTrue(any("waiting for another worker" in err for _, err in outs))
+        self.assertTrue(saw_wait)
 
     def test_review_needs_changes_and_base(self):
         g = self.git_project()
