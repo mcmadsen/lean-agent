@@ -5515,8 +5515,22 @@ class CliTest(unittest.TestCase):
         self.assertEqual(w.stdout.strip(), out[out.index("run " + m["run"] + " ·"):].strip())
         again = self.cli("runs", "--wait", m["run"])  # already finished: printed at once
         self.assertEqual(again.stdout, w.stdout)
-        self.assertIn("No runs in progress", self.cli("runs", "--wait", "all").stdout)
+        self.assertIn("Nothing to collect.", self.cli("runs", "--wait", "all").stdout)
         self.assertEqual(self.cli("runs", "--wait", "nope", check=False).returncode, 1)
+
+    def test_runs_wait_all_collects_a_run_that_finished_without_a_foreground_once(self):
+        p = self.start_run(turns="3", sleep="0.5")
+        [m] = self.running_markers()
+        os.killpg(p.pid, signal.SIGTERM)
+        p.wait(timeout=20)
+        self.wait_for(lambda: not self.running_markers(), "the run to finish", 60)
+        brief = self.cli("brief").stdout
+        self.assertIn(f"Finished, not collected: {m['run']}", brief)
+        w = self.cli("runs", "--wait", "all", LEAN_AGENT_WAIT_POLL="0.2")
+        self.assertRegex(w.stdout, rf"run {m['run']} · haiku · done")
+        again = self.cli("runs", "--wait", "all")
+        self.assertEqual(again.stdout.strip(), "Nothing to collect.")
+        self.assertNotIn("not collected", self.cli("brief").stdout)
 
     def test_runs_wait_exits_nonzero_for_a_failed_run_and_on_timeout(self):
         p = self.start_run(turns="3", sleep="0.5", FAKE_FAIL_MODEL="haiku")

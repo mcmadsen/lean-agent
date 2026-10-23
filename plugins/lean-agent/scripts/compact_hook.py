@@ -16,6 +16,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import usage  # noqa: E402
+import lean_common  # noqa: E402
 import lean_memory  # noqa: E402
 
 RECENT_HOURS = 12
@@ -211,8 +212,12 @@ def handoff(hours=RECENT_HOURS):
             running.append(f"{m.get('run', '?')} {m.get('model', '')} {m.get('project', '')}: {m.get('task', '')[:80]}")
         except (OSError, ValueError, TypeError):
             continue
-    if running:
-        lines.append("Running now: " + "; ".join(running) + ". They survive a clear; collect with `lean-agent runs --wait all`")
+    live_ids = {s.split()[0] for s in running}
+    waiting = lean_common.uncollected_ids(home, live_ids)
+    if running or waiting:
+        lines.append("Running now: " + ("; ".join(running) if running else "none")
+                     + (f". Finished, not collected: {', '.join(waiting)}" if waiting else "")
+                     + ". They survive a clear; collect with `lean-agent runs --wait all`")
     shown = recent(runs, hours)[-10:] or runs[-3:]
     if shown:
         lines.append("Recent runs:")
