@@ -3648,7 +3648,7 @@ class CliTest(unittest.TestCase):
     def test_thread_cli(self):
         self.assertEqual(self.cli("thread", "new", "Pricing page").stdout.strip(), "t1")
         self.assertEqual(self.cli("thread", "new", "Billing").stdout.strip(), "t2")
-        self.cli("thread", "merge", "t2", "t1")
+        self.assertEqual(self.cli("thread", "merge", "t2", "T1").stdout.strip(), "t2 -> t1")  # prints the normalized id
         self.assertEqual(self.cli("thread", "merge", "t1", "t2", check=False).returncode, 1)
         self.assertEqual(self.cli("thread", "merge", "t1", "t1", check=False).returncode, 1)
         self.cli("thread", "move", "abc", "#4")
@@ -3815,7 +3815,7 @@ class CliTest(unittest.TestCase):
 
     def test_thread_op_id_round_trip_and_bubble_hides_the_suffix(self):
         ds, m, rec = self.model_records()
-        import lean_threads
+        lean_threads = self.threads_home()
         lean_threads.new("A")
         lean_threads.new("B")
         rec("user", "Merge thread t2 into t1 [op 0123456789ab]", uuid="o1")

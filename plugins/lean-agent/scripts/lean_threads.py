@@ -277,7 +277,7 @@ def cli(action, args, as_json=False, out=print):
                               "unmerge": "usage: lean-agent thread unmerge tB"}[action])
         elif action == "merge":
             merge(*args)
-            out(f"{norm(args[0])} -> {resolve(args[1])}")
+            out(f"{norm(args[0])} -> {resolve(norm(args[1]))}")
         elif action == "unmerge":
             unmerge(args[0])
             out(f"{norm(args[0])} is its own thread again")
