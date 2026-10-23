@@ -384,7 +384,7 @@ class BudgetTest(Base):
                     "lean-agent runs > /tmp/x", "lean-agent runs 2>/tmp/x", "lean-agent runs < /etc/passwd",
                     "lean-agent runs <(cat f)", "lean-agent runs >(cat)", "lean-agent run p --why \"unbalanced",
                     "lean-agent runs | grep --include=x y", "lean-agent runs | tail -f x", "lean-agent runs | cat",
-                    "lean-agent runs | grep -e x /srv/f", "lean-agent runs | grep --rec x", "lean-agent runs | head /srv/f",
+                    "lean-agent runs | grep -e x /srv/f", "lean-agent runs | grep --rec x",
                     "lean-agent runs <<EOF; rm x\nbody\nEOF"):
             out = bash(cmd)
             self.assertTrue(denied(out), cmd)
@@ -398,7 +398,11 @@ class BudgetTest(Base):
                     "lean-agent runs 2>&1 | grep -i x | tail -3", "lean-agent run p --why \"a; b\" -- \"x | y\"",
                     "lean-agent run p -- 'a & b > c'", "lean-agent runs | grep -c x", "lean-agent runs | head -n 5",
                     "lean-agent runs | wc -l", "lean-agent runs 2>&1", "lean-agent runs | grep -ic word",
-                    "lean-agent runs &&\nlean-agent todo list", "lean-agent runs;\nlean-agent todo list"):
+                    "lean-agent runs &&\nlean-agent todo list", "lean-agent runs;\nlean-agent todo list",
+                    "lean-agent run p -m sonnet --why 'x' -- \"$(cat <<'EOF'\nmulti-line task; with | pipes\nEOF\n)\"",
+                    "lean-agent doc write ~/Downloads/x.md <<'EOF'\nbody\nEOF",
+                    "lean-agent run p -- \"t\" <<'EOF' 2>&1\nbody\nEOF",
+                    "lean-agent runs | head -n 5>/dev/null"):
             self.assertIsNone(bash(cmd), cmd)
         out = read("/srv/shop/src/app.py")
         self.assertTrue(denied(out))

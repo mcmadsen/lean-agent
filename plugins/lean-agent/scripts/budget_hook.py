@@ -54,6 +54,7 @@ def emit(**fields):
 
 
 HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1([^\n]*)\n.*?\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
+CAT_HEREDOC = re.compile(r"\$\(\s*cat\s+<<-?[ \t]*(['\"])(\w+)\1[ \t]*\n.*?\n[ \t]*\2[ \t]*\n\s*\)", re.S)  # "$(cat <<'EOF' ... EOF )": quoted text
 HEREDOC_SUB = r"<<DATA\3"  # the body is data; the rest of the `<<EOF` line stays, to be checked as commands
 
 
@@ -191,6 +192,7 @@ def lean_agent_only(command):
     2>&1, >&2, >/dev/null, 2>/dev/null and &>/dev/null redirect; &&, ||, ;, a lone & and newlines separate
     commands; a pipe may only feed head, tail, grep or wc reading stdin."""
     import shlex
+    command = CAT_HEREDOC.sub("DATA", command)  # a quoted heredoc is text, whatever the shell would not expand in it
     if "$(" in command or "`" in command:
         return False
     bin_dir = os.path.join(PLUGIN_ROOT, "bin") + os.sep
@@ -200,6 +202,7 @@ def lean_agent_only(command):
         tokens = list(lex)
     except ValueError:
         return False
+    glued = []
     stages, words, i = [], [], 0  # stages: word lists; None marks a break between commands
     while i < len(tokens):
         tok = tokens[i]
@@ -215,7 +218,8 @@ def lean_agent_only(command):
                 words = []
             elif re.search(r"[<>]", tok) and "(" not in tok and ")" not in tok:
                 if tok != "<<" and words and re.fullmatch(r"\d", words[-1]):
-                    words.pop()  # the fd number of 2>/dev/null
+                    fd = words.pop()  # the fd number of 2>/dev/null
+                    glued.append((len(stages), fd))  # or the last argument of `head -n 5>/dev/null`
                 if (tok, tokens[i] if i < len(tokens) else None) not in REDIRECT_OK:
                     return False
                 i += 1
@@ -225,7 +229,7 @@ def lean_agent_only(command):
             words.append(tok)
     stages.append(words)
     first = True
-    for words in stages:
+    for n, words in enumerate(stages):
         if words is None:
             first = True
             continue
@@ -236,7 +240,7 @@ def lean_agent_only(command):
         if not words:
             continue
         if not first:
-            if not pipe_stage_ok(words):
+            if not (pipe_stage_ok(words) or any(pipe_stage_ok(words + [fd]) for at, fd in glued if at == n)):
                 return False
         elif not (words[0] == "cd" or os.path.basename(words[0]) == "lean-agent"
                   or os.path.realpath(os.path.expanduser(words[0])).startswith(bin_dir)):
