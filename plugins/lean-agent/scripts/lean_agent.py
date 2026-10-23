@@ -7861,6 +7861,104 @@ def cmd_remember(a):
     return 1 if any(l.startswith("CONFLICT") for l in lines) else 0  # something needs the user's decision
 
 
+ADVISE_RULE = """\
+You are the advisor: a memory-light orchestrator asks you what to do with a new user request before it acts. You change
+nothing. Read what applies: run exactly `{lean} <memory list|cards|todo list|brief>` (-p <project> for memory/cards) for
+the memories, cards, open todos, hand-off notes and the latest checkpoint; the runs and the latest review of the project
+are in the task. Look for earlier decisions on the same topic in the memories and notes.
+Answer with at most 15 lines, the first one exactly `ADVICE`, then one short line each:
+`known:` facts and earlier decisions that apply (or none)
+`project:` the project slug and the card ids (--cards) that fit
+`suggested:` ONE exact command: `{lean} run <project> --cards auto|<ids> -m <model> --effort <low|medium|high> [--todo N|new] [--worktree <name>] --why "..." -- "<task>"`,
+  or `{lean} remember "<text>"`, or `answer from state` when nothing needs doing
+`risks:` open review gaps on that branch, a decision that contradicts the request, a run still working on it (or none)
+`ask the user first:` `yes: <the question>` or `no`
+Pick the cheapest model that fits (haiku for reading, sonnet for edits, opus only for hard design). No other text.
+"""
+ADVICE_KEEP = 50
+
+
+def advice_dir():
+    return home("advice")
+
+
+def stored_advice():
+    """Every stored advice, oldest first: {ts, thread, project, request, text}."""
+    out = []
+    for f in sorted(glob.glob(os.path.join(advice_dir(), "*.json"))):
+        d = load_json(f, None)
+        if isinstance(d, dict) and d.get("text"):
+            out.append(d)
+    return out
+
+
+def store_advice(entry):
+    os.makedirs(advice_dir(), exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    save_json(os.path.join(advice_dir(), stamp + ".json"), entry)
+    for f in sorted(glob.glob(os.path.join(advice_dir(), "*.json")))[:-ADVICE_KEEP]:
+        os.remove(f)
+
+
+def advise_state(slug, path, thread):
+    """The runs and the latest review of the project, as text for the advisor (no need to make it fetch them)."""
+    todo = int(thread) if thread.isdigit() else None
+    lines = ["Last runs of this project:"]
+    for r in [r for r in ledger() if r.get("project") == slug][-10:]:
+        lines.append(f"- {r.get('id')} {r.get('status')} {r.get('model')}"
+                     + (f" todo #{r['todo']}" if r.get("todo") else "") + f": {str(r.get('task', ''))[:100]!r}")
+    rv = latest_review(slug, path, None)
+    if rv:
+        sev = {}
+        for f in rv.get("findings") or []:
+            sev[f.get("severity")] = sev.get(f.get("severity"), 0) + 1
+        gaps = [g if isinstance(g, str) else g.get("what", "") for g in rv.get("gaps") or []]
+        lines.append(f"Latest review: {rv.get('verdict')} of {rv.get('branch') or rv.get('ref')} "
+                     f"({', '.join(f'{n} {k}' for k, n in sev.items()) or 'no findings'}); open gaps: "
+                     + ("; ".join(g[:80] for g in gaps[:5]) or "none"))
+    else:
+        lines.append("Latest review: none")
+    return "\n".join(lines) + (f"\nThread #{todo} is the work-queue item the request belongs to." if todo else "")
+
+
+def cmd_advise(a):
+    """Ask a cheap read-only worker what to do with a new request; prints (and stores) its short ADVICE block."""
+    what = sys.stdin.read().strip() if a.task_file == "-" else read_text(a.task_file).strip() if a.task_file \
+        else " ".join(a.text).strip()
+    if not what:
+        die('what? lean-agent advise "<the user\'s request>" [--project <p>] [--thread <tag>]   (or --task-file -)')
+    projs = projects()
+    ref = a.project or next((r["project"] for r in reversed(ledger()) if r.get("project") in projs), None) \
+        or next(iter(projs), None)
+    if not ref:
+        die("no project to run the advisor in: --project <p> (or lean-agent learn <path>)")
+    slug, path = resolve_project(ref)
+    thread = str(a.thread or "main").lstrip("#")
+    lean = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
+    task = (f"The user's new request (project {slug}" + (f", thread {a.thread}" if a.thread else "") + "):\n" + what
+            + "\n\nProjects: " + ", ".join(sorted(projs)) + "\n" + advise_state(slug, path, thread))
+    ns = argparse.Namespace(resume=None, task=[task], task_file=None, model="haiku",
+                            why="advise on a new request", cards="auto", card_list=None, project=slug,
+                            read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=15,
+                            max_usd=0.3, max_context=3000, max_cards=5, ttype="read", role="advisor",
+                            effort="low", role_rule=ADVISE_RULE.format(lean=lean), todo=None,
+                            internal_cmd=[f"{lean} {c}" for c in ("memory list", "cards", "todo list", "brief")])
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = cmd_run(ns)
+    run = next((r for r in reversed(ledger()) if r.get("role") == "advisor" and r["project"] == slug), None)
+    reply = parse_feedback(run_result_text(run))[0] if run else ""
+    lines = reply.strip().splitlines()
+    start = next((i for i, l in enumerate(lines) if l.strip().startswith("ADVICE")), None)
+    if start is None:
+        print(out.getvalue(), file=sys.stderr)
+        die("the advisor didn't answer with an ADVICE block; see its reply above", rc or 1)
+    text = "\n".join(l.rstrip() for l in lines[start:start + 15] if l.strip())
+    store_advice({"ts": now_iso(), "thread": thread, "project": slug, "request": what[:300], "text": text})
+    print(text)
+    return 0
+
+
 def cmd_publish(a):
     """Publish (or update) an artifact through a worker, so the orchestrator never loads the Artifact tools."""
     mode = artifacts_mode()
@@ -8058,6 +8156,16 @@ def build_parser():
     s.add_argument("--task-file", help="read it from a file ('-' = stdin)")
     s.add_argument("--project", "-p", help="the project it is about (default: the latest run's)")
     s.set_defaults(fn=cmd_remember)
+
+    s = sub.add_parser("advise", help="before acting on a NEW user request: a cheap read-only worker reads the memories, "
+                       "cards, todos, hand-off notes, checkpoint, recent runs and latest review, and answers in <= 15 "
+                       "lines (ADVICE: known, project and cards, suggested command, risks, ask the user first?). "
+                       "Stored in ~/.lean-agent/advice (last 50); the dashboard shows it under the message")
+    s.add_argument("text", nargs="*", help="the user's request")
+    s.add_argument("--task-file", help="read it from a file ('-' = stdin)")
+    s.add_argument("--project", "-p", help="the project it is about (default: the latest run's)")
+    s.add_argument("--thread", help="the thread tag of the message (#N or tN; default main)")
+    s.set_defaults(fn=cmd_advise)
 
     s = sub.add_parser("config", help="switches: artifacts off|worker|direct (worker: publish through `lean-agent publish`, the default; "
                        "direct: the orchestrator has the Artifact tools itself), "
