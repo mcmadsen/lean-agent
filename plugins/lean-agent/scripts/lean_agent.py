@@ -8884,7 +8884,7 @@ def build_parser():
     s.add_argument("args", nargs=argparse.REMAINDER, help="add: the lean-agent command, e.g. do <project> <recipe>")
     s.set_defaults(fn=cmd_schedule)
 
-    s = sub.add_parser("thread", help="threads: new \"title\" | list | show tN [--all] | close tN | reopen tN | merge tB tA | unmerge tB | move tN")
+    s = sub.add_parser("thread", help="threads: new \"title\" | list | show tN [--all] | close tN | reopen tN | merge tB tA | unmerge tB | move tN (the latest request of this session only, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
     s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move"])
     s.add_argument("args", nargs="*")
     s.add_argument("--json", action="store_true", help="list: as JSON")

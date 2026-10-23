@@ -622,15 +622,28 @@ def _retag(path, items_of, thread, new, since, aliases, ts_key):
             lean_common.write_json_atomic(path, doc)
 
 
+def cli_session():
+    """The session a CLI call belongs to: LEAN_AGENT_SESSION, else the service session the hook records in up.json
+    (when the hook has routed a prompt for it); None means the latest request of any session."""
+    sid = os.environ.get("LEAN_AGENT_SESSION")
+    if not sid:
+        sid = lean_common.read_json(lean_home("up.json"), {}).get("session_id")
+    st = lean_common.read_json(state_path(), {})
+    return sid if sid and sid in ((st.get("sessions") or {}) if isinstance(st, dict) else {}) else None
+
+
 def move_latest(tid, session=None):
     """Wrong thread: the latest request of this session goes to `tid`, `tid` becomes the current thread, and what the old
     thread recorded since that request is re-homed: the append-only logs through the overrides, todo.json and the hand-off
-    notes in place. Returns (old thread, new thread)."""
+    notes in place. Single-session scope: only the latest request of `session` (else the latest one recorded), and only
+    when it is under 24 h old. Returns (old thread, new thread)."""
     tid = norm(tid)
     st = lean_common.read_json(state_path(), {})
     rec = ((st.get("sessions") or {}).get(session or "") or st.get("latest") or {}) if isinstance(st, dict) else {}
     if not rec.get("thread"):
         raise ValueError("no current thread to move a request out of")
+    if time.time() - _epoch(rec.get("ts")) > 24 * 3600:
+        raise ValueError("nothing recent to move (the latest request is over 24 h old)")
     with _locked() as data:
         old, tid = resolve(rec["thread"], data["aliases"]), resolve(tid, data["aliases"])
         if old == tid:
@@ -694,7 +707,7 @@ def cli(action, args, as_json=False, out=print):
             unmerge(args[0])
             out(f"{norm(args[0])} is its own thread again")
         elif action == "move":
-            old, new_ = move_latest(args[0])
+            old, new_ = move_latest(args[0], cli_session())
             out(f"the latest request moved from {old} to {new_}")
         else:
             raise ValueError("usage: lean-agent thread new|list|show|close|reopen|merge|unmerge|move")
