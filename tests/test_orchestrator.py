@@ -633,7 +633,7 @@ class CliTest(unittest.TestCase):
         self.assertTrue(os.path.exists(newest["output"]))
         self.assertTrue(dashboard.state()["version"])
 
-    def _page_probe(self, body):
+    def _page_probe(self, body, chat_js=False):
         """Run `body` (JavaScript) against the page's left column, thread list and suggestion code, sliced out of app.js."""
         import shutil
         node = shutil.which("node")
@@ -642,6 +642,9 @@ class CliTest(unittest.TestCase):
         js = open(os.path.join(os.path.dirname(CLI), "dashboard_ui", "app.js")).read()
         helpers = js[js.index("const esc="):js.index("const store=")]
         code = js[js.index("// <suggestions>"):js.index("function reviewLines")]
+        if chat_js:  # the part of chat.js that draws the merge marker
+            cjs = open(os.path.join(os.path.dirname(CLI), "dashboard_ui", "chat.js")).read()
+            code += cjs[cjs.index("function clearHtml"):cjs.index("function tick")]
         probe = """(async()=>{
         const el={},$=id=>el[id]||(el[id]={textContent:"",innerHTML:"",value:"",title:""});
         const timers=[],setTimeout=(f,ms)=>(timers.push({f,ms}),timers.length),clearTimeout=()=>{};
@@ -731,7 +734,7 @@ class CliTest(unittest.TestCase):
         out.dots=[(h.match(/dot-warn/g)||[]).length,h.indexOf("dot-warn")<h.indexOf("Sample todo"),String($("n-chat").textContent)];
         out.sel=/class="row sel"[^>]*data-thread="#10"/.test(h);
         out.tabs=[$("n-inbox").textContent,$("n-todos").textContent].map(String);
-        ui.threads=[];put("threads",threadListHtml());out.empty=$("threads").innerHTML.includes("No threads yet");
+        ui.threads=[];put("threads",threadListHtml());out.empty=[($("threads").innerHTML.match(/class="row/g)||[]).length,$("threads").innerHTML.includes('data-thread="main"')];  // Main is always listed
         out.ask=askHtml("ask-s").includes('placeholder="Ask Claude anything"')&&askHtml("ask-s").includes("data-ask");
         openSheet("move","m1","#10");
         """.replace('openSheet("move","m1","#10");', 'ui.threads=[{id:"main",title:"Main"},{id:"#10",title:"A"},{id:"#11",title:"B"},{id:"t1",title:"C"}];'
@@ -744,7 +747,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(out["dots"], [1, True, "1"])  # only the thread that waits for you has a dot
         self.assertTrue(out["sel"])
         self.assertEqual(out["tabs"], ["", ""])
-        self.assertTrue(out["empty"])
+        self.assertEqual(out["empty"], [1, True])
         self.assertTrue(out["ask"])
         self.assertEqual(out["picker"], [True, True, False, False])  # not the thread it is in, not main
         self.assertEqual(out["sheet"], [True, True])
@@ -765,6 +768,158 @@ class CliTest(unittest.TestCase):
         self.assertEqual(out["none"], ["", ""])
         self.assertFalse(out["nomid"])
         self.assertTrue(out["escaped"])
+
+    def test_dashboard_badge_sheets_toggle(self):
+        out = self._page_probe("""
+        const store={get:(k,d)=>d,set(){}};let themeNow="";
+        const chat={service:true,confirm:false},clearHtml=()=>'<button data-act="clear-ask">Clear session…</button>';
+        const run=i=>({id:"r"+i,ts:"2026-10-22T09:0"+(i%10)+":00",status:i%3?"done":"partial",model:"sonnet",effort:"high",todo:10,cost:0.95+i,units:1,passes:1});
+        let S={runs:[...Array(9).keys()].map(run),running:[{run:"live1",todo:10,model:"opus",effort:"max",turns:5}],
+          schedule:[{id:1,cmd:"sync",when:"daily",enabled:true,next:null,last:null}],schedule_runner:"",version:"0.32.0",
+          scheduled_results:[{id:5,args:["sync","--check"],first:"update available: lean-agent 0.31.0 -> 0.32.1 (2 commit(s)).",rc:0}],
+          optimize:[{project:"p1",ts:null,left:2,running:false}],pushes:[{branch:"b1",to:"origin/b1",count:2,ts:"2026-10-22T09:00:00"}],
+          context:{calls:3,now:40000,compact_at:67000}};
+        lastBoard={cards:[{id:"n1",kind:"note",note:1,note_kind:"decision",text:"Waiting on a name",column:"Waiting on you",done_at:null}]};
+        drawBadges();
+        out.bar=$("badges").innerHTML.replace(/<[^>]+>/g,"|").replace(/[|]+/g,"|");
+        out.closed=[ui.badge||null,!!$("bwrap").hidden];
+        const state=()=>[ui.badge,$("bwrap").hidden,(($("badges").innerHTML.match(/aria-pressed="true"/g))||[]).length];
+        toggleBadge("runs");out.runs=state();
+        const r=$("bsheet").innerHTML;
+        out.runsHtml=[(r.match(/class="runrow/g)||[]).length,r.includes("Stop run"),r.includes('data-id="live1"'),r.includes("opus / max"),r.includes("running · 5 turns"),
+          r.includes("Show all 10 runs"),r.includes("Pushes"),r.includes("b1 · 2 pushes"),r.includes("#10 · $0.95"),r.includes('class="bclose"')];
+        toggleBadge("schedule");out.schedule=state();
+        const sc=$("bsheet").innerHTML;
+        out.schedHtml=[sc.includes("update available"),sc.includes('data-act="sync"'),sc.includes("Run optimize"),sc.includes("#1 sync"),sc.includes("runrow")];
+        toggleBadge("notes");out.notes=state();
+        const nt=$("bsheet").innerHTML;
+        out.notesHtml=[nt.includes("Waiting on a name"),nt.includes("Main"),nt.includes('data-act="close-note" data-card="n1"'),nt.includes("+ Note"),nt.includes('data-act="add-note"')];
+        toggleBadge("context");out.context=state();
+        const cx=$("bsheet").innerHTML;
+        out.ctxHtml=[cx.includes("Orchestrator context · compacts at about 67k"),cx.includes("whole session"),cx.includes("Clear session…"),cx.includes("Theme: auto"),cx.includes("+ Add item"),cx.includes('data-act="add"')];
+        chat.service=false;toggleBadge("context");toggleBadge("context");out.ctxHtml.push($("bsheet").innerHTML.includes("whole session"));
+        toggleBadge("context");  // the same badge again closes it
+        out.again=state();
+        toggleBadge("runs");closeBadge();out.escape=state();
+        """)
+        self.assertEqual(out["bar"], "|Runs 10|Schedule 1|Notes 1|Context 40k|")
+        self.assertEqual(out["closed"], [None, True])
+        self.assertEqual(out["runs"], ["runs", False, 1])
+        self.assertEqual(out["runsHtml"][1:], [True] * 9)
+        self.assertEqual(out["runsHtml"][0], 7)  # the live run is one of the 7 shown; the rest are behind "Show all"
+        self.assertEqual(out["schedule"], ["schedule", False, 1])
+        self.assertEqual(out["schedHtml"], [True, True, True, True, False])
+        self.assertEqual(out["notes"], ["notes", False, 1])
+        self.assertEqual(out["notesHtml"], [True] * 5)
+        self.assertEqual(out["context"], ["context", False, 1])
+        self.assertEqual(out["ctxHtml"], [True] * 6 + [False])
+        self.assertEqual(out["again"], [None, True, 0])
+        self.assertEqual(out["escape"], [None, True, 0])
+        js = open(os.path.join(os.path.dirname(CLI), "dashboard_ui", "app.js")).read()
+        self.assertIn('if(e.key==="Escape"){closeView();closeBadge()}', js)  # Escape closes the sheet
+
+    def test_dashboard_merge_summary_request_and_marker(self):
+        out = self._page_probe("""
+        const T="",chat={key:"#14"};let fb=false;const fallback=()=>fb,hhmm=ts=>String(ts||"").slice(11,16),refresh=async()=>{calls.push("refresh")};
+        const alert=m=>calls.push("alert:"+m),fetch=async()=>{calls.push("threads");return {ok:false}};
+        const select2=[];const sel=id=>select2.push(id);
+        ui.threads=[{id:"main",title:"Main"},{id:"#10",title:"Sample ten",messages:3},{id:"#14",title:"B",messages:6,merged:[{id:"#15",at:"2026-10-22T09:40:03"}]},
+          {id:"#15",title:"C",messages:4},{id:"t1",title:"Free topic",messages:3},{id:"optimize",title:"Optimize"}];
+        ui.picks=["#15","#14"];
+        const m=mergeSummary();
+        out.two=[m.text,m.keeps,m.button,m.to,m.ids];
+        ui.target="#15";out.change=mergeSummary().keeps;
+        ui.picks=["t1","#15","#14"];ui.target=null;
+        const m3=mergeSummary();out.three=[m3.text,m3.button,m3.keeps];
+        ui.picks=["#14"];out.one=[mergeSummary(),mergeSummaryHtml()];
+        ui.picks=["#14","#15"];ui.target=null;out.sumHtml=[mergeSummaryHtml().includes("Merge #14 and #15 into one thread"),mergeSummaryHtml().includes("Keeps the title of #14"),
+          mergeSummaryHtml().includes(">Change<"),mergeSummaryHtml().includes(">Merge 2 threads<"),mergeSummaryHtml().includes(">Cancel<")];
+        const rows=threadListHtml(true);
+        out.boxes=[(rows.match(/type="checkbox"/g)||[]).length,rows.includes('data-pick="#15" checked'),rows.includes('data-pick="main"'),rows.includes('data-pick="optimize"')];
+        out.noBoxes=threadListHtml().includes("checkbox");
+        const post=async(path,body)=>{calls.push([path,body]);return body.from==="bad"?{ok:false,error:"nope"}:{ok:true}};
+        let sheetClosed=0;
+        await mergeGo(["#14","#15","t1"],"#14");
+        out.req=calls.splice(0);
+        out.after=[ui.picks.length,ui.merge];
+        await mergeGo(["bad","#14"],"#14");out.fail=calls.splice(0);
+        // desktop: the open thread is the target, one other is picked
+        ui.sel="#10";ui.merge={pick:null};
+        const box=mergeBoxHtml();
+        out.box=[box.includes("Merge into #10"),box.includes('data-merge-pick="#14" checked'),box.includes('data-merge-pick="main"'),box.includes('data-merge-pick="#10"'),
+          box.includes('data-merge-pick="optimize"'),box.includes("Merge 2 threads"),box.includes("keep the title of #10")];
+        ui.merge={pick:"t1"};await mergeOpenGo();out.desk=calls.splice(0);
+        // the marker with Unmerge, in the thread it was merged into
+        const mk=mergedMarks();out.marks=mk.length;
+        out.marker=[mergedHtml(mk[0]).includes("Merged #15 into this thread · 09:40"),mergedHtml(mk[0]).includes('data-act="unmerge" data-from="#15"'),mergedHtml(mk[0]).includes(">Unmerge<")];
+        await unmergeThread("#15");out.unmerge=calls.splice(0);
+        fb=true;out.fallback=mergedMarks().length;fb=false;chat.key="main";out.main=mergedMarks().length;
+        """.replace("const select2=[];const sel=id=>select2.push(id);", ""), chat_js=True)
+        self.assertEqual(out["two"], ["Merge #14 and #15 into one thread", "Keeps the title of #14", "Merge 2 threads", "#14", ["#14", "#15"]])
+        self.assertEqual(out["change"], "Keeps the title of #15")
+        self.assertEqual(out["three"], ["Merge #14, #15 and Free topic into one thread", "Merge 3 threads", "Keeps the title of #14"])
+        self.assertEqual(out["one"], [None, ""])
+        self.assertEqual(out["sumHtml"], [True] * 5)
+        self.assertEqual(out["boxes"], [4, True, False, False])
+        self.assertFalse(out["noBoxes"])
+        self.assertEqual(out["req"], [["/api/thread/merge", {"from": "#15", "into": "#14"}], ["/api/thread/merge", {"from": "t1", "into": "#14"}],
+                                      "threads", "refresh"])
+        self.assertEqual(out["after"], [0, None])
+        self.assertEqual(out["fail"], [["/api/thread/merge", {"from": "bad", "into": "#14"}], "alert:Couldn't merge bad: nope", "threads"])
+        self.assertEqual(out["box"], [True, True, False, False, False, True, True])
+        self.assertEqual(out["desk"], [["/api/thread/merge", {"from": "t1", "into": "#10"}], "threads", "refresh"])
+        self.assertEqual(out["marks"], 1)
+        self.assertEqual(out["marker"], [True] * 3)
+        self.assertEqual(out["unmerge"], [["/api/thread/unmerge", {"from": "#15"}], "threads", "refresh"])
+        self.assertEqual((out["fallback"], out["main"]), (0, 0))  # no merge marker in fallback or in Main
+
+    def test_dashboard_lists_main_in_fallback_and_optimize_by_suggestions(self):
+        out = self._page_probe("""
+        const mins=m=>new Date(Date.now()-m*60000).toISOString().slice(0,19);
+        ui.threads=[{id:"optimize",title:"Optimize",kind:"free",waiting:false,last_message:null,messages:0}];  // what fallback used to send
+        let h=threadListHtml();
+        out.fallbackList=[h.includes('data-thread="main"'),h.includes(">Main<"),h.includes('data-thread="optimize"')];
+        ui.threads=[{id:"main",title:"Main",kind:"main",messages:2,last_message:mins(3)},{id:"#12",title:"Task twelve",kind:"task",messages:5,last_message:mins(9)},
+          {id:"optimize",title:"Optimize",kind:"free",messages:0}];
+        h=threadListHtml();out.rows=(h.match(/class="row/g)||[]).length;out.noOpt=!h.includes("optimize");
+        const sg=(id,card)=>({id,kind:"archive",card,reason:"r",meta:"m"});
+        lastBoard={cards:[{id:"opt-p1",kind:"optimize",column:"Waiting on you",project:"p1",optimize:{suggestions:[sg("archive:a","a"),sg("archive:b","b")],drafts:[]}}]};
+        h=threadListHtml();out.withSug=[h.includes('data-thread="optimize"'),h.includes("2 suggestions"),h.includes("no messages yet")];
+        lastBoard={cards:[{id:"opt-p1",kind:"optimize",column:"Waiting on you",project:"p1",optimize:{suggestions:[sg("archive:a","a")],drafts:[]}}]};
+        out.one=threadListHtml().includes("1 suggestion ")||threadListHtml().includes("1 suggestion<");
+        lastBoard={cards:[]};ui.threads[2].messages=3;h=threadListHtml();out.withMessages=[h.includes('data-thread="optimize"'),h.includes("3 messages")];
+        """)
+        self.assertEqual(out["fallbackList"], [True, True, False])  # Main is there, an empty Optimize isn't
+        self.assertEqual((out["rows"], out["noOpt"]), (2, True))
+        self.assertEqual(out["withSug"], [True, True, False])
+        self.assertTrue(out["one"])
+        self.assertEqual(out["withMessages"], [True, True])
+
+    def test_dashboard_fallback_thread_list_has_main_and_task_threads_with_messages(self):
+        lt = self.threads_home()
+        import dash_chat
+        dash_chat._CHAT.clear()
+        dash_chat._BRIDGE.update(up=False, at=time.time() + 3600, home=dash_chat.lean_home())
+        self.addCleanup(lambda: dash_chat._BRIDGE.update(at=0))
+        for key, n in (("12", 2), ("13", 0)):
+            d = dash_chat.lean_home("chat", "threads", key)
+            os.makedirs(d)
+            with open(os.path.join(d, "events.jsonl"), "w") as fh:
+                for i in range(n):
+                    fh.write(json.dumps({"i": i + 1, "kind": "user", "text": "hello", "ts": "2026-10-22T09:0%d:00" % i}) + "\n")
+        lt.new("Free one")
+        lt.new("Free two")
+        lt.merge("t2", "t1")
+        out = dash_chat.thread_list()
+        ids = [t["id"] for t in out["threads"]]
+        self.assertEqual(ids[0], "main")
+        self.assertEqual(sorted(ids), sorted(["main", "#12", "t1", "optimize"]))  # #13 has no messages, t2 is merged into t1
+        by = {t["id"]: t for t in out["threads"]}
+        self.assertEqual(by["#12"]["messages"], 2)
+        self.assertEqual([m["id"] for m in by["t1"]["merged"]], ["t2"])
+        self.assertTrue(by["t1"]["merged"][0]["at"])
+        lt.unmerge("t2")
+        self.assertEqual({t["id"]: t for t in dash_chat.thread_list()["threads"]}["t1"]["merged"], [])
 
     def test_dashboard_flat_inbox_and_todos(self):
         out = self._page_probe("""
@@ -815,7 +970,7 @@ class CliTest(unittest.TestCase):
         if not node:
             self.skipTest("node isn't installed")
         js = open(os.path.join(os.path.dirname(CLI), "dashboard_ui", "app.js")).read()
-        fn = js[js.index("function syncNotice"):js.index("function drawSchedule")]
+        fn = js[js.index("function syncNotice"):js.index("function schedHtml")]
         probe = fn + """
         const rec=(first,args)=>({args:args||["sync","--check"],first});
         const up=rec("update available: lean-agent 0.30.0 -> 0.31.0 (2 commit(s)). Install it: lean-agent sync");
@@ -3637,7 +3792,7 @@ class CliTest(unittest.TestCase):
             sent = [json.loads(l) for l in fh if l.startswith('{"type": "user"')]
         self.assertEqual(sent[0]["message"]["content"], "hello")  # untagged, to the main stream-json thread
         code, body, _ = dashboard.api_get("/api/threads", {})
-        self.assertEqual((code, json.loads(body)["threads"][0]["id"]), (200, "optimize"))
+        self.assertEqual((code, [t["id"] for t in json.loads(body)["threads"]]), (200, ["main", "optimize"]))  # Main is listed too
 
     def test_guide_has_the_thread_rules(self):
         with open(os.path.join(os.path.dirname(CLI), "..", "templates", "guide.md")) as fh:

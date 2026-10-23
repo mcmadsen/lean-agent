@@ -176,16 +176,47 @@ def thread_unmerge(src):
 
 
 def thread_list():
-    """The threads (aliases and expiry applied): from the transcript model when the bridge answers, else the registry."""
+    """The threads (aliases and expiry applied): from the transcript model when the bridge answers, else the registry
+    plus Main and each task thread that has messages. Each thread lists the threads merged into it."""
     if service_up():
-        return {"threads": dash_service.model().thread_summaries(), "service_status": service_status()}
-    out = []
+        out, status = dash_service.model().thread_summaries(), service_status()
+    else:
+        out, status = _fallback_threads(), service_status()
+    data = lean_threads.load()
+    for t in out:
+        t["merged"] = [{"id": src, "at": (data["threads"].get(src) or {}).get("merged_at"),
+                        "title": (data["threads"].get(src) or {}).get("title")}
+                       for src, dst in data["aliases"].items() if lean_threads.resolve(dst, data["aliases"]) == t["id"]]
+    return {"threads": out, "service_status": status}
+
+
+def _fallback_threads():
+    """No service: Main, the registered threads, and each task thread with saved messages (newest first, Main on top)."""
+    def row(tid, title, kind, c):
+        evs = [e for e in c.events if e.get("kind") in ("user", "assistant")] if c else []
+        return {"id": tid, "title": title, "kind": kind, "waiting": bool(c and c.pending),
+                "last_message": evs[-1]["ts"] if evs else None, "messages": len(evs)}
+    out = {}
     for t in lean_threads.threads():
         c = _CHAT.get((lean_home(), thread_key(t["id"])))
-        out.append({"id": t["id"], "title": t["title"], "kind": t["kind"], "waiting": bool(c and c.pending),
-                    "last_message": t.get("last_message"),
-                    "messages": len([e for e in c.events if e.get("kind") in ("user", "assistant")]) if c else 0})
-    return {"threads": out, "service_status": service_status()}
+        r = row(t["id"], t["title"], t["kind"], c)
+        r["last_message"] = r["last_message"] or t.get("last_message")
+        out[t["id"]] = r
+    base = lean_home("chat", "threads")
+    for k in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+        tid = "#" + k
+        if not k.isdigit() or tid in out or not os.path.exists(os.path.join(base, k, "events.jsonl")):
+            continue
+        try:
+            c = chat(k)
+        except ValueError:
+            continue
+        r = row(tid, c.meta.get("title") or tid, "task", c)
+        if r["messages"]:
+            out[tid] = r
+    main = row("main", "Main", "main", chat("main"))
+    rest = sorted((r for r in out.values() if r["id"] != "main"), key=lambda r: (r["last_message"] or "", r["id"]), reverse=True)
+    return [main] + rest
 
 
 def thread_dir(key):

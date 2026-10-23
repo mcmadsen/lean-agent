@@ -52,8 +52,10 @@ function drawChat(){
   const box=$("msgs"),atEnd=box.scrollHeight-box.scrollTop-box.clientHeight<80;
   const evs=[...chat.events.values()].sort((a,b)=>a.i-b.i);
   let h=typeof contextCard==="function"?contextCard():"",ai=null;  // consecutive replies and tool calls share one block
+  const marks=mergedMarks(),putMarks=until=>{while(marks.length&&(until==null||(marks[0].at||"")<=until))h+=mergedHtml(marks.shift())};
   const flush=()=>{if(ai){h+=`<div class="ai"><div class="av" aria-hidden="true">O</div><div class="body"><div class="who">Orchestrator · ${esc(hhmm(ai.ts))}${ai.about?" "+aboutChip(ai.about):""}</div>${ai.parts.join("")}</div></div>`;ai=null}};
   for(const e of evs){
+    if(marks.length&&(marks[0].at||"")<=e.ts){flush();putMarks(e.ts)}
     if(e.kind==="tool"&&e.name==="AskUserQuestion")continue;  // its question card says it all
     if(e.kind==="assistant"||e.kind==="tool"||e.kind==="permission"){
       const card=e.kind==="permission"&&(e.state==="pending"||e.state==="in_app"||(e.questions&&e.questions.length));
@@ -70,7 +72,7 @@ function drawChat(){
     else if(e.kind==="result")h+=`<div class="sysl">${e.error?"stopped with an error":"done"}${e.seconds?" · "+e.seconds+" s":""}${e.cost!=null?" · $"+Number(e.cost).toFixed(2):""}</div>`;
     else h+=`<div class="sysl${e.kind==="error"?" bad":""}">${esc(e.text)}</div>`;
   }
-  flush();
+  flush();putMarks();
   if(!evs.length)h+=`<div class="sysl">${chat.key==="main"?"Talk to lean-agent here: ask for work, answer its questions, approve what it wants to run.":chat.key==="optimize"?"Optimize suggestions for your projects show up here.":"Nothing in this thread yet; your first message brings its context along."}</div>`;
   for(const r of ((typeof S!=="undefined"&&S&&S.running)||[]).filter(r=>chat.key==="main"||String(r.todo)===String(chat.key)))  // one compact line per running worker
     h+=`<div class="wline"><span class="dot dot-run" aria-hidden="true"></span><span class="mono">running · ${r.todo!=null?"#"+esc(r.todo):"lookup"} · ${esc(r.model||"?")} / ${esc(r.effort||"default")} · ${r.turns||0} turns · ${dur(secs(r.started)||0)}</span><button type="button" class="btn sm" data-act="run-stop" data-id="${esc(r.run)}" aria-label="Stop run ${esc(r.run)}">Stop run</button></div>`;
@@ -80,10 +82,7 @@ function drawChat(){
     const f=fid&&document.getElementById(fid);if(f){f.focus();if(sel&&f.setSelectionRange)try{f.setSelectionRange(sel[0],sel[1])}catch(e){}}
     if(atEnd)box.scrollTop=box.scrollHeight;
   }
-  const waiting=evs.some(e=>e.kind==="permission"&&e.state==="pending");
-  $("cstat").textContent=waiting?"waits for you":chat.status==="working"?"working…":chat.alive?"ready":"idle";
-  $("cstat").className="chip "+(waiting?"tone-warn":chat.status==="working"?"tone-run":"tone-mute");
-  drawWorking();drawClear();
+  drawWorking();
   if(typeof drawHeader==="function"&&chat.headSig!==chat.service+"|"+rcState()+"|"+fallback()){chat.headSig=chat.service+"|"+rcState()+"|"+fallback();drawHeader();if(S&&S.plan)drawPlanBox(S)}
   if(typeof drawBanners==="function")drawBanners();
   tick();
@@ -96,16 +95,22 @@ function drawWorking(){
   if(!w.firstChild)w.innerHTML=`<span class="dot dot-run" aria-hidden="true"></span><span>Orchestrator is working</span><span class="mono mute" aria-hidden="true">· <span data-since="${chat.workStart}"></span></span><span class="hspace"></span><button type="button" class="btn sm" data-act="interrupt">Interrupt</button>`;
   else w.querySelector("[data-since]").dataset.since=chat.workStart;
 }
-function drawClear(){
-  const b=$("clearbox"),task=typeof taskLabel==="function"?taskLabel():"";
-  const fb=fallback();
-  $("cnew").textContent=fb?"Clear thread…":chat.service?"Clear session…":"New thread";
-  if(!chat.confirm){b.hidden=true;b.innerHTML="";return}
-  if(b.firstChild)return;
-  b.hidden=false;
-  b.innerHTML=`<div class="clearbox" role="alert"><span>${fb?`Clear this thread? Only ${chat.key==="main"?"the orchestrator":"this task's"} thread is cleared; nothing else is touched.`:chat.service?`Clear the whole session? This clears the conversation in the dashboard, the Claude app and the terminal${task?", not only "+esc(task):""}.`:"Start this thread over? The old conversation stays in Claude Code's history."}</span><span class="acts"><button type="button" class="btn sm danger" data-act="clear-yes">${fb?"Clear thread":chat.service?"Clear session":"Start over"}</button><button type="button" class="btn sm" data-act="clear-no" id="clear-no">Cancel</button></span></div>`;
-  $("clear-no").focus();
+function clearHtml(){  // in the Context sheet: the button, or its inline confirm
+  const task=typeof taskLabel==="function"?taskLabel():"",fb=fallback();
+  if(!chat.confirm)return `<button type="button" class="btn sm" data-act="clear-ask">${fb?"Clear thread…":chat.service?"Clear session…":"Start thread over…"}</button>`;
+  return `<div class="clearbox" role="alert"><span>${fb?`Clear this thread? Only ${chat.key==="main"?"the orchestrator":"this task's"} thread is cleared; nothing else is touched.`:chat.service?`Clear the whole session? This clears the conversation in the dashboard, the Claude app and the terminal${task?", not only "+esc(task):""}.`:"Start this thread over? The old conversation stays in Claude Code's history."}</span><span class="acts"><button type="button" class="btn sm danger" data-act="clear-yes">${fb?"Clear thread":chat.service?"Clear session":"Start over"}</button><button type="button" class="btn sm" data-act="clear-no" id="clear-no">Cancel</button></span></div>`;
 }
+function drawClear(focus){
+  if(typeof drawSheet==="function")drawSheet();
+  const b=focus&&document.getElementById(focus);if(b)b.focus();
+}
+// the line a merge leaves in the target thread, with Unmerge
+const mergedMarks=()=>{
+  if(fallback()||chat.key==="main")return[];
+  const t=ui.threads.find(t=>threadKey(t.id)===chat.key);
+  return ((t&&t.merged)||[]).slice().sort((a,b)=>(a.at||"").localeCompare(b.at||""));
+};
+const mergedHtml=m=>`<div class="merged mono"><span class="ln"></span><span>Merged ${esc(m.title&&!/^#/.test(m.id)?m.title:m.id)} into this thread${m.at?" · "+esc(hhmm(m.at)):""}</span><button type="button" class="link" data-act="unmerge" data-from="${esc(m.id)}" aria-label="Unmerge ${esc(m.id)}">Unmerge</button><span class="ln"></span></div>`;
 function tick(){
   const now=Date.now();
   for(const el of document.querySelectorAll("[data-since]")){const s=Math.max(0,Math.round((now-el.dataset.since)/1000));el.textContent=dur(s)}
@@ -131,7 +136,7 @@ async function pollChat(){
     if(s.now)chat.skew=Date.now()-s.now*1000;
     chat.workStart=s.work_since?s.work_since*1000+(chat.skew||0):0;
     drawChat();loadThreads();
-  }catch(e){ui.offline=ui.offline||Date.now();$("cstat").textContent="offline";if(typeof drawBanners==="function")drawBanners()}
+  }catch(e){ui.offline=ui.offline||Date.now();if(typeof drawBanners==="function")drawBanners()}
   const busy=chat.status==="working"||Date.now()-chat.sentAt<15000||[...chat.events.values()].some(e=>e.kind==="permission"&&e.state==="pending");
   chat.timer=setTimeout(pollChat,busy?1200:5000);
 }
@@ -157,8 +162,8 @@ document.addEventListener("click",e=>{
     post("/api/chat/answer",{thread:chat.key,rid:a.dataset.rid,allow:true,answers}).then(pollChat)}
   else if(act==="skip"){done();post("/api/chat/answer",{thread:chat.key,rid:a.dataset.rid,allow:false,message:"skipped"}).then(pollChat)}
   else if(act==="interrupt"){done();post("/api/chat/stop",{thread:chat.key}).then(pollChat)}
-  else if(act==="clear-ask"){done();chat.confirm=true;drawClear()}
-  else if(act==="clear-no"){done();chat.confirm=false;drawClear();$("cnew").focus()}
+  else if(act==="clear-ask"){done();chat.confirm=true;drawClear("clear-no")}
+  else if(act==="clear-no"){done();chat.confirm=false;drawClear();const b=document.querySelector('[data-act="clear-ask"]');if(b)b.focus()}
   else if(act==="clear-yes"){done();chat.confirm=false;drawClear();
     post("/api/chat/new",{thread:chat.service?"main":chat.key}).then(()=>{chat.events.clear();chat.cursor=0;refresh()})}  // one session: main clears it everywhere
   else if(act==="note-decide"){done();const c=selected(),i=$("dec-"+(c&&c.note));const v=i?i.value.trim():"";if(!v){if(i)i.focus();return}
