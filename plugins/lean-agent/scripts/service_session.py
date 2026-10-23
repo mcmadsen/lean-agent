@@ -289,13 +289,8 @@ def checkpoint_prompt():
 
 
 def running_runs():
-    """Ids of the lean-agent runs alive now (running/*.json with a live pid)."""
-    out = []
-    for f in glob.glob(lean_home("running", "*.json")):
-        m = _load(f)
-        if m.get("pid") and lean_common.pid_alive(m["pid"]):
-            out.append(m.get("run") or os.path.basename(f)[:-5])
-    return sorted(out)
+    """Ids of the lean-agent runs alive now."""
+    return sorted(rid for rid, _ in lean_common.running_runs(lean_home()))
 
 
 def _knob(name, default):
