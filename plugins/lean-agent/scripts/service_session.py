@@ -405,7 +405,6 @@ class AutoClear:
         self.waiting = None   # (transcript offset, when) once the prompt is out
         self.held = None      # why a due clear waits (running workers)
         self.manual = False   # the clear in progress was asked for with `lean-agent clear`
-        self.requeued = None  # the clear_requested value this host re-queued once already
 
     def transcript(self):
         rec = _load(lean_home("chat", "service.json"))
@@ -429,19 +428,6 @@ class AutoClear:
                 self.log(f"holding the clear: {why}")
             update_up(clear_hold=why)
 
-    def retry_manual(self, now, reason):
-        """A requested clear that could not start within the checkpoint wait: queue it once more, then report
-        `clear not done: <reason>` (up.json, `service status`) and drop the request."""
-        asked = _load(up_path()).get("clear_requested")
-        if self.requeued != asked:
-            self.requeued = now
-            update_up(clear_requested=now)
-            self.log(f"clear requested but not started ({reason}): queued once more")
-        else:
-            self.requeued = None
-            update_up(clear_requested=None, clear_status=f"clear not done: {reason}")
-            self.log(f"clear not done: {reason}")
-
     def blocked(self, st):
         idle = _knob("LEAN_AGENT_CLEAR_IDLE", CLEAR_IDLE)
         now = self.now()
@@ -464,10 +450,8 @@ class AutoClear:
                 return
             answered = st["ended"] and "checkpointed" in st["text"].lower()
             timed_out = now - since >= _knob("LEAN_AGENT_CLEAR_WAIT", CLEAR_WAIT)
-            if timed_out and not answered and not st["ended"]:
+            if timed_out and not answered and not st["ended"] and not self.manual:
                 self.waiting = self.started = None  # a turn is still running: /clear would land in it; ask again at a turn end
-                if self.manual:
-                    self.retry_manual(now, "a turn is still running")
                 self.log("no reply in time and a turn is running: giving up this round")
                 return
             if answered or timed_out:
@@ -477,14 +461,14 @@ class AutoClear:
             return
         if _load(up_path()).get("clear_requested"):
             # asked for by the user: ignores the threshold, the gap, the idle time and live runs (they are detached
-            # and survive); waits only for a turn end and for a pending permission prompt
+            # and survive); waits for a turn end however long it takes, and for a pending permission prompt
             st = transcript_state(path)
             if not st["ended"] or permission_pending(self.session_id()):
                 asked = _load(up_path()).get("clear_requested")
-                if not permission_pending(self.session_id()) and isinstance(asked, (int, float)) \
+                if not os.path.exists(path) and isinstance(asked, (int, float)) \
                         and now - asked >= _knob("LEAN_AGENT_CLEAR_WAIT", CLEAR_WAIT):
-                    self.retry_manual(now, "the transcript was not found" if not os.path.exists(path)
-                                      else "a turn is still running")
+                    update_up(clear_requested=None, clear_status="clear not done: the transcript was not found")
+                    self.log("clear not done: the transcript was not found")
                 return
             update_up(clear_requested=None, clear_status=None)
             self.hold(None)
