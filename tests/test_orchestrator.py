@@ -5162,6 +5162,14 @@ class CliTest(unittest.TestCase):
         self.assertIn("12,000", self.cli("config", "clear-at", LEAN_AGENT_CLEAR_AT="12000").stdout)
         self.assertEqual(self.cli("config", "clear-at", "x", check=False).returncode, 1)
 
+    def test_clear_at_reads_the_compaction_point_up_recorded(self):
+        os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "up.json"), "w") as fh:
+            json.dump({"compact_at": 80000}, fh)
+        out = self.cli("config", "clear-at").stdout
+        self.assertIn("auto = 72,000 tokens", out)
+        self.assertIn("compacts at ~80,000", out)
+
     def auto_clear_up(self, ctx, **env):
         """`up` with the fake session whose turns leave `ctx` tokens of context; fast clocks for the auto clear."""
         self.env.update(dict(FAKE_CTX=str(ctx), LEAN_AGENT_CLEAR_POLL="0.1", LEAN_AGENT_CLEAR_IDLE="0",

@@ -117,7 +117,7 @@ def _orchestrator_context():
     series = usage.context_series(path)
     window = int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or DEFAULT_COMPACT_WINDOW)
     pct = float(os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") or DEFAULT_COMPACT_PCT)
-    compact_at = compaction_point(window, pct)
+    compact_at = (_json(home("up.json"), {}) or {}).get("compact_at") or compaction_point(window, pct)
     return {"now": series[-1][1] if series else 0, "calls": len(series), "compact_at": compact_at,
             "trend": [c for _, c in series[-60:]],
             "updated": datetime.datetime.fromtimestamp(os.path.getmtime(path)).isoformat(timespec="seconds")}

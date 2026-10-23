@@ -6358,6 +6358,7 @@ def cmd_up(a):
     up_info = load_json(home("up.json"), {})  # the dashboard's own conversation gets the same settings
     up_info["chat_env"] = {k: env[k] for k in list(ORCHESTRATOR_ENV) + ["LEAN_AGENT_BUDGET", "LEAN_AGENT_BUDGET_SET"]
                            if k in env}
+    up_info["compact_at"] = service_session.compact_at(env)  # what the clear threshold and the dashboard read
     save_json(home("up.json"), up_info)
     env = push_guard.git_env(env)  # the orchestrator's own git commands are guarded too
     link = None
@@ -7174,7 +7175,7 @@ def cmd_attribution(a):
 
 def clear_at_text():
     """The effective clear threshold, the compaction point, and why a due clear waits (if it does)."""
-    n, point = service_session.clear_at(), service_session.compact_at()
+    n, point = service_session.clear_at(), service_session.up_compact_at()
     text = ("auto = " if service_session.clear_setting() == "auto" else "") + (f"{n:,} tokens" if n else "off")
     text += f" (the orchestrator compacts at ~{point:,})"
     hold = load_json(home("up.json"), {}).get("clear_hold")
