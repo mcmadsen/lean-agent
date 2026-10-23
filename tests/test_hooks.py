@@ -452,7 +452,9 @@ class BudgetTest(Base):
                     "lean-agent run p <<EOF\n$(rm x)\nEOF", "lean-agent run p <<EOF\n`rm x`\nEOF",
                     "lean-agent run p <<'EOF'\nx\nEOF2\n", "lean-agent run p <<'EOF'\nx\n EOF\n",
                     "lean-agent run p <<'EOF'\nx\nEOF\n$(rm x)", "lean-agent run p <<-'EOF'\nx\n  EOF\n",
-                    "lean-agent run p <<'EOF' $(rm x)\nx\nEOF", "lean-agent run p <<<x"):
+                    "lean-agent run p <<'EOF' $(rm x)\nx\nEOF", "lean-agent run p <<<x",
+                    "lean-agent run p -- '$(cat <<\"EOF\"'; rm -rf ~", "lean-agent runs # <<EOF\nrm x\nEOF",
+                    "lean-agent runs # '\\''\nrm x\n#'\\''", "lean-agent runs # note", "lean-agent runs;#c"):
             self.assertFalse(ok(cmd), cmd)
         for cmd in ("lean-agent run p -m sonnet --task-file - <<'EOF'\nGoal: x\n$(rm y) `z`\nEOF",
                     "lean-agent run p --task-file - <<EOF\nGoal: x\nEOF", "lean-agent run p --task-file - <<\"EOF\"\n$(x)\nEOF\n",
@@ -460,7 +462,9 @@ class BudgetTest(Base):
                     "lean-agent run p --task-file - <<-EOF\n\tbody\nEOF", "lean-agent run p -- 'a $(b) `c`'",
                     "lean-agent run p -- \"a \\$(b) \\`c\"", "lean-agent run p --task-file - <<'EOF' 2>&1\nx\nEOF",
                     "lean-agent run p --task-file - <<'EOF' && lean-agent runs\nx\nEOF\n",
-                    "lean-agent run p --task-file - <<'A'\nx\nA\nlean-agent runs"):
+                    "lean-agent run p --task-file - <<'A'\nx\nA\nlean-agent runs",
+                    "lean-agent run p -- 'a # b'", "lean-agent run p -- \"a # b\"", "lean-agent run p -- about#3",
+                    "lean-agent run p -- http://x/y#frag", "lean-agent run p --task-file - <<'EOF'\n# heading\nEOF"):
             self.assertTrue(ok(cmd), cmd)
         self.assertFalse(ok("lean-agent run p <<'EOF'\nx\nEOF\nrm x"))
 
@@ -473,7 +477,9 @@ class BudgetTest(Base):
         examples = []
         for m in re.finditer(r"^```(\w*)\n(.*?)^```", guide, re.S | re.M):
             if m.group(1) == "sh":
-                examples.append(m.group(2))
+                # a trailing `# comment` in the guide isn't part of the command (strict mode denies comments)
+                examples.append("\n".join(re.sub(r"\s+#\s.*$", "", l) if l.startswith("lean-agent ") else l
+                                          for l in m.group(2).splitlines()))
             elif m.group(1) == "text":  # lines with a trailing `# comment`: the comment isn't part of the command
                 examples += [re.sub(r"\s+#.*$", "", l) for l in m.group(2).splitlines() if l.startswith("lean-agent ")]
         text = re.sub(r"^```.*?^```", "", guide, flags=re.S | re.M)
