@@ -516,7 +516,7 @@ class BudgetTest(Base):
             self.assertNotIn("Old thing", out["permissionDecisionReason"])
         for cmd in ('lean-agent run -p shop --todo 1 -m haiku --why x "fix it"', "lean-agent review shop --todo=#1",
                     "lean-agent run -p shop --todo none -m haiku --why x look", "lean-agent run --resume 0101-x more",
-                    "lean-agent review shop --status", "lean-agent todo add x"):
+                    "lean-agent review shop --status", "lean-agent review shop --decide-gaps", "lean-agent todo add x"):
             self.assertIsNone(run_hook("budget_hook.py", ev(cmd), **self.env), cmd)
 
     def test_check_before_auto_compaction(self):
