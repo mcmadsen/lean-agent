@@ -799,6 +799,21 @@ class CliTest(unittest.TestCase):
         self.assertEqual(out["picker"], [True, True, False, False])  # not the thread it is in, not main
         self.assertEqual(out["sheet"], [True, True])
 
+    def test_dashboard_cleared_marker_and_the_context_sheet_threshold(self):
+        out = self._page_probe("""
+        const hhmm=ts=>String(ts||"").slice(11,16);
+        out.marker=clearedHtml({kind:"cleared",ts:"2026-10-22T14:02:00"});
+        const chat={service:true,confirm:false,key:"main"},fallback=()=>false;
+        const store={get:(k,d)=>d,set(){}};let themeNow="";
+        S={context:{calls:3,now:40000,compact_at:67000,clear_at:40000,last_clear:"2026-10-22T14:02:30"}};
+        out.sheet=contextHtml();
+        S={context:{calls:3,now:40000,compact_at:67000,clear_at:40000,last_clear:null}};
+        out.never=contextHtml();
+        """, chat_js=True)
+        self.assertIn("Context cleared · 14:02 · continued from a checkpoint", out["marker"])
+        self.assertIn("Clears at about 40k · last clear 14:02", out["sheet"])
+        self.assertIn("Clears at about 40k · not cleared yet", out["never"])
+
     def test_dashboard_routing_line_and_move(self):
         out = self._page_probe("""
         out.text=[routeText({target:"#10",also:[]}),routeText({target:"#10",also:["#14"]}),routeText({target:"t3",title:"Plan the move",also:[]}),
@@ -3282,8 +3297,87 @@ class CliTest(unittest.TestCase):
         self._hook_record(home, "s2", new)
         m.refresh()
         self.assertEqual((m.path, m.sid), (new, "s2"))
-        self.assertIn("new conversation", [e.get("text") for e in m.snapshot("main", 0)["events"] if e["kind"] == "note"])
+        self.assertEqual([e["kind"] for e in m.snapshot("main", 0)["events"] if e["kind"] == "cleared"], ["cleared"])
         self.assertEqual([e["text"] for e in m.snapshot("main", 0)["events"] if e["kind"] == "user"], ["hello", "after the clear"])
+
+    def _chain_record(self, home, paths, sources=None):
+        """What the SessionStart hook leaves: the current transcript and the chain of all of them."""
+        t0 = time.time() - 100
+        meta = {p: {"ts": t0 + n, "source": (sources or {}).get(p, "clear" if n else "startup")} for n, p in enumerate(paths)}
+        with open(os.path.join(home, "chat", "service.json"), "w") as fh:
+            json.dump({"session_id": os.path.basename(paths[-1])[:-6], "transcript_path": paths[-1], "source": meta[paths[-1]]["source"],
+                       "ts": time.time(), "chain": paths, "chain_meta": meta}, fh)
+
+    def _chain_two(self):
+        ds, home, proj, tr, up = self._follow_env()
+        self._user_file(tr, 'About #5 "Shop": first half', time.time())
+        new = os.path.join(proj, "s2.jsonl")
+        self._user_file(new, 'About #5 "Shop": second half', time.time())
+        self._chain_record(home, [tr, new])
+        return ds, home, tr, new
+
+    def test_service_chain_shows_both_halves_of_a_thread_with_the_marker_between(self):
+        ds, home, tr, new = self._chain_two()
+        m = ds.Model()  # a dashboard that starts after the clear
+        m.refresh()
+        for key in ("5", "main"):
+            evs = [e for e in m.snapshot(key, 0)["events"] if e["kind"] in ("user", "cleared")]
+            self.assertEqual([e["kind"] for e in evs], ["user", "cleared", "user"], key)
+        evs = m.snapshot("5", 0)["events"]
+        self.assertEqual([e["text"] for e in evs if e["kind"] == "user"], ['About #5 "Shop": first half', 'About #5 "Shop": second half'])
+        self.assertRegex(next(e for e in evs if e["kind"] == "cleared")["ts"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$")
+        ids = [e["i"] for e in m.snapshot("main", 0)["events"]]
+        self.assertEqual(len(ids), len(set(ids)))
+        # a thread that has nothing around the clear shows no marker
+        self.assertEqual([e for e in m.snapshot("9", 0)["events"] if e["kind"] == "cleared"], [])
+        self.assertEqual([t["messages"] for t in m.thread_summaries() if t["id"] == "#5"], [2])
+        self.assertEqual(m.sid, "s2")
+
+    def test_service_chain_cursor_polling_across_the_switch(self):
+        ds, home, tr, new = self._chain_two()
+        os.remove(new)
+        self._chain_record(home, [tr])
+        m = ds.Model()
+        m.refresh()
+        snap = m.snapshot("5", 0)
+        self.assertEqual([e["text"] for e in snap["events"] if e["kind"] == "user"], ['About #5 "Shop": first half'])
+        cur = snap["cursor"]
+        self.assertEqual(m.snapshot("5", cur)["events"], [])
+        self._user_file(new, 'About #5 "Shop": second half', time.time())
+        self._chain_record(home, [tr, new])
+        m.refresh()
+        snap = m.snapshot("5", cur)
+        self.assertEqual([(e["kind"], e.get("text")) for e in snap["events"] if e["kind"] in ("user", "cleared")],
+                         [("cleared", None), ("user", 'About #5 "Shop": second half')])
+        self.assertGreater(snap["cursor"], cur)
+        self.assertEqual(m.snapshot("5", snap["cursor"])["events"], [])
+        with open(new, "a") as fh:  # the current transcript is tailed
+            fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": 'About #5 "Shop": third'}}) + "\n")
+        m.refresh()
+        self.assertEqual([e["text"] for e in m.snapshot("5", snap["cursor"])["events"] if e["kind"] == "user"], ['About #5 "Shop": third'])
+
+    def test_service_chain_reads_an_old_transcript_once(self):
+        ds, home, tr, new = self._chain_two()
+        m = ds.Model()
+        m.refresh()
+        reads = []
+        real = open
+        def counting(path, *a, **kw):
+            if str(path) in (tr, new):
+                reads.append(str(path))
+            return real(path, *a, **kw)
+        with mock.patch("builtins.open", counting):
+            m.refresh()
+            m.refresh()
+            self.assertEqual(reads, [])  # nothing new in either
+            with real(tr, "a") as fh:
+                fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "late line"}}) + "\n")
+            with real(new, "a") as fh:
+                fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "fresh line"}}) + "\n")
+            m.refresh()
+        self.assertEqual(reads, [new])
+        texts = [e["text"] for e in m.snapshot("main", 0)["events"] if e["kind"] == "user"]
+        self.assertEqual(texts, ['About #5 "Shop": first half', 'About #5 "Shop": second half', "fresh line"])
 
     def test_up_deletes_the_previous_sessions_service_record(self):
         chat = os.path.join(self.env["LEAN_AGENT_HOME"], "chat")
@@ -3502,7 +3596,7 @@ class CliTest(unittest.TestCase):
             cur = json.load(fh)
         self.assertNotEqual(cur["transcript_path"], old)
         self.assertEqual((cur["source"], cur["session_id"]), ("clear", os.path.basename(cur["transcript_path"])[:-6]))
-        self.assertIn("new conversation", [e.get("text") for e in main.snapshot()["events"] if e["kind"] == "note"])
+        self.assertIn("cleared", [e["kind"] for e in main.snapshot()["events"]])
         self.assertEqual(ss.info()["transcript"], old)  # up.json keeps the id `up` started with
         # without the bridge the per-thread stream-json sessions are used as before
         p.terminate()

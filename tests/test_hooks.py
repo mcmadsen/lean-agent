@@ -200,6 +200,17 @@ class SessionHookTest(Base):
         self.run_injected({me: 900, 900: 500, 500: 1})  # hook <- sh <- claude(500)
         self.assertEqual(self.record()["session_id"], "s1")
 
+    def test_keeps_a_chain_of_the_transcripts_in_order_and_the_last_20(self):
+        me = os.getpid()
+        for n in range(23):
+            self.run_injected({me: 900, 900: 500, 500: 1}, event={"session_id": f"s{n}", "transcript_path": f"/t/s{n}.jsonl",
+                                                                  "source": "clear" if n else "startup"})
+        self.run_injected({me: 900, 900: 500, 500: 1}, event={"session_id": "s22", "transcript_path": "/t/s22.jsonl", "source": "resume"})
+        rec = self.record()
+        self.assertEqual(rec["chain"], [f"/t/s{n}.jsonl" for n in range(3, 23)])
+        self.assertEqual(rec["chain_meta"]["/t/s22.jsonl"]["source"], "clear")  # the same transcript again: not a new entry
+        self.assertEqual(set(rec["chain_meta"]), set(rec["chain"]))
+
     def no_record(self):
         self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json")))
 
