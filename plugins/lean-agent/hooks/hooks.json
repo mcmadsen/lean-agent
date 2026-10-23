@@ -56,17 +56,6 @@
         ]
       }
     ],
-    "PermissionRequest": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/trampoline.py permission_hook.py",
-            "timeout": 600
-          }
-        ]
-      }
-    ],
     "UserPromptSubmit": [
       {
         "hooks": [

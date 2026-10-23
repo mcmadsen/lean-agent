@@ -174,7 +174,7 @@ def run_due(log=print):
 
 
 def record(job_id, args, rc, text, out_path=None):
-    """Save a finished job's output and add it to scheduled.jsonl (what the next conversation and the dashboard read)."""
+    """Save a finished job's output and add it to scheduled.jsonl (what the next conversation reads)."""
     if out_path is None:
         out_path = lean_home("scheduled", f"{job_id}-{datetime.datetime.now().strftime('%m%d-%H%M%S')}.txt")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
