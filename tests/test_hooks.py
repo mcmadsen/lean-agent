@@ -681,7 +681,7 @@ class BudgetTest(Base):
         self.assertTrue(second.startswith("New thread t2"), second)
         again = ctx("the quarterly report needs a chart in the docs")
         self.assertTrue(again.startswith('Thread t1 "Publish'), again)
-        self.assertIn("guessed; wrong? lean-agent thread move t1 tN", again)
+        self.assertIn("guessed; wrong? lean-agent thread move tN", again)
         self.assertTrue(ctx("what about t2 now?").startswith('Thread t2 "Fix export'))  # explicit wins over words
         self.assertTrue(ctx("#7 is failing").startswith('Thread #7'))
         self.assertTrue(ctx("yes please").startswith("Thread #7"))  # no content words: the last topic
@@ -707,7 +707,7 @@ class BudgetTest(Base):
         old = os.path.join(home, "chat", "threads.json")
         with open(old, "w") as fh:
             json.dump({"threads": {"t4": {"id": "t4", "title": "Old topic", "kind": "free", "created": "2026-01-01T00:00:00",
-                                          "last_message": "2026-01-01T00:00:00"}}, "aliases": {}, "moves": {}}, fh)
+                                          "last_message": "2026-01-01T00:00:00"}}, "aliases": {}}, fh)
         sys.path.insert(0, ROOT)
         with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": home}):
             import lean_threads

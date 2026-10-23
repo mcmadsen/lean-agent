@@ -311,7 +311,7 @@ through `LEAN_AGENT_THREAD`.
 | `lean-agent thread close tN` / `reopen tN` | Hide a finished topic from `now` and from matching / bring it back |
 | `lean-agent thread new "<title>"` / `list` | Start a free thread / list them |
 | `lean-agent thread merge tB tA` / `unmerge tB` | Fold thread B into A / give B its own tag back |
-| `lean-agent thread move <message> <thread>` | Move a message to another thread |
+| `lean-agent thread move tN` | Wrong thread: move the latest request, the current thread and the work recorded since to tN |
 
 The brief after a `/clear` starts with the same open threads. Strict mode allows all of these: they only read or change
 the registry.
