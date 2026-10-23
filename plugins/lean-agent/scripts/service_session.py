@@ -18,6 +18,7 @@ Socket protocol: one JSON object per connection, newline-terminated; one JSON li
     anything wrong    -> {"ok": false, "error": "..."}
 """
 import collections
+import glob
 import hashlib
 import json
 import os
@@ -31,6 +32,7 @@ import threading
 import time
 import uuid
 
+import lean_common
 import lean_log
 import usage
 
@@ -160,7 +162,7 @@ def go_fresh(restart_host=False, wait=None, now=time.time, sleep=time.sleep):
     if alive():
         path = _load(lean_home("chat", "service.json")).get("transcript_path") or info().get("transcript") or ""
         offset = transcript_state(path)["size"]
-        sent, _ = send(CLEAR_PROMPT)
+        sent, _ = send(checkpoint_prompt())
         limit = now() + (CLEAR_WAIT if wait is None else wait)
         checkpointed = False
         while sent and now() < limit and not checkpointed:
@@ -241,7 +243,9 @@ def info():
 
 # ---------------------------------------------------------------- auto clear (inside `up`)
 
-CLEAR_AT = 40000       # tokens of context after a finished turn above which the session is cleared (0 = off)
+CLEAR_AT = "auto"      # tokens of context after a finished turn above which the session is cleared: "auto" = just before compaction, 0 = off
+CLEAR_MARGIN = 8000    # "auto" clears this far below the compaction point
+CLEAR_HARD = 3000      # within this of the compaction point the clear no longer waits for running workers
 CLEAR_PROMPT = "Checkpoint now: run lean-agent checkpoint with your soft state, then reply 'checkpointed'"
 CLEAR_WAIT = 120       # seconds to wait for the checkpoint before clearing anyway
 CLEAR_GAP = 600        # seconds between two clears
@@ -249,15 +253,49 @@ CLEAR_IDLE = 30        # seconds since the user last typed
 TAIL_READ = 512 * 1024  # how much of the transcript's end is read
 
 
-def clear_at():
-    """The threshold: LEAN_AGENT_CLEAR_AT, else `lean-agent config clear-at N`, else 40000."""
-    raw = os.environ.get("LEAN_AGENT_CLEAR_AT")
-    if raw is None or not raw.strip().isdigit():
-        raw = _load(lean_home("config.json")).get("clear_at")
+def compact_at(env=None):
+    """Tokens at which Claude Code compacts the session: from its environment (`up` sets it), else the defaults."""
+    env = os.environ if env is None else env
     try:
-        return max(0, int(raw))
-    except (TypeError, ValueError):
-        return CLEAR_AT
+        window = int(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or lean_common.DEFAULT_COMPACT_WINDOW)
+        pct = float(env.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") or lean_common.DEFAULT_COMPACT_PCT)
+    except ValueError:
+        window, pct = lean_common.DEFAULT_COMPACT_WINDOW, lean_common.DEFAULT_COMPACT_PCT
+    return lean_common.compaction_point(window, pct)
+
+
+def clear_setting():
+    """What is set: LEAN_AGENT_CLEAR_AT, else `lean-agent config clear-at`, else "auto" (or a number of tokens)."""
+    for raw in (os.environ.get("LEAN_AGENT_CLEAR_AT"), _load(lean_home("config.json")).get("clear_at")):
+        raw = str(raw).strip().lower() if raw is not None else ""
+        if raw == "auto" or raw.isdigit():
+            return "auto" if raw == "auto" else int(raw)
+    return CLEAR_AT
+
+
+def clear_at(env=None):
+    """The threshold in tokens (0 = off): a number as set, or for "auto" the compaction point less CLEAR_MARGIN."""
+    setting = clear_setting()
+    return max(0, compact_at(env) - CLEAR_MARGIN) if setting == "auto" else setting
+
+
+def checkpoint_prompt():
+    """CLEAR_PROMPT, plus the ids of the runs alive (they go on through the clear; the new session collects them)."""
+    runs = running_runs()
+    if not runs:
+        return CLEAR_PROMPT
+    return CLEAR_PROMPT.replace("with your soft state", f"with your soft state and the running runs {', '.join(runs[:6])} "
+                                "(they go on after the clear)", 1)
+
+
+def running_runs():
+    """Ids of the lean-agent runs alive now (running/*.json with a live pid)."""
+    out = []
+    for f in glob.glob(lean_home("running", "*.json")):
+        m = _load(f)
+        if m.get("pid") and lean_common.pid_alive(m["pid"]):
+            out.append(m.get("run") or os.path.basename(f)[:-5])
+    return sorted(out)
 
 
 def _knob(name, default):
@@ -348,12 +386,15 @@ def permission_pending(session_id):
 class AutoClear:
     """Keeps the orchestrator's context small: after a finished turn that left the context above `clear_at()`, asks
     the session for a checkpoint, then types /clear (after its 'checkpointed' reply, or CLEAR_WAIT seconds). Never
-    while a permission prompt waits, within CLEAR_IDLE seconds of the user typing, or within CLEAR_GAP of the last one."""
+    while a permission prompt waits, within CLEAR_IDLE seconds of the user typing, within CLEAR_GAP of the last one,
+    or while a lean-agent run is alive (runs are detached and survive a clear, but the new session would only meet
+    them in the brief) unless the context is within CLEAR_HARD of compaction."""
 
     def __init__(self, host, now=time.time):
         self.host, self.now = host, now
         self.started = None   # when the last checkpoint prompt went out
         self.waiting = None   # (transcript offset, when) once the prompt is out
+        self.held = None      # why a due clear waits (running workers)
 
     def transcript(self):
         rec = _load(lean_home("chat", "service.json"))
@@ -368,6 +409,14 @@ class AutoClear:
     def last_gap_start(self):
         """When the last clear (or checkpoint request) happened: the record survives a restart of `up`."""
         return max(self.started or 0, last_clear(_load(lean_home("chat", "service.json"))) or 0)
+
+    def hold(self, why):
+        """Why the clear waits (shown by doctor and `service status`), or None; logged when it changes."""
+        if why != self.held:
+            self.held = why
+            if why:
+                self.log(f"holding the clear: {why}")
+            update_up(clear_hold=why)
 
     def blocked(self, st):
         idle = _knob("LEAN_AGENT_CLEAR_IDLE", CLEAR_IDLE)
@@ -398,16 +447,23 @@ class AutoClear:
                 self.log(f"/clear sent ({'checkpointed' if answered else 'no reply in time'})")
                 self.host.paste("/clear")
             return
-        limit = clear_at()
+        limit = clear_at(getattr(self.host, "env", None))
         if not limit or now - self.last_gap_start() < _knob("LEAN_AGENT_CLEAR_GAP", CLEAR_GAP):
             return
         st = transcript_state(path)
         if not st["ended"] or st["ctx"] <= limit or self.blocked(st):
+            self.hold(None)
             return
+        runs = running_runs()
+        if runs and st["ctx"] < compact_at(getattr(self.host, "env", None)) - CLEAR_HARD:
+            self.hold(f"{len(runs)} run(s) alive ({', '.join(runs[:3])}{', ...' if len(runs) > 3 else ''}): the clear "
+                      f"waits for them (or for {compact_at(getattr(self.host, 'env', None)) - CLEAR_HARD:,} tokens)")
+            return
+        self.hold(None)
         self.started = now
         self.waiting = (st["size"], now)
         self.log(f"context {st['ctx']:,} tokens is above {limit:,}: asking for a checkpoint")
-        self.host.paste(CLEAR_PROMPT)
+        self.host.paste(checkpoint_prompt())
 
     def run(self):
         poll = _knob("LEAN_AGENT_CLEAR_POLL", 2)

@@ -212,7 +212,7 @@ def handoff(hours=RECENT_HOURS):
         except (OSError, ValueError, TypeError):
             continue
     if running:
-        lines.append("Running now: " + "; ".join(running))
+        lines.append("Running now: " + "; ".join(running) + ". They survive a clear; collect with `lean-agent runs --wait all`")
     shown = recent(runs, hours)[-10:] or runs[-3:]
     if shown:
         lines.append("Recent runs:")

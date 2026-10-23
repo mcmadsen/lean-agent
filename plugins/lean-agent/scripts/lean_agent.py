@@ -20,6 +20,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -1283,7 +1284,112 @@ def new_todo(slug, title):
     return data["next"] - 1
 
 
+SUPERVISOR = []  # [True] in the detached process that does a run's real work
+
+
 def cmd_run(a):
+    """The run command; once the launch is cleared the work moves to a detached supervisor (see detach_run), which
+    ends here when the run is done instead of returning to the caller."""
+    rc = 1
+    try:
+        rc = _cmd_run(a)
+        return rc
+    except SystemExit as e:
+        rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+        raise
+    except BaseException:
+        if SUPERVISOR:
+            import traceback
+            traceback.print_exc()
+        raise
+    finally:
+        if SUPERVISOR:
+            for f in (sys.stdout, sys.stderr):
+                try:
+                    f.flush()
+                except (OSError, ValueError):
+                    pass
+            os._exit(rc or 0)
+
+
+def detach_run(workdir, run_id):
+    """Moves the rest of a run into a detached process (own session, stdin /dev/null, output in the run's work dir),
+    so it survives whatever kills this command: the orchestrator's /clear, its shell tool ending, a closed terminal.
+    Returns None in that process (it carries on), else the exit code once it is done, after this process has relayed
+    its output. Ctrl-C here is passed on to it, which stops the run as before."""
+    if SUPERVISOR or not hasattr(os, "fork") or os.environ.get("LEAN_AGENT_NO_DETACH") == "1":
+        return None
+    os.makedirs(workdir, exist_ok=True)
+    paths = [os.path.join(workdir, f"supervisor.{n}") for n in ("out", "err")]
+    for f in (sys.stdout, sys.stderr):
+        try:
+            f.flush()
+        except (OSError, ValueError):
+            pass
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setsid()
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGHUP, signal.SIG_DFL)
+            for fd, path, flags in ((0, os.devnull, os.O_RDONLY), (1, paths[0], os.O_WRONLY | os.O_CREAT | os.O_TRUNC),
+                                    (2, paths[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC)):
+                os.dup2(os.open(path, flags, 0o644), fd)
+            sys.stdin = open(os.devnull)
+            sys.stdout = open(1, "w", buffering=1, closefd=False)
+            sys.stderr = open(2, "w", buffering=1, closefd=False)
+        except BaseException:
+            os._exit(1)
+        SUPERVISOR.append(True)
+        return None
+    pos, status, interrupted = [0, 0], None, None
+
+    def relay():
+        for i, out in enumerate((sys.stdout, sys.stderr)):
+            try:
+                with open(paths[i], "rb") as fh:
+                    fh.seek(pos[i])
+                    data = fh.read()
+            except OSError:
+                continue
+            if data:
+                pos[i] += len(data)
+                try:
+                    out.write(data.decode("utf-8", "replace"))
+                    out.flush()
+                except (OSError, ValueError):
+                    pass
+    while status is None:
+        try:
+            done, st = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = st
+                break
+            relay()
+            time.sleep(0.1)
+        except KeyboardInterrupt:
+            interrupted = interrupted or time.time()
+            try:
+                os.killpg(pid, signal.SIGINT)
+            except OSError:
+                pass
+        except ChildProcessError:
+            status = 0
+        if interrupted and time.time() - interrupted > 60:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    relay()
+    entry = next((r for r in reversed(ledger()) if r["id"] == run_id), None)
+    if entry:
+        LAST_RUN[:] = [entry]  # what the callers of cmd_run read after it
+    rc = os.waitstatus_to_exitcode(status)
+    return rc if rc >= 0 else 128 - rc
+
+
+def _cmd_run(a):
     if a.resume == "last":  # the latest run, so the command needs no `$(lean-agent runs --last)`
         a.resume = latest_run_id(ordinary=True)
     if getattr(a, "escalate", None) and not a.resume:
@@ -1533,12 +1639,15 @@ def cmd_run(a):
             if t["id"] == todo_id and t["status"] == "open":
                 t["status"] = "doing"
         save_json(home("todo.json"), data)
+    rc = detach_run(workdir, run_id)
+    if rc is not None:
+        return rc
     print(f"run {run_id} started · {model} · {slug}" + (" (resumed)" if prev else "") +
           f" · see it later with `lean-agent runs --show {run_id}`", file=sys.stderr, flush=True)
     running_key = launch_key or run_id  # every run is listed while it runs (the dashboard, the status line)
     save_json(home("running", running_key + ".json"), {"pid": os.getpid(), "started": now_iso(), "run": run_id,
                                                       "task": task[:2000], "model": model, "project": slug,
-                                                      "workdir": workdir, "todo": todo_id, "effort": effort,
+                                                      "workdir": workdir, "todo": todo_id, "effort": effort, "detached": bool(SUPERVISOR),
                                                       "branch": (wt or {}).get("branch") if isinstance(wt, dict) else None,
                                                       "role": getattr(a, "role", None)
                                                       or (prev or {}).get("role")})
@@ -5734,7 +5843,71 @@ def cmd_logs(a):
     return 0
 
 
+def live_runs():
+    """[(run id, marker)] of the runs in progress, oldest first (running/*.json whose process is alive)."""
+    out = []
+    for f in glob.glob(home("running", "*.json")):
+        m = load_json(f, {})
+        if isinstance(m, dict) and m.get("run") and dashboard_pid_alive(m.get("pid")):
+            out.append((m["run"], m))
+    return sorted(out, key=lambda x: x[1].get("started") or "")
+
+
+def print_finished_run(r):
+    """A finished run's result as `run` printed it (its saved summary), else the one line from the ledger."""
+    files = sorted(glob.glob(os.path.join(r.get("workdir") or "", "summary-*.txt")),
+                   key=lambda f: int(re.sub(r"\D", "", os.path.basename(f)) or 0))
+    if files:
+        sys.stdout.write(read_text(files[-1]))
+        return
+    cost = f"${r['cost_usd']:.2f}" if isinstance(r.get("cost_usd"), (int, float)) else "$?"
+    print(f"run {r['id']} · {r['model']} · {r['status']} · {r.get('turns') or '?'} turns · "
+          f"{r.get('units', 0):,} sonnet-eq tok · {cost}")
+
+
+def wait_for_runs(target, timeout):
+    """`runs --wait <id|all|last>`: blocks until those runs are recorded, prints each result as `run` printed it.
+    Exit 0 when every one ended well, 1 when one failed or vanished, 124 on the timeout."""
+    live = live_runs()
+    if target == "all":
+        ids = [rid for rid, _ in live]
+        if not ids:
+            print("No runs in progress.")
+            return 0
+    elif target == "last":
+        ids = [live[-1][0]] if live else [latest_run_id()]
+    else:
+        ids = [target]
+        if target not in {rid for rid, _ in live} and not any(r["id"] == target for r in ledger()):
+            die(f"no run {target!r} (lean-agent runs)")
+    poll = env_num("LEAN_AGENT_WAIT_POLL", 2, float)
+    deadline = time.time() + timeout if timeout else None
+    pending, bad = list(ids), False
+    while pending:
+        alive = {rid for rid, _ in live_runs()}
+        gone = [rid for rid in pending if rid not in alive]
+        if gone:
+            recorded = {r["id"]: r for r in ledger() if r["id"] in gone}
+            for rid in gone:
+                if rid in recorded:
+                    print_finished_run(recorded[rid])
+                    bad = bad or recorded[rid]["status"] not in ("done", "partial", "needs-input", "awaiting-confirmation")
+                else:
+                    print(f"run {rid} · ended without a result (its process is gone; see lean-agent logs)")
+                    bad = True
+                pending.remove(rid)
+            sys.stdout.flush()
+            continue
+        if deadline and time.time() >= deadline:
+            print(f"timeout: still running: {', '.join(pending)} (wait again: lean-agent runs --wait {' '.join(pending[:1])})")
+            return 124
+        time.sleep(poll)
+    return 1 if bad else 0
+
+
 def cmd_runs(a):
+    if getattr(a, "wait", None):
+        return wait_for_runs(a.wait, a.timeout)
     if getattr(a, "dismiss", None):
         known = {r.get("id") for r in ledger()}
         d = load_json(home("dismissed.json"), {})
@@ -5878,6 +6051,7 @@ def cmd_doctor(a):
         report(True if docs == "available" else None, f"publish: Claude Docs connector {docs}" + (" (no init event)" if docs == "unknown" else ""),
                "turn claude.ai connectors on and connect Claude Docs; until then `publish` writes a local file")
     report(True, f"strict orchestrator: {'on' if strict_on() else 'off'} (lean-agent config strict on|off)")
+    report(True, f"auto-clear: {clear_at_text()} (lean-agent config clear-at auto|N)")
 
     slug = default_project(path)
     projs = projects()
@@ -6966,17 +7140,26 @@ def cmd_attribution(a):
     return 0
 
 
+def clear_at_text():
+    """The effective clear threshold, the compaction point, and why a due clear waits (if it does)."""
+    n, point = service_session.clear_at(), service_session.compact_at()
+    text = ("auto = " if service_session.clear_setting() == "auto" else "") + (f"{n:,} tokens" if n else "off")
+    text += f" (the orchestrator compacts at ~{point:,})"
+    hold = load_json(home("up.json"), {}).get("clear_hold")
+    return text + (f" · clear held: {hold}" if hold else "")
+
+
 def cmd_config(a):
     if a.name == "clear-at":
         if a.value is not None:
-            if not a.value.isdigit():
-                die("clear-at takes a number of tokens (0 = off)")
+            if not (a.value.isdigit() or a.value.lower() == "auto"):
+                die("clear-at takes auto, or a number of tokens (0 = off)")
             cfg = load_json(home("config.json"), {})
-            cfg["clear_at"] = int(a.value)
+            cfg["clear_at"] = "auto" if a.value.lower() == "auto" else int(a.value)
             save_json(home("config.json"), cfg)
-        n = service_session.clear_at()
-        print(f"clear-at: {f'{n:,} tokens' if n else 'off'} · `up` has the orchestrator checkpoint, then clears its context, "
-              "when a finished turn leaves it above this" + (" (LEAN_AGENT_CLEAR_AT is set and wins)" if os.environ.get("LEAN_AGENT_CLEAR_AT") else ""))
+        print(f"clear-at: {clear_at_text()} · `up` has the orchestrator checkpoint, then clears its context, "
+              "when a finished turn leaves it above this, and not while workers run unless compaction is near"
+              + (" (LEAN_AGENT_CLEAR_AT is set and wins)" if os.environ.get("LEAN_AGENT_CLEAR_AT") else ""))
         return 0
     if a.name == "artifacts":
         if a.value == "on":
@@ -7643,7 +7826,7 @@ def cmd_service(a):
             import plistlib
             with open(path, "wb") as fh:
                 plistlib.dump({"Label": SERVICE_LABEL, "ProgramArguments": args, "RunAtLoad": True,
-                               "KeepAlive": True, "ThrottleInterval": 60, "EnvironmentVariables": env,
+                               "KeepAlive": True, "ThrottleInterval": 60, "AbandonProcessGroup": True, "EnvironmentVariables": env,
                                "StandardOutPath": log, "StandardErrorPath": log,
                                "WorkingDirectory": home("home")}, fh)
             ctl("bootout", f"gui/{uid}/{SERVICE_LABEL}")
@@ -7651,7 +7834,7 @@ def cmd_service(a):
         else:
             with open(path, "w") as fh:
                 fh.write("[Unit]\nDescription=lean-agent orchestrator (lean-agent up)\n\n[Service]\n"
-                         f"ExecStart={' '.join(shlex.quote(x) for x in args)}\nRestart=always\nRestartSec=60\n"
+                         f"ExecStart={' '.join(shlex.quote(x) for x in args)}\nRestart=always\nRestartSec=60\nKillMode=process\n"
                          + "".join(f"Environment={k}={shlex.quote(v)}\n" for k, v in env.items())
                          + f"StandardOutput=append:{log}\nStandardError=append:{log}\n\n[Install]\n"
                          "WantedBy=default.target\n")
@@ -7680,10 +7863,13 @@ def cmd_service(a):
         sys.stdout.write("".join(text.splitlines(True)[-a.n:]) or "(no log yet)\n")
         return 0
     if a.action in ("restart", "stop"):
-        running = [f for f in glob.glob(home("running", "*.json")) if dashboard_pid_alive(load_json(f, {}).get("pid"))]
+        # detached runs (own session, recorded by their own process) carry on through a restart; only a run an older
+        # lean-agent started in the orchestrator's process group would be stopped with it
+        running = [f for f in glob.glob(home("running", "*.json"))
+                   if dashboard_pid_alive(load_json(f, {}).get("pid")) and not load_json(f, {}).get("detached")]
         if running and not a.yes:
-            die(f"{len(running)} worker(s) still running (lean-agent runs --running); they'd be stopped with it. "
-                f"Wait for them, or: lean-agent service {a.action} --yes")
+            die(f"{len(running)} worker(s) still running (lean-agent runs --running) that are not detached; they'd be "
+                f"stopped with it. Wait for them, or: lean-agent service {a.action} --yes")
     if a.action == "restart" and getattr(a, "clear", False):
         fresh_start()
     if plat == "mac":
@@ -7692,6 +7878,7 @@ def cmd_service(a):
         if a.action == "status":
             print(f"service: {path}: " + ("running" if is_running else "loaded, not running" if loaded else "not loaded")
                   + f" (log: lean-agent service logs)")
+            print("auto-clear: " + clear_at_text())
             return 0 if is_running else 1
         if a.action == "start" and is_running:
             print("already running (lean-agent service restart restarts it with the current settings)")
@@ -7725,6 +7912,7 @@ def cmd_service(a):
     if a.action == "status":
         state = re.search(r"state = (\w+)|Active: (\S+ \S+)", out)
         print(f"service: {path}: " + ((state.group(1) or state.group(2)) if state else ("running" if rc == 0 else "not running")))
+        print("auto-clear: " + clear_at_text())
     else:
         print(f"{a.action}: " + ("ok" if rc == 0 else out[:200]))
     return rc
@@ -8343,9 +8531,9 @@ def build_parser():
     s = sub.add_parser("config", help="switches: artifacts off|worker|direct (worker: publish through `lean-agent publish`, the default; "
                        "direct: the orchestrator has the Artifact tools itself), "
                        "strict on|off (the orchestrator only runs lean-agent commands; default on), "
-                       "clear-at N (clear the orchestrator's context above N tokens after a checkpoint; default 40000, 0 = off)")
+                       "clear-at auto|N (clear the orchestrator's context above N tokens after a checkpoint; default auto = 8000 below its compaction point, 0 = off)")
     s.add_argument("name", choices=["artifacts", "strict", "clear-at"])
-    s.add_argument("value", nargs="?", help="on|off, or a number for clear-at")
+    s.add_argument("value", nargs="?", help="on|off, or auto|a number for clear-at")
     s.set_defaults(fn=cmd_config)
 
     s = sub.add_parser("attribution", help="should commits and PRs credit Claude? ask the user once, then set on|off")
@@ -8621,6 +8809,9 @@ def build_parser():
     s.add_argument("--project", "-p")
     s.add_argument("--last", action="store_true", help="print only the id of the latest run")
     s.add_argument("--running", action="store_true", help="runs in progress right now")
+    s.add_argument("--wait", metavar="RUN_ID|all|last", help="block until those runs are recorded, then print each result "
+                   "as `run` printed it (exit 1 if one failed, 124 on --timeout)")
+    s.add_argument("--timeout", type=float, default=0, metavar="SECONDS", help="with --wait: give up after this long")
     s.add_argument("--dismiss", nargs="+", metavar="RUN_ID", help="the dashboard stops showing these runs' questions "
                    "(a failed or outdated run that needs nothing from you)")
     s.add_argument("--tokens", action="store_true", help="print the latest (or --show) run's run/tokens/context lines again")
