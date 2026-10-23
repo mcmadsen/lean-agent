@@ -8069,7 +8069,7 @@ def docs_tools(tools):
 
 
 DOCS_SERVER_RE = re.compile(r"claude[ _.]?docs", re.I)  # "claude.ai Claude Docs", "Claude_Docs", ...
-PUBLISH_CACHE_AGE = 600  # a "missing" result stops launches for 10 minutes (artifacts mode worker); `lean-agent doctor` re-probes now
+PUBLISH_CACHE_AGE = 600  # a "missing" result stops publish launches for 10 minutes, whatever the artifacts mode; `lean-agent doctor` re-probes now, only in artifacts mode worker
 
 
 def docs_server_alive(servers):
@@ -8345,7 +8345,7 @@ def cmd_publish(a):
     if run and run.get("init_stop"):  # the worker had no Claude Docs tool: stopped before its first turn
         publish_fallback(slug, title, content, a.as_is, bool(url))
     links = DOC_LINK_RE.findall(parse_feedback(run_result_text(run))[0] if run else "")
-    if not links and rc == 0 and load_json(home("publish-check.json"), {}).get("docs") == "pending":
+    if not links and rc == 0 and publish_cached() == "pending":
         publish_fallback(slug, title, content, a.as_is, bool(url))  # the server stayed pending: no Docs tool was seen
     if not links:
         die("publish failed: the worker's reply has no Claude Docs link (https://claude.ai/artifact/...); "
