@@ -2889,6 +2889,24 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.ledger()[-1]["thread"], "t1")  # the current thread follows
         self.assertEqual(self.cli("thread", "move", "t1", check=False).returncode, 1)  # already there
 
+    def test_thread_move_is_scoped_to_one_session_and_to_a_recent_request(self):
+        lt = self.threads_home()
+        lt.route("Publish the report via docs", "s1")  # t1
+        lt.route("Fix the export timeout in billing", "s2")  # t2
+        out = self.cli("thread", "move", "t1", LEAN_AGENT_SESSION="s2").stdout
+        self.assertIn("moved from t2 to t1", out)  # s2's request, though s1's came first
+        self.assertEqual(len(lt.load()["threads"]["t1"]["requests"]), 2)
+        stale = (datetime.datetime.now() - datetime.timedelta(hours=25)).isoformat(timespec="seconds")
+        with open(lt.state_path()) as fh:
+            st = json.load(fh)
+        for rec in list(st["sessions"].values()) + [st["latest"]]:
+            rec["ts"] = stale
+        with open(lt.state_path(), "w") as fh:
+            json.dump(st, fh)
+        r = self.cli("thread", "move", "t2", check=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("nothing recent to move", r.stdout + r.stderr)
+
     def test_thread_expiry_counts_merged_threads_last_message(self):
         lt = self.threads_home()
         lt.new("A")
