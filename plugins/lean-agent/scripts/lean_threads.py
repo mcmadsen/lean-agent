@@ -1,7 +1,7 @@
 """The thread registry (`lean-agent thread`): every message in the one service session belongs to a thread.
 
 Task threads are tagged `About #N "title":`, free threads `Thread tN "title":`. The registry lives in
-~/.lean-agent/chat/threads.json (written atomically under a lock): the threads, the aliases left by merges (merged id ->
+~/.lean-agent/threads.json (written atomically under a lock): the threads, the aliases left by merges (merged id ->
 target id) and per-message moves. Aliases and moves are kept here, never in the transcript, so they survive /clear,
 restarts and compaction.
 
@@ -11,6 +11,7 @@ thread after 7 days without a message. The id `optimize` is reserved for the opt
 import contextlib
 import datetime
 import json
+import math
 import os
 import re
 import time
@@ -31,7 +32,20 @@ def lean_home(*parts):
 
 
 def path():
-    return lean_home("chat", "threads.json")
+    return lean_home("threads.json")
+
+
+def _migrate():
+    """The registry used to live in chat/ (named for the removed dashboard): move it, and its lock file, up once."""
+    old = lean_home("chat", "threads.json")
+    if os.path.exists(old) and not os.path.exists(path()):
+        try:
+            os.makedirs(os.path.dirname(path()), exist_ok=True)
+            os.replace(old, path())
+            if os.path.exists(old + ".lock"):
+                os.remove(old + ".lock")
+        except OSError:
+            pass
 
 
 def now_iso():
@@ -69,6 +83,7 @@ def _empty():
 
 
 def load():
+    _migrate()
     try:
         with open(path()) as fh:
             data = json.load(fh)
@@ -86,6 +101,7 @@ def load():
 def _locked():
     """Read-modify-write: hold the lock from load to the atomic replace; yields the data to change."""
     os.makedirs(os.path.dirname(path()), exist_ok=True)
+    _migrate()
     with open(path() + ".lock", "a") as lock:
         if fcntl:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -255,6 +271,178 @@ def threads(now=None, include_expired=False):
             tgt["last_message"] = s["last_message"]
     out = [t for t in tops.values() if include_expired or not expired(t, now)]
     return sorted(out, key=lambda t: (t.get("last_message") or "", t["id"]), reverse=True)
+
+
+# ------------------------------------------------------------------ automatic threads (the prompt hook)
+
+MATCH_THRESHOLD = 0.4  # share of the prompt's (idf-weighted) words found in a thread, after the recency boost
+REQUESTS_KEPT = 20
+REQUEST_CHARS = 300
+STOP = set("""the a an and or but if then else for to of in on at by with from into onto about as is are was were be been
+being do does did done have has had it its this that these those there here we you i me my our your they them he she
+can could would should will shall may might must not no yes ok okay please just also so very more most some any all
+what which who whom how why when where than too lets let get got make made use using new need want like again still
+now thanks thank hello hey hi""".split())
+EXPLICIT_RE = re.compile(r"(?<![\w/&])(?:#(\d+)|[tT](\d+))\b")
+
+
+def stem(w):
+    for suffix in ("ing", "ed", "es", "s"):
+        if len(w) > len(suffix) + 3 and w.endswith(suffix):
+            return w[:-len(suffix)]
+    return w
+
+
+def words(text):
+    """The content words of a text: lowercase, 3+ letters, no stop words, crudely stemmed."""
+    return {stem(w) for w in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", str(text or "").lower()) if w not in STOP}
+
+
+def title_from(prompt):
+    """A thread title from a prompt: its first line's first 8 content-ish words."""
+    line = next((l for l in str(prompt).splitlines() if l.strip()), "")
+    ws = [w for w in re.sub(r"[^\w#'./+-]+", " ", line).split() if w.lower() not in STOP or len(w) > 3][:8]
+    return " ".join(ws)[:80] or "untitled"
+
+
+def _doc(t, data):
+    """Title words count double; merged-in threads' titles and the recent request texts add to the thread's words."""
+    title = words(t.get("title"))
+    for src, dst in data["aliases"].items():
+        if resolve(dst, data["aliases"]) == t["id"]:
+            title |= words((data["threads"].get(src) or {}).get("title"))
+    body = set()
+    for r in (t.get("requests") or [])[-8:]:
+        body |= words(r.get("text"))
+    return title, body
+
+
+def score_threads(prompt, now=None, current=None, data=None):
+    """[(score, thread id)] best first for the open threads. Prompt words are weighted by rarity across the threads (idf);
+    the score is the weighted share of the prompt's words the thread has (title words count 2x), times a recency
+    boost (up to +30%, fading over a day) and +0.1 for the thread the last prompt went to."""
+    data = data or load()
+    now = time.time() if now is None else now
+    pw = words(prompt)
+    if not pw:
+        return []
+    open_ = [t for k, t in data["threads"].items() if k not in data["aliases"] and k not in RESERVED and not t.get("closed")]
+    docs = {t["id"]: _doc(t, data) for t in open_}
+    df = {w: sum(1 for ti, bo in docs.values() if w in ti or w in bo) for w in pw}
+    idf = {w: math.log(1 + (len(open_) + 1) / (1 + df[w])) for w in pw}
+    total = sum(idf.values())
+    out = []
+    for t in open_:
+        ti, bo = docs[t["id"]]
+        shared = [w for w in pw if w in ti or w in bo]
+        if not shared or (len(shared) < 2 and len(pw) > 2):
+            continue  # one shared word out of a long prompt is a coincidence
+        got = sum(idf[w] * (2.0 if w in ti else 1.0) for w in shared) / total
+        age_h = max(0.0, now - _epoch(t.get("last_message") or t.get("created"))) / 3600
+        sc = min(1.0, got) * (1 + 0.3 * math.exp(-age_h / 24)) + (0.1 if t["id"] == current else 0)
+        out.append((sc, t["id"]))
+    return sorted(out, reverse=True)
+
+
+def state_path():
+    return lean_home("current-thread.json")
+
+
+def current(session=None, max_age_h=24):
+    """The thread the orchestrator's latest prompt went to: this session's, else the latest one (a worker command has no
+    session id), if it is recent. None when there is none."""
+    try:
+        with open(state_path()) as fh:
+            st = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    rec = (st.get("sessions") or {}).get(session or "") or st.get("latest") or {}
+    if not rec.get("thread") or time.time() - _epoch(rec.get("ts")) > max_age_h * 3600:
+        return None
+    tid = resolve(rec["thread"])
+    t = load()["threads"].get(tid) or {}
+    return None if t.get("closed") else tid
+
+
+def set_current(tid, session=None):
+    rec = {"thread": tid, "ts": now_iso()}
+    try:
+        with open(state_path()) as fh:
+            st = json.load(fh)
+    except (OSError, ValueError):
+        st = {}
+    st.setdefault("sessions", {})
+    if session:
+        st["sessions"][session] = rec
+        if len(st["sessions"]) > 20:
+            for k in sorted(st["sessions"], key=lambda k: st["sessions"][k].get("ts", ""))[:-20]:
+                del st["sessions"][k]
+    st["latest"] = rec
+    tmp = f"{state_path()}.{os.getpid()}.tmp"
+    os.makedirs(os.path.dirname(state_path()), exist_ok=True)
+    with open(tmp, "w") as fh:
+        json.dump(st, fh, indent=1)
+    os.replace(tmp, state_path())
+
+
+def resolve_tag(value=None):
+    """The thread a command records: `--thread` (`none` opts out), else LEAN_AGENT_THREAD (set for workers), else the
+    orchestrator's current thread. Returns a canonical id or None."""
+    value = value if value is not None else os.environ.get("LEAN_AGENT_THREAD")
+    if value is not None and str(value).strip():
+        if str(value).strip().lower() == "none":
+            return None
+        try:
+            return resolve(norm(value))
+        except ValueError:
+            return None
+    return current()
+
+
+def route(prompt, session=None, now=None):
+    """Assign a user prompt to a thread without any model call; stores the request and the current-thread state.
+    Returns (thread id, how, context line) with how in explicit|guessed|new."""
+    text = " ".join(str(prompt or "").split())
+    now_s = now_iso()
+    m = EXPLICIT_RE.search(text)
+    with _locked() as data:
+        tid, how = None, None
+        if m:
+            cand = resolve(f"#{int(m.group(1))}" if m.group(1) else f"t{int(m.group(2))}", data["aliases"])
+            if cand in data["threads"] or cand.startswith("#"):
+                tid, how = cand, "explicit"
+                _ensure(data, tid, title_from(text), create=True)
+        if tid is None:
+            cur = None
+            try:
+                with open(state_path()) as fh:
+                    st = json.load(fh)
+                cur = ((st.get("sessions") or {}).get(session or "") or st.get("latest") or {}).get("thread")
+            except (OSError, ValueError):
+                pass
+            ranked = score_threads(text, now, cur, data)
+            if ranked and ranked[0][0] >= MATCH_THRESHOLD:
+                tid, how = ranked[0][1], "guessed"
+            elif not words(text) and cur and cur in data["threads"] and not data["threads"][cur].get("closed") \
+                    and cur not in data["aliases"]:
+                tid, how = cur, "guessed"  # "yes, go ahead": no content words, it continues the last topic
+        if tid is None:
+            nums = [int(k[1:]) for k in data["threads"] if re.fullmatch(r"t\d+", k)]
+            tid, how = f"t{max(nums, default=0) + 1}", "new"
+            data["threads"][tid] = {"id": tid, "title": title_from(text), "created": now_s, "last_message": now_s, "kind": "free"}
+        t = data["threads"][tid]
+        t["last_message"] = now_s
+        t.setdefault("requests", []).append({"ts": now_s, "text": text[:REQUEST_CHARS]})
+        del t["requests"][:-REQUESTS_KEPT]
+        title = t["title"]
+    set_current(tid, session)
+    if how == "new":
+        line = f'New thread {tid} "{title}"'
+    elif how == "guessed":
+        line = f'Thread {tid} "{title}" (guessed; wrong? lean-agent thread move {tid} tN)'
+    else:
+        line = f'Thread {tid} "{title}"'
+    return tid, how, line
 
 
 # ------------------------------------------------------------------ the CLI

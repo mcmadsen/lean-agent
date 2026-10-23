@@ -40,15 +40,15 @@ def in_home_or_service(cwd, home):
 
 
 def prompt_needs_hook(event):
-    """Could the UserPromptSubmit hook act on this prompt here? Only the orchestrator home or the service session,
-    and only a '# ' memory message or /memory, /init."""
+    """Could the UserPromptSubmit hook act on this prompt here? Only in the orchestrator home or the service session
+    (every prompt there is put in a thread), never in a worker's run folder."""
     prompt = str(event.get("prompt") or "").strip()
-    if not (re.match(MEMORY_MESSAGE_RE, prompt) or re.match(COMMAND_PROMPT_RE, prompt)):
+    if not prompt:
         return False
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     # computed inline: the hook must stay cheap, and importing usage here would defeat that
     home = os.path.realpath(os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent")))
-    return in_home_or_service(cwd, home)
+    return in_home_or_service(cwd, home) and not cwd.startswith(os.path.join(home, "work") + os.sep)
 
 
 STDIN = None
@@ -66,6 +66,7 @@ import usage  # noqa: E402
 import push_guard  # noqa: E402
 import lean_common  # noqa: E402
 import lean_schedule  # noqa: E402
+import lean_threads  # noqa: E402
 
 
 def compaction_point():
@@ -505,17 +506,25 @@ MEMORY_REDIRECT = ("lean-agent: this is a request to keep something (a '#' memor
 
 
 def prompt_hook(event):
-    """UserPromptSubmit in the strict orchestrator: a one-line '#' memory message is redirected to
-    `lean-agent remember`; /memory and /init (Claude Code's own memory editors) are refused when the hook sees them."""
+    """UserPromptSubmit in the orchestrator: the prompt is put in a thread (no model call; one context line). In the
+    strict orchestrator a one-line '#' memory message is also redirected to `lean-agent remember`, and /memory and /init
+    (Claude Code's own memory editors) are refused."""
     prompt = str(event.get("prompt") or "").strip()
-    reply = None
-    if re.match(COMMAND_PROMPT_RE, prompt):
-        reply = {"decision": "block", "reason": "lean-agent: the orchestrator's memory lives in lean-agent, not in "
-                 "Claude Code's memory files. Say what to keep and a worker files it (`lean-agent remember`)."}
-    elif re.match(MEMORY_MESSAGE_RE, prompt) and "\n" not in prompt and len(prompt) < 500:
-        reply = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": MEMORY_REDIRECT}}
-    if reply:
-        print(json.dumps(reply))
+    strict = strict_on(usage.lean_home())
+    if strict and re.match(COMMAND_PROMPT_RE, prompt):
+        print(json.dumps({"decision": "block", "reason": "lean-agent: the orchestrator's memory lives in lean-agent, not in "
+                          "Claude Code's memory files. Say what to keep and a worker files it (`lean-agent remember`)."}))
+        return
+    lines = []
+    if not prompt.startswith("/"):  # slash commands are not requests
+        try:
+            lines.append(lean_threads.route(prompt, event.get("session_id"))[2])
+        except (OSError, ValueError):
+            pass
+    if strict and re.match(MEMORY_MESSAGE_RE, prompt) and "\n" not in prompt and len(prompt) < 500:
+        lines.append(MEMORY_REDIRECT)
+    if lines:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "\n".join(lines)}}))
 
 
 def main():
@@ -526,8 +535,7 @@ def main():
     if event.get("hook_event_name") == "UserPromptSubmit":
         cwd = os.path.realpath(event.get("cwd") or os.getcwd())
         home = os.path.realpath(usage.lean_home())
-        if (in_home_or_service(cwd, home)
-                and not cwd.startswith(os.path.join(home, "work") + os.sep) and strict_on(usage.lean_home())):
+        if in_home_or_service(cwd, home) and not cwd.startswith(os.path.join(home, "work") + os.sep):
             prompt_hook(event)
         return 0
     transcript = event.get("transcript_path")

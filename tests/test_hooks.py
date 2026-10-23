@@ -661,14 +661,60 @@ class BudgetTest(Base):
         self.assertIn("lean-agent remember", out["hookSpecificOutput"]["additionalContext"])
         self.assertEqual(prompt("/memory")["decision"], "block")
         self.assertEqual(prompt("/init")["decision"], "block")
-        self.assertIsNone(prompt("# Plan\n- one\n- two"))  # a markdown heading, not a memory message
-        self.assertIsNone(prompt("note that the sky is blue"))
-        self.assertIsNone(prompt("#12 is failing"))  # a thread number
-        self.assertIsNone(prompt("#bug in the export"))  # a tag
+        ctx = lambda text, **kw: ((prompt(text, **kw) or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+        self.assertNotIn("lean-agent remember", ctx("# Plan\n- one\n- two"))  # a markdown heading, not a memory message
+        self.assertNotIn("lean-agent remember", ctx("#12 is failing"))  # a thread number
+        self.assertNotIn("lean-agent remember", ctx("#bug in the export"))  # a tag
         self.assertIsNone(prompt("# always answer in Danish", self.tmp.name))  # a normal session
         self.assertIsNone(prompt("/memory", os.path.join(home, "work", "run1")))  # a worker
         self.set_strict("off")
-        self.assertIsNone(prompt("# always answer in Danish"))
+        self.assertNotIn("lean-agent remember", ctx("# always answer in Danish"))  # still threaded, not redirected
+
+    def test_prompt_hook_threads_every_request(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        prompt = lambda text, cwd=home, sid="s1": run_hook("budget_hook.py", {
+            "hook_event_name": "UserPromptSubmit", "cwd": cwd, "session_id": sid, "prompt": text}, **self.env)
+        ctx = lambda text, **kw: ((prompt(text, **kw) or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+        first = ctx("Publish the quarterly report through the docs worker")
+        self.assertTrue(first.startswith('New thread t1 "Publish quarterly report'), first)
+        second = ctx("Fix the export retry loop in the billing service")
+        self.assertTrue(second.startswith("New thread t2"), second)
+        again = ctx("the quarterly report needs a chart in the docs")
+        self.assertTrue(again.startswith('Thread t1 "Publish'), again)
+        self.assertIn("guessed; wrong? lean-agent thread move t1 tN", again)
+        self.assertTrue(ctx("what about t2 now?").startswith('Thread t2 "Fix export'))  # explicit wins over words
+        self.assertTrue(ctx("#7 is failing").startswith('Thread #7'))
+        self.assertTrue(ctx("yes please").startswith("Thread #7"))  # no content words: the last topic
+        self.assertEqual(ctx("/clear"), "")  # a slash command is not a request
+        self.assertEqual(prompt("hello there", self.tmp.name), None)  # a normal session is left alone
+        sys.path.insert(0, ROOT)
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": home}):
+            import lean_threads
+            t1 = lean_threads.load()["threads"]["t1"]
+            self.assertEqual(len(t1["requests"]), 2)
+            self.assertEqual(lean_threads.current("s1"), "#7")
+            self.assertEqual(lean_threads.resolve_tag(), "#7")
+            self.assertEqual(lean_threads.resolve_tag("none"), None)
+            self.assertEqual(lean_threads.resolve_tag("T2"), "t2")
+            # closed threads are ignored by matching
+            with lean_threads._locked() as data:
+                data["threads"]["t1"]["closed"] = "2026-01-01T00:00:00"
+            self.assertEqual(lean_threads.score_threads("quarterly report chart docs"), [])
+
+    def test_thread_registry_moves_out_of_the_chat_dir(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(os.path.join(home, "chat"))
+        old = os.path.join(home, "chat", "threads.json")
+        with open(old, "w") as fh:
+            json.dump({"threads": {"t4": {"id": "t4", "title": "Old topic", "kind": "free", "created": "2026-01-01T00:00:00",
+                                          "last_message": "2026-01-01T00:00:00"}}, "aliases": {}, "moves": {}}, fh)
+        sys.path.insert(0, ROOT)
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": home}):
+            import lean_threads
+            self.assertIn("t4", lean_threads.load()["threads"])
+            self.assertTrue(os.path.exists(os.path.join(home, "threads.json")), os.listdir(home))
+            self.assertFalse(os.path.exists(old), os.listdir(home))
+            self.assertEqual(lean_threads.new("Next"), "t5")
 
     def test_strict_denies_review_learn_text_and_abbreviated_flags_do_not_exist(self):
         sys.path.insert(0, ROOT)
