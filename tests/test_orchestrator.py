@@ -5507,6 +5507,24 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "inline", LEAN_AGENT_NO_DETACH="1"
                                   ).returncode, 0)
 
+    def test_no_detach_run_removes_its_running_marker_when_the_tee_closes(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "inline", LEAN_AGENT_NO_DETACH="1")
+        self.assertEqual(self.running_markers(), [])
+
+    def test_two_processes_marking_runs_collected_keep_both_ids(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        code = ("import sys; sys.path.insert(0, %r); import lean_common; "
+                "[lean_common.mark_collected_ids(%r, [f'{sys.argv[1]}{i}']) for i in range(30)]"
+                % (os.path.dirname(CLI), home))
+        procs = [subprocess.Popen([sys.executable, "-c", code, tag]) for tag in ("a", "b")]
+        for p in procs:
+            self.assertEqual(p.wait(timeout=60), 0)
+        done = json.load(open(os.path.join(home, "collected.json")))
+        for tag in ("a", "b"):
+            for i in range(30):
+                self.assertIn(f"{tag}{i}", done)
+
     def test_ctrl_c_in_the_foreground_still_stops_the_run(self):
         p = self.start_run(turns="20", sleep="1")
         [m] = self.running_markers()
@@ -5784,7 +5802,7 @@ class CliTest(unittest.TestCase):
         ac.tick()
         self.assertEqual(len(host.pasted), 2)  # once
 
-    def test_a_clear_request_with_a_missing_transcript_gives_up_after_one_requeue(self):
+    def test_a_clear_request_with_a_missing_transcript_gives_up_with_a_status(self):
         ac, host, clock, turn, home = self.auto_clear_unit()
         os.environ.pop("LEAN_AGENT_CLEAR_AT")
         # the transcript s1.jsonl is never written: nothing ever "ends"
@@ -5795,17 +5813,63 @@ class CliTest(unittest.TestCase):
         ac.tick()
         self.assertEqual(host.pasted, [])
         self.assertEqual(up()["clear_requested"], asked)
-        clock[0] = asked + 121  # past the checkpoint wait: queued once more
-        ac.tick()
-        again = up()["clear_requested"]
-        self.assertGreater(again, asked)
-        self.assertIsNone(up().get("clear_status"))
-        clock[0] = again + 121  # and again past it: reported, not queued forever
+        clock[0] = asked + 121  # past the wait: reported and dropped
         ac.tick()
         self.assertIsNone(up().get("clear_requested"))
         self.assertRegex(up()["clear_status"], r"^clear not done: the transcript was not found")
         ac.tick()
         self.assertEqual(host.pasted, [])
+
+    def test_a_clear_request_waits_for_a_long_turn_however_long_then_clears(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        os.environ.pop("LEAN_AGENT_CLEAR_AT")
+        self.queue_clear(home)
+        asked = json.load(open(os.path.join(home, "up.json")))["clear_requested"]
+        clock[0] = asked
+        with open(os.path.join(home, "s1.jsonl"), "a") as fh:  # a turn mid tool call
+            fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "id": "t", "stop_reason": "tool_use",
+                     "content": [{"type": "tool_use", "id": "x", "name": "Bash", "input": {}}],
+                     "usage": {"input_tokens": 1, "cache_read_input_tokens": 5000}}}) + "\n")
+        for _ in range(5):
+            clock[0] += 3600
+            ac.tick()
+        self.assertEqual(host.pasted, [])
+        up = json.load(open(os.path.join(home, "up.json")))
+        self.assertTrue(up.get("clear_requested"))
+        self.assertIsNone(up.get("clear_status"))
+        turn("done", ctx=5000)
+        ac.tick()
+        self.assertIn("Checkpoint now", host.pasted[0])
+        turn("checkpointed", ctx=5000)
+        ac.tick()
+        self.assertEqual(host.pasted[-1], "/clear")
+
+    def test_a_clear_request_still_clears_when_a_turn_starts_after_the_checkpoint_prompt(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        os.environ.pop("LEAN_AGENT_CLEAR_AT")
+        turn("done", ctx=5000)
+        self.queue_clear(home)
+        ac.tick()
+        self.assertIn("Checkpoint now", host.pasted[0])
+        with open(os.path.join(home, "s1.jsonl"), "a") as fh:  # the checkpoint turn never ends
+            fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "id": "t", "stop_reason": "tool_use",
+                     "content": [{"type": "tool_use", "id": "x", "name": "Bash", "input": {}}],
+                     "usage": {"input_tokens": 1, "cache_read_input_tokens": 5000}}}) + "\n")
+        ac.tick()
+        self.assertEqual(len(host.pasted), 1)
+        clock[0] += 121
+        ac.tick()
+        self.assertEqual(host.pasted[-1], "/clear")
+
+    def test_host_start_drops_a_stale_clear_request(self):
+        import service_session
+        home = tempfile.mkdtemp()
+        os.environ["LEAN_AGENT_HOME"] = home
+        self.addCleanup(os.environ.pop, "LEAN_AGENT_HOME", None)
+        with open(os.path.join(home, "up.json"), "w") as fh:
+            json.dump({"clear_requested": 5.0}, fh)
+        service_session.update_up(pid=None, clear_requested=None, clear_hold=None)  # what the host does on start
+        self.assertIsNone(json.load(open(os.path.join(home, "up.json")))["clear_requested"])
 
     def test_clear_request_waits_while_a_permission_prompt_is_pending(self):
         ac, host, clock, turn, home = self.auto_clear_unit()
