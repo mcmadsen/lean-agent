@@ -577,7 +577,8 @@ def state():
                      head=" ".join(str(r.get("result_head") or m["head"]).split())[:160])
         else:
             merged[r.get("id")] = {"id": r.get("id"), "ts": r.get("ts"), "status": r.get("status"), "model": r.get("model"),
-                                   "project": r.get("project"), "role": r.get("role"), "units": r.get("units") or 0,
+                                   "project": r.get("project"), "role": r.get("role"), "effort": r.get("effort"), "todo": r.get("todo"),
+                                   "units": r.get("units") or 0,
                                    "cost": r.get("cost_usd"), "turns": r.get("turns"), "passes": 1,
                                    "head": " ".join(str(r.get("result_head") or r.get("task") or "").split())[:160]}
     runs = sorted(merged.values(), key=lambda r: r["ts"] or "", reverse=True)[:25]

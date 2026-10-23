@@ -152,6 +152,7 @@ def merge(src, dst):
             raise ValueError(f"merging {src} into {dst} would make a cycle ({dst} already leads to {src})")
         data["aliases"][src] = dst
         data["threads"][src]["merged_into"] = dst
+        data["threads"][src]["merged_at"] = now_iso()
     return resolve(dst)
 
 
@@ -163,6 +164,7 @@ def unmerge(src):
         del data["aliases"][src]
         if src in data["threads"]:
             data["threads"][src].pop("merged_into", None)
+            data["threads"][src].pop("merged_at", None)
 
 
 def move(message_id, thread):

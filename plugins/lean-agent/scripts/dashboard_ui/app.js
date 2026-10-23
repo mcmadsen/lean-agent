@@ -14,10 +14,10 @@ function meter(p,warnAt,badAt){const c=p>=badAt?"bad":p>=warnAt?"warn":"";return
 function post(path,body){return fetch(path,{method:"POST",headers:{"Content-Type":"application/json","X-Lean-Agent-Token":T},body:JSON.stringify(body||{})}).then(r=>r.json().catch(()=>({ok:false,error:"HTTP "+r.status})))}
 
 // theme: follows the system unless you pick light or dark (remembered in this browser)
+let themeNow="";
 function setTheme(t){if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;else delete document.documentElement.dataset.theme;
-  $("theme").textContent="Theme: "+(t||"auto");store.set("la-theme",t||null)}
+  themeNow=t||"";store.set("la-theme",t||null)}
 setTheme(store.get("la-theme",null));
-$("theme").onclick=()=>{const cur=document.documentElement.dataset.theme||"";setTheme({"":"light",light:"dark",dark:""}[cur])};
 
 // a run's answer or details, over the page
 async function show(id,details){
@@ -29,7 +29,7 @@ function closeView(){$("view").style.display="none"}
 // state
 let S=null,lastBoard=null;
 const ui={sel:(t=>/^\d+$/.test(t)?"#"+t:/^(main|optimize|t\d+|#\d+)$/.test(t)?t:"main")(store.get("la-thread","main")),cardId:null,tab:store.get("la-ltab","chat"),
-  open:{},sg:{},sgConfirm:null,offline:0,lastOk:null,now:"",bannerHtml:null,threads:[],doneOpen:false,changed:new Set(),html:{},sheet:null};
+  open:{},sg:{},sgConfirm:null,offline:0,lastOk:null,now:"",bannerHtml:null,threads:[],doneOpen:false,changed:new Set(),html:{},sheet:null,badge:null,runsAll:false,merge:null,picks:[],target:null};
 const threadKey=id=>id==="main"?"main":String(id).replace(/^#/,"");  // the chat key of a thread id: `#12` -> `12`, `t3` stays
 function aboutLabel(key){const c=cardsBy().get(String(key));
   if(c)return c.kind==="item"?"#"+c.id:c.kind==="run"?"run "+(c.runs||[])[0]:c.kind==="note"?"note "+c.note:c.title.slice(0,30);
@@ -129,12 +129,24 @@ function sameItem(list){const t=list.map(c=>c.todo);return t[0]!=null&&t.every(x
 const agoS=t=>{const a=ago(t);return a==="now"?a:a?a+" ago":""};
 const plural=(n,w)=>`${n} ${w}${n===1?"":"s"}`;
 const threadName=id=>/^#/.test(id)?id:((ui.threads.find(t=>t.id===id)||{}).title||(id==="main"?"Main":id==="optimize"?"Optimize":id));
-function threadRow(t){
-  const tag=/^#/.test(t.id)?t.id:"",meta=[t.messages?plural(t.messages,"message"):"no messages yet",agoS(t.last_message)].filter(Boolean).join(" · ");
-  return `<button type="button" class="row${t.id===ui.sel?" sel":""}" data-act="select" data-thread="${esc(t.id)}"><span class="t">${tag?`<span class="id mono">${esc(tag)}</span> `:""}${esc(t.title||t.id)}</span>`
-    +`<span class="m"><span>${esc(meta)}</span>${t.waiting?'<span class="dot dot-warn" role="img" aria-label="waits for you"></span>':""}</span></button>`;
+const sugCount=()=>sugGroups(((lastBoard&&lastBoard.cards)||[]).filter(c=>c.kind==="optimize"&&c.column==="Waiting on you"),ui.sg,sugMatch).reduce((a,g)=>a+g.open.length,0);
+function threadMeta(t){
+  const n=t.id==="optimize"?sugCount():0;
+  return [n?plural(n,"suggestion"):t.messages?plural(t.messages,"message"):"no messages yet",agoS(t.last_message)].filter(Boolean).join(" · ");
 }
-const threadListHtml=()=>ui.threads.length?ui.threads.map(threadRow).join(""):'<div class="empty">No threads yet. Ask Claude anything, or start one with +.</div>';
+function threadRow(t,box){  // box: a checkbox in front (the phone's pick-to-merge list)
+  const tag=/^#/.test(t.id)?t.id:"",title=t.title&&t.title!==t.id?t.title:"";
+  const btn=`<button type="button" class="row${t.id===ui.sel?" sel":""}" data-act="select" data-thread="${esc(t.id)}"><span class="t">${tag?`<span class="id mono">${esc(tag)}</span> `:""}${esc(title||t.id)}</span>`
+    +`<span class="m"><span>${esc(threadMeta(t))}</span>${t.waiting?'<span class="dot dot-warn" role="img" aria-label="waits for you"></span>':""}</span></button>`;
+  if(!box)return btn;
+  const can=t.id!=="main"&&t.id!=="optimize",on=(ui.picks||[]).includes(t.id);
+  return `<div class="trow">${can?`<label class="pick"><input type="checkbox" data-pick="${esc(t.id)}"${on?" checked":""} aria-label="Pick ${esc(tag||title||t.id)} to merge"></label>`:'<span class="pick"></span>'}${btn}</div>`;
+}
+function listedThreads(){  // Main is always there; Optimize only while it has suggestions or messages
+  const l=ui.threads.filter(t=>t.id!=="optimize"||t.messages||sugCount()||t.id===ui.sel);
+  return l.some(t=>t.id==="main")?l:[{id:"main",title:"Main",kind:"main",messages:0,waiting:false}].concat(l);
+}
+const threadListHtml=box=>{const l=listedThreads();return l.length?l.map(t=>threadRow(t,box)).join(""):'<div class="empty">No threads yet. Ask Claude anything, or start one with +.</div>'};
 const askHtml=id=>`<form class="ask" data-ask><label class="sr" for="${id}">Ask Claude anything</label><input type="text" id="${id}" autocomplete="off" placeholder="Ask Claude anything"><button type="submit" class="btn primary">Ask</button></form>`;
 const cardThread=c=>c.kind==="item"?"#"+c.id:c.todo!=null?"#"+c.todo:"main";
 const dotOf=c=>c.kind==="pr"&&/ready/.test(c.why||"")?"dot-ok":c.kind==="note"?"dot-run":/merged|approved/.test(c.why||"")?"dot-ok":"dot-warn";
@@ -197,19 +209,63 @@ const redraw=()=>{drawLeft();if(typeof drawChat==="function")drawChat()};
 async function loadThreads(){
   try{const r=await fetch(`/api/threads?t=${T}`);if(!r.ok)return;const s=await r.json();ui.threads=s.threads||[];
     if(s.service_status&&typeof chat!=="undefined")chat.svc=s.service_status}catch(e){return}
-  drawLeft();if(typeof drawHeader==="function")drawHeader();
+  drawLeft();if(typeof drawHeader==="function")drawHeader();if(typeof drawChat==="function")drawChat();
 }
 function setTab(t){ui.tab=t;store.set("la-ltab",t);document.body.dataset.tab=t;
   for(const b of document.querySelectorAll("[data-ltab]")){const on=b.dataset.ltab===t;b.classList.toggle("on",on);b.setAttribute("aria-pressed",on)}
   for(const n of ["chat","inbox","todos"])$("l-"+n).hidden=n!==t}
-function openPanel(v){$("panel-t").textContent=v==="runs"?"Recent runs":"Schedule";$("c-runs").hidden=v!=="runs";$("c-sched").hidden=v!=="schedule";if(!$("panel").open)$("panel").showModal()}
 // the thread switcher (phone) and the move picker: one sheet
 function openSheet(mode,mid,from){
   const move=mode==="move";ui.sheet={mode,mid};
   $("sheet-t").textContent=move?"Move message to":"Threads";
   $("sheetbody").innerHTML=move?`<div class="rows">${ui.threads.filter(t=>t.id!=="main"&&t.id!==from).map(t=>`<button type="button" class="row" data-act="move-to" data-to="${esc(t.id)}"><span class="t">${/^#/.test(t.id)?`<span class="id mono">${esc(t.id)}</span> `:""}${esc(t.title||t.id)}</span></button>`).join("")||'<div class="empty">No other thread to move it to.</div>'}</div>`
-    :`<div class="thr-top">${askHtml("ask-s")}<button type="button" class="btn tnew" data-act="new-thread" aria-label="New thread">+</button></div><div class="rows">${threadListHtml()}</div>`;
+    :`<div class="thr-top">${askHtml("ask-s")}<button type="button" class="btn tnew" data-act="new-thread" aria-label="New thread">+</button></div><div class="hint mono">No thread picked: Claude chooses one, or starts a new one.</div><fieldset class="picks"><legend>Pick two or more</legend><div class="rows" id="pickrows">${threadListHtml(true)}</div></fieldset>`;
+  $("mergesum").innerHTML=move?"":mergeSummaryHtml();
   if(!$("sheet").open)$("sheet").showModal();
+}
+// merging threads: the phone ticks two or more in the threads sheet, the desktop picks one in the open thread's header
+const pickTargets=()=>{const l=listedThreads().map(t=>t.id),p=(ui.picks||[]).filter(id=>l.includes(id));return p.sort((a,b)=>l.indexOf(a)-l.indexOf(b))};
+const mergeTarget=()=>{const p=pickTargets();return p.includes(ui.target)?ui.target:p[0]};
+const mergeName=id=>/^#/.test(id)?id:threadName(id);
+function mergeSummary(){  // null until two are ticked
+  const p=pickTargets(),to=mergeTarget();if(p.length<2)return null;
+  const names=p.map(mergeName),list=names.length===2?names.join(" and "):names.slice(0,-1).join(", ")+" and "+names[names.length-1];
+  return {ids:p,to,text:`Merge ${list} into one thread`,keeps:`Keeps the title of ${mergeName(to)}`,button:`Merge ${p.length} threads`};
+}
+function mergeSummaryHtml(){
+  const m=mergeSummary();if(!m)return"";
+  return `<div class="mergesum"><div class="mst">${esc(m.text)}</div><div class="msk mono"><span>${esc(m.keeps)}</span><button type="button" class="link" data-act="merge-change">Change</button></div>`
+    +`<div class="msn">Messages are ordered by time. Open questions and prompts move along.</div><div class="acts"><button type="button" class="btn primary" data-act="merge-go">${esc(m.button)}</button><button type="button" class="btn" data-act="merge-cancel">Cancel</button></div></div>`;
+}
+async function mergeThreads(ids,to){  // every other thread into `to`, one after the other
+  for(const from of ids.filter(id=>id!==to)){
+    const r=await post("/api/thread/merge",{from,into:to});
+    if(!r.ok){alert("Couldn't merge "+from+": "+(r.error||"unknown error"));return false}
+  }
+  return true;
+}
+async function mergeGo(ids,to){
+  if(!await mergeThreads(ids,to)){loadThreads();return}
+  ui.picks=[];ui.target=null;ui.merge=null;closeSheet();
+  await loadThreads();select(to);refresh();
+}
+async function unmergeThread(from){
+  const r=await post("/api/thread/unmerge",{from});
+  if(!r.ok)alert("Couldn't unmerge: "+(r.error||"unknown error"));
+  await loadThreads();return refresh();
+}
+function mergePick(){  // desktop: the thread picked to merge into the open one (the first until you pick)
+  const m=ui.merge,others=ui.threads.filter(t=>t.id!=="main"&&t.id!=="optimize"&&t.id!==ui.sel);
+  return {others,pick:m&&m.pick&&others.some(t=>t.id===m.pick)?m.pick:(others[0]||{}).id};
+}
+const mergeOpenGo=()=>{const {pick}=mergePick();return pick?mergeGo([pick,ui.sel],ui.sel):undefined};
+function mergeBoxHtml(){  // desktop: pick the thread to merge into the open one
+  if(!ui.merge)return"";
+  const {others,pick}=mergePick();
+  return `<section class="mergebox" role="dialog" aria-label="Merge threads"><div class="mgt">Merge into ${esc(mergeName(ui.sel))}</div><fieldset><legend class="mono">Pick the thread to merge in</legend>`
+    +(others.map(t=>`<label class="mgl"><input type="radio" name="mg" data-merge-pick="${esc(t.id)}"${t.id===pick?" checked":""}><span>${/^#/.test(t.id)?`<span class="id mono">${esc(t.id)}</span> `:""}${esc(t.title&&t.title!==t.id?t.title:t.id)}</span><span class="mute">· ${esc(plural(t.messages||0,"message"))}</span></label>`).join("")||'<div class="empty">No other thread to merge in.</div>')
+    +`</fieldset><div class="msn">Messages are ordered by time and keep the title of ${esc(mergeName(ui.sel))}. Open questions and prompts move along.</div>`
+    +`<div class="acts"><button type="button" class="btn primary" data-act="merge-do"${pick?"":" disabled"}>Merge 2 threads</button><button type="button" class="btn" data-act="merge-cancel">Cancel</button></div></section>`;
 }
 function closeSheet(){const d=$("sheet");if(d&&d.open)d.close();ui.sheet=null}
 async function newThread(){
@@ -242,6 +298,85 @@ function routeHtml(e){
   return `<div class="route mono"><span>${esc(t)}</span>${e.mid?`<button type="button" class="btn sm" data-act="move" data-mid="${esc(e.mid)}" data-from="${esc(e.thread||"")}" aria-label="Move this message to another thread">Move</button>`:""}</div>`;
 }
 
+function syncNotice(s){  // the newest sync record, if it says an update is available and this version isn't there yet
+  const verGE=(a,b)=>{const x=String(a).split(".").map(Number),y=String(b).split(".").map(Number);for(let i=0;i<3;i++){if((x[i]||0)!==(y[i]||0))return(x[i]||0)>(y[i]||0)}return true};
+  const last=(s.scheduled_results||[]).find(r=>/sync/.test((r.args||[]).join(" ")));
+  const m=last&&/(\d+\.\d+\.\d+)\s*(?:->|→)\s*(\d+\.\d+\.\d+)/.exec(last.first||"");
+  return m&&!(s.version&&verGE(s.version,m[2]))?last:null;
+}
+function schedHtml(s){
+  const upd=syncNotice(s);
+  const kept=store.get("la-syncmsg","");if(kept){ui.syncMsg=kept;store.set("la-syncmsg","")}
+  return (upd?`<div class="update"><span>${esc(upd.first)}</span><button type="button" class="btn sm" data-act="sync"${ui.syncing?" disabled":""}>${ui.syncing?"Syncing…":"Sync"}</button></div>`:"")
+    +(ui.syncMsg?`<div class="mono mute small" role="status" style="padding:4px">${esc(ui.syncMsg)}</div>`:"")
+    +((s.optimize||[]).length?`<div class="grp"><span>Optimize</span><span>${s.optimize.length}</span></div>`+s.optimize.map(o=>`<div class="line"><span class="t">${esc(o.project)}${o.ts?" · last "+when(o.ts):" · never ran"}${o.left?" · "+o.left+" to decide":""}</span><button type="button" class="btn sm" data-act="opt-run" data-slug="${esc(o.project)}"${o.running?" disabled":""}>${o.running?"running":"Run optimize"}</button></div>`).join(""):"")
+    +s.schedule.map(j=>`<article class="card"><div class="t"><span class="mono">#${j.id} ${esc(j.cmd)}</span></div><div class="mt"><span class="chip tone-mute">${esc(j.when)}</span><span>${j.enabled?(j.next?"next "+when(j.next):""):"paused"} · ${j.last?"last "+when(j.last):"never ran yet"}</span></div></article>`).join("")
+    +`<div class="mono mute small" style="padding:4px">${esc(s.schedule_runner||"")}</div>`
+    +((s.scheduled_results||[]).length?`<div class="grp"><span>Recent results</span><span>${s.scheduled_results.length}</span></div>`+s.scheduled_results.slice(0,5).map(r=>`<div class="line"><span class="t">#${r.id} ${esc(r.first)}</span><span class="chip ${r.rc?"tone-bad":"tone-ok"}">exit ${r.rc}</span></div>`).join(""):"");
+}
+// the bottom badges: each toggles a sheet (a popover over the bar on the desktop, a bottom sheet on the phone)
+const BADGES=[["runs","Runs"],["schedule","Schedule"],["notes","Notes"],["context","Context"]];
+const noteCards=()=>((lastBoard&&lastBoard.cards)||[]).filter(c=>c.kind==="note");
+function runList(){  // workers still running first (a run is in the ledger only once it ends), then the recent runs
+  const st=S||{},have=new Set((st.runs||[]).map(r=>r.id)),live=new Map((st.running||[]).map(r=>[r.run,r]));
+  return (st.running||[]).filter(r=>!have.has(r.run)).map(r=>({id:r.run,todo:r.todo,model:r.model,effort:r.effort,status:"running",units:0,live:r}))
+    .concat((st.runs||[]).map(r=>live.has(r.id)?Object.assign({},r,{live:live.get(r.id)}):r));
+}
+function badgeCount(key){
+  const st=S||{};
+  if(key==="runs")return runList().length;
+  if(key==="schedule")return (st.schedule||[]).length;
+  if(key==="notes")return noteCards().length;
+  return st.context&&st.context.calls?k(st.context.now):"";
+}
+const badgesHtml=()=>BADGES.map(([key,label])=>{const n=badgeCount(key),on=ui.badge===key;
+  return `<button type="button" class="bb${on?" on":""}" data-act="badge" data-badge="${key}" aria-pressed="${on}" aria-expanded="${on}">${label}${n!==""&&n!=null?" "+esc(n):""}</button>`}).join("");
+function runRowHtml(r){
+  const lv=r.live,st=lv?`running · ${plural(lv.turns||0,"turn")}`:(r.status||"").split(":")[0]+(r.passes>1?" · "+r.passes+" passes":""),
+    cost=r.cost!=null?"$"+r.cost.toFixed(2):r.units?k(r.units):"",model=[r.model,r.effort].filter(Boolean).join(" / ");
+  return `<div class="runrow${lv?" isrun":""}" data-run="${esc(r.id)}"><div class="rt"><span class="rid mono">${esc(r.id)}</span><span class="rc mono">${esc([r.todo!=null?"#"+r.todo:"",cost].filter(Boolean).join(" · "))}</span></div>`
+    +`<div class="rt"><span class="rchips">${model?`<span class="chip tone-mute">${esc(model)}</span>`:""}<span class="chip ${lv?"tone-run":tone(r.status)}">${esc(st)}</span></span>`
+    +(lv?`<button type="button" class="stopb" data-act="run-stop" data-id="${esc(r.id)}" aria-label="Stop run ${esc(r.id)}">Stop run</button>`:"")+`</div></div>`;
+}
+function runsHtml(){
+  const rs=runList(),list=ui.runsAll?rs:rs.slice(0,7),st=S||{};
+  const same=p=>String(p.to||"").replace(/^origin\//,"")===p.branch,pushes=st.pushes||[];
+  return `<div class="runs">${list.map(runRowHtml).join("")||'<div class="empty">No runs yet.</div>'}`
+    +(rs.length>7?`<button type="button" class="more" data-act="runs-all">${ui.runsAll?"Show fewer runs":"Show all "+rs.length+" runs"}</button>`:"")+"</div>"
+    +(pushes.length?`<div class="desk"><div class="grp"><span>Pushes</span><span>${pushes.length}</span></div>`+pushes.map(p=>`<div class="mono mute small" style="padding:2px 4px">${esc(p.branch)}${same(p)?"":" → "+esc(p.to)} · ${p.count} push${p.count>1?"es":""}${p.failed?` · ${p.failed} failed`:""} · last ${when(p.ts)}</div>`).join("")+"</div>":"");
+}
+function notesHtml(){
+  const ns=noteCards();
+  return (ns.map(c=>{const age=agoS(c.done_at);
+    return `<div class="nrow"><button type="button" class="ntext" data-act="open-card" data-card="${esc(c.id)}" data-thread="${esc(cardThread(c))}"><span class="t">${esc(c.text)}</span><span class="m mono">${esc([c.note_kind||"note",threadName(cardThread(c)),age].filter(Boolean).join(" · "))}</span></button>`
+      +`<button type="button" class="btn sm" data-act="close-note" data-card="${esc(c.id)}" aria-label="Close note ${c.note}">Close</button></div>`}).join("")||'<div class="empty">No hand-off notes.</div>')
+    +`<div class="bact"><button type="button" class="btn sm" data-act="add-note">+ Note</button></div>`;
+}
+function contextHtml(){
+  const c=(S||{}).context,whole=typeof chat!=="undefined"&&chat.service?" · whole session":"";
+  return (c&&c.calls?`<div class="ctxmeter mono"><span>Orchestrator context · compacts at about ${k(c.compact_at)}${whole?` <span class="mute">${esc(whole.slice(3))}</span>`:""}</span><div class="meter thin${c.now>=c.compact_at*.9?" warn":""}" role="img" aria-label="Orchestrator context${whole}: ${k(c.now)} of ${k(c.compact_at)} before compaction"><div style="width:${Math.min(100,c.now*100/c.compact_at)}%"></div></div></div>`
+    :'<div class="empty">No context numbers yet.</div>')
+    +`<div class="bact">${typeof clearHtml==="function"?clearHtml():""}</div>`
+    +`<div class="bact"><button type="button" class="btn sm" data-act="theme">Theme: ${esc(themeNow||"auto")}</button><button type="button" class="btn sm" data-act="add">+ Add item</button></div>`;
+}
+const BADGE_TITLE={runs:"Runs",schedule:"Schedule",notes:"Notes",context:"Context"};
+function sheetHtml(key){
+  const st=S||{},n=badgeCount(key),body=key==="runs"?runsHtml():key==="schedule"?schedHtml(st):key==="notes"?notesHtml():contextHtml();
+  return `<div class="bhandle" aria-hidden="true"></div><div class="bhd"><h2>${BADGE_TITLE[key]}${n!==""?` <span class="mono mute">${esc(n)}</span>`:""}</h2><button type="button" class="bclose" data-act="close-badge" aria-label="Close ${BADGE_TITLE[key].toLowerCase()}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3L3 13"/></svg></button></div><div class="bbody">${body}</div>`;
+}
+function drawSheet(){
+  if(!ui.badge||!S){$("bwrap").hidden=true;return}
+  $("bsheet").setAttribute&&$("bsheet").setAttribute("aria-label",BADGE_TITLE[ui.badge]);
+  put("bsheet",sheetHtml(ui.badge));$("bwrap").hidden=false;
+}
+function drawBadges(){put("badges",badgesHtml());drawSheet()}
+function toggleBadge(key){
+  ui.badge=ui.badge===key?null:key;ui.runsAll=false;
+  drawBadges();
+  if(typeof document!=="undefined"&&document.querySelector){const b=document.querySelector(`[data-badge="${key}"]`);if(b)b.focus()}
+}
+function closeBadge(){if(ui.badge)toggleBadge(ui.badge)}
+
 // CENTER: the open thread (chat.js draws the messages)
 function selected(){
   const cards=cardsBy(),m=/^#(\d+)$/.exec(ui.sel);
@@ -268,10 +403,13 @@ function drawHeader(){
   rcEl.hidden=fb||!(service||(svc&&svc.configured));
   rcEl.textContent="Remote Control "+rc;rcEl.className="chip "+(rc==="on"?"tone-ok":rc==="off"?"tone-warn":"tone-mute");
   rcEl.title=rc==="on"?"This session is also open in the Claude app":rc==="off"?"Dashboard only: the Claude app does not see this session":"Can't tell whether Remote Control is on";
+  const canMerge=!fb&&/^(#\d+|t\d+)$/.test(ui.sel);
+  $("merge").hidden=!canMerge;if(!canMerge)ui.merge=null;drawMerge();
   $("handled").hidden=!c||c.kind==="thread"||c.kind==="note";
   $("handled").textContent=c&&c.kind==="item"&&c.column!=="Done"?"Done…":"Mark handled";
   $("ctxpills").innerHTML=proj?`<span class="cpill"><span>${esc(proj)}</span><button type="button" class="x" data-act="clear-project" aria-label="Remove project: ${esc(proj)}">×</button></span>`:"";
 }
+function drawMerge(){const h=mergeBoxHtml();$("mergebox").hidden=!h;put("mergebox",h)}
 function optimizeHtml(){  // the Optimize thread: the v0.31.1 Apply / Reject cards
   const pf=$("bfilter").value,cards=((lastBoard&&lastBoard.cards)||[]).filter(c=>c.kind==="optimize"&&c.column==="Waiting on you"&&(!pf||c.project===pf));
   const gs=sugGroups(cards,ui.sg,sugMatch);
@@ -318,36 +456,9 @@ function cardActs(c){  // a board card's buttons, plus Stop run while a worker r
 function select(id,cardId){
   ui.sel=id||"main";ui.cardId=cardId||null;store.set("la-thread",ui.sel);
   if(isPhone())setTab("chat");
-  closeSheet();drawHeader();drawLeft();if(typeof openThread==="function")openThread(threadKey(ui.sel));
+  closeSheet();if(ui.badge)closeBadge();ui.merge=null;drawHeader();drawLeft();if(typeof openThread==="function")openThread(threadKey(ui.sel));
 }
 
-// runs and schedule: two views reached from the footer
-function drawRuns(s){
-  const list=s.runs.slice(0,30);
-  $("runs").innerHTML=list.map(r=>`<div class="runrow" data-run="${esc(r.id)}"><div class="top"><span>${esc(r.id)}</span><span class="mute">${r.cost!=null?"$"+r.cost.toFixed(2):k(r.units)}</span></div>
-    <div class="acts"><span class="chip tone-mute">${esc(r.model||"")}</span><span class="chip ${tone(r.status)}">${esc((r.status||"").split(":")[0])}${r.passes>1?" · "+r.passes+" passes":""}</span>${r.role?`<span class="chip tone-mute">${esc(r.role)}</span>`:""}</div>
-    <div class="h">${esc(r.head)}</div></div>`).join("")||'<div class="empty">No runs yet.</div>';
-  $("n-runs").textContent=s.runs.length||"";
-}
-function syncNotice(s){  // the newest sync record, if it says an update is available and this version isn't there yet
-  const verGE=(a,b)=>{const x=String(a).split(".").map(Number),y=String(b).split(".").map(Number);for(let i=0;i<3;i++){if((x[i]||0)!==(y[i]||0))return(x[i]||0)>(y[i]||0)}return true};
-  const last=(s.scheduled_results||[]).find(r=>/sync/.test((r.args||[]).join(" ")));
-  const m=last&&/(\d+\.\d+\.\d+)\s*(?:->|→)\s*(\d+\.\d+\.\d+)/.exec(last.first||"");
-  return m&&!(s.version&&verGE(s.version,m[2]))?last:null;
-}
-function drawSchedule(s){
-  const upd=syncNotice(s);
-  const kept=store.get("la-syncmsg","");if(kept){ui.syncMsg=kept;store.set("la-syncmsg","")}
-  $("sched").innerHTML=(upd?`<div class="update"><span>${esc(upd.first)}</span><button type="button" class="btn sm" data-act="sync"${ui.syncing?" disabled":""}>${ui.syncing?"Syncing…":"Sync"}</button></div>`:"")
-    +(ui.syncMsg?`<div class="mono mute small" role="status" style="padding:4px">${esc(ui.syncMsg)}</div>`:"")
-    +((s.optimize||[]).length?`<div class="grp"><span>Optimize</span><span>${s.optimize.length}</span></div>`+s.optimize.map(o=>`<div class="line"><span class="t">${esc(o.project)}${o.ts?" · last "+when(o.ts):" · never ran"}${o.left?" · "+o.left+" to decide":""}</span><button type="button" class="btn sm" data-act="opt-run" data-slug="${esc(o.project)}"${o.running?" disabled":""}>${o.running?"running":"Run optimize"}</button></div>`).join(""):"")
-    +s.schedule.map(j=>`<article class="card"><div class="t"><span class="mono">#${j.id} ${esc(j.cmd)}</span></div><div class="mt"><span class="chip tone-mute">${esc(j.when)}</span><span>${j.enabled?(j.next?"next "+when(j.next):""):"paused"} · ${j.last?"last "+when(j.last):"never ran yet"}</span></div></article>`).join("")
-    +`<div class="mono mute small" style="padding:4px">${esc(s.schedule_runner||"")}</div>`
-    +((s.scheduled_results||[]).length?`<div class="grp"><span>Recent results</span><span>${s.scheduled_results.length}</span></div>`+s.scheduled_results.slice(0,5).map(r=>`<div class="line"><span class="t">#${r.id} ${esc(r.first)}</span><span class="chip ${r.rc?"tone-bad":"tone-ok"}">exit ${r.rc}</span></div>`).join(""):"");
-  const same=p=>String(p.to||"").replace(/^origin\//,"")===p.branch;
-  $("pushes").innerHTML=s.pushes.length?`<div class="grp"><span>Pushes</span><span>${s.pushes.length}</span></div>`+s.pushes.map(p=>`<div class="mono mute small" style="padding:2px 4px">${esc(p.branch)}${same(p)?"":" → "+esc(p.to)} · ${p.count} push${p.count>1?"es":""}${p.failed?` · ${p.failed} failed`:""} · last ${when(p.ts)}</div>`).join(""):"";
-  $("n-sched").textContent=s.schedule.length||"";
-}
 function drawPlanBox(s){
   const wk=s.plan.seven_day,ses=s.plan.five_hour,hm=t=>new Date(t*1000).toTimeString().slice(0,5),dhm=t=>new Date(t*1000).toLocaleDateString(undefined,{weekday:"short"})+" "+hm(t);
   const ok=p=>p&&Number.isFinite(p.pct),tone=p=>p>95?" bad":p>80?" warn":"";
@@ -363,9 +474,8 @@ function drawPlanBox(s){
   const w=s.week;
   if(h&&w)h+=`<span class="u-tot">${w.runs} runs · $${w.cost} · ${s.todo_done_week} todos done</span>`;
   $("ustrip").innerHTML=h;$("ustrip").hidden=!h;
-  const c=s.context;
-  const whole=typeof chat!=="undefined"&&chat.service?" · whole session":"";
-  $("ctxmeter").innerHTML=c&&c.calls?`<span>Orchestrator context${whole} · compacts at ${k(c.compact_at)}</span><div class="meter thin${c.now>=c.compact_at*.9?" warn":""}" role="img" aria-label="Orchestrator context${whole}: ${k(c.now)} of ${k(c.compact_at)} before compaction"><div style="width:${Math.min(100,c.now*100/c.compact_at)}%"></div></div>`:"";
+  $("mustrip").innerHTML=h;$("mustrip").hidden=!h;
+  drawBadges();
 }
 
 // the week's graph (the plan's own numbers: week % against on-pace, 5-hour session windows)
@@ -429,7 +539,7 @@ async function optRun(slug){
 }
 async function doSync(){
   if(ui.syncing||!confirm("Update lean-agent now (lean-agent sync)?"))return;
-  ui.syncing=true;ui.syncMsg="";drawSchedule(S);
+  ui.syncing=true;ui.syncMsg="";drawSheet();
   const before=S.version;let r;
   try{r=await post("/api/action",{do:"sync"})}catch(e){r={ok:false,output:String(e)}}
   ui.syncing=false;
@@ -464,12 +574,20 @@ async function onAct(el){
   if(what==="new-thread")return newThread();
   if(what==="move")return openSheet("move",el.dataset.mid,el.dataset.from);
   if(what==="move-to")return moveMessage(ui.sheet&&ui.sheet.mid,el.dataset.to);
-  if(what==="views")return openPanel(el.dataset.v);
-  if(what==="close-panel")return $("panel").close();
+  if(what==="badge")return toggleBadge(el.dataset.badge);
+  if(what==="close-badge")return closeBadge();
+  if(what==="runs-all"){ui.runsAll=!ui.runsAll;return drawSheet()}
+  if(what==="theme"){setTheme({"":"light",light:"dark",dark:""}[themeNow]);return drawSheet()}
+  if(what==="merge-open"){ui.merge={pick:null};return drawMerge()}
+  if(what==="merge-cancel"){ui.merge=null;ui.picks=[];ui.target=null;if(ui.sheet&&ui.sheet.mode==="switch")openSheet("switch");return drawMerge()}
+  if(what==="merge-change"){const p=pickTargets();ui.target=p[(p.indexOf(mergeTarget())+1)%p.length];$("mergesum").innerHTML=mergeSummaryHtml();return}
+  if(what==="merge-go"){const m=mergeSummary();if(m)return mergeGo(m.ids,m.to);return}
+  if(what==="merge-do")return mergeOpenGo();
+  if(what==="unmerge")return unmergeThread(el.dataset.from);
   if(what==="edit"){const r=await askText(`Edit #${c.id}`,"The item's text",c.text);if(r&&r.text)act({do:"todo-edit",id:c.id,text:r.text})}
   if(what==="note-edit"){const r=await askText(`Edit note ${c.note}`,"The note's text",c.text);if(r&&r.text)act({do:"note-edit",n:c.note,text:r.text})}
-  if(what==="add")addItem();
-  if(what==="add-note")addNote();
+  if(what==="add"){closeBadge();addItem()}
+  if(what==="add-note"){closeBadge();addNote()}
   if(what==="plan-graph"){$("graph").showModal();if(S)drawPlan(S)}
   if(what==="close-graph")$("graph").close();
   if(what==="close-view")closeView();
@@ -488,30 +606,37 @@ async function addNote(){
   if(r&&r.text)act({do:"note-add",text:r.text,kind:$("notekind").value});
 }
 document.addEventListener("click",e=>{
-  const run=e.target.closest("[data-run]");if(run){e.preventDefault();if($("panel").open)$("panel").close();show(run.dataset.run);return}
   const a=e.target.closest("[data-act]");if(a){e.preventDefault();onAct(a);return}
+  const run=e.target.closest("[data-run]");if(run){e.preventDefault();if(ui.badge)closeBadge();show(run.dataset.run);return}
   const tab=e.target.closest("[data-ltab]");if(tab)setTab(tab.dataset.ltab)
 });
 document.addEventListener("submit",e=>{
   const f=e.target.closest("form[data-ask]");if(!f)return;
   e.preventDefault();const i=f.querySelector("input"),v=i.value;i.value="";ask(v);
 });
-document.addEventListener("keydown",e=>{if(e.key==="Escape")closeView()});
-$("bfilter").addEventListener("change",()=>{store.set("la-board-project",$("bfilter").value);if(lastBoard){drawLeft();drawHeader();if(typeof drawChat==="function")drawChat()}});
+document.addEventListener("keydown",e=>{if(e.key==="Escape"){closeView();closeBadge()}});
+document.addEventListener("change",e=>{
+  const p=e.target.closest("[data-pick]");
+  if(p){const on=new Set(ui.picks||[]);p.checked?on.add(p.dataset.pick):on.delete(p.dataset.pick);ui.picks=[...on];$("mergesum").innerHTML=mergeSummaryHtml();return}
+  const m=e.target.closest("[data-merge-pick]");if(m&&ui.merge)ui.merge.pick=m.dataset.mergePick;
+});
+$("mproj").addEventListener("change",()=>{$("bfilter").value=$("mproj").value;$("bfilter").dispatchEvent(new Event("change"))});
+$("bfilter").addEventListener("change",()=>{store.set("la-board-project",$("bfilter").value);$("mproj").value=$("bfilter").value;if(lastBoard){drawLeft();drawHeader();if(typeof drawChat==="function")drawChat()}});
 window.matchMedia("(max-width:900px)").addEventListener("change",()=>{drawLeft()});
 window.addEventListener("resize",()=>{if(S&&$("graph").open)drawPlan(S)});
 
 async function load(){
   let s;try{const r=await fetch(`/api/state?t=${T}`);if(!r.ok)throw new Error(r.status);s=await r.json()}
-  catch(e){ui.offline=ui.offline||Date.now();drawBanners();$("stamp").innerHTML=`<span class="dot dot-bad" aria-hidden="true"></span>offline`;$("stamp").title="can't reach lean-agent: is `lean-agent up` or `lean-agent dashboard` running?";return}
+  catch(e){ui.offline=ui.offline||Date.now();drawBanners();setStamp(`<span class="dot dot-bad" aria-hidden="true"></span>offline`,"can't reach lean-agent: is `lean-agent up` or `lean-agent dashboard` running?");return}
   if(s.page_version&&s.page_version!==V){location.reload();return}
   S=Object.assign(S||{},s);lastBoard=s.board;ui.offline=0;ui.lastOk=new Date();ui.now=s.now.slice(11,16);
   drawStamp();
   const f=$("bfilter"),cur=f.value||store.get("la-board-project","");
-  f.innerHTML='<option value="">All projects</option>'+s.board.projects.map(p=>`<option${p===cur?" selected":""}>${esc(p)}</option>`).join("");
+  f.innerHTML=$("mproj").innerHTML='<option value="">All projects</option>'+s.board.projects.map(p=>`<option${p===cur?" selected":""}>${esc(p)}</option>`).join("");
+  $("mproj").value=f.value;
   const changed=changedSet(s.board.cards);sugPrune(s.board.cards);
   loadThreads();
-  drawLeft(changed);drawHeader();drawBanners();if(typeof drawChat==="function")drawChat();drawRuns(s);drawSchedule(s);drawPlanBox(s);
+  drawLeft(changed);drawHeader();drawBanners();if(typeof drawChat==="function")drawChat();drawBadges();drawPlanBox(s);
   if($("graph").open)drawPlan(s);
 }
 const inFallback=()=>typeof fallback==="function"&&fallback();  // chat.js loads after this file
@@ -527,8 +652,8 @@ function drawBanners(){  // connection state at the top of the center pane
 function drawStamp(){  // the top-left dot: live, no service (the server's word) or offline (this page can't reach the server)
   if(ui.offline||!ui.now)return;
   const fb=inFallback();
-  $("stamp").innerHTML=`<span class="dot ${fb?"dot-warn":"dot-ok"}" aria-hidden="true"></span>${fb?"no service":"live "+ui.now}`;
-  $("stamp").title=fb?"lean-agent service not running: each task has its own thread":"";
+  setStamp(`<span class="dot ${fb?"dot-warn":"dot-ok"}" aria-hidden="true"></span>${fb?"no service":"live "+ui.now}`,fb?"lean-agent service not running: each task has its own thread":"");
 }
+function setStamp(h,title){for(const id of ["stamp","mstamp"]){$(id).innerHTML=h;$(id).title=title}}
 setTab(ui.tab);
 load();setInterval(load,15000);

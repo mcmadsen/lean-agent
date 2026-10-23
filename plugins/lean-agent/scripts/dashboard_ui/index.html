@@ -2,6 +2,7 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>lean-agent</title>
 <link rel="stylesheet" href="/ui/style.css?v=__PAGE_VERSION__"></head><body>
+<header class="mhead" id="mhead"><div class="mtop"><div class="logo" aria-hidden="true">&gt;_</div><div class="mname"><div class="name">lean-agent</div><span class="live mono" id="mstamp"><span class="dot dot-ok" aria-hidden="true"></span>…</span></div><label class="bb mproj"><span class="sr">Project</span><select id="mproj" aria-label="Project"><option value="">All projects</option></select></label></div><button type="button" class="ustrip" id="mustrip" data-act="plan-graph" title="Show the week's graph" hidden></button></header>
 <div class="ws" id="ws">
 
 <!-- LEFT: Chat / Inbox / Todos -->
@@ -18,7 +19,6 @@
  <section class="ltab" id="l-chat" aria-label="Chat"><div class="thr-top"><form class="ask" data-ask><label class="sr" for="ask-d">Ask Claude anything</label><input type="text" id="ask-d" autocomplete="off" placeholder="Ask Claude anything"><button type="submit" class="btn primary">Ask</button></form><button type="button" class="btn tnew" data-act="new-thread" aria-label="New thread">+</button></div><div class="rows" id="threads"></div></section>
  <section class="ltab" id="l-inbox" aria-label="Inbox" hidden><div class="rows" id="inbox"></div></section>
  <section class="ltab" id="l-todos" aria-label="Todos" hidden><div class="rows" id="todos"></div></section>
- <div class="inbox-foot"><button type="button" class="btn sm" data-act="views" data-v="runs">Runs <span id="n-runs"></span></button><button type="button" class="btn sm" data-act="views" data-v="schedule">Schedule <span id="n-sched"></span></button><button type="button" class="btn sm" data-act="add">+ Add item</button><button type="button" class="btn sm" data-act="add-note">+ Note</button><button id="theme" type="button" class="btn sm" title="switch theme"></button></div>
 </aside>
 
 <!-- RIGHT: the open thread -->
@@ -26,16 +26,15 @@
  <header class="thead">
   <div class="tbar"><button type="button" class="tsw" id="tbar" data-act="sheet" aria-haspopup="dialog" aria-label="Switch thread"><span id="tbar-t"></span><svg class="chev" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button><button type="button" class="btn tnew" data-act="new-thread" aria-label="New thread">+</button></div>
   <div class="tmeta"><h1 id="ttitle">Main</h1><div class="mono mute sub" id="tsub"></div></div>
-  <div class="tacts"><span id="rc" class="chip tone-mute" hidden></span><span id="cstat" class="chip tone-mute">idle</span><button id="handled" type="button" class="btn" hidden>Mark handled</button><button id="cnew" type="button" class="btn" data-act="clear-ask">Clear session…</button></div>
+  <div class="tacts"><span id="rc" class="chip tone-mute" hidden></span><button id="handled" type="button" class="btn" hidden>Mark handled</button><button id="merge" type="button" class="btn" data-act="merge-open" hidden>Merge…</button></div>
  </header>
- <div id="clearbox" hidden></div>
+ <div id="mergebox" hidden></div>
  <div class="banners" id="banners"></div>
  <div class="stream" id="msgs"></div>
  <div class="composer-wrap">
   <div class="working" id="working" hidden></div>
   <form class="composer" id="chatform">
    <div class="ctx" id="ctxpills"></div>
-   <div class="ctxmeter mono" id="ctxmeter"></div>
    <textarea id="chatin" rows="2" aria-label="Message" placeholder="Message (Enter sends, Shift+Enter: new line)"></textarea>
    <div class="cbar">
     <div class="pills" id="cmds"><button type="button" class="pill mono" data-cmd="run">/run</button><button type="button" class="pill mono" data-cmd="review">/review</button><button type="button" class="pill mono" data-cmd="todo">/todo</button><button type="button" class="pill mono" data-cmd="handoff">/handoff</button></div>
@@ -51,10 +50,10 @@
  <button type="button" class="seg on" data-ltab="chat" aria-pressed="true">Chat <span id="m-chat" class="badge"></span></button><button type="button" class="seg" data-ltab="inbox" aria-pressed="false">Inbox <span id="m-inbox"></span></button><button type="button" class="seg" data-ltab="todos" aria-pressed="false">Todos <span id="m-todos"></span></button>
 </nav>
 
-<dialog id="sheet" aria-labelledby="sheet-t"><div class="bh"><h2 id="sheet-t">Threads</h2><button type="button" class="btn sm" data-act="close-sheet">Close</button></div><div id="sheetbody"></div></dialog>
-<dialog id="panel" aria-labelledby="panel-t"><div class="bh"><h2 id="panel-t"></h2><button type="button" class="btn sm" data-act="close-panel">Close</button></div>
- <section id="c-runs" aria-label="Recent runs"><div id="runs"></div></section>
- <section id="c-sched" aria-label="Schedule" hidden><div id="sched"></div><div id="pushes"></div></section></dialog>
+<nav class="badges" id="badges" aria-label="More"></nav>
+<div id="bwrap" hidden><div class="bscrim" data-act="close-badge"></div><section id="bsheet" role="dialog" aria-label="More"></section></div>
+
+<dialog id="sheet" aria-labelledby="sheet-t"><div class="bh"><h2 id="sheet-t">Threads</h2><button type="button" class="btn sm" data-act="close-sheet">Close</button></div><div id="sheetbody"></div><div id="mergesum"></div></dialog>
 <dialog id="ask"><form method="dialog"><b id="asktitle"></b><div id="askhint" class="mute small"></div><div id="askextra"></div><textarea id="asktext" rows="3"></textarea>
  <div class="acts"><button class="btn" value="cancel" type="submit" formnovalidate>Cancel</button><button class="btn primary" value="ok" id="askok" type="submit">OK</button></div></form></dialog>
 <dialog id="graph"><div class="bh"><h2>Plan usage this week</h2><button type="button" class="btn sm" data-act="close-graph">Close</button></div>
