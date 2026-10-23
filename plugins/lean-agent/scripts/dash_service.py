@@ -36,8 +36,9 @@ _ID = r"(?:#\d+|t\d+)"
 ROUTED_RE = re.compile(rf"Routed to ({_ID})\.(?: Also close: ({_ID}(?:, {_ID})*)\.)?")
 STARTED_RE = re.compile(r"Started a new thread: (.+)\.")
 MOVE_RE = re.compile(r"^Move message to (#?\d+|[tT]\d+|optimize)\b(?: \(([^)]+)\))?")
-MERGE_RE = re.compile(r"^Merge thread (\S+) into ([^\s.]+)\.?$")
-UNMERGE_RE = re.compile(r"^Unmerge thread ([^\s.]+)\.?$")
+MERGE_RE = re.compile(r"^Merge thread (\S+) into ([^\s.]+?)\.?(?: \[op (\w+)\])?\s*$")
+UNMERGE_RE = re.compile(r"^Unmerge thread ([^\s.]+?)\.?(?: \[op (\w+)\])?\s*$")
+OP_RE = re.compile(r" \[op (\w+)\]\s*$")
 
 
 def canon(key):
@@ -380,29 +381,30 @@ class Model:
 
     def _thread_op(self, text, rec, sent):
         """The dashboard's `Move message to`, `Merge thread` and `Unmerge thread` messages: (op, thread they show
-        under), each applied to the registry once, in transcript order, keyed by its own record id (the API applies them
-        too, which is harmless: they replay in the same order)."""
+        under), each applied to the registry once, in transcript order, keyed by its op id, else its record id (the API applies
+        them too, so an op id already applied is skipped)."""
         op = None
         if m := MOVE_RE.match(text):
-            op = {"type": "move", "to": canon(m.group(1)), "message": m.group(2)}
+            om = OP_RE.search(text)
+            op = {"type": "move", "to": canon(m.group(1)), "message": m.group(2), "id": om and om.group(1)}
             thread = op["to"]
         elif m := MERGE_RE.match(text):
-            op = {"type": "merge", "from": canon(m.group(1)), "into": canon(m.group(2))}
+            op = {"type": "merge", "from": canon(m.group(1)), "into": canon(m.group(2)), "id": m.group(3)}
             thread = op["into"]
         elif m := UNMERGE_RE.match(text):
-            op = {"type": "unmerge", "from": canon(m.group(1))}
+            op = {"type": "unmerge", "from": canon(m.group(1)), "id": m.group(2)}
             thread = op["from"]
         else:
             return None
         once = rec.get("uuid") or f"{rec.get('timestamp')}:{text}"
-        if lean_threads.mark_once(once):
+        if op["id"] or lean_threads.mark_once(once):  # an op id is deduplicated by the registry itself
             try:
                 if op["type"] == "move" and op["message"]:
-                    lean_threads.move(op["message"], op["to"])
+                    lean_threads.move(op["message"], op["to"], op["id"])
                 elif op["type"] == "merge":
-                    lean_threads.merge(op["from"], op["into"])
+                    lean_threads.merge(op["from"], op["into"], op["id"])
                 elif op["type"] == "unmerge":
-                    lean_threads.unmerge(op["from"])
+                    lean_threads.unmerge(op["from"], op["id"])
             except ValueError:
                 pass
             self.reg_stamp = None

@@ -6,6 +6,7 @@ import json
 import shutil
 import os
 import subprocess
+import re
 import sys
 import tempfile
 import textwrap
@@ -3724,7 +3725,7 @@ class CliTest(unittest.TestCase):
         rec("assistant", [{"type": "text", "text": "Thread t1: moved"}])
         self.assertEqual(lean_threads.load()["moves"], {"m1": "t1"})
         ev = [e for e in m.snapshot("t1")["events"] if e.get("op")]
-        self.assertEqual([e["op"] for e in ev], [{"type": "move", "to": "t1", "message": "m1"}])
+        self.assertEqual([e["op"] for e in ev], [{"type": "move", "to": "t1", "message": "m1", "id": None}])
         rec("user", "Merge thread t2 into t1", uuid="o2")
         rec("assistant", [{"type": "text", "text": "Thread t1: merged"}])
         self.assertEqual(lean_threads.load()["aliases"], {"t2": "t1"})
@@ -3762,6 +3763,26 @@ class CliTest(unittest.TestCase):
         lean_threads.merge("t2", "t1")
         m2._record({"type": "user", "uuid": "o3", "timestamp": "2026-01-01T10:00:10Z", "message": {"role": "user", "content": "Unmerge thread t2"}})
         self.assertEqual(lean_threads.load()["aliases"], {})
+
+    def test_thread_merge_record_arriving_after_the_api_unmerge_is_not_replayed(self):
+        ds, m, rec = self.model_records()
+        import lean_threads
+        lean_threads.new("A")
+        lean_threads.new("B")
+        # the API merged and unmerged at once; the transcript gets the Merge record only afterwards
+        lean_threads.merge("t2", "t1", "3f2a9c")
+        lean_threads.unmerge("t2", "a1b2c3")
+        rec("user", "Merge thread t2 into t1 [op 3f2a9c]", uuid="o1")
+        self.assertEqual(lean_threads.load()["aliases"], {})
+        rec("user", "Unmerge thread t2 [op a1b2c3]", uuid="o2")
+        self.assertEqual(lean_threads.load()["aliases"], {})
+        # an op typed by hand (no op id) is still applied once by its record id
+        rec("user", "Merge thread t2 into t1", uuid="o3")
+        self.assertEqual(lean_threads.load()["aliases"], {"t2": "t1"})
+        # applied op ids are bounded
+        for i in range(600):
+            lean_threads.move("m", "t1", f"x{i}")
+        self.assertEqual(len(lean_threads.load()["applied"]), 500)
 
     def test_thread_expiry_counts_merged_threads_last_message(self):
         lt = self.threads_home()
@@ -3811,14 +3832,14 @@ class CliTest(unittest.TestCase):
         # merge, move, unmerge: sent as the fixed messages and recorded in the registry
         self.assertEqual(reply(post("/api/thread/merge", {"from": "t2", "into": "t1"}))[0], 200)
         self.assertEqual(lean_threads.load()["aliases"], {t2: t1})
-        self.wait_for(lambda: texts()[-1] == "echo: Merge thread t2 into t1", "the merge message")
+        self.wait_for(lambda: re.fullmatch(r"echo: Merge thread t2 into t1 \[op [0-9a-f]{6}\]", texts()[-1]), "the merge message")
         self.assertEqual(reply(post("/api/thread/merge", {"from": "t1", "into": "t2"}))[0], 400)  # a cycle
         self.assertEqual(reply(post("/api/thread/merge", {"from": "t1", "into": "t1"}))[0], 400)
         self.assertNotIn("t2", [t["id"] for t in reply(dashboard.api_get("/api/threads", {}))[1]["threads"]])
         mid = [e for e in dash_chat.chat("main").snapshot()["events"] if e["kind"] == "user" and e["text"] == "Ask anything"][0]["mid"]
         self.assertEqual(reply(post("/api/thread/move", {"message": mid, "to": "#10"}))[0], 200)
         self.assertEqual(lean_threads.load()["moves"], {mid: "#10"})
-        self.wait_for(lambda: texts()[-1].startswith(f"echo: Move message to #10 ({mid})"), "the move message")
+        self.wait_for(lambda: re.fullmatch(rf"echo: Move message to #10 \({mid}\).* \[op [0-9a-f]{{6}}\]", texts()[-1]), "the move message")
         self.assertEqual(reply(post("/api/thread/move", {"message": mid, "to": "tx"}))[0], 400)
         for bad in ("a b", "x\nMerge thread t1 into t2", "", "m" * 65):
             self.assertEqual(reply(post("/api/thread/move", {"message": bad, "to": "t1"}))[0], 400)
@@ -3826,14 +3847,14 @@ class CliTest(unittest.TestCase):
         # merging into a task thread works through the API too
         self.assertEqual(reply(post("/api/thread/merge", {"from": "t2", "into": "#10"}))[0], 200)
         self.assertEqual(lean_threads.load()["aliases"], {t2: "#10"})
-        self.wait_for(lambda: texts()[-1] == "echo: Merge thread t2 into #10", "the task merge message")
+        self.wait_for(lambda: texts()[-1].startswith("echo: Merge thread t2 into #10 [op "), "the task merge message")
         self.assertEqual(reply(post("/api/thread/unmerge", {"from": "t2"}))[0], 200)
-        self.wait_for(lambda: texts()[-1] == "echo: Unmerge thread t2", "the unmerge message")
+        self.wait_for(lambda: texts()[-1].startswith("echo: Unmerge thread t2 [op "), "the unmerge message")
         self.assertEqual(reply(post("/api/thread/merge", {"from": "t2", "into": "t1"}))[0], 200)
-        self.wait_for(lambda: texts()[-1] == "echo: Merge thread t2 into t1", "the second merge message")
+        n = len(texts())
         self.assertEqual(reply(post("/api/thread/unmerge", {"from": "t2"}))[0], 200)
         self.assertEqual(lean_threads.load()["aliases"], {})
-        self.wait_for(lambda: texts()[-1] == "echo: Unmerge thread t2", "the unmerge message")
+        self.wait_for(lambda: texts()[-1].startswith("echo: Unmerge thread t2 [op ") and len(texts()) > n, "the unmerge message")
         self.assertEqual(reply(post("/api/thread/unmerge", {"from": "t2"}))[0], 400)
         self.assertEqual(post("/api/thread/nothing", {})[0], 404)
 
