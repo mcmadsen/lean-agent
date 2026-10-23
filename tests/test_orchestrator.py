@@ -2779,6 +2779,21 @@ class CliTest(unittest.TestCase):
         self.assertIn("t2", self.cli("thread", "list").stdout)
         self.assertEqual(self.cli("thread", "unmerge", "t2", check=False).returncode, 1)
 
+    def test_an_explicit_thread_id_reopens_a_closed_thread(self):
+        lt = self.threads_home()
+        lt.route("Old topic about the parser", "s1")
+        lt.route("Something else entirely about deployments", "s1")
+        self.cli("thread", "close", "t1")
+        tid, how, _ = lt.route("back to t1 please", "s1")
+        self.assertEqual((tid, how), ("t1", "explicit"))
+        self.assertNotIn("closed", lt.load()["threads"]["t1"])
+        self.assertIn("t1 ", self.cli("now").stdout)
+        lt.set_closed("t1", True)
+        with lt._locked() as data:
+            data["threads"]["t1"]["auto_closed"] = True
+        lt.route("t1 again", "s1")
+        self.assertNotIn("auto_closed", lt.load()["threads"]["t1"])
+
     def test_thread_move_rehomes_the_latest_request_and_the_work_since(self):
         self.cli("learn", self.proj, "--name", "proj")
         lt = self.threads_home()
