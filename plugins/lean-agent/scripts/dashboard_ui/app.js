@@ -394,7 +394,7 @@ function contextText(c){
 }
 function drawHeader(){
   const c=selected(),service=!!(typeof chat!=="undefined"&&chat.service),rc=typeof rcState==="function"?rcState():"unknown",proj=$("bfilter").value;
-  const fb=inFallback(),shared=fb?"":!service?"not shared":rc==="on"?"also open in the Claude app":rc==="off"?"dashboard only":"";
+  const fb=inFallback(),shared=fb?"not shared":rc==="on"?"also open in the Claude app":rc==="off"?"dashboard only":"";
   const label=threadLabel(),to=/^#/.test(ui.sel)?ui.sel:threadName(ui.sel);
   $("ttitle").textContent=label;$("tbar-t").textContent=label;
   $("tsub").textContent=[ui.sel==="main"&&!fb?"Whole session":"",shared].filter(Boolean).join(" · ");
