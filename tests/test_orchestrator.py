@@ -102,7 +102,7 @@ FAKE_CLAUDE = textwrap.dedent("""\
         time.sleep(float(os.environ.get("FAKE_INIT_SLEEP", "0")))
     with open(log, "a") as fh:
         fh.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "task": task,
-                             "append": open(append).read(), "mcp": mcp,
+                             "append": open(append).read(), "mcp": mcp, "thread": os.environ.get("LEAN_AGENT_THREAD"),
                              "automem": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
                              "bash_out": os.environ.get("BASH_MAX_OUTPUT_LENGTH"),
                              "service": os.environ.get("LEAN_AGENT_SERVICE_SESSION"),
@@ -2629,6 +2629,37 @@ class CliTest(unittest.TestCase):
                 os.environ.pop("LEAN_AGENT_COMPACT_BUFFER", None)
             else:
                 os.environ["LEAN_AGENT_COMPACT_BUFFER"] = old
+
+    def test_commands_record_the_current_thread(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        lt = self.threads_home()
+        tid, _, _ = lt.route("Fix the export timeout in billing", "s1")
+        self.assertEqual(tid, "t1")
+        self.cli("run", "-p", "proj", "look at it", "--model", "haiku", "--why", "t")
+        self.assertEqual(self.ledger()[-1]["thread"], "t1")
+        self.assertEqual(self.calls()[-1]["thread"], "t1")  # the worker's environment
+        self.cli("run", "-p", "proj", "look again", "--model", "haiku", "--why", "t", "--thread", "none")
+        self.assertIsNone(self.ledger()[-1]["thread"])
+        self.assertEqual(self.calls()[-1]["thread"], "none")
+        self.cli("run", "-p", "proj", "and again", "--model", "haiku", "--why", "t", "--thread", "#9")
+        self.assertEqual(self.ledger()[-1]["thread"], "#9")
+        self.cli("remember", "Never merge on Fridays.", FAKE_ANSWER="REMEMBERED feedback x")
+        self.assertEqual(self.ledger()[-1]["thread"], "t1")
+        self.cli("todo", "add", "Fix it", "--thread", "t1")
+        self.cli("todo", "add", "Other", "--thread", "none")
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "todo.json")) as fh:
+            items = json.load(fh)["items"]
+        self.assertEqual([t.get("thread") for t in items], ["t1", None])
+        self.cli("checkpoint", "state one")
+        self.cli("handoff", "--note", "a note", "--kind", "fyi")
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "handoff-notes.json")) as fh:
+            notes = json.load(fh)
+        self.assertEqual([n.get("thread") for n in notes], ["t1", "t1"])
+        # a worker's nested command inherits the thread from its environment
+        self.cli("todo", "add", "Nested", LEAN_AGENT_THREAD="t5")
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "todo.json")) as fh:
+            self.assertEqual(json.load(fh)["items"][-1]["thread"], "t5")
+        self.assertNotEqual(self.cli("todo", "add", "x", "--thread", "bogus", check=False).returncode, 0)
 
     def threads_home(self):
         sys.path.insert(0, os.path.dirname(CLI))

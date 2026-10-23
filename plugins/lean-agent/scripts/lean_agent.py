@@ -1615,6 +1615,8 @@ def _cmd_run(a):
     env = dict(os.environ)
     env.pop("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", None)  # never pull in the project's CLAUDE.md
     env.pop("LEAN_AGENT_SERVICE_SESSION", None)  # the service session's hooks (session, permission) must not act in a worker
+    thread_tag = lean_threads.resolve_tag()
+    env["LEAN_AGENT_THREAD"] = thread_tag or "none"  # nested lean-agent commands in the worker record the same thread
     env["BASH_MAX_OUTPUT_LENGTH"] = os.environ.get("LEAN_AGENT_WORKER_BASH_OUTPUT") or "8000"  # not the orchestrator's
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"  # memory comes from lean-agent cards instead
     env = push_guard.git_env(env)  # git refuses pushes to guarded branches (pre-push), whatever the worker runs
@@ -1640,7 +1642,7 @@ def _cmd_run(a):
     running_key = launch_key or run_id  # every run is listed while it runs (the status line)
     save_json(home("running", running_key + ".json"), {"pid": os.getpid(), "started": now_iso(), "run": run_id,
                                                       "task": task[:2000], "model": model, "project": slug,
-                                                      "workdir": workdir, "todo": todo_id, "effort": effort, "detached": bool(SUPERVISOR),
+                                                      "workdir": workdir, "todo": todo_id, "thread": thread_tag, "effort": effort, "detached": bool(SUPERVISOR),
                                                       "branch": (wt or {}).get("branch") if isinstance(wt, dict) else None,
                                                       "role": getattr(a, "role", None)
                                                       or (prev or {}).get("role")})
@@ -1776,7 +1778,7 @@ def _cmd_run(a):
         "mcp_seq": mcp_seq[:60], "mcp_offered": {k: len(v) for k, v in offered.items()},
         "result_head": (summary or "")[:600],
         "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
-        "allow_cmd": allow_cmd, "todo": todo_id,
+        "allow_cmd": allow_cmd, "todo": todo_id, "thread": thread_tag,
         "role": role, "effort": effort, "worktree": wt_name, "review_meta": review_meta, "launch_key": launch_key,
         "recipe": (getattr(a, "recipe", None) or (None, None))[0],
         "recipe_step": (getattr(a, "recipe", None) or (None, None))[1],
@@ -4059,7 +4061,7 @@ def report_review(slug, project, entry, review, meta):
         head, dirty = meta["head"], ""
     else:  # the working tree as it is now, after the review
         head, dirty = review_state(project)
-    append_jsonl(reviews_path(slug), {"ts": now_iso(), "run": entry["id"], "verdict": verdict, "head": head,
+    append_jsonl(reviews_path(slug), {"ts": now_iso(), "run": entry["id"], "thread": entry.get("thread"), "verdict": verdict, "head": head,
                                       "dirty": dirty, "ref": meta.get("ref"), "mode": meta.get("mode", "worktree"),
                                       "base": meta.get("base"), "findings": findings, "checks": checks,
                                       "reuse": review.get("reuse") or [], "new_symbols": meta.get("new_symbols") or [],
@@ -4438,7 +4440,7 @@ def worktree_push(a):
         push_env["LEAN_AGENT_PUSH_GUARD_OVERRIDE"] = "1"
     p = subprocess.run(["git", "-C", path, "push", "origin", f"HEAD:refs/heads/{target}"],
                        capture_output=True, text=True, env=push_env)
-    append_jsonl(home("pushes.jsonl"), {"ts": now_iso(), "project": slug, "branch": branch, "to": f"origin/{target}",
+    append_jsonl(home("pushes.jsonl"), {"ts": now_iso(), "thread": lean_threads.resolve_tag(), "project": slug, "branch": branch, "to": f"origin/{target}",
                                         "sha": sha, "review": match["run"], "approved": a.allow_send,
                                         "guard_override": a.override_guard if hit else None,
                                         "ok": p.returncode == 0})
@@ -7403,7 +7405,7 @@ def cmd_todo(a):
         if missing:
             die(f"--after: no todo {', '.join('#' + str(x) for x in missing)}")
         t = {"id": data["next"], "text": text, "project": project, "ref": a.ref, "prio": a.prio or "normal",
-             "due": a.due, "status": "open", "created": now_iso(), "notes": []}
+             "due": a.due, "status": "open", "created": now_iso(), "notes": [], "thread": lean_threads.resolve_tag()}
         if a.epic:
             t["epic"], t["after"] = a.epic, after
             data.setdefault("epics", {}).setdefault(a.epic, {"project": project, "counts": []})
@@ -8281,7 +8283,8 @@ def cmd_handoff(a):
     notes = compact_hook.load_notes()
     if a.note or a.done:
         if a.note:
-            notes.append(dict({"ts": now_iso(), "text": " ".join(a.note.split())}, **({"kind": a.kind} if a.kind else {})))
+            notes.append(dict({"ts": now_iso(), "text": " ".join(a.note.split())}, **({"kind": a.kind} if a.kind else {}),
+                              **({"thread": tag} if (tag := lean_threads.resolve_tag()) else {})))
         if a.done:
             drop = set(range(1, len(notes) + 1)) if a.done == "all" else {
                 int(x) for x in a.done.split(",") if x.strip().isdigit()}
@@ -8314,7 +8317,7 @@ def cmd_checkpoint(a):
     if not text:
         die('checkpoint needs the soft state: lean-agent checkpoint "<promises, decisions, next steps>" (or --file -)')
     notes = compact_hook.load_notes()
-    notes.append({"ts": now_iso(), "text": text, "kind": "checkpoint"})
+    notes.append({"ts": now_iso(), "text": text, "kind": "checkpoint", "thread": lean_threads.resolve_tag()})
     old = [i for i, n in enumerate(notes) if n.get("kind") == "checkpoint"][:-3]
     save_json(compact_hook.notes_path(), [n for i, n in enumerate(notes) if i not in old])
     print(f"checkpoint saved ({len(text.splitlines())} lines); `lean-agent brief` shows it first")
@@ -8332,6 +8335,9 @@ def cmd_home(a):
 
 
 # ---------------------------------------------------------------- CLI
+
+THREAD_HELP = "the thread this is recorded under (default: the current one; none = no thread)"
+
 
 def build_parser():
     # no abbreviated options (`--not` for `--note`): the strict-mode hook matches the full flag names
@@ -8421,6 +8427,7 @@ def build_parser():
     s = sub.add_parser("checkpoint", help="save your soft state (promises, decisions, next steps) for after a /clear")
     s.add_argument("text", nargs="*", help="the soft state, 15 lines or fewer")
     s.add_argument("--file", help="read it from a file (- = stdin)")
+    s.add_argument("--thread", dest="thread_tag", metavar="tN|none", help=THREAD_HELP)
     s.set_defaults(fn=cmd_checkpoint)
 
     s = sub.add_parser("brief", help="what a fresh session starts from: the latest checkpoint, then the hand-off")
@@ -8435,6 +8442,7 @@ def build_parser():
     s.add_argument("--project", "-p", help="the project the worker runs in (default: the latest run's)")
     s.add_argument("--task-file", help="what to publish, or the content ('-' = stdin)")
     s.add_argument("--as-is", action="store_true", help="the input is the content itself: publish it unchanged (haiku)")
+    s.add_argument("--thread", dest="thread_tag", metavar="tN|none", help=THREAD_HELP)
     s.set_defaults(fn=cmd_publish)
 
     s = sub.add_parser("remember", help="file something to keep (memory, project card, todo, feedback rule or hand-off "
@@ -8443,6 +8451,7 @@ def build_parser():
     s.add_argument("text", nargs="*", help="what to keep")
     s.add_argument("--task-file", help="read it from a file ('-' = stdin)")
     s.add_argument("--project", "-p", help="the project it is about (default: the latest run's)")
+    s.add_argument("--thread", dest="thread_tag", metavar="tN|none", help=THREAD_HELP)
     s.set_defaults(fn=cmd_remember)
 
     s = sub.add_parser("advise", help="before acting on a NEW user request: a cheap read-only worker reads the memories, "
@@ -8554,6 +8563,7 @@ def build_parser():
                    "context tokens over all its calls (default LEAN_AGENT_RUN_MAX_READS, 6,000,000; 0 = no limit)")
     s.add_argument("--answer-lines", type=int, metavar="N", help="the worker answers in at most N lines and puts "
                    "the rest in a details file (0 = whole answer; default LEAN_AGENT_ANSWER_LINES, 25 in the orchestrator)")
+    s.add_argument("--thread", dest="thread_tag", metavar="tN|none", help=THREAD_HELP)
     s.set_defaults(fn=cmd_run)
 
     s = sub.add_parser("chrome", help="Claude in Chrome for workers: check (once) | status")
@@ -8653,6 +8663,7 @@ def build_parser():
     s.add_argument("--max-turns", type=int, default=env_num("LEAN_AGENT_REVIEW_MAX_TURNS", 80))
     s.add_argument("--max-context", type=int, default=4000, help="token cap for the review's cards")
     s.add_argument("--todo", type=todo_arg, metavar="N", help="the work-queue item this is for")
+    s.add_argument("--thread", dest="thread_tag", metavar="tN|none", help=THREAD_HELP)
     s.set_defaults(fn=cmd_review)
 
     s = sub.add_parser("tracker", help="the project's tracker: identity (org/project/repo, who you are) and notes "
@@ -8724,6 +8735,7 @@ def build_parser():
                    "worktree has uncommitted changes (they aren't pushed)")
     s.add_argument("--override-guard", metavar="WHY", help="push: push to a guarded branch anyway (logged; only "
                    "when the user explicitly asked for exactly this)")
+    s.add_argument("--thread", dest="thread_tag", metavar="tN|none", help=THREAD_HELP)
     s.set_defaults(fn=cmd_worktree)
 
     s = sub.add_parser("logs", help="lean-agent's local logs: error (default), debug, or verbose (saved outputs)")
@@ -8768,6 +8780,7 @@ def build_parser():
     s.add_argument("--after", metavar="N,N", help="add: ready only once these items are done")
     s.add_argument("--count", action="append", metavar="COUNTER", help="epic NAME: show this counter's progress "
                    "(lean-agent count) on the epic's board card")
+    s.add_argument("--thread", dest="thread_tag", metavar="tN|none", help=THREAD_HELP)
     s.set_defaults(fn=cmd_todo)
 
     s = sub.add_parser("doc", help="write a document (from stdin) to Downloads, Documents, Desktop, temp or "
@@ -8904,6 +8917,7 @@ def build_parser():
                    "decide or answer (shown under Waiting on you); reminder (default) or fyi go to the board's Notes")
     s.add_argument("--done", metavar="N,N|all", help="close open items by number")
     s.add_argument("--hours", type=int, default=12, help="runs from the last N hours (default 12)")
+    s.add_argument("--thread", dest="thread_tag", metavar="tN|none", help=THREAD_HELP)
     s.set_defaults(fn=cmd_handoff)
 
     s = sub.add_parser("output", help="the full output of a command that brief mode shortened")
@@ -8962,6 +8976,11 @@ def main(argv=None):
         a.task += leftover  # task words given after options
     if a.cmd == "run" and not a.resume and not a.project:
         ap.error("run needs --project (or --resume)")
+    if getattr(a, "thread_tag", None):  # --thread tN|none: every record this command makes (and its workers') carries it
+        try:
+            os.environ["LEAN_AGENT_THREAD"] = "none" if a.thread_tag.lower() == "none" else lean_threads.norm(a.thread_tag)
+        except ValueError as e:
+            ap.error(str(e))
     capture = BRIEF and a.cmd in BRIEF_COMMANDS and not getattr(a, "show", None)
     if capture:
         real, sys.stdout = sys.stdout, io.StringIO()
