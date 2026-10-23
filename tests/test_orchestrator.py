@@ -4616,6 +4616,50 @@ class CliTest(unittest.TestCase):
         self.assertIn("no open known gaps", p.stdout)
         self.assertEqual(p.returncode, 0)
 
+    def test_review_decide_gaps_edge_cases(self):
+        self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        gaps = [{"what": "A thing", "file": "a.py", "line": 1, "blocks_goal": False, "scoped_out": ""},
+                {"what": "B thing", "file": "b.py", "line": 2, "blocks_goal": False, "scoped_out": ""},
+                {"what": "C thing", "file": "c.py", "line": 3, "blocks_goal": False, "scoped_out": ""}]
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[], gaps=gaps))
+        self.assertEqual(self.cli("review", "proj", check=False, FAKE_REVIEW=approve).returncode, 2)
+        head = "\nLEAN-GAPS "
+        ok = '{"status": "done", "used": [], "unneeded": [], "missing": ""}'
+        # empty and invalid LEAN-GAPS: exit 1 with the run to look at, nothing applied
+        for fb in (ok + head + '{"decisions": []}', ok + head + "not json", ok):
+            p = self.cli("review", "proj", "--decide-gaps", check=False, FAKE_FEEDBACK=fb)
+            self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+            self.assertIn("the worker gave no gap decisions", p.stdout)
+            self.assertIn("lean-agent runs --show ", p.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "reviews", "proj.declined.jsonl")))
+        # a decline without a reason, a gap the worker omitted, and a question with fewer than 2 options all need the user
+        decisions = {"decisions": [{"gap": "g1", "action": "decline", "why": "  "},
+                                   {"gap": "g3", "action": "ask", "question": "Keep C?", "options": ["only one"]}]}
+        p = self.cli("review", "proj", "--decide-gaps", check=False, FAKE_FEEDBACK=ok + head + json.dumps(decisions))
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn("0 declined, 0 fix tasks, 3 need you", p.stdout)
+        self.assertIn("needs you g1: a.py: A thing - what should happen?", p.stdout)
+        self.assertIn("needs you g2: b.py: B thing - what should happen?", p.stdout)
+        self.assertIn("needs you g3: Keep C?", p.stdout)
+        self.assertEqual(p.stdout.count("1) Out of scope: decline it"), 3)
+        self.assertEqual(p.stdout.count("2) Fix it in this change"), 3)
+        self.assertNotIn("only one", p.stdout)
+        # --head picks the review of that branch, and latest_review needs the head argument
+        p = self.cli("review", "proj", "--decide-gaps", "--head", "nowhere", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("no review of nowhere yet", p.stderr)
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        try:
+            self.assertEqual(L.latest_review("proj", self.proj, None)["verdict"], "approve")
+            self.assertIsNone(L.latest_review("proj", self.proj, "nowhere"))
+            with self.assertRaises(TypeError):
+                L.latest_review("proj", self.proj)
+        finally:
+            del os.environ["LEAN_AGENT_HOME"]
+
     def test_review_catches_self_declared_gaps(self):
         self.git_project()
         self.cli("learn", self.proj, "--name", "proj")
