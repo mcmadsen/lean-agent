@@ -633,88 +633,181 @@ class CliTest(unittest.TestCase):
         self.assertTrue(os.path.exists(newest["output"]))
         self.assertTrue(dashboard.state()["version"])
 
-    def test_dashboard_suggestions_in_needs_you(self):
+    def _page_probe(self, body):
+        """Run `body` (JavaScript) against the page's left column, thread list and suggestion code, sliced out of app.js."""
         import shutil
         node = shutil.which("node")
         if not node:
             self.skipTest("node isn't installed")
         js = open(os.path.join(os.path.dirname(CLI), "dashboard_ui", "app.js")).read()
-        helpers = js[js.index("const esc="):js.index("const verdict=")]
-        inbox = js[js.index("function groupOf"):js.index("// CENTER")]
+        helpers = js[js.index("const esc="):js.index("const store=")]
+        code = js[js.index("// <suggestions>"):js.index("function reviewLines")]
         probe = """(async()=>{
-        const el={},$=id=>el[id]||(el[id]={textContent:"",innerHTML:"",value:""});
+        const el={},$=id=>el[id]||(el[id]={textContent:"",innerHTML:"",value:"",title:""});
         const timers=[],setTimeout=(f,ms)=>(timers.push({f,ms}),timers.length),clearTimeout=()=>{};
-        const calls=[],sent=[],done=new Set();let fail=null,phone=false;
-        const window={matchMedia:()=>({matches:phone})};
-        const ui={filter:"all",q:"",open:{},sg:{},sgConfirm:null,sel:"main"};
-        const threadKey=x=>x,matches=()=>true,S={threads:[]},select=()=>{},sendChat=t=>sent.push(t);
+        const calls=[],sent=[],done=new Set();let fail=null;
+        const window={matchMedia:()=>({matches:false})};
+        const ui={sel:"main",cardId:null,open:{},sg:{},sgConfirm:null,threads:[],doneOpen:false,changed:new Set(),html:{},sheet:null};
+        const put=(id,h)=>{$(id).innerHTML=h};
+        const threadKey=x=>x,matches=()=>true,select=()=>{},sendChat=t=>sent.push(t);
+        let lastBoard={cards:[]};
+        const out={};
+        """ + helpers + code + body + """
+        console.log(JSON.stringify(out));})().catch(e=>{console.error(e);process.exit(1)})"""
+        p = subprocess.run([node, "-e", probe], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def test_dashboard_suggestions_in_optimize_thread(self):
+        out = self._page_probe("""
         const sg=(id,card,meta)=>({id,kind:"archive",card,reason:"r",meta});
         const build=()=>{const left=l=>l.filter(x=>!done.has(x.id));
           return {cards:[{id:"opt-p1",kind:"optimize",column:"Waiting on you",project:"p1",optimize:{
             suggestions:left([sg("archive:a","a","used in 0 of 6 runs"),sg("archive:b","b","used in 0 of 4 runs")]),
             drafts:left([{id:"draft-x",kind:"preset",name:"n1",title:"Preset s:n1",summary:"from 2 runs"}])}},
             {id:"n1",kind:"note",column:"Waiting on you",title:"Decide",text:"d",note:1}]}};
-        let lastBoard=build();
-        const load=async()=>{lastBoard=build();drawInbox(new Set())};
+        lastBoard=build();
+        const load=async()=>{lastBoard=build();redraw()};
         const post=async(path,body)=>{calls.push(body);if(fail)return {ok:false,error:fail};
           const ids=body.ids?body.ids.split(","):[];
           if(body.do==="optimize-unreject")ids.forEach(i=>done.delete(i));
           else if(body.do==="optimize-apply-all")[...body.apply.split(",").filter(Boolean),...ids].forEach(i=>done.add(i));
           else ids.forEach(i=>done.add(i));
           return {ok:true}};
-        """ + helpers + inbox + """
-        const out={},html=()=>$("inbox").innerHTML,head=()=>$("n-inbox").textContent;
-        drawInbox(new Set());
-        out.start=[head(),String($("m-inbox").textContent),html().includes("3 from optimize"),html().includes("Archive card a"),
-          html().includes("used in 0 of 6 runs"),html().includes("Accept draft preset n1"),html().includes("Apply all 3"),
-          html().includes("Ask the orchestrator"),$("ifilters").innerHTML.includes("Suggestions 3")];
-        out.after_decisions=html().indexOf("Decide")<html().indexOf("Archive card a");
-        let pr=sugRun("p1","archive:a","apply");  // the row leaves at once and the count drops
-        out.hidden=[html().includes("Archive card a"),head()];
+        const inbox=()=>$("inbox").innerHTML,thread=()=>optimizeHtml();
+        const n=()=>{const m=/(\\d+) optimize suggestion/.exec(inbox());return m?+m[1]:0};  // the one row in the inbox
+        drawLeft(new Set());
+        out.start=[n(),String($("n-inbox").textContent),inbox().includes("Decide"),(inbox().match(/class="row inrow/g)||[]).length,
+          inbox().includes('data-thread="optimize"'),inbox().includes("Archive card a")];
+        out.cards=[thread().includes("Archive card a"),thread().includes("used in 0 of 6 runs"),thread().includes("Accept draft preset n1"),
+          thread().includes("Apply all 3"),thread().includes("Ask the orchestrator")];
+        let pr=sugRun("p1","archive:a","apply");  // the card leaves at once and the count drops
+        out.hidden=[thread().includes("Archive card a"),n()];
         await pr;
         fail="boom";pr=sugRun("p1","archive:b","apply");await pr;  // a failure brings it back with the error
-        out.failed=[html().includes("Archive card b"),html().includes("boom"),head()];
+        out.failed=[thread().includes("Archive card b"),thread().includes("boom"),n()];
         fail=null;
         pr=sugRun("p1","archive:b","reject");  // Rejected, Undo for 10 s, then it leaves
-        out.rejected=[html().includes("Rejected ·"),html().includes("Undo"),head(),timers[timers.length-1].ms];
+        out.rejected=[thread().includes("Rejected ·"),thread().includes("Undo"),n(),timers[timers.length-1].ms];
         await pr;
         await sugRun("p1","archive:b","undo");
-        out.undone=[calls[calls.length-1].do,html().includes("Archive card b"),html().includes("Rejected ·"),head()];
+        out.undone=[calls[calls.length-1].do,thread().includes("Archive card b"),thread().includes("Rejected ·"),n()];
         await sugRun("p1","archive:b","reject");timers[timers.length-1].f();
-        out.left=[html().includes("Archive card b"),head()];
+        out.left=[thread().includes("Archive card b"),n()];
         fail="nope";await sugRun("p1","draft-x","reject");
-        out.reject_failed=[html().includes("nope"),html().includes("Rejected ·"),head()];
+        out.reject_failed=[thread().includes("nope"),thread().includes("Rejected ·"),n()];
         fail=null;
         await sugApplyAll("p1");
-        out.all=[calls[calls.length-1],head(),html().includes("Suggestions")];
-        done.clear();ui.sg={};lastBoard=build();
-        phone=true;drawInbox(new Set());
-        out.phone=[html().includes("3 suggestions"),html().includes("Apply all"),html().includes('aria-expanded="false"')];
-        ui.open["sug|p1"]=true;drawInbox(new Set());out.phone_open=html().includes("Apply all 3");
-        done.add("draft-x");lastBoard=build();drawInbox(new Set());ui.open["sug|p1"]=false;drawInbox(new Set());out.kind=html().includes("2 archive suggestions");
-        phone=false;ui.sgConfirm="p1";drawInbox(new Set());out.confirm=[html().includes('data-act="opt-all-yes"'),html().includes("Apply all 2")];
+        out.all=[calls[calls.length-1],n(),inbox().includes("optimize suggestion"),thread().includes("No optimize suggestions")];
+        done.clear();ui.sg={};done.add("draft-x");lastBoard=build();ui.sgConfirm="p1";redraw();
+        out.confirm=[thread().includes('data-act="opt-all-yes"'),thread().includes("Apply all 2")];
         sugAsk("p1");out.ask=[sent.length,sent[0].includes("AskUserQuestion"),sent[0].includes("Archive card a"),sent[0].includes("Archive card b")];
-        ui.filter="suggestions";ui.sgConfirm=null;drawInbox(new Set());out.filter=[html().includes("Archive card a"),html().includes("Decide")];
-        console.log(JSON.stringify(out));})().catch(e=>{console.error(e);process.exit(1)})"""
-        p = subprocess.run([node, "-e", probe], capture_output=True, text=True)
-        self.assertEqual(p.returncode, 0, p.stderr)
-        out = json.loads(p.stdout)
-        self.assertEqual(out["start"], ["4 to answer · 4 items", "4", True, True, True, True, True, True, True])
-        self.assertTrue(out["after_decisions"])
-        self.assertEqual(out["hidden"], [False, "3 to answer · 3 items"])
-        self.assertEqual(out["failed"], [True, True, "3 to answer · 3 items"])
-        self.assertEqual(out["rejected"], [True, True, "2 to answer · 2 items", 10000])
-        self.assertEqual(out["undone"], ["optimize-unreject", True, False, "3 to answer · 3 items"])
-        self.assertEqual(out["left"], [False, "2 to answer · 2 items"])
-        self.assertEqual(out["reject_failed"], [True, False, "2 to answer · 2 items"])
+        """)
+        self.assertEqual(out["start"], [3, "2", True, 2, True, False])  # the note and one row for all suggestions
+        self.assertEqual(out["cards"], [True] * 5)
+        self.assertEqual(out["hidden"], [False, 2])
+        self.assertEqual(out["failed"], [True, True, 2])
+        self.assertEqual(out["rejected"], [True, True, 1, 10000])
+        self.assertEqual(out["undone"], ["optimize-unreject", True, False, 2])
+        self.assertEqual(out["left"], [False, 1])
+        self.assertEqual(out["reject_failed"], [True, False, 1])
         self.assertEqual(out["all"][0], {"do": "optimize-apply-all", "project": "p1", "apply": "", "ids": "draft-x"})
-        self.assertEqual(out["all"][1:], ["1 to answer · 1 item", False])
-        self.assertEqual(out["phone"], [True, False, True])
-        self.assertTrue(out["phone_open"])
-        self.assertTrue(out["kind"])
+        self.assertEqual(out["all"][1:], [0, False, True])
         self.assertEqual(out["confirm"], [True, True])
         self.assertEqual(out["ask"], [1, True, True, True])
-        self.assertEqual(out["filter"], [True, False])
+
+    def test_dashboard_thread_list_rows(self):
+        out = self._page_probe("""
+        const mins=m=>new Date(Date.now()-m*60000).toISOString().slice(0,19);
+        ui.threads=[{id:"main",title:"Main",kind:"main",waiting:true,last_message:mins(1),messages:12},
+          {id:"#10",title:"Sample todo",kind:"task",waiting:false,last_message:mins(20),messages:1},
+          {id:"t1",title:"Free chat",kind:"free",waiting:false,last_message:null,messages:0}];
+        ui.sel="#10";
+        drawLeft(new Set());
+        const h=$("threads").innerHTML;
+        out.rows=(h.match(/class="row/g)||[]).length;
+        out.tag=[h.includes('<span class="id mono">#10</span> Sample todo'),h.includes("Free chat"),h.includes("t1</span>")];
+        out.meta=[h.includes("12 messages · 1 min ago"),h.includes("1 message · 20 min ago"),h.includes("no messages yet")];
+        out.dots=[(h.match(/dot-warn/g)||[]).length,h.indexOf("dot-warn")<h.indexOf("Sample todo"),String($("n-chat").textContent)];
+        out.sel=/class="row sel"[^>]*data-thread="#10"/.test(h);
+        out.tabs=[$("n-inbox").textContent,$("n-todos").textContent].map(String);
+        ui.threads=[];put("threads",threadListHtml());out.empty=$("threads").innerHTML.includes("No threads yet");
+        out.ask=askHtml("ask-s").includes('placeholder="Ask Claude anything"')&&askHtml("ask-s").includes("data-ask");
+        openSheet("move","m1","#10");
+        """.replace('openSheet("move","m1","#10");', 'ui.threads=[{id:"main",title:"Main"},{id:"#10",title:"A"},{id:"#11",title:"B"},{id:"t1",title:"C"}];'
+                    '$("sheet").open=false;$("sheet").showModal=()=>{};openSheet("move","m1","#10");const m=$("sheetbody").innerHTML;'
+                    'out.picker=[m.includes(\'data-to="#11"\'),m.includes(\'data-to="t1"\'),m.includes(\'data-to="#10"\'),m.includes(\'data-to="main"\')];'
+                    'openSheet("switch");out.sheet=[$("sheetbody").innerHTML.includes("Ask Claude anything"),$("sheetbody").innerHTML.includes(\'data-act="new-thread"\')];'))
+        self.assertEqual(out["rows"], 3)
+        self.assertEqual(out["tag"], [True, True, False])
+        self.assertEqual(out["meta"], [True, True, True])
+        self.assertEqual(out["dots"], [1, True, "1"])  # only the thread that waits for you has a dot
+        self.assertTrue(out["sel"])
+        self.assertEqual(out["tabs"], ["", ""])
+        self.assertTrue(out["empty"])
+        self.assertTrue(out["ask"])
+        self.assertEqual(out["picker"], [True, True, False, False])  # not the thread it is in, not main
+        self.assertEqual(out["sheet"], [True, True])
+
+    def test_dashboard_routing_line_and_move(self):
+        out = self._page_probe("""
+        out.text=[routeText({target:"#10",also:[]}),routeText({target:"#10",also:["#14"]}),routeText({target:"t3",title:"Plan the move",also:[]}),
+          routeText({target:"#10",also:["#14","#15"]}),routeText(null)];
+        const h=routeHtml({mid:"m-1",thread:"#10",routing:{target:"#10",also:[]}});
+        out.html=[h.includes("Routed to #10 by Claude"),h.includes('data-act="move"'),h.includes('data-mid="m-1"'),h.includes('data-from="#10"'),h.includes(">Move<")];
+        out.none=[routeHtml({mid:"m-2"}),routeHtml({mid:"m-3",routing:null})];
+        out.nomid=routeHtml({routing:{target:"#10",also:[]}}).includes("data-act");
+        out.escaped=routeHtml({mid:"m",routing:{target:"t1",title:"<b>x</b>",also:[]}}).includes("&lt;b&gt;");
+        """)
+        self.assertEqual(out["text"], ["Routed to #10 by Claude", "Routed to #10. Also close: #14", "Started a new thread: Plan the move",
+                                       "Routed to #10. Also close: #14, #15", ""])
+        self.assertEqual(out["html"], [True] * 5)
+        self.assertEqual(out["none"], ["", ""])
+        self.assertFalse(out["nomid"])
+        self.assertTrue(out["escaped"])
+
+    def test_dashboard_flat_inbox_and_todos(self):
+        out = self._page_probe("""
+        const mins=m=>new Date(Date.now()-m*60000).toISOString().slice(0,19);
+        const item=(id,title,column,o)=>Object.assign({id,kind:"item",title,text:title,column,prio:"normal",live:[],runs:[],notes:0,project:"p",last_run:null,review:null},o||{});
+        lastBoard={cards:[
+          item(12,"Fix the export","Waiting on you",{last_run:{id:"r1",status:"needs-input",ts:mins(30)},cause:"auth",cause_label:"authorization failed"}),
+          {id:"q-r2",kind:"run",title:"Authorization failed",column:"Waiting on you",project:"p",last_run:{id:"r2",status:"needs-input",ts:mins(5)},cause:"auth",cause_label:"authorization failed",todo:null},
+          {id:"q-r3",kind:"run",title:"Which layout?",column:"Waiting on you",project:"p",last_run:{id:"r3",status:"needs-input",ts:mins(120)},todo:7},
+          {id:"n1",kind:"note",title:"Decide the name",column:"Waiting on you",note:1,done_at:mins(3*60)},
+          {id:"v-p-b",kind:"review",title:"branch b",column:"In review",project:"p",ref:"b"},
+          {id:"opt-p",kind:"optimize",column:"Waiting on you",project:"p",optimize:{suggestions:[{id:"archive:a",kind:"archive",card:"a",reason:"r",meta:"m"}],drafts:[]}},
+          item(7,"Open sample","Open",{prio:"high"}),item(8,"Doing sample","In progress",{live:[{run:"r9"}]}),item(9,"Review sample","In review",{review:{verdict:"approve"}}),
+          item(3,"Finished sample","Done",{result:"merged"})]};
+        drawLeft(new Set());
+        const h=$("inbox").innerHTML;
+        out.flat=[h.includes('class="grp"'),h.includes("<h2"),h.includes("pill"),(h.match(/class="row [^"]*inrow/g)||[]).length];
+        out.groupRow=[h.includes("2 runs blocked: authorization failed"),(h.match(/runs blocked/g)||[]).length,h.includes("Fix the export")];  // one row for the cause
+        out.run=h.includes('data-card="q-r3" data-thread="#7"');
+        out.note=h.includes('data-card="n1" data-thread="main"');
+        out.optimize=/<button[^>]*data-thread="optimize"[^>]*><span class="t"><span class="dot dot-warn" aria-hidden="true"><\\/span>1 optimize suggestion<\\/span><span class="m"><span>Optimize<\\/span>/.test(h);
+        out.title_then_thread_age=/Which layout\\?<\\/span><span class="m"><span>#7<\\/span><span>2 h<\\/span>/.test(h);
+        out.dot=/class="dot dot-run"[^>]*><\\/span>Decide the name/.test(h);
+        out.review=h.includes("branch b");
+        ui.open["auth"]=true;drawLeft();out.kids=[$("inbox").innerHTML.includes('role="group" aria-label="Runs blocked'),$("inbox").innerHTML.includes('data-card="12" data-thread="#12"')];
+        out.counts=[$("n-inbox").textContent,$("m-inbox").textContent,$("n-todos").textContent].map(String);
+        const t=$("todos").innerHTML;
+        out.todos=[(t.match(/class="row todorow"/g)||[]).length,t.includes("#7</span> Open sample"),t.includes("chip tone-run\\">doing"),t.includes("running"),t.includes("approved"),t.includes("high · p"),
+          t.includes("Finished sample"),t.includes("Done in the last 7 days"),t.includes('aria-expanded="false"'),t.includes("branch b"),t.indexOf("Doing sample")<t.indexOf("Open sample")];
+        ui.doneOpen=true;drawLeft();out.done=[$("todos").innerHTML.includes("Finished sample"),$("todos").innerHTML.includes("merged")];
+        """)
+        self.assertEqual(out["flat"], [False, False, False, 4])  # the cause group, the question, the note and the optimize row
+        self.assertEqual(out["groupRow"], [True, 1, False])
+        self.assertTrue(out["run"])
+        self.assertTrue(out["note"])
+        self.assertTrue(out["optimize"])
+        self.assertTrue(out["title_then_thread_age"])
+        self.assertTrue(out["dot"])
+        self.assertFalse(out["review"])
+        self.assertEqual(out["kids"], [True, True])
+        self.assertEqual(out["counts"], ["4", "4", "4"])
+        self.assertEqual(out["todos"], [4, True, False, True, True, True, False, True, True, False, True])
+        self.assertEqual(out["done"], [True, True])
 
     def test_sync_notice_hidden_when_version_is_current(self):
         import shutil
@@ -2078,7 +2171,8 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(card3["sig"], next(c for c in b["cards"] if c["id"] == 3)["sig"])  # it shows as changed
         self.assertEqual({c["id"]: c["sig"] for c in b["cards"] if c["id"] != 3},
                          {c["id"]: c["sig"] for c in b2["cards"] if c["id"] != 3 and c["kind"] != "lookup"})
-        self.assertIn('id="c-board"', dashboard.PAGE)
+        self.assertNotIn('id="c-board"', dashboard.PAGE)  # the board is gone: todos are a list in the left column
+        self.assertIn('id="todos"', dashboard.PAGE)
         self.assertNotIn("draggable", dashboard.PAGE)  # view only for now
 
     def test_board_follows_reviews_merges_and_results(self):
@@ -3498,6 +3592,9 @@ class CliTest(unittest.TestCase):
         self.assertEqual(reply(post("/api/chat", {"thread": "t9", "text": "x"}))[0], 400)  # no such thread
         listed = {t["id"]: t for t in reply(dashboard.api_get("/api/threads", {}))[1]["threads"]}
         self.assertEqual((listed["t1"]["messages"] >= 2, listed["#10"]["title"], listed["t1"]["kind"]), (True, "Fix x", "free"))
+        made = reply(post("/api/thread/new", {"title": "Plan the move"}))  # the page's + button
+        self.assertEqual((made[0], made[1]["ok"], lean_threads.load()["threads"][made[1]["id"]]["title"]), (200, True, "Plan the move"))
+        self.assertEqual(reply(post("/api/thread/new", {"title": "  "}))[0], 400)
         # merge, move, unmerge: sent as the fixed messages and recorded in the registry
         self.assertEqual(reply(post("/api/thread/merge", {"from": "t2", "into": "t1"}))[0], 200)
         self.assertEqual(lean_threads.load()["aliases"], {t2: t1})

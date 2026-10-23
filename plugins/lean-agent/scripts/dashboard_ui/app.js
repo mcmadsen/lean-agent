@@ -149,14 +149,15 @@ function drawInbox(changed){  // the number of rows
   const sgs=sugGroups(cards.filter(c=>c.kind==="optimize"&&c.column==="Waiting on you"&&(!pf||c.project===pf)),ui.sg,sugMatch);
   const nSug=sgs.reduce((a,g)=>a+g.open.length,0);
   // runs blocked by the same cause (the same authorization error, say) are one row
-  const byCause=new Map();for(const c of wait)if(c.kind==="run"&&c.cause){if(!byCause.has(c.cause))byCause.set(c.cause,[]);byCause.get(c.cause).push(c)}
+  const blocked=c=>c.cause&&(c.kind==="run"||(c.kind==="item"&&c.last_run&&/needs|await/.test(c.last_run.status)));
+  const byCause=new Map();for(const c of wait)if(blocked(c)){if(!byCause.has(c.cause))byCause.set(c.cause,[]);byCause.get(c.cause).push(c)}
   const seen=new Set();let h="",n=0;
   const grow=(cause,group)=>{const open=!!ui.open[cause],item=sameItem(group),newest=group.reduce((a,c)=>((c.last_run||{}).ts||"")>a?(c.last_run||{}).ts:a,""),label=group[0].cause_label||cause;
     return `<button type="button" class="row grow inrow" aria-expanded="${open}" data-act="cause" data-cause="${esc(cause)}"><span class="t"><span class="dot dot-warn" aria-hidden="true"></span>${group.length} runs blocked: ${esc(label)}</span>`
       +`<span class="m"><span>${esc(item!=null?"#"+item:"Main")}</span><span>${esc(ago(newest))}</span></span>`
       +`<svg class="chev${open?" open":""}" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button>`
       +(open?`<div class="kids" role="group" aria-label="Runs blocked: ${esc(label)}">${group.map(c=>inboxRow(c,cardThread(c),cardAge(c),changed.has(String(c.id)),"kid")).join("")}</div>`:"")};
-  for(const c of wait){const g=c.kind==="run"&&c.cause&&byCause.get(c.cause);
+  for(const c of wait){const g=blocked(c)&&byCause.get(c.cause);
     if(g&&g.length>1){if(seen.has(c.cause))continue;seen.add(c.cause);h+=grow(c.cause,g)}
     else h+=inboxRow(c,cardThread(c),cardAge(c),changed.has(String(c.id)));
     n++}
