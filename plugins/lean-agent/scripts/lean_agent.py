@@ -35,6 +35,7 @@ import lean_log  # noqa: E402
 import lean_memory  # noqa: E402
 import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
+import lean_threads  # noqa: E402
 import service_session  # noqa: E402
 from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive as dashboard_pid_alive, plugin_version  # noqa: E402
 
@@ -7175,6 +7176,10 @@ def cmd_doc(a):
     return 0
 
 
+def cmd_thread(a):
+    return lean_threads.cli(a.action, a.args, a.json)
+
+
 def cmd_schedule(a):
     if a.when in ("-h", "--help") or any(x in ("-h", "--help") for x in a.args or []):
         build_parser()._subparsers._group_actions[0].choices["schedule"].print_help()
@@ -8074,6 +8079,12 @@ def build_parser():
                    "rm/run/pause/resume: the job number")
     s.add_argument("args", nargs=argparse.REMAINDER, help="add: the lean-agent command, e.g. do <project> <recipe>")
     s.set_defaults(fn=cmd_schedule)
+
+    s = sub.add_parser("thread", help="dashboard threads: new \"title\" | list | merge tB tA | unmerge tB | move MESSAGE THREAD")
+    s.add_argument("action", choices=["new", "list", "merge", "unmerge", "move"])
+    s.add_argument("args", nargs="*")
+    s.add_argument("--json", action="store_true", help="list: as JSON")
+    s.set_defaults(fn=cmd_thread)
 
     s = sub.add_parser("week", help="the last 7 days: pace, runs, reviews, pushes, todos, scheduled jobs")
     s.add_argument("--days", type=int, default=7)
