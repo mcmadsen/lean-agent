@@ -98,8 +98,8 @@ def unlinked_worker(command):
         if os.path.basename(words[0]) != "lean-agent" or len(words) < 2 or words[1] not in ("run", "review", "do"):
             continue
         rest = words[2:]
-        if words[1] == "review" and (rest[:1] == ["decline"] or "--status" in rest):
-            continue
+        if words[1] == "review" and (rest[:1] == ["decline"] or {"--status", "--decide-gaps"} & set(rest)):
+            continue  # decisions about a review, not work for the board
         if {"-h", "--help"} & set(rest):
             continue
         if "--resume" in rest or any(w == "--todo" or w.startswith("--todo=") for w in rest):

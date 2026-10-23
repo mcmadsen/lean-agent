@@ -1526,6 +1526,9 @@ def cmd_run(a):
     elif role == "review-learn":
         summary, learned = parse_marker(summary, "LEAN-CHECKLIST")
         save_json(os.path.join(workdir, "checklist.json"), learned or {})
+    elif role == "gap-decider":
+        summary, decided = parse_marker(summary, "LEAN-GAPS")
+        save_json(os.path.join(workdir, "gaps.json"), decided or {})
     elif role == "tracker-discover":
         summary, found = parse_marker(summary, "LEAN-TRACKER")
         save_json(os.path.join(workdir, "tracker.json"), found or {})
@@ -2739,12 +2742,17 @@ def add_to_review_cards(slug, checklist=(), helpers=(), replace=()):
     return added
 
 
+def latest_review(slug, path, head=None):
+    """The latest review recorded for the project, or for the branch `head` when given."""
+    br = branch_of(path, head) if head else ""
+    return next((r for r in reversed(list(read_jsonl(reviews_path(slug)))) if not head or r.get("ref") == head
+                 or (br and (r.get("branch") or branch_of(path, r.get("ref"))) == br)), None)
+
+
 def cmd_review_decline(a):
     """Record that findings of the latest review were discussed and declined, so later reviews leave them out."""
     slug, path = resolve_project(a.project)
-    br = branch_of(path, a.head) if a.head else ""
-    last = next((r for r in reversed(list(read_jsonl(reviews_path(slug)))) if not a.head or r.get("ref") == a.head
-                 or (br and (r.get("branch") or branch_of(path, r.get("ref"))) == br)), None)
+    last = latest_review(slug, path, a.head)
     if not last:
         die(f"no review of {a.head or slug} yet")
     if not a.numbers and not a.all_gaps:
@@ -3205,7 +3213,84 @@ def workers_on(slug, path, head):
     return out
 
 
+GAP_RULE = """You decide what happens to the known gaps of a review of project {project}. A known gap is something the
+change doesn't deliver, or says it doesn't yet. Read the project's cards (already in your context) and the code
+around each gap, and the tracker if the cards name one, then decide each gap:
+- "decline": it is out of scope, planned elsewhere, already covered, or doesn't matter for the goal. Give the reason
+  as the user would want it recorded ("out of scope: hosting is a separate task").
+- "fix": it should be done in this change. Give a one-line task for a worker that could start it as written.
+- "ask": only a product or preference choice you can't settle from the cards, the code or the tracker. Give the
+  question and 2-4 short options.
+Prefer deciding over asking. Don't change any file.
+
+The open known gaps:
+{gaps}
+
+Before the LEAN-FEEDBACK line, add one line exactly like this (valid JSON, one line, one entry per gap above):
+LEAN-GAPS {{"decisions": [{{"gap": "g1", "action": "decline|fix|ask", "why": "reason", "task": "fix task (fix only)", "question": "one question (ask only)", "options": ["a", "b"]}}]}}
+"""
+
+
+def decide_gaps(a):
+    """A sonnet worker decides each open known gap of the branch's latest review: decline (recorded here), fix
+    (a task to start) or ask (a question for the user). Exit 2 when something needs the user."""
+    slug, path = resolve_project(a.project)
+    last = latest_review(slug, path, a.head)
+    if not last:
+        die(f"no review of {a.head or slug} yet")
+    declined = declined_for(slug, last.get("ref"), path, last.get("head"))
+    open_gaps = [(f"g{i}", g) for i, g in enumerate(last.get("gaps") or [], 1) if not gap_declined(g, declined)]
+    if not open_gaps:
+        print(f"review {last['run']} has no open known gaps")
+        return 0
+    listing = "\n".join(f"- {gid} {g.get('file', '?')}{':' + str(g['line']) if g.get('line') else ''}: "
+                        f"{str(g.get('what', ''))[:300]}" for gid, g in open_gaps)
+    ns = argparse.Namespace(resume=None, task=[f"Decide the open known gaps of review {last['run']} "
+                                               f"({last.get('branch') or last.get('ref') or slug})."],
+                            task_file=None, model="sonnet", todo=getattr(a, "todo", None),
+                            why="decide the known gaps from the project's cards and code", cards="auto",
+                            card_list=None, project=slug, read_only=True, chrome=None, mcp=None, tools=None,
+                            allow_send=None, max_turns=30, max_usd=1.5, max_context=a.max_context, max_cards=6,
+                            ttype="read", role="gap-decider", effort="medium",
+                            role_rule=GAP_RULE.format(project=path, gaps=listing))
+    rc = cmd_run(ns)
+    run = next((r for r in reversed(ledger()) if r.get("role") == "gap-decider" and r["project"] == slug), None)
+    got = load_json(os.path.join(run["workdir"], "gaps.json"), {}) if run else {}
+    by_id = {d.get("gap"): d for d in got.get("decisions") or [] if isinstance(d, dict)}
+    if not by_id:
+        print(f"the worker gave no gap decisions{' (exit %d)' % rc if rc else ''}; see: lean-agent runs --show "
+              f"{run['id'] if run else '?'}")
+        return rc or 1
+    done, fixes, asks = [], [], []
+    for gid, g in open_gaps:
+        d = by_id.get(gid) or {}
+        action, why = d.get("action"), str(d.get("why") or "").strip()
+        if action == "decline" and why:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_review_decline(argparse.Namespace(project=slug, numbers=[gid], all_gaps=False, why=why,
+                                                      head=a.head, all_branches=False))
+            done.append((gid, why))
+        elif action == "fix" and str(d.get("task") or "").strip():
+            fixes.append((gid, str(d["task"]).strip()))
+        else:
+            opts = [str(o) for o in d.get("options") or [] if str(o).strip()][:4]
+            opts = opts if len(opts) >= 2 else ["Out of scope: decline it", "Fix it in this change"]
+            q = str(d.get("question") or f"{g.get('file', '?')}: {str(g.get('what', ''))[:140]} - what should happen?")
+            asks.append((gid, q, opts))
+    print(f"{len(done)} declined" + (f" ({'; '.join(f'{gid}: {why[:60]}' for gid, why in done)})" if done else "")
+          + f", {len(fixes)} fix tasks, {len(asks)} need you")
+    for gid, task in fixes:
+        print(f"  fix {gid}: {task}")
+    for gid, q, opts in asks:
+        print(f"  needs you {gid}: {q}")
+        for i, o in enumerate(opts, 1):
+            print(f"    {i}) {o}")
+    return 2 if asks else 0
+
+
 def cmd_review(a):
+    if a.decide_gaps:
+        return decide_gaps(a)
     rc = review_main(a)
     if getattr(a, "for_push", False) and not a.status:
         print("Before the push: fix everything this review found in ONE worker (or one worktree session), then run "
@@ -7908,6 +7993,9 @@ def build_parser():
                    "branch, and says how to batch fixes before the next review")
     s.add_argument("--yes", action="store_true", help="--for-push: review even though workers still run")
     s.add_argument("--status", action="store_true", help="exit 0 only if the current code has an approve")
+    s.add_argument("--decide-gaps", action="store_true", help="a sonnet worker decides the open known gaps of the "
+                   "branch's latest review from the project's cards and code: declines are recorded, fixes come back as "
+                   "tasks, product choices as questions; exit 2 when something needs the user")
     s.add_argument("--runs", type=int, default=1, metavar="N", help="N independent passes merged into one review "
                    "(variance is real: 2 cheap passes often beat 1 expensive one)")
     s.add_argument("--independent", action="store_true", help="for comparison runs: no earlier findings, decisions, "

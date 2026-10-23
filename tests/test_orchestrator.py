@@ -4557,6 +4557,57 @@ class CliTest(unittest.TestCase):
         p = self.cli("run", "-p", "proj", "--escalate", "haiku,sonnet", "--why", "x", "look up totals")
         self.assertIn("escalate: haiku -> sonnet (the next model only if a run fails)", p.stdout)
 
+    def test_review_decide_gaps_by_a_worker(self):
+        self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        gaps = [{"what": "Other browser: not done yet", "file": "docs/DISTRIBUTION.md", "line": 5, "blocks_goal": False,
+                 "scoped_out": "ask the user"},
+                {"what": "Policy URL is a placeholder", "file": "docs/DISTRIBUTION.md", "line": 7, "blocks_goal": False,
+                 "scoped_out": ""},
+                {"what": "Retry the upload once", "file": "api/totals.py", "line": 3, "blocks_goal": False, "scoped_out": ""},
+                {"what": "Which store listing name to use", "file": "docs/DISTRIBUTION.md", "line": 9,
+                 "blocks_goal": False, "scoped_out": "ask the user"}]
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[], gaps=gaps))
+        self.assertEqual(self.cli("review", "proj", check=False, FAKE_REVIEW=approve).returncode, 2)
+        decisions = {"decisions": [
+            {"gap": "g1", "action": "decline", "why": "out of scope: the other browser is a separate task"},
+            {"gap": "g2", "action": "decline", "why": "the hosting card says the URL is set at release"},
+            {"gap": "g3", "action": "fix", "task": "Retry the upload once in api/totals.py"},
+            {"gap": "g4", "action": "ask", "question": "Which name should the store listing use?",
+             "options": ["Shop", "Shop Assistant", "Shop for Chrome"]}]}
+        fb = '{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-GAPS ' + json.dumps(decisions)
+        p = self.cli("review", "proj", "--decide-gaps", check=False, FAKE_FEEDBACK=fb)
+        call = self.calls()[-1]
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn("sonnet", call["argv"][call["argv"].index("--model") + 1])
+        self.assertIn("g1 docs/DISTRIBUTION.md:5: Other browser: not done yet", call["append"])
+        self.assertIn("g4 docs/DISTRIBUTION.md:9: Which store listing name", call["append"])
+        self.assertIn("2 declined", p.stdout)
+        self.assertIn("1 fix tasks, 1 need you", p.stdout)
+        self.assertIn("fix g3: Retry the upload once in api/totals.py", p.stdout)
+        self.assertIn("needs you g4: Which name should the store listing use?", p.stdout)
+        self.assertIn("3) Shop for Chrome", p.stdout)
+        self.assertNotIn("g1:", p.stdout.split("needs you")[1])
+        st = self.cli("review", "proj", "--status", check=False).stdout
+        self.assertIn("2 known gap(s) not acknowledged", st)  # g1 and g2 were recorded as declined
+        self.assertNotIn("Other browser", st)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "reviews", "proj.declined.jsonl")) as fh:
+            why = [json.loads(l)["why"] for l in fh]
+        self.assertEqual(why, ["out of scope: the other browser is a separate task",
+                               "the hosting card says the URL is set at release"])
+        # nothing left to ask: exit 0
+        rest = {"decisions": [{"gap": "g3", "action": "decline", "why": "not worth it"},
+                              {"gap": "g4", "action": "decline", "why": "the user picked Shop"}]}
+        fb = '{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-GAPS ' + json.dumps(rest)
+        p = self.cli("review", "proj", "--decide-gaps", check=False, FAKE_FEEDBACK=fb)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("2 declined", p.stdout)
+        self.assertIn("0 fix tasks, 0 need you", p.stdout)
+        self.assertEqual(self.cli("review", "proj", "--status").returncode, 0)
+        p = self.cli("review", "proj", "--decide-gaps", check=False)
+        self.assertIn("no open known gaps", p.stdout)
+        self.assertEqual(p.returncode, 0)
+
     def test_review_catches_self_declared_gaps(self):
         self.git_project()
         self.cli("learn", self.proj, "--name", "proj")
