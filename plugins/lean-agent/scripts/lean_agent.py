@@ -7614,7 +7614,11 @@ def cmd_doc(a):
 
 
 def cmd_thread(a):
-    return lean_threads.cli(a.action, a.args, a.json)
+    return lean_threads.cli(a.action, a.args + (["--all"] if a.all else []), a.json)
+
+
+def cmd_now(a):
+    print(lean_threads.now_text())
 
 
 def cmd_schedule(a):
@@ -8875,11 +8879,15 @@ def build_parser():
     s.add_argument("args", nargs=argparse.REMAINDER, help="add: the lean-agent command, e.g. do <project> <recipe>")
     s.set_defaults(fn=cmd_schedule)
 
-    s = sub.add_parser("thread", help="threads: new \"title\" | list | merge tB tA | unmerge tB | move MESSAGE THREAD")
-    s.add_argument("action", choices=["new", "list", "merge", "unmerge", "move"])
+    s = sub.add_parser("thread", help="threads: new \"title\" | list | show tN [--all] | close tN | reopen tN | merge tB tA | unmerge tB | move MESSAGE THREAD")
+    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move"])
     s.add_argument("args", nargs="*")
     s.add_argument("--json", action="store_true", help="list: as JSON")
+    s.add_argument("--all", action="store_true", help="show: every entry (default: the latest 40)")
     s.set_defaults(fn=cmd_thread)
+
+    s = sub.add_parser("now", help="what we are working on: the open threads by last activity, with state and last action")
+    s.set_defaults(fn=cmd_now)
 
     s = sub.add_parser("week", help="the last 7 days: pace, runs, reviews, pushes, todos, scheduled jobs")
     s.add_argument("--days", type=int, default=7)
