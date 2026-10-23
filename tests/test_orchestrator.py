@@ -255,6 +255,12 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("look up the fixture", err)
         self.assertIn("No saved command outputs", self.cli("logs", "verbose").stdout)
 
+    def test_runs_last_and_show_last_on_an_empty_ledger(self):
+        for flags in (("--last",), ("--show", "last"), ("--show",)):
+            r = self.cli("runs", *flags, check=False)
+            self.assertNotEqual(r.returncode, 0, flags)
+            self.assertIn("no runs yet", r.stdout + r.stderr, flags)
+
     def test_runs_show_prints_summary_again(self):
         self.cli("learn", self.proj)
         out = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "t").stdout
