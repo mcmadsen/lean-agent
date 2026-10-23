@@ -125,7 +125,8 @@ Other ways to run the orchestrator:
 | `lean-agent do <project> <recipe> [key=value ...] [--apply [--allow-send "<approved>"]]` | Run a recipe in one command. `--apply` runs its apply step with the last check's answer as its plan (`--from <run-id>`, or `--fresh` to re-derive); outward changes stop with the list until the user approves them. A recipe saved with `--fields id,title,state` tells workers to fetch only those; with `--complete` every item must be listed (OK / change / unclear) or the run fails. |
 | `lean-agent text-len <file> [-p project]` | Characters, words, lines, checked against limits named in the project's tracker notes (e.g. a description limit). |
 | `lean-agent card shorten <project> <id> [--save]` | A shorter text for a card (one Haiku call); lists headings, `code`, paths, names and numbers that would be lost, and saves only if none are. |
-| `lean-agent runs --running` | Runs in progress. Every run prints `run <id> started` first, so a background launch is visible. |
+| `lean-agent runs --running` | Runs in progress. Every run prints `run <id> started` first, so a background launch is visible. A run's work happens in a detached process, so killing the command (or a `/clear`) doesn't stop it; Ctrl-C does. |
+| `lean-agent runs --wait <id\|all\|last> [--timeout S]` | Blocks until those runs are recorded, then prints each result as `run` printed it. Exit 1 if one failed, 124 on timeout. After a clear: `lean-agent runs --wait all`. |
 | `lean-agent run --resume <run-id> "<follow-up>"` | Continue a worker's session (cheap: its context is cached). |
 | `lean-agent card show\|add\|rm\|core\|unarchive\|protect <project> <id>` | Inspect or edit cards; `add` creates *note* cards from what workers had to discover. `protect` (`--off` to undo) keeps `optimize` from archiving, demoting or trimming a card; `unarchive` brings one back (`core` on an archived card unarchives it too). `optimize --apply --skip a,b` leaves those cards out. |
 | `lean-agent optimize <project> [--apply [ids]] [--accept ids] [--reject ids] [--unreject ids]` | Promote/demote core cards, archive dead ones, flag big cards to trim, list recent context gaps, and draft new recipe cards and MCP presets from what workers actually did. |
@@ -260,10 +261,12 @@ Every orchestrator turn re-reads the whole conversation, so it's kept short:
   so a topic can end with a fresh session instead of a long one.
 - **Clears itself:** `lean-agent run` prints a short result (about 1,200 characters of the answer, questions kept,
   a pointer to `runs --show <id>`; `--verbose` adds the token lines, `--full` everything). When `up` sees the
-  orchestrator's context above 40,000 tokens after a finished turn (`lean-agent config clear-at N`, 0 = off), it has
+  orchestrator's context above `clear-at` after a finished turn (default `auto`: 8,000 tokens below where Claude Code
+  compacts, ~59,000 of the default ~67,000; `lean-agent config clear-at auto|N`, 0 = off; `doctor` shows both), it has
   the orchestrator save its soft state with `lean-agent checkpoint`, then clears the session; the new session starts
   with `lean-agent brief` (the checkpoint first). Never while a permission prompt waits, within 30 s of typing, or
-  twice in 10 minutes; each clear is logged in `logs/debug.log` (component `auto-clear`).
+  twice in 10 minutes, and not while a worker runs unless the context is within 3,000 tokens of compaction (`doctor` and
+  `service status` say why it waits); runs are detached and survive a clear; each clear is logged in `logs/debug.log` (component `auto-clear`).
 - **Restart with a clean context:** `lean-agent service restart --clear` and `lean-agent up --clear` have a live
   session checkpoint first (the same prompt as the auto clear, up to 120 s for 'checkpointed'), then the next session
   is a new one (a new session id in `up.json`) that starts from the brief, like after a clear. The dashboard keeps

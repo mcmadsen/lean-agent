@@ -175,6 +175,7 @@ lean-agent optimize {{P}} --apply --skip checkout-notes
 - Standing rule, checkpoint: on "Checkpoint now", run `lean-agent checkpoint` with your soft state (promises to the
   user, decisions made in chat, next steps, open threads with their tags) in 15 lines or fewer, then reply
   `checkpointed`. After a clear, continue from the brief you start with and keep the same thread tags.
+  Runs survive a clear: collect them with `lean-agent runs --wait all`.
 - Big JS/TS front-end refactor or migration: look first with `lean-agent map <project>` (`--who-uses`, `--deps`,
   `--route all`, `--unused`), not a worker. Safety net on the code as it is: `lean-agent check <project> add types
   "npx tsc --noEmit"` (and lint, tests), `lean-agent check <project> baseline`, a counter per legacy pattern (worker:
