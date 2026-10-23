@@ -3243,6 +3243,20 @@ class CliTest(unittest.TestCase):
         self.assertIn("Short answer.", short)
         self.assertNotIn("full report:", short)
 
+    def test_brief_after_a_clear_lists_the_open_threads(self):
+        self.assertNotIn("Open threads", self.cli("brief").stdout)
+        lt = self.threads_home()
+        for i in range(8):
+            lt.route(f"Topic{i} alpha{i} beta{i} gamma{i}", "s1")
+        lt.route("Parked item about unrelated zebra", "s1")
+        self.cli("thread", "close", "t9")
+        out = self.cli("brief").stdout
+        self.assertIn("Open threads (8), latest first:", out)
+        self.assertIn("t8 ", out)
+        self.assertNotIn("zebra", out)
+        self.assertLessEqual(len(out.split("Full list")[0].splitlines()), 6)
+        self.assertIn("lean-agent thread show tN", out)
+
     def test_checkpoint_and_brief(self):
         self.assertEqual(self.cli("brief").stdout.count("Checkpoint of"), 0)
         self.cli("checkpoint", "promised the user a status at noon [thread:billing]")
