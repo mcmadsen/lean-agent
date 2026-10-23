@@ -260,7 +260,7 @@ Every orchestrator turn re-reads the whole conversation, so it's kept short:
   orchestrator's context above 40,000 tokens after a finished turn (`lean-agent config clear-at N`, 0 = off), it has
   the orchestrator save its soft state with `lean-agent checkpoint`, then clears the session; the new session starts
   with `lean-agent brief` (the checkpoint first). Never while a permission prompt waits, within 30 s of typing, or
-  twice in 10 minutes; each clear is logged in `logs/session.log`.
+  twice in 10 minutes; each clear is logged in `logs/debug.log` (component `auto-clear`).
 - **Short answers in:** workers answer in at most 25 lines and put the rest in a details file; lean-agent's
   report commands print one line per item (brief mode); reviews print the verdict and one line per finding.
 - **No MCP servers of its own:** `lean-agent up` switches your user-scope and plugin MCP servers off for the
