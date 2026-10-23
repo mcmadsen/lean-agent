@@ -74,7 +74,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `publish` | b | allowed: a worker makes a Claude Docs doc (or a local file without the connector) |
 | `config strict on`, `config artifacts …`, `attribution`, `limits`, `budget`, `context` | b | allowed: switches and limits |
 | `config strict off` | c | **denied**: the orchestrator doesn't lift its own guardrail |
-| `runs`, `logs`, `output`, `stats`, `savings`, `week`, `guide`, `doctor`, `dashboard` | a | allowed |
+| `runs` (also `runs --wait <id\|all\|last>`, which blocks until those runs are recorded and prints their results), `logs`, `output`, `stats`, `savings`, `week`, `guide`, `doctor`, `dashboard` | a | allowed |
 | `up`, `install`, `trust`, `home`, `env`, `sync`, `service` | b | allowed: lean-agent's own setup and updates |
 
 A lean-agent command with the same name as a denied one but another first word, a quoted text that merely contains the

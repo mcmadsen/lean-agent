@@ -142,6 +142,14 @@ def _load_json(p):
         return json.load(fh)
 
 
+def service_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 class CliTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -5131,7 +5139,13 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.cli("checkpoint", check=False).returncode, 1)
 
     def test_config_clear_at(self):
-        self.assertIn("40,000", self.cli("config", "clear-at").stdout)
+        out = self.cli("config", "clear-at").stdout
+        self.assertIn("auto = 59,000 tokens", out)
+        self.assertIn("compacts at ~67,000", out)
+        self.assertIn("auto = 52,000", self.cli("config", "clear-at", CLAUDE_CODE_AUTO_COMPACT_WINDOW="100000",
+                                                 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="60").stdout)
+        self.assertIn("auto = 59,000", self.cli("config", "clear-at", "auto").stdout)
+        self.assertIn("auto = 59,000", self.cli("doctor", check=False).stdout)
         self.assertIn("55,000", self.cli("config", "clear-at", "55000").stdout)
         self.assertIn("55,000", self.cli("config", "clear-at").stdout)
         self.assertIn("off", self.cli("config", "clear-at", "0").stdout)
@@ -5428,6 +5442,151 @@ class CliTest(unittest.TestCase):
         ac.tick()
         self.assertEqual(len(host.pasted), 2)
         self.assertIn("Checkpoint now", host.pasted[1])
+
+    def running_markers(self):
+        out = []
+        for f in glob.glob(os.path.join(self.env["LEAN_AGENT_HOME"], "running", "*.json")):
+            try:
+                out.append(json.load(open(f)))
+            except ValueError:
+                pass
+        return out
+
+    def start_run(self, turns="4", sleep="0.7", **env):
+        """A foreground `run` in its own process group (so a test can kill that group), once its marker exists."""
+        self.cli("learn", self.proj, "--name", "proj")
+        p = subprocess.Popen([sys.executable, CLI, "run", "-p", "proj", "-m", "haiku", "--why", "x", "look around"],
+                             env=dict(self.env, FAKE_TURNS=turns, FAKE_TURN_SLEEP=sleep, **env),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             start_new_session=True)
+        self.addCleanup(lambda: p.poll() is None and p.kill())
+        self.wait_for(lambda: self.running_markers(), "the run's marker")
+        self.addCleanup(lambda: [os.kill(m["pid"], signal.SIGKILL) for m in self.running_markers()
+                                 if m.get("pid") and service_alive(m["pid"])])
+        return p
+
+    def test_a_run_survives_its_foreground_being_killed_and_is_recorded(self):
+        p = self.start_run()
+        [m] = self.running_markers()
+        self.assertTrue(m["detached"])
+        self.assertNotEqual(m["pid"], p.pid)
+        os.killpg(p.pid, signal.SIGTERM)
+        p.wait(timeout=20)
+        self.assertTrue(service_alive(m["pid"]))
+        self.wait_for(lambda: not self.running_markers(), "the run to finish", 60)
+        last = self.ledger()[-1]
+        self.assertEqual((last["id"], last["status"]), (m["run"], "done"))
+
+    def test_run_prints_what_it_printed_before_with_a_detached_worker(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "look around")
+        self.assertRegex(p.stdout, r"run \S+ · haiku · done")
+        self.assertIn(f"run {self.ledger()[-1]['id']} started", p.stderr)
+        self.assertEqual(self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "again", check=False,
+                                  FAKE_FAIL_MODEL="haiku").returncode, 1)
+        self.assertEqual(self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "inline", LEAN_AGENT_NO_DETACH="1"
+                                  ).returncode, 0)
+
+    def test_ctrl_c_in_the_foreground_still_stops_the_run(self):
+        p = self.start_run(turns="20", sleep="1")
+        [m] = self.running_markers()
+        p.send_signal(signal.SIGINT)
+        p.wait(timeout=40)
+        self.assertNotEqual(p.returncode, 0)
+        self.wait_for(lambda: not service_alive(m["pid"]), "the run to stop", 40)
+
+    def test_runs_wait_prints_each_result_and_the_exit_code(self):
+        p = self.start_run(turns="3", sleep="0.7")
+        [m] = self.running_markers()
+        w = self.cli("runs", "--wait", "all", LEAN_AGENT_WAIT_POLL="0.2")
+        self.assertRegex(w.stdout, rf"run {m['run']} · haiku · done")
+        self.assertIn("resume: lean-agent run --resume", w.stdout)
+        out, _ = p.communicate(timeout=30)
+        self.assertEqual(w.stdout.strip(), out[out.index("run " + m["run"] + " ·"):].strip())
+        again = self.cli("runs", "--wait", m["run"])  # already finished: printed at once
+        self.assertEqual(again.stdout, w.stdout)
+        self.assertIn("No runs in progress", self.cli("runs", "--wait", "all").stdout)
+        self.assertEqual(self.cli("runs", "--wait", "nope", check=False).returncode, 1)
+
+    def test_runs_wait_exits_nonzero_for_a_failed_run_and_on_timeout(self):
+        p = self.start_run(turns="3", sleep="0.5", FAKE_FAIL_MODEL="haiku")
+        w = self.cli("runs", "--wait", "last", check=False, LEAN_AGENT_WAIT_POLL="0.2")
+        self.assertEqual(w.returncode, 1)
+        self.assertIn("failed", w.stdout)
+        p.communicate(timeout=30)
+
+    def test_runs_wait_times_out_with_a_nonzero_exit(self):
+        p = self.start_run(turns="8", sleep="1")
+        [m] = self.running_markers()
+        t = self.cli("runs", "--wait", "all", "--timeout", "1", check=False, LEAN_AGENT_WAIT_POLL="0.2")
+        self.assertEqual(t.returncode, 124)
+        self.assertIn(f"timeout: still running: {m['run']}", t.stdout)
+
+    def test_brief_lists_running_runs_and_how_to_collect_them(self):
+        os.makedirs(os.path.join(self.env["LEAN_AGENT_HOME"], "running"))
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "running", "r1.json"), "w") as fh:
+            json.dump({"pid": os.getpid(), "run": "r1", "model": "haiku", "project": "proj", "task": "t"}, fh)
+        line = next(l for l in self.cli("brief").stdout.splitlines() if l.startswith("Running now:"))
+        self.assertIn("r1 haiku proj: t", line)
+        self.assertTrue(line.endswith("collect with `lean-agent runs --wait all`"), line)
+
+    def test_service_restart_keeps_detached_runs_but_refuses_legacy_ones(self):
+        fake = os.path.join(self.tmp.name, "systemctl")
+        with open(fake, "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(fake, 0o755)
+        env = dict(LEAN_AGENT_SERVICE_PLATFORM="linux", LEAN_AGENT_SYSTEMCTL=fake)
+        self.cli("service", "install", **env)
+        with open(os.path.join(self.tmp.name, ".config", "systemd", "user", "lean-agent.service")) as fh:
+            self.assertIn("KillMode=process", fh.read())
+        p = self.start_run(turns="6", sleep="0.7")
+        [m] = self.running_markers()
+        self.assertEqual(self.cli("service", "restart", **env).returncode, 0)
+        self.assertTrue(service_alive(m["pid"]))
+        legacy = os.path.join(self.env["LEAN_AGENT_HOME"], "running", "old.json")
+        with open(legacy, "w") as fh:
+            json.dump({"pid": os.getpid(), "run": "old"}, fh)
+        r = self.cli("service", "restart", check=False, **env)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not detached", r.stderr)
+        self.assertEqual(self.cli("service", "restart", "--yes", **env).returncode, 0)
+        os.remove(legacy)
+        p.communicate(timeout=60)
+
+    def test_auto_clear_holds_while_a_run_is_alive_until_compaction_is_near(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        os.environ.pop("LEAN_AGENT_CLEAR_AT")  # auto: 59,000 of the default 67,000
+        os.makedirs(os.path.join(home, "running"))
+        marker = os.path.join(home, "running", "r1.json")
+        with open(marker, "w") as fh:
+            json.dump({"pid": os.getpid(), "run": "r1"}, fh)
+        turn("done", ctx=50000)  # below auto: nothing
+        ac.tick()
+        self.assertEqual(host.pasted, [])
+        turn("done", ctx=60000)  # due, but a run is alive
+        ac.tick()
+        self.assertEqual(host.pasted, [])
+        self.assertIn("1 run(s) alive (r1)", json.load(open(os.path.join(home, "up.json")))["clear_hold"])
+        turn("done", ctx=64500)  # within 3,000 of compaction: clear anyway, with the checkpoint step
+        ac.tick()
+        self.assertIn("Checkpoint now", host.pasted[0])
+        self.assertIn("r1", host.pasted[0])
+        os.remove(marker)
+
+    def test_auto_clear_goes_ahead_when_the_runs_are_gone(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        os.environ.pop("LEAN_AGENT_CLEAR_AT")
+        os.makedirs(os.path.join(home, "running"))
+        marker = os.path.join(home, "running", "r1.json")
+        with open(marker, "w") as fh:
+            json.dump({"pid": os.getpid(), "run": "r1"}, fh)
+        turn("done", ctx=60000)
+        ac.tick()
+        self.assertEqual(host.pasted, [])
+        os.remove(marker)
+        ac.tick()
+        self.assertEqual(len(host.pasted), 1)
+        self.assertIsNone(json.load(open(os.path.join(home, "up.json")))["clear_hold"])
 
     def test_permission_pending_ignores_requests_older_than_the_hooks_wait(self):
         sys.path.insert(0, os.path.dirname(CLI))
