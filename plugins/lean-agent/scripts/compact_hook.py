@@ -256,6 +256,16 @@ def cut_lines(text, limit):
     return (cut[:nl] if nl > 0 else cut).rstrip()
 
 
+def threads_summary(lines=6):
+    """The open threads in a few lines (`lean-agent now`, without closing idle ones), so a fresh session knows the topics."""
+    try:
+        import lean_threads
+        text = lean_threads.now_text(close_idle=False, max_lines=lines)
+    except Exception:  # a broken registry must not break the brief
+        return ""
+    return "" if text.startswith("No open") else text + "\nFull list: lean-agent now; one topic: lean-agent thread show tN"
+
+
 def brief(cap=None):
     """What a fresh orchestrator session starts from: the latest checkpoint (its soft state), then the hand-off.
     With `cap`, the checkpoint gets up to CHECKPOINT_CAP characters and the hand-off the rest."""
@@ -269,6 +279,9 @@ def brief(cap=None):
             body = shown
         head = f"Checkpoint of {str(cps[-1].get('ts', ''))[:16].replace('T', ' ')} (your own soft state before the clear; continue from it):\n{body}\n\n"
     rest = handoff()
+    topics = threads_summary()
+    if topics:
+        head += topics + "\n\n"
     if cap:
         room = max(0, cap - len(head) - len(BRIEF_MORE) - 1)
         shown = cut_lines(rest, room)
