@@ -359,6 +359,8 @@ def route(prompt, session=None, now=None):
             if cand in data["threads"] or cand.startswith("#"):
                 tid, how = cand, "explicit"
                 _ensure(data, tid, title_from(text), create=True)
+                data["threads"][tid].pop("closed", None)  # naming a closed thread reopens it
+                data["threads"][tid].pop("auto_closed", None)
         if tid is None:
             cur = None
             try:
