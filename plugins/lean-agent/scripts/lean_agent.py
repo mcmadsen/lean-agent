@@ -41,7 +41,7 @@ import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
 import service_session  # noqa: E402
-from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive as dashboard_pid_alive, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected  # noqa: E402
+from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive as dashboard_pid_alive, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, _now  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -167,19 +167,12 @@ def die(msg, code=1):
 
 
 def load_json(path, default):
-    try:
-        with open(path) as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return default
+    return read_json(path, default)
 
 
 def save_json(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w") as fh:
-        json.dump(data, fh, indent=1)
-    os.replace(tmp, path)
+    write_json_atomic(path, data)
 
 
 def append_jsonl(path, entry):
@@ -218,7 +211,7 @@ def slugify(text, limit=48):
 
 
 def now_iso():
-    return datetime.datetime.now().isoformat(timespec="seconds")
+    return _now()
 
 
 def stem(w):
