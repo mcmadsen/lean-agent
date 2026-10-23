@@ -1371,6 +1371,15 @@ def cmd_run(a):
         tools = a.tools or (READONLY_TOOLS + ",Bash" if read_only else WORKER_TOOLS)
 
     todo_id = (prev or {}).get("todo") or getattr(a, "todo", None)
+    if todo_id == "new":  # the run's own queue item, named after its --why: the orchestrator never runs `todo add`
+        data = todos()
+        title = " ".join((getattr(a, "why", None) or task.splitlines()[0]).split())[:200]
+        data["items"].append({"id": data["next"], "text": title, "project": slug, "ref": None, "prio": "normal",
+                              "due": None, "status": "open", "created": now_iso(), "notes": []})
+        todo_id = data["next"]
+        data["next"] += 1
+        save_json(home("todo.json"), data)
+        print(f"todo #{todo_id}: {title}", flush=True)
     if todo_id is not None and not (prev or {}).get("todo"):
         data = todos()
         t = next((x for x in data["items"] if x["id"] == todo_id), None)
@@ -1387,6 +1396,8 @@ def cmd_run(a):
         if bad:
             die(f"--allow-cmd {c!r}: {', '.join(sorted(bad))} changes something; a read-only worker only gets "
                 "commands that read (show, list, get, view, log)")
+    if not prev and read_only:  # commands lean-agent itself grants a role (the librarian's memory commands)
+        allow_cmd = allow_cmd + list(getattr(a, "internal_cmd", None) or [])
     if allow_cmd and not prev:  # tell the worker, now and on a resume (role.md is read again then)
         note = ("\nBesides read-only git you may run exactly these read-only commands (and nothing else): "
                 + "; ".join(f"`{c} ...`" for c in allow_cmd) + "\n")
@@ -1886,7 +1897,7 @@ def narrowing_hints(offered, mcp_seq):
             lines.append(line + f": preset {name}:{p} covers it (~{cost(ts):,} tok)")
         else:
             lines.append(line + f" ({', '.join(used)}): next time --mcp {name}:{','.join(used)} (~{cost(used):,} tok), "
-                         f"or save it: lean-agent mcp preset {name} <name> {','.join(used)}")
+                         f"or a worker saves it: lean-agent mcp preset {name} <name> {','.join(used)}")
     return lines
 
 
@@ -5316,7 +5327,7 @@ def _cmd_optimize(a):
         open_gaps.append(n)
     open_gaps = open_gaps[-a.notes:]
     if open_gaps:
-        print("\nContext gaps reported by workers (turn recurring ones into cards with `lean-agent card add`; "
+        print("\nContext gaps reported by workers (turn recurring ones into cards with `lean-agent remember --project <p>`; "
               f"hide one with --ack <run-id>):")
         for n in open_gaps:
             print(f"- [{n['run']}] {n['missing'][:200]}")
@@ -5483,7 +5494,8 @@ ORCHESTRATOR_DENY = [
     "Skill", "Glob", "Grep", "LS", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "EnterPlanMode",
     "EnterWorktree", "ExitWorktree", "LSP", "Artifact", "ArtifactComments", "ArtifactData", "CronCreate", "CronDelete",
     "CronList", "DesignSync", "ListAgents", "ListConnectors", "ListPlugins", "ListSkills", "ReadNotifications",
-    "ReportFindings", "ScheduleWakeup", "SearchMcpRegistry", "SearchPlugins", "SearchSkills", "SendMessage",
+    "ReportFindings", "ScheduleWakeup", "ListMcpResources", "ListMcpResourcesTool", "ReadMcpResource",
+    "ReadMcpResourceTool", "ReadMcpResourceDir", "ReadMcpResourceDirTool", "SearchMcpRegistry", "SearchPlugins", "SearchSkills", "SendMessage",
     "SendUserFile", "ShowOnboardingRolePicker", "SuggestConnectors", "SuggestPluginInstall", "SuggestSkills",
 ]
 PLUGIN_ID = "lean-agent@lean-agent"
@@ -5531,7 +5543,7 @@ def orchestrator_settings(existing):
         perms.pop("deny", None)
         data["permissions"] = perms
         for key in ("disableBundledSkills", "disableClaudeAiConnectors", "claudeMdExcludes", "enabledPlugins",
-                    "autoCompactWindow"):
+                    "autoCompactWindow", "enableAllProjectMcpServers", "autoMemoryEnabled"):
             data.pop(key, None)
         return data
     servers = [n for n, v in lean_mcp.discover().items() if v["source"] in ("user", "desktop")]
@@ -5545,6 +5557,8 @@ def orchestrator_settings(existing):
     data["disableBundledSkills"] = True
     data["autoCompactWindow"] = env_num("LEAN_AGENT_COMPACT_WINDOW", 100000)  # the orchestrator compacts early
     data["disableClaudeAiConnectors"] = True
+    data["enableAllProjectMcpServers"] = False  # no .mcp.json server connects here (disable_home_mcp lists them off)
+    data["autoMemoryEnabled"] = False  # memory is filed by `lean-agent remember`, not by Claude Code
     line = data.get("statusLine")
     if not line or "statusline.py" in str((line or {}).get("command", "")):  # a status line you set yourself stays
         data["statusLine"] = {"type": "command", "padding": 0, "command":
@@ -5925,11 +5939,23 @@ TRUST_HINT = ("the orchestrator home is not trusted yet, so Claude Code ignores 
               "`lean-agent` command will ask for approval. Fix once with: lean-agent trust")
 
 
+def home_mcpjson_servers(h):
+    """Names of the servers declared in a .mcp.json in the orchestrator home or a folder above it (Claude Code
+    offers those project servers to the session)."""
+    names, p = [], h
+    while True:
+        names += list((load_json(os.path.join(p, ".mcp.json"), {}) or {}).get("mcpServers") or {})
+        if os.path.dirname(p) == p:
+            return sorted(set(names))
+        p = os.path.dirname(p)
+
+
 def disable_home_mcp(h):
-    """Switch off, for the orchestrator home only, the MCP servers Claude Code would otherwise connect there
-    (your user-scope servers and plugin servers): the orchestrator uses none of them, and a server that fails
-    at start only adds a warning. Workers still get them with --mcp. Writes the same per-folder list `/mcp`
-    uses (disabledMcpServers in ~/.claude.json); returns the names newly switched off."""
+    """Switch off, for the orchestrator home only, every MCP server Claude Code would otherwise connect there:
+    your user-scope servers and plugin servers (disabledMcpServers, the list `/mcp` uses) and the project servers of
+    a .mcp.json (disabledMcpjsonServers, none enabled; enableAllProjectMcpServers is off in the home's settings).
+    The orchestrator uses none of them, and a server that fails at start only adds a warning. Workers still get them
+    with --mcp. Written to ~/.claude.json; returns the names newly switched off."""
     if os.environ.get("LEAN_AGENT_ORCHESTRATOR_TRIM") == "0":
         return []
     cfg = claude_global_config()
@@ -5937,18 +5963,23 @@ def disable_home_mcp(h):
     if not isinstance(data, dict):
         return []
     names = sorted(n for n, v in lean_mcp.discover().items() if v["source"] in ("user", "plugin"))
+    jnames = home_mcpjson_servers(h)
     proj = data.setdefault("projects", {}).setdefault(h, {})
     have = list(proj.get("disabledMcpServers") or [])
+    jhave = list(proj.get("disabledMcpjsonServers") or [])
     new = [n for n in names if n not in have]
-    if not new:
+    jnew = [n for n in jnames if n not in jhave]
+    if not new and not jnew and proj.get("enabledMcpjsonServers") == []:
         return []
-    proj["disabledMcpServers"] = have + new
     latest = load_json(cfg, None)  # Claude Code writes this file too: re-read right before writing
     if isinstance(latest, dict):
-        latest.setdefault("projects", {}).setdefault(h, {})["disabledMcpServers"] = have + new
         data = latest
+    entry = data.setdefault("projects", {}).setdefault(h, {})
+    entry["disabledMcpServers"] = have + new
+    entry["disabledMcpjsonServers"] = jhave + jnew
+    entry["enabledMcpjsonServers"] = []
     save_json(cfg, data)
-    return new
+    return new + jnew
 
 
 def cmd_trust(a):
@@ -6353,7 +6384,7 @@ def cmd_context(a):
             if tip:
                 print(f"           -> {tip}")
         if total > 20000:
-            print("  Messages can't be taken out of a running conversation: `lean-agent handoff --note` for what's "
+            print("  Messages can't be taken out of a running conversation: `lean-agent checkpoint` for what's "
                   "open, then /compact or /clear.")
 
     if not a.apply:
@@ -7104,8 +7135,8 @@ PRIOS = {"high": 0, "normal": 1, "low": 2}
 
 
 def todo_arg(v):
-    """--todo N (or #N); `none` says the run isn't queue work (a quick lookup)."""
-    return None if str(v).lower() in ("none", "-") else int(str(v).lstrip("#"))
+    """--todo N (or #N); `none` says the run isn't queue work (a quick lookup); `new` makes the item from --why."""
+    return None if str(v).lower() in ("none", "-") else "new" if str(v).lower() == "new" else int(str(v).lstrip("#"))
 
 
 def todos():
@@ -7217,7 +7248,7 @@ def cmd_todo(a):
             ready = epic_status(data, a.epic)[2]
             items = [t for t in items if t in ready]
         if not items:
-            print("Nothing open. Add work with: lean-agent todo add \"...\"")
+            print("Nothing open. Start work with: lean-agent run ... --todo new")
             return 0
         t = items[0]
         print(todo_line(t))
@@ -7777,6 +7808,59 @@ def artifact_note_url(title):
     return None
 
 
+REMEMBER_RULE = """\
+You are the librarian: you file the one item the user wants kept, in the right place, with lean-agent's own commands
+(run exactly `{lean} <memory|card|cards|todo|handoff> ...`; nothing else changes anything). You may read project files.
+First read what exists: `{lean} memory list` (-p <project> for a project's), `{lean} cards <project>`,
+`{lean} todo list`, `{lean} handoff`. Then pick the one right place:
+- how the user wants work done (a rule, a preference, a correction): `{lean} memory add "<text>" --type feedback --name <short-name>`
+- a fact about the user, a project's state or where something lives: `memory add ... --type user|project|reference`
+- project knowledge workers need again (convention, command, gotcha): `{lean} card add <project> <id> --title "..." --text "..."`
+- something to do later: `{lean} todo add "<text>" [-p <project>] [--ref ...]`
+- a short note for the next orchestrator session: `{lean} handoff --note "<text>" --kind reminder`
+If a memory, card, todo or note already says the same, update it (`memory edit`, `card add` with that id, `todo edit`)
+instead of adding another. If the new item contradicts an existing entry, change nothing and report a conflict. Never
+store secrets (tokens, passwords, keys). Keep the text as the user gave it, short.
+End your answer with one line per outcome and nothing after them:
+`REMEMBERED <where> <id>` (where = memory, feedback, card, todo or handoff; id = the memory name, card id, todo or note number),
+`UNCHANGED <where> <id>` when it was already there, or `CONFLICT <where> <id>: <the existing entry in one line>`.
+"""
+REMEMBER_LINE_RE = re.compile(r"^(REMEMBERED|UNCHANGED|CONFLICT) \S+ \S.*$", re.M)
+
+
+def cmd_remember(a):
+    """File something to keep through a small librarian worker, so the orchestrator never writes knowledge itself."""
+    what = sys.stdin.read().strip() if a.task_file == "-" else read_text(a.task_file).strip() if a.task_file \
+        else " ".join(a.text).strip()
+    if not what:
+        die('what? lean-agent remember "Never merge on Fridays." [--project <p>]   (or --task-file -)')
+    projs = projects()
+    ref = a.project or next((r["project"] for r in reversed(ledger()) if r.get("project") in projs), None) \
+        or next(iter(projs), None)
+    if not ref:
+        die("no project to run the librarian in: --project <p> (or lean-agent learn <path>)")
+    slug, _ = resolve_project(ref)
+    lean = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
+    task = ("Keep this for the user" + (f" (about project {slug})" if a.project else "") + ":\n" + what)
+    ns = argparse.Namespace(resume=None, task=[task], task_file=None, model="sonnet",
+                            why="file something the user wants kept", cards="auto", card_list=None, project=slug,
+                            read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=20,
+                            max_usd=0.5, max_context=2000, max_cards=4, ttype="read", role="librarian",
+                            effort="low", role_rule=REMEMBER_RULE.format(lean=lean), todo=None,
+                            internal_cmd=[f"{lean} {c}" for c in ("memory", "card", "cards", "todo", "handoff")])
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = cmd_run(ns)
+    run = next((r for r in reversed(ledger()) if r.get("role") == "librarian" and r["project"] == slug), None)
+    lines = [m.group(0).strip() for m in REMEMBER_LINE_RE.finditer(
+        parse_feedback(run_result_text(run))[0] if run else "")]
+    if not lines:
+        print(out.getvalue(), file=sys.stderr)
+        die("the librarian didn't report what it filed; see its reply above", rc or 1)
+    print("\n".join(lines))
+    return 1 if any(l.startswith("CONFLICT") for l in lines) else 0  # something needs the user's decision
+
+
 def cmd_publish(a):
     """Publish (or update) an artifact through a worker, so the orchestrator never loads the Artifact tools."""
     mode = artifacts_mode()
@@ -7966,6 +8050,14 @@ def build_parser():
     s.add_argument("--task-file", help="what to publish, or the content ('-' = stdin)")
     s.add_argument("--as-is", action="store_true", help="the input is the content itself: publish it unchanged (haiku)")
     s.set_defaults(fn=cmd_publish)
+
+    s = sub.add_parser("remember", help="file something to keep (memory, project card, todo, feedback rule or hand-off "
+                       "note) through a small librarian worker; it updates an existing entry rather than duplicating "
+                       "and reports a conflict. Prints one line per change")
+    s.add_argument("text", nargs="*", help="what to keep")
+    s.add_argument("--task-file", help="read it from a file ('-' = stdin)")
+    s.add_argument("--project", "-p", help="the project it is about (default: the latest run's)")
+    s.set_defaults(fn=cmd_remember)
 
     s = sub.add_parser("config", help="switches: artifacts off|worker|direct (worker: publish through `lean-agent publish`, the default; "
                        "direct: the orchestrator has the Artifact tools itself), "
@@ -8424,7 +8516,7 @@ def build_parser():
 
     s = sub.add_parser("handoff", help="the hand-off note a new or compacted orchestrator session starts from")
     s.add_argument("--note", metavar="TEXT", help="add an open item or pending decision")
-    s.add_argument("--kind", choices=["decision", "reminder", "fyi"], help="--note: decision = the user must "
+    s.add_argument("--kind", choices=["decision", "reminder", "fyi", "checkpoint"], help="--note: decision = the user must "
                    "decide or answer (shown under Waiting on you); reminder (default) or fyi go to the board's Notes")
     s.add_argument("--done", metavar="N,N|all", help="close open items by number")
     s.add_argument("--hours", type=int, default=12, help="runs from the last N hours (default 12)")
