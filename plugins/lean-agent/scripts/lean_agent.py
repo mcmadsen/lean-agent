@@ -6083,7 +6083,7 @@ def cmd_doctor(a):
         report(True if docs == "available" else None, f"publish: Claude Docs connector {docs}" + (" (no init event)" if docs == "unknown" else ""),
                "turn claude.ai connectors on and connect Claude Docs; until then `publish` writes a local file")
     report(True, f"strict orchestrator: {'on' if strict_on() else 'off'} (lean-agent config strict on|off)")
-    report(True, f"auto-clear: {clear_at_text()} (lean-agent config clear-at auto|N)")
+    report(True, f"auto clear: {clear_at_text()} (lean-agent config clear-at off|auto|N)")
 
     slug = default_project(path)
     projs = projects()
@@ -7176,7 +7176,10 @@ def cmd_attribution(a):
 def clear_at_text():
     """The effective clear threshold, the compaction point, and why a due clear waits (if it does)."""
     n, point = service_session.clear_at(), service_session.up_compact_at()
-    text = ("auto = " if service_session.clear_setting() == "auto" else "") + (f"{n:,} tokens" if n else "off")
+    if n:
+        text = ("auto = " if service_session.clear_setting() == "auto" else "") + f"{n:,} tokens"
+    else:
+        text = "off (clear with `lean-agent clear`)"
     text += f" (the orchestrator compacts at ~{point:,})"
     hold = load_json(home("up.json"), {}).get("clear_hold")
     return text + (f" · clear held: {hold}" if hold else "")
@@ -7185,12 +7188,12 @@ def clear_at_text():
 def cmd_config(a):
     if a.name == "clear-at":
         if a.value is not None:
-            if not (a.value.isdigit() or a.value.lower() == "auto"):
-                die("clear-at takes auto, or a number of tokens (0 = off)")
+            if not (a.value.isdigit() or a.value.lower() in ("auto", "off")):
+                die("clear-at takes off (default), auto, or a number of tokens")
             cfg = load_json(home("config.json"), {})
-            cfg["clear_at"] = "auto" if a.value.lower() == "auto" else int(a.value)
+            cfg["clear_at"] = a.value.lower() if a.value.lower() in ("auto", "off") else int(a.value)
             save_json(home("config.json"), cfg)
-        print(f"clear-at: {clear_at_text()} · `up` has the orchestrator checkpoint, then clears its context, "
+        print(f"auto clear: {clear_at_text()} · with auto|N, `up` has the orchestrator checkpoint, then clears its context, "
               "when a finished turn leaves it above this, and not while workers run unless compaction is near"
               + (" (LEAN_AGENT_CLEAR_AT is set and wins)" if os.environ.get("LEAN_AGENT_CLEAR_AT") else ""))
         return 0
@@ -7911,7 +7914,7 @@ def cmd_service(a):
         if a.action == "status":
             print(f"service: {path}: " + ("running" if is_running else "loaded, not running" if loaded else "not loaded")
                   + f" (log: lean-agent service logs)")
-            print("auto-clear: " + clear_at_text())
+            print("auto clear: " + clear_at_text())
             return 0 if is_running else 1
         if a.action == "start" and is_running:
             print("already running (lean-agent service restart restarts it with the current settings)")
@@ -7945,7 +7948,7 @@ def cmd_service(a):
     if a.action == "status":
         state = re.search(r"state = (\w+)|Active: (\S+ \S+)", out)
         print(f"service: {path}: " + ((state.group(1) or state.group(2)) if state else ("running" if rc == 0 else "not running")))
-        print("auto-clear: " + clear_at_text())
+        print("auto clear: " + clear_at_text())
     else:
         print(f"{a.action}: " + ("ok" if rc == 0 else out[:200]))
     return rc
@@ -8412,6 +8415,15 @@ def cmd_handoff(a):
     print(f"(saved {home('handoff.md')}; a new or compacted orchestrator session starts with this note)")
 
 
+def cmd_clear(a):
+    """Ask the service session to checkpoint and /clear at the end of its current turn (see service_session.AutoClear)."""
+    if not service_session.request_clear():
+        print("no service session is up (start it with `lean-agent up` or `lean-agent service start`)", file=sys.stderr)
+        return 1
+    print("clear queued: runs at the end of this turn; running workers keep going (collect with `lean-agent runs --wait all`)")
+    return 0
+
+
 def cmd_checkpoint(a):
     """Save the orchestrator's soft state as a hand-off note of kind "checkpoint"; the last 3 are kept."""
     import compact_hook
@@ -8524,6 +8536,9 @@ def build_parser():
     s.add_argument("--project", "-p")
     s.set_defaults(fn=cmd_text_len)
 
+    s = sub.add_parser("clear", help="clear the service session (checkpoint, then /clear) at the end of this turn; "
+                                     "only when the user asks")
+    s.set_defaults(fn=cmd_clear)
     s = sub.add_parser("checkpoint", help="save your soft state (promises, decisions, next steps) for after a /clear")
     s.add_argument("text", nargs="*", help="the soft state, 15 lines or fewer")
     s.add_argument("--file", help="read it from a file (- = stdin)")
@@ -8564,9 +8579,9 @@ def build_parser():
     s = sub.add_parser("config", help="switches: artifacts off|worker|direct (worker: publish through `lean-agent publish`, the default; "
                        "direct: the orchestrator has the Artifact tools itself), "
                        "strict on|off (the orchestrator only runs lean-agent commands; default on), "
-                       "clear-at auto|N (clear the orchestrator's context above N tokens after a checkpoint; default auto = 8000 below its compaction point, 0 = off)")
+                       "clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`)")
     s.add_argument("name", choices=["artifacts", "strict", "clear-at"])
-    s.add_argument("value", nargs="?", help="on|off, or auto|a number for clear-at")
+    s.add_argument("value", nargs="?", help="on|off, or off|auto|a number for clear-at")
     s.set_defaults(fn=cmd_config)
 
     s = sub.add_parser("attribution", help="should commits and PRs credit Claude? ask the user once, then set on|off")
