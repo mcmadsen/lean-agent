@@ -4461,6 +4461,28 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("  tokens: input", p.stdout)
         self.assertIn("  tokens: input", self.cli("runs", "--show").stdout)  # kept for runs --show
 
+    def test_compact_run_output(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        long = "\n".join(f"line {i:03d} of a long worker answer" for i in range(120)) + "\nQuestion: which region should it use?\n"
+        args = ("run", "-p", "proj", "-m", "haiku", "--why", "x", "look")
+        p = self.cli(*args, LEAN_AGENT_BRIEF="1", FAKE_ANSWER=long)
+        rid = self.ledger()[-1]["id"]
+        self.assertIn("line 000", p.stdout)
+        self.assertNotIn("line 119", p.stdout)
+        self.assertIn("Question: which region should it use?", p.stdout)  # kept in full
+        self.assertIn(f"… full report: lean-agent runs --show {rid}", p.stdout)
+        self.assertLess(len(p.stdout), 2400)
+        self.assertNotIn("  tokens: input", p.stdout)
+        self.assertNotIn("budget left", p.stdout)
+        self.assertIn("line 119", self.cli("runs", "--show", rid).stdout)  # the ledger copy is whole
+        self.assertIn("  tokens: input", self.cli(*args, "--verbose", LEAN_AGENT_BRIEF="1", FAKE_ANSWER=long).stdout)
+        full = self.cli(*args, "--full", LEAN_AGENT_BRIEF="1", FAKE_ANSWER=long).stdout
+        self.assertIn("line 119", full)
+        self.assertNotIn("full report:", full)
+        short = self.cli(*args, LEAN_AGENT_BRIEF="1", FAKE_ANSWER="Short answer.").stdout
+        self.assertIn("Short answer.", short)
+        self.assertNotIn("full report:", short)
+
     def test_brief_review(self):
         self.git_project()
         self.cli("learn", self.proj, "--name", "proj")
