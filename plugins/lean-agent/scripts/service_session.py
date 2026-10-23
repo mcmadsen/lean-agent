@@ -188,6 +188,15 @@ def update_up(**fields):
     os.replace(tmp, up_path())
 
 
+def request_clear():
+    """`lean-agent clear`: ask the `up` host to checkpoint and /clear at the end of the current turn. False when no
+    service session is up."""
+    if not alive():
+        return False
+    update_up(clear_requested=time.time())
+    return True
+
+
 # ---------------------------------------------------------------- client
 
 def request(msg, timeout=5):
@@ -243,7 +252,7 @@ def info():
 
 # ---------------------------------------------------------------- auto clear (inside `up`)
 
-CLEAR_AT = "auto"      # tokens of context after a finished turn above which the session is cleared: "auto" = just before compaction, 0 = off
+CLEAR_AT = 0          # tokens of context after a finished turn above which the session is cleared: "auto" = just before compaction; 0 = off (default: only `lean-agent clear` clears)
 CLEAR_MARGIN = 8000    # "auto" clears this far below the compaction point
 CLEAR_HARD = 3000      # within this of the compaction point the clear no longer waits for running workers
 CLEAR_PROMPT = "Checkpoint now: run lean-agent checkpoint with your soft state, then reply 'checkpointed'"
@@ -271,11 +280,11 @@ def up_compact_at():
 
 
 def clear_setting():
-    """What is set: LEAN_AGENT_CLEAR_AT, else `lean-agent config clear-at`, else "auto" (or a number of tokens)."""
+    """What is set: LEAN_AGENT_CLEAR_AT, else `lean-agent config clear-at`, else off (0); "auto" or a number of tokens opt in."""
     for raw in (os.environ.get("LEAN_AGENT_CLEAR_AT"), _load(lean_home("config.json")).get("clear_at")):
         raw = str(raw).strip().lower() if raw is not None else ""
-        if raw == "auto" or raw.isdigit():
-            return "auto" if raw == "auto" else int(raw)
+        if raw in ("auto", "off") or raw.isdigit():
+            return "auto" if raw == "auto" else 0 if raw == "off" else int(raw)
     return CLEAR_AT
 
 
@@ -397,6 +406,7 @@ class AutoClear:
         self.started = None   # when the last checkpoint prompt went out
         self.waiting = None   # (transcript offset, when) once the prompt is out
         self.held = None      # why a due clear waits (running workers)
+        self.manual = False   # the clear in progress was asked for with `lean-agent clear`
 
     def transcript(self):
         rec = _load(lean_home("chat", "service.json"))
@@ -437,12 +447,15 @@ class AutoClear:
         if self.waiting:
             offset, since = self.waiting
             st = transcript_state(path, offset)
-            if permission_pending(self.session_id()) or now - self.host.last_input < _knob("LEAN_AGENT_CLEAR_IDLE", CLEAR_IDLE):
+            if permission_pending(self.session_id()) or (
+                    not self.manual and now - self.host.last_input < _knob("LEAN_AGENT_CLEAR_IDLE", CLEAR_IDLE)):
                 return
             answered = st["ended"] and "checkpointed" in st["text"].lower()
             timed_out = now - since >= _knob("LEAN_AGENT_CLEAR_WAIT", CLEAR_WAIT)
             if timed_out and not answered and not st["ended"]:
                 self.waiting = self.started = None  # a turn is still running: /clear would land in it; ask again at a turn end
+                if self.manual:
+                    update_up(clear_requested=now)
                 self.log("no reply in time and a turn is running: giving up this round")
                 return
             if answered or timed_out:
@@ -450,6 +463,21 @@ class AutoClear:
                 self.log(f"/clear sent ({'checkpointed' if answered else 'no reply in time'})")
                 self.host.paste("/clear")
             return
+        if _load(up_path()).get("clear_requested"):
+            # asked for by the user: ignores the threshold, the gap, the idle time and live runs (they are detached
+            # and survive); waits only for a turn end and for a pending permission prompt
+            st = transcript_state(path)
+            if not st["ended"] or permission_pending(self.session_id()):
+                return
+            update_up(clear_requested=None)
+            self.hold(None)
+            self.manual = True
+            self.started = now
+            self.waiting = (st["size"], now)
+            self.log("clear requested with `lean-agent clear`: asking for a checkpoint")
+            self.host.paste(checkpoint_prompt())
+            return
+        self.manual = False
         limit = clear_at(getattr(self.host, "env", None))
         if not limit or now - self.last_gap_start() < _knob("LEAN_AGENT_CLEAR_GAP", CLEAR_GAP):
             self.hold(None)

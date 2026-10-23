@@ -44,6 +44,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `run`, `review`, `do`, `tracker --discover` (all flags, `--mcp`, `--allow-cmd`, `--todo new\|N\|none`) | b | allowed, in the background; they start workers |
 | `thread new\|list\|merge\|unmerge\|move` | b | allowed |
 | `checkpoint`, `brief` | b | allowed |
+| `clear` | b | allowed: queues a checkpoint and /clear of the service session at the end of the turn; only when the user asks |
 | `handoff` (read), `handoff --done N`, `handoff --note … --kind checkpoint\|fyi\|decision` | b | allowed: the orchestrator's own state; a `decision` note is how it asks the user something asynchronously |
 | `handoff --note …` with no kind, or kind reminder | c | **denied**: user content; `remember` |
 | `todo list\|next\|start\|done` | b | allowed: status that follows a run it started |
