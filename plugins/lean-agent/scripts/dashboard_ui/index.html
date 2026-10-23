@@ -4,37 +4,39 @@
 <link rel="stylesheet" href="/ui/style.css?v=__PAGE_VERSION__"></head><body>
 <div class="ws" id="ws">
 
-<!-- LEFT: what needs you -->
-<aside class="inbox" id="pane-inbox" aria-label="Needs you">
+<!-- LEFT: Chat / Inbox / Todos -->
+<aside class="inbox" id="pane-inbox" aria-label="Threads, inbox and todos">
  <div class="brand">
   <div class="logo" aria-hidden="true">&gt;_</div><div class="name">lean-agent</div>
   <span class="hspace"></span><span class="live mono" id="stamp"><span class="dot dot-ok" aria-hidden="true"></span>…</span>
  </div>
- <div class="pad"><label class="search"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
-  <input type="search" id="q" aria-label="Search runs, PRs and notes" placeholder="Search runs, PRs, notes"><span class="mono kbd">⌘K</span></label></div>
+ <button type="button" class="ustrip" id="ustrip" data-act="plan-graph" title="Show the week's graph" hidden></button>
+ <div class="seg-group ltabs" role="group" aria-label="Views" id="ltabs">
+  <button type="button" class="seg on" data-ltab="chat" aria-pressed="true">Chat <span id="n-chat" class="badge"></span></button><button type="button" class="seg" data-ltab="inbox" aria-pressed="false">Inbox <span id="n-inbox"></span></button><button type="button" class="seg" data-ltab="todos" aria-pressed="false">Todos <span id="n-todos"></span></button>
+ </div>
  <div class="pad"><label class="picker"><span class="sr">Project</span><select id="bfilter" aria-label="Project"><option value="">All projects</option></select></label></div>
- <div class="inbox-head"><h2>Needs you</h2><span class="mono mute" id="n-inbox" aria-live="polite"></span></div>
- <div class="pills" id="ifilters" role="group" aria-label="Show"></div>
- <div class="rows" id="inbox"></div>
- <div class="inbox-foot"><button type="button" class="btn sm" data-act="add">+ Add item</button><button type="button" class="btn sm" data-act="add-note">+ Note</button><button id="theme" type="button" class="btn sm" title="switch theme"></button></div>
+ <section class="ltab" id="l-chat" aria-label="Chat"><div class="thr-top"><form class="ask" data-ask><label class="sr" for="ask-d">Ask Claude anything</label><input type="text" id="ask-d" autocomplete="off" placeholder="Ask Claude anything"><button type="submit" class="btn primary">Ask</button></form><button type="button" class="btn tnew" data-act="new-thread" aria-label="New thread">+</button></div><div class="rows" id="threads"></div></section>
+ <section class="ltab" id="l-inbox" aria-label="Inbox" hidden><div class="rows" id="inbox"></div></section>
+ <section class="ltab" id="l-todos" aria-label="Todos" hidden><div class="rows" id="todos"></div></section>
+ <div class="inbox-foot"><button type="button" class="btn sm" data-act="views" data-v="runs">Runs <span id="n-runs"></span></button><button type="button" class="btn sm" data-act="views" data-v="schedule">Schedule <span id="n-sched"></span></button><button type="button" class="btn sm" data-act="add">+ Add item</button><button type="button" class="btn sm" data-act="add-note">+ Note</button><button id="theme" type="button" class="btn sm" title="switch theme"></button></div>
 </aside>
 
-<!-- CENTER: the conversation with the orchestrator -->
+<!-- RIGHT: the open thread -->
 <main class="thread" id="pane-chat" aria-label="Conversation">
  <header class="thead">
-  <div class="tmeta"><h1 id="ttitle">Orchestrator session</h1><div class="mono mute sub" id="tsub"></div><div class="mute sub" id="ttask" hidden></div><div class="mono mute sub mlive" id="mlive"></div></div>
-  <div class="tacts"><div class="seg-group scope" role="group" aria-label="Show messages" id="scope" hidden></div><span id="rc" class="chip tone-mute" hidden></span><span id="cstat" class="chip tone-mute">idle</span><button id="handled" type="button" class="btn" hidden>Mark handled</button><button id="cnew" type="button" class="btn" data-act="clear-ask">Clear session…</button></div>
+  <div class="tbar"><button type="button" class="tsw" id="tbar" data-act="sheet" aria-haspopup="dialog" aria-label="Switch thread"><span id="tbar-t"></span><svg class="chev" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button><button type="button" class="btn tnew" data-act="new-thread" aria-label="New thread">+</button></div>
+  <div class="tmeta"><h1 id="ttitle">Main</h1><div class="mono mute sub" id="tsub"></div></div>
+  <div class="tacts"><span id="rc" class="chip tone-mute" hidden></span><span id="cstat" class="chip tone-mute">idle</span><button id="handled" type="button" class="btn" hidden>Mark handled</button><button id="cnew" type="button" class="btn" data-act="clear-ask">Clear session…</button></div>
  </header>
  <div id="clearbox" hidden></div>
  <div class="banners" id="banners"></div>
- <button type="button" class="ustrip" id="ustrip" data-act="plan-graph" title="Show the week's graph" hidden></button>
  <div class="stream" id="msgs"></div>
  <div class="composer-wrap">
   <div class="working" id="working" hidden></div>
   <form class="composer" id="chatform">
    <div class="ctx" id="ctxpills"></div>
    <div class="ctxmeter mono" id="ctxmeter"></div>
-   <textarea id="chatin" rows="2" aria-label="Message the orchestrator" placeholder="Message the orchestrator (Enter sends, Shift+Enter: new line)"></textarea>
+   <textarea id="chatin" rows="2" aria-label="Message" placeholder="Message (Enter sends, Shift+Enter: new line)"></textarea>
    <div class="cbar">
     <div class="pills" id="cmds"><button type="button" class="pill mono" data-cmd="run">/run</button><button type="button" class="pill mono" data-cmd="review">/review</button><button type="button" class="pill mono" data-cmd="todo">/todo</button><button type="button" class="pill mono" data-cmd="handoff">/handoff</button></div>
     <div class="send"><button type="submit" class="btn primary">Send <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4"/></svg></button></div>
@@ -42,26 +44,17 @@
   </form>
  </div>
 </main>
-
-<!-- RIGHT: live work -->
-<aside class="work" id="pane-work" aria-label="Work">
- <div class="seg-group" role="group" aria-label="Work views" id="tabs">
-  <button type="button" class="seg on" data-tab="board" aria-pressed="true">Board <span id="n-board"></span></button>
-  <button type="button" class="seg" data-tab="runs" aria-pressed="false">Runs <span id="n-runs"></span></button>
-  <button type="button" class="seg" data-tab="schedule" aria-pressed="false">Schedule <span id="n-sched"></span></button>
- </div>
- <section id="c-board" class="tab" aria-label="Board"><div id="board"></div></section>
- <section id="c-runs" class="tab" hidden aria-label="Recent runs"><div id="runs"></div></section>
- <section id="c-sched" class="tab" hidden aria-label="Schedule"><div id="sched"></div><div id="pushes"></div></section>
- <section class="box" id="c-ctx" aria-label="Orchestrator context" hidden><div id="ctx"></div></section>
-</aside>
 </div>
 
-<!-- phone: one pane at a time -->
+<!-- phone: the same three tabs, full width -->
 <nav class="mtabs" role="group" aria-label="Views" id="mtabs">
- <button type="button" class="seg on" data-pane="chat" aria-pressed="true">Chat <span id="m-chat" class="badge"></span></button><button type="button" class="seg" data-pane="inbox" aria-pressed="false">Inbox <span id="m-inbox"></span></button><button type="button" class="seg" data-pane="work" data-wtab="board" aria-pressed="false">Board <span id="m-board"></span></button><button type="button" class="seg" data-pane="work" data-wtab="runs" aria-pressed="false">Runs</button>
+ <button type="button" class="seg on" data-ltab="chat" aria-pressed="true">Chat <span id="m-chat" class="badge"></span></button><button type="button" class="seg" data-ltab="inbox" aria-pressed="false">Inbox <span id="m-inbox"></span></button><button type="button" class="seg" data-ltab="todos" aria-pressed="false">Todos <span id="m-todos"></span></button>
 </nav>
 
+<dialog id="sheet" aria-labelledby="sheet-t"><div class="bh"><h2 id="sheet-t">Threads</h2><button type="button" class="btn sm" data-act="close-sheet">Close</button></div><div id="sheetbody"></div></dialog>
+<dialog id="panel" aria-labelledby="panel-t"><div class="bh"><h2 id="panel-t"></h2><button type="button" class="btn sm" data-act="close-panel">Close</button></div>
+ <section id="c-runs" aria-label="Recent runs"><div id="runs"></div></section>
+ <section id="c-sched" aria-label="Schedule" hidden><div id="sched"></div><div id="pushes"></div></section></dialog>
 <dialog id="ask"><form method="dialog"><b id="asktitle"></b><div id="askhint" class="mute small"></div><div id="askextra"></div><textarea id="asktext" rows="3"></textarea>
  <div class="acts"><button class="btn" value="cancel" type="submit" formnovalidate>Cancel</button><button class="btn primary" value="ok" id="askok" type="submit">OK</button></div></form></dialog>
 <dialog id="graph"><div class="bh"><h2>Plan usage this week</h2><button type="button" class="btn sm" data-act="close-graph">Close</button></div>
