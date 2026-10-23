@@ -164,9 +164,9 @@ class CliTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def cli(self, *args, check=True, **env):
-        p = subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True,
-                           env=dict(self.env, **env), stdin=subprocess.DEVNULL)
+    def cli(self, *args, check=True, input=None, **env):
+        p = subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True, input=input,
+                           env=dict(self.env, **env), stdin=None if input is not None else subprocess.DEVNULL)
         if check and p.returncode != 0:
             raise AssertionError(f"exit {p.returncode}\n{p.stdout}\n{p.stderr}")
         return p
@@ -334,23 +334,46 @@ class CliTest(unittest.TestCase):
         self.cli("learn", self.proj)
         home = self.cli("home").stdout.strip()
         deny = lambda: json.load(open(os.path.join(home, ".claude", "settings.json")))["permissions"]["deny"]
+        for mode in ("worker", "off"):  # worker is the default: the orchestrator never loads the Artifact tools
+            if mode == "off":
+                self.assertIn("artifacts: off", self.cli("config", "artifacts", "off").stdout)
+            for tool in ("Artifact", "ArtifactComments", "ArtifactData"):
+                self.assertIn(tool, deny())
+            self.assertIn(f"artifacts: {mode}", self.cli("doctor", check=False).stdout)
+        self.assertIn("artifacts: direct", self.cli("config", "artifacts", "direct").stdout)
         self.assertNotIn("Artifact", deny())
         self.assertNotIn("ArtifactComments", deny())
         self.assertIn("ArtifactData", deny())
-        self.assertIn("artifacts: on", self.cli("doctor", check=False).stdout)
-        self.assertIn("artifacts: off", self.cli("config", "artifacts", "off").stdout)
+        self.assertIn("artifacts: worker", self.cli("config", "artifacts", "worker").stdout)
         self.assertIn("Artifact", deny())
-        self.assertIn("ArtifactComments", deny())
-        self.assertIn("ArtifactData", deny())
-        self.assertIn("artifacts: off", self.cli("doctor", check=False).stdout)
-        self.cli("config", "artifacts", "on")
-        self.assertNotIn("Artifact", deny())
-        self.assertIn("ArtifactData", deny())
         with open(os.path.join(os.path.dirname(CLI), "..", "templates", "guide.md")) as fh:
             guide = fh.read()
-        for text in ("Artifact tool", "private by default", 'lean-agent handoff --kind fyi "artifact: <url> <title>"',
+        for text in ("lean-agent publish", "never with your own tools", "private by default",
                      "Never put secrets, tokens or credentials", "`lean-agent doc write` stays for local files"):
             self.assertIn(text, guide)
+
+    def test_publish_runs_a_worker_with_the_artifact_tool_and_reuses_the_url_by_title(self):
+        self.cli("learn", self.proj)
+        env = dict(FAKE_ANSWER="Published.\nARTIFACT https://artifacts.example/a1")
+        out = self.cli("publish", "Weekly plan", "--task-file", "-", input="plan text", **env).stdout
+        self.assertIn("artifact: https://artifacts.example/a1", out)
+        call = self.calls()[-1]
+        argv = call["argv"]
+        self.assertIn("Artifact", argv[argv.index("--allowedTools") + 1].split(","))
+        self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
+        self.assertIn("plan text", call["task"])
+        self.assertNotIn("existing artifact", call["task"])
+        self.assertIn("artifact: https://artifacts.example/a1 Weekly plan", self.cli("handoff").stdout)
+        env["FAKE_ANSWER"] = "Updated.\nARTIFACT https://artifacts.example/a1"
+        self.cli("publish", "Weekly plan", "--as-is", "--task-file", "-", input="new text", **env)
+        call = self.calls()[-1]
+        self.assertIn("Update the existing artifact https://artifacts.example/a1", call["task"])
+        self.assertEqual(call["argv"][call["argv"].index("--model") + 1], "haiku")
+        self.assertEqual(self.cli("handoff").stdout.count("artifact: https://artifacts.example/a1"), 1)
+        self.cli("publish", "Other", "--task-file", "-", input="x", **env)  # another title: no URL reused
+        self.assertNotIn("existing artifact", self.calls()[-1]["task"])
+        self.cli("config", "artifacts", "off")
+        self.assertNotEqual(self.cli("publish", "Weekly plan", "--task-file", "-", input="x", check=False).returncode, 0)
 
     def test_guide_has_the_strict_orchestrator_rules(self):
         with open(os.path.join(os.path.dirname(CLI), "..", "templates", "guide.md")) as fh:

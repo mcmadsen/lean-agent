@@ -5504,8 +5504,14 @@ def attribution():
     return load_json(home("config.json"), {}).get("attribution")
 
 
-def artifacts_on():
-    return load_json(home("config.json"), {}).get("artifacts", "on") != "off"
+ARTIFACT_MODES = ("off", "worker", "direct")
+
+
+def artifacts_mode():
+    """off | worker (default: `lean-agent publish` starts a worker that has the Artifact tool) | direct (the
+    orchestrator has the Artifact tools itself, which adds ~17k tokens to every turn). The old value "on" is direct."""
+    v = load_json(home("config.json"), {}).get("artifacts", "worker")
+    return "direct" if v == "on" else v if v in ARTIFACT_MODES else "worker"
 
 
 def strict_on():
@@ -5531,7 +5537,7 @@ def orchestrator_settings(existing):
     servers = [n for n, v in lean_mcp.discover().items() if v["source"] in ("user", "desktop")]
     trim = load_json(home("context-trim.json"), {})  # what `lean-agent context --apply` took out
     deny = set(ORCHESTRATOR_DENY)
-    if artifacts_on():
+    if artifacts_mode() == "direct":
         deny -= {"Artifact", "ArtifactComments"}  # ArtifactData stays denied
     perms["deny"] = sorted(deny | set(trim.get("deny") or [])
                            | {lean_mcp.tool_prefix(n).rstrip("_") for n in servers})
@@ -5788,7 +5794,7 @@ def cmd_doctor(a):
                + ", ".join(f"{os.path.basename(f)} ~{t:,}" for f, t in loaded),
                "keep files other than lean-agent's guide out: lean-agent doctor --fix (refreshes the excludes)")
     report(is_trusted(h), "orchestrator home is trusted", "lean-agent trust")
-    report(True, f"artifacts: {'on' if artifacts_on() else 'off'} (lean-agent config artifacts on|off)")
+    report(True, f"artifacts: {artifacts_mode()} (lean-agent config artifacts off|worker|direct)")
     report(True, f"strict orchestrator: {'on' if strict_on() else 'off'} (lean-agent config strict on|off)")
 
     slug = default_project(path)
@@ -6862,7 +6868,12 @@ def cmd_config(a):
         print(f"clear-at: {f'{n:,} tokens' if n else 'off'} · `up` has the orchestrator checkpoint, then clears its context, "
               "when a finished turn leaves it above this" + (" (LEAN_AGENT_CLEAR_AT is set and wins)" if os.environ.get("LEAN_AGENT_CLEAR_AT") else ""))
         return 0
-    if a.value not in (None, "on", "off"):
+    if a.name == "artifacts":
+        if a.value == "on":
+            a.value = "direct"
+        if a.value not in (None, *ARTIFACT_MODES):
+            die("artifacts takes off, worker or direct")
+    elif a.value not in (None, "on", "off"):
         die(f"{a.name} takes on or off")
     if a.name == "strict":
         if a.value:
@@ -6881,9 +6892,13 @@ def cmd_config(a):
         settings = os.path.join(h, ".claude", "settings.json")
         if os.path.isdir(os.path.join(h, ".claude")):
             save_json(settings, orchestrator_settings(load_json(settings, {})))
-    print(f"artifacts: {'on' if artifacts_on() else 'off'} · the orchestrator "
-          + ("may create and comment on artifacts (private until the user shares them)" if artifacts_on() else
-             "can't use the Artifact tools"))
+    mode = artifacts_mode()
+    print(f"artifacts: {mode} · " + {
+        "worker": "the orchestrator publishes through `lean-agent publish` (a worker has the Artifact tool; private "
+                  "until the user shares them)",
+        "direct": "the orchestrator has the Artifact tools itself (private until the user shares them; adds ~17k "
+                  "tokens to every turn)",
+        "off": "no artifacts: the orchestrator can't use the Artifact tools and `publish` refuses"}[mode])
     return 0
 
 
@@ -7731,6 +7746,65 @@ def cmd_grep_log(a):
     return 0 if hits else 1
 
 
+PUBLISH_RULE = """\
+You publish one artifact for the orchestrator, with the Artifact tool. Publish a new private artifact{update}.
+Never put secrets, tokens or credentials in it. {content}
+End your answer with one line `ARTIFACT <url>` (the artifact's URL), and nothing after it.
+"""
+ARTIFACT_NOTE_RE = re.compile(r"^artifact: (\S+) (.*)$")
+
+
+def artifact_note_url(title):
+    """The URL of the artifact published under this title, from the hand-off note `publish` recorded."""
+    import compact_hook
+    for n in reversed(compact_hook.load_notes()):
+        m = ARTIFACT_NOTE_RE.match(n.get("text") or "") if n.get("kind") == "fyi" else None
+        if m and m.group(2) == title:
+            return m.group(1)
+    return None
+
+
+def cmd_publish(a):
+    """Publish (or update) an artifact through a worker, so the orchestrator never loads the Artifact tools."""
+    mode = artifacts_mode()
+    if mode == "off":
+        die("artifacts are off (lean-agent config artifacts worker)")
+    title = " ".join(a.title.split())
+    content = sys.stdin.read().strip() if a.task_file == "-" else read_text(a.task_file).strip() if a.task_file else ""
+    if not content:
+        die("say what to publish, or give the content: --task-file - <<'EOF' ... EOF")
+    url = a.url or artifact_note_url(title)
+    projs = projects()
+    ref = a.project or next((r["project"] for r in reversed(ledger()) if r.get("project") in projs), None) \
+        or next(iter(projs), None)
+    if not ref:
+        die("no project to run the worker in: --project <p> (or lean-agent learn <path>)")
+    slug, _ = resolve_project(ref)
+    task = (f"Title: {title}\n"
+            + (f"Update the existing artifact {url}: read it first, then change it.\n" if url else "")
+            + ("The content, to publish as it is:\n" if a.as_is else "What to publish:\n") + content)
+    rule = PUBLISH_RULE.format(
+        update=f", or update the artifact at {url} (read it first with the Artifact tool)" if url else "",
+        content="Publish the content exactly as given." if a.as_is else
+        "Read what you need in the project to write it, then publish it.")
+    ns = argparse.Namespace(resume=None, task=[task], task_file=None, model="haiku" if a.as_is else "sonnet",
+                            why="publish an artifact for the orchestrator", cards="none", card_list=None, project=slug,
+                            read_only=False, chrome=None, mcp=None, tools=WORKER_TOOLS + ",Artifact",
+                            allow_send=None, max_turns=20, max_usd=1.0, max_context=2000, max_cards=4, ttype="write",
+                            role="publisher", effort="low", role_rule=rule)
+    rc = cmd_run(ns)
+    run = next((r for r in reversed(ledger()) if r.get("role") == "publisher" and r["project"] == slug), None)
+    m = re.search(r"(?m)^ARTIFACT (\S+)\s*$", parse_feedback(run_result_text(run))[0] if run else "")
+    if not m:
+        die("the worker didn't report an artifact URL; see its reply above", rc or 1)
+    new = m.group(1)
+    print(f"artifact: {new}")
+    if artifact_note_url(title) != new:
+        a2 = argparse.Namespace(note=f"artifact: {new} {title}", kind="fyi", done=None, hours=24)
+        cmd_handoff(a2)
+    return 0
+
+
 def cmd_handoff(a):
     import compact_hook
     notes = compact_hook.load_notes()
@@ -7868,7 +7942,18 @@ def build_parser():
     s = sub.add_parser("brief", help="what a fresh session starts from: the latest checkpoint, then the hand-off")
     s.set_defaults(fn=cmd_brief)
 
-    s = sub.add_parser("config", help="switches: artifacts on|off (may the orchestrator publish artifacts; default on), "
+    s = sub.add_parser("publish", help="publish (or update) a private artifact through a small worker that has the "
+                       "Artifact tool; prints its URL and records it as a hand-off note, so a later call with the same "
+                       "title updates it. The content or what to publish comes on stdin: --task-file -")
+    s.add_argument("title")
+    s.add_argument("--url", help="update this existing artifact instead of making a new one")
+    s.add_argument("--project", "-p", help="the project the worker runs in (default: the latest run's)")
+    s.add_argument("--task-file", help="what to publish, or the content ('-' = stdin)")
+    s.add_argument("--as-is", action="store_true", help="the input is the content itself: publish it unchanged (haiku)")
+    s.set_defaults(fn=cmd_publish)
+
+    s = sub.add_parser("config", help="switches: artifacts off|worker|direct (worker: publish through `lean-agent publish`, the default; "
+                       "direct: the orchestrator has the Artifact tools itself), "
                        "strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "clear-at N (clear the orchestrator's context above N tokens after a checkpoint; default 40000, 0 = off)")
     s.add_argument("name", choices=["artifacts", "strict", "clear-at"])
