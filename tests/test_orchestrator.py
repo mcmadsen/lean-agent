@@ -508,6 +508,29 @@ class CliTest(unittest.TestCase):
         self.cli("do", "proj", "item-states", "--todo", "new")
         self.assertEqual(self.todo_count("recipe item-states"), 1)
 
+    def test_an_explicit_todo_wins_on_a_re_review(self):
+        g = self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        bad = json.dumps(dict(REUSE_CHECKED, verdict="changes-requested", checks=[], findings=[
+            {"severity": "major", "file": "api/totals.py", "line": 3, "issue": "rounding drops cents"}]))
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        self.cli("review", "proj", "--head", "feature", "--base", "main", "--todo", "new", check=False, FAKE_REVIEW=bad)
+        self.cli("todo", "add", "Another item")
+        g("checkout", "-q", "feature")
+        with open(os.path.join(self.proj, "api", "totals.py"), "a") as fh:
+            fh.write("# fix\n")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "fix")
+        g("checkout", "-q", "main")
+        self.cli("review", "proj", "--head", "feature", "--base", "main", "--todo", "2", check=False, FAKE_REVIEW=approve)
+        self.assertEqual([r["todo"] for r in self.ledger() if r.get("role") == "reviewer"], [1, 2])
+
+    def test_a_refused_launch_leaves_no_todo(self):
+        self.cli("learn", self.proj)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--todo", "new", "--allow-cmd", "x",
+                     "t", check=False)  # --allow-cmd without --read-only: refused
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(self.todo_count("#1"), 0)
+
     def test_a_refused_todo_new_launch_leaves_no_item_and_advise_publish_have_their_own_run(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "-m", "haiku", "--todo", "new", "t", check=False)  # no --why: refused
