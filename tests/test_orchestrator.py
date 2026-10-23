@@ -36,6 +36,9 @@ FAKE_CLAUDE = textwrap.dedent("""\
     if sys.argv[1:3] == ["mcp", "get"]:
         print(os.environ.get("FAKE_MCP_GET", ""))
         sys.exit(0)
+    if sys.argv[1:2] == ["--version"]:
+        print(os.environ.get("FAKE_VERSION", "1.0.0"))
+        sys.exit(0)
     if sys.argv[1:2] == ["plugin"]:
         with open(os.environ["FAKE_LOG"], "a") as fh:
             fh.write(json.dumps({"plugin": sys.argv[1:]}) + "\\n")
@@ -65,8 +68,11 @@ FAKE_CLAUDE = textwrap.dedent("""\
                     extra += 400 * len(names)
         if os.environ.get("FAKE_PROBE_TOOLS"):
             tools = json.loads(os.environ["FAKE_PROBE_TOOLS"])
-        print(json.dumps({"type": "system", "subtype": "init", "tools": tools, "mcp_servers": servers,
-                          "agents": json.loads(os.environ.get("FAKE_PROBE_AGENTS") or "[]")}))
+        if os.environ.get("FAKE_PROBE_SERVERS"):
+            servers = json.loads(os.environ["FAKE_PROBE_SERVERS"])
+        if not os.environ.get("FAKE_PROBE_NOINIT"):
+            print(json.dumps({"type": "system", "subtype": "init", "tools": tools, "mcp_servers": servers,
+                              "agents": json.loads(os.environ.get("FAKE_PROBE_AGENTS") or "[]")}))
         if os.environ.get("FAKE_PLAN"):  # what Claude reports about the plan, as in real stream-json output
             print(json.dumps({"type": "rate_limit_event", "rate_limit_info": json.loads(os.environ["FAKE_PLAN"])}))
         print(json.dumps({"type": "result", "usage": {"input_tokens": 8000 + (3000 if chrome else 0) + extra}}))
@@ -90,7 +96,8 @@ FAKE_CLAUDE = textwrap.dedent("""\
     if os.environ.get("FAKE_WORKER_TOOLS"):  # the worker's init event; a worker stopped there never logs a turn
         import time
         print(json.dumps({"type": "system", "subtype": "init", "session_id": "sess-1",
-                          "tools": json.loads(os.environ["FAKE_WORKER_TOOLS"])}), flush=True)
+                          "tools": json.loads(os.environ["FAKE_WORKER_TOOLS"]),
+                          "mcp_servers": json.loads(os.environ.get("FAKE_WORKER_SERVERS") or "[]")}), flush=True)
         time.sleep(float(os.environ.get("FAKE_INIT_SLEEP", "0")))
     with open(log, "a") as fh:
         fh.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "task": task,
@@ -385,19 +392,24 @@ class CliTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
         self.assertEqual(argv[argv.index("--tools") + 1], "Read,Glob,Grep,ToolSearch")
         allowed = argv[argv.index("--allowedTools") + 1].split(",")
-        self.assertEqual(sorted(allowed), sorted(["Read", "Glob", "Grep", "ToolSearch", "mcp__claude_ai_Claude_Docs",
-                                                  "mcp__Claude_Docs"]))
+        docs = [f"{p}__{t}" for p in ("mcp__claude_ai_Claude_Docs", "mcp__Claude_Docs")
+                for t in ("batch", "guide", "update", "create", "read", "query", "export")]
+        self.assertEqual(sorted(allowed), sorted(["Read", "Glob", "Grep", "ToolSearch"] + docs))
+        self.assertFalse([t for t in allowed if t.endswith("__delete") or t in ("mcp__claude_ai_Claude_Docs",
+                                                                              "mcp__Claude_Docs")])
         self.assertEqual(argv[argv.index("--disallowedTools") + 1].split(","),
                          ["mcp__claude_ai_Claude_Docs__delete", "mcp__Claude_Docs__delete"])
         self.assertTrue(json.loads(argv[argv.index("--settings") + 1])["disableAllHooks"])
         self.assertIn("Never delete a doc", call["append"])
         self.assertIn("one `batch` call", call["append"])
         self.assertEqual(self.ledger()[-1]["role"], "publisher")
+        self.assertTrue(self.ledger()[-1]["read_only"])
         self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
         self.assertIn("plan text", call["task"])
         self.assertNotIn("existing doc", call["task"])
         self.assertIn("artifact: https://claude.ai/artifact/a1 Weekly plan", self.cli("handoff").stdout)
-        self.assertIn("publish: Claude Docs connector available", self.cli("doctor", check=False).stdout)
+        self.assertIn("publish: Claude Docs connector available", self.cli(
+            "doctor", check=False, FAKE_PROBE_TOOLS=self.DOCS_TOOLS).stdout)
         env["FAKE_ANSWER"] = "Updated.\nhttps://claude.ai/artifact/a1"
         self.cli("publish", "Weekly plan", "--as-is", "--task-file", "-", input="new text", **env)
         call = self.calls()[-1]
@@ -429,6 +441,32 @@ class CliTest(unittest.TestCase):
         self.assertEqual((self.ledger()[-1]["role"], self.ledger()[-1]["status"]), ("publisher", "error"))
         self.assertIn("publish: Claude Docs connector missing", self.cli("doctor", check=False).stdout)
 
+    def test_publish_continues_when_the_docs_server_is_connecting_without_tools(self):
+        self.cli("learn", self.proj)
+        out = self.cli("publish", "Weekly plan", "--as-is", "--task-file", "-", input="plan", check=False,
+                       FAKE_WORKER_TOOLS=json.dumps(["Read", "ToolSearch"]), FAKE_ANSWER="ok\nhttps://claude.ai/artifact/p1",
+                       FAKE_WORKER_SERVERS=json.dumps([{"name": "claude.ai Claude Docs", "status": "pending"}])).stdout
+        self.assertIn("doc: https://claude.ai/artifact/p1", out)
+        self.assertEqual(len(self.calls()), 1)  # the run was not stopped at init
+
+    def test_publish_fallback_without_as_is_composes_the_document(self):
+        self.cli("learn", self.proj)
+        p = self.cli("publish", "Open questions", "--task-file", "-", input="a list of the open db questions",
+                     check=False, FAKE_WORKER_TOOLS=json.dumps(["Read"]), FAKE_INIT_SLEEP="2",
+                     FAKE_ANSWER="## Questions\n- which db?")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Claude Docs connector not available to workers", p.stderr)
+        compose = self.calls()[-1]
+        self.assertIn("--safe-mode", compose["argv"])
+        self.assertIn("Write the document the request below describes, as Markdown, in your reply only", compose["task"])
+        self.assertIn("a list of the open db questions", compose["task"])
+        self.assertEqual(len(self.calls()), 1)  # the publisher stopped at init; only the composer ran a turn
+        with open(p.stdout.strip().splitlines()[-1]) as fh:
+            text = fh.read()
+        self.assertTrue(text.startswith("# Open questions\n\n## Questions\n- which db?"))
+        self.assertNotIn("a list of the open db questions", text)
+        self.assertNotIn("LEAN-FEEDBACK", text)
+
     def test_publish_reply_without_a_link_fails(self):
         self.cli("learn", self.proj)
         p = self.cli("publish", "Weekly plan", "--task-file", "-", input="plan", check=False,
@@ -437,6 +475,35 @@ class CliTest(unittest.TestCase):
         self.assertIn("publish failed: the worker's reply has no Claude Docs link", p.stderr)
         self.assertNotIn("doc:", p.stdout)
         self.assertNotIn("artifact:", self.cli("handoff").stdout)
+
+    def test_doctor_reports_unknown_without_an_init_event_and_always_reprobes(self):
+        out = self.cli("doctor", check=False, FAKE_PROBE_NOINIT="1").stdout
+        self.assertIn("publish: Claude Docs connector unknown (no init event)", out)
+        self.assertNotIn("connector missing", out)
+        self.cli("doctor", check=False, FAKE_PROBE_TOOLS=json.dumps(["Read", "mcp__Claude_Docs__guide"]))
+        out = self.cli("doctor", check=False, FAKE_PROBE_TOOLS=json.dumps(["Read"])).stdout  # a fresh cache is not used
+        self.assertIn("publish: Claude Docs connector missing", out)
+        out = self.cli("doctor", check=False, FAKE_PROBE_TOOLS=json.dumps(["Read"]),
+                       FAKE_PROBE_SERVERS=json.dumps([{"name": "claude.ai Claude Docs", "status": "connecting"}])).stdout
+        self.assertIn("publish: Claude Docs connector pending", out)
+
+    def test_publish_cache_is_ignored_when_stale_by_age_or_version(self):
+        self.cli("learn", self.proj)
+        self.cli("doctor", check=False, FAKE_PROBE_TOOLS=json.dumps(["Read"]))  # caches "missing"
+        env = dict(FAKE_WORKER_TOOLS=self.DOCS_TOOLS, FAKE_ANSWER="ok\nhttps://claude.ai/artifact/c1")
+        p = self.cli("publish", "T1", "--as-is", "--task-file", "-", input="x", check=False, **env)
+        self.assertNotEqual(p.returncode, 0)  # fresh cache: fallback without a launch
+        self.assertFalse(os.path.exists(self.log) and self.calls())
+        out = self.cli("publish", "T1", "--as-is", "--task-file", "-", input="x", FAKE_VERSION="2.0.0", **env).stdout
+        self.assertIn("doc: https://claude.ai/artifact/c1", out)  # another version: re-probed by launching
+        path = os.path.join(self.env["LEAN_AGENT_HOME"], "publish-check.json")
+        with open(path) as fh:
+            rec = json.load(fh)
+        rec.update(docs="missing", at=rec["at"] - 90000)
+        with open(path, "w") as fh:
+            json.dump(rec, fh)
+        out = self.cli("publish", "T2", "--as-is", "--task-file", "-", input="x", FAKE_VERSION="2.0.0", **env).stdout
+        self.assertIn("doc: https://claude.ai/artifact/c1", out)  # older than a day: launched again
 
     def test_doctor_checks_the_publisher_path_without_a_turn(self):
         out = self.cli("doctor", check=False, FAKE_PROBE_TOOLS=json.dumps(["Read", "mcp__Claude_Docs__guide"])).stdout

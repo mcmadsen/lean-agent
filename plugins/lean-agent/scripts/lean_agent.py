@@ -61,7 +61,16 @@ READONLY_TOOLS = "Read,Glob,Grep"
 PUBLISH_TOOLS = READONLY_TOOLS + ",ToolSearch"
 DOCS_SERVERS = ("mcp__claude_ai_Claude_Docs", "mcp__Claude_Docs")  # the connector's name differs by environment
 DOCS_TOOL_RE = re.compile(r"^mcp__(claude_ai_)?Claude_Docs__")
+DOCS_ALLOWED = [f"{s}__{t}" for s in DOCS_SERVERS for t in ("batch", "guide", "update", "create", "read", "query", "export")]
 PUBLISH_ISOLATION = ["--setting-sources", "", "--disallowedTools", ",".join(s + "__delete" for s in DOCS_SERVERS)]
+PUBLISH_SETTINGS = {"disableAllHooks": True}  # no Bash to guard, and no hook of any plugin or setting runs in it
+
+
+def publisher_parts():
+    """(isolation, tools, allowed, permission mode, settings) of the publisher: the one place its launch flags are
+    built, for `publish` (via cmd_run) and the doctor probe."""
+    return (list(PUBLISH_ISOLATION), PUBLISH_TOOLS, PUBLISH_TOOLS.split(",") + DOCS_ALLOWED, "default",
+            dict(PUBLISH_SETTINGS))
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target", "__pycache__", ".next", "vendor"}
 STOPWORDS = set("the and for with that this from into have has are was were will would should could "
                 "you your our their not but all any can use using used make add fix get set run".split())
@@ -1247,7 +1256,7 @@ def duplicate_launch_guard(a, model, task):
     return key
 
 
-NO_RESUME_ROLES = ("librarian", "advisor", "publisher", "gap-decider")  # one-shot helpers with their own grants
+NO_RESUME_ROLES = ("librarian", "advisor", "publisher", "composer", "gap-decider")  # one-shot helpers with their own grants
 
 
 def latest_run_id(runs=None, ordinary=False):
@@ -1436,7 +1445,7 @@ def cmd_run(a):
     chrome_allowed, chrome_disallowed, chrome_profile = resolve_chrome(chrome_spec, project) if chrome_spec else ([], [], None)
     publisher = (getattr(a, "role", None) or (prev or {}).get("role")) == "publisher"
     if publisher:
-        isolation = list(PUBLISH_ISOLATION)
+        isolation = publisher_parts()[0]
     elif mcp_servers or chrome_spec:
         if mcp_servers:
             lean_mcp.write_config(mcp_path, mcp_servers)
@@ -1454,12 +1463,11 @@ def cmd_run(a):
         isolation = ["--safe-mode"]
     lean_json = os.path.join(PLUGIN_ROOT, "bin", "lean-json")
     if publisher:
-        allowed = PUBLISH_TOOLS.split(",") + list(DOCS_SERVERS)
-        permission_mode = "default"
+        _, _, allowed, permission_mode, _ = publisher_parts()
     elif read_only:
         allowed = READONLY_TOOLS.split(",") + [f"Bash(git -C {project} {sub}:*)" for sub in READONLY_GIT]
         allowed.append(f"Bash({lean_json}:*)")  # reads a file, prints a compact view
-        allowed +=[f"Bash({c}:*)" for c in allow_cmd + internal_cmd]  # read-only commands the orchestrator named, and the role's own
+        allowed += [f"Bash({c}:*)" for c in allow_cmd + internal_cmd]  # read-only commands the orchestrator named, and the role's own
         permission_mode = "default"
     else:
         allowed = [tools]
@@ -1491,8 +1499,8 @@ def cmd_run(a):
         hooks["PostToolUse"] = [{"matcher": "mcp__.*", "hooks": [{
             "type": "command", "timeout": 20,
             "command": f"python3 {json.dumps(os.path.join(HERE, 'mcp_trim_hook.py'))}"}]}]
-    if publisher:  # no Bash to guard, and no hook of any plugin or setting runs in it
-        flag_settings["disableAllHooks"] = True
+    if publisher:
+        flag_settings.update(publisher_parts()[4])
     else:
         flag_settings["hooks"] = hooks
     if flag_settings:
@@ -5861,7 +5869,7 @@ def cmd_doctor(a):
     report(True, f"artifacts: {artifacts_mode()} (lean-agent config artifacts off|worker|direct)")
     if artifacts_mode() == "worker":
         docs = publish_check()
-        report(True if docs == "available" else None, f"publish: Claude Docs connector {docs}",
+        report(True if docs == "available" else None, f"publish: Claude Docs connector {docs}" + (" (no init event)" if docs == "unknown" else ""),
                "turn claude.ai connectors on and connect Claude Docs; until then `publish` writes a local file")
     report(True, f"strict orchestrator: {'on' if strict_on() else 'off'} (lean-agent config strict on|off)")
 
@@ -7865,32 +7873,91 @@ def docs_tools(tools):
     return [t for t in tools or [] if isinstance(t, str) and DOCS_TOOL_RE.match(t)]
 
 
+DOCS_SERVER_RE = re.compile(r"claude[ _.]?docs", re.I)  # "claude.ai Claude Docs", "Claude_Docs", ...
+PUBLISH_CACHE_AGE = 86400
+
+
+def docs_server_alive(servers):
+    """True when a Claude Docs server is listed as connected or still connecting: claude.ai connectors can be
+    connecting at the init event, with their tools not listed yet."""
+    return any(isinstance(s, dict) and DOCS_SERVER_RE.search(str(s.get("name") or ""))
+               and str(s.get("status") or "").lower() in ("connected", "pending", "connecting") for s in servers or [])
+
+
+def claude_version():
+    try:
+        r = subprocess.run([os.environ.get("LEAN_AGENT_CLAUDE") or "claude", "--version"], capture_output=True,
+                           text=True, timeout=15, stdin=subprocess.DEVNULL)
+        return r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
 def publish_init_check(ev):
-    """The publisher's on_init: stops it before its first turn when its tools have no Claude Docs tool. The
-    outcome is kept for `lean-agent doctor`."""
+    """The publisher's on_init: stops it before its first turn when it has no Claude Docs tool and no Claude Docs
+    server that is connected or connecting. The outcome is kept for `lean-agent doctor` and `publish`."""
     found = docs_tools(ev.get("tools"))
-    save_json(home("publish-check.json"), {"ts": now_iso(), "docs": bool(found)})
-    return None if found else "no Claude Docs tool (mcp__claude_ai_Claude_Docs__*, mcp__Claude_Docs__*) in the worker's tools"
+    alive = docs_server_alive(ev.get("mcp_servers"))
+    save_json(home("publish-check.json"), {"ts": now_iso(), "docs": "available" if found else "pending" if alive
+                                           else "missing", "version": claude_version(), "at": time.time()})
+    return None if found or alive else \
+        "no Claude Docs tool (mcp__claude_ai_Claude_Docs__*, mcp__Claude_Docs__*) in the worker's tools"
+
+
+def publish_cached():
+    """The last init outcome ('available'|'pending'|'missing'), unless it is older than a day or was taken with
+    another `claude --version`."""
+    last = load_json(home("publish-check.json"), None)
+    if not isinstance(last, dict) or last.get("docs") not in ("available", "pending", "missing"):
+        return None
+    if time.time() - (last.get("at") or 0) > PUBLISH_CACHE_AGE or last.get("version") != claude_version():
+        return None
+    return last["docs"]
 
 
 def publish_check():
-    """'available' | 'missing': the last publish's init event, else a launch with the publisher's flags that is
-    stopped at its init event (no turn)."""
+    """'available' | 'pending' | 'missing' | 'unknown': always a fresh launch with the publisher's flags, stopped at
+    its init event (no turn); 'unknown' when it sent no init event."""
     import tempfile
-    last = load_json(home("publish-check.json"), None)
-    if not isinstance(last, dict):
-        cmd = [os.environ.get("LEAN_AGENT_CLAUDE") or "claude", "-p", "--output-format", "stream-json", "--verbose",
-               "--model", "haiku", *PUBLISH_ISOLATION, "--disable-slash-commands", "--tools", PUBLISH_TOOLS,
-               "--allowedTools", ",".join(PUBLISH_TOOLS.split(",") + list(DOCS_SERVERS)),
-               "--permission-mode", "default", "--max-turns", "1", "--settings", json.dumps({"disableAllHooks": True})]
-        with tempfile.TemporaryDirectory() as d:
-            try:
-                stream_worker(cmd, "Reply ok.", d, dict(os.environ), 60,
-                              on_init=lambda ev: publish_init_check(ev) or "checked")
-            except OSError:
-                return "missing"
-        last = load_json(home("publish-check.json"), {})
-    return "available" if last.get("docs") else "missing"
+    isolation, tools, allowed, mode, settings = publisher_parts()
+    cmd = [os.environ.get("LEAN_AGENT_CLAUDE") or "claude", "-p", "--output-format", "stream-json", "--verbose",
+           "--model", "haiku", *isolation, "--disable-slash-commands", "--tools", tools,
+           "--allowedTools", ",".join(allowed), "--permission-mode", mode, "--max-turns", "1",
+           "--settings", json.dumps(settings)]
+    seen = []
+    def on_init(ev):
+        seen.append(1)
+        publish_init_check(ev)
+        return "checked"
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            stream_worker(cmd, "Reply ok.", d, dict(os.environ), 60, on_init=on_init)
+        except OSError:
+            return "unknown"
+    return load_json(home("publish-check.json"), {}).get("docs", "unknown") if seen else "unknown"
+
+
+def publish_fallback(slug, title, content, as_is):
+    """The local file for the user to publish from the Claude app, when the connector is missing. Without --as-is
+    `content` is the request, not the document: a compose-only worker (no connector, --safe-mode) writes it."""
+    if not as_is:
+        ns = argparse.Namespace(resume=None, task=["Write the document the request below describes, as Markdown, "
+                                                   "in your reply only.\n\n" + content], task_file=None,
+                                model="sonnet", why="compose a document for the orchestrator", cards="none",
+                                card_list=None, project=slug, read_only=True, chrome=None, mcp=None, tools=None,
+                                allow_send=None, max_turns=20, max_usd=1.0, max_context=2000, max_cards=4,
+                                ttype="read", role="composer", effort="low", role_rule="")
+        rc, out, run = run_role(ns, quiet=True)
+        content = parse_feedback(run_result_text(run))[0].strip() if run else ""
+        if not content:
+            print(out, file=sys.stderr)
+            die("the compose worker returned no document; " + PUBLISH_MISSING, rc or 1)
+    path = home(slug, "publish", slugify(title) + ".md")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(f"# {title}\n\n{content}\n")
+    print(path)
+    die(PUBLISH_MISSING, 2)
 
 
 def artifact_note_url(title):
@@ -8074,14 +8141,11 @@ def cmd_publish(a):
                             project=slug, read_only=True, chrome=None, mcp=None, tools=PUBLISH_TOOLS,
                             allow_send=None, max_turns=20, max_usd=1.0, max_context=2000, max_cards=4, ttype="write",
                             role="publisher", effort="low", role_rule=rule)
+    if publish_cached() == "missing":  # a recent init event said so: no launch
+        publish_fallback(slug, title, content, a.as_is)
     rc, _, run = run_role(ns)
     if run and run.get("init_stop"):  # the worker had no Claude Docs tool: stopped before its first turn
-        path = home(slug, "publish", slugify(title) + ".md")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
-            fh.write(f"# {title}\n\n{content}\n")
-        print(path)
-        die(PUBLISH_MISSING, 2)
+        publish_fallback(slug, title, content, a.as_is)
     links = DOC_LINK_RE.findall(parse_feedback(run_result_text(run))[0] if run else "")
     if not links:
         die("publish failed: the worker's reply has no Claude Docs link (https://claude.ai/artifact/...); "
