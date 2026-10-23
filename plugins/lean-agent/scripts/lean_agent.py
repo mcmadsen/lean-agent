@@ -7871,7 +7871,7 @@ PUBLISH_UPDATE = ("Update the existing doc {url}: read it first, then change it 
                   "don't create a new one.")
 DOC_LINK_RE = re.compile(r"https://claude\.ai/artifact/[\w\-./?=&#%]+")
 PUBLISH_MISSING = ("Claude Docs connector not available to workers (check that claude.ai connectors are on and "
-                   "Claude Docs is connected; after connecting Claude Docs, run `lean-agent doctor` to re-check); "
+                   "Claude Docs is connected; run `lean-agent doctor` to re-check, or wait 10 minutes); "
                    "publish this file from the Claude app")
 ARTIFACT_NOTE_RE = re.compile(r"^artifact: (\S+) (.*)$")
 
@@ -7881,7 +7881,7 @@ def docs_tools(tools):
 
 
 DOCS_SERVER_RE = re.compile(r"claude[ _.]?docs", re.I)  # "claude.ai Claude Docs", "Claude_Docs", ...
-PUBLISH_CACHE_AGE = 600  # doctor re-probes on every run and refreshes the cache
+PUBLISH_CACHE_AGE = 600  # a "missing" result stops launches for 10 minutes (artifacts mode worker); `lean-agent doctor` re-probes now
 
 
 def docs_server_alive(servers):
@@ -8157,7 +8157,7 @@ def cmd_publish(a):
     if run and run.get("init_stop"):  # the worker had no Claude Docs tool: stopped before its first turn
         publish_fallback(slug, title, content, a.as_is, bool(url))
     links = DOC_LINK_RE.findall(parse_feedback(run_result_text(run))[0] if run else "")
-    if not links and load_json(home("publish-check.json"), {}).get("docs") == "pending":
+    if not links and rc == 0 and load_json(home("publish-check.json"), {}).get("docs") == "pending":
         publish_fallback(slug, title, content, a.as_is, bool(url))  # the server stayed pending: no Docs tool was seen
     if not links:
         die("publish failed: the worker's reply has no Claude Docs link (https://claude.ai/artifact/...); "

@@ -507,18 +507,22 @@ class CliTest(unittest.TestCase):
 
     def test_publish_treats_failed_or_unrelated_servers_as_missing(self):
         self.cli("learn", self.proj)
+        check = os.path.join(self.env["LEAN_AGENT_HOME"], "publish-check.json")
         for servers in ([{"name": "claude.ai Claude Docs", "status": "failed"}],
                         [{"name": "claude.ai Claude Docs", "status": "needs-auth"}],
                         [{"name": "other_server", "status": "connected"}]):
+            if os.path.exists(check):
+                os.remove(check)  # a cached "missing" would skip the launch
             p = self.cli("publish", "T", "--as-is", "--task-file", "-", input="x", check=False,
                          FAKE_WORKER_TOOLS=json.dumps(["Read"]), FAKE_WORKER_SERVERS=json.dumps(servers),
                          FAKE_INIT_SLEEP="2", FAKE_ANSWER="https://claude.ai/artifact/never")
             self.assertNotEqual(p.returncode, 0)
             self.assertIn("Claude Docs connector not available", p.stderr)
             self.assertIn("lean-agent doctor", p.stderr)
-            with open(os.path.join(self.env["LEAN_AGENT_HOME"], "publish-check.json")) as fh:
+            self.assertTrue(os.path.exists(check))  # only a launched worker's init event rewrites the record
+            with open(check) as fh:
                 self.assertEqual(json.load(fh)["docs"], "missing")
-        self.assertFalse(os.path.exists(self.log) and self.calls())
+        self.assertFalse(os.path.exists(self.log) and self.calls())  # stopped at init: no turn logged
 
     def test_publish_falls_back_when_the_server_stayed_pending_and_no_link_came(self):
         self.cli("learn", self.proj)
