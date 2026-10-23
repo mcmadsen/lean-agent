@@ -34,18 +34,20 @@ MEMORY_MESSAGE_RE = r"^#[ \t]+\S"  # '# keep this', not '#12 is failing' or '#ta
 COMMAND_PROMPT_RE = r"^/(memory|init)(\s|$)"
 
 
+def in_home_or_service(cwd, home):
+    """Is this the orchestrator (cwd in the lean-agent home) or the service session?"""
+    return cwd == home or cwd.startswith(home + os.sep) or os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1"
+
+
 def prompt_needs_hook(event):
     """Could the UserPromptSubmit hook act on this prompt here? Only the orchestrator home or the service session,
     and only a '# ' memory message or /memory, /init."""
-    import re
     prompt = str(event.get("prompt") or "").strip()
     if not (re.match(MEMORY_MESSAGE_RE, prompt) or re.match(COMMAND_PROMPT_RE, prompt)):
         return False
-    if os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1":
-        return True
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     home = os.path.realpath(os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent")))
-    return cwd == home or cwd.startswith(home + os.sep)
+    return in_home_or_service(cwd, home)
 
 
 STDIN = None
@@ -523,7 +525,7 @@ def main():
     if event.get("hook_event_name") == "UserPromptSubmit":
         cwd = os.path.realpath(event.get("cwd") or os.getcwd())
         home = os.path.realpath(usage.lean_home())
-        if ((cwd == home or cwd.startswith(home + os.sep) or os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1")
+        if (in_home_or_service(cwd, home)
                 and not cwd.startswith(os.path.join(home, "work") + os.sep) and strict_on(usage.lean_home())):
             prompt_hook(event)
         return 0

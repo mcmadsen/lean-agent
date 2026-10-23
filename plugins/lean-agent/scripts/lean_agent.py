@@ -1246,7 +1246,7 @@ def latest_run_id(runs=None, ordinary=False):
     """The id of the latest run in `runs` (default: the whole ledger); dies when there is none. `ordinary` skips
     role runs (reviewers, librarian, advisor ...): `run --resume last` is for the orchestrator's own work."""
     runs = [r for r in (ledger() if runs is None else runs) if not (ordinary and r.get("role"))]
-    return runs[-1]["id"] if runs else die("no runs yet")
+    return runs[-1]["id"] if runs else die("no ordinary runs yet (only reviewer/helper runs)" if ordinary and ledger() else "no runs yet")
 
 
 def new_todo(slug, title):
@@ -1259,14 +1259,6 @@ def new_todo(slug, title):
     save_json(home("todo.json"), data)
     print(f"todo #{data['next'] - 1}: {title}", flush=True)
     return data["next"] - 1
-
-
-def settle_todo(a, slug, title):
-    """`--todo new` becomes a real queue item once, in the outermost entry point, so no attempt below makes
-    another; a.todo is the number afterwards."""
-    if getattr(a, "todo", None) == "new":
-        a.todo = new_todo(slug, title)
-    return getattr(a, "todo", None)
 
 
 def cmd_run(a):
@@ -1400,6 +1392,7 @@ def cmd_run(a):
     todo_id = (prev or {}).get("todo") or getattr(a, "todo", None)
     if todo_id == "new":  # the run's own queue item, named after its --why: the orchestrator never runs `todo add`
         todo_id = new_todo(slug, getattr(a, "why", None) or task.splitlines()[0])
+        a.todo = todo_id
     if todo_id is not None and not (prev or {}).get("todo"):
         data = todos()
         t = next((x for x in data["items"] if x["id"] == todo_id), None)
@@ -1846,9 +1839,6 @@ def run_escalating(a):
     if a.task == ["-"] or a.task_file == "-" or (not a.task and a.task_file is None and not sys.stdin.isatty()):
         a.task, a.task_file = [sys.stdin.read().strip()], None  # read once, for every attempt
     rc = 1
-    if getattr(a, "todo", None) == "new":  # once, not once per attempt
-        task = (" ".join(a.task) if a.task else read_text(a.task_file)).strip()
-        settle_todo(a, resolve_project(a.project)[0], a.why or (task.splitlines() or [f"escalation {'/'.join(models)}"])[0])
     print(f"escalate: {' -> '.join(models)} (the next model only if a run fails)", flush=True)
     for i, model in enumerate(models):
         b = copy.copy(a)
@@ -1856,6 +1846,7 @@ def run_escalating(a):
         b.why = a.why or f"escalation {'/'.join(models)}"
         LAST_RUN[:] = []
         rc = cmd_run(b)
+        a.todo = b.todo  # a `new` item is made by the first attempt that launches, and the later ones share it
         last = LAST_RUN[0] if LAST_RUN else {}
         if done_ok(last) or last.get("status") == "partial" or i == len(models) - 1:
             return rc
@@ -3289,7 +3280,6 @@ def decide_gaps(a):
         return 0
     listing = "\n".join(f"- {gid} {g.get('file', '?')}{':' + str(g['line']) if g.get('line') else ''}: "
                         f"{str(g.get('what', ''))[:300]}" for gid, g in open_gaps)
-    settle_todo(a, slug, "decide the known gaps from the project's cards and code")
     ns = argparse.Namespace(resume=None, task=[f"Decide the open known gaps of review {last['run']} "
                                                f"({last.get('branch') or last.get('ref') or slug})."],
                             task_file=None, model="sonnet", todo=getattr(a, "todo", None),
@@ -3482,10 +3472,8 @@ def review_main(a):
         if risk and not getattr(a, "reviewer_model", None):
             print(f"review: the changes since are high-risk ({'; '.join(risk)}): {delta_model} again", flush=True)
         meta["after"] = {"run": prev["id"], "head": old_head}
-        if not prev.get("todo"):
-            settle_todo(a, slug, f"re-review after fixes ({effort} effort, fresh context)")
         ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=delta_model,
-                                todo=getattr(a, "todo", None) or prev.get("todo"),
+                                todo=prev.get("todo") or getattr(a, "todo", None),
                                 why=f"re-review after fixes ({effort} effort, fresh context)", cards=None,
                                 card_list=cards, project=slug, read_only=True, chrome=None, mcp=None, tools=None,
                                 allow_send=None, max_turns=a.max_turns, max_usd=a.max_usd, max_context=a.max_context,
@@ -3583,7 +3571,6 @@ def review_main(a):
             "hunks": changed_hunks(path, [merge_base, sha] if mode == "ref" else [merge_base]),
             "edited_tests": focus["tests"], "independent": bool(a.independent), "gaps": focus.get("gaps") or [],
             "goal": getattr(a, "goal", None), "ci_parity": focus.get("ci_parity") or []}
-    settle_todo(a, slug, f"pre-PR review ({effort} effort)")
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=model, estimate=getattr(a, "_estimate", None),
                             todo=getattr(a, "todo", None),
                             why=f"pre-PR review ({effort} effort)", cards=None, card_list=cards, project=slug,
@@ -7059,7 +7046,6 @@ def cmd_do(a):
                  + ("The user approved: " + a.allow_send if a.allow_send else
                     "Nothing is approved yet: list each change (item, from -> to, evidence) and stop with "
                     "awaiting-confirmation."))
-    settle_todo(a, slug, f"recipe {a.name}: {r['why']}")
     ns = argparse.Namespace(resume=None, task=[text], task_file=None, model=step.get("model") or r["model"],
                             todo=getattr(a, "todo", None),
                             why=f"recipe {a.name}: {r['why']}", cards=r.get("cards"), project=slug,
