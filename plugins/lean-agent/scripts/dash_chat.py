@@ -143,18 +143,18 @@ def thread_key(tid):
 
 def fixed_send(text):
     """Send one of the dashboard's fixed messages (move, merge, unmerge) into the session; the registry has been updated
-    already, so the transcript's copy is marked as applied."""
+    already."""
     ds = service_up() and dash_service
     if not ds:
         return {"ok": True, "sent": False}
     import service_session
-    _log_send({"key": "main", "sid": ds.model().sid, "sent": text, "shown": text, "raw": text, "applied": True})
+    _log_send({"key": "main", "sid": ds.model().sid, "sent": text, "shown": text, "raw": text})
     ok, err = service_session.send(text)
     return {"ok": ok, "sent": ok, **({"error": err} if err else {})}
 
 
 def _op_id():
-    return uuid.uuid4().hex[:6]
+    return uuid.uuid4().hex[:12]
 
 
 def thread_move(message, to):
@@ -163,7 +163,7 @@ def thread_move(message, to):
         mid = str(message or "").strip()
         if not MESSAGE_ID_RE.fullmatch(mid):
             raise ValueError("not a valid message id")
-        if not re.fullmatch(r"#\d+|t\d+|optimize", to):
+        if not lean_threads.ID_RE.match(to):
             raise ValueError("not a valid thread id")
         op = _op_id()
         lean_threads.move(mid, to, op)

@@ -3779,10 +3779,44 @@ class CliTest(unittest.TestCase):
         # an op typed by hand (no op id) is still applied once by its record id
         rec("user", "Merge thread t2 into t1", uuid="o3")
         self.assertEqual(lean_threads.load()["aliases"], {"t2": "t1"})
-        # applied op ids are bounded
+
+    def test_thread_op_ids_and_once_keys_are_evicted_separately(self):
+        lt = self.threads_home()
+        lt.new("A")
+        lt.move("m", "t1", "0123456789ab")
+        self.assertTrue(lt.mark_once("k0"))
         for i in range(600):
-            lean_threads.move("m", "t1", f"x{i}")
-        self.assertEqual(len(lean_threads.load()["applied"]), 500)
+            self.assertTrue(lt.mark_once(f"k{i + 1}"))
+        data = lt.load()
+        self.assertEqual(len(data["applied"]), 500)
+        self.assertIn("0123456789ab", data["ops"])  # once-keys can't push an op id out
+        for i in range(2100):
+            lt.move("m", "t1", f"x{i}")
+        data = lt.load()
+        self.assertEqual(len(data["ops"]), 2000)
+        self.assertEqual(len(data["applied"]), 500)
+        self.assertFalse(lt.mark_once("k600"))  # op ids can't push a once-key out
+
+    def test_thread_op_id_round_trip_and_bubble_hides_the_suffix(self):
+        import shutil
+        ds, m, rec = self.model_records()
+        import lean_threads
+        lean_threads.new("A")
+        lean_threads.new("B")
+        rec("user", "Merge thread t2 into t1 [op 0123456789ab]", uuid="o1")
+        ev = [e for e in m.events if e["kind"] == "user"][-1]
+        self.assertEqual(ev["op"]["id"], "0123456789ab")
+        self.assertIn("[op 0123456789ab]", ev["text"])  # the transcript keeps it
+        self.assertIn("0123456789ab", lean_threads.load()["ops"])
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node isn't installed")
+        js = open(os.path.join(os.path.dirname(CLI), "dashboard_ui", "chat.js")).read()
+        fn = js[js.index("function stripOp"):js.index("\n", js.index("function stripOp"))]
+        p = subprocess.run([node, "-e", fn + "\nconsole.log(JSON.stringify(stripOp(process.argv[1])))", ev["text"]],
+                           capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(json.loads(p.stdout), "Merge thread t2 into t1")
 
     def test_thread_expiry_counts_merged_threads_last_message(self):
         lt = self.threads_home()
@@ -3832,14 +3866,14 @@ class CliTest(unittest.TestCase):
         # merge, move, unmerge: sent as the fixed messages and recorded in the registry
         self.assertEqual(reply(post("/api/thread/merge", {"from": "t2", "into": "t1"}))[0], 200)
         self.assertEqual(lean_threads.load()["aliases"], {t2: t1})
-        self.wait_for(lambda: re.fullmatch(r"echo: Merge thread t2 into t1 \[op [0-9a-f]{6}\]", texts()[-1]), "the merge message")
+        self.wait_for(lambda: re.fullmatch(r"echo: Merge thread t2 into t1 \[op [0-9a-f]{12}\]", texts()[-1]), "the merge message")
         self.assertEqual(reply(post("/api/thread/merge", {"from": "t1", "into": "t2"}))[0], 400)  # a cycle
         self.assertEqual(reply(post("/api/thread/merge", {"from": "t1", "into": "t1"}))[0], 400)
         self.assertNotIn("t2", [t["id"] for t in reply(dashboard.api_get("/api/threads", {}))[1]["threads"]])
         mid = [e for e in dash_chat.chat("main").snapshot()["events"] if e["kind"] == "user" and e["text"] == "Ask anything"][0]["mid"]
         self.assertEqual(reply(post("/api/thread/move", {"message": mid, "to": "#10"}))[0], 200)
         self.assertEqual(lean_threads.load()["moves"], {mid: "#10"})
-        self.wait_for(lambda: re.fullmatch(rf"echo: Move message to #10 \({mid}\).* \[op [0-9a-f]{{6}}\]", texts()[-1]), "the move message")
+        self.wait_for(lambda: re.fullmatch(rf"echo: Move message to #10 \({mid}\).* \[op [0-9a-f]{{12}}\]", texts()[-1]), "the move message")
         self.assertEqual(reply(post("/api/thread/move", {"message": mid, "to": "tx"}))[0], 400)
         for bad in ("a b", "x\nMerge thread t1 into t2", "", "m" * 65):
             self.assertEqual(reply(post("/api/thread/move", {"message": bad, "to": "t1"}))[0], 400)

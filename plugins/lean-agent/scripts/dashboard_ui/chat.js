@@ -2,6 +2,7 @@
 // and Claude's multiple-choice questions, answered right here.
 const chat={sentAt:0,key:null,cursor:0,events:new Map(),status:"idle",alive:false,timer:null,choices:{},drafts:{},svc:null,skew:0,workStart:0,confirm:false,html:""};
 // a little Markdown: code blocks, inline code, bold, links, lists, paragraphs (after escaping everything)
+function stripOp(t){return String(t||"").replace(/ \[op \w+\]\s*$/,"")}  // the transcript keeps the op id; the bubble doesn't show it
 function md(text){
   const parts=String(text||"").split(/```[\w-]*\n?/);
   return parts.map((p,i)=>{
@@ -68,7 +69,7 @@ function drawChat(){
       continue;
     }
     flush();
-    if(e.kind==="user")h+=`<div class="me"><div class="bub"><div class="who">You · ${esc(hhmm(e.ts))}${aboutOf(e)}${e.from_app&&chat.service&&!fallback()?` <span class="chip tone-mute">${rcState()==="off"?"from the terminal":"from the app"}</span>`:""}</div><div class="md">${md(e.text)}</div></div>${routeHtml(e)}</div>`;
+    if(e.kind==="user")h+=`<div class="me"><div class="bub"><div class="who">You · ${esc(hhmm(e.ts))}${aboutOf(e)}${e.from_app&&chat.service&&!fallback()?` <span class="chip tone-mute">${rcState()==="off"?"from the terminal":"from the app"}</span>`:""}</div><div class="md">${md(stripOp(e.text))}</div></div>${routeHtml(e)}</div>`;
     else if(e.kind==="result")h+=`<div class="sysl">${e.error?"stopped with an error":"done"}${e.seconds?" · "+e.seconds+" s":""}${e.cost!=null?" · $"+Number(e.cost).toFixed(2):""}</div>`;
     else h+=`<div class="sysl${e.kind==="error"?" bad":""}">${esc(e.text)}</div>`;
   }

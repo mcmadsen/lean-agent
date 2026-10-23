@@ -22,6 +22,7 @@ except ImportError:  # not on Windows: no lock, the write is still atomic
 
 EXPIRE_DAYS = 7
 RESERVED = {"optimize": "Optimize"}
+OPS_KEPT = 2000  # applied op ids kept (mark_once keys have their own, shorter list)
 ID_RE = re.compile(r"^(#\d+|t\d+|optimize)$")
 
 
@@ -89,7 +90,10 @@ def _locked():
         if fcntl:
             fcntl.flock(lock, fcntl.LOCK_EX)
         data = load()
+        before = json.dumps(data, sort_keys=True)
         yield data
+        if json.dumps(data, sort_keys=True) == before:
+            return  # nothing changed (an op already seen): no write
         tmp = f"{path()}.{os.getpid()}.tmp"
         with open(tmp, "w") as fh:
             json.dump(data, fh, indent=1)
@@ -141,14 +145,14 @@ def touch(tid, title=None, ts=None):
 
 def _seen_op(data, op):
     """Whether the operation with this op id was applied already (ops without an id are never 'seen')."""
-    return bool(op) and ("op:" + op) in data.get("applied", [])
+    return bool(op) and op in data.get("ops", [])
 
 
 def _note_op(data, op):
     if op:
-        seen = data.setdefault("applied", [])
-        seen.append("op:" + op)
-        del seen[:-500]
+        seen = data.setdefault("ops", [])
+        seen.append(op)
+        del seen[:-OPS_KEPT]
 
 
 def merge(src, dst, op=None):
