@@ -344,6 +344,14 @@ class CliTest(unittest.TestCase):
                      "Never put secrets, tokens or credentials", "`lean-agent doc write` stays for local files"):
             self.assertIn(text, guide)
 
+    def test_guide_has_the_strict_orchestrator_rules(self):
+        with open(os.path.join(os.path.dirname(CLI), "..", "templates", "guide.md")) as fh:
+            guide = fh.read()
+        for text in ("The orchestrator only orchestrates", "never read project files or run\n   project commands yourself",
+                     "--cards auto", "lean-agent review <project> --decide-gaps", "show the user only\n   its summary",
+                     "AskUserQuestion, one question per gap", "blocked-run triage", "delegate the decision"):
+            self.assertIn(text, guide)
+
     def test_duplicate_launch_guard_ref_and_extra_cost(self):
         self.cli("learn", self.proj)
         on = dict(LEAN_AGENT_LAUNCH_GUARD="1")

@@ -8,8 +8,11 @@ results, and report briefly.
 1. **Delegate project work with `lean-agent run`.** Never use the built-in Agent (Task) tool
    or the Workflow tool for project work. Do so only if the user explicitly asks for them in
    this conversation.
-2. **Don't read project source yourself** beyond one small lookup (one file region). Send a
-   `-m haiku --read-only` worker instead.
+2. **The orchestrator only orchestrates:** plan, delegate, track and summarise. You never read project files or run
+   project commands yourself (strict mode, `lean-agent config strict on|off`, refuses both); every piece of project
+   work is a `lean-agent run <project> --cards auto ...` worker (`--read-only` for lookups), so the right cards are
+   read. Decisions a worker can make from the cards go to a worker too (blocked-run triage, which `optimize`
+   suggestions to apply): delegate the decision and show the user only its summary.
 3. **Workers run in the background, at most 4 at a time.** Start every `lean-agent run`, `review`, `do` and
    `tracker --discover` as a background Bash command (run_in_background), tell the user in one line what you
    started, and end your turn: the user can keep talking to you while it runs, and you're notified when it
@@ -43,9 +46,10 @@ results, and report briefly.
    `--reviewer-model`.
    Pass the task or PR title with `--goal "..."`: the reviewer then checks the change delivers it end to end.
    A review can approve with "known gaps" (things the change itself says aren't done, or doesn't deliver):
-   before calling the work ready or opening a PR, tell the user about each gap in one line and ask. Only the
-   user's word that one is out of scope may close it: `lean-agent review decline <project> g<n> --why "..."`.
-   `review --status` exits 2 while a gap is open. When a human finds something the review missed, record it
+   before calling the work ready or opening a PR, run `lean-agent review <project> --decide-gaps` (a worker
+   declines what the cards and code settle, returns fix tasks, and lists what needs the user) and show the user only
+   its summary. Ask about each "needs you" gap with AskUserQuestion, one question per gap, then record the answer:
+   `lean-agent review decline <project> g<n> --why "..."`. `review --status` exits 2 while a gap is open. When a human finds something the review missed, record it
    with `lean-agent review learn <project> <PR> --text "..."`.
    Before tracker work (assign, vote, close), run `lean-agent tracker <project>` once; if your identity is
    unknown, `lean-agent tracker <project> --discover --mcp <tracker>`. Only `lean-agent review <project> --status [--head <branch>]` exiting 0 means

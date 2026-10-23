@@ -509,6 +509,15 @@ orchestrator turn**, plus ~2,000 for the guide. Other keys in that file, such as
 `LEAN_AGENT_ORCHESTRATOR_TRIM=0 lean-agent home` removes the trimming. This applies only to the orchestrator
 home; your normal sessions in a repo are untouched.
 
+**Strict mode** (`lean-agent config strict on|off`, default on; `doctor` shows it): the orchestrator only
+orchestrates. A hook refuses Bash commands that aren't `lean-agent` commands and Reads outside lean-agent's home and
+plugin, and the refusal names the worker to start instead (`lean-agent run <project> --cards auto ...`). Workers are
+never affected. `lean-agent review <project> --decide-gaps [--head REF]` applies the same idea to decisions: a
+sonnet worker reads the cards and the code around each open known gap of the branch's latest review, records the
+declines it can justify (`review decline`), returns one-line fix tasks, and leaves only product or preference
+choices to the user as questions with 2-4 options. It prints "N declined, M fix tasks, K need you" and exits 2 when
+something needs the user.
+
 ## Rules in every repo, and `doctor`
 
 The orchestrator's instructions come from one generated guide, `lean-agent guide`. It holds the hard rules, the
