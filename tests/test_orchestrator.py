@@ -2072,6 +2072,34 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("Tidy", self.cli("todo").stdout)
         self.assertIn("Todos: 1 done, 1 open", self.cli("week").stdout)
 
+    def test_home_settings_carry_the_status_line_unless_the_user_set_one(self):
+        home = self.cli("home").stdout.strip()
+        settings = os.path.join(home, ".claude", "settings.json")
+        with open(settings) as fh:
+            line = json.load(fh)["statusLine"]
+        self.assertEqual(line["type"], "command")
+        self.assertTrue(line["command"].endswith("trampoline.py\" statusline.py"), line)
+        mine = {"type": "command", "command": "echo mine"}
+        with open(settings, "w") as fh:
+            json.dump({"statusLine": mine}, fh)
+        self.cli("home")
+        with open(settings) as fh:
+            self.assertEqual(json.load(fh)["statusLine"], mine)  # a status line you set yourself stays
+
+    def test_statusline_prints_the_todo_count_and_the_next_job(self):
+        h = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(h, exist_ok=True)
+        with open(os.path.join(h, "todo.json"), "w") as fh:
+            json.dump({"next": 4, "items": [{"id": 1, "status": "open"}, {"id": 2, "status": "doing"},
+                                            {"id": 3, "status": "done"}]}, fh)
+        self.cli("schedule", "add", "daily 09:00", "stats")
+        p = subprocess.run([sys.executable, os.path.join(os.path.dirname(CLI), "statusline.py")], input="{}",
+                           capture_output=True, text=True, env=self.env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(p.stdout.startswith("lean-agent · "), p.stdout)
+        self.assertIn("2 todo", p.stdout)
+        self.assertRegex(p.stdout, r"next job (Mon|Tue|Wed|Thu|Fri|Sat|Sun) 09:00")
+
     def test_schedule(self):
         self.cli("learn", self.proj, "--name", "proj")
         out = self.cli("schedule", "add", "weekdays 08:45", "stats").stdout
