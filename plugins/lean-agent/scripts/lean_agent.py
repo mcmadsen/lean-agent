@@ -8053,9 +8053,9 @@ def handover_list(a):
     slug = resolve_project(a.project)[0] if a.project else "*"
     files = [f for f in glob.glob(os.path.join(handover_dir(slug), "*.md")) if not f.endswith(".prev.md")]
     for f in sorted(files, key=os.path.getmtime, reverse=True):
-        head = read_text(f).split("\n", 2)
+        head = read_text(f).split("\n", 3)
         title = head[0][2:].strip() if head[0].startswith("# ") else os.path.basename(f)
-        date = head[1].strip("_ ").split(" ")[0] if len(head) > 1 and head[1].startswith("_") else ""
+        date = next((l.strip("_ ").split(" ")[0] for l in head[1:] if l.startswith("_")), "")
         print(f"{f}  {title}" + (f"  {date}" if date else ""))
     return 0
 
@@ -8075,9 +8075,9 @@ def cmd_handover(a):
     if not a.as_is:
         ns = argparse.Namespace(resume=None, task=[HANDOVER_TASK + "Title: " + title + "\n\n" + content], task_file=None,
                                 model="sonnet", why="write a handover document for the orchestrator", cards="none",
-                                card_list=None, project=slug, read_only=True, chrome=None, mcp=None, tools=None,
-                                allow_send=None, max_turns=20, max_usd=1.0, max_context=2000, max_cards=4,
-                                ttype="read", role="composer", effort="low", role_rule="")
+                                card_list=None, project=slug, read_only=True, chrome=None, mcp=None,
+                                tools=READONLY_TOOLS, allow_send=None, max_turns=20, max_usd=1.0, max_context=2000,
+                                max_cards=4, ttype="read", role="composer", effort="low", role_rule="")
         rc, out, run = run_role(ns, quiet=True)
         content = parse_feedback(run_result_text(run))[0].strip() if run else ""
         if not content:

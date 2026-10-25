@@ -94,12 +94,6 @@ FAKE_CLAUDE = textwrap.dedent("""\
             for i, name in enumerate(os.environ["FAKE_MCP_CALL"].split(",")):  # several calls, in order
                 fh.write(json.dumps({"type": "assistant", "timestamp": ts, "message": {"content": [
                     {"type": "tool_use", "id": "tu-%d-%d" % (os.getpid(), i), "name": name, "input": {}}]}}) + "\\n")
-    if os.environ.get("FAKE_WORKER_TOOLS"):  # the worker's init event; a worker stopped there never logs a turn
-        import time
-        print(json.dumps({"type": "system", "subtype": "init", "session_id": "sess-1",
-                          "tools": json.loads(os.environ["FAKE_WORKER_TOOLS"]),
-                          "mcp_servers": json.loads(os.environ.get("FAKE_WORKER_SERVERS") or "[]")}), flush=True)
-        time.sleep(float(os.environ.get("FAKE_INIT_SLEEP", "0")))
     with open(log, "a") as fh:
         fh.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "task": task,
                              "append": open(append).read(), "mcp": mcp, "thread": os.environ.get("LEAN_AGENT_THREAD"),
@@ -367,231 +361,91 @@ class CliTest(unittest.TestCase):
             self.assertEqual(json.load(fh)["strict"], "off")
         self.assertIn("strict: on", self.cli("config", "strict", "on").stdout)
 
-    def test_artifacts_setting_in_home_settings_guide_and_doctor(self):
+    def test_publish_and_the_artifacts_switch_are_gone_and_old_keys_are_ignored(self):
         self.cli("learn", self.proj)
+        p = self.cli("publish", "T", "--task-file", "-", input="x", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("invalid choice", p.stderr)
+        self.assertNotEqual(self.cli("config", "artifacts", "off", check=False).returncode, 0)
+        home_dir = self.env["LEAN_AGENT_HOME"]
+        with open(os.path.join(home_dir, "config.json"), "w") as fh:
+            json.dump({"artifacts": "direct"}, fh)  # an old key: ignored, the Artifact tools stay denied
+        self.cli("handoff", "--note", "artifact: https://example.invalid/a1 Old plan", "--kind", "fyi")
+        self.assertIn("artifact: https://example.invalid/a1 Old plan", self.cli("handoff").stdout)
+        self.cli("thread", "show", "t1", check=False)
         home = self.cli("home").stdout.strip()
-        deny = lambda: json.load(open(os.path.join(home, ".claude", "settings.json")))["permissions"]["deny"]
-        for mode in ("worker", "off"):  # worker is the default: the orchestrator never loads the Artifact tools
-            if mode == "off":
-                self.assertIn("artifacts: off", self.cli("config", "artifacts", "off").stdout)
-            for tool in ("Artifact", "ArtifactComments", "ArtifactData"):
-                self.assertIn(tool, deny())
-            self.assertIn(f"artifacts: {mode}", self.cli("doctor", check=False).stdout)
-        self.assertIn("artifacts: direct", self.cli("config", "artifacts", "direct").stdout)
-        self.assertNotIn("Artifact", deny())
-        self.assertNotIn("ArtifactComments", deny())
-        self.assertIn("ArtifactData", deny())
-        self.assertIn("artifacts: worker", self.cli("config", "artifacts", "worker").stdout)
-        self.assertIn("Artifact", deny())
-        with open(os.path.join(os.path.dirname(CLI), "..", "templates", "guide.md")) as fh:
-            guide = fh.read()
-        for text in ("lean-agent publish", "never with your own tools", "private by default",
-                     "Never put secrets, tokens or credentials", "A local file is a worker task"):
-            self.assertIn(text, guide)
+        deny = json.load(open(os.path.join(home, ".claude", "settings.json")))["permissions"]["deny"]
+        for tool in ("Artifact", "ArtifactComments", "ArtifactData"):
+            self.assertIn(tool, deny)
+        out = self.cli("doctor", check=False).stdout
+        self.assertNotIn("publish:", out)
+        self.assertNotIn("artifacts:", out)
+        self.assertIn("lean-agent handover", self.cli("guide").stdout)
 
-    DOCS_TOOLS = json.dumps(["Read", "Glob", "Grep", "ToolSearch", "mcp__claude_ai_Claude_Docs__batch",
-                             "mcp__claude_ai_Claude_Docs__create", "mcp__claude_ai_Claude_Docs__delete"])
+    def handover_dir(self):
+        return os.path.join(self.env["LEAN_AGENT_HOME"], "proj", "handovers")
 
-    def test_publish_runs_a_docs_worker_and_reuses_the_link_by_title(self):
-        self.cli("learn", self.proj)
-        env = dict(FAKE_WORKER_TOOLS=self.DOCS_TOOLS, FAKE_ANSWER="Published.\nhttps://claude.ai/artifact/a1")
-        out = self.cli("publish", "Weekly plan", "--task-file", "-", input="plan text", **env).stdout
-        self.assertIn("doc: https://claude.ai/artifact/a1", out)
+    def test_handover_writes_a_markdown_file_with_header_from_a_read_only_worker(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        out = self.cli("handover", "Weekly plan", "-p", "proj", "--task-file", "-", input="open questions",
+                       FAKE_ANSWER="## Open\n- one").stdout
+        path = os.path.join(self.handover_dir(), "weekly-plan.md")
+        self.assertEqual(out.strip(), f"handover: {path}")
+        lines = open(path).read().split("\n")
+        self.assertEqual(lines[0], "# Weekly plan")
+        self.assertRegex(lines[2], r"^_\d{4}-\d\d-\d\d(?: \u00b7 thread t\d+)?_$")
+        self.assertIn("## Open", lines)
         call = self.calls()[-1]
-        argv = call["argv"]
-        self.assertNotIn("--safe-mode", argv)
-        self.assertNotIn("--strict-mcp-config", argv)  # it drops claude.ai connectors in -p
-        self.assertIn("--disable-slash-commands", argv)
-        self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
-        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Glob,Grep,ToolSearch")
-        allowed = argv[argv.index("--allowedTools") + 1].split(",")
-        docs = [f"{p}__{t}" for p in ("mcp__claude_ai_Claude_Docs", "mcp__Claude_Docs")
-                for t in ("batch", "guide", "update", "create", "read", "query", "export")]
-        self.assertEqual(sorted(allowed), sorted(["Read", "Glob", "Grep", "ToolSearch"] + docs))
-        self.assertFalse([t for t in allowed if t.endswith("__delete") or t in ("mcp__claude_ai_Claude_Docs",
-                                                                              "mcp__Claude_Docs")])
-        self.assertEqual(argv[argv.index("--disallowedTools") + 1].split(","),
-                         ["mcp__claude_ai_Claude_Docs__delete", "mcp__Claude_Docs__delete"])
-        self.assertTrue(json.loads(argv[argv.index("--settings") + 1])["disableAllHooks"])
-        self.assertIn("Never delete a doc", call["append"])
-        self.assertIn("one `batch` call", call["append"])
-        self.assertEqual(self.ledger()[-1]["role"], "publisher")
+        self.assertIn("--safe-mode", call["argv"])
+        self.assertEqual(call["argv"][call["argv"].index("--tools") + 1], "Read,Glob,Grep")
+        self.assertIn("open questions", call["task"])
+        self.assertEqual(self.ledger()[-1]["role"], "composer")
         self.assertTrue(self.ledger()[-1]["read_only"])
-        self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
-        self.assertIn("plan text", call["task"])
-        self.assertNotIn("existing doc", call["task"])
-        self.assertIn("artifact: https://claude.ai/artifact/a1 Weekly plan", self.cli("handoff").stdout)
-        self.assertIn("publish: Claude Docs connector available", self.cli(
-            "doctor", check=False, FAKE_PROBE_TOOLS=self.DOCS_TOOLS).stdout)
-        env["FAKE_ANSWER"] = "Updated.\nhttps://claude.ai/artifact/a1"
-        self.cli("publish", "Weekly plan", "--as-is", "--task-file", "-", input="new text", **env)
-        call = self.calls()[-1]
-        self.assertIn("Update the existing doc https://claude.ai/artifact/a1", call["task"])
-        self.assertIn("don't create a new one", call["append"])
-        self.assertEqual(call["argv"][call["argv"].index("--model") + 1], "haiku")
-        self.assertEqual(self.cli("handoff").stdout.count("artifact: https://claude.ai/artifact/a1"), 1)
-        self.cli("publish", "Other", "--task-file", "-", input="x", **env)  # another title: no link reused
-        self.assertNotIn("existing doc", self.calls()[-1]["task"])
-        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "w", "t")  # every other worker keeps --safe-mode
-        self.assertIn("--safe-mode", self.calls()[-1]["argv"])
-        self.cli("config", "artifacts", "off")
-        self.assertNotEqual(self.cli("publish", "Weekly plan", "--task-file", "-", input="x", check=False).returncode, 0)
 
-    def test_publish_without_docs_tools_writes_a_local_file_and_runs_no_turn(self):
-        self.cli("learn", self.proj)
-        p = self.cli("publish", "Open questions", "--as-is", "--task-file", "-", input="- which db?", check=False,
-                     FAKE_WORKER_TOOLS=json.dumps(["Read", "Glob", "Grep", "ToolSearch", "mcp__other__thing"]),
-                     FAKE_INIT_SLEEP="5", FAKE_ANSWER="https://claude.ai/artifact/never")
+    def test_handover_as_is_saves_the_text_and_the_same_title_keeps_the_previous_file(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("handover", "Plan", "-p", "proj", "--as-is", "--task-file", "-", input="first text", FAKE_ANSWER="unused")
+        self.assertFalse(os.path.exists(self.log) and self.calls())  # no worker
+        path = os.path.join(self.handover_dir(), "plan.md")
+        self.assertIn("first text", open(path).read())
+        self.cli("handover", "Plan", "-p", "proj", "--as-is", "--task-file", "-", input="second text")
+        self.assertIn("second text", open(path).read())
+        self.assertNotIn("first text", open(path).read())
+        self.assertIn("first text", open(os.path.join(self.handover_dir(), "plan.prev.md")).read())
+        self.cli("handover", "Plan", "-p", "proj", "--as-is", "--task-file", "-", input="third text")
+        self.assertIn("second text", open(os.path.join(self.handover_dir(), "plan.prev.md")).read())
+
+    def test_handover_with_an_empty_reply_is_an_error_and_writes_no_file(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("handover", "Empty", "-p", "proj", "--task-file", "-", input="x", check=False, FAKE_ANSWER="")
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("Claude Docs connector not available to workers", p.stderr)
-        path = p.stdout.strip().splitlines()[-1]
-        self.assertEqual(path, os.path.join(self.env["LEAN_AGENT_HOME"], self.ledger()[-1]["project"], "publish",
-                                            "open-questions.md"))
-        with open(path) as fh:
-            self.assertEqual(fh.read(), "# Open questions\n\n- which db?\n")
-        self.assertFalse(os.path.exists(self.log) and self.calls())  # stopped at its init event: no turn
-        self.assertNotIn("artifact/never", p.stdout)
-        self.assertEqual((self.ledger()[-1]["role"], self.ledger()[-1]["status"]), ("publisher", "error"))
-        self.assertIn("publish: Claude Docs connector missing", self.cli("doctor", check=False).stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.handover_dir(), "empty.md")))
 
-    def test_publish_continues_when_the_docs_server_is_connecting_without_tools(self):
-        self.cli("learn", self.proj)
-        out = self.cli("publish", "Weekly plan", "--as-is", "--task-file", "-", input="plan", check=False,
-                       FAKE_WORKER_TOOLS=json.dumps(["Read", "ToolSearch"]), FAKE_ANSWER="ok\nhttps://claude.ai/artifact/p1",
-                       FAKE_WORKER_SERVERS=json.dumps([{"name": "claude.ai Claude Docs", "status": "pending"}])).stdout
-        self.assertIn("doc: https://claude.ai/artifact/p1", out)
-        self.assertEqual(len(self.calls()), 1)  # the run was not stopped at init
+    def test_handover_list_shows_newest_first_with_title_and_date(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("handover", "Older one", "-p", "proj", "--as-is", "--task-file", "-", input="a")
+        old = os.path.join(self.handover_dir(), "older-one.md")
+        os.utime(old, (1, 1))
+        self.cli("handover", "Newer one", "-p", "proj", "--as-is", "--task-file", "-", input="b")
+        self.cli("handover", "Newer one", "-p", "proj", "--as-is", "--task-file", "-", input="c")  # leaves a .prev.md
+        lines = self.cli("handover", "--list", "-p", "proj").stdout.strip().split("\n")
+        self.assertEqual(len(lines), 2)
+        self.assertIn("newer-one.md  Newer one", lines[0])
+        self.assertIn("older-one.md  Older one", lines[1])
+        self.assertRegex(lines[0], r"\d{4}-\d\d-\d\d$")
+        self.assertEqual(len(self.cli("handover", "--list").stdout.strip().split("\n")), 2)
 
-    def test_publish_fallback_without_as_is_composes_the_document(self):
-        self.cli("learn", self.proj)
-        p = self.cli("publish", "Open questions", "--task-file", "-", input="a list of the open db questions",
-                     check=False, FAKE_WORKER_TOOLS=json.dumps(["Read"]), FAKE_INIT_SLEEP="2",
-                     FAKE_ANSWER="## Questions\n- which db?")
-        self.assertNotEqual(p.returncode, 0)
-        self.assertIn("Claude Docs connector not available to workers", p.stderr)
-        compose = self.calls()[-1]
-        self.assertIn("--safe-mode", compose["argv"])
-        self.assertIn("Write the document the request below describes, as Markdown, in your reply only", compose["task"])
-        self.assertIn("a list of the open db questions", compose["task"])
-        self.assertEqual(len(self.calls()), 1)  # the publisher stopped at init; only the composer ran a turn
-        with open(p.stdout.strip().splitlines()[-1]) as fh:
-            text = fh.read()
-        self.assertTrue(text.startswith("# Open questions\n\n## Questions\n- which db?"))
-        self.assertNotIn("a list of the open db questions", text)
-        self.assertNotIn("LEAN-FEEDBACK", text)
-
-    def test_publish_reply_without_a_link_fails(self):
-        self.cli("learn", self.proj)
-        p = self.cli("publish", "Weekly plan", "--task-file", "-", input="plan", check=False,
-                     FAKE_WORKER_TOOLS=self.DOCS_TOOLS, FAKE_ANSWER="I made it, see https://claude.ai/chat/1")
-        self.assertNotEqual(p.returncode, 0)
-        self.assertIn("publish failed: the worker's reply has no Claude Docs link", p.stderr)
-        self.assertNotIn("doc:", p.stdout)
-        self.assertNotIn("artifact:", self.cli("handoff").stdout)
-
-    def test_doctor_reports_unknown_without_an_init_event_and_always_reprobes(self):
-        out = self.cli("doctor", check=False, FAKE_PROBE_NOINIT="1").stdout
-        self.assertIn("publish: Claude Docs connector unknown (no init event)", out)
-        self.assertNotIn("connector missing", out)
-        self.cli("doctor", check=False, FAKE_PROBE_TOOLS=json.dumps(["Read", "mcp__Claude_Docs__guide"]))
-        out = self.cli("doctor", check=False, FAKE_PROBE_TOOLS=json.dumps(["Read"])).stdout  # a fresh cache is not used
-        self.assertIn("publish: Claude Docs connector missing", out)
-        out = self.cli("doctor", check=False, FAKE_PROBE_TOOLS=json.dumps(["Read"]),
-                       FAKE_PROBE_SERVERS=json.dumps([{"name": "claude.ai Claude Docs", "status": "connecting"}])).stdout
-        self.assertIn("publish: Claude Docs connector pending", out)
-
-    def test_publish_cache_is_ignored_when_stale_by_age_or_version(self):
-        self.cli("learn", self.proj)
-        self.cli("doctor", check=False, FAKE_PROBE_TOOLS=json.dumps(["Read"]))  # caches "missing"
-        env = dict(FAKE_WORKER_TOOLS=self.DOCS_TOOLS, FAKE_ANSWER="ok\nhttps://claude.ai/artifact/c1")
-        p = self.cli("publish", "T1", "--as-is", "--task-file", "-", input="x", check=False, **env)
-        self.assertNotEqual(p.returncode, 0)  # fresh cache: fallback without a launch
-        self.assertFalse(os.path.exists(self.log) and self.calls())
-        out = self.cli("publish", "T1", "--as-is", "--task-file", "-", input="x", FAKE_VERSION="2.0.0", **env).stdout
-        self.assertIn("doc: https://claude.ai/artifact/c1", out)  # another version: re-probed by launching
-        path = os.path.join(self.env["LEAN_AGENT_HOME"], "publish-check.json")
-        with open(path) as fh:
-            rec = json.load(fh)
-        rec.update(docs="missing", at=rec["at"] - 700)
-        with open(path, "w") as fh:
-            json.dump(rec, fh)
-        out = self.cli("publish", "T2", "--as-is", "--task-file", "-", input="x", FAKE_VERSION="2.0.0", **env).stdout
-        self.assertIn("doc: https://claude.ai/artifact/c1", out)  # older than 10 minutes: launched again
-
-    def test_publish_treats_failed_or_unrelated_servers_as_missing(self):
-        self.cli("learn", self.proj)
-        check = os.path.join(self.env["LEAN_AGENT_HOME"], "publish-check.json")
-        for servers in ([{"name": "claude.ai Claude Docs", "status": "failed"}],
-                        [{"name": "claude.ai Claude Docs", "status": "needs-auth"}],
-                        [{"name": "other_server", "status": "connected"}]):
-            if os.path.exists(check):
-                os.remove(check)  # a cached "missing" would skip the launch
-            p = self.cli("publish", "T", "--as-is", "--task-file", "-", input="x", check=False,
-                         FAKE_WORKER_TOOLS=json.dumps(["Read"]), FAKE_WORKER_SERVERS=json.dumps(servers),
-                         FAKE_INIT_SLEEP="2", FAKE_ANSWER="https://claude.ai/artifact/never")
-            self.assertNotEqual(p.returncode, 0)
-            self.assertIn("Claude Docs connector not available", p.stderr)
-            self.assertIn("lean-agent doctor", p.stderr)
-            self.assertTrue(os.path.exists(check))  # only a launched worker's init event rewrites the record
-            with open(check) as fh:
-                self.assertEqual(json.load(fh)["docs"], "missing")
-        self.assertFalse(os.path.exists(self.log) and self.calls())  # stopped at init: no turn logged
-
-    def test_publish_falls_back_when_the_server_stayed_pending_and_no_link_came(self):
-        self.cli("learn", self.proj)
-        p = self.cli("publish", "Plan", "--as-is", "--task-file", "-", input="plan", check=False,
-                     FAKE_WORKER_TOOLS=json.dumps(["Read", "ToolSearch"]), FAKE_ANSWER="I could not find the tool.",
-                     FAKE_WORKER_SERVERS=json.dumps([{"name": "claude.ai Claude Docs", "status": "pending"}]))
-        self.assertNotEqual(p.returncode, 0)
-        self.assertIn("Claude Docs connector not available", p.stderr)
-        self.assertNotIn("has no Claude Docs link", p.stderr)
-        with open(p.stdout.strip().splitlines()[-1]) as fh:
-            self.assertEqual(fh.read(), "# Plan\n\nplan\n")
-
-    def test_a_failing_publisher_with_a_pending_server_reports_no_link_and_writes_no_file(self):
-        self.cli("learn", self.proj)
-        p = self.cli("publish", "Plan", "--as-is", "--task-file", "-", input="plan", check=False,
-                     FAKE_WORKER_TOOLS=json.dumps(["Read", "ToolSearch"]), FAKE_FAIL_MODEL="haiku",
-                     FAKE_WORKER_SERVERS=json.dumps([{"name": "claude.ai Claude Docs", "status": "pending"}]))
-        self.assertNotEqual(p.returncode, 0)
-        self.assertIn("has no Claude Docs link", p.stderr)
-        self.assertNotIn("connector not available", p.stderr)
-        self.assertEqual(glob.glob(os.path.join(self.env["LEAN_AGENT_HOME"], "*", "publish", "*.md")), [])
-
-    def test_publish_fallback_with_a_url_says_the_file_is_a_fresh_document(self):
-        self.cli("learn", self.proj)
-        p = self.cli("publish", "Plan", "--as-is", "--url", "https://claude.ai/artifact/a1", "--task-file", "-",
-                     input="plan", check=False, FAKE_WORKER_TOOLS=json.dumps(["Read"]), FAKE_INIT_SLEEP="2")
-        self.assertNotEqual(p.returncode, 0)
-        self.assertIn("fresh document, not an update", p.stderr)
-
-    def test_publish_composer_with_an_empty_reply_writes_no_file(self):
-        self.cli("learn", self.proj)
-        p = self.cli("publish", "Empty one", "--task-file", "-", input="request", check=False,
-                     FAKE_WORKER_TOOLS=json.dumps(["Read"]), FAKE_INIT_SLEEP="2", FAKE_ANSWER="")
-        self.assertNotEqual(p.returncode, 0)
-        self.assertIn("the compose worker returned no document", p.stderr)
-        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], self.ledger()[-1]["project"],
-                                                     "publish", "empty-one.md")))
-
-    def test_publish_cache_pending_and_unknown_do_not_block_a_launch(self):
-        self.cli("learn", self.proj)
-        env = dict(FAKE_WORKER_TOOLS=self.DOCS_TOOLS, FAKE_ANSWER="ok\nhttps://claude.ai/artifact/c1")
-        path = os.path.join(self.env["LEAN_AGENT_HOME"], "publish-check.json")
-        self.cli("doctor", check=False, FAKE_PROBE_TOOLS=json.dumps(["Read"]))  # writes a record
-        with open(path) as fh:
-            rec = json.load(fh)
-        for docs in ("pending", "unknown"):
-            rec.update(docs=docs, at=time.time())
-            with open(path, "w") as fh:
-                json.dump(rec, fh)
-            out = self.cli("publish", "T" + docs, "--as-is", "--task-file", "-", input="x", **env).stdout
-            self.assertIn("doc: https://claude.ai/artifact/c1", out)
-
-    def test_doctor_checks_the_publisher_path_without_a_turn(self):
-        out = self.cli("doctor", check=False, FAKE_PROBE_TOOLS=json.dumps(["Read", "mcp__Claude_Docs__guide"])).stdout
-        self.assertIn("publish: Claude Docs connector available", out)
-        self.assertFalse(os.path.exists(self.log) and self.calls())  # a launch stopped at init, not a worker turn
+    def test_handover_is_tagged_with_the_thread_and_listed_by_thread_show(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.threads_home().route("Write the handover", "s1")  # t1
+        out = self.cli("handover", "Tagged", "-p", "proj", "--as-is", "--thread", "t1", "--task-file", "-", input="x").stdout
+        path = out.split("handover: ", 1)[1].strip()
+        self.assertIn("thread t1_", open(path).read().split("\n")[2])
+        self.assertIn(f"handover {path}", self.cli("thread", "show", "t1").stdout)
+        self.cli("handover", "Untagged", "-p", "proj", "--as-is", "--thread", "none", "--task-file", "-", input="x")
+        self.assertNotIn("thread", open(os.path.join(self.handover_dir(), "untagged.md")).read().split("\n")[2])
+        self.cli("handover", "Worker", "-p", "proj", "--thread", "t1", "--task-file", "-", input="x", FAKE_ANSWER="body")
+        self.assertEqual(self.ledger()[-1]["thread"], "t1")
 
     def test_remember_runs_a_librarian_and_prints_what_it_filed(self):
         self.cli("learn", self.proj)
@@ -735,14 +589,14 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertEqual(self.todo_count("#1"), 0)
 
-    def test_a_refused_todo_new_launch_leaves_no_item_and_advise_publish_have_their_own_run(self):
+    def test_a_refused_todo_new_launch_leaves_no_item_and_advise_handover_have_their_own_run(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "-m", "haiku", "--todo", "new", "t", check=False)  # no --why: refused
         self.assertNotEqual(p.returncode, 0)
         self.assertEqual(self.todo_count("#1"), 0)
         self.cli("advise", "Fix the export retry loop", FAKE_ANSWER="Here.\nADVICE\nline 1")
-        self.cli("publish", "Weekly plan", "--task-file", "-", input="plan text", FAKE_ANSWER="https://claude.ai/artifact/1")
-        self.assertEqual([r.get("role") for r in self.ledger()], ["advisor", "publisher"])
+        self.cli("handover", "Weekly plan", "--task-file", "-", input="plan text", FAKE_ANSWER="body")
+        self.assertEqual([r.get("role") for r in self.ledger()], ["advisor", "composer"])
         self.assertEqual(self.todo_count("#1"), 0)
 
     def test_resume_last_skips_reviewer_runs_and_says_when_only_role_runs_exist(self):

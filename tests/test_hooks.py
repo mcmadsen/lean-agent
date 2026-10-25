@@ -583,7 +583,7 @@ class BudgetTest(Base):
                        "lean-agent thread move t2", "lean-agent checkpoint 'x' --thread t1", "lean-agent review proj --head b --thread none",
                        "lean-agent handoff --note 'x' --kind fyi --thread t1",
                        "lean-agent checkpoint 'x'", "lean-agent brief", "lean-agent runs --last", "lean-agent review proj --head b",
-                       "lean-agent publish 'T' --task-file - <<'EOF'\ntext\nEOF", "lean-agent sync", "lean-agent doctor",
+                       "lean-agent handover 'T' --task-file - <<'EOF'\ntext\nEOF", "lean-agent handover --list", "lean-agent sync", "lean-agent doctor",
                        "lean-agent config strict on", "lean-agent card proj show x", "lean-agent optimize proj",
                        "lean-agent codemod proj 'npx jscodeshift src'", "lean-agent worktrees", "lean-agent guard list",
                        "lean-agent run proj --cards auto -m sonnet --why x -- 'worktree push the branch'",
