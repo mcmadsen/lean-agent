@@ -136,6 +136,9 @@ FAKE_CLAUDE = textwrap.dedent("""\
 """)
 
 
+PLAYWRIGHT_DIR = os.environ.get("LEAN_AGENT_PLAYWRIGHT_DIR")  # opt-in knob: read before setUp clears LEAN_AGENT_*
+
+
 def _load_json(p):
     with open(p) as fh:
         return json.load(fh)
@@ -494,9 +497,17 @@ class CliTest(unittest.TestCase):
         self.cli("learn", self.proj, "--name", "proj")
         self.threads_home().route("Publish the report via docs", "s1")  # t1
         self.threads_home().route("Fix the export timeout in billing", "s1")  # t2, the current one
+        self.cli("handover", "Early", "-p", "proj", "--as-is", "--thread", "t2", "--task-file", "-", input="x")
+        reg_path = os.path.join(self.env["LEAN_AGENT_HOME"], "handovers.json")
+        recs = self.registry()
+        recs[0]["ts"] = (datetime.datetime.now() - datetime.timedelta(hours=1)).isoformat(timespec="seconds")
+        with open(reg_path, "w") as fh:
+            json.dump(recs, fh)  # made before the moved request
         self.cli("handover", "Plan", "-p", "proj", "--as-is", "--thread", "t2", "--task-file", "-", input="x")
+        self.cli("handover", "Elsewhere", "-p", "proj", "--as-is", "--thread", "t4", "--task-file", "-", input="x")
         self.cli("thread", "move", "t1")
-        self.assertEqual(self.registry()[0]["thread"], "t1")
+        self.assertEqual({r["title"]: r["thread"] for r in self.registry()},
+                         {"Early": "t2", "Plan": "t1", "Elsewhere": "t4"})
 
     def test_remember_runs_a_librarian_and_prints_what_it_filed(self):
         self.cli("learn", self.proj)
@@ -2315,8 +2326,11 @@ class CliTest(unittest.TestCase):
         share, span, why = fe_tools.png_diff(os.path.join(t, "a.png"), os.path.join(t, "b.png"))
         self.assertEqual((share, span, why), (0.2, (0.0, 0.2), None))
         self.assertEqual(fe_tools._area(span), "rows 0-20% (top)")
-        if not (os.environ.get("LEAN_AGENT_PLAYWRIGHT_DIR") and shutil.which("node")):
-            return  # the browser part needs Playwright (local runs set LEAN_AGENT_PLAYWRIGHT_DIR)
+        if not (PLAYWRIGHT_DIR and shutil.which("node")):
+            self.skipTest("the browser part needs Playwright (local runs set LEAN_AGENT_PLAYWRIGHT_DIR)")
+        patcher = mock.patch.dict(os.environ, {"LEAN_AGENT_PLAYWRIGHT_DIR": PLAYWRIGHT_DIR})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         import http.server
         import threading
         site = os.path.join(t, "site")
