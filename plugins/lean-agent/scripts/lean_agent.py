@@ -8052,6 +8052,8 @@ def handover_dir(slug):
 def handover_list(a):
     slug = resolve_project(a.project)[0] if a.project else "*"
     files = [f for f in glob.glob(os.path.join(handover_dir(slug), "*.md")) if not f.endswith(".prev.md")]
+    if not files:
+        print("No handovers yet.")
     for f in sorted(files, key=os.path.getmtime, reverse=True):
         head = read_text(f).split("\n", 3)
         title = head[0][2:].strip() if head[0].startswith("# ") else os.path.basename(f)
@@ -8095,7 +8097,12 @@ def cmd_handover(a):
     with file_lock(reg):
         recs = load_json(reg, [])
         recs = recs if isinstance(recs, list) else []
-        recs.append({"ts": now_iso(), "thread": thread, "title": title, "path": path})
+        rec = {"ts": now_iso(), "thread": thread, "title": title, "path": path}
+        i = next((i for i, r in enumerate(recs) if isinstance(r, dict) and r.get("path") == path), None)
+        if i is None:
+            recs.append(rec)
+        else:
+            recs[i] = rec  # the same file again: one record, with the new title, date and thread
         save_json(reg, recs)
     print(f"handover: {path}")
     return 0
