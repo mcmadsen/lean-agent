@@ -451,6 +451,53 @@ class CliTest(unittest.TestCase):
         self.cli("handover", "Worker", "-p", "proj", "--thread", "t1", "--task-file", "-", input="x", FAKE_ANSWER="body")
         self.assertEqual(self.ledger()[-1]["thread"], "t1")
 
+    def registry(self):
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "handovers.json")) as fh:
+            return json.load(fh)
+
+    def test_handover_same_path_replaces_its_record(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("handover", "Plan", "-p", "proj", "--as-is", "--thread", "none", "--task-file", "-", input="a")
+        self.cli("handover", "plan!", "-p", "proj", "--as-is", "--thread", "t4", "--task-file", "-", input="b")
+        recs = self.registry()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual((recs[0]["title"], recs[0]["thread"]), ("plan!", "t4"))
+        self.assertTrue(recs[0]["path"].endswith("plan.md"))
+
+    def test_handover_same_title_in_two_projects_gives_two_files_both_listed(self):
+        other = os.path.join(os.path.dirname(self.proj), "other")
+        os.makedirs(other)
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("learn", other, "--name", "other")
+        for slug in ("proj", "other"):
+            self.cli("handover", "Plan", "-p", slug, "--as-is", "--task-file", "-", input=slug)
+        paths = [os.path.join(self.env["LEAN_AGENT_HOME"], slug, "handovers", "plan.md") for slug in ("proj", "other")]
+        self.assertTrue(all(os.path.exists(f) for f in paths))
+        listed = self.cli("handover", "--list").stdout
+        self.assertTrue(all(f in listed for f in paths))
+        self.assertEqual(len(self.registry()), 2)
+
+    def test_handover_without_a_title_or_text_is_an_error(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("handover", "-p", "proj", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("needs a title", p.stderr)
+        p = self.cli("handover", "Empty", "-p", "proj", "--as-is", "--task-file", "-", input="  \n", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("say what the handover is about", p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.handover_dir(), "empty.md")))
+
+    def test_handover_list_on_an_empty_home_says_so(self):
+        self.assertEqual(self.cli("handover", "--list").stdout.strip(), "No handovers yet.")
+
+    def test_thread_move_retags_handover_records(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.threads_home().route("Publish the report via docs", "s1")  # t1
+        self.threads_home().route("Fix the export timeout in billing", "s1")  # t2, the current one
+        self.cli("handover", "Plan", "-p", "proj", "--as-is", "--thread", "t2", "--task-file", "-", input="x")
+        self.cli("thread", "move", "t1")
+        self.assertEqual(self.registry()[0]["thread"], "t1")
+
     def test_remember_runs_a_librarian_and_prints_what_it_filed(self):
         self.cli("learn", self.proj)
         out = self.cli("remember", "Never merge on Fridays.", FAKE_ANSWER="Filed.\nREMEMBERED feedback no-friday-merges").stdout
