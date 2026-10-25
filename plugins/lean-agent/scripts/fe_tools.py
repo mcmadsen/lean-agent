@@ -26,6 +26,8 @@ import tempfile
 import time
 import urllib.request
 import zlib
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import lean_common  # noqa: E402
 
 CODE_EXT = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte")
 STYLE_EXT = (".css", ".scss", ".sass", ".less")
@@ -929,10 +931,7 @@ def run_pages(slug, root, conf, out_dir, routes, log):
         return _load(os.path.join(out_dir, "results.json"), [])
     finally:
         if server and server.poll() is None:
-            try:
-                os.killpg(server.pid, 15)
-            except OSError:
-                pass
+            lean_common.signal_group(server.pid, 15)
 
 
 def cmd_parity(slug, path, a, log=print):

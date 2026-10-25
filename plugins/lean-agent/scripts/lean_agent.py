@@ -39,7 +39,7 @@ import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
 import service_session  # noqa: E402
-from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
+from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive, signal_group, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -1334,17 +1334,11 @@ def detach_run(workdir, run_id):
             time.sleep(0.1)
         except KeyboardInterrupt:
             interrupted = interrupted or time.time()
-            try:
-                os.killpg(pid, signal.SIGINT)
-            except OSError:
-                pass
+            signal_group(pid, signal.SIGINT)
         except ChildProcessError:
             status = 0
         if interrupted and time.time() - interrupted > 60:
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except OSError:
-                pass
+            signal_group(pid, signal.SIGKILL)
     relay()
     entry = next((r for r in reversed(ledger()) if r["id"] == run_id), None)
     if entry:

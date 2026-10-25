@@ -3843,6 +3843,29 @@ class CliTest(unittest.TestCase):
         th.join()
         self.assertIn("the late summary", w.stdout)
 
+    def test_signal_group_only_reaches_a_group_it_could_have_created(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_common
+        own = os.getpgrp()
+        with mock.patch.object(os, "killpg") as kp:
+            for bad in (0, 1, -1, -5, None, "x", os.getpid(), own):
+                self.assertFalse(lean_common.signal_group(bad, signal.SIGKILL), bad)
+            kp.assert_not_called()
+        child = subprocess.Popen(["sleep", "30"])  # shares our group: not a group of its own
+        shared = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        try:
+            with mock.patch.object(os, "killpg") as kp:
+                self.assertFalse(lean_common.signal_group(child.pid, signal.SIGKILL))
+                kp.assert_not_called()
+                self.assertTrue(lean_common.signal_group(shared.pid, signal.SIGTERM))
+                kp.assert_called_once_with(shared.pid, signal.SIGTERM)
+        finally:
+            child.kill()
+            shared.kill()
+            child.wait()
+            shared.wait()
+        self.assertFalse(lean_common.pid_alive(0))
+
     def test_runs_show_marks_the_run_collected(self):
         home = self.env["LEAN_AGENT_HOME"]
         wd = os.path.join(home, "work", "r8")

@@ -703,9 +703,7 @@ class Host:
         self.stopping.set()
         proc = self.proc
         if proc and proc.poll() is None:
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except OSError:
+            if not lean_common.signal_group(proc.pid, signal.SIGTERM):
                 proc.terminate()
             killer = threading.Timer(15, lambda: proc.poll() is None and proc.kill())
             killer.daemon = True

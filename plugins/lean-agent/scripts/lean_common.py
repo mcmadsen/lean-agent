@@ -153,8 +153,29 @@ def running_runs(lean_home):
     return sorted(out, key=lambda x: (x[1].get("started") or "", x[0]))
 
 
+def signal_group(pid, sig):
+    """killpg(pid, sig) for a process group lean-agent started itself (a child it spawned with its own session).
+    Refuses pid <= 1, its own pid and its own process group, so a stale or unset pid can never reach the caller's
+    session, init, or (as kill(-1) / killpg(0) do) every process it may signal. Returns True when sent."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 1 or pid == os.getpid() or pid == os.getpgrp():
+        return False
+    try:
+        if os.getpgid(pid) != pid:  # not the leader of a group of its own: not one we created
+            return False
+        os.killpg(pid, sig)
+        return True
+    except OSError:
+        return False
+
+
 def pid_alive(pid):
     try:
+        if int(pid) <= 0:
+            return False
         os.kill(int(pid), 0)
         return True
     except (OSError, ValueError, TypeError):
