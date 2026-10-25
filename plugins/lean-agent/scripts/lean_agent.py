@@ -8,10 +8,8 @@ only the context cards and tools the orchestrator picked. Workers report back
 which context they used, and the context library improves from that.
 """
 import argparse
-import collections
 import contextlib
 import datetime
-import functools
 import glob
 import hashlib
 import io
@@ -58,25 +56,6 @@ CONFLICT_RE = re.compile(r"(?i)\b(sub-?agents?|agent tool|task tool|workflow too
 
 WORKER_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
 READONLY_TOOLS = "Read,Glob,Grep"
-# The publisher writes Claude Docs docs through the claude.ai connector. --safe-mode, --strict-mcp-config and --bare
-# all drop claude.ai connectors in -p, so this role keeps only what leaves them on: no settings files, no hooks,
-# no slash commands, and default permissions, so only these tools run (other MCP tools are denied, never asked).
-PUBLISH_TOOLS = READONLY_TOOLS + ",ToolSearch"
-DOCS_SERVERS = ("mcp__claude_ai_Claude_Docs", "mcp__Claude_Docs")  # the connector's name differs by environment
-DOCS_TOOL_RE = re.compile(r"^mcp__(claude_ai_)?Claude_Docs__")
-DOCS_ALLOWED = [f"{s}__{t}" for s in DOCS_SERVERS for t in ("batch", "guide", "update", "create", "read", "query", "export")]
-PUBLISH_ISOLATION = ["--setting-sources", "", "--disallowedTools", ",".join(s + "__delete" for s in DOCS_SERVERS)]
-PUBLISH_SETTINGS = {"disableAllHooks": True}  # no Bash to guard, and no hook of any plugin or setting runs in it
-
-
-PublisherParts = collections.namedtuple("PublisherParts", "isolation tools allowed permission_mode settings")
-
-
-def publisher_parts():
-    """The publisher's launch flags (isolation, tools, allowed, permission mode, settings): the one place they are
-    built, for `publish` (via cmd_run) and the doctor probe."""
-    return PublisherParts(list(PUBLISH_ISOLATION), PUBLISH_TOOLS, PUBLISH_TOOLS.split(",") + DOCS_ALLOWED, "default",
-                          dict(PUBLISH_SETTINGS))
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target", "__pycache__", ".next", "vendor"}
 STOPWORDS = set("the and for with that this from into have has are was were will would should could "
                 "you your our their not but all any can use using used make add fix get set run".split())
@@ -1244,7 +1223,7 @@ def duplicate_launch_guard(a, model, task):
     return key
 
 
-NO_RESUME_ROLES = ("librarian", "advisor", "publisher", "composer", "gap-decider")  # one-shot helpers with their own grants
+NO_RESUME_ROLES = ("librarian", "advisor", "composer", "gap-decider")  # one-shot helpers with their own grants
 
 
 def latest_run_id(runs=None, ordinary=False):
@@ -1541,10 +1520,7 @@ def _cmd_run(a):
             print(f"lean-agent: warning: {sname}: {problem} (lean-agent doctor says more)", file=sys.stderr)
     mcp_path = os.path.join(workdir, "mcp.json")
     chrome_allowed, chrome_disallowed, chrome_profile = resolve_chrome(chrome_spec, project) if chrome_spec else ([], [], None)
-    publisher = (getattr(a, "role", None) or (prev or {}).get("role")) == "publisher"
-    if publisher:
-        isolation = publisher_parts().isolation
-    elif mcp_servers or chrome_spec:
+    if mcp_servers or chrome_spec:
         if mcp_servers:
             lean_mcp.write_config(mcp_path, mcp_servers)
         # --safe-mode disables MCP and Chrome; this keeps the same isolation but admits exactly these servers
@@ -1560,10 +1536,7 @@ def _cmd_run(a):
     else:
         isolation = ["--safe-mode"]
     lean_json = os.path.join(PLUGIN_ROOT, "bin", "lean-json")
-    if publisher:
-        parts = publisher_parts()
-        allowed, permission_mode = parts.allowed, parts.permission_mode
-    elif read_only:
+    if read_only:
         allowed = READONLY_TOOLS.split(",") + [f"Bash(git -C {project} {sub}:*)" for sub in READONLY_GIT]
         allowed.append(f"Bash({lean_json}:*)")  # reads a file, prints a compact view
         allowed += [f"Bash({c}:*)" for c in allow_cmd + internal_cmd]  # read-only commands the orchestrator named, and the role's own
@@ -1598,10 +1571,7 @@ def _cmd_run(a):
         hooks["PostToolUse"] = [{"matcher": "mcp__.*", "hooks": [{
             "type": "command", "timeout": 20,
             "command": f"python3 {json.dumps(os.path.join(HERE, 'mcp_trim_hook.py'))}"}]}]
-    if publisher:
-        flag_settings.update(publisher_parts().settings)
-    else:
-        flag_settings["hooks"] = hooks
+    flag_settings["hooks"] = hooks
     if flag_settings:
         cmd += ["--settings", json.dumps(flag_settings)]
     if prev:
@@ -1658,8 +1628,7 @@ def _cmd_run(a):
     try:
         with wt_lock:
             raw, err, reads = stream_worker(cmd, today_line() + "\n\n" + task, workdir, env,
-                                            env_num("LEAN_AGENT_RUN_TIMEOUT", 1800), max_reads, note_session,
-                                            publish_init_check if publisher else None)
+                                            env_num("LEAN_AGENT_RUN_TIMEOUT", 1800), max_reads, note_session)
     except FileNotFoundError:
         die(f"'{claude}' not found on PATH")
     finally:
@@ -1705,10 +1674,7 @@ def _cmd_run(a):
     details_path, n_details, answer_cut = None, 0, False
     if answer_lines and summary:
         summary, details_path, n_details, answer_cut = split_answer(summary, answer_lines, workdir)
-    if reads.get("init_stop"):  # stopped at its init event (a tool it needs is missing): no turn ran
-        out = {"subtype": "init_stop", "is_error": True, "session_id": reads.get("session_id"), "num_turns": 0}
-        err, raw = reads["init_stop"], ""
-    elif reads.get("stopped") and not out.get("type"):  # stopped by lean-agent: no result event, so build one
+    if reads.get("stopped") and not out.get("type"):  # stopped by lean-agent: no result event, so build one
         out = {"subtype": "error_max_context_reads", "session_id": reads.get("session_id"),
                "num_turns": reads["turns"], "usage": reads["usage"]}
     subtype = out.get("subtype") or "error"
@@ -1780,7 +1746,7 @@ def _cmd_run(a):
         "recipe_step": (getattr(a, "recipe", None) or (None, None))[1],
         "estimate_usd": (getattr(a, "estimate", None) or (None, None))[0],
         "estimate_kind": (getattr(a, "estimate", None) or (None, None))[1],
-        "answer_lines": answer_lines, "details": details_path, "init_stop": reads.get("init_stop"),
+        "answer_lines": answer_lines, "details": details_path,
     }
     append_jsonl(home("ledger.jsonl"), entry)  # the budget line below counts this run
     LAST_RUN[:] = [entry]
@@ -1902,16 +1868,14 @@ def note_progress(workdir, turn, msg, u):
         pass
 
 
-def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0, on_session=None, on_init=None):
+def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0, on_session=None):
     """Run a worker and read its stream-json as it comes, so a run that keeps re-reading a large context
     can be stopped (after `max_reads` context tokens summed over its calls; 0 = never) and resumed later.
-    `on_session(id)` is called once, when the first event carries the session id. `on_init(event)` sees the
-    system/init event; a reason it returns stops the worker there, before its first turn (in "init_stop").
-    Returns (stdout, stderr, {"ctx", "turns", "usage", "session_id", "stopped", "init_stop"})."""
+    `on_session(id)` is called once, when the first event carries the session id.
+    Returns (stdout, stderr, {"ctx", "turns", "usage", "session_id", "stopped"})."""
     import tempfile
     import threading
-    reads = {"ctx": 0, "turns": 0, "usage": {k: 0 for k in usage.FIELDS}, "session_id": None, "stopped": False,
-             "init_stop": None}
+    reads = {"ctx": 0, "turns": 0, "usage": {k: 0 for k in usage.FIELDS}, "session_id": None, "stopped": False}
     seen, lines = set(), []
     with tempfile.TemporaryFile("w+") as errf:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True,
@@ -1931,7 +1895,7 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0, on_session=No
                 pass
             for line in proc.stdout:
                 lines.append(line)
-                if '"session_id"' in line or '"assistant"' in line or (on_init and '"init"' in line):
+                if '"session_id"' in line or '"assistant"' in line:
                     try:
                         ev = json.loads(line)
                     except ValueError:
@@ -1942,12 +1906,6 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0, on_session=No
                         reads["session_id"] = ev["session_id"]
                         if on_session:
                             on_session(reads["session_id"])
-                    if on_init and ev.get("type") == "system" and ev.get("subtype") == "init":
-                        reads["init_stop"] = on_init(ev)
-                        if reads["init_stop"]:
-                            reads["stopped"] = True
-                            proc.kill()  # nothing to finish: no turn has started
-                            break
                     msg = ev.get("message") if ev.get("type") == "assistant" else None
                     if not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict) or msg.get("id") in seen:
                         continue
@@ -5684,16 +5642,6 @@ def attribution():
     return load_json(home("config.json"), {}).get("attribution")
 
 
-ARTIFACT_MODES = ("off", "worker", "direct")
-
-
-def artifacts_mode():
-    """off | worker (default: `lean-agent publish` starts a worker that makes a Claude Docs doc) | direct (the
-    orchestrator has the Artifact tools itself, which adds ~17k tokens to every turn). The old value "on" is direct."""
-    v = load_json(home("config.json"), {}).get("artifacts", "worker")
-    return "direct" if v == "on" else v if v in ARTIFACT_MODES else "worker"
-
-
 def strict_on():
     return load_json(home("config.json"), {}).get("strict", "on") != "off"
 
@@ -5717,8 +5665,6 @@ def orchestrator_settings(existing):
     servers = [n for n, v in lean_mcp.discover().items() if v["source"] in ("user", "desktop")]
     trim = load_json(home("context-trim.json"), {})  # what `lean-agent context --apply` took out
     deny = set(ORCHESTRATOR_DENY)
-    if artifacts_mode() == "direct":
-        deny -= {"Artifact", "ArtifactComments"}  # ArtifactData stays denied
     perms["deny"] = sorted(deny | set(trim.get("deny") or [])
                            | {lean_mcp.tool_prefix(n).rstrip("_") for n in servers})
     data["permissions"] = perms
@@ -6045,11 +5991,6 @@ def cmd_doctor(a):
                + ", ".join(f"{os.path.basename(f)} ~{t:,}" for f, t in loaded),
                "keep files other than lean-agent's guide out: lean-agent doctor --fix (refreshes the excludes)")
     report(is_trusted(h), "orchestrator home is trusted", "lean-agent trust")
-    report(True, f"artifacts: {artifacts_mode()} (lean-agent config artifacts off|worker|direct)")
-    if artifacts_mode() == "worker":
-        docs = publish_check()
-        report(True if docs == "available" else None, f"publish: Claude Docs connector {docs}" + (" (no init event)" if docs == "unknown" else ""),
-               "turn claude.ai connectors on and connect Claude Docs; until then `publish` writes a local file")
     report(True, f"strict orchestrator: {'on' if strict_on() else 'off'} (lean-agent config strict on|off)")
     report(True, f"auto clear: {clear_at_text()} (lean-agent config clear-at off|auto|N)")
 
@@ -7131,37 +7072,15 @@ def cmd_config(a):
               "when a finished turn leaves it above this, and not while workers run unless compaction is near"
               + (" (LEAN_AGENT_CLEAR_AT is set and wins)" if os.environ.get("LEAN_AGENT_CLEAR_AT") else ""))
         return 0
-    if a.name == "artifacts":
-        if a.value == "on":
-            a.value = "direct"
-        if a.value not in (None, *ARTIFACT_MODES):
-            die("artifacts takes off, worker or direct")
-    elif a.value not in (None, "on", "off"):
+    if a.value not in (None, "on", "off"):
         die(f"{a.name} takes on or off")
-    if a.name == "strict":
-        if a.value:
-            cfg = load_json(home("config.json"), {})
-            cfg["strict"] = a.value
-            save_json(home("config.json"), cfg)
-        print(f"strict: {'on' if strict_on() else 'off'} · the orchestrator "
+    if a.value:
+        cfg = load_json(home("config.json"), {})
+        cfg["strict"] = a.value
+        save_json(home("config.json"), cfg)
+    print(f"strict: {'on' if strict_on() else 'off'} · the orchestrator "
               + ("may only run lean-agent commands and read lean-agent's own files; project work goes to workers"
                  if strict_on() else "may also run other commands and read project files"))
-        return 0
-    if a.name == "artifacts" and a.value:
-        cfg = load_json(home("config.json"), {})
-        cfg["artifacts"] = a.value
-        save_json(home("config.json"), cfg)
-        h = home("home")
-        settings = os.path.join(h, ".claude", "settings.json")
-        if os.path.isdir(os.path.join(h, ".claude")):
-            save_json(settings, orchestrator_settings(load_json(settings, {})))
-    mode = artifacts_mode()
-    print(f"artifacts: {mode} · " + {
-        "worker": "the orchestrator publishes through `lean-agent publish` (a worker makes a Claude Docs doc; "
-                  "private until the user shares it)",
-        "direct": "the orchestrator has the Artifact tools itself (private until the user shares them; adds ~17k "
-                  "tokens to every turn)",
-        "off": "no artifacts: the orchestrator can't use the Artifact tools and `publish` refuses"}[mode])
     return 0
 
 
@@ -7974,128 +7893,6 @@ def cmd_grep_log(a):
     return 0 if hits else 1
 
 
-PUBLISH_RULE = """\
-You publish one document for the orchestrator as a Claude Docs doc, with the Claude Docs tools
-(mcp__claude_ai_Claude_Docs__* or mcp__Claude_Docs__*; load a deferred one with ToolSearch, query "select:<name>").
-{action}
-Never delete a doc. Never put secrets, tokens or credentials in it. {content}
-End your answer with the doc's link (https://claude.ai/artifact/...) on its own line, and nothing after it.
-"""
-PUBLISH_NEW = ("Create a new doc titled exactly as the task's Title: one `batch` call that creates the container and "
-               "writes the body as markdown (read `guide` first if you don't know the call's shape).")
-PUBLISH_UPDATE = ("Update the existing doc {url}: read it first, then change it with `update` (or `batch`); "
-                  "don't create a new one.")
-DOC_LINK_RE = re.compile(r"https://claude\.ai/artifact/[\w\-./?=&#%]+")
-PUBLISH_MISSING = ("Claude Docs connector not available to workers (check that claude.ai connectors are on and "
-                   "Claude Docs is connected; run `lean-agent doctor` to re-check, or wait 10 minutes); "
-                   "publish this file from the Claude app")
-ARTIFACT_NOTE_RE = re.compile(r"^artifact: (\S+) (.*)$")
-
-
-def docs_tools(tools):
-    return [t for t in tools or [] if isinstance(t, str) and DOCS_TOOL_RE.match(t)]
-
-
-DOCS_SERVER_RE = re.compile(r"claude[ _.]?docs", re.I)  # "claude.ai Claude Docs", "Claude_Docs", ...
-PUBLISH_CACHE_AGE = 600  # a "missing" result stops publish launches for 10 minutes, whatever the artifacts mode; `lean-agent doctor` re-probes now, only in artifacts mode worker
-
-
-def docs_server_alive(servers):
-    """True when a Claude Docs server is listed as connected or still connecting: claude.ai connectors can be
-    connecting at the init event, with their tools not listed yet."""
-    return any(isinstance(s, dict) and DOCS_SERVER_RE.search(str(s.get("name") or ""))
-               and str(s.get("status") or "").lower() in ("connected", "pending", "connecting") for s in servers or [])
-
-
-@functools.lru_cache(maxsize=None)
-def claude_version():
-    try:
-        r = subprocess.run([os.environ.get("LEAN_AGENT_CLAUDE") or "claude", "--version"], capture_output=True,
-                           text=True, timeout=15, stdin=subprocess.DEVNULL)
-        return r.stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        return ""
-
-
-def publish_init_check(ev):
-    """The publisher's on_init: stops it before its first turn when it has no Claude Docs tool and no Claude Docs
-    server that is connected or connecting. The outcome is kept for `lean-agent doctor` and `publish`."""
-    found = docs_tools(ev.get("tools"))
-    alive = docs_server_alive(ev.get("mcp_servers"))
-    save_json(home("publish-check.json"), {"ts": now_iso(), "docs": "available" if found else "pending" if alive
-                                           else "missing", "version": claude_version(), "at": time.time()})
-    return None if found or alive else \
-        "no Claude Docs tool (mcp__claude_ai_Claude_Docs__*, mcp__Claude_Docs__*) in the worker's tools"
-
-
-def publish_cached():
-    """The last init outcome ('available'|'pending'|'missing'), unless it is older than 10 minutes or was taken with
-    another `claude --version`."""
-    last = load_json(home("publish-check.json"), None)
-    if not isinstance(last, dict) or last.get("docs") not in ("available", "pending", "missing"):
-        return None
-    if time.time() - (last.get("at") or 0) > PUBLISH_CACHE_AGE or last.get("version") != claude_version():
-        return None
-    return last["docs"]
-
-
-def publish_check():
-    """'available' | 'pending' | 'missing' | 'unknown': always a fresh launch with the publisher's flags, stopped at
-    its init event (no turn); 'unknown' when it sent no init event."""
-    import tempfile
-    isolation, tools, allowed, mode, settings = publisher_parts()
-    cmd = [os.environ.get("LEAN_AGENT_CLAUDE") or "claude", "-p", "--output-format", "stream-json", "--verbose",
-           "--model", "haiku", *isolation, "--disable-slash-commands", "--tools", tools,
-           "--allowedTools", ",".join(allowed), "--permission-mode", mode, "--max-turns", "1",
-           "--settings", json.dumps(settings)]
-    seen = []
-    def on_init(ev):
-        seen.append(1)
-        publish_init_check(ev)
-        return "checked"
-    with tempfile.TemporaryDirectory() as d:
-        try:
-            stream_worker(cmd, "Reply ok.", d, dict(os.environ), 60, on_init=on_init)
-        except OSError:
-            return "unknown"
-    return load_json(home("publish-check.json"), {}).get("docs", "unknown") if seen else "unknown"
-
-
-def publish_fallback(slug, title, content, as_is, update=False):
-    """The local file for the user to publish from the Claude app, when the connector is missing. Without --as-is
-    `content` is the request, not the document: a compose-only worker (no connector, --safe-mode) writes it. The file
-    is always a fresh document: --url / the recorded link of the title are not updated."""
-    if not as_is:
-        ns = argparse.Namespace(resume=None, task=["Write the document the request below describes, as Markdown, "
-                                                   "in your reply only.\n\n" + content], task_file=None,
-                                model="sonnet", why="compose a document for the orchestrator", cards="none",
-                                card_list=None, project=slug, read_only=True, chrome=None, mcp=None, tools=None,
-                                allow_send=None, max_turns=20, max_usd=1.0, max_context=2000, max_cards=4,
-                                ttype="read", role="composer", effort="low", role_rule="")
-        rc, out, run = run_role(ns, quiet=True)
-        content = parse_feedback(run_result_text(run))[0].strip() if run else ""
-        if not content:
-            print(out, file=sys.stderr)
-            die("the compose worker returned no document; " + PUBLISH_MISSING, rc or 1)
-    path = home(slug, "publish", slugify(title) + ".md")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as fh:
-        fh.write(f"# {title}\n\n{content}\n")
-    print(path)
-    die(PUBLISH_MISSING + "; the local file is a fresh document, not an update of the linked doc" if update else
-        PUBLISH_MISSING, 2)
-
-
-def artifact_note_url(title):
-    """The URL of the artifact published under this title, from the hand-off note `publish` recorded."""
-    import compact_hook
-    for n in reversed(compact_hook.load_notes()):
-        m = ARTIFACT_NOTE_RE.match(n.get("text") or "") if n.get("kind") == "fyi" else None
-        if m and m.group(2) == title:
-            return m.group(1)
-    return None
-
-
 REMEMBER_RULE = """\
 You are the librarian: you file the one item the user wants kept, in the right place, with lean-agent's own commands
 (run exactly `{lean} <memory|card|cards|todo|handoff> ...`; nothing else changes anything). You may read project files.
@@ -8243,46 +8040,64 @@ def cmd_advise(a):
     return 0
 
 
-def cmd_publish(a):
-    """Publish (or update) a Claude Docs doc through a worker, so the orchestrator never loads the doc tools. Without
-    the connector the content goes to a local file instead, for the user to publish from the Claude app."""
-    mode = artifacts_mode()
-    if mode == "off":
-        die("artifacts are off (lean-agent config artifacts worker)")
-    title = " ".join(a.title.split())
+HANDOVER_TASK = ("Write the handover document the request below describes, as Markdown, in your reply only (no title "
+                 "line: lean-agent adds it). Read what you need in the project first. Never put secrets, tokens or "
+                 "credentials in it.\n\n")
+
+
+def handover_dir(slug):
+    return home(slug, "handovers")
+
+
+def handover_list(a):
+    slug = resolve_project(a.project)[0] if a.project else "*"
+    files = [f for f in glob.glob(os.path.join(handover_dir(slug), "*.md")) if not f.endswith(".prev.md")]
+    for f in sorted(files, key=os.path.getmtime, reverse=True):
+        head = read_text(f).split("\n", 2)
+        title = head[0][2:].strip() if head[0].startswith("# ") else os.path.basename(f)
+        date = head[1].strip("_ ").split(" ")[0] if len(head) > 1 and head[1].startswith("_") else ""
+        print(f"{f}  {title}" + (f"  {date}" if date else ""))
+    return 0
+
+
+def cmd_handover(a):
+    """Write a handover document as a plain Markdown file under the lean-agent home and print its path."""
+    if a.list:
+        return handover_list(a)
+    title = " ".join((a.title or "").split())
+    if not title:
+        die("handover needs a title (or --list)")
     content = sys.stdin.read().strip() if a.task_file == "-" else read_text(a.task_file).strip() if a.task_file else ""
     if not content:
-        die("say what to publish, or give the content: --task-file - <<'EOF' ... EOF")
-    url = a.url or artifact_note_url(title)
-    slug, _ = role_project(a, "worker")
-    task = (f"Title: {title}\n"
-            + (f"Update the existing doc {url}: read it first, then change it.\n" if url else "")
-            + ("The content, to publish as it is:\n" if a.as_is else "What to publish:\n") + content)
-    rule = PUBLISH_RULE.format(
-        action=PUBLISH_UPDATE.format(url=url) if url else PUBLISH_NEW,
-        content="Publish the content exactly as given." if a.as_is else
-        "Read what you need in the project to write it, then publish it.")
-    ns = argparse.Namespace(resume=None, task=[task], task_file=None, model="haiku" if a.as_is else "sonnet",
-                            why="publish a Claude Docs doc for the orchestrator", cards="none", card_list=None,
-                            project=slug, read_only=True, chrome=None, mcp=None, tools=PUBLISH_TOOLS,
-                            allow_send=None, max_turns=20, max_usd=1.0, max_context=2000, max_cards=4, ttype="write",
-                            role="publisher", effort="low", role_rule=rule)
-    if publish_cached() == "missing":  # a recent init event said so: no launch
-        publish_fallback(slug, title, content, a.as_is, bool(url))
-    rc, _, run = run_role(ns)
-    if run and run.get("init_stop"):  # the worker had no Claude Docs tool: stopped before its first turn
-        publish_fallback(slug, title, content, a.as_is, bool(url))
-    links = DOC_LINK_RE.findall(parse_feedback(run_result_text(run))[0] if run else "")
-    if not links and rc == 0 and publish_cached() == "pending":
-        publish_fallback(slug, title, content, a.as_is, bool(url))  # the server stayed pending: no Docs tool was seen
-    if not links:
-        die("publish failed: the worker's reply has no Claude Docs link (https://claude.ai/artifact/...); "
-            "see its reply above", rc or 1)
-    new = links[-1].rstrip(".,)")
-    print(f"doc: {new}")
-    if artifact_note_url(title) != new:
-        a2 = argparse.Namespace(note=f"artifact: {new} {title}", kind="fyi", done=None, hours=24)
-        cmd_handoff(a2)
+        die("say what the handover is about, or give its text: --task-file - <<'EOF' ... EOF")
+    slug, _ = role_project(a, "composer")
+    run = None
+    if not a.as_is:
+        ns = argparse.Namespace(resume=None, task=[HANDOVER_TASK + "Title: " + title + "\n\n" + content], task_file=None,
+                                model="sonnet", why="write a handover document for the orchestrator", cards="none",
+                                card_list=None, project=slug, read_only=True, chrome=None, mcp=None, tools=None,
+                                allow_send=None, max_turns=20, max_usd=1.0, max_context=2000, max_cards=4,
+                                ttype="read", role="composer", effort="low", role_rule="")
+        rc, out, run = run_role(ns, quiet=True)
+        content = parse_feedback(run_result_text(run))[0].strip() if run else ""
+        if not content:
+            print(out, file=sys.stderr)
+            die("the worker returned no document; no handover written", rc or 1)
+    thread = lean_threads.resolve_tag()
+    path = os.path.abspath(os.path.join(handover_dir(slug), slugify(title) + ".md"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path):
+        os.replace(path, path[:-3] + ".prev.md")
+    with open(path, "w") as fh:
+        fh.write(f"# {title}\n\n_{datetime.date.today().isoformat()}" + (f" \u00b7 thread {thread}" if thread else "")
+                 + f"_\n\n{content}\n")
+    reg = home("handovers.json")
+    with file_lock(reg):
+        recs = load_json(reg, [])
+        recs = recs if isinstance(recs, list) else []
+        recs.append({"ts": now_iso(), "thread": thread, "title": title, "path": path})
+        save_json(reg, recs)
+    print(f"handover: {path}")
     return 0
 
 
@@ -8443,17 +8258,17 @@ def build_parser():
     s = sub.add_parser("brief", help="what a fresh session starts from: the latest checkpoint, then the hand-off")
     s.set_defaults(fn=cmd_brief)
 
-    s = sub.add_parser("publish", help="publish (or update) a private Claude Docs doc through a small worker that has "
-                       "the claude.ai Claude Docs connector; prints its link and records it as a hand-off note, so a "
-                       "later call with the same title updates it. Without the connector it writes a local file (always a "
-                       "fresh document, not an update of --url's doc) and exits non-zero. The content or what to publish comes on stdin: --task-file -")
-    s.add_argument("title")
-    s.add_argument("--url", help="update this existing doc (a claude.ai artifact link) instead of making a new one")
+    s = sub.add_parser("handover", help="write a handover document (plain Markdown) under the lean-agent home and print "
+                       "its path: a read-only worker writes it from the request on stdin (--task-file -), or --as-is "
+                       "saves the given text. The same title again keeps the old file as <slug>.prev.md. --list shows "
+                       "the existing ones, newest first")
+    s.add_argument("title", nargs="?")
     s.add_argument("--project", "-p", help="the project the worker runs in (default: the latest run's)")
-    s.add_argument("--task-file", help="what to publish, or the content ('-' = stdin)")
-    s.add_argument("--as-is", action="store_true", help="the input is the content itself: publish it unchanged (haiku)")
+    s.add_argument("--task-file", help="the request, or the text itself with --as-is ('-' = stdin)")
+    s.add_argument("--as-is", action="store_true", help="the input is the document: save it unchanged")
+    s.add_argument("--list", action="store_true", help="list the existing handovers instead of writing one")
     s.add_argument("--thread", dest="thread_tag", metavar="tN|none", help=THREAD_HELP)
-    s.set_defaults(fn=cmd_publish)
+    s.set_defaults(fn=cmd_handover)
 
     s = sub.add_parser("remember", help="file something to keep (memory, project card, todo, feedback rule or hand-off "
                        "note) through a small librarian worker; it updates an existing entry rather than duplicating "
@@ -8474,11 +8289,9 @@ def build_parser():
     s.add_argument("--thread", help="the thread tag of the message (#N or tN; default main)")
     s.set_defaults(fn=cmd_advise)
 
-    s = sub.add_parser("config", help="switches: artifacts off|worker|direct (worker: publish through `lean-agent publish`, the default; "
-                       "direct: the orchestrator has the Artifact tools itself), "
-                       "strict on|off (the orchestrator only runs lean-agent commands; default on), "
+    s = sub.add_parser("config", help="switches: strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`)")
-    s.add_argument("name", choices=["artifacts", "strict", "clear-at"])
+    s.add_argument("name", choices=["strict", "clear-at"])
     s.add_argument("value", nargs="?", help="on|off, or off|auto|a number for clear-at")
     s.set_defaults(fn=cmd_config)
 

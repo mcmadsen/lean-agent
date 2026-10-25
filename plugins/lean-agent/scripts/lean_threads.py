@@ -382,7 +382,7 @@ def route(prompt, session=None, now=None):
 
 IDLE_DAYS = 7  # `now` closes an open thread with no activity for this long (LEAN_AGENT_THREAD_IDLE_DAYS or config thread_idle_days)
 NOW_LINES = 25
-KINDS = ['request', 'run', 'review', 'todo', 'note', 'doc', 'push']
+KINDS = ['request', 'run', 'review', 'todo', 'note', 'handover', 'push']
 
 
 def idle_days():
@@ -475,11 +475,11 @@ def events(data=None, todos=None):
     notes = lean_common.read_json(lean_home("handoff-notes.json"), [])
     for n in notes if isinstance(notes, list) else []:
         if isinstance(n, dict):
-            m = re.match(r"^artifact: (\S+) (.*)$", n.get("text") or "")
-            if m:
-                add(n.get("thread"), n.get("ts"), "doc", f"{m.group(2)} {m.group(1)}")
-            else:
-                add(n.get("thread"), n.get("ts"), "note", f"{n.get('kind') or 'note'}: {n.get('text')}")
+            add(n.get("thread"), n.get("ts"), "note", f"{n.get('kind') or 'note'}: {n.get('text')}")
+    hs = lean_common.read_json(lean_home("handovers.json"), [])
+    for h in hs if isinstance(hs, list) else []:
+        if isinstance(h, dict):
+            add(h.get("thread"), h.get("ts"), "handover", str(h.get("path")))
     for v in out.values():
         v.sort(key=lambda e: (e[0], KINDS.index(e[2])))  # same second: the order the work happens in
     return out
@@ -669,6 +669,7 @@ def move_latest(tid, session=None):
         _retag(lean_home("todo.json"), lambda d: (d.get("items") if isinstance(d, dict) else None) or [], old, tid, since,
                data["aliases"], "created")
         _retag(lean_home("handoff-notes.json"), lambda d: d if isinstance(d, list) else [], old, tid, since, data["aliases"], "ts")
+        _retag(lean_home("handovers.json"), lambda d: d if isinstance(d, list) else [], old, tid, since, data["aliases"], "ts")
     set_current(tid, session)
     return old, tid
 
