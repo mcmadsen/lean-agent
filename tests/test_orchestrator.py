@@ -3735,6 +3735,35 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "inline", LEAN_AGENT_NO_DETACH="1"
                                   ).returncode, 0)
 
+    def test_in_process_run_does_not_fork(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        with mock.patch.object(L, "CLI_ENTRY", []), mock.patch.dict(os.environ, {}, clear=False), \
+                mock.patch.object(os, "fork") as fork:
+            os.environ.pop("LEAN_AGENT_NO_DETACH", None)
+            self.assertIsNone(L.detach_run(os.path.join(self.tmp.name, "wd"), "r1"))
+        fork.assert_not_called()
+
+    def test_forked_supervisor_never_returns_into_the_caller(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+
+        class Exited(BaseException):
+            pass
+        for boom in (RuntimeError("x"), SystemExit(3), None):
+            with mock.patch.object(L, "CLI_ENTRY", [True]), mock.patch.object(L, "SUPERVISOR", [True]), \
+                    mock.patch.object(L, "_cmd_run", side_effect=boom, return_value=0), \
+                    mock.patch.object(os, "_exit", side_effect=Exited) as ex:
+                with self.assertRaises(Exited), contextlib.redirect_stderr(io.StringIO()):
+                    L.cmd_run(types.SimpleNamespace())
+            ex.assert_called_once()
+        with mock.patch.object(L, "CLI_ENTRY", [True]), mock.patch.object(L, "SUPERVISOR", []), \
+                mock.patch.object(os, "fork", return_value=0), mock.patch.object(os, "setsid", side_effect=OSError), \
+                mock.patch.object(os, "_exit", side_effect=Exited) as ex:
+            with self.assertRaises(Exited):
+                L.detach_run(os.path.join(self.tmp.name, "wd"), "r1")
+        ex.assert_called_once_with(1)
+
     def test_no_detach_run_removes_its_running_marker_when_the_tee_closes(self):
         self.cli("learn", self.proj, "--name", "proj")
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "inline", LEAN_AGENT_NO_DETACH="1")
