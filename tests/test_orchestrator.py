@@ -455,8 +455,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.ledger()[-1]["thread"], "t1")
 
     def registry(self):
-        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "handovers.json")) as fh:
-            return json.load(fh)
+        return _load_json(os.path.join(self.env["LEAN_AGENT_HOME"], "handovers.json"))
 
     def test_handover_same_path_replaces_its_record(self):
         self.cli("learn", self.proj, "--name", "proj")
@@ -2326,11 +2325,12 @@ class CliTest(unittest.TestCase):
         share, span, why = fe_tools.png_diff(os.path.join(t, "a.png"), os.path.join(t, "b.png"))
         self.assertEqual((share, span, why), (0.2, (0.0, 0.2), None))
         self.assertEqual(fe_tools._area(span), "rows 0-20% (top)")
+
+    def test_parity_in_a_browser(self):
         if not (PLAYWRIGHT_DIR and shutil.which("node")):
             self.skipTest("the browser part needs Playwright (local runs set LEAN_AGENT_PLAYWRIGHT_DIR)")
-        patcher = mock.patch.dict(os.environ, {"LEAN_AGENT_PLAYWRIGHT_DIR": PLAYWRIGHT_DIR})
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        t = self.tmp.name
+        pw = {"LEAN_AGENT_PLAYWRIGHT_DIR": PLAYWRIGHT_DIR}
         import http.server
         import threading
         site = os.path.join(t, "site")
@@ -2347,12 +2347,12 @@ class CliTest(unittest.TestCase):
         root = self._fe_fixture()
         try:
             url = f"http://127.0.0.1:{server.server_address[1]}"
-            self.cli("parity", "shop", "set", "--url", url, "--routes", "/,/settings/")
-            self.assertIn("2 routes recorded", self.cli("parity", "shop", "baseline").stdout)
-            self.assertIn("2/2 routes unchanged", self.cli("parity", "shop").stdout)
+            self.cli("parity", "shop", "set", "--url", url, "--routes", "/,/settings/", **pw)
+            self.assertIn("2 routes recorded", self.cli("parity", "shop", "baseline", **pw).stdout)
+            self.assertIn("2/2 routes unchanged", self.cli("parity", "shop", **pw).stdout)
             with open(os.path.join(site, "settings", "index.html"), "w") as fh:
                 fh.write(page("#c33", "Save changes<script>console.error('boom')</script>"))
-            r = self.cli("parity", "shop", check=False)
+            r = self.cli("parity", "shop", check=False, **pw)
             self.assertEqual(r.returncode, 1)
             self.assertIn("1/2 routes unchanged", r.stdout)
             self.assertIn("(top)", r.stdout)
