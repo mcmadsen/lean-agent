@@ -1247,6 +1247,7 @@ def new_todo(slug, title):
 
 
 SUPERVISOR = []  # [True] in the detached process that does a run's real work
+CLI_ENTRY = []  # [True] when started as the program (see the __main__ block): only then may a run detach
 
 
 def cmd_run(a):
@@ -1265,15 +1266,17 @@ def cmd_run(a):
             traceback.print_exc()
         raise
     finally:
-        if isinstance(sys.stdout, Tee):
-            sys.stdout.close()  # the summary file is complete, then the running marker goes (also without a detached supervisor)
-        if SUPERVISOR:
-            for f in (sys.stdout, sys.stderr):
-                try:
-                    f.flush()
-                except (OSError, ValueError):
-                    pass
-            os._exit(rc or 0)
+        try:
+            if isinstance(sys.stdout, Tee):
+                sys.stdout.close()  # the summary file is complete, then the running marker goes (also without a detached supervisor)
+        finally:
+            if SUPERVISOR:  # the forked copy never returns or raises into the caller
+                for f in (sys.stdout, sys.stderr):
+                    try:
+                        f.flush()
+                    except (OSError, ValueError):
+                        pass
+                os._exit(rc if isinstance(rc, int) else 0)
 
 
 def detach_run(workdir, run_id):
@@ -1281,7 +1284,7 @@ def detach_run(workdir, run_id):
     so it survives whatever kills this command: the orchestrator's /clear, its shell tool ending, a closed terminal.
     Returns None in that process (it carries on), else the exit code once it is done, after this process has relayed
     its output. Ctrl-C here is passed on to it, which stops the run as before."""
-    if SUPERVISOR or not hasattr(os, "fork") or os.environ.get("LEAN_AGENT_NO_DETACH") == "1":
+    if (SUPERVISOR or not CLI_ENTRY or not hasattr(os, "fork") or os.environ.get("LEAN_AGENT_NO_DETACH") == "1"):
         return None
     os.makedirs(workdir, exist_ok=True)
     paths = [os.path.join(workdir, f"supervisor.{n}") for n in ("out", "err")]
@@ -1304,8 +1307,8 @@ def detach_run(workdir, run_id):
             sys.stdout = open(1, "w", buffering=1, closefd=False)
             sys.stderr = open(2, "w", buffering=1, closefd=False)
         except BaseException:
-            os._exit(1)
-        SUPERVISOR.append(True)
+            os._exit(1)  # never back into the caller: this is a copy of it
+        SUPERVISOR.append(True)  # cmd_run's finally ends this process with os._exit
         return None
     pos, status, interrupted = [0, 0], None, None
 
@@ -8920,4 +8923,5 @@ class Tee:
 
 
 if __name__ == "__main__":
+    CLI_ENTRY.append(True)
     sys.exit(main())
