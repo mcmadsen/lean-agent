@@ -1868,7 +1868,7 @@ def note_progress(workdir, turn, msg, u):
         pass
 
 
-def stream_worker(cmd, prompt, workdir, env, timeout, max_reads=0, on_session=None):
+def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session):
     """Run a worker and read its stream-json as it comes, so a run that keeps re-reading a large context
     can be stopped (after `max_reads` context tokens summed over its calls; 0 = never) and resumed later.
     `on_session(id)` is called once, when the first event carries the session id.
