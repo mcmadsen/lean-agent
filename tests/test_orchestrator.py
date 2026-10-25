@@ -171,7 +171,11 @@ class CliTest(unittest.TestCase):
             fh.write(FAKE_CLAUDE)
         os.chmod(fake, 0o755)
         self.log = os.path.join(t, "calls.jsonl")
-        self.env = dict(os.environ, LEAN_AGENT_HOME=os.path.join(t, "home"), LEAN_AGENT_CLAUDE=fake,
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("LEAN_AGENT_")}  # the caller's settings stay out
+        patcher = mock.patch.dict(os.environ, clean, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.env = dict(clean, LEAN_AGENT_HOME=os.path.join(t, "home"), LEAN_AGENT_CLAUDE=fake,
                         FAKE_LOG=self.log, CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD="1",
                         HOME=t, CLAUDE_CONFIG_DIR=os.path.join(t, "cfg"), LEAN_AGENT_LAUNCH_GUARD="0",
                         LEAN_AGENT_HTTP_CHECK="0")

@@ -14,8 +14,13 @@ from unittest import mock
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins", "lean-agent", "scripts")
 
 
+def base_env(**extra):
+    """The caller's environment minus every LEAN_AGENT_* key, plus what a test asks for."""
+    return dict({k: v for k, v in os.environ.items() if not k.startswith("LEAN_AGENT_")}, **extra)
+
+
 def run_hook(script, event, **env):
-    full_env = dict(os.environ, **env)
+    full_env = base_env(**env)
     p = subprocess.run(
         [sys.executable, os.path.join(ROOT, script)],
         input=json.dumps(event), capture_output=True, text=True, env=full_env, check=True,
@@ -32,6 +37,9 @@ def assistant_line(mid, inp, cw, cr, out, model="claude-test"):
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        patcher = mock.patch.dict(os.environ, base_env(), clear=True)  # the caller's LEAN_AGENT_* stay out
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.env = {"CLAUDE_PLUGIN_DATA": os.path.join(self.tmp.name, "data"),
                     "LEAN_AGENT_HOME": os.path.join(self.tmp.name, "home"), "LEAN_AGENT_CTX_NUDGE": "0"}
 
@@ -101,14 +109,14 @@ class SqueezeTest(Base):
                      "print('Traceback (most recent call last):')\nprint('  File \"app.py\", line 3')\n"
                      "print('ValueError: bad config')\nsys.exit(3)\n")
         sq = os.path.join(ROOT, "..", "bin", "lean-sq")
-        p = subprocess.run([sq, sys.executable, script], capture_output=True, text=True, env=dict(os.environ, **self.env))
+        p = subprocess.run([sq, sys.executable, script], capture_output=True, text=True, env=base_env(**self.env))
         self.assertEqual(p.returncode, 3)
         self.assertIn("ValueError: bad config", p.stdout)
         self.assertIn('File "app.py", line 3', p.stdout)
         self.assertIn("3,000 download lines", p.stdout)
         self.assertIn("[exit code 3]", p.stdout)
         self.assertLess(len(p.stdout), 2000)
-        p = subprocess.run([sq, "echo small"], capture_output=True, text=True, env=dict(os.environ, **self.env))
+        p = subprocess.run([sq, "echo small"], capture_output=True, text=True, env=base_env(**self.env))
         self.assertEqual((p.returncode, p.stdout), (0, "small\n"))
 
     def test_worker_answer_never_squeezed(self):
@@ -145,10 +153,10 @@ class CompactTest(Base):
         home = self.env["LEAN_AGENT_HOME"]
         os.makedirs(home, exist_ok=True)
         p = subprocess.run([sys.executable, os.path.join(ROOT, "compact_hook.py"), "pre"], capture_output=True,
-                           text=True, input=json.dumps({"cwd": self.tmp.name}), env=dict(os.environ, **self.env))
+                           text=True, input=json.dumps({"cwd": self.tmp.name}), env=base_env(**self.env))
         self.assertEqual(p.stdout, "")  # the user's other sessions compact as usual
         p = subprocess.run([sys.executable, os.path.join(ROOT, "compact_hook.py"), "pre"], capture_output=True,
-                           text=True, input=json.dumps({"cwd": home}), env=dict(os.environ, **self.env))
+                           text=True, input=json.dumps({"cwd": home}), env=base_env(**self.env))
         self.assertIn("every approval the user gave for an outward action", p.stdout)
 
     def test_digest_after_compaction(self):
@@ -161,7 +169,7 @@ class CompactTest(Base):
             fh.write(json.dumps({"ref": "feature-x", "head": "abc123def456", "verdict": "changes-requested",
                                  "findings": [{"severity": "major"}]}) + "\n")
         p = subprocess.run([sys.executable, os.path.join(ROOT, "compact_hook.py"), "post"], capture_output=True,
-                           text=True, input=json.dumps({"cwd": home, "source": "compact"}), env=dict(os.environ, **self.env))
+                           text=True, input=json.dumps({"cwd": home, "source": "compact"}), env=base_env(**self.env))
         ctx = json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("- 1020-1 done haiku shop: list the checkout tests", ctx)
         self.assertIn("shop feature-x @ abc123def4 changes-requested (1 blocking)", ctx)
@@ -186,15 +194,13 @@ class SessionHookTest(Base):
             self.up(pid)
         claudes = {pid} if claudes is None else set(claudes)
         cmd = lambda p: ["/usr/bin/claude", "--x"] if p in claudes else ["sh", "-c", "x"]
-        old = {k: os.environ.get(k) for k in ("LEAN_AGENT_SERVICE_SESSION", "LEAN_AGENT_HOME")}
-        os.environ.update(LEAN_AGENT_SERVICE_SESSION="1", LEAN_AGENT_HOME=self.env["LEAN_AGENT_HOME"])
         real_stdin, sys.stdin = sys.stdin, io.StringIO(json.dumps(event or {"session_id": "s1"}))
         try:
-            session_hook.main(ppid=lambda p: chain.get(p, 0), cmd=cmd, wait=wait)
+            with mock.patch.dict(os.environ, base_env(LEAN_AGENT_SERVICE_SESSION="1",
+                                                      LEAN_AGENT_HOME=self.env["LEAN_AGENT_HOME"]), clear=True):
+                session_hook.main(ppid=lambda p: chain.get(p, 0), cmd=cmd, wait=wait)
         finally:
             sys.stdin = real_stdin
-            for k, v in old.items():
-                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
     def test_records_when_the_service_claude_is_an_ancestor(self):
         me = os.getpid()
@@ -342,7 +348,7 @@ class SessionHookTest(Base):
                      "sys.stdout.write(p.stdout)\n" % sys.executable)
         os.chmod(fake, 0o755)
         p = subprocess.run([fake, os.path.join(ROOT, "session_hook.py"), json.dumps(event)], capture_output=True,
-                           text=True, env=dict(os.environ, **self.env, **env), check=True)
+                           text=True, env=base_env(**self.env, **env), check=True)
         return json.loads(p.stdout) if p.stdout.strip() else None
 
     def test_clear_adds_the_brief_with_the_checkpoint_first(self):
@@ -393,12 +399,8 @@ class SessionHookTest(Base):
         with open(os.path.join(home, "handoff-notes.json"), "w") as fh:
             json.dump([{"ts": "2026-10-23T09:00:00", "text": long_cp, "kind": "checkpoint"},
                        {"ts": "2026-10-23T09:01:00", "text": "keep this open item in the hand-off"}], fh)
-        old = os.environ.get("LEAN_AGENT_HOME")
-        os.environ["LEAN_AGENT_HOME"] = home
-        try:
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
             text = compact_hook.brief(3000)
-        finally:
-            os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.__setitem__("LEAN_AGENT_HOME", old)
         self.assertLessEqual(len(text), 3000)
         self.assertIn("soft state line 000", text)
         self.assertNotIn("soft state line 199", text)
@@ -425,7 +427,7 @@ class SessionHookTest(Base):
                              ("s-" + source, "/x/s-%s.jsonl" % source, source))
             self.assertIsInstance(rec["ts"], float)
             os.remove(os.path.join(self.env["LEAN_AGENT_HOME"], "chat", "service.json"))
-        env = dict(os.environ, **self.env)
+        env = base_env(**self.env)
         env.pop("LEAN_AGENT_SERVICE_SESSION", None)
         subprocess.run([sys.executable, os.path.join(ROOT, "session_hook.py")], input=json.dumps({"session_id": "x"}),
                        text=True, env=env, check=True)
@@ -433,7 +435,7 @@ class SessionHookTest(Base):
 
     def test_never_fails_the_session(self):
         self.up(os.getpid())
-        env = dict(os.environ, LEAN_AGENT_SERVICE_SESSION="1", **self.env)
+        env = base_env(LEAN_AGENT_SERVICE_SESSION="1", **self.env)
         for bad in ("", "not json", "[1]", "{}"):
             p = subprocess.run([sys.executable, os.path.join(ROOT, "session_hook.py")], input=bad, text=True,
                                capture_output=True, env=env)
@@ -691,7 +693,7 @@ class BudgetTest(Base):
         self.assertEqual(ctx("/clear"), "")  # a slash command is not a request
         self.assertEqual(prompt("hello there", self.tmp.name), None)  # a normal session is left alone
         sys.path.insert(0, ROOT)
-        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": home}):
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
             import lean_threads
             t1 = lean_threads.load()["threads"]["t1"]
             self.assertEqual(len(t1["requests"]), 2)
@@ -722,7 +724,7 @@ class BudgetTest(Base):
             json.dump({"threads": {"t4": {"id": "t4", "title": "Old topic", "kind": "free", "created": "2026-01-01T00:00:00",
                                           "last_message": "2026-01-01T00:00:00"}}, "aliases": {}}, fh)
         sys.path.insert(0, ROOT)
-        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": home}):
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
             import lean_threads
             self.assertIn("t4", lean_threads.load()["threads"])
             self.assertTrue(os.path.exists(os.path.join(home, "threads.json")), os.listdir(home))
@@ -1002,7 +1004,7 @@ class BudgetTest(Base):
         ev = {"session_id": "s5", "cwd": home, "source": "compact"}
         run = lambda: json.loads(subprocess.run([sys.executable, os.path.join(ROOT, "compact_hook.py"), "post"],
                                                 input=json.dumps(ev), capture_output=True, text=True,
-                                                env=dict(os.environ, **self.env), check=True).stdout)
+                                                env=base_env(**self.env), check=True).stdout)
         self.assertNotIn("compacted more than once", run()["hookSpecificOutput"]["additionalContext"])
         self.assertIn("suggest the user starts a fresh conversation (/clear)",
                       run()["hookSpecificOutput"]["additionalContext"])
@@ -1055,7 +1057,7 @@ class BudgetTest(Base):
         with open(os.path.join(home, "handoff-notes.json"), "w") as fh:
             json.dump([{"text": "Ask the user whether to merge PR 512"}], fh)
         p = subprocess.run([sys.executable, os.path.join(ROOT, "compact_hook.py"), "post"], input=json.dumps(start),
-                           capture_output=True, text=True, env=dict(os.environ, **self.env), check=True)
+                           capture_output=True, text=True, env=base_env(**self.env), check=True)
         note = json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("1. Ask the user whether to merge PR 512", note)
         self.assertIn("1020-101010-abcd done haiku shop", note)
@@ -1063,7 +1065,7 @@ class BudgetTest(Base):
         self.assertIn("Items and branches touched: PR 512, SHOP-77", note)
         p = subprocess.run([sys.executable, os.path.join(ROOT, "compact_hook.py"), "post"],
                            input=json.dumps(dict(start, source="resume")), capture_output=True, text=True,
-                           env=dict(os.environ, **self.env), check=True)
+                           env=base_env(**self.env), check=True)
         self.assertEqual(p.stdout.strip(), "")  # a resumed session still has its context
 
     def test_report_shows_context_trend_and_compaction_saving(self):
@@ -1071,13 +1073,13 @@ class BudgetTest(Base):
             for i in range(12):
                 fh.write(assistant_line(f"t{i}", 10, 0, 20000 * (i + 1), 10))
         p = subprocess.run([sys.executable, os.path.join(ROOT, "usage.py"), "report", self.transcript],
-                           capture_output=True, text=True, env=dict(os.environ, **self.env), check=True)
+                           capture_output=True, text=True, env=base_env(**self.env), check=True)
         self.assertIn("Context per call, by quarter of the session: 40,010 -> 100,010 -> 160,010 -> 220,010", p.stdout)
         self.assertIn("Re-reading context above ~67K cost this session", p.stdout)
 
     def test_report(self):
         p = subprocess.run([sys.executable, os.path.join(ROOT, "usage.py"), "report", self.transcript],
-                           capture_output=True, text=True, env=dict(os.environ, **self.env), check=True)
+                           capture_output=True, text=True, env=base_env(**self.env), check=True)
         self.assertIn("3,450", p.stdout)
         self.assertIn("Calls:   2 API calls · first call context 11,100 tokens", p.stdout)
         self.assertIn("claude-small", p.stdout)
