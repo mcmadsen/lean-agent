@@ -146,7 +146,8 @@ Other ways to run the orchestrator:
 | `lean-agent schedule add "<when>" <lean-agent command>` | Recurring work: `"hourly"`, `"every 2h"`, `"daily 09:00"`, `"weekdays 08:45"`, `"mon,wed 10:00"`; the command is a lean-agent one (`do <project> <recipe>`, `run ...`, `review ...`, `week`), never arbitrary shell, so outward actions still stop for approval. `list`, `rm N`, `run N` (now), `pause N`, `resume N`; `schedule defaults` adds an update check every morning (`sync --check`, installs nothing), a weekly `optimize` report per project and a Friday `week` report. Jobs run while `lean-agent up` runs (a timer in it), else from the orchestrator's next tool call; a slot missed by more than 6 hours waits for the next one. Results go to `~/.lean-agent/scheduled/`; the running conversation is told when one finishes, and the hand-off note lists them. |
 | `lean-agent week [--days N]` | The week: pace against your plan, runs by model and project, savings, the biggest runs, reviews, pushes, todos done and open, scheduled runs. |
 | `lean-agent sync --check` | Whether an update is available (version and commits); installs nothing. |
-| `lean-agent publish "<title>" [--url U] [--project P] [--as-is] --task-file - <<'EOF' ... EOF` | Publishes a private Claude Docs doc through a small worker (sonnet; haiku with `--as-is`, when the input is the content itself) that has the claude.ai Claude Docs connector, so the orchestrator never loads the doc tools. The worker runs without `--safe-mode` (it drops claude.ai connectors) but with no settings files, hooks or slash commands, only Read/Glob/Grep/ToolSearch and the Docs tools allowed, and the Docs `delete` tool denied. Prints the link (`doc: https://claude.ai/artifact/...`) and records it as a hand-off note (`artifact: <link> <title>`); publishing again under the same title updates that doc. If the worker's tools have no Claude Docs tool it is stopped before its first turn, the content goes to `<LEAN_AGENT_HOME>/<project>/publish/<title>.md` and the command exits non-zero; `doctor` shows `publish: Claude Docs connector available\|missing`. `lean-agent config artifacts off\|worker\|direct` (default worker; direct gives the orchestrator the tools itself). |
+| `lean-agent handover "<title>" [--project P] [--task-file F\|-] [--as-is] [--thread tN\|none]` | Writes a handover as a plain Markdown file: `<LEAN_AGENT_HOME>/<project>/handovers/<title slug>.md`, and prints `handover: <path>`. A read-only worker (sonnet, `--safe-mode`, Read/Glob/Grep) writes it from the request in the input; with `--as-is` the input is the document. The file starts with `# <title>` and `_<date> · thread tN_`. Writing the same title again moves the old file to `<slug>.prev.md`; an empty reply writes nothing and exits non-zero. Recorded like other role runs (not resumable) under the current thread; `thread show` lists it as `handover <path>`. The strict orchestrator may run it. |
+| `lean-agent handover --list [--project P]` | Existing handovers, newest first: path, title, date |
 | `lean-agent remember "<what>" [--project P] [--task-file -]` | Files something to keep through a small librarian worker (sonnet, `--cards auto`, read-only to project code, may run only lean-agent's memory/card/todo/handoff commands): memory, project card, todo, feedback rule or hand-off note, updating an existing entry instead of duplicating and reporting a conflict instead of overwriting. Prints `REMEMBERED <where> <id>`, `UNCHANGED ...` or `CONFLICT ...` lines (exit 1 on a conflict). |
 | `lean-agent advise "<request>" [--project P] [--thread TAG] [--task-file -]` | Before the orchestrator acts on a NEW user request: a cheap worker (haiku, `--cards auto`, read-only) reads the memories, cards, open todos, hand-off notes, latest checkpoint, the last ~10 runs and the latest review of the project, and answers in at most 15 lines starting with `ADVICE`: `known` (facts and earlier decisions), `project` and cards, `suggested` (one exact `lean-agent run ...` or `remember ...` command, or "answer from state"), `risks` (e.g. open review gaps, a decision the request contradicts) and `ask the user first` (yes + the question, or no). Printed and stored in `~/.lean-agent/advice/` (last 50) with the thread tag. The guide has the orchestrator run it for every new request (not for follow-ups in a thread, answers, status checks or resumes), deviate only with a one-line reason, and ask with AskUserQuestion about a risk or conflict unless the user's own request already answers it. |
 | `lean-agent service install\|status\|start\|restart\|stop\|logs\|uninstall` | Optional: keep `lean-agent up` running across logins, restarts and closed terminals (a macOS LaunchAgent, or a systemd user unit on Linux; it restarts `up` if it stops). Everything else works without it. After `lean-agent sync`, `service restart` starts `lean-agent up` again with the new settings (it waits while workers are running; `--yes` restarts anyway). `service restart --clear` (or `lean-agent up --clear`) also starts the orchestrator on a fresh context after a checkpoint. |
@@ -301,13 +302,13 @@ Every request to the orchestrator gets a thread without a model call: the prompt
 threads (title, aliases and recent requests; rare words weigh more, recent threads get a small boost, a score of 0.4 or
 more matches) or opens a new one titled from the prompt. An explicit `t7` or `#7` in the prompt wins. The hook adds one
 context line (`Thread t7 "..."`, or `New thread`, or `guessed` with the command to fix it). The thread is stored in the
-state of every run, review, todo, note, publish and push that follows; `--thread tN|none` overrides it, workers inherit it
+state of every run, review, todo, note, handover and push that follows; `--thread tN|none` overrides it, workers inherit it
 through `LEAN_AGENT_THREAD`.
 
 | Command | What it does |
 |---|---|
 | `lean-agent now` | Open threads by last activity (at most 25 lines): state (running, open review, open todos, idle), last action, age. Closes threads idle for 7 days (`LEAN_AGENT_THREAD_IDLE_DAYS` or `thread_idle_days` in config.json); nothing is deleted |
-| `lean-agent thread show tN [--all]` | Everything for the topic in time order: requests, runs, reviews, todos, notes, published docs, pushes |
+| `lean-agent thread show tN [--all]` | Everything for the topic in time order: requests, runs, reviews, todos, notes, handovers, pushes |
 | `lean-agent thread close tN` / `reopen tN` | Hide a finished topic from `now` and from matching / bring it back |
 | `lean-agent thread new "<title>"` / `list` | Start a free thread / list them |
 | `lean-agent thread merge tB tA` / `unmerge tB` | Fold thread B into A / give B its own tag back |
@@ -315,6 +316,12 @@ through `LEAN_AGENT_THREAD`.
 
 The brief after a `/clear` starts with the same open threads. Strict mode allows all of these: they only read or change
 the registry.
+
+## Handovers
+
+`lean-agent handover "<title>"` turns a request (or, with `--as-is`, ready text) into a plain Markdown file under
+`<LEAN_AGENT_HOME>/<project>/handovers/` and prints its path; open that file, or copy it wherever it is needed.
+Nothing is uploaded. `handover --list` shows what exists. Details are in the command table above.
 
 ## Large front-end work: map, check, count, parity, codemod, slices
 
