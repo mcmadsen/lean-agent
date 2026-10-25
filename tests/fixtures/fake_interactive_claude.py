@@ -14,8 +14,10 @@ import tty
 import uuid
 
 if not os.environ.get("FAKE_NAMED_CLAUDE"):  # same pid, but named claude as the real one is: the hook looks for that
-    os.environ["FAKE_NAMED_CLAUDE"] = os.path.realpath(sys.executable)
-    os.execv(os.path.realpath(sys.executable), ["claude", os.path.abspath(__file__)] + sys.argv[1:])
+    real = os.path.realpath(sys.executable)
+    os.environ["FAKE_NAMED_CLAUDE"] = real
+    # argv[0] is a path, not a bare "claude": Python 3.9 finds its stdlib from argv[0] (a bare name is looked up on PATH)
+    os.execv(real, [os.path.join(os.path.dirname(real), "claude"), os.path.abspath(__file__)] + sys.argv[1:])
 HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugins", "lean-agent", "scripts", "session_hook.py")
 argv = sys.argv[1:]
 sid = argv[argv.index("--session-id") + 1] if "--session-id" in argv else argv[argv.index("--resume") + 1]
