@@ -7969,7 +7969,7 @@ def start_thread_session(tid, t, prompt=None):
         import compact_hook
         msg = compact_hook.thread_brief(tid, THREAD_BRIEF_CAP) + "\n" + lean_threads.BRIEF_END + "\n\n" + prompt
     r = service_session.sessions_request("start", thread=tid, prompt=msg)
-    if not r.get("ok"):
+    if not r.get("ok") and not service_session.alive(tid):  # a timed-out request may still have started the host
         raise RuntimeError(f"could not start the session of {tid}: {r.get('error') or 'not started'}")
     lean_threads.set_session(tid, session_on=True)  # only a started session is one the service keeps
     return r.get("name") or service_session.thread_session_name(tid, t.get("title"))
