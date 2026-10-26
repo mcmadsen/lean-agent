@@ -3254,6 +3254,115 @@ class CliTest(unittest.TestCase):
         p.wait(timeout=30)
         self.assertEqual(len(self.read_jsonl(log)), 3)
 
+    def read_json(self, path):
+        with open(path) as fh:
+            return json.load(fh)
+
+    def thread_calls(self, log):
+        return {c["thread"]: c for c in self.read_jsonl(log) if c.get("thread")}
+
+    def test_every_thread_is_its_own_hosted_session(self):
+        p, log, ss = self.start_up("--name", "la")
+        prompt = os.path.join(self.tmp.name, "p.txt")
+        with open(prompt, "w") as fh:
+            fh.write("first job")
+        out = self.cli("thread", "new", "Fix the parser please", "--prompt-file", prompt).stdout
+        self.assertIn('thread t1 started: Remote Control "lean-agent \u00b7 t1 Fix the parser please"', out)
+        self.cli("thread", "new", "A very long title that has to be cut so the name stays short")
+        self.wait_for(lambda: len(self.thread_calls(log)) == 2 and ss.alive("t1") and ss.alive("t2"), "both thread sessions")
+        calls = self.thread_calls(log)
+        main = self.read_jsonl(log)[0]
+        self.assertIsNone(main["thread"])
+        self.assertEqual(main["role"], "main")
+        for tid, c in calls.items():
+            self.assertEqual(c["role"], "thread")
+            self.assertEqual(c["service"], "1")
+            name = c["argv"][c["argv"].index("--remote-control") + 1]
+            self.assertTrue(name.startswith(f"lean-agent \u00b7 {tid} "))
+            self.assertLessEqual(len(name), 40)
+        self.assertEqual(calls["t1"]["argv"][calls["t1"]["argv"].index("--remote-control") + 1], "lean-agent \u00b7 t1 Fix the parser please")
+        sid1 = calls["t1"]["argv"][-1]
+        self.assertNotEqual(sid1, main["argv"][-1])
+        # up.json: main plus a record per thread, each with its own socket and pid
+        up = self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "up.json"))
+        self.assertEqual(sorted(up["sessions"]), ["main", "t1", "t2"])
+        self.assertEqual(up["sessions"]["t1"]["session_id"], sid1)
+        self.assertEqual(len({r["socket"] for r in up["sessions"].values()}), 3)
+        # the first message arrives (brief + prompt) in t1 only
+        tr1 = ss.info("t1")["transcript"]
+        self.wait_for(lambda: len(self.read_jsonl(tr1)) >= 2, "the first message")
+        first = self.read_jsonl(tr1)[0]["message"]["content"]
+        self.assertIn("thread t1: Fix the parser please", first)
+        self.assertTrue(first.endswith("first job"))
+        self.assertEqual(self.read_jsonl(ss.info("t2")["transcript"]), [])
+        # send reaches the right pty
+        msg = os.path.join(self.tmp.name, "m.txt")
+        with open(msg, "w") as fh:
+            fh.write("only for two")
+        self.cli("thread", "send", "t2", "--prompt-file", msg)
+        tr2 = ss.info("t2")["transcript"]
+        self.wait_for(lambda: len(self.read_jsonl(tr2)) >= 2, "the message in t2")
+        self.assertEqual(self.read_jsonl(tr2)[0]["message"]["content"], "only for two")
+        self.assertNotIn("only for two", json.dumps(self.read_jsonl(tr1)))
+        listing = self.cli("thread", "sessions").stdout
+        self.assertIn("t1", listing)
+        self.assertIn("t2", listing)
+        # manual clear of one thread's session moves only its record and registry session id
+        self.cli("clear", "--thread", "t1")
+        self.wait_for(lambda: self.read_jsonl(log)[-1].get("clear_hook") is not None or any(
+            "clear_hook" in c for c in self.read_jsonl(log)), "the clear", secs=30)
+        self.wait_for(lambda: ss.info("t1")["session_id"] != sid1, "t1 on its new session id", secs=30)
+        self.assertEqual(ss.info("main")["session_id"], main["argv"][-1])
+        reg = self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"))["threads"]
+        self.assertEqual(reg["t1"]["session_id"], ss.info("t1")["session_id"])
+        self.assertEqual(reg["t2"]["session_id"], calls["t2"]["argv"][-1])
+        p.terminate()
+        p.wait(timeout=30)
+
+    def test_closing_and_opening_a_thread_resumes_the_same_session_and_restart_resumes_all(self):
+        p, log, ss = self.start_up()
+        for title in ("one", "two"):
+            self.cli("thread", "new", title)
+        self.wait_for(lambda: len(self.thread_calls(log)) == 2 and ss.alive("t1") and ss.alive("t2"), "both sessions")
+        sids = {t: c["argv"][-1] for t, c in self.thread_calls(log).items()}
+        n = len(self.read_jsonl(log))
+        out = self.cli("thread", "close", "t1").stdout
+        self.assertIn("t1: session stopped", out)
+        self.assertFalse(ss.alive("t1"))
+        self.assertTrue(ss.alive("t2"))
+        self.assertNotIn("t1", self.cli("thread", "sessions").stdout)
+        reg = self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"))["threads"]
+        self.assertEqual((reg["t1"]["session_id"], bool(reg["t1"].get("closed")), reg["t1"].get("session_on")), (sids["t1"], True, None))
+        self.assertIn("resumed", self.cli("thread", "open", "t1").stdout)
+        self.wait_for(lambda: len(self.read_jsonl(log)) == n + 1 and ss.alive("t1"), "t1 again")
+        call = self.read_jsonl(log)[-1]
+        self.assertEqual((call["thread"], call["argv"][-2:]), ("t1", ["--resume", sids["t1"]]))
+        # restarting the service resumes every open thread session (and the main one); a session with a transcript by --resume
+        self.assertTrue(ss.send("hello two", "t2")[0])
+        self.wait_for(lambda: os.path.exists(ss.info("t2")["transcript"]), "t2's transcript")
+        p.terminate()
+        p.wait(timeout=30)
+        p2, log2, ss = self.start_up()
+        self.wait_for(lambda: ss.alive("t1") and ss.alive("t2"), "the thread sessions after a restart")
+        self.wait_for(lambda: sum(1 for c in self.read_jsonl(log) if c.get("thread") == "t2") == 2, "t2 started again")
+        again = self.thread_calls(log)
+        self.assertEqual({t: c["argv"][-2:] for t, c in again.items()}, {t: ["--resume", sids[t]] for t in sids})
+        p2.terminate()
+        p2.wait(timeout=30)
+
+    def test_thread_new_refuses_above_max_thread_sessions(self):
+        p, log, ss = self.start_up()
+        self.cli("config", "max-thread-sessions", "1")
+        self.cli("thread", "new", "first")
+        r = self.cli("thread", "new", "second", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("thread close t1", r.stderr + r.stdout)
+        self.assertEqual(sorted(self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"))["threads"]), ["t1"])
+        self.cli("thread", "close", "t1")
+        self.assertIn("t2 started", self.cli("thread", "new", "second").stdout)
+        p.terminate()
+        p.wait(timeout=30)
+
     def test_wrapper_non_push_git_spawns_no_extra_git(self):
         sys.path.insert(0, os.path.dirname(CLI))
         import push_guard

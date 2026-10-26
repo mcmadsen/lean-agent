@@ -18,6 +18,16 @@ BRIEF_CAP = 3000  # characters of brief added to a cleared session
 CHAIN_KEEP = 20   # transcripts kept in the record's chain
 
 
+def session_key():
+    """"main", or the thread id of a thread session (`lean-agent thread new` starts those)."""
+    tid = os.environ.get("LEAN_AGENT_THREAD") or ""
+    return tid if os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread" and tid else "main"
+
+
+def up_record(up, key):
+    return up if key == "main" else ((up.get("sessions") or {}).get(key) or {})
+
+
 def restarted_fresh(home, event):
     """True for the startup of the session `up --clear` / `service restart --clear` asked for: up.json names its id as fresh_sid."""
     if event.get("source") != "startup":
@@ -86,7 +96,7 @@ def is_claude(argv):
     return parts[-1] == "cli.js" and "claude-code" in parts[:-1]
 
 
-def owned(home, ppid=parent_pid, cmd=argv_of, wait=3.0):
+def owned(home, ppid=parent_pid, cmd=argv_of, wait=3.0, key="main"):
     """True when the service claude pid in up.json is among the first 8 ancestors of this process, whatever its command
     (a custom name or a wrapper still works), with no other claude nearer: a claude started from the service claude's
     Bash tool does not count. `up` writes the pid just after the spawn, so a hook that is faster than that waits
@@ -95,7 +105,7 @@ def owned(home, ppid=parent_pid, cmd=argv_of, wait=3.0):
     while True:
         try:
             with open(os.path.join(home, "up.json")) as fh:
-                pid = json.load(fh).get("pid")
+                pid = up_record(json.load(fh), key).get("pid")
         except (OSError, ValueError, AttributeError):
             pid = None
         if isinstance(pid, int) and pid > 0:
@@ -115,7 +125,7 @@ def owned(home, ppid=parent_pid, cmd=argv_of, wait=3.0):
     return False
 
 
-def follow_up(home, event):
+def follow_up(home, event, key="main"):
     """up.json names the session a restart of `up` resumes: when this event starts a new session id (a /clear, or a
     compaction that starts a new id), it records that id and its transcript, atomically."""
     path = os.path.join(home, "up.json")
@@ -124,11 +134,18 @@ def follow_up(home, event):
             up = json.load(fh)
     except (OSError, ValueError):
         return
-    if not isinstance(up, dict) or up.get("session_id") == event["session_id"]:
+    if not isinstance(up, dict):
         return
-    up["session_id"] = event["session_id"]
+    rec = up if key == "main" else up.setdefault("sessions", {}).setdefault(key, {})
+    if key != "main":  # the registry names the session a restart resumes
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import lean_threads
+        lean_threads.set_session(key, session_id=event["session_id"])
+    if rec.get("session_id") == event["session_id"]:
+        return
+    rec["session_id"] = event["session_id"]
     if event.get("transcript_path"):
-        up["transcript"] = event["transcript_path"]
+        rec["transcript"] = event["transcript_path"]
     tmp = f"{path}.{os.getpid()}.tmp"
     try:
         with open(tmp, "w") as fh:
@@ -148,9 +165,10 @@ def main(ppid=parent_pid, cmd=argv_of, wait=3.0):
     if not isinstance(event, dict) or not event.get("session_id"):
         return
     home = os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent"))
-    if not owned(home, ppid, cmd, wait):
+    key = session_key()
+    if not owned(home, ppid, cmd, wait, key):
         return
-    path = os.path.join(home, "chat", "service.json")
+    path = os.path.join(home, "chat", "service.json" if key == "main" else f"service-{key}.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.{os.getpid()}.tmp"
     try:
@@ -161,7 +179,7 @@ def main(ppid=parent_pid, cmd=argv_of, wait=3.0):
     if not isinstance(old, dict):
         old = {}
     now = time.time()
-    fresh = restarted_fresh(home, event)
+    fresh = key == "main" and restarted_fresh(home, event)
     chain, meta = chain_of(old, event, now, fresh)
     with open(tmp, "w") as fh:
         json.dump({"session_id": event["session_id"], "transcript_path": event.get("transcript_path"),
@@ -174,7 +192,7 @@ def main(ppid=parent_pid, cmd=argv_of, wait=3.0):
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}),
               flush=True)
     try:  # after the brief, so a failure here can never skip it
-        follow_up(home, event)
+        follow_up(home, event, key)
     except Exception:
         pass
 

@@ -58,9 +58,10 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `advise "<request>" [--project P] [--thread TAG] [--task-file -]` | b | allowed: starts a read-only haiku advisor worker; stores its short answer in `advice/` |
 | `run`, `review`, `do`, `tracker --discover` (all flags, `--mcp`, `--allow-cmd`, `--todo new\|N\|none`) | b | allowed, in the background; they start workers |
 | `now`, `thread list`, `thread show tN [--all]` | b | allowed: read-only |
-| `thread new\|close\|reopen\|merge\|unmerge\|move` | b | allowed: they only change the thread registry |
+| `thread new "title" [--prompt-file F\|-]`, `thread send tN --prompt-file F\|-`, `thread open tN`, `thread close tN`, `thread sessions` | b | allowed: each thread is its own Remote Control session (`lean-agent · tN <title>`) that `up` hosts next to the main one; they start, message, resume, checkpoint-and-stop and list those sessions; `max-thread-sessions` (default 8) caps them; idle sessions are never closed automatically |
+| `thread reopen\|merge\|unmerge\|move` | b | allowed: they only change the thread registry |
 | `checkpoint`, `brief` | b | allowed |
-| `clear` | b | allowed: queues a checkpoint and /clear of the service session at the end of the turn; only when the user asks |
+| `clear [--thread tN]` | b | allowed: queues a checkpoint and /clear of the service session (or the thread's own session) at the end of the turn; only when the user asks |
 | `handoff` (read), `handoff --done N`, `handoff --note … --kind checkpoint\|fyi\|decision` | b | allowed: the orchestrator's own state; a `decision` note is how it asks the user something asynchronously |
 | `handoff --note …` with no kind, or kind reminder | c | **denied**: user content; `remember` |
 | `todo list\|next\|start\|done` | b | allowed: status that follows a run it started |

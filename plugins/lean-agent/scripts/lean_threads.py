@@ -147,6 +147,28 @@ def new(title):
     return tid
 
 
+def set_session(tid, **fields):
+    """Record a thread's own Remote Control session in the registry: session_id (what --resume continues) and session_on
+    (the service hosts it). A None value removes the field."""
+    tid = resolve(norm(tid))
+    with _locked() as data:
+        t = data["threads"].get(tid)
+        if t is None:
+            raise ValueError(f"no such thread {tid}")
+        for k, v in fields.items():
+            if v is None:
+                t.pop(k, None)
+            else:
+                t[k] = v
+    return tid
+
+
+def session_threads():
+    """Ids of the threads whose session the service keeps running, oldest first."""
+    ts = load()["threads"]
+    return sorted((k for k, t in ts.items() if t.get("session_on")), key=lambda k: int(k[1:]) if k[1:].isdigit() else 0)
+
+
 def merge(src, dst):
     src, dst = norm(src), norm(dst)
     if src == dst:

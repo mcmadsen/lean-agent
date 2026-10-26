@@ -28,7 +28,8 @@ transcript = os.path.join(tdir, sid + ".jsonl")
 with open(os.environ["FAKE_SESSION_LOG"], "a") as fh:
     fh.write(json.dumps({"argv": argv, "cwd": os.getcwd(), "pid": os.getpid(),
                          "service": os.environ.get("LEAN_AGENT_SERVICE_SESSION"),
-                         "leaked": os.environ.get("CLAUDECODE")}) + "\n")
+                         "leaked": os.environ.get("CLAUDECODE"), "thread": os.environ.get("LEAN_AGENT_THREAD"),
+                         "role": os.environ.get("LEAN_AGENT_SESSION_ROLE")}) + "\n")
 
 
 def add(rec):
