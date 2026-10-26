@@ -262,6 +262,7 @@ REQUESTS_KEPT = 20
 CONFIDENT_MARGIN = 0.15  # a guess is uncertain when the best thread beats the second by less than this ...
 CONFIDENT_SCORE = 0.55   # ... or scores below this (the match threshold is MATCH_THRESHOLD)
 REQUEST_CHARS = 300
+BRIEF_END = "[end of brief]"  # closes the brief a thread session's first message starts with; the prompt follows
 STOP = set("""the a an and or but if then else for to of in on at by with from into onto about as is are was were be been
 being do does did done have has had it its this that these those there here we you i me my our your they them he she
 can could would should will shall may might must not no yes ok okay please just also so very more most some any all
