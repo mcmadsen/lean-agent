@@ -2833,6 +2833,18 @@ class CliTest(unittest.TestCase):
         self.addCleanup(patch.stop)
         return lean_threads
 
+    def test_pin_dedupes_a_handed_over_request_only_against_the_target_thread(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        lt = self.threads_home()
+        lt.route("Publish the report via docs", "s1")  # t1
+        lt.route("Fix the export timeout in billing", "s1")  # t2
+        self.assertTrue(lt.pin("t1", "Check the nightly run"))
+        self.assertTrue(lt.pin("t2", "Check the nightly run"))  # same words, other thread: still t2's request
+        self.assertTrue(lt.pin("t2", "Check the nightly run"))  # already stored for t2: not twice
+        reqs = {t: [r["text"] for r in lt.load()["threads"][t].get("requests") or []] for t in ("t1", "t2")}
+        self.assertEqual(reqs["t1"].count("Check the nightly run"), 1)
+        self.assertEqual(reqs["t2"].count("Check the nightly run"), 1)
+
     def test_now_and_doctor_show_each_threads_session(self):
         self.cli("learn", self.proj, "--name", "proj")
         lt = self.threads_home()

@@ -422,7 +422,7 @@ def pin(tid, prompt, session=None, now=None):
         if t is None:
             return False
         t["last_message"] = now_s
-        if text and not any(r.get("text") == text for x in data["threads"].values() for r in x.get("requests") or []):
+        if text and not any(r.get("text") == text for r in t.get("requests") or []):
             # not when the front desk already stored it as the request it handed over
             data["next_request"] = int(data.get("next_request") or 0) + 1
             t.setdefault("requests", []).append({"id": f"r{data['next_request']}", "ts": now_s, "text": text})
