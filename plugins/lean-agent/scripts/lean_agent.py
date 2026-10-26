@@ -5720,13 +5720,18 @@ def cli_reference():
     return "\n".join(lines)
 
 
+def in_project(path, v):
+    """Whether `path` is the learned project `v`'s root or inside it (symlinks resolved on both sides)."""
+    root = os.path.realpath(v["path"])
+    p = os.path.realpath(path)
+    return p == root or p.startswith(root + os.sep)
+
+
 def default_project(path=None):
     """Learned project containing `path` (default: cwd), else the first learned one, else 'shop'."""
     projs = projects()
-    p = os.path.realpath(path or os.getcwd())
     for slug, v in projs.items():
-        root = os.path.realpath(v["path"])
-        if p == root or p.startswith(root + os.sep):
+        if in_project(path or os.getcwd(), v):
             return slug
     return next(iter(sorted(projs)), "shop")
 
@@ -6291,8 +6296,7 @@ def cmd_doctor(a):
                "keep files other than lean-agent's guide out: lean-agent doctor --fix (refreshes the excludes)")
     report(is_trusted(h), "orchestrator home is trusted", "lean-agent trust")
     report(True, f"strict orchestrator: {'on' if strict_on() else 'off'} (lean-agent config strict on|off)")
-    pslug = next((sl for sl, v in projects().items()
-                  if (path + os.sep).startswith(os.path.realpath(v["path"]) + os.sep)), None)
+    pslug = next((sl for sl, v in projects().items() if in_project(path, v)), None)
     if pslug:
         if project_rules_on(pslug):
             report(None, f"project rules: on for {pslug} (workers load CLAUDE.md and .claude/rules natively, and the "
@@ -6309,18 +6313,18 @@ def cmd_doctor(a):
 
     slug = default_project(path)
     projs = projects()
-    in_project = slug in projs and (path + os.sep).startswith(os.path.realpath(projs[slug]["path"]) + os.sep)
-    root = os.path.realpath(projs[slug]["path"]) if in_project else None
+    is_in_project = slug in projs and in_project(path, projs[slug])
+    root = os.path.realpath(projs[slug]["path"]) if is_in_project else None
     is_home = path == os.path.realpath(h) or path.startswith(os.path.realpath(h) + os.sep)
-    if not in_project and not is_home:
+    if not is_in_project and not is_home:
         report(None, f"{path} isn't a learned project, so the per-project checks are skipped (run doctor in a "
                "project's folder for them, or `lean-agent learn <repo root> --name <name>` if this should be one)")
-    if in_project and a.fix and projs[slug].get("rules") != "off":
+    if is_in_project and a.fix and projs[slug].get("rules") != "off":
         install_block(slug)
 
     files = instruction_files(path)
     print("  instruction files loaded here: " + (", ".join(files) or "none"))
-    if in_project:
+    if is_in_project:
         want = render_block(slug).splitlines()[0]
         holders = [f for f in files if BLOCK_BEGIN in read_text(f)]
         current_holders = [f for f in holders if want in read_text(f)]
