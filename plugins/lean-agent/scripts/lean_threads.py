@@ -404,16 +404,21 @@ def pinned_thread():
 
 def pin(tid, prompt, session=None, now=None):
     """A prompt in a thread session belongs to that thread, whatever it says: stores the request, makes the thread current."""
-    text = " ".join(str(prompt or "").split())
+    prompt = str(prompt or "")
+    if BRIEF_END in prompt:  # the first message of a started thread: brief, then the user's prompt; only that is a request
+        prompt = prompt.split(BRIEF_END, 1)[1]
+    text = " ".join(prompt.split())[:REQUEST_CHARS]
     now_s = now_iso() if now is None else datetime.datetime.fromtimestamp(now).isoformat(timespec="seconds")
     with _locked() as data:
         t = data["threads"].get(tid)
         if t is None:
             return False
         t["last_message"] = now_s
-        data["next_request"] = int(data.get("next_request") or 0) + 1
-        t.setdefault("requests", []).append({"id": f"r{data['next_request']}", "ts": now_s, "text": text[:REQUEST_CHARS]})
-        del t["requests"][:-REQUESTS_KEPT]
+        if text and not any(r.get("text") == text for x in data["threads"].values() for r in x.get("requests") or []):
+            # not when the front desk already stored it as the request it handed over
+            data["next_request"] = int(data.get("next_request") or 0) + 1
+            t.setdefault("requests", []).append({"id": f"r{data['next_request']}", "ts": now_s, "text": text})
+            del t["requests"][:-REQUESTS_KEPT]
     set_current(tid, session)
     return True
 
