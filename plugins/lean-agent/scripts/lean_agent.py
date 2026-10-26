@@ -1844,6 +1844,9 @@ def _cmd_run(a):
         calls = entry["mcp_calls"]
         detail("mcp: " + (", ".join(f"{k} x{v}" for k, v in sorted(calls.items())) or "no MCP tool calls"))
     print(f"resume: lean-agent run --resume {run_id} \"<follow-up>\"")
+    why_failed = failure_reason(status, out, err, raw)
+    if why_failed:  # the last line: a background-task notification shows only the output's tail
+        print(f"run {run_id} failed: {why_failed}")
     if role == "reviewer" and (review_meta or {}).get("multi"):
         print(f"review pass {review_meta['multi']}: {len((review or {}).get('findings') or [])} findings "
               f"(merged after the last pass)")
@@ -1855,6 +1858,25 @@ def _cmd_run(a):
         print(f"second opinion: {n} reuse candidates passed to the reviewer")
         return 0
     return 0 if status in ("done", "partial", "needs-input", "awaiting-confirmation") else 1
+
+
+LIMIT_WORDS = {"max_turns": "hit its turn limit (--max-turns)", "max_budget_usd": "hit its budget (--max-usd)",
+               "max_context_reads": "stopped by lean-agent for re-reading too much context (--max-reads)"}
+
+
+def failure_reason(status, out, err, raw):
+    """One line saying why a run did not succeed ('' when it did): the limit it hit, else the worker's own words,
+    else the last line of the process output (kill, timeout, crash)."""
+    if status in ("done", "partial", "needs-input", "awaiting-confirmation"):
+        return ""
+    sub = str(out.get("subtype") or "")
+    if sub.startswith("error_max_"):
+        return LIMIT_WORDS.get(sub[len("error_"):], f"hit its limit ({sub[len('error_max_'):]})")
+    for text in (out.get("result"), err, raw):
+        lines = [l.strip() for l in str(text or "").splitlines() if l.strip() and not l.lstrip().startswith("{")]
+        if lines:
+            return lines[-1][:200] if text is not out.get("result") else lines[0][:200]
+    return sub or "no result from the worker"
 
 
 def note_progress(workdir, turn, msg, u):
@@ -5835,9 +5857,12 @@ def cmd_logs(a):
         else:
             cur = [line]
             entries.append(cur)
-    for e in entries[-a.n:]:
+    if a.run:
+        entries = [e for e in entries if a.run in "".join(e)]
+    shown = entries[::-1][:a.n]  # newest first
+    for e in shown:
         sys.stdout.write("".join(e))
-    print(f"({len(entries[-a.n:])} of {len(entries)} entries from {path})")
+    print(f"({len(shown)} of {len(entries)} entries, newest first, from {path})")
     return 0
 
 
@@ -5986,6 +6011,7 @@ def stop_run(target):
         print(f"or start over: git -C {path} reset --hard {start[:12] if start else '<commit>'} && git -C {path} clean -fd")
     else:
         print(f"resume it: lean-agent run --resume {rid} \"<what to do next>\"")
+    print(f"run {rid} failed: stopped by `lean-agent runs --stop`")
     return 0
 
 
@@ -6028,6 +6054,8 @@ def cmd_runs(a):
             files = det
         text = read_text(files[-1])
         mark_collected(r["id"])
+        if a.tail:
+            text = "".join(text.splitlines(True)[-a.tail:])
         if a.grep:
             rx = re.compile(re.escape(a.grep), re.I)
             text = "".join(l for l in text.splitlines(True) if rx.search(l)) or f"(no line matches {a.grep!r})\n"
@@ -8707,7 +8735,8 @@ def build_parser():
 
     s = sub.add_parser("logs", help="lean-agent's local logs: error (default), debug, or verbose (saved outputs)")
     s.add_argument("level", nargs="?", default="error", choices=["error", "debug", "verbose"])
-    s.add_argument("-n", type=int, default=20, help="last N entries")
+    s.add_argument("-n", type=int, default=10, help="newest N entries (default 10)")
+    s.add_argument("--run", metavar="RUN_ID", help="only entries that mention this run")
     s.set_defaults(fn=cmd_logs)
 
     s = sub.add_parser("runs", help="recent worker runs (id, status, model, task)")
@@ -8724,6 +8753,8 @@ def build_parser():
                    help="print a run's whole summary again (default: the latest run)")
     s.add_argument("--details", action="store_true", help="with --show: the run's details file instead")
     s.add_argument("--grep", metavar="TEXT", help="with --show/--details: only lines containing TEXT")
+    s.add_argument("--tail", type=int, nargs="?", const=20, default=0, metavar="N",
+                   help="with --show: only the last N lines of the output (default 20), the failure reason is the last")
     s.add_argument("-n", type=int, default=10)
     s.set_defaults(fn=cmd_runs)
 
