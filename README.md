@@ -249,7 +249,8 @@ Every orchestrator turn re-reads the whole conversation, so it's kept short:
   start-up context (system prompt, tools, guide), calls, average and peak context per call.
 - **Compaction is Claude Code's call:** no overrides are set, so the orchestrator compacts where Claude Code does
   (~167K on a 200K window). `lean-agent config compact-window N|default` and `compact-pct P|default` (or `up --compact-at N`)
-  opt in to earlier compaction; they take effect on `service restart`.
+  opt in to earlier compaction; they take effect on `service restart`. Limits: compact-window 100000 or more
+  (Claude Code's minimum; to compact earlier on a bigger window lower compact-pct), compact-pct 10-95.
 - **Keeps what matters:** a PreCompact hook (lean-agent's home only) tells the summary to keep the user's goals
   and open requests, every approval word for word, runs in progress, branches and PRs, unfixed findings and
   decisions, and to drop worker answers, command output, file contents and the guide: lean-agent stores those.

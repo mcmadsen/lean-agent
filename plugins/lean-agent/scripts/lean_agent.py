@@ -150,6 +150,12 @@ def load_json(path, default):
     return read_json(path, default)
 
 
+def config_json():
+    """The home's config.json as a dict (anything else in it counts as empty)."""
+    cfg = load_json(home("config.json"), {})
+    return cfg if isinstance(cfg, dict) else {}
+
+
 def save_json(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     write_json_atomic(path, data)
@@ -5861,11 +5867,11 @@ CLAUDE_CREDIT_RE = re.compile(r"(?im)^\s*co-authored-by:.*\b(claude|anthropic)\b
 
 def attribution():
     """'on', 'off', or None when the user hasn't been asked yet."""
-    return load_json(home("config.json"), {}).get("attribution")
+    return config_json().get("attribution")
 
 
 def strict_on():
-    return load_json(home("config.json"), {}).get("strict", "on") != "off"
+    return config_json().get("strict", "on") != "off"
 
 
 def orchestrator_settings(existing):
@@ -6567,7 +6573,7 @@ def cmd_up(a):
     if a.compact_at:  # Claude Code's window can't go below 100K: lower the percentage instead
         window = max(COMPACT_WINDOW_MIN, a.compact_at)
         env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(window)
-        env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(max(10, min(95, round(a.compact_at * 100 / window))))
+        env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(max(lean_common.COMPACT_PCT_RANGE[0], min(lean_common.COMPACT_PCT_RANGE[1], round(a.compact_at * 100 / window))))
     try:
         window = int(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or 0) or None
         pct = float(env.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") or 0) or None
@@ -7393,7 +7399,7 @@ def cmd_savings(a):
 
 def cmd_attribution(a):
     if a.value:
-        cfg = load_json(home("config.json"), {})
+        cfg = config_json()
         cfg["attribution"] = a.value
         save_json(home("config.json"), cfg)
         h = home("home")
@@ -7449,9 +7455,10 @@ def cmd_config(a):
             if a.name == "compact-window" and raw != "default" and int(raw) < COMPACT_WINDOW_MIN:
                 die(f"compact-window takes {COMPACT_WINDOW_MIN} or more (Claude Code's minimum) or default; "
                     "to compact earlier on a bigger window, lower compact-pct")
-            if a.name == "compact-pct" and raw != "default" and not 10 <= int(raw) <= 95:
-                die("compact-pct takes 10-95 or default")
-            cfg = load_json(home("config.json"), {})
+            lo, hi = lean_common.COMPACT_PCT_RANGE
+            if a.name == "compact-pct" and raw != "default" and not lo <= int(raw) <= hi:
+                die(f"compact-pct takes {lo}-{hi} or default")
+            cfg = config_json()
             if raw == "default":
                 cfg.pop(key, None)
             else:
@@ -7465,7 +7472,7 @@ def cmd_config(a):
         if a.value is not None:
             if not (a.value.isdigit() and int(a.value) > 0) and a.value.lower() != "default":
                 die("max-thread-sessions takes a number or default")
-            cfg = load_json(home("config.json"), {})
+            cfg = config_json()
             if a.value.lower() == "default":
                 cfg.pop("max_thread_sessions", None)
             else:
@@ -7478,7 +7485,7 @@ def cmd_config(a):
         if a.value is not None:
             if not (a.value.isdigit() or a.value.lower() in ("auto", "off")):
                 die("clear-at takes off (default), auto, or a number of tokens")
-            cfg = load_json(home("config.json"), {})
+            cfg = config_json()
             cfg["clear_at"] = a.value.lower() if a.value.lower() in ("auto", "off") else int(a.value)
             save_json(home("config.json"), cfg)
         print(f"auto clear: {clear_at_text()} · with auto|N, `up` has the orchestrator checkpoint, then clears its context, "
@@ -7488,7 +7495,7 @@ def cmd_config(a):
     if a.value not in (None, "on", "off"):
         die(f"{a.name} takes on or off")
     if a.value:
-        cfg = load_json(home("config.json"), {})
+        cfg = config_json()
         cfg["strict"] = a.value
         save_json(home("config.json"), cfg)
     print(f"strict: {'on' if strict_on() else 'off'} · the orchestrator "
@@ -7969,6 +7976,9 @@ def thread_session_tid(raw):
     return tid, t
 
 
+START_GRACE = 10  # seconds a host may take to come up after a failed or timed-out start request
+
+
 def start_thread_session(tid, t, prompt=None):
     """Ask `up` to host the thread's session (resuming it when its transcript exists). Returns the Remote Control name;
     raises RuntimeError when it did not start."""
@@ -7979,8 +7989,13 @@ def start_thread_session(tid, t, prompt=None):
         import compact_hook
         msg = compact_hook.thread_brief(tid, THREAD_BRIEF_CAP) + "\n" + lean_threads.BRIEF_END + "\n\n" + prompt
     r = service_session.sessions_request("start", thread=tid, prompt=msg)
-    if not r.get("ok") and not service_session.alive(tid):  # a timed-out request may still have started the host
-        raise RuntimeError(f"could not start the session of {tid}: {r.get('error') or 'not started'}")
+    if not r.get("ok"):  # a failed or timed-out request may still have a host coming up: give it a moment
+        deadline = time.time() + START_GRACE
+        while not service_session.alive(tid) and time.time() < deadline:
+            time.sleep(0.5)
+        if not service_session.alive(tid):
+            service_session.sessions_request("stop", thread=tid)  # nothing may start later unrecorded
+            raise RuntimeError(f"could not start the session of {tid}: {r.get('error') or 'not started'}")
     lean_threads.set_session(tid, session_on=True)  # only a started session is one the service keeps
     return r.get("name") or service_session.thread_session_name(tid, t.get("title"))
 

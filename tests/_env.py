@@ -3,6 +3,7 @@ import os
 
 # The Claude Code compaction settings the code reads (they move compaction_point), plus the switch that turns it off;
 # tests that need them set them explicitly
+# DISABLE_COMPACT is not listed: the code never reads it (only DISABLE_AUTO_COMPACT)
 CLAUDE_COMPACT_KNOBS = ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "DISABLE_AUTO_COMPACT")
 
 
