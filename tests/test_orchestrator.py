@@ -3457,6 +3457,31 @@ class CliTest(unittest.TestCase):
             self.assertTrue(lean_threads.load()["threads"]["t1"].get("session_on"))
             self.assertEqual(lean_threads.session_threads(), ["t1"])
 
+    def test_discard_only_removes_a_thread_without_requests(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        lt = self.threads_home()
+        lt.route("Publish the report via docs", "s1")  # t1, with its first request
+        empty = lt.new("brand new")
+        lt.discard("t1")
+        lt.discard(empty)
+        self.assertEqual(list(lt.load()["threads"]), ["t1"])
+
+    def test_failed_thread_send_leaves_session_on_unset(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        lt = self.threads_home()
+        lt.route("Publish the report via docs", "s1")  # t1
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        import service_session
+        args = argparse.Namespace(action="send", args=["t1"], prompt_file=None, json=False, all=False)
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(L, "thread_prompt", return_value="go on"), \
+                mock.patch.object(service_session, "alive", side_effect=lambda key="main": key == "main"), \
+                mock.patch.object(service_session, "sessions_request", return_value={"ok": False, "error": "boom"}), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                L.cmd_thread(args)
+        self.assertIsNone(lt.load()["threads"]["t1"].get("session_on"))
+
     def test_thread_new_refuses_above_max_thread_sessions(self):
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "1")
@@ -3944,6 +3969,8 @@ class CliTest(unittest.TestCase):
         self.assertIn("compaction: Claude Code default (~167k for a 200k window)", out)
         self.assertNotIn("CLAUDE_CODE_AUTO_COMPACT_WINDOW", json.loads(self.cli("env", "--json").stdout)["env"])
         self.assertEqual(self.cli("config", "compact-window", "soon", check=False).returncode, 1)
+        self.assertIn("100000", self.cli("config", "compact-window", "100000").stdout)  # the minimum itself is accepted
+        self.cli("config", "compact-window", "default")
         small = self.cli("config", "compact-window", "50000", check=False)
         self.assertEqual(small.returncode, 1)
         self.assertIn("100000 or more", small.stderr)
