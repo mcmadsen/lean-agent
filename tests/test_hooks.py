@@ -957,17 +957,17 @@ class BudgetTest(Base):
         with open(self.transcript, "a") as fh:
             fh.write(assistant_line("big1", 10, 0, 140000, 50))
         ev = dict(self.ev, cwd=home)
-        env = dict(self.env, LEAN_AGENT_CTX_NUDGE="100000")
+        env = dict(self.env, LEAN_AGENT_CTX_NUDGE="100000", CLAUDE_CODE_AUTO_COMPACT_WINDOW="100000")
         out = run_hook("budget_hook.py", ev, **env)
         note = out["hookSpecificOutput"]["additionalContext"]
         self.assertIn("re-reads ~140,010 tokens of context on every call", note)
         self.assertIn("per 100 calls", note)
         self.assertIn("/compact", note)
-        self.assertIn("restart it once with `lean-agent up`", note)  # no early-compaction env in this session
+        self.assertNotIn("restart it once", note)
         self.assertIsNone(run_hook("budget_hook.py", ev, **env))  # once per 50K more
         self.assertIsNone(run_hook("budget_hook.py", dict(self.ev, session_id="s2", cwd=self.tmp.name), **env))
-        out = run_hook("budget_hook.py", dict(ev, session_id="s3"), CLAUDE_CODE_AUTO_COMPACT_WINDOW="100000", **env)
-        self.assertNotIn("restart it once", out["hookSpecificOutput"]["additionalContext"])
+        out = run_hook("budget_hook.py", dict(ev, session_id="s3"), **env)
+        self.assertIn("re-reads", out["hookSpecificOutput"]["additionalContext"])
 
     def test_workers_start_in_the_background_in_lean_home(self):
         home = self.env["LEAN_AGENT_HOME"]
@@ -1099,7 +1099,8 @@ class BudgetTest(Base):
             for i in range(12):
                 fh.write(assistant_line(f"t{i}", 10, 0, 20000 * (i + 1), 10))
         p = subprocess.run([sys.executable, os.path.join(ROOT, "usage.py"), "report", self.transcript],
-                           capture_output=True, text=True, env=base_env(**self.env), check=True)
+                           capture_output=True, text=True, check=True,
+                           env=base_env(**self.env, LEAN_AGENT_COMPACT_WINDOW="100000", LEAN_AGENT_COMPACT_PCT="70"))
         self.assertIn("Context per call, by quarter of the session: 40,010 -> 100,010 -> 160,010 -> 220,010", p.stdout)
         self.assertIn("Re-reading context above ~67K cost this session", p.stdout)
 

@@ -70,13 +70,14 @@ import lean_threads  # noqa: E402
 
 
 def compaction_point():
-    """Where Claude Code compacts this session, from its environment (`lean-agent up` sets both); 0 if unknown."""
+    """Where Claude Code compacts this session: from its environment (`lean-agent up` sets it when compaction is
+    overridden), else its own default for the model's window."""
     try:
-        window = int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or 0)
-        pct = float(os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") or 0)
+        window = int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or 0) or None
+        pct = float(os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") or 0) or None
     except ValueError:
         return 0
-    if not window or not (0 < pct <= 100):
+    if pct is not None and not (0 < pct <= 100):
         return 0
     return lean_common.compaction_point(window, pct)
 
@@ -686,9 +687,6 @@ def main():
                f"{state['totals'].get('_ctx', 0) // calls:,} per call so far). Compacting to ~20K would save about "
                f"{per100:,} sonnet-eq per 100 calls. Keep replies short, then ask the user to send /compact (lean-agent "
                "tells the summary what to keep), or run `lean-agent handoff` and go on in a fresh session.")
-        if not os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"):
-            msg += (" This session was started without lean-agent's early compaction (an older `lean-agent up`): "
-                    "restart it once with `lean-agent up` to compact at ~67K automatically.")
         emit(additionalContext=msg)
         return 0
 

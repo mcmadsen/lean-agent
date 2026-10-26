@@ -13,8 +13,8 @@ except ImportError:  # Windows
     fcntl = None
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_COMPACT_WINDOW = 100000  # the orchestrator's CLAUDE_CODE_AUTO_COMPACT_WINDOW
-DEFAULT_COMPACT_PCT = 70  # ...and its CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
+STANDARD_WINDOW = 200000  # a model's context window unless it is a 1M one
+LONG_WINDOW = 1000000
 
 
 def thread_key(tid):
@@ -23,16 +23,59 @@ def thread_key(tid):
     return tid[1:] if tid.startswith("#") else tid
 
 
-def compaction_point(window, pct):
+def compact_buffer():
+    """Claude Code's fixed autocompact buffer (LEAN_AGENT_COMPACT_BUFFER, default 33,000)."""
+    try:
+        return int(os.environ.get("LEAN_AGENT_COMPACT_BUFFER") or 33000)
+    except ValueError:
+        return 33000
+
+
+def configured_model():
+    """The orchestrator's model: ANTHROPIC_MODEL, else the `model` pinned in its home's settings ("" if neither)."""
+    return os.environ.get("ANTHROPIC_MODEL") or read_json(lean_home("home", ".claude", "settings.json"), {}).get("model") or ""
+
+
+def model_window(model=None):
+    """The context window of `model` (default: the configured one): 1M for [1m]/1M models, else 200K."""
+    model = str(model or configured_model()).lower()
+    return LONG_WINDOW if "[1m]" in model or "-1m" in model or model.endswith("1m") else STANDARD_WINDOW
+
+
+def compaction_point(window=None, pct=None, model=None):
     """Tokens at which Claude Code compacts: the percentage of the window, but never past the window minus its
-    fixed autocompact buffer (LEAN_AGENT_COMPACT_BUFFER, default 33,000)."""
+    fixed autocompact buffer. No window and no percentage = Claude Code's own default: the model's window less the buffer."""
     # Claude Code's /context panel shows a 33k autocompact buffer on a 100k window, i.e. compaction at ~67k
     # (the percentage alone would say 70k).
-    try:
-        buffer = int(os.environ.get("LEAN_AGENT_COMPACT_BUFFER") or 33000)
-    except ValueError:
-        buffer = 33000
-    return int(min(window * pct / 100, window - buffer))
+    full = window or model_window(model)
+    return int(min(full * (pct or 100) / 100, full - compact_buffer()))
+
+
+def compact_overrides(env=None):
+    """(window, pct) the orchestrator is told to compact by, each None when Claude Code's default applies:
+    LEAN_AGENT_COMPACT_WINDOW / LEAN_AGENT_COMPACT_PCT, else `lean-agent config compact-window|compact-pct`.
+    "default" (or nothing) means no override."""
+    env = os.environ if env is None else env
+    cfg = read_json(lean_home("config.json"), {})
+    out = []
+    for name, key in (("LEAN_AGENT_COMPACT_WINDOW", "compact_window"), ("LEAN_AGENT_COMPACT_PCT", "compact_pct")):
+        raw = str(env.get(name) or cfg.get(key) or "default").strip().lower()
+        try:
+            n = float(raw)
+        except ValueError:
+            n = 0
+        out.append(int(n) if n > 0 else None)
+    return tuple(out)
+
+
+def compaction_label(window=None, pct=None, model=None):
+    """`compaction: ...` text for doctor and service status."""
+    if not window and not pct:
+        w = model_window(model)
+        size = f"{w // 1000000}M" if w >= 1000000 else f"{w // 1000}k"
+        return f"Claude Code default (~{compaction_point(model=model) // 1000}k for a {size} window)"
+    return (f"~{compaction_point(window, pct, model):,} (compact-window {window or 'default'}, "
+            f"pct {pct or 'default'}; set by config)")
 
 
 def lean_home(*parts):

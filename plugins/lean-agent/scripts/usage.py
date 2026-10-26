@@ -265,7 +265,7 @@ def context_series(path):
     return out
 
 
-KEEP = lean_common.compaction_point(lean_common.DEFAULT_COMPACT_WINDOW, lean_common.DEFAULT_COMPACT_PCT)  # where `lean-agent up` makes the orchestrator compact
+KEEP = lean_common.compaction_point(*lean_common.compact_overrides())  # where the orchestrator compacts
 
 
 def compact_saving(series):

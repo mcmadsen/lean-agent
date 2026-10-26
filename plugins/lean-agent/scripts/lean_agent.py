@@ -39,7 +39,8 @@ import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
 import service_session  # noqa: E402
-from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive, signal_group, lost_runs, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
+import lean_common
+from lean_common import compact_overrides, compaction_label, compaction_point, pid_alive, signal_group, lost_runs, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -5652,14 +5653,30 @@ def _cmd_optimize(a):
 
 ORCHESTRATOR_ENV = {
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",   # memory lives in lean-agent; no MEMORY.md on every turn
-    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": str(DEFAULT_COMPACT_PCT),
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": str(DEFAULT_COMPACT_WINDOW),  # with 70%: compact at ~67K tokens, not at 70% of a 1M window
     "BASH_MAX_OUTPUT_LENGTH": "20000",
     "MAX_MCP_OUTPUT_TOKENS": "10000",
     "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
     "LEAN_AGENT_BRIEF": "1",          # lean-agent commands print one line per item (details on request)
     "LEAN_AGENT_ANSWER_LINES": "25",  # workers answer in <= 25 lines; the rest goes to a details file
 }
+
+
+def orchestrator_env():
+    """ORCHESTRATOR_ENV plus the compaction overrides, if any are set (`config compact-window|compact-pct`): Claude
+    Code's own default compaction point applies otherwise."""
+    window, pct = compact_overrides()
+    env = dict(ORCHESTRATOR_ENV)
+    if window:
+        env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(window)
+    if pct:
+        env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(pct)
+    return env
+
+
+def compaction_text():
+    """`compaction: ...` for doctor and service status."""
+    window, pct = compact_overrides()
+    return "compaction: " + compaction_label(window, pct, lean_common.configured_model())
 
 
 def seed_recipes():
@@ -5856,7 +5873,11 @@ def orchestrator_settings(existing):
                            | {lean_mcp.tool_prefix(n).rstrip("_") for n in servers})
     data["permissions"] = perms
     data["disableBundledSkills"] = True
-    data["autoCompactWindow"] = env_num("LEAN_AGENT_COMPACT_WINDOW", 100000)  # the orchestrator compacts early
+    window = compact_overrides()[0]
+    if window:
+        data["autoCompactWindow"] = window
+    else:
+        data.pop("autoCompactWindow", None)
     data["disableClaudeAiConnectors"] = True
     data["enableAllProjectMcpServers"] = False  # no .mcp.json server connects here (disable_home_mcp lists them off)
     data["autoMemoryEnabled"] = False  # memory is filed by `lean-agent remember`, not by Claude Code
@@ -6265,6 +6286,7 @@ def cmd_doctor(a):
                    f"lean-agent config project-rules off --project {pslug}")
         else:
             report(True, f"project rules: off for {pslug}, rule cards instead (lean-agent config project-rules on)")
+    report(True, compaction_text() + " (lean-agent config compact-window N|default, compact-pct P|default)")
     report(True, f"auto clear: {clear_at_text()} (lean-agent config clear-at off|auto|N)")
 
     slug = default_project(path)
@@ -6492,7 +6514,7 @@ def cmd_up(a):
     if getattr(a, "clear", False) and not a.fresh:
         fresh_start()
     prev = load_json(home("up.json"), {})
-    save_json(home("up.json"), {"started": now_iso(), "server_env": ORCHESTRATOR_ENV, "name": a.name,
+    save_json(home("up.json"), {"started": now_iso(), "server_env": orchestrator_env(), "name": a.name,
                                 "local": a.local,
                                 **({} if a.fresh else {k: prev[k] for k in ("session_id", "fresh_sid") if prev.get(k)})})
     set_home_model(h, a.model)
@@ -6509,14 +6531,20 @@ def cmd_up(a):
         print(f"lean-agent: MCP servers off for the orchestrator itself (workers still get them with --mcp): "
               f"{', '.join(off)}")
     env = dict(os.environ)
-    for k, v in ORCHESTRATOR_ENV.items():
+    for k, v in orchestrator_env().items():
         env.setdefault(k, v)
     if a.compact_at:  # Claude Code's window can't go below 100K: lower the percentage instead
         window = max(100000, a.compact_at)
         env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(window)
         env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(max(10, min(95, round(a.compact_at * 100 / window))))
-    print(f"lean-agent: the orchestrator compacts at ~{compaction_point(int(env['CLAUDE_CODE_AUTO_COMPACT_WINDOW']), int(env['CLAUDE_AUTOCOMPACT_PCT_OVERRIDE'])):,} "
-          "tokens of context (keeps goals, approvals, open runs and findings; `--compact-at N` to change)", flush=True)
+    try:
+        window = int(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or 0) or None
+        pct = float(env.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") or 0) or None
+    except ValueError:
+        window = pct = None
+    print("lean-agent: the orchestrator compacts at " + compaction_label(window, pct, lean_common.configured_model())
+          .replace("; set by config", "") + " (keeps goals, approvals, open runs and findings; "
+          "`config compact-window N` or `up --compact-at N` to compact earlier)", flush=True)
     for line in orchestrator_context_lines(h):
         print("lean-agent: " + line, flush=True)
     if a.budget:
@@ -6725,7 +6753,7 @@ def message_advice(kind, label):
 def probe_home(h):
     """(init event, start-up context tokens) of a one-turn Haiku session in the home, as the orchestrator starts."""
     claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
-    env = dict(os.environ, **ORCHESTRATOR_ENV)
+    env = dict(os.environ, **orchestrator_env())
     try:
         out = subprocess.run([claude, "-p", "--output-format", "stream-json", "--verbose", "--model", "haiku",
                               "--max-turns", "1"], input="Reply with just OK. Do not use tools.", capture_output=True,
@@ -7130,7 +7158,7 @@ def cmd_sync(a):
     refresh_blocks()
 
     up = load_json(home("up.json"), {})
-    restart = bool(up) and not up.get("local") and up.get("server_env") != ORCHESTRATOR_ENV
+    restart = bool(up) and not up.get("local") and up.get("server_env") != orchestrator_env()
     print(f"plugin: {plugin}")
     forwarded = forward_old_hooks()
     if forwarded:
@@ -7164,9 +7192,9 @@ def cmd_install(a):
 
 def cmd_env(a):
     if a.json:
-        print(json.dumps({"env": ORCHESTRATOR_ENV}, indent=2))
+        print(json.dumps({"env": orchestrator_env()}, indent=2))
     else:
-        for k, v in ORCHESTRATOR_ENV.items():
+        for k, v in orchestrator_env().items():
             print(f"export {k}={v}")
 
 
@@ -7348,6 +7376,24 @@ def cmd_config(a):
                  "CLAUDE.md and .claude/rules itself, and the repo's .claude/settings.json (hooks, permissions, plugins) "
                  "applies too; rule cards are skipped" if on else
                  "the repo's CLAUDE.md and rules reach workers as cards (rule cards, picked by their paths: globs)"))
+        return 0
+    if a.name in ("compact-window", "compact-pct"):
+        key = a.name.replace("-", "_")
+        if a.value is not None:
+            raw = a.value.lower()
+            if raw != "default" and not (raw.isdigit() and int(raw) > 0):
+                die(f"{a.name} takes a number or default")
+            if a.name == "compact-pct" and raw != "default" and not 10 <= int(raw) <= 95:
+                die("compact-pct takes 10-95 or default")
+            cfg = load_json(home("config.json"), {})
+            if raw == "default":
+                cfg.pop(key, None)
+            else:
+                cfg[key] = int(raw)
+            save_json(home("config.json"), cfg)
+            print("takes effect when the orchestrator restarts: lean-agent service restart")
+        env_name = "LEAN_AGENT_" + key.upper()
+        print(compaction_text() + (f" ({env_name} is set and wins)" if os.environ.get(env_name) else ""))
         return 0
     if a.name == "clear-at":
         if a.value is not None:
@@ -8067,6 +8113,7 @@ def cmd_service(a):
         if a.action == "status":
             print(f"service: {path}: " + ("running" if is_running else "loaded, not running" if loaded else "not loaded")
                   + f" (log: lean-agent service logs)")
+            print(compaction_text())
             print("auto clear: " + clear_at_text())
             return 0 if is_running else 1
         if a.action == "start" and is_running:
@@ -8101,6 +8148,7 @@ def cmd_service(a):
     if a.action == "status":
         state = re.search(r"state = (\w+)|Active: (\S+ \S+)", out)
         print(f"service: {path}: " + ((state.group(1) or state.group(2)) if state else ("running" if rc == 0 else "not running")))
+        print(compaction_text())
         print("auto clear: " + clear_at_text())
     else:
         print(f"{a.action}: " + ("ok" if rc == 0 else out[:200]))
@@ -8521,7 +8569,7 @@ def build_parser():
     s.add_argument("--name", default="lean-agent", help="session name in the Claude app")
     s.add_argument("--budget", type=int, help="optional self-set cap per orchestrator session (sonnet-eq tokens)")
     s.add_argument("--compact-at", type=int, metavar="TOKENS", help="compact the orchestrator's context at about this "
-                   "many tokens (default ~67,000)")
+                   "many tokens (default: Claude Code's own)")
     s.add_argument("--budget-5h", type=int, help="lean-agent budget per 5-hour window (Sonnet-equivalent tokens)")
     s.add_argument("--budget-week", type=int, help="lean-agent budget per 7 days (Sonnet-equivalent tokens)")
     s.add_argument("--permission-mode", help="e.g. acceptEdits, auto")
@@ -8634,10 +8682,10 @@ def build_parser():
     s.set_defaults(fn=cmd_advise)
 
     s = sub.add_parser("config", help="switches: strict on|off (the orchestrator only runs lean-agent commands; default on), "
-                       "clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`)")
-    s.add_argument("name", choices=["strict", "clear-at", "project-rules"])
+                       "clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), compact-window N|default and compact-pct P|default (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
+    s.add_argument("name", choices=["strict", "clear-at", "project-rules", "compact-window", "compact-pct"])
     s.add_argument("--project", "-p", help="project-rules: the project (default: the current directory)")
-    s.add_argument("value", nargs="?", help="on|off, or off|auto|a number for clear-at")
+    s.add_argument("value", nargs="?", help="on|off, or off|auto|a number for clear-at, a number|default for compact-window and compact-pct")
     s.set_defaults(fn=cmd_config)
 
     s = sub.add_parser("attribution", help="should commits and PRs credit Claude? ask the user once, then set on|off")

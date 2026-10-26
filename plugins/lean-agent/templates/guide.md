@@ -182,7 +182,7 @@ lean-agent optimize {{P}} --apply --skip checkout-notes
   `lean-agent text-len <file> -p <project>`. An `-m opus|fable` run that answers "ask the user, then add --yes":
   tell the user the expected cost and plan share; add `--yes` only after they agree. What lean-agent saves:
   `lean-agent savings` (`--measure` once per project).
-- Your context compacts at about 67K tokens. After a compaction, and in a new session after recent work, you get
+- Claude Code decides when your context compacts. After a compaction, and in a new session after recent work, you get
   the hand-off note (open items, standing rules, recent runs, items touched); use `lean-agent runs --show <id>`
   for a run's full answer instead of asking the user again. Keep your own state in it:
   `lean-agent handoff --note "..." --kind fyi` (close with `--done N` once answered or stale): one topic, under ~200
