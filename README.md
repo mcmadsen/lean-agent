@@ -511,6 +511,14 @@ orchestrator turn**, plus ~2,000 for the guide. Other keys in that file, such as
 `LEAN_AGENT_ORCHESTRATOR_TRIM=0 lean-agent home` removes the trimming. This applies only to the orchestrator
 home; your normal sessions in a repo are untouched.
 
+**Repo rules** (`CLAUDE.md`, `.claude/rules/**/*.md`): `learn` imports them as `rule` cards and keeps each rule's
+`paths:` globs and description. A rule card comes along when the task text, `run --files`, or the worktree's changed
+files match a glob; a rule without `paths:` and the root `CLAUDE.md`'s opening section are always candidates within the card budget.
+`lean-agent config project-rules on|off [-p project]` (default off) lets workers load them natively instead: they run
+in their worktree (or the project) with `--setting-sources project` rather than `--safe-mode`, rule cards are skipped,
+and the repo's `.claude/settings.json` (hooks, permissions, plugins, env) applies too; `doctor` shows the mode. Advisor,
+reviewer, composer and gap-decider runs stay isolated.
+
 **Strict mode** (`lean-agent config strict on|off`, default on; `doctor` shows it): the orchestrator only
 orchestrates. A hook refuses Bash commands that aren't `lean-agent` commands and Reads outside lean-agent's home and
 plugin, and the refusal names the worker to start instead (`lean-agent run <project> --cards auto ...`). Workers are
