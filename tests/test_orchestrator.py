@@ -3560,8 +3560,17 @@ class CliTest(unittest.TestCase):
     def test_thread_new_refuses_above_max_thread_sessions(self):
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "1")
-        self.cli("thread", "new", "first")
+        # a host record the service wrote (host_pid of a live process) counts whether or not that host answers yet
+        ss.update_session("t9", host_pid=os.getpid(), pid=None)
+        self.assertFalse(ss.alive("t9"))
         r = self.cli("thread", "new", "second", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("max-thread-sessions 1", r.stderr + r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json")) and
+                         self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"))["threads"])
+        ss.update_session("t9", host_pid=None)  # the host stopped
+        self.assertIn("t1 started", self.cli("thread", "new", "first").stdout)
+        r = self.cli("thread", "new", "third", check=False)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("thread close t1", r.stderr + r.stdout)
         self.assertEqual(sorted(self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"))["threads"]), ["t1"])
