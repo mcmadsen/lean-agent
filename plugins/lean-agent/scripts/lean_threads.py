@@ -215,6 +215,8 @@ def threads(now=None, include_expired=False):
 
 MATCH_THRESHOLD = 0.4  # share of the prompt's (idf-weighted) words found in a thread, after the recency boost
 REQUESTS_KEPT = 20
+CONFIDENT_MARGIN = 0.15  # a guess is uncertain when the best thread beats the second by less than this ...
+CONFIDENT_SCORE = 0.55   # ... or scores below this (the match threshold is MATCH_THRESHOLD)
 REQUEST_CHARS = 300
 STOP = set("""the a an and or but if then else for to of in on at by with from into onto about as is are was were be been
 being do does did done have has had it its this that these those there here we you i me my our your they them he she
@@ -330,14 +332,24 @@ def resolve_tag(value=None):
     return current()
 
 
+def _uncertain(ranked, tid, cur):
+    """Whether a guessed thread should come with a "wrong? move it" hint: not for a continuation of the current thread,
+    but when the best score is below CONFIDENT_SCORE or beats the second best by less than CONFIDENT_MARGIN."""
+    if tid == cur or not ranked:
+        return False
+    second = ranked[1][0] if len(ranked) > 1 else 0.0
+    return ranked[0][0] < CONFIDENT_SCORE or ranked[0][0] - second < CONFIDENT_MARGIN
+
+
 def route(prompt, session=None, now=None):
-    """Assign a user prompt to a thread without any model call; stores the request and the current-thread state.
-    Returns (thread id, how, context line) with how in explicit|guessed|new."""
+    """Assign a user prompt to a thread without any model call; stores the request (with a short id, rN) and the
+    current-thread state. Returns (thread id, how, context line) with how in explicit|guessed|new; the line carries the
+    request id and the move hint only when the guess is uncertain (see _uncertain)."""
     text = " ".join(str(prompt or "").split())
     now_s = now_iso() if now is None else datetime.datetime.fromtimestamp(now).isoformat(timespec="seconds")
     m = EXPLICIT_RE.search(text)
     with _locked() as data:
-        tid, how = None, None
+        tid, how, unsure = None, None, False
         if m:
             cand = resolve(f"#{int(m.group(1))}" if m.group(1) else f"t{int(m.group(2))}", data["aliases"])
             if cand in data["threads"] or cand.startswith("#"):
@@ -356,6 +368,7 @@ def route(prompt, session=None, now=None):
             ranked = score_threads(text, now, cur, data)
             if ranked and ranked[0][0] >= MATCH_THRESHOLD:
                 tid, how = ranked[0][1], "guessed"
+                unsure = _uncertain(ranked, tid, cur)
             elif not words(text) and cur and cur in data["threads"] and not data["threads"][cur].get("closed") \
                     and cur not in data["aliases"]:
                 tid, how = cur, "guessed"  # "yes, go ahead": no content words, it continues the last topic
@@ -365,23 +378,106 @@ def route(prompt, session=None, now=None):
             data["threads"][tid] = {"id": tid, "title": title_from(text), "created": now_s, "last_message": now_s, "kind": "free"}
         t = data["threads"][tid]
         t["last_message"] = now_s
-        t.setdefault("requests", []).append({"ts": now_s, "text": text[:REQUEST_CHARS]})
+        data["next_request"] = int(data.get("next_request") or 0) + 1
+        rid = f"r{data['next_request']}"
+        t.setdefault("requests", []).append({"id": rid, "ts": now_s, "text": text[:REQUEST_CHARS]})
         del t["requests"][:-REQUESTS_KEPT]
         title = t["title"]
     set_current(tid, session)
     if how == "new":
         line = f'New thread {tid} "{title}"'
-    elif how == "guessed":
-        line = f'Thread {tid} "{title}" (guessed; wrong? lean-agent thread move tN)'
+    elif how == "guessed" and unsure:
+        line = f'Thread {tid} "{title}" ({rid}, guessed \u2014 wrong? lean-agent thread move {rid} tN)'
     else:
         line = f'Thread {tid} "{title}"'
     return tid, how, line
 
 
+# ------------------------------------------------------------------ notifications and runs
+
+NOTIFICATION_RE = re.compile(r"<task-notification|\btask-id\b|Background command .{0,2000}?\b(?:completed|failed|was stopped)\b", re.S)
+SYSTEM_PROMPT_RE = re.compile(r"\s*<(?:system-reminder|task-notification|command-|local-command|hook)", re.I)
+RUN_ID_RE = re.compile(r"\b\d{4}-\d{6}-[0-9a-f]{4}\b")
+OUTPUT_FILE_RE = re.compile(r"<output-file>\s*([^<\s][^<]*?)\s*</output-file>|output[- ]file[:=]\s*(\S+)", re.I)
+OUTPUT_READ = 200_000
+
+
+def is_notification(prompt):
+    """A prompt Claude Code (or a hook) wrote, not the user: a background-task notification or a system-tagged message."""
+    text = str(prompt or "")
+    return bool(NOTIFICATION_RE.search(text) or SYSTEM_PROMPT_RE.match(text))
+
+
+def thread_of_run(rec, data=None):
+    """The thread of a ledger/running record: a `thread move` override, else its tag (merges followed); None if untagged."""
+    data = data or load()
+    tid = data["overrides"].get(f"run:{rec.get('id') or rec.get('run')}") or rec.get("thread")
+    if not tid or str(tid).lower() == "none":
+        return None
+    try:
+        return resolve(norm(tid), data["aliases"])
+    except ValueError:
+        return None
+
+
+def _read_tail(p, n=OUTPUT_READ):
+    """The first and last n/2 bytes of a file (all of it when small)."""
+    try:
+        with open(p, "rb") as fh:
+            raw = fh.read(n // 2 + 1)
+            if len(raw) > n // 2:
+                fh.seek(0, 2)
+                fh.seek(max(n // 2, fh.tell() - n // 2))
+                raw = raw[:n // 2] + b"\n" + fh.read()
+        return raw.decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def run_of_notification(text):
+    """The lean-agent run a background-task notification is about: a run id in the notification or in its output file
+    (`run <id> started`), else the run whose task text is inside the notification's command. None if there is none."""
+    text = str(text or "")
+    known = {r.get("id"): r for r in _jsonl(lean_home("ledger.jsonl")) if r.get("id")}
+    for f in glob.glob(lean_home("running", "*.json")):
+        m = lean_common.read_json(f, {})
+        if isinstance(m, dict) and m.get("run"):
+            known.setdefault(m["run"], dict(m, id=m["run"]))
+    blobs = [text]
+    for mo in OUTPUT_FILE_RE.finditer(text):
+        blobs.append(_read_tail(os.path.expanduser(mo.group(1) or mo.group(2))))
+    for blob in blobs:
+        started = re.findall(r"\brun (\d{4}-\d{6}-[0-9a-f]{4}) started", blob)
+        for rid in reversed(started):
+            if rid in known:
+                return known[rid]
+        for rid in RUN_ID_RE.findall(blob):
+            if rid in known:
+                return known[rid]
+    flat = " ".join(text.split())
+    for rec in sorted(known.values(), key=lambda r: str(r.get("ts") or r.get("started") or ""), reverse=True):
+        task = " ".join(str(rec.get("task") or "").split())[:60]
+        if len(task) >= 12 and task in flat:
+            return rec
+    return None
+
+
+def notification_line(prompt):
+    """The context line for a notification prompt: the thread of the run it is about, or "" (no run found: it stays with
+    the current thread, silently). Creates no thread, stores no request, changes no current thread."""
+    rec = run_of_notification(prompt)
+    if not rec:
+        return ""
+    data = load()
+    tid = thread_of_run(rec, data)
+    t = data["threads"].get(tid) if tid else None
+    return f'Thread {tid} "{t.get("title")}" (this run\'s)' if t and not t.get("closed") else ""
+
+
 # ------------------------------------------------------------------ show the work (`now`, `thread show`)
 
 IDLE_DAYS = 7  # `now` closes an open thread with no activity for this long (LEAN_AGENT_THREAD_IDLE_DAYS or config thread_idle_days)
-NOW_LINES = 25
+NOW_LINES = 30
 KINDS = ['request', 'run', 'review', 'todo', 'note', 'handover', 'push']
 
 
@@ -537,10 +633,53 @@ def autoclose(data, evs, running, todos, days, now):
     return gone
 
 
+def elapsed(ts, now=None):
+    s = max(0, int((time.time() if now is None else now) - _epoch(ts)))
+    return f"{s // 3600}h{s % 3600 // 60:02d}m" if s >= 3600 else f"{s // 60}m{s % 60:02d}s"
+
+
+def _details(tid, ev, data, todos, live, waiting, now):
+    """The parallel work of one thread, one indented line each: runs in progress (id, model, elapsed, task), finished runs
+    nobody collected yet, reviews with open findings or gaps, the next open todo."""
+    out = []
+    for rid, m in live:
+        if thread_of_run(dict(m, id=rid), data) == tid:
+            out.append(f"  running {rid} {m.get('model') or '?'} {elapsed(m.get('started'), now)}: {one_line(m.get('task'), 60)}")
+    for r in waiting:
+        if thread_of_run(r, data) == tid:
+            out.append(f"  done, not collected {r['id']} {r.get('model') or '?'} {r.get('status') or '?'}: "
+                       f"{one_line(r.get('task') or r.get('result_head'), 50)}")
+    latest = {}
+    for _, _, kind, text in ev:
+        if kind == "review":
+            latest[text.split()[1]] = text
+    for text in latest.values():
+        w = text.split()
+        if w[2].rstrip(",") != "approve":
+            out.append(f"  review open {w[0]} {w[1]}: {w[2].rstrip(',')} {' '.join(w[3:5])}")
+    nxt = sorted((int(t.get("id") or 0), t) for k, t in todos.items()
+                 if t.get("status") != "done" and t.get("thread") and _resolved(t["thread"], data) == tid)
+    if nxt:
+        out.append(f"  next todo #{nxt[0][1].get('id')}: {one_line(nxt[0][1].get('text'), 60)}")
+    return out
+
+
+def _resolved(tag, data):
+    try:
+        return resolve(norm(tag), data["aliases"])
+    except ValueError:
+        return None
+
+
 def now_text(now=None, close_idle=True, max_lines=NOW_LINES):
-    """Open threads by last activity: id, title, state, last action and age (<= max_lines lines)."""
+    """Open threads by last activity (<= max_lines lines): a row per thread with its id, title, state, last action and
+    age, and under it what runs in parallel for it: running runs, finished-but-uncollected runs, open review, next todo."""
     now = time.time() if now is None else now
     days, todos = idle_days(), _todo_map()
+    live = lean_common.running_runs(lean_home())
+    live_ids = {rid for rid, _ in live}
+    ledger = {r["id"]: r for r in _jsonl(lean_home("ledger.jsonl")) if r.get("id")}
+    waiting = [ledger[i] for i in lean_common.uncollected_ids(lean_home(), live_ids) if i in ledger]
     with _locked() as data:
         evs = events(data, todos)
         running = _running_by_thread(data)
@@ -552,14 +691,29 @@ def now_text(now=None, close_idle=True, max_lines=NOW_LINES):
             ev = evs.get(tid, [])
             last_ts = max([t.get("last_message") or t.get("created") or ""] + [e[1] for e in ev])
             act = next((e for e in reversed(ev) if e[2] != "request"), None) or (ev[-1] if ev else None)
-            rows.append((_epoch(last_ts), last_ts, tid, t, act, _state(tid, ev, running, data)))
+            rows.append((_epoch(last_ts), last_ts, tid, t, act, _state(tid, ev, running, data),
+                         _details(tid, ev, data, todos, live, waiting, now)))
     rows.sort(key=lambda r: (r[0], r[2]), reverse=True)
     lines = [f"Open threads ({len(rows)}), latest first:"] if rows else ["No open threads."]
-    for _, last_ts, tid, t, act, state in rows[:max_lines - 2]:
+    budget = max_lines - 2  # header and the footer line
+    shown = 0
+    for _, last_ts, tid, t, act, state, det in rows:
+        if budget < 1:
+            break
         lines.append(f"{tid:<4} {one_line(t['title'], 40):<40} {state:<22} {age(last_ts, now):>4}  "
                      + (f"{act[2]}: {one_line(act[3].split(' ', 1)[-1] if act[2] in ('run', 'review') else act[3], 60)}" if act else "-"))
-    if len(rows) > max_lines - 2:
-        lines.append(f"... and {len(rows) - max_lines + 2} older (lean-agent thread list)")
+        budget -= 1
+        shown += 1
+        keep = max(0, min(len(det), budget - (len(rows) - shown)))  # one row each for the threads still to come
+        if keep < len(det):
+            keep = max(0, keep - 1)  # room for the "... more" line
+        lines += det[:keep]
+        budget -= keep
+        if keep < len(det):
+            lines.append(f"  ... {len(det) - keep} more for {tid} (lean-agent thread show {tid})")
+            budget -= 1
+    if shown < len(rows):
+        lines.append(f"... and {len(rows) - shown} older (lean-agent thread list)")
     if closed:
         lines.append(f"Closed as idle (> {days:g} days): {', '.join(closed)} (lean-agent thread reopen tN)")
     return "\n".join(lines)
@@ -608,12 +762,12 @@ def _tagged(tag, thread, aliases):
         return False
 
 
-def _retag(path, items_of, thread, new, since, aliases, ts_key):
-    """Rewrite, under the file's lock, the thread of the entries of `thread` from `since` on."""
+def _retag(path, items_of, thread, new, since, aliases, ts_key, until=float("inf")):
+    """Rewrite, under the file's lock, the thread of the entries of `thread` from `since` up to (not including) `until`."""
     with lean_common.file_lock(path):
         doc = lean_common.read_json(path, None)
         items = items_of(doc)
-        hit = [e for e in items if isinstance(e, dict) and _tagged(e.get("thread"), thread, aliases) and _epoch(e.get(ts_key)) >= since]
+        hit = [e for e in items if isinstance(e, dict) and _tagged(e.get("thread"), thread, aliases) and since <= _epoch(e.get(ts_key)) < until]
         for e in hit:
             e["thread"] = new
         if hit:
@@ -630,27 +784,40 @@ def cli_session():
     return sid if sid and sid in ((st.get("sessions") or {}) if isinstance(st, dict) else {}) else None
 
 
-def move_latest(tid, session=None):
-    """Wrong thread: the latest request of this session goes to `tid`, `tid` becomes the current thread, and what the old
-    thread recorded since that request is re-homed: the append-only logs through the overrides, todo.json and the hand-off
-    notes in place. Single-session scope: only the latest request of `session` (else the latest one recorded), and only
-    when it is under 24 h old. Returns (old thread, new thread)."""
+def move_latest(tid, session=None, ref=None):
+    """Wrong thread: a request goes to `tid` and what its old thread recorded since is re-homed: the append-only logs
+    through the overrides, todo.json and the hand-off notes in place. `ref` names the request: an id (`r12`), a thread
+    (its latest request), or None for the latest request of this session (else the latest one recorded, only when under
+    24 h old; `tid` then becomes the current thread). The work moved is what the old thread recorded from that request
+    until its next request. Returns (old thread, new thread)."""
     tid = norm(tid)
     st = lean_common.read_json(state_path(), {})
     rec = ((st.get("sessions") or {}).get(session or "") or st.get("latest") or {}) if isinstance(st, dict) else {}
-    if not rec.get("thread"):
-        raise ValueError("no current thread to move a request out of")
-    if rec.get("ts") and time.time() - _epoch(rec["ts"]) > 24 * 3600:
-        raise ValueError("nothing recent to move (the latest request is over 24 h old)")
+    if ref is None:
+        if not rec.get("thread"):
+            raise ValueError("no current thread to move a request out of")
+        if rec.get("ts") and time.time() - _epoch(rec["ts"]) > 24 * 3600:
+            raise ValueError("nothing recent to move (the latest request is over 24 h old)")
     with _locked() as data:
-        old, tid = resolve(rec["thread"], data["aliases"]), resolve(tid, data["aliases"])
+        tid = resolve(tid, data["aliases"])
+        if ref is None:
+            old = resolve(rec["thread"], data["aliases"])
+        elif re.fullmatch(r"r\d+", str(ref)):
+            old = next((k for k, t in data["threads"].items() if any(r.get("id") == ref for r in t.get("requests") or [])), None)
+            if old is None:
+                raise ValueError(f"no request {ref} (the last {REQUESTS_KEPT} of each thread are kept)")
+        else:
+            old = resolve(norm(ref), data["aliases"])
         if old == tid:
-            raise ValueError(f"the latest request is in {tid} already")
+            raise ValueError(f"the request is in {tid} already" if ref else f"the latest request is in {tid} already")
         reqs = (data["threads"].get(old) or {}).get("requests") or []
         if not reqs:
             raise ValueError(f"{old} has no request to move")
-        req = reqs.pop()
+        i = next((i for i, r in enumerate(reqs) if r.get("id") == ref), len(reqs) - 1) if ref and ref[0] == "r" else len(reqs) - 1
+        req = reqs.pop(i)
         since = _epoch(req["ts"])
+        until = _epoch(reqs[i]["ts"]) if i < len(reqs) else float("inf")  # up to the old thread's next request
+        newest = all(since >= _epoch(r.get("ts")) for t in data["threads"].values() for r in t.get("requests") or [])
         dst = _ensure(data, tid, title_from(req["text"]))
         dst.pop("closed", None)
         dst.pop("auto_closed", None)
@@ -658,17 +825,18 @@ def move_latest(tid, session=None):
         dst["requests"].sort(key=lambda r: _epoch(r.get("ts")))
         dst["last_message"] = max([dst.get("last_message") or "", req["ts"]], key=_epoch)
         src = data["threads"][old]
-        src["last_message"] = reqs[-1]["ts"] if reqs else src.get("created")
+        if i >= len(reqs):
+            src["last_message"] = reqs[-1]["ts"] if reqs else src.get("created")
         for kind, key, r in _log_records():
-            if data["overrides"].get(key) is None and _tagged(r.get("thread"), old, data["aliases"]) and _epoch(r.get("ts")) >= since:
+            if since <= _epoch(r.get("ts")) < until and (data["overrides"].get(key) == old or (
+                    data["overrides"].get(key) is None and _tagged(r.get("thread"), old, data["aliases"]))):
                 data["overrides"][key] = tid
-            elif data["overrides"].get(key) == old and _epoch(r.get("ts")) >= since:
-                data["overrides"][key] = tid
-        _retag(lean_home("todo.json"), lambda d: (d.get("items") if isinstance(d, dict) else None) or [], old, tid, since,
-               data["aliases"], "created")
-        _retag(lean_home("handoff-notes.json"), lambda d: d if isinstance(d, list) else [], old, tid, since, data["aliases"], "ts")
-        _retag(lean_home("handovers.json"), lambda d: d if isinstance(d, list) else [], old, tid, since, data["aliases"], "ts")
-    set_current(tid, session)
+        for path_, items_of, ts_key in ((lean_home("todo.json"), lambda d: (d.get("items") if isinstance(d, dict) else None) or [], "created"),
+                                        (lean_home("handoff-notes.json"), lambda d: d if isinstance(d, list) else [], "ts"),
+                                        (lean_home("handovers.json"), lambda d: d if isinstance(d, list) else [], "ts")):
+            _retag(path_, items_of, old, tid, since, data["aliases"], ts_key, until)
+    if ref is None or newest:
+        set_current(tid, session)
     return old, tid
 
 
@@ -696,8 +864,8 @@ def cli(action, args, as_json=False, out=print):
             if len(args) != 1:
                 raise ValueError(f"usage: lean-agent thread {action} tN")
             out(f"{set_closed(args[0], action == 'close')} {'closed' if action == 'close' else 'open again'}")
-        elif action == "merge" and len(args) != 2 or action in ("unmerge", "move") and len(args) != 1:
-            raise ValueError({"merge": "usage: lean-agent thread merge tB tA", "move": "usage: lean-agent thread move tN",
+        elif action == "merge" and len(args) != 2 or action == "unmerge" and len(args) != 1 or action == "move" and len(args) not in (1, 2):
+            raise ValueError({"merge": "usage: lean-agent thread merge tB tA", "move": "usage: lean-agent thread move [rN|tM] tN",
                               "unmerge": "usage: lean-agent thread unmerge tB"}[action])
         elif action == "merge":
             merge(*args)
@@ -706,8 +874,8 @@ def cli(action, args, as_json=False, out=print):
             unmerge(args[0])
             out(f"{norm(args[0])} is its own thread again")
         elif action == "move":
-            old, new_ = move_latest(args[0], cli_session())
-            out(f"the latest request moved from {old} to {new_}")
+            old, new_ = move_latest(args[-1], cli_session(), args[0] if len(args) == 2 else None)
+            out(f"{'the latest request' if len(args) == 1 else args[0]} moved from {old} to {new_}")
         else:
             raise ValueError("usage: lean-agent thread new|list|show|close|reopen|merge|unmerge|move")
     except ValueError as e:

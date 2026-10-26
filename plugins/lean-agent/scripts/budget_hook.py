@@ -506,7 +506,8 @@ MEMORY_REDIRECT = ("lean-agent: this is a request to keep something (a '#' memor
 
 
 def prompt_hook(event):
-    """UserPromptSubmit in the orchestrator: the prompt is put in a thread (no model call; one context line). In the
+    """UserPromptSubmit in the orchestrator: the prompt is put in a thread (no model call; one context line); a background-task notification is only
+    pointed at the thread of the run it is about. In the
     strict orchestrator a one-line '#' memory message is also redirected to `lean-agent remember`, and /memory and /init
     (Claude Code's own memory editors) are refused."""
     prompt = str(event.get("prompt") or "").strip()
@@ -518,9 +519,13 @@ def prompt_hook(event):
     lines = []
     if not prompt.startswith("/"):  # slash commands are not requests
         try:
-            lines.append(lean_threads.route(prompt, event.get("session_id"))[2])
+            if lean_threads.is_notification(prompt):  # a background-task notification: never a new request or thread
+                lines.append(lean_threads.notification_line(prompt))
+            else:
+                lines.append(lean_threads.route(prompt, event.get("session_id"))[2])
         except Exception:  # never break the prompt
             pass
+        lines = [l for l in lines if l]
     if strict and re.match(MEMORY_MESSAGE_RE, prompt) and "\n" not in prompt and len(prompt) < 500:
         lines.append(MEMORY_REDIRECT)
     if lines:

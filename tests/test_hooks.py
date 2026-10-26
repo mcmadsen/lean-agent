@@ -675,6 +675,30 @@ class BudgetTest(Base):
         self.set_strict("off")
         self.assertNotIn("lean-agent remember", ctx("# always answer in Danish"))  # still threaded, not redirected
 
+    def test_prompt_hook_notification_never_creates_a_thread(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        prompt = lambda text: run_hook("budget_hook.py", {
+            "hook_event_name": "UserPromptSubmit", "cwd": home, "session_id": "s1", "prompt": text}, **self.env)
+        ctx = lambda text: ((prompt(text) or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+        self.assertTrue(ctx("Publish the quarterly report through the docs worker").startswith("New thread t1"))
+        self.assertTrue(ctx("Fix the export retry loop in the billing service").startswith("New thread t2"))
+        with open(os.path.join(home, "ledger.jsonl"), "w") as fh:
+            fh.write(json.dumps({"id": "0101-100000-aaaa", "ts": "2026-01-01T10:00:00", "thread": "t1", "task": "x"}) + "\n")
+        out = os.path.join(home, "bg.output")
+        with open(out, "w") as fh:
+            fh.write("run 0101-100000-aaaa started\n")
+        note = f"<task-notification><task-id>b1</task-id><output-file>{out}</output-file><summary>Background command completed</summary></task-notification>"
+        self.assertTrue(ctx(note).startswith('Thread t1 "Publish'), ctx(note))
+        self.assertNotIn("guess", ctx(note))
+        self.assertEqual(ctx('<task-notification><task-id>b2</task-id><summary>Background command "sleep 1" completed</summary></task-notification>'), "")
+        sys.path.insert(0, ROOT)
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
+            import lean_threads
+            reg = lean_threads.load()["threads"]
+            self.assertEqual(sorted(reg), ["t1", "t2"])
+            self.assertEqual([len(t["requests"]) for t in reg.values()], [1, 1])  # no request stored
+            self.assertEqual(lean_threads.current("s1"), "t2")
+
     def test_prompt_hook_threads_every_request(self):
         home = self.env["LEAN_AGENT_HOME"]
         prompt = lambda text, cwd=home, sid="s1": run_hook("budget_hook.py", {
@@ -686,7 +710,8 @@ class BudgetTest(Base):
         self.assertTrue(second.startswith("New thread t2"), second)
         again = ctx("the quarterly report needs a chart in the docs")
         self.assertTrue(again.startswith('Thread t1 "Publish'), again)
-        self.assertIn("guessed; wrong? lean-agent thread move tN", again)
+        self.assertNotIn("guessed", again)  # a confident match carries no hint
+        self.assertEqual(again, 'Thread t1 "Publish quarterly report through docs worker"')
         self.assertTrue(ctx("what about t2 now?").startswith('Thread t2 "Fix export'))  # explicit wins over words
         self.assertTrue(ctx("#7 is failing").startswith('Thread #7'))
         self.assertTrue(ctx("yes please").startswith("Thread #7"))  # no content words: the last topic
