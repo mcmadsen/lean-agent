@@ -6087,11 +6087,13 @@ def wait_for_runs(target, timeout):
 def stop_run(target):
     """`runs --stop <id|last>`: ends a running run (its own supervisor group only), records it as `stopped`, shows what
     it changed in its worktree and how to go on or start over."""
-    live = [(rid, m) for rid, m in live_runs()] + lost_runs(home())
-    if target == "last":
-        mine = [x for x in live if not x[1].get("role")] or live
+    running, lost = live_runs(), lost_runs(home())
+    live = running + lost
+    if target == "last":  # the newest live run; a lost one only when named
+        mine = [x for x in running if not x[1].get("role")] or running
         if not mine:
-            die("no run in progress to stop (lean-agent runs --running)")
+            die("no run in progress to stop (lean-agent runs --running)" +
+                (f"; lost runs are stopped by id: {', '.join(r for r, _ in lost)}" if lost else ""))
         target = mine[-1][0]
     hit = next((x for x in live if x[0] == target), None)
     done = next((r for r in ledger() if r["id"] == target), None)

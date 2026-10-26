@@ -4395,6 +4395,27 @@ class CliTest(unittest.TestCase):
         self.assertEqual((row["read_only"], row["tools"], row["cards"], row["answer_lines"], row["thread"]),
                          (True, "Read,Grep", ["c1"], 7, "th"))
 
+    def test_stop_last_picks_the_newest_live_run_never_a_lost_one(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(os.path.join(home, "running"), exist_ok=True)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        with open(os.path.join(home, "running", "k9.json"), "w") as fh:
+            json.dump({"pid": dead.pid, "run": "0101-000000-bbbb", "started": "2099-01-01T00:00:00", "task": "t",
+                       "model": "haiku", "project": "proj"}, fh)
+        r = self.cli("runs", "--stop", "last", check=False)  # only a lost run exists: nothing live to stop
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no run in progress", r.stderr)
+        self.assertIn("0101-000000-bbbb", r.stderr)
+        p = self.start_run(turns="3", sleep="30")
+        live = []
+        self.wait_for(lambda: live.__setitem__(slice(None), [m for m in self.running_markers() if m["run"] != "0101-000000-bbbb"]) or live,
+                      "the live run's marker")
+        out = self.cli("runs", "--stop", "last", LEAN_AGENT_STOP_WAIT="3").stdout
+        p.communicate(timeout=30)
+        self.assertIn(f"run {live[0]['run']} stopped", out)
+        self.assertFalse([x for x in self.ledger() if x["id"] == "0101-000000-bbbb"])
+
     def test_runs_wait_prints_each_result_and_the_exit_code(self):
         p = self.start_run(turns="3", sleep="0.7")
         [m] = self.running_markers()
