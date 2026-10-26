@@ -242,8 +242,8 @@ def resolve_project(ref):
     path = os.path.abspath(os.path.expanduser(ref))
     if os.path.isdir(path):
         for s, v in projs.items():
-            if v["path"] == path:
-                return s, path
+            if same_path(v["path"], path):
+                return s, v["path"]
         return learn(path, quiet=True), path
     die(f"unknown project {ref!r}; register it with: lean-agent learn <path>")
 
@@ -458,6 +458,10 @@ def rule_cards_for(cards, task, files, changed, budget, have):
     return out
 
 
+def same_path(a, b):
+    return bool(a and b) and (a == b or os.path.realpath(a) == os.path.realpath(b))
+
+
 def project_rules_on(slug):
     return projects().get(slug, {}).get("project_rules") == "on"
 
@@ -466,11 +470,11 @@ def learn(path, include_user_skills=False, quiet=False, name=None, rules=None):
     path = os.path.abspath(os.path.expanduser(path))
     if not os.path.isdir(path):
         die(f"not a directory: {path}")
-    slug = next((s for s, v in projects().items() if v["path"] == path), None)
+    slug = next((s for s, v in projects().items() if same_path(v["path"], path)), None)
     if name:
         slug = slugify(name, 32)
         other = projects().get(slug)
-        if other and other["path"] != path:
+        if other and not same_path(other["path"], path):
             die(f"project name {slug!r} is already used for {other['path']}")
     slug = slug or project_slug(path)
 
@@ -522,7 +526,7 @@ def learn(path, include_user_skills=False, quiet=False, name=None, rules=None):
             add("skill", f"skill {name}" + (f" - {desc}" if desc else ""), f, body, base="skill-" + slugify(name, 32))
 
     with library_lock(slug):
-        prev_slug = next((s for s, v in projects().items() if v["path"] == path), slug)
+        prev_slug = next((s for s, v in projects().items() if same_path(v["path"], path)), slug)
         old = {c["id"]: c for c in load_cards(slug) or load_cards(prev_slug)}
         cards = []
         source_changed = []
@@ -545,7 +549,7 @@ def learn(path, include_user_skills=False, quiet=False, name=None, rules=None):
 
     projs = projects()
     kept = dict(projs.get(slug) or {})
-    for other in [s for s, v in projs.items() if v["path"] == path and s != slug]:
+    for other in [s for s, v in projs.items() if same_path(v["path"], path) and s != slug]:
         kept = {**projs.pop(other), **kept}  # renamed with --name: keep its settings
     rules = "off" if rules is False else kept.get("rules")
     projs[slug] = {**kept, "path": path, "learned": now_iso(), "rules": rules}
@@ -1045,7 +1049,7 @@ def code_tools_note(project):
     """For a JS/TS project: the cheap code tools a worker should use instead of reading files ('' otherwise)."""
     if not os.path.exists(os.path.join(project, "package.json")):
         return ""
-    slug = next((s for s, v in projects().items() if v.get("path") == project), None)
+    slug = next((s for s, v in projects().items() if same_path(v.get("path"), project)), None)
     if not slug:
         return ""
     la = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
@@ -6287,7 +6291,8 @@ def cmd_doctor(a):
                "keep files other than lean-agent's guide out: lean-agent doctor --fix (refreshes the excludes)")
     report(is_trusted(h), "orchestrator home is trusted", "lean-agent trust")
     report(True, f"strict orchestrator: {'on' if strict_on() else 'off'} (lean-agent config strict on|off)")
-    pslug = next((sl for sl, v in projects().items() if v["path"] == path), None)
+    pslug = next((sl for sl, v in projects().items()
+                  if (path + os.sep).startswith(os.path.realpath(v["path"]) + os.sep)), None)
     if pslug:
         if project_rules_on(pslug):
             report(None, f"project rules: on for {pslug} (workers load CLAUDE.md and .claude/rules natively, and the "
