@@ -210,7 +210,8 @@ class CliTest(unittest.TestCase):
                 pid = json.load(open(f)).get("pid")
             except (OSError, ValueError):
                 continue
-            if isinstance(pid, int) and pid > 1 and service_alive(pid):
+            if isinstance(pid, int) and pid > 1 and pid != os.getpid() and service_alive(pid) \
+                    and os.getpgid(pid) != os.getpgrp():  # never the test process itself or its group
                 pids.append(pid)
         for pid in pids:
             try:
