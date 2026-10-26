@@ -3574,6 +3574,7 @@ def review_main(a):
         meta["after"] = {"run": prev["id"], "head": old_head}
         ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=delta_model,
                                 todo=(getattr(a, "todo", None) if getattr(a, "todo", None) not in (None, "new")
+                                      or ("todo" in vars(a) and a.todo is None)  # `--todo none`: no item, not the earlier one
                                       else prev.get("todo") or getattr(a, "todo", None)),
                                 why=f"re-review after fixes ({effort} effort, fresh context)", cards=None,
                                 card_list=cards, project=slug, read_only=True, chrome=None, mcp=None, tools=None,
@@ -7976,7 +7977,7 @@ def store_advice(entry):
         os.remove(f)
 
 
-def advise_state(slug, path, thread):
+def advise_state(slug, path, thread, thread_arg=None):
     """The runs and the latest review of the project, as text for the advisor (no need to make it fetch them)."""
     todo = int(thread) if thread.isdigit() else None
     lines = ["Last runs of this project:"]
@@ -7984,6 +7985,10 @@ def advise_state(slug, path, thread):
         lines.append(f"- {r.get('id')} {r.get('status')} {r.get('model')}"
                      + (f" todo #{r['todo']}" if r.get("todo") else "") + f": {str(r.get('task', ''))[:100]!r}")
     rv = latest_review(slug, path, None)
+    tag = lean_threads.resolve_tag(thread_arg)
+    mine = next((r for r in reversed(list(read_jsonl(reviews_path(slug)))) if tag and r.get("thread") == tag), None)
+    if mine and (mine.get("ref") or mine.get("branch")):  # the thread works on a branch: that branch's review
+        rv = latest_review(slug, path, mine.get("ref") or mine.get("branch")) or rv
     if rv:
         sev = {}
         for f in rv.get("findings") or []:
@@ -8008,7 +8013,7 @@ def cmd_advise(a):
     thread = thread_key(a.thread) or "main"
     lean = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
     task = (f"The user's new request (project {slug}" + (f", thread {a.thread}" if a.thread else "") + "):\n" + what
-            + "\n\nProjects: " + ", ".join(sorted(projs)) + "\n" + advise_state(slug, path, thread))
+            + "\n\nProjects: " + ", ".join(sorted(projs)) + "\n" + advise_state(slug, path, thread, a.thread))
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model="haiku",
                             why="advise on a new request", cards="auto", card_list=None, project=slug,
                             read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=15,
@@ -8480,7 +8485,8 @@ def build_parser():
     s.add_argument("--max-usd", type=float, default=env_num("LEAN_AGENT_REVIEW_MAX_USD", 6.0, float))
     s.add_argument("--max-turns", type=int, default=env_num("LEAN_AGENT_REVIEW_MAX_TURNS", 80))
     s.add_argument("--max-context", type=int, default=4000, help="token cap for the review's cards")
-    s.add_argument("--todo", type=todo_arg, metavar="N", help="the work-queue item this is for")
+    s.add_argument("--todo", type=todo_arg, metavar="N", default=argparse.SUPPRESS,
+                   help="the work-queue item this is for (none: no item, also on a re-review)")
     s.add_argument("--thread", dest="thread_tag", metavar="tN|none", help=THREAD_HELP)
     s.set_defaults(fn=cmd_review)
 

@@ -3735,6 +3735,51 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "inline", LEAN_AGENT_NO_DETACH="1"
                                   ).returncode, 0)
 
+    def test_a_missing_claude_binary_leaves_no_todo_new_item(self):
+        self.cli("learn", self.proj)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--todo", "new", "t", check=False,
+                     LEAN_AGENT_CLAUDE="no-such-claude-binary")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(self.todo_count("#1"), 0)
+
+    def test_new_todo_saves_todo_json_once(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": self.env["LEAN_AGENT_HOME"]}), \
+                mock.patch.object(L, "save_json", wraps=L.save_json) as sv, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(L.new_todo("proj", "Export: cap the retry loop"), 1)
+        self.assertEqual(sv.call_count, 1)
+
+    def test_todo_none_is_honoured_on_a_re_review(self):
+        g = self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        bad = json.dumps(dict(REUSE_CHECKED, verdict="changes-requested", checks=[], findings=[
+            {"severity": "major", "file": "api/totals.py", "line": 3, "issue": "rounding drops cents"}]))
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        self.cli("review", "proj", "--head", "feature", "--base", "main", "--todo", "new", check=False, FAKE_REVIEW=bad)
+        g("checkout", "-q", "feature")
+        with open(os.path.join(self.proj, "api", "totals.py"), "a") as fh:
+            fh.write("# fix\n")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "fix")
+        g("checkout", "-q", "main")
+        self.cli("review", "proj", "--head", "feature", "--base", "main", "--todo", "none", check=False, FAKE_REVIEW=approve)
+        self.assertEqual([r.get("todo") for r in self.ledger() if r.get("role") == "reviewer"], [1, None])
+
+    def test_advise_uses_the_latest_review_of_the_threads_branch(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        rdir = os.path.join(self.env["LEAN_AGENT_HOME"], "reviews")
+        os.makedirs(rdir)
+
+        def rec(ref, thread, verdict):
+            return json.dumps({"ts": "2999-01-01T00:00:00", "run": "r", "thread": thread, "verdict": verdict, "head": ref,
+                               "ref": ref, "findings": [], "checks": []})
+        with open(os.path.join(rdir, "proj.jsonl"), "w") as fh:
+            fh.write(rec("mine", "#7", "approve") + "\n" + rec("other", "#8", "changes-requested") + "\n")
+        self.cli("advise", "x", "--thread", "#7", FAKE_ANSWER="ADVICE\nline")
+        self.assertIn("Latest review: approve of mine", self.calls()[-1]["task"])
+        self.cli("advise", "x", "--thread", "#9", FAKE_ANSWER="ADVICE\nline")
+        self.assertIn("Latest review: changes-requested of other", self.calls()[-1]["task"])
+
     def test_in_process_run_does_not_fork(self):
         sys.path.insert(0, os.path.dirname(CLI))
         import lean_agent as L
@@ -3894,6 +3939,68 @@ class CliTest(unittest.TestCase):
             child.wait()
             shared.wait()
         self.assertFalse(lean_common.pid_alive(0))
+
+    def test_signal_group_is_false_when_getpgid_finds_no_process(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_common
+        with mock.patch.object(os, "getpgid", side_effect=ProcessLookupError), mock.patch.object(os, "killpg") as kp:
+            self.assertFalse(lean_common.signal_group(os.getpid() + 12345, signal.SIGTERM))
+            self.assertFalse(lean_common.signal_group(os.getpid() + 12345, signal.SIGTERM, wait=0.2))
+        kp.assert_not_called()
+
+    def test_signal_group_waits_for_a_fresh_child_to_become_its_group_leader(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_common
+        child = subprocess.Popen([sys.executable, "-c", "import os, time; time.sleep(0.5); os.setsid(); time.sleep(30)"])
+        try:
+            self.assertFalse(lean_common.signal_group(child.pid, signal.SIGTERM))  # not its own group yet
+            self.assertTrue(lean_common.signal_group(child.pid, signal.SIGTERM, wait=5))
+            self.assertEqual(child.wait(timeout=10), -signal.SIGTERM)
+        finally:
+            child.kill()
+            child.wait()
+
+    def test_host_stop_terminates_directly_when_signal_group_refuses(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import service_session
+        host = object.__new__(service_session.Host)
+        host.stopping = threading.Event()
+        host.proc = mock.Mock(pid=4242)
+        host.proc.poll.return_value = None
+        with mock.patch.object(service_session.lean_common, "signal_group", return_value=False) as sg, \
+                mock.patch.object(threading, "Timer") as timer:
+            host.stop()
+        sg.assert_called_once_with(4242, signal.SIGTERM)
+        host.proc.terminate.assert_called_once_with()
+        self.assertTrue(host.stopping.is_set())
+        timer.return_value.start.assert_called_once_with()
+
+    def test_a_tee_that_fails_to_close_still_ends_the_supervisor_with_os_exit(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+
+        class Exited(BaseException):
+            pass
+
+        class BadTee(L.Tee):
+            def __init__(self):
+                pass
+
+            def close(self):
+                raise OSError("disk full")
+
+            def flush(self):
+                pass
+        old = sys.stdout
+        sys.stdout = BadTee()
+        try:
+            with mock.patch.object(L, "SUPERVISOR", [True]), mock.patch.object(L, "_cmd_run", return_value=0), \
+                    mock.patch.object(os, "_exit", side_effect=Exited) as ex:
+                with self.assertRaises(Exited):
+                    L.cmd_run(types.SimpleNamespace())
+        finally:
+            sys.stdout = old
+        ex.assert_called_once_with(0)
 
     def test_runs_show_marks_the_run_collected(self):
         home = self.env["LEAN_AGENT_HOME"]
