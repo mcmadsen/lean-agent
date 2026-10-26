@@ -765,6 +765,7 @@ class BudgetTest(Base):
         again = ctx("what about t2 now?")  # explicit wins over words; its session is not running: send starts it
         self.assertTrue(again.startswith('Belongs to t2 "Fix export retry loop in billing service" \u2014 hand it over'), again)
         self.assertTrue(again.endswith("lean-agent thread send t2 --prompt-file -"), again)
+        self.assertTrue(ctx("why does the task-id column stay empty in the quarterly report?").startswith("Belongs to t1"))  # not a notification
         self.assertTrue(ctx("#7 is failing").startswith('Belongs to #7'))  # an explicit #N names its own thread
         self.assertTrue(ctx("yes please").startswith('Belongs to #7'))  # no content words: the last topic
         self.assertEqual(ctx("what's the status?"), "Status question \u2014 answer it here: lean-agent now")
@@ -776,7 +777,7 @@ class BudgetTest(Base):
             import lean_threads
             reg = lean_threads.load()["threads"]
             self.assertEqual(sorted(reg), ["#7", "t1", "t2"])  # a new topic creates no thread (`thread new` does); naming #7 does
-            self.assertEqual(len(reg["t1"]["requests"]), 1)
+            self.assertEqual(len(reg["t1"]["requests"]), 2)  # the chart request and the task-id question
             self.assertEqual(lean_threads.current("s1"), "#7")
             self.assertEqual(lean_threads.resolve_tag(), "#7")
             self.assertEqual(lean_threads.resolve_tag("none"), None)

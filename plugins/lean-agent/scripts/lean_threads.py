@@ -506,7 +506,7 @@ def route(prompt, session=None, now=None, create=True):
 
 # ------------------------------------------------------------------ notifications and runs
 
-NOTIFICATION_RE = re.compile(r"<task-notification|\btask-id\b|Background command .{0,2000}?\b(?:completed|failed|was stopped)\b", re.S)
+NOTIFICATION_RE = re.compile(r"\s*(?:<task-notification|Background command .{0,2000}?\b(?:completed|failed|was stopped)\b)", re.S)
 SYSTEM_PROMPT_RE = re.compile(r"\s*<(?:system-reminder|task-notification|command-|local-command|hook)", re.I)
 RUN_ID_RE = re.compile(r"\b\d{4}-\d{6}-[0-9a-f]{4}\b")
 OUTPUT_FILE_RE = re.compile(r"<output-file>\s*([^<\s][^<]*?)\s*</output-file>|output[- ]file[:=]\s*(\S+)", re.I)
@@ -516,7 +516,7 @@ OUTPUT_READ = 200_000
 def is_notification(prompt):
     """A prompt Claude Code (or a hook) wrote, not the user: a background-task notification or a system-tagged message."""
     text = str(prompt or "")
-    return bool(NOTIFICATION_RE.search(text) or SYSTEM_PROMPT_RE.match(text))
+    return bool(NOTIFICATION_RE.match(text) or SYSTEM_PROMPT_RE.match(text))
 
 
 def thread_of_run(rec, data=None):
