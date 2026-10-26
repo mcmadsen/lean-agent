@@ -7948,17 +7948,18 @@ def thread_session_tid(raw):
 
 
 def start_thread_session(tid, t, prompt=None):
-    """Ask `up` to host the thread's session (resuming it when its transcript exists). Returns the Remote Control name."""
+    """Ask `up` to host the thread's session (resuming it when its transcript exists). Returns the Remote Control name;
+    raises RuntimeError when it did not start."""
     if not t.get("session_id"):
         lean_threads.set_session(tid, session_id=str(uuid.uuid4()))
-    lean_threads.set_session(tid, session_on=True)
     msg = None
     if prompt:
         import compact_hook
         msg = compact_hook.thread_brief(tid, THREAD_BRIEF_CAP) + "\n" + lean_threads.BRIEF_END + "\n\n" + prompt
     r = service_session.sessions_request("start", thread=tid, prompt=msg)
     if not r.get("ok"):
-        die(f"could not start the session of {tid}: {r.get('error') or 'not started'}")
+        raise RuntimeError(f"could not start the session of {tid}: {r.get('error') or 'not started'}")
+    lean_threads.set_session(tid, session_on=True)  # only a started session is one the service keeps
     return r.get("name") or service_session.thread_session_name(tid, t.get("title"))
 
 
@@ -7989,7 +7990,11 @@ def cmd_thread(a):
                 "`lean-agent config max-thread-sessions N`")
         tid = lean_threads.new(a.args[0])
         t = lean_threads.load()["threads"][tid]
-        name = start_thread_session(tid, t, prompt)
+        try:
+            name = start_thread_session(tid, t, prompt)
+        except RuntimeError as exc:
+            lean_threads.discard(tid)  # a thread nobody can talk to is not left behind
+            die(f"{exc} (thread {tid} was removed)")
         print(f'thread {tid} started: Remote Control "{name}"')
         return 0
     if act in ("send", "open"):
@@ -8016,7 +8021,10 @@ def cmd_thread(a):
                     die(f"{tid}: {err}")
             print(f"{tid} is running" + (": message sent" if prompt else ""))
             return 0
-        name = start_thread_session(tid, t, prompt)
+        try:
+            name = start_thread_session(tid, t, prompt)
+        except RuntimeError as exc:
+            die(str(exc))
         print(f'thread {tid} ' + ("started" if t.get("session_id") is None else "resumed") + f': Remote Control "{name}"'
               + (": message sent" if prompt else ""))
         return 0
