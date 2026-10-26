@@ -5669,7 +5669,7 @@ ORCHESTRATOR_ENV = {
 }
 
 
-COMPACT_WINDOW_MIN = 100000  # the smallest CLAUDE_CODE_AUTO_COMPACT_WINDOW Claude Code accepts
+COMPACT_WINDOW_MIN = lean_common.COMPACT_WINDOW_MIN
 
 
 def orchestrator_env():
@@ -5684,9 +5684,9 @@ def orchestrator_env():
     return env
 
 
-def compaction_text():
+def compaction_text(problems=None):
     """`compaction: ...` for doctor and service status."""
-    window, pct = compact_overrides()
+    window, pct = compact_overrides(problems=problems)
     return "compaction: " + compaction_label(window, pct, lean_common.configured_model())
 
 
@@ -6300,7 +6300,11 @@ def cmd_doctor(a):
                    f"lean-agent config project-rules off --project {pslug}")
         else:
             report(True, f"project rules: off for {pslug}, rule cards instead (lean-agent config project-rules on)")
-    report(True, compaction_text() + " (lean-agent config compact-window N|default, compact-pct P|default)")
+    bad = []
+    text = compaction_text(bad)
+    for msg in bad:
+        report(None, "compaction setting ignored: " + msg, "lean-agent config compact-window N|default, compact-pct P|default")
+    report(True, text + " (lean-agent config compact-window N|default, compact-pct P|default)")
     report(True, f"auto clear: {clear_at_text()} (lean-agent config clear-at off|auto|N)")
 
     slug = default_project(path)
@@ -8865,10 +8869,10 @@ def build_parser():
     s.set_defaults(fn=cmd_advise)
 
     s = sub.add_parser("config", help="switches: strict on|off (the orchestrator only runs lean-agent commands; default on), "
-                       "max-thread-sessions N (thread sessions the service runs; default 8), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), compact-window N|default and compact-pct P|default (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
+                       "max-thread-sessions N (thread sessions the service runs; default 8), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
     s.add_argument("name", choices=["strict", "clear-at", "project-rules", "compact-window", "compact-pct", "max-thread-sessions"])
     s.add_argument("--project", "-p", help="project-rules: the project (default: the current directory)")
-    s.add_argument("value", nargs="?", help="on|off, or off|auto|a number for clear-at, a number|default for compact-window and compact-pct")
+    s.add_argument("value", nargs="?", help="on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
     s.set_defaults(fn=cmd_config)
 
     s = sub.add_parser("attribution", help="should commits and PRs credit Claude? ask the user once, then set on|off")
