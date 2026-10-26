@@ -570,6 +570,7 @@ class BudgetTest(Base):
         denied = lambda out: out and out["hookSpecificOutput"]["permissionDecision"] == "deny"
         changing = ("lean-agent worktree push proj feat --allow-send 'push feat'", "lean-agent worktree reset proj feat",
                     "lean-agent worktree setup proj feat --run 'npm ci'", "lean-agent worktree rm proj feat",
+                    "lean-agent worktree base proj develop",
                     "lean-agent worktree --force rm proj feat", "lean-agent rules proj", "lean-agent rules proj --off",
                     "lean-agent codemod proj 'npx jscodeshift src' --apply", "cd /srv && lean-agent worktree push p b",
                     "lean-agent runs && FOO=1 lean-agent worktree push p b", "timeout 60 lean-agent worktree push p b",
@@ -584,7 +585,7 @@ class BudgetTest(Base):
                        "lean-agent now", "lean-agent thread show t1 --all", "lean-agent thread close t1", "lean-agent thread reopen t1",
                        "lean-agent thread move t2", "lean-agent checkpoint 'x' --thread t1", "lean-agent review proj --head b --thread none",
                        "lean-agent handoff --note 'x' --kind fyi --thread t1",
-                       "lean-agent checkpoint 'x'", "lean-agent brief", "lean-agent runs --last", "lean-agent review proj --head b",
+                       "lean-agent checkpoint 'x'", "lean-agent brief", "lean-agent runs --last", "lean-agent runs --stop last", "lean-agent review proj --head b",
                        "lean-agent handover 'T' --task-file - <<'EOF'\ntext\nEOF", "lean-agent handover --list", "lean-agent sync", "lean-agent doctor",
                        "lean-agent config strict on", "lean-agent card proj show x", "lean-agent optimize proj",
                        "lean-agent codemod proj 'npx jscodeshift src'", "lean-agent worktrees", "lean-agent guard list",

@@ -39,7 +39,7 @@ import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
 import service_session  # noqa: E402
-from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive, signal_group, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
+from lean_common import DEFAULT_COMPACT_PCT, DEFAULT_COMPACT_WINDOW, compaction_point, pid_alive, signal_group, lost_runs, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -1617,6 +1617,7 @@ def _cmd_run(a):
     running_key = launch_key or run_id  # every run is listed while it runs (the status line)
     save_json(home("running", running_key + ".json"), {"pid": os.getpid(), "started": now_iso(), "run": run_id,
                                                       "task": task[:2000], "model": model, "project": slug,
+                                                      "path": project, "start_head": git(project, "rev-parse", "HEAD"),
                                                       "workdir": workdir, "todo": todo_id, "thread": thread_tag, "effort": effort, "detached": bool(SUPERVISOR),
                                                       "branch": (wt or {}).get("branch") if isinstance(wt, dict) else None,
                                                       "role": getattr(a, "role", None)
@@ -5925,6 +5926,69 @@ def wait_for_runs(target, timeout):
     return 1 if bad else 0
 
 
+def stop_run(target):
+    """`runs --stop <id|last>`: ends a running run (its own supervisor group only), records it as `stopped`, shows what
+    it changed in its worktree and how to go on or start over."""
+    live = [(rid, m) for rid, m in live_runs()] + lost_runs(home())
+    if target == "last":
+        mine = [x for x in live if not x[1].get("role")] or live
+        if not mine:
+            die("no run in progress to stop (lean-agent runs --running)")
+        target = mine[-1][0]
+    hit = next((x for x in live if x[0] == target), None)
+    done = next((r for r in ledger() if r["id"] == target), None)
+    if not hit:
+        die(f"run {target} already ended: {done['status']}" if done else f"no running run {target!r} (lean-agent runs --running)")
+    rid, m = hit
+    pid = m.get("pid")
+    if pid_alive(pid):
+        signal_group(pid, signal.SIGTERM, wait=2)
+        deadline = time.time() + env_num("LEAN_AGENT_STOP_WAIT", 5, float)
+        while pid_alive(pid) and time.time() < deadline:
+            time.sleep(0.05)
+        if pid_alive(pid):
+            signal_group(pid, signal.SIGKILL, wait=2)
+            for _ in range(100):
+                if not pid_alive(pid):
+                    break
+                time.sleep(0.05)
+    if not any(r["id"] == rid for r in ledger()):  # the supervisor was killed before it could record anything
+        append_jsonl(home("ledger.jsonl"), {
+            "id": rid, "ts": now_iso(), "project": m.get("project"), "project_path": m.get("path"),
+            "workdir": m.get("workdir") or home("work", rid), "model": m.get("model") or "?", "why": "stopped",
+            "status": "stopped", "turns": None, "seconds": None, "usage": {}, "units": 0, "cost_usd": None,
+            "session_id": m.get("session_id"), "resumed": False, "task": (m.get("task") or "")[:300],
+            "todo": m.get("todo"), "thread": m.get("thread"), "role": m.get("role"), "effort": m.get("effort"),
+            "launch_key": None, "start_head": m.get("start_head")})
+    for f in glob.glob(home("running", "*.json")):
+        if load_json(f, {}).get("run") == rid:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+    mark_collected(rid)
+    print(f"run {rid} stopped" + (f" (was running since {m['started'][11:19]})" if m.get("started") else ""))
+    path, start = m.get("path"), m.get("start_head")
+    if path and os.path.isdir(path):
+        changed = git(path, "status", "--porcelain") or ""
+        print(f"changes in {path}:" if changed else f"no uncommitted changes in {path}")
+        if changed:
+            print(changed)
+        if start:
+            commits = git(path, "log", "--oneline", f"{start}..HEAD") or ""
+            if commits:
+                print("commits since the run started:\n" + commits)
+            stat = git(path, "diff", "--stat", start)
+            if stat:
+                print(f"changed since {start[:10]} (the run's start):\n{stat}")
+        print(f"resume it: lean-agent run --resume {rid} \"<what to do next>\"" if m.get("session_id") else
+              "no session was recorded: start a new run")
+        print(f"or start over: git -C {path} reset --hard {start[:12] if start else '<commit>'} && git -C {path} clean -fd")
+    else:
+        print(f"resume it: lean-agent run --resume {rid} \"<what to do next>\"")
+    return 0
+
+
 def cmd_runs(a):
     if getattr(a, "wait", None):
         return wait_for_runs(a.wait, a.timeout)
@@ -5932,12 +5996,18 @@ def cmd_runs(a):
     if a.project:
         slug, _ = resolve_project(a.project)
         runs = [r for r in runs if r["project"] == slug]
+    if getattr(a, "stop", None):
+        return stop_run(a.stop)
     if a.running:
         found = False
         for _, m in live_runs():
             found = True
             print(f"{m.get('run', '?')}  running since {m.get('started', '?')[11:19]}  {m.get('model', '?'):<7} "
                   f"{m.get('project', '?'):<16} {m.get('task', '')[:70]}")
+        for rid, m in lost_runs(home()):
+            found = True
+            print(f"{rid}  lost  (supervisor died; close it: lean-agent runs --stop {rid})  {m.get('model', '?'):<7} "
+                  f"{m.get('project', '?'):<16} {m.get('task', '')[:50]}")
         if not found:
             print("No runs in progress.")
         return
@@ -5973,6 +6043,9 @@ def cmd_runs(a):
         return
     for r in runs[-a.n:]:
         print(f"{r['id']}  {r['status']:<22} {r['model']:<7} {r['project']:<16} {r['task'][:70]}")
+    for rid, m in lost_runs(home()):
+        if not a.project or m.get("project") == a.project:
+            print(f"{rid}  {'lost':<22} {m.get('model', '?'):<7} {m.get('project', '?'):<16} {m.get('task', '')[:70]}")
 
 
 def instruction_files(path):
@@ -8641,6 +8714,8 @@ def build_parser():
     s.add_argument("--project", "-p")
     s.add_argument("--last", action="store_true", help="print only the id of the latest run")
     s.add_argument("--running", action="store_true", help="runs in progress right now")
+    s.add_argument("--stop", metavar="RUN_ID|last", help="stop a run in progress (only lean-agent's own run), mark it "
+                   "stopped and list what it changed in its worktree")
     s.add_argument("--wait", metavar="RUN_ID|all|last", help="block until those runs are recorded, then print each result "
                    "as `run` printed it (exit 1 if one failed, 124 on --timeout)")
     s.add_argument("--timeout", type=float, default=0, metavar="SECONDS", help="with --wait: give up after this long")

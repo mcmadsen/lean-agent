@@ -4043,6 +4043,43 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.wait_for(lambda: not service_alive(m["pid"]), "the run to stop", 40)
 
+    def test_runs_stop_ends_the_run_marks_it_stopped_and_lists_its_changes(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        p = self.start_run(turns="3", sleep="30")
+        [m] = self.running_markers()
+        self.assertTrue(m["start_head"])
+        self.assertTrue(os.path.isdir(m["path"]))
+        with open(os.path.join(m["path"], "api", "totals.py"), "a") as fh:
+            fh.write("# half done\n")
+        out = self.cli("runs", "--stop", "last", LEAN_AGENT_STOP_WAIT="3").stdout
+        p.communicate(timeout=30)
+        self.assertIn(f"run {m['run']} stopped", out)
+        self.assertIn("api/totals.py", out)
+        self.assertIn(f"lean-agent run --resume {m['run']}", out)
+        self.assertIn("reset --hard " + m["start_head"][:12], out)
+        self.assertEqual(self.running_markers(), [])  # never left as running
+        row = next(r for r in self.ledger() if r["id"] == m["run"])
+        self.assertEqual(row["status"], "stopped")
+        self.assertIn("No runs in progress.", self.cli("runs", "--running").stdout)
+        self.assertIn("already ended: stopped", self.cli("runs", "--stop", m["run"], check=False).stderr)
+
+    def test_a_run_whose_supervisor_died_is_lost_and_stop_closes_it(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(os.path.join(home, "running"), exist_ok=True)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        with open(os.path.join(home, "running", "k1.json"), "w") as fh:
+            json.dump({"pid": dead.pid, "run": "0101-000000-aaaa", "started": "2026-01-01T00:00:00", "task": "t",
+                       "model": "haiku", "project": "proj", "workdir": os.path.join(home, "work", "0101-000000-aaaa")}, fh)
+        self.assertRegex(self.cli("runs").stdout, r"0101-000000-aaaa\s+lost")
+        self.assertIn("lost", self.cli("runs", "--running").stdout)
+        out = self.cli("runs", "--stop", "0101-000000-aaaa").stdout
+        self.assertIn("stopped", out)
+        self.assertNotRegex(self.cli("runs").stdout, r"aaaa\s+lost")
+        self.assertRegex(self.cli("runs").stdout, r"aaaa\s+stopped")
+
     def test_runs_wait_prints_each_result_and_the_exit_code(self):
         p = self.start_run(turns="3", sleep="0.7")
         [m] = self.running_markers()

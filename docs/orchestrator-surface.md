@@ -55,6 +55,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `cards`, `card show`, `suggest`, `projects` | a | allowed |
 | `card add\|rm\|core\|shorten\|unarchive\|protect` | c | **denied** |
 | `recipes` | a | allowed |
+| `worktree base` | c | **denied** (it changes the project's base branch; `run --worktree-base` is per run) |
 | `recipe add\|rm` | c | **denied** (stored runs are presets) |
 | `mcp list\|tools\|preset\|env\|ignore` (all of `mcp`), `chrome check` | c | **denied**: the orchestrator neither lists nor runs MCP servers or presets; a read-only worker with `--allow-cmd 'lean-agent mcp'` does |
 | `chrome status` | a | allowed |
@@ -76,7 +77,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `handover` (also `--list`) | b | allowed: a worker writes a Markdown file; it only writes under LEAN_AGENT_HOME |
 | `config strict on`, `attribution`, `limits`, `budget`, `context` | b | allowed: switches and limits |
 | `config strict off` | c | **denied**: the orchestrator doesn't lift its own guardrail |
-| `runs` (also `runs --wait <id\|all\|last>`, which blocks until those runs are recorded and prints their results), `logs`, `output`, `stats`, `savings`, `week`, `guide`, `doctor` | a | allowed |
+| `runs` (also `runs --wait <id\|all\|last>`, which blocks until those runs are recorded and prints their results; `runs --stop <id\|last>`, which ends one of lean-agent's own runs, records it as `stopped` and lists what it changed in its worktree; a run whose supervisor died shows as `lost`), `logs`, `output`, `stats`, `savings`, `week`, `guide`, `doctor` | a | allowed |
 | `up`, `install`, `trust`, `home`, `env`, `sync`, `service` | b | allowed: lean-agent's own setup and updates |
 
 A lean-agent command with the same name as a denied one but another first word, a quoted text that merely contains the
