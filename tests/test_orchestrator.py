@@ -542,7 +542,8 @@ class CliTest(unittest.TestCase):
         block = "ADVICE\n" + "\n".join(f"line {i}" for i in range(1, 21))  # 21 lines: the command keeps 15
         out = self.cli("advise", "Fix the export retry loop", "--thread", "#7", FAKE_ANSWER="Here.\n" + block).stdout
         lines = out.strip().splitlines()
-        self.assertEqual((len(lines), lines[0], lines[-1]), (15, "ADVICE", "line 14"))
+        self.assertEqual((len(lines), lines[0], lines[-1]), (15, "Understood as: (not stated)", "line 13"))
+        self.assertEqual(lines[1], "ADVICE")
         call = self.calls()[-1]
         argv = call["argv"]
         self.assertIn("Fix the export retry loop", call["task"])
@@ -551,8 +552,9 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("Write", argv[argv.index("--tools") + 1].split(","))
         allowed = argv[argv.index("--allowedTools") + 1]
         lean = os.path.realpath(os.path.join(os.path.dirname(CLI), "..", "bin", "lean-agent"))
-        for sub in ("memory list", "cards", "todo list", "brief"):
+        for sub in ("memory list", "todo list", "brief"):
             self.assertIn(f"Bash({lean} {sub}:*)", allowed)
+        self.assertNotIn(f"Bash({lean} cards:*)", allowed)  # the card titles are in the task
         self.assertNotIn("handoff", allowed)
         files = sorted(glob.glob(os.path.join(adv, "*.json")))
         self.assertEqual(len(files), 1)
@@ -561,7 +563,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual((kept["thread"], kept["text"]), ("7", out.strip()))
         self.assertTrue(kept["project"].startswith("proj"))
         self.assertEqual(self.cli("advise", "--task-file", "-", input="again", FAKE_ANSWER="ADVICE\nsuggested: answer from state").stdout.strip(),
-                         "ADVICE\nsuggested: answer from state")
+                         "Understood as: (not stated)\nADVICE\nsuggested: answer from state")
         with open(sorted(glob.glob(os.path.join(adv, "*.json")))[-1]) as fh:
             self.assertEqual(json.load(fh)["thread"], "main")
         p = self.cli("advise", "x", check=False, FAKE_ANSWER="No idea.")
@@ -571,6 +573,32 @@ class CliTest(unittest.TestCase):
         for i in range(55):  # the last 50 are kept
             self.cli("advise", f"r{i}", FAKE_ANSWER="ADVICE\nknown: none")
         self.assertEqual(len(glob.glob(os.path.join(adv, "*.json"))), 50)
+
+    def test_advise_gets_the_recent_requests_and_card_titles_and_echoes_how_it_understood(self):
+        self.cli("learn", self.proj)
+        self.cli("card", "add", "proj", "export-notes", "--title", "Export retry notes", "--text", "Short note.")
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"), "w") as fh:
+            json.dump({"threads": {"t9": {"title": "export", "requests": [
+                {"id": f"r{i}", "ts": "2026-01-01T00:00:00", "text": f"request number {i} " + "x" * 400} for i in range(8)]}},
+                "aliases": {}, "overrides": {}}, fh)
+        out = self.cli("advise", "create the work item and the PR", "--thread", "t9",
+                       FAKE_ANSWER="ADVICE\nunderstood: open a work item and a PR\nambiguous: for the export | for the import\n"
+                                   "ask the user first: no\nsuggested: answer from state").stdout
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "Understood as: open a work item and a PR")
+        self.assertEqual(lines[1], "Ambiguous: for the export | for the import")
+        self.assertIn("ask the user first: yes: which reading?", out)  # an ambiguous request is never "no"
+        self.assertNotIn("ask the user first: no", out)
+        task = self.calls()[-1]["task"]
+        self.assertIn("export-notes: Export retry notes", task)
+        self.assertIn("request number 7", task)
+        self.assertIn("request number 3", task)
+        self.assertNotIn("request number 2", task)  # the last five only
+        self.assertNotIn("x" * 250, task)           # trimmed
+        append = self.calls()[-1]["append"]
+        self.assertIn("user already asked: proceed", append)
+        self.assertIn("never run", append)
+        self.assertNotIn("cards|", append)
 
     def test_run_todo_new_makes_the_queue_item_from_why(self):
         self.cli("learn", self.proj)
