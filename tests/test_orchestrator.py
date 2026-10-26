@@ -200,7 +200,37 @@ class CliTest(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     up.kill()
             up.communicate()
+        self.stop_detached_runs()  # a run that outlives its test keeps writing into the folder removed next
         self.tmp.cleanup()
+
+    def stop_detached_runs(self):
+        pids = []
+        for f in glob.glob(os.path.join(self.env["LEAN_AGENT_HOME"], "running", "*.json")):
+            try:
+                pid = json.load(open(f)).get("pid")
+            except (OSError, ValueError):
+                continue
+            if isinstance(pid, int) and pid > 1 and service_alive(pid):
+                pids.append(pid)
+        for pid in pids:
+            try:
+                if os.getpgid(pid) == pid:
+                    os.killpg(pid, signal.SIGKILL)  # the run's own group: its supervisor and the claude under it
+                else:
+                    os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        end = time.time() + 10
+        while time.time() < end and any(self.running_process(pid) for pid in pids):
+            time.sleep(0.05)
+
+    @staticmethod
+    def running_process(pid):
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                return fh.read().rsplit(")", 1)[1].split()[0] != "Z"  # a zombie nobody reaped is gone
+        except (OSError, IndexError):
+            return False
 
     def cli(self, *args, check=True, input=None, **env):
         p = subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True, input=input,
