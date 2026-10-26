@@ -6248,6 +6248,15 @@ class RuleGlobTest(unittest.TestCase):
         self.assertFalse(m("src/*.cs", "src/a/b.cs"))
         self.assertTrue(m("*.{ts,tsx}", "web/x.tsx"))
 
+    def test_an_always_included_claude_md_already_sent_still_suppresses_the_intro(self):
+        def card(i, kind, source, **kw):
+            return dict({"id": i, "kind": kind, "source": source, "tokens": 5}, **kw)
+        cards = [card("intro", "claude-md", "CLAUDE.md"), card("sec", "claude-md", "CLAUDE.md"), card("r", "rule", ".claude/rules/r.md")]
+        got = self.agent.rule_cards_for(cards, "", [], [], 100, {"intro"})
+        self.assertEqual([c["id"] for c in got], ["r"])
+        got = self.agent.rule_cards_for(cards, "", [], [], 100, set())
+        self.assertEqual([c["id"] for c in got], ["intro", "r"])
+
 
 if __name__ == "__main__":
     import gha_runner

@@ -436,12 +436,14 @@ def rule_cards_for(cards, task, files, changed, budget, have):
     seen = list(files) + task_paths(task) + list(changed)
     chosen, intro = [], True
     for c in cards:
-        if c.get("archived") or c["id"] in have or not is_rule_card(c):
+        if not is_rule_card(c):
             continue
         if c["kind"] == "claude-md":  # only the root file's opening section is always sent; the rest is picked by relevance
             if not intro:
                 continue
-            intro = False
+            intro = False  # even when it is already in `have` or archived: the later sections must not take its place
+        if c.get("archived") or c["id"] in have:
+            continue
         globs = c.get("globs") or []
         if globs:
             if any(glob_match(g, f) for g in globs for f in seen):
