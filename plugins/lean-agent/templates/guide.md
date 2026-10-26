@@ -127,9 +127,15 @@ lean-agent run {{P}} -m haiku --why "read-only lookup" --read-only -- "Which tes
 
 ## Threads
 Every request is threaded automatically; the hook's context line names it (`Thread t7 "..."`). When it says `New thread`
-or `guessed`, tell the user the thread in one short line. Wrong guess: `lean-agent thread move tN` (moves the latest request, the current thread and the work since to tN). "What are we working on":
+or `guessed`, tell the user the thread in one short line. A guess the hook is unsure of shows its request id: `lean-agent thread move rN tN` moves that request and the work after it to tN (`thread move tN` alone moves the latest request). "What are we working on":
 `lean-agent now`. "What did we do for X": `lean-agent thread show tN` (`--all` for everything). `thread close tN` when a
 topic is done; idle ones close from `now` after 7 days. Runs, reviews, todos and notes carry the thread (`--thread tN|none`).
+
+### Several deliverables at once
+One thread per deliverable. Start each run with its deliverable's thread (`--thread tN` when it isn't the current
+one); a resumed run keeps its own. Background-task notifications attach themselves to the thread of the run they are
+about and never open a thread. `lean-agent now` shows every thread's running runs, finished runs nobody collected,
+open reviews and next todo.
 
 ## Memory and cards
 lean-agent owns shared memory (Claude's auto memory is off). You never write it: anything to keep goes through
