@@ -643,6 +643,22 @@ class CliTest(unittest.TestCase):
         self.cli("review", "proj", "--head", "feature", "--base", "main", "--todo", "2", check=False, FAKE_REVIEW=approve)
         self.assertEqual([r["todo"] for r in self.ledger() if r.get("role") == "reviewer"], [1, 2])
 
+    def test_a_re_review_without_todo_inherits_the_earlier_item(self):
+        g = self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        bad = json.dumps(dict(REUSE_CHECKED, verdict="changes-requested", checks=[], findings=[
+            {"severity": "major", "file": "api/totals.py", "line": 3, "issue": "rounding drops cents"}]))
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        self.cli("review", "proj", "--head", "feature", "--base", "main", "--todo", "new", check=False, FAKE_REVIEW=bad)
+        g("checkout", "-q", "feature")
+        with open(os.path.join(self.proj, "api", "totals.py"), "a") as fh:
+            fh.write("# fix\n")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "fix")
+        g("checkout", "-q", "main")
+        self.cli("review", "proj", "--head", "feature", "--base", "main", check=False, FAKE_REVIEW=approve)
+        self.assertEqual([r["todo"] for r in self.ledger() if r.get("role") == "reviewer"], [1, 1])
+        self.assertEqual(self.todo_count("re-review after fixes"), 0)
+
     def test_a_refused_launch_leaves_no_todo(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--todo", "new", "--allow-cmd", "x",
@@ -3809,6 +3825,35 @@ class CliTest(unittest.TestCase):
                 L.detach_run(os.path.join(self.tmp.name, "wd"), "r1")
         ex.assert_called_once_with(1)
 
+    def test_a_second_ctrl_c_while_the_supervisor_is_signalled_is_deferred_and_exits_130(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        sent = []
+
+        def fake_signal_group(pid, sig, wait=0):
+            sent.append(sig)
+            os.kill(os.getpid(), signal.SIGINT)  # the second Ctrl-C lands while the first is being passed on
+            time.sleep(0.05)
+            return True
+
+        def fake_waitpid(pid, flags):
+            if not sent:
+                os.kill(os.getpid(), signal.SIGINT)  # the first Ctrl-C, once the relay loop runs
+            return (pid, 0) if len(sent) >= 2 else (0, 0)
+        old = signal.getsignal(signal.SIGINT)
+        with mock.patch.object(L, "CLI_ENTRY", [True]), mock.patch.object(L, "SUPERVISOR", []), \
+                mock.patch.dict(os.environ, {"LEAN_AGENT_NO_DETACH": ""}), \
+                mock.patch.object(os, "fork", return_value=4242), mock.patch.object(os, "waitpid", fake_waitpid), \
+                mock.patch.object(L, "signal_group", fake_signal_group), mock.patch.object(L, "ledger", return_value=[]):
+            rc = None
+            try:
+                rc = L.detach_run(os.path.join(self.tmp.name, "wd"), "r1")
+            except KeyboardInterrupt:
+                self.fail("Ctrl-C escaped detach_run")
+        self.assertEqual(rc, 130)
+        self.assertEqual(sent, [signal.SIGINT, signal.SIGINT])
+        self.assertIs(signal.getsignal(signal.SIGINT), old)
+
     def test_no_detach_run_removes_its_running_marker_when_the_tee_closes(self):
         self.cli("learn", self.proj, "--name", "proj")
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "inline", LEAN_AGENT_NO_DETACH="1")
@@ -3951,9 +3996,20 @@ class CliTest(unittest.TestCase):
     def test_signal_group_waits_for_a_fresh_child_to_become_its_group_leader(self):
         sys.path.insert(0, os.path.dirname(CLI))
         import lean_common
-        child = subprocess.Popen([sys.executable, "-c", "import os, time; time.sleep(0.5); os.setsid(); time.sleep(30)"])
+        ready = os.path.join(self.tmp.name, "child-started")
+        go = os.path.join(self.tmp.name, "child-go")
+        child = subprocess.Popen([sys.executable, "-c", (
+            "import os, sys, time\n"
+            "open(sys.argv[1], 'w').close()\n"  # written before setsid: the child is up but still in our group
+            "while not os.path.exists(sys.argv[2]): time.sleep(0.01)\n"
+            "os.setsid(); time.sleep(30)"), ready, go])
         try:
+            deadline = time.time() + 10
+            while not os.path.exists(ready) and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(os.path.exists(ready))
             self.assertFalse(lean_common.signal_group(child.pid, signal.SIGTERM))  # not its own group yet
+            open(go, "w").close()
             self.assertTrue(lean_common.signal_group(child.pid, signal.SIGTERM, wait=5))
             self.assertEqual(child.wait(timeout=10), -signal.SIGTERM)
         finally:
