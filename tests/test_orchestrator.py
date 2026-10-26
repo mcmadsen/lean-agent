@@ -1285,6 +1285,40 @@ class CliTest(unittest.TestCase):
         self.assertIn("stopped:max_budget_usd", p.stdout)
         self.assertEqual(p.returncode, 1)
 
+    def test_a_failed_run_ends_with_its_reason_and_runs_show_tail_keeps_it(self):
+        self.cli("learn", self.proj)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False, FAKE_SUBTYPE="error_max_turns")
+        last = p.stdout.strip().splitlines()[-1]
+        rid = p.stdout.split("run ")[1].split()[0]
+        self.assertEqual(last, f"run {rid} failed: hit its turn limit (--max-turns)")
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False, FAKE_SUBTYPE="error_max_budget_usd")
+        self.assertIn("failed: hit its budget (--max-usd)", p.stdout.strip().splitlines()[-1])
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False, FAKE_SELF_KILL="1")
+        self.assertRegex(p.stdout.strip().splitlines()[-1], r"^run \S+ failed: .+")
+        ok = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t").stdout
+        self.assertNotIn(" failed: ", ok)
+        tail = self.cli("runs", "--show", rid, "--tail", "3").stdout.splitlines()
+        self.assertEqual(len(tail), 3)
+        self.assertEqual(tail[-1], last)
+        self.assertGreater(len(self.cli("runs", "--show", rid, "--tail").stdout.splitlines()), 3)
+
+    def test_logs_list_the_newest_entries_first_with_a_default_of_ten_and_filter_by_run(self):
+        log_dir = os.path.join(self.env["LEAN_AGENT_HOME"], "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        with open(os.path.join(log_dir, "error.log"), "w") as fh:
+            for i in range(15):
+                fh.write(f"2026-01-01 00:00:{i:02d} ERROR run: r{i % 3} entry {i}\n    detail {i}\n")
+        out = self.cli("logs").stdout
+        entries = [l for l in out.splitlines() if "ERROR run" in l]
+        self.assertEqual(len(entries), 10)
+        self.assertIn("entry 14", entries[0])
+        self.assertIn("entry 5", entries[-1])
+        self.assertIn("(10 of 15 entries, newest first", out)
+        out = self.cli("logs", "--run", "r1", "-n", "2").stdout
+        entries = [l for l in out.splitlines() if "ERROR run" in l]
+        self.assertEqual([e.split("entry ")[1] for e in entries], ["13", "10"])
+        self.assertIn("(2 of 5 entries", out)
+
     def test_trust_write_config(self):
         cfg_dir = os.path.join(self.tmp.name, "cfg")
         with open(os.path.join(cfg_dir, ".claude.json"), "w") as fh:
