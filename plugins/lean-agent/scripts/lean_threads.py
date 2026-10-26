@@ -147,6 +147,14 @@ def new(title):
     return tid
 
 
+def discard(tid):
+    """Remove a thread that was just created and never got a request (a failed `thread new`)."""
+    with _locked() as data:
+        t = data["threads"].get(tid)
+        if t is not None and not t.get("requests"):
+            del data["threads"][tid]
+
+
 def set_session(tid, **fields):
     """Record a thread's own Remote Control session in the registry: session_id (what --resume continues) and session_on
     (the service hosts it). A None value removes the field."""

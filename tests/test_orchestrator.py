@@ -3370,6 +3370,21 @@ class CliTest(unittest.TestCase):
         p2.terminate()
         p2.wait(timeout=30)
 
+    def test_thread_new_rolls_back_when_the_session_does_not_start(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        import lean_threads
+        import service_session
+        args = argparse.Namespace(action="new", args=["export retries"], prompt_file=None, json=False, all=False)
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(service_session, "alive", return_value=True), \
+                mock.patch.object(service_session, "sessions_request", return_value={"ok": False, "error": "boom"}), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(SystemExit):
+                L.cmd_thread(args)
+            self.assertIn("boom", err.getvalue())
+            self.assertEqual(lean_threads.load()["threads"], {})  # no thread left, none marked as hosted
+            self.assertEqual(lean_threads.session_threads(), [])
+
     def test_thread_new_refuses_above_max_thread_sessions(self):
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "1")
