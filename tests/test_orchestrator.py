@@ -5430,8 +5430,8 @@ class CliTest(unittest.TestCase):
         p = self.cli("worktree", "push", "proj", "origin/feature", check=False)
         self.assertIn("credit Claude, but attribution is off", p.stderr)
         subprocess.run(["git", "-C", wt, "push", "-q", "origin", "HEAD:refs/heads/published"], check=True)
-        p = self.cli("worktree", "push", "proj", "origin/feature", check=False)  # now published elsewhere: not ours to block
-        self.assertNotIn("credit Claude", p.stderr)
+        p = self.cli("worktree", "push", "proj", "origin/feature", check=False)  # published elsewhere, but it is what this push sends
+        self.assertIn("credit Claude", p.stderr)
         subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--amend", "-m",
                         "fix"], check=True)
         self.cli("review", "proj", "--head", "feature", "--base", "main", FAKE_REVIEW=approve)
