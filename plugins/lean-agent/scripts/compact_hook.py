@@ -290,6 +290,28 @@ def brief(cap=None):
     return head + rest + (("\n" + BRIEF_MORE) if more else "")
 
 
+def thread_brief(tid, cap=None):
+    """What a cleared thread session starts from: its thread line, its own latest checkpoint and notes, and its own work
+    (`thread show`): nothing of the other threads."""
+    import lean_threads
+    t = lean_threads.load()["threads"].get(tid) or {}
+    lines = [f'Thread {tid} "{t.get("title") or tid}"']
+    mine = [n for n in load_notes() if n.get("thread") == tid]
+    cps = [n for n in mine if n.get("kind") == "checkpoint"]
+    if cps:
+        lines.append(f"Checkpoint of {str(cps[-1].get('ts', ''))[:16].replace('T', ' ')} (your own soft state before the clear; continue from it):")
+        lines.append(str(cps[-1].get("text", "")))
+    notes = [n for n in mine if n.get("kind") != "checkpoint"][-5:]
+    if notes:
+        lines.append("Notes: " + " | ".join(" ".join(str(n.get("text") or "").split())[:200] for n in notes))
+    try:
+        lines.append(lean_threads.show_text(tid, limit=15))
+    except Exception:
+        pass
+    text = "\n".join(lines)
+    return cut_lines(text, cap) + (("\n" + BRIEF_MORE) if cap and len(text) > cap else "") if cap else text
+
+
 def has_recent_work(hours=RECENT_HOURS):
     home = usage.lean_home()
     runs = read_jsonl(os.path.join(home, "ledger.jsonl"), 50)

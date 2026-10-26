@@ -6376,6 +6376,13 @@ def cmd_doctor(a):
     print("  window budgets: " + (", ".join(parts) or "none (lean-agent limits)")
           + ("; plan reset times set" if cfg.get("plan") else "; windows roll (lean-agent limits plan)")
           + ("; calibrated" if cfg.get("caps") else ""))
+    try:
+        for tid, t in lean_threads.load()["threads"].items():
+            if t.get("session_on") or (t.get("session_id") and not t.get("closed")):
+                state, name = lean_threads.session_state(tid, t)
+                print(f"  thread {tid} session: {state}" + (f' (Remote Control "{name}")' if name else ""))
+    except Exception:
+        pass
     print("doctor: " + ("all good" if not bad else f"{len(bad)} problem(s)"))
     return 1 if bad else 0
 

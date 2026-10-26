@@ -720,71 +720,106 @@ class BudgetTest(Base):
         self.set_strict("off")
         self.assertNotIn("lean-agent remember", ctx("# always answer in Danish"))  # still threaded, not redirected
 
-    def test_prompt_hook_notification_never_creates_a_thread(self):
+    def make_threads(self, *titles, session_on=()):
         home = self.env["LEAN_AGENT_HOME"]
-        prompt = lambda text: run_hook("budget_hook.py", {
-            "hook_event_name": "UserPromptSubmit", "cwd": home, "session_id": "s1", "prompt": text}, **self.env)
-        ctx = lambda text: ((prompt(text) or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
-        self.assertTrue(ctx("Publish the quarterly report through the docs worker").startswith("New thread t1"))
-        self.assertTrue(ctx("Fix the export retry loop in the billing service").startswith("New thread t2"))
+        sys.path.insert(0, ROOT)
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
+            import lean_threads
+            ids = [lean_threads.new(t) for t in titles]
+            for tid in session_on:
+                lean_threads.set_session(tid, session_on=True)
+        return ids
+
+    def prompt_ctx(self, text, cwd=None, sid="s1", **env):
+        out = run_hook("budget_hook.py", {"hook_event_name": "UserPromptSubmit", "cwd": cwd or self.env["LEAN_AGENT_HOME"],
+                                          "session_id": sid, "prompt": text}, **dict(self.env, **env))
+        return ((out or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+
+    def test_prompt_hook_notification_attaches_silently_and_never_creates_a_thread(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        ctx = self.prompt_ctx
+        self.make_threads("Publish quarterly report through docs worker", "Fix export retry loop in billing service")
         with open(os.path.join(home, "ledger.jsonl"), "w") as fh:
             fh.write(json.dumps({"id": "0101-100000-aaaa", "ts": "2026-01-01T10:00:00", "thread": "t1", "task": "x"}) + "\n")
         out = os.path.join(home, "bg.output")
         with open(out, "w") as fh:
             fh.write("run 0101-100000-aaaa started\n")
         note = f"<task-notification><task-id>b1</task-id><output-file>{out}</output-file><summary>Background command completed</summary></task-notification>"
-        self.assertTrue(ctx(note).startswith('Thread t1 "Publish'), ctx(note))
-        self.assertNotIn("guess", ctx(note))
+        self.assertEqual(ctx(note), "")
         self.assertEqual(ctx('<task-notification><task-id>b2</task-id><summary>Background command "sleep 1" completed</summary></task-notification>'), "")
         sys.path.insert(0, ROOT)
         with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
             import lean_threads
             reg = lean_threads.load()["threads"]
             self.assertEqual(sorted(reg), ["t1", "t2"])
-            self.assertEqual([len(t["requests"]) for t in reg.values()], [1, 1])  # no request stored
-            self.assertEqual(lean_threads.current("s1"), "t2")
+            self.assertEqual([len(t.get("requests", [])) for t in reg.values()], [0, 0])  # no request stored
 
-    def test_prompt_hook_threads_every_request(self):
+    def test_main_session_hook_tells_the_orchestrator_to_hand_over_or_start(self):
         home = self.env["LEAN_AGENT_HOME"]
-        prompt = lambda text, cwd=home, sid="s1": run_hook("budget_hook.py", {
-            "hook_event_name": "UserPromptSubmit", "cwd": cwd, "session_id": sid, "prompt": text}, **self.env)
-        ctx = lambda text, **kw: ((prompt(text, **kw) or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
-        first = ctx("Publish the quarterly report through the docs worker")
-        self.assertTrue(first.startswith('New thread t1 "Publish quarterly report'), first)
-        second = ctx("Fix the export retry loop in the billing service")
-        self.assertTrue(second.startswith("New thread t2"), second)
-        again = ctx("the quarterly report needs a chart in the docs")
-        self.assertTrue(again.startswith('Thread t1 "Publish'), again)
-        self.assertNotIn("guessed", again)  # a confident match carries no hint
-        self.assertEqual(again, 'Thread t1 "Publish quarterly report through docs worker"')
-        self.assertTrue(ctx("what about t2 now?").startswith('Thread t2 "Fix export'))  # explicit wins over words
-        self.assertTrue(ctx("#7 is failing").startswith('Thread #7'))
-        self.assertTrue(ctx("yes please").startswith("Thread #7"))  # no content words: the last topic
+        ctx = self.prompt_ctx
+        new_topic = 'New topic \u2014 start it: lean-agent thread new "<title>" --prompt-file -'
+        self.assertEqual(ctx("Publish the quarterly report through the docs worker"), new_topic)
+        self.make_threads("Publish quarterly report through docs worker", "Fix export retry loop in billing service", session_on=["t1"])
+        self.assertEqual(ctx("the quarterly report needs a chart in the docs"),
+                         'Belongs to t1 "Publish quarterly report through docs worker" \u2014 hand it over: lean-agent thread send t1 --prompt-file -')
+        again = ctx("what about t2 now?")  # explicit wins over words; its session is not running: send starts it
+        self.assertTrue(again.startswith('Belongs to t2 "Fix export retry loop in billing service" \u2014 hand it over'), again)
+        self.assertTrue(again.endswith("lean-agent thread send t2 --prompt-file -"), again)
+        self.assertEqual(ctx("what's the status?"), "Status question \u2014 answer it here: lean-agent now")
+        self.assertEqual(ctx("Write a long migration plan for the mobile client's offline sync engine"), new_topic)
         self.assertEqual(ctx("/clear"), "")  # a slash command is not a request
-        self.assertEqual(prompt("hello there", self.tmp.name), None)  # a normal session is left alone
+        self.assertEqual(self.prompt_ctx("hello there", cwd=self.tmp.name), "")  # a normal session is left alone
         sys.path.insert(0, ROOT)
         with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
             import lean_threads
-            t1 = lean_threads.load()["threads"]["t1"]
-            self.assertEqual(len(t1["requests"]), 2)
-            self.assertEqual(lean_threads.current("s1"), "#7")
-            self.assertEqual(lean_threads.resolve_tag(), "#7")
-            self.assertEqual(lean_threads.resolve_tag("none"), None)
-            self.assertEqual(lean_threads.resolve_tag("T2"), "t2")
-            # closed threads are ignored by matching
+            reg = lean_threads.load()["threads"]
+            self.assertEqual(sorted(reg), ["t1", "t2"])  # a new topic creates no thread: `thread new` does
+            self.assertEqual(len(reg["t1"]["requests"]), 1)
             with lean_threads._locked() as data:
                 data["threads"]["t1"]["closed"] = "2026-01-01T00:00:00"
-            self.assertEqual(lean_threads.score_threads("quarterly report chart docs"), [])
-            # naming a closed thread brings it back; an exception in routing never breaks the prompt
-            self.assertTrue(ctx("the quarterly report is t1 again").startswith('Thread t1 "Publish'))
-            self.assertNotIn("closed", lean_threads.load()["threads"]["t1"])
+            self.assertEqual(lean_threads.score_threads("quarterly report chart docs"), [])  # closed threads are ignored
             with open(lean_threads.path()) as fh:
                 good = fh.read()
             with open(lean_threads.path(), "w") as fh:
-                json.dump({"threads": {"t1": 5}}, fh)  # a registry that makes route() raise
+                json.dump({"threads": {"t1": 5}}, fh)  # a registry that makes routing raise
             self.assertEqual(ctx("another request entirely"), "")
             with open(lean_threads.path(), "w") as fh:
                 fh.write(good)
+
+    def test_thread_session_hook_pins_every_prompt_and_never_guesses(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        self.make_threads("Publish quarterly report through docs worker", "Fix export retry loop in billing service")
+        env = {"LEAN_AGENT_SESSION_ROLE": "thread", "LEAN_AGENT_THREAD": "t2"}
+        self.assertEqual(self.prompt_ctx("the quarterly report needs a chart in the docs", **env), "")  # matches t1; belongs to t2
+        self.assertEqual(self.prompt_ctx("Something unrelated about mobile sync", **env), "")  # no 'New topic'
+        self.assertEqual(self.prompt_ctx("what's the status?", **env), "")
+        with open(os.path.join(home, "bg.output"), "w") as fh:
+            fh.write("done\n")
+        self.assertEqual(self.prompt_ctx("<task-notification><task-id>b1</task-id><summary>Background command completed</summary></task-notification>", **env), "")
+        sys.path.insert(0, ROOT)
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
+            import lean_threads
+            reg = lean_threads.load()["threads"]
+            self.assertEqual(sorted(reg), ["t1", "t2"])
+            self.assertEqual(len(reg["t1"].get("requests", [])), 0)
+            self.assertEqual(len(reg["t2"]["requests"]), 3)  # the notification is not a request
+            self.assertEqual(lean_threads.current("s1"), "t2")
+
+    def test_thread_brief_after_a_clear_covers_only_that_thread(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        self.make_threads("Publish quarterly report through docs worker", "Fix export retry loop in billing service")
+        with open(os.path.join(home, "handoff-notes.json"), "w") as fh:
+            json.dump([{"kind": "checkpoint", "ts": "2026-01-01T10:00:00", "text": "main soft state", "thread": None},
+                       {"kind": "checkpoint", "ts": "2026-01-01T11:00:00", "text": "billing soft state", "thread": "t2"},
+                       {"kind": "fyi", "ts": "2026-01-01T11:30:00", "text": "docs note", "thread": "t1"}], fh)
+        sys.path.insert(0, ROOT)
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
+            import compact_hook
+            text = compact_hook.thread_brief("t2", 3000)
+        self.assertTrue(text.startswith('Thread t2 "Fix export retry loop in billing service"'), text)
+        self.assertIn("billing soft state", text)
+        for other in ("main soft state", "docs note", "Publish quarterly"):
+            self.assertNotIn(other, text)
 
     def test_thread_registry_moves_out_of_the_chat_dir(self):
         home = self.env["LEAN_AGENT_HOME"]
