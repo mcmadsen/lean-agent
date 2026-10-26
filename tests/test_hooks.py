@@ -14,9 +14,15 @@ from unittest import mock
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins", "lean-agent", "scripts")
 
 
+# Claude Code's own compaction settings move compaction_point; tests that need them set them explicitly
+CLAUDE_COMPACT_KNOBS = ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "DISABLE_AUTO_COMPACT",
+                        "DISABLE_COMPACT")
+
+
 def base_env(**extra):
-    """The caller's environment minus every LEAN_AGENT_* key, plus what a test asks for."""
-    return dict({k: v for k, v in os.environ.items() if not k.startswith("LEAN_AGENT_")}, **extra)
+    """The caller's environment minus every LEAN_AGENT_* key and Claude Code compaction knob, plus what a test asks for."""
+    return dict({k: v for k, v in os.environ.items()
+                 if not k.startswith("LEAN_AGENT_") and k not in CLAUDE_COMPACT_KNOBS}, **extra)
 
 
 def run_hook(script, event, **env):
