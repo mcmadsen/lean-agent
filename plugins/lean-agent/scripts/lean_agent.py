@@ -8020,6 +8020,7 @@ def cmd_thread(a):
                 die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
             return lean_threads.cli("new", a.args, a.json)
         on = lean_threads.session_threads()
+        on += sorted(service_session.hosted_threads() - set(on), key=lambda k: int(k[1:]) if k[1:].isdigit() else 0)
         cap = service_session.max_thread_sessions()
         if len(on) >= cap:
             die(f"{len(on)} thread sessions are open (max-thread-sessions {cap}): close one first, e.g. "
@@ -8046,6 +8047,7 @@ def cmd_thread(a):
         running = service_session.alive(tid)
         if not running and not t.get("session_on"):
             on = lean_threads.session_threads()
+            on += sorted(service_session.hosted_threads() - set(on) - {tid})
             if len(on) >= service_session.max_thread_sessions():
                 die(f"{len(on)} thread sessions are open (max-thread-sessions {service_session.max_thread_sessions()}): "
                     f"close one first, e.g. `lean-agent thread close {on[0]}`")

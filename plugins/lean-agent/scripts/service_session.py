@@ -234,6 +234,24 @@ def session_rec(key="main"):
     return rec if isinstance(rec, dict) else {}
 
 
+def hosted_threads():
+    """Ids of the thread sessions the service holds a host record for: written when it starts the host
+    (host_pid), cleared when it stops, ignored when that process is gone. Independent of alive()."""
+    out = set()
+    sessions = _load(up_path()).get("sessions")
+    for tid, rec in (sessions.items() if isinstance(sessions, dict) else []):
+        pid = rec.get("host_pid") if isinstance(rec, dict) and tid != "main" else None
+        if isinstance(pid, int) and pid > 0:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except OSError:
+                pass
+            out.add(tid)
+    return out
+
+
 def request_clear(key="main"):
     """`lean-agent clear [--thread tN]`: ask the `up` host to checkpoint and /clear at the end of the current turn.
     False when that session is not up."""
@@ -909,6 +927,7 @@ class Sessions:
                 fresh = False
             else:
                 host = self.hosts[tid] = self.make_host(tid)
+                update_session(tid, host_pid=os.getpid())
                 host.thread = threading.Thread(target=self._run, args=(tid, host), daemon=True)
                 host.thread.start()
                 threading.Thread(target=AutoClear(host).run, daemon=True).start()
@@ -932,7 +951,7 @@ class Sessions:
         except Exception as exc:  # one thread's session never takes `up` down
             lean_log.log("error", "sessions", f"{tid}: {exc}")
         finally:
-            update_session(tid, pid=None)
+            update_session(tid, pid=None, host_pid=None)
 
     def stop(self, tid, wait=20):
         host = self.hosts.get(tid)
@@ -940,7 +959,7 @@ class Sessions:
             return False
         host.stop()
         host.thread.join(timeout=wait)
-        update_session(tid, pid=None)
+        update_session(tid, pid=None, host_pid=None)
         return True
 
     def stop_all(self, wait=0):
