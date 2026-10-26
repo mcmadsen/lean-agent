@@ -1422,7 +1422,8 @@ def _cmd_run(a):
         slug, project = resolve_project(a.project)
         sync_memory(slug)
         if getattr(a, "worktree", None):
-            wt = ensure_worktree(slug, project, a.worktree, reset=getattr(a, "reset_worktree", False))
+            wt = ensure_worktree(slug, project, a.worktree, reset=getattr(a, "reset_worktree", False),
+                                 base=getattr(a, "worktree_base", None))
             project = wt["path"]
             print(f"worktree: {wt['ref']} at {wt['path']} ({'reused' if wt['reused'] else 'created'}"
                   f"{', on branch ' + wt['branch'] if wt['branch'] else ', detached'}, HEAD {wt['head'][:10]})", flush=True)
@@ -4118,13 +4119,39 @@ def worktree_index():
     return load_json(home("worktrees.json"), {})
 
 
-def ensure_worktree(slug, repo, ref, reset=False):
-    """A shared worktree of `ref` for this project: reuse it (moved to the ref's tip when clean) or create it."""
+def worktree_base(slug, repo, flag=None):
+    """The base for a new branch: --worktree-base, else the project's configured base, else origin/HEAD."""
+    return flag or (projects().get(slug) or {}).get("base") or default_base(repo)
+
+
+def ensure_worktree(slug, repo, ref, reset=False, base=None):
+    """A shared worktree of `ref` for this project: reuse it (moved to the ref's tip when clean) or create it.
+    A branch that exists neither locally nor on the remote is created from the base."""
     if ref.startswith("origin/"):
         git(repo, "fetch", "-q", "origin")
     sha = git(repo, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
+    new_from = None
     if not sha:
-        die(f"unknown ref {ref!r} in {repo}")
+        if git(repo, "remote") and not ref.startswith("origin/"):
+            git(repo, "fetch", "-q", "origin")
+            if git(repo, "rev-parse", "--verify", "--quiet", "origin/" + ref + "^{commit}"):
+                ref = "origin/" + ref
+                sha = git(repo, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
+    if not sha:
+        new_from = worktree_base(slug, repo, base)
+        if ref.startswith("origin/"):
+            ref = ref[len("origin/"):]  # a branch to create: it gets a local name
+        if new_from and new_from.startswith("origin/"):
+            git(repo, "fetch", "-q", "origin")
+        sha = new_from and git(repo, "rev-parse", "--verify", "--quiet", new_from + "^{commit}")
+        if not sha:
+            die(f"unknown ref {ref!r} in {repo}, and no usable base to create it from"
+                + (f" ({new_from!r} is unknown)" if new_from else " (no origin/HEAD)")
+                + f". Say where to branch from: --worktree-base <ref>, or set it once: lean-agent worktree base {slug} <ref>")
+        r = subprocess.run(["git", "-C", repo, "branch", "-q", "--no-track", ref, sha], capture_output=True, text=True)
+        if r.returncode != 0:
+            die(f"could not create branch {ref!r} from {new_from}: {(r.stderr or r.stdout).strip()[:300]}")
+        print(f"worktree: created {ref} from {new_from}", flush=True)
     name = slugify(ref.replace("/", "-"), 60)
     path = home("worktrees", slug, name)
     reused = os.path.isdir(path) and git(path, "rev-parse", "--git-dir") is not None
@@ -4255,6 +4282,8 @@ def cmd_worktree(a):
         return worktree_setup_cmd(a)
     if a.action == "push":
         return worktree_push(a)
+    if a.action == "base":
+        return worktree_base_cmd(a)
     if not a.ref:
         die("which worktree? lean-agent worktree rm <project> <ref>")
     slug, repo = resolve_project(a.project)
@@ -4272,6 +4301,21 @@ def cmd_worktree(a):
     del idx[slug][name]
     save_json(home("worktrees.json"), idx)
     print(f"removed {w['path']}")
+
+
+def worktree_base_cmd(a):
+    """The project's base branch: where new --worktree branches start and what a push is measured against."""
+    slug, _ = resolve_project(a.project)
+    projs = projects()
+    if a.off:
+        projs[slug].pop("base", None)
+    elif a.ref:
+        projs[slug]["base"] = a.ref
+    if a.off or a.ref:
+        save_json(home("projects.json"), projs)
+    cur = projs[slug].get("base")
+    print(f"{slug}: base {cur}" if cur else f"{slug}: no base set (origin/HEAD is used). Set one: lean-agent worktree base {slug} <ref>")
+    return 0
 
 
 def worktree_setup_cmd(a):
@@ -4358,10 +4402,15 @@ def worktree_push(a):
         return 0
     sha = git(path, "rev-parse", "HEAD")
     if attribution() == "off":
-        # only commits unique to this branch: anything on a remote-tracking branch is already published
-        unique = (git(path, "rev-list", "HEAD", "--not", "--remotes") if git(path, "remote")
-                  else git(path, "rev-list", "HEAD", "--not", w.get("ref") or "HEAD~20")) or ""
-        rng = None
+        # only the commits being pushed: those the remote branch lacks, else those since the base branch
+        if has_remote:
+            unique = git(path, "rev-list", f"{remote_ref}..HEAD") or ""
+        else:
+            pbase = worktree_base(slug, repo)
+            mb = pbase and git(path, "merge-base", pbase, "HEAD")
+            unique = (git(path, "rev-list", f"{mb}..HEAD") if mb else
+                      git(path, "rev-list", "HEAD", "--not", "--remotes") if git(path, "remote") else
+                      git(path, "rev-list", "HEAD", "--not", w.get("ref") or "HEAD~20")) or ""
         bodies = git(path, "log", "--no-walk=unsorted", "--format=%H%n%B%n--END--", *unique.split()) if unique.strip() else ""
         bodies = bodies or ""
         credited = [sha_[:12] for sha_, body in re.findall(r"(?s)([0-9a-f]{40})\n(.*?)--END--", bodies)
@@ -8387,6 +8436,8 @@ def build_parser():
     s.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="model effort for the worker")
     s.add_argument("--worktree", metavar="REF", help="run in a shared lean-agent git worktree of this branch/ref "
                    "(your checkout is never touched; installed deps persist for the next worker)")
+    s.add_argument("--worktree-base", metavar="REF", help="--worktree: where a branch that doesn't exist yet is "
+                   "created from (default: the project's `worktree base`, else origin/HEAD)")
     s.add_argument("--reset-worktree", action="store_true", help="--worktree: move it to the ref's tip even if it "
                    "holds commits or changes that aren't there (they're discarded)")
     s.add_argument("--chrome", nargs="?", const="all", metavar="TOOL,TOOL",
@@ -8564,7 +8615,7 @@ def build_parser():
     s.add_argument("project", nargs="?")
     s.set_defaults(fn=cmd_worktrees)
     s = sub.add_parser("worktree", help="shared worktrees: rm, setup (run on new ones), push (after review + approval)")
-    s.add_argument("action", choices=["rm", "setup", "push"])
+    s.add_argument("action", choices=["rm", "setup", "push", "base"])
     s.add_argument("project")
     s.add_argument("ref", nargs="?", help="the worktree's branch (setup: also run the command there now)")
     s.add_argument("--run", dest="command", metavar="COMMAND", help="setup: the command for new worktrees")
