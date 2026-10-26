@@ -298,23 +298,28 @@ with the opt-in `clear-at`).
 
 ## Threads
 
-Every request to the orchestrator gets a thread without a model call: the prompt hook scores it against the open
-threads (title, aliases and recent requests; rare words weigh more, recent threads get a small boost, a score of 0.4 or
-more matches) or opens a new one titled from the prompt. An explicit `t7` or `#7` in the prompt wins. The hook adds one
-context line (`Thread t7 "..."`, or `New thread`, or `guessed` with the command to fix it). The thread is stored in the
-state of every run, review, todo, note, handover and push that follows; `--thread tN|none` overrides it, workers inherit it
-through `LEAN_AGENT_THREAD`.
+Each thread is its own Remote Control session. The main session is the front desk: its prompt hook scores every request
+against the open threads without a model call (title, aliases and recent requests; rare words weigh more, recent threads
+get a small boost, a score of 0.4 or more matches; an explicit `t7` or `#7` wins) and adds one line saying what to do:
+`Belongs to t7 "..."` (hand it over with `lean-agent thread send t7 --prompt-file -`), `New topic` (start it with
+`lean-agent thread new "<title>" --prompt-file -`), or `Status question` (answered in main with `lean-agent now`).
+Notifications of background work attach to their run's thread silently. A thread session never guesses: every prompt
+belongs to its thread, its context line is just `Thread t7 "..."` (once, at session start and after a `/clear`), and
+everything started there is tagged t7. The thread is stored in the state of every run, review, todo, note, handover and
+push that follows; `--thread tN|none` overrides it, workers inherit it through `LEAN_AGENT_THREAD`.
 
 | Command | What it does |
 |---|---|
 | `lean-agent now` | Open threads by last activity (at most 25 lines): state (running, open review, open todos, idle), last action, age. Closes threads idle for 7 days (`LEAN_AGENT_THREAD_IDLE_DAYS` or `thread_idle_days` in config.json); nothing is deleted |
 | `lean-agent thread show tN [--all]` | Everything for the topic in time order: requests, runs, reviews, todos, notes, handovers, pushes |
 | `lean-agent thread close tN` / `reopen tN` | Hide a finished topic from `now` and from matching / bring it back |
-| `lean-agent thread new "<title>"` / `list` | Start a free thread / list them |
+| `lean-agent thread new "<title>" [--prompt-file F\|-]` / `list` | Start a thread with its own Remote Control session (with a first message) / list threads |
+| `lean-agent thread send tN --prompt-file F\|-` / `open tN` / `sessions` | Hand a message to the thread's session (starting or resuming it) / bring its session back / list the running sessions |
 | `lean-agent thread merge tB tA` / `unmerge tB` | Fold thread B into A / give B its own tag back |
 | `lean-agent thread move tN` | Wrong thread: move the latest request, the current thread and the work recorded since to tN |
 
-The brief after a `/clear` starts with the same open threads. Strict mode allows all of these: they only read or change
+`now` and `doctor` show each thread's session (running or closed, with its Remote Control name). The brief after a `/clear`
+in the main session starts with the open threads; in a thread session it covers only that thread. Strict mode allows all of these: they only read or change
 the registry.
 
 ## Handovers
