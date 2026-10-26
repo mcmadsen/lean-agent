@@ -6632,12 +6632,41 @@ def host_session(cmd, extra, env, h, name):
         drop_bridge_pointers(h)
         state.update(seen="", stale=False, retried=True)
 
-    host = service_session.Host(build, env, h, remote_control=True, on_text=on_text, on_stale=on_stale)
+    def thread_host(tid):
+        t = lean_threads.load()["threads"].get(tid) or {}
+        name = service_session.thread_session_name(tid, t.get("title"))
+
+        def build_thread():  # the registry names the session (the hook moves it on a /clear): read it at every spawn
+            sid = (lean_threads.load()["threads"].get(tid) or {}).get("session_id")
+            if not sid or not re.fullmatch(r"[0-9a-fA-F-]{36}", sid):
+                sid = str(uuid.uuid4())
+                lean_threads.set_session(tid, session_id=sid)
+            resume = os.path.exists(service_session.transcript_path(h, sid))
+            return list(cmd) + ["--remote-control", name, "--resume" if resume else "--session-id", sid] + extra, sid
+
+        tenv = dict(env, LEAN_AGENT_THREAD=tid, LEAN_AGENT_SESSION_ROLE="thread")
+        th = service_session.Host(build_thread, tenv, h, remote_control=True, key=tid)
+        th.name = name
+        return th
+
+    env["LEAN_AGENT_SESSION_ROLE"] = "main"
+    sessions = service_session.Sessions(thread_host)
+    host = service_session.Host(build, env, h, remote_control=True, on_text=on_text, on_stale=on_stale,
+                                on_message=sessions.dispatch)
     threading.Thread(target=schedule_timer, daemon=True).start()
+    for tid in lean_threads.session_threads():  # every open thread session comes back with the service
+        try:
+            sessions.start(tid)
+        except Exception as exc:
+            print(f"lean-agent: could not start the session of {tid}: {exc}", file=sys.stderr)
     threading.Thread(target=service_session.AutoClear(host).run, daemon=True).start()
 
+    def stop_all(*_):
+        sessions.stop_all()
+        host.stop()
+
     for sig in (signal.SIGTERM, signal.SIGHUP):  # the service (or anyone) stops `up`: stop claude too, promptly
-        signal.signal(sig, lambda *_: host.stop())
+        signal.signal(sig, stop_all)
     try:
         rc = host.run()
     except FileNotFoundError:
@@ -6647,6 +6676,8 @@ def host_session(cmd, extra, env, h, name):
     except KeyboardInterrupt:
         host.stop()
         rc = 0
+    finally:
+        sessions.stop_all(wait=20)
     return rc
 
 
@@ -7395,6 +7426,19 @@ def cmd_config(a):
         env_name = "LEAN_AGENT_" + key.upper()
         print(compaction_text() + (f" ({env_name} is set and wins)" if os.environ.get(env_name) else ""))
         return 0
+    if a.name == "max-thread-sessions":
+        if a.value is not None:
+            if not (a.value.isdigit() and int(a.value) > 0) and a.value.lower() != "default":
+                die("max-thread-sessions takes a number or default")
+            cfg = load_json(home("config.json"), {})
+            if a.value.lower() == "default":
+                cfg.pop("max_thread_sessions", None)
+            else:
+                cfg["max_thread_sessions"] = int(a.value)
+            save_json(home("config.json"), cfg)
+        print(f"max-thread-sessions: {service_session.max_thread_sessions()} · the thread sessions (one Remote Control "
+              "item each) the service keeps running; `thread new` refuses above it until one is closed")
+        return 0
     if a.name == "clear-at":
         if a.value is not None:
             if not (a.value.isdigit() or a.value.lower() in ("auto", "off")):
@@ -7870,8 +7914,117 @@ def cmd_doc(a):
     return 0
 
 
+def thread_prompt(a):
+    if not a.prompt_file:
+        return None
+    return (sys.stdin.read() if a.prompt_file == "-" else read_text(a.prompt_file)).strip() or None
+
+
+def thread_brief(tid, title):
+    """The short brief a thread's session starts with: what the thread is and the notes recorded under it."""
+    import compact_hook
+    lines = [f"You are the orchestrator of thread {tid}: {title}. It is your own Remote Control session; what you record "
+             f"is filed under {tid} (see `lean-agent thread show {tid}`)."]
+    notes = [n for n in compact_hook.load_notes() if n.get("thread") == tid][-3:]
+    if notes:
+        lines.append("Notes so far: " + " | ".join(" ".join(str(n.get("text") or "").split())[:200] for n in notes))
+    return "\n".join(lines)
+
+
+def thread_session_tid(raw):
+    try:
+        tid = lean_threads.resolve(lean_threads.norm(raw))
+    except ValueError as exc:
+        die(str(exc))
+    t = lean_threads.load()["threads"].get(tid)
+    if not t:
+        die(f"no such thread {tid}")
+    return tid, t
+
+
+def start_thread_session(tid, t, prompt=None):
+    """Ask `up` to host the thread's session (resuming it when its transcript exists). Returns the Remote Control name."""
+    if not t.get("session_id"):
+        lean_threads.set_session(tid, session_id=str(uuid.uuid4()))
+    lean_threads.set_session(tid, session_on=True)
+    msg = None
+    if prompt:
+        msg = thread_brief(tid, t.get("title") or tid) + "\n\n" + prompt
+    r = service_session.sessions_request("start", thread=tid, prompt=msg)
+    if not r.get("ok"):
+        die(f"could not start the session of {tid}: {r.get('error') or 'not started'}")
+    return r.get("name") or service_session.thread_session_name(tid, t.get("title"))
+
+
 def cmd_thread(a):
-    return lean_threads.cli(a.action, a.args + (["--all"] if a.all else []), a.json)
+    act = a.action
+    if act == "sessions":
+        r = service_session.sessions_request("list")
+        if not r.get("ok"):
+            die("no service session is up (start it with `lean-agent up` or `lean-agent service start`)")
+        for x in r.get("sessions") or []:
+            print(f"{x['thread']:<6}{x['name'] or '-':<42}pid {x['pid']:<8}idle {x['idle']}s")
+        if not r.get("sessions"):
+            print("no thread sessions running (start one with `lean-agent thread new \"title\"`)")
+        return 0
+    if act == "new":
+        if len(a.args) != 1:
+            die('usage: lean-agent thread new "title" [--prompt-file F|-]')
+        prompt = thread_prompt(a)
+        if not service_session.alive():
+            if prompt:
+                die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
+            return lean_threads.cli("new", a.args, a.json)
+        on = lean_threads.session_threads()
+        cap = service_session.max_thread_sessions()
+        if len(on) >= cap:
+            die(f"{len(on)} thread sessions are open (max-thread-sessions {cap}): close one first, e.g. "
+                f"`lean-agent thread close {on[0]}` (`lean-agent thread sessions` lists them), or "
+                "`lean-agent config max-thread-sessions N`")
+        tid = lean_threads.new(a.args[0])
+        t = lean_threads.load()["threads"][tid]
+        name = start_thread_session(tid, t, prompt)
+        print(f'thread {tid} started: Remote Control "{name}"')
+        return 0
+    if act in ("send", "open"):
+        if len(a.args) != 1:
+            die(f"usage: lean-agent thread {act} tN" + (" --prompt-file F|-" if act == "send" else ""))
+        tid, t = thread_session_tid(a.args[0])
+        prompt = thread_prompt(a)
+        if act == "send" and not prompt:
+            die("thread send needs the message: --prompt-file F|-")
+        if not service_session.alive():
+            die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
+        running = service_session.alive(tid)
+        if not running and not t.get("session_on"):
+            on = lean_threads.session_threads()
+            if len(on) >= service_session.max_thread_sessions():
+                die(f"{len(on)} thread sessions are open (max-thread-sessions {service_session.max_thread_sessions()}): "
+                    f"close one first, e.g. `lean-agent thread close {on[0]}`")
+        if t.get("closed"):
+            lean_threads.set_closed(tid, False)
+        if running:
+            if prompt:
+                ok, err = service_session.send(prompt, tid)
+                if not ok:
+                    die(f"{tid}: {err}")
+            print(f"{tid} is running" + (": message sent" if prompt else ""))
+            return 0
+        name = start_thread_session(tid, t, prompt)
+        print(f'thread {tid} ' + ("started" if t.get("session_id") is None else "resumed") + f': Remote Control "{name}"'
+              + (": message sent" if prompt else ""))
+        return 0
+    if act == "close":
+        if len(a.args) != 1:
+            die("usage: lean-agent thread close tN")
+        tid, t = thread_session_tid(a.args[0])
+        if service_session.alive(tid):
+            ok = service_session.checkpoint_session(tid)
+            service_session.sessions_request("stop", thread=tid)
+            print(f"{tid}: session stopped" + ("" if ok is None else " (checkpointed)" if ok else " (no checkpoint reply in time)"))
+        lean_threads.set_session(tid, session_on=None)
+        return lean_threads.cli("close", [tid], a.json)
+    return lean_threads.cli(act, a.args + (["--all"] if a.all else []), a.json)
 
 
 def cmd_now(a):
@@ -8518,8 +8671,11 @@ def cmd_handoff(a):
 
 def cmd_clear(a):
     """Ask the service session to checkpoint and /clear at the end of its current turn (see service_session.AutoClear)."""
-    if not service_session.request_clear():
-        print("no service session is up (start it with `lean-agent up` or `lean-agent service start`)", file=sys.stderr)
+    tid = lean_threads.norm(a.thread) if a.thread else "main"
+    if not service_session.request_clear(tid):
+        print(f"no service session is up for {tid if a.thread else 'the orchestrator'} (start it with `lean-agent up` or "
+              "`lean-agent service start`" + (f"; a thread's session: `lean-agent thread open {tid}`" if a.thread else "") + ")",
+              file=sys.stderr)
         return 1
     print("clear queued: runs at the end of this turn; running workers keep going (collect with `lean-agent runs --wait all`); check with `lean-agent service status`")
     return 0
@@ -8640,6 +8796,7 @@ def build_parser():
 
     s = sub.add_parser("clear", help="clear the service session (checkpoint, then /clear) at the end of this turn; "
                                      "only when the user asks")
+    s.add_argument("--thread", metavar="tN", help="clear that thread's own session instead of the main one")
     s.set_defaults(fn=cmd_clear)
     s = sub.add_parser("checkpoint", help="save your soft state (promises, decisions, next steps) for after a /clear")
     s.add_argument("text", nargs="*", help="the soft state, 15 lines or fewer")
@@ -8682,8 +8839,8 @@ def build_parser():
     s.set_defaults(fn=cmd_advise)
 
     s = sub.add_parser("config", help="switches: strict on|off (the orchestrator only runs lean-agent commands; default on), "
-                       "clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), compact-window N|default and compact-pct P|default (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
-    s.add_argument("name", choices=["strict", "clear-at", "project-rules", "compact-window", "compact-pct"])
+                       "max-thread-sessions N (thread sessions the service runs; default 8), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), compact-window N|default and compact-pct P|default (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
+    s.add_argument("name", choices=["strict", "clear-at", "project-rules", "compact-window", "compact-pct", "max-thread-sessions"])
     s.add_argument("--project", "-p", help="project-rules: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="on|off, or off|auto|a number for clear-at, a number|default for compact-window and compact-pct")
     s.set_defaults(fn=cmd_config)
@@ -9100,9 +9257,10 @@ def build_parser():
     s.add_argument("args", nargs=argparse.REMAINDER, help="add: the lean-agent command, e.g. do <project> <recipe>")
     s.set_defaults(fn=cmd_schedule)
 
-    s = sub.add_parser("thread", help="threads: new \"title\" | list | show tN [--all] | close tN | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
-    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move"])
+    s = sub.add_parser("thread", help="threads: new \"title\" [--prompt-file F|-] (its own Remote Control session) | send tN --prompt-file F|- | open tN (resume its session) | sessions | list | show tN [--all] | close tN (checkpoint, stop its session) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
+    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions"])
     s.add_argument("args", nargs="*")
+    s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin)")
     s.add_argument("--json", action="store_true", help="list: as JSON")
     s.add_argument("--all", action="store_true", help="show: every entry (default: the latest 40)")
     s.set_defaults(fn=cmd_thread)

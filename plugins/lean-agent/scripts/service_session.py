@@ -61,9 +61,9 @@ def fallback_dir():
     return os.path.join(FALLBACK_ROOT, f"lean-agent-{os.getuid()}")
 
 
-def sock_path():
-    """<home>/session.sock, or a short private path when that is too long for AF_UNIX."""
-    path = lean_home("session.sock")
+def sock_path(key="main"):
+    """<home>/session.sock (a thread session: session-tN.sock), or a short private path when that is too long for AF_UNIX."""
+    path = lean_home("session.sock" if key == "main" else f"session-{key}.sock")
     if len(os.fsencode(path)) <= SOCK_MAX:
         return path
     d = fallback_dir()
@@ -75,13 +75,14 @@ def sock_path():
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o700:
         raise RuntimeError(f"{d} must be a directory owned by you with mode 0700; remove or fix it")
     digest = hashlib.sha256(os.fsencode(os.path.realpath(lean_home()))).hexdigest()[:12]
-    return os.path.join(d, digest + ".sock")
+    return os.path.join(d, digest + ("" if key == "main" else "-" + key) + ".sock")
 
 
-def client_sock_path():
+def client_sock_path(key="main"):
     """The socket `up` recorded in up.json, else sock_path()."""
-    rec = _load(up_path()).get("socket")
-    return rec if isinstance(rec, str) and rec else sock_path()
+    up = _load(up_path())
+    rec = up.get("socket") if key == "main" else (up.get("sessions") or {}).get(key, {}).get("socket")
+    return rec if isinstance(rec, str) and rec else sock_path(key)
 
 
 def up_path():
@@ -106,7 +107,12 @@ def transcript_path(cwd, session_id):
     return os.path.join(cfg, "projects", project_slug(os.path.realpath(cwd)), session_id + ".jsonl")
 
 
-def drop_stale_record(cwd, sid):
+def service_record(key="main"):
+    """The SessionStart hook's record for a hosted session."""
+    return lean_home("chat", "service.json" if key == "main" else f"service-{key}.json")
+
+
+def drop_stale_record(cwd, sid, key="main"):
     """A new conversation makes the old service.json and its chain stale: removed before the spawn, so a fast
     SessionStart hook of the new session is not deleted. A restart after a /clear, before the new transcript exists,
     keeps it: it goes only when no transcript of its chain exists at all (`up --fresh` removes it itself).
@@ -114,13 +120,13 @@ def drop_stale_record(cwd, sid):
     was lost): the record stays as long as any transcript of its chain exists, so the record of earlier clears stays."""
     if os.path.exists(transcript_path(cwd, sid)):
         return
-    rec = _load(lean_home("chat", "service.json"))
+    rec = _load(service_record(key))
     chain = rec.get("chain") if isinstance(rec.get("chain"), list) else []
     known = [p for p in [rec.get("transcript_path"), *chain] if isinstance(p, str) and p]
     if any(os.path.exists(p) for p in known):
         return
     try:
-        os.remove(lean_home("chat", "service.json"))
+        os.remove(service_record(key))
     except OSError:
         pass
 
@@ -177,6 +183,23 @@ def go_fresh(restart_host=False, wait=None, now=time.time, sleep=time.sleep):
     return sid, checkpointed
 
 
+def checkpoint_session(key="main", wait=None, now=time.time, sleep=time.sleep):
+    """Have a live session save its soft state: sends the checkpoint prompt and waits (up to `wait` seconds, default
+    CLEAR_WAIT) for its 'checkpointed' reply. None when the prompt could not be sent."""
+    path = _load(service_record(key)).get("transcript_path") or info(key).get("transcript") or ""
+    offset = transcript_state(path)["size"]
+    sent, _ = send(checkpoint_prompt(), key)
+    if not sent:
+        return None
+    limit = now() + (CLEAR_WAIT if wait is None else wait)
+    while now() < limit:
+        st = transcript_state(path, offset)
+        if st["ended"] and "checkpointed" in st["text"].lower():
+            return True
+        sleep(0.5)
+    return False
+
+
 def update_up(**fields):
     """Merge fields into up.json (written by `up`; the hooks read it)."""
     os.makedirs(os.path.dirname(up_path()), exist_ok=True)
@@ -186,18 +209,43 @@ def update_up(**fields):
         lean_common.write_json_atomic(up_path(), data)
 
 
-def request_clear():
-    """`lean-agent clear`: ask the `up` host to checkpoint and /clear at the end of the current turn. False when no
-    service session is up."""
-    if not alive():
+def update_session(key, **fields):
+    """Merge fields into one hosted session's record: the main session keeps its fields at the top of up.json (the
+    hooks and older clients read them there) and in sessions.main; a thread session lives in sessions.tN only."""
+    if key == "main":
+        update_up(**fields)
+    os.makedirs(os.path.dirname(up_path()), exist_ok=True)
+    with lean_common.file_lock(up_path()):
+        data = _load(up_path())
+        sessions = data.get("sessions") if isinstance(data.get("sessions"), dict) else {}
+        rec = dict(sessions.get(key) or {})
+        rec.update(fields)
+        sessions[key] = rec
+        data["sessions"] = sessions
+        lean_common.write_json_atomic(up_path(), data)
+
+
+def session_rec(key="main"):
+    """One hosted session's record from up.json ({} when it never ran)."""
+    up = _load(up_path())
+    if key == "main":
+        return up
+    rec = (up.get("sessions") or {}).get(key)
+    return rec if isinstance(rec, dict) else {}
+
+
+def request_clear(key="main"):
+    """`lean-agent clear [--thread tN]`: ask the `up` host to checkpoint and /clear at the end of the current turn.
+    False when that session is not up."""
+    if not alive(key):
         return False
-    update_up(clear_requested=time.time(), clear_status=None)
+    update_session(key, clear_requested=time.time(), clear_status=None)
     return True
 
 
 # ---------------------------------------------------------------- client
 
-def request(msg, timeout=5):
+def request(msg, timeout=5, key="main"):
     """Send one message to the bridge; the reply dict, or {"ok": False, "error": ...} (never raises)."""
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -205,7 +253,7 @@ def request(msg, timeout=5):
         return {"ok": False, "error": f"no session bridge ({exc})"}
     try:
         s.settimeout(timeout)
-        s.connect(client_sock_path())
+        s.connect(client_sock_path(key))
         s.sendall(json.dumps(msg).encode() + b"\n")
         s.shutdown(socket.SHUT_WR)
         buf = b""
@@ -222,28 +270,28 @@ def request(msg, timeout=5):
         s.close()
 
 
-def send(text):
-    r = request({"text": text})
+def send(text, key="main"):
+    r = request({"text": text}, key=key)
     return bool(r.get("ok")), r.get("error", "")
 
 
-def keys(k):
-    r = request({"keys": k})
+def keys(k, key="main"):
+    r = request({"keys": k}, key=key)
     return bool(r.get("ok")), r.get("error", "")
 
 
-def alive():
-    r = request({"ping": True}, timeout=2)
+def alive(key="main"):
+    r = request({"ping": True}, timeout=2, key=key)
     return bool(r.get("ok") and r.get("alive"))
 
 
-def tail():
-    return request({"tail": True}).get("text", "")
+def tail(key="main"):
+    return request({"tail": True}, key=key).get("text", "")
 
 
-def info():
+def info(key="main"):
     """session_id, transcript, pid, remote_control, ... from up.json ({} when `up` never ran)."""
-    up = _load(up_path())
+    up = session_rec(key)
     return {k: up[k] for k in ("session_id", "transcript", "pid", "host_pid", "remote_control", "socket",
                                "session_started") if k in up}
 
@@ -383,24 +431,34 @@ class AutoClear:
 
     def __init__(self, host, now=time.time):
         self.host, self.now = host, now
+        self.key = getattr(host, "key", "main")
         self.started = None   # when the last checkpoint prompt went out
         self.waiting = None   # (transcript offset, when) once the prompt is out
         self.held = None      # why a due clear waits (running workers)
         self.manual = False   # the clear in progress was asked for with `lean-agent clear`
 
+    def record(self):
+        """The hook's record of the transcript this session writes now (chat/service.json, thread: service-tN.json)."""
+        return _load(service_record(self.key))
+
     def transcript(self):
-        rec = _load(lean_home("chat", "service.json"))
-        return rec.get("transcript_path") or info().get("transcript") or ""
+        return self.record().get("transcript_path") or info(self.key).get("transcript") or ""
 
     def session_id(self):
-        return _load(lean_home("chat", "service.json")).get("session_id") or info().get("session_id")
+        return self.record().get("session_id") or info(self.key).get("session_id")
+
+    def up(self):
+        return session_rec(self.key)
+
+    def update(self, **fields):
+        update_session(self.key, **fields)
 
     def log(self, msg, level="debug"):
         lean_log.log(level, "auto-clear", msg)
 
     def last_gap_start(self):
         """When the last clear (or checkpoint request) happened: the record survives a restart of `up`."""
-        return max(self.started or 0, last_clear(_load(lean_home("chat", "service.json"))) or 0)
+        return max(self.started or 0, last_clear(self.record()) or 0)
 
     def hold(self, why):
         """Why the clear waits (shown by doctor and `service status`), or None; logged when it changes."""
@@ -408,7 +466,7 @@ class AutoClear:
             self.held = why
             if why:
                 self.log(f"holding the clear: {why}")
-            update_up(clear_hold=why)
+            self.update(clear_hold=why)
 
     def blocked(self, st):
         idle = _knob("LEAN_AGENT_CLEAR_IDLE", CLEAR_IDLE)
@@ -446,20 +504,20 @@ class AutoClear:
                 self.log(f"/clear sent ({'checkpointed' if answered else 'no reply in time'})")
                 self.host.paste("/clear")
             return
-        if _load(up_path()).get("clear_requested"):
+        if self.up().get("clear_requested"):
             # asked for by the user: ignores the threshold, the gap, the idle time and live runs (they are detached
             # and survive); waits for a turn end however long it takes
             st = transcript_state(path)
             if not st["ended"]:
                 self.hold(CLEAR_PENDING)
-                asked = _load(up_path()).get("clear_requested")
+                asked = self.up().get("clear_requested")
                 if not os.path.exists(path) and isinstance(asked, (int, float)) \
                         and now - asked >= _knob("LEAN_AGENT_CLEAR_WAIT", CLEAR_WAIT):
-                    update_up(clear_requested=None, clear_status="clear not done: the transcript was not found")
+                    self.update(clear_requested=None, clear_status="clear not done: the transcript was not found")
                     self.hold(None)
                     self.log("clear not done: the transcript was not found")
                 return
-            update_up(clear_requested=None, clear_status=None)
+            self.update(clear_requested=None, clear_status=None)
             self.hold(CLEAR_PENDING)
             self.manual = True
             self.started = now
@@ -509,10 +567,12 @@ def child_env(env):
 class Host:
     """Runs `cmd` in a pty this object owns, drains its output, restarts it when it dies, serves the socket."""
 
-    def __init__(self, build_cmd, env, cwd, remote_control=False, on_text=None, on_stale=None):
+    def __init__(self, build_cmd, env, cwd, remote_control=False, on_text=None, on_stale=None, key="main", on_message=None):
         self.build_cmd = build_cmd  # () -> (argv, session_id): resume or start by whether the transcript exists
         self.env, self.cwd = child_env(env), cwd
         self.remote_control = remote_control
+        self.key = key  # "main", or the thread id of a thread session
+        self.on_message = on_message  # (msg) -> reply or None: session management requests (the main host's bridge)
         self.on_text, self.on_stale = on_text, on_stale
         self.proc = None
         self.master = None
@@ -523,8 +583,11 @@ class Host:
         self.stopping = threading.Event()
         self.reason = None
         self.server = None
-        self.mirror = sys.stdout.isatty() and sys.stdin.isatty()
+        self.mirror = key == "main" and sys.stdout.isatty() and sys.stdin.isatty()
         self.log = None
+        self.name = None
+        self.thread = None     # the thread running run() (thread sessions)
+        self.last_output = 0.0
         self.last_input = 0.0  # when someone last typed into the session (the terminal, or a message sent to the bridge)
 
     # -- output
@@ -548,6 +611,7 @@ class Host:
             if not raw:
                 break
             self._remember(raw)
+            self.last_output = time.time()
             if self.log:
                 try:
                     self.log.write(raw)
@@ -609,6 +673,8 @@ class Host:
 
     def dispatch(self, msg):
         try:
+            if self.on_message and msg.get("sessions_op"):
+                return self.on_message(msg)
             if msg.get("ping"):
                 return {"ok": True, "alive": self.alive(), "pid": self.proc.pid if self.proc else None}
             if msg.get("tail"):
@@ -630,10 +696,10 @@ class Host:
         return {"ok": False, "error": 'expected {"text": ...}, {"keys": ...}, {"ping": true} or {"tail": true}'}
 
     def serve(self):
-        path = sock_path()
+        path = sock_path(self.key)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         if os.path.exists(path):
-            if alive():
+            if alive(self.key):
                 raise RuntimeError(f"another session bridge answers on {path} (is another `lean-agent up` running?)")
             os.remove(path)
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -671,16 +737,18 @@ class Host:
         except OSError:
             size = None
         fcntl.ioctl(master, termios.TIOCSWINSZ, size or struct.pack("HHHH", 50, 200, 0, 0))
-        drop_stale_record(self.cwd, sid)
-        update_up(pid=None, session_started=time.strftime("%Y-%m-%dT%H:%M:%S"), clear_requested=None, clear_hold=None)
+        drop_stale_record(self.cwd, sid, self.key)
+        update_session(self.key, pid=None, session_started=time.strftime("%Y-%m-%dT%H:%M:%S"), clear_requested=None,
+                       clear_hold=None)
         try:
             proc = subprocess.Popen(argv, env=self.env, cwd=self.cwd, stdin=slave, stdout=slave, stderr=slave,
                                     start_new_session=True)
         finally:
             os.close(slave)  # only the session holds it now, so reading ends when it exits
         self.proc, self.master = proc, master
-        update_up(session_id=sid, transcript=transcript_path(self.cwd, sid), pid=proc.pid, host_pid=os.getpid(),
-                  remote_control=self.remote_control, socket=sock_path())
+        update_session(self.key, session_id=sid, transcript=transcript_path(self.cwd, sid), pid=proc.pid,
+                       host_pid=os.getpid(), remote_control=self.remote_control, socket=sock_path(self.key),
+                       **({"name": self.name} if self.name else {}))
         t = threading.Thread(target=self._pump, args=(master,), daemon=True)
         t.start()
         return t
@@ -721,7 +789,7 @@ class Host:
                 pass
             self.server = None
             try:
-                os.remove(sock_path())
+                os.remove(sock_path(self.key))
             except OSError:
                 pass
 
@@ -734,7 +802,7 @@ class Host:
         """Serve the bridge and keep the session running until stopped. Returns the exit code of a session that
         died soon after starting (a start that fails), else keeps restarting it."""
         os.makedirs(lean_home("logs"), exist_ok=True)
-        logpath = lean_home("logs", "session.log")
+        logpath = lean_home("logs", "session.log" if self.key == "main" else f"session-{self.key}.log")
         if os.path.exists(logpath) and os.path.getsize(logpath) > (1 << 20):
             os.replace(logpath, logpath + ".1")
         self.log = open(logpath, "ab")
@@ -782,3 +850,132 @@ class Host:
             self.close()
             if self.log:
                 self.log.close()
+
+
+# ---------------------------------------------------------------- thread sessions (inside `up`)
+
+MAX_THREAD_SESSIONS = 8
+READY_QUIET = 1.5   # seconds without output from a new session before its first message is typed
+READY_WAIT = 40     # ... and the longest wait for that
+NAME_MAX = 40
+
+
+def thread_session_name(tid, title):
+    """The Remote Control name of a thread session: `lean-agent · tN <title>`, cut to NAME_MAX characters."""
+    name = f"lean-agent \u00b7 {tid} {' '.join(str(title or '').split())}".strip()
+    return name if len(name) <= NAME_MAX else name[:NAME_MAX - 1].rstrip() + "\u2026"
+
+
+def max_thread_sessions():
+    try:
+        n = int(_load(lean_home("config.json")).get("max_thread_sessions"))
+        return n if n > 0 else MAX_THREAD_SESSIONS
+    except (TypeError, ValueError):
+        return MAX_THREAD_SESSIONS
+
+
+def wait_ready(host, quiet=None, limit=READY_WAIT):
+    """Until the new session has printed something and then been quiet for `quiet` seconds (its input box is up)."""
+    quiet = _knob("LEAN_AGENT_READY_QUIET", READY_QUIET) if quiet is None else quiet
+    end = time.time() + limit
+    last, since = -1, time.time()
+    while time.time() < end and not host.stopping.is_set():
+        n = host.tail_len if host.alive() else 0
+        if n != last:
+            last, since = n, time.time()
+        elif n and time.time() - since >= quiet:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+class Sessions:
+    """The thread sessions `up` hosts next to the main one: one Host (own pty, socket, up.json record, transcript
+    tracking, AutoClear) per thread, started and stopped through the main bridge (`sessions_op` messages)."""
+
+    def __init__(self, make_host):
+        self.make_host = make_host  # (tid) -> Host for that thread's session
+        self.hosts = {}
+        self.lock = threading.RLock()
+
+    def running(self, tid):
+        h = self.hosts.get(tid)
+        return bool(h and h.thread.is_alive() and not h.stopping.is_set())
+
+    def start(self, tid, prompt=None):
+        with self.lock:
+            if self.running(tid):
+                host = self.hosts[tid]
+                fresh = False
+            else:
+                host = self.hosts[tid] = self.make_host(tid)
+                host.thread = threading.Thread(target=self._run, args=(tid, host), daemon=True)
+                host.thread.start()
+                threading.Thread(target=AutoClear(host).run, daemon=True).start()
+                fresh = True
+        if prompt:
+            threading.Thread(target=self._first, args=(host, prompt, fresh), daemon=True).start()
+        return host
+
+    def _first(self, host, prompt, fresh):
+        if fresh:
+            wait_ready(host)
+        try:
+            host.last_input = time.time()
+            host.paste(prompt)
+        except OSError as exc:
+            lean_log.log("error", "sessions", f"first message to {host.key} not delivered: {exc}")
+
+    def _run(self, tid, host):
+        try:
+            host.run()
+        except Exception as exc:  # one thread's session never takes `up` down
+            lean_log.log("error", "sessions", f"{tid}: {exc}")
+        finally:
+            update_session(tid, pid=None)
+
+    def stop(self, tid, wait=20):
+        host = self.hosts.get(tid)
+        if not host:
+            return False
+        host.stop()
+        host.thread.join(timeout=wait)
+        update_session(tid, pid=None)
+        return True
+
+    def stop_all(self, wait=0):
+        """Ask every thread session to end; with `wait`, until each has (its socket is removed by then)."""
+        hosts = list(self.hosts.values())
+        for host in hosts:
+            host.stop()
+        for host in hosts:
+            if wait and host.thread:
+                host.thread.join(timeout=wait)
+
+    def listing(self):
+        out = []
+        for tid, host in sorted(self.hosts.items(), key=lambda kv: int(kv[0][1:]) if kv[0][1:].isdigit() else 0):
+            if self.running(tid) and host.alive():
+                rec = session_rec(tid)
+                out.append({"thread": tid, "name": rec.get("name"), "pid": host.proc.pid,
+                            "idle": round(time.time() - max(host.last_output, host.last_input))})
+        return out
+
+    def dispatch(self, msg):
+        op, tid = msg.get("sessions_op"), msg.get("thread")
+        try:
+            if op == "list":
+                return {"ok": True, "sessions": self.listing()}
+            if op == "start":
+                host = self.start(tid, msg.get("prompt"))
+                return {"ok": True, "name": session_rec(tid).get("name") or host.name}
+            if op == "stop":
+                return {"ok": self.stop(tid)}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": "unknown sessions_op"}
+
+
+def sessions_request(op, timeout=60, **fields):
+    """Ask the `up` host (through the main bridge) to list, start or stop thread sessions."""
+    return request({"sessions_op": op, **fields}, timeout=timeout)
