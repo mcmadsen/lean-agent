@@ -3874,6 +3874,9 @@ class CliTest(unittest.TestCase):
         self.assertIn("compaction: Claude Code default (~167k for a 200k window)", out)
         self.assertNotIn("CLAUDE_CODE_AUTO_COMPACT_WINDOW", json.loads(self.cli("env", "--json").stdout)["env"])
         self.assertEqual(self.cli("config", "compact-window", "soon", check=False).returncode, 1)
+        small = self.cli("config", "compact-window", "50000", check=False)
+        self.assertEqual(small.returncode, 1)
+        self.assertIn("100000 or more", small.stderr)
 
     def test_compaction_point_default_and_overrides(self):
         sys.path.insert(0, os.path.dirname(CLI))
@@ -3887,6 +3890,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(lean_common.compaction_label(), "Claude Code default (~167k for a 200k window)")
         self.assertEqual(lean_common.compaction_label(model="opus[1m]"), "Claude Code default (~967k for a 1M window)")
         self.assertEqual(lean_common.compaction_label(100000, 70), "~67,000 (compact-window 100000, pct 70; set by config)")
+        self.assertEqual(lean_common.compaction_label(100000, 70, source=False), "~67,000 (compact-window 100000, pct 70)")
 
     def test_doctor_and_service_status_show_the_compaction(self):
         self.assertIn("compaction: Claude Code default (~167k for a 200k window)", self.cli("doctor", check=False).stdout)

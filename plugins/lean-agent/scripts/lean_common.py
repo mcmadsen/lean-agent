@@ -69,14 +69,14 @@ def compact_overrides(env=None):
     return tuple(out)
 
 
-def compaction_label(window=None, pct=None, model=None):
-    """`compaction: ...` text for doctor and service status."""
+def compaction_label(window=None, pct=None, model=None, source=True):
+    """`compaction: ...` text for doctor and service status; source=False leaves out where the setting comes from."""
     if not window and not pct:
         w = model_window(model)
         size = f"{w // 1000000}M" if w >= 1000000 else f"{w // 1000}k"
         return f"Claude Code default (~{compaction_point(model=model) // 1000}k for a {size} window)"
     return (f"~{compaction_point(window, pct, model):,} (compact-window {window or 'default'}, "
-            f"pct {pct or 'default'}; set by config)")
+            f"pct {pct or 'default'}{'; set by config' if source else ''})")
 
 
 def lean_home(*parts):
