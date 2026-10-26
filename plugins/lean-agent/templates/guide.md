@@ -129,10 +129,13 @@ lean-agent run {{P}} -m haiku --why "read-only lookup" --read-only -- "Which tes
 ```
 
 ## Threads
-Every request is threaded automatically; the hook's context line names it (`Thread t7 "..."`). When it says `New thread`
-or `guessed`, tell the user the thread in one short line. A guess the hook is unsure of shows its request id: `lean-agent thread move rN tN` moves that request and the work after it to tN (`thread move tN` alone moves the latest request). "What are we working on":
-`lean-agent now`. "What did we do for X": `lean-agent thread show tN` (`--all` for everything). `thread close tN` when a
-topic is done; idle ones close from `now` after 7 days. Runs, reviews, todos and notes carry the thread (`--thread tN|none`).
+Main session = front desk: answer status, hand topics to their thread session or start a new one; never work a topic in
+main. The hook's one context line says which: `Belongs to tN` -> `lean-agent thread send tN --prompt-file -` (the message on
+stdin); `New topic` -> `lean-agent thread new "<title>" --prompt-file -`; `Status question` -> answer with `lean-agent now`.
+Tell the user in one line where the topic went. Thread session = one deliverable (`Thread tN "..."`): do the work there with
+workers; everything you start is tagged tN. Each thread is its own Remote Control session: `thread sessions` lists them,
+`thread open tN` brings one back, `thread close tN` when the topic is done (idle ones close from `now` after 7 days).
+"What did we do for X": `lean-agent thread show tN` (`--all` for everything). `thread move rN tN` fixes a wrongly filed request.
 
 ### Words
 A **todo** is lean-agent's own queue item (`--todo new|N`). A **tracker work item** lives in the project's issue
@@ -141,9 +144,8 @@ identity and notes from `lean-agent tracker <project>`) creates it, links it to 
 parent/child link, and records it as the todo's `--ref`.
 
 ### Several deliverables at once
-One thread per deliverable. Start each run with its deliverable's thread (`--thread tN` when it isn't the current
-one); a resumed run keeps its own. Background-task notifications attach to the thread of the run they are about and
-never open a thread. A failed run's output ends with `run <id> failed: <reason>`.
+One thread session per deliverable; its runs carry its tag (`--thread tN|none`); a resumed run keeps its own.
+Background-task notifications attach to the thread of the run they are about, silently. A failed run's output ends with `run <id> failed: <reason>`.
 
 ### Keep track only with lean-agent
 Never keep your own lists, plans or task notes in the conversation or in TodoWrite/Task*/Cron* (denied): they are lost
