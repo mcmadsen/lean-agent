@@ -1320,26 +1320,42 @@ def detach_run(workdir, run_id):
                     out.flush()
                 except (OSError, ValueError):
                     pass
-    while status is None:
-        try:
-            done, st = os.waitpid(pid, os.WNOHANG)
-            if done:
-                status = st
-                break
-            relay()
-            time.sleep(0.1)
-        except KeyboardInterrupt:
-            interrupted = interrupted or time.time()
-            signal_group(pid, signal.SIGINT, wait=2)
-        except ChildProcessError:
-            status = 0
-        if interrupted and time.time() - interrupted > 60:
-            signal_group(pid, signal.SIGKILL, wait=2)
+    presses = [0]
+
+    def on_sigint(signum, frame):  # only counts: a Ctrl-C while the child is being signalled must not unwind this loop
+        presses[0] += 1
+    try:
+        previous = signal.signal(signal.SIGINT, on_sigint)
+    except ValueError:  # not the main thread
+        previous = None
+    sent = 0
+    try:
+        while status is None:
+            try:
+                done, st = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    status = st
+                    break
+                if presses[0] > sent:
+                    sent = presses[0]
+                    interrupted = interrupted or time.time()
+                    signal_group(pid, signal.SIGINT, wait=2)
+                relay()
+                time.sleep(0.1)
+            except ChildProcessError:
+                status = 0
+            if interrupted and time.time() - interrupted > 60:
+                signal_group(pid, signal.SIGKILL, wait=2)
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGINT, previous)
     relay()
     entry = next((r for r in reversed(ledger()) if r["id"] == run_id), None)
     if entry:
         LAST_RUN[:] = [entry]  # what the callers of cmd_run read after it
         mark_collected(run_id)  # relayed above: the caller has seen the result
+    if presses[0]:
+        return 130
     rc = os.waitstatus_to_exitcode(status)
     return rc if rc >= 0 else 128 - rc
 
@@ -7977,8 +7993,9 @@ def store_advice(entry):
         os.remove(f)
 
 
-def advise_state(slug, path, thread, thread_arg=None):
+def advise_state(slug, path, thread_arg):
     """The runs and the latest review of the project, as text for the advisor (no need to make it fetch them)."""
+    thread = thread_key(thread_arg) or "main"
     todo = int(thread) if thread.isdigit() else None
     lines = ["Last runs of this project:"]
     for r in [r for r in ledger() if r.get("project") == slug][-10:]:
@@ -8013,7 +8030,7 @@ def cmd_advise(a):
     thread = thread_key(a.thread) or "main"
     lean = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
     task = (f"The user's new request (project {slug}" + (f", thread {a.thread}" if a.thread else "") + "):\n" + what
-            + "\n\nProjects: " + ", ".join(sorted(projs)) + "\n" + advise_state(slug, path, thread, a.thread))
+            + "\n\nProjects: " + ", ".join(sorted(projs)) + "\n" + advise_state(slug, path, a.thread))
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model="haiku",
                             why="advise on a new request", cards="auto", card_list=None, project=slug,
                             read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=15,
