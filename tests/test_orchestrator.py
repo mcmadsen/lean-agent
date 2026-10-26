@@ -480,6 +480,36 @@ class CliTest(unittest.TestCase):
         self.cli("config", "project-rules", "on", "-p", "proj")
         self.assertIn("project rules: on for proj", self.cli("doctor", self.proj, check=False).stdout)
 
+    def run_in(self, cwd, *args, **env):
+        return subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True, cwd=cwd,
+                              env=dict(self.env, **env), stdin=subprocess.DEVNULL)
+
+    def test_doctor_from_a_project_subdirectory_finds_the_project(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.run_in(os.path.join(self.proj, "web"), "doctor")
+        self.assertNotIn("Traceback", p.stderr)
+        self.assertIn("project rules: off for proj", p.stdout)
+        self.assertNotIn("isn't a learned project", p.stdout)
+
+    def test_doctor_outside_any_project_prints_no_project_lines(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        outside = os.path.join(self.tmp.name, "elsewhere")
+        os.makedirs(outside)
+        p = self.run_in(outside, "doctor")
+        self.assertNotIn("Traceback", p.stderr)
+        self.assertNotIn("project rules:", p.stdout)
+        self.assertNotIn("lean-agent rules load here", p.stdout)
+        self.assertIn("isn't a learned project", p.stdout)
+
+    def test_relearning_through_a_symlink_keeps_the_stored_path(self):
+        link = os.path.join(self.tmp.name, "alias")
+        os.symlink(self.proj, link)
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("learn", link)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "projects.json")) as fh:
+            projs = json.load(fh)
+        self.assertEqual({k: v["path"] for k, v in projs.items()}, {"proj": self.proj})
+
     def test_project_rules_on_runs_natively_and_skips_rule_cards(self):
         self.write_rules()
         self.cli("learn", self.proj, "--name", "proj")

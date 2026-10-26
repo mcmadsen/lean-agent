@@ -552,6 +552,8 @@ def learn(path, include_user_skills=False, quiet=False, name=None, rules=None):
     for other in [s for s, v in projs.items() if same_path(v["path"], path) and s != slug]:
         kept = {**projs.pop(other), **kept}  # renamed with --name: keep its settings
     rules = "off" if rules is False else kept.get("rules")
+    if kept.get("path") and same_path(kept["path"], path):
+        path = kept["path"]  # re-learned through another symlink: the stored path stays
     projs[slug] = {**kept, "path": path, "learned": now_iso(), "rules": rules}
     save_json(home("projects.json"), projs)
     cards = sync_memory(slug)
@@ -6304,9 +6306,9 @@ def cmd_doctor(a):
                    f"lean-agent config project-rules off --project {pslug}")
         else:
             report(True, f"project rules: off for {pslug}, rule cards instead (lean-agent config project-rules on)")
-    bad = []
-    text = compaction_text(bad)
-    for msg in bad:
+    ignored = []
+    text = compaction_text(ignored)
+    for msg in ignored:
         report(None, "compaction setting ignored: " + msg, "lean-agent config compact-window N|default, compact-pct P|default")
     report(True, text + " (lean-agent config compact-window N|default, compact-pct P|default)")
     report(True, f"auto clear: {clear_at_text()} (lean-agent config clear-at off|auto|N)")
