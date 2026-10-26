@@ -22,6 +22,8 @@ import unittest
 import uuid
 from unittest import mock
 
+from _env import clean_environ
+
 # A review that did the reuse pass for the symbols the test repo's change adds.
 REUSE_CHECKED = {"searches": [{"for": "total", "found": "nothing"}],
                  "reuse": [{"symbol": s, "candidates": [], "verdict": "justified-new"}
@@ -136,9 +138,6 @@ FAKE_CLAUDE = textwrap.dedent("""\
 """)
 
 
-# Claude Code's own compaction settings move compaction_point; tests that need them set them explicitly
-CLAUDE_COMPACT_KNOBS = ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "DISABLE_AUTO_COMPACT",
-                        "DISABLE_COMPACT")
 PLAYWRIGHT_DIR = os.environ.get("LEAN_AGENT_PLAYWRIGHT_DIR")  # opt-in knob: read before setUp clears LEAN_AGENT_*
 
 
@@ -177,8 +176,7 @@ class CliTest(unittest.TestCase):
             fh.write(FAKE_CLAUDE)
         os.chmod(fake, 0o755)
         self.log = os.path.join(t, "calls.jsonl")
-        clean = {k: v for k, v in os.environ.items()
-                 if not k.startswith("LEAN_AGENT_") and k not in CLAUDE_COMPACT_KNOBS}  # the caller's settings stay out
+        clean = clean_environ()  # the caller's settings stay out
         patcher = mock.patch.dict(os.environ, clean, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
