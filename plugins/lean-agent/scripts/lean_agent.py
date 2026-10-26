@@ -1587,6 +1587,8 @@ def _cmd_run(a):
     env.pop("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", None)  # never pull in the project's CLAUDE.md
     env.pop("LEAN_AGENT_SERVICE_SESSION", None)  # the service session's hooks (session, permission) must not act in a worker
     thread_tag = lean_threads.resolve_tag()
+    if prev and not os.environ.get("LEAN_AGENT_THREAD"):  # a resumed run stays with its deliverable, whatever thread is current now
+        thread_tag = lean_threads.thread_of_run(prev) or thread_tag
     env["LEAN_AGENT_THREAD"] = thread_tag or "none"  # nested lean-agent commands in the worker record the same thread
     env["BASH_MAX_OUTPUT_LENGTH"] = os.environ.get("LEAN_AGENT_WORKER_BASH_OUTPUT") or "8000"  # not the orchestrator's
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"  # memory comes from lean-agent cards instead
@@ -8716,7 +8718,7 @@ def build_parser():
     s.add_argument("args", nargs=argparse.REMAINDER, help="add: the lean-agent command, e.g. do <project> <recipe>")
     s.set_defaults(fn=cmd_schedule)
 
-    s = sub.add_parser("thread", help="threads: new \"title\" | list | show tN [--all] | close tN | reopen tN | merge tB tA | unmerge tB | move tN (the latest request of this session only, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
+    s = sub.add_parser("thread", help="threads: new \"title\" | list | show tN [--all] | close tN | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
     s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move"])
     s.add_argument("args", nargs="*")
     s.add_argument("--json", action="store_true", help="list: as JSON")

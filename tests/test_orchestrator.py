@@ -2666,8 +2666,8 @@ class CliTest(unittest.TestCase):
             fh.write(json.dumps({"ts": lt.now_iso(), "thread": "t2", "project": "proj", "branch": "fix-export",
                                  "to": "origin/main", "sha": "abcdef123456", "ok": True}) + "\n")
         out = self.cli("now").stdout
-        self.assertLessEqual(len(out.splitlines()), 25)
-        lines = out.splitlines()
+        self.assertLessEqual(len(out.splitlines()), 30)
+        lines = [l for l in out.splitlines() if not l.startswith("  ")]  # the thread rows, not their detail lines
         self.assertTrue(lines[1].startswith("t2 "), out)  # latest activity first
         self.assertIn("1 todo open", lines[1])
         self.assertIn("push: proj fix-export", lines[1])
@@ -2899,6 +2899,167 @@ class CliTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("nothing recent to move", r.stdout + r.stderr)
 
+    def write_ledger(self, *recs):
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "ledger.jsonl"), "a") as fh:
+            for r in recs:
+                fh.write(json.dumps(r) + "\n")
+
+    def iso(self, ago):
+        return (datetime.datetime.now() - datetime.timedelta(seconds=ago)).isoformat(timespec="seconds")
+
+    def test_notification_attaches_to_its_runs_thread_and_creates_nothing(self):
+        lt = self.threads_home()
+        h = self.env["LEAN_AGENT_HOME"]
+        lt.route("Publish the report via docs", "s1")  # t1
+        lt.route("Fix the export timeout in billing", "s1")  # t2, the current thread
+        self.write_ledger({"id": "0101-100000-aaaa", "ts": self.iso(60), "thread": "t1", "model": "haiku", "status": "ok",
+                           "task": "Draft the quarterly report outline for the docs site"},
+                          {"id": "0101-100100-bbbb", "ts": self.iso(50), "thread": "t2", "model": "haiku", "status": "ok",
+                           "task": "Profile the billing export"})
+        out_file = os.path.join(h, "bg.output")
+        with open(out_file, "w") as fh:
+            fh.write("run 0101-100000-aaaa started \xb7 haiku \xb7 proj\nresult...\n")
+        before = json.dumps(lt.load(), sort_keys=True)
+        cur = lt.current("s1")
+        note = lambda body: f"<task-notification>\n<task-id>bx1</task-id>\n{body}\n</task-notification>"
+        # 1. the run id inside the notification's output file
+        line = lt.notification_line(note(f"<output-file>{out_file}</output-file>\n<summary>Background command completed (exit code 0)</summary>"))
+        self.assertTrue(line.startswith('Thread t1 "Publish report via docs"'), line)
+        self.assertNotIn("guess", line)
+        # 2. a run id in the text
+        self.assertTrue(lt.notification_line(note("run 0101-100100-bbbb finished")).startswith("Thread t2 "))
+        # 3. the task's command text
+        cmd = 'Background command "lean-agent run -p proj -- Draft the quarterly report outline for the docs site" completed'
+        self.assertTrue(lt.notification_line(note(f"<summary>{cmd}</summary>")).startswith("Thread t1 "))
+        # no run found: silent, on the current thread
+        self.assertEqual(lt.notification_line(note("<summary>Background command \"sleep 5\" completed</summary>")), "")
+        self.assertEqual(lt.notification_line(note("<output-file>/nonexistent/x.output</output-file>")), "")
+        self.assertEqual(json.dumps(lt.load(), sort_keys=True), before)  # no thread, no request
+        self.assertEqual(lt.current("s1"), cur)
+        # a moved run follows the override; a merged thread its target
+        lt.merge("t1", "t2")
+        self.assertTrue(lt.notification_line(note(f"<output-file>{out_file}</output-file>")).startswith("Thread t2 "))
+        self.assertTrue(lt.is_notification(note("x")))
+        self.assertTrue(lt.is_notification('Background command "x" completed (exit code 0)'))
+        self.assertTrue(lt.is_notification("<system-reminder>hook said</system-reminder>"))
+        self.assertFalse(lt.is_notification("please fix the completed export"))
+
+    def test_hint_only_when_the_guess_is_uncertain(self):
+        lt = self.threads_home()
+        self.assertFalse(lt._uncertain([(0.9, "t1"), (0.3, "t2")], "t1", "t2"))  # a clear winner
+        self.assertTrue(lt._uncertain([(0.9, "t1"), (0.85, "t2")], "t1", "t2"))  # too close to the second
+        self.assertTrue(lt._uncertain([(0.45, "t1")], "t1", None))  # near the threshold
+        self.assertFalse(lt._uncertain([(0.45, "t1")], "t1", "t1"))  # the current thread continues
+        t0 = datetime.datetime.now().timestamp() - 5000
+        lt.route("Publish the quarterly report via docs", "s1", t0)  # t1
+        lt.route("Fix the export timeout in billing", "s1", t0 + 10)  # t2
+        lt.route("Profile billing report generation", "s1", t0 + 20)  # t3 or a guess: two shared topics
+        self.assertEqual(len(lt.load()["threads"]), 3)
+        # the same words in two threads, the current one (t3) not the best: uncertain, with the request id and the move command
+        tid, how, line = lt.route("export billing report docs", "s1", t0 + 30)
+        self.assertEqual(how, "guessed")
+        self.assertRegex(line, r'^Thread t\d "[^"]+" \(r\d+, guessed \u2014 wrong\? lean-agent thread move r\d+ tN\)$')
+        rid = lt.load()["threads"][tid]["requests"][-1]["id"]
+        self.assertIn(f"({rid}, guessed", line)
+        self.assertIn(f"thread move {rid} tN", line)
+        # a clear winner: no hint
+        tid, how, line = lt.route("the quarterly report needs a chart in the docs", "s1", t0 + 40)
+        self.assertEqual((tid, how), ("t1", "guessed"))
+        self.assertEqual(line, 'Thread t1 "Publish quarterly report via docs"')
+        # the current thread continues: no hint either
+        tid, how, line = lt.route("the quarterly report chart docs again", "s1", t0 + 50)
+        self.assertEqual((tid, how, line), ("t1", "guessed", 'Thread t1 "Publish quarterly report via docs"'))
+        ids = [r["id"] for t in lt.load()["threads"].values() for r in t["requests"]]
+        self.assertEqual(len(ids), len(set(ids)))  # unique per home
+
+    def test_thread_move_by_request_id_moves_the_work_until_the_next_request(self):
+        lt = self.threads_home()
+        t0 = datetime.datetime.now().timestamp() - 3000
+        lt.route("Publish the report via docs", "s1", t0)  # t1 r1
+        lt.route("Fix the export timeout in billing", "s1", t0 + 100)  # t2 r2
+        lt.route("Publish the report docs chart", "s1", t0 + 200)  # t1 r3
+        lt.route("Write the report docs summary", "s1", t0 + 400)  # t1 r4
+        iso = lambda off: datetime.datetime.fromtimestamp(t0 + off).isoformat(timespec="seconds")
+        self.write_ledger({"id": "0101-100000-aaaa", "ts": iso(250), "thread": "t1", "model": "haiku", "status": "ok", "task": "after r3"},
+                          {"id": "0101-100001-bbbb", "ts": iso(450), "thread": "t1", "model": "haiku", "status": "ok", "task": "after r4"},
+                          {"id": "0101-100002-cccc", "ts": iso(50), "thread": "t1", "model": "haiku", "status": "ok", "task": "after r1"})
+        self.assertEqual([r["id"] for r in lt.load()["threads"]["t1"]["requests"]], ["r1", "r3", "r4"])
+        out = self.cli("thread", "move", "r3", "t2").stdout
+        self.assertIn("r3 moved from t1 to t2", out)
+        reg = lt.load()["threads"]
+        self.assertEqual([r["id"] for r in reg["t1"]["requests"]], ["r1", "r4"])
+        self.assertEqual([r["id"] for r in reg["t2"]["requests"]], ["r2", "r3"])
+        self.assertEqual(lt.current(), "t1")  # r4 is still the latest request
+        shown2 = self.cli("thread", "show", "t2").stdout
+        self.assertIn("after r3", shown2)  # started after r3, before r4
+        self.assertNotIn("after r4", shown2)
+        shown1 = self.cli("thread", "show", "t1").stdout
+        self.assertIn("after r4", shown1)
+        self.assertIn("after r1", shown1)
+        self.assertNotIn("after r3", shown1)
+        # a thread as the source: its latest request; the old one-argument form still works
+        self.assertIn("moved from t1 to t2", self.cli("thread", "move", "t1", "t2").stdout)  # r4
+        self.assertEqual(lt.current(), "t2")  # it was the latest request
+        self.assertIn("after r4", self.cli("thread", "show", "t2").stdout)
+        self.assertIn("latest request moved from t2 to t1", self.cli("thread", "move", "t1").stdout)
+        bad = self.cli("thread", "move", "r99", "t1", check=False)
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("no request r99", bad.stdout + bad.stderr)
+        self.assertEqual(self.cli("thread", "move", "r1", "t1", check=False).returncode, 1)  # already there
+
+    def test_a_resumed_run_keeps_its_thread_and_a_new_run_follows_the_current_one(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        lt = self.threads_home()
+        lt.route("Publish the report via docs", "s1")  # t1
+        self.cli("run", "-p", "proj", "first", "--model", "haiku", "--why", "t")
+        first = self.ledger()[-1]
+        self.assertEqual(first["thread"], "t1")
+        lt.route("Fix the export timeout in billing", "s1")  # t2 is current now
+        self.cli("run", "-p", "proj", "second", "--model", "haiku", "--why", "t")
+        self.assertEqual(self.ledger()[-1]["thread"], "t2")
+        self.cli("run", "--resume", first["id"], "and then more", "--why", "t")
+        self.assertEqual(self.ledger()[-1]["thread"], "t1")
+        self.assertEqual(self.calls()[-1]["thread"], "t1")  # its nested commands too
+        self.assertEqual(lt.current("s1"), "t2")  # a run never changes the current thread
+        self.cli("run", "--resume", first["id"], "explicit", "--thread", "t2", "--why", "t")
+        self.assertEqual(self.ledger()[-1]["thread"], "t2")
+
+    def test_now_shows_the_parallel_work_of_each_thread_in_few_lines(self):
+        lt = self.threads_home()
+        h = self.env["LEAN_AGENT_HOME"]
+        lt.route("Publish the report via docs", "s1")  # t1
+        lt.route("Fix the export timeout in billing", "s1")  # t2
+        self.write_ledger({"id": "0101-100000-aaaa", "ts": self.iso(300), "thread": "t1", "model": "sonnet", "status": "ok",
+                           "task": "Draft the outline", "result_head": "outline done"})
+        with open(os.path.join(h, "collected.json"), "w") as fh:
+            json.dump({"_cutoff": self.iso(3600)}, fh)
+        os.makedirs(os.path.join(h, "running"), exist_ok=True)
+        with open(os.path.join(h, "running", "0101-100050-bbbb.json"), "w") as fh:
+            json.dump({"pid": os.getpid(), "run": "0101-100050-bbbb", "started": self.iso(125), "model": "opus",
+                       "task": "Fix the export timeout\nwith a retry", "thread": "t2"}, fh)
+        os.makedirs(os.path.join(h, "reviews"), exist_ok=True)
+        with open(os.path.join(h, "reviews", "proj.jsonl"), "w") as fh:
+            fh.write(json.dumps({"run": "0101-100000-aaaa", "ts": self.iso(200), "thread": "t1", "verdict": "changes-requested",
+                                 "findings": [{}, {}]}) + "\n")
+        self.cli("todo", "add", "Chart for the report", "--thread", "t1")
+        out = self.cli("now").stdout
+        lines = out.splitlines()
+        self.assertLessEqual(len(lines), 30)
+        t1 = lines.index(next(l for l in lines if l.startswith("t1 ")))
+        t2 = lines.index(next(l for l in lines if l.startswith("t2 ")))
+        det = lambda i, j: "\n".join(lines[i + 1:j])
+        d2 = det(t2, len(lines)) if t2 > t1 else det(t2, t1)
+        d1 = det(t1, t2) if t1 < t2 else det(t1, len(lines))
+        self.assertRegex(d2, r"  running 0101-100050-bbbb opus 2m\d\ds: Fix the export timeout with a retry")
+        self.assertRegex(d1, r"  done, not collected 0101-100000-aaaa sonnet ok: Draft the outline")
+        self.assertIn("  review open 0101-100000-aaaa proj: changes-requested 2 findings", d1)
+        self.assertIn("  next todo #", d1)
+        self.assertNotIn("not collected", d2)
+        # many threads still fit the budget, and the brief carries it
+        for i in range(40):
+            lt.new(f"Topic number {i}")
+        self.assertLessEqual(len(self.cli("now").stdout.splitlines()), 30)
+
     def test_thread_move_uses_the_up_json_session_and_falls_back_for_an_unknown_one(self):
         lt = self.threads_home()
         lt.route("Publish the report via docs", "s1")  # t1
@@ -2917,10 +3078,10 @@ class CliTest(unittest.TestCase):
         self.assertIn("moved from t2 to t1", r.stdout)
 
     def test_thread_move_needs_exactly_one_argument(self):
-        for args in ((), ("t1", "t2")):
+        for args in ((), ("t1", "t2", "t3")):
             r = self.cli("thread", "move", *args, check=False)
             self.assertEqual(r.returncode, 1)
-            self.assertIn("usage: lean-agent thread move tN", r.stdout + r.stderr)
+            self.assertIn("usage: lean-agent thread move [rN|tM] tN", r.stdout + r.stderr)
 
     def test_thread_expiry_counts_merged_threads_last_message(self):
         lt = self.threads_home()
@@ -3375,11 +3536,13 @@ class CliTest(unittest.TestCase):
             lt.route(f"Topic{i} alpha{i} beta{i} gamma{i}", "s1")
         lt.route("Parked item about unrelated zebra", "s1")
         self.cli("thread", "close", "t9")
+        self.cli("todo", "add", "Ship topic seven", "--thread", "t8")
         out = self.cli("brief").stdout
+        self.assertIn("  next todo #", out)  # the parallel work is in the brief too
         self.assertIn("Open threads (8), latest first:", out)
         self.assertIn("t8 ", out)
         self.assertNotIn("zebra", out)
-        self.assertLessEqual(len(out.split("Full list")[0].splitlines()), 6)
+        self.assertLessEqual(len(out.split("Full list")[0].splitlines()), 16)
         self.assertIn("lean-agent thread show tN", out)
 
     def test_checkpoint_and_brief(self):

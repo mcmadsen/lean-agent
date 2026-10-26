@@ -256,8 +256,8 @@ def cut_lines(text, limit):
     return (cut[:nl] if nl > 0 else cut).rstrip()
 
 
-def threads_summary(lines=6):
-    """The open threads in a few lines (`lean-agent now`, without closing idle ones), so a fresh session knows the topics."""
+def threads_summary(lines=16):
+    """The open threads with their parallel work (`lean-agent now`, without closing idle ones), so a fresh session knows the topics and what is still running."""
     try:
         import lean_threads
         text = lean_threads.now_text(close_idle=False, max_lines=lines)
