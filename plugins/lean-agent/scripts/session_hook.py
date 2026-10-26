@@ -185,7 +185,17 @@ def main(ppid=parent_pid, cmd=argv_of, wait=3.0):
         json.dump({"session_id": event["session_id"], "transcript_path": event.get("transcript_path"),
                    "source": event.get("source"), "ts": now, "chain": chain, "chain_meta": meta}, fh)
     os.replace(tmp, path)
-    if event.get("source") == "clear" or fresh:
+    if key != "main":  # a thread session: its thread line at every start, and after a clear only its own brief
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import compact_hook
+        if event.get("source") == "clear":
+            text = compact_hook.thread_brief(key, BRIEF_CAP)
+        else:
+            import lean_threads
+            t = lean_threads.load()["threads"].get(key) or {}
+            text = f'Thread {key} "{t.get("title") or key}"'
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}), flush=True)
+    elif event.get("source") == "clear" or fresh:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import compact_hook
         text = compact_hook.brief(BRIEF_CAP)

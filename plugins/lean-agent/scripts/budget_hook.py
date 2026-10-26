@@ -543,8 +543,9 @@ MEMORY_REDIRECT = ("lean-agent: this is a request to keep something (a '#' memor
 
 
 def prompt_hook(event):
-    """UserPromptSubmit in the orchestrator: the prompt is put in a thread (no model call; one context line); a background-task notification is only
-    pointed at the thread of the run it is about. In the
+    """UserPromptSubmit in the orchestrator. Main session: the prompt is matched against the open threads (no model call) and
+    one context line says what to do (hand it to its thread session, start a new one, or answer a status question with `now`);
+    a background-task notification is silent. Thread session: the prompt is pinned to its thread, no line. In the
     strict orchestrator a one-line '#' memory message is also redirected to `lean-agent remember`, and /memory and /init
     (Claude Code's own memory editors) are refused."""
     prompt = str(event.get("prompt") or "").strip()
@@ -554,12 +555,16 @@ def prompt_hook(event):
                           "Claude Code's memory files. Say what to keep and a worker files it (`lean-agent remember`)."}))
         return
     lines = []
+    pinned = lean_threads.pinned_thread()
     if not prompt.startswith("/"):  # slash commands are not requests
         try:
-            if lean_threads.is_notification(prompt):  # a background-task notification: never a new request or thread
-                lines.append(lean_threads.notification_line(prompt))
-            else:
-                lines.append(lean_threads.route(prompt, event.get("session_id"))[2])
+            if pinned:  # a thread session: everything belongs to its thread, nothing is guessed or announced
+                if not lean_threads.is_notification(prompt):
+                    lean_threads.pin(pinned, prompt, event.get("session_id"))
+            elif lean_threads.is_notification(prompt):  # a background-task notification: never a new request or thread; attaches to its run's thread silently
+                lean_threads.notification_line(prompt)
+            else:  # the main session is the front desk: one line saying what to do with the request
+                lines.append(lean_threads.advise(prompt, event.get("session_id"))[1])
         except Exception:  # never break the prompt
             pass
         lines = [l for l in lines if l]

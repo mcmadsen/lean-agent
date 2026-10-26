@@ -163,6 +163,28 @@ def set_session(tid, **fields):
     return tid
 
 
+def session_state(tid, t=None):
+    """"running" when the service hosts the thread's session now, "closed" otherwise, with its Remote Control name."""
+    t = t if t is not None else load()["threads"].get(tid) or {}
+    if not t.get("session_on"):
+        return "closed", None
+    try:
+        import service_session
+        rec = service_session.session_rec(tid)
+        name = rec.get("name") or service_session.thread_session_name(tid, t.get("title"))
+        return ("running" if rec.get("pid") else "closed"), name
+    except Exception:
+        return "closed", None
+
+
+def session_lines(tid, t):
+    """The `now` line for a thread's own session: running or closed, with its Remote Control name ([] for a thread that never had one)."""
+    state, name = session_state(tid, t)
+    if state == "closed" and not t.get("session_id"):
+        return []
+    return [f'  session: {state}' + (f' \u2014 Remote Control "{name}"' if name else "")]
+
+
 def session_threads():
     """Ids of the threads whose session the service keeps running, oldest first."""
     ts = load()["threads"]
@@ -363,10 +385,61 @@ def _uncertain(ranked, tid, cur):
     return ranked[0][0] < CONFIDENT_SCORE or ranked[0][0] - second < CONFIDENT_MARGIN
 
 
-def route(prompt, session=None, now=None):
+STATUS_RE = re.compile(r"\b(status|progress|what(?:'s| is| are) (?:running|going on|happening|open|left)|how(?:'s| is| are) (?:it|things|the \w+) going|"
+                       r"where are we|any news|update me|what are we (?:doing|working on))\b", re.I)
+STATUS_MAX = 120  # characters: a longer message is a request, not a status question
+
+
+def is_status_question(text):
+    text = " ".join(str(text or "").split())
+    return len(text) <= STATUS_MAX and bool(STATUS_RE.search(text))
+
+
+def pinned_thread():
+    """The thread this process is the session of (LEAN_AGENT_SESSION_ROLE=thread and LEAN_AGENT_THREAD), else None."""
+    tid = os.environ.get("LEAN_AGENT_THREAD") or ""
+    return tid if os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread" and tid else None
+
+
+def pin(tid, prompt, session=None, now=None):
+    """A prompt in a thread session belongs to that thread, whatever it says: stores the request, makes the thread current."""
+    text = " ".join(str(prompt or "").split())
+    now_s = now_iso() if now is None else datetime.datetime.fromtimestamp(now).isoformat(timespec="seconds")
+    with _locked() as data:
+        t = data["threads"].get(tid)
+        if t is None:
+            return False
+        t["last_message"] = now_s
+        data["next_request"] = int(data.get("next_request") or 0) + 1
+        t.setdefault("requests", []).append({"id": f"r{data['next_request']}", "ts": now_s, "text": text[:REQUEST_CHARS]})
+        del t["requests"][:-REQUESTS_KEPT]
+    set_current(tid, session)
+    return True
+
+
+def advise(prompt, session=None, now=None):
+    """The main session is the front desk: what the orchestrator should do with a user prompt, in one line. A status
+    question is answered there (`now`); a prompt that belongs to an open thread is handed to its session; anything else
+    is a new topic for a new thread session. Matched requests are stored under their thread; a new topic creates nothing
+    (`thread new` does). Returns (thread id or None, line)."""
+    text = " ".join(str(prompt or "").split())
+    if is_status_question(text) and not EXPLICIT_RE.search(text):
+        return None, "Status question \u2014 answer it here: lean-agent now"
+    tid, how, _ = route(text, session, now, create=False)
+    if tid is None:
+        return None, 'New topic \u2014 start it: lean-agent thread new "<title>" --prompt-file -'
+    t = load()["threads"].get(tid) or {}
+    title = t.get("title") or tid
+    if t.get("session_on"):
+        return tid, f'Belongs to {tid} "{title}" \u2014 hand it over: lean-agent thread send {tid} --prompt-file -'
+    return tid, f'Belongs to {tid} "{title}" \u2014 hand it over (this starts its session): lean-agent thread send {tid} --prompt-file -'
+
+
+def route(prompt, session=None, now=None, create=True):
     """Assign a user prompt to a thread without any model call; stores the request (with a short id, rN) and the
     current-thread state. Returns (thread id, how, context line) with how in explicit|guessed|new; the line carries the
-    request id and the move hint only when the guess is uncertain (see _uncertain)."""
+    request id and the move hint only when the guess is uncertain (see _uncertain). With create=False a new topic
+    creates no thread and stores nothing: it returns (None, "new", "")."""
     text = " ".join(str(prompt or "").split())
     now_s = now_iso() if now is None else datetime.datetime.fromtimestamp(now).isoformat(timespec="seconds")
     m = EXPLICIT_RE.search(text)
@@ -394,6 +467,8 @@ def route(prompt, session=None, now=None):
             elif not words(text) and cur and cur in data["threads"] and not data["threads"][cur].get("closed") \
                     and cur not in data["aliases"]:
                 tid, how = cur, "guessed"  # "yes, go ahead": no content words, it continues the last topic
+        if tid is None and not create:
+            return None, "new", ""
         if tid is None:
             nums = [int(k[1:]) for k in data["threads"] if re.fullmatch(r"t\d+", k)]
             tid, how = f"t{max(nums, default=0) + 1}", "new"
@@ -718,7 +793,7 @@ def now_text(now=None, close_idle=True, max_lines=NOW_LINES):
             last_ts = max([t.get("last_message") or t.get("created") or ""] + [e[1] for e in ev])
             act = next((e for e in reversed(ev) if e[2] != "request"), None) or (ev[-1] if ev else None)
             rows.append((_epoch(last_ts), last_ts, tid, t, act, _state(tid, ev, running, data),
-                         _details(tid, ev, data, todos, live, waiting, now)))
+                         session_lines(tid, t) + _details(tid, ev, data, todos, live, waiting, now)))
     rows.sort(key=lambda r: (r[0], r[2]), reverse=True)
     lines = [f"Open threads ({len(rows)}), latest first:"] if rows else ["No open threads."]
     budget = max_lines - 2  # header and the footer line

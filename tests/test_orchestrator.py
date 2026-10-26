@@ -2789,6 +2789,26 @@ class CliTest(unittest.TestCase):
         self.addCleanup(patch.stop)
         return lean_threads
 
+    def test_now_and_doctor_show_each_threads_session(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        lt = self.threads_home()
+        lt.route("Publish the report via docs", "s1")  # t1
+        lt.route("Fix the export timeout in billing", "s1")  # t2
+        lt.route("Profile the parser startup", "s1")  # t3
+        lt.set_session("t1", session_id="11111111-1111-1111-1111-111111111111", session_on=True)
+        lt.set_session("t2", session_id="22222222-2222-2222-2222-222222222222")  # closed: has a session id, not hosted
+        up = os.path.join(self.env["LEAN_AGENT_HOME"], "up.json")
+        with open(up, "w") as fh:
+            json.dump({"sessions": {"t1": {"pid": os.getpid(), "name": "lean-agent \u00b7 t1 Publish report"}}}, fh)
+        out = self.cli("now").stdout
+        self.assertRegex(out, r'(?m)^  session: running \u2014 Remote Control "lean-agent \u00b7 t1 Publish report"$')
+        self.assertRegex(out, r"(?m)^  session: closed$")
+        self.assertEqual(out.count("session:"), 2)  # t3 never had a session
+        doc = self.cli("doctor", check=False).stdout
+        self.assertIn('thread t1 session: running (Remote Control "lean-agent \u00b7 t1 Publish report")', doc)
+        self.assertIn("thread t2 session: closed", doc)
+        self.assertNotIn("thread t3 session", doc)
+
     def test_now_and_thread_show_list_the_work_of_a_topic(self):
         self.cli("learn", self.proj, "--name", "proj")
         lt = self.threads_home()
