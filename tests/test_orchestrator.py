@@ -5412,6 +5412,62 @@ class CliTest(unittest.TestCase):
         self.assertEqual(remote(), local)
         self.assertIn("nothing to push", self.cli("worktree", "push", "proj", "origin/feature").stdout)
 
+    def test_worktree_creates_missing_branch_from_a_base(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("checkout", "-q", "main")
+        g("branch", "develop", "feature")
+        self.cli("learn", self.proj, "--name", "proj")
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "brand-new",
+                       "--worktree-base", "develop", "--", "t").stdout
+        self.assertIn("worktree: created brand-new from develop", out)
+        wt = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", "brand-new")
+        self.assertTrue(os.path.isfile(os.path.join(wt, "api", "totals.py")))  # develop's files, not main's
+        self.assertEqual(subprocess.run(["git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True,
+                                        text=True).stdout.strip(), "brand-new")
+        self.assertIn("base develop", self.cli("worktree", "base", "proj", "develop").stdout)
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "other-new", "--", "t").stdout
+        self.assertIn("worktree: created other-new from develop", out)  # the configured base
+        p = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "third", "--worktree-base", "nope",
+                     "--", "t", check=False)
+        self.assertIn("'nope' is unknown", p.stderr)
+
+    def test_push_credit_check_looks_only_at_the_pushed_commits(self):
+        g = self.git_project()
+        ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+        g("add", "-A")
+        g(*ident, "commit", "-qm", "page")
+        g("checkout", "-q", "main")
+        origin = os.path.join(self.tmp.name, "origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+        g("remote", "add", "origin", origin)
+        g("push", "-q", "origin", "main")
+        g("checkout", "-qb", "develop")  # the project's base: local only, with many flagged commits
+        for i in range(5):
+            g(*ident, "commit", "-q", "--allow-empty", "-m", f"base {i}\n\nCo-Authored-By: Claude <noreply@anthropic.com>")
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("worktree", "base", "proj", "develop")
+        self.cli("attribution", "off")
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "topic", "--", "t")
+        wt = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", "topic")
+        wg = lambda *a: subprocess.run(["git", "-C", wt, *ident, *a], check=True, capture_output=True, text=True)
+        def change(msg):
+            with open(os.path.join(wt, "web", "n.txt"), "a") as fh:
+                fh.write(msg + "\n")
+            wg("add", "-A")
+            wg("commit", "-q", "-m", msg)
+        change("clean change")
+        p = self.cli("worktree", "push", "proj", "topic", check=False)  # past the credit check, stopped by the review
+        self.assertNotIn("credit Claude", p.stderr)
+        self.assertIn("no approving review", p.stderr)
+        change("flagged\n\nCo-Authored-By: Claude <noreply@anthropic.com>")
+        flagged = wg("rev-parse", "HEAD").stdout.strip()[:12]
+        p = self.cli("worktree", "push", "proj", "topic", check=False)
+        self.assertIn("credit Claude", p.stderr)
+        self.assertIn(flagged, p.stderr)
+        self.assertEqual(len(re.findall(r"[0-9a-f]{12}", p.stderr.split("credit Claude")[0])), 1)
+
     def test_detached_worktree_keeps_commits_and_clean_merge_keeps_approval(self):
         g = self.git_project()
         g("add", "-A")
