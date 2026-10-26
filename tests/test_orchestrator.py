@@ -3975,6 +3975,23 @@ class CliTest(unittest.TestCase):
         self.assertEqual(small.returncode, 1)
         self.assertIn("100000 or more", small.stderr)
 
+    def test_invalid_compact_settings_are_ignored_with_a_doctor_warning(self):
+        os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "config.json"), "w") as fh:
+            json.dump({"compact_window": 50000, "compact_pct": 99}, fh)
+        env = json.loads(self.cli("env", "--json").stdout)["env"]
+        self.assertNotIn("CLAUDE_CODE_AUTO_COMPACT_WINDOW", env)
+        self.assertNotIn("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", env)
+        out = self.cli("doctor", check=False).stdout
+        self.assertIn("compaction setting ignored: compact-window '50000' is not 100000 or more", out)
+        self.assertIn("compact-pct '99' is not 10-95", out)
+        self.assertIn("compaction: Claude Code default", out)
+        out = self.cli("doctor", check=False, LEAN_AGENT_COMPACT_WINDOW="soon").stdout
+        self.assertIn("LEAN_AGENT_COMPACT_WINDOW 'soon' is not 100000 or more", out)
+        env = json.loads(self.cli("env", "--json", LEAN_AGENT_COMPACT_WINDOW="120000").stdout)["env"]
+        self.assertEqual(env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "120000")
+        self.assertIn("100000 or more", self.cli("config", "--help").stdout.replace("\n", " "))
+
     def test_compaction_point_default_and_overrides(self):
         sys.path.insert(0, os.path.dirname(CLI))
         import lean_common

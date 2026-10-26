@@ -52,20 +52,33 @@ def compaction_point(window=None, pct=None, model=None):
     return int(min(full * (pct or 100) / 100, full - compact_buffer()))
 
 
-def compact_overrides(env=None):
+COMPACT_WINDOW_MIN = 100000  # the smallest CLAUDE_CODE_AUTO_COMPACT_WINDOW Claude Code accepts
+COMPACT_PCT_RANGE = (10, 95)
+
+
+def compact_overrides(env=None, problems=None):
     """(window, pct) the orchestrator is told to compact by, each None when Claude Code's default applies:
     LEAN_AGENT_COMPACT_WINDOW / LEAN_AGENT_COMPACT_PCT, else `lean-agent config compact-window|compact-pct`.
-    "default" (or nothing) means no override."""
+    "default" (or nothing) means no override. A value `config` would refuse is ignored (Claude Code's default applies)
+    and described in `problems` when given."""
     env = os.environ if env is None else env
     cfg = read_json(lean_home("config.json"), {})
+    cfg = cfg if isinstance(cfg, dict) else {}
+    limits = {"compact_window": (COMPACT_WINDOW_MIN, None), "compact_pct": COMPACT_PCT_RANGE}
     out = []
     for name, key in (("LEAN_AGENT_COMPACT_WINDOW", "compact_window"), ("LEAN_AGENT_COMPACT_PCT", "compact_pct")):
         raw = str(env.get(name) or cfg.get(key) or "default").strip().lower()
         try:
-            n = float(raw)
-        except ValueError:
+            n = int(float(raw))
+        except (ValueError, OverflowError):
             n = 0
-        out.append(int(n) if n > 0 else None)
+        lo, hi = limits[key]
+        if raw != "default" and not (n >= lo and (hi is None or n <= hi)):
+            if problems is not None:
+                problems.append(f"{name if env.get(name) else key.replace('_', '-')} {raw!r} is not "
+                                + (f"{lo} or more" if hi is None else f"{lo}-{hi}") + "; Claude Code's default applies")
+            n = 0
+        out.append(n if n > 0 else None)
     return tuple(out)
 
 
