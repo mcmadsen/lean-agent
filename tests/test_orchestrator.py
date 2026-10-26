@@ -2847,7 +2847,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(len(runs(shown)), 1)  # the one after the request
         self.assertEqual(len(runs(self.cli("thread", "show", "t2").stdout)), 1)  # the one before stays
         self.assertIn("slow on big files", shown)
-        self.assertTrue(self.cli("now").stdout.splitlines()[1].startswith("t1 "))
+        self.assertIn("\nt1 ", self.cli("now").stdout)  # both rows; their order within one second is a tie
         self.cli("run", "-p", "proj", "later", "--model", "haiku", "--why", "t")
         self.assertEqual(self.ledger()[-1]["thread"], "t1")  # the current thread follows
         self.assertEqual(self.cli("thread", "move", "t1", check=False).returncode, 1)  # already there
