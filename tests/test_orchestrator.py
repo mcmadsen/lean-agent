@@ -467,6 +467,15 @@ class CliTest(unittest.TestCase):
         open(os.path.join(self.proj, "New.cs"), "w").write("class New {}")  # untracked, changed
         self.assertIn("rule-csharp", sent())
 
+    def test_doctor_prints_project_rules_for_a_project_registered_via_symlink(self):
+        link = os.path.join(self.tmp.name, "link")
+        os.symlink(self.proj, link)
+        self.cli("learn", link, "--name", "proj")
+        self.assertIn("project rules: off", self.cli("doctor", self.proj, check=False).stdout)
+        self.assertIn("project rules: off", self.cli("doctor", link, check=False).stdout)
+        self.cli("config", "project-rules", "on", "-p", "proj")
+        self.assertIn("project rules: on for proj", self.cli("doctor", self.proj, check=False).stdout)
+
     def test_project_rules_on_runs_natively_and_skips_rule_cards(self):
         self.write_rules()
         self.cli("learn", self.proj, "--name", "proj")
