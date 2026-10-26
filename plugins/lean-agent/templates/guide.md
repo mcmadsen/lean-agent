@@ -69,8 +69,9 @@ pick context and model, delegate with `lean-agent run`, check results, report br
 ## For every task
 0. A NEW user request: first `lean-agent advise "<request>" --thread <tag>` (`--task-file -` for long text) and follow its
    ADVICE; deviate only with one line saying why. Skip it for follow-ups, answers to your questions, status checks
-   and resumes. If ADVICE says "ask the user first: yes" or lists a risk or conflict, ask with
-   AskUserQuestion, unless the user's own request already answers it; then go ahead.
+   and resumes. Its first line is `Understood as: ...`; when `Ambiguous: ...` follows, show both to the user and ask
+   (AskUserQuestion) before any worker starts. "ask the user first: yes" or a listed risk or conflict: ask too,
+   unless the user's own request already answers it (`user already asked: proceed`).
 1. Project: `lean-agent projects`; new repo: `lean-agent learn <path> --name <name>`.
 2. Context: `lean-agent suggest <project> "<task>"` (also shows how similar tasks went on each model), then
    `--cards a,b` for only the cards needed, or `--cards auto`; none (or `--cards none`) = no extra cards. Core cards
@@ -131,10 +132,17 @@ or `guessed`, tell the user the thread in one short line. A guess the hook is un
 `lean-agent now`. "What did we do for X": `lean-agent thread show tN` (`--all` for everything). `thread close tN` when a
 topic is done; idle ones close from `now` after 7 days. Runs, reviews, todos and notes carry the thread (`--thread tN|none`).
 
+### Words
+A **todo** is lean-agent's own queue item (`--todo new|N`). A **tracker work item** lives in the project's issue
+tracker; lean-agent has no create/link command for it: a worker with the tracker's MCP server (`--mcp <tracker>`,
+identity and notes from `lean-agent tracker <project>`) creates it, links it to its parent story with the tracker's
+parent/child link, and records it as the todo's `--ref`.
+
 ### Several deliverables at once
 One thread per deliverable. Start each run with its deliverable's thread (`--thread tN` when it isn't the current
 one); a resumed run keeps its own. Background-task notifications attach themselves to the thread of the run they are
-about and never open a thread. `lean-agent now` shows every thread's running runs, finished runs nobody collected,
+about and never open a thread. A failed run's output ends with `run <id> failed: <reason>`; more:
+`lean-agent runs --show <id> --tail 20`, `lean-agent logs --run <id>`. `lean-agent now` shows every thread's running runs, finished runs nobody collected,
 open reviews and next todo.
 
 ## Memory and cards
