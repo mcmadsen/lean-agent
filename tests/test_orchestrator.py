@@ -3099,6 +3099,8 @@ class CliTest(unittest.TestCase):
         self.assertTrue(lt.is_notification('Background command "x" completed (exit code 0)'))
         self.assertTrue(lt.is_notification("<system-reminder>hook said</system-reminder>"))
         self.assertFalse(lt.is_notification("please fix the completed export"))
+        self.assertFalse(lt.is_notification("why does the task-id column stay empty in the export?"))
+        self.assertFalse(lt.is_notification('see the line Background command "x" completed in the log'))
 
     def test_hint_only_when_the_guess_is_uncertain(self):
         lt = self.threads_home()
