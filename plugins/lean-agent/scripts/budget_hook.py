@@ -401,6 +401,38 @@ DELEGATE_MCP = ("MCP servers are for workers: lean-agent run <project> --read-on
                 "[--mcp <server>:<tools>] [--allow-cmd 'lean-agent mcp'] -- '<which servers / what tool X returns>'.")
 
 
+# Tools that would keep track outside lean-agent: refused with the lean-agent command that does it. Matched by
+# exact name or prefix (Task* except TaskOutput, which reads lean-agent's own background output).
+TRACK_TODO = ("lean-agent keeps the todos: `lean-agent todo list|next|start|done` (a new one: `lean-agent remember "
+              "\"<todo>\"`, or `run --todo new`); what we are doing: `lean-agent now`.")
+TRACK_STOP = "Stop a run with `lean-agent runs --stop <id>`; see runs with `lean-agent runs`."
+TRACK_SCHEDULE = "lean-agent keeps the schedules: `lean-agent schedule list|run|pause|resume`; new ones via `lean-agent remember`."
+TRACK_RUN = ("Start a worker with `lean-agent run <project> --cards auto -m <model> --why '…' -- '<task>'` and follow "
+             "it with `lean-agent runs --show <id> --tail`.")
+TRACK_WORKER = "A worker does that: lean-agent run <project> --read-only --cards auto -m haiku --why '…' -- '<task>'."
+TRACK_REDIRECT = {
+    "TodoWrite": TRACK_TODO, "TaskCreate": TRACK_TODO, "TaskUpdate": TRACK_TODO, "TaskList": TRACK_TODO,
+    "TaskGet": TRACK_TODO, "TaskStop": TRACK_STOP, "KillShell": TRACK_STOP, "CronCreate": TRACK_SCHEDULE,
+    "CronDelete": TRACK_SCHEDULE, "CronList": TRACK_SCHEDULE, "ScheduleWakeup": TRACK_SCHEDULE,
+    "Agent": TRACK_RUN, "Task": TRACK_RUN, "Workflow": TRACK_RUN, "SendMessage": TRACK_RUN,
+    "Monitor": "Wait for runs with `lean-agent runs --wait <id|all>`; read one with `lean-agent runs --show <id> --tail`.",
+    "EnterPlanMode": "Plans are a worker's task or a thread: `lean-agent thread show tN`, `lean-agent advise \"<request>\"`.",
+    "ExitPlanMode": "Plans are a worker's task or a thread: `lean-agent thread show tN`, `lean-agent advise \"<request>\"`.",
+    "PushNotification": "The user is reached by your reply (AskUserQuestion for a question); lean-agent tracks the rest: `lean-agent now`.",
+    "NotebookEdit": TRACK_WORKER, "NotebookRead": TRACK_WORKER, "WebFetch": TRACK_WORKER, "WebSearch": TRACK_WORKER,
+}
+TRACK_PREFIX = {"Task": TRACK_TODO, "Cron": TRACK_SCHEDULE}
+
+
+def tracking_redirect(tool):
+    """The lean-agent alternative to a tool that keeps track outside lean-agent, or ''."""
+    if tool in TRACK_REDIRECT:
+        return TRACK_REDIRECT[tool]
+    if tool == "TaskOutput":
+        return ""
+    return next((m for pre, m in TRACK_PREFIX.items() if tool and tool.startswith(pre)), "")
+
+
 def flag_value(words, flag):
     """The value of `--flag X` or `--flag=X` among `words`, or None."""
     for i, w in enumerate(words):
@@ -476,6 +508,9 @@ def own_path(path, cwd, lean_root):
 def strict_denial(event, cwd, lean_root):
     """Why the strict orchestrator may not make this call, or ''."""
     tool, tool_input = event.get("tool_name"), event.get("tool_input") or {}
+    redirect = tracking_redirect(tool)
+    if redirect:
+        return f"strict mode: the orchestrator keeps track only with lean-agent, not with {tool[:40]}. " + redirect
     if tool == "Bash":
         command = str(tool_input.get("command") or "")
         if not lean_agent_only(command):

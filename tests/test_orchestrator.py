@@ -2095,21 +2095,21 @@ class CliTest(unittest.TestCase):
         os.makedirs(os.path.join(home, ".claude", "rules"))
         with open(os.path.join(home, ".claude", "rules", "extra.md"), "w") as fh:
             fh.write("extra rule " * 100)
-        env = dict(FAKE_PROBE_TOOLS=json.dumps(["Bash", "Read", "Monitor", "NotebookEdit2", "mcp__x__y"]),
+        env = dict(FAKE_PROBE_TOOLS=json.dumps(["Bash", "Read", "KeepTool", "NotebookEdit2", "mcp__x__y"]),
                    FAKE_PROBE_AGENTS=json.dumps(["reviewer", "planner"]))
         out = self.cli("context", **env).stdout
         self.assertIn("Start-up context: ~8,000 tokens", out)
-        self.assertIn("never called in these sessions: Monitor, NotebookEdit2", out)  # Read is always kept
+        self.assertIn("never called in these sessions: KeepTool, NotebookEdit2", out)  # Read is always kept
         self.assertIn("extra.md (~", out)
         self.assertIn("2 agents load here (reviewer, planner)", out)
         self.assertRegex(out, r"~\s*[\d,]+  output    Bash: lean-agent run -p shop -m haiku x")
         self.assertIn("brief mode is off in this session", out)
-        out = self.cli("context", "--apply", "--keep", "Monitor", **env).stdout
+        out = self.cli("context", "--apply", "--keep", "KeepTool", **env).stdout
         self.assertIn("denied 1 tool(s), excluded 1 file(s)", out)
         with open(os.path.join(home, ".claude", "settings.json")) as fh:
             data = json.load(fh)
         self.assertIn("NotebookEdit2", data["permissions"]["deny"])
-        self.assertNotIn("Monitor", data["permissions"]["deny"])
+        self.assertNotIn("KeepTool", data["permissions"]["deny"])
         self.assertTrue(any(x.endswith("extra.md") for x in data["claudeMdExcludes"]))
         self.cli("home")  # kept when the home is refreshed (sync)
         with open(os.path.join(home, ".claude", "settings.json")) as fh:

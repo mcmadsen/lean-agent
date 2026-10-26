@@ -562,6 +562,50 @@ class BudgetTest(Base):
         self.assertIsNone(read("/srv/shop/src/app.py"))
 
 
+    def test_strict_orchestrator_keeps_track_only_with_lean_agent(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        self.set_strict("on")
+        ev = lambda tool, **inp: dict(self.ev, cwd=home, tool_name=tool, tool_input=inp)
+        hook = lambda tool, **inp: run_hook("budget_hook.py", ev(tool, **inp), LEAN_AGENT_TODO_REMINDER="0", **self.env)
+        reason = lambda out: out["hookSpecificOutput"]["permissionDecisionReason"]
+        redirects = {
+            "lean-agent todo list": ("TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"),
+            "lean-agent runs --stop <id>": ("TaskStop", "KillShell"),
+            "lean-agent schedule": ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup"),
+            "lean-agent run <project>": ("Agent", "Task", "Workflow", "SendMessage"),
+            "lean-agent runs --wait": ("Monitor",),
+            "A worker": ("NotebookEdit", "WebFetch", "WebSearch"),
+        }
+        for text, tools in redirects.items():
+            for tool in tools:
+                out = hook(tool)
+                self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny", tool)
+                self.assertIn("keeps track only with lean-agent", reason(out), tool)
+                self.assertIn(text, reason(out), tool)
+        for tool in ("AskUserQuestion", "TaskOutput", "BashOutput", "ToolSearch"):
+            self.assertFalse(hook(tool), tool)
+        for cmd in ("lean-agent now", "lean-agent thread show t3", "lean-agent thread move r4 t2",
+                    "lean-agent thread close t3", "lean-agent thread reopen t3", "lean-agent runs --show abc --tail 20",
+                    "lean-agent runs --wait all", "lean-agent runs --stop abc", "lean-agent logs --run abc",
+                    "lean-agent handover", "lean-agent advise \"do x\"", "lean-agent learn proj",
+                    "lean-agent todo list", "lean-agent todo done 3", "lean-agent remember \"x\""):
+            self.assertFalse(hook("Bash", command=cmd, run_in_background=True), cmd)
+        for out in (hook("Read", file_path="/srv/proj/src/app.py"), hook("Read", file_path="/srv/other/work/0101-000000-abcd/summary-1.txt"),
+                    hook("Bash", command="cat /srv/proj/summary-1.txt", run_in_background=True),
+                    hook("Bash", command="tail -n 5 /srv/work/0101-000000-abcd/result.json", run_in_background=True)):
+            self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_orchestrator_settings_deny_the_tracking_tools(self):
+        sys.path.insert(0, ROOT)
+        import lean_agent
+        for tool in ("TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop", "KillShell",
+                     "CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "Agent", "Task", "Workflow",
+                     "SendMessage", "NotebookEdit", "WebFetch", "WebSearch", "Monitor", "EnterPlanMode",
+                     "ExitPlanMode"):
+            self.assertIn(tool, lean_agent.ORCHESTRATOR_DENY)
+        for tool in ("AskUserQuestion", "TaskOutput", "BashOutput", "ToolSearch", "Bash", "Read"):
+            self.assertNotIn(tool, lean_agent.ORCHESTRATOR_DENY)
+
     def test_strict_orchestrator_denies_lean_agent_subcommands_that_change_a_repo_or_tracker(self):
         home = self.env["LEAN_AGENT_HOME"]
         self.set_strict("on")

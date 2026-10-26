@@ -20,14 +20,29 @@ denied for the orchestrator and workers use it. The enforcement is `strict_denia
 
 | Tool | Class | Status |
 | --- | --- | --- |
-| Edit, MultiEdit, Write, NotebookEdit | c | denied in the home settings |
-| Agent, Task, Workflow, WebFetch, WebSearch, Skill, LSP, EnterWorktree, ExitWorktree, TodoWrite, Task*, Cron*, Artifact*, SendMessage, SendUserFile, plugin/skill/connector search and install tools, ... | c | denied in the home settings (full list: `ORCHESTRATOR_DENY`) |
-| Glob, Grep, LS, NotebookRead | a | denied in the home settings |
-| `mcp__*` (every MCP server tool) | c | denied: server prefixes in the home settings, and every `mcp__` name by the hook |
-| ListMcpResources(Tool), ReadMcpResource(Tool), ReadMcpResourceDir(Tool) | a | denied in the home settings and by the hook |
-| Bash | b | allowed only for `lean-agent` commands (no other command, no redirects to files, no command substitution); subcommands in section 2 |
-| Read | a | allowed only for lean-agent's own files (home, run files, the plugin) |
-| AskUserQuestion, ToolSearch, Monitor, TaskOutput, TaskStop, ExitPlanMode (names vary by Claude Code version) | b | allowed: they talk to the user or watch the orchestrator's own background commands |
+| Bash | b | **allowed** only for `lean-agent` commands (no other command, no redirects to files, no command substitution); subcommands in section 2 |
+| AskUserQuestion | b | **allowed**: talks to the user |
+| TaskOutput, BashOutput | a | **allowed**: read the output of lean-agent's own background commands |
+| ToolSearch | b | **allowed**, only to load an allowed tool |
+| Read | a | **allowed** only for lean-agent's own files (home, run files, the plugin) |
+| TodoWrite, TaskCreate, TaskUpdate, TaskList, TaskGet (`Task*` except TaskOutput) | c | **denied** (settings and hook); redirect: `lean-agent todo list\|next\|start\|done`, `lean-agent now` |
+| TaskStop, KillShell | c | **denied**; redirect: `lean-agent runs --stop <id>` |
+| CronCreate, CronDelete, CronList, ScheduleWakeup | c | **denied**; redirect: `lean-agent schedule list\|run\|pause\|resume` |
+| Agent, Task, Workflow, SendMessage | c | **denied**; redirect: `lean-agent run` |
+| Monitor | b | **denied**; redirect: `lean-agent runs --wait <id\|all>` |
+| EnterPlanMode, ExitPlanMode | b | **denied**; redirect: a thread (`thread show tN`) or `advise` |
+| PushNotification | b | **denied**: the user is reached by the reply |
+| NotebookEdit, NotebookRead, WebFetch, WebSearch | c | **denied**; redirect: a worker |
+| Edit, MultiEdit, Write | c | **denied** in the home settings |
+| Artifact*, Skill, LSP, EnterWorktree, ExitWorktree, SendUserFile, plugin/skill/connector search and install tools, ... | c | **denied** in the home settings (full list: `ORCHESTRATOR_DENY`) |
+| Glob, Grep, LS | a | **denied** in the home settings |
+| `mcp__*` (every MCP server tool) | c | **denied**: server prefixes in the home settings, and every `mcp__` name by the hook |
+| ListMcpResources(Tool), ReadMcpResource(Tool), ReadMcpResourceDir(Tool) | a | **denied** in the home settings and by the hook |
+
+The redirect text is `TRACK_REDIRECT` in `budget_hook.py`. A new `lean-agent` command that reads or updates only
+lean-agent's own state (`now`, `thread`, `runs --show --tail|--wait|--stop`, `logs`, `handover`, `advise`, `learn`,
+`output` of a lean-agent command) needs no entry; one that takes a project file or arbitrary output file as input
+must be added to the denied rows of section 2.
 
 Also off in the home settings: Claude Code auto memory (`autoMemoryEnabled: false`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`),
 bundled skills, claude.ai connectors, every other plugin, and every MCP server (`enableAllProjectMcpServers: false`; the
