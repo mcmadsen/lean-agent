@@ -3434,7 +3434,7 @@ class CliTest(unittest.TestCase):
         import lean_threads
         import service_session
         args = argparse.Namespace(action="new", args=["export retries"], prompt_file=None, json=False, all=False)
-        with mock.patch.dict(os.environ, self.env), mock.patch.object(service_session, "alive", return_value=True), \
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(service_session, "alive", side_effect=lambda key="main": key == "main"), \
                 mock.patch.object(service_session, "sessions_request", return_value={"ok": False, "error": "boom"}), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             with self.assertRaises(SystemExit):
@@ -3442,6 +3442,20 @@ class CliTest(unittest.TestCase):
             self.assertIn("boom", err.getvalue())
             self.assertEqual(lean_threads.load()["threads"], {})  # no thread left, none marked as hosted
             self.assertEqual(lean_threads.session_threads(), [])
+
+    def test_thread_new_keeps_the_thread_when_the_start_times_out_but_the_session_runs(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        import lean_threads
+        import service_session
+        args = argparse.Namespace(action="new", args=["export retries"], prompt_file=None, json=False, all=False)
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(service_session, "alive", return_value=True), \
+                mock.patch.object(service_session, "sessions_request", return_value={"ok": False, "error": "timed out"}), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(L.cmd_thread(args), 0)
+            self.assertIn("thread t1 started", out.getvalue())
+            self.assertTrue(lean_threads.load()["threads"]["t1"].get("session_on"))
+            self.assertEqual(lean_threads.session_threads(), ["t1"])
 
     def test_thread_new_refuses_above_max_thread_sessions(self):
         p, log, ss = self.start_up()
