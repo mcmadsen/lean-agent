@@ -154,6 +154,32 @@ def running_runs(lean_home):
     return sorted(out, key=lambda x: (x[1].get("started") or "", x[0]))
 
 
+def lost_runs(lean_home):
+    """[(run id, marker)] of runs whose supervisor died without recording a result: a running/*.json whose process is
+    gone and whose run is not in the ledger."""
+    done = set()
+    try:
+        with open(os.path.join(lean_home, "ledger.jsonl")) as fh:
+            for line in fh:
+                try:
+                    done.add(json.loads(line).get("id"))
+                except (ValueError, AttributeError):
+                    continue
+    except OSError:
+        pass
+    out = []
+    for f in glob.glob(os.path.join(lean_home, "running", "*.json")):
+        try:
+            with open(f) as fh:
+                m = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        rid = isinstance(m, dict) and (m.get("run") or os.path.basename(f)[:-5])
+        if rid and not (m.get("pid") and pid_alive(m["pid"])) and rid not in done:
+            out.append((rid, m))
+    return sorted(out, key=lambda x: (x[1].get("started") or "", x[0]))
+
+
 def signal_group(pid, sig, wait=0):
     """killpg(pid, sig) for a process group lean-agent started itself (a child it spawned with its own session).
     Refuses pid <= 1, its own pid and its own process group, so a stale or unset pid can never reach the caller's
