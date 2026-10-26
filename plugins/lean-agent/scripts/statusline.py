@@ -13,6 +13,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import lean_common  # noqa: E402
 import usage  # noqa: E402
 
 
@@ -61,10 +62,10 @@ def line(event):
     for f in os.listdir(rdir) if os.path.isdir(rdir) else []:
         try:
             with open(os.path.join(rdir, f)) as fh:
-                os.kill(int(json.load(fh).get("pid", 0)), 0)
-            running += 1
-        except (OSError, ValueError, TypeError):
+                alive = lean_common.pid_alive(json.load(fh).get("pid"))
+        except (OSError, ValueError, AttributeError):
             continue
+        running += 1 if alive else 0
     if running:
         parts.append(f"{running} running")
     try:
