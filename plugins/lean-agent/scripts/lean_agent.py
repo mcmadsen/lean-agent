@@ -6608,6 +6608,12 @@ def cmd_up(a):
     return remote_control(cmd + extra, env, h)
 
 
+def session_argv(cmd, extra, h, name, sid):
+    """The claude command line of a hosted session: Remote Control under `name`, resuming `sid` when its transcript exists."""
+    resume = os.path.exists(service_session.transcript_path(h, sid))
+    return list(cmd) + ["--remote-control", name, "--resume" if resume else "--session-id", sid] + extra
+
+
 def host_session(cmd, extra, env, h, name):
     """`up` hosts the one interactive orchestrator session in a pty it owns (so it also runs under launchd /
     systemd, where there is no terminal), with Remote Control, and serves the socket
@@ -6619,11 +6625,7 @@ def host_session(cmd, extra, env, h, name):
         sid = load_json(home("up.json"), {}).get("session_id") or str(uuid.uuid4())
         if not re.fullmatch(r"[0-9a-fA-F-]{36}", sid):
             sid = str(uuid.uuid4())
-        resume = os.path.exists(service_session.transcript_path(h, sid))
-        argv = list(cmd)
-        argv += ["--remote-control", name]
-        argv += ["--resume" if resume else "--session-id", sid] + extra
-        return argv, sid
+        return session_argv(cmd, extra, h, name, sid), sid
 
     state = {"seen": "", "stale": False}
 
@@ -6657,8 +6659,7 @@ def host_session(cmd, extra, env, h, name):
             if not sid or not re.fullmatch(r"[0-9a-fA-F-]{36}", sid):
                 sid = str(uuid.uuid4())
                 lean_threads.set_session(tid, session_id=sid)
-            resume = os.path.exists(service_session.transcript_path(h, sid))
-            return list(cmd) + ["--remote-control", name, "--resume" if resume else "--session-id", sid] + extra, sid
+            return session_argv(cmd, extra, h, name, sid), sid
 
         tenv = dict(env, LEAN_AGENT_THREAD=tid, LEAN_AGENT_SESSION_ROLE="thread")
         th = service_session.Host(build_thread, tenv, h, remote_control=True, key=tid)
