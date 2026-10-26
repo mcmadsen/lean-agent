@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import tty
 import uuid
 
@@ -44,6 +45,8 @@ if os.environ.get("FAKE_START_HOOK"):  # what Claude Code does when a session st
         "source": "resume" if "--resume" in argv else "startup"}), text=True, capture_output=True, check=False)
     with open(os.environ["FAKE_SESSION_LOG"], "a") as fh:
         fh.write(json.dumps({"start_hook": hook.stdout, "sid": sid}) + "\n")
+if os.environ.get("FAKE_START_DELAY"):  # a slow start: the host takes this many seconds to come up
+    time.sleep(float(os.environ["FAKE_START_DELAY"]))
 tty.setraw(0)
 sys.stdout.write("fake claude ready\r\n")
 sys.stdout.flush()

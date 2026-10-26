@@ -3510,6 +3510,53 @@ class CliTest(unittest.TestCase):
                 L.cmd_thread(args)
         self.assertIsNone(lt.load()["threads"]["t1"].get("session_on"))
 
+    def start_thread_with_lost_reply(self, delay, grace):
+        """start_thread_session against a real `up` whose start reply is lost (as on a timeout); returns (result, stops)."""
+        import lean_agent as L
+        import service_session
+        lt = self.threads_home()
+        tid = lt.new("slow")
+        real, real_alive, stops, t0 = service_session.sessions_request, service_session.alive, [], time.time()
+
+        def alive(key="main"):  # the thread's host answers only `delay` seconds after the start request
+            return real_alive(key) and (key == "main" or time.time() - t0 >= delay)
+
+        def lost(op, **kw):
+            if op == "stop":
+                stops.append(kw["thread"])
+            r = real(op, **kw)
+            return {"ok": False, "error": "timed out"} if op == "start" else r
+        with mock.patch.dict(os.environ, dict(self.env, FAKE_START_DELAY=str(delay))), \
+                mock.patch.object(service_session, "sessions_request", side_effect=lost), \
+                mock.patch.object(service_session, "alive", side_effect=alive), \
+                mock.patch.object(L, "START_GRACE", grace):
+            try:
+                return tid, L.start_thread_session(tid, lt.load()["threads"][tid]), stops, lt
+            except RuntimeError as exc:
+                return tid, exc, stops, lt
+
+    def test_thread_start_waits_for_a_slow_host_after_a_lost_reply(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        p, log, ss = self.start_up()
+        tid, res, stops, lt = self.start_thread_with_lost_reply(delay=2, grace=20)
+        self.assertNotIsInstance(res, Exception)
+        self.assertEqual(stops, [])
+        self.assertTrue(lt.load()["threads"][tid].get("session_on"))
+        ss.sessions_request("stop", thread=tid)
+        p.terminate()
+        p.wait(timeout=30)
+
+    def test_thread_start_that_never_comes_up_is_rolled_back_and_stopped(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        p, log, ss = self.start_up()
+        tid, res, stops, lt = self.start_thread_with_lost_reply(delay=30, grace=1)
+        self.assertIsInstance(res, RuntimeError)
+        self.assertEqual(stops, [tid])
+        self.assertIsNone(lt.load()["threads"][tid].get("session_on"))
+        self.assertFalse(ss.alive(tid))
+        p.terminate()
+        p.wait(timeout=30)
+
     def test_thread_new_refuses_above_max_thread_sessions(self):
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "1")
@@ -4002,6 +4049,33 @@ class CliTest(unittest.TestCase):
         small = self.cli("config", "compact-window", "50000", check=False)
         self.assertEqual(small.returncode, 1)
         self.assertIn("100000 or more", small.stderr)
+
+    def test_compact_pct_limits_are_10_to_95(self):
+        for ok in ("10", "95"):
+            self.assertEqual(self.cli("config", "compact-pct", ok, check=False).returncode, 0, ok)
+        for bad in ("9", "96"):
+            r = self.cli("config", "compact-pct", bad, check=False)
+            self.assertEqual(r.returncode, 1, bad)
+            self.assertIn("10-95", r.stderr + r.stdout)
+
+    def test_compact_window_zero_and_negative_are_refused(self):
+        for bad in ("0", "-1", "-100000"):
+            self.assertEqual(self.cli("config", "compact-window", bad, check=False).returncode, 1, bad)
+
+    def test_a_non_dict_config_json_does_not_crash_doctor(self):
+        os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "config.json"), "w") as fh:
+            json.dump(["not", "a", "dict"], fh)
+        r = self.cli("doctor", check=False)
+        self.assertNotIn("Traceback", r.stderr + r.stdout)
+        self.assertIn("compaction: Claude Code default", r.stdout)
+
+    def test_env_compact_window_zero_is_ignored_with_a_warning(self):
+        # documented behaviour: 0 is not "default" and not 100000 or more, so it is reported and Claude Code's default applies
+        out = self.cli("doctor", check=False, LEAN_AGENT_COMPACT_WINDOW="0").stdout
+        self.assertIn("LEAN_AGENT_COMPACT_WINDOW '0' is not 100000 or more", out)
+        env = json.loads(self.cli("env", "--json", LEAN_AGENT_COMPACT_WINDOW="0").stdout)["env"]
+        self.assertNotIn("CLAUDE_CODE_AUTO_COMPACT_WINDOW", env)
 
     def test_invalid_compact_settings_are_ignored_with_a_doctor_warning(self):
         os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
