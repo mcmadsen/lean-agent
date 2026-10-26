@@ -392,6 +392,80 @@ class CliTest(unittest.TestCase):
     def handover_dir(self):
         return os.path.join(self.env["LEAN_AGENT_HOME"], "proj", "handovers")
 
+    def write_rules(self):
+        d = os.path.join(self.proj, ".claude", "rules")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "csharp.md"), "w") as fh:
+            fh.write('---\ndescription: C# conventions\npaths:\n  - "**/*.cs"\n  - "**/appsettings*.json"\n---\n'
+                     "# C# conventions\nUse file-scoped namespaces.\n")
+        with open(os.path.join(d, "general.md"), "w") as fh:
+            fh.write("# General\nKeep commits small.\n")
+
+    def rule_cards(self):
+        cards = json.load(open(os.path.join(self.env["LEAN_AGENT_HOME"], "library", "proj", "cards.json")))
+        return {c["id"]: c for c in cards if c["kind"] == "rule"}
+
+    def test_learn_imports_rule_cards_with_globs_and_drops_removed_ones(self):
+        self.write_rules()
+        self.cli("learn", self.proj, "--name", "proj")
+        rules = self.rule_cards()
+        self.assertEqual(set(rules), {"rule-csharp", "rule-general"})
+        self.assertEqual(rules["rule-csharp"]["globs"], ["**/*.cs", "**/appsettings*.json"])
+        self.assertEqual(rules["rule-csharp"]["description"], "C# conventions")
+        self.assertNotIn("globs", rules["rule-general"])
+        self.assertNotIn("paths:", rules["rule-csharp"]["text"])
+        os.remove(os.path.join(self.proj, ".claude", "rules", "csharp.md"))
+        self.cli("learn", self.proj, "--name", "proj")
+        self.assertEqual(set(self.rule_cards()), {"rule-general"})
+
+    def test_rule_cards_are_picked_by_task_paths_files_and_changed_files(self):
+        self.write_rules()
+        self.cli("learn", self.proj, "--name", "proj")
+
+        def sent(*extra, task="tidy up"):
+            self.cli("run", "proj", "-m", "haiku", "--why", "x", "--cards", "auto", *extra, "--", task)
+            return self.ledger()[-1]["cards"]
+        self.assertNotIn("rule-csharp", sent())
+        self.assertIn("rule-general", sent())  # no paths: always a candidate
+        self.assertIn("rule-csharp", sent(task="fix src/Orders/Order.cs"))
+        self.assertIn("rule-csharp", sent(task="edit appsettings.Production.json"))
+        self.assertIn("rule-csharp", sent("--files", "x/y/Foo.cs"))
+        self.assertNotIn("rule-csharp", sent("--files", "x/y/foo.py"))
+        g = self.git_project()
+        g("checkout", "-q", "main")
+        open(os.path.join(self.proj, "New.cs"), "w").write("class New {}")  # untracked, changed
+        self.assertIn("rule-csharp", sent())
+
+    def test_project_rules_on_runs_natively_and_skips_rule_cards(self):
+        self.write_rules()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.assertIn("project-rules for proj: off", self.cli("config", "project-rules", "-p", "proj").stdout)
+        self.assertIn("project rules: off", self.cli("doctor", self.proj, check=False).stdout)
+        self.assertIn("project-rules for proj: on", self.cli("config", "project-rules", "on", "-p", "proj").stdout)
+        doctor = self.cli("doctor", self.proj, check=False).stdout
+        self.assertIn("project rules: on for proj", doctor)
+        self.assertIn("settings.json", doctor)
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--cards", "auto", "--", "fix src/Order.cs")
+        call = self.calls()[-1]
+        argv = call["argv"]
+        self.assertNotIn("--safe-mode", argv)
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "project")
+        for flag in ("--disable-slash-commands", "--tools", "--permission-mode"):
+            self.assertIn(flag, argv)
+        self.assertEqual(os.path.realpath(call["cwd"]), os.path.realpath(self.proj))
+        self.assertEqual(call["automem"], "1")
+        self.assertFalse([c for c in self.ledger()[-1]["cards"] if c.startswith("rule-")])
+        self.assertNotIn("Keep commits small", call["append"])
+        self.assertNotIn("Monorepo for Acme", call["append"])  # the root CLAUDE.md loads natively
+        self.cli("run", "--resume", self.ledger()[-1]["id"], "more")
+        self.assertEqual(self.calls()[-1]["argv"][self.calls()[-1]["argv"].index("--setting-sources") + 1], "project")
+        # a role run keeps the isolation
+        self.cli("handover", "Plan", "-p", "proj", "--task-file", "-", input="x", FAKE_ANSWER="## A")
+        self.assertIn("--safe-mode", self.calls()[-1]["argv"])
+        self.cli("config", "project-rules", "off", "-p", "proj")
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--cards", "auto", "--", "fix src/Order.cs")
+        self.assertIn("--safe-mode", self.calls()[-1]["argv"])
+
     def test_handover_writes_a_markdown_file_with_header_from_a_read_only_worker(self):
         self.cli("learn", self.proj, "--name", "proj")
         out = self.cli("handover", "Weekly plan", "-p", "proj", "--task-file", "-", input="open questions",

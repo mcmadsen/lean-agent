@@ -393,6 +393,97 @@ def parse_skill(path):
     return meta.get("name") or os.path.basename(d), meta.get("description", ""), body.strip()
 
 
+def parse_rule(text):
+    """(globs, description, body) of a .claude/rules file; `paths:` is a list, a quoted string or a comma list."""
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", text, re.S)
+    if not m:
+        return [], "", text
+    globs, desc, key = [], "", None
+    for line in m.group(1).splitlines():
+        item = re.match(r"^\s+-\s*(.*)$", line)
+        if item and key == "paths":
+            globs.append(item.group(1).strip().strip("\"'"))
+            continue
+        k, _, v = line.partition(":")
+        key, v = k.strip(), v.strip().strip("\"'")
+        if key == "paths" and v:
+            globs += [g.strip().strip("\"'") for g in v.strip("[]").split(",") if g.strip()]
+        elif key == "description":
+            desc = v
+    return [g for g in globs if g], desc, m.group(2)
+
+
+def glob_match(pattern, path):
+    """Path glob: ** crosses folders, * and ? stay in one, {a,b} alternates; a pattern without / matches any folder."""
+    if "/" not in pattern:
+        pattern = "**/" + pattern
+    out, i = "", 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif pattern.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif pattern[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif pattern[i] == "?":
+            out, i = out + "[^/]", i + 1
+        elif pattern[i] == "{":
+            j = pattern.find("}", i)
+            if j < 0:
+                out, i = out + re.escape("{"), i + 1
+            else:
+                out, i = out + "(?:" + "|".join(re.escape(x) for x in pattern[i + 1:j].split(",")) + ")", j + 1
+        else:
+            out, i = out + re.escape(pattern[i]), i + 1
+    return re.fullmatch(out, path.lstrip("./")) is not None
+
+
+def task_paths(task):
+    return [t.strip("`'\"(),;:") for t in re.findall(r"[\w@.+-]+(?:/[\w@.+-]+)*\.\w+|[\w@.+-]+(?:/[\w@.+-]+)+", task)]
+
+
+def changed_files(project):
+    out = []
+    for args in (("diff", "--name-only", "HEAD"), ("ls-files", "--others", "--exclude-standard")):
+        out += (git(project, *args) or "").splitlines()
+    return out
+
+
+def is_rule_card(c):
+    """Cards of the repo's CLAUDE.md / .claude/rules, which Claude Code would load itself with project-rules on."""
+    return c["kind"] == "rule" or (c["kind"] == "claude-md" and os.path.dirname(c.get("source", "")) == "")
+
+
+def rule_cards_for(cards, task, files, changed, budget, have):
+    """Rule cards to add: the root CLAUDE.md's opening section and rules without `paths:` (always candidates), and rules whose
+    `paths:` match a path in the task, `files` or the changed files. Within `budget` tokens."""
+    seen = list(files) + task_paths(task) + list(changed)
+    chosen, intro = [], True
+    for c in cards:
+        if c.get("archived") or c["id"] in have or not is_rule_card(c):
+            continue
+        if c["kind"] == "claude-md":  # only the root file's opening section is always sent; the rest is picked by relevance
+            if not intro:
+                continue
+            intro = False
+        globs = c.get("globs") or []
+        if globs:
+            if any(glob_match(g, f) for g in globs for f in seen):
+                chosen.append((1, c))
+        else:
+            chosen.append((0, c))
+    out = []
+    for _, c in sorted(chosen, key=lambda x: x[0]):
+        if c["tokens"] <= budget:
+            out.append(c)
+            budget -= c["tokens"]
+    return out
+
+
+def project_rules_on(slug):
+    return projects().get(slug, {}).get("project_rules") == "on"
+
+
 def learn(path, include_user_skills=False, quiet=False, name=None, rules=None):
     path = os.path.abspath(os.path.expanduser(path))
     if not os.path.isdir(path):
@@ -407,13 +498,14 @@ def learn(path, include_user_skills=False, quiet=False, name=None, rules=None):
 
     fresh, ids = [], set()
 
-    def add(kind, title, source, text, base=None):
+    def add(kind, title, source, text, base=None, **extra):
         base = base or slugify(title)
         cid, n = base, 2
         while cid in ids:
             cid, n = f"{base}-{n}", n + 1
         ids.add(cid)
-        fresh.append({"id": cid, "kind": kind, "title": title, "source": source, "text": text})
+        fresh.append({"id": cid, "kind": kind, "title": title, "source": source, "text": text,
+                      **{k: v for k, v in extra.items() if v}})
 
     scope_owner = {}  # id scope -> folder, so two folders never share a prefix
     for kind, f in find_memory_files(path):
@@ -430,14 +522,18 @@ def learn(path, include_user_skills=False, quiet=False, name=None, rules=None):
                 scope, ss = scope_of(d, n)
             if ss:
                 scope_owner[ss] = d
-        for i, (head, body) in enumerate(split_sections(BLOCK_RE.sub("\n", read_text(f)))):
+        text, extra = BLOCK_RE.sub("\n", read_text(f)), {}
+        if kind == "rule":
+            globs, desc, text = parse_rule(text)
+            extra = {"globs": globs, "description": desc}
+        for i, (head, body) in enumerate(split_sections(text)):
             title = f"{scope}: {head}" if scope else head
             hs = slugify(head, 28)
             if ss and i == 0 and (body.startswith(f"# {head}\n") or head == "overview"):
                 base = ss  # a nested file's intro section is named after its folder
             else:
                 base = hs if not ss or hs.startswith(ss) else f"{ss}-{hs}"
-            add(kind, title, rel, body, base=base)
+            add(kind, title, rel, body, base=base, **extra)
 
     skill_dirs = [os.path.join(path, ".claude", "skills")]
     if include_user_skills:
@@ -736,7 +832,7 @@ def suggest(slug, task, max_tokens, ttype=None, explain=False, strict=False, lim
     budget = max_tokens - sum(c["tokens"] for c in picked)
     scored, closest = [], None
     for c in cards:
-        if is_core(c, ttype):
+        if is_core(c, ttype) or c["kind"] == "rule":
             continue
         title_hits = tw & words(c["title"])
         body_hits = (tw & words(c["text"])) - title_hits
@@ -1408,6 +1504,7 @@ def _cmd_run(a):
     wt = None
     if prev:
         slug, project = prev["project"], prev["project_path"]
+        native_rules = bool(prev.get("native_rules"))
         cards, workdir, run_id = [], prev["workdir"], prev["id"]
         tools = prev.get("tools", WORKER_TOOLS)
         read_only = prev.get("read_only", False)
@@ -1448,6 +1545,13 @@ def _cmd_run(a):
             ttype = getattr(a, "ttype", None) or task_type(task, a.read_only, bool(a.chrome))
             cards = [c for c in lib.values() if is_core(c, ttype) and not c.get("archived")]
             cards += [lib[x] for x in wanted if lib[x] not in cards]
+        native_rules = bool(not getattr(a, "role", None) and project_rules_on(slug))
+        if native_rules:  # Claude Code loads CLAUDE.md and the rules itself
+            cards = [c for c in cards if not is_rule_card(c)]
+        elif not getattr(a, "role", None) and getattr(a, "card_list", None) is None and a.cards != "none":
+            cards = cards + rule_cards_for(list(lib.values()), task, getattr(a, "files", None) or [],
+                                           changed_files(project), a.max_context - sum(c["tokens"] for c in cards),
+                                           {c["id"] for c in cards})
         run_id = datetime.datetime.now().strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
         workdir = home("work", run_id)
         os.makedirs(workdir, exist_ok=True)
@@ -1531,7 +1635,7 @@ def _cmd_run(a):
         if mcp_servers:
             lean_mcp.write_config(mcp_path, mcp_servers)
         # --safe-mode disables MCP and Chrome; this keeps the same isolation but admits exactly these servers
-        isolation = ["--setting-sources", ""]
+        isolation = ["--setting-sources", "project" if native_rules else ""]
         if chrome_profile != "loose":
             isolation += ["--strict-mcp-config"]
         if mcp_servers:
@@ -1540,6 +1644,8 @@ def _cmd_run(a):
             isolation += ["--chrome"]
         if mcp_disallowed or chrome_disallowed:
             isolation += ["--disallowedTools", ",".join(mcp_disallowed + chrome_disallowed)]
+    elif native_rules:  # the repo's CLAUDE.md, rules, and .claude/settings.json (hooks, permissions, plugins) load
+        isolation = ["--setting-sources", "project"]
     else:
         isolation = ["--safe-mode"]
     lean_json = os.path.join(PLUGIN_ROOT, "bin", "lean-json")
@@ -1638,7 +1744,8 @@ def _cmd_run(a):
     try:
         with wt_lock:
             raw, err, reads = stream_worker(cmd, today_line() + "\n\n" + task, workdir, env,
-                                            env_num("LEAN_AGENT_RUN_TIMEOUT", 1800), max_reads, note_session)
+                                            env_num("LEAN_AGENT_RUN_TIMEOUT", 1800), max_reads, note_session,
+                                            cwd=project if native_rules else None)
     except FileNotFoundError:
         die(f"'{claude}' not found on PATH")
     finally:
@@ -1740,6 +1847,7 @@ def _cmd_run(a):
     entry = {
         "id": run_id, "ts": now_iso(), "project": slug, "project_path": project, "workdir": workdir,
         "model": model, "why": a.why or (prev and "resume"), "cards": sorted(sent), "tools": tools,
+        "native_rules": native_rules or None,
         "status": status, "turns": out.get("num_turns"), "seconds": seconds,
         "usage": {k: u.get(k, 0) for k in usage.FIELDS}, "weighted": weighted,
         "units": int(usage.units(u, model)),
@@ -1900,7 +2008,7 @@ def note_progress(workdir, turn, msg, u):
         pass
 
 
-def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session):
+def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd=None):
     """Run a worker and read its stream-json as it comes, so a run that keeps re-reading a large context
     can be stopped (after `max_reads` context tokens summed over its calls; 0 = never) and resumed later.
     `on_session(id)` is called once, when the first event carries the session id.
@@ -1911,7 +2019,7 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session):
     seen, lines = set(), []
     with tempfile.TemporaryFile("w+") as errf:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True,
-                                cwd=workdir, env=env)
+                                cwd=cwd or workdir, env=env)
         timed_out = []
 
         def on_timer():
@@ -6149,6 +6257,14 @@ def cmd_doctor(a):
                "keep files other than lean-agent's guide out: lean-agent doctor --fix (refreshes the excludes)")
     report(is_trusted(h), "orchestrator home is trusted", "lean-agent trust")
     report(True, f"strict orchestrator: {'on' if strict_on() else 'off'} (lean-agent config strict on|off)")
+    pslug = next((sl for sl, v in projects().items() if v["path"] == path), None)
+    if pslug:
+        if project_rules_on(pslug):
+            report(None, f"project rules: on for {pslug} (workers load CLAUDE.md and .claude/rules natively, and the "
+                         "repo's .claude/settings.json: hooks, permissions, plugins; role runs stay isolated)",
+                   f"lean-agent config project-rules off --project {pslug}")
+        else:
+            report(True, f"project rules: off for {pslug}, rule cards instead (lean-agent config project-rules on)")
     report(True, f"auto clear: {clear_at_text()} (lean-agent config clear-at off|auto|N)")
 
     slug = default_project(path)
@@ -7218,6 +7334,21 @@ def clear_at_text():
 
 
 def cmd_config(a):
+    if a.name == "project-rules":
+        slug, _ = resolve_project(a.project or os.getcwd())
+        if a.value not in (None, "on", "off"):
+            die("project-rules takes on or off")
+        if a.value:
+            projs = projects()
+            projs[slug] = {**projs[slug], "project_rules": a.value}
+            save_json(home("projects.json"), projs)
+        on = project_rules_on(slug)
+        print(f"project-rules for {slug}: {'on' if on else 'off'} · "
+              + ("workers run in the project (or worktree) with --setting-sources project: Claude Code loads its "
+                 "CLAUDE.md and .claude/rules itself, and the repo's .claude/settings.json (hooks, permissions, plugins) "
+                 "applies too; rule cards are skipped" if on else
+                 "the repo's CLAUDE.md and rules reach workers as cards (rule cards, picked by their paths: globs)"))
+        return 0
     if a.name == "clear-at":
         if a.value is not None:
             if not (a.value.isdigit() or a.value.lower() in ("auto", "off")):
@@ -8504,7 +8635,8 @@ def build_parser():
 
     s = sub.add_parser("config", help="switches: strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`)")
-    s.add_argument("name", choices=["strict", "clear-at"])
+    s.add_argument("name", choices=["strict", "clear-at", "project-rules"])
+    s.add_argument("--project", "-p", help="project-rules: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="on|off, or off|auto|a number for clear-at")
     s.set_defaults(fn=cmd_config)
 
@@ -8569,6 +8701,7 @@ def build_parser():
     s.add_argument("--cards", help="comma-separated card ids, or 'auto'")
     s.add_argument("--max-context", type=int, default=2000, help="token cap for --cards auto")
     s.add_argument("--max-cards", type=int, default=4, help="--cards auto: at most this many matching cards")
+    s.add_argument("--files", nargs="+", metavar="PATH", help="files the worker is pointed at: rule cards whose paths: globs match come along")
     s.add_argument("--read-only", action="store_true", help=f"tools: {READONLY_TOOLS}")
     s.add_argument("--ref", metavar="REF", help="the branch/commit to look at when it isn't checked out (read with git show)")
     s.add_argument("--again", action="store_true", help="run even if the same task is running or just finished")

@@ -73,6 +73,8 @@ pick context and model, delegate with `lean-agent run`, check results, report br
    (AskUserQuestion) before any worker starts. "ask the user first: yes" or a listed risk or conflict: ask too,
    unless the user's own request already answers it (`user already asked: proceed`).
 1. Project: `lean-agent projects`; new repo: `lean-agent learn <path> --name <name>`.
+   The repo's CLAUDE.md and `.claude/rules` reach workers as rule cards (a rule with `paths:` globs only when the task,
+   `--files` or the changed files match); `lean-agent config project-rules on` loads them natively instead.
 2. Context: `lean-agent suggest <project> "<task>"` (also shows how similar tasks went on each model), then
    `--cards a,b` for only the cards needed, or `--cards auto`; none (or `--cards none`) = no extra cards. Core cards
    are always sent; `lean-agent cards <project> test` searches them.
