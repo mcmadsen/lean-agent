@@ -3345,7 +3345,7 @@ class CliTest(unittest.TestCase):
         tr1 = ss.info("t1")["transcript"]
         self.wait_for(lambda: len(self.read_jsonl(tr1)) >= 2, "the first message")
         first = self.read_jsonl(tr1)[0]["message"]["content"]
-        self.assertIn("thread t1: Fix the parser please", first)
+        self.assertTrue(first.startswith('Thread t1 "Fix the parser please"'), first)
         self.assertTrue(first.endswith("first job"))
         self.assertEqual(self.read_jsonl(ss.info("t2")["transcript"]), [])
         # send reaches the right pty
