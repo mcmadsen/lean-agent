@@ -7933,15 +7933,7 @@ def thread_prompt(a):
     return (sys.stdin.read() if a.prompt_file == "-" else read_text(a.prompt_file)).strip() or None
 
 
-def thread_brief(tid, title):
-    """The short brief a thread's session starts with: what the thread is and the notes recorded under it."""
-    import compact_hook
-    lines = [f"You are the orchestrator of thread {tid}: {title}. It is your own Remote Control session; what you record "
-             f"is filed under {tid} (see `lean-agent thread show {tid}`)."]
-    notes = [n for n in compact_hook.load_notes() if n.get("thread") == tid][-3:]
-    if notes:
-        lines.append("Notes so far: " + " | ".join(" ".join(str(n.get("text") or "").split())[:200] for n in notes))
-    return "\n".join(lines)
+THREAD_BRIEF_CAP = 2000  # characters of brief a thread session starts with
 
 
 def thread_session_tid(raw):
@@ -7962,7 +7954,8 @@ def start_thread_session(tid, t, prompt=None):
     lean_threads.set_session(tid, session_on=True)
     msg = None
     if prompt:
-        msg = thread_brief(tid, t.get("title") or tid) + "\n\n" + prompt
+        import compact_hook
+        msg = compact_hook.thread_brief(tid, THREAD_BRIEF_CAP) + "\n" + lean_threads.BRIEF_END + "\n\n" + prompt
     r = service_session.sessions_request("start", thread=tid, prompt=msg)
     if not r.get("ok"):
         die(f"could not start the session of {tid}: {r.get('error') or 'not started'}")
