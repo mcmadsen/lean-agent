@@ -1204,14 +1204,7 @@ def duplicate_launch_guard(a, model, task):
     marker = home("running", key + ".json")
     if not getattr(a, "again", False):
         m = load_json(marker, {})
-        alive = False
-        if m.get("pid"):
-            try:
-                os.kill(m["pid"], 0)
-                alive = True
-            except OSError:
-                alive = False
-        if alive:
+        if pid_alive(m.get("pid")):
             die(f"the same task is already running (started {m.get('started', '?')}, pid {m['pid']}); wait for it, "
                 "or pass --again to start another", 2)
         recent = next((r for r in reversed(ledger()) if r.get("launch_key") == key), None)
@@ -1284,7 +1277,7 @@ def detach_run(workdir, run_id):
     so it survives whatever kills this command: the orchestrator's /clear, its shell tool ending, a closed terminal.
     Returns None in that process (it carries on), else the exit code once it is done, after this process has relayed
     its output. Ctrl-C here is passed on to it, which stops the run as before."""
-    if (SUPERVISOR or not CLI_ENTRY or not hasattr(os, "fork") or os.environ.get("LEAN_AGENT_NO_DETACH") == "1"):
+    if SUPERVISOR or not CLI_ENTRY or not hasattr(os, "fork") or os.environ.get("LEAN_AGENT_NO_DETACH") == "1":
         return None
     os.makedirs(workdir, exist_ok=True)
     paths = [os.path.join(workdir, f"supervisor.{n}") for n in ("out", "err")]
@@ -1337,11 +1330,11 @@ def detach_run(workdir, run_id):
             time.sleep(0.1)
         except KeyboardInterrupt:
             interrupted = interrupted or time.time()
-            signal_group(pid, signal.SIGINT)
+            signal_group(pid, signal.SIGINT, wait=2)
         except ChildProcessError:
             status = 0
         if interrupted and time.time() - interrupted > 60:
-            signal_group(pid, signal.SIGKILL)
+            signal_group(pid, signal.SIGKILL, wait=2)
     relay()
     entry = next((r for r in reversed(ledger()) if r["id"] == run_id), None)
     if entry:
@@ -3348,9 +3341,7 @@ def workers_on(slug, path, head):
     out = []
     for f in glob.glob(home("running", "*.json")):
         m = load_json(f, {})
-        try:
-            os.kill(int(m.get("pid", 0)), 0)
-        except (OSError, ValueError, TypeError):
+        if not pid_alive(m.get("pid")):
             continue
         if m.get("project") == slug and m.get("role") != "reviewer" and br and bare_ref(m.get("branch")) == br:
             out.append(m.get("run"))

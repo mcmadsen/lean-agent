@@ -495,9 +495,7 @@ def _running_by_thread(data):
     home = lean_home()
     for f in glob.glob(os.path.join(home, "running", "*.json")):
         m = lean_common.read_json(f, {})
-        try:
-            os.kill(int(m.get("pid")), 0)
-        except (OSError, ValueError, TypeError):
+        if not lean_common.pid_alive(m.get("pid")):
             continue
         if m.get("thread"):
             tid = resolve(m["thread"], data["aliases"])
