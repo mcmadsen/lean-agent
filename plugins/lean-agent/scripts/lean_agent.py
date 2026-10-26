@@ -8118,16 +8118,21 @@ def cmd_remember(a):
 
 ADVISE_RULE = """\
 You are the advisor: a memory-light orchestrator asks you what to do with a new user request before it acts. You change
-nothing. Read what applies: run exactly `{lean} <memory list|cards|todo list|brief>` (-p <project> for memory/cards) for
-the memories, cards, open todos, hand-off notes and the latest checkpoint; the runs and the latest review of the project
-are in the task. Look for earlier decisions on the same topic in the memories and notes.
+nothing and start nothing: never run `{lean} run` or any worker. The project's card ids and titles, the runs, the latest
+review and the user's recent requests in this thread are in the task. For the rest run exactly
+`{lean} <memory list|todo list|brief>` (memory list takes `-p <project>`; no other flags). Look for earlier decisions on the
+same topic in the memories and notes.
+If the user's recent requests already explicitly asked for the action (e.g. "create the work item and the PR"), do not
+advise asking again: put `user already asked: proceed` in `ask the user first:`.
 Answer with at most 15 lines, the first one exactly `ADVICE`, then one short line each:
+`understood:` the request in one line, in your own words
+`ambiguous:` only when the request has two plausible readings: `<reading A> | <reading B>` (leave the line out otherwise)
 `known:` facts and earlier decisions that apply (or none)
 `project:` the project slug and the card ids (--cards) that fit
 `suggested:` ONE exact command: `{lean} run <project> --cards auto|<ids> -m <model> --effort <low|medium|high> [--todo N|new] [--worktree <name>] --why "..." -- "<task>"`,
   or `{lean} remember "<text>"`, or `answer from state` when nothing needs doing
 `risks:` open review gaps on that branch, a decision that contradicts the request, a run still working on it (or none)
-`ask the user first:` `yes: <the question>` or `no`
+`ask the user first:` `yes: <the question>`, `user already asked: proceed`, or `no`; an ambiguous request is always `yes`
 Pick the cheapest model that fits (haiku for reading, sonnet for edits, opus only for hard design). No other text.
 """
 ADVICE_KEEP = 50
@@ -8171,6 +8176,43 @@ def advise_state(slug, path, thread_arg):
     return "\n".join(lines) + (f"\nThread #{todo} is the work-queue item the request belongs to." if todo else "")
 
 
+def advise_requests(thread_arg, limit=5, chars=200):
+    """The user's last requests in the thread (thread registry), oldest first, trimmed, as text for the advisor."""
+    tag = lean_threads.resolve_tag(thread_arg)
+    t = (lean_threads.load()["threads"].get(tag) or {}) if tag else {}
+    reqs = [" ".join(str(r.get("text") or "").split())[:chars] for r in (t.get("requests") or [])[-limit:]]
+    reqs = [r for r in reqs if r]
+    return ("The user's recent requests in this thread (oldest first):\n" + "\n".join(f"- {r}" for r in reqs)) if reqs else ""
+
+
+def advise_cards(slug, limit=40):
+    """The project's cards as `id: title` lines for the advisor (so it needs no command to see them)."""
+    cards = [c for c in load_cards(slug) if not c.get("archived")][:limit]
+    return ("Cards of the project (id: title):\n" + "\n".join(f"- {c['id']}: {c['title'][:70]}" for c in cards)) if cards \
+        else "Cards of the project: none"
+
+
+def shape_advice(lines, limit=15):
+    """The advisor's ADVICE block as printed: `Understood as:` first, `Ambiguous:` second when it found two readings
+    (then the user is asked before a worker starts), then the rest of the block."""
+    understood, ambiguous, rest = "", "", []
+    for l in lines:
+        low = l.strip().lower()
+        if low.startswith("understood:"):
+            understood = l.strip()[len("understood:"):].strip()
+        elif low.startswith("ambiguous:"):
+            ambiguous = l.strip()[len("ambiguous:"):].strip()
+        else:
+            rest.append(l.rstrip())
+    if ambiguous:
+        ask = f"ask the user first: yes: which reading? {ambiguous}"[:300]
+        rest = [ask if l.strip().lower().startswith("ask the user first") else l for l in rest]
+        if not any(l.startswith("ask the user first") for l in rest):
+            rest.append(ask)
+    head = [f"Understood as: {understood or '(not stated)'}"] + ([f"Ambiguous: {ambiguous}"] if ambiguous else [])
+    return "\n".join((head + rest)[:limit])
+
+
 def cmd_advise(a):
     """Ask a cheap read-only worker what to do with a new request; prints (and stores) its short ADVICE block."""
     what = sys.stdin.read().strip() if a.task_file == "-" else read_text(a.task_file).strip() if a.task_file \
@@ -8182,13 +8224,14 @@ def cmd_advise(a):
     thread = thread_key(a.thread) or "main"
     lean = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
     task = (f"The user's new request (project {slug}" + (f", thread {a.thread}" if a.thread else "") + "):\n" + what
-            + "\n\nProjects: " + ", ".join(sorted(projs)) + "\n" + advise_state(slug, path, a.thread))
+            + "\n\nProjects: " + ", ".join(sorted(projs)) + "\n" + advise_state(slug, path, a.thread)
+            + "\n" + advise_cards(slug) + ("\n" + advise_requests(a.thread)).rstrip())
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model="haiku",
                             why="advise on a new request", cards="auto", card_list=None, project=slug,
                             read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=15,
                             max_usd=0.3, max_context=3000, max_cards=5, ttype="read", role="advisor",
                             effort="low", role_rule=ADVISE_RULE.format(lean=lean), todo=None,
-                            internal_cmd=[f"{lean} {c}" for c in ("memory list", "cards", "todo list", "brief")])
+                            internal_cmd=[f"{lean} {c}" for c in ("memory list", "todo list", "brief")])
     rc, out, run = run_role(ns, quiet=True)
     reply = parse_feedback(run_result_text(run))[0] if run else ""
     lines = reply.strip().splitlines()
@@ -8196,7 +8239,8 @@ def cmd_advise(a):
     if start is None:
         print(out, file=sys.stderr)
         die("the advisor didn't answer with an ADVICE block; see its reply above", rc or 1)
-    text = "\n".join(l.rstrip() for l in lines[start:start + 15] if l.strip())
+    block = [l for l in lines[start:start + 16] if l.strip()]
+    text = shape_advice(block)
     store_advice({"ts": now_iso(), "thread": thread, "project": slug, "request": what[:300], "text": text})
     print(text)
     return 0
