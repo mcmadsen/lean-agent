@@ -765,6 +765,8 @@ class BudgetTest(Base):
         again = ctx("what about t2 now?")  # explicit wins over words; its session is not running: send starts it
         self.assertTrue(again.startswith('Belongs to t2 "Fix export retry loop in billing service" \u2014 hand it over'), again)
         self.assertTrue(again.endswith("lean-agent thread send t2 --prompt-file -"), again)
+        self.assertTrue(ctx("#7 is failing").startswith('Belongs to #7'))  # an explicit #N names its own thread
+        self.assertTrue(ctx("yes please").startswith('Belongs to #7'))  # no content words: the last topic
         self.assertEqual(ctx("what's the status?"), "Status question \u2014 answer it here: lean-agent now")
         self.assertEqual(ctx("Write a long migration plan for the mobile client's offline sync engine"), new_topic)
         self.assertEqual(ctx("/clear"), "")  # a slash command is not a request
@@ -773,8 +775,12 @@ class BudgetTest(Base):
         with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
             import lean_threads
             reg = lean_threads.load()["threads"]
-            self.assertEqual(sorted(reg), ["t1", "t2"])  # a new topic creates no thread: `thread new` does
+            self.assertEqual(sorted(reg), ["#7", "t1", "t2"])  # a new topic creates no thread (`thread new` does); naming #7 does
             self.assertEqual(len(reg["t1"]["requests"]), 1)
+            self.assertEqual(lean_threads.current("s1"), "#7")
+            self.assertEqual(lean_threads.resolve_tag(), "#7")
+            self.assertEqual(lean_threads.resolve_tag("none"), None)
+            self.assertEqual(lean_threads.resolve_tag("T2"), "t2")
             with lean_threads._locked() as data:
                 data["threads"]["t1"]["closed"] = "2026-01-01T00:00:00"
             self.assertEqual(lean_threads.score_threads("quarterly report chart docs"), [])  # closed threads are ignored
@@ -804,6 +810,20 @@ class BudgetTest(Base):
             self.assertEqual(len(reg["t1"].get("requests", [])), 0)
             self.assertEqual(len(reg["t2"]["requests"]), 3)  # the notification is not a request
             self.assertEqual(lean_threads.current("s1"), "t2")
+
+    def test_a_handed_over_prompt_is_stored_once_without_the_brief(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        self.make_threads("Publish quarterly report through docs worker", "Fix export retry loop in billing service")
+        self.prompt_ctx("the quarterly report needs a chart in the docs")  # the front desk stores it under t1
+        sys.path.insert(0, ROOT)
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
+            import lean_threads
+            brief = "Thread t1 \"Publish\"\nNotes: a | b\n" + lean_threads.BRIEF_END + "\n\n"
+            env = {"LEAN_AGENT_SESSION_ROLE": "thread", "LEAN_AGENT_THREAD": "t1"}
+            self.prompt_ctx(brief + "the quarterly report needs a chart in the docs", **env)  # handed over: not stored again
+            self.prompt_ctx(brief + "also add the totals row", **env)  # new: stored without the brief
+            texts = [r["text"] for r in lean_threads.load()["threads"]["t1"]["requests"]]
+        self.assertEqual(texts, ["the quarterly report needs a chart in the docs", "also add the totals row"])
 
     def test_thread_brief_after_a_clear_covers_only_that_thread(self):
         home = self.env["LEAN_AGENT_HOME"]
