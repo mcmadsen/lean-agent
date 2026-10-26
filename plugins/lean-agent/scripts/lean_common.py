@@ -4,6 +4,7 @@ import datetime
 import glob
 import json
 import os
+import re
 import time
 import uuid
 
@@ -263,3 +264,32 @@ def plugin_version():
             return json.load(fh).get("version") or "?"
     except (OSError, ValueError, AttributeError):
         return "?"
+
+
+def glob_match(pattern, path):
+    """Path glob: ** crosses folders, * and ? stay in one, {a,b} alternates; a pattern without / matches any folder.
+    Shared by the rules (`paths:`) and anything else that needs `**` globs: fnmatch alone lets `*` cross folders and has
+    neither `**` nor {a,b}, so "src/*.cs" would match "src/a/b.cs"."""
+    while path.startswith("./"):  # only a leading "./"; ".claude/..." and "../" keep their dots
+        path = path[2:]
+    if "/" not in pattern:
+        pattern = "**/" + pattern
+    out, i = "", 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif pattern.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif pattern[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif pattern[i] == "?":
+            out, i = out + "[^/]", i + 1
+        elif pattern[i] == "{":
+            j = pattern.find("}", i)
+            if j < 0:
+                out, i = out + re.escape("{"), i + 1
+            else:
+                out, i = out + "(?:" + "|".join(re.escape(x) for x in pattern[i + 1:j].split(",")) + ")", j + 1
+        else:
+            out, i = out + re.escape(pattern[i]), i + 1
+    return re.fullmatch(out, path) is not None

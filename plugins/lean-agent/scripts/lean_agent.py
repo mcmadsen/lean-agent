@@ -40,7 +40,7 @@ import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
 import service_session  # noqa: E402
 import lean_common
-from lean_common import compact_overrides, compaction_label, compaction_point, pid_alive, signal_group, lost_runs, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
+from lean_common import glob_match, compact_overrides, compaction_label, compaction_point, pid_alive, signal_group, lost_runs, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -412,31 +412,6 @@ def parse_rule(text):
         elif key == "description":
             desc = v
     return [g for g in globs if g], desc, m.group(2)
-
-
-def glob_match(pattern, path):
-    """Path glob: ** crosses folders, * and ? stay in one, {a,b} alternates; a pattern without / matches any folder."""
-    if "/" not in pattern:
-        pattern = "**/" + pattern
-    out, i = "", 0
-    while i < len(pattern):
-        if pattern.startswith("**/", i):
-            out, i = out + "(?:.*/)?", i + 3
-        elif pattern.startswith("**", i):
-            out, i = out + ".*", i + 2
-        elif pattern[i] == "*":
-            out, i = out + "[^/]*", i + 1
-        elif pattern[i] == "?":
-            out, i = out + "[^/]", i + 1
-        elif pattern[i] == "{":
-            j = pattern.find("}", i)
-            if j < 0:
-                out, i = out + re.escape("{"), i + 1
-            else:
-                out, i = out + "(?:" + "|".join(re.escape(x) for x in pattern[i + 1:j].split(",")) + ")", j + 1
-        else:
-            out, i = out + re.escape(pattern[i]), i + 1
-    return re.fullmatch(out, path.lstrip("./")) is not None
 
 
 def task_paths(task):

@@ -6228,6 +6228,27 @@ class CliTest(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(h, ".claude", "settings.json")))
 
 
+class RuleGlobTest(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_common
+        import lean_agent
+        self.common, self.agent = lean_common, lean_agent
+
+    def test_glob_match_keeps_leading_dots_and_strips_only_dot_slash(self):
+        m = self.common.glob_match
+        self.assertTrue(m(".claude/rules/*.md", ".claude/rules/x.md"))
+        self.assertTrue(m(".claude/rules/*.md", "./.claude/rules/x.md"))
+        self.assertTrue(m(".claude/rules/*.md", "././.claude/rules/x.md"))
+        self.assertFalse(m("claude/rules/*.md", ".claude/rules/x.md"))
+        self.assertFalse(m("a/*.md", "../a/x.md"))
+        self.assertTrue(m("**/appsettings*.json", "src/Web/appsettings.Development.json"))
+        self.assertTrue(m("**/appsettings*.json", "appsettings.json"))
+        self.assertTrue(m("src/**/*.cs", "src/a/b.cs"))
+        self.assertFalse(m("src/*.cs", "src/a/b.cs"))
+        self.assertTrue(m("*.{ts,tsx}", "web/x.tsx"))
+
+
 if __name__ == "__main__":
     import gha_runner
     gha_runner.main(__file__)
