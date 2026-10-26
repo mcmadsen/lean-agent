@@ -5806,6 +5806,22 @@ class CliTest(unittest.TestCase):
                      "--", "t", check=False)
         self.assertIn("'nope' is unknown", p.stderr)
 
+    def test_worktree_refuses_a_branch_name_one_typo_from_an_existing_branch(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("checkout", "-q", "main")
+        g("branch", "develop", "feature")
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "develop2", "--", "t", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("did you mean develop? add --worktree-base <ref> to create develop2", p.stderr)
+        self.assertFalse(subprocess.run(["git", "-C", self.proj, "rev-parse", "--verify", "-q", "develop2"],
+                                        capture_output=True).returncode == 0)
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "develop2",
+                       "--worktree-base", "develop", "--", "t").stdout
+        self.assertIn("worktree: created develop2 from develop", out)
+
     def test_push_credit_check_looks_only_at_the_pushed_commits(self):
         g = self.git_project()
         ident = ["-c", "user.name=t", "-c", "user.email=t@t"]

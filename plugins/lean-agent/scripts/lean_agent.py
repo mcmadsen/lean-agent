@@ -4237,6 +4237,25 @@ def worktree_base(slug, repo, flag=None):
     return flag or (projects().get(slug) or {}).get("base") or default_base(repo)
 
 
+def edit_distance(a, b):
+    """Levenshtein distance between two strings."""
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def branch_names(repo):
+    """Local and remote branch names (the remote ones without `origin/`), without duplicates."""
+    out = git(repo, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes") or ""
+    names = [r[len("refs/heads/"):] if r.startswith("refs/heads/") else r.split("/", 3)[-1]
+             for r in out.split() if not r.endswith("/HEAD")]
+    return list(dict.fromkeys(names))
+
+
 def ensure_worktree(slug, repo, ref, reset=False, base=None):
     """A shared worktree of `ref` for this project: reuse it (moved to the ref's tip when clean) or create it.
     A branch that exists neither locally nor on the remote is created from the base."""
@@ -4254,6 +4273,10 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None):
         new_from = worktree_base(slug, repo, base)
         if ref.startswith("origin/"):
             ref = ref[len("origin/"):]  # a branch to create: it gets a local name
+        if not base:  # no explicit base: a name one or two edits from an existing branch is more likely a typo than a new branch
+            near = next((b for b in branch_names(repo) if b != ref and edit_distance(b, ref) <= 2), None)
+            if near:
+                die(f"no branch {ref!r} in {repo}; did you mean {near}? add --worktree-base <ref> to create {ref}")
         if new_from and new_from.startswith("origin/"):
             git(repo, "fetch", "-q", "origin")
         sha = new_from and git(repo, "rev-parse", "--verify", "--quiet", new_from + "^{commit}")
