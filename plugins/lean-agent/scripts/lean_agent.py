@@ -5826,7 +5826,7 @@ ORCHESTRATOR_DENY = [
     "CronList", "DesignSync", "ListAgents", "ListConnectors", "ListPlugins", "ListSkills", "ReadNotifications",
     "ReportFindings", "ScheduleWakeup", "ListMcpResources", "ListMcpResourcesTool", "ReadMcpResource",
     "ReadMcpResourceTool", "ReadMcpResourceDir", "ReadMcpResourceDirTool", "SearchMcpRegistry", "SearchPlugins", "SearchSkills", "SendMessage",
-    "SendUserFile", "ShowOnboardingRolePicker", "SuggestConnectors", "SuggestPluginInstall", "SuggestSkills",
+    "SendUserFile", "TaskStop", "KillShell", "ExitPlanMode", "Monitor", "PushNotification", "ShowOnboardingRolePicker", "SuggestConnectors", "SuggestPluginInstall", "SuggestSkills",
 ]
 PLUGIN_ID = "lean-agent@lean-agent"
 

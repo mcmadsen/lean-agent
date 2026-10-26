@@ -142,10 +142,15 @@ parent/child link, and records it as the todo's `--ref`.
 
 ### Several deliverables at once
 One thread per deliverable. Start each run with its deliverable's thread (`--thread tN` when it isn't the current
-one); a resumed run keeps its own. Background-task notifications attach themselves to the thread of the run they are
-about and never open a thread. A failed run's output ends with `run <id> failed: <reason>`; more:
-`lean-agent runs --show <id> --tail 20`, `lean-agent logs --run <id>`. `lean-agent now` shows every thread's running runs, finished runs nobody collected,
-open reviews and next todo.
+one); a resumed run keeps its own. Background-task notifications attach to the thread of the run they are about and
+never open a thread. A failed run's output ends with `run <id> failed: <reason>`.
+
+### Keep track only with lean-agent
+Never keep your own lists, plans or task notes in the conversation or in TodoWrite/Task*/Cron* (denied): they are lost
+at the next compaction. What are we doing: `lean-agent now`. A topic: `lean-agent thread show tN`. A run:
+`lean-agent runs --show <id> --tail 20` (`lean-agent logs --run <id>` for errors). Stop it: `lean-agent runs --stop <id>`.
+Remember something: `lean-agent remember "..."`. A todo: `lean-agent todo list|next|start|done`. Before a long break:
+`lean-agent checkpoint "..."`.
 
 ## Memory and cards
 lean-agent owns shared memory (Claude's auto memory is off). You never write it: anything to keep goes through
