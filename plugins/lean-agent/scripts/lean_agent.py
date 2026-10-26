@@ -1722,9 +1722,24 @@ def _cmd_run(a):
           f" · see it later with `lean-agent runs --show {run_id}`", file=sys.stderr, flush=True)
     seed_collected(home())  # runs recorded from here on can be told apart from a ledger older than collected.json
     running_key = launch_key or run_id  # every run is listed while it runs (the status line)
-    save_json(home("running", running_key + ".json"), {"pid": os.getpid(), "started": now_iso(), "run": run_id,
+    wt_name = (prev or {}).get("worktree") or (wt and wt["name"])
+    run_type = (prev or {}).get("type") or getattr(a, "ttype", None) or task_type(task, read_only, bool(chrome_spec))
+    fixed = {  # the ledger fields known at launch: the marker carries them so a stopped run is recorded like a finished one
+        "id": run_id, "project": slug, "project_path": project, "workdir": workdir,
+        "model": model, "why": a.why or (prev and "resume"), "cards": sorted(c["id"] for c in cards), "tools": tools,
+        "native_rules": native_rules or None, "session_id": prev["session_id"] if prev else None,
+        "resumed": bool(prev), "task": task[:300], "mcp": mcp_specs,
+        "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
+        "allow_cmd": allow_cmd, "todo": todo_id, "thread": thread_tag,
+        "role": role, "effort": effort, "worktree": wt_name, "review_meta": review_meta, "launch_key": launch_key,
+        "recipe": (getattr(a, "recipe", None) or (None, None))[0],
+        "recipe_step": (getattr(a, "recipe", None) or (None, None))[1],
+        "estimate_usd": (getattr(a, "estimate", None) or (None, None))[0],
+        "estimate_kind": (getattr(a, "estimate", None) or (None, None))[1],
+        "answer_lines": answer_lines, "start_head": git(project, "rev-parse", "HEAD")}
+    save_json(home("running", running_key + ".json"), {"fixed": fixed, "pid": os.getpid(), "started": now_iso(), "run": run_id,
                                                       "task": task[:2000], "model": model, "project": slug,
-                                                      "path": project, "start_head": git(project, "rev-parse", "HEAD"),
+                                                      "path": project, "start_head": fixed["start_head"],
                                                       "workdir": workdir, "todo": todo_id, "thread": thread_tag, "effort": effort, "detached": bool(SUPERVISOR),
                                                       "branch": (wt or {}).get("branch") if isinstance(wt, dict) else None,
                                                       "role": getattr(a, "role", None)
@@ -1732,7 +1747,6 @@ def _cmd_run(a):
     for line in mcp_cost_lines(mcp_specs, chrome_spec):
         print(line, flush=True)
 
-    wt_name = (prev or {}).get("worktree") or (wt and wt["name"])
     wt_lock = worktree_lock(slug, wt_name, read_only) if wt_name else contextlib.nullcontext()
     started = datetime.datetime.now()
     started_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
@@ -1811,7 +1825,6 @@ def _cmd_run(a):
     weighted = usage.weighted(u)
 
     # learning: card stats and missing context
-    run_type = (prev or {}).get("type") or getattr(a, "ttype", None) or task_type(task, read_only, bool(chrome_spec))
     used, unneeded = set(fb.get("used") or []), set(fb.get("unneeded") or [])
     sent = {c["id"] for c in cards}
     if sent or used or unneeded:
@@ -1845,28 +1858,19 @@ def _cmd_run(a):
         append_jsonl(home("library", slug, "missing.jsonl"),
                      {"ts": now_iso(), "run": run_id, "task": task[:160], "missing": missing_note})
 
-    entry = {
-        "id": run_id, "ts": now_iso(), "project": slug, "project_path": project, "workdir": workdir,
-        "model": model, "why": a.why or (prev and "resume"), "cards": sorted(sent), "tools": tools,
-        "native_rules": native_rules or None,
+    entry = dict(fixed, ts=now_iso(), **{
+        "cards": sorted(sent),
         "status": status, "turns": out.get("num_turns"), "seconds": seconds,
         "usage": {k: u.get(k, 0) for k in usage.FIELDS}, "weighted": weighted,
         "units": int(usage.units(u, model)),
         "cost_usd": out.get("total_cost_usd"), "session_id": out.get("session_id") or reads.get("session_id") or (prev and prev["session_id"]),
-        "resumed": bool(prev), "task": task[:300], "missing": missing_note,
+        "missing": missing_note,
         "parent_session": os.environ.get("CLAUDE_CODE_SESSION_ID"),
-        "mcp": mcp_specs, "mcp_calls": {t: mcp_seq.count(t) for t in dict.fromkeys(mcp_seq)},
+        "mcp_calls": {t: mcp_seq.count(t) for t in dict.fromkeys(mcp_seq)},
         "mcp_seq": mcp_seq[:60], "mcp_offered": {k: len(v) for k, v in offered.items()},
         "result_head": (summary or "")[:600],
-        "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
-        "allow_cmd": allow_cmd, "todo": todo_id, "thread": thread_tag,
-        "role": role, "effort": effort, "worktree": wt_name, "review_meta": review_meta, "launch_key": launch_key,
-        "recipe": (getattr(a, "recipe", None) or (None, None))[0],
-        "recipe_step": (getattr(a, "recipe", None) or (None, None))[1],
-        "estimate_usd": (getattr(a, "estimate", None) or (None, None))[0],
-        "estimate_kind": (getattr(a, "estimate", None) or (None, None))[1],
-        "answer_lines": answer_lines, "details": details_path,
-    }
+        "details": details_path,
+    })
     append_jsonl(home("ledger.jsonl"), entry)  # the budget line below counts this run
     LAST_RUN[:] = [entry]
 
@@ -6107,13 +6111,13 @@ def stop_run(target):
                     break
                 time.sleep(0.05)
     if not any(r["id"] == rid for r in ledger()):  # the supervisor was killed before it could record anything
-        append_jsonl(home("ledger.jsonl"), {
-            "id": rid, "ts": now_iso(), "project": m.get("project"), "project_path": m.get("path"),
-            "workdir": m.get("workdir") or home("work", rid), "model": m.get("model") or "?", "why": "stopped",
-            "status": "stopped", "turns": None, "seconds": None, "usage": {}, "units": 0, "cost_usd": None,
-            "session_id": m.get("session_id"), "resumed": False, "task": (m.get("task") or "")[:300],
-            "todo": m.get("todo"), "thread": m.get("thread"), "role": m.get("role"), "effort": m.get("effort"),
-            "launch_key": None, "start_head": m.get("start_head")})
+        row = {"project": m.get("project"), "project_path": m.get("path"), "workdir": m.get("workdir") or home("work", rid),
+               "model": m.get("model") or "?", "task": (m.get("task") or "")[:300], "todo": m.get("todo"),
+               "thread": m.get("thread"), "role": m.get("role"), "effort": m.get("effort"), "start_head": m.get("start_head")}
+        row.update(m.get("fixed") or {})
+        row.update(id=rid, ts=now_iso(), why="stopped", status="stopped", turns=None, seconds=None, usage={}, units=0,
+                   cost_usd=None, session_id=m.get("session_id") or row.get("session_id"))
+        append_jsonl(home("ledger.jsonl"), row)
     for f in glob.glob(home("running", "*.json")):
         if load_json(f, {}).get("run") == rid:
             try:
