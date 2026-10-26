@@ -4368,6 +4368,11 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.running_markers(), [])  # never left as running
         row = next(r for r in self.ledger() if r["id"] == m["run"])
         self.assertEqual(row["status"], "stopped")
+        for k, v in m["fixed"].items():  # the same fields as a finished run's row
+            if k not in ("why", "session_id"):
+                self.assertEqual(row[k], v, k)
+        for k in ("read_only", "tools", "chrome", "native_rules", "answer_lines", "cards", "thread", "type"):
+            self.assertIn(k, row)
         self.assertIn("No runs in progress.", self.cli("runs", "--running").stdout)
         self.assertIn("already ended: stopped", self.cli("runs", "--stop", m["run"], check=False).stderr)
 
@@ -4378,13 +4383,17 @@ class CliTest(unittest.TestCase):
         dead.wait()
         with open(os.path.join(home, "running", "k1.json"), "w") as fh:
             json.dump({"pid": dead.pid, "run": "0101-000000-aaaa", "started": "2026-01-01T00:00:00", "task": "t",
-                       "model": "haiku", "project": "proj", "workdir": os.path.join(home, "work", "0101-000000-aaaa")}, fh)
+                       "model": "haiku", "project": "proj", "workdir": os.path.join(home, "work", "0101-000000-aaaa"),
+                       "fixed": {"read_only": True, "tools": "Read,Grep", "cards": ["c1"], "answer_lines": 7, "thread": "th"}}, fh)
         self.assertRegex(self.cli("runs").stdout, r"0101-000000-aaaa\s+lost")
         self.assertIn("lost", self.cli("runs", "--running").stdout)
         out = self.cli("runs", "--stop", "0101-000000-aaaa").stdout
         self.assertIn("stopped", out)
         self.assertNotRegex(self.cli("runs").stdout, r"aaaa\s+lost")
         self.assertRegex(self.cli("runs").stdout, r"aaaa\s+stopped")
+        row = next(r for r in self.ledger() if r["id"] == "0101-000000-aaaa")
+        self.assertEqual((row["read_only"], row["tools"], row["cards"], row["answer_lines"], row["thread"]),
+                         (True, "Read,Grep", ["c1"], 7, "th"))
 
     def test_runs_wait_prints_each_result_and_the_exit_code(self):
         p = self.start_run(turns="3", sleep="0.7")
