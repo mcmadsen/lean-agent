@@ -707,8 +707,9 @@ def main():
             return 0
 
     compact_at = compaction_point()
-    # before Claude Code compacts: at 80% of its compaction point (sessions started without lean-agent's early
-    # compaction: at LEAN_AGENT_CTX_NUDGE, default 100,000), then every 50,000 more
+    # before Claude Code compacts: at 80% of its compaction point (the configured one, else its default for the model's
+    # window; LEAN_AGENT_CTX_NUDGE sets it directly, and 100,000 applies when the environment can't be read), then every
+    # 50,000 more
     nudge_at = int(os.environ.get("LEAN_AGENT_CTX_NUDGE") or (compact_at * 0.8 if compact_at else 100000))
     if in_home and not checking and nudge_at and ctx >= nudge_at and ctx >= (state.get("nudged") or 0) + 50000:
         state["nudged"] = ctx

@@ -5665,6 +5665,9 @@ ORCHESTRATOR_ENV = {
 }
 
 
+COMPACT_WINDOW_MIN = 100000  # the smallest CLAUDE_CODE_AUTO_COMPACT_WINDOW Claude Code accepts
+
+
 def orchestrator_env():
     """ORCHESTRATOR_ENV plus the compaction overrides, if any are set (`config compact-window|compact-pct`): Claude
     Code's own default compaction point applies otherwise."""
@@ -6547,7 +6550,7 @@ def cmd_up(a):
     for k, v in orchestrator_env().items():
         env.setdefault(k, v)
     if a.compact_at:  # Claude Code's window can't go below 100K: lower the percentage instead
-        window = max(100000, a.compact_at)
+        window = max(COMPACT_WINDOW_MIN, a.compact_at)
         env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(window)
         env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(max(10, min(95, round(a.compact_at * 100 / window))))
     try:
@@ -6555,8 +6558,8 @@ def cmd_up(a):
         pct = float(env.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") or 0) or None
     except ValueError:
         window = pct = None
-    print("lean-agent: the orchestrator compacts at " + compaction_label(window, pct, lean_common.configured_model())
-          .replace("; set by config", "") + " (keeps goals, approvals, open runs and findings; "
+    print("lean-agent: the orchestrator compacts at " + compaction_label(window, pct, lean_common.configured_model(), source=False)
+          + " (keeps goals, approvals, open runs and findings; "
           "`config compact-window N` or `up --compact-at N` to compact earlier)", flush=True)
     for line in orchestrator_context_lines(h):
         print("lean-agent: " + line, flush=True)
@@ -7427,6 +7430,9 @@ def cmd_config(a):
             raw = a.value.lower()
             if raw != "default" and not (raw.isdigit() and int(raw) > 0):
                 die(f"{a.name} takes a number or default")
+            if a.name == "compact-window" and raw != "default" and int(raw) < COMPACT_WINDOW_MIN:
+                die(f"compact-window takes {COMPACT_WINDOW_MIN} or more (Claude Code's minimum) or default; "
+                    "to compact earlier on a bigger window, lower compact-pct")
             if a.name == "compact-pct" and raw != "default" and not 10 <= int(raw) <= 95:
                 die("compact-pct takes 10-95 or default")
             cfg = load_json(home("config.json"), {})
