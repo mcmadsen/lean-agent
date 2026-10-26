@@ -262,13 +262,17 @@ TAIL_READ = 512 * 1024  # how much of the transcript's end is read
 
 
 def compact_at(env=None):
-    """Tokens at which Claude Code compacts the session: from its environment (`up` sets it), else the defaults."""
-    env = os.environ if env is None else env
+    """Tokens at which Claude Code compacts the session: from its environment (`up` sets it when compaction is
+    overridden), else the configured overrides, else Claude Code's own default."""
+    ambient = env is None
+    env = os.environ if ambient else env
     try:
-        window = int(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or lean_common.DEFAULT_COMPACT_WINDOW)
-        pct = float(env.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") or lean_common.DEFAULT_COMPACT_PCT)
+        window = int(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or 0) or None
+        pct = float(env.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") or 0) or None
     except ValueError:
-        window, pct = lean_common.DEFAULT_COMPACT_WINDOW, lean_common.DEFAULT_COMPACT_PCT
+        window = pct = None
+    if ambient and not window and not pct:
+        window, pct = lean_common.compact_overrides()
     return lean_common.compaction_point(window, pct)
 
 

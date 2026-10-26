@@ -3706,14 +3706,53 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("state 2", out)
         self.assertEqual(self.cli("checkpoint", check=False).returncode, 1)
 
+    def test_default_orchestrator_env_has_no_compaction_overrides(self):
+        env = json.loads(self.cli("env", "--json").stdout)["env"]
+        self.assertNotIn("CLAUDE_CODE_AUTO_COMPACT_WINDOW", env)
+        self.assertNotIn("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", env)
+        self.assertNotIn("DISABLE_AUTO_COMPACT", env)
+
+    def test_config_compact_restores_the_overrides(self):
+        out = self.cli("config", "compact-window", "100000").stdout
+        self.assertIn("service restart", out)
+        self.assertIn("compaction: ~67,000 (compact-window 100000, pct default; set by config)", out)
+        out = self.cli("config", "compact-pct", "70").stdout
+        self.assertIn("compaction: ~67,000 (compact-window 100000, pct 70; set by config)", out)
+        env = json.loads(self.cli("env", "--json").stdout)["env"]
+        self.assertEqual((env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"]), ("100000", "70"))
+        self.assertIn("compaction: ~67,000", self.cli("doctor", check=False).stdout)
+        env = json.loads(self.cli("env", "--json", LEAN_AGENT_COMPACT_WINDOW="200000").stdout)["env"]
+        self.assertEqual(env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "200000")
+        self.cli("config", "compact-window", "default")
+        out = self.cli("config", "compact-pct", "default").stdout
+        self.assertIn("compaction: Claude Code default (~167k for a 200k window)", out)
+        self.assertNotIn("CLAUDE_CODE_AUTO_COMPACT_WINDOW", json.loads(self.cli("env", "--json").stdout)["env"])
+        self.assertEqual(self.cli("config", "compact-window", "soon", check=False).returncode, 1)
+
+    def test_compaction_point_default_and_overrides(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_common
+        old = os.environ.pop("LEAN_AGENT_COMPACT_BUFFER", None)
+        self.addCleanup(lambda: old is None or os.environ.__setitem__("LEAN_AGENT_COMPACT_BUFFER", old))
+        self.assertEqual(lean_common.compaction_point(), 167000)
+        self.assertEqual(lean_common.compaction_point(model="sonnet[1m]"), 967000)
+        self.assertEqual(lean_common.compaction_point(None, 50), 100000)
+        self.assertEqual(lean_common.compaction_point(100000, 70), 67000)
+        self.assertEqual(lean_common.compaction_label(), "Claude Code default (~167k for a 200k window)")
+        self.assertEqual(lean_common.compaction_label(model="opus[1m]"), "Claude Code default (~967k for a 1M window)")
+        self.assertEqual(lean_common.compaction_label(100000, 70), "~67,000 (compact-window 100000, pct 70; set by config)")
+
+    def test_doctor_and_service_status_show_the_compaction(self):
+        self.assertIn("compaction: Claude Code default (~167k for a 200k window)", self.cli("doctor", check=False).stdout)
+
     def test_config_clear_at(self):
         out = self.cli("config", "clear-at").stdout
         self.assertIn("auto clear: off (clear with `lean-agent clear`)", out)
-        self.assertIn("compacts at ~67,000", out)
+        self.assertIn("compacts at ~167,000", out)
         self.assertIn("auto = 52,000", self.cli("config", "clear-at", CLAUDE_CODE_AUTO_COMPACT_WINDOW="100000",
                                                  CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="60", LEAN_AGENT_CLEAR_AT="auto").stdout)
-        self.assertIn("auto = 59,000", self.cli("config", "clear-at", "auto").stdout)
-        self.assertIn("auto = 59,000", self.cli("doctor", check=False).stdout)
+        self.assertIn("auto = 159,000", self.cli("config", "clear-at", "auto").stdout)
+        self.assertIn("auto = 159,000", self.cli("doctor", check=False).stdout)
         self.assertIn("55,000", self.cli("config", "clear-at", "55000").stdout)
         self.assertIn("55,000", self.cli("config", "clear-at").stdout)
         self.assertIn("auto clear: off", self.cli("config", "clear-at", "off").stdout)
@@ -3939,8 +3978,10 @@ class CliTest(unittest.TestCase):
         home = tempfile.mkdtemp()
         os.makedirs(os.path.join(home, "chat"))
         old = {k: os.environ.get(k) for k in ("LEAN_AGENT_HOME", "LEAN_AGENT_CLEAR_AT", "LEAN_AGENT_CLEAR_GAP",
-                                              "LEAN_AGENT_CLEAR_IDLE", "LEAN_AGENT_LOG_DIR")}
-        os.environ.update(LEAN_AGENT_HOME=home, LEAN_AGENT_CLEAR_AT="40000", LEAN_AGENT_LOG_DIR=os.path.join(home, "logs"))
+                                              "LEAN_AGENT_CLEAR_IDLE", "LEAN_AGENT_LOG_DIR", "LEAN_AGENT_COMPACT_WINDOW",
+                                              "LEAN_AGENT_COMPACT_PCT")}
+        os.environ.update(LEAN_AGENT_HOME=home, LEAN_AGENT_CLEAR_AT="40000", LEAN_AGENT_LOG_DIR=os.path.join(home, "logs"),
+                          LEAN_AGENT_COMPACT_WINDOW="100000", LEAN_AGENT_COMPACT_PCT="70")  # compaction at 67,000
         for k in ("LEAN_AGENT_CLEAR_GAP", "LEAN_AGENT_CLEAR_IDLE"):
             os.environ.pop(k, None)
         self.addCleanup(lambda: [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)

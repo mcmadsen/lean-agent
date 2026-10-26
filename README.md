@@ -247,9 +247,9 @@ Every orchestrator turn re-reads the whole conversation, so it's kept short:
   is still loaded on every call, with sizes. The CLI reference isn't in the guide: `lean-agent guide --cli`.
 - **Shows its size at start:** `lean-agent up` prints the guide's size and the last orchestrator session's
   start-up context (system prompt, tools, guide), calls, average and peak context per call.
-- **Compacts early:** `lean-agent up` sets Claude Code's auto-compact window to 100,000 tokens at 70%, so the
-  orchestrator compacts at about 67,000 tokens instead of 70% of a 1M window (`up --compact-at N` to change;
-  the home's settings carry `autoCompactWindow` too).
+- **Compaction is Claude Code's call:** no overrides are set, so the orchestrator compacts where Claude Code does
+  (~167K on a 200K window). `lean-agent config compact-window N|default` and `compact-pct P|default` (or `up --compact-at N`)
+  opt in to earlier compaction; they take effect on `service restart`.
 - **Keeps what matters:** a PreCompact hook (lean-agent's home only) tells the summary to keep the user's goals
   and open requests, every approval word for word, runs in progress, branches and PRs, unfixed findings and
   decisions, and to drop worker answers, command output, file contents and the guide: lean-agent stores those.
@@ -293,7 +293,7 @@ Every orchestrator turn re-reads the whole conversation, so it's kept short:
   a step needs judgement); `--escalate haiku,sonnet` does the same for workers.
 
 In short: `lean-agent run` hands the orchestrator a compact result, `lean-agent checkpoint` saves its soft state, and
-Claude Code compacts the orchestrator's context at ~67K tokens; the session is cleared only on `lean-agent clear` (or
+Claude Code decides when to compact the orchestrator's context; the session is cleared only on `lean-agent clear` (or
 with the opt-in `clear-at`).
 
 ## Threads
