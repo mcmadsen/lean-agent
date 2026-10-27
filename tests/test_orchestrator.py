@@ -1014,7 +1014,7 @@ class CliTest(unittest.TestCase):
                  check=False, FAKE_REVIEW=prev)
         out = self.cli("review", "case", "--head", "fix-races", "--base", "main", "--independent",
                        "--reviewer-model", "fable", check=False, FAKE_REVIEW=prev).stdout
-        self.assertRegex(out, r"reviewer: fable, effort high \(expected ~\$[\d.]+, estimated from Sonnet reviews and "
+        self.assertRegex(out, r"reviewer: fable \(--reviewer-model\), effort high \(expected ~\$[\d.]+, estimated from Sonnet reviews and "
                               r"the price ratio, corrected x[\d.]+ from \d+ earlier estimate")
 
     def test_expensive_run_asks_first(self):
@@ -4648,8 +4648,11 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("t2", ss.session_rec("main").get("sessions") or {})
         self.cli("thread", "close", "t2")  # idempotent
         self.assertIn("started", self.cli("thread", "new", "second").stdout)
+        # shut down only once the new session is up, so stopping `up` never races its start
+        self.wait_for(lambda: re.search(r"t3\b", self.cli("thread", "sessions").stdout), "the second session to be listed",
+                      secs=30)
         p.terminate()
-        p.wait(timeout=30)
+        p.wait(timeout=60)
 
     def test_record_without_a_host_pid_is_not_pending(self):
         p, log, ss = self.start_up()
@@ -5802,7 +5805,7 @@ class CliTest(unittest.TestCase):
             g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", *(["--amend", "--no-edit"] if amend else ["-m", "fix"]))
             g("checkout", "-q", "main")
         minor = json.dumps(dict(REUSE_CHECKED, verdict="approve", checks=[], findings=[
-            {"severity": "minor", "category": "style", "file": "api/totals.py", "line": 1, "issue": "rename total_sum"}]))
+            {"severity": "minor", "category": "style", "file": "CLAUDE.md", "line": 1, "issue": "rename total_sum"}]))
         approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
         # 1. the whole change, once (opus, as the user chose)
         self.cli("review", "proj", "--head", "feature", "--base", "main", "--reviewer-model", "opus", check=False,
@@ -5810,18 +5813,22 @@ class CliTest(unittest.TestCase):
         first = sha()
         self.assertIn("declined 1.", self.cli("review", "decline", "proj", "1", "--head", first, "--why", "left on purpose").stdout)
         # 2. a fix worker commits elsewhere: review by commit sha finds the branch and reviews only the delta, on sonnet
-        commit("CLAUDE.md", "One more rule.\n")
+        commit("api/totals.py", "# one more rule\n")
         out = self.cli("review", "proj", "--head", sha(), check=False, FAKE_REVIEW=minor).stdout
         self.assertIn("reviewing only what changed since", out)
         delta = [c for c in self.calls() if "Re-review after fixes" in c["task"]][-1]
         self.assertEqual(model(delta), "sonnet")
-        self.assertIn("declined: [style] api/totals.py: rename total_sum", delta["task"])
+        self.assertIn("declined: [style] CLAUDE.md: rename total_sum", delta["task"])
         self.assertIn("left out 1 finding(s) declined earlier", out)  # the decision followed the branch
         self.assertEqual(self.cli("review", "proj", "--status", "--head", "feature").returncode, 0)
         # 3. an amend: the old tip is gone from the history but in the branch's reflog
-        commit("CLAUDE.md", "And another.\n", amend=True)
+        commit("api/totals.py", "# and another\n", amend=True)
         self.assertIn("reviewing only what changed since", self.cli("review", "proj", "--head", "feature", check=False,
                                                                      FAKE_REVIEW=approve).stdout)
+        # a docs-only delta is skipped by policy, --force reviews it anyway
+        commit("CLAUDE.md", "A docs line.\n")
+        self.assertIn("skipped (docs-only)", self.cli("review", "proj", "--head", "feature", check=False,
+                                                       FAKE_REVIEW=approve).stdout)
         # 4. a large delta gets a full review; --for-push refuses while a fix worker runs on the branch
         commit("api/big.py", "x = 1\n" * 900)
         st = self.cli("review", "proj", "--status", "--head", "feature", check=False).stdout
