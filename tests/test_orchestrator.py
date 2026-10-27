@@ -1586,12 +1586,25 @@ class CliTest(unittest.TestCase):
                  TRACKER_PAT="pat-value", AZURE_DEVOPS_ORG="acme", UNRELATED_VAR="x", ANTHROPIC_API_KEY="sk-ant")
         env = self.calls()[-1]["mcp"]["servers"]["tracker"]["env"]
         self.assertEqual(env["TRACKER_PAT"], "pat-value")
-        self.assertEqual(env["AZURE_DEVOPS_ORG"], "acme")
+        self.assertNotIn("AZURE_DEVOPS_ORG", env)  # another server's variable
         self.assertNotIn("UNRELATED_VAR", env)
         self.assertNotIn("ANTHROPIC_API_KEY", env)
         self.assertNotIn("pat-value", self.cli("runs").stdout)
         with open(os.path.join(self.env["LEAN_AGENT_HOME"], "ledger.jsonl")) as fh:
             self.assertNotIn("pat-value", fh.read())
+
+    def test_auth_variables_go_only_to_the_server_they_belong_to(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_mcp
+        shell = {"AZURE_DEVOPS_PAT": "a", "ADO_ORG": "b", "GITHUB_TOKEN": "c", "TOKEN": "d", "PAT": "e",
+                 "AZURE_CLIENT_ID": "f", "ANTHROPIC_API_KEY": "g"}
+        ado = lean_mcp.with_auth_env({"command": "x", "env": {"OWN_KEY": ""}}, shell, name="azure-devops")["env"]
+        self.assertEqual(sorted(ado), ["ADO_ORG", "AZURE_DEVOPS_PAT", "OWN_KEY"])
+        gh = lean_mcp.with_auth_env({"command": "x"}, shell, name="github")["env"]
+        self.assertEqual(sorted(gh), ["GITHUB_TOKEN"])
+        own = lean_mcp.with_auth_env({"command": "x", "env": {"TOKEN": ""}}, shell, name="other").get("env")
+        self.assertEqual(own, {"TOKEN": "d"})  # named in its own config
+        self.assertEqual(lean_mcp.with_auth_env({"command": "x"}, shell), {"command": "x"})
 
     def test_run_stops_early_when_the_mcp_server_is_unauthenticated_and_remembers_it_once(self):
         self.use_tracker()
