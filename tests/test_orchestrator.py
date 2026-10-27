@@ -3897,7 +3897,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("api/totals.py", call["task"])
         self.assertEqual(self.cli("review", "proj", "--status", check=False).returncode, 1)
         approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
-        p = self.cli("review", "proj", "--resume", "--same-session", check=False, FAKE_REVIEW=approve)
+        p = self.cli("review", "proj", "--resume", "--same-session", "--force", check=False, FAKE_REVIEW=approve)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("Re-review the current diff", self.calls()[-1]["task"])
         self.assertIn("--resume", self.calls()[-1]["argv"])
@@ -5872,13 +5872,13 @@ class CliTest(unittest.TestCase):
              "issue": "only the warning dialog is handled; other dialogs share the cause"}],
             reuse=[{"symbol": s, "candidates": ["src/init/surfaces.ts:2"], "verdict": "wraps-existing"}
                    for s in ("createOverlayStore", "useOverlayOpen", "src/dialogs/overlayStore.ts")]))
-        out = self.cli("review", "proj", "--head", "feature", "--base", "main", "--second-opinion", "off", check=False,
-                       FAKE_REVIEW=scope).stdout
+        out = self.cli("review", "proj", "--head", "feature", "--base", "main", "--second-opinion", "off", "--force",
+                       check=False, FAKE_REVIEW=scope).stdout
         self.assertIn("1. [major/scope] src/dialogs/overlayStore.ts:1", out)
         self.assertNotIn("duplicates existing code", out)  # wraps-existing is reuse done right
         self.assertIn("declined 1. [major/scope]", self.cli("review", "decline", "proj", "1", "--head", "feature",
                                                              "--why", "other dialogs: separate ticket").stdout)
-        out = self.cli("review", "proj", "--head", "feature", "--base", "main", "--second-opinion", "on", check=False,
+        out = self.cli("review", "proj", "--head", "feature", "--base", "main", "--second-opinion", "on", "--force", check=False,
                        FAKE_REUSE=reuse, FAKE_REVIEW=scope).stdout
         self.assertIn("left out 1 finding(s) declined earlier", out)
         self.assertIn("REVIEW: APPROVE", out)
@@ -5889,7 +5889,7 @@ class CliTest(unittest.TestCase):
         weak = json.dumps(dict(json.loads(main_review), findings=[], reuse=[
             {"symbol": "createOverlayStore", "candidates": [], "verdict": "justified-new", "why": "different"},
             {"symbol": "useOverlayOpen", "candidates": [], "verdict": "justified-new", "why": "n/a"}]))
-        out = self.cli("review", "proj", "--head", "feature", "--base", "main", "--second-opinion", "on", check=False,
+        out = self.cli("review", "proj", "--head", "feature", "--base", "main", "--second-opinion", "on", "--force", check=False,
                        FAKE_REUSE=reuse, FAKE_REVIEW=weak).stdout
         self.assertIn("justified-new verdict(s) not accepted", out)
         self.assertIn("createOverlayStore: the second opinion says duplicate src/init/surfaces.ts:2", out)
@@ -5899,7 +5899,7 @@ class CliTest(unittest.TestCase):
         write("src/dialogs/overlayStore.ts", "export function deferOverlay() {}\n")
         g("commit", "-qam", "fix")
         g("checkout", "-q", "main")
-        self.cli("review", "proj", "--resume", "--head", "feature", check=False, FAKE_REVIEW=main_review)
+        self.cli("review", "proj", "--resume", "--force", "--head", "feature", check=False, FAKE_REVIEW=main_review)
         rr = next(c for c in reversed(self.calls()) if "Re-review after fixes" in c["task"])
         self.assertIn("The earlier review's open items", rr["task"])
         self.assertIn("declined: [scope] src/dialogs/overlayStore.ts", rr["task"])
@@ -5916,7 +5916,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("Nothing new", self.cli("review", "learn", "proj", "--text",
                                               "Before adding overlay state, check the shared surface counter").stdout)
         approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
-        self.cli("review", "proj", "--second-opinion", "off", FAKE_REVIEW=approve)
+        self.cli("review", "proj", "--second-opinion", "off", "--force", FAKE_REVIEW=approve)
         append = self.calls()[-1]["append"]
         self.assertIn("Review checklist (lessons from human reviews)", append)
         self.assertIn("check the shared surface counter", append)
@@ -6090,7 +6090,8 @@ class CliTest(unittest.TestCase):
         # decline the auto-raised one; it must not come back on --resume, and can't flip the verdict
         self.cli("review", "decline", "proj", "1", "--head", "fix", "--why", "false positive: it calls clearTimer")
         resumed = dict(rv, verdict="changes-requested", findings=[])
-        out = self.cli("review", "proj", "--resume", "--head", "fix", check=False, FAKE_REVIEW=json.dumps(resumed)).stdout
+        out = self.cli("review", "proj", "--resume", "--force", "--head", "fix", check=False,
+                       FAKE_REVIEW=json.dumps(resumed)).stdout
         self.assertNotIn("[major/duplication]", out)
         self.assertIn("left out 1 finding(s) declined earlier", out)
         self.assertIn("REVIEW: APPROVE", out)
@@ -6814,6 +6815,88 @@ class CliTest(unittest.TestCase):
         with open(os.path.join(h, "CLAUDE.md")) as fh:
             self.assertIn("lean-agent orchestrator", fh.read())
         self.assertTrue(os.path.exists(os.path.join(h, ".claude", "settings.json")))
+
+    APPROVE = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+    REQUEST = json.dumps(dict(REUSE_CHECKED, verdict="changes-requested", checks=[], findings=[
+        {"severity": "major", "file": "api/totals.py", "line": 3, "issue": "rounding drops cents"}]))
+
+    def commit_on(self, g, branch, path, text, msg="fix"):
+        g("checkout", "-q", branch)
+        os.makedirs(os.path.dirname(os.path.join(self.proj, path)), exist_ok=True)
+        with open(os.path.join(self.proj, path), "a") as fh:
+            fh.write(text)
+        g("add", "-A", path)
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", msg)
+        g("checkout", "-q", "main")
+
+    def reviewer_runs(self):
+        try:
+            return [r for r in self.ledger() if r.get("role") == "reviewer"]
+        except OSError:
+            return []
+
+    def review_feature(self, *extra, **env):
+        return self.cli("review", "proj", "--head", "feature", "--base", "main", *extra, check=False,
+                        **dict({"FAKE_REVIEW": self.APPROVE}, **env))
+
+    def test_review_of_an_unchanged_head_runs_nothing_and_exits_with_the_stored_status(self):
+        self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.review_feature(FAKE_REVIEW=self.REQUEST)
+        self.assertEqual(len(self.reviewer_runs()), 1)
+        p = self.review_feature()
+        self.assertRegex(p.stdout, r"review: no new commits since [0-9a-f]{12} — verdict changes-requested stands")
+        self.assertEqual((p.returncode, len(self.reviewer_runs())), (1, 1))
+        p = self.review_feature("--resume")
+        self.assertIn("no new commits since", p.stdout)
+        self.assertEqual(len(self.reviewer_runs()), 1)
+        self.review_feature("--force", FAKE_REVIEW=self.REQUEST)
+        self.assertEqual(len(self.reviewer_runs()), 2)
+
+    def test_approved_head_exits_zero_without_a_run(self):
+        self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.review_feature()
+        p = self.review_feature()
+        self.assertEqual((p.returncode, len(self.reviewer_runs())), (0, 1))
+        self.assertIn("verdict approve stands", p.stdout)
+
+    def test_a_force_pushed_head_is_reviewed_again(self):
+        g = self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.review_feature()
+        g("checkout", "-q", "feature")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--amend", "-m", "feature, reworded")
+        g("checkout", "-q", "main")
+        p = self.review_feature()
+        self.assertNotIn("no new commits", p.stdout)
+        self.assertEqual(len(self.reviewer_runs()), 2)
+
+    def test_review_of_the_working_tree_follows_uncommitted_changes(self):
+        g = self.git_project()  # on feature, web/page.txt uncommitted
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("review", "proj", "--base", "main", check=False, FAKE_REVIEW=self.APPROVE)
+        self.assertEqual(len(self.reviewer_runs()), 1)
+        p = self.cli("review", "proj", "--base", "main", check=False, FAKE_REVIEW=self.APPROVE)
+        self.assertIn("no new commits", p.stdout)  # the same uncommitted state
+        self.assertEqual(len(self.reviewer_runs()), 1)
+        with open(os.path.join(self.proj, "web", "page.txt"), "a") as fh:
+            fh.write("more\n")
+        self.cli("review", "proj", "--base", "main", check=False, FAKE_REVIEW=self.APPROVE)
+        self.assertEqual(len(self.reviewer_runs()), 2)  # dirty worktree: reviewed again
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        self.cli("review", "proj", "--base", "main", check=False, FAKE_REVIEW=self.APPROVE)
+        self.assertEqual(len(self.reviewer_runs()), 3)  # committed: a new head
+
+    def test_an_empty_range_is_not_reviewed_and_counts_as_approved(self):
+        g = self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        g("branch", "empty", "main")
+        p = self.cli("review", "proj", "--head", "empty", "--base", "main", check=False, FAKE_REVIEW=self.APPROVE)
+        self.assertRegex(p.stdout, r"review: no new commits since [0-9a-f]{12} — verdict skipped \(empty range\) stands")
+        self.assertEqual((p.returncode, len(self.reviewer_runs())), (0, 0))
+        self.assertEqual(self.cli("review", "proj", "--head", "empty", "--base", "main", "--status", check=False).returncode, 0)
 
 
 class RuleGlobTest(unittest.TestCase):
