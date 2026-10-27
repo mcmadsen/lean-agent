@@ -6106,12 +6106,7 @@ class CliTest(unittest.TestCase):
         out = self.cli("run", "proj", "-m", "haiku", "--why", "Add thing", "--worktree", "my-own-name",
                        "--worktree-base", "main", "--", "t").stdout
         self.assertIn("worktree: created my-own-name", out)  # explicit names are taken as they are
-        # no other place invents a branch name
-        with open(CLI) as fh:
-            src = fh.read()
-        self.assertNotIn('"lean/', src)
-        self.assertNotIn("'lean/", src)
-        self.assertEqual(src.count("new_branch_name("), 3)  # definition, run --worktree auto, branch-name
+
 
     def test_auto_branch_next_to_a_similar_branch_skips_the_typo_check(self):
         g = self.git_project()
@@ -6156,6 +6151,33 @@ class CliTest(unittest.TestCase):
         self.assertNotIn(rule, self.calls()[-1]["append"])  # the branch already exists
         self.cli("run", "proj", "-m", "haiku", "--why", "x", "--read-only", "--worktree", "auto", "--", "look")
         self.assertNotIn(rule, self.calls()[-1]["append"])
+
+    def test_branch_name_inputs_and_call_sites_agree(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("branch", "-m", "feature", "feat-old")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        bn = lambda *a, **k: self.cli("branch-name", "-p", "proj", *a, **k)
+        self.assertEqual(bn("Release notes", "--type", "release", "--version", "3.1").stdout.strip(),
+                         "release/release-3.1")
+        p = bn("Add x", "--task", "a b/c", check=False)  # an invalid --task is a clear error, not a mangled name
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("invalid task id 'a b/c'", p.stderr)
+        # a todo without a tracker ref: its number is the task id
+        self.cli("todo", "add", "Export totals", "-p", "proj")
+        run = lambda *a: self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "auto", *a, "--", "Export totals").stdout
+        self.assertIn("branch: feature/1-export-totals", run("--todo", "1", "--worktree-base", "main"))
+        self.assertIn("branch: release/release-5.0", run("--branch-type", "release", "--branch-version", "5.0",
+                                                         "--worktree-base", "main"))
+        # run --worktree auto and branch-name make the same name
+        self.assertEqual(bn("Export totals").stdout.strip(), "feature/export-totals")
+        self.assertIn("branch: feature/export-totals", run("--worktree-base", "main"))
+        # without --worktree-base: the project's default base (here main) is used
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "auto", "--", "Other thing").stdout
+        self.assertIn("branch: feature/other-thing", out)
+        self.assertIn("worktree: created feature/other-thing from main", out)
 
     def test_worktree_creates_missing_branch_from_a_base(self):
         g = self.git_project()
