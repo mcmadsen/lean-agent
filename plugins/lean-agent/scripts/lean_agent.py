@@ -2180,7 +2180,8 @@ def note_progress(workdir, turn, msg, u):
 
 
 def mcp_unauthenticated(ev, tools, denied):
-    """The MCP server whose tool results say unauthorized/anonymous twice (once for a run's first MCP call), or None.
+    """The MCP server whose tool results are errors saying unauthorized/anonymous twice (once for a run's first
+    MCP call), or None. Successful results and browser tools' page text never count.
     `tools` {tool_use id: server} and `denied` {server: count} are the caller's state across events."""
     content = (ev.get("message") or {}).get("content")
     if not isinstance(content, list):
@@ -2189,14 +2190,16 @@ def mcp_unauthenticated(ev, tools, denied):
         if not isinstance(c, dict):
             continue
         if c.get("type") == "tool_use" and str(c.get("name") or "").startswith("mcp__"):
-            tools[c.get("id")] = c["name"].split("__")[1]
+            server = c["name"].split("__")[1]
+            if not lean_mcp.BROWSER_SERVER.search(server):  # page text is not a server's answer
+                tools[c.get("id")] = server
         elif c.get("type") == "tool_result" and c.get("tool_use_id") in tools:
             body = c.get("content")
             text = " ".join(str(b.get("text") or "") for b in body if isinstance(b, dict)) \
                 if isinstance(body, list) else str(body or "")
             denied.setdefault("#calls", 0)
             denied["#calls"] += 1
-            if lean_mcp.UNAUTH.search(text):
+            if lean_mcp.unauth_error(text, c.get("is_error")):
                 server = tools[c["tool_use_id"]]
                 denied[server] = denied.get(server, 0) + 1
                 if denied[server] >= 2 or denied["#calls"] == 1:
@@ -2204,13 +2207,24 @@ def mcp_unauthenticated(ev, tools, denied):
     return None
 
 
+def resolved_server_key(server, found):
+    """The configured key of the server a tool name's middle part (mcp__<part>__tool) stands for: a plugin's full
+    key or alias, or a name Claude Code sanitised; the part itself if nothing matches."""
+    for key, rec in found.items():
+        if server in (key, rec.get("alias"), lean_mcp.tool_prefix(key)[5:-2]):
+            return key
+    return server
+
+
 def record_unauth_card(server, slug):
-    """A project memory card saying the server runs unauthenticated in workers, once."""
+    """A project memory card saying the server runs unauthenticated in workers, once per project and server."""
+    found = lean_mcp.discover()
+    server = resolved_server_key(server, found)
     title = f"MCP {server} runs unauthenticated in workers"
     store = memory_store()
-    if any(m["name"] == title for m in lean_memory.read_all(store)):
+    if any(m["name"] == title and m["scope"] == slug for m in lean_memory.read_all(store)):
         return False
-    fix = lean_mcp.auth_fix(server, (lean_mcp.discover().get(server) or {}).get("config") or {})
+    fix = lean_mcp.auth_fix(server, (found.get(server) or {}).get("config") or {})
     body = (f"{title}. Seen {datetime.date.today().isoformat()}: its tool results said anonymous / not authorized. "
             f"Check: lean-agent mcp check {server}. Fix: {fix}")
     return bool(lean_memory.add(store, body, "reference", scope=slug, name=title, source="mcp auth check"))
