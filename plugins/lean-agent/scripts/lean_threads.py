@@ -193,6 +193,15 @@ def session_lines(tid, t):
     return [f'  session: {state}' + (f' \u2014 Remote Control "{name}"' if name else "")]
 
 
+def session_threads_by_activity():
+    """Ids of the threads whose session the service keeps running, most recently active first (ties: newest id)."""
+    data = load()
+    evs = events(data)
+    num = lambda k: int(k[1:]) if k[1:].isdigit() else 0
+    last = lambda k: max((e[0] for e in evs.get(k, [])), default=0)
+    return sorted(session_threads(), key=lambda k: (last(k), num(k)), reverse=True)
+
+
 def session_threads():
     """Ids of the threads whose session the service keeps running, oldest first."""
     ts = load()["threads"]
@@ -469,8 +478,10 @@ def prompt_refs(text):
 
 
 def _bare_ref_pat(i):
-    """A number as an id reference in thread history: #N, PR N, AB#N, ABC-N, or inside a branch name (feature/N-...)."""
-    return re.compile(r"(?:#|\b(?:PR|ticket|issue|bug|case)\s*|[A-Za-z]+[-#]|/)" + re.escape(i) + r"(?![\w])", re.I)
+    """A number as an id reference in thread history: #N, PR N, AB#N, a ticket key (ABC-N, upper case), or inside a branch name (feature/N-...); not 'case N' prose or
+    word-N fragments like sha-256."""
+    return re.compile(r"(?:#|\bPR\s*|(?-i:\b[A-Z][A-Z0-9]+-)|\b(?:feature|bugfix|hotfix|release)/(?:[\w.]*-)?)"
+                      + re.escape(i) + r"(?![\w])", re.I)
 
 
 def id_thread(text, data):
@@ -755,7 +766,8 @@ def age(ts, now=None):
     return f"{int(s // 86400)}d" if s >= 86400 * 2 else f"{int(s // 3600)}h" if s >= 3600 else f"{int(s // 60)}m"
 
 
-def _running_by_thread(data):
+def running_by_thread(data):
+    """{thread id: [run ids]} of the live runs tagged with each thread."""
     out = {}
     home = lean_home()
     for f in glob.glob(os.path.join(home, "running", "*.json")):
@@ -764,14 +776,14 @@ def _running_by_thread(data):
             continue
         if m.get("thread"):
             tid = resolve(m["thread"], data["aliases"])
-            out[tid] = out.get(tid, 0) + 1
+            out.setdefault(tid, []).append(m.get("run") or os.path.basename(f)[:-5])
     return out
 
 
 def _state(tid, evs, running, data):
     parts = []
     if running.get(tid):
-        parts.append(f"{running[tid]} running")
+        parts.append(f"{len(running[tid])} running")
     latest = {}
     for _, _, kind, text in evs:
         if kind == "review":
@@ -855,7 +867,7 @@ def now_text(now=None, close_idle=True, max_lines=NOW_LINES):
     waiting = [ledger[i] for i in lean_common.uncollected_ids(lean_home(), live_ids) if i in ledger]
     with _locked() as data:
         evs = events(data, todos)
-        running = _running_by_thread(data)
+        running = running_by_thread(data)
         closed = autoclose(data, evs, running, todos, days, now) if close_idle else []
         rows = []
         for tid, t in data["threads"].items():

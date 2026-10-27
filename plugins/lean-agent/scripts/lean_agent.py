@@ -6842,7 +6842,8 @@ def host_session(cmd, extra, env, h, name):
     host = service_session.Host(build, env, h, remote_control=True, on_text=on_text, on_stale=on_stale,
                                 on_message=sessions.dispatch)
     threading.Thread(target=schedule_timer, daemon=True).start()
-    for tid in lean_threads.session_threads():  # every open thread session comes back with the service
+    # open thread sessions come back with the service, the most recently active first, up to max-thread-sessions
+    for tid in lean_threads.session_threads_by_activity()[:service_session.max_thread_sessions()]:
         try:
             sessions.start(tid)
         except Exception as exc:
@@ -8174,7 +8175,7 @@ def start_thread_session(tid, t, prompt=None):
         if not service_session.alive(tid):
             service_session.sessions_request("stop", thread=tid)  # nothing may start later unrecorded
             raise RuntimeError(f"could not start the session of {tid}: {r.get('error') or 'not started'}")
-    lean_threads.set_session(tid, session_on=True, session_on_at=time.time())  # only a started session is one the service keeps
+    lean_threads.set_session(tid, session_on=True)  # only a started session is one the service keeps
     return r.get("name") or service_session.thread_session_name(tid, t.get("title"))
 
 
@@ -8192,7 +8193,7 @@ def close_thread_session(tid):
         service_session.sessions_request("stop", thread=tid)
         stopped = True
     try:
-        lean_threads.set_session(tid, session_on=None, session_on_at=None)
+        lean_threads.set_session(tid, session_on=None)
     except ValueError:  # a host record of a thread that no longer exists
         pass
     service_session.drop_session(tid)
@@ -8238,11 +8239,11 @@ def make_room_for_thread_session(tid=None):
     cap = service_session.max_thread_sessions()
     sessions = [s for s in open_thread_sessions() if s["thread"] != tid]
     while len(sessions) >= cap:
-        busy = lean_threads._running_by_thread(lean_threads.load())
+        busy = lean_threads.running_by_thread(lean_threads.load())
         free = [s for s in sessions if s["thread"] not in busy]
         if not free:
             die(f"{len(sessions)} thread sessions are open (max-thread-sessions {cap}) and all are busy:\n" +
-                "\n".join(f'{s["thread"]} "{s["title"]}" idle {_idle_age(s["idle"])}, {busy[s["thread"]]} running'
+                "\n".join(f'{s["thread"]} "{s["title"]}" idle {_idle_age(s["idle"])}, {len(busy[s["thread"]])} running ({", ".join(busy[s["thread"]])})'
                           for s in sessions) + "\nwait for one, or `lean-agent config max-thread-sessions N`")
         v = max(free, key=lambda s: s["idle"])
         close_thread_session(v["thread"])
