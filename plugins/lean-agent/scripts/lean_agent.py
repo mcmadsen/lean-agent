@@ -3545,7 +3545,7 @@ def choose_review_model(path, rng_args, names, explicit=None, rereview=False):
     if rereview:
         return "sonnet", "re-review"
     names = [n for n in names if n]
-    if names and all(n.endswith(".md") or n.startswith("docs/") or TEST_FILE.search(n) for n in names):
+    if names and all(is_docs_file(n) or TEST_FILE.search(n) for n in names):
         return "sonnet", "docs/tests only"
     stat = git(path, "diff", "--numstat", *rng_args) or ""
     size = sum(int(x) for l in stat.splitlines() for x in l.split("\t")[:2] if x.isdigit())
