@@ -8657,7 +8657,8 @@ THREAD_START_PENDING = 60  # seconds a just-started thread session counts before
 def close_thread_session(tid):
     """Checkpoint (when it answers) and stop a thread's host, but only when the service lists it as hosted; then clear
     session_on and the host record at once. Idempotent. Returns (a host was stopped, checkpoint result, a stale
-    record or flag was cleared)."""
+    record or flag was cleared). Raises RuntimeError, leaving the records, when the stop request failed and the host
+    process is still alive."""
     ok, stopped = None, False
     rec = service_session.session_rec(tid)
     listed = service_session.sessions_request("list", timeout=5)
@@ -8668,7 +8669,10 @@ def close_thread_session(tid):
     if hosted:
         if service_session.alive(tid):
             ok = service_session.checkpoint_session(tid)
-        service_session.sessions_request("stop", thread=tid)
+        res = service_session.sessions_request("stop", thread=tid)
+        if not res.get("ok") and rec.get("host_pid") and pid_alive(rec["host_pid"]):
+            raise RuntimeError(f"{tid}: the session did not stop ({res.get('error') or 'stop request failed'}); "
+                               f"host pid {rec['host_pid']} is still alive")
         stopped = True
     t = lean_threads.load()["threads"].get(tid) or {}
     stale = not stopped and bool(rec or t.get("session_on"))
@@ -8732,7 +8736,10 @@ def make_room_for_thread_session(tid=None):
                 "\n".join(f'{s["thread"]} "{s["title"]}" idle {_idle_age(s["idle"])}, {len(busy[s["thread"]])} running ({", ".join(busy[s["thread"]])})'
                           for s in sessions) + "\nwait for one, or `lean-agent config max-thread-sessions N`")
         v = max(free, key=lambda s: s["idle"])
-        close_thread_session(v["thread"])
+        try:
+            close_thread_session(v["thread"])
+        except RuntimeError as exc:
+            die(str(exc))
         if v["thread"] in lean_threads.load()["threads"]:
             lean_threads.set_closed(v["thread"], True)
         print(f'closed {v["thread"]} "{v["title"]}" (idle {_idle_age(v["idle"])}) to make room \u2014 reopen with '
@@ -8811,7 +8818,10 @@ def cmd_thread(a):
         if len(a.args) != 1:
             die("usage: lean-agent thread close tN")
         tid, t = thread_session_tid(a.args[0])
-        stopped, ok, stale = close_thread_session(tid)
+        try:
+            stopped, ok, stale = close_thread_session(tid)
+        except RuntimeError as exc:
+            die(str(exc))
         if stopped:
             print(f"{tid}: session stopped" + ("" if ok is None else " (checkpointed)" if ok else " (no checkpoint reply in time)"))
         elif stale:
