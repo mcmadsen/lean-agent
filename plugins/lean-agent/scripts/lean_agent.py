@@ -8656,7 +8656,10 @@ def close_thread_session(tid):
     ok, stopped = None, False
     rec = service_session.session_rec(tid)
     listed = service_session.sessions_request("list", timeout=5)
-    hosted = bool(listed.get("ok")) and any(x.get("thread") == tid for x in listed.get("sessions") or [])
+    if listed.get("ok"):
+        hosted = any(x.get("thread") == tid for x in listed.get("sessions") or [])
+    else:  # the service did not answer: a live host process still gets stopped
+        hosted = bool(rec.get("host_pid")) and pid_alive(rec["host_pid"])
     if hosted:
         if service_session.alive(tid):
             ok = service_session.checkpoint_session(tid)
