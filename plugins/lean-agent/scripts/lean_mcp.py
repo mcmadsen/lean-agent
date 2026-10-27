@@ -426,7 +426,17 @@ class ProbeError(Exception):
 
 _AUTH_ENV = re.compile(r"(^|_)(PAT|TOKEN|API_?KEY|SECRET|AZURE|AZUREDEVOPS|ADO)(_|$)", re.I)
 _NOT_FOR_SERVERS = ("ANTHROPIC_", "CLAUDE", "LEAN_AGENT")  # the worker's own credentials never go to a server
-UNAUTH = re.compile(r"anonymous|not authori[sz]ed|unauthori[sz]ed|\b401\b|\b403\b|authentication required|access denied", re.I)
+_NOAUTH = r"(?:not|un)\s?authori[sz]ed"
+UNAUTH = re.compile(rf"anonymous.{{0,120}}?{_NOAUTH}|{_NOAUTH}.{{0,120}}?anonymous"
+                    r"|\b(?:http|status)(?:/\d(?:\.\d)?)?[ :=]*(?:code )?(?:401|403)\b|\b(?:401|403) (?:unauthori[sz]ed|forbidden)\b",
+                    re.I | re.S)
+BROWSER_SERVER = re.compile(r"chrome|browser|playwright|puppeteer|selenium", re.I)  # their results are page text
+ERROR_TEXT = re.compile(r"^\s*(?:mcp )?(?:error|failed|exception)\b|\b(?:error|failed) (?:calling|executing|running)\b", re.I)
+
+
+def unauth_error(text, is_error=False):
+    """A tool result that is an error saying the server is anonymous / unauthorized. A successful result never is."""
+    return bool(UNAUTH.search(text)) and (bool(is_error) or bool(ERROR_TEXT.search(text)))
 
 
 SAFE_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT", "APPDATA",

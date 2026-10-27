@@ -126,8 +126,10 @@ FAKE_CLAUDE = textwrap.dedent("""\
             print(json.dumps({"type": "assistant", "session_id": "sess-1", "message": {"id": "mm-%d" % i, "content": [
                 {"type": "tool_use", "id": "tu%d" % i, "name": "mcp__tracker__list_projects", "input": {}}],
                 "usage": {"input_tokens": 10}}}), flush=True)
+            err = text.startswith("ERR:")  # an error result; anything else is a successful one
             print(json.dumps({"type": "user", "session_id": "sess-1", "message": {"content": [
-                {"type": "tool_result", "tool_use_id": "tu%d" % i, "content": [{"type": "text", "text": text}]}]}}), flush=True)
+                {"type": "tool_result", "tool_use_id": "tu%d" % i, "is_error": err,
+                 "content": [{"type": "text", "text": text[4:] if err else text}]}]}}), flush=True)
             time.sleep(0.3)
     if os.environ.get("FAKE_SELF_KILL"):  # killed from outside, like the OOM killer
         import signal
@@ -1606,10 +1608,35 @@ class CliTest(unittest.TestCase):
         self.assertEqual(own, {"TOKEN": "d"})  # named in its own config
         self.assertEqual(lean_mcp.with_auth_env({"command": "x"}, shell), {"command": "x"})
 
+    def test_unauthenticated_detection_counts_only_mcp_error_results(self):
+        la = lean_agent_module()
+
+        def feed(state, name, text, is_error=False, n=[0]):
+            n[0] += 1
+            tid = "t%d" % n[0]
+            call = {"message": {"content": [{"type": "tool_use", "id": tid, "name": name}]}}
+            res = {"message": {"content": [{"type": "tool_result", "tool_use_id": tid, "is_error": is_error,
+                                            "content": [{"type": "text", "text": text}]}]}}
+            return la.mcp_unauthenticated(call, *state) or la.mcp_unauthenticated(res, *state)
+
+        state = ({}, {})
+        feed(state, "mcp__tracker__list", "ok")  # the first call is fine, so one denial is not enough
+        # successful results that mention the words are not failures
+        self.assertIsNone(feed(state, "mcp__tracker__get", "status 403 in the changelog; anonymous access is documented"))
+        self.assertIsNone(feed(state, "mcp__tracker__get", "The anonymous identity is not authorized", False))
+        # browser page text, even flagged as an error, is not a server's answer
+        self.assertIsNone(feed(state, "mcp__claude-in-chrome__get_page_text", "403 Forbidden", True))
+        self.assertIsNone(feed(state, "Bash", "HTTP 401", True))
+        self.assertIsNone(feed(state, "mcp__tracker__get", "ERROR: something else broke", True))
+        self.assertIsNone(feed(state, "mcp__tracker__get", "Request failed with HTTP 403 Forbidden", True))
+        self.assertEqual(feed(state, "mcp__tracker__get", "HTTP 401 unauthorized", True), "tracker")
+        # the very first MCP call erroring that way stops at once
+        self.assertEqual(feed(({}, {}), "mcp__tracker__get", "anonymous caller is unauthorized", True), "tracker")
+
     def test_run_stops_early_when_the_mcp_server_is_unauthenticated_and_remembers_it_once(self):
         self.use_tracker()
         self.cli("learn", self.proj)
-        denied = json.dumps(["The anonymous identity is not authorized to list projects."])
+        denied = json.dumps(["ERR:The anonymous identity is not authorized to list projects."])
         args = ("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tracker:list_projects", "list them")
         out = self.cli(*args, check=False, FAKE_MCP_RESULTS=denied, FAKE_HANG="1")
         self.assertEqual(out.returncode, 1)
@@ -1619,7 +1646,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(listed.count("MCP tracker runs unauthenticated in workers"), 1)
         self.assertIn("reference", listed)
         # known issue: the card is announced and sent on the next run that uses the server, and not written twice
-        out = self.cli(*args, check=False, FAKE_MCP_RESULTS=json.dumps(["ok", "denied: 403 Forbidden", "403 Forbidden"]),
+        out = self.cli(*args, check=False, FAKE_MCP_RESULTS=json.dumps(["ok", "ERR:denied: 403 Forbidden", "ERR:403 Forbidden"]),
                        FAKE_HANG="1")
         self.assertIn("known issue: MCP tracker runs unauthenticated in workers", out.stdout)
         self.assertIn("MCP tracker runs unauthenticated in workers", self.calls()[-1]["append"] if self.calls()[-1].get("append") else "")
