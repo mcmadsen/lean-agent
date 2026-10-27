@@ -4638,7 +4638,7 @@ class CliTest(unittest.TestCase):
         ss.update_session(tid, host_pid=dead.pid, host_started=time.time() - 3600)
         out = self.cli("thread", "sessions").stdout
         self.assertNotIn(tid, out)
-        self.assertIsNone(lt.load()["threads"][tid].get("session_on"))  # pruned
+        self.assertTrue(lt.load()["threads"][tid].get("session_on"))  # still meant to be open: only the host record is pruned
         self.assertNotIn(tid, ss.session_rec("main").get("sessions") or {})
         self.assertIn("started", self.cli("thread", "new", "first").stdout)
         self.assertRegex(self.cli("thread", "sessions").stdout, r"t2\b")
@@ -4651,12 +4651,45 @@ class CliTest(unittest.TestCase):
         p.terminate()
         p.wait(timeout=30)
 
+    def test_record_without_a_host_pid_is_not_pending(self):
+        p, log, ss = self.start_up()
+        self.cli("config", "max-thread-sessions", "1")
+        ss.update_session("t9", host_pid=None, host_started=time.time(), pid=None)
+        self.assertNotIn("t9", self.cli("thread", "sessions").stdout)
+        self.assertIn("t1 started", self.cli("thread", "new", "first").stdout)
+        p.terminate()
+        p.wait(timeout=30)
+
+    def test_service_restart_resumes_open_sessions_with_stale_host_records_and_counts_them_once(self):
+        p, log, ss = self.start_up()
+        self.cli("config", "max-thread-sessions", "2")
+        lt = self.threads_home()
+        self.assertIn("t1 started", self.cli("thread", "new", "first").stdout)
+        p.terminate()
+        p.wait(timeout=30)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        ss.update_session("t1", host_pid=dead.pid, host_started=time.time() - 3600)  # stale record left by a crash
+        lt.set_session("t1", session_on=True)
+        self.cli("thread", "sessions", check=False)  # pruning the dead record keeps the intent
+        self.assertTrue(lt.load()["threads"]["t1"].get("session_on"))
+        p2, log2, ss2 = self.start_up()
+        self.wait_for(lambda: len(re.findall(r"^t1\b", self.cli("thread", "sessions", check=False).stdout, re.M)) == 1,
+                      "t1 resumed once")
+        self.assertTrue(lt.load()["threads"]["t1"].get("session_on"))
+        self.cli("thread", "close", "t1")
+        self.assertIsNone(lt.load()["threads"]["t1"].get("session_on"))
+        self.assertNotIn("t1", ss2.session_rec("main").get("sessions") or {})
+        p2.terminate()
+        p2.wait(timeout=30)
+
     def test_at_the_cap_the_longest_idle_session_without_a_run_is_closed(self):
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "2")
         lt = self.threads_home()
         self.cli("thread", "new", "alpha topic")
-        time.sleep(1.5)
+        self.wait_for(lambda: re.search(r"^t1\b.*idle [1-9]\d*s", self.cli("thread", "sessions").stdout, re.M),
+                      "alpha to be idle longer than beta will be")
         self.cli("thread", "new", "beta topic")
         out = self.cli("thread", "new", "gamma topic").stdout
         self.assertRegex(out, r'closed t1 "alpha topic" \(idle \d+[mhd]\) to make room \u2014 reopen with lean-agent thread open t1')
