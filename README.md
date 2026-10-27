@@ -789,6 +789,7 @@ The session budget is in **weighted tokens**, input-token equivalents using the 
 | `LEAN_AGENT_READ_GUARD` / `LEAN_AGENT_READ_LINES` | on / `40` | In the orchestrator, refuse `cat`/`less`/long `tail` of a lean-agent run file longer than this. |
 | `LEAN_AGENT_RESULT_CHARS` | `12000` | Max worker reply printed back to the orchestrator (workers lead with a summary; the full result is saved). |
 | `LEAN_AGENT_HOME` | `~/.lean-agent` | Where everything lives. |
+| `LEAN_AGENT_SESSION_SOCKET_WAIT` / `_READY_WAIT` / `_STOP_WAIT` / `_RESTART_DELAY` | `15` / `40` / `20` / `2` | Seconds the `up` service session waits for the old socket, for a new session's input box, for a stopping session, and before restarting one; test/advanced knobs. |
 
 ## The plugin
 
