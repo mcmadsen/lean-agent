@@ -96,6 +96,8 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      "lean-agent mcp"`, `--mcp <server>` to call it). Its commands are (worker: `lean-agent mcp list -p <project>`),
      (worker: `lean-agent mcp tools <server>`) and (worker: `lean-agent mcp preset <server>`); it picks a preset, not the
      whole server (tens of thousands of tokens per turn; `run` prints the cost); `read` is automatic. Plugin servers (`plugin:<plugin>:<server>`) work too.
+     Check a server's auth first with `lean-agent mcp check <server>`; a run stops early (`MCP <server> is not
+     authenticated`) when the server answers anonymous, and `advise`/`run` show the known-issue card.
    - `--chrome=<tool>,<tool>`: the user's real Chrome (Teams, Gmail ...); a worker checks the connection once (worker:
      `lean-agent chrome check`; it is refused for you, `lean-agent chrome status` is not).
    - New branches follow the project's branch rules: get a name with `lean-agent branch-name` or let lean-agent create
