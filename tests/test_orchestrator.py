@@ -2889,6 +2889,41 @@ class CliTest(unittest.TestCase):
         p = self.cli("up", LEAN_AGENT_CLAUDE=fake, check=False)
         self.assertIn("often the Claude desktop app", p.stdout)
 
+    def test_a_second_up_waits_for_the_previous_one_to_let_go_of_the_socket(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import service_session
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        self.addCleanup(os.environ.pop, "LEAN_AGENT_HOME", None)
+        path = service_session.sock_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        old = service_session.Host(lambda: ([], "x"), {}, self.tmp.name)
+        old.serve()
+        threading.Timer(1.5, old.close).start()  # the previous up is still shutting down
+        t0 = time.time()
+        new = service_session.Host(lambda: ([], "x"), {}, self.tmp.name)
+        new.claim_socket(path, wait=10)
+        self.assertGreaterEqual(time.time() - t0, 1)
+        self.assertFalse(os.path.exists(path))
+        stale = service_session.Host(lambda: ([], "x"), {}, self.tmp.name)
+        stale.serve()
+        stale.server.close()  # a socket file nobody answers on is stale
+        new.claim_socket(path, wait=10)
+        self.assertFalse(os.path.exists(path))
+        holder = service_session.Host(lambda: ([], "x"), {}, self.tmp.name)
+        holder.serve()
+        self.addCleanup(holder.close)
+        with self.assertRaisesRegex(RuntimeError, "did not stop within 1 s"):
+            new.claim_socket(path, wait=1)
+        holder.close()
+        late = service_session.Host(lambda: ([], "x"), {}, self.tmp.name)
+        late.serve()
+        os.remove(path)  # a newer up takes the path over while `late` is still closing
+        newer = service_session.Host(lambda: ([], "x"), {}, self.tmp.name)
+        newer.serve()
+        self.addCleanup(newer.close)
+        late.close()
+        self.assertTrue(os.path.exists(path))
+
     def start_up(self, *args):
         """`lean-agent up` with the fake interactive claude; returns (process, session log path) once the
         session answers on the bridge."""
@@ -2914,6 +2949,14 @@ class CliTest(unittest.TestCase):
                       + "\nstderr (last lines):\n" + "\n".join(err.splitlines()[-25:]))
         self.assertTrue(service_session.alive())
         return p, log, service_session
+
+    def stop_up(self, p, timeout=30):
+        """Stop an `up` and wait until it is gone and its bridge socket with it, so a restart never meets the old one."""
+        import service_session
+        p.terminate()
+        p.wait(timeout=timeout)
+        path = service_session.sock_path()
+        self.wait_for(lambda: not os.path.exists(path), "the old up's socket to disappear", secs=timeout)
 
     def wait_for(self, cond, what, secs=10):
         import time as _t
@@ -2992,8 +3035,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(ss.sock_path(), sock)
         self.assertTrue(ss.alive())
         self.assertEqual(ss.send("hi"), (True, ""))
-        p.terminate()
-        p.wait(timeout=20)
+        self.stop_up(p, 20)
         self.assertFalse(os.path.exists(sock))
 
     def test_up_hosts_one_interactive_session_and_the_socket_types_into_it(self):
@@ -3027,8 +3069,7 @@ class CliTest(unittest.TestCase):
         self.assertFalse(ss.request({"nope": 1})["ok"])
         self.assertTrue(ss.alive())
         # stopping `up` stops the session and removes the socket
-        p.terminate()
-        p.wait(timeout=20)
+        self.stop_up(p, 20)
         self.assertFalse(os.path.exists(ss.sock_path()))
         self.assertFalse(ss.alive())
         self.assertEqual(ss.send("x")[0], False)
@@ -3036,8 +3077,7 @@ class CliTest(unittest.TestCase):
         p2, log2, ss = self.start_up("--name", "la")
         self.assertEqual(self.read_jsonl(log)[-1]["argv"][-2:], ["--resume", sid])
         self.assertEqual(ss.info()["session_id"], sid)
-        p2.terminate()
-        p2.wait(timeout=20)
+        self.stop_up(p2, 20)
         # --fresh starts a new conversation
         p3, _, ss = self.start_up("--fresh")
         self.assertIn("--session-id", self.read_jsonl(log)[-1]["argv"])
@@ -3660,8 +3700,7 @@ class CliTest(unittest.TestCase):
         self.wait_for(lambda: len(self.read_jsonl(log)) == 2 and ss.alive(), "the restart", secs=20)
         self.assertNotEqual(ss.info()["pid"], pid)
         self.assertEqual(self.read_jsonl(log)[1]["argv"][-2:], ["--session-id", self.read_jsonl(log)[0]["argv"][-1]])
-        p.terminate()
-        p.wait(timeout=20)
+        self.stop_up(p, 20)
         # a start that dies at once ends `up` (the service manager decides what to do)
         self.env["LEAN_AGENT_SESSION_QUICK_EXIT"] = "20"
         p, log, ss = self.start_up()
@@ -3731,8 +3770,7 @@ class CliTest(unittest.TestCase):
         reg = self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"))["threads"]
         self.assertEqual(reg["t1"]["session_id"], ss.info("t1")["session_id"])
         self.assertEqual(reg["t2"]["session_id"], calls["t2"]["argv"][-1])
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
 
     def test_closing_and_opening_a_thread_resumes_the_same_session_and_restart_resumes_all(self):
         p, log, ss = self.start_up()
@@ -3755,15 +3793,13 @@ class CliTest(unittest.TestCase):
         # restarting the service resumes every open thread session (and the main one); a session with a transcript by --resume
         self.assertTrue(ss.send("hello two", "t2")[0])
         self.wait_for(lambda: os.path.exists(ss.info("t2")["transcript"]), "t2's transcript")
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
         p2, log2, ss = self.start_up()
         self.wait_for(lambda: ss.alive("t1") and ss.alive("t2"), "the thread sessions after a restart")
         self.wait_for(lambda: sum(1 for c in self.read_jsonl(log) if c.get("thread") == "t2") == 2, "t2 started again")
         again = self.thread_calls(log)
         self.assertEqual({t: c["argv"][-2:] for t, c in again.items()}, {t: ["--resume", sids[t]] for t in sids})
-        p2.terminate()
-        p2.wait(timeout=30)
+        self.stop_up(p2, 30)
 
     def closed_thread_with_history(self, ctx=None):
         """A service with t1 that has talked (so it has a transcript) and is then closed; returns (process, log, ss, old sid)."""
@@ -3806,8 +3842,7 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("--resume", self.read_jsonl(log)[-1]["argv"])
         tr = ss.info("t1")["transcript"]
         self.wait_for(lambda: any("next job please" in json.dumps(r) for r in self.read_jsonl(tr)), "the message")
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
 
     def test_resume_old_resumes_the_previous_session(self):
         p, log, ss, old = self.closed_thread_with_history(ctx=84000)
@@ -3817,8 +3852,7 @@ class CliTest(unittest.TestCase):
         self.assertIn(f"t1 resumed old session {old[:8]} (context ~84k)", out)
         self.wait_for(lambda: len(self.read_jsonl(log)) == n + 1 and ss.alive("t1"), "t1 again")
         self.assertEqual(self.read_jsonl(log)[-1]["argv"][-2:], ["--resume", old])
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
 
     def test_config_thread_fresh_after_default_and_off(self):
         self.cli("config", "thread-fresh-after", "idle=2h,context=10%")
@@ -3857,8 +3891,7 @@ class CliTest(unittest.TestCase):
         argv = self.read_jsonl(log)[-1]["argv"]
         self.assertNotIn("--resume", argv)
         self.assertNotEqual(argv[argv.index("--session-id") + 1], old)
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
 
     def test_auto_fresh_is_decided_again_under_the_start_lock(self):
         p, log, ss, old = self.closed_thread_with_history(ctx=150000)
@@ -3873,8 +3906,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("t1 is running", out)
         self.assertEqual(len(self.read_jsonl(log)), n)
         self.assertTrue(ss.alive("t1"))
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
 
     def test_failed_auto_fresh_start_retries_fresh_and_never_resumes_the_old_session(self):
         p, log, ss, old = self.closed_thread_with_history(ctx=150000)
@@ -3892,8 +3924,7 @@ class CliTest(unittest.TestCase):
         argv = self.read_jsonl(log)[-1]["argv"]
         self.assertNotIn("--resume", argv)
         self.assertNotEqual(argv[argv.index("--session-id") + 1], old)
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
 
     def write_prompt(self, text):
         path = os.path.join(self.tmp.name, "prompt.txt")
@@ -3908,8 +3939,7 @@ class CliTest(unittest.TestCase):
             fresh, line, _ = L.prepare_thread_session("t1", False)
         self.assertFalse(fresh)
         self.assertEqual(line, "t1 resumed (context ~84k)")
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
 
     def test_thread_new_rolls_back_when_the_session_does_not_start(self):
         L = lean_agent_module()
@@ -3995,8 +4025,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(stops, [])
         self.assertTrue(lt.load()["threads"][tid].get("session_on"))
         ss.sessions_request("stop", thread=tid)
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
 
     def test_thread_start_that_never_comes_up_is_rolled_back_and_stopped(self):
         sys.path.insert(0, os.path.dirname(CLI))
@@ -4006,8 +4035,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(stops, [tid])
         self.assertIsNone(lt.load()["threads"][tid].get("session_on"))
         self.assertFalse(ss.alive(tid))
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
 
     def test_thread_new_refuses_above_max_thread_sessions(self):
         p, log, ss = self.start_up()
@@ -4033,8 +4061,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("t2 started", r.stdout)
         self.cli("thread", "close", "t2")
         self.assertIn("t3 started", self.cli("thread", "new", "fourth").stdout)
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
 
     def test_wrapper_non_push_git_spawns_no_extra_git(self):
         sys.path.insert(0, os.path.dirname(CLI))
@@ -4676,8 +4703,7 @@ class CliTest(unittest.TestCase):
     def test_up_restart_after_an_auto_clear_resumes_the_post_clear_session(self):
         p, log, ss, sid = self.cleared_up()
         first = self.service_record()["chain"][0]
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
         p2, log2, ss = self.start_up("--name", "la")
         self.wait_for(lambda: "argv" in self.read_jsonl(log)[-1], "the restarted session's start", secs=30)
         self.assertEqual(self.read_jsonl(log)[-1]["argv"][-2:], ["--resume", sid])
@@ -4725,8 +4751,7 @@ class CliTest(unittest.TestCase):
         new = ss.info()["session_id"]
         self.assertNotIn(new, (sid, ""))
         self.assertEqual(_load_json(os.path.join(self.env["LEAN_AGENT_HOME"], "up.json"))["fresh_sid"], new)
-        p.terminate()
-        p.wait(timeout=20)
+        self.stop_up(p, 20)
         p2, log2, ss = self.start_up("--name", "la")  # the service starts `up` again
         argv = [r for r in self.read_jsonl(log) if "argv" in r][-1]["argv"]
         self.assertEqual(argv[-2:], ["--session-id", new])
@@ -4786,8 +4811,7 @@ class CliTest(unittest.TestCase):
     def test_up_fresh_resets_the_chain(self):
         p, log, ss, sid = self.cleared_up()
         self.assertTrue(self.service_record()["chain"])
-        p.terminate()
-        p.wait(timeout=20)
+        self.stop_up(p, 20)
         p2, _, ss = self.start_up("--name", "la", "--fresh")
         self.assertIn("--session-id", self.read_jsonl(log)[-1]["argv"])
         self.assertNotEqual(ss.info()["session_id"], sid)
@@ -5100,8 +5124,7 @@ class CliTest(unittest.TestCase):
         # shut down only once the new session is up, so stopping `up` never races its start
         self.wait_for(lambda: re.search(r"^t3\b", self.cli("thread", "sessions").stdout, re.M),
                       "the second session to be listed", secs=120)
-        p.terminate()
-        p.wait(timeout=60)
+        self.stop_up(p, 60)
 
     def test_close_takes_several_threads_all_or_idle(self):
         p, log, ss = self.start_up()
@@ -5121,8 +5144,7 @@ class CliTest(unittest.TestCase):
         out = self.cli("thread", "close", "--all").stdout
         self.assertIn("closed 2 threads: t3, t4", out)
         self.assertIn("no thread sessions", self.cli("thread", "sessions").stdout)
-        p.terminate()
-        p.wait(timeout=60)
+        self.stop_up(p, 60)
 
     def test_close_idle_skips_busy_and_fresh_sessions(self):
         L = lean_agent_module()
@@ -5147,8 +5169,7 @@ class CliTest(unittest.TestCase):
         ss.update_session("t9", host_pid=None, host_started=time.time(), pid=None)
         self.assertNotIn("t9", self.cli("thread", "sessions").stdout)
         self.assertIn("t1 started", self.cli("thread", "new", "first").stdout)
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
 
     def test_close_of_a_thread_the_service_does_not_host_only_clears_the_record(self):
         p, log, ss = self.start_up()
@@ -5161,8 +5182,7 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("session stopped", out)
         self.assertIsNone(lt.load()["threads"][tid].get("session_on"))
         self.assertNotIn(tid, ss.session_rec("main").get("sessions") or {})
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
 
     def open_sessions_with_listing(self, listed, rec):
         L = lean_agent_module()
@@ -5236,16 +5256,14 @@ class CliTest(unittest.TestCase):
         self.wait_for(lambda: ss.alive("t2") and ss.alive("t3"), "the two most recent threads resumed")
         self.assertFalse(ss.alive("t1"))
         self.assertTrue(lt.load()["threads"]["t1"].get("session_on"))  # still meant to be open, just not resumed
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
 
     def test_service_restart_resumes_open_sessions_with_stale_host_records_and_counts_them_once(self):
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "2")
         lt = self.threads_home()
         self.assertIn("t1 started", self.cli("thread", "new", "first").stdout)
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
         dead = subprocess.Popen(["true"])
         dead.wait()
         ss.update_session("t1", host_pid=dead.pid, host_started=time.time() - 3600)  # stale record left by a crash
@@ -5259,8 +5277,7 @@ class CliTest(unittest.TestCase):
         self.cli("thread", "close", "t1")
         self.assertIsNone(lt.load()["threads"]["t1"].get("session_on"))
         self.assertNotIn("t1", ss2.session_rec("main").get("sessions") or {})
-        p2.terminate()
-        p2.wait(timeout=30)
+        self.stop_up(p2, 30)
 
     def test_at_the_cap_the_longest_idle_session_without_a_run_is_closed(self):
         p, log, ss = self.start_up()
@@ -5289,8 +5306,7 @@ class CliTest(unittest.TestCase):
         err = r.stderr + r.stdout
         self.assertRegex(err, r't2 "beta topic" idle \d+[mhd], 1 running')
         self.assertRegex(err, r't3 "gamma topic" idle \d+[mhd], 1 running')
-        p.terminate()
-        p.wait(timeout=30)
+        self.stop_up(p, 30)
 
     def lost_run_marker(self, rid="0101-000000-aaaa"):
         home = self.env["LEAN_AGENT_HOME"]
