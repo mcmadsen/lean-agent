@@ -4739,6 +4739,9 @@ class CliTest(unittest.TestCase):
         self.assertIn("--clear goes with --lost", r.stderr)
         stopped = self.cli("runs", "--stop", "0101-000000-aaaa", check=False)  # acknowledged, still stoppable by id
         self.assertNotIn("no running run", stopped.stderr)
+        self.assertIn("run 0101-000000-aaaa stopped", stopped.stdout)
+        rows = [json.loads(l) for l in open(os.path.join(self.env["LEAN_AGENT_HOME"], "ledger.jsonl")) if l.strip()]
+        self.assertEqual([r["status"] for r in rows if r["id"] == "0101-000000-aaaa"], ["stopped"])  # recorded, once
 
     def test_routing_by_id_beats_topic_words(self):
         lt = self.threads_home()
@@ -7296,6 +7299,7 @@ class RuleGlobTest(unittest.TestCase):
         self.assertEqual(t("ABC-12"), "ABC-12")
         self.assertEqual(t("AB#4711"), "4711")
         self.assertEqual(t("PR 512"), "512")
+        self.assertEqual(t("abc-12"), "12")  # only upper-case keys are tracker keys; a lowercase one yields its number
         self.assertIsNone(t("no id"))
         self.assertIsNone(t(None))
 
