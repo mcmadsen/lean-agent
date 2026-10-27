@@ -58,7 +58,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `advise "<request>" [--project P] [--thread TAG] [--task-file -]` | b | allowed: starts a read-only haiku advisor worker; stores its short answer in `advice/` |
 | `run`, `review`, `do`, `tracker --discover` (all flags, `--mcp`, `--allow-cmd`, `--todo new\|N\|none`) | b | allowed, in the background; they start workers |
 | `now`, `thread list`, `thread show tN [--all]` | b | allowed: read-only |
-| `thread new "title" [--prompt-file F\|-]`, `thread send tN --prompt-file F\|-`, `thread open tN`, `thread close tN`, `thread sessions` | b | allowed: each thread is its own Remote Control session (`lean-agent · tN <title>`) that `up` hosts next to the main one; they start, message, resume, checkpoint-and-stop and list those sessions; `max-thread-sessions` (default 8) caps them; idle sessions are never closed automatically |
+| `thread new "title" [--prompt-file F\|-]`, `thread send tN --prompt-file F\|-`, `thread open tN`, `thread close tN`, `thread sessions` | b | allowed: each thread is its own Remote Control session (`lean-agent · tN <title>`) that `up` hosts next to the main one; they start, message, resume, checkpoint-and-stop and list those sessions; `max-thread-sessions` (default 8) caps the sessions hosted now; at the cap `thread new`/`open`/`send` closes the longest-idle session that has no running run (checkpointed, thread closed, reopen with `thread open`) and refuses, listing them, when every one is busy; a session meant to be open is resumed when the service starts |
 | `thread reopen\|merge\|unmerge\|move` | b | allowed: they only change the thread registry |
 | `checkpoint`, `brief` | b | allowed |
 | `clear [--thread tN]` | b | allowed: queues a checkpoint and /clear of the service session (or the thread's own session) at the end of the turn; only when the user asks |
@@ -93,7 +93,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `handover` (also `--list`) | b | allowed: a worker writes a Markdown file; it only writes under LEAN_AGENT_HOME |
 | `config strict on`, `attribution`, `limits`, `budget`, `context` | b | allowed: switches and limits |
 | `config strict off` | c | **denied**: the orchestrator doesn't lift its own guardrail |
-| `runs` (also `runs --wait <id\|all\|last>`, which blocks until those runs are recorded and prints their results; `runs --stop <id\|last>`, which ends one of lean-agent's own runs, records it as `stopped` and lists what it changed in its worktree; a run whose supervisor died shows as `lost`), `logs`, `output`, `stats`, `savings`, `week`, `guide`, `doctor` | a | allowed |
+| `runs` (also `runs --wait <id\|all\|last>`, which blocks until those runs are recorded and prints their results; `runs --stop <id\|last>`, which ends one of lean-agent's own runs, records it as `stopped` and lists what it changed in its worktree; a run whose supervisor died shows as `lost`: `runs --lost` lists them, `runs --lost --clear` acknowledges them, and `runs --stop <id>` still closes one by id; `--clear` needs `--lost`), `logs`, `output`, `stats`, `savings`, `week`, `guide`, `doctor` | a | allowed |
 | `up`, `install`, `trust`, `home`, `env`, `sync`, `service` | b | allowed: lean-agent's own setup and updates |
 
 A lean-agent command with the same name as a denied one but another first word, a quoted text that merely contains the
