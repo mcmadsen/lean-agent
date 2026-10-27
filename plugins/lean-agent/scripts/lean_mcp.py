@@ -438,11 +438,32 @@ def is_auth_env(name):
     return bool(_AUTH_ENV.search(name)) and not name.upper().startswith(_NOT_FOR_SERVERS)
 
 
-def with_auth_env(cfg, env=None):
+_ALIASES = {"devops": ("ADO",)}  # short prefixes a server's own tooling is known to use
+
+
+def server_terms(name):
+    """The identifier tokens of a server key: 'azure-devops' -> ['azure', 'devops']."""
+    return [t for t in re.split(r"[^a-z0-9]+", str(name or "").lower()) if len(t) >= 2 and t not in ("mcp", "server")]
+
+
+def env_belongs_to(var, name):
+    """Whether a shell variable is the server's own: its name carries all the server's identifier tokens
+    (AZURE_DEVOPS_PAT, AZUREDEVOPS_PAT for 'azure-devops'), or a known short prefix of it (ADO_*)."""
+    terms = server_terms(name)
+    if not terms or var.upper().startswith(_NOT_FOR_SERVERS):
+        return False
+    parts = var.lower().split("_")
+    if all(t in parts for t in terms) or "".join(terms) in parts:
+        return True
+    return any(var.upper().split("_")[0] == a for t in terms for a in _ALIASES.get(t, ()))
+
+
+def with_auth_env(cfg, env=None, name=None):
     """A stdio server's config plus the variables it needs for auth. Claude Code starts an MCP server with only a
     small safe environment (HOME, PATH, ...) plus the config's own env block, so a token that lives in the user's
-    shell never reaches it. Copied into that server's env block only: variables named there with no value, and the
-    user's auth-looking ones (PAT, TOKEN, API_KEY, AZURE_*, ...). The config itself is left as it was."""
+    shell never reaches it. Copied into that server's env block only: variables its own config names with no
+    value, and shell variables whose name carries the server's own identifier tokens (see env_belongs_to). Other
+    servers never get them. The config itself is left as it was."""
     if server_type(cfg) != "stdio":
         return cfg
     env = os.environ if env is None else env
@@ -451,7 +472,7 @@ def with_auth_env(cfg, env=None):
         if v in (None, "") and (env.get(k) or env_from_command(k)):
             block[k] = env.get(k) or env_from_command(k)
     for k, v in env.items():
-        if k not in block and v and is_auth_env(k):
+        if k not in block and v and name and env_belongs_to(k, name):
             block[k] = v
     return dict(cfg, env=block) if block != (cfg.get("env") or {}) else cfg
 
@@ -471,7 +492,7 @@ def auth_state(name, cfg):
     """'' or a doctor/check line when the server probably depends on a login a worker can't do."""
     if server_type(cfg) != "stdio":
         return ""
-    served = with_auth_env(cfg)
+    served = with_auth_env(cfg, name=name)
     if any(is_auth_env(k) for k in (served.get("env") or {})):
         return ""
     args = [str(x) for x in cfg.get("args") or []]
@@ -483,9 +504,9 @@ def auth_state(name, cfg):
 class _Session:
     """A stdio server started the way a worker's Claude Code would, spoken to directly."""
 
-    def __init__(self, cfg, timeout):
+    def __init__(self, cfg, timeout, name=None):
         env = {k: v for k, v in os.environ.items() if k in SAFE_ENV}  # what Claude Code gives a stdio server
-        env.update({k: os.path.expandvars(str(v)) for k, v in (with_auth_env(cfg).get("env") or {}).items()})
+        env.update({k: os.path.expandvars(str(v)) for k, v in (with_auth_env(cfg, name=name).get("env") or {}).items()})
         cmd = [os.path.expandvars(cfg["command"])] + [os.path.expandvars(str(x)) for x in cfg.get("args") or []]
         try:
             self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -540,11 +561,11 @@ class _Session:
         self.proc.kill()
 
 
-def probe(cfg, timeout=20.0):
+def probe(cfg, timeout=20.0, name=None):
     """List a stdio server's tools by speaking MCP to it directly (no model call)."""
     if server_type(cfg) != "stdio":
         raise ProbeError("only stdio servers can be probed directly; try `lean-agent mcp tools <server> --measure`")
-    sess = _Session(cfg, timeout)
+    sess = _Session(cfg, timeout, name)
     try:
         sess.start()
         return sess.tools()
@@ -567,7 +588,7 @@ def check(name, cfg, timeout=30.0):
     if server_type(cfg) != "stdio":
         return "skipped", "only stdio servers can be checked directly"
     try:
-        sess = _Session(cfg, timeout)
+        sess = _Session(cfg, timeout, name)
     except ProbeError as exc:
         return "failed", str(exc)
     try:

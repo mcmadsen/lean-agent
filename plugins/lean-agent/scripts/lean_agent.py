@@ -1126,7 +1126,7 @@ def server_tools(name, cfg, refresh=False, session=True):
             and cache[name].get("key", config_key(cfg)) == config_key(cfg)):  # a plugin update changes the config
         return cache[name]["tools"]
     try:
-        tools = lean_mcp.probe(cfg)
+        tools = lean_mcp.probe(cfg, name=name)
         entry = {"tools": {t["name"]: lean_mcp.tool_tokens(t) for t in tools if t.get("name")}, "status": "connected"}
     except lean_mcp.ProbeError:
         if not session:
@@ -1342,7 +1342,7 @@ def resolve_mcp(project, specs):
         if name not in available:
             unknown_server(name, available)
         cfg = available[name]["config"]
-        servers[name] = lean_mcp.with_auth_env(cfg)  # the auth variables the server needs, from the user's environment
+        servers[name] = lean_mcp.with_auth_env(cfg, name=name)  # the auth variables the server needs, from the user's environment
         prefix = lean_mcp.tool_prefix(name)
         if not wanted:
             allowed.append(prefix.rstrip("_"))  # mcp__server: every tool of that server
