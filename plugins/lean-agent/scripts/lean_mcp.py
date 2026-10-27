@@ -448,24 +448,36 @@ def is_auth_env(name):
     return bool(_AUTH_ENV.search(name)) and not name.upper().startswith(_NOT_FOR_SERVERS)
 
 
-_ALIASES = {"devops": ("ADO",)}  # short prefixes a server's own tooling is known to use
+_AUTH_WORDS = ("token", "pat", "key", "secret", "password", "credential", "credentials", "auth")
 
 
 def server_terms(name):
-    """The identifier tokens of a server key: 'azure-devops' -> ['azure', 'devops']."""
-    return [t for t in re.split(r"[^a-z0-9]+", str(name or "").lower()) if len(t) >= 2 and t not in ("mcp", "server")]
+    """The identifier tokens of a server key: 'azure-devops' -> ['azure', 'devops']. A plugin-keyed server
+    ('plugin:<plugin>:<server>') drops the 'plugin' token and uses the plugin and server names."""
+    name = str(name or "").lower()
+    if name.startswith("plugin:"):
+        name = name[len("plugin:"):]
+    out = []
+    for t in re.split(r"[^a-z0-9]+", name):
+        if len(t) >= 2 and t not in ("mcp", "server") and t not in out:
+            out.append(t)
+    return out
 
 
 def env_belongs_to(var, name):
-    """Whether a shell variable is the server's own: its name carries all the server's identifier tokens
-    (AZURE_DEVOPS_PAT, AZUREDEVOPS_PAT for 'azure-devops'), or a known short prefix of it (ADO_*)."""
+    """Whether a shell variable is the server's own: its name contains one of the server's identifier terms
+    (GITHUB_TOKEN for 'github', AZUREDEVOPS_PAT for 'azure-devops') AND an auth word (TOKEN, PAT, KEY, SECRET,
+    PASSWORD, CREDENTIAL, AUTH), so GITHUB_ACTIONS or GITHUB_WORKSPACE never pass. The short ADO_ prefix counts
+    only for a server whose terms include both azure and devops (or ado)."""
     terms = server_terms(name)
     if not terms or var.upper().startswith(_NOT_FOR_SERVERS):
         return False
     parts = var.lower().split("_")
-    if all(t in parts for t in terms) or "".join(terms) in parts:
+    if not any(p in _AUTH_WORDS for p in parts):
+        return False
+    if any(t in parts for t in terms) or ("azure" in terms and "devops" in terms and "azuredevops" in parts):
         return True
-    return any(var.upper().split("_")[0] == a for t in terms for a in _ALIASES.get(t, ()))
+    return parts[0] == "ado" and ("ado" in terms or "azure" in terms and "devops" in terms)
 
 
 def with_auth_env(cfg, env=None, name=None):
@@ -586,7 +598,19 @@ def probe(cfg, timeout=20.0, name=None):
 
 
 _READ_ONLY_NAME = re.compile(r"^(?:list_|get_|whoami$|me$|.+_list$|.+_get$)", re.I)
-_WRITES = re.compile(r"create|update|delete|write|set|add|remove|post|put|patch", re.I)
+_WRITE_WORDS = frozenset(("create", "update", "delete", "write", "set", "add", "remove", "post", "put", "patch"))
+
+
+class _Writes:
+    """Matches a tool name with a write word as a whole segment (split on _ - . and camelCase), so offset and asset don't."""
+
+    @staticmethod
+    def search(name):
+        spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name or "")
+        return any(seg in _WRITE_WORDS for seg in re.split(r"[_\-.\s]+", spaced.lower()))
+
+
+_WRITES = _Writes()
 
 
 def pick_check_tool(tools):
