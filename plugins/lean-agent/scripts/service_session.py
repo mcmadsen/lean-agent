@@ -385,12 +385,13 @@ def parse_fresh_after(raw):
     out = dict(FRESH_AFTER)
     if raw in ("off", "no", "0"):
         return None
+    if raw == "default":
+        raw = ""
     for part in filter(None, (p.strip() for p in raw.replace(" ", ",").split(","))):
         k, _, v = part.partition("=")
         try:
             if k == "idle":
-                mult = {"s": 1, "m": 60, "h": 3600}.get(v[-1:])
-                out["idle"] = float(v[:-1] if mult else v) * (mult or 60)
+                out["idle"] = lean_common.parse_duration(v)
             elif k == "context":
                 out["context"] = float(v.rstrip("%"))
             else:

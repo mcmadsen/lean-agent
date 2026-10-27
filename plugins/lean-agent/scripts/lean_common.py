@@ -129,6 +129,17 @@ def write_json_atomic(path, data):
 COLLECTED_CUTOFF = "_cutoff"  # collected.json key: runs recorded before it count as collected (legacy ledger)
 
 
+DURATION_UNITS = {"s": 1, "m": 60, "": 60, "h": 3600, "d": 86400}
+
+
+def parse_duration(text):
+    """Seconds in a duration such as 90m, 2h, 1d or 45s (a bare number is minutes); ValueError otherwise."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*", str(text or ""))
+    if not m:
+        raise ValueError(f"not a duration: {text!r} (use e.g. 90m, 2h, 1d)")
+    return float(m.group(1)) * DURATION_UNITS[m.group(2)]
+
+
 def now_iso():
     return datetime.datetime.now().isoformat(timespec="seconds")
 

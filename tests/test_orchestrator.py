@@ -3512,6 +3512,14 @@ class CliTest(unittest.TestCase):
         p.terminate()
         p.wait(timeout=30)
 
+    def test_config_thread_fresh_after_default_and_off(self):
+        self.cli("config", "thread-fresh-after", "idle=2h,context=10%")
+        self.assertIn("idle=120m,context=10%", self.cli("config", "thread-fresh-after").stdout)
+        self.assertIn("idle=30m,context=50%", self.cli("config", "thread-fresh-after", "default").stdout)
+        self.assertIn("thread-fresh-after: off", self.cli("config", "thread-fresh-after", "off").stdout)
+        self.assertIn("idle=30m,context=50%", self.cli("config", "thread-fresh-after", "default").stdout)
+        self.assertNotEqual(self.cli("config", "thread-fresh-after", "idle=bogus", check=False).returncode, 0)
+
     def test_send_to_a_big_idle_open_session_continues_fresh_only_when_both_limits_hold(self):
         p, log, ss, old = self.closed_thread_with_history(ctx=150000)
         msg = os.path.join(self.tmp.name, "m.txt")
