@@ -372,7 +372,7 @@ def lean_agent_only(command):
 #             orchestrator links a run with `--todo new` and keeps its own state with checkpoint / handoff --kind fyi.
 #   "mcp"     lists or runs MCP servers or presets: the whole `mcp` subcommand, `chrome check`.
 # Bookkeeping stays allowed: todo list|next|start|done, handoff (read, --done, --kind checkpoint|fyi|decision), thread
-# (also new|send|open|close|sessions: they start, message and stop the thread's own session, never project work),
+# (also new|send|open|close [tN ...|--all|--idle DUR]|sessions: they start, message and stop the thread's own session, never project work),
 # checkpoint, clear [--thread tN] (queues a /clear for the end of the turn), brief, runs (also `runs --wait`, which blocks until runs finish, and `runs --stop`, which only ends lean-agent's own runs), review (it starts its own worker), handover (writes only under LEAN_AGENT_HOME), sync, doctor, optimize and the like.
 CHANGING_ACTIONS = {"worktree": {"rm", "setup", "push", "reset", "base"}}
 CHANGING_ALWAYS = {"rules"}

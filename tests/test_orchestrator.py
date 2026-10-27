@@ -4738,6 +4738,44 @@ class CliTest(unittest.TestCase):
         p.terminate()
         p.wait(timeout=60)
 
+    def test_close_takes_several_threads_all_or_idle(self):
+        p, log, ss = self.start_up()
+        for title in ("one", "two", "three", "four"):
+            self.assertIn("started", self.cli("thread", "new", title).stdout)
+        self.wait_for(lambda: len(re.findall(r"^t\d", self.cli("thread", "sessions").stdout, re.M)) == 4, "four sessions", secs=60)
+        out = self.cli("thread", "close", "t1", "t2").stdout
+        self.assertIn("t1: session stopped", out)
+        self.assertIn("t2: session stopped", out)
+        self.assertIn("closed 2 threads: t1, t2", out)
+        self.assertNotRegex(self.cli("thread", "sessions").stdout, r"^t[12]\b")
+        out = self.cli("thread", "close", "--idle", "1d").stdout  # nothing idle for a day
+        self.assertIn("closed 0 threads", out)
+        self.assertIn("t3", self.cli("thread", "sessions").stdout)
+        self.assertNotEqual(self.cli("thread", "close", "--idle", "soon", check=False).returncode, 0)
+        self.assertNotEqual(self.cli("thread", "close", "t3", "--all", check=False).returncode, 0)
+        out = self.cli("thread", "close", "--all").stdout
+        self.assertIn("closed 2 threads: t3, t4", out)
+        self.assertIn("no thread sessions", self.cli("thread", "sessions").stdout)
+        p.terminate()
+        p.wait(timeout=60)
+
+    def test_close_idle_skips_busy_and_fresh_sessions(self):
+        import lean_agent as L
+        sessions = [{"thread": "t1", "idle": 7300}, {"thread": "t2", "idle": 7300}, {"thread": "t3", "idle": 60}]
+        closed = []
+        args = argparse.Namespace(args=[], all=False, idle="2h", json=False)
+        with mock.patch.object(L, "open_thread_sessions", return_value=sessions), \
+                mock.patch.object(L.lean_threads, "running_by_thread", return_value={"t2": ["r1"]}), \
+                mock.patch.object(L, "close_thread_session", side_effect=lambda t: closed.append(t) or (True, True, False)), \
+                mock.patch.object(L.lean_threads, "cli", return_value=0), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(L.close_threads(args), 0)
+        self.assertEqual(closed, ["t1"])
+        self.assertIn("closed 1 thread: t1", out.getvalue())
+        self.assertEqual(L.parse_idle("90m"), 5400)
+        self.assertEqual(L.parse_idle("2h"), 7200)
+        self.assertRaises(ValueError, L.parse_idle, "soon")
+
     def test_record_without_a_host_pid_is_not_pending(self):
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "1")
