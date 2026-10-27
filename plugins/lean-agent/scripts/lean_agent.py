@@ -8829,6 +8829,53 @@ def make_room_for_thread_session(tid=None):
         sessions.remove(v)
 
 
+def parse_idle(text):
+    """Seconds in a duration such as 90m, 2h, 1d or 45s (a bare number is minutes); ValueError otherwise."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*", str(text or ""))
+    if not m:
+        raise ValueError(f"not a duration: {text!r} (use e.g. 90m, 2h, 1d)")
+    return float(m.group(1)) * {"s": 1, "m": 60, "": 60, "h": 3600, "d": 86400}[m.group(2)]
+
+
+def close_threads(a):
+    """`thread close tN...|--all|--idle DUR`: one checkpoint-and-stop per thread, then a summary line."""
+    if sum(map(bool, (a.args, a.all, a.idle))) != 1:
+        die("usage: lean-agent thread close tN [tM ...] | --all | --idle DUR")
+    if a.idle:
+        try:
+            limit = parse_idle(a.idle)
+        except ValueError as exc:
+            die(str(exc))
+        busy = lean_threads.running_by_thread(lean_threads.load())
+        tids = [s["thread"] for s in open_thread_sessions() if s["idle"] >= limit and s["thread"] not in busy]
+    elif a.all:
+        tids = [s["thread"] for s in open_thread_sessions()]
+    else:
+        tids = []
+        for ref in a.args:
+            tid = thread_session_tid(ref)[0]
+            if tid not in tids:
+                tids.append(tid)
+    done, failed = [], []
+    for tid in tids:
+        try:
+            stopped, ok, stale = close_thread_session(tid)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            failed.append(tid)
+            continue
+        if stopped:
+            print(f"{tid}: session stopped" + ("" if ok is None else " (checkpointed)" if ok else " (no checkpoint reply in time)"))
+        elif stale:
+            print(f"{tid}: no running session; record cleared")
+        lean_threads.cli("close", [tid], a.json)
+        done.append(tid)
+    if len(tids) != 1 or a.all or a.idle:
+        print(f"closed {len(done)} thread{'s' * (len(done) != 1)}" + (f": {', '.join(done)}" if done else "")
+              + (f"; failed: {', '.join(failed)}" if failed else ""))
+    return 1 if failed else 0
+
+
 def cmd_thread(a):
     act = a.action
     if act == "sessions":
@@ -8904,18 +8951,7 @@ def cmd_thread(a):
               + (": message sent" if prompt else ""))
         return 0
     if act == "close":
-        if len(a.args) != 1:
-            die("usage: lean-agent thread close tN")
-        tid, t = thread_session_tid(a.args[0])
-        try:
-            stopped, ok, stale = close_thread_session(tid)
-        except RuntimeError as exc:
-            die(str(exc))
-        if stopped:
-            print(f"{tid}: session stopped" + ("" if ok is None else " (checkpointed)" if ok else " (no checkpoint reply in time)"))
-        elif stale:
-            print(f"{tid}: no running session; record cleared")
-        return lean_threads.cli("close", [tid], a.json)
+        return close_threads(a)
     if act == "reopen" and len(a.args) == 1:
         tid, t = thread_session_tid(a.args[0])
         if t.get("closed") and t.get("session_id"):
@@ -10185,12 +10221,13 @@ def build_parser():
     s.add_argument("args", nargs=argparse.REMAINDER, help="add: the lean-agent command, e.g. do <project> <recipe>")
     s.set_defaults(fn=cmd_schedule)
 
-    s = sub.add_parser("thread", help="threads: new \"title\" [--prompt-file F|-] (its own Remote Control session) | send tN --prompt-file F|- | open tN (resume its session) | sessions | list | show tN [--all] | close tN (checkpoint, stop its session) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
+    s = sub.add_parser("thread", help="threads: new \"title\" [--prompt-file F|-] (its own Remote Control session) | send tN --prompt-file F|- | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
     s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions"])
     s.add_argument("args", nargs="*")
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin)")
     s.add_argument("--json", action="store_true", help="list: as JSON")
-    s.add_argument("--all", action="store_true", help="show: every entry (default: the latest 40)")
+    s.add_argument("--all", action="store_true", help="show: every entry (default: the latest 40); close: every open session")
+    s.add_argument("--idle", help="close: every session idle at least this long (e.g. 2h, 90m) without a running run")
     s.add_argument("--resume-old", action="store_true", help="reopen|send|open: continue the thread's previous Claude session "
                    "instead of starting a new one from a short brief")
     s.set_defaults(fn=cmd_thread)
