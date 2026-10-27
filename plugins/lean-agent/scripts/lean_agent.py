@@ -166,7 +166,7 @@ def save_json(path, data):
 
 def append_jsonl(path, entry):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a") as fh:
+    with file_lock(path), open(path, "a") as fh:  # the lock keeps a concurrent rewrite (update_last_review) from eating it
         fh.write(json.dumps(entry) + "\n")
 
 
@@ -4284,14 +4284,17 @@ def answer_template(ns_syms, focus):
 def update_last_review(slug, run_id, change):
     """Rewrite the newest recorded review of `run_id` with change(record)."""
     path = reviews_path(slug)
-    recs = list(read_jsonl(path))
-    for r in reversed(recs):
-        if r.get("run") == run_id:
-            change(r)
-            break
-    with open(path, "w") as fh:
-        for r in recs:
-            fh.write(json.dumps(r) + "\n")
+    with file_lock(path):
+        recs = list(read_jsonl(path))
+        for r in reversed(recs):
+            if r.get("run") == run_id:
+                change(r)
+                break
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as fh:
+            for r in recs:
+                fh.write(json.dumps(r) + "\n")
+        os.replace(tmp, path)
 
 
 def fill_reuse(a, slug, path, meta, symbols):
