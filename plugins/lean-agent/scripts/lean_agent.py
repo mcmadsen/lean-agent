@@ -228,7 +228,7 @@ def task_type(task, read_only=False, chrome=False):
 
 
 def is_core(c, ttype):
-    return bool(c.get("rule")) or bool(c.get("core")) or ttype in (c.get("core_types") or [])
+    return not c.get("rule") and (bool(c.get("core")) or ttype in (c.get("core_types") or []))
 
 
 # ---------------------------------------------------------------- projects & library
@@ -1688,7 +1688,7 @@ def _cmd_run(a):
             if missing:
                 die(f"unknown card(s): {', '.join(missing)} (see: lean-agent cards {slug})")
             ttype = getattr(a, "ttype", None) or task_type(task, a.read_only, bool(a.chrome))
-            cards = [c for c in lib.values() if is_core(c, ttype) and not c.get("archived")]
+            cards = [c for c in lib.values() if is_core(c, ttype) and not c.get("archived") and not c.get("rule")]
             cards += [lib[x] for x in wanted if lib[x] not in cards]
         if not getattr(a, "role", None) and a.cards != "none" and getattr(a, "card_list", None) is None:
             known = server_issue_cards([c for c in lib.values() if not c.get("archived")], project,
@@ -1697,7 +1697,7 @@ def _cmd_run(a):
             for c in known:
                 if is_issue_card(c):
                     print(f"known issue: {re.sub(r'^memory [a-z]+: ', '', c['title'])}", flush=True)
-        cards = cards + lean_rules.pick_within_budget([c for c in lib.values() if c.get("rule") and c not in cards])
+        cards = [c for c in cards if not c.get("rule")] + lean_rules.pick_within_budget([c for c in lib.values() if c.get("rule")])
         native_rules = bool(not getattr(a, "role", None) and project_rules_on(slug))
         if native_rules:  # Claude Code loads CLAUDE.md and the rules itself
             cards = [c for c in cards if not is_rule_card(c)]
