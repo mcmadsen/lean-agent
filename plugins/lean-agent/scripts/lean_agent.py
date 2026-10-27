@@ -2955,6 +2955,23 @@ def is_declined(f, declined):
     return False
 
 
+def run_reuse_check(a, slug, model, why, cards, ref, rule):
+    """The cheap search-only reuse-check run; its review.json as a dict ({} when it left none), None if the run died."""
+    ns = argparse.Namespace(resume=None, task=["Find existing code that the new symbols duplicate."], task_file=None,
+                            model=model, why=why, cards=None, card_list=cards,
+                            project=slug, read_only=True, chrome=None, mcp=None, tools=None, allow_send=None,
+                            max_turns=30, max_usd=1.0, max_context=a.max_context, ttype="review", role="reuse-check",
+                            review_meta={"ref": ref, "mode": "second-opinion"}, effort="low", role_rule=rule)
+    LAST_RUN[:] = []
+    try:
+        cmd_run(ns)
+    except SystemExit:
+        return None
+    run = LAST_RUN[0] if LAST_RUN else next(
+        (r for r in reversed(ledger()) if r.get("role") == "reuse-check" and r["project"] == slug), None)
+    return load_json(os.path.join(run["workdir"], "review.json"), {}) if run and run.get("workdir") else {}
+
+
 def second_opinion(a, slug, path, ns_syms, names, scope, read_rule, rng, grep_ref, cards):
     """For big or new-abstraction diffs, a cheap search-only pass for reuse candidates; their text, or ''."""
     mode = getattr(a, "second_opinion", "auto") or "auto"
@@ -2963,21 +2980,12 @@ def second_opinion(a, slug, path, ns_syms, names, scope, read_rule, rng, grep_re
         return ""
     model = os.environ.get("LEAN_AGENT_REUSE_MODEL") or "haiku"
     print(f"review: second opinion first ({model}, search-only reuse pass)", flush=True)
-    ns = argparse.Namespace(resume=None, task=["Find existing code that the new symbols duplicate."], task_file=None,
-                            model=model, why="reuse/duplication second opinion", cards=None, card_list=cards,
-                            project=slug, read_only=True, chrome=None, mcp=None, tools=None, allow_send=None,
-                            max_turns=30, max_usd=1.0, max_context=a.max_context, ttype="review", role="reuse-check",
-                            review_meta={"ref": getattr(a, "_label", None), "mode": "second-opinion"},
-                            effort="low", role_rule=REUSE_RULE.format(scope=scope, project=path, diff_range=rng,
-                                                                     read_rule=read_rule, grep_ref=grep_ref,
-                                                                     new_symbols=symbols_text(ns_syms),
-                                                                     decisions=getattr(a, "_decisions", "")))
-    try:
-        cmd_run(ns)
-    except SystemExit:
+    rv = run_reuse_check(a, slug, model, "reuse/duplication second opinion", cards, getattr(a, "_label", None),
+                         REUSE_RULE.format(scope=scope, project=path, diff_range=rng, read_rule=read_rule,
+                                           grep_ref=grep_ref, new_symbols=symbols_text(ns_syms),
+                                           decisions=getattr(a, "_decisions", "")))
+    if rv is None:
         return ""
-    run = next((r for r in reversed(ledger()) if r.get("role") == "reuse-check" and r["project"] == slug), None)
-    rv = load_json(os.path.join(run["workdir"], "review.json"), {}) if run else {}
     lines = []
     for r in rv.get("reuse") or []:
         if isinstance(r, dict) and r.get("candidates") and r.get("verdict") not in REUSE_OK:
@@ -3084,11 +3092,16 @@ def add_to_review_cards(slug, checklist=(), helpers=(), replace=()):
     return added
 
 
+def on_branch(path, r, head, br):
+    """Whether review record `r` is of `head` or of its branch `br`."""
+    return not head or bare_ref(r.get("ref")) == bare_ref(head) or bool(
+        br and (r.get("branch") or branch_of(path, r.get("ref"))) == br)
+
+
 def latest_review(slug, path, head):
     """The latest review recorded for the project, or for the branch `head` when given."""
     br = branch_of(path, head) if head else ""
-    return next((r for r in reversed(list(read_jsonl(reviews_path(slug)))) if is_real_review(r) and (not head or r.get("ref") == head
-                 or (br and (r.get("branch") or branch_of(path, r.get("ref"))) == br))), None)
+    return next((r for r in reversed(list(read_jsonl(reviews_path(slug)))) if is_real_review(r) and on_branch(path, r, head, br)), None)
 
 
 def cmd_review_decline(a):
@@ -3810,8 +3823,7 @@ def review_max_rerounds():
 def branch_reviews(slug, path, label):
     """The recorded reviews of one branch, oldest first."""
     br = branch_of(path, label) if label and label != "working tree" else ""
-    return [r for r in read_jsonl(reviews_path(slug))
-            if bare_ref(r.get("ref")) == bare_ref(label) or (br and r.get("branch") == br)]
+    return [r for r in read_jsonl(reviews_path(slug)) if on_branch(path, r, label, br)]
 
 
 def rerounds(slug, path, label, sha):
@@ -4307,23 +4319,13 @@ def fill_reuse(a, slug, path, meta, symbols):
     model = os.environ.get("LEAN_AGENT_REUSE_MODEL") or "haiku"
     print(f"review: {len(symbols)} reuse entr{'y' if len(symbols) == 1 else 'ies'} missing: filling them with a "
           f"{model} search-only run instead of resuming the reviewer", flush=True)
-    ns = argparse.Namespace(resume=None, task=["Find existing code that the new symbols duplicate."], task_file=None,
-                            model=model, why="fill the reuse entries the reviewer left out", cards=None, card_list=[],
-                            project=slug, read_only=True, chrome=None, mcp=None, tools=None, allow_send=None,
-                            max_turns=30, max_usd=1.0, max_context=a.max_context, ttype="review", role="reuse-check",
-                            review_meta={"ref": meta.get("ref"), "mode": "second-opinion"}, effort="low",
-                            role_rule=REUSE_RULE.format(scope=f"{meta.get('ref') or 'the working tree'}", project=path,
-                                                        diff_range=rng, read_rule=read_rule,
-                                                        grep_ref=meta["head"] if ref_mode else "",
-                                                        new_symbols="\n" + "\n".join(f"- {x}" for x in symbols),
-                                                        decisions=""))
-    LAST_RUN[:] = []
-    try:
-        cmd_run(ns)
-    except SystemExit:
+    rv = run_reuse_check(a, slug, model, "fill the reuse entries the reviewer left out", [], meta.get("ref"),
+                         REUSE_RULE.format(scope=f"{meta.get('ref') or 'the working tree'}", project=path,
+                                           diff_range=rng, read_rule=read_rule,
+                                           grep_ref=meta["head"] if ref_mode else "",
+                                           new_symbols="\n" + "\n".join(f"- {x}" for x in symbols), decisions=""))
+    if rv is None:
         return []
-    run = LAST_RUN[0] if LAST_RUN else None
-    rv = load_json(os.path.join(run["workdir"], "review.json"), {}) if run and run.get("workdir") else {}
     return [r for r in rv.get("reuse") or [] if isinstance(r, dict) and r.get("symbol")]
 
 
