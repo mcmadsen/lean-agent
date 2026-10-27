@@ -8234,7 +8234,7 @@ class RuleUnitTest(unittest.TestCase):
         self.assertEqual(self.memory.clusters(self.dir), [])
 
     def test_clusters_compare_against_the_first_entry_only(self):
-        for i, extra in enumerate(("", " alpha beta", " alpha beta gamma delta")):
+        for i, extra in enumerate(("", " alpha beta", " alpha beta gamma delta epsilon")):
             path = os.path.join(self.dir, f"project_chain_{i}.md")
             with open(path, "w") as fh:
                 fh.write(f"---\nname: chain\ntype: project\nscope: global\ncreated: 2025-01-0{i + 1}\n---\n\n"
