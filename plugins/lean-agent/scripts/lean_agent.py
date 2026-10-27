@@ -4295,8 +4295,9 @@ BRANCH_KINDS = ("feature", "bugfix", "release")
 DEFAULT_BRANCH_RULES = {"feature": "feature/{task-id}-{name}", "bugfix": "bugfix/{task-id}-{name}",
                         "release": "release/release-{version}"}
 _BUGFIX_WORDS = re.compile(r"\b(fix(es|ed|ing)?|bugs?|hotfix(es)?|regressions?|defects?)\b", re.I)
-_RELEASE_TITLE = re.compile(r"^\s*release\b", re.I)
-_VERSION = re.compile(r"\bv?(\d+(?:\.\d+)+(?:[-+.\w]*\w)?|\d+)\b")
+_VERSION = re.compile(r"\bv?(\d+\.\d+(?:\.\d+)?)(?![\w.]*\w)")
+_RELEASE_TITLE = re.compile(r"^\s*release\s+" + _VERSION.pattern, re.I)
+_RELEASE_BRANCH = re.compile(r"(?<![\w/-])release/\S", re.I)
 
 
 def branch_rules(slug):
@@ -4313,15 +4314,15 @@ def branch_slug(title, limit=40):
 
 
 def infer_branch_kind(title):
-    """release for a release task (title starts with "release"), bugfix when fix/bug/hotfix/regression/defect is a
-    word in it, else feature."""
-    if _RELEASE_TITLE.match(title or ""):
+    """release when the title starts with "release" and a version (x.y or x.y.z, optional v) or names a release/
+    branch, bugfix when fix/bug/hotfix/regression/defect is a word in it, else feature."""
+    if _RELEASE_TITLE.match(title or "") or _RELEASE_BRANCH.search(title or ""):
         return "release"
     return "bugfix" if _BUGFIX_WORDS.search(title or "") else "feature"
 
 
 def title_version(title):
-    m = re.match(r"^\s*release\s+" + _VERSION.pattern, title or "", re.I)
+    m = _RELEASE_TITLE.match(title or "")
     return m.group(1) if m else None
 
 
