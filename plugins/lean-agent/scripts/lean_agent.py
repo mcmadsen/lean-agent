@@ -9191,7 +9191,9 @@ def cmd_thread(a):
             print(f"{tid} is running" + (": message sent" if prompt else ""))
             return 0
         with thread_start_lock():
-            if why and service_session.alive(tid):
+            if why:  # decided again under the lock: a concurrent send may have restarted it fresh already
+                why = auto_fresh_reason(tid) if service_session.alive(tid) else ""
+            if why:
                 try:
                     close_thread_session(tid)
                 except RuntimeError as exc:
