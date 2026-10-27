@@ -6108,7 +6108,7 @@ def stop_run(target):
     """`runs --stop <id|last>`: ends a running run (its own supervisor group only), records it as `stopped`, shows what
     it changed in its worktree and how to go on or start over."""
     running, lost = live_runs(), lost_runs(home())
-    live = running + lost
+    live = running + lost_runs(home(), acknowledged=True)  # an acknowledged lost run can still be stopped by id
     if target == "last":  # the newest live run; a lost one only when named
         mine = [x for x in running if not x[1].get("role")] or running
         if not mine:
@@ -6179,6 +6179,8 @@ def cmd_runs(a):
         runs = [r for r in runs if r["project"] == slug]
     if getattr(a, "stop", None):
         return stop_run(a.stop)
+    if getattr(a, "clear", False) and not getattr(a, "lost", False):
+        die("--clear goes with --lost: lean-agent runs --lost --clear", 2)
     if getattr(a, "lost", False):
         lost = lost_runs(home())
         if a.clear:
