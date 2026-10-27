@@ -1502,6 +1502,7 @@ def _cmd_run(a):
         cards, workdir, run_id = [], prev["workdir"], prev["id"]
         tools = prev.get("tools", WORKER_TOOLS)
         read_only = prev.get("read_only", False)
+        auto_branch = bool(prev.get("auto_branch"))
         chrome_spec = prev.get("chrome")
         role_file = os.path.join(workdir, "role.md")
         role_rule = getattr(a, "role_rule", None) or (read_text(role_file) if os.path.exists(role_file) else "")
@@ -1513,18 +1514,26 @@ def _cmd_run(a):
         slug, project = resolve_project(a.project)
         sync_memory(slug)
         auto_branch = getattr(a, "worktree", None) == "auto"
-        if auto_branch:  # a new branch named by the project's branch rules
-            title = getattr(a, "why", None) or task.splitlines()[0]
-            a.worktree = new_branch_name(slug, project, getattr(a, "branch_type", None),
-                                         todo_task_id(getattr(a, "todo", None)), title,
-                                         getattr(a, "branch_version", None))
-            print(f"branch: {a.worktree}", flush=True)
-            note = release_note(slug, a.worktree)
-            if note:
-                print(note, flush=True)
+        if auto_branch and a.read_only:  # a read-only worker changes nothing, so it gets no new branch
+            print("branch: --worktree auto makes a branch for a worker that writes; this read-only worker gets none "
+                  "(it runs in the project's checkout)", flush=True)
+            a.worktree = None
+            auto_branch = False
         if getattr(a, "worktree", None):
-            wt = ensure_worktree(slug, project, a.worktree, reset=getattr(a, "reset_worktree", False),
-                                 base=getattr(a, "worktree_base", None), typed=not auto_branch)
+            # an auto name is chosen and its branch created under one lock, so parallel runs can't pick the same name
+            os.makedirs(home("worktrees", slug), exist_ok=True)
+            with file_lock(home("worktrees", slug, ".auto-branch.lock")) if auto_branch else contextlib.nullcontext():
+                if auto_branch:
+                    title = getattr(a, "why", None) or task.splitlines()[0]
+                    a.worktree = new_branch_name(slug, project, getattr(a, "branch_type", None),
+                                                 todo_task_id(getattr(a, "todo", None)), title,
+                                                 getattr(a, "branch_version", None))
+                    print(f"branch: {a.worktree}", flush=True)
+                    note = release_note(slug, a.worktree)
+                    if note:
+                        print(note, flush=True)
+                wt = ensure_worktree(slug, project, a.worktree, reset=getattr(a, "reset_worktree", False),
+                                     base=getattr(a, "worktree_base", None), typed=not auto_branch)
             project = wt["path"]
             print(f"worktree: {wt['ref']} at {wt['path']} ({'reused' if wt['reused'] else 'created'}"
                   f"{', on branch ' + wt['branch'] if wt['branch'] else ', detached'}, HEAD {wt['head'][:10]})", flush=True)
@@ -1732,7 +1741,7 @@ def _cmd_run(a):
         "model": model, "why": a.why or (prev and "resume"), "cards": sorted(c["id"] for c in cards), "tools": tools,
         "native_rules": native_rules or None, "session_id": prev["session_id"] if prev else None,
         "resumed": bool(prev), "task": task[:300], "mcp": mcp_specs,
-        "read_only": read_only, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
+        "read_only": read_only, "auto_branch": auto_branch, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
         "allow_cmd": allow_cmd, "todo": todo_id, "thread": thread_tag,
         "role": role, "effort": effort, "worktree": wt_name, "review_meta": review_meta, "launch_key": launch_key,
         "recipe": (getattr(a, "recipe", None) or (None, None))[0],

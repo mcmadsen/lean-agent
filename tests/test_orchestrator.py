@@ -6117,6 +6117,19 @@ class CliTest(unittest.TestCase):
         self.assertIn("branch: feature/add-thing-2", out)
         self.assertIn("worktree: created feature/add-thing-2", out)
 
+    def test_worktree_auto_is_for_write_workers_only(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "Look at x", "--read-only", "--worktree", "auto",
+                       "--worktree-base", "main", "--", "look").stdout
+        self.assertIn("this read-only worker gets none", out)
+        self.assertNotIn("worktree: created", out)
+        branches = subprocess.run(["git", "-C", self.proj, "branch", "--list"], capture_output=True, text=True).stdout
+        self.assertNotIn("look-at-x", branches)
+
     def test_worktree_creates_missing_branch_from_a_base(self):
         g = self.git_project()
         g("add", "-A")
