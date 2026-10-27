@@ -4726,6 +4726,14 @@ class CliTest(unittest.TestCase):
         self.assertEqual(lt.id_thread("port 8080 is busy", lt.load()), None)
         self.assertEqual(lt.id_thread("4711 status", lt.load()), "t1")
 
+    def test_explicit_hash_number_creates_the_task_thread(self):
+        lt = self.threads_home()
+        t0 = datetime.datetime.now().timestamp() - 5000
+        for n in ("4711", "12"):
+            tid, how, _ = lt.route(f"Start on #{n} please", "s1", t0)
+            self.assertEqual((tid, how), (f"#{n}", "explicit"))
+            self.assertIn(f"#{n}", lt.load()["threads"])
+
     def test_prompt_ids(self):
         lt = self.threads_home()
         self.assertEqual(lt.prompt_refs("fix #4711 and PR 4712 and AB#4713"), ({"4711", "4712", "4713"}, set()))

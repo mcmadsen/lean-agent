@@ -514,8 +514,6 @@ def route(prompt, session=None, now=None, create=True):
     m = EXPLICIT_RE.search(text)
     with _locked() as data:
         tid, how, unsure = None, None, False
-        if m and m.group(1) and len(m.group(1)) >= 3 and f"#{int(m.group(1))}" not in data["threads"]:
-            m = None  # #4711 names a PR or ticket, not a thread
         if m:
             cand = resolve(f"#{int(m.group(1))}" if m.group(1) else f"t{int(m.group(2))}", data["aliases"])
             if cand in data["threads"] or cand.startswith("#"):
