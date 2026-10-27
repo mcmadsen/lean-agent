@@ -4071,8 +4071,9 @@ def review_main(a):
         meta["since_hunks"] = changed_hunks(path, since)
         meta["earlier"] = [str(f.get("issue", "")) for f in last.get("findings") or []]
         risk = high_risk(path, since, changed) if since else []
-        delta_model, why_model = choose_review_model(path, since, changed, os.environ.get("LEAN_AGENT_DELTA_REVIEW_MODEL")
-                                                     or explicit, rereview=True)
+        delta_model, why_model = choose_review_model(path, since, changed, getattr(a, "reviewer_model", None)
+                                                     or os.environ.get("LEAN_AGENT_DELTA_REVIEW_MODEL") or explicit,
+                                                     rereview=True)
         print(f"reviewer: {delta_model} ({why_model})", flush=True)
         if risk and usage.model_rate(delta_model) <= 1:
             print(f"review: the changes since are high-risk ({'; '.join(risk)}): --reviewer-model "
