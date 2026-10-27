@@ -6179,16 +6179,30 @@ def cmd_runs(a):
         runs = [r for r in runs if r["project"] == slug]
     if getattr(a, "stop", None):
         return stop_run(a.stop)
+    if getattr(a, "lost", False):
+        lost = lost_runs(home())
+        if a.clear:
+            for rid, m in lost:
+                m["lost_ack"] = now_iso()
+                save_json(home("running", (m.get("run") or rid) + ".json"), m)
+            print(f"{len(lost)} lost runs marked lost and acknowledged")
+            return
+        for rid, m in lost:
+            print(f"{rid}  lost  (supervisor died; close it: lean-agent runs --stop {rid})  {m.get('model', '?'):<7} "
+                  f"{m.get('project', '?'):<16} {m.get('task', '')[:50]}")
+        if not lost:
+            print("No lost runs.")
+        return
     if a.running:
         found = False
         for _, m in live_runs():
             found = True
             print(f"{m.get('run', '?')}  running since {m.get('started', '?')[11:19]}  {m.get('model', '?'):<7} "
                   f"{m.get('project', '?'):<16} {m.get('task', '')[:70]}")
-        for rid, m in lost_runs(home()):
+        lost = lost_runs(home())
+        if lost:
             found = True
-            print(f"{rid}  lost  (supervisor died; close it: lean-agent runs --stop {rid})  {m.get('model', '?'):<7} "
-                  f"{m.get('project', '?'):<16} {m.get('task', '')[:50]}")
+            print(f"{len(lost)} lost runs \u2014 lean-agent runs --lost")
         if not found:
             print("No runs in progress.")
         return
@@ -7996,19 +8010,101 @@ def start_thread_session(tid, t, prompt=None):
         if not service_session.alive(tid):
             service_session.sessions_request("stop", thread=tid)  # nothing may start later unrecorded
             raise RuntimeError(f"could not start the session of {tid}: {r.get('error') or 'not started'}")
-    lean_threads.set_session(tid, session_on=True)  # only a started session is one the service keeps
+    lean_threads.set_session(tid, session_on=True, session_on_at=time.time())  # only a started session is one the service keeps
     return r.get("name") or service_session.thread_session_name(tid, t.get("title"))
+
+
+THREAD_START_PENDING = 60  # seconds a just-started thread session counts before its host has to answer
+
+
+def close_thread_session(tid):
+    """Checkpoint (when it answers) and stop a thread's host (when its process is alive), then clear session_on and the
+    host record at once. Idempotent. Returns (a host was stopped, checkpoint result)."""
+    ok, stopped = None, False
+    rec = service_session.session_rec(tid)
+    if service_session.alive(tid):
+        ok = service_session.checkpoint_session(tid)
+    if service_session.alive(tid) or pid_alive(rec.get("host_pid")):
+        service_session.sessions_request("stop", thread=tid)
+        stopped = True
+    try:
+        lean_threads.set_session(tid, session_on=None, session_on_at=None)
+    except ValueError:  # a host record of a thread that no longer exists
+        pass
+    service_session.drop_session(tid)
+    return stopped, ok
+
+
+def open_thread_sessions():
+    """The thread sessions that are open: [{thread, title, name, pid, idle, started}], oldest id first. A thread counts
+    when its host process is alive (and the service lists it), or it started less than THREAD_START_PENDING seconds ago.
+    Records of dead hosts are pruned (host record dropped, session_on cleared). The one count the cap and
+    `thread sessions` both use."""
+    now = time.time()
+    threads = lean_threads.load()["threads"]
+    recs = service_session.session_rec("main").get("sessions")
+    recs = {k: v for k, v in (recs.items() if isinstance(recs, dict) else []) if k != "main" and isinstance(v, dict)}
+    listed = service_session.sessions_request("list", timeout=5)
+    listing = {x["thread"]: x for x in listed.get("sessions") or []} if listed.get("ok") else None
+    out = []
+    for tid in sorted(set(recs) | {k for k, t in threads.items() if t.get("session_on")},
+                      key=lambda k: int(k[1:]) if k[1:].isdigit() else 0):
+        rec, t = recs.get(tid) or {}, threads.get(tid) or {}
+        started = rec.get("host_started") or t.get("session_on_at") or 0
+        pending = now - started < THREAD_START_PENDING
+        host_up = pid_alive(rec.get("host_pid")) and (listing is None or tid in listing)
+        if host_up or pending and (not rec.get("host_pid") or pid_alive(rec["host_pid"])):
+            x = listing.get(tid) if listing else None
+            out.append({"thread": tid, "title": t.get("title") or "", "pid": x and x.get("pid") or rec.get("pid"),
+                        "name": (x and x.get("name")) or rec.get("name") or service_session.thread_session_name(tid, t.get("title")),
+                        "idle": x["idle"] if x else round(now - started) if started else 0, "started": started})
+        elif rec or t.get("session_on"):
+            try:
+                if t.get("session_on"):
+                    lean_threads.set_session(tid, session_on=None, session_on_at=None)
+                service_session.drop_session(tid)
+            except ValueError:
+                pass
+    return out
+
+
+def fmt_idle(sec):
+    return f"{sec // 86400}d" if sec >= 172800 else f"{sec // 3600}h" if sec >= 3600 else f"{sec // 60}m"
+
+
+def make_room_for_thread_session(tid=None):
+    """Before a thread session starts: at max-thread-sessions, close the longest-idle open session that has no live run
+    tagged with its thread (checkpointed like `thread close`); when every one is busy, refuse and list them."""
+    cap = service_session.max_thread_sessions()
+    sessions = [s for s in open_thread_sessions() if s["thread"] != tid]
+    while len(sessions) >= cap:
+        busy = {}
+        for rid, m in live_runs():
+            if m.get("thread"):
+                busy.setdefault(m["thread"], rid)
+        free = [s for s in sessions if s["thread"] not in busy]
+        if not free:
+            die(f"{len(sessions)} thread sessions are open (max-thread-sessions {cap}) and all are busy:\n" +
+                "\n".join(f'{s["thread"]} "{s["title"]}" idle {fmt_idle(s["idle"])}, running run {busy[s["thread"]]}'
+                          for s in sessions) + "\nwait for one, or `lean-agent config max-thread-sessions N`")
+        v = max(free, key=lambda s: s["idle"])
+        close_thread_session(v["thread"])
+        if v["thread"] in lean_threads.load()["threads"]:
+            lean_threads.set_closed(v["thread"], True)
+        print(f'closed {v["thread"]} "{v["title"]}" (idle {fmt_idle(v["idle"])}) to make room \u2014 reopen with '
+              f'lean-agent thread open {v["thread"]}')
+        sessions.remove(v)
 
 
 def cmd_thread(a):
     act = a.action
     if act == "sessions":
-        r = service_session.sessions_request("list")
-        if not r.get("ok"):
+        if not service_session.alive():
             die("no service session is up (start it with `lean-agent up` or `lean-agent service start`)")
-        for x in r.get("sessions") or []:
-            print(f"{x['thread']:<6}{x['name'] or '-':<42}pid {x['pid']:<8}idle {x['idle']}s")
-        if not r.get("sessions"):
+        sessions = open_thread_sessions()
+        for x in sessions:
+            print(f"{x['thread']:<6}{x['name'] or '-':<42}pid {x['pid'] or '-':<8}idle {x['idle']}s")
+        if not sessions:
             print("no thread sessions running (start one with `lean-agent thread new \"title\"`)")
         return 0
     if act == "new":
@@ -8019,13 +8115,7 @@ def cmd_thread(a):
             if prompt:
                 die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
             return lean_threads.cli("new", a.args, a.json)
-        on = lean_threads.session_threads()
-        on += sorted(service_session.hosted_threads() - set(on), key=lambda k: int(k[1:]) if k[1:].isdigit() else 0)
-        cap = service_session.max_thread_sessions()
-        if len(on) >= cap:
-            die(f"{len(on)} thread sessions are open (max-thread-sessions {cap}): close one first, e.g. "
-                f"`lean-agent thread close {on[0]}` (`lean-agent thread sessions` lists them), or "
-                "`lean-agent config max-thread-sessions N`")
+        make_room_for_thread_session()
         tid = lean_threads.new(a.args[0])
         t = lean_threads.load()["threads"][tid]
         try:
@@ -8045,12 +8135,8 @@ def cmd_thread(a):
         if not service_session.alive():
             die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
         running = service_session.alive(tid)
-        if not running and not t.get("session_on"):
-            on = lean_threads.session_threads()
-            on += sorted(service_session.hosted_threads() - set(on) - {tid})
-            if len(on) >= service_session.max_thread_sessions():
-                die(f"{len(on)} thread sessions are open (max-thread-sessions {service_session.max_thread_sessions()}): "
-                    f"close one first, e.g. `lean-agent thread close {on[0]}`")
+        if not running:
+            make_room_for_thread_session(tid)
         if t.get("closed"):
             lean_threads.set_closed(tid, False)
         if running:
@@ -8071,11 +8157,9 @@ def cmd_thread(a):
         if len(a.args) != 1:
             die("usage: lean-agent thread close tN")
         tid, t = thread_session_tid(a.args[0])
-        if service_session.alive(tid):
-            ok = service_session.checkpoint_session(tid)
-            service_session.sessions_request("stop", thread=tid)
+        stopped, ok = close_thread_session(tid)
+        if stopped:
             print(f"{tid}: session stopped" + ("" if ok is None else " (checkpointed)" if ok else " (no checkpoint reply in time)"))
-        lean_threads.set_session(tid, session_on=None)
         return lean_threads.cli("close", [tid], a.json)
     return lean_threads.cli(act, a.args + (["--all"] if a.all else []), a.json)
 
@@ -9178,6 +9262,8 @@ def build_parser():
     s.add_argument("--project", "-p")
     s.add_argument("--last", action="store_true", help="print only the id of the latest run")
     s.add_argument("--running", action="store_true", help="runs in progress right now")
+    s.add_argument("--lost", action="store_true", help="list the lost runs (supervisor died without a result); with --clear mark them acknowledged")
+    s.add_argument("--clear", action="store_true", help="with --lost: mark the lost runs lost-and-acknowledged so they stop appearing")
     s.add_argument("--stop", metavar="RUN_ID|last", help="stop a run in progress (only lean-agent's own run), mark it "
                    "stopped and list what it changed in its worktree")
     s.add_argument("--wait", metavar="RUN_ID|all|last", help="block until those runs are recorded, then print each result "
