@@ -1166,6 +1166,44 @@ def session_probe_server(name, cfg):
 READ_TOOL_RE = re.compile(r"(^|[_-])(get|list|search|read|query|fetch|find|view|show|describe|count|lookup)([_-]|$)", re.I)
 
 
+ISSUE_WORDS = re.compile(r"anonymous|not authori[sz]ed|unauthori[sz]ed|unauthenticated|broken|fails|failing|problem|"
+                         r"doesn't work|does not work|bug", re.I)
+
+
+def is_issue_card(c):
+    """A problem/reference note (a reference or project memory, or one that describes a failure)."""
+    return bool(re.match(r"memory (reference|project|feedback):", c.get("title") or "")
+                or ISSUE_WORDS.search((c.get("title") or "") + " " + (c.get("text") or "")))
+
+
+def server_terms(project, specs, task):
+    """Names (server, alias, short plugin name) of the --mcp servers and of servers or their tools named in the task."""
+    servers = lean_mcp.discover(project)
+    aliases = lean_mcp.display_names(servers)
+    terms, cache = set(), mcp_cache()
+
+    def add(full):
+        terms.update(t for t in (full, full.split(":")[-1], aliases.get(full)) if t and len(t) >= 3)
+    for name, _ in lean_mcp.parse_specs(specs):
+        add(lean_mcp.resolve_name(name, servers) or name)
+    for full in servers:
+        names = [full.split(":")[-1], aliases.get(full)] + list((cache.get(full, {}).get("tools") or {}))
+        if any(n and len(n) >= 3 and re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", task or "", re.I) for n in names):
+            add(full)
+    return terms
+
+
+def server_issue_cards(cards, project, specs, task, have, limit=2):
+    """Up to `limit` cards, not already chosen, that mention one of the servers a run uses or its task names."""
+    terms = server_terms(project, specs, task)
+    if not terms:
+        return []
+    rx = re.compile(r"(?<![\w-])(" + "|".join(re.escape(t) for t in sorted(terms, key=len, reverse=True)) + r")(?![\w-])", re.I)
+    hits = [c for c in cards if c["id"] not in have and rx.search((c.get("title") or "") + " " + (c.get("text") or ""))]
+    hits.sort(key=lambda c: not is_issue_card(c))
+    return hits[:limit]
+
+
 def mcp_presets(server, known=None):
     """{preset: [tools]} for a server: the user's presets plus an automatic `read` preset."""
     presets = dict(load_json(home("mcp-presets.json"), {}).get(server, {}))
@@ -1561,6 +1599,13 @@ def _cmd_run(a):
             ttype = getattr(a, "ttype", None) or task_type(task, a.read_only, bool(a.chrome))
             cards = [c for c in lib.values() if is_core(c, ttype) and not c.get("archived")]
             cards += [lib[x] for x in wanted if lib[x] not in cards]
+        if not getattr(a, "role", None) and a.cards != "none" and getattr(a, "card_list", None) is None:
+            known = server_issue_cards([c for c in lib.values() if not c.get("archived")], project,
+                                       (prev or {}).get("mcp") or a.mcp or [], task, {c["id"] for c in cards})
+            cards = cards + known
+            for c in known:
+                if is_issue_card(c):
+                    print(f"known issue: {re.sub(r'^memory [a-z]+: ', '', c['title'])}", flush=True)
         native_rules = bool(not getattr(a, "role", None) and project_rules_on(slug))
         if native_rules:  # Claude Code loads CLAUDE.md and the rules itself
             cards = [c for c in cards if not is_rule_card(c)]
@@ -9371,7 +9416,8 @@ Answer with at most 15 lines, the first one exactly `ADVICE`, then one short lin
 `project:` the project slug and the card ids (--cards) that fit
 `suggested:` ONE exact command: `{lean} run <project> --cards auto|<ids> -m <model> --effort <low|medium|high> [--todo N|new] [--worktree <name>] --why "..." -- "<task>"`,
   or `{lean} remember "<text>"`, or `answer from state` when nothing needs doing
-`risks:` open review gaps on that branch, a decision that contradicts the request, a run still working on it (or none)
+`risks:` open review gaps on that branch, a decision that contradicts the request, a run still working on it, and any
+  "Known issues" listed in the task that apply (say what to do first, e.g. the fix it names) (or none)
 `ask the user first:` `yes: <the question>`, `user already asked: proceed`, or `no`; an ambiguous request is always `yes`
 Pick the cheapest model that fits (haiku for reading, sonnet for edits, opus only for hard design). No other text.
 """
@@ -9425,11 +9471,19 @@ def advise_requests(thread_arg, limit=5, chars=200):
     return ("The user's recent requests in this thread (oldest first):\n" + "\n".join(f"- {r}" for r in reqs)) if reqs else ""
 
 
-def advise_cards(slug, limit=40):
-    """The project's cards as `id: title` lines for the advisor (so it needs no command to see them)."""
-    cards = [c for c in load_cards(slug) if not c.get("archived")][:limit]
-    return ("Cards of the project (id: title):\n" + "\n".join(f"- {c['id']}: {c['title'][:70]}" for c in cards)) if cards \
+def advise_cards(slug, limit=40, request="", project=None):
+    """The project's cards as `id: title` lines for the advisor (so it needs no command to see them), then the
+    cards that mention a server or tool the request names, with their text, to warn about."""
+    all_cards = [c for c in load_cards(slug) if not c.get("archived")]
+    cards = all_cards[:limit]
+    out = ("Cards of the project (id: title):\n" + "\n".join(f"- {c['id']}: {c['title'][:70]}" for c in cards)) if cards \
         else "Cards of the project: none"
+    known = server_issue_cards(all_cards, project, [], request, set())
+    if known:
+        out += ("\nKnown issues about servers or tools the request names (warn the user if one applies, before any "
+                "worker starts):\n" + "\n".join(f"- {c['id']}: {c['title'][:90]}: {' '.join((c.get('text') or '').split())[:300]}"
+                                              for c in known))
+    return out
 
 
 def shape_advice(lines, limit=15):
@@ -9465,7 +9519,7 @@ def cmd_advise(a):
     lean = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
     task = (f"The user's new request (project {slug}" + (f", thread {a.thread}" if a.thread else "") + "):\n" + what
             + "\n\nProjects: " + ", ".join(sorted(projs)) + "\n" + advise_state(slug, path, a.thread)
-            + "\n" + advise_cards(slug) + ("\n" + advise_requests(a.thread)).rstrip())
+            + "\n" + advise_cards(slug, request=what, project=path) + ("\n" + advise_requests(a.thread)).rstrip())
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model="haiku",
                             why="advise on a new request", cards="auto", card_list=None, project=slug,
                             read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=15,
