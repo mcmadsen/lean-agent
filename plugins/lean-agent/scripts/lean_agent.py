@@ -4348,6 +4348,8 @@ def branch_name(project, kind, task_id, title, version=None, taken=()):
     if "{version}" in pattern and not version:
         die(f"a release branch needs a version: add --version X (rule: {pattern})")
     task_id = str(task_id).strip() if task_id not in (None, "") else ""
+    if task_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", task_id):
+        die(f"invalid task id {task_id!r}: use the tracker work item id, e.g. ABC-12 or 123 (letters, digits, . _ -)")
     name = branch_slug(title) or "work"
     out = pattern.replace("{version}", re.sub(r"[^A-Za-z0-9._+-]+", "-", version or "").strip("-"))
     out = out.replace("{name}", name)
