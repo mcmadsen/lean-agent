@@ -3670,6 +3670,15 @@ def last_review(slug, path, label):
                  if r.get("head") and not is_skipped(r.get("verdict"))), None)
 
 
+def reviewed_baseline(slug, path, head, prev):
+    """The head a re-review continues from: the last head a review was RECORDED for on the branch, not whatever
+    the latest reviewer run was launched on (a run that never finished a review would move the baseline to the
+    commit after the fixes). Falls back to the earlier run's head."""
+    known = not head or git(path, "rev-parse", "--verify", "--quiet", head + "^{commit}")
+    rec = last_review(slug, path, review_target(path, head)[2]) if known else None
+    return rec["head"] if rec else ((prev or {}).get("review_meta") or {}).get("head")
+
+
 def is_merge_only(path, since, sha, base):
     """Only merge commits since `since` (that is, nothing but the base's own commits came in), none resolving
     conflicts or adding changes of their own."""
@@ -3806,7 +3815,7 @@ def review_main(a):
     if (not a.resume and not getattr(a, "full_review", False) and a.head and not a.independent and a.runs == 1
             and not a.status):
         prev_ = earlier_review(slug, path, a.head)
-        old = ((prev_ or {}).get("review_meta") or {}).get("head")
+        old = reviewed_baseline(slug, path, a.head, prev_)
         new = git(path, "rev-parse", "--verify", "--quiet", a.head + "^{commit}")
         if prev_ and old and new and old != new:
             stat = git(path, "diff", "--numstat", old, new) or ""
@@ -3819,7 +3828,8 @@ def review_main(a):
             else:
                 print(f"review: {size} changed lines since the review at {old[:12]} (over {delta_max}, "
                       "LEAN_AGENT_DELTA_MAX_LINES): a full review", flush=True)
-    if a.resume and not getattr(a, "force", False) and not a.independent:
+    if (a.resume and not getattr(a, "force", False) and not a.independent
+            and (not a.head or git(path, "rev-parse", "--verify", "--quiet", a.head + "^{commit}"))):
         sha, _, label, _ = review_target(path, a.head)
         cap = review_max_rerounds()
         if rerounds(slug, path, label, sha) >= cap:
@@ -3829,7 +3839,7 @@ def review_main(a):
         if not prev:
             die(f"no earlier review of {a.head or slug} to resume"
                 + (f"; start one: lean-agent review {slug} --head {a.head}" if a.head else ""))
-        old_head = (prev.get("review_meta") or {}).get("head")
+        old_head = reviewed_baseline(slug, path, a.head, prev)
         meta, where = refresh_review_meta(path, prev.get("review_meta") or {}, fetch=not a.no_fetch)
         print(f"re-review of {meta.get('ref') or '?'} @ {meta['head'][:12]} (after reviewer {prev['id']})",
               flush=True)
@@ -3869,8 +3879,8 @@ def review_main(a):
             rc = cmd_run(ns)
             return reuse_follow_up(a, slug, meta, effort) if rc == 2 else rc
         # a fresh reviewer with a small context: the open findings and only what changed since the last review
-        last = next((r for r in reversed(list(read_jsonl(reviews_path(slug)))) if r.get("run") == prev["id"]
-                     or (r.get("ref") == meta.get("ref") and r.get("head") == old_head)), None) or {}
+        last = next((r for r in reversed(branch_reviews(slug, path, meta.get("ref") or a.head)) if r.get("head") == old_head),
+                    None) or next((r for r in reversed(list(read_jsonl(reviews_path(slug)))) if r.get("run") == prev["id"]), None) or {}
         open_items = [f"- [{f.get('severity')}/{f.get('category') or '?'}] {f.get('file')}:{f.get('line', '')} "
                       f"{str(f.get('issue', ''))[:200]}" for f in last.get("findings") or []]
         open_items += [f"- [check] {str(c.get('what', ''))[:200]}" for c in last.get("checks") or []]
