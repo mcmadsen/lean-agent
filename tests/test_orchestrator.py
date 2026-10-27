@@ -7258,6 +7258,34 @@ class CliTest(unittest.TestCase):
         self.assertEqual(first.returncode, 2, first.stdout)
         self.assertEqual(second.returncode, first.returncode, second.stdout)
 
+    def test_release_branch_version_bump_only_and_merge_only_deltas_are_skipped(self):
+        g = self.skip_project()
+        g("checkout", "-qb", "release/3.0", "main")
+        self.write_commit(g, {"src/code.py": "x = 5\n"}, "release work")
+        self.review_branch("release/3.0")
+        self.assertEqual(len(self.real_reviews()), 1)
+        self.write_commit(g, {"plugin.json": '{\n  "name": "demo",\n  "version": "3.0.1"\n}\n'}, "bump")
+        self.assertIn("skipped (", self.review_branch("release/3.0").stdout)  # a version bump only
+        self.assertEqual(len(self.real_reviews()), 1)
+        g("checkout", "-qb", "release/3.1", "main")
+        self.write_commit(g, {"src/code.py": "x = 6\n"}, "release work")
+        self.review_branch("release/3.1")
+        self.assertEqual(len(self.real_reviews()), 2)
+        g("checkout", "-q", "main")
+        self.write_commit(g, {"src/other.py": "o = 1\n"}, "main moves on")
+        g("checkout", "-q", "release/3.1")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-ff", "-m", "merge main", "main")
+        self.assertIn("skipped (", self.review_branch("release/3.1").stdout)  # a clean merge of the base only
+        self.assertEqual(len(self.real_reviews()), 2)
+
+    def test_is_docs_file_is_the_one_docs_check(self):
+        import lean_agent as L
+        self.assertTrue(L.is_docs_file("README.md"))
+        self.assertTrue(L.is_docs_file("docs/a.txt"))
+        self.assertFalse(L.is_docs_file("src/prompts/p.md"))
+        self.assertFalse(L.is_docs_file("plugins/x/templates/t.md"))
+        self.assertFalse(L.is_docs_file("src/code.py"))
+
     def test_release_branch_skip_only_for_bumps_merges_and_docs(self):
         g = self.skip_project()
         g("checkout", "-qb", "release/2.0", "main")
