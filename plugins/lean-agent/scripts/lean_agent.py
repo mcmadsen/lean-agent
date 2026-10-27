@@ -8839,16 +8839,17 @@ def parse_idle(text):
 
 def close_threads(a):
     """`thread close tN...|--all|--idle DUR`: one checkpoint-and-stop per thread, then a summary line."""
-    if sum(map(bool, (a.args, a.all, a.idle))) != 1:
+    idle, all_ = getattr(a, "idle", None), getattr(a, "all", False)
+    if sum(map(bool, (a.args, all_, idle))) != 1:
         die("usage: lean-agent thread close tN [tM ...] | --all | --idle DUR")
-    if a.idle:
+    if idle:
         try:
-            limit = parse_idle(a.idle)
+            limit = parse_idle(idle)
         except ValueError as exc:
             die(str(exc))
         busy = lean_threads.running_by_thread(lean_threads.load())
         tids = [s["thread"] for s in open_thread_sessions() if s["idle"] >= limit and s["thread"] not in busy]
-    elif a.all:
+    elif all_:
         tids = [s["thread"] for s in open_thread_sessions()]
     else:
         tids = []
@@ -8870,7 +8871,7 @@ def close_threads(a):
             print(f"{tid}: no running session; record cleared")
         lean_threads.cli("close", [tid], a.json)
         done.append(tid)
-    if len(tids) != 1 or a.all or a.idle:
+    if len(tids) != 1 or all_ or idle:
         print(f"closed {len(done)} thread{'s' * (len(done) != 1)}" + (f": {', '.join(done)}" if done else "")
               + (f"; failed: {', '.join(failed)}" if failed else ""))
     return 1 if failed else 0
@@ -8878,6 +8879,7 @@ def close_threads(a):
 
 def cmd_thread(a):
     act = a.action
+    resume_old = getattr(a, "resume_old", False)
     if act == "sessions":
         if not service_session.alive():
             die("no service session is up (start it with `lean-agent up` or `lean-agent service start`)")
@@ -8917,7 +8919,7 @@ def cmd_thread(a):
             die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
         running = service_session.alive(tid)
         force, why = False, ""
-        if running and prompt and not a.resume_old:
+        if running and prompt and not resume_old:
             why = auto_fresh_reason(tid)
             if why:
                 try:
@@ -8944,7 +8946,7 @@ def cmd_thread(a):
                 return 0
             make_room_for_thread_session(tid)
             try:
-                name, line = start_closed_thread(tid, t, prompt, a.resume_old, force)
+                name, line = start_closed_thread(tid, t, prompt, resume_old, force)
             except RuntimeError as exc:
                 die(str(exc))
         print((line or f"thread {tid} started") + (f" ({why})" if why else "") + f': Remote Control "{name}"'
@@ -8956,17 +8958,17 @@ def cmd_thread(a):
         tid, t = thread_session_tid(a.args[0])
         if t.get("closed") and t.get("session_id"):
             if not service_session.alive():
-                prepare_thread_session(tid, a.resume_old)  # the next `send` starts as decided here
+                prepare_thread_session(tid, resume_old)  # the next `send` starts as decided here
                 return lean_threads.cli("reopen", [tid], a.json)
             with thread_start_lock():
                 make_room_for_thread_session(tid)
                 try:
-                    name, line = start_closed_thread(tid, t, None, a.resume_old)
+                    name, line = start_closed_thread(tid, t, None, resume_old)
                 except RuntimeError as exc:
                     die(str(exc))
             print(line + f': Remote Control "{name}"')
             return 0
-    return lean_threads.cli(act, a.args + (["--all"] if a.all else []), a.json)
+    return lean_threads.cli(act, a.args + (["--all"] if getattr(a, "all", False) else []), a.json)
 
 
 def cmd_now(a):
