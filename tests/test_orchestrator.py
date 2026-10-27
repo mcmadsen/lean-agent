@@ -3105,7 +3105,8 @@ class CliTest(unittest.TestCase):
         self.assertIn("t1 ", lines[2])
         shown = self.cli("thread", "show", "t2").stdout
         kinds = [l[17:].split()[0] for l in shown.splitlines()[1:]]
-        self.assertEqual(kinds, ["request", "run", "todo", "note", "push"])
+        self.assertRegex(kinds[0], r"^r\d+$")
+        self.assertEqual(["request"] + kinds[1:], ["request", "run", "todo", "note", "push"])
         self.assertIn('t2 "Fix export timeout billing"', shown)
         self.assertIn("haiku", shown)
         self.assertNotIn("Publish the report", shown)
@@ -3189,6 +3190,16 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("#1", shown)
         self.assertTrue({"t2", "#2", "#3", "optimize"} <= set(shown), shown)
         self.assertIn("t1", [t["id"] for t in lt.threads(include_expired=True)])  # nothing was deleted
+
+    def test_thread_show_has_request_ids_of_merged_threads(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        lt = self.threads_home()
+        lt.route("Publish the report via docs", "s1")  # t1, r1
+        lt.route("Zebra crossing quantum paint", "s1")  # unrelated: t2
+        lt.merge("t2", "t1")
+        out = lt.show_text("t1")
+        self.assertRegex(out, r"r\d+  request +Publish the report")
+        self.assertRegex(out, r"r\d+  request +Zebra crossing")
 
     def test_a_done_task_with_a_fresh_request_stays_open(self):
         lt = self.threads_home()
@@ -3630,7 +3641,7 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("t1", self.cli("thread", "sessions").stdout)
         reg = self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"))["threads"]
         self.assertEqual((reg["t1"]["session_id"], bool(reg["t1"].get("closed")), reg["t1"].get("session_on")), (sids["t1"], True, None))
-        self.assertIn("resumed", self.cli("thread", "open", "t1").stdout)
+        self.assertIn("resumed old session", self.cli("thread", "open", "t1", "--resume-old").stdout)
         self.wait_for(lambda: len(self.read_jsonl(log)) == n + 1 and ss.alive("t1"), "t1 again")
         call = self.read_jsonl(log)[-1]
         self.assertEqual((call["thread"], call["argv"][-2:]), ("t1", ["--resume", sids["t1"]]))
@@ -3646,6 +3657,139 @@ class CliTest(unittest.TestCase):
         self.assertEqual({t: c["argv"][-2:] for t, c in again.items()}, {t: ["--resume", sids[t]] for t in sids})
         p2.terminate()
         p2.wait(timeout=30)
+
+    def closed_thread_with_history(self, ctx=None):
+        """A service with t1 that has talked (so it has a transcript) and is then closed; returns (process, log, ss, old sid)."""
+        if ctx:
+            self.env["FAKE_CTX"] = str(ctx)
+        p, log, ss = self.start_up()
+        self.cli("thread", "new", "Fix the parser")
+        self.wait_for(lambda: "t1" in self.thread_calls(log) and ss.alive("t1"), "t1")
+        self.assertTrue(ss.send("first job", "t1")[0])
+        self.wait_for(lambda: os.path.exists(ss.info("t1")["transcript"]), "t1 transcript")
+        old = self.thread_calls(log)["t1"]["argv"][-1]
+        return p, log, ss, old
+
+    def test_reopen_and_send_after_close_start_a_new_session_from_a_brief(self):
+        p, log, ss, old = self.closed_thread_with_history()
+        self.assertIn("t1: session stopped", self.cli("thread", "close", "t1").stdout)
+        n = len(self.read_jsonl(log))
+        out = self.cli("thread", "reopen", "t1").stdout
+        self.assertRegex(out, r"t1 started fresh \(brief ~\d+(\.\d)?k tokens\)")
+        self.wait_for(lambda: len(self.read_jsonl(log)) == n + 1 and ss.alive("t1"), "t1 again")
+        argv = self.read_jsonl(log)[-1]["argv"]
+        self.assertNotIn("--resume", argv)
+        new = argv[argv.index("--session-id") + 1]
+        self.assertNotEqual(new, old)
+        reg = self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"))["threads"]["t1"]
+        self.assertEqual((reg["session_id"], reg["session_history"]), (new, [old]))
+        tr = ss.info("t1")["transcript"]
+        self.wait_for(lambda: len(self.read_jsonl(tr)) >= 2, "the brief")
+        first = json.dumps(self.read_jsonl(tr)[0])
+        self.assertIn("Fix the parser", first)
+        self.assertIn("lean-agent thread show t1", first)
+        # a send to the closed thread: fresh as well, with the message after the brief
+        self.cli("thread", "close", "t1")
+        msg = os.path.join(self.tmp.name, "m.txt")
+        with open(msg, "w") as fh:
+            fh.write("next job please")
+        out = self.cli("thread", "send", "t1", "--prompt-file", msg).stdout
+        self.assertIn("t1 started fresh", out)
+        self.wait_for(lambda: self.read_jsonl(log)[-1].get("thread") == "t1" and ss.alive("t1") and len(self.read_jsonl(log)) == n + 2, "t1 third")
+        self.assertNotIn("--resume", self.read_jsonl(log)[-1]["argv"])
+        tr = ss.info("t1")["transcript"]
+        self.wait_for(lambda: any("next job please" in json.dumps(r) for r in self.read_jsonl(tr)), "the message")
+        p.terminate()
+        p.wait(timeout=30)
+
+    def test_resume_old_resumes_the_previous_session(self):
+        p, log, ss, old = self.closed_thread_with_history(ctx=84000)
+        self.cli("thread", "close", "t1")
+        n = len(self.read_jsonl(log))
+        out = self.cli("thread", "reopen", "t1", "--resume-old").stdout
+        self.assertIn(f"t1 resumed old session {old[:8]} (context ~84k)", out)
+        self.wait_for(lambda: len(self.read_jsonl(log)) == n + 1 and ss.alive("t1"), "t1 again")
+        self.assertEqual(self.read_jsonl(log)[-1]["argv"][-2:], ["--resume", old])
+        p.terminate()
+        p.wait(timeout=30)
+
+    def test_config_thread_fresh_after_default_and_off(self):
+        self.cli("config", "thread-fresh-after", "idle=2h,context=10%")
+        self.assertIn("idle=120m,context=10%", self.cli("config", "thread-fresh-after").stdout)
+        self.assertIn("idle=30m,context=50%", self.cli("config", "thread-fresh-after", "default").stdout)
+        self.assertIn("thread-fresh-after: off", self.cli("config", "thread-fresh-after", "off").stdout)
+        self.assertIn("idle=30m,context=50%", self.cli("config", "thread-fresh-after", "default").stdout)
+        self.assertNotEqual(self.cli("config", "thread-fresh-after", "idle=bogus", check=False).returncode, 0)
+
+    def send_in_process(self, ages, prompt="more work"):
+        """`thread send t1` run in this process, with the hosted sessions reporting an idle age of `ages` seconds."""
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        real = L.open_thread_sessions
+        args = argparse.Namespace(action="send", args=["t1"], prompt_file=None, json=False, all=False)
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(L, "thread_prompt", return_value=prompt), \
+                mock.patch.object(L, "open_thread_sessions", side_effect=lambda: [dict(x, idle=ages) for x in real()]), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            L.cmd_thread(args)
+        return out.getvalue()
+
+    def test_send_to_a_big_idle_open_session_continues_fresh_only_when_both_limits_hold(self):
+        p, log, ss, old = self.closed_thread_with_history(ctx=150000)
+        n = len(self.read_jsonl(log))
+        self.cli("config", "thread-fresh-after", "idle=1h,context=50%")  # not idle long enough
+        self.assertIn("t1 is running", self.send_in_process(1800))
+        self.cli("config", "thread-fresh-after", "idle=1m,context=99%")  # idle, but the context is below 99% of the compaction point
+        self.assertIn("t1 is running", self.send_in_process(600))
+        self.cli("config", "thread-fresh-after", "off")
+        self.assertIn("t1 is running", self.send_in_process(99999))
+        self.assertEqual(len(self.read_jsonl(log)), n)
+        self.cli("config", "thread-fresh-after", "idle=1m,context=1%")
+        out = self.send_in_process(600)
+        self.assertIn("t1 started fresh", out)
+        self.assertIn("idle ", out)
+        self.wait_for(lambda: len(self.read_jsonl(log)) == n + 1 and ss.alive("t1"), "t1 fresh")
+        argv = self.read_jsonl(log)[-1]["argv"]
+        self.assertNotIn("--resume", argv)
+        self.assertNotEqual(argv[argv.index("--session-id") + 1], old)
+        p.terminate()
+        p.wait(timeout=30)
+
+    def test_failed_auto_fresh_start_retries_fresh_and_never_resumes_the_old_session(self):
+        p, log, ss, old = self.closed_thread_with_history(ctx=150000)
+        n = len(self.read_jsonl(log))
+        self.cli("config", "thread-fresh-after", "idle=1m,context=1%")
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        with mock.patch.object(L, "start_thread_session", side_effect=RuntimeError("boom")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self.send_in_process(600)
+        self.assertFalse(ss.alive("t1"))
+        out = self.cli("thread", "send", "t1", "--prompt-file", self.write_prompt("again")).stdout
+        self.assertIn("t1 started fresh", out)
+        self.wait_for(lambda: len(self.read_jsonl(log)) == n + 1 and ss.alive("t1"), "t1 fresh")
+        argv = self.read_jsonl(log)[-1]["argv"]
+        self.assertNotIn("--resume", argv)
+        self.assertNotEqual(argv[argv.index("--session-id") + 1], old)
+        p.terminate()
+        p.wait(timeout=30)
+
+    def write_prompt(self, text):
+        path = os.path.join(self.tmp.name, "prompt.txt")
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+
+    def test_opening_an_open_thread_with_a_transcript_says_resumed(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        p, log, ss, old = self.closed_thread_with_history(ctx=84000)
+        with mock.patch.dict(os.environ, self.env):
+            fresh, line, _ = L.prepare_thread_session("t1", False)
+        self.assertFalse(fresh)
+        self.assertEqual(line, "t1 resumed (context ~84k)")
+        p.terminate()
+        p.wait(timeout=30)
 
     def test_thread_new_rolls_back_when_the_session_does_not_start(self):
         sys.path.insert(0, os.path.dirname(CLI))
@@ -4845,6 +4989,44 @@ class CliTest(unittest.TestCase):
         p.terminate()
         p.wait(timeout=60)
 
+    def test_close_takes_several_threads_all_or_idle(self):
+        p, log, ss = self.start_up()
+        for title in ("one", "two", "three", "four"):
+            self.assertIn("started", self.cli("thread", "new", title).stdout)
+        self.wait_for(lambda: len(re.findall(r"^t\d", self.cli("thread", "sessions").stdout, re.M)) == 4, "four sessions", secs=60)
+        out = self.cli("thread", "close", "t1", "t2").stdout
+        self.assertIn("t1: session stopped", out)
+        self.assertIn("t2: session stopped", out)
+        self.assertIn("closed 2 threads: t1, t2", out)
+        self.assertNotRegex(self.cli("thread", "sessions").stdout, r"^t[12]\b")
+        out = self.cli("thread", "close", "--idle", "1d").stdout  # nothing idle for a day
+        self.assertIn("closed 0 threads", out)
+        self.assertIn("t3", self.cli("thread", "sessions").stdout)
+        self.assertNotEqual(self.cli("thread", "close", "--idle", "soon", check=False).returncode, 0)
+        self.assertNotEqual(self.cli("thread", "close", "t3", "--all", check=False).returncode, 0)
+        out = self.cli("thread", "close", "--all").stdout
+        self.assertIn("closed 2 threads: t3, t4", out)
+        self.assertIn("no thread sessions", self.cli("thread", "sessions").stdout)
+        p.terminate()
+        p.wait(timeout=60)
+
+    def test_close_idle_skips_busy_and_fresh_sessions(self):
+        import lean_agent as L
+        sessions = [{"thread": "t1", "idle": 7300}, {"thread": "t2", "idle": 7300}, {"thread": "t3", "idle": 60}]
+        closed = []
+        args = argparse.Namespace(args=[], all=False, idle="2h", json=False)
+        with mock.patch.object(L, "open_thread_sessions", return_value=sessions), \
+                mock.patch.object(L.lean_threads, "running_by_thread", return_value={"t2": ["r1"]}), \
+                mock.patch.object(L, "close_thread_session", side_effect=lambda t: closed.append(t) or (True, True, False)), \
+                mock.patch.object(L.lean_threads, "cli", return_value=0), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(L.close_threads(args), 0)
+        self.assertEqual(closed, ["t1"])
+        self.assertIn("closed 1 thread: t1", out.getvalue())
+        self.assertEqual(L.parse_idle("90m"), 5400)
+        self.assertEqual(L.parse_idle("2h"), 7200)
+        self.assertRaises(ValueError, L.parse_idle, "soon")
+
     def test_record_without_a_host_pid_is_not_pending(self):
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "1")
@@ -5074,6 +5256,25 @@ class CliTest(unittest.TestCase):
             self.assertTrue(hit("256", text), text)
         for text in ("case 256 closed", "bug 256", "issue 256", "uses sha-256", "SHA256", "date 2026-10-256", "port 256"):
             self.assertFalse(hit("256", text), text)
+
+    def test_routing_finds_an_id_deep_in_a_checkpoint_note(self):
+        lt = self.threads_home()
+        t0 = datetime.datetime.now().timestamp() - 5000
+        lt.route("Login redesign", "s1", t0)  # t1
+        lt.route("Dashboard colours", "s1", t0 + 10)  # t2
+        long_note = "state: " + "x" * 400 + " pushed feature/login-4711 as PR 4711, waiting for review"
+        ts = datetime.datetime.fromtimestamp(t0 + 20).astimezone().isoformat(timespec="seconds")
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "handoff-notes.json"), "w") as fh:
+            json.dump([{"ts": ts, "text": long_note, "kind": "checkpoint", "thread": "t1"}], fh)
+        self.assertEqual(lt.id_thread("PR 4711 got a comment", lt.load()), "t1")
+        self.assertEqual(lt.id_thread("rebase feature/login-4711", lt.load()), "t1")
+
+    def test_thread_show_prints_request_ids(self):
+        lt = self.threads_home()
+        lt.route("Login redesign", "s1")  # t1
+        out = lt.show_text("t1")
+        self.assertRegex(out, r"(?m)^\S+ \S+  r\d+  request  Login redesign")
+        self.assertNotIn("now", out.split("\n")[0])
 
     def test_routing_by_branch_name(self):
         lt = self.threads_home()
