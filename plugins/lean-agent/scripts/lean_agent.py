@@ -2899,6 +2899,9 @@ def _norm_gap(t):
     return " ".join(re.findall(r"[a-z]{3,}", str(t).lower()))
 
 
+GAP_EXCUSED_RE = re.compile(r"\b(documented|out of scope|already (handled|covered|addressed|dealt with)|handled (elsewhere|already))\b", re.I)
+
+
 def gap_declined(g, declined):
     """A known gap the user acknowledged (lean-agent review decline <project> g<n>), recognised on later tips by
     file and normalised text, whatever number it gets and however the reviewer words it."""
@@ -4381,6 +4384,13 @@ def enforce_review_rules(review, meta, declined=()):
     if len(kept) < len(gaps):
         notes.append(f"{len(gaps) - len(kept)} gap(s) declined earlier on this branch still apply (not asked again)")
     gaps = kept
+    excused = [(g, m.group(0)) for g in gaps for m in [GAP_EXCUSED_RE.search(str(g.get("what", "")))]
+               if m and g.get("blocks_goal") is not True]
+    if excused:
+        gaps = [g for g in gaps if not any(g is e for e, _ in excused)]
+        notes.append(f"{len(excused)} gap(s) auto-declined, their own text says so: "
+                     + "; ".join(f"{e.get('file') or '?'}: {w}" for e, w in excused[:5]))
+        review["_auto_declined"] = [{"file": e.get("file"), "gap": e.get("what"), "why": w} for e, w in excused]
     for g in gaps:
         if g.get("blocks_goal") is True and not str(g.get("scoped_out") or "").strip() and not any(
                 f.get("category") == "completeness" and os.path.basename(str(f.get("file", ""))) ==
