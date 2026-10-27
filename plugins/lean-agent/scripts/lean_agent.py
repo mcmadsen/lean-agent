@@ -1255,6 +1255,85 @@ def canonical_specs(project, specs):
     return out
 
 
+def rule_hits(cards, *names):
+    """[(rule card, target)] for the rules that forbid one of these server names/aliases."""
+    return [(c, t) for c in cards if c.get("rule") for t in c.get("targets") or [] if lean_rules.matches(t, *names)]
+
+
+def enforce_mcp_rules(cards, project, specs, force=False):
+    """Refuse `--mcp X` when a rule forbids X (print the rule and its alternative); --force-mcp only warns."""
+    available = lean_mcp.discover(project)
+    aliases = lean_mcp.display_names(available)
+    for name, _ in lean_mcp.parse_specs(specs):
+        for c, target in rule_hits(cards, name, aliases.get(name) or ""):
+            line = lean_rules.rule_line(c)
+            if force:
+                print(f"lean-agent: warning: --force-mcp overrides rule {c['id']} against {name}: {line}", file=sys.stderr)
+                continue
+            alt = c.get("alternative")
+            die(f"--mcp {name} is forbidden by rule {c['id']}: {line}" + (f"\nUse {alt} instead, or pass --force-mcp "
+                                                                         "to run with the server anyway." if alt else
+                                                                         "\nPass --force-mcp to run with it anyway."))
+
+
+def projs_path(slug):
+    return projects().get(slug, {}).get("path")
+
+
+def project_rules(slug):
+    """The project's rule cards (memories kept in sync first), within the rule token budget."""
+    try:
+        cards = sync_memory(slug)
+    except OSError:
+        cards = load_cards(slug)
+    return lean_rules.pick_within_budget([c for c in cards if c.get("rule")])
+
+
+CONFLICT_GLOBS = (("CLAUDE.md",), (".claude", "agents", "*.md"), (".claude", "skills", "*", "SKILL.md"),
+                  (".claude", "rules", "**", "*.md"))
+
+
+def conflicting_files(path, rules):
+    """['<file> tells agents to use <target>, which rule <id> forbids'] for the repo's agent/skill/rule files. Never edits."""
+    out = []
+    files = []
+    for parts in CONFLICT_GLOBS:
+        files += glob.glob(os.path.join(path, *parts), recursive=True)
+    for f in sorted(set(files)):
+        try:
+            text = read_text(f)
+        except OSError:
+            continue
+        lines = [l for l in text.splitlines() if not lean_rules.PROHIBITION.search(l)]
+        body = "\n".join(lines)
+        for c in rules:
+            for t in c.get("targets") or []:
+                if re.search(r"\b(?:use|using|call|run|via|with|through)\s+(?:the\s+)?`?" + re.escape(t) + r"\b|\b"
+                             + re.escape(t) + r"\s+mcp\b|\bmcp__[\w-]*" + re.escape(t), body, re.I):
+                    out.append(f"{os.path.relpath(f, path)} tells agents to use {t}, which rule {c['id']} forbids")
+                    break
+    return out
+
+
+def advise_rules(slug, path):
+    """Lines for advise: each applicable rule with its alternative, then files that contradict a rule."""
+    rules = project_rules(slug)
+    lines = [lean_rules.rule_line(c) + (f" (forbids: {', '.join(c['targets'])})" if c.get("targets") else "") for c in rules]
+    lines += ["Conflict: " + m for m in conflicting_files(path, [c for c in rules if c.get("targets")])]
+    return lines
+
+
+def task_rule_warnings(cards, task):
+    """Warn (no refusal) when the task text asks for a tool that a rule forbids."""
+    for c in cards:
+        for t in (c.get("targets") or []) if c.get("rule") else []:
+            if re.search(r"\b(?:use|using|call|calling|run|via|with|through)\s+(?:the\s+)?`?" + re.escape(t) + r"\b|\b"
+                         + re.escape(t) + r"\s+(?:mcp|cli)\b", task, re.I):
+                print(f"lean-agent: warning: the task asks for {t}, which rule {c['id']} forbids: "
+                      f"{lean_rules.rule_line(c)}", file=sys.stderr)
+                break
+
+
 def resolve_mcp(project, specs):
     """Turn --mcp specs into (servers config, allowed tool rules, disallowed tool names)."""
     available = lean_mcp.discover(project)
@@ -1700,6 +1779,9 @@ def _cmd_run(a):
                   f"`{named[0]}`. Allow exactly what it needs, e.g. --allow-cmd \"{named[0]} <read-only subcommand>\", "
                   "or look it up yourself.", file=sys.stderr)
     mcp_specs = prev.get("mcp") if prev else canonical_specs(project, a.mcp or [])
+    if mcp_specs and not prev:
+        enforce_mcp_rules(list(lib.values()), project, mcp_specs, getattr(a, "force_mcp", False))
+    task_rule_warnings(list(lib.values()), task)
     mcp_servers, mcp_allowed, mcp_disallowed = resolve_mcp(project, mcp_specs) if mcp_specs else ({}, [], [])
     for sname, scfg in mcp_servers.items():
         for problem in lean_mcp.config_problems(scfg):
@@ -7040,6 +7122,8 @@ def cmd_doctor(a):
         else:
             report(True, f"project rules: off for {pslug}, rule cards instead (lean-agent config project-rules on)")
     if pslug:
+        for msg in conflicting_files(projs_path(pslug) or path, [c for c in project_rules(pslug) if c.get("targets")]):
+            report(None, msg, "update that file (lean-agent never edits it) or `lean-agent memory rm` the rule")
         report(True, f"branch rules for {pslug}: " + "  ".join(f"{k}={v}" for k, v in branch_rules(pslug).items())
                + " (lean-agent config branch-rules)")
     ignored = []
@@ -8409,6 +8493,7 @@ def cmd_do(a):
     ns = argparse.Namespace(resume=None, task=[text], task_file=None, model=step.get("model") or r["model"],
                             todo=getattr(a, "todo", None),
                             why=f"recipe {a.name}: {r['why']}", cards=r.get("cards"), project=slug,
+                            force_mcp=getattr(a, "force_mcp", False),
                             read_only=bool(r.get("read_only")) and not a.apply, chrome=None,
                             mcp=list(step.get("mcp") or r.get("mcp") or []), tools=None, allow_send=a.allow_send,
                             max_turns=r.get("max_turns") or 40, max_usd=r.get("max_usd") or 3.0, max_context=2000,
@@ -9530,7 +9615,10 @@ def cmd_advise(a):
     projs = projects()
     thread = thread_key(a.thread) or "main"
     lean = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
+    rule_lines = advise_rules(slug, path)
     task = (f"The user's new request (project {slug}" + (f", thread {a.thread}" if a.thread else "") + "):\n" + what
+            + ("\n\nRules to respect (the user's standing rules; say so in ADVICE when the request touches one):\n"
+               + "\n".join(rule_lines) if rule_lines else "")
             + "\n\nProjects: " + ", ".join(sorted(projs)) + "\n" + advise_state(slug, path, a.thread)
             + "\n" + advise_cards(slug, request=what, project=path) + ("\n" + advise_requests(a.thread)).rstrip())
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model="haiku",
@@ -9548,6 +9636,8 @@ def cmd_advise(a):
         die("the advisor didn't answer with an ADVICE block; see its reply above", rc or 1)
     block = [l for l in lines[start:start + 16] if l.strip()]
     text = shape_advice(block)
+    if rule_lines:
+        text = "\n".join(rule_lines) + "\n" + text
     store_advice({"ts": now_iso(), "thread": thread, "project": slug, "request": what[:300], "text": text})
     print(text)
     return 0
@@ -9734,6 +9824,7 @@ def build_parser():
     s.add_argument("--task-file")
     s.add_argument("--read-only", action="store_true")
     s.add_argument("--mcp", action="append", metavar="SERVER[:PRESET]")
+    s.add_argument("--force-mcp", action="store_true", help="use --mcp servers even when a rule forbids them")
     s.add_argument("--cards")
     s.add_argument("--evidence", action="append", metavar="TEXT", help="evidence hint, strongest first (repeatable)")
     s.add_argument("--apply-task", help="the step that makes the changes (outward actions need approval)")
@@ -9918,6 +10009,7 @@ def build_parser():
                    help="the user approved this outward action (send/post/submit...); describe exactly what")
     s.add_argument("--mcp", action="append", metavar="SERVER[:TOOL,TOOL]",
                    help="give the worker this MCP server, optionally only these tools (repeatable)")
+    s.add_argument("--force-mcp", action="store_true", help="use --mcp servers even when a rule forbids them")
     s.add_argument("--escalate", metavar="MODEL,MODEL", help="try the first model; if its run fails, run the task "
                    "again on the next (e.g. haiku,sonnet). Replaces --model")
     s.add_argument("--todo", type=todo_arg, metavar="N", help="the work-queue item this run "

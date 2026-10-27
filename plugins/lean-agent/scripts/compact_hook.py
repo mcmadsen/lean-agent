@@ -18,6 +18,7 @@ sys.path.insert(0, HERE)
 import usage  # noqa: E402
 import lean_common  # noqa: E402
 import lean_memory  # noqa: E402
+import lean_rules  # noqa: E402
 
 RECENT_HOURS = 12
 REF_WORDS = re.compile(r"\b(?:PR|pull request|work item|issue|ticket|bug|story)\s*#?\s*(\d{2,})\b", re.I)
@@ -144,19 +145,25 @@ def standing_rules(limit=10, runs=()):
                     flagged.add(c["id"])
                 used[c["id"]] = used.get(c["id"], 0) + int(c.get("used") or 0)
     work = set().union(*(_words(str(r.get("task", ""))) for r in runs)) if runs else set()
+    always = []  # rules are always in the brief, within their token budget, before anything ranked
+    for m in mems:
+        r = lean_rules.classify(m["body"], m["type"])
+        if r["rule"]:
+            always.append({**r, "text": m["body"], "tokens": len(m["body"]) // 4 + 1, "updated": m.get("modified") or ""})
+    always = [c for c in lean_rules.pick_within_budget(always)]
     rules = [m for m in mems if m["type"] in ("feedback", "user")]
     rules.sort(key=lambda m: m.get("modified") or "", reverse=True)
     rules.sort(key=lambda m: (("mem-" + _slug(m["stem"])) not in flagged, -len(_words(m["body"]) & work),
                               -used.get("mem-" + _slug(m["stem"]), 0)))
-    out, seen = [], []
+    out, seen = [lean_rules.rule_line(c) for c in always], [_words(c["text"]) for c in always]
     for m in rules:
+        if len(out) >= limit:
+            break
         w = _words(m["body"])
-        if any(w and len(w & s) / len(w | s) >= 0.7 for s in seen):
+        if any(w and s and len(w & s) / len(w | s) >= 0.7 for s in seen):
             continue  # the same rule saved twice (e.g. a "-2" copy)
         seen.append(w)
         out.append(" ".join(m["body"].split())[:200])
-        if len(out) >= limit:
-            break
     return out
 
 
