@@ -3807,7 +3807,63 @@ def record_skip(slug, path, a, sha, label, mode, base, reason):
     return 0
 
 
+def review_costs(a):
+    """`review --costs`: what the reviews of the last N days cost, from the ledger: per branch and per model, runs,
+    second turns (the reviewer resumed, or the cheap fill-in run), re-review rounds and skipped reviews by reason."""
+    days = getattr(a, "days", 7)
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).isoformat(timespec="seconds")
+    proj = getattr(a, "project_opt", None) or a.project
+    slug = resolve_project(proj)[0] if proj else None
+    runs = [r for r in ledger() if r.get("ts", "") >= cutoff and (slug is None or r.get("project") == slug)
+            and r.get("role") in ("reviewer", "reuse-check") and (r.get("review_meta") or {}).get("ref") is not None]
+    by_branch, by_model = {}, {}
+    firsts = rereviews = seconds = 0
+    reviews = 0
+    for r in runs:
+        meta = r.get("review_meta") or {}
+        fill = r.get("role") == "reuse-check" and str(r.get("why") or "").startswith("fill the reuse")
+        if r.get("role") == "reuse-check" and not fill:
+            kind = "helper"  # the up-front second opinion: costs count, it is not a review
+        elif fill or (r.get("resumed") and not meta.get("resume")):
+            kind = "second"
+            seconds += 1
+        elif meta.get("resume"):
+            kind = "re"
+            rereviews += 1
+            reviews += 1
+        else:
+            kind = "first"
+            firsts += 1
+            reviews += 1
+        cost = r.get("cost_usd") or 0
+        for table, key in ((by_branch, meta.get("ref") or "?"), (by_model, model_family(r.get("model")))):
+            row = table.setdefault(key, [0, 0.0])
+            row[0] += 1
+            row[1] += cost
+    skips = {}
+    for sl in ([slug] if slug else list(projects())):
+        for rec in read_jsonl(reviews_path(sl)):
+            if is_skipped(rec.get("verdict")) and rec.get("ts", "") >= cutoff:
+                why = re.sub(r"^skipped \((.*)\)$", r"\1", rec["verdict"])
+                why = "branch" if why.startswith("branch ") else why
+                skips[why] = skips.get(why, 0) + 1
+    total = sum(v[1] for v in by_model.values())
+    print(f"review costs, last {days} day(s){' · ' + slug if slug else ''}: ${total:.2f} over {len(runs)} run(s)")
+    print(f"  {reviews} reviews ({firsts} first, {rereviews} re-reviews) · {seconds} second turns · "
+          f"average ${total / reviews:.2f} per review" if reviews else "  no reviews")
+    for title, table in (("per model", by_model), ("per branch", by_branch)):
+        print(f"  {title}:")
+        for key, (n, cost) in sorted(table.items(), key=lambda kv: -kv[1][1]):
+            print(f"    {key}: ${cost:.2f} ({n} run(s))")
+    print("  skipped: " + (", ".join(f"{n} {w}" for w, n in sorted(skips.items())) if skips else "none"))
+    return 0
+
+
 def cmd_review(a):
+    if getattr(a, "costs", False):
+        return review_costs(a)
+    if not a.project:
+        die("review needs a project (or --costs)")
     if a.decide_gaps:
         return decide_gaps(a)
     rc = review_main(a)
@@ -4162,9 +4218,9 @@ def answer_template(ns_syms, focus):
              "array one entry per test below, in this format; entries for names not listed are fine, missing ones "
              "make the review incomplete.",
              'reuse entry: {"symbol": "<name as listed>", "candidates": ["file:line existing code"], '
-             '"verdict": "extend|wraps-existing|reuse|duplicate|justified-new", "why": "<why it can\'t be reused>"}',
-             'coverage entry: {"test": "<test as listed>", "protected": "<what it protected>", "still_covered": '
-             'true|false, "where": "<file:line or reason it was removed>"}']
+             '"verdict": "duplicate|extends-existing|wraps-existing|justified-new", "why": "<why it can\'t be reused>"}',
+             'coverage entry: {"test": "<test as listed>", "protected": "<what it protected>", "verdict": '
+             '"still-covered|lost|intentional", "by": "<other test, or why it was removed>"}']
     lines += ["Symbols (reuse):"] + [f"- {x}" for x in syms[:60]] if syms else []
     lines += ["Tests (coverage):"] + [f"- {x}" for x in tests[:30]] if tests else []
     return "\n" + "\n".join(lines) + "\n"
@@ -9665,8 +9721,12 @@ def build_parser():
     s.add_argument("--skip", metavar="CARD_IDS", help="leave these cards out of the suggestions and --apply")
     s.set_defaults(fn=cmd_optimize)
 
-    s = sub.add_parser("review", help="pre-PR review by a read-only reviewer (sonnet, high effort)")
-    s.add_argument("project")
+    s = sub.add_parser("review", help="pre-PR review by a read-only reviewer (model by risk, high effort)")
+    s.add_argument("project", nargs="?")
+    s.add_argument("--costs", action="store_true", help="what reviews cost: totals per branch and model, runs, second "
+                   "turns, re-review rounds, skips and the average per review, from the ledger (--project P, --days N)")
+    s.add_argument("--project", "-p", dest="project_opt", metavar="P", help="--costs: only this project")
+    s.add_argument("--days", type=int, default=7, help="--costs: how many days back (default 7)")
     s.add_argument("--base", help="branch the change is based on (default: origin's default branch)")
     s.add_argument("--head", metavar="REF", help="review this branch/commit straight from git (no checkout needed); "
                    "with --status: check that ref")
