@@ -105,7 +105,7 @@ FAKE_CLAUDE = textwrap.dedent("""\
                              "addclaudemd": os.environ.get("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD")}) + "\\n")
     import time
     if os.environ.get("FAKE_RELEASE_FILE"):  # hold until the test says go
-        end = time.time() + 30
+        end = time.time() + float(os.environ.get("FAKE_RELEASE_WAIT", "30"))
         while not os.path.exists(os.environ["FAKE_RELEASE_FILE"]) and time.time() < end:
             time.sleep(0.05)
     if os.environ.get("FAKE_FINISH_AT"):  # make parallel fake workers finish together
@@ -1328,7 +1328,7 @@ class CliTest(unittest.TestCase):
     def test_parallel_runs_keep_all_stats(self):
         self.cli("learn", self.proj)
         fb = json.dumps({"status": "done", "used": ["testing"], "unneeded": [], "missing": ""})
-        env = dict(self.env, FAKE_FEEDBACK=fb, FAKE_FINISH_AT=str(time.time() + 1.5))
+        env = dict(self.env, FAKE_FEEDBACK=fb, FAKE_FINISH_AT=str(time.time() + scaled(1.5)))
         procs = [subprocess.Popen([sys.executable, CLI, "run", "-p", "proj", "-m", "haiku", "--why", "x",
                                    "--cards", "testing", f"task {i}"], env=env, stdin=subprocess.DEVNULL,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for i in range(16)]
@@ -7275,7 +7275,7 @@ class CliTest(unittest.TestCase):
         self.git_project()
         self.cli("learn", self.proj, "--name", "proj")
         release = os.path.join(self.tmp.name, "release")
-        env = dict(self.env, FAKE_RELEASE_FILE=release)
+        env = dict(self.env, FAKE_RELEASE_FILE=release, FAKE_RELEASE_WAIT=str(scaled(30)))
         cmd = [sys.executable, CLI, "run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feature", "--", "t"]
         self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feature", "--", "create it first")
         errs = [os.path.join(self.tmp.name, f"err{i}") for i in range(2)]
