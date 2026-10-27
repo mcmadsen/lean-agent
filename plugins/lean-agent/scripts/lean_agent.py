@@ -4346,20 +4346,20 @@ def reuse_follow_up(a, slug, meta, effort):
         rec["unchecked"] = [w for w in unchecked if w not in filled]
         rec["coverage_not_checked"] = not_cov
         rec["coverage_unchecked"] = []
-        keep = [c for c in rec.get("checks") or [] if not str(c.get("what", "")).startswith(
-            ("reuse not checked for", "coverage not checked for"))]
+        keep = [c for c in rec.get("checks") or [] if not str(c.get("what", "")).startswith("reuse not checked for")
+                and (not_cov or not str(c.get("what", "")).startswith("coverage not checked for"))]
         if rec["unchecked"]:
             keep.append({"what": "reuse not checked for: " + ", ".join(rec["unchecked"][:10]),
                          "why": "the cheap reuse run did not answer for these"})
         keep += [{"what": f"justify or fix: {r.get('symbol')}: existing code {', '.join(map(str, r['candidates']))[:160]}",
                   "why": "a new abstraction next to an existing one needs a reason"} for r in dup]
         rec["checks"] = keep
-        if rec.get("verdict") == "needs-checks" and not keep and not rec.get("disputed") and not any(
+        if rec.get("verdict") == "needs-checks" and not keep and not not_cov and not rec.get("disputed") and not any(
                 f.get("severity") in ("blocker", "major") for f in rec.get("findings") or []):
             rec["verdict"] = "approve"
     update_last_review(slug, last["run"], patch)
     print(f"review: {len(filled)} reuse entr{'y' if len(filled) == 1 else 'ies'} filled by the cheap run"
-          + (f"; coverage not checked for {len(not_cov)} edited test(s)" if not_cov else ""), flush=True)
+          + (f"; coverage not checked: {len(not_cov)} test{'' if len(not_cov) == 1 else 's'}" if not_cov else ""), flush=True)
     now = (list(read_jsonl(reviews_path(slug))) or [last])[-1]
     return 0 if now.get("verdict") == "approve" and not any(g.get("unaddressed") for g in now.get("gaps") or []) else 2
 
