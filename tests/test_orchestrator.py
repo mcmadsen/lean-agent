@@ -2914,7 +2914,8 @@ class CliTest(unittest.TestCase):
         self.assertIn("t1 ", lines[2])
         shown = self.cli("thread", "show", "t2").stdout
         kinds = [l[17:].split()[0] for l in shown.splitlines()[1:]]
-        self.assertEqual(kinds, ["request", "run", "todo", "note", "push"])
+        self.assertRegex(kinds[0], r"^r\d+$")
+        self.assertEqual(["request"] + kinds[1:], ["request", "run", "todo", "note", "push"])
         self.assertIn('t2 "Fix export timeout billing"', shown)
         self.assertIn("haiku", shown)
         self.assertNotIn("Publish the report", shown)
@@ -4978,6 +4979,13 @@ class CliTest(unittest.TestCase):
             json.dump([{"ts": ts, "text": long_note, "kind": "checkpoint", "thread": "t1"}], fh)
         self.assertEqual(lt.id_thread("PR 4711 got a comment", lt.load()), "t1")
         self.assertEqual(lt.id_thread("rebase feature/login-4711", lt.load()), "t1")
+
+    def test_thread_show_prints_request_ids(self):
+        lt = self.threads_home()
+        lt.route("Login redesign", "s1")  # t1
+        out = lt.show_text("t1")
+        self.assertRegex(out, r"(?m)^\S+ \S+  r\d+  request  Login redesign")
+        self.assertNotIn("now", out.split("\n")[0])
 
     def test_routing_by_branch_name(self):
         lt = self.threads_home()
