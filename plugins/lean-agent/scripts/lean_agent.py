@@ -1079,7 +1079,9 @@ def code_tools_note(project):
     return "\n".join(lines) + "\n"
 
 
-def build_append(project, cards, read_only=False, allow_send=None, chrome=False, role_rule="", answer_lines=0):
+def build_append(project, cards, read_only=False, allow_send=None, chrome=False, role_rule="", answer_lines=0,
+                 branch_rule=False):
+    """branch_rule: the worker may create a branch itself (it writes, and no branch was made for it)."""
     parts = [WORKER_PROTOCOL.format(
         answer_rule=ANSWER_RULE.format(n=answer_lines, mark=DETAILS_MARK) if answer_lines else "",
         project=project, sq=os.path.join(PLUGIN_ROOT, "bin", "lean-sq"),
@@ -1087,7 +1089,7 @@ def build_append(project, cards, read_only=False, allow_send=None, chrome=False,
         send_rule=ALLOW_SEND_RULE.format(approved=allow_send) if allow_send else SEND_RULE,
         browser_rule=BROWSER_RULE if chrome else "",
         role_rule=role_rule)]
-    if not read_only:
+    if branch_rule:
         parts.append(BRANCH_RULE)
     tools = code_tools_note(project)
     if tools:
@@ -1509,7 +1511,8 @@ def _cmd_run(a):
         lib = {c["id"]: c for c in load_cards(slug)}
         with open(os.path.join(workdir, "append.md"), "w") as fh:  # same context, current send/browser rules
             fh.write(build_append(project, [lib[c] for c in prev.get("cards", []) if c in lib], read_only,
-                                  a.allow_send, bool(chrome_spec), role_rule, answer_lines))
+                                  a.allow_send, bool(chrome_spec), role_rule, answer_lines,
+                                  branch_rule=not read_only and not auto_branch))
     else:
         slug, project = resolve_project(a.project)
         sync_memory(slug)
@@ -1603,7 +1606,8 @@ def _cmd_run(a):
             with open(os.path.join(workdir, "role.md"), "w") as fh:
                 fh.write(role_rule)
         with open(os.path.join(workdir, "append.md"), "w") as fh:
-            fh.write(build_append(project, cards, read_only, a.allow_send, bool(chrome_spec), role_rule, answer_lines))
+            fh.write(build_append(project, cards, read_only, a.allow_send, bool(chrome_spec), role_rule, answer_lines,
+                                  branch_rule=not read_only and not auto_branch))
         tools = a.tools or (READONLY_TOOLS + ",Bash" if read_only else WORKER_TOOLS)
 
     todo_id = (prev or {}).get("todo") or getattr(a, "todo", None)
