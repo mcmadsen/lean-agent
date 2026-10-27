@@ -4685,7 +4685,7 @@ def infer_branch_kind(title):
 
 def title_version(title):
     m = _RELEASE_TITLE.match(title or "")
-    return m.group(1) if m else None
+    return m.group(1).rstrip(".-_,;:!?") if m else None
 
 
 def task_id_of(ref):

@@ -6228,6 +6228,7 @@ class CliTest(unittest.TestCase):
         for title in ("Release notes page", "Release 7 things", "Releases 2.0", "Update release process"):
             self.assertTrue(bn(title).stdout.startswith("feature/"), title)  # no version after "release": a feature
         self.assertEqual(bn("Release 2.0-rc1").stdout.strip(), "release/release-2.0-rc1")
+        self.assertEqual(bn("Release 2.0-rc1.").stdout.strip(), "release/release-2.0-rc1")  # trailing punctuation is not the version
         self.assertTrue(bn("Backport fix to release/2.0").stdout.startswith("bugfix/"))
         self.assertTrue(bn("Cut release/2.0 from main").stdout.startswith("feature/"))
         self.assertTrue(bn("Cut release/2.0 from main", "--type", "release", "--version", "2.0").stdout.startswith("release/"))
