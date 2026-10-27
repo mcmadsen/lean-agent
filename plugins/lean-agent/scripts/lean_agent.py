@@ -8070,8 +8070,8 @@ def open_thread_sessions():
     return out
 
 
-def fmt_idle(sec):
-    return f"{sec // 86400}d" if sec >= 172800 else f"{sec // 3600}h" if sec >= 3600 else f"{sec // 60}m"
+def _idle_age(sec):
+    return lean_threads.age(datetime.datetime.fromtimestamp(time.time() - sec).isoformat(timespec="seconds"))
 
 
 def make_room_for_thread_session(tid=None):
@@ -8080,20 +8080,17 @@ def make_room_for_thread_session(tid=None):
     cap = service_session.max_thread_sessions()
     sessions = [s for s in open_thread_sessions() if s["thread"] != tid]
     while len(sessions) >= cap:
-        busy = {}
-        for rid, m in live_runs():
-            if m.get("thread"):
-                busy.setdefault(m["thread"], rid)
+        busy = lean_threads._running_by_thread(lean_threads.load())
         free = [s for s in sessions if s["thread"] not in busy]
         if not free:
             die(f"{len(sessions)} thread sessions are open (max-thread-sessions {cap}) and all are busy:\n" +
-                "\n".join(f'{s["thread"]} "{s["title"]}" idle {fmt_idle(s["idle"])}, running run {busy[s["thread"]]}'
+                "\n".join(f'{s["thread"]} "{s["title"]}" idle {_idle_age(s["idle"])}, {busy[s["thread"]]} running'
                           for s in sessions) + "\nwait for one, or `lean-agent config max-thread-sessions N`")
         v = max(free, key=lambda s: s["idle"])
         close_thread_session(v["thread"])
         if v["thread"] in lean_threads.load()["threads"]:
             lean_threads.set_closed(v["thread"], True)
-        print(f'closed {v["thread"]} "{v["title"]}" (idle {fmt_idle(v["idle"])}) to make room \u2014 reopen with '
+        print(f'closed {v["thread"]} "{v["title"]}" (idle {_idle_age(v["idle"])}) to make room \u2014 reopen with '
               f'lean-agent thread open {v["thread"]}')
         sessions.remove(v)
 
