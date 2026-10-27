@@ -8391,6 +8391,23 @@ def cmd_config(a):
         print(f"review-max-rerounds: {review_max_rerounds()} · re-reviews of one branch's lineage before `review "
               "--resume` refuses (--force overrides)")
         return 0
+    if a.name == "thread-fresh-after":
+        if a.value is not None:
+            try:
+                service_session.parse_fresh_after(a.value)
+            except ValueError as exc:
+                die(str(exc))
+            cfg = config_json()
+            if a.value.lower() in ("default", ""):
+                cfg.pop("thread_fresh_after", None)
+            else:
+                cfg["thread_fresh_after"] = a.value.lower()
+            save_json(home("config.json"), cfg)
+        fa = service_session.fresh_after()
+        print("thread-fresh-after: " + (f"idle={fa[0] / 60:g}m,context={fa[1]:g}%" if fa else "off") + " \u00b7 `thread send` to an open "
+              "session idle this long whose context is this share of the compaction point checkpoints it and continues in "
+              "a new session started from a short brief (idle=30m,context=50%|off|default)")
+        return 0
     if a.name == "clear-at":
         if a.value is not None:
             if not (a.value.isdigit() or a.value.lower() in ("auto", "off")):
@@ -8867,6 +8884,32 @@ def cmd_doc(a):
     return 0
 
 
+def auto_fresh_reason(tid):
+    """Why a running thread session should continue fresh (idle and big, per thread-fresh-after), else ''."""
+    limits = service_session.fresh_after()
+    if not limits:
+        return ""
+    mine = next((x for x in open_thread_sessions() if x["thread"] == tid), None)
+    ctx, point = service_session.session_context(tid), service_session.up_compact_at()
+    if not mine or mine["idle"] < limits[0] or not ctx or not point or ctx < point * limits[1] / 100:
+        return ""
+    return f"idle {_idle_age(mine['idle'])}, context ~{kt(ctx)} is {ctx * 100 // point}% of the compaction point"
+
+
+def start_closed_thread(tid, t, prompt, resume_old, force=False):
+    """Start the session of a thread that is not running: a new one from the brief, or with `resume_old` (and for a
+    thread that never closed) the previous one. Returns (Remote Control name, the line saying which)."""
+    fresh, line, t = prepare_thread_session(tid, resume_old, force)
+    msg = None
+    if fresh:
+        msg, tokens = fresh_message(tid, prompt)
+        line = f"{tid} started fresh (brief ~{kt(tokens)} tokens)"
+    if t.get("closed"):
+        lean_threads.set_closed(tid, False)
+    name = start_thread_session(tid, t, prompt, msg)
+    return name, line
+
+
 def thread_prompt(a):
     if not a.prompt_file:
         return None
@@ -8890,13 +8933,55 @@ def thread_session_tid(raw):
 START_GRACE = 10  # seconds a host may take to come up after a failed or timed-out start request
 
 
-def start_thread_session(tid, t, prompt=None):
+def transcript_of(sid):
+    return service_session.transcript_path(service_session.lean_home("home"), sid)
+
+
+def kt(n):
+    return f"{n / 1000:.1f}k" if n < 10000 else f"{round(n / 1000)}k"
+
+
+def prepare_thread_session(tid, resume_old, force=False):
+    """Decide how a thread's session starts. Returns (fresh, line, t): `fresh` a new session from the brief, `line` the
+    text that says which. A closed thread (or `force`) with an old transcript gets a new session id, the old one
+    kept in session_history; `resume_old` resumes the previous one instead."""
+    t = lean_threads.load()["threads"].get(tid) or {}
+    sid = t.get("session_id")
+    if not sid:
+        return False, None, t
+    hist = list(t.get("session_history") or [])
+    has = os.path.exists(transcript_of(sid))
+    if resume_old:
+        if not has and hist:  # reopened fresh but never started: go back to the previous one
+            sid = hist.pop()
+            lean_threads.set_session(tid, session_id=sid, session_history=hist or None)
+            has = True
+        ctx = service_session.transcript_state(transcript_of(sid))["ctx"] if has else 0
+        return False, f"{tid} resumed old session {sid[:8]}" + (f" (context ~{kt(ctx)})" if ctx else ""), t
+    if has and (t.get("closed") or force):
+        lean_threads.set_session(tid, session_id=str(uuid.uuid4()), session_history=(hist + [sid])[-20:])
+        t = lean_threads.load()["threads"].get(tid) or {}
+        return True, None, t
+    if has:
+        ctx = service_session.transcript_state(transcript_of(sid))["ctx"]
+        return False, f"{tid} resumed" + (f" (context ~{kt(ctx)})" if ctx else ""), t
+    return True, None, t
+
+
+def fresh_message(tid, prompt=None):
+    """(first message, tokens of brief) of a new session: the brief, then the user's message."""
+    import compact_hook
+    brief = compact_hook.fresh_brief(tid)
+    msg = brief + "\n" + lean_threads.BRIEF_END + ("\n\n" + prompt if prompt else "\n\n(No message yet: wait for the user.)")
+    return msg, max(1, len(brief) // 4)
+
+
+def start_thread_session(tid, t, prompt=None, msg=None):
     """Ask `up` to host the thread's session (resuming it when its transcript exists). Returns the Remote Control name;
     raises RuntimeError when it did not start."""
     if not t.get("session_id"):
         lean_threads.set_session(tid, session_id=str(uuid.uuid4()))
-    msg = None
-    if prompt:
+    if msg is None and prompt:
         import compact_hook
         msg = compact_hook.thread_brief(tid, THREAD_BRIEF_CAP) + "\n" + lean_threads.BRIEF_END + "\n\n" + prompt
     r = service_session.sessions_request("start", thread=tid, prompt=msg)
@@ -9007,8 +9092,54 @@ def make_room_for_thread_session(tid=None):
         sessions.remove(v)
 
 
+def parse_idle(text):
+    """Seconds in a duration such as 90m, 2h, 1d or 45s (a bare number is minutes); ValueError otherwise."""
+    return lean_common.parse_duration(text)
+
+
+def close_threads(a):
+    """`thread close tN...|--all|--idle DUR`: one checkpoint-and-stop per thread, then a summary line."""
+    idle, all_ = getattr(a, "idle", None), getattr(a, "all", False)
+    if sum(map(bool, (a.args, all_, idle))) != 1:
+        die("usage: lean-agent thread close tN [tM ...] | --all | --idle DUR")
+    if idle:
+        try:
+            limit = parse_idle(idle)
+        except ValueError as exc:
+            die(str(exc))
+        busy = lean_threads.running_by_thread(lean_threads.load())
+        tids = [s["thread"] for s in open_thread_sessions() if s["idle"] >= limit and s["thread"] not in busy]
+    elif all_:
+        tids = [s["thread"] for s in open_thread_sessions()]
+    else:
+        tids = []
+        for ref in a.args:
+            tid = thread_session_tid(ref)[0]
+            if tid not in tids:
+                tids.append(tid)
+    done, failed = [], []
+    for tid in tids:
+        try:
+            stopped, ok, stale = close_thread_session(tid)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            failed.append(tid)
+            continue
+        if stopped:
+            print(f"{tid}: session stopped" + ("" if ok is None else " (checkpointed)" if ok else " (no checkpoint reply in time)"))
+        elif stale:
+            print(f"{tid}: no running session; record cleared")
+        lean_threads.cli("close", [tid], a.json)
+        done.append(tid)
+    if len(tids) != 1 or all_ or idle:
+        print(f"closed {len(done)} thread{'s' * (len(done) != 1)}" + (f": {', '.join(done)}" if done else "")
+              + (f"; failed: {', '.join(failed)}" if failed else ""))
+    return 1 if failed else 0
+
+
 def cmd_thread(a):
     act = a.action
+    resume_old = getattr(a, "resume_old", False)
     if act == "sessions":
         if not service_session.alive():
             die("no service session is up (start it with `lean-agent up` or `lean-agent service start`)")
@@ -9047,7 +9178,10 @@ def cmd_thread(a):
         if not service_session.alive():
             die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
         running = service_session.alive(tid)
-        if running:
+        force, why = False, ""
+        if running and prompt and not resume_old:
+            why = auto_fresh_reason(tid)
+        if running and not why:
             if t.get("closed"):
                 lean_threads.set_closed(tid, False)
             if prompt:
@@ -9057,6 +9191,13 @@ def cmd_thread(a):
             print(f"{tid} is running" + (": message sent" if prompt else ""))
             return 0
         with thread_start_lock():
+            if why and service_session.alive(tid):
+                try:
+                    close_thread_session(tid)
+                except RuntimeError as exc:
+                    die(str(exc))
+                force = True
+                prepare_thread_session(tid, False, True)  # new session id now: a failed start below still retries fresh
             if service_session.alive(tid):  # another call started it while this one waited
                 if prompt:
                     ok, err = service_session.send(prompt, tid)
@@ -9065,29 +9206,30 @@ def cmd_thread(a):
                 print(f"{tid} is running" + (": message sent" if prompt else ""))
                 return 0
             make_room_for_thread_session(tid)
-            if t.get("closed"):
-                lean_threads.set_closed(tid, False)
             try:
-                name = start_thread_session(tid, t, prompt)
+                name, line = start_closed_thread(tid, t, prompt, resume_old, force)
             except RuntimeError as exc:
                 die(str(exc))
-        print(f'thread {tid} ' + ("started" if t.get("session_id") is None else "resumed") + f': Remote Control "{name}"'
+        print((line or f"thread {tid} started") + (f" ({why})" if why else "") + f': Remote Control "{name}"'
               + (": message sent" if prompt else ""))
         return 0
     if act == "close":
-        if len(a.args) != 1:
-            die("usage: lean-agent thread close tN")
+        return close_threads(a)
+    if act == "reopen" and len(a.args) == 1:
         tid, t = thread_session_tid(a.args[0])
-        try:
-            stopped, ok, stale = close_thread_session(tid)
-        except RuntimeError as exc:
-            die(str(exc))
-        if stopped:
-            print(f"{tid}: session stopped" + ("" if ok is None else " (checkpointed)" if ok else " (no checkpoint reply in time)"))
-        elif stale:
-            print(f"{tid}: no running session; record cleared")
-        return lean_threads.cli("close", [tid], a.json)
-    return lean_threads.cli(act, a.args + (["--all"] if a.all else []), a.json)
+        if t.get("closed") and t.get("session_id"):
+            if not service_session.alive():
+                prepare_thread_session(tid, resume_old)  # the next `send` starts as decided here
+                return lean_threads.cli("reopen", [tid], a.json)
+            with thread_start_lock():
+                make_room_for_thread_session(tid)
+                try:
+                    name, line = start_closed_thread(tid, t, None, resume_old)
+                except RuntimeError as exc:
+                    die(str(exc))
+            print(line + f': Remote Control "{name}"')
+            return 0
+    return lean_threads.cli(act, a.args + (["--all"] if getattr(a, "all", False) else []), a.json)
 
 
 def cmd_now(a):
@@ -9919,7 +10061,7 @@ def build_parser():
     s = sub.add_parser("config", help="switches: strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "max-thread-sessions N (thread sessions the service runs; default 8), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
     s.add_argument("name", choices=["strict", "clear-at", "project-rules", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
-                                           "review-max-rerounds", "review-skip", "review-model"])
+                                           "review-max-rerounds", "review-skip", "review-model", "thread-fresh-after"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)
@@ -10359,12 +10501,15 @@ def build_parser():
     s.add_argument("args", nargs=argparse.REMAINDER, help="add: the lean-agent command, e.g. do <project> <recipe>")
     s.set_defaults(fn=cmd_schedule)
 
-    s = sub.add_parser("thread", help="threads: new \"title\" [--prompt-file F|-] (its own Remote Control session) | send tN --prompt-file F|- | open tN (resume its session) | sessions | list | show tN [--all] | close tN (checkpoint, stop its session) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
+    s = sub.add_parser("thread", help="threads: new \"title\" [--prompt-file F|-] (its own Remote Control session) | send tN --prompt-file F|- | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
     s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions"])
     s.add_argument("args", nargs="*")
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin)")
     s.add_argument("--json", action="store_true", help="list: as JSON")
-    s.add_argument("--all", action="store_true", help="show: every entry (default: the latest 40)")
+    s.add_argument("--all", action="store_true", help="show: every entry (default: the latest 40); close: every open session")
+    s.add_argument("--idle", help="close: every session idle at least this long (e.g. 2h, 90m) without a running run")
+    s.add_argument("--resume-old", action="store_true", help="reopen|send|open: continue the thread's previous Claude session "
+                   "instead of starting a new one from a short brief")
     s.set_defaults(fn=cmd_thread)
 
     s = sub.add_parser("now", help="what we are working on: the open threads by last activity, with state and last action")
