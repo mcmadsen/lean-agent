@@ -3527,6 +3527,30 @@ def choose_review_model(path, rng_args, names, explicit=None, rereview=False):
     return "sonnet", f"{size} lines" if size < SMALL_REVIEW_LINES else f"{size} lines, no sensitive paths"
 
 
+MAX_REVIEW_CARDS = 4
+
+
+def review_cards(slug, path, rng_args, names, goal, focus, max_tokens):
+    """Cards for a reviewer prompt: the learned review checklist, rules whose globs match a changed file, then cards whose keywords appear in the
+    diff, the goal or the focus; at most MAX_REVIEW_CARDS, never the generic core cards of the project."""
+    lib = [c for c in load_cards(slug) if not c.get("archived")]
+    chosen = [c for c in lib if c["id"] in REVIEW_CARDS]  # the review's own learned checklist
+    chosen += [c for c in lib if is_rule_card(c) and c.get("globs") and any(glob_match(g, f) for g in c["globs"] for f in names)]
+    diff = (git(path, "diff", "-U0", "--no-color", *rng_args) or "")[:30000]
+    added = " ".join(l[1:] for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++"))
+    text = " ".join(re.split(r"[/._-]+", " ".join(names))) + " " + (goal or "") + " " + (focus or "") + " " + added
+    picked, reasons, _ = suggest(slug, text, max_tokens, "review", explain=True, strict=True, limit=MAX_REVIEW_CARDS)
+    for c in picked:
+        if c not in chosen and not reasons.get(c["id"], "").startswith("core") and not is_rule_card(c):
+            chosen.append(c)
+    out, used = [], 0
+    for c in chosen[:MAX_REVIEW_CARDS]:
+        if used + c["tokens"] <= max_tokens:
+            out.append(c)
+            used += c["tokens"]
+    return out
+
+
 def earlier_review(slug, path, head):
     """The latest reviewer run this review continues: of the same branch (with or without origin/), or of a commit
     the new one builds on (an ancestor, or amended away on the same branch) that isn't merged into the base."""
@@ -3932,7 +3956,7 @@ def review_main(a):
                 "file:line):\n" + ("\n".join(open_items[:25]) or "- none") + "\n\nGive the changes since then the full "
                 "passes; don't re-review code that didn't change. " + decisions_text(slug, meta.get("ref"), path, meta["head"])
                 + (a.focus or "") + answer_template(ns_syms, focus))
-        cards = suggest(slug, " ".join(re.split(r"[/._-]+", " ".join(changed))), a.max_context, "review")
+        cards = review_cards(slug, path, since, changed, getattr(a, "goal", None), a.focus, a.max_context)
         meta["since_hunks"] = changed_hunks(path, since)
         meta["earlier"] = [str(f.get("issue", "")) for f in last.get("findings") or []]
         risk = high_risk(path, since, changed) if since else []
@@ -3991,8 +4015,8 @@ def review_main(a):
         read_rule = ""
     if not names:
         die(f"nothing to review: no changes on {label} since {base}")
-    path_words = " ".join(re.split(r"[/._-]+", " ".join(names)))
-    cards = suggest(slug, path_words + " " + (a.focus or ""), a.max_context, "review")
+    cards = review_cards(slug, path, [merge_base, sha] if mode == "ref" else [merge_base], names,
+                         getattr(a, "goal", None), a.focus, a.max_context)
     ns_syms = new_symbols(path, [merge_base, sha] if mode == "ref" else [merge_base], new)
     focus = change_focus(path, [merge_base, sha] if mode == "ref" else [merge_base])
     focus["gaps"] = self_declared_gaps(path, [merge_base, sha] if mode == "ref" else [merge_base],

@@ -7141,6 +7141,28 @@ class ReviewUnitTest(unittest.TestCase):
         self.assertTrue(any("2 gap(s) auto-declined" in n for n in notes), notes)
         self.assertTrue(any("gap(s) declined earlier" in n for n in notes), notes)
 
+    def test_review_cards_are_only_the_ones_that_match_the_change(self):
+        agent = self.agent
+
+        def card(i, kind="note", title="", text="", **kw):
+            return dict({"id": i, "kind": kind, "title": title, "text": text, "tokens": 50, "used": 0, "offered": 0,
+                         "source": i}, **kw)
+        cards = [card("review-checklist", title="Review checklist (lessons from human reviews)", text="lessons"),
+                 card("generic", title="Project overview", text="Everything about the project", core=True),
+                 card("rule-hit", kind="rule", title="api rule", text="x", globs=["api/*.py"]),
+                 card("rule-miss", kind="rule", title="web rule", text="x", globs=["web/*.ts"]),
+                 card("rule-open", kind="rule", title="general rule", text="x"),
+                 card("kw", title="Quota ledger", text="quota ledger counters are reset nightly"),
+                 card("other", title="Billing exports", text="csv export of invoices")]
+        diff = "+++ b/api/q.py\n+def bump_quota_ledger(n):\n+    return n\n"
+        with mock.patch.object(agent, "load_cards", return_value=cards), \
+                mock.patch.object(agent, "git", return_value=diff):
+            got = [c["id"] for c in agent.review_cards("p", "/x", ["a", "b"], ["api/q.py"], "fix the quota ledger", None, 2000)]
+        self.assertEqual(got, ["review-checklist", "rule-hit", "kw"])
+        many = cards + [card(f"r{i}", kind="rule", title="t", text="x", globs=["api/*.py"]) for i in range(6)]
+        with mock.patch.object(agent, "load_cards", return_value=many), mock.patch.object(agent, "git", return_value=diff):
+            self.assertEqual(len(agent.review_cards("p", "/x", ["a", "b"], ["api/q.py"], "", None, 2000)), 4)
+
     def test_the_prompt_template_lists_every_symbol_and_edited_test(self):
         t = self.agent.answer_template({"files": ["a/x.py"], "symbols": ["foo (a/x.py)"]},
                                        {"tests": ["t.py: 'test_one' (assert edited)"]})
