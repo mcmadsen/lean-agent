@@ -585,11 +585,18 @@ def probe(cfg, timeout=20.0, name=None):
         sess.close()
 
 
+_READ_ONLY_NAME = re.compile(r"^(?:list_|get_|whoami$|me$|.+_list$|.+_get$)", re.I)
+_WRITES = re.compile(r"create|update|delete|write|set|add|remove|post|put|patch", re.I)
+
+
 def pick_check_tool(tools):
-    """The first tool that looks cheap and read-only (list/get/whoami/project), preferring one with no required arguments."""
-    named = [t for t in tools if re.search(r"list|get|whoami|project", t.get("name") or "", re.I)]
-    free = [t for t in named if not (t.get("inputSchema") or {}).get("required")]
-    return (free or named or [None])[0]
+    """A tool that is safe to call for a check: a read-only looking name (list_*, get_*, whoami, *_list, *_get) with
+    no write word in it and no required input. None when there is no such tool (the check then only lists tools)."""
+    for t in tools:
+        name = t.get("name") or ""
+        if _READ_ONLY_NAME.match(name) and not _WRITES.search(name) and not (t.get("inputSchema") or {}).get("required"):
+            return t
+    return None
 
 
 def check(name, cfg, timeout=30.0):
@@ -609,7 +616,7 @@ def check(name, cfg, timeout=30.0):
             return "ok", f"{len(tools)} tools listed (no read-only tool to call)"
         res = sess.call("tools/call", {"name": tool["name"], "arguments": {}})
         text = " ".join(str(c.get("text") or "") for c in res.get("content") or [] if isinstance(c, dict))
-        if res.get("isError") or UNAUTH.search(text):
+        if res.get("isError"):
             if UNAUTH.search(text):
                 return "unauthorized", f"{tool['name']}: {text[:160]}"
             if re.search(r"required|invalid|missing|validation", text, re.I):
