@@ -3000,6 +3000,16 @@ class CliTest(unittest.TestCase):
         self.assertTrue({"t2", "#2", "#3", "optimize"} <= set(shown), shown)
         self.assertIn("t1", [t["id"] for t in lt.threads(include_expired=True)])  # nothing was deleted
 
+    def test_thread_show_has_request_ids_of_merged_threads(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        lt = self.threads_home()
+        lt.route("Publish the report via docs", "s1")  # t1, r1
+        lt.route("Zebra crossing quantum paint", "s1")  # unrelated: t2
+        lt.merge("t2", "t1")
+        out = lt.show_text("t1")
+        self.assertRegex(out, r"r\d+  request +Publish the report")
+        self.assertRegex(out, r"r\d+  request +Zebra crossing")
+
     def test_a_done_task_with_a_fresh_request_stays_open(self):
         lt = self.threads_home()
         lt.new("anchor")  # creates the registry
