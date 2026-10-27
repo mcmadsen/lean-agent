@@ -1822,6 +1822,12 @@ def _cmd_run(a):
     details_path, n_details, answer_cut = None, 0, False
     if answer_lines and summary:
         summary, details_path, n_details, answer_cut = split_answer(summary, answer_lines, workdir)
+    if reads.get("unauth"):
+        out = {"subtype": "error_mcp_unauthenticated", "session_id": reads.get("session_id"),
+               "num_turns": reads["turns"], "usage": reads["usage"], "is_error": True,
+               "result": f"MCP {reads['unauth']} is not authenticated (anonymous) — lean-agent mcp check {reads['unauth']}"}
+        if record_unauth_card(reads["unauth"], slug):
+            print(f"remembered: MCP {reads['unauth']} runs unauthenticated in workers")
     if reads.get("stopped") and not out.get("type"):  # stopped by lean-agent: no result event, so build one
         out = {"subtype": "error_max_context_reads", "session_id": reads.get("session_id"),
                "num_turns": reads["turns"], "usage": reads["usage"]}
@@ -1833,6 +1839,8 @@ def _cmd_run(a):
             print(f"lean-agent: run {run_id} stopped at its limit ({subtype[len('error_max_'):]}) with {len(dirty)} "
                   f"uncommitted file(s) in {project}: resume it to commit what's done and go on "
                   f"(lean-agent run --resume {run_id} \"commit what is finished, then continue\")", file=sys.stderr)
+    elif subtype == "error_mcp_unauthenticated":
+        status = "failed"
     elif out.get("is_error") or not out:
         status = "error"
     else:
@@ -1999,6 +2007,8 @@ def failure_reason(status, out, err, raw):
     if status in ("done", "partial", "needs-input", "awaiting-confirmation"):
         return ""
     sub = str(out.get("subtype") or "")
+    if sub == "error_mcp_unauthenticated":
+        return out["result"]
     if sub.startswith("error_max_"):
         return LIMIT_WORDS.get(sub[len("error_"):], f"hit its limit ({sub[len('error_max_'):]})")
     for text in (out.get("result"), err, raw):
@@ -2029,6 +2039,43 @@ def note_progress(workdir, turn, msg, u):
         pass
 
 
+def mcp_unauthenticated(ev, tools, denied):
+    """The MCP server whose tool results say unauthorized/anonymous twice (once for a run's first MCP call), or None.
+    `tools` {tool_use id: server} and `denied` {server: count} are the caller's state across events."""
+    content = (ev.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return None
+    for c in content:
+        if not isinstance(c, dict):
+            continue
+        if c.get("type") == "tool_use" and str(c.get("name") or "").startswith("mcp__"):
+            tools[c.get("id")] = c["name"].split("__")[1]
+        elif c.get("type") == "tool_result" and c.get("tool_use_id") in tools:
+            body = c.get("content")
+            text = " ".join(str(b.get("text") or "") for b in body if isinstance(b, dict)) \
+                if isinstance(body, list) else str(body or "")
+            denied.setdefault("#calls", 0)
+            denied["#calls"] += 1
+            if lean_mcp.UNAUTH.search(text):
+                server = tools[c["tool_use_id"]]
+                denied[server] = denied.get(server, 0) + 1
+                if denied[server] >= 2 or denied["#calls"] == 1:
+                    return server
+    return None
+
+
+def record_unauth_card(server, slug):
+    """A project memory card saying the server runs unauthenticated in workers, once."""
+    title = f"MCP {server} runs unauthenticated in workers"
+    store = memory_store()
+    if any(m["name"] == title for m in lean_memory.read_all(store)):
+        return False
+    fix = lean_mcp.auth_fix(server, (lean_mcp.discover().get(server) or {}).get("config") or {})
+    body = (f"{title}. Seen {datetime.date.today().isoformat()}: its tool results said anonymous / not authorized. "
+            f"Check: lean-agent mcp check {server}. Fix: {fix}")
+    return bool(lean_memory.add(store, body, "reference", scope=slug, name=title, source="mcp auth check"))
+
+
 def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd=None):
     """Run a worker and read its stream-json as it comes, so a run that keeps re-reading a large context
     can be stopped (after `max_reads` context tokens summed over its calls; 0 = never) and resumed later.
@@ -2036,8 +2083,9 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
     Returns (stdout, stderr, {"ctx", "turns", "usage", "session_id", "stopped"})."""
     import tempfile
     import threading
-    reads = {"ctx": 0, "turns": 0, "usage": {k: 0 for k in usage.FIELDS}, "session_id": None, "stopped": False}
-    seen, lines = set(), []
+    reads = {"ctx": 0, "turns": 0, "usage": {k: 0 for k in usage.FIELDS}, "session_id": None, "stopped": False,
+             "unauth": None}
+    seen, lines, mcp_tools, mcp_denied = set(), [], {}, {}
     with tempfile.TemporaryFile("w+") as errf:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True,
                                 cwd=cwd or workdir, env=env)
@@ -2063,6 +2111,11 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
                         continue
                     if not isinstance(ev, dict):
                         continue
+                    server = mcp_unauthenticated(ev, mcp_tools, mcp_denied)
+                    if server:
+                        reads["unauth"] = server
+                        proc.terminate()
+                        break
                     if not reads["session_id"] and ev.get("session_id"):
                         reads["session_id"] = ev["session_id"]
                         if on_session:
@@ -2081,7 +2134,7 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
                         reads["stopped"] = True
                         proc.terminate()
                         break
-            if reads["stopped"]:
+            if reads["stopped"] or reads["unauth"]:
                 try:
                     proc.wait(timeout=30)
                 except subprocess.TimeoutExpired:
@@ -2094,7 +2147,7 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
         err = errf.read()
     if timed_out:
         err = (err + f"\ntimed out after {timeout:g} s").strip()
-    elif proc.returncode < 0 and not reads["stopped"]:
+    elif proc.returncode < 0 and not reads["stopped"] and not reads["unauth"]:
         n = -proc.returncode
         err = (err + f"\nkilled by signal {n}" + (" (outside lean-agent, e.g. out of memory)" if n == 9 else
                                                     " (outside lean-agent)")).strip()
@@ -5258,6 +5311,41 @@ def cmd_chrome(a):
         return 1
 
 
+MCP_CHECK_TTL = 3600
+
+
+def mcp_checks():
+    return load_json(home("mcp-check.json"), {})
+
+
+def mcp_check_line(name, rec, now=None):
+    """The doctor line for a server from its last `mcp check` (ok flag, text)."""
+    age = (now or time.time()) - rec.get("at", 0)
+    when = "" if age < MCP_CHECK_TTL else f" (checked {int(age // 3600)} h ago; lean-agent mcp check {name} refreshes)"
+    st = rec.get("status")
+    if st == "ok":
+        return True, f"MCP {name}: authenticated, {rec.get('detail', '')}{when}", None
+    if st == "unauthorized":
+        return False, f"MCP {name} runs unauthenticated (anonymous) in workers{when}", rec.get("fix")
+    return None, f"MCP {name}: check {st}: {rec.get('detail', '')}{when}", rec.get("fix")
+
+
+def run_mcp_check(name, cfg):
+    """Start the server as a worker would, classify, remember the result for doctor. Returns the record."""
+    status, detail = lean_mcp.check(name, cfg)
+    rec = {"status": status, "detail": detail, "at": time.time()}
+    if status == "unauthorized":
+        rec["fix"] = lean_mcp.auth_fix(name, cfg)
+    elif status == "ok":
+        hint = lean_mcp.auth_state(name, cfg)
+        if hint:
+            rec["hint"] = hint
+    store = mcp_checks()
+    store[name] = rec
+    save_json(home("mcp-check.json"), store)
+    return rec
+
+
 def cmd_mcp(a):
     if a.action == "env":
         store = load_json(home("mcp-env.json"), {})
@@ -5295,6 +5383,16 @@ def cmd_mcp(a):
     servers = lean_mcp.discover(project)
     if a.server and a.server != CHROME:
         a.server = lean_mcp.resolve_name(a.server, servers) or a.server
+    if a.action == "check":
+        if not a.server or a.server not in servers:
+            unknown_server(a.server or "", servers)
+        rec = run_mcp_check(a.server, servers[a.server]["config"])
+        print(f"{a.server}: {rec['status']}" + (f" ({rec['detail']})" if rec["detail"] else ""))
+        if rec.get("fix"):
+            print(f"fix: {rec['fix']}")
+        elif rec.get("hint"):
+            print(f"note: {rec['hint']}")
+        return 0 if rec["status"] in ("ok", "skipped") else 1
     if a.action == "ignore":
         if a.server:
             if a.server not in servers and not a.rm:
@@ -6973,6 +7071,13 @@ def cmd_doctor(a):
             print(f"  plugin MCP server {name}: ignored (not used; `lean-agent mcp ignore --rm {name}` to check it again)")
             continue
         report(*diagnose_plugin_server(name, info, claude_view, plugin_srv))
+    checks = mcp_checks()
+    for name in sorted(set(load_json(home("mcp-presets.json"), {})) | set(checks)):
+        rec = checks.get(name)
+        if rec and rec.get("status") != "skipped":
+            report(*mcp_check_line(name, rec))
+        elif not rec:
+            report(None, f"MCP {name}: auth not checked", f"lean-agent mcp check {name}")
     budgets = usage.window_budgets()
     parts = [f"{k}={v:,}" for k, v in budgets.items() if v]
     parts += [f"{k}={v}% of plan" for k, v in usage.pct_budgets().items()]
@@ -9764,7 +9869,7 @@ def build_parser():
     s.set_defaults(fn=cmd_chrome)
 
     s = sub.add_parser("mcp", help="MCP servers workers can use: list, tools <server>, preset <server> ...")
-    s.add_argument("action", choices=["list", "tools", "preset", "env", "ignore"])
+    s.add_argument("action", choices=["list", "tools", "preset", "env", "ignore", "check"])
     s.add_argument("server", nargs="?", help="a server; for env: the variable name")
     s.add_argument("preset_name", nargs="?", help="preset: name to set or remove")
     s.add_argument("preset_tools", nargs="?", help="preset: comma-separated tools")
