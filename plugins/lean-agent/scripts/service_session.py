@@ -41,6 +41,8 @@ KEY_NAMES = {"esc": "\x1b", "escape": "\x1b", "enter": "\r", "return": "\r", "ta
              "ctrl-d": "\x04", "up": "\x1b[A", "down": "\x1b[B", "right": "\x1b[C", "left": "\x1b[D",
              "backspace": "\x7f"}
 TAIL_BYTES = 64 * 1024
+ANSI_TAIL_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+SOCKET_WAIT = 15  # seconds a starting bridge waits for the previous `up` of the same home to let go of the socket
 QUICK_EXIT = 20  # seconds: a session that dies sooner than this is not restarted (the service manager decides)
 PARENT_SESSION_VARS = re.compile(r"^(CLAUDECODE|CLAUDE_PID|CLAUDE_CODE_(SESSION_ID|ENTRYPOINT|CHILD_SESSION|REMOTE\w*|"
                                  r"MESSAGING_\w+|SSE_PORT|WORKER_EPOCH|TEE_SDK_STDOUT|SESSION_ATTENDED|"
@@ -747,13 +749,29 @@ class Host:
             return {"ok": False, "error": str(exc)}
         return {"ok": False, "error": 'expected {"text": ...}, {"keys": ...}, {"ping": true} or {"tail": true}'}
 
+    def claim_socket(self, path, wait=SOCKET_WAIT):
+        """Free `path` for this bridge. A holder that is the previous `up` of this home still shutting down (it answers,
+        or its socket file is still there) is waited for up to `wait` seconds; a socket nobody answers on is stale and
+        removed. Only a bridge that keeps answering after that is refused."""
+        end = time.time() + wait
+        while os.path.exists(path):
+            if not request({"ping": True}, timeout=2, key=self.key).get("ok"):  # a bridge that is closing down still answers
+                try:
+                    os.remove(path)  # stale: nobody listens
+                except OSError:
+                    pass
+                break
+            if time.time() >= end:
+                pid = session_rec(self.key).get("host_pid")
+                raise RuntimeError(f"another session bridge answers on {path}"
+                                   + (f" (pid {pid})" if pid else "") + f" and did not stop within {wait:g} s "
+                                   "(is another `lean-agent up` running for this home?)")
+            time.sleep(0.2)
+
     def serve(self):
         path = sock_path(self.key)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        if os.path.exists(path):
-            if alive(self.key):
-                raise RuntimeError(f"another session bridge answers on {path} (is another `lean-agent up` running?)")
-            os.remove(path)
+        self.claim_socket(path)
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         old = os.umask(0o177)
         try:
@@ -761,6 +779,7 @@ class Host:
         finally:
             os.umask(old)
         os.chmod(path, 0o600)
+        self.sock_ino = os.stat(path).st_ino
         srv.listen(8)
         srv.settimeout(0.5)
         self.server = srv
@@ -841,7 +860,9 @@ class Host:
                 pass
             self.server = None
             try:
-                os.remove(sock_path(self.key))
+                path = sock_path(self.key)
+                if os.stat(path).st_ino == getattr(self, "sock_ino", None):  # not the socket of a newer `up` that took over
+                    os.remove(path)
             except OSError:
                 pass
 
@@ -893,6 +914,10 @@ class Host:
                         self.on_stale()
                     continue
                 if time.time() - started < float(os.environ.get("LEAN_AGENT_SESSION_QUICK_EXIT") or QUICK_EXIT):
+                    print(f"lean-agent: the {'main' if self.key == 'main' else self.key} session exited with {rc} "
+                          f"{time.time() - started:.1f} s after it started; not restarting it (see {logpath}). Its last output:\n"
+                          + "\n".join(ANSI_TAIL_RE.sub("", self.tail_text()).replace("\r", "").splitlines()[-8:]),
+                          file=sys.stderr, flush=True)
                     return rc
                 time.sleep(2)
             return 0
