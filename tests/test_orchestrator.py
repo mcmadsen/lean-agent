@@ -4701,6 +4701,11 @@ class CliTest(unittest.TestCase):
         self.assertIn("2 lost runs marked", self.cli("runs", "--lost", "--clear").stdout)
         self.assertIn("No runs in progress.", self.cli("runs", "--running").stdout)
         self.assertIn("No lost runs.", self.cli("runs", "--lost").stdout)
+        r = self.cli("runs", "--clear", check=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--clear goes with --lost", r.stderr)
+        stopped = self.cli("runs", "--stop", "0101-000000-aaaa", check=False)  # acknowledged, still stoppable by id
+        self.assertNotIn("no running run", stopped.stderr)
 
     def test_routing_by_id_beats_topic_words(self):
         lt = self.threads_home()
