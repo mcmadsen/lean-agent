@@ -148,7 +148,7 @@ def standing_rules(limit=10, runs=()):
     always = []  # rules are always in the brief, within their token budget, before anything ranked
     for m in mems:
         r = lean_rules.classify(m["body"], m["type"])
-        if r["rule"]:
+        if r["rule"] and r["targets"]:  # prohibitions of a named tool; other feedback is ranked below
             always.append({**r, "text": m["body"], "tokens": len(m["body"]) // 4 + 1, "updated": m.get("modified") or ""})
     always = [c for c in lean_rules.pick_within_budget(always)]
     rules = [m for m in mems if m["type"] in ("feedback", "user")]

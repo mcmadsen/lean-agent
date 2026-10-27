@@ -1620,6 +1620,112 @@ class CliTest(unittest.TestCase):
         self.assertIn("Known issues", task)
         self.assertIn("runs anonymous in workers", task)
 
+    RULE = "Never use the tracker MCP server; use trackercli instead."
+
+    def add_rule(self, text=None, name="no tracker mcp"):
+        self.cli("memory", "add", text or self.RULE, "--type", "feedback", "--name", name)
+
+    def cards_json(self):
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "library", "proj", "cards.json")) as fh:
+            return json.load(fh)
+
+    def test_a_rule_is_always_sent_to_workers_and_never_archived(self):
+        self.use_tracker()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.add_rule()
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "unrelated chores")
+        self.assertIn("use trackercli instead", json.dumps(self.calls()[-1]))
+        card = next(c for c in self.cards_json() if c["id"].startswith("mem-") and c.get("rule"))
+        self.assertEqual(card["targets"], ["tracker"])
+        self.assertEqual(card["alternative"], "trackercli")
+        out = self.cli("card", "rm", "proj", card["id"])
+        self.assertIn("never archived", out.stdout)
+        self.assertFalse(next(c for c in self.cards_json() if c["id"] == card["id"]).get("archived"))
+
+    def test_an_archived_rule_is_unarchived_when_the_library_loads(self):
+        self.use_tracker()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.add_rule()
+        path = os.path.join(self.env["LEAN_AGENT_HOME"], "library", "proj", "cards.json")
+        cards = self.cards_json()
+        for c in cards:
+            if c.get("rule"):
+                c["archived"] = True
+        with open(path, "w") as fh:
+            json.dump(cards, fh)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "unrelated chores")
+        self.assertFalse(any(c.get("archived") for c in self.cards_json() if c.get("rule")))
+        self.assertIn("use trackercli instead", json.dumps(self.calls()[-1]))
+
+    def test_run_refuses_an_mcp_server_a_rule_forbids_and_force_mcp_overrides(self):
+        self.use_tracker()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.add_rule()
+        out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tracker:read", "list them", check=False)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("forbidden by rule", out.stderr)
+        self.assertIn("Never use the tracker MCP server", out.stderr)
+        self.assertIn("Use trackercli instead", out.stderr)
+        n = len(self.calls()) if os.path.exists(self.log) else 0
+        out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tracker:list_projects", "--force-mcp",
+                       "list them", check=False)
+        self.assertIn("--force-mcp overrides rule", out.stderr)
+        self.assertEqual(len(self.calls()), n + 1)
+
+    def test_a_task_that_asks_for_a_forbidden_tool_gets_a_warning_not_a_refusal(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.add_rule()
+        out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "use trackercli and the tracker MCP to list items")
+        self.assertIn("the task asks for tracker, which rule", out.stderr)
+
+    def test_advise_lists_the_rule_and_its_alternative_first(self):
+        self.use_tracker()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.add_rule()
+        out = self.cli("advise", "list the open items", FAKE_ANSWER="ADVICE\nunderstood: list items\nask the user first: no")
+        self.assertTrue(out.stdout.startswith("Rule: Never use the tracker MCP server"))
+        self.assertIn("; use trackercli", out.stdout.splitlines()[0])
+        self.assertIn("Rules to respect", self.calls()[-1]["task"])
+
+    def test_conflicting_project_files_are_flagged_by_doctor_and_advise_and_not_edited(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.add_rule()
+        agents = os.path.join(self.proj, ".claude", "agents")
+        os.makedirs(agents)
+        f = os.path.join(agents, "helper.md")
+        body = "---\nname: helper\n---\nTo read items, use the tracker MCP server.\n"
+        with open(f, "w") as fh:
+            fh.write(body)
+        want = ".claude/agents/helper.md tells agents to use tracker, which rule "
+        self.assertIn(want, self.cli("doctor", self.proj, check=False).stdout)
+        out = self.cli("advise", "list the open items", FAKE_ANSWER="ADVICE\nunderstood: x\nask the user first: no")
+        self.assertIn(want, out.stdout)
+        with open(f) as fh:
+            self.assertEqual(fh.read(), body)
+
+    def test_recording_a_near_identical_memory_updates_the_entry_and_dedupe_merges_old_ones(self):
+        self.add_rule()
+        self.add_rule(self.RULE + " It ran as the anonymous identity.", name="no tracker mcp again")
+        listed = self.cli("memory", "list").stdout
+        self.assertEqual(listed.count(" tok"), 1)
+        store = self.cli("memory", "where").stdout.split(": ", 1)[1].splitlines()[0]
+        with open(os.path.join(store, "feedback_no_tracker_mcp.md")) as fh:
+            text = fh.read()
+        self.assertIn("created:", text)
+        self.assertRegex(text, r"- \d{4}-\d\d-\d\d: Never use the tracker MCP server.*anonymous identity")
+        # old copies written before: listed (dry run), then merged
+        for i in (2, 3):
+            with open(os.path.join(store, f"feedback_copy_{i}.md"), "w") as fh:
+                fh.write("---\nname: copy\ntype: feedback\nscope: global\n---\n" + self.RULE + " Noted.\n")
+        out = self.cli("memory", "dedupe").stdout
+        self.assertIn("run again with --apply", out)
+        self.assertTrue(os.path.exists(os.path.join(store, "feedback_copy_3.md")))
+        out = self.cli("memory", "dedupe", "--apply").stdout
+        self.assertIn("merged 1 cluster", out)
+        self.assertFalse(os.path.exists(os.path.join(store, "feedback_copy_3.md")))
+        self.assertTrue(os.path.exists(os.path.join(store, "feedback_copy_2.md")))
+        self.assertIn("no near-duplicate", self.cli("memory", "dedupe").stdout)
+
     def test_run_mcp_whole_server_and_errors(self):
         self.cli("learn", self.proj)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tickets", "t")
@@ -7728,6 +7834,53 @@ class RuleGlobTest(unittest.TestCase):
         self.assertEqual([c["id"] for c in got], ["r"])
         got = self.agent.rule_cards_for(cards, "", [], [], 100, set())
         self.assertEqual([c["id"] for c in got], ["intro", "r"])
+
+
+class RuleUnitTest(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_rules
+        import lean_memory
+        self.rules, self.memory = lean_rules, lean_memory
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def test_classification_finds_targets_and_the_alternative(self):
+        c = self.rules.classify("Never use the tracker MCP server; use trackercli instead.", "project")
+        self.assertEqual((c["rule"], c["targets"], c["alternative"]), (True, ["tracker"], "trackercli"))
+        c = self.rules.classify("Use rg instead of grep for searching.", "project")
+        self.assertEqual((c["rule"], c["targets"], c["alternative"]), (True, ["grep"], "rg"))
+        c = self.rules.classify("Avoid calling curl directly.", "project")
+        self.assertEqual((c["rule"], c["targets"]), (True, ["curl"]))
+        self.assertTrue(self.rules.classify("The user likes short answers", "feedback")["rule"])
+
+    def test_classification_leaves_ordinary_notes_alone(self):
+        for text in ("Do not forget to run the tests", "The build uses make and runs fast", "We use the tracker for tickets",
+                     "Never mind, it works"):
+            self.assertFalse(self.rules.classify(text, "project")["rule"], text)
+
+    def test_matching_handles_aliases_and_plugin_names(self):
+        self.assertTrue(self.rules.matches("tracker", "plugin:acme:tracker"))
+        self.assertTrue(self.rules.matches("tracker-mcp", "tracker"))
+        self.assertFalse(self.rules.matches("tracker", "chat"))
+
+    def test_rule_budget_prefers_the_newest_and_most_specific(self):
+        rules = [{"id": "old", "tokens": 300, "updated": "2026-01-01", "targets": ["a"]},
+                 {"id": "new", "tokens": 300, "updated": "2026-06-01", "targets": ["b"]},
+                 {"id": "general", "tokens": 50, "updated": "2026-09-01", "targets": []}]
+        self.assertEqual([c["id"] for c in self.rules.pick_within_budget(rules, 400)], ["new", "general"])
+
+    def test_created_is_stored_and_backfilled_from_modified(self):
+        path = self.memory.add(self.dir, "Plain fact about builds", "project")
+        self.assertTrue(self.memory.read_all(self.dir)[0]["created"])
+        with open(path, "w") as fh:
+            fh.write("---\nname: old\ntype: project\nmodified: 2025-01-02T03:04:05+00:00\n---\n\nOld fact\n")
+        self.assertEqual(self.memory.read_all(self.dir)[0]["created"], "2025-01-02T03:04:05+00:00")
+
+    def test_dedupe_needs_the_same_targets(self):
+        self.memory.add(self.dir, "Never use the alpha tool in the build step", "feedback")
+        self.memory.add(self.dir, "Never use the beta tool in the build step", "feedback")
+        self.assertEqual(len(self.memory.read_all(self.dir)), 2)
 
 
 if __name__ == "__main__":
