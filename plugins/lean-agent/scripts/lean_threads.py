@@ -449,14 +449,28 @@ def advise(prompt, session=None, now=None):
     return tid, f'Belongs to {tid} "{title}" \u2014 hand it over (this starts its session): lean-agent thread send {tid} --prompt-file -'
 
 
-ID_REF_RE = re.compile(r"(?:\bPR\s*#?|[A-Za-z]+-?#|#|(?<![\w.-]))(\d{3,})\b", re.I)  # 4711, #4711, PR 4711, AB#4711
+ID_REF_RE = re.compile(r"(\bPR\s*#?|[A-Za-z]+-?#|#|(?<![\w.-]))(\d{3,})\b", re.I)  # 4711, #4711, PR 4711, AB#4711
 BRANCH_RE = re.compile(r"\b((?:feature|bugfix|hotfix|release)/[\w.-]+)", re.I)
 
 
 def prompt_ids(text):
     """The strong identifiers in a prompt: numbers with 3+ digits (also as #123, PR 123, AB#123) and branch names."""
-    ids = {m.group(1) for m in ID_REF_RE.finditer(text)}
-    return ids | {m.group(1).lower() for m in BRANCH_RE.finditer(text)}
+    explicit, bare = prompt_refs(text)
+    return explicit | bare
+
+
+def prompt_refs(text):
+    """(explicit, bare): ids written as #123, PR 123, AB#123 or a branch name, and bare 3+ digit numbers (ports, HTTP
+    codes, years), which only count against a thread whose history holds the number as an id reference."""
+    explicit, bare = set(), set()
+    for m in ID_REF_RE.finditer(text):
+        (explicit if m.group(1) else bare).add(m.group(2))
+    return explicit | {m.group(1).lower() for m in BRANCH_RE.finditer(text)}, bare - explicit
+
+
+def _bare_ref_pat(i):
+    """A number as an id reference in thread history: #N, PR N, AB#N, ABC-N, or inside a branch name (feature/N-...)."""
+    return re.compile(r"(?:#|\b(?:PR|ticket|issue|bug|case)\s*|[A-Za-z]+[-#]|/)" + re.escape(i) + r"(?![\w])", re.I)
 
 
 def id_thread(text, data):
@@ -464,10 +478,11 @@ def id_thread(text, data):
     one with the most recent mention. A prompt about a release PR goes to a thread whose title or branch says release.
     None when no such strong signal exists."""
     open_ = {k for k, t in data["threads"].items() if k not in data["aliases"] and k not in RESERVED and not t.get("closed")}
-    ids = prompt_ids(text)
+    explicit, bare = prompt_refs(text)
     best, best_ts = None, -1.0
-    if ids:
-        pats = [re.compile(r"(?<![\w.])" + re.escape(i) + r"(?![\w])", re.I) for i in ids]
+    if explicit or bare:
+        pats = [re.compile(r"(?<![\w.])" + re.escape(i) + r"(?![\w])", re.I) for i in explicit]
+        pats += [_bare_ref_pat(i) for i in bare]
         for tid, evs in events(data).items():
             if tid not in open_:
                 continue

@@ -4718,6 +4718,28 @@ class CliTest(unittest.TestCase):
         lt.pin("t2", "Dashboard ticket 4711 follow-up", "s1", t0 + 80)
         self.assertEqual(lt.route("what about 4711", "s1", t0 + 90)[0], "t2")
 
+    def test_bare_numbers_are_ordinary_words_without_an_id_reference_in_history(self):
+        lt = self.threads_home()
+        t0 = datetime.datetime.now().timestamp() - 5000
+        lt.route("Investigate ticket 4711 login failures", "s1", t0)  # t1
+        lt.route("Check the proxy listening on port 8080", "s1", t0 + 10)  # t2, 8080 is just a port
+        self.assertEqual(lt.id_thread("port 8080 is busy", lt.load()), None)
+        self.assertEqual(lt.id_thread("4711 status", lt.load()), "t1")
+
+    def test_prompt_ids(self):
+        lt = self.threads_home()
+        self.assertEqual(lt.prompt_refs("fix #4711 and PR 4712 and AB#4713"), ({"4711", "4712", "4713"}, set()))
+        self.assertEqual(lt.prompt_refs("port 8080 returns 502"), (set(), {"8080", "502"}))
+        self.assertEqual(lt.prompt_refs("on feature/4711-login")[0], {"feature/4711-login"})
+        self.assertEqual(lt.prompt_ids("port 80 on feature/x-1"), {"feature/x-1"})
+        self.assertEqual(lt.prompt_ids("#4711 and 4711"), {"4711"})
+
+    def test_routing_by_branch_name(self):
+        lt = self.threads_home()
+        t0 = datetime.datetime.now().timestamp() - 5000
+        lt.route("Work on feature/login-redesign today", "s1", t0)  # t1
+        lt.route("Dashboard colours", "s1", t0 + 10)  # t2
+        self.assertEqual(lt.id_thread("rebase feature/login-redesign please", lt.load()), "t1")
 
     def test_a_run_whose_supervisor_died_is_lost_and_stop_closes_it(self):
         home = self.env["LEAN_AGENT_HOME"]
