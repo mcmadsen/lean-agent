@@ -5813,6 +5813,18 @@ def cmd_memory(a):
         for slug in projects():
             sync_memory(slug)
         return
+    if a.action == "dedupe":
+        groups = lean_memory.clusters(store, {lean_memory.GLOBAL, scope} if a.project else None)
+        for g in groups:
+            print(f"{len(g)} near-identical (keeps {g[0]['stem']}): " + ", ".join(m["stem"] for m in g[1:]))
+            if a.apply:
+                lean_memory.merge_cluster(store, g)
+        if a.apply:
+            for slug in projects():
+                sync_memory(slug)
+        print((f"merged {len(groups)} cluster(s)" if a.apply else f"{len(groups)} cluster(s); run again with --apply to merge")
+              if groups else "no near-duplicate memories")
+        return
     if a.action == "edit":
         if not a.text or not a.new_text:
             die('memory edit needs the memory name and the new text: lean-agent memory edit <name> "<text>"')
@@ -10041,14 +10053,15 @@ def build_parser():
     s.add_argument("--grep", metavar="TEXT", help="preset: only presets whose name, description or tools contain TEXT")
     s.set_defaults(fn=cmd_mcp)
 
-    s = sub.add_parser("memory", help="shared memory: where | import | list | add | edit | rm")
-    s.add_argument("action", choices=["where", "import", "list", "add", "edit", "rm"])
+    s = sub.add_parser("memory", help="shared memory: where | import | list | add | edit | rm | dedupe")
+    s.add_argument("action", choices=["where", "import", "list", "add", "edit", "rm", "dedupe"])
     s.add_argument("text", nargs="?", help="add: the memory text; edit/rm: the memory's name")
     s.add_argument("new_text", nargs="?", help="edit: the new text")
     s.add_argument("--project", "-p", help="scope to a project (default: global)")
     s.add_argument("--type", choices=lean_memory.TYPES, help="add: memory type (default project)")
     s.add_argument("--name", help="add: short name (the type is added for you); edit: new description")
     s.add_argument("--from", dest="source", metavar="DIR", help="import: folder to import (default: Claude's)")
+    s.add_argument("--apply", action="store_true", help="dedupe: merge the duplicate clusters (default: list them)")
     s.set_defaults(fn=cmd_memory)
 
     s = sub.add_parser("limits", help="usage in your plan's session and weekly windows; budgets for agents")
