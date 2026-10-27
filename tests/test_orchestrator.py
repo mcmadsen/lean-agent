@@ -6939,6 +6939,145 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("limit reached", p.stderr)
         self.assertEqual(len(self.reviewer_runs()), 3)
 
+    def write_commit(self, g, files, msg="change"):
+        for path, text in files.items():
+            full = os.path.join(self.proj, path)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w") as fh:
+                fh.write(text)
+        g("add", "-A", *files)
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", msg)
+
+    def real_reviews(self):
+        """The heads a reviewer ran on (a skip is recorded without a run; an incomplete review takes two turns)."""
+        try:
+            with open(os.path.join(self.env["LEAN_AGENT_HOME"], "reviews", "proj.jsonl")) as fh:
+                return sorted({r["head"] for r in map(json.loads, fh) if not r["verdict"].startswith("skipped")})
+        except OSError:
+            return []
+
+    def skip_project(self):
+        """main with a manifest, a changelog and code; branches are cut from it by the tests."""
+        g = self.git_project()
+        g("checkout", "-q", "main")
+        self.write_commit(g, {"plugin.json": '{\n  "name": "demo",\n  "version": "1.0.0"\n}\n',
+                              "app/App.csproj": "<Project>\n  <PropertyGroup>\n    <Version>1.0.0</Version>\n"
+                                                "  </PropertyGroup>\n</Project>\n",
+                              "CHANGELOG.md": "# Changes\n", "src/code.py": "x = 1\n"}, "manifests")
+        self.cli("learn", self.proj, "--name", "proj")
+        return g
+
+    def review_branch(self, branch, *extra, **env):
+        return self.cli("review", "proj", "--head", branch, "--base", "main", "--second-opinion", "off", *extra, check=False,
+                        **dict({"FAKE_REVIEW": self.APPROVE}, **env))
+
+    def assert_skipped(self, branch, reason, *extra):
+        p = self.review_branch(branch, *extra)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn(f"skipped ({reason})", p.stdout)
+        self.assertEqual(len(self.real_reviews()), 0)
+        st = self.cli("review", "proj", "--head", branch, "--status", check=False)
+        self.assertEqual(st.returncode, 0, st.stdout)
+        self.assertIn(f"skipped ({reason})", st.stdout)
+
+    def test_a_version_bump_is_skipped(self):
+        g = self.skip_project()
+        g("checkout", "-qb", "bump", "main")
+        self.write_commit(g, {"plugin.json": '{\n  "name": "demo",\n  "version": "1.0.1"\n}\n',
+                              "app/App.csproj": "<Project>\n  <PropertyGroup>\n    <Version>1.0.1</Version>\n"
+                                                "  </PropertyGroup>\n</Project>\n",
+                              "CHANGELOG.md": "# Changes\n## 1.0.1\n- fixes\n"}, "bump")
+        self.assert_skipped("bump", "version-bump")
+        p = self.review_branch("bump", "--force")  # --force always reviews
+        self.assertNotIn("skipped", p.stdout)
+        self.assertEqual(len(self.real_reviews()), 1)
+
+    def test_a_manifest_change_beyond_the_version_is_reviewed(self):
+        g = self.skip_project()
+        g("checkout", "-qb", "bump", "main")
+        self.write_commit(g, {"plugin.json": '{\n  "name": "renamed",\n  "version": "1.0.1"\n}\n'}, "bump")
+        self.review_branch("bump")
+        self.assertEqual(len(self.real_reviews()), 1)
+
+    def test_docs_only_and_tests_only_changes_are_skipped(self):
+        g = self.skip_project()
+        g("checkout", "-qb", "docs", "main")
+        self.write_commit(g, {"README.md": "# hi\n", "docs/guide.txt": "guide\n"}, "docs")
+        self.assert_skipped("docs", "docs-only")
+        g("checkout", "-qb", "tests", "main")
+        self.write_commit(g, {"tests/test_code.py": "def test_x(): pass\n", "web/page.test.ts": "x\n"}, "tests")
+        self.assert_skipped("tests", "tests-only")
+        g("checkout", "-qb", "mixed", "main")
+        self.write_commit(g, {"README.md": "# hi\n", "src/code.py": "x = 2\n"}, "both")
+        self.review_branch("mixed")
+        self.assertEqual(len(self.real_reviews()), 1)
+
+    def test_a_clean_merge_of_the_base_is_skipped_but_a_conflict_resolution_is_reviewed(self):
+        g = self.skip_project()
+        g("checkout", "-qb", "work", "main")
+        self.write_commit(g, {"src/code.py": "x = 2\n"}, "work")
+        g("checkout", "-q", "main")
+        self.write_commit(g, {"src/other.py": "o = 1\n"}, "main moves on")
+        self.review_branch("work")
+        self.assertEqual(len(self.real_reviews()), 1)
+        g("checkout", "-q", "work")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "merge", "--no-ff", "-qm", "merge main", "main")
+        g("checkout", "-q", "main")
+        p = self.review_branch("work")
+        self.assertIn("skipped (merge-only)", p.stdout)
+        self.assertEqual((p.returncode, len(self.real_reviews())), (0, 1))
+        # a merge that resolves a conflict (and changes more) is code to review
+        g("checkout", "-q", "main")
+        self.write_commit(g, {"src/clash.py": "from main\n"}, "main clash")
+        g("checkout", "-q", "work")
+        self.write_commit(g, {"src/clash.py": "from work\n"}, "work clash")
+        g("checkout", "-q", "main")
+        self.review_branch("work")
+        self.assertEqual(len(self.real_reviews()), 2)
+        g("checkout", "-q", "work")
+        subprocess.run(["git", "-C", self.proj, "merge", "--no-ff", "main"], capture_output=True)
+        self.write_commit(g, {"src/clash.py": "resolved differently\n"}, "merge main, resolved")
+        g("checkout", "-q", "main")
+        self.review_branch("work", "--force")  # (the re-review limit would stop it)
+        self.assertEqual(len(self.real_reviews()), 3)
+
+    def test_a_merge_after_a_review_that_asked_for_changes_is_reviewed(self):
+        g = self.skip_project()
+        g("checkout", "-qb", "work", "main")
+        self.write_commit(g, {"src/code.py": "x = 2\n"}, "work")
+        g("checkout", "-q", "main")
+        self.write_commit(g, {"src/other.py": "o = 1\n"}, "main moves on")
+        self.review_branch("work", FAKE_REVIEW=self.REQUEST)
+        g("checkout", "-q", "work")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "merge", "--no-ff", "-qm", "merge main", "main")
+        g("checkout", "-q", "main")
+        p = self.review_branch("work")
+        self.assertNotIn("skipped", p.stdout)
+        self.assertEqual(len(self.real_reviews()), 2)
+
+    def test_release_branches_are_skipped_and_the_policy_is_configurable(self):
+        g = self.skip_project()
+        g("checkout", "-qb", "release/1.2", "main")
+        self.write_commit(g, {"src/code.py": "x = 3\n"}, "release work")
+        self.assert_skipped("release/1.2", "branch release/1.2")
+        self.assertIn("branches=release/*", self.cli("config", "review-skip", "-p", "proj").stdout)
+        self.cli("config", "review-skip", "-p", "proj", "docs-only,branches=hotfix/*|rel/*")
+        out = self.cli("config", "review-skip", "-p", "proj").stdout
+        self.assertIn("review-skip for proj: docs-only,branches=hotfix/*|rel/*", out)
+        g("checkout", "-qb", "release/1.3", "main")
+        self.write_commit(g, {"src/code.py": "x = 4\n"}, "more release work")
+        self.review_branch("release/1.3")
+        self.assertEqual(len(self.real_reviews()), 1)
+        self.assertEqual(self.cli("config", "review-skip", "-p", "proj", "bogus", check=False).returncode, 1)
+        self.cli("config", "review-skip", "-p", "proj", "off")
+        g("checkout", "-qb", "docs", "main")
+        self.write_commit(g, {"README.md": "# hi\n"}, "docs")
+        self.review_branch("docs")
+        self.assertEqual(len(self.real_reviews()), 2)
+        self.cli("config", "review-skip", "-p", "proj", "default")
+        self.assertIn("version-bump,merge-only,docs-only,tests-only,branches=release/*",
+                      self.cli("config", "review-skip", "-p", "proj").stdout)
+
 
 class RuleGlobTest(unittest.TestCase):
     def setUp(self):

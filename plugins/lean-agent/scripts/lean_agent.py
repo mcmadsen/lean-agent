@@ -10,6 +10,7 @@ which context they used, and the context library improves from that.
 import argparse
 import contextlib
 import datetime
+import fnmatch
 import glob
 import hashlib
 import io
@@ -3619,7 +3620,81 @@ def review_gate(a, slug, path):
     mb = git(path, "merge-base", base, sha) if base else None
     if mode == "ref" and mb and git(path, "diff", "--name-only", mb, sha) == "":
         return record_skip(slug, path, a, sha, label, mode, base, "empty range")
+    if mb and not dirty:
+        why = skip_reason(slug, path, label, mode, sha, mb, base)
+        if why:
+            return record_skip(slug, path, a, sha, label, mode, base, why)
     return None
+
+
+REVIEW_SKIP_DEFAULT = "version-bump,merge-only,docs-only,tests-only,branches=release/*"
+SKIP_CLASSES = ("version-bump", "merge-only", "docs-only", "tests-only")
+MANIFESTS = {"plugin.json", "package.json", "package-lock.json", "marketplace.json", "manifest.json", "composer.json"}
+VERSION_LINE = re.compile(r'^\s*("version"\s*:|<(Assembly|File|Package|Informational)?Version(Prefix|Suffix)?>)')
+TEST_FILE = re.compile(r"(^|/)(tests?|__tests__|spec|specs)/|(^|/)test_[^/]*$|_test\.[^/]*$|\.(test|spec)\.[^/]*$|Tests?\.cs$")
+
+
+def review_skip_setting(slug):
+    """(classes, branch patterns) the project leaves out of review (config review-skip)."""
+    raw = (projects().get(slug) or {}).get("review_skip", REVIEW_SKIP_DEFAULT)
+    classes, patterns = [], []
+    for tok in str(raw).split(","):
+        tok = tok.strip()
+        if tok.startswith("branches="):
+            patterns += [p for p in tok[len("branches="):].split("|") if p]
+        elif tok in SKIP_CLASSES:
+            classes.append(tok)
+    return classes, patterns
+
+
+def is_version_bump(path, mb, sha, files):
+    """Only version fields of manifests (plugin/package/csproj/props/json) and the changelog changed."""
+    bumped = False
+    for f in files:
+        name = os.path.basename(f)
+        if name.lower().startswith("changelog"):
+            continue
+        if not (name in MANIFESTS or name.endswith((".csproj", ".props"))):
+            return False
+        lines = [l for l in (git(path, "diff", "-U0", mb, sha, "--", f) or "").splitlines()
+                 if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+        if not lines or not all(VERSION_LINE.match(l[1:]) for l in lines):
+            return False
+        bumped = True
+    return bumped
+
+
+def last_review(slug, path, label):
+    """The branch's latest recorded review that looked at code (not a skip): what a re-review continues from."""
+    return next((r for r in reversed(branch_reviews(slug, path, label))
+                 if r.get("head") and not is_skipped(r.get("verdict"))), None)
+
+
+def is_merge_only(path, since, sha, base):
+    """Only merge commits since `since` (that is, nothing but the base's own commits came in), none resolving
+    conflicts or adding changes of their own."""
+    rng = [f"{since}..{sha}", "^" + base]
+    if git(path, "rev-list", "--no-merges", *rng) != "":
+        return False
+    merges = (git(path, "rev-list", "--merges", *rng) or "").split()
+    return bool(merges) and all(git(path, "show", "--format=", "--cc", m) == "" for m in merges)
+
+
+def skip_reason(slug, path, label, mode, sha, mb, base):
+    """Why this change needs no review under the project's review-skip policy, or ''."""
+    classes, patterns = review_skip_setting(slug)
+    names = {bare_ref(label), branch_of(path, label) if mode == "ref" else ""} - {""}
+    if any(fnmatch.fnmatch(n, p) for n in names for p in patterns):
+        return "branch " + sorted(names)[0]
+    files = (git(path, "diff", "--name-only", mb, sha) or "").split("\n")
+    files = [f for f in files if f]
+    earlier = last_review(slug, path, label)  # a merge since a review that asked for changes is not waved through
+    since = earlier["head"] if earlier and approved(earlier.get("verdict")) else mb
+    checks = {"version-bump": lambda: bool(files) and is_version_bump(path, mb, sha, files),
+              "merge-only": lambda: is_merge_only(path, since, sha, base),
+              "docs-only": lambda: bool(files) and all(f.endswith(".md") or f.startswith("docs/") for f in files),
+              "tests-only": lambda: bool(files) and all(TEST_FILE.search(f) for f in files)}
+    return next((c for c in classes if checks[c]()), "")
 
 
 def review_max_rerounds():
@@ -7735,6 +7810,30 @@ def cmd_config(a):
         print(f"max-thread-sessions: {service_session.max_thread_sessions()} · the thread sessions (one Remote Control "
               "item each) the service keeps running; `thread new` refuses above it until one is closed")
         return 0
+    if a.name == "review-skip":
+        slug, _ = resolve_project(a.project or os.getcwd())
+        if a.value is not None:
+            raw = ",".join([a.value] + (a.more or [])).replace(" ", "")
+            if raw.lower() == "default":
+                raw = None
+            elif raw.lower() in ("off", "none"):
+                raw = ""
+            else:
+                for tok in raw.split(","):
+                    if tok not in SKIP_CLASSES and not (tok.startswith("branches=") and len(tok) > 9):
+                        die(f"review-skip takes {', '.join(SKIP_CLASSES)}, branches=<pattern>[|<pattern>] "
+                            "(comma-separated), off or default")
+            projs = projects()
+            saved = {k: v for k, v in projs[slug].items() if k != "review_skip"}
+            if raw is not None:
+                saved["review_skip"] = raw
+            projs[slug] = saved
+            save_json(home("projects.json"), projs)
+        classes, patterns = review_skip_setting(slug)
+        print(f"review-skip for {slug}: " + (",".join(classes + (["branches=" + "|".join(patterns)] if patterns else []))
+                                             or "off") + " · these changes get no review run, a `skipped (<reason>)` "
+              "verdict that counts as approved; `review --force` reviews anyway")
+        return 0
     if a.name == "review-max-rerounds":
         if a.value is not None:
             if not a.value.isdigit() and a.value.lower() != "default":
@@ -9225,7 +9324,7 @@ def build_parser():
                        "max-thread-sessions N (thread sessions the service runs; default 8), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
     s.add_argument("name", choices=["strict", "clear-at", "project-rules", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
                                            "review-max-rerounds", "review-skip"])
-    s.add_argument("--project", "-p", help="project-rules: the project (default: the current directory)")
+    s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)
     s.set_defaults(fn=cmd_config)
