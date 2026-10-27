@@ -494,7 +494,7 @@ def id_thread(text, data):
     if explicit or bare:
         pats = [re.compile(r"(?<![\w.])" + re.escape(i) + r"(?![\w])", re.I) for i in explicit]
         pats += [_bare_ref_pat(i) for i in bare]
-        for tid, evs in events(data).items():
+        for tid, evs in events(data, full=True).items():
             if tid not in open_:
                 continue
             for ep, _, _, ev_text in evs:
@@ -714,9 +714,10 @@ def _log_records():
         yield "push", f"push:{r.get('ts')}:{r.get('branch')}", r
 
 
-def events(data=None, todos=None):
+def events(data=None, todos=None, full=False):
     """{thread id: [(epoch, ts, kind, text)]} in time order: requests, runs, reviews, todos, notes, documents, pushes.
-    A record's thread follows `thread move` overrides, then merges; records without a thread are left out."""
+    A record's thread follows `thread move` overrides, then merges; records without a thread are left out. `full` keeps
+    the whole note text and adds run tasks, branches and worktrees (the routing index)."""
     data = data or load()
     todos = _todo_map() if todos is None else todos
     out = {}
@@ -729,7 +730,7 @@ def events(data=None, todos=None):
             tid = resolve(norm(tid), data["aliases"])
         except ValueError:
             return
-        out.setdefault(tid, []).append((_epoch(ts), str(ts), kind, one_line(text, 160)))
+        out.setdefault(tid, []).append((_epoch(ts), str(ts), kind, one_line(text, 100000 if full else 160)))
 
     for tid, t in data["threads"].items():
         for r in t.get("requests") or []:
@@ -739,12 +740,16 @@ def events(data=None, todos=None):
             what = (r.get("result_head") or "").strip().splitlines()
             text = (f"{r.get('id')} {r.get('model') or '?'} {r.get('status') or '?'} {r.get('project') or ''}: "
                     f"{one_line(what[0] if what else r.get('task'), 90)}")
+            if full:
+                text += f" {r.get('task') or ''} {r.get('branch') or ''} {r.get('worktree') or ''}"
         elif kind == "review":
             text = (f"{r.get('run')} {r['_slug']} {r.get('verdict')}, {len(r.get('findings') or [])} findings"
                     + (f", {len(r.get('gaps') or [])} gaps" if r.get("gaps") else ""))
         else:
             text = (f"{r.get('project')} {r.get('branch')} -> {r.get('to')} {str(r.get('sha') or '')[:8]}"
                     + ("" if r.get("ok", True) else " FAILED"))
+            if full:
+                text += f" {r.get('worktree') or ''}"
         add(r.get("thread"), r.get("ts"), kind, text, key)
     for t in todos.values():
         add(t.get("thread"), t.get("created"), "todo", f"#{t.get('id')} {t.get('status')} {t.get('text')}")

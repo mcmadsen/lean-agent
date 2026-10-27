@@ -4967,6 +4967,18 @@ class CliTest(unittest.TestCase):
         for text in ("case 256 closed", "bug 256", "issue 256", "uses sha-256", "SHA256", "date 2026-10-256", "port 256"):
             self.assertFalse(hit("256", text), text)
 
+    def test_routing_finds_an_id_deep_in_a_checkpoint_note(self):
+        lt = self.threads_home()
+        t0 = datetime.datetime.now().timestamp() - 5000
+        lt.route("Login redesign", "s1", t0)  # t1
+        lt.route("Dashboard colours", "s1", t0 + 10)  # t2
+        long_note = "state: " + "x" * 400 + " pushed feature/login-4711 as PR 4711, waiting for review"
+        ts = datetime.datetime.fromtimestamp(t0 + 20).astimezone().isoformat(timespec="seconds")
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "handoff-notes.json"), "w") as fh:
+            json.dump([{"ts": ts, "text": long_note, "kind": "checkpoint", "thread": "t1"}], fh)
+        self.assertEqual(lt.id_thread("PR 4711 got a comment", lt.load()), "t1")
+        self.assertEqual(lt.id_thread("rebase feature/login-4711", lt.load()), "t1")
+
     def test_routing_by_branch_name(self):
         lt = self.threads_home()
         t0 = datetime.datetime.now().timestamp() - 5000
