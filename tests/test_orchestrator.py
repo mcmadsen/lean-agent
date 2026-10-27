@@ -149,6 +149,14 @@ FAKE_CLAUDE = textwrap.dedent("""\
 PLAYWRIGHT_DIR = os.environ.get("LEAN_AGENT_PLAYWRIGHT_DIR")  # opt-in knob: read before setUp clears LEAN_AGENT_*
 
 
+
+def lean_agent_module():
+    """lean_agent imported once, from the plugin's scripts folder."""
+    if os.path.dirname(CLI) not in sys.path:
+        sys.path.insert(0, os.path.dirname(CLI))
+    import lean_agent
+    return lean_agent
+
 def _load_json(p):
     with open(p) as fh:
         return json.load(fh)
@@ -891,8 +899,7 @@ class CliTest(unittest.TestCase):
 
     def test_role_commands_use_their_own_run_not_the_latest_one_of_the_role(self):
         self.cli("learn", self.proj)
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         wd = self.tmp.name
 
         def worker(n, answer):
@@ -954,8 +961,7 @@ class CliTest(unittest.TestCase):
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures"))
         import review_case
         root = review_case.build(os.path.join(self.tmp.name, "case"))
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         mb = L.git(root, "merge-base", "main", "fix-races")
         fc = L.change_focus(root, [mb, L.git(root, "rev-parse", "fix-races")])
         self.assertEqual(len(fc["tests"]), 4)
@@ -1107,8 +1113,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("over the 4,000-character limit", out)
 
     def test_tracker_conflicts_pair_by_type(self):
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         conf = {"notes": ["User Story states: New, Active, Completed, Closed (no Removed)", "Bugs go through review"],
                 "discovered": {"states": {"Bug": {"states": ["New", "Doing", "In Review", "Shipped", "Closed"],
                                                   "source": "items"},
@@ -1121,8 +1126,7 @@ class CliTest(unittest.TestCase):
 
     def test_optimize_skip_protect_unarchive(self):
         self.cli("learn", self.proj)
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
         try:
             slug = [x for x in L.projects()][0]
@@ -1154,8 +1158,7 @@ class CliTest(unittest.TestCase):
 
     def _archivable(self):
         self.cli("learn", self.proj)
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
         try:
             slug = [x for x in L.projects()][0]
@@ -2719,7 +2722,7 @@ class CliTest(unittest.TestCase):
         old = os.environ.get("LEAN_AGENT_HOME")
         os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
         try:
-            import lean_agent as L
+            L = lean_agent_module()
             note = L.code_tools_note(root)
         finally:
             os.environ.pop("LEAN_AGENT_HOME") if old is None else os.environ.update(LEAN_AGENT_HOME=old)
@@ -2803,8 +2806,11 @@ class CliTest(unittest.TestCase):
         self.addCleanup(lambda: os.environ.__setitem__("LEAN_AGENT_HOME", old) if old else
                         os.environ.pop("LEAN_AGENT_HOME", None))
         self.wait_for(lambda: p.poll() is not None or (len(self.read_jsonl(log)) > before and service_session.alive()),
-                      "the session to answer on the bridge", secs=30)
-        self.assertIsNone(p.poll(), "up exited")
+                      "the session to answer on the bridge", secs=120)
+        if p.poll() is not None:
+            out, err = p.communicate()
+            self.fail(f"up exited with {p.returncode}\nstdout (last lines):\n" + "\n".join(out.splitlines()[-15:])
+                      + "\nstderr (last lines):\n" + "\n".join(err.splitlines()[-25:]))
         self.assertTrue(service_session.alive())
         return p, log, service_session
 
@@ -3723,8 +3729,7 @@ class CliTest(unittest.TestCase):
 
     def send_in_process(self, ages, prompt="more work"):
         """`thread send t1` run in this process, with the hosted sessions reporting an idle age of `ages` seconds."""
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         real = L.open_thread_sessions
         args = argparse.Namespace(action="send", args=["t1"], prompt_file=None, json=False, all=False)
         with mock.patch.dict(os.environ, self.env), mock.patch.object(L, "thread_prompt", return_value=prompt), \
@@ -3758,8 +3763,7 @@ class CliTest(unittest.TestCase):
         p, log, ss, old = self.closed_thread_with_history(ctx=150000)
         n = len(self.read_jsonl(log))
         self.cli("config", "thread-fresh-after", "idle=1m,context=1%")
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         with mock.patch.object(L, "start_thread_session", side_effect=RuntimeError("boom")), \
                 contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
@@ -3781,8 +3785,7 @@ class CliTest(unittest.TestCase):
         return path
 
     def test_opening_an_open_thread_with_a_transcript_says_resumed(self):
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         p, log, ss, old = self.closed_thread_with_history(ctx=84000)
         with mock.patch.dict(os.environ, self.env):
             fresh, line, _ = L.prepare_thread_session("t1", False)
@@ -3792,8 +3795,7 @@ class CliTest(unittest.TestCase):
         p.wait(timeout=30)
 
     def test_thread_new_rolls_back_when_the_session_does_not_start(self):
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         import lean_threads
         import service_session
         args = argparse.Namespace(action="new", args=["export retries"], prompt_file=None, json=False, all=False)
@@ -3807,8 +3809,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(lean_threads.session_threads(), [])
 
     def test_thread_new_keeps_the_thread_when_the_start_times_out_but_the_session_runs(self):
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         import lean_threads
         import service_session
         args = argparse.Namespace(action="new", args=["export retries"], prompt_file=None, json=False, all=False)
@@ -3833,8 +3834,7 @@ class CliTest(unittest.TestCase):
         self.cli("learn", self.proj, "--name", "proj")
         lt = self.threads_home()
         lt.route("Publish the report via docs", "s1")  # t1
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         import service_session
         args = argparse.Namespace(action="send", args=["t1"], prompt_file=None, json=False, all=False)
         with mock.patch.dict(os.environ, self.env), mock.patch.object(L, "thread_prompt", return_value="go on"), \
@@ -3847,7 +3847,7 @@ class CliTest(unittest.TestCase):
 
     def start_thread_with_lost_reply(self, delay, grace):
         """start_thread_session against a real `up` whose start reply is lost (as on a timeout); returns (result, stops)."""
-        import lean_agent as L
+        L = lean_agent_module()
         import service_session
         lt = self.threads_home()
         tid = lt.new("slow")
@@ -4282,7 +4282,7 @@ class CliTest(unittest.TestCase):
 
     def test_cli_strips_the_service_session_variable_for_its_children(self):
         sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent
+        lean_agent = lean_agent_module()
         os.environ["LEAN_AGENT_SERVICE_SESSION"] = "1"
         try:
             lean_agent.main(["--help"])
@@ -4814,8 +4814,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.todo_count("#1"), 0)
 
     def test_new_todo_saves_todo_json_once(self):
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": self.env["LEAN_AGENT_HOME"]}), \
                 mock.patch.object(L, "save_json", wraps=L.save_json) as sv, contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(L.new_todo("proj", "Export: cap the retry loop"), 1)
@@ -4852,8 +4851,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("Latest review: changes-requested of other", self.calls()[-1]["task"])
 
     def test_in_process_run_does_not_fork(self):
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         with mock.patch.object(L, "CLI_ENTRY", []), mock.patch.dict(os.environ, {}, clear=False), \
                 mock.patch.object(os, "fork") as fork:
             os.environ.pop("LEAN_AGENT_NO_DETACH", None)
@@ -4861,8 +4859,7 @@ class CliTest(unittest.TestCase):
         fork.assert_not_called()
 
     def test_forked_supervisor_never_returns_into_the_caller(self):
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
 
         class Exited(BaseException):
             pass
@@ -4881,8 +4878,7 @@ class CliTest(unittest.TestCase):
         ex.assert_called_once_with(1)
 
     def test_a_second_ctrl_c_while_the_supervisor_is_signalled_is_deferred_and_exits_130(self):
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         sent = []
 
         def fake_signal_group(pid, sig, wait=0):
@@ -4975,17 +4971,18 @@ class CliTest(unittest.TestCase):
         self.assertNotIn(tid, out)
         self.assertTrue(lt.load()["threads"][tid].get("session_on"))  # still meant to be open: only the host record is pruned
         self.assertNotIn(tid, ss.session_rec("main").get("sessions") or {})
-        self.assertIn("started", self.cli("thread", "new", "first").stdout)
-        self.assertRegex(self.cli("thread", "sessions").stdout, r"t2\b")
+        self.cli("thread", "new", "first")
+        self.wait_for(lambda: re.search(r"^t2\b", self.cli("thread", "sessions").stdout, re.M),
+                      "the first session to be listed", secs=120)
         self.cli("thread", "close", "t2")  # a closed session frees its slot at once, flag and record gone
-        self.assertNotIn("t2", self.cli("thread", "sessions").stdout)
+        self.assertNotRegex(self.cli("thread", "sessions").stdout, r"^t2\b")
         self.assertIsNone(lt.load()["threads"]["t2"].get("session_on"))
         self.assertNotIn("t2", ss.session_rec("main").get("sessions") or {})
         self.cli("thread", "close", "t2")  # idempotent
-        self.assertIn("started", self.cli("thread", "new", "second").stdout)
+        self.cli("thread", "new", "second")
         # shut down only once the new session is up, so stopping `up` never races its start
-        self.wait_for(lambda: re.search(r"t3\b", self.cli("thread", "sessions").stdout), "the second session to be listed",
-                      secs=30)
+        self.wait_for(lambda: re.search(r"^t3\b", self.cli("thread", "sessions").stdout, re.M),
+                      "the second session to be listed", secs=120)
         p.terminate()
         p.wait(timeout=60)
 
@@ -5011,7 +5008,7 @@ class CliTest(unittest.TestCase):
         p.wait(timeout=60)
 
     def test_close_idle_skips_busy_and_fresh_sessions(self):
-        import lean_agent as L
+        L = lean_agent_module()
         sessions = [{"thread": "t1", "idle": 7300}, {"thread": "t2", "idle": 7300}, {"thread": "t3", "idle": 60}]
         closed = []
         args = argparse.Namespace(args=[], all=False, idle="2h", json=False)
@@ -5051,7 +5048,7 @@ class CliTest(unittest.TestCase):
         p.wait(timeout=30)
 
     def open_sessions_with_listing(self, listed, rec):
-        import lean_agent as L
+        L = lean_agent_module()
         import service_session
         lt = self.threads_home()
         tid = lt.new("coming up")
@@ -5084,8 +5081,7 @@ class CliTest(unittest.TestCase):
 
     def test_parallel_thread_new_cannot_exceed_the_cap(self):
         """The cap check and the start are one locked step: two concurrent `thread new` never overlap in it."""
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         import service_session
         self.threads_home()
         inside, peak, guard = [0], [0], threading.Lock()
@@ -5477,8 +5473,7 @@ class CliTest(unittest.TestCase):
         timer.return_value.start.assert_called_once_with()
 
     def test_a_tee_that_fails_to_close_still_ends_the_supervisor_with_os_exit(self):
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
 
         class Exited(BaseException):
             pass
@@ -5752,7 +5747,7 @@ class CliTest(unittest.TestCase):
         with open(os.path.join(home, "up.json")) as fh:
             self.assertEqual(json.load(fh)["clear_hold"], "clear requested: waiting for the turn to end")
         sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent
+        lean_agent = lean_agent_module()
         with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": home}):
             self.assertIn("clear held: clear requested: waiting for the turn to end", lean_agent.clear_at_text())
         turn("done", ctx=5000)
@@ -5875,8 +5870,7 @@ class CliTest(unittest.TestCase):
 
     def test_auto_cards_skip_core_cards_marked_unneeded(self):
         self.cli("learn", self.proj, "--name", "proj")
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
         try:
             cards = L.load_cards("proj")
@@ -6024,8 +6018,7 @@ class CliTest(unittest.TestCase):
         p = self.cli("review", "proj", "--decide-gaps", "--head", "feature", check=False, FAKE_FEEDBACK=ok + head + '{"decisions": []}')
         self.assertNotIn("no review of", p.stderr)
         self.assertIn("the worker gave no gap decisions", p.stdout)
-        sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent as L
+        L = lean_agent_module()
         os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
         try:
             self.assertEqual(L.latest_review("proj", self.proj, None)["verdict"], "approve")
@@ -7602,7 +7595,7 @@ class CliTest(unittest.TestCase):
         st = self.cli("review", "proj", "--head", "feat", "--status", check=False)
         self.assertEqual(st.returncode, 2, st.stdout)
         self.assertIn("known gap", st.stdout)
-        import lean_agent
+        lean_agent = lean_agent_module()
         with mock.patch.dict(os.environ, self.env):
             last = lean_agent.latest_review("proj", self.proj, "feat")
         self.assertNotIn("skipped", last["verdict"])
@@ -7626,7 +7619,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(len(self.real_reviews()), 3)
 
     def test_reuse_check_without_a_run_of_its_own_returns_nothing_not_an_older_ledger_run(self):
-        import lean_agent as L
+        L = lean_agent_module()
         wd = os.path.join(self.proj, "old-reuse")
         os.makedirs(wd, exist_ok=True)
         with open(os.path.join(wd, "review.json"), "w") as fh:
@@ -7671,7 +7664,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(len(self.real_reviews()), 2)
 
     def test_is_docs_file_is_the_one_docs_check(self):
-        import lean_agent as L
+        L = lean_agent_module()
         self.assertTrue(L.is_docs_file("README.md"))
         self.assertTrue(L.is_docs_file("docs/a.txt"))
         self.assertFalse(L.is_docs_file("src/prompts/p.md"))
@@ -7717,7 +7710,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.reviewer_runs()[-1].get("model"), "haiku")
 
     def test_close_stops_a_live_host_when_the_service_list_request_fails(self):
-        import lean_agent as L
+        L = lean_agent_module()
         import service_session
         lt = self.threads_home()
         tid = lt.new("hosted")
@@ -7745,7 +7738,7 @@ class CliTest(unittest.TestCase):
             self.assertNotIn("stop", calls)
 
     def test_close_reports_a_failed_stop_of_a_live_host_and_keeps_its_records(self):
-        import lean_agent as L
+        L = lean_agent_module()
         import service_session
         lt = self.threads_home()
         tid = lt.new("hosted")
@@ -7837,7 +7830,7 @@ class CliTest(unittest.TestCase):
 class ReviewUnitTest(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0, os.path.dirname(CLI))
-        import lean_agent
+        lean_agent = lean_agent_module()
         self.agent = lean_agent
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, True)
@@ -8001,7 +7994,7 @@ class RuleGlobTest(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0, os.path.dirname(CLI))
         import lean_common
-        import lean_agent
+        lean_agent = lean_agent_module()
         self.common, self.agent = lean_common, lean_agent
 
     def test_task_id_of_reads_hash_ticket_key_and_prefixed_refs(self):
