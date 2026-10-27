@@ -8232,6 +8232,19 @@ class RuleUnitTest(unittest.TestCase):
         self.assertIn("note 59", text)
         self.assertNotIn("note 0 ", text)
 
+    def test_body_trim_drops_whole_oldest_entries(self):
+        m = self.memory
+        entries = [f"- 2025-01-{i + 1:02d}: entry{i} " + "y" * 300 for i in range(10)]
+        out = m._trim_entries("base text\n" + "\n".join(entries))
+        self.assertLessEqual(len(out), m.MAX_BODY)
+        kept = [ln for ln in out.split("\n") if ln]
+        self.assertEqual(kept, entries[-len(kept):])  # a suffix of intact entries, none cut
+        self.assertIn("entry9", out)
+        self.assertNotIn("base text", out)
+        one = m._trim_entries("- 2025-01-01: head " + "z" * 5000)
+        self.assertLessEqual(len(one), m.MAX_BODY)
+        self.assertTrue(one.startswith("- 2025-01-01: head z") and one.endswith(m.TRUNCATED))
+
     def test_load_cards_classifies_notes_once_per_file_version(self):
         agent = lean_agent_module()
         path = os.path.join(self.dir, "library.json")
