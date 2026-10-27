@@ -7233,6 +7233,17 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("skipped", p.stdout)
         self.assertEqual(len(self.real_reviews()), 3)
 
+    def test_reuse_check_without_a_run_of_its_own_returns_nothing_not_an_older_ledger_run(self):
+        import lean_agent as L
+        wd = os.path.join(self.proj, "old-reuse")
+        os.makedirs(wd, exist_ok=True)
+        with open(os.path.join(wd, "review.json"), "w") as fh:
+            fh.write(json.dumps({"reuse": [{"symbol": "old"}]}))
+        old = {"role": "reuse-check", "project": "proj", "workdir": wd}
+        a = argparse.Namespace(max_context=None)
+        with mock.patch.object(L, "cmd_run", lambda ns: None), mock.patch.object(L, "ledger", lambda: [old]):
+            self.assertEqual(L.run_reuse_check(a, "proj", "haiku", "why", [], "feat", "rule"), {})
+
     def test_release_branch_skip_only_for_bumps_merges_and_docs(self):
         g = self.skip_project()
         g("checkout", "-qb", "release/2.0", "main")

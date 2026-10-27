@@ -2967,8 +2967,7 @@ def run_reuse_check(a, slug, model, why, cards, ref, rule):
         cmd_run(ns)
     except SystemExit:
         return None
-    run = LAST_RUN[0] if LAST_RUN else next(
-        (r for r in reversed(ledger()) if r.get("role") == "reuse-check" and r["project"] == slug), None)
+    run = LAST_RUN[0] if LAST_RUN else None  # this call's own run, never an older reuse-check from the ledger
     return load_json(os.path.join(run["workdir"], "review.json"), {}) if run and run.get("workdir") else {}
 
 
