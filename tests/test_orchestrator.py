@@ -4743,7 +4743,7 @@ class CliTest(unittest.TestCase):
     def test_routing_by_id_beats_topic_words(self):
         lt = self.threads_home()
         t0 = datetime.datetime.now().timestamp() - 5000
-        lt.route("Investigate ticket 4711 login failures", "s1", t0)  # t1
+        lt.route("Investigate PR 4711 login failures", "s1", t0)  # t1
         lt.route("Status dashboard design review notes", "s1", t0 + 10)  # t2
         lt.route("Prepare release notes and changelog", "s1", t0 + 20)  # t3
         self.assertEqual(lt.route("4711 status", "s1", t0 + 30)[0], "t1")
@@ -4751,15 +4751,15 @@ class CliTest(unittest.TestCase):
         self.assertEqual(lt.route("PR 4711 needs a status dashboard review", "s1", t0 + 40)[0], "t1")
         self.assertEqual(lt.route("create the release PR", "s1", t0 + 50)[0], "t3")
         # several threads mention the id: the most recent mention wins
-        lt.route("Also ticket 4711 again", "s1", t0 + 60)  # t1 (4711)
+        lt.route("Also PR 4711 again", "s1", t0 + 60)  # t1 (4711)
         lt.route("Dashboard colours", "s1", t0 + 70)
-        lt.pin("t2", "Dashboard ticket 4711 follow-up", "s1", t0 + 80)
+        lt.pin("t2", "Dashboard PR 4711 follow-up", "s1", t0 + 80)
         self.assertEqual(lt.route("what about 4711", "s1", t0 + 90)[0], "t2")
 
     def test_bare_numbers_are_ordinary_words_without_an_id_reference_in_history(self):
         lt = self.threads_home()
         t0 = datetime.datetime.now().timestamp() - 5000
-        lt.route("Investigate ticket 4711 login failures", "s1", t0)  # t1
+        lt.route("Investigate PR 4711 login failures", "s1", t0)  # t1
         lt.route("Check the proxy listening on port 8080", "s1", t0 + 10)  # t2, 8080 is just a port
         self.assertEqual(lt.id_thread("port 8080 is busy", lt.load()), None)
         self.assertEqual(lt.id_thread("4711 status", lt.load()), "t1")
@@ -4779,6 +4779,14 @@ class CliTest(unittest.TestCase):
         self.assertEqual(lt.prompt_refs("on feature/4711-login")[0], {"feature/4711-login"})
         self.assertEqual(lt.prompt_ids("port 80 on feature/x-1"), {"feature/x-1"})
         self.assertEqual(lt.prompt_ids("#4711 and 4711"), {"4711"})
+
+    def test_history_id_reference_pattern(self):
+        lt = self.threads_home()
+        hit = lambda n, text: bool(lt._bare_ref_pat(n).search(text))
+        for text in ("fixed #256", "PR 256 merged", "AB#256", "ABC-256 done", "on feature/256-login", "bugfix/ABC-256"):
+            self.assertTrue(hit("256", text), text)
+        for text in ("case 256 closed", "bug 256", "issue 256", "uses sha-256", "SHA256", "date 2026-10-256", "port 256"):
+            self.assertFalse(hit("256", text), text)
 
     def test_routing_by_branch_name(self):
         lt = self.threads_home()
@@ -4803,6 +4811,8 @@ class CliTest(unittest.TestCase):
         self.assertNotRegex(self.cli("runs").stdout, r"aaaa\s+lost")
         self.assertRegex(self.cli("runs").stdout, r"aaaa\s+stopped")
         row = next(r for r in self.ledger() if r["id"] == "0101-000000-aaaa")
+        self.assertTrue(row["status"].startswith("stopped"), row["status"])
+        self.assertFalse(os.path.exists(os.path.join(home, "running", "k1.json")))
         self.assertEqual((row["read_only"], row["tools"], row["cards"], row["answer_lines"], row["thread"]),
                          (True, "Read,Grep", ["c1"], 7, "th"))
 
