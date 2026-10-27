@@ -3871,7 +3871,7 @@ def review_main(a):
                   "coverage for what's new).")
         if a.same_session or not since:  # the old way: continue the reviewer's whole session
             task = (f"The change was updated after your review. {where} Check whether each earlier finding is "
-                    "resolved, and look for new problems. " + (a.focus or ""))
+                    "resolved, and look for new problems. " + (a.focus or "") + answer_template(ns_syms, focus))
             ns = argparse.Namespace(resume=prev["id"], task=[task], task_file=None, model=None, why=None, cards=None,
                                     project=None, read_only=True, chrome=None, mcp=None, tools=None, allow_send=None,
                                     max_turns=a.max_turns, max_usd=a.max_usd, max_context=4000, role="reviewer",
@@ -3892,7 +3892,7 @@ def review_main(a):
         task = ("Re-review after fixes. The earlier review's open items (say for each: fixed / still open, with "
                 "file:line):\n" + ("\n".join(open_items[:25]) or "- none") + "\n\nGive the changes since then the full "
                 "passes; don't re-review code that didn't change. " + decisions_text(slug, meta.get("ref"), path, meta["head"])
-                + (a.focus or ""))
+                + (a.focus or "") + answer_template(ns_syms, focus))
         cards = suggest(slug, " ".join(re.split(r"[/._-]+", " ".join(changed))), a.max_context, "review")
         meta["since_hunks"] = changed_hunks(path, since)
         meta["earlier"] = [str(f.get("issue", "")) for f in last.get("findings") or []]
@@ -3997,6 +3997,7 @@ def review_main(a):
         task += f"\nThe author asks you to look closely at: {a.focus}\n"
     if getattr(a, "goal", None):
         task += f"\nThe change's stated goal (task, work item or PR title): {a.goal}\n"
+    task += answer_template(ns_syms, focus)
     meta = {"base": base, "merge_base": merge_base, "head": sha, "dirty": dirty, "ref": label, "mode": mode,
             "files": len(names), "new_symbols": ns_syms["files"] + ns_syms["symbols"],
             "second_opinion": getattr(a, "_second", []),
@@ -4084,32 +4085,103 @@ def multi_pass_review(a, slug, path, ns, meta, effort):
     return reuse_follow_up(a, slug, meta, effort) if rc == 2 else rc
 
 
+def answer_template(ns_syms, focus):
+    """The fill-in part of the reviewer prompt: one line per new symbol (reuse) and edited/removed test (coverage)
+    lean-agent found, with the answer format, so the first turn is complete."""
+    syms = [f"new file {f}" for f in ns_syms["files"]] + list(ns_syms["symbols"])
+    tests = list(focus.get("tests") or [])
+    if not syms and not tests:
+        return ""
+    lines = ["Fill-in template: your \"reuse\" array needs exactly one entry per symbol below and your \"coverage\" "
+             "array one entry per test below, in this format; entries for names not listed are fine, missing ones "
+             "make the review incomplete.",
+             'reuse entry: {"symbol": "<name as listed>", "candidates": ["file:line existing code"], '
+             '"verdict": "extend|wraps-existing|reuse|duplicate|justified-new", "why": "<why it can\'t be reused>"}',
+             'coverage entry: {"test": "<test as listed>", "protected": "<what it protected>", "still_covered": '
+             'true|false, "where": "<file:line or reason it was removed>"}']
+    lines += ["Symbols (reuse):"] + [f"- {x}" for x in syms[:60]] if syms else []
+    lines += ["Tests (coverage):"] + [f"- {x}" for x in tests[:30]] if tests else []
+    return "\n" + "\n".join(lines) + "\n"
+
+
+def update_last_review(slug, run_id, change):
+    """Rewrite the newest recorded review of `run_id` with change(record)."""
+    path = reviews_path(slug)
+    recs = list(read_jsonl(path))
+    for r in reversed(recs):
+        if r.get("run") == run_id:
+            change(r)
+            break
+    with open(path, "w") as fh:
+        for r in recs:
+            fh.write(json.dumps(r) + "\n")
+
+
+def fill_reuse(a, slug, path, meta, symbols):
+    """The cheap reuse-check run (haiku, search-only) for symbols the reviewer left out; its reuse entries."""
+    ref_mode = meta.get("mode") == "ref"
+    rng = f"{meta['merge_base']} {meta['head']}" if ref_mode and meta.get("merge_base") else (meta.get("merge_base") or "HEAD")
+    read_rule = (f"These files are NOT checked out. Read them at the reviewed commit with `git -C {path} show "
+                 f"{meta['head']}:<path>`." if ref_mode else "")
+    model = os.environ.get("LEAN_AGENT_REUSE_MODEL") or "haiku"
+    print(f"review: {len(symbols)} reuse entr{'y' if len(symbols) == 1 else 'ies'} missing: filling them with a "
+          f"{model} search-only run instead of resuming the reviewer", flush=True)
+    ns = argparse.Namespace(resume=None, task=["Find existing code that the new symbols duplicate."], task_file=None,
+                            model=model, why="fill the reuse entries the reviewer left out", cards=None, card_list=[],
+                            project=slug, read_only=True, chrome=None, mcp=None, tools=None, allow_send=None,
+                            max_turns=30, max_usd=1.0, max_context=a.max_context, ttype="review", role="reuse-check",
+                            review_meta={"ref": meta.get("ref"), "mode": "second-opinion"}, effort="low",
+                            role_rule=REUSE_RULE.format(scope=f"{meta.get('ref') or 'the working tree'}", project=path,
+                                                        diff_range=rng, read_rule=read_rule,
+                                                        grep_ref=meta["head"] if ref_mode else "",
+                                                        new_symbols="\n" + "\n".join(f"- {x}" for x in symbols),
+                                                        decisions=""))
+    LAST_RUN[:] = []
+    try:
+        cmd_run(ns)
+    except SystemExit:
+        return []
+    run = LAST_RUN[0] if LAST_RUN else None
+    rv = load_json(os.path.join(run["workdir"], "review.json"), {}) if run and run.get("workdir") else {}
+    return [r for r in rv.get("reuse") or [] if isinstance(r, dict) and r.get("symbol")]
+
+
 def reuse_follow_up(a, slug, meta, effort):
-    """Once per review: if the reviewer left symbols unchecked or a justified-new verdict wasn't accepted, send it
-    back (same session, cached context) to finish the reuse pass before the result goes to the user."""
+    """Once per review: reuse entries the reviewer left out are filled by the cheap reuse-check run, coverage and gap
+    entries still missing are recorded as 'not checked'. The main reviewer is not resumed for them."""
     last = (list(read_jsonl(reviews_path(slug))) or [None])[-1]
-    gaps = (last or {}).get("unchecked", []) + (last or {}).get("disputed", []) + [
-        f"coverage entry for edited test {t}" for t in (last or {}).get("coverage_unchecked", [])] + [
-        f"gap entry for {g.get('file', '?')}:{g.get('line') or ''} \"{str(g.get('what', ''))[:120]}\" (does it keep "
-        "the goal from working? is it out of scope, and where does it say so?)"
-        for g in (last or {}).get("gaps", []) if g.get("unaddressed")]
-    if not last or not gaps:
+    if not last or not (last.get("unchecked") or last.get("coverage_unchecked")
+                        or any(g.get("unaddressed") for g in last.get("gaps") or [])):
         return 2
-    prev = next((r for r in reversed(ledger()) if r["id"] == last["run"]), None)
-    if not prev:
-        return 2
-    print(f"review: sending the reviewer back once to finish the reuse pass ({len(gaps)} open)", flush=True)
-    task = ("Your review isn't complete. For each item below: a reuse entry (search the repository, at least one "
-            "search each; for justified-new, say concretely why the existing code can't be reused or extended), a "
-            "coverage entry (what the test protected, and whether that's still tested; a pure rename is "
-            "still-covered), or a gap entry (pass 0):\n"
-            + "\n".join(f"- {g}" for g in gaps[:20]) + "\nThen reply with a complete LEAN-REVIEW line again "
-            "(all findings, searches and reuse entries, not only the new ones).")
-    ns = argparse.Namespace(resume=prev["id"], task=[task], task_file=None, model=None, why=None, cards=None,
-                            project=None, read_only=True, chrome=None, mcp=None, tools=None, allow_send=None,
-                            max_turns=min(a.max_turns, 30), max_usd=min(a.max_usd, 2.0), max_context=4000,
-                            role="reviewer", effort=effort, review_meta=meta)
-    return cmd_run(ns)
+    path = (projects().get(slug) or {}).get("path") or ""
+    unchecked = list(last.get("unchecked") or [])
+    got = fill_reuse(a, slug, path, meta, unchecked) if unchecked and path and meta.get("head") else []
+    names = " ".join(str(r.get("symbol")) for r in got)
+    filled = [w for w in unchecked if w.replace("new file ", "").split(" (")[0] in names]
+    dup = [r for r in got if r.get("candidates") and r.get("verdict") in ("reuse", "duplicate")]
+    not_cov = list(last.get("coverage_unchecked") or [])
+
+    def patch(rec):
+        rec["reuse"] = (rec.get("reuse") or []) + got
+        rec["unchecked"] = [w for w in unchecked if w not in filled]
+        rec["coverage_not_checked"] = not_cov
+        rec["coverage_unchecked"] = []
+        keep = [c for c in rec.get("checks") or [] if not str(c.get("what", "")).startswith(
+            ("reuse not checked for", "coverage not checked for"))]
+        if rec["unchecked"]:
+            keep.append({"what": "reuse not checked for: " + ", ".join(rec["unchecked"][:10]),
+                         "why": "the cheap reuse run did not answer for these"})
+        keep += [{"what": f"justify or fix: {r.get('symbol')}: existing code {', '.join(map(str, r['candidates']))[:160]}",
+                  "why": "a new abstraction next to an existing one needs a reason"} for r in dup]
+        rec["checks"] = keep
+        if rec.get("verdict") == "needs-checks" and not keep and not rec.get("disputed") and not any(
+                f.get("severity") in ("blocker", "major") for f in rec.get("findings") or []):
+            rec["verdict"] = "approve"
+    update_last_review(slug, last["run"], patch)
+    print(f"review: {len(filled)} reuse entr{'y' if len(filled) == 1 else 'ies'} filled by the cheap run"
+          + (f"; coverage not checked for {len(not_cov)} edited test(s)" if not_cov else ""), flush=True)
+    now = (list(read_jsonl(reviews_path(slug))) or [last])[-1]
+    return 0 if now.get("verdict") == "approve" and not any(g.get("unaddressed") for g in now.get("gaps") or []) else 2
 
 
 DESIGN_CATEGORIES = ("completeness", "duplication", "scope", "platform")
