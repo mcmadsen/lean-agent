@@ -8831,10 +8831,7 @@ def make_room_for_thread_session(tid=None):
 
 def parse_idle(text):
     """Seconds in a duration such as 90m, 2h, 1d or 45s (a bare number is minutes); ValueError otherwise."""
-    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*", str(text or ""))
-    if not m:
-        raise ValueError(f"not a duration: {text!r} (use e.g. 90m, 2h, 1d)")
-    return float(m.group(1)) * {"s": 1, "m": 60, "": 60, "h": 3600, "d": 86400}[m.group(2)]
+    return lean_common.parse_duration(text)
 
 
 def close_threads(a):
