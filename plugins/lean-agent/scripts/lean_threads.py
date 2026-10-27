@@ -924,7 +924,9 @@ def show_text(tid, all_=False, limit=40):
     shown = ev if all_ or len(ev) <= limit else ev[-limit:]
     if len(shown) < len(ev):
         lines.append(f"... {len(ev) - len(shown)} earlier (lean-agent thread show {tid} --all)")
-    lines += [f"{ts[:16].replace('T', ' ')}  {kind:<8} {text}" for _, ts, kind, text in shown]
+    rids = {(str(r.get("ts")), one_line(r.get("text"), 160)): r.get("id") for r in t.get("requests") or [] if r.get("id")}
+    lines += [f"{ts[:16].replace('T', ' ')}  {(rids[(ts, text)] + '  ' if kind == 'request' and (ts, text) in rids else '') + f'{kind:<8}'} {text}"
+              for _, ts, kind, text in shown]
     if not ev:
         lines.append("(nothing recorded yet)")
     return "\n".join(lines)
