@@ -312,6 +312,42 @@ def thread_brief(tid, cap=None):
     return cut_lines(text, cap) + (("\n" + BRIEF_MORE) if cap and len(text) > cap else "") if cap else text
 
 
+FRESH_BRIEF_TOKENS = 1500  # a thread's fresh session starts from at most this much brief (about 4 characters a token)
+
+
+def fresh_brief(tid, max_tokens=FRESH_BRIEF_TOKENS):
+    """What a closed thread's new session starts from: its title, latest checkpoint, the last 5 requests (with their
+    ids) and runs, its handovers and pushes, and where to read more. The oldest items go first when it is too long."""
+    import lean_threads
+    data = lean_threads.load()
+    t = data["threads"].get(tid) or {}
+    head = [f'Thread {tid} "{t.get("title") or tid}" (a new session: the old conversation is not carried over)']
+    cps = [n for n in load_notes() if n.get("thread") == tid and n.get("kind") == "checkpoint"]
+    if cps:
+        head.append(f"Latest checkpoint ({str(cps[-1].get('ts', ''))[:16].replace('T', ' ')}; continue from it):")
+        head.append(cut_lines(str(cps[-1].get("text", "")), CHECKPOINT_CAP))
+    tail = f"For more: lean-agent thread show {tid}"
+    items = []  # (epoch, line)
+    ev = lean_threads.events(data).get(tid, [])
+    for r in (t.get("requests") or [])[-5:]:
+        items.append((lean_threads._epoch(r.get("ts")), f'request {r.get("id")}: {lean_threads.one_line(r.get("text"), 160)}'))
+    for kind, keep in (("run", 5), ("handover", 3), ("push", 3)):
+        for e in [e for e in ev if e[2] == kind][-keep:]:
+            items.append((e[0], f"{kind} {e[3]}"))
+    items.sort(key=lambda i: i[0])
+    room = max_tokens * 4 - len("\n".join(head + [tail])) - 80
+    kept = []
+    for _, line in reversed(items):  # newest first, so the oldest are the ones left out
+        if len(line) + 1 > room:
+            break
+        room -= len(line) + 1
+        kept.append(line)
+    body = []
+    if kept:
+        body = ["Recent work:"] + ([f"... {len(items) - len(kept)} older items left out"] if len(kept) < len(items) else []) + kept[::-1]
+    return "\n".join(head + body + [tail])
+
+
 def has_recent_work(hours=RECENT_HOURS):
     home = usage.lean_home()
     runs = read_jsonl(os.path.join(home, "ledger.jsonl"), 50)
