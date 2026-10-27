@@ -190,12 +190,12 @@ def est_tokens(text):
     return (len(text) + 3) // 4
 
 
-def slugify(text, limit=48):
+def slugify(text, limit=48, empty="card"):
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     if len(slug) > limit:  # cut at a word boundary
         cut = slug[:limit + 1].rfind("-")
         slug = slug[:cut if cut > limit // 2 else limit]
-    return slug.strip("-") or "card"
+    return slug.strip("-") or empty
 
 
 def words(text):
@@ -4300,11 +4300,7 @@ def branch_slug(title, limit=40):
     """Lowercase ascii words joined by '-', cut at a word boundary (accents folded, other scripts dropped)."""
     import unicodedata
     text = unicodedata.normalize("NFKD", title or "").encode("ascii", "ignore").decode()
-    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    if len(slug) > limit:
-        cut = slug[:limit + 1].rfind("-")
-        slug = slug[:cut if cut > limit // 2 else limit]
-    return slug.strip("-")
+    return slugify(text, limit, empty="")
 
 
 def infer_branch_kind(title):
