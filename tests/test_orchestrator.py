@@ -1606,16 +1606,23 @@ class CliTest(unittest.TestCase):
         self.assertIsNone(pick(t("get_ticket", ["id"]), t("set_default"), t("list_and_update"), t("add_get")))
         self.assertIsNone(pick(t("forget_it"), t("budget"), t("find_project"), t("project")))  # unanchored words
         self.assertIsNone(pick(t("put_get"), t("post_list")))
+        self.assertEqual(pick(t("get_offset"), t("list_assets")), "get_offset")  # offset/assets are not 'set'/'add'
+        self.assertIsNone(pick(t("list-set"), t("get.delete"), t("getUpdate")))
 
     def test_auth_variables_go_only_to_the_server_they_belong_to(self):
         sys.path.insert(0, os.path.dirname(CLI))
         import lean_mcp
         shell = {"AZURE_DEVOPS_PAT": "a", "ADO_ORG": "b", "GITHUB_TOKEN": "c", "TOKEN": "d", "PAT": "e",
-                 "AZURE_CLIENT_ID": "f", "ANTHROPIC_API_KEY": "g"}
+                 "AZURE_CLIENT_ID": "f", "ANTHROPIC_API_KEY": "g", "ADO_PAT": "h", "GITHUB_ACTIONS": "i",
+                 "GITHUB_WORKSPACE": "j", "GITHUB_PASSWORD": "k"}
         ado = lean_mcp.with_auth_env({"command": "x", "env": {"OWN_KEY": ""}}, shell, name="azure-devops")["env"]
-        self.assertEqual(sorted(ado), ["ADO_ORG", "AZURE_DEVOPS_PAT", "OWN_KEY"])
+        self.assertEqual(sorted(ado), ["ADO_PAT", "AZURE_DEVOPS_PAT", "OWN_KEY"])
         gh = lean_mcp.with_auth_env({"command": "x"}, shell, name="github")["env"]
-        self.assertEqual(sorted(gh), ["GITHUB_TOKEN"])
+        self.assertEqual(sorted(gh), ["GITHUB_PASSWORD", "GITHUB_TOKEN"])
+        plug = lean_mcp.with_auth_env({"command": "x"}, shell, name="plugin:github:github")["env"]
+        self.assertEqual(sorted(plug), ["GITHUB_PASSWORD", "GITHUB_TOKEN"])  # not ADO_PAT: no azure+devops terms
+        self.assertEqual(lean_mcp.server_terms("plugin:acme:github"), ["acme", "github"])
+        self.assertTrue(lean_mcp.env_belongs_to("ACME_API_KEY", "plugin:acme:github"))
         own = lean_mcp.with_auth_env({"command": "x", "env": {"TOKEN": ""}}, shell, name="other").get("env")
         self.assertEqual(own, {"TOKEN": "d"})  # named in its own config
         self.assertEqual(lean_mcp.with_auth_env({"command": "x"}, shell), {"command": "x"})
