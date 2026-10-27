@@ -6139,6 +6139,24 @@ class CliTest(unittest.TestCase):
         branches = subprocess.run(["git", "-C", self.proj, "branch", "--list"], capture_output=True, text=True).stdout
         self.assertNotIn("look-at-x", branches)
 
+    def test_branch_rule_only_when_the_worker_may_make_a_branch_itself(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("branch", "-m", "feature", "feat-old")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        rule = "New branches follow the project's branch rules"
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--", "write something")
+        self.assertIn(rule, self.calls()[-1]["append"])
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--read-only", "--", "look")
+        self.assertNotIn(rule, self.calls()[-1]["append"])
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "auto", "--worktree-base", "main", "--",
+                 "Add a thing")
+        self.assertNotIn(rule, self.calls()[-1]["append"])  # the branch already exists
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--read-only", "--worktree", "auto", "--", "look")
+        self.assertNotIn(rule, self.calls()[-1]["append"])
+
     def test_worktree_creates_missing_branch_from_a_base(self):
         g = self.git_project()
         g("add", "-A")
