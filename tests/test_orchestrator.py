@@ -5799,7 +5799,7 @@ class CliTest(unittest.TestCase):
         commit_fix("# fix 3\n")
         bad = json.dumps(dict(REUSE_CHECKED, verdict="changes-requested", checks=[], findings=[
             {"severity": "major", "file": "api/totals.py", "line": 3, "issue": "rounding drops cents"}]))
-        self.cli("review", "proj", "--head", "feature", "--base", "main", check=False, FAKE_REVIEW=bad)
+        self.cli("review", "proj", "--head", "feature", "--base", "main", "--force", check=False, FAKE_REVIEW=bad)
         commit_fix("# fix 4\n")
         out = self.cli("review", "proj", "--head", "feature", "--base", "main", "--full-review", FAKE_REVIEW=approve).stdout
         self.assertIn("passing 1 earlier findings", out)
@@ -7077,6 +7077,31 @@ class CliTest(unittest.TestCase):
         self.cli("config", "review-skip", "-p", "proj", "default")
         self.assertIn("version-bump,merge-only,docs-only,tests-only,branches=release/*",
                       self.cli("config", "review-skip", "-p", "proj").stdout)
+
+    def test_a_re_review_continues_from_the_last_reviewed_head_not_the_latest_run(self):
+        g = self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+
+        def rev(ref):
+            return subprocess.run(["git", "-C", self.proj, "rev-parse", ref], capture_output=True, text=True).stdout.strip()
+        self.review_feature(FAKE_REVIEW=self.REQUEST)
+        reviewed = rev("feature")
+        self.commit_on(g, "feature", "api/totals.py", "# fix\n")
+        fixes = rev("feature")
+        # a reviewer launched on the fixes that never recorded a review (aborted, over budget ...)
+        ledger = os.path.join(self.env["LEAN_AGENT_HOME"], "ledger.jsonl")
+        last = self.reviewer_runs()[-1]
+        ghost = dict(last, id="ghost-run", review_meta=dict(last["review_meta"], head=fixes))
+        with open(ledger, "a") as fh:
+            fh.write(json.dumps(ghost) + "\n")
+        self.commit_on(g, "feature", "api/totals.py", "# fix again\n")
+        newest = rev("feature")
+        p = self.review_feature(FAKE_REVIEW=self.REQUEST)
+        self.assertIn(f"was reviewed at {reviewed[:12]}", p.stdout)
+        call = self.calls()[-1]
+        self.assertIn(f"diff --stat {reviewed} {newest}", call["append"])
+        self.assertIn("rounding drops cents", call["task"])  # the earlier findings come along as context
+        self.assertNotIn(fixes[:12], call["task"].split("Re-review")[0])
 
 
 class RuleGlobTest(unittest.TestCase):
