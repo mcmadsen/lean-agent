@@ -980,7 +980,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("4 edited tests, 1 defaults, 2 module state", out)
         self.assertIn("coverage not checked for 4 of 4 edited tests", out)
         self.assertNotIn("REVIEW: APPROVE", out)
-        self.assertIn("reviewer: sonnet, effort high (expected ~$", out)
+        self.assertRegex(out, r"reviewer: sonnet( \(\d+ lines\))?, effort high \(expected ~\$")
         self.assertIn("high-risk change (touches", out)
         append = self.calls()[-1]["append"]
         self.assertIn("capturedAtMs = Date.now()", append)
@@ -7158,23 +7158,23 @@ class CliTest(unittest.TestCase):
         g("checkout", "-qb", "release/1.2", "main")
         self.write_commit(g, {"src/code.py": "x = 3\n"}, "release work")
         self.assert_skipped("release/1.2", "branch release/1.2")
-        self.assertIn("branches=release/*", self.cli("config", "review-skip", "-p", "proj").stdout)
-        self.cli("config", "review-skip", "-p", "proj", "docs-only,branches=hotfix/*|rel/*")
-        out = self.cli("config", "review-skip", "-p", "proj").stdout
+        self.assertIn("branches=release/*", self.cli("config", "-p", "proj", "review-skip").stdout)
+        self.cli("config", "-p", "proj", "review-skip", "docs-only,branches=hotfix/*|rel/*")
+        out = self.cli("config", "-p", "proj", "review-skip").stdout
         self.assertIn("review-skip for proj: docs-only,branches=hotfix/*|rel/*", out)
         g("checkout", "-qb", "release/1.3", "main")
         self.write_commit(g, {"src/code.py": "x = 4\n"}, "more release work")
         self.review_branch("release/1.3")
         self.assertEqual(len(self.real_reviews()), 1)
-        self.assertEqual(self.cli("config", "review-skip", "-p", "proj", "bogus", check=False).returncode, 1)
-        self.cli("config", "review-skip", "-p", "proj", "off")
+        self.assertEqual(self.cli("config", "-p", "proj", "review-skip", "bogus", check=False).returncode, 1)
+        self.cli("config", "-p", "proj", "review-skip", "off")
         g("checkout", "-qb", "docs", "main")
         self.write_commit(g, {"README.md": "# hi\n"}, "docs")
         self.review_branch("docs")
         self.assertEqual(len(self.real_reviews()), 2)
-        self.cli("config", "review-skip", "-p", "proj", "default")
+        self.cli("config", "-p", "proj", "review-skip", "default")
         self.assertIn("version-bump,merge-only,docs-only,tests-only,branches=release/*",
-                      self.cli("config", "review-skip", "-p", "proj").stdout)
+                      self.cli("config", "-p", "proj", "review-skip").stdout)
 
     def test_a_re_review_continues_from_the_last_reviewed_head_not_the_latest_run(self):
         g = self.git_project()
