@@ -380,6 +380,10 @@ Existing names get `-2`, `-3`; every name passes `git check-ref-format --branch`
 (`--worktree my-branch`) and old `lean/*` branches keep working. `release/*` is guarded by default: creating it
 locally is fine, pushing it stays blocked unless you allow it (`lean-agent guard`). `doctor` shows the rules.
 
+`--worktree auto` is for workers that write: a read-only worker gets no new branch. The name is chosen and the branch
+created under a lock, so parallel runs never pick the same name. `auto` is a reserved value: a branch literally named
+auto is given as `refs/heads/auto` or `heads/auto`.
+
 ## Shared worktrees
 
 `lean-agent run <project> --worktree <branch> ...` runs the worker in a git worktree of that branch at
