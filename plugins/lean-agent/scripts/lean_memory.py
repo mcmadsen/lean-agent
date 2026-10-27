@@ -16,6 +16,8 @@ import json
 import os
 import re
 
+import lean_rules
+
 TYPES = ("user", "feedback", "project", "reference")
 GLOBAL = "global"
 
@@ -124,6 +126,7 @@ def read_all(d):
             "type": meta.get("type") if meta.get("type") in TYPES else "project",
             "scope": meta.get("scope") or GLOBAL,
             "modified": meta.get("modified", ""),
+            "created": meta.get("created") or meta.get("modified", ""),  # backfilled from `modified` when missing
         })
     return out
 
@@ -155,14 +158,58 @@ def rebuild_index(d):
         fh.write("\n".join(lines) + "\n")
 
 
-def add(d, text, mtype="project", scope=GLOBAL, name=None, source=None, rebuild=True, description=None, stem=None):
-    """Write one memory unless the same text is already stored. Returns its path, or None for a duplicate."""
+def _now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def _targets(text, mtype):
+    return lean_rules.classify(text, mtype)["targets"]
+
+
+def _same(a_text, a_name, a_type, b):
+    """Near-identical: token-set similarity >= 0.75 of the text or title, with the same rule targets."""
+    return (b["scope"] and lean_rules.near_duplicate(a_text, a_name, b["body"], b["name"],
+                                                     _targets(a_text, a_type), _targets(b["body"], b["type"])))
+
+
+def _detail(text, limit=160):
+    return " ".join(text.split())[:limit]
+
+
+def _append_detail(m, text):
+    """Add a dated line with the new detail to an existing memory (kept short); returns its path."""
+    with open(m["file"], encoding="utf-8", errors="replace") as fh:
+        meta, body = parse(fh.read())
+    detail = _detail(text)
+    if lean_rules.tokens(detail) <= lean_rules.tokens(body):
+        return m["file"]  # nothing new to add
+    body += f"\n- {datetime.date.today().isoformat()}: {detail}"
+    meta["modified"] = _now()
+    meta.setdefault("created", m["created"])
+    with open(m["file"], "w") as fh:
+        fh.write(_frontmatter(meta) + "\n" + body + "\n")
+    return m["file"]
+
+
+def add(d, text, mtype="project", scope=GLOBAL, name=None, source=None, rebuild=True, description=None, stem=None,
+        dedupe=True):
+    """Write one memory unless the same text is already stored. Returns its path, or None for a duplicate.
+    A near-identical entry (same scope, same targets) is updated with the new detail instead of getting a twin."""
     text = text.strip()
     if not text:
         return None
     digest = _digest(text)
-    if any(_digest(m["body"]) == digest for m in read_all(d)):
+    existing = read_all(d)
+    if any(_digest(m["body"]) == digest for m in existing):
         return None
+    if dedupe:
+        twin = next((m for m in existing if m["scope"] == (scope or GLOBAL)
+                     and _same(text, name or text.splitlines()[0][:60], mtype, m)), None)
+        if twin:
+            path = _append_detail(twin, text)
+            if rebuild:
+                rebuild_index(d)
+            return path
     mtype = mtype if mtype in TYPES else "project"
     name = name or text.splitlines()[0][:60]
     base = _slug(name)
@@ -173,8 +220,7 @@ def add(d, text, mtype="project", scope=GLOBAL, name=None, source=None, rebuild=
     while os.path.exists(path):
         path, n = os.path.join(d, f"{stem}_{n}.md"), n + 1
     meta = {"name": name, "description": (description or text.splitlines()[0])[:120], "type": mtype, "scope": scope or GLOBAL,
-            "modified": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-            "source": source}
+            "created": _now(), "modified": _now(), "source": source}
     with open(path, "w") as fh:
         fh.write(_frontmatter(meta) + "\n" + text + "\n")
     if rebuild:
@@ -191,7 +237,7 @@ def import_dirs(d, sources, scope=GLOBAL):
         for m in read_all(src):
             ok = add(d, m["body"], m["type"], scope=m["scope"] if m["scope"] != GLOBAL else scope,
                      name=m["name"], source=f"imported from {m['file']}", rebuild=False,
-                     description=m["description"] or None, stem=m["stem"])
+                     description=m["description"] or None, stem=m["stem"], dedupe=False)
             added, skipped = (added + 1, skipped) if ok else (added, skipped + 1)
     rebuild_index(d)
     return added, skipped
@@ -228,7 +274,8 @@ def edit(d, ref, text=None, mtype=None, description=None, scope=None):
         meta["description"] = body.splitlines()[0][:120]
     if scope:
         meta["scope"] = scope
-    meta["modified"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    meta.setdefault("created", meta.get("modified") or _now())
+    meta["modified"] = _now()
     with open(m["file"], "w") as fh:
         fh.write(_frontmatter(meta) + "\n" + body + "\n")
     rebuild_index(d)
@@ -242,3 +289,39 @@ def remove(d, stem):
     os.remove(path)
     rebuild_index(d)
     return True
+
+
+def clusters(d, scopes=None):
+    """Groups (lists, oldest first) of near-duplicate memories of one scope and one type."""
+    mems = [m for m in read_all(d) if scopes is None or m["scope"] in scopes]
+    parent = list(range(len(mems)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i, a in enumerate(mems):
+        for j in range(i + 1, len(mems)):
+            b = mems[j]
+            if a["scope"] == b["scope"] and a["type"] == b["type"] and _same(a["body"], a["name"], a["type"], b):
+                parent[root(j)] = root(i)
+    groups = {}
+    for i, m in enumerate(mems):
+        groups.setdefault(root(i), []).append(m)
+    return [sorted(g, key=lambda m: (m["created"] or "9", m["stem"])) for g in groups.values() if len(g) > 1]
+
+
+def merge_cluster(d, group):
+    """Keep the oldest entry, append the others' extra detail (dated, short) and delete them. Returns the kept stem."""
+    keep, rest = group[0], group[1:]
+    for m in rest:
+        _append_detail(read_all_one(d, keep), m["body"])
+        os.remove(m["file"])
+    rebuild_index(d)
+    return keep["stem"]
+
+
+def read_all_one(d, m):
+    return next(x for x in read_all(d) if x["file"] == m["file"])
