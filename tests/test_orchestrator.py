@@ -1595,6 +1595,18 @@ class CliTest(unittest.TestCase):
         with open(os.path.join(self.env["LEAN_AGENT_HOME"], "ledger.jsonl")) as fh:
             self.assertNotIn("pat-value", fh.read())
 
+    def test_check_tool_is_a_read_only_tool_without_required_input(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_mcp
+        t = lambda n, req=None: {"name": n, "inputSchema": {"required": req} if req else {}}
+        pick = lambda *tools: (lean_mcp.pick_check_tool(list(tools)) or {}).get("name")
+        self.assertEqual(pick(t("delete_list"), t("create_project"), t("get_ticket", ["id"]), t("list_projects")), "list_projects")
+        self.assertEqual(pick(t("projects_list")), "projects_list")
+        self.assertEqual(pick(t("whoami")), "whoami")
+        self.assertIsNone(pick(t("get_ticket", ["id"]), t("set_default"), t("list_and_update"), t("add_get")))
+        self.assertIsNone(pick(t("forget_it"), t("budget"), t("find_project"), t("project")))  # unanchored words
+        self.assertIsNone(pick(t("put_get"), t("post_list")))
+
     def test_auth_variables_go_only_to_the_server_they_belong_to(self):
         sys.path.insert(0, os.path.dirname(CLI))
         import lean_mcp
