@@ -175,6 +175,24 @@ def _same(a_text, a_name, a_type, b):
 MAX_BODY = 2000
 
 
+_ENTRY_START = re.compile(r"(?m)^(?=- \d{4}-\d\d-\d\d: )")
+TRUNCATED = "[truncated]"
+
+
+def _trim_entries(body):
+    """Cap a body at MAX_BODY chars by dropping whole oldest entries (the text before the first dated line counts
+    as the oldest); never cuts inside an entry. A single entry over the cap keeps its head and is marked truncated."""
+    if len(body) <= MAX_BODY:
+        return body
+    parts = [p for p in _ENTRY_START.split(body) if p.strip()]
+    while len(parts) > 1 and len("".join(parts).rstrip()) > MAX_BODY:
+        parts.pop(0)
+    body = "".join(parts).rstrip()
+    if len(body) > MAX_BODY:
+        body = body[:MAX_BODY - len(TRUNCATED) - 1].rstrip() + " " + TRUNCATED
+    return body
+
+
 def _append_detail(m, text, force=False):
     """Add the new text under a dated line to an existing memory; the entry is capped at MAX_BODY chars, keeping
     the newest parts. Returns its path."""
@@ -184,9 +202,7 @@ def _append_detail(m, text, force=False):
     if _norm(text) in _norm(body) or not force and lean_rules.tokens(text) <= lean_rules.tokens(body):
         return m["file"]  # nothing new to add
     body = body.rstrip() + f"\n- {datetime.date.today().isoformat()}: {text}"
-    if len(body) > MAX_BODY:
-        body = body[-MAX_BODY:]
-        body = body[body.index("\n") + 1:] if "\n" in body else body
+    body = _trim_entries(body)
     meta["modified"] = _now()
     meta.setdefault("created", m["created"])
     with open(m["file"], "w") as fh:
