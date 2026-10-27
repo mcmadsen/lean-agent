@@ -4675,8 +4675,8 @@ class CliTest(unittest.TestCase):
         r = self.cli("thread", "new", "delta topic", check=False)
         self.assertNotEqual(r.returncode, 0)
         err = r.stderr + r.stdout
-        self.assertRegex(err, r't2 "beta topic" idle \d+[mhd], running run 0101-000000-aaaa')
-        self.assertRegex(err, r't3 "gamma topic" idle \d+[mhd], running run 0101-000001-aaaa')
+        self.assertRegex(err, r't2 "beta topic" idle \d+[mhd], 1 running')
+        self.assertRegex(err, r't3 "gamma topic" idle \d+[mhd], 1 running')
         p.terminate()
         p.wait(timeout=30)
 
