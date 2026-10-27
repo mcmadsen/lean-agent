@@ -7123,6 +7123,24 @@ class ReviewUnitTest(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, True)
 
+    def test_gaps_declined_earlier_or_excused_by_their_own_text_are_not_shown(self):
+        agent = self.agent
+        declined = [{"gap": "the update URL is a placeholder, never hosted for the second browser", "file": "docs/DIST.md"}]
+        same = {"what": "The update URL is a placeholder: never hosted for the second browser!", "file": "docs/DIST.md"}
+        other = {"what": "retry on timeout is missing from the uploader", "file": "src/up.py"}
+        self.assertTrue(agent.gap_declined(same, declined))
+        self.assertFalse(agent.gap_declined(other, declined))
+        review = {"verdict": "approve", "gaps": [
+            {"what": "only the warning dialog is handled; documented in the README", "file": "src/a.py", "blocks_goal": False},
+            {"what": "the second package is out of scope for this change", "file": "src/b.py"},
+            {"what": "documented but the build still fails", "file": "src/c.py", "blocks_goal": True},
+            dict(same), dict(other)]}
+        verdict, findings, checks, notes = agent.enforce_review_rules(review, {"head": "abc"}, declined)
+        shown = [g["file"] for g in review["_gaps"]]
+        self.assertEqual(shown, ["src/c.py", "src/up.py"])
+        self.assertTrue(any("2 gap(s) auto-declined" in n for n in notes), notes)
+        self.assertTrue(any("gap(s) declined earlier" in n for n in notes), notes)
+
     def test_the_prompt_template_lists_every_symbol_and_edited_test(self):
         t = self.agent.answer_template({"files": ["a/x.py"], "symbols": ["foo (a/x.py)"]},
                                        {"tests": ["t.py: 'test_one' (assert edited)"]})
