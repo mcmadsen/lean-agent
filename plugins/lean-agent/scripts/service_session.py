@@ -171,7 +171,7 @@ def go_fresh(restart_host=False, wait=None, now=time.time, sleep=time.sleep):
         path = _load(lean_home("chat", "service.json")).get("transcript_path") or info().get("transcript") or ""
         offset = transcript_state(path)["size"]
         sent, _ = send(checkpoint_prompt())
-        limit = now() + (CLEAR_WAIT if wait is None else wait)
+        limit = now() + (_knob("LEAN_AGENT_CLEAR_WAIT", CLEAR_WAIT) if wait is None else wait)
         checkpointed = False
         while sent and now() < limit and not checkpointed:
             st = transcript_state(path, offset)
@@ -749,10 +749,11 @@ class Host:
             return {"ok": False, "error": str(exc)}
         return {"ok": False, "error": 'expected {"text": ...}, {"keys": ...}, {"ping": true} or {"tail": true}'}
 
-    def claim_socket(self, path, wait=SOCKET_WAIT):
+    def claim_socket(self, path, wait=None):
         """Free `path` for this bridge. A holder that is the previous `up` of this home still shutting down (it answers,
         or its socket file is still there) is waited for up to `wait` seconds; a socket nobody answers on is stale and
         removed. Only a bridge that keeps answering after that is refused."""
+        wait = _knob("LEAN_AGENT_SOCKET_WAIT", SOCKET_WAIT) if wait is None else wait
         end = time.time() + wait
         while os.path.exists(path):
             if not request({"ping": True}, timeout=2, key=self.key).get("ok"):  # a bridge that is closing down still answers
@@ -919,7 +920,7 @@ class Host:
                           + "\n".join(ANSI_TAIL_RE.sub("", self.tail_text()).replace("\r", "").splitlines()[-8:]),
                           file=sys.stderr, flush=True)
                     return rc
-                time.sleep(2)
+                time.sleep(_knob("LEAN_AGENT_RESTART_DELAY", 2))
             return 0
         finally:
             if restore:
@@ -951,9 +952,10 @@ def max_thread_sessions():
         return MAX_THREAD_SESSIONS
 
 
-def wait_ready(host, quiet=None, limit=READY_WAIT):
+def wait_ready(host, quiet=None, limit=None):
     """Until the new session has printed something and then been quiet for `quiet` seconds (its input box is up)."""
     quiet = _knob("LEAN_AGENT_READY_QUIET", READY_QUIET) if quiet is None else quiet
+    limit = _knob("LEAN_AGENT_READY_WAIT", READY_WAIT) if limit is None else limit
     end = time.time() + limit
     last, since = -1, time.time()
     while time.time() < end and not host.stopping.is_set():
@@ -1012,12 +1014,12 @@ class Sessions:
         finally:
             update_session(tid, pid=None, host_pid=None)
 
-    def stop(self, tid, wait=20):
+    def stop(self, tid, wait=None):
         host = self.hosts.get(tid)
         if not host:
             return False
         host.stop()
-        host.thread.join(timeout=wait)
+        host.thread.join(timeout=_knob("LEAN_AGENT_STOP_WAIT", 20) if wait is None else wait)
         update_session(tid, pid=None, host_pid=None)
         return True
 
