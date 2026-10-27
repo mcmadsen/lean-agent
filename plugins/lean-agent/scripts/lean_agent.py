@@ -3773,20 +3773,32 @@ def is_merge_only(path, since, sha, base):
     return bool(merges) and all(git(path, "show", "--format=", "--cc", m) == "" for m in merges)
 
 
+def is_docs_file(f):
+    """Prose docs: *.md or docs/, but not what ships as prompts or templates (those change behaviour)."""
+    parts = f.split("/")
+    if "prompts" in parts[:-1] or "templates" in parts[:-1]:
+        return False
+    return f.endswith(".md") or f.startswith("docs/")
+
+
 def skip_reason(slug, path, label, mode, sha, mb, base):
-    """Why this change needs no review under the project's review-skip policy, or ''."""
+    """Why this change needs no review under the project's review-skip policy, or ''. The change judged is what
+    came in since the branch's last real review when there is one, else the whole branch diff."""
     classes, patterns = review_skip_setting(slug)
     names = {bare_ref(label), branch_of(path, label) if mode == "ref" else ""} - {""}
-    if any(fnmatch.fnmatch(n, p) for n in names for p in patterns):
-        return "branch " + sorted(names)[0]
-    files = (git(path, "diff", "--name-only", mb, sha) or "").split("\n")
-    files = [f for f in files if f]
     earlier = last_review(slug, path, label)  # a merge since a review that asked for changes is not waved through
+    lo = mb
+    if earlier and git(path, "merge-base", "--is-ancestor", earlier["head"], sha) is not None:
+        lo = earlier["head"]
+    files = [f for f in (git(path, "diff", "--name-only", lo, sha) or "").split("\n") if f]
     since = earlier["head"] if earlier and approved(earlier.get("verdict")) else mb
-    checks = {"version-bump": lambda: bool(files) and is_version_bump(path, mb, sha, files),
+    checks = {"version-bump": lambda: bool(files) and is_version_bump(path, lo, sha, files),
               "merge-only": lambda: is_merge_only(path, since, sha, base),
-              "docs-only": lambda: bool(files) and all(f.endswith(".md") or f.startswith("docs/") for f in files),
+              "docs-only": lambda: bool(files) and all(is_docs_file(f) for f in files),
               "tests-only": lambda: bool(files) and all(TEST_FILE.search(f) for f in files)}
+    if any(fnmatch.fnmatch(n, p) for n in names for p in patterns):
+        # a release branch is waved through only while it just takes version bumps, merges and docs
+        return "branch " + sorted(names)[0] if any(checks[c]() for c in ("version-bump", "merge-only", "docs-only")) else ""
     return next((c for c in classes if checks[c]()), "")
 
 
