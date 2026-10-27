@@ -2759,6 +2759,11 @@ def is_skipped(verdict):
     return str(verdict or "").startswith("skipped")
 
 
+def is_real_review(r):
+    """A review that looked at code: a policy skip (flagged, or recorded as `skipped (...)`) is not the latest review."""
+    return not r.get("skip") and not is_skipped(r.get("verdict"))
+
+
 def approved(verdict):
     """A skipped review (policy, empty range) counts as approved."""
     return verdict == "approve" or is_skipped(verdict)
@@ -2784,7 +2789,7 @@ def refresh_review_meta(path, meta, fetch=True):
 def previous_findings(slug, label, mode):
     """The latest recorded review of the same branch/ref, for a fresh review to check against."""
     for r in reversed(list(read_jsonl(reviews_path(slug)))):
-        if r.get("ref") == label and r.get("mode", "worktree") == mode:
+        if is_real_review(r) and r.get("ref") == label and r.get("mode", "worktree") == mode:
             return r
     return None
 
@@ -3065,8 +3070,8 @@ def add_to_review_cards(slug, checklist=(), helpers=(), replace=()):
 def latest_review(slug, path, head):
     """The latest review recorded for the project, or for the branch `head` when given."""
     br = branch_of(path, head) if head else ""
-    return next((r for r in reversed(list(read_jsonl(reviews_path(slug)))) if not head or r.get("ref") == head
-                 or (br and (r.get("branch") or branch_of(path, r.get("ref"))) == br)), None)
+    return next((r for r in reversed(list(read_jsonl(reviews_path(slug)))) if is_real_review(r) and (not head or r.get("ref") == head
+                 or (br and (r.get("branch") or branch_of(path, r.get("ref"))) == br))), None)
 
 
 def cmd_review_decline(a):
@@ -3386,7 +3391,7 @@ def cmd_review_learn(a):
             die("reading a pull request's threads needs its tracker: --mcp <server>:<preset or tools> "
                 "(see: lean-agent mcp list)")
         last = next((r for r in reversed(list(read_jsonl(reviews_path(slug))))
-                     if not a.head or r.get("ref") == a.head), None)
+                     if is_real_review(r) and (not a.head or r.get("ref") == a.head)), None)
         ours = "\n".join(f"- [{f.get('severity')}] {f.get('file')}: {f.get('issue')}"
                          for f in (last or {}).get("findings", [])[:20]) or (
             "- (no findings)" if last else "- (no lean-agent review recorded)")
@@ -3796,7 +3801,7 @@ def rerounds(slug, path, label, sha):
 def record_skip(slug, path, a, sha, label, mode, base, reason):
     """Record `skipped (<reason>)` as the branch's verdict: it counts as approved for --status."""
     verdict = f"skipped ({reason})"
-    append_jsonl(reviews_path(slug), {"ts": now_iso(), "run": "skipped", "thread": None, "verdict": verdict, "head": sha,
+    append_jsonl(reviews_path(slug), {"ts": now_iso(), "run": "skipped", "skip": True, "thread": None, "verdict": verdict, "head": sha,
                                       "dirty": "", "ref": label, "mode": mode, "base": base, "findings": [], "checks": [],
                                       "reuse": [], "new_symbols": [], "unchecked": [], "disputed": [],
                                       "coverage_unchecked": [], "gaps": [], "goal": None,
@@ -3875,6 +3880,18 @@ def cmd_review(a):
     return rc
 
 
+def skipped_status(slug, path, label, sha):
+    """--status after a policy skip: the last real review's status if it left open gaps, else approved."""
+    real = last_review(slug, path, label)
+    if not real:
+        return 0
+    open_gaps = [g for g in real.get("gaps") or [] if not gap_declined(g, declined_for(slug, real.get("ref"), path, sha))]
+    if not open_gaps:
+        return 0
+    print(f"  the last real review ({real['run']}, {real['verdict']}) left {len(open_gaps)} known gap(s) not acknowledged")
+    return 2 if approved(real["verdict"]) else 1
+
+
 def review_main(a):
     slug, path = resolve_project(a.project)
     if a.head and a.head.startswith("origin/") and not a.no_fetch:
@@ -3889,6 +3906,8 @@ def review_main(a):
                 print(f"  g{i}. {g.get('file', '?')}: {str(g.get('what', ''))[:140]}")
             if approved(match["verdict"]) and open_gaps:
                 return 2
+            if is_skipped(match["verdict"]):
+                return skipped_status(slug, path, label, sha)
             return 0 if approved(match["verdict"]) else 1
         prev_ = earlier_review(slug, path, a.head) if a.head else None
         old = ((prev_ or {}).get("review_meta") or {}).get("head")
