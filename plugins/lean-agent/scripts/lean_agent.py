@@ -3699,7 +3699,7 @@ def review_gate(a, slug, path):
     match, _ = find_review(slug, path, a.head)
     if match and (match.get("verdict") in ("approve", "changes-requested") or is_skipped(match.get("verdict"))):
         print(f"review: no new commits since {sha[:12]} — verdict {match['verdict']} stands")
-        return 0 if approved(match["verdict"]) else 1
+        return stored_exit(slug, path, match, label, sha)[0]
     base = a.base or default_base(path)
     mb = git(path, "merge-base", base, sha) if base else None
     if mode == "ref" and mb and git(path, "diff", "--name-only", mb, sha) == "":
@@ -3909,6 +3909,17 @@ def cmd_review(a):
     return rc
 
 
+def stored_exit(slug, path, match, label, sha):
+    """(exit code, open gaps) of a stored review: 2 for an approve that still has open gaps, 1 for changes
+    requested, 0 for an approve; after a policy skip, what the last real review left."""
+    open_gaps = [g for g in match.get("gaps") or [] if not gap_declined(g, declined_for(slug, match.get("ref"), path, sha))]
+    if approved(match["verdict"]) and open_gaps:
+        return 2, open_gaps
+    if is_skipped(match["verdict"]):
+        return skipped_status(slug, path, label, sha), open_gaps
+    return (0 if approved(match["verdict"]) else 1), open_gaps
+
+
 def skipped_status(slug, path, label, sha):
     """--status after a policy skip: the last real review's status if it left open gaps, else approved."""
     real = last_review(slug, path, label)
@@ -3928,16 +3939,12 @@ def review_main(a):
     if a.status:
         match, (sha, label) = find_review(slug, path, a.head)
         if match:
-            open_gaps = [g for g in match.get("gaps") or [] if not gap_declined(g, declined_for(slug, match.get("ref"), path, sha))]
+            code, open_gaps = stored_exit(slug, path, match, label, sha)
             print(f"review {match['run']} of {label} @ {sha[:12]}: {match['verdict']}"
                   + (f", {len(open_gaps)} known gap(s) not acknowledged" if open_gaps else ""))
             for i, g in enumerate(open_gaps, 1):
                 print(f"  g{i}. {g.get('file', '?')}: {str(g.get('what', ''))[:140]}")
-            if approved(match["verdict"]) and open_gaps:
-                return 2
-            if is_skipped(match["verdict"]):
-                return skipped_status(slug, path, label, sha)
-            return 0 if approved(match["verdict"]) else 1
+            return code
         prev_ = earlier_review(slug, path, a.head) if a.head else None
         old = ((prev_ or {}).get("review_meta") or {}).get("head")
         if old and old != sha:
