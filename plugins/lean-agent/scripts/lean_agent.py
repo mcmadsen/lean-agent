@@ -3799,12 +3799,16 @@ def skip_reason(slug, path, label, mode, sha, mb, base):
     came in since the branch's last real review when there is one, else the whole branch diff."""
     classes, patterns = review_skip_setting(slug)
     names = {bare_ref(label), branch_of(path, label) if mode == "ref" else ""} - {""}
-    earlier = last_review(slug, path, label)  # a merge since a review that asked for changes is not waved through
+    earlier = last_review(slug, path, label)
+    # only a clean approval narrows the range to what came in since it; after changes-requested, needs-checks or
+    # open gaps the whole branch diff is judged, so a docs-only follow-up does not wave findings through
+    settled = bool(earlier and approved(earlier.get("verdict")) and not
+                   [g for g in earlier.get("gaps") or [] if not gap_declined(g, declined_for(slug, earlier.get("ref"), path, sha))])
     lo = mb
-    if earlier and git(path, "merge-base", "--is-ancestor", earlier["head"], sha) is not None:
+    if settled and git(path, "merge-base", "--is-ancestor", earlier["head"], sha) is not None:
         lo = earlier["head"]
     files = [f for f in (git(path, "diff", "--name-only", lo, sha) or "").split("\n") if f]
-    since = earlier["head"] if earlier and approved(earlier.get("verdict")) else mb
+    since = lo
     checks = {"version-bump": lambda: bool(files) and is_version_bump(path, lo, sha, files),
               "merge-only": lambda: is_merge_only(path, since, sha, base),
               "docs-only": lambda: bool(files) and all(is_docs_file(f) for f in files),
