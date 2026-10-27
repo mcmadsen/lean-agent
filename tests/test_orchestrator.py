@@ -1712,6 +1712,21 @@ class CliTest(unittest.TestCase):
         self.assertIn("never archived", out.stdout)
         self.assertFalse(next(c for c in self.cards_json() if c["id"] == card["id"]).get("archived"))
 
+    def test_over_budget_rules_are_not_all_sent(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        path = os.path.join(self.env["LEAN_AGENT_HOME"], "library", "proj", "cards.json")
+        cards = self.cards_json()
+        for i in range(6):
+            cards.append({"id": f"mem-r{i}", "kind": "note", "title": f"rule {i}", "text": f"ZRULE{i} " + "word " * 20,
+                          "rule": True, "tokens": 150, "updated": f"2026-01-0{i + 1}", "targets": [],
+                          "offered": 0, "used": 0, "unneeded": 0})
+        with open(path, "w") as fh:
+            json.dump(cards, fh)
+        for cards_arg in ("auto", "mem-r0"):
+            self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--cards", cards_arg, "unrelated chores")
+            sent = json.dumps(self.calls()[-1])
+            self.assertEqual(sum(f"ZRULE{i}" in sent for i in range(6)), 2, cards_arg)
+
     def test_an_archived_rule_is_unarchived_when_the_library_loads(self):
         self.use_tracker()
         self.cli("learn", self.proj, "--name", "proj")
