@@ -3622,6 +3622,31 @@ def review_gate(a, slug, path):
     return None
 
 
+def review_max_rerounds():
+    v = config_json().get("review_max_rerounds")
+    return v if isinstance(v, int) and v >= 0 else 2
+
+
+def branch_reviews(slug, path, label):
+    """The recorded reviews of one branch, oldest first."""
+    br = branch_of(path, label) if label and label != "working tree" else ""
+    return [r for r in read_jsonl(reviews_path(slug))
+            if bare_ref(r.get("ref")) == bare_ref(label) or (br and r.get("branch") == br)]
+
+
+def rerounds(slug, path, label, sha):
+    """How many re-reviews in a row the branch's current lineage has had: delta reviews back from the latest review,
+    as long as each reviewed a head that `sha` builds on (a force-pushed head starts a new lineage)."""
+    n = 0
+    for r in reversed(branch_reviews(slug, path, label)):
+        if is_skipped(r.get("verdict")):
+            continue
+        if not r.get("delta") or git(path, "merge-base", "--is-ancestor", r.get("head") or "?", sha) is None:
+            break
+        n += 1
+    return n
+
+
 def record_skip(slug, path, a, sha, label, mode, base, reason):
     """Record `skipped (<reason>)` as the branch's verdict: it counts as approved for --status."""
     verdict = f"skipped ({reason})"
@@ -3719,6 +3744,11 @@ def review_main(a):
             else:
                 print(f"review: {size} changed lines since the review at {old[:12]} (over {delta_max}, "
                       "LEAN_AGENT_DELTA_MAX_LINES): a full review", flush=True)
+    if a.resume and not getattr(a, "force", False) and not a.independent:
+        sha, _, label, _ = review_target(path, a.head)
+        cap = review_max_rerounds()
+        if rerounds(slug, path, label, sha) >= cap:
+            die(f"re-review limit reached ({cap}) — ask the user, or --force")
     if a.resume:
         prev = earlier_review(slug, path, a.head)
         if not prev:
@@ -7705,6 +7735,19 @@ def cmd_config(a):
         print(f"max-thread-sessions: {service_session.max_thread_sessions()} · the thread sessions (one Remote Control "
               "item each) the service keeps running; `thread new` refuses above it until one is closed")
         return 0
+    if a.name == "review-max-rerounds":
+        if a.value is not None:
+            if not a.value.isdigit() and a.value.lower() != "default":
+                die("review-max-rerounds takes a number (0 = no re-reviews without --force) or default")
+            cfg = config_json()
+            if a.value.lower() == "default":
+                cfg.pop("review_max_rerounds", None)
+            else:
+                cfg["review_max_rerounds"] = int(a.value)
+            save_json(home("config.json"), cfg)
+        print(f"review-max-rerounds: {review_max_rerounds()} · re-reviews of one branch's lineage before `review "
+              "--resume` refuses (--force overrides)")
+        return 0
     if a.name == "clear-at":
         if a.value is not None:
             if not (a.value.isdigit() or a.value.lower() in ("auto", "off")):
@@ -9180,7 +9223,8 @@ def build_parser():
 
     s = sub.add_parser("config", help="switches: strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "max-thread-sessions N (thread sessions the service runs; default 8), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
-    s.add_argument("name", choices=["strict", "clear-at", "project-rules", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions"])
+    s.add_argument("name", choices=["strict", "clear-at", "project-rules", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
+                                           "review-max-rerounds", "review-skip"])
     s.add_argument("--project", "-p", help="project-rules: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)
