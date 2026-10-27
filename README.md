@@ -375,7 +375,7 @@ lean-agent run P --worktree auto [--branch-type bugfix] --todo 12 -- "Fix login 
 ```
 
 The type is inferred when not given: bugfix when the title has fix/bug/hotfix/regression/defect as a word, release when
-it starts with "release" (a release needs a version: `--version X`, or "Release 1.2" in the title), else feature.
+it starts with "release" plus a version (x.y or x.y.z, optional v) or names a release/ branch (a release needs a version: `--version X`, or "Release 1.2" in the title), else feature.
 Existing names get `-2`, `-3`; every name passes `git check-ref-format --branch`. Explicit branch names
 (`--worktree my-branch`) and old `lean/*` branches keep working. `release/*` is guarded by default: creating it
 locally is fine, pushing it stays blocked unless you allow it (`lean-agent guard`). `doctor` shows the rules.

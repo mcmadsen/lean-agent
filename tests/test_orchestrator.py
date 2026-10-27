@@ -6044,6 +6044,11 @@ class CliTest(unittest.TestCase):
                          "bugfix/123-login-times-out")
         self.assertEqual(bn("Release 2.1", "--version", "2.1").stdout.strip(), "release/release-2.1")
         self.assertEqual(bn("Release 3.0").stdout.strip(), "release/release-3.0")  # version from the title
+        self.assertEqual(bn("Release v2.1.3").stdout.strip(), "release/release-2.1.3")
+        for title in ("Release notes page", "Release 7 things", "Releases 2.0", "Update release process"):
+            self.assertTrue(bn(title).stdout.startswith("feature/"), title)  # no version after "release": a feature
+        self.assertTrue(bn("Cut release/2.0 from main", "--version", "2.0").stdout.startswith("release/"))
+        self.assertIn("--version X", bn("Release 7", "--type", "release", check=False).stderr)  # no bare integer
         p = bn("Release notes", "--type", "release", check=False)
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("--version X", p.stderr)
