@@ -191,7 +191,7 @@ def checkpoint_session(key="main", wait=None, now=time.time, sleep=time.sleep):
     sent, _ = send(checkpoint_prompt(), key)
     if not sent:
         return None
-    limit = now() + (CLEAR_WAIT if wait is None else wait)
+    limit = now() + (_knob("LEAN_AGENT_CLEAR_WAIT", CLEAR_WAIT) if wait is None else wait)
     while now() < limit:
         st = transcript_state(path, offset)
         if st["ended"] and "checkpointed" in st["text"].lower():
@@ -966,11 +966,15 @@ class Sessions:
                 host.thread.join(timeout=wait)
 
     def listing(self):
+        """The hosts the service supervises; state is "running" while the process is up, else "starting" (a host that is
+        coming up or being restarted)."""
         out = []
         for tid, host in sorted(self.hosts.items(), key=lambda kv: int(kv[0][1:]) if kv[0][1:].isdigit() else 0):
-            if self.running(tid) and host.alive():
+            if self.running(tid):
+                up = host.alive()
                 rec = session_rec(tid)
-                out.append({"thread": tid, "name": rec.get("name"), "pid": host.proc.pid,
+                out.append({"thread": tid, "name": rec.get("name"), "pid": host.proc.pid if up else None,
+                            "state": "running" if up else "starting",
                             "idle": round(time.time() - max(host.last_output, host.last_input))})
         return out
 

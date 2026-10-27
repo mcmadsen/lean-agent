@@ -8591,21 +8591,26 @@ THREAD_START_PENDING = 60  # seconds a just-started thread session counts before
 
 
 def close_thread_session(tid):
-    """Checkpoint (when it answers) and stop a thread's host (when its process is alive), then clear session_on and the
-    host record at once. Idempotent. Returns (a host was stopped, checkpoint result)."""
+    """Checkpoint (when it answers) and stop a thread's host, but only when the service lists it as hosted; then clear
+    session_on and the host record at once. Idempotent. Returns (a host was stopped, checkpoint result, a stale
+    record or flag was cleared)."""
     ok, stopped = None, False
     rec = service_session.session_rec(tid)
-    if service_session.alive(tid):
-        ok = service_session.checkpoint_session(tid)
-    if service_session.alive(tid) or pid_alive(rec.get("host_pid")):
+    listed = service_session.sessions_request("list", timeout=5)
+    hosted = bool(listed.get("ok")) and any(x.get("thread") == tid for x in listed.get("sessions") or [])
+    if hosted:
+        if service_session.alive(tid):
+            ok = service_session.checkpoint_session(tid)
         service_session.sessions_request("stop", thread=tid)
         stopped = True
+    t = lean_threads.load()["threads"].get(tid) or {}
+    stale = not stopped and bool(rec or t.get("session_on"))
     try:
         lean_threads.set_session(tid, session_on=None)
     except ValueError:  # a host record of a thread that no longer exists
         pass
     service_session.drop_session(tid)
-    return stopped, ok
+    return stopped, ok, stale
 
 
 def open_thread_sessions():
@@ -8627,18 +8632,24 @@ def open_thread_sessions():
         started = rec.get("host_started") or 0
         alive = bool(rec.get("host_pid")) and pid_alive(rec["host_pid"])
         pending = alive and now - started < THREAD_START_PENDING
-        if alive and (listing is None or tid in listing) or pending:
+        coming_up = bool(listing) and (listing.get(tid) or {}).get("state") == "starting"  # the service is (re)starting it
+        if alive and (listing is None or tid in listing) or pending or coming_up:
             x = listing.get(tid) if listing else None
             out.append({"thread": tid, "title": t.get("title") or "", "pid": x and x.get("pid") or rec.get("pid"),
                         "name": (x and x.get("name")) or rec.get("name") or service_session.thread_session_name(tid, t.get("title")),
                         "idle": x["idle"] if x else round(now - started) if started else 0, "started": started})
-        elif rec:
-            service_session.drop_session(tid)
+        elif rec and (alive or listing is None or not rec.get("host_pid") or now - started > THREAD_START_PENDING):
+            service_session.drop_session(tid)  # neither listed nor alive (a live host the service does not list is stale too)
     return out
 
 
 def _idle_age(sec):
     return lean_threads.age(datetime.datetime.fromtimestamp(time.time() - sec).isoformat(timespec="seconds"))
+
+
+def thread_start_lock():
+    """Held from the cap check to the end of the start, so parallel callers see each other's sessions."""
+    return lean_common.file_lock(home("thread-start"))
 
 
 def make_room_for_thread_session(tid=None):
@@ -8681,14 +8692,15 @@ def cmd_thread(a):
             if prompt:
                 die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
             return lean_threads.cli("new", a.args, a.json)
-        make_room_for_thread_session()
-        tid = lean_threads.new(a.args[0])
-        t = lean_threads.load()["threads"][tid]
-        try:
-            name = start_thread_session(tid, t, prompt)
-        except RuntimeError as exc:
-            lean_threads.discard(tid)  # a thread nobody can talk to is not left behind
-            die(f"{exc} (thread {tid} was removed)")
+        with thread_start_lock():  # the cap check and the start are one step: parallel `thread new` cannot exceed the cap
+            make_room_for_thread_session()
+            tid = lean_threads.new(a.args[0])
+            t = lean_threads.load()["threads"][tid]
+            try:
+                name = start_thread_session(tid, t, prompt)
+            except RuntimeError as exc:
+                lean_threads.discard(tid)  # a thread nobody can talk to is not left behind
+                die(f"{exc} (thread {tid} was removed)")
         print(f'thread {tid} started: Remote Control "{name}"')
         return 0
     if act in ("send", "open"):
@@ -8701,21 +8713,30 @@ def cmd_thread(a):
         if not service_session.alive():
             die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
         running = service_session.alive(tid)
-        if not running:
-            make_room_for_thread_session(tid)
-        if t.get("closed"):
-            lean_threads.set_closed(tid, False)
         if running:
+            if t.get("closed"):
+                lean_threads.set_closed(tid, False)
             if prompt:
                 ok, err = service_session.send(prompt, tid)
                 if not ok:
                     die(f"{tid}: {err}")
             print(f"{tid} is running" + (": message sent" if prompt else ""))
             return 0
-        try:
-            name = start_thread_session(tid, t, prompt)
-        except RuntimeError as exc:
-            die(str(exc))
+        with thread_start_lock():
+            if service_session.alive(tid):  # another call started it while this one waited
+                if prompt:
+                    ok, err = service_session.send(prompt, tid)
+                    if not ok:
+                        die(f"{tid}: {err}")
+                print(f"{tid} is running" + (": message sent" if prompt else ""))
+                return 0
+            make_room_for_thread_session(tid)
+            if t.get("closed"):
+                lean_threads.set_closed(tid, False)
+            try:
+                name = start_thread_session(tid, t, prompt)
+            except RuntimeError as exc:
+                die(str(exc))
         print(f'thread {tid} ' + ("started" if t.get("session_id") is None else "resumed") + f': Remote Control "{name}"'
               + (": message sent" if prompt else ""))
         return 0
@@ -8723,9 +8744,11 @@ def cmd_thread(a):
         if len(a.args) != 1:
             die("usage: lean-agent thread close tN")
         tid, t = thread_session_tid(a.args[0])
-        stopped, ok = close_thread_session(tid)
+        stopped, ok, stale = close_thread_session(tid)
         if stopped:
             print(f"{tid}: session stopped" + ("" if ok is None else " (checkpointed)" if ok else " (no checkpoint reply in time)"))
+        elif stale:
+            print(f"{tid}: no running session; record cleared")
         return lean_threads.cli("close", [tid], a.json)
     return lean_threads.cli(act, a.args + (["--all"] if a.all else []), a.json)
 

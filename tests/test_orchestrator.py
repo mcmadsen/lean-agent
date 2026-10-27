@@ -4660,6 +4660,96 @@ class CliTest(unittest.TestCase):
         p.terminate()
         p.wait(timeout=30)
 
+    def test_close_of_a_thread_the_service_does_not_host_only_clears_the_record(self):
+        p, log, ss = self.start_up()
+        lt = self.threads_home()
+        tid = lt.new("ghost")
+        lt.set_session(tid, session_on=True)
+        ss.update_session(tid, host_pid=os.getpid(), host_started=time.time())  # a live pid the service does not host
+        out = self.cli("thread", "close", tid).stdout
+        self.assertIn(f"{tid}: no running session; record cleared", out)
+        self.assertNotIn("session stopped", out)
+        self.assertIsNone(lt.load()["threads"][tid].get("session_on"))
+        self.assertNotIn(tid, ss.session_rec("main").get("sessions") or {})
+        p.terminate()
+        p.wait(timeout=30)
+
+    def open_sessions_with_listing(self, listed, rec):
+        import lean_agent as L
+        import service_session
+        lt = self.threads_home()
+        tid = lt.new("coming up")
+        lt.set_session(tid, session_on=True)
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(service_session, "session_rec", side_effect=lambda k="main": {"sessions": {tid: rec}} if k == "main" else rec), \
+                mock.patch.object(service_session, "sessions_request", return_value={"ok": True, "sessions": listed(tid)}), \
+                mock.patch.object(service_session, "drop_session") as drop:
+            return tid, L.open_thread_sessions(), drop
+
+    def test_a_host_the_service_lists_as_starting_keeps_its_record(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        rec = {"host_pid": dead.pid, "host_started": time.time() - 3600}
+        tid, out, drop = self.open_sessions_with_listing(lambda t: [{"thread": t, "state": "starting", "idle": 0, "pid": None}], rec)
+        self.assertEqual([x["thread"] for x in out], [tid])
+        drop.assert_not_called()
+
+    def test_an_unlisted_dead_host_record_is_pruned_after_the_pending_window(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        tid, out, drop = self.open_sessions_with_listing(lambda t: [], {"host_pid": dead.pid, "host_started": time.time() - 3600})
+        self.assertEqual(out, [])
+        drop.assert_called_once_with(tid)
+        tid, out, drop = self.open_sessions_with_listing(lambda t: [], {"host_pid": dead.pid, "host_started": time.time() - 5})
+        self.assertEqual(out, [])
+        drop.assert_not_called()  # a record this young may still be coming up
+
+    def test_parallel_thread_new_cannot_exceed_the_cap(self):
+        """The cap check and the start are one locked step: two concurrent `thread new` never overlap in it."""
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        import service_session
+        self.threads_home()
+        inside, peak, guard = [0], [0], threading.Lock()
+
+        def enter(*a, **k):
+            with guard:
+                inside[0] += 1
+                peak[0] = max(peak[0], inside[0])
+
+        def start(tid, t, prompt=None):
+            time.sleep(0.5)  # the window in which a second caller would see the cap not yet reached
+            with guard:
+                inside[0] -= 1
+            return "name"
+        args = argparse.Namespace(action="new", args=["parallel"], prompt_file=None, json=False, all=False)
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(L, "thread_prompt", return_value=None), \
+                mock.patch.object(service_session, "alive", return_value=True), \
+                mock.patch.object(L, "make_room_for_thread_session", side_effect=enter), \
+                mock.patch.object(L, "start_thread_session", side_effect=start), \
+                contextlib.redirect_stdout(io.StringIO()):
+            ts = [threading.Thread(target=L.cmd_thread, args=(args,)) for _ in range(2)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(30)
+        self.assertEqual(inside[0], 0)
+        self.assertEqual(peak[0], 1)
+
+    def test_restart_with_more_open_threads_than_the_cap_resumes_only_the_most_recent(self):
+        lt = self.threads_home()
+        for i in range(3):
+            lt.set_session(lt.new(f"open {i}"), session_on=True)
+        self.cli("config", "max-thread-sessions", "2")
+        p, log, ss = self.start_up()
+        self.wait_for(lambda: ss.alive("t2") and ss.alive("t3"), "the two most recent threads resumed")
+        self.assertFalse(ss.alive("t1"))
+        self.assertTrue(lt.load()["threads"]["t1"].get("session_on"))  # still meant to be open, just not resumed
+        p.terminate()
+        p.wait(timeout=30)
+
     def test_service_restart_resumes_open_sessions_with_stale_host_records_and_counts_them_once(self):
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "2")
