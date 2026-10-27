@@ -8038,10 +8038,11 @@ def close_thread_session(tid):
 
 
 def open_thread_sessions():
-    """The thread sessions that are open: [{thread, title, name, pid, idle, started}], oldest id first. A thread counts
-    when its host process is alive (and the service lists it), or it started less than THREAD_START_PENDING seconds ago.
-    Records of dead hosts are pruned (host record dropped, session_on cleared). The one count the cap and
-    `thread sessions` both use."""
+    """The thread sessions hosted now: [{thread, title, name, pid, idle, started}], oldest id first. A thread counts
+    when its recorded host process is alive (and the service lists it), or the host started less than
+    THREAD_START_PENDING seconds ago and its process is alive; a record without a host pid is not pending. Dead host
+    records are dropped, but session_on (the thread's session is meant to be open: the service resumes it when it
+    starts) stays until the thread is closed. The one count the cap and `thread sessions` both use."""
     now = time.time()
     threads = lean_threads.load()["threads"]
     recs = service_session.session_rec("main").get("sessions")
@@ -8052,21 +8053,16 @@ def open_thread_sessions():
     for tid in sorted(set(recs) | {k for k, t in threads.items() if t.get("session_on")},
                       key=lambda k: int(k[1:]) if k[1:].isdigit() else 0):
         rec, t = recs.get(tid) or {}, threads.get(tid) or {}
-        started = rec.get("host_started") or t.get("session_on_at") or 0
-        pending = now - started < THREAD_START_PENDING
-        host_up = pid_alive(rec.get("host_pid")) and (listing is None or tid in listing)
-        if host_up or pending and (not rec.get("host_pid") or pid_alive(rec["host_pid"])):
+        started = rec.get("host_started") or 0
+        alive = bool(rec.get("host_pid")) and pid_alive(rec["host_pid"])
+        pending = alive and now - started < THREAD_START_PENDING
+        if alive and (listing is None or tid in listing) or pending:
             x = listing.get(tid) if listing else None
             out.append({"thread": tid, "title": t.get("title") or "", "pid": x and x.get("pid") or rec.get("pid"),
                         "name": (x and x.get("name")) or rec.get("name") or service_session.thread_session_name(tid, t.get("title")),
                         "idle": x["idle"] if x else round(now - started) if started else 0, "started": started})
-        elif rec or t.get("session_on"):
-            try:
-                if t.get("session_on"):
-                    lean_threads.set_session(tid, session_on=None, session_on_at=None)
-                service_session.drop_session(tid)
-            except ValueError:
-                pass
+        elif rec:
+            service_session.drop_session(tid)
     return out
 
 
