@@ -2886,6 +2886,34 @@ class CliTest(unittest.TestCase):
         p = self.cli("up", LEAN_AGENT_CLAUDE=fake, check=False)
         self.assertIn("often the Claude desktop app", p.stdout)
 
+    def test_session_wait_overrides_are_read_at_use_time(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import service_session as ss
+        for name in ("SOCKET_WAIT", "READY_WAIT", "STOP_WAIT", "RESTART_DELAY"):
+            default = getattr(ss, name)
+            env = "LEAN_AGENT_SESSION_" + name
+            with mock.patch.dict(os.environ, {env: "7.5"}):
+                self.assertEqual(ss._session_wait(name, default, default), 7.5, name)
+                self.assertEqual(ss._session_wait(name, 3, default), 3, name)  # an explicit wait wins
+            with mock.patch.dict(os.environ, {env: "junk"}):
+                self.assertEqual(ss._session_wait(name, default, default), default, name)
+            self.assertEqual(ss._session_wait(name, default, default), default, name)
+        self.assertEqual(ss.Sessions.stop.__defaults__, (ss.STOP_WAIT,))
+        self.assertEqual(ss.wait_ready.__defaults__, (None, ss.READY_WAIT))
+        self.assertEqual(ss.Host.claim_socket.__defaults__, (ss.SOCKET_WAIT,))
+
+    def test_stop_joins_for_the_session_stop_wait_override(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import service_session as ss
+        host = mock.Mock()
+        sessions = ss.Sessions.__new__(ss.Sessions)
+        sessions.hosts = {"t1": host}
+        with mock.patch.object(ss, "update_session"), mock.patch.dict(os.environ, {"LEAN_AGENT_SESSION_STOP_WAIT": "4"}):
+            self.assertTrue(sessions.stop("t1"))
+            host.thread.join.assert_called_with(timeout=4.0)
+            sessions.stop("t1", wait=1)
+            host.thread.join.assert_called_with(timeout=1)
+
     def test_a_second_up_waits_for_the_previous_one_to_let_go_of_the_socket(self):
         sys.path.insert(0, os.path.dirname(CLI))
         import service_session
