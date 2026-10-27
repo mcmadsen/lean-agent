@@ -2750,8 +2750,17 @@ def decisive(records):
     changes-requested); a later needs-checks run (a check, a --resume test) doesn't hide it. None if empty."""
     if not records:
         return None
-    decided = [r for r in records if r.get("verdict") in ("approve", "changes-requested")]
+    decided = [r for r in records if r.get("verdict") in ("approve", "changes-requested") or is_skipped(r.get("verdict"))]
     return (decided or records)[-1]
+
+
+def is_skipped(verdict):
+    return str(verdict or "").startswith("skipped")
+
+
+def approved(verdict):
+    """A skipped review (policy, empty range) counts as approved."""
+    return verdict == "approve" or is_skipped(verdict)
 
 
 def refresh_review_meta(path, meta, fetch=True):
@@ -3594,6 +3603,39 @@ def decide_gaps(a):
     return 2 if asks else 0
 
 
+def review_gate(a, slug, path):
+    """Reviews that need no run: the head was reviewed already and nothing changed since, or the range is empty.
+    Returns the exit code to stop with, else None. --force reviews anyway."""
+    if getattr(a, "force", False) or a.independent:
+        return None
+    if a.head and not git(path, "rev-parse", "--verify", "--quiet", a.head + "^{commit}"):
+        return None  # unknown ref: the review itself says so
+    sha, dirty, label, mode = review_target(path, a.head)
+    match, _ = find_review(slug, path, a.head)
+    if match and (match.get("verdict") in ("approve", "changes-requested") or is_skipped(match.get("verdict"))):
+        print(f"review: no new commits since {sha[:12]} — verdict {match['verdict']} stands")
+        return 0 if approved(match["verdict"]) else 1
+    base = a.base or default_base(path)
+    mb = git(path, "merge-base", base, sha) if base else None
+    if mode == "ref" and mb and git(path, "diff", "--name-only", mb, sha) == "":
+        return record_skip(slug, path, a, sha, label, mode, base, "empty range")
+    return None
+
+
+def record_skip(slug, path, a, sha, label, mode, base, reason):
+    """Record `skipped (<reason>)` as the branch's verdict: it counts as approved for --status."""
+    verdict = f"skipped ({reason})"
+    append_jsonl(reviews_path(slug), {"ts": now_iso(), "run": "skipped", "thread": None, "verdict": verdict, "head": sha,
+                                      "dirty": "", "ref": label, "mode": mode, "base": base, "findings": [], "checks": [],
+                                      "reuse": [], "new_symbols": [], "unchecked": [], "disputed": [],
+                                      "coverage_unchecked": [], "gaps": [], "goal": None,
+                                      "branch": branch_of(path, label) if mode == "ref" else "", "after": None,
+                                      "delta": False})
+    print(f"review: no new commits since {sha[:12]} — verdict {verdict} stands" if reason == "empty range"
+          else f"review: {verdict} for {label} @ {sha[:12]}; --force reviews it anyway")
+    return 0
+
+
 def cmd_review(a):
     if a.decide_gaps:
         return decide_gaps(a)
@@ -3618,9 +3660,9 @@ def review_main(a):
                   + (f", {len(open_gaps)} known gap(s) not acknowledged" if open_gaps else ""))
             for i, g in enumerate(open_gaps, 1):
                 print(f"  g{i}. {g.get('file', '?')}: {str(g.get('what', ''))[:140]}")
-            if match["verdict"] == "approve" and open_gaps:
+            if approved(match["verdict"]) and open_gaps:
                 return 2
-            return 0 if match["verdict"] == "approve" else 1
+            return 0 if approved(match["verdict"]) else 1
         prev_ = earlier_review(slug, path, a.head) if a.head else None
         old = ((prev_ or {}).get("review_meta") or {}).get("head")
         if old and old != sha:
@@ -3643,6 +3685,9 @@ def review_main(a):
                   + ("" if a.head or last.get("mode") != "ref" else f"; check it with --status --head {last['ref']}")
                   + ".")
         return 1
+    gated = review_gate(a, slug, path)
+    if gated is not None:
+        return gated
     model = getattr(a, "reviewer_model", None) or os.environ.get("LEAN_AGENT_REVIEW_MODEL") or "sonnet"
     effort = os.environ.get("LEAN_AGENT_REVIEW_EFFORT") or "high"
     line, low = budget_line()
@@ -4629,7 +4674,7 @@ def clean_merge_approval(slug, path):
         return None
     first, second = parents
     review = next((r for r in reversed(list(read_jsonl(reviews_path(slug))))
-                   if r.get("head") == first and r.get("verdict") == "approve" and not r.get("dirty")), None)
+                   if r.get("head") == first and approved(r.get("verdict")) and not r.get("dirty")), None)
     if not review:
         return None
     auto = git(path, "merge-tree", "--write-tree", first, second)
@@ -4700,13 +4745,13 @@ def worktree_push(a):
                 "`git rebase` with an exec that rewrites the message), or turn attribution on.")
     match, _ = find_review(slug, path, "HEAD")
     inherited = None
-    if not match or match["verdict"] != "approve":
+    if not match or not approved(match["verdict"]):
         inherited = clean_merge_approval(slug, path)
         if inherited:
             match = inherited
             print(f"approval carried over from {match['run']}: HEAD is a clean merge of {match['_merged']} into the "
                   f"reviewed {match['head'][:10]} and changes none of the PR's own files")
-    if not match or match["verdict"] != "approve":
+    if not match or not approved(match["verdict"]):
         die(f"{branch} @ {sha[:12]} has no approving review. Run: lean-agent review {slug} --head {branch}"
             + (f" --base <base>" if not has_remote else ""), 2)
     target = remote_ref.split("/", 1)[1] if "/" in remote_ref else branch
@@ -9331,7 +9376,9 @@ def build_parser():
     s.add_argument("--for-push", action="store_true", help="the push gate: refuses while fix workers still run on the "
                    "branch, and says how to batch fixes before the next review")
     s.add_argument("--yes", action="store_true", help="--for-push: review even though workers still run")
-    s.add_argument("--status", action="store_true", help="exit 0 only if the current code has an approve")
+    s.add_argument("--force", action="store_true", help="review even when nothing changed since the last review, the "
+                   "re-review limit is reached, or the change is of a kind review-skip leaves out")
+    s.add_argument("--status", action="store_true", help="exit 0 only if the current code has an approve (or a skipped review)")
     s.add_argument("--decide-gaps", action="store_true", help="a sonnet worker decides the open known gaps of the "
                    "branch's latest review from the project's cards and code: declines are recorded, fixes come back as "
                    "tasks, product choices as questions; exit 2 when something needs the user")
