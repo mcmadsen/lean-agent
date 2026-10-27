@@ -492,6 +492,17 @@ uncommitted changes and new untracked files.
   the reason; `--apply` removes them. It checks `--head`, HEAD, the default branch and every base branch your
   reviews used, matches partial paths (relative to a package folder, in backticks, with `:line`), and keeps a
   line whose symbol is found even when its path is wrong.
+- **Cheaper reviews:** the reviewer prompt carries a fill-in template listing every new symbol (reuse) and edited or
+  removed test (coverage) with the answer format; entries still missing are filled by the cheap haiku reuse run (coverage
+  is recorded as "not checked") instead of resuming the main reviewer. The model is chosen by risk unless
+  `--reviewer-model` is given: re-reviews, docs/test-only and small diffs (under about 150 lines) sonnet, first reviews of
+  large diffs (about 800 lines or more) or of security-sensitive paths and keywords (auth, token, crypto, secret,
+  password, permission, cert, sign, encrypt, sanitize, csp, cors) opus, fable never by default; `config review-model
+  auto|<model>` fixes it. A gap declined earlier on the branch (matched by location and similar wording) is not shown
+  again, and a gap whose own text says it is documented, out of scope or already handled is declined with that reason
+  (one summary line). Review prompts carry at most 4 cards: rules whose globs match the changed files, or cards whose
+  keywords appear in the diff or goal. `review --costs [--project P] [--days 7]` prints totals per branch and model,
+  runs, second turns, re-review rounds, skips by reason and the average cost per review, from the ledger.
 - **Re-review:** `review <project> --resume` starts a fresh reviewer with a small context: the open findings and
   checks of the last review, the declined decisions, and only the diff since then (with its own new symbols and
   edited tests). That's cheaper than continuing a long session, and it converges: a new major about code that

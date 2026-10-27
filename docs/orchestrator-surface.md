@@ -88,10 +88,10 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `branch-name` (prints a name from the project's branch rules, read-only), `worktrees`, `codemod` (throwaway copy), `map`, `slices`, `check`, `parity`, `grep-log`, `text-len` | a | allowed |
 | `slices --create`, `learn` | b | allowed: todos, cards and lean-agent's own repo rules block derived from the code by lean-agent, with no text from the user |
 | `optimize` (also `--apply`, `--accept`, `--reject`) | b | allowed: applies drafts a worker made from run feedback; no orchestrator text is stored. |
-| `review decline <p> <n>…` (also `review-decline`), `review learn <p> <PR> --mcp <tracker>` (also `review-learn`) | b | allowed: review state, and lessons a worker derives from human reviews |
+| `review --costs`, `review decline <p> <n>…` (also `review-decline`), `review learn <p> <PR> --mcp <tracker>` (also `review-learn`) | b | allowed: review state, and lessons a worker derives from human reviews |
 | `review learn <p> --text "…"` / `--helper "…"` | c | **denied**: text the orchestrator supplies is knowledge; `remember` (or a worker) |
 | `handover` (also `--list`) | b | allowed: a worker writes a Markdown file; it only writes under LEAN_AGENT_HOME |
-| `config strict on`, `config branch-rules`, `config review-skip`, `config review-max-rerounds`, `attribution`, `limits`, `budget`, `context` | b | allowed: switches and limits |
+| `config strict on`, `config branch-rules`, `config review-skip`, `config review-max-rerounds`, `config review-model`, `attribution`, `limits`, `budget`, `context` | b | allowed: switches and limits |
 | `config strict off` | c | **denied**: the orchestrator doesn't lift its own guardrail |
 | `runs` (also `runs --wait <id\|all\|last>`, which blocks until those runs are recorded and prints their results; `runs --stop <id\|last>`, which ends one of lean-agent's own runs, records it as `stopped` and lists what it changed in its worktree; a run whose supervisor died shows as `lost`: `runs --lost` lists them, `runs --lost --clear` acknowledges them, and `runs --stop <id>` still closes one by id; `--clear` needs `--lost`), `logs`, `output`, `stats`, `savings`, `week`, `guide`, `doctor` | a | allowed |
 | `up`, `install`, `trust`, `home`, `env`, `sync`, `service` | b | allowed: lean-agent's own setup and updates |

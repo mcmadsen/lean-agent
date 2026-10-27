@@ -48,6 +48,9 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      settle, returns fix tasks, lists what needs the user) and show the user only its summary. Ask about each "needs
      you" gap with AskUserQuestion, one question per gap, then record it:
      `lean-agent review decline <project> g<n> --why "..."`. `review --status` exits 2 while a gap is open.
+   - Reviews skip unchanged heads and docs/test/version/merge/release changes by themselves (`skipped (<reason>)`
+     counts as approved; `--force` overrides); re-reviews are capped at 2 per branch (`--force` overrides).
+     `lean-agent review --costs [--project P] [--days 7]` shows what reviews cost, per branch and model.
    - Only `lean-agent review <project> --status [--head <branch>]` exiting 0 means approved; ask before creating the
      PR (outward). Before tracker work (assign, vote, close) run `lean-agent tracker <project>` once; identity
      unknown: `lean-agent tracker <project> --discover --mcp <tracker>`.
