@@ -5065,15 +5065,15 @@ class CliTest(unittest.TestCase):
         self.assertNotIn(tid, out)
         self.assertTrue(lt.load()["threads"][tid].get("session_on"))  # still meant to be open: only the host record is pruned
         self.assertNotIn(tid, ss.session_rec("main").get("sessions") or {})
-        self.cli("thread", "new", "first")
+        self.assertIn("started", self.cli("thread", "new", "first").stdout)  # printed when the host takes it, not when it is up
         self.wait_for(lambda: re.search(r"^t2\b", self.cli("thread", "sessions").stdout, re.M),
                       "the first session to be listed", secs=120)
         self.cli("thread", "close", "t2")  # a closed session frees its slot at once, flag and record gone
-        self.assertNotRegex(self.cli("thread", "sessions").stdout, r"^t2\b")
+        self.assertIsNone(re.search(r"^t2\b", self.cli("thread", "sessions").stdout, re.M))
         self.assertIsNone(lt.load()["threads"]["t2"].get("session_on"))
         self.assertNotIn("t2", ss.session_rec("main").get("sessions") or {})
         self.cli("thread", "close", "t2")  # idempotent
-        self.cli("thread", "new", "second")
+        self.assertIn("started", self.cli("thread", "new", "second").stdout)
         # shut down only once the new session is up, so stopping `up` never races its start
         self.wait_for(lambda: re.search(r"^t3\b", self.cli("thread", "sessions").stdout, re.M),
                       "the second session to be listed", secs=120)
@@ -5089,7 +5089,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("t1: session stopped", out)
         self.assertIn("t2: session stopped", out)
         self.assertIn("closed 2 threads: t1, t2", out)
-        self.assertNotRegex(self.cli("thread", "sessions").stdout, r"^t[12]\b")
+        self.assertIsNone(re.search(r"^t[12]\b", self.cli("thread", "sessions").stdout, re.M))
         out = self.cli("thread", "close", "--idle", "1d").stdout  # nothing idle for a day
         self.assertIn("closed 0 threads", out)
         self.assertIn("t3", self.cli("thread", "sessions").stdout)
