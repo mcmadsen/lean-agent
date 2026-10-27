@@ -437,7 +437,7 @@ def advise(prompt, session=None, now=None):
     is a new topic for a new thread session. Matched requests are stored under their thread; a new topic creates nothing
     (`thread new` does). Returns (thread id or None, line)."""
     text = " ".join(str(prompt or "").split())
-    if is_status_question(text) and not EXPLICIT_RE.search(text):
+    if is_status_question(text) and not EXPLICIT_RE.search(text) and not (prompt_ids(text) and id_thread(text, load())):
         return None, "Status question \u2014 answer it here: lean-agent now"
     tid, how, _ = route(text, session, now, create=False)
     if tid is None:
@@ -447,6 +447,46 @@ def advise(prompt, session=None, now=None):
     if t.get("session_on"):
         return tid, f'Belongs to {tid} "{title}" \u2014 hand it over: lean-agent thread send {tid} --prompt-file -'
     return tid, f'Belongs to {tid} "{title}" \u2014 hand it over (this starts its session): lean-agent thread send {tid} --prompt-file -'
+
+
+ID_REF_RE = re.compile(r"(?:\bPR\s*#?|[A-Za-z]+-?#|#|(?<![\w.-]))(\d{3,})\b", re.I)  # 4711, #4711, PR 4711, AB#4711
+BRANCH_RE = re.compile(r"\b((?:feature|bugfix|hotfix|release)/[\w.-]+)", re.I)
+
+
+def prompt_ids(text):
+    """The strong identifiers in a prompt: numbers with 3+ digits (also as #123, PR 123, AB#123) and branch names."""
+    ids = {m.group(1) for m in ID_REF_RE.finditer(text)}
+    return ids | {m.group(1).lower() for m in BRANCH_RE.finditer(text)}
+
+
+def id_thread(text, data):
+    """The open thread whose stored requests, runs, notes, pushes or branch mention an id of the prompt; with several, the
+    one with the most recent mention. A prompt about a release PR goes to a thread whose title or branch says release.
+    None when no such strong signal exists."""
+    open_ = {k for k, t in data["threads"].items() if k not in data["aliases"] and k not in RESERVED and not t.get("closed")}
+    ids = prompt_ids(text)
+    best, best_ts = None, -1.0
+    if ids:
+        pats = [re.compile(r"(?<![\w.])" + re.escape(i) + r"(?![\w])", re.I) for i in ids]
+        for tid, evs in events(data).items():
+            if tid not in open_:
+                continue
+            for ep, _, _, ev_text in evs:
+                if ep > best_ts and any(p.search(ev_text) for p in pats):
+                    best, best_ts = tid, ep
+            for r in data["threads"][tid].get("requests") or []:  # the full stored text, not the shortened event line
+                if _epoch(r.get("ts")) > best_ts and any(p.search(str(r.get("text"))) for p in pats):
+                    best, best_ts = tid, _epoch(r.get("ts"))
+        if best:
+            return best
+    w = words(text)
+    if "release" in {x.rstrip("s") for x in w} and (re.search(r"\bPRs?\b|pull request", text, re.I)):
+        evs = events(data)
+        cands = [k for k in open_ if "release" in str(data["threads"][k].get("title")).lower()
+                 or any(e[2] == "push" and "release" in e[3].lower() for e in evs.get(k, []))]
+        if cands:
+            return max(cands, key=lambda k: _epoch(data["threads"][k].get("last_message") or data["threads"][k].get("created")))
+    return None
 
 
 def route(prompt, session=None, now=None, create=True):
@@ -459,6 +499,8 @@ def route(prompt, session=None, now=None, create=True):
     m = EXPLICIT_RE.search(text)
     with _locked() as data:
         tid, how, unsure = None, None, False
+        if m and m.group(1) and len(m.group(1)) >= 3 and f"#{int(m.group(1))}" not in data["threads"]:
+            m = None  # #4711 names a PR or ticket, not a thread
         if m:
             cand = resolve(f"#{int(m.group(1))}" if m.group(1) else f"t{int(m.group(2))}", data["aliases"])
             if cand in data["threads"] or cand.startswith("#"):
@@ -466,6 +508,9 @@ def route(prompt, session=None, now=None, create=True):
                 _ensure(data, tid, title_from(text), create=True)
                 data["threads"][tid].pop("closed", None)  # naming a closed thread reopens it
                 data["threads"][tid].pop("auto_closed", None)
+        if tid is None:
+            tid = id_thread(text, data)
+            how = "guessed" if tid else None
         if tid is None:
             cur = None
             try:
