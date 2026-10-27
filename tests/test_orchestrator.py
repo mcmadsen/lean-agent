@@ -3520,31 +3520,73 @@ class CliTest(unittest.TestCase):
         self.assertIn("idle=30m,context=50%", self.cli("config", "thread-fresh-after", "default").stdout)
         self.assertNotEqual(self.cli("config", "thread-fresh-after", "idle=bogus", check=False).returncode, 0)
 
+    def send_in_process(self, ages, prompt="more work"):
+        """`thread send t1` run in this process, with the hosted sessions reporting an idle age of `ages` seconds."""
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        real = L.open_thread_sessions
+        args = argparse.Namespace(action="send", args=["t1"], prompt_file=None, json=False, all=False)
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(L, "thread_prompt", return_value=prompt), \
+                mock.patch.object(L, "open_thread_sessions", side_effect=lambda: [dict(x, idle=ages) for x in real()]), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            L.cmd_thread(args)
+        return out.getvalue()
+
     def test_send_to_a_big_idle_open_session_continues_fresh_only_when_both_limits_hold(self):
         p, log, ss, old = self.closed_thread_with_history(ctx=150000)
-        msg = os.path.join(self.tmp.name, "m.txt")
-        with open(msg, "w") as fh:
-            fh.write("more work")
         n = len(self.read_jsonl(log))
         self.cli("config", "thread-fresh-after", "idle=1h,context=50%")  # not idle long enough
-        self.assertIn("t1 is running", self.cli("thread", "send", "t1", "--prompt-file", msg).stdout)
-        self.cli("config", "thread-fresh-after", "idle=1s,context=99%")  # idle, but the context is below 99% of the compaction point
-        import time as _t
-        _t.sleep(2)
-        self.assertIn("t1 is running", self.cli("thread", "send", "t1", "--prompt-file", msg).stdout)
+        self.assertIn("t1 is running", self.send_in_process(1800))
+        self.cli("config", "thread-fresh-after", "idle=1m,context=99%")  # idle, but the context is below 99% of the compaction point
+        self.assertIn("t1 is running", self.send_in_process(600))
         self.cli("config", "thread-fresh-after", "off")
-        _t.sleep(2)
-        self.assertIn("t1 is running", self.cli("thread", "send", "t1", "--prompt-file", msg).stdout)
+        self.assertIn("t1 is running", self.send_in_process(99999))
         self.assertEqual(len(self.read_jsonl(log)), n)
-        self.cli("config", "thread-fresh-after", "idle=1s,context=1%")
-        _t.sleep(2)
-        out = self.cli("thread", "send", "t1", "--prompt-file", msg).stdout
+        self.cli("config", "thread-fresh-after", "idle=1m,context=1%")
+        out = self.send_in_process(600)
         self.assertIn("t1 started fresh", out)
         self.assertIn("idle ", out)
         self.wait_for(lambda: len(self.read_jsonl(log)) == n + 1 and ss.alive("t1"), "t1 fresh")
         argv = self.read_jsonl(log)[-1]["argv"]
         self.assertNotIn("--resume", argv)
         self.assertNotEqual(argv[argv.index("--session-id") + 1], old)
+        p.terminate()
+        p.wait(timeout=30)
+
+    def test_failed_auto_fresh_start_retries_fresh_and_never_resumes_the_old_session(self):
+        p, log, ss, old = self.closed_thread_with_history(ctx=150000)
+        n = len(self.read_jsonl(log))
+        self.cli("config", "thread-fresh-after", "idle=1m,context=1%")
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        with mock.patch.object(L, "start_thread_session", side_effect=RuntimeError("boom")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self.send_in_process(600)
+        self.assertFalse(ss.alive("t1"))
+        out = self.cli("thread", "send", "t1", "--prompt-file", self.write_prompt("again")).stdout
+        self.assertIn("t1 started fresh", out)
+        self.wait_for(lambda: len(self.read_jsonl(log)) == n + 1 and ss.alive("t1"), "t1 fresh")
+        argv = self.read_jsonl(log)[-1]["argv"]
+        self.assertNotIn("--resume", argv)
+        self.assertNotEqual(argv[argv.index("--session-id") + 1], old)
+        p.terminate()
+        p.wait(timeout=30)
+
+    def write_prompt(self, text):
+        path = os.path.join(self.tmp.name, "prompt.txt")
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+
+    def test_opening_an_open_thread_with_a_transcript_says_resumed(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent as L
+        p, log, ss, old = self.closed_thread_with_history(ctx=84000)
+        with mock.patch.dict(os.environ, self.env):
+            fresh, line, _ = L.prepare_thread_session("t1", False)
+        self.assertFalse(fresh)
+        self.assertEqual(line, "t1 resumed (context ~84k)")
         p.terminate()
         p.wait(timeout=30)
 
