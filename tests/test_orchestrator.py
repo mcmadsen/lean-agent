@@ -6212,7 +6212,10 @@ class CliTest(unittest.TestCase):
         self.assertEqual(bn("Release v2.1.3").stdout.strip(), "release/release-2.1.3")
         for title in ("Release notes page", "Release 7 things", "Releases 2.0", "Update release process"):
             self.assertTrue(bn(title).stdout.startswith("feature/"), title)  # no version after "release": a feature
-        self.assertTrue(bn("Cut release/2.0 from main", "--version", "2.0").stdout.startswith("release/"))
+        self.assertEqual(bn("Release 2.0-rc1").stdout.strip(), "release/release-2.0-rc1")
+        self.assertTrue(bn("Backport fix to release/2.0").stdout.startswith("bugfix/"))
+        self.assertTrue(bn("Cut release/2.0 from main").stdout.startswith("feature/"))
+        self.assertTrue(bn("Cut release/2.0 from main", "--type", "release", "--version", "2.0").stdout.startswith("release/"))
         self.assertIn("--version X", bn("Release 7", "--type", "release", check=False).stderr)  # no bare integer
         p = bn("Release notes", "--type", "release", check=False)
         self.assertNotEqual(p.returncode, 0)
@@ -6246,7 +6249,7 @@ class CliTest(unittest.TestCase):
         g("branch", "bugfix")  # a plain "bugfix" branch: bugfix/... can't exist beside it
         self.assertIn("a branch named 'bugfix' exists", bn("Fix z", check=False).stderr)
 
-    def test_run_worktree_auto_names_the_branch_and_all_generators_use_the_helper(self):
+    def test_run_worktree_auto_names_the_branch_from_todo_task_or_release_title(self):
         g = self.git_project()
         g("add", "-A")
         g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
@@ -6809,6 +6812,15 @@ class RuleGlobTest(unittest.TestCase):
         import lean_common
         import lean_agent
         self.common, self.agent = lean_common, lean_agent
+
+    def test_task_id_of_reads_hash_ticket_key_and_prefixed_refs(self):
+        t = self.agent.task_id_of
+        self.assertEqual(t("#7"), "7")
+        self.assertEqual(t("ABC-12"), "ABC-12")
+        self.assertEqual(t("AB#4711"), "4711")
+        self.assertEqual(t("PR 512"), "512")
+        self.assertIsNone(t("no id"))
+        self.assertIsNone(t(None))
 
     def test_glob_match_keeps_leading_dots_and_strips_only_dot_slash(self):
         m = self.common.glob_match
