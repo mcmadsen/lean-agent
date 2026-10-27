@@ -5843,6 +5843,7 @@ class CliTest(unittest.TestCase):
         out = p.stdout
         self.assertEqual(p.returncode, 2, out)
         self.assertIn("1 new files, 2 new symbols for the reuse pass", out)  # test files don't count
+        self.assertIn("reviewer: sonnet (", out)  # the model and why: a small diff
         calls = self.calls()
         second = next(c for c in calls if "search-only second opinion" in c["append"])
         main = next(c for c in calls if "Reuse and duplication. For every new file" in c["append"])
@@ -7107,6 +7108,13 @@ class CliTest(unittest.TestCase):
         self.assertNotIn(fixes[:12], call["task"].split("Re-review")[0])
 
 
+    def test_config_review_model_and_the_reviewer_line(self):
+        self.assertIn("review-model: auto", self.cli("config", "review-model").stdout)
+        self.assertIn("review-model: opus", self.cli("config", "review-model", "opus").stdout)
+        self.cli("config", "review-model", "auto")
+        self.assertIn("review-model: auto", self.cli("config", "review-model").stdout)
+
+
 class ReviewUnitTest(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0, os.path.dirname(CLI))
@@ -7149,6 +7157,59 @@ class ReviewUnitTest(unittest.TestCase):
         self.assertEqual([c["what"] for c in now["checks"]], ["reuse not checked for: bar (a/x.py)"])
         self.assertEqual(now["verdict"], "needs-checks")
         self.assertEqual(rc, 2)
+
+
+    def _repo(self, files):
+        def g(*args):
+            subprocess.run(["git", "-C", self.dir, "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                           check=True, capture_output=True)
+        g("init", "-q", "-b", "main")
+        with open(os.path.join(self.dir, "keep.txt"), "w") as fh:
+            fh.write("x\n")
+        g("add", "-A")
+        g("commit", "-qm", "base")
+        for rel, text in files.items():
+            os.makedirs(os.path.dirname(os.path.join(self.dir, rel)), exist_ok=True)
+            with open(os.path.join(self.dir, rel), "w") as fh:
+                fh.write(text)
+        g("add", "-A")
+        g("commit", "-qm", "change")
+        return list(files)
+
+    def test_reviewer_model_by_risk(self):
+        agent = self.agent
+        with mock.patch.object(agent, "config_json", return_value={}), mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LEAN_AGENT_REVIEW_MODEL", None)
+            small = self._repo({"src/a.py": "x = 1\n"})
+            pick = lambda names, **kw: agent.choose_review_model(self.dir, ["HEAD~1", "HEAD"], names, **kw)
+            self.assertEqual(pick(small), ("sonnet", "1 lines"))
+            self.assertEqual(pick(small, rereview=True), ("sonnet", "re-review"))
+            self.assertEqual(pick(small, explicit="fable"), ("fable", "--reviewer-model"))
+            self.assertEqual(pick(["README.md", "tests/test_a.py"])[1], "docs/tests only")
+            self.assertEqual(pick(["src/a.py"])[0], "sonnet")
+        with mock.patch.object(agent, "config_json", return_value={"review_model": "haiku"}):
+            self.assertEqual(pick(small), ("haiku", "config review-model"))
+
+    def test_security_words_and_large_diffs_pick_opus_and_fable_is_never_automatic(self):
+        agent = self.agent
+        with mock.patch.object(agent, "config_json", return_value={}):
+            os.environ.pop("LEAN_AGENT_REVIEW_MODEL", None)
+            self._repo({"src/a.py": "def f(user):\n    return refresh_token(user)\n"})
+            m, why = agent.choose_review_model(self.dir, ["HEAD~1", "HEAD"], ["src/a.py"])
+            self.assertEqual(m, "opus")
+            self.assertIn("security-sensitive: token", why)
+            m, why = agent.choose_review_model(self.dir, ["HEAD~1", "HEAD"], ["src/a.py"], rereview=True)
+            self.assertEqual((m, why), ("sonnet", "re-review"))
+        d2 = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d2, True)
+        self.dir, old = d2, self.dir
+        with mock.patch.object(agent, "config_json", return_value={}):
+            self._repo({"src/big.py": "".join(f"v{i} = {i}\n" for i in range(900))})
+            m, why = agent.choose_review_model(self.dir, ["HEAD~1", "HEAD"], ["src/big.py"])
+            self.assertEqual(m, "opus")
+            self.assertIn("large diff", why)
+            self.assertNotEqual(m, "fable")
+        self.dir = old
 
 
 class RuleGlobTest(unittest.TestCase):
