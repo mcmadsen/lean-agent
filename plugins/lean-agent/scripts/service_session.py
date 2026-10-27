@@ -367,6 +367,45 @@ def checkpoint_prompt():
                                 "(they go on after the clear)", 1)
 
 
+FRESH_AFTER = {"idle": 1800, "context": 50}  # thread-fresh-after defaults: idle seconds, % of the compaction point
+
+
+def fresh_after():
+    """(idle seconds, context percent) a big idle thread session must reach before `thread send` starts it fresh,
+    or None when off: LEAN_AGENT_THREAD_FRESH_AFTER, else `lean-agent config thread-fresh-after idle=30m,context=50%|off`."""
+    raw = os.environ.get("LEAN_AGENT_THREAD_FRESH_AFTER") or _load(lean_home("config.json")).get("thread_fresh_after")
+    try:
+        return parse_fresh_after(raw)
+    except ValueError:
+        return parse_fresh_after(None)
+
+
+def parse_fresh_after(raw):
+    raw = str(raw if raw is not None else "").strip().lower()
+    out = dict(FRESH_AFTER)
+    if raw in ("off", "no", "0"):
+        return None
+    for part in filter(None, (p.strip() for p in raw.replace(" ", ",").split(","))):
+        k, _, v = part.partition("=")
+        try:
+            if k == "idle":
+                mult = {"s": 1, "m": 60, "h": 3600}.get(v[-1:])
+                out["idle"] = float(v[:-1] if mult else v) * (mult or 60)
+            elif k == "context":
+                out["context"] = float(v.rstrip("%"))
+            else:
+                raise ValueError(k)
+        except ValueError:
+            raise ValueError(f"thread-fresh-after takes idle=30m,context=50% or off, not {raw!r}")
+    return out["idle"], out["context"]
+
+
+def session_context(tid):
+    """Tokens in the last usage record of the thread session's transcript (0 when unknown)."""
+    path = (info(tid) or {}).get("transcript")
+    return transcript_state(path)["ctx"] if path else 0
+
+
 def running_runs():
     """Ids of the lean-agent runs alive now."""
     return sorted(rid for rid, _ in lean_common.running_runs(lean_home()))
