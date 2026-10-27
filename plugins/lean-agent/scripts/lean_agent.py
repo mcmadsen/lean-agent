@@ -1512,7 +1512,8 @@ def _cmd_run(a):
     else:
         slug, project = resolve_project(a.project)
         sync_memory(slug)
-        if getattr(a, "worktree", None) == "auto":  # a new branch named by the project's branch rules
+        auto_branch = getattr(a, "worktree", None) == "auto"
+        if auto_branch:  # a new branch named by the project's branch rules
             title = getattr(a, "why", None) or task.splitlines()[0]
             a.worktree = new_branch_name(slug, project, getattr(a, "branch_type", None),
                                          todo_task_id(getattr(a, "todo", None)), title,
@@ -1523,7 +1524,7 @@ def _cmd_run(a):
                 print(note, flush=True)
         if getattr(a, "worktree", None):
             wt = ensure_worktree(slug, project, a.worktree, reset=getattr(a, "reset_worktree", False),
-                                 base=getattr(a, "worktree_base", None))
+                                 base=getattr(a, "worktree_base", None), typed=not auto_branch)
             project = wt["path"]
             print(f"worktree: {wt['ref']} at {wt['path']} ({'reused' if wt['reused'] else 'created'}"
                   f"{', on branch ' + wt['branch'] if wt['branch'] else ', detached'}, HEAD {wt['head'][:10]})", flush=True)
@@ -4377,9 +4378,10 @@ def release_note(slug, name):
             "(lean-agent guard)")
 
 
-def ensure_worktree(slug, repo, ref, reset=False, base=None):
+def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True):
     """A shared worktree of `ref` for this project: reuse it (moved to the ref's tip when clean) or create it.
-    A branch that exists neither locally nor on the remote is created from the base."""
+    A branch that exists neither locally nor on the remote is created from the base. `typed` is False for a generated
+    name, which skips the "did you mean" check (that is only for names the user typed)."""
     if ref.startswith("origin/"):
         git(repo, "fetch", "-q", "origin")
     sha = git(repo, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
@@ -4394,7 +4396,7 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None):
         new_from = worktree_base(slug, repo, base)
         if ref.startswith("origin/"):
             ref = ref[len("origin/"):]  # a branch to create: it gets a local name
-        if not base:  # no explicit base: a name one or two edits from an existing branch is more likely a typo than a new branch
+        if typed and not base:  # no explicit base: a name one or two edits from an existing branch is more likely a typo than a new branch
             near = next((b for b in branch_names(repo) if b != ref and edit_distance(b, ref) <= 2), None)
             if near:
                 die(f"no branch {ref!r} in {repo}; did you mean {near}? add --worktree-base <ref> to create {ref}")

@@ -6104,6 +6104,19 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("'lean/", src)
         self.assertEqual(src.count("new_branch_name("), 3)  # definition, run --worktree auto, branch-name
 
+    def test_auto_branch_next_to_a_similar_branch_skips_the_typo_check(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("checkout", "-q", "main")
+        g("branch", "-m", "feature", "feat-old")
+        g("branch", "feature/add-thing")  # one edit from the generated feature/add-thing-2
+        self.cli("learn", self.proj, "--name", "proj")
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "Add thing", "--worktree", "auto",
+                       "--worktree-base", "main", "--", "Add thing").stdout
+        self.assertIn("branch: feature/add-thing-2", out)
+        self.assertIn("worktree: created feature/add-thing-2", out)
+
     def test_worktree_creates_missing_branch_from_a_base(self):
         g = self.git_project()
         g("add", "-A")
