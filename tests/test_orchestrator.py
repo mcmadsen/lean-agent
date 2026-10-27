@@ -1645,6 +1645,21 @@ class CliTest(unittest.TestCase):
         # the very first MCP call erroring that way stops at once
         self.assertEqual(feed(({}, {}), "mcp__tracker__get", "anonymous caller is unauthorized", True), "tracker")
 
+    def test_doctor_reports_auth_for_every_configured_mcp_server(self):
+        self.use_tracker()
+        self.cli("learn", self.proj)
+        out = self.cli("doctor", check=False).stdout
+        self.assertRegex(out, r"MCP tracker: auth not checked")
+        self.assertRegex(out, r"MCP tickets: auth not checked")
+
+    def test_unauth_card_uses_the_configured_key_and_is_written_once_per_project(self):
+        la = lean_agent_module()
+        found = {"plugin:tools:tracker": {"alias": "tracker", "config": {}}, "other-srv": {"config": {}}}
+        self.assertEqual(la.resolved_server_key("tracker", found), "plugin:tools:tracker")
+        self.assertEqual(la.resolved_server_key("plugin_tools_tracker", found), "plugin:tools:tracker")
+        self.assertEqual(la.resolved_server_key("other-srv", found), "other-srv")
+        self.assertEqual(la.resolved_server_key("unknown", found), "unknown")
+
     def test_run_stops_early_when_the_mcp_server_is_unauthenticated_and_remembers_it_once(self):
         self.use_tracker()
         self.cli("learn", self.proj)

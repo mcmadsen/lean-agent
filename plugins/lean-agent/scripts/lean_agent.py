@@ -7240,10 +7240,13 @@ def cmd_doctor(a):
             continue
         report(*diagnose_plugin_server(name, info, claude_view, plugin_srv))
     checks = mcp_checks()
-    for name in sorted(set(load_json(home("mcp-presets.json"), {})) | set(checks)):
+    configured = {n: v["config"] for n, v in lean_mcp.discover().items() if n not in ignored}
+    for name in sorted(set(load_json(home("mcp-presets.json"), {})) | set(checks) | set(configured)):
         rec = checks.get(name)
         if rec and rec.get("status") != "skipped":
             report(*mcp_check_line(name, rec))
+        elif name in configured and lean_mcp.server_type(configured[name]) != "stdio":
+            report(None, f"MCP {name}: auth not checked (only stdio servers can be checked directly)")
         elif not rec:
             report(None, f"MCP {name}: auth not checked", f"lean-agent mcp check {name}")
     budgets = usage.window_budgets()
