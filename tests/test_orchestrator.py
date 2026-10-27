@@ -7157,7 +7157,16 @@ class CliTest(unittest.TestCase):
         g = self.skip_project()
         g("checkout", "-qb", "release/1.2", "main")
         self.write_commit(g, {"src/code.py": "x = 3\n"}, "release work")
-        self.assert_skipped("release/1.2", "branch release/1.2")
+        self.review_branch("release/1.2")  # arbitrary content on a release branch is reviewed
+        self.assertEqual(len(self.real_reviews()), 1)
+        self.write_commit(g, {"CHANGELOG.md": "# Changes\n- release work\n", "docs/notes.md": "n\n"}, "notes")
+        p = self.review_branch("release/1.2")  # the delta since that review is docs only
+        self.assertIn("skipped (", p.stdout)
+        self.assertEqual(len(self.real_reviews()), 1)
+        g("checkout", "-qb", "release/1.25", "main")
+        self.write_commit(g, {"CHANGELOG.md": "# Changes\n- notes\n"}, "notes")
+        self.assertIn("skipped (branch release/1.25)", self.review_branch("release/1.25").stdout)
+        self.assertEqual(len(self.real_reviews()), 1)
         self.assertIn("branches=release/*", self.cli("config", "-p", "proj", "review-skip").stdout)
         self.cli("config", "-p", "proj", "review-skip", "docs-only,branches=hotfix/*|rel/*")
         out = self.cli("config", "-p", "proj", "review-skip").stdout
@@ -7165,16 +7174,106 @@ class CliTest(unittest.TestCase):
         g("checkout", "-qb", "release/1.3", "main")
         self.write_commit(g, {"src/code.py": "x = 4\n"}, "more release work")
         self.review_branch("release/1.3")
-        self.assertEqual(len(self.real_reviews()), 1)
-        self.assertEqual(self.cli("config", "-p", "proj", "review-skip", "bogus", check=False).returncode, 1)
+        self.assertEqual(len(self.real_reviews()), 2)
+        for bad in ("bogus", "docs-only,bogus", "branches=", "docs-only,,tests-only"):
+            self.assertEqual(self.cli("config", "-p", "proj", "review-skip", bad, check=False).returncode, 1, bad)
+        self.assertIn("review-skip for proj: docs-only,branches=hotfix/*|rel/*",
+                      self.cli("config", "-p", "proj", "review-skip").stdout)  # a refused value changes nothing
         self.cli("config", "-p", "proj", "review-skip", "off")
         g("checkout", "-qb", "docs", "main")
         self.write_commit(g, {"README.md": "# hi\n"}, "docs")
         self.review_branch("docs")
-        self.assertEqual(len(self.real_reviews()), 2)
+        self.assertEqual(len(self.real_reviews()), 3)
         self.cli("config", "-p", "proj", "review-skip", "default")
         self.assertIn("version-bump,merge-only,docs-only,tests-only,branches=release/*",
                       self.cli("config", "-p", "proj", "review-skip").stdout)
+
+    def test_a_skip_after_an_approved_review_with_gaps_keeps_that_review_and_its_gaps(self):
+        g = self.skip_project()
+        gaps = [{"what": "Retry the upload once", "file": "src/code.py", "line": 1, "blocks_goal": False, "scoped_out": ""}]
+        with_gaps = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[], gaps=gaps))
+        g("checkout", "-qb", "feat", "main")
+        self.write_commit(g, {"src/code.py": "x = 2\n"}, "code")
+        self.review_branch("feat", FAKE_REVIEW=with_gaps)
+        self.assertEqual(len(self.real_reviews()), 1)
+        self.write_commit(g, {"README.md": "# hi\n"}, "docs")  # judged on the delta since that review: docs only
+        p = self.review_branch("feat")
+        self.assertIn("skipped (docs-only)", p.stdout)
+        self.assertEqual(len(self.real_reviews()), 1)
+        st = self.cli("review", "proj", "--head", "feat", "--status", check=False)
+        self.assertEqual(st.returncode, 2, st.stdout)
+        self.assertIn("known gap", st.stdout)
+        import lean_agent
+        with mock.patch.dict(os.environ, self.env):
+            last = lean_agent.latest_review("proj", self.proj, "feat")
+        self.assertNotIn("skipped", last["verdict"])
+        self.assertEqual(last["gaps"], gaps)  # the skip is not the latest review
+
+    def test_release_branch_skip_only_for_bumps_merges_and_docs(self):
+        g = self.skip_project()
+        g("checkout", "-qb", "release/2.0", "main")
+        self.write_commit(g, {"src/prompts/p.md": "prompt\n", "docs/a.md": "a\n"}, "prompt text")
+        self.review_branch("release/2.0")
+        self.assertEqual(len(self.real_reviews()), 1)  # a prompt file is not documentation
+        g("checkout", "-qb", "tmpl", "main")
+        self.write_commit(g, {"plugins/x/templates/t.md": "t\n"}, "template")
+        self.review_branch("tmpl")
+        self.assertEqual(len(self.real_reviews()), 2)
+
+    def test_re_review_cap_zero_refuses_and_a_full_review_starts_the_count_again(self):
+        g = self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("config", "review-max-rerounds", "0")
+        self.review_feature(FAKE_REVIEW=self.REQUEST)
+        self.commit_on(g, "feature", "api/totals.py", "# fix\n")
+        self.assertIn("re-review limit reached (0)", self.review_feature().stderr)
+        self.assertEqual(len(self.reviewer_runs()), 1)
+        self.cli("config", "review-max-rerounds", "1")
+        self.review_feature(FAKE_REVIEW=self.REQUEST)  # the one allowed re-review
+        self.commit_on(g, "feature", "api/totals.py", "# fix 2\n")
+        self.assertIn("limit reached (1)", self.review_feature().stderr)
+        self.review_feature("--full-review", FAKE_REVIEW=self.REQUEST)
+        self.commit_on(g, "feature", "api/totals.py", "# fix 3\n")
+        self.assertNotIn("limit reached", self.review_feature().stderr)
+
+    def test_reviewer_model_flag_beats_the_delta_env_on_a_re_review(self):
+        g = self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.review_feature(FAKE_REVIEW=self.REQUEST)
+        self.commit_on(g, "feature", "api/totals.py", "# fix\n")
+        self.review_feature("--reviewer-model", "opus", FAKE_REVIEW=self.REQUEST, LEAN_AGENT_DELTA_REVIEW_MODEL="haiku")
+        self.assertEqual(self.reviewer_runs()[-1].get("model"), "opus")
+        self.commit_on(g, "feature", "api/totals.py", "# fix 2\n")
+        self.review_feature(FAKE_REVIEW=self.REQUEST, LEAN_AGENT_DELTA_REVIEW_MODEL="haiku")
+        self.assertEqual(self.reviewer_runs()[-1].get("model"), "haiku")
+
+    def test_close_stops_a_live_host_when_the_service_list_request_fails(self):
+        import lean_agent as L
+        import service_session
+        lt = self.threads_home()
+        tid = lt.new("hosted")
+        lt.set_session(tid, session_on=True)
+        calls = []
+
+        def request(kind, **kw):
+            calls.append(kind)
+            return {"ok": False, "error": "timed out"} if kind == "list" else {"ok": True}
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(service_session, "session_rec", return_value={"host_pid": os.getpid()}), \
+                mock.patch.object(service_session, "sessions_request", side_effect=request), \
+                mock.patch.object(service_session, "alive", return_value=False), \
+                mock.patch.object(service_session, "drop_session"):
+            stopped, _, _ = L.close_thread_session(tid)
+            self.assertTrue(stopped)
+            self.assertIn("stop", calls)
+            calls.clear()
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(service_session, "session_rec", return_value={"host_pid": 2 ** 22 + 12345}), \
+                mock.patch.object(service_session, "sessions_request", side_effect=request), \
+                mock.patch.object(service_session, "drop_session"):
+            stopped, _, _ = L.close_thread_session(tid)
+            self.assertFalse(stopped)
+            self.assertNotIn("stop", calls)
 
     def test_a_re_review_continues_from_the_last_reviewed_head_not_the_latest_run(self):
         g = self.git_project()
@@ -7247,6 +7346,14 @@ class ReviewUnitTest(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, True)
 
+    def test_a_negated_excuse_in_a_gap_is_not_auto_declined(self):
+        for text in ("not documented anywhere", "the retry isn't already handled", "no longer out of scope",
+                     "errors are never handled elsewhere", "unclear whether this is documented"):
+            self.assertIsNone(self.agent.gap_excuse(text), text)
+        self.assertEqual(self.agent.gap_excuse("This is documented in the README"), "documented")
+        self.assertEqual(self.agent.gap_excuse("Retry: already handled elsewhere"), "already handled")
+        self.assertIsNone(self.agent.gap_excuse("not handled elsewhere"))
+
     def test_gaps_declined_earlier_or_excused_by_their_own_text_are_not_shown(self):
         agent = self.agent
         declined = [{"gap": "the update URL is a placeholder, never hosted for the second browser", "file": "docs/DIST.md"}]
@@ -7297,6 +7404,23 @@ class ReviewUnitTest(unittest.TestCase):
         self.assertIn("coverage entry:", t)
         self.assertEqual(self.agent.answer_template({"files": [], "symbols": []}, {"tests": []}), "")
 
+    def test_coverage_not_checked_does_not_turn_needs_checks_into_approve(self):
+        agent, rp = self.agent, os.path.join(self.dir, "reviews.jsonl")
+        rec = {"run": "r1", "verdict": "needs-checks", "findings": [], "reuse": [], "gaps": [], "disputed": [],
+               "unchecked": [], "coverage_unchecked": ["t.py: 'test_one'"],
+               "checks": [{"what": "coverage not checked for edited tests: t"}]}
+        with open(rp, "w") as fh:
+            fh.write(json.dumps(rec) + "\n")
+        with mock.patch.object(agent, "reviews_path", return_value=rp), \
+                mock.patch.object(agent, "projects", return_value={"p": {"path": self.dir}}):
+            with mock.patch("builtins.print") as pr:
+                rc = agent.reuse_follow_up(argparse.Namespace(max_context=1000), "p", {"head": "abc"}, "high")
+        with open(rp) as fh:
+            now = json.loads(fh.read())
+        self.assertEqual(now["verdict"], "needs-checks")
+        self.assertEqual(rc, 2)
+        self.assertIn("coverage not checked: 1 test", pr.call_args[0][0])
+
     def test_missing_entries_are_filled_by_the_cheap_run_not_by_resuming_the_reviewer(self):
         agent, rp = self.agent, os.path.join(self.dir, "reviews.jsonl")
         rec = {"run": "r1", "verdict": "needs-checks", "findings": [], "reuse": [], "gaps": [], "disputed": [],
@@ -7318,7 +7442,8 @@ class ReviewUnitTest(unittest.TestCase):
         self.assertEqual(now["unchecked"], ["bar (a/x.py)"])
         self.assertEqual(now["coverage_not_checked"], ["t.py: 'test_one'"])
         self.assertEqual(now["coverage_unchecked"], [])
-        self.assertEqual([c["what"] for c in now["checks"]], ["reuse not checked for: bar (a/x.py)"])
+        self.assertEqual([c["what"] for c in now["checks"]],
+                         ["coverage not checked for edited tests: t", "reuse not checked for: bar (a/x.py)"])
         self.assertEqual(now["verdict"], "needs-checks")
         self.assertEqual(rc, 2)
 
