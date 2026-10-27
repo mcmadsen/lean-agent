@@ -1524,7 +1524,7 @@ def _cmd_run(a):
             os.makedirs(home("worktrees", slug), exist_ok=True)
             with file_lock(home("worktrees", slug, ".auto-branch.lock")) if auto_branch else contextlib.nullcontext():
                 if auto_branch:
-                    title = getattr(a, "why", None) or task.splitlines()[0]
+                    title = branch_title(getattr(a, "todo", None), task)
                     a.worktree = new_branch_name(slug, project, getattr(a, "branch_type", None),
                                                  todo_task_id(getattr(a, "todo", None)), title,
                                                  getattr(a, "branch_version", None))
@@ -4368,6 +4368,15 @@ def todo_task_id(todo_id):
         return None
     item = next((t for t in todos()["items"] if t["id"] == todo_id), None)
     return (task_id_of(item.get("ref")) if item else None) or todo_id
+
+
+def branch_title(todo_id, task):
+    """What a generated branch is named after: the todo's title, else the first line of the task text (never --why)."""
+    item = next((t for t in todos()["items"] if t["id"] == todo_id), None) if isinstance(todo_id, int) else None
+    if item and item.get("text"):
+        return item["text"]
+    lines = (task or "").strip().splitlines()
+    return lines[0] if lines else ""
 
 
 def new_branch_name(slug, repo, kind, task_id, title, version=None):

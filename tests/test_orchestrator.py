@@ -6080,19 +6080,23 @@ class CliTest(unittest.TestCase):
         g = self.git_project()
         g("add", "-A")
         g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("branch", "-m", "feature", "feat-old")  # a plain "feature" branch would block feature/...
         g("checkout", "-q", "main")
         self.cli("learn", self.proj, "--name", "proj")
         self.cli("todo", "add", "Login timeout", "-p", "proj", "--ref", "PR 512")
         out = self.cli("run", "proj", "-m", "haiku", "--why", "Fix login timeout", "--worktree", "auto", "--todo", "1",
                        "--worktree-base", "main", "--", "t").stdout
-        self.assertIn("branch: bugfix/512-fix-login-timeout", out)
-        out = self.cli("run", "proj", "-m", "haiku", "--why", "Release 4.2", "--worktree", "auto",
-                       "--worktree-base", "main", "--", "t").stdout
+        self.assertIn("branch: feature/512-login-timeout", out)  # the todo's title, not --why
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "Ignored why", "--worktree", "auto",
+                       "--worktree-base", "main", "--", "Fix the export crash\nmore detail").stdout
+        self.assertIn("branch: bugfix/fix-the-export-crash", out)  # no todo: the task's first line
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "auto",
+                       "--worktree-base", "main", "--", "Release 4.2").stdout
         self.assertIn("branch: release/release-4.2", out)
         self.assertIn("guarded", out)  # created locally; pushing stays blocked
         self.assertIn("pushing it stays blocked", out)
-        p = self.cli("run", "proj", "-m", "haiku", "--why", "Release notes", "--branch-type", "release",
-                     "--worktree", "auto", "--worktree-base", "main", "--", "t", check=False)
+        p = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--branch-type", "release",
+                     "--worktree", "auto", "--worktree-base", "main", "--", "Release notes", check=False)
         self.assertIn("--version X", p.stderr)
         out = self.cli("run", "proj", "-m", "haiku", "--why", "Add thing", "--worktree", "my-own-name",
                        "--worktree-base", "main", "--", "t").stdout
