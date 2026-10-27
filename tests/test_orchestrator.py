@@ -6031,6 +6031,79 @@ class CliTest(unittest.TestCase):
         self.assertEqual(remote(), local)
         self.assertIn("nothing to push", self.cli("worktree", "push", "proj", "origin/feature").stdout)
 
+    def test_branch_names_follow_the_project_rules(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("branch", "-m", "feature", "feat-old")  # git_project's plain "feature" branch would block feature/...
+        self.cli("learn", self.proj, "--name", "proj")
+        bn = lambda *a, **k: self.cli("branch-name", "-p", "proj", *a, **k)
+        self.assertEqual(bn("Add export", "--task", "ABC-7").stdout.strip(), "feature/ABC-7-add-export")
+        self.assertEqual(bn("Add export").stdout.strip(), "feature/add-export")  # no id: the '-' goes too
+        self.assertEqual(bn("Login times out", "--type", "bugfix", "--task", "123").stdout.strip(),
+                         "bugfix/123-login-times-out")
+        self.assertEqual(bn("Release 2.1", "--version", "2.1").stdout.strip(), "release/release-2.1")
+        self.assertEqual(bn("Release 3.0").stdout.strip(), "release/release-3.0")  # version from the title
+        p = bn("Release notes", "--type", "release", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("--version X", p.stderr)
+        # inference
+        for title, kind in (("Fix login timeout", "bugfix"), ("Hotfix for payments", "bugfix"), ("Crash: a bug in x", "bugfix"),
+                            ("Regression in search", "bugfix"), ("Defect in cart", "bugfix"), ("Prefix handling", "feature"),
+                            ("Add dark mode", "feature")):
+            self.assertTrue(bn(title).stdout.startswith(kind + "/"), title)
+        # slug rules: unicode, punctuation, length
+        self.assertEqual(bn("Café: déjà vu!! (naïve) ✓").stdout.strip(), "feature/cafe-deja-vu-naive")
+        self.assertEqual(bn("日本語").stdout.strip(), "feature/work")
+        long = bn("word " * 30).stdout.strip()
+        self.assertLessEqual(len(long.split("/", 1)[1]), 40)
+        self.assertFalse(long.endswith("-"))
+        # custom rules per project, and back
+        out = self.cli("config", "branch-rules", "-p", "proj", "feature=feat/{name}", "bugfix=fix/{task-id}/{name}").stdout
+        self.assertIn("feature=feat/{name}", out)
+        self.assertEqual(bn("Add x").stdout.strip(), "feat/add-x")
+        self.assertEqual(bn("Fix y", "--task", "9").stdout.strip(), "fix/9/fix-y")
+        self.assertEqual(bn("Release 1.0").stdout.strip(), "release/release-1.0")
+        p = self.cli("config", "branch-rules", "-p", "proj", "feature=a b/{name}", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("feature=feature/{task-id}-{name}", self.cli("config", "branch-rules", "-p", "proj", "default").stdout)
+        self.assertIn("branch rules for proj: feature=feature/{task-id}-{name}", self.cli("doctor", self.proj, check=False).stdout)
+        # collisions get -2, -3
+        g("branch", "feature/add-x")
+        self.assertEqual(bn("Add x").stdout.strip(), "feature/add-x-2")
+        g("branch", "feature/add-x-2")
+        self.assertEqual(bn("Add x").stdout.strip(), "feature/add-x-3")
+        g("branch", "bugfix")  # a plain "bugfix" branch: bugfix/... can't exist beside it
+        self.assertIn("a branch named 'bugfix' exists", bn("Fix z", check=False).stderr)
+
+    def test_run_worktree_auto_names_the_branch_and_all_generators_use_the_helper(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("todo", "add", "Login timeout", "-p", "proj", "--ref", "PR 512")
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "Fix login timeout", "--worktree", "auto", "--todo", "1",
+                       "--worktree-base", "main", "--", "t").stdout
+        self.assertIn("branch: bugfix/512-fix-login-timeout", out)
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "Release 4.2", "--worktree", "auto",
+                       "--worktree-base", "main", "--", "t").stdout
+        self.assertIn("branch: release/release-4.2", out)
+        self.assertIn("guarded", out)  # created locally; pushing stays blocked
+        self.assertIn("pushing it stays blocked", out)
+        p = self.cli("run", "proj", "-m", "haiku", "--why", "Release notes", "--branch-type", "release",
+                     "--worktree", "auto", "--worktree-base", "main", "--", "t", check=False)
+        self.assertIn("--version X", p.stderr)
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "Add thing", "--worktree", "my-own-name",
+                       "--worktree-base", "main", "--", "t").stdout
+        self.assertIn("worktree: created my-own-name", out)  # explicit names are taken as they are
+        # no other place invents a branch name
+        with open(CLI) as fh:
+            src = fh.read()
+        self.assertNotIn('"lean/', src)
+        self.assertNotIn("'lean/", src)
+        self.assertEqual(src.count("new_branch_name("), 3)  # definition, run --worktree auto, branch-name
+
     def test_worktree_creates_missing_branch_from_a_base(self):
         g = self.git_project()
         g("add", "-A")

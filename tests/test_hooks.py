@@ -520,7 +520,7 @@ class BudgetTest(Base):
             self.assertIn("Delegate it: lean-agent run <project> --cards auto -m <model> --why",
                           out["hookSpecificOutput"]["permissionDecisionReason"])
             self.assertIn("--read-only", out["hookSpecificOutput"]["permissionDecisionReason"])
-        for cmd in ("lean-agent runs", "lean-agent runs --show 3", "lean-agent runs --show last --tail 20", "lean-agent logs --run r7 -n 5", "lean-agent runs --wait all", "lean-agent runs --wait last --timeout 90",
+        for cmd in ("lean-agent runs", "lean-agent branch-name -p shop --type bugfix --task 12 \"Fix login\"", "lean-agent config branch-rules -p shop default", "lean-agent runs --show 3", "lean-agent runs --show last --tail 20", "lean-agent logs --run r7 -n 5", "lean-agent runs --wait all", "lean-agent runs --wait last --timeout 90",
                     "cd /tmp && lean-agent review shop --status",
                     plugin + "/bin/lean-agent stats", "lean-agent run shop --cards auto -m haiku --why x -- 'look'",
                     "lean-agent run p -- \"x\" 2>&1", "lean-agent runs >/dev/null 2>&1", "lean-agent todo list 2>&1 | head",
