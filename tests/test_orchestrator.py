@@ -7108,6 +7108,36 @@ class CliTest(unittest.TestCase):
         self.assertNotIn(fixes[:12], call["task"].split("Re-review")[0])
 
 
+    def test_review_costs_from_the_ledger(self):
+        now = datetime.datetime.now()
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+
+        def run(i, model, cost, ref, days=0, role="reviewer", **kw):
+            return dict({"id": i, "project": "proj", "role": role, "model": model, "cost_usd": cost,
+                         "ts": (now - datetime.timedelta(days=days)).isoformat(timespec="seconds"),
+                         "review_meta": {"ref": ref}}, **kw)
+        rows = [run("a", "claude-opus-4", 4.0, "feat/a"), run("b", "sonnet", 1.0, "feat/a", review_meta={"ref": "feat/a", "resume": True}),
+                run("c", "sonnet", 0.5, "feat/b"), run("d", "sonnet", 0.25, "feat/b", resumed=True),
+                run("e", "haiku", 0.05, "feat/b", role="reuse-check", why="fill the reuse entries the reviewer left out"),
+                run("old", "sonnet", 9.0, "feat/old", days=30)]
+        rows[1]["review_meta"] = {"ref": "feat/a", "resume": True}
+        with open(os.path.join(home, "ledger.jsonl"), "w") as fh:
+            fh.writelines(json.dumps(r) + "\n" for r in rows)
+        self.cli("learn", self.proj, "--name", "proj")
+        os.makedirs(os.path.join(home, "reviews"), exist_ok=True)
+        with open(os.path.join(home, "reviews", "proj.jsonl"), "a") as fh:
+            for why in ("docs-only", "docs-only", "version-bump"):
+                fh.write(json.dumps({"ts": now.isoformat(timespec="seconds"), "verdict": f"skipped ({why})"}) + "\n")
+        out = self.cli("review", "--costs", "--project", "proj").stdout
+        self.assertIn("$5.80 over 5 run(s)", out)
+        self.assertIn("3 reviews (2 first, 1 re-reviews) · 2 second turns · average $1.93 per review", out)
+        self.assertIn("opus: $4.00 (1 run(s))", out)
+        self.assertIn("feat/a: $5.00 (2 run(s))", out)
+        self.assertNotIn("feat/old", out)
+        self.assertIn("skipped: 2 docs-only, 1 version-bump", out)
+        self.assertIn("feat/old", self.cli("review", "--costs", "--days", "60").stdout)
+
     def test_config_review_model_and_the_reviewer_line(self):
         self.assertIn("review-model: auto", self.cli("config", "review-model").stdout)
         self.assertIn("review-model: opus", self.cli("config", "review-model", "opus").stdout)
@@ -7169,7 +7199,7 @@ class ReviewUnitTest(unittest.TestCase):
         self.assertIn("- new file a/x.py", t)
         self.assertIn("- foo (a/x.py)", t)
         self.assertIn("- t.py: 'test_one'", t)
-        self.assertIn('"verdict": "extend|wraps-existing', t)
+        self.assertIn('"verdict": "duplicate|extends-existing', t)
         self.assertIn("coverage entry:", t)
         self.assertEqual(self.agent.answer_template({"files": [], "symbols": []}, {"tests": []}), "")
 

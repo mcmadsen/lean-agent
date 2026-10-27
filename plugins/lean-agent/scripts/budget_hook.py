@@ -176,7 +176,7 @@ def foreground_worker(command):
         sub, rest = words[1], words[2:]
         if sub not in ("run", "review", "do", "tracker") or {"-h", "--help"} & set(rest):
             continue  # help text starts nothing
-        if sub == "review" and (rest[:1] == ["decline"] or "--status" in rest):
+        if sub == "review" and (rest[:1] == ["decline"] or {"--status", "--costs"} & set(rest)):
             continue  # instant
         if sub == "tracker" and "--discover" not in rest:
             continue
@@ -190,7 +190,7 @@ def unlinked_worker(command):
         if os.path.basename(words[0]) != "lean-agent" or len(words) < 2 or words[1] not in ("run", "review", "do"):
             continue
         rest = words[2:]
-        if words[1] == "review" and (rest[:1] == ["decline"] or {"--status", "--decide-gaps"} & set(rest)):
+        if words[1] == "review" and (rest[:1] == ["decline"] or {"--status", "--decide-gaps", "--costs"} & set(rest)):
             continue  # decisions about a review, not work for the board
         if {"-h", "--help"} & set(rest):
             continue

@@ -631,7 +631,7 @@ class BudgetTest(Base):
                        "lean-agent now", "lean-agent thread show t1 --all", "lean-agent thread close t1", "lean-agent thread reopen t1",
                        "lean-agent thread move t2", "lean-agent checkpoint 'x' --thread t1", "lean-agent review proj --head b --thread none",
                        "lean-agent handoff --note 'x' --kind fyi --thread t1",
-                       "lean-agent checkpoint 'x'", "lean-agent brief", "lean-agent runs --last", "lean-agent runs --stop last", "lean-agent review proj --head b",
+                       "lean-agent checkpoint 'x'", "lean-agent brief", "lean-agent review --costs --days 7", "lean-agent runs --last", "lean-agent runs --stop last", "lean-agent review proj --head b",
                        "lean-agent handover 'T' --task-file - <<'EOF'\ntext\nEOF", "lean-agent handover --list", "lean-agent sync", "lean-agent doctor",
                        "lean-agent config strict on", "lean-agent card proj show x", "lean-agent optimize proj",
                        "lean-agent codemod proj 'npx jscodeshift src'", "lean-agent worktrees", "lean-agent guard list",
@@ -1084,7 +1084,7 @@ class BudgetTest(Base):
             self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny", cmd)
             self.assertIn("run_in_background: true", out["hookSpecificOutput"]["permissionDecisionReason"])
             self.assertIsNone(run_hook("budget_hook.py", ev(cmd, bg=True), LEAN_AGENT_TODO_REMINDER="0", **self.env))
-        for cmd in ("lean-agent review shop --status", "lean-agent review decline shop 1 --why x",
+        for cmd in ("lean-agent review shop --status", "lean-agent review --costs --days 3", "lean-agent review decline shop 1 --why x",
                     "lean-agent runs --show", "lean-agent tracker shop", "lean-agent stats",
                     "cat > /tmp/task.md <<'EOF'\nThen run lean-agent review shop --resume\nEOF",
                     'echo "next: lean-agent run -p shop"', "git commit -m 'lean-agent do shop x'"):
@@ -1109,7 +1109,8 @@ class BudgetTest(Base):
             self.assertNotIn("Old thing", out["permissionDecisionReason"])
         for cmd in ('lean-agent run -p shop --todo 1 -m haiku --why x "fix it"', "lean-agent review shop --todo=#1",
                     "lean-agent run -p shop --todo none -m haiku --why x look", "lean-agent run --resume 0101-x more",
-                    "lean-agent review shop --status", "lean-agent review shop --decide-gaps", "lean-agent todo add x"):
+                    "lean-agent review shop --status", "lean-agent review shop --decide-gaps", "lean-agent review --costs",
+                    "lean-agent todo add x"):
             self.assertIsNone(run_hook("budget_hook.py", ev(cmd), **self.env), cmd)
 
     def test_check_before_auto_compaction(self):
