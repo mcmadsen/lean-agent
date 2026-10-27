@@ -361,6 +361,25 @@ orchestrator before the first commit or PR (`lean-agent attribution` says "not s
   comments;
 - `lean-agent worktree push` refuses commits that still credit Claude.
 
+## Branch names
+
+New branches follow the project's branch rules, by default `feature/{task-id}-{name}`, `bugfix/{task-id}-{name}` and
+`release/release-{version}`. `{name}` is a lowercase ascii slug of the title (up to ~40 characters); `{task-id}` is the
+linked tracker item id of the todo, else the todo number, else left out together with its `-`. Change them per project:
+
+```
+lean-agent config branch-rules --project P feature=<pattern> bugfix=<pattern> release=<pattern>
+lean-agent config branch-rules --project P default      # back to the defaults
+lean-agent branch-name --project P [--type feature|bugfix|release] [--task ID] [--version X] "Fix login timeout"
+lean-agent run P --worktree auto [--branch-type bugfix] --todo 12 -- "Fix login timeout"   # branch: bugfix/12-fix-login-timeout
+```
+
+The type is inferred when not given: bugfix when the title has fix/bug/hotfix/regression/defect as a word, release when
+it starts with "release" (a release needs a version: `--version X`, or "Release 1.2" in the title), else feature.
+Existing names get `-2`, `-3`; every name passes `git check-ref-format --branch`. Explicit branch names
+(`--worktree my-branch`) and old `lean/*` branches keep working. `release/*` is guarded by default: creating it
+locally is fine, pushing it stays blocked unless you allow it (`lean-agent guard`). `doctor` shows the rules.
+
 ## Shared worktrees
 
 `lean-agent run <project> --worktree <branch> ...` runs the worker in a git worktree of that branch at

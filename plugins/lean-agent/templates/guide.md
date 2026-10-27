@@ -95,6 +95,8 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      whole server (tens of thousands of tokens per turn; `run` prints the cost); `read` is automatic. Plugin servers (`plugin:<plugin>:<server>`) work too.
    - `--chrome=<tool>,<tool>`: the user's real Chrome (Teams, Gmail ...); a worker checks the connection once (worker:
      `lean-agent chrome check`; it is refused for you, `lean-agent chrome status` is not).
+   - New branches follow the project's branch rules: get a name with `lean-agent branch-name` or let lean-agent create
+     it (`--worktree auto [--branch-type feature|bugfix|release]`).
    - `--worktree <branch>`: shared lean-agent git worktree of that branch (e.g. a reviewer's checks on a PR branch);
      the user's checkout is untouched. Reuse the name for the next worker (dependencies and builds stay). Read-only
      workers share one; file-changing workers take turns. `lean-agent worktrees` lists them; removing one, pushing
