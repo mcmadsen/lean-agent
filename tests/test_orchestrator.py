@@ -7310,6 +7310,33 @@ class CliTest(unittest.TestCase):
             self.assertFalse(stopped)
             self.assertNotIn("stop", calls)
 
+    def test_close_reports_a_failed_stop_of_a_live_host_and_keeps_its_records(self):
+        import lean_agent as L
+        import service_session
+        lt = self.threads_home()
+        tid = lt.new("hosted")
+        lt.set_session(tid, session_on=True)
+
+        def request(kind, **kw):
+            return {"ok": True, "sessions": [{"thread": tid}]} if kind == "list" else {"ok": False, "error": "no reply"}
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(service_session, "session_rec", return_value={"host_pid": os.getpid()}), \
+                mock.patch.object(service_session, "sessions_request", side_effect=request), \
+                mock.patch.object(service_session, "alive", return_value=False), \
+                mock.patch.object(service_session, "drop_session") as drop:
+            with self.assertRaises(RuntimeError):
+                L.close_thread_session(tid)
+            drop.assert_not_called()
+            self.assertTrue(lt.load()["threads"][tid].get("session_on"))
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(service_session, "session_rec", return_value={"host_pid": 2 ** 22 + 12345}), \
+                mock.patch.object(service_session, "sessions_request", side_effect=request), \
+                mock.patch.object(service_session, "alive", return_value=False), \
+                mock.patch.object(service_session, "drop_session") as drop:
+            stopped, _, _ = L.close_thread_session(tid)  # the host is gone after a failed request: closed
+            self.assertTrue(stopped)
+            drop.assert_called_once()
+
     def test_a_re_review_continues_from_the_last_reviewed_head_not_the_latest_run(self):
         g = self.git_project()
         self.cli("learn", self.proj, "--name", "proj")
