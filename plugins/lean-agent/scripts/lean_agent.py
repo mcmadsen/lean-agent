@@ -228,7 +228,7 @@ def task_type(task, read_only=False, chrome=False):
 
 
 def is_core(c, ttype):
-    return not c.get("rule") and (bool(c.get("core")) or ttype in (c.get("core_types") or []))
+    return not c.get("is_rule") and (bool(c.get("core")) or ttype in (c.get("core_types") or []))
 
 
 # ---------------------------------------------------------------- projects & library
@@ -299,7 +299,16 @@ def library_lock(slug):
 
 
 def load_cards(slug):
-    return load_json(library_path(slug), [])
+    """The project's cards; the old `rule` flag becomes `is_rule`, and notes the classifier calls rules are rules."""
+    cards = load_json(library_path(slug), [])
+    for c in cards:
+        if "rule" in c:
+            c["is_rule"] = bool(c.pop("rule"))
+        if c.get("kind") == "note" and not c.get("is_rule"):
+            fields = rule_fields(c.get("text", ""), "note")
+            if fields["is_rule"]:
+                c.update(fields, archived=False)
+    return cards
 
 
 def save_cards(slug, cards):
@@ -590,7 +599,7 @@ def memory_store():
 
 def rule_fields(text, mtype):
     r = lean_rules.classify(text, mtype)
-    return {"rule": r["rule"], "targets": r["targets"], "alternative": r["alternative"]}
+    return {"is_rule": r["rule"], "targets": r["targets"], "alternative": r["alternative"]}
 
 
 def sync_memory(slug):
@@ -610,7 +619,7 @@ def sync_memory(slug):
                 kept.append(c)
             elif c["id"] in fresh:
                 c.update(fresh.pop(c["id"]))
-                if c.get("rule") and c.get("archived"):
+                if c.get("is_rule") and c.get("archived"):
                     c["archived"] = False  # one-time migration: a rule is never archived
                 kept.append(c)
         for c in fresh.values():
@@ -786,7 +795,7 @@ def _cmd_card(a):
         return
     c = find_card(cards, a.id)
     if a.action == "rm":
-        if c.get("rule"):
+        if c.get("is_rule"):
             print(f"{a.id} is a rule and is never archived; delete it for good with `lean-agent memory rm {a.id}`")
             return
         if c["kind"] == "note":
@@ -822,7 +831,7 @@ def suggest(slug, task, max_tokens, ttype=None, explain=False, strict=False, lim
     best one, and at most `limit` of them. Returns the picked cards, or with explain=True
     (picked, reasons, closest rejected card)."""
     import math
-    cards = [c for c in load_cards(slug) if not c.get("archived") or c.get("rule")]
+    cards = [c for c in load_cards(slug) if not c.get("archived") or c.get("is_rule")]
     ttype = ttype or task_type(task)
     tw = words(task)
     n = len(cards) or 1
@@ -831,8 +840,8 @@ def suggest(slug, task, max_tokens, ttype=None, explain=False, strict=False, lim
         for w in words(c["title"]) | words(c["text"]):
             df[w] = df.get(w, 0) + 1
     idf = {w: math.log((n + 1) / (df.get(w, 0) + 1)) for w in tw}
-    picked = lean_rules.pick_within_budget([c for c in cards if c.get("rule")])  # rules: always, exempt from ranking
-    picked += [c for c in cards if is_core(c, ttype) and not c.get("rule") and not (strict and often_unneeded(c, ttype))]
+    picked = lean_rules.pick_within_budget([c for c in cards if c.get("is_rule")])  # rules: always, exempt from ranking
+    picked += [c for c in cards if is_core(c, ttype) and not c.get("is_rule") and not (strict and often_unneeded(c, ttype))]
     reasons = {c["id"]: f"core for {ttype}" if ttype in (c.get("core_types") or []) else "core" for c in picked}
     budget = max_tokens - sum(c["tokens"] for c in picked)
     scored, closest = [], None
@@ -1257,7 +1266,7 @@ def canonical_specs(project, specs):
 
 def rule_hits(cards, *names):
     """[(rule card, target)] for the rules that forbid one of these server names/aliases."""
-    return [(c, t) for c in cards if c.get("rule") for t in c.get("targets") or [] if lean_rules.matches(t, *names)]
+    return [(c, t) for c in cards if c.get("is_rule") for t in c.get("targets") or [] if lean_rules.matches(t, *names)]
 
 
 def enforce_mcp_rules(cards, project, specs, force=False):
@@ -1277,7 +1286,7 @@ def enforce_mcp_rules(cards, project, specs, force=False):
 
 
 def projs_path(slug):
-    return projects().get(slug, {}).get("path")
+    return (projects().get(slug) or {}).get("path")
 
 
 def project_rules(slug):
@@ -1286,7 +1295,7 @@ def project_rules(slug):
         cards = sync_memory(slug)
     except OSError:
         cards = load_cards(slug)
-    return lean_rules.pick_within_budget([c for c in cards if c.get("rule")])
+    return lean_rules.pick_within_budget([c for c in cards if c.get("is_rule")])
 
 
 CONFLICT_GLOBS = (("CLAUDE.md",), (".claude", "agents", "*.md"), (".claude", "skills", "*", "SKILL.md"),
@@ -1326,7 +1335,7 @@ def advise_rules(slug, path):
 def task_rule_warnings(cards, task):
     """Warn (no refusal) when the task text asks for a tool that a rule forbids."""
     for c in cards:
-        for t in (c.get("targets") or []) if c.get("rule") else []:
+        for t in (c.get("targets") or []) if c.get("is_rule") else []:
             if re.search(r"\b(?:use|using|call|calling|run|via|with|through)\s+(?:the\s+)?`?" + re.escape(t) + r"\b|\b"
                          + re.escape(t) + r"\s+(?:mcp|cli)\b", task, re.I):
                 print(f"lean-agent: warning: the task asks for {t}, which rule {c['id']} forbids: "
@@ -1688,7 +1697,7 @@ def _cmd_run(a):
             if missing:
                 die(f"unknown card(s): {', '.join(missing)} (see: lean-agent cards {slug})")
             ttype = getattr(a, "ttype", None) or task_type(task, a.read_only, bool(a.chrome))
-            cards = [c for c in lib.values() if is_core(c, ttype) and not c.get("archived") and not c.get("rule")]
+            cards = [c for c in lib.values() if is_core(c, ttype) and not c.get("archived") and not c.get("is_rule")]
             cards += [lib[x] for x in wanted if lib[x] not in cards]
         if not getattr(a, "role", None) and a.cards != "none" and getattr(a, "card_list", None) is None:
             known = server_issue_cards([c for c in lib.values() if not c.get("archived")], project,
@@ -1697,7 +1706,7 @@ def _cmd_run(a):
             for c in known:
                 if is_issue_card(c):
                     print(f"known issue: {re.sub(r'^memory [a-z]+: ', '', c['title'])}", flush=True)
-        cards = [c for c in cards if not c.get("rule")] + lean_rules.pick_within_budget([c for c in lib.values() if c.get("rule")])
+        cards = [c for c in cards if not c.get("is_rule")] + lean_rules.pick_within_budget([c for c in lib.values() if c.get("is_rule")])
         native_rules = bool(not getattr(a, "role", None) and project_rules_on(slug))
         if native_rules:  # Claude Code loads CLAUDE.md and the rules itself
             cards = [c for c in cards if not is_rule_card(c)]
@@ -4545,7 +4554,7 @@ def reuse_follow_up(a, slug, meta, effort):
     last = (list(read_jsonl(reviews_path(slug))) or [None])[-1]
     if not last or not (last.get("unchecked") or last.get("coverage_unchecked")):
         return 2  # open gaps are for `review --decide-gaps`, not for another turn
-    path = (projects().get(slug) or {}).get("path") or ""
+    path = projs_path(slug) or ""
     unchecked = list(last.get("unchecked") or [])
     got = fill_reuse(a, slug, path, meta, unchecked) if unchecked and path and meta.get("head") else []
     names = " ".join(str(r.get("symbol")) for r in got)
@@ -4796,7 +4805,7 @@ def enforce_review_rules(review, meta, declined=()):
 
 
 def report_review(slug, project, entry, review, meta):
-    root = (projects().get(slug) or {}).get("path") or project
+    root = projs_path(slug) or project
     declined = () if meta.get("independent") else declined_for(slug, meta.get("ref"), root, meta.get("head"))
     verdict, findings, checks, notes = enforce_review_rules(review, meta, declined)
     order = {"blocker": 0, "major": 1, "minor": 2, "nit": 3}
@@ -6337,7 +6346,7 @@ def _card_actions(slug, cards, a, skip):
     rejected = {k for k, v in load_json(home("library", slug, "drafts.json"), {}).items() if v == "rejected"}
     actions = []
     for c in cards:
-        if c.get("archived") or c.get("rule") or c["id"] in skip:  # rules are never demoted or archived
+        if c.get("archived") or c.get("is_rule") or c["id"] in skip:  # rules are never demoted or archived
             continue
         for t, bt in sorted((c.get("by_type") or {}).items()):
             if bt["offered"] < a.min_runs:
@@ -9742,7 +9751,7 @@ def advise_requests(thread_arg, limit=5, chars=200):
     return ("The user's recent requests in this thread (oldest first):\n" + "\n".join(f"- {r}" for r in reqs)) if reqs else ""
 
 
-def advise_cards(slug, limit=40, request="", project=None):
+def advise_cards(slug, request, project, limit=40):
     """The project's cards as `id: title` lines for the advisor (so it needs no command to see them), then the
     cards that mention a server or tool the request names, with their text, to warn about."""
     all_cards = [c for c in load_cards(slug) if not c.get("archived")]

@@ -1705,7 +1705,7 @@ class CliTest(unittest.TestCase):
         self.add_rule()
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "unrelated chores")
         self.assertIn("use trackercli instead", json.dumps(self.calls()[-1]))
-        card = next(c for c in self.cards_json() if c["id"].startswith("mem-") and c.get("rule"))
+        card = next(c for c in self.cards_json() if c["id"].startswith("mem-") and c.get("is_rule"))
         self.assertEqual(card["targets"], ["tracker"])
         self.assertEqual(card["alternative"], "trackercli")
         out = self.cli("card", "rm", "proj", card["id"])
@@ -1718,7 +1718,7 @@ class CliTest(unittest.TestCase):
         cards = self.cards_json()
         for i in range(6):
             cards.append({"id": f"mem-r{i}", "kind": "note", "title": f"rule {i}", "text": f"ZRULE{i} " + "word " * 20,
-                          "rule": True, "tokens": 150, "updated": f"2026-01-0{i + 1}", "targets": [],
+                          "is_rule": True, "tokens": 150, "updated": f"2026-01-0{i + 1}", "targets": [],
                           "offered": 0, "used": 0, "unneeded": 0})
         with open(path, "w") as fh:
             json.dump(cards, fh)
@@ -1727,6 +1727,18 @@ class CliTest(unittest.TestCase):
             sent = json.dumps(self.calls()[-1])
             self.assertEqual(sum(f"ZRULE{i}" in sent for i in range(6)), 2, cards_arg)
 
+    def test_existing_note_cards_are_classified_as_rules_on_load(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        path = os.path.join(self.env["LEAN_AGENT_HOME"], "library", "proj", "cards.json")
+        cards = self.cards_json() + [{"id": "n-old", "kind": "note", "title": "tracker", "text": self.RULE, "rule": False,
+                                      "tokens": 12, "archived": True, "offered": 0, "used": 0, "unneeded": 0, "updated": "2026-01-01"}]
+        with open(path, "w") as fh:
+            json.dump(cards, fh)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "unrelated chores")
+        self.assertIn("use trackercli instead", json.dumps(self.calls()[-1]))
+        card = next(c for c in self.cards_json() if c["id"] == "n-old")
+        self.assertTrue(card.get("is_rule") and not card.get("archived") and "rule" not in card)
+
     def test_an_archived_rule_is_unarchived_when_the_library_loads(self):
         self.use_tracker()
         self.cli("learn", self.proj, "--name", "proj")
@@ -1734,12 +1746,12 @@ class CliTest(unittest.TestCase):
         path = os.path.join(self.env["LEAN_AGENT_HOME"], "library", "proj", "cards.json")
         cards = self.cards_json()
         for c in cards:
-            if c.get("rule"):
+            if c.get("is_rule"):
                 c["archived"] = True
         with open(path, "w") as fh:
             json.dump(cards, fh)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "unrelated chores")
-        self.assertFalse(any(c.get("archived") for c in self.cards_json() if c.get("rule")))
+        self.assertFalse(any(c.get("archived") for c in self.cards_json() if c.get("is_rule")))
         self.assertIn("use trackercli instead", json.dumps(self.calls()[-1]))
 
     def test_run_refuses_an_mcp_server_a_rule_forbids_and_force_mcp_overrides(self):
