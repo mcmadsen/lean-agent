@@ -1213,7 +1213,7 @@ def resolve_mcp(project, specs):
         if name not in available:
             unknown_server(name, available)
         cfg = available[name]["config"]
-        servers[name] = cfg
+        servers[name] = lean_mcp.with_auth_env(cfg)  # the auth variables the server needs, from the user's environment
         prefix = lean_mcp.tool_prefix(name)
         if not wanted:
             allowed.append(prefix.rstrip("_"))  # mcp__server: every tool of that server

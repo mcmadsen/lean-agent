@@ -424,60 +424,168 @@ class ProbeError(Exception):
     pass
 
 
-def probe(cfg, timeout=20.0):
-    """List a stdio server's tools by speaking MCP to it directly (no model call)."""
+_AUTH_ENV = re.compile(r"(^|_)(PAT|TOKEN|API_?KEY|SECRET|AZURE|AZUREDEVOPS|ADO)(_|$)", re.I)
+_NOT_FOR_SERVERS = ("ANTHROPIC_", "CLAUDE", "LEAN_AGENT")  # the worker's own credentials never go to a server
+UNAUTH = re.compile(r"anonymous|not authori[sz]ed|unauthori[sz]ed|\b401\b|\b403\b|authentication required|access denied", re.I)
+
+
+def is_auth_env(name):
+    return bool(_AUTH_ENV.search(name)) and not name.upper().startswith(_NOT_FOR_SERVERS)
+
+
+def with_auth_env(cfg, env=None):
+    """A stdio server's config plus the variables it needs for auth. Claude Code starts an MCP server with only a
+    small safe environment (HOME, PATH, ...) plus the config's own env block, so a token that lives in the user's
+    shell never reaches it. Copied into that server's env block only: variables named there with no value, and the
+    user's auth-looking ones (PAT, TOKEN, API_KEY, AZURE_*, ...). The config itself is left as it was."""
     if server_type(cfg) != "stdio":
-        raise ProbeError("only stdio servers can be probed directly; try `lean-agent mcp tools <server> --measure`")
-    env = dict(os.environ)
-    env.update({k: os.path.expandvars(str(v)) for k, v in (cfg.get("env") or {}).items()})
-    cmd = [os.path.expandvars(cfg["command"])] + [os.path.expandvars(str(x)) for x in cfg.get("args") or []]
-    try:
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                text=True, env=env, cwd=cfg.get("cwd") or None)
-    except OSError as exc:
-        raise ProbeError(f"could not start {cmd[0]}: {exc}")
-    lines = queue.Queue()
-    threading.Thread(target=lambda: [lines.put(l) for l in proc.stdout], daemon=True).start()
-    deadline = time.time() + timeout
+        return cfg
+    env = os.environ if env is None else env
+    block = dict(cfg.get("env") or {})
+    for k, v in list(block.items()):
+        if v in (None, "") and (env.get(k) or env_from_command(k)):
+            block[k] = env.get(k) or env_from_command(k)
+    for k, v in env.items():
+        if k not in block and v and is_auth_env(k):
+            block[k] = v
+    return dict(cfg, env=block) if block != (cfg.get("env") or {}) else cfg
 
-    def send(msg):
-        proc.stdin.write(json.dumps(msg) + "\n")
-        proc.stdin.flush()
 
-    def call(mid, method, params):
-        send({"jsonrpc": "2.0", "id": mid, "method": method, "params": params})
+def auth_fix(name, cfg):
+    """What to do when a server runs unauthenticated in a worker."""
+    text = " ".join([str(cfg.get("command") or "")] + [str(x) for x in cfg.get("args") or []] + [name]).lower()
+    fix = (f"A worker cannot open a browser, so a server that logs in interactively runs anonymous. Give {name} a "
+           "token instead: put it in the server's env block (or export it, then `lean-agent mcp env VAR --command "
+           "\"<prints it>\"`), or switch the server to its env/CLI-login mode if it has one")
+    if "devops" in text:
+        fix += " (for this server: add `-a azcli` after `az login`, or `-a env` with a PAT in its env block, to its args if your version supports it; see its README)"
+    return fix + "."
+
+
+def auth_state(name, cfg):
+    """'' or a doctor/check line when the server probably depends on a login a worker can't do."""
+    if server_type(cfg) != "stdio":
+        return ""
+    served = with_auth_env(cfg)
+    if any(is_auth_env(k) for k in (served.get("env") or {})):
+        return ""
+    args = [str(x) for x in cfg.get("args") or []]
+    if any(x in ("-a", "--authentication", "--auth") or x.startswith("--auth") for x in args):
+        return ""
+    return f"{name} has no token in its env and may log in interactively; workers can't. " + auth_fix(name, cfg)
+
+
+class _Session:
+    """A stdio server started the way a worker's Claude Code would, spoken to directly."""
+
+    def __init__(self, cfg, timeout):
+        env = dict(os.environ)
+        env.update({k: os.path.expandvars(str(v)) for k, v in (with_auth_env(cfg).get("env") or {}).items()})
+        cmd = [os.path.expandvars(cfg["command"])] + [os.path.expandvars(str(x)) for x in cfg.get("args") or []]
+        try:
+            self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                         text=True, env=env, cwd=cfg.get("cwd") or None)
+        except OSError as exc:
+            raise ProbeError(f"could not start {cmd[0]}: {exc}")
+        self.lines = queue.Queue()
+        threading.Thread(target=lambda: [self.lines.put(l) for l in self.proc.stdout], daemon=True).start()
+        self.deadline = time.time() + timeout
+        self.mid = 0
+
+    def send(self, msg):
+        self.proc.stdin.write(json.dumps(msg) + "\n")
+        self.proc.stdin.flush()
+
+    def call(self, method, params):
+        self.mid += 1
+        mid = self.mid
+        self.send({"jsonrpc": "2.0", "id": mid, "method": method, "params": params})
         while True:
-            left = deadline - time.time()
+            left = self.deadline - time.time()
             if left <= 0:
                 raise ProbeError(f"timed out waiting for {method}")
             try:
-                line = lines.get(timeout=left)
+                line = self.lines.get(timeout=left)
             except queue.Empty:
                 continue
             try:
                 msg = json.loads(line)
             except ValueError:
                 continue
-            if msg.get("id") == mid:
+            if isinstance(msg, dict) and msg.get("id") == mid:
                 if "error" in msg:
                     raise ProbeError(f"{method}: {msg['error'].get('message')}")
                 return msg.get("result") or {}
 
-    try:
-        call(1, "initialize", {"protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-                               "clientInfo": {"name": "lean-agent", "version": "0.3"}})
-        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        tools, cursor, mid = [], None, 2
+    def start(self):
+        self.call("initialize", {"protocolVersion": PROTOCOL_VERSION, "capabilities": {},
+                                 "clientInfo": {"name": "lean-agent", "version": "0.3"}})
+        self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def tools(self):
+        tools, cursor = [], None
         while True:
-            res = call(mid, "tools/list", {"cursor": cursor} if cursor else {})
+            res = self.call("tools/list", {"cursor": cursor} if cursor else {})
             tools += res.get("tools") or []
-            cursor, mid = res.get("nextCursor"), mid + 1
+            cursor = res.get("nextCursor")
             if not cursor:
                 return tools
+
+    def close(self):
+        self.proc.kill()
+
+
+def probe(cfg, timeout=20.0):
+    """List a stdio server's tools by speaking MCP to it directly (no model call)."""
+    if server_type(cfg) != "stdio":
+        raise ProbeError("only stdio servers can be probed directly; try `lean-agent mcp tools <server> --measure`")
+    sess = _Session(cfg, timeout)
+    try:
+        sess.start()
+        return sess.tools()
     except (BrokenPipeError, OSError) as exc:
         raise ProbeError(f"server exited: {exc}")
     finally:
-        proc.kill()
+        sess.close()
+
+
+def pick_check_tool(tools):
+    """The first tool that looks cheap and read-only (list/get/whoami/project), preferring one with no required arguments."""
+    named = [t for t in tools if re.search(r"list|get|whoami|project", t.get("name") or "", re.I)]
+    free = [t for t in named if not (t.get("inputSchema") or {}).get("required")]
+    return (free or named or [None])[0]
+
+
+def check(name, cfg, timeout=30.0):
+    """Start the server as a worker would and make one cheap read-only call.
+    Returns (status, detail): ok | unauthorized | failed | skipped."""
+    if server_type(cfg) != "stdio":
+        return "skipped", "only stdio servers can be checked directly"
+    try:
+        sess = _Session(cfg, timeout)
+    except ProbeError as exc:
+        return "failed", str(exc)
+    try:
+        sess.start()
+        tools = sess.tools()
+        tool = pick_check_tool(tools)
+        if not tool:
+            return "ok", f"{len(tools)} tools listed (no read-only tool to call)"
+        res = sess.call("tools/call", {"name": tool["name"], "arguments": {}})
+        text = " ".join(str(c.get("text") or "") for c in res.get("content") or [] if isinstance(c, dict))
+        if res.get("isError") or UNAUTH.search(text):
+            if UNAUTH.search(text):
+                return "unauthorized", f"{tool['name']}: {text[:160]}"
+            if re.search(r"required|invalid|missing|validation", text, re.I):
+                return "ok", f"{tool['name']} reached the server (it wants arguments)"
+            return "failed", f"{tool['name']}: {text[:160]}"
+        return "ok", f"{tool['name']} answered"
+    except ProbeError as exc:
+        return ("unauthorized" if UNAUTH.search(str(exc)) else "failed"), str(exc)[:200]
+    except (BrokenPipeError, OSError) as exc:
+        return "failed", f"server exited: {exc}"
+    finally:
+        sess.close()
 
 
 def parse_specs(specs):
