@@ -8702,7 +8702,10 @@ def prepare_thread_session(tid, resume_old, force=False):
         lean_threads.set_session(tid, session_id=str(uuid.uuid4()), session_history=(hist + [sid])[-20:])
         t = lean_threads.load()["threads"].get(tid) or {}
         return True, None, t
-    return (not has), None, t
+    if has:
+        ctx = service_session.transcript_state(transcript_of(sid))["ctx"]
+        return False, f"{tid} resumed" + (f" (context ~{kt(ctx)})" if ctx else ""), t
+    return True, None, t
 
 
 def fresh_message(tid, prompt=None):
@@ -8918,13 +8921,7 @@ def cmd_thread(a):
         force, why = False, ""
         if running and prompt and not resume_old:
             why = auto_fresh_reason(tid)
-            if why:
-                try:
-                    close_thread_session(tid)
-                except RuntimeError as exc:
-                    die(str(exc))
-                running, force = False, True
-        if running:
+        if running and not why:
             if t.get("closed"):
                 lean_threads.set_closed(tid, False)
             if prompt:
@@ -8934,6 +8931,13 @@ def cmd_thread(a):
             print(f"{tid} is running" + (": message sent" if prompt else ""))
             return 0
         with thread_start_lock():
+            if why and service_session.alive(tid):
+                try:
+                    close_thread_session(tid)
+                except RuntimeError as exc:
+                    die(str(exc))
+                force = True
+                prepare_thread_session(tid, False, True)  # new session id now: a failed start below still retries fresh
             if service_session.alive(tid):  # another call started it while this one waited
                 if prompt:
                     ok, err = service_session.send(prompt, tid)
