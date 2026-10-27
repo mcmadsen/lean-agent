@@ -6898,6 +6898,47 @@ class CliTest(unittest.TestCase):
         self.assertEqual((p.returncode, len(self.reviewer_runs())), (0, 0))
         self.assertEqual(self.cli("review", "proj", "--head", "empty", "--base", "main", "--status", check=False).returncode, 0)
 
+    def test_re_reviews_stop_at_the_limit_per_lineage(self):
+        g = self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.review_feature(FAKE_REVIEW=self.REQUEST)
+        for n in (1, 2):
+            self.commit_on(g, "feature", "api/totals.py", f"# fix {n}\n")
+            p = self.review_feature(FAKE_REVIEW=self.REQUEST)
+            self.assertIn("reviewing only what changed since", p.stdout)
+        self.assertEqual(len(self.reviewer_runs()), 3)
+        self.commit_on(g, "feature", "api/totals.py", "# fix 3\n")
+        p = self.review_feature("--resume")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("re-review limit reached (2) — ask the user, or --force", p.stderr)
+        p = self.review_feature()  # the automatic re-review is capped too
+        self.assertIn("re-review limit reached (2)", p.stderr)
+        self.assertEqual(len(self.reviewer_runs()), 3)
+        self.review_feature("--force")
+        self.assertEqual(len(self.reviewer_runs()), 4)
+        self.cli("config", "review-max-rerounds", "4")
+        self.assertIn("review-max-rerounds: 4", self.cli("config", "review-max-rerounds").stdout)
+        self.commit_on(g, "feature", "api/totals.py", "# fix 4\n")
+        self.assertNotIn("limit reached", self.review_feature().stderr)
+        self.assertEqual(len(self.reviewer_runs()), 5)
+
+    def test_a_force_pushed_head_starts_a_new_re_review_lineage(self):
+        g = self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("config", "review-max-rerounds", "1")
+        self.review_feature(FAKE_REVIEW=self.REQUEST)
+        self.commit_on(g, "feature", "api/totals.py", "# fix\n")
+        self.review_feature(FAKE_REVIEW=self.REQUEST)
+        self.commit_on(g, "feature", "api/totals.py", "# fix 2\n")
+        self.assertIn("limit reached (1)", self.review_feature().stderr)
+        g("checkout", "-q", "feature")
+        g("reset", "-q", "--hard", "HEAD~2")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--amend", "-m", "feature, rewritten")
+        g("checkout", "-q", "main")
+        p = self.review_feature(FAKE_REVIEW=self.REQUEST)
+        self.assertNotIn("limit reached", p.stderr)
+        self.assertEqual(len(self.reviewer_runs()), 3)
+
 
 class RuleGlobTest(unittest.TestCase):
     def setUp(self):
