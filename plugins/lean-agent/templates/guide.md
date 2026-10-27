@@ -176,7 +176,7 @@ lean-agent optimize {{P}} --apply --skip checkout-notes
   what was filed; on a conflict, ask which entry wins and remember the answer.
 - Rules (feedback memories, anything saying "never use X") go to every worker within a ~400-token budget and are never
   archived; a worker's `--mcp X` is refused when a rule forbids X (`--force-mcp` overrides: only if the user says so).
-  `lean-agent memory dedupe --apply` merges near-identical memories; `lean-agent mcp check <server>` tests auth.
+  `lean-agent memory dedupe --apply` merges near-identical memories. Workers (not you) test MCP auth with `mcp check`.
 - `memory add|edit|rm|import` and `card add|rm|core|protect|unarchive|shorten` are refused for you; a worker (or the
   librarian) uses them. `optimize --apply --skip <card>` applies all but the named cards.
 - Save recurring "missing" context as a card (remember it with `--project`). After a costly exploring run (many turns
