@@ -314,7 +314,7 @@ push that follows; `--thread tN|none` overrides it, workers inherit it through `
 |---|---|
 | `lean-agent now` | Open threads by last activity (at most 25 lines): state (running, open review, open todos, idle), last action, age. Closes threads idle for 7 days (`LEAN_AGENT_THREAD_IDLE_DAYS` or `thread_idle_days` in config.json); nothing is deleted |
 | `lean-agent thread show tN [--all]` | Everything for the topic in time order: requests, runs, reviews, todos, notes, handovers, pushes |
-| `lean-agent thread close tN` / `reopen tN` | Hide a finished topic from `now` and from matching / bring it back |
+| `lean-agent thread close tN [tM ...]` / `--all` / `--idle 2h` / `reopen tN` | Hide finished topics from `now` and from matching (one checkpoint per thread, a summary line at the end; `--idle` skips sessions with a running run) / bring one back: a closed thread starts a new session from a short brief built from its record, `--resume-old` continues the previous transcript instead |
 | `lean-agent thread new "<title>" [--prompt-file F\|-]` / `list` | Start a thread with its own Remote Control session (with a first message) / list threads |
 | `lean-agent thread send tN --prompt-file F\|-` / `open tN` / `sessions` | Hand a message to the thread's session (starting or resuming it) / bring its session back / list the running sessions |
 | `lean-agent thread merge tB tA` / `unmerge tB` | Fold thread B into A / give B its own tag back |
