@@ -646,6 +646,7 @@ lean-agent memory list [-p shop]
 lean-agent memory add "Never merge on Fridays" --type feedback        # global
 lean-agent memory add "Staging DB resets nightly" -p shop             # project-only
 lean-agent memory rm <name>
+lean-agent memory dedupe [-p shop] [--apply]   # list (or merge) near-identical memories
 ```
 
 - **Same format as auto memory:** one topic file per memory with `type` (user, feedback, project, reference) and
@@ -657,7 +658,15 @@ lean-agent memory rm <name>
   in `suggest`, and `optimize` archives the ones that are never used.
 - **Agents write memory too:** the orchestrator saves anything you ask it to remember, and workers can add durable
   facts to the `remember` field of their feedback line. User and feedback memories become global; project and
-  reference memories stay with that project. Duplicate text is skipped.
+  reference memories stay with that project. Duplicate text is skipped; a near-identical memory (same type, title
+  and similar text) is appended to the existing entry under a dated line (entries are capped at about 2000
+  characters, newest kept), and `memory dedupe --apply` merges old copies without losing their text. Each memory
+  records `created` and `modified` timestamps.
+- **Rules:** a feedback memory, or any memory or note that forbids something ("never use X", "use Y instead of
+  X"), is a rule. Rules are sent with every worker, advise and brief within their own budget of about 400 tokens
+  (newest and most specific first), never archived or demoted by `optimize`, and not counted against the card
+  budget. See them with `lean-agent doctor` (prints the project's rules) or `lean-agent memory list` (the `mem-*` cards). A run
+  with `--mcp X` is refused when a rule forbids X and names the alternative; `--force-mcp` runs it anyway with a warning.
 - **Migration:** `import` copies and never changes your files. Once you're happy, set `"autoMemoryEnabled": false`
   in `~/.claude/settings.json` and remove `autoMemoryDirectory`, so normal sessions stop loading `MEMORY.md`.
 
