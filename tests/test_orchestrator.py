@@ -3853,6 +3853,22 @@ class CliTest(unittest.TestCase):
         p.terminate()
         p.wait(timeout=30)
 
+    def test_auto_fresh_is_decided_again_under_the_start_lock(self):
+        p, log, ss, old = self.closed_thread_with_history(ctx=150000)
+        n = len(self.read_jsonl(log))
+        L = lean_agent_module()
+        # the first look says "fresh", the one under the lock finds a concurrent send already handled it
+        with mock.patch.object(L, "auto_fresh_reason", side_effect=["idle 10m", ""]) as reason, \
+                mock.patch.object(L, "close_thread_session") as close:
+            out = self.send_in_process(600)
+        self.assertEqual(reason.call_count, 2)
+        close.assert_not_called()
+        self.assertIn("t1 is running", out)
+        self.assertEqual(len(self.read_jsonl(log)), n)
+        self.assertTrue(ss.alive("t1"))
+        p.terminate()
+        p.wait(timeout=30)
+
     def test_failed_auto_fresh_start_retries_fresh_and_never_resumes_the_old_session(self):
         p, log, ss, old = self.closed_thread_with_history(ctx=150000)
         n = len(self.read_jsonl(log))
@@ -5365,6 +5381,18 @@ class CliTest(unittest.TestCase):
         out = lt.show_text("t1")
         self.assertRegex(out, r"(?m)^\S+ \S+  r\d+  request  Login redesign")
         self.assertNotIn("now", out.split("\n")[0])
+
+    def test_thread_show_request_ids_are_the_threads_own_and_in_order(self):
+        lt = self.threads_home()
+        lt.route("Login redesign", "s1")  # t1, r1
+        lt.route("Zebra crossing quantum paint", "s1")  # unrelated: t2, r2
+        lt.route("Login redesign colours", "s1")  # t1 again
+        t1 = re.findall(r"\b(r\d+)  request", lt.show_text("t1"))
+        t2 = re.findall(r"\b(r\d+)  request", lt.show_text("t2"))
+        self.assertEqual(len(t1), 2)
+        self.assertEqual(len(t2), 1)
+        self.assertFalse(set(t1) & set(t2))
+        self.assertEqual(t1, sorted(t1, key=lambda r: int(r[1:])))
 
     def test_routing_by_branch_name(self):
         lt = self.threads_home()
@@ -8164,6 +8192,16 @@ class RuleUnitTest(unittest.TestCase):
         with open(path, "w") as fh:
             fh.write("---\nname: old\ntype: project\nmodified: 2025-01-02T03:04:05+00:00\n---\n\nOld fact\n")
         self.assertEqual(self.memory.read_all(self.dir)[0]["created"], "2025-01-02T03:04:05+00:00")
+
+    def test_dedupe_with_a_project_leaves_other_projects_alone(self):
+        text = "Staging database resets every night at two"
+        for scope in ("alpha", "beta"):
+            for i in (1, 2):
+                with open(os.path.join(self.dir, f"project_{scope}_{i}.md"), "w") as fh:
+                    fh.write(f"---\nname: staging reset\ntype: project\nscope: {scope}\ncreated: 2025-01-0{i}\n---\n\n{text}\n")
+        self.assertEqual(len(self.memory.clusters(self.dir)), 2)
+        groups = self.memory.clusters(self.dir, {self.memory.GLOBAL, "alpha"})
+        self.assertEqual([[m["scope"] for m in g] for g in groups], [["alpha", "alpha"]])
 
     def test_dedupe_needs_the_same_targets(self):
         self.memory.add(self.dir, "Never use the alpha tool in the build step", "feedback")
