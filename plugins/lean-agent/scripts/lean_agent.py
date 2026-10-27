@@ -3853,7 +3853,7 @@ def record_skip(slug, path, a, sha, label, mode, base, reason):
                                       "delta": False})
     print(f"review: no new commits since {sha[:12]} — verdict {verdict} stands" if reason == "empty range"
           else f"review: {verdict} for {label} @ {sha[:12]}; --force reviews it anyway")
-    return 0
+    return skipped_status(slug, path, label, sha)  # what a second run on this head exits with
 
 
 def review_costs(a):
