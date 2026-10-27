@@ -7200,12 +7200,12 @@ class CliTest(unittest.TestCase):
         gaps = [{"what": "Retry the upload once", "file": "src/code.py", "line": 1, "blocks_goal": False, "scoped_out": ""}]
         with_gaps = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[], gaps=gaps))
         g("checkout", "-qb", "feat", "main")
-        self.write_commit(g, {"src/code.py": "x = 2\n"}, "code")
-        self.review_branch("feat", FAKE_REVIEW=with_gaps)
+        self.write_commit(g, {"tests/test_code.py": "def test_x(): pass\n"}, "tests")
+        self.review_branch("feat", "--force", FAKE_REVIEW=with_gaps)
         self.assertEqual(len(self.real_reviews()), 1)
-        self.write_commit(g, {"README.md": "# hi\n"}, "docs")  # judged on the delta since that review: docs only
+        self.write_commit(g, {"tests/test_more.py": "def test_y(): pass\n"}, "more tests")  # the whole branch is tests only
         p = self.review_branch("feat")
-        self.assertIn("skipped (docs-only)", p.stdout)
+        self.assertIn("skipped (tests-only)", p.stdout)
         self.assertEqual(len(self.real_reviews()), 1)
         st = self.cli("review", "proj", "--head", "feat", "--status", check=False)
         self.assertEqual(st.returncode, 2, st.stdout)
@@ -7215,6 +7215,23 @@ class CliTest(unittest.TestCase):
             last = lean_agent.latest_review("proj", self.proj, "feat")
         self.assertNotIn("skipped", last["verdict"])
         self.assertEqual(last["gaps"], gaps)  # the skip is not the latest review
+
+    def test_docs_only_follow_up_is_skipped_after_an_approval_but_not_after_changes_requested(self):
+        g = self.skip_project()
+        g("checkout", "-qb", "ok", "main")
+        self.write_commit(g, {"src/code.py": "x = 2\n"}, "code")
+        self.review_branch("ok")
+        self.write_commit(g, {"README.md": "# hi\n"}, "docs")
+        self.assertIn("skipped (docs-only)", self.review_branch("ok").stdout)
+        self.assertEqual(len(self.real_reviews()), 1)
+        g("checkout", "-qb", "asked", "main")
+        self.write_commit(g, {"src/code.py": "x = 3\n"}, "code")
+        self.review_branch("asked", FAKE_REVIEW=self.REQUEST)
+        self.assertEqual(len(self.real_reviews()), 2)
+        self.write_commit(g, {"README.md": "# hello\n"}, "docs")
+        p = self.review_branch("asked", FAKE_REVIEW=self.REQUEST)
+        self.assertNotIn("skipped", p.stdout)
+        self.assertEqual(len(self.real_reviews()), 3)
 
     def test_release_branch_skip_only_for_bumps_merges_and_docs(self):
         g = self.skip_project()
