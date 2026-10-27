@@ -36,6 +36,7 @@ import usage  # noqa: E402
 import lean_mcp  # noqa: E402
 import lean_log  # noqa: E402
 import lean_memory  # noqa: E402
+import lean_rules  # noqa: E402
 import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
@@ -227,7 +228,7 @@ def task_type(task, read_only=False, chrome=False):
 
 
 def is_core(c, ttype):
-    return bool(c.get("core")) or ttype in (c.get("core_types") or [])
+    return bool(c.get("rule")) or bool(c.get("core")) or ttype in (c.get("core_types") or [])
 
 
 # ---------------------------------------------------------------- projects & library
@@ -587,13 +588,18 @@ def memory_store():
     return lean_memory.store_dir(home())
 
 
+def rule_fields(text, mtype):
+    r = lean_rules.classify(text, mtype)
+    return {"rule": r["rule"], "targets": r["targets"], "alternative": r["alternative"]}
+
+
 def sync_memory(slug):
     """Mirror the shared memory store into a project's cards (global memories + this project's)."""
     mems = [m for m in lean_memory.read_all(memory_store()) if m["scope"] in (lean_memory.GLOBAL, slug)]
     fresh = {}
     for m in mems:
         cid = "mem-" + slugify(m["stem"], 40)
-        fresh[cid] = {"id": cid, "kind": "memory", "title": f"memory {m['type']}: {m['description'] or m['name']}"[:120],
+        fresh[cid] = {**rule_fields(m["body"], m["type"]), "id": cid, "kind": "memory", "title": f"memory {m['type']}: {m['description'] or m['name']}"[:120],
                       "source": m["file"], "text": m["body"], "tokens": est_tokens(m["body"])}
     with library_lock(slug):
         cards = load_cards(slug)
@@ -604,6 +610,8 @@ def sync_memory(slug):
                 kept.append(c)
             elif c["id"] in fresh:
                 c.update(fresh.pop(c["id"]))
+                if c.get("rule") and c.get("archived"):
+                    c["archived"] = False  # one-time migration: a rule is never archived
                 kept.append(c)
         for c in fresh.values():
             c.update({"core": False, "archived": False, "offered": 0, "used": 0, "unneeded": 0, "updated": now_iso()})
@@ -770,7 +778,7 @@ def _cmd_card(a):
             if a.core:
                 existing["core"] = True
         else:
-            cards.append({"id": slugify(a.id), "kind": "note", "title": a.title or a.id, "source": "learned",
+            cards.append({**rule_fields(text, "note"), "id": slugify(a.id), "kind": "note", "title": a.title or a.id, "source": "learned",
                           "text": text.strip(), "tokens": est_tokens(text), "core": a.core, "archived": False,
                           "offered": 0, "used": 0, "unneeded": 0, "updated": now_iso()})
         save_cards(slug, cards)
@@ -778,6 +786,9 @@ def _cmd_card(a):
         return
     c = find_card(cards, a.id)
     if a.action == "rm":
+        if c.get("rule"):
+            print(f"{a.id} is a rule and is never archived; delete it for good with `lean-agent memory rm {a.id}`")
+            return
         if c["kind"] == "note":
             cards.remove(c)
         else:
@@ -811,7 +822,7 @@ def suggest(slug, task, max_tokens, ttype=None, explain=False, strict=False, lim
     best one, and at most `limit` of them. Returns the picked cards, or with explain=True
     (picked, reasons, closest rejected card)."""
     import math
-    cards = [c for c in load_cards(slug) if not c.get("archived")]
+    cards = [c for c in load_cards(slug) if not c.get("archived") or c.get("rule")]
     ttype = ttype or task_type(task)
     tw = words(task)
     n = len(cards) or 1
@@ -820,7 +831,8 @@ def suggest(slug, task, max_tokens, ttype=None, explain=False, strict=False, lim
         for w in words(c["title"]) | words(c["text"]):
             df[w] = df.get(w, 0) + 1
     idf = {w: math.log((n + 1) / (df.get(w, 0) + 1)) for w in tw}
-    picked = [c for c in cards if is_core(c, ttype) and not (strict and often_unneeded(c, ttype))]
+    picked = lean_rules.pick_within_budget([c for c in cards if c.get("rule")])  # rules: always, exempt from ranking
+    picked += [c for c in cards if is_core(c, ttype) and not c.get("rule") and not (strict and often_unneeded(c, ttype))]
     reasons = {c["id"]: f"core for {ttype}" if ttype in (c.get("core_types") or []) else "core" for c in picked}
     budget = max_tokens - sum(c["tokens"] for c in picked)
     scored, closest = [], None
@@ -1606,6 +1618,7 @@ def _cmd_run(a):
             for c in known:
                 if is_issue_card(c):
                     print(f"known issue: {re.sub(r'^memory [a-z]+: ', '', c['title'])}", flush=True)
+        cards = cards + lean_rules.pick_within_budget([c for c in lib.values() if c.get("rule") and c not in cards])
         native_rules = bool(not getattr(a, "role", None) and project_rules_on(slug))
         if native_rules:  # Claude Code loads CLAUDE.md and the rules itself
             cards = [c for c in cards if not is_rule_card(c)]
@@ -6216,7 +6229,7 @@ def _card_actions(slug, cards, a, skip):
     rejected = {k for k, v in load_json(home("library", slug, "drafts.json"), {}).items() if v == "rejected"}
     actions = []
     for c in cards:
-        if c.get("archived") or c["id"] in skip:
+        if c.get("archived") or c.get("rule") or c["id"] in skip:  # rules are never demoted or archived
             continue
         for t, bt in sorted((c.get("by_type") or {}).items()):
             if bt["offered"] < a.min_runs:
