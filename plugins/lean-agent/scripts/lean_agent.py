@@ -2906,6 +2906,23 @@ def _norm_gap(t):
 
 GAP_EXCUSED_RE = re.compile(r"\b(documented|out of scope|already (handled|covered|addressed|dealt with)|handled (elsewhere|already))\b", re.I)
 
+GAP_NEGATION_RE = re.compile(r"\b(not|no|never|nor|neither|without|cannot|isn|aren|wasn|weren|doesn|don|didn|hasn|haven|hadn|won|wouldn|"
+                             r"shouldn|couldn|can|nothing|nobody|none|lacks?|missing|unclear|unless|if|whether)\b|n't|n\u2019t", re.I)
+
+
+def gap_excuse(text):
+    """The excusing phrase of a gap's own text ("documented", "out of scope"...), only when every occurrence is
+    affirmative: a negation in the few words before it ("not documented", "isn't already handled", "no longer out
+    of scope", "never handled") or a conditional means no auto-decline."""
+    text = str(text or "")
+    found = None
+    for m in GAP_EXCUSED_RE.finditer(text):
+        before = re.findall(r"[\w\u2019']+", text[:m.start()])[-4:]
+        if GAP_NEGATION_RE.search(" ".join(before)):
+            return None
+        found = found or m.group(0)
+    return found
+
 
 def gap_declined(g, declined):
     """A known gap the user acknowledged (lean-agent review decline <project> g<n>), recognised on later tips by
@@ -4483,8 +4500,8 @@ def enforce_review_rules(review, meta, declined=()):
     if len(kept) < len(gaps):
         notes.append(f"{len(gaps) - len(kept)} gap(s) declined earlier on this branch still apply (not asked again)")
     gaps = kept
-    excused = [(g, m.group(0)) for g in gaps for m in [GAP_EXCUSED_RE.search(str(g.get("what", "")))]
-               if m and g.get("blocks_goal") is not True]
+    excused = [(g, w) for g in gaps for w in [gap_excuse(g.get("what"))]
+               if w and g.get("blocks_goal") is not True]
     if excused:
         gaps = [g for g in gaps if not any(g is e for e, _ in excused)]
         notes.append(f"{len(excused)} gap(s) auto-declined, their own text says so: "
