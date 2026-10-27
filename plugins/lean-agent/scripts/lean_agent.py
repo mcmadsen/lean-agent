@@ -1080,7 +1080,7 @@ def code_tools_note(project):
 
 
 def build_append(project, cards, read_only=False, allow_send=None, chrome=False, role_rule="", answer_lines=0,
-                 branch_rule=False):
+                 *, branch_rule):
     """branch_rule: the worker may create a branch itself (it writes, and no branch was made for it)."""
     parts = [WORKER_PROTOCOL.format(
         answer_rule=ANSWER_RULE.format(n=answer_lines, mark=DETAILS_MARK) if answer_lines else "",
@@ -1524,8 +1524,7 @@ def _cmd_run(a):
             auto_branch = False
         if getattr(a, "worktree", None):
             # an auto name is chosen and its branch created under one lock, so parallel runs can't pick the same name
-            os.makedirs(home("worktrees", slug), exist_ok=True)
-            with file_lock(home("worktrees", slug, ".auto-branch.lock")) if auto_branch else contextlib.nullcontext():
+            with file_lock(home("worktrees", slug, ".auto-branch")) if auto_branch else contextlib.nullcontext():
                 if auto_branch:
                     title = branch_title(getattr(a, "todo", None), task)
                     a.worktree = new_branch_name(slug, project, getattr(a, "branch_type", None),
@@ -4299,9 +4298,8 @@ BRANCH_KINDS = ("feature", "bugfix", "release")
 DEFAULT_BRANCH_RULES = {"feature": "feature/{task-id}-{name}", "bugfix": "bugfix/{task-id}-{name}",
                         "release": "release/release-{version}"}
 _BUGFIX_WORDS = re.compile(r"\b(fix(es|ed|ing)?|bugs?|hotfix(es)?|regressions?|defects?)\b", re.I)
-_VERSION = re.compile(r"\bv?(\d+\.\d+(?:\.\d+)?)(?![\w.]*\w)")
+_VERSION = re.compile(r"\bv?(\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9][\w.]*)?)(?![\w.]*\w)")
 _RELEASE_TITLE = re.compile(r"^\s*release\s+" + _VERSION.pattern, re.I)
-_RELEASE_BRANCH = re.compile(r"(?<![\w/-])release/\S", re.I)
 
 
 def branch_rules(slug):
@@ -4318,9 +4316,9 @@ def branch_slug(title, limit=40):
 
 
 def infer_branch_kind(title):
-    """release when the title starts with "release" and a version (x.y or x.y.z, optional v) or names a release/
-    branch, bugfix when fix/bug/hotfix/regression/defect is a word in it, else feature."""
-    if _RELEASE_TITLE.match(title or "") or _RELEASE_BRANCH.search(title or ""):
+    """release only when the title starts with "release" and a version (x.y or x.y.z, optional v and suffix like -rc1);
+    a title that merely mentions release/... is judged by the other rules. bugfix when fix/bug/hotfix/regression/defect is a word in it, else feature."""
+    if _RELEASE_TITLE.match(title or ""):
         return "release"
     return "bugfix" if _BUGFIX_WORDS.search(title or "") else "feature"
 
@@ -4332,7 +4330,8 @@ def title_version(title):
 
 def task_id_of(ref):
     """A tracker work item id out of a todo's ref ("PR 512", "ABC-12", "#7"); None when there is none."""
-    m = re.search(r"[A-Za-z][A-Za-z0-9]*-\d+|\d+", ref or "")
+    import compact_hook
+    m = compact_hook.REF_KEY.search(ref or "") or re.search(r"\d+", ref or "")
     return m.group(0) if m else None
 
 
