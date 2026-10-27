@@ -7244,6 +7244,20 @@ class CliTest(unittest.TestCase):
         with mock.patch.object(L, "cmd_run", lambda ns: None), mock.patch.object(L, "ledger", lambda: [old]):
             self.assertEqual(L.run_reuse_check(a, "proj", "haiku", "why", [], "feat", "rule"), {})
 
+    def test_a_skip_exits_with_the_status_a_second_run_on_the_same_head_gives(self):
+        g = self.skip_project()
+        gaps = [{"what": "Retry the upload once", "file": "src/code.py", "line": 1, "blocks_goal": False, "scoped_out": ""}]
+        with_gaps = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[], gaps=gaps))
+        g("checkout", "-qb", "feat", "main")
+        self.write_commit(g, {"tests/test_code.py": "def test_x(): pass\n"}, "tests")
+        self.review_branch("feat", "--force", FAKE_REVIEW=with_gaps)
+        self.write_commit(g, {"tests/test_more.py": "def test_y(): pass\n"}, "more tests")
+        first = self.review_branch("feat")
+        self.assertIn("skipped (tests-only)", first.stdout)
+        second = self.review_branch("feat")
+        self.assertEqual(first.returncode, 2, first.stdout)
+        self.assertEqual(second.returncode, first.returncode, second.stdout)
+
     def test_release_branch_skip_only_for_bumps_merges_and_docs(self):
         g = self.skip_project()
         g("checkout", "-qb", "release/2.0", "main")
