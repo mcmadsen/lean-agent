@@ -1790,18 +1790,18 @@ class CliTest(unittest.TestCase):
 
     def test_recording_a_near_identical_memory_updates_the_entry_and_dedupe_merges_old_ones(self):
         self.add_rule()
-        self.add_rule(self.RULE + " It ran as the anonymous identity.", name="no tracker mcp again")
+        self.add_rule(self.RULE + " Thanks.")
         listed = self.cli("memory", "list").stdout
         self.assertEqual(listed.count(" tok"), 1)
         store = self.cli("memory", "where").stdout.split(": ", 1)[1].splitlines()[0]
         with open(os.path.join(store, "feedback_no_tracker_mcp.md")) as fh:
             text = fh.read()
         self.assertIn("created:", text)
-        self.assertRegex(text, r"- \d{4}-\d\d-\d\d: Never use the tracker MCP server.*anonymous identity")
+        self.assertRegex(text, r"- \d{4}-\d\d-\d\d: Never use the tracker MCP server.*Thanks")
         # old copies written before: listed (dry run), then merged
         for i in (2, 3):
             with open(os.path.join(store, f"feedback_copy_{i}.md"), "w") as fh:
-                fh.write("---\nname: copy\ntype: feedback\nscope: global\n---\n" + self.RULE + " Noted.\n")
+                fh.write("---\nname: no tracker mcp\ntype: feedback\nscope: global\n---\n" + self.RULE + " Noted.\n")
         out = self.cli("memory", "dedupe").stdout
         self.assertIn("run again with --apply", out)
         self.assertTrue(os.path.exists(os.path.join(store, "feedback_copy_3.md")))
@@ -8157,6 +8157,40 @@ class RuleUnitTest(unittest.TestCase):
         self.memory.add(self.dir, "Never use the alpha tool in the build step", "feedback")
         self.memory.add(self.dir, "Never use the beta tool in the build step", "feedback")
         self.assertEqual(len(self.memory.read_all(self.dir)), 2)
+
+    def test_merge_keeps_full_bodies_and_caps_the_entry(self):
+        a = a_path = self.memory.add(self.dir, "Release steps: tag the build, upload the artifact, notify the channel", "project", name="release steps")
+        b = self.memory.add(self.dir, "Release steps: tag the build, upload the artifact, notify the channel, UNIQUEMARK", "project",
+                            name="release steps", dedupe=False)
+        group = self.memory.clusters(self.dir)[0]
+        self.memory.merge_cluster(self.dir, group)
+        self.assertFalse(os.path.exists(b))
+        with open(a) as fh:
+            self.assertIn("UNIQUEMARK", fh.read())
+        for i in range(60):
+            self.memory._append_detail(self.memory.read_all(self.dir)[0], f"note {i} " + "x" * 80, force=True)
+        with open(a_path) as fh:
+            text = fh.read()
+        self.assertLessEqual(len(text.split("---\n", 2)[2]), self.memory.MAX_BODY + 5)
+        self.assertIn("note 59", text)
+        self.assertNotIn("note 0 ", text)
+
+    def test_dedupe_needs_the_same_type_and_title_and_does_not_chain(self):
+        body = "Always run the formatter before committing the changes to the repository"
+        self.memory.add(self.dir, body, "feedback", name="formatter")
+        self.memory.add(self.dir, body + " please", "project", name="formatter")  # other type
+        self.memory.add(self.dir, body + " now", "feedback", name="unrelated title here")  # other title
+        self.assertEqual(len(self.memory.read_all(self.dir)), 3)
+        self.assertEqual(self.memory.clusters(self.dir), [])
+
+    def test_clusters_compare_against_the_first_entry_only(self):
+        for i, extra in enumerate(("", " alpha beta", " alpha beta gamma delta")):
+            path = os.path.join(self.dir, f"project_chain_{i}.md")
+            with open(path, "w") as fh:
+                fh.write(f"---\nname: chain\ntype: project\nscope: global\ncreated: 2025-01-0{i + 1}\n---\n\n"
+                         "one two three four five six seven eight nine ten eleven twelve" + extra + "\n")
+        groups = self.memory.clusters(self.dir)
+        self.assertEqual([[m["stem"] for m in g] for g in groups], [["project_chain_0", "project_chain_1"]])
 
 
 if __name__ == "__main__":

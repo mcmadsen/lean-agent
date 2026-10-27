@@ -167,23 +167,26 @@ def _targets(text, mtype):
 
 
 def _same(a_text, a_name, a_type, b):
-    """Near-identical: token-set similarity >= 0.75 of the text or title, with the same rule targets."""
-    return (b["scope"] and lean_rules.near_duplicate(a_text, a_name, b["body"], b["name"],
+    """Near-identical: same type, token-set similarity >= 0.75 of both text and title, same rule targets."""
+    return (b["scope"] and b["type"] == a_type and lean_rules.near_duplicate(a_text, a_name, b["body"], b["name"],
                                                      _targets(a_text, a_type), _targets(b["body"], b["type"])))
 
 
-def _detail(text, limit=160):
-    return " ".join(text.split())[:limit]
+MAX_BODY = 2000
 
 
-def _append_detail(m, text):
-    """Add a dated line with the new detail to an existing memory (kept short); returns its path."""
+def _append_detail(m, text, force=False):
+    """Add the new text under a dated line to an existing memory; the entry is capped at MAX_BODY chars, keeping
+    the newest parts. Returns its path."""
     with open(m["file"], encoding="utf-8", errors="replace") as fh:
         meta, body = parse(fh.read())
-    detail = _detail(text)
-    if lean_rules.tokens(detail) <= lean_rules.tokens(body):
+    text = text.strip()
+    if _norm(text) in _norm(body) or not force and lean_rules.tokens(text) <= lean_rules.tokens(body):
         return m["file"]  # nothing new to add
-    body += f"\n- {datetime.date.today().isoformat()}: {detail}"
+    body = body.rstrip() + f"\n- {datetime.date.today().isoformat()}: {text}"
+    if len(body) > MAX_BODY:
+        body = body[-MAX_BODY:]
+        body = body[body.index("\n") + 1:] if "\n" in body else body
     meta["modified"] = _now()
     meta.setdefault("created", m["created"])
     with open(m["file"], "w") as fh:
@@ -202,6 +205,7 @@ def add(d, text, mtype="project", scope=GLOBAL, name=None, source=None, rebuild=
     existing = read_all(d)
     if any(_digest(m["body"]) == digest for m in existing):
         return None
+    mtype = mtype if mtype in TYPES else "project"
     if dedupe:
         twin = next((m for m in existing if m["scope"] == (scope or GLOBAL)
                      and _same(text, name or text.splitlines()[0][:60], mtype, m)), None)
@@ -210,7 +214,6 @@ def add(d, text, mtype="project", scope=GLOBAL, name=None, source=None, rebuild=
             if rebuild:
                 rebuild_index(d)
             return path
-    mtype = mtype if mtype in TYPES else "project"
     name = name or text.splitlines()[0][:60]
     base = _slug(name)
     if base.startswith(mtype + "_"):  # `--name feedback_x` must not become feedback_feedback_x
@@ -293,31 +296,23 @@ def remove(d, stem):
 
 def clusters(d, scopes=None):
     """Groups (lists, oldest first) of near-duplicate memories of one scope and one type."""
-    mems = [m for m in read_all(d) if scopes is None or m["scope"] in scopes]
-    parent = list(range(len(mems)))
-
-    def root(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    for i, a in enumerate(mems):
-        for j in range(i + 1, len(mems)):
-            b = mems[j]
-            if a["scope"] == b["scope"] and a["type"] == b["type"] and _same(a["body"], a["name"], a["type"], b):
-                parent[root(j)] = root(i)
-    groups = {}
-    for i, m in enumerate(mems):
-        groups.setdefault(root(i), []).append(m)
-    return [sorted(g, key=lambda m: (m["created"] or "9", m["stem"])) for g in groups.values() if len(g) > 1]
+    mems = sorted((m for m in read_all(d) if scopes is None or m["scope"] in scopes),
+                  key=lambda m: (m["created"] or "9", m["stem"]))
+    groups = []  # each group is compared against its first (oldest) entry only, so no chains
+    for m in mems:
+        home = next((g for g in groups if g[0]["scope"] == m["scope"] and _same(m["body"], m["name"], m["type"], g[0])), None)
+        if home:
+            home.append(m)
+        else:
+            groups.append([m])
+    return [g for g in groups if len(g) > 1]
 
 
 def merge_cluster(d, group):
     """Keep the oldest entry, append the others' extra detail (dated, short) and delete them. Returns the kept stem."""
     keep, rest = group[0], group[1:]
     for m in rest:
-        _append_detail(read_all_one(d, keep), m["body"])
+        _append_detail(read_all_one(d, keep), m["body"], force=True)  # merged before the file goes
         os.remove(m["file"])
     rebuild_index(d)
     return keep["stem"]

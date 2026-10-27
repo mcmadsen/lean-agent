@@ -97,7 +97,7 @@ def near_duplicate(new_text, new_title, old_text, old_title, new_targets=None, o
     if sorted(new_targets or []) != sorted(old_targets or []):
         return False
     return (similarity(new_text, old_text) >= threshold
-            or similarity(new_title or "", old_title or "") >= threshold and bool(new_title))
+            and bool(new_title) and similarity(new_title, old_title or "") >= threshold)
 
 
 def pick_within_budget(rules, budget=RULE_TOKENS):
