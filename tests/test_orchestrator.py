@@ -8232,6 +8232,23 @@ class RuleUnitTest(unittest.TestCase):
         self.assertIn("note 59", text)
         self.assertNotIn("note 0 ", text)
 
+    def test_load_cards_classifies_notes_once_per_file_version(self):
+        agent = lean_agent_module()
+        path = os.path.join(self.dir, "library.json")
+        with open(path, "w") as fh:
+            json.dump([{"kind": "note", "text": "plain note about the build"}], fh)
+        calls = []
+        real = agent.rule_fields
+        with mock.patch.object(agent, "library_path", return_value=path), \
+                mock.patch.object(agent, "rule_fields", side_effect=lambda *a: calls.append(a) or real(*a)):
+            agent.load_cards("x")
+            agent.load_cards("x")
+            self.assertEqual(len(calls), 1)
+            with open(path, "w") as fh:
+                json.dump([{"kind": "note", "text": "another note, longer than before"}], fh)
+            agent.load_cards("x")
+            self.assertEqual(len(calls), 2)
+
     def test_dedupe_needs_the_same_type_and_title_and_does_not_chain(self):
         body = "Always run the formatter before committing the changes to the repository"
         self.memory.add(self.dir, body, "feedback", name="formatter")

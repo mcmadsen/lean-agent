@@ -298,16 +298,35 @@ def library_lock(slug):
                 fcntl.flock(fh, fcntl.LOCK_UN)
 
 
+_note_rules = {}  # library path -> ((mtime_ns, size), {note text: rule fields or None}); dropped when the file changes
+
+
+def _note_rule_fields(path, text):
+    try:
+        st = os.stat(path)
+        stamp = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = None
+    entry = _note_rules.get(path)
+    if stamp is None or not entry or entry[0] != stamp:
+        entry = _note_rules[path] = (stamp, {})
+    if text not in entry[1]:
+        fields = rule_fields(text, "note")
+        entry[1][text] = fields if fields["is_rule"] else None
+    return entry[1][text]
+
+
 def load_cards(slug):
     """The project's cards; the old `rule` flag becomes `is_rule`, and notes the classifier calls rules are rules."""
-    cards = load_json(library_path(slug), [])
+    path = library_path(slug)
+    cards = load_json(path, [])
     for c in cards:
         if "rule" in c:
             c["is_rule"] = bool(c.pop("rule"))
         if c.get("kind") == "note" and not c.get("is_rule"):
-            fields = rule_fields(c.get("text", ""), "note")
-            if fields["is_rule"]:
-                c.update(fields, archived=False)
+            fields = _note_rule_fields(path, c.get("text", ""))
+            if fields:
+                c.update(fields, targets=list(fields["targets"]), archived=False)
     return cards
 
 
