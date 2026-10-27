@@ -211,9 +211,9 @@ def running_runs(lean_home):
     return sorted(out, key=lambda x: (x[1].get("started") or "", x[0]))
 
 
-def lost_runs(lean_home):
+def lost_runs(lean_home, acknowledged=False):
     """[(run id, marker)] of runs whose supervisor died without recording a result: a running/*.json whose process is
-    gone and whose run is not in the ledger."""
+    gone and whose run is not in the ledger (and that `runs --lost --clear` has not acknowledged, unless acknowledged=True)."""
     done = set()
     try:
         with open(os.path.join(lean_home, "ledger.jsonl")) as fh:
@@ -232,7 +232,7 @@ def lost_runs(lean_home):
         except (OSError, ValueError):
             continue
         rid = isinstance(m, dict) and (m.get("run") or os.path.basename(f)[:-5])
-        if rid and not (m.get("pid") and pid_alive(m["pid"])) and rid not in done:
+        if rid and not (m.get("pid") and pid_alive(m["pid"])) and rid not in done and (acknowledged or not m.get("lost_ack")):
             out.append((rid, m))
     return sorted(out, key=lambda x: (x[1].get("started") or "", x[0]))
 

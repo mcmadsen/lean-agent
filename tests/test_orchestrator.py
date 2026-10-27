@@ -3560,22 +3560,27 @@ class CliTest(unittest.TestCase):
     def test_thread_new_refuses_above_max_thread_sessions(self):
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "1")
-        # a host record the service wrote (host_pid of a live process) counts whether or not that host answers yet
-        ss.update_session("t9", host_pid=os.getpid(), pid=None)
+        # a host record the service just wrote (host_pid of a live process) counts whether or not that host answers yet
+        ss.update_session("t9", host_pid=os.getpid(), host_started=time.time(), pid=None)
         self.assertFalse(ss.alive("t9"))
+        marker = os.path.join(self.env["LEAN_AGENT_HOME"], "running", "k9.json")  # a live run tagged with it: not closable
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        with open(marker, "w") as fh:
+            json.dump({"pid": os.getpid(), "run": "0101-000009-aaaa", "started": "2026-01-01T00:00:00", "task": "t",
+                       "model": "haiku", "project": "proj", "thread": "t9"}, fh)
         r = self.cli("thread", "new", "second", check=False)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("max-thread-sessions 1", r.stderr + r.stdout)
         self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json")) and
                          self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"))["threads"])
+        os.remove(marker)
         ss.update_session("t9", host_pid=None)  # the host stopped
         self.assertIn("t1 started", self.cli("thread", "new", "first").stdout)
-        r = self.cli("thread", "new", "third", check=False)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("thread close t1", r.stderr + r.stdout)
-        self.assertEqual(sorted(self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"))["threads"]), ["t1"])
-        self.cli("thread", "close", "t1")
-        self.assertIn("t2 started", self.cli("thread", "new", "second").stdout)
+        r = self.cli("thread", "new", "third")  # at the cap the idle t1 makes room
+        self.assertIn('closed t1 "first"', r.stdout)
+        self.assertIn("t2 started", r.stdout)
+        self.cli("thread", "close", "t2")
+        self.assertIn("t3 started", self.cli("thread", "new", "fourth").stdout)
         p.terminate()
         p.wait(timeout=30)
 
@@ -4621,6 +4626,166 @@ class CliTest(unittest.TestCase):
             self.assertIn(k, row)
         self.assertIn("No runs in progress.", self.cli("runs", "--running").stdout)
         self.assertIn("already ended: stopped", self.cli("runs", "--stop", m["run"], check=False).stderr)
+
+    def test_cap_counts_only_live_sessions_and_close_frees_a_slot(self):
+        p, log, ss = self.start_up()
+        self.cli("config", "max-thread-sessions", "1")
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        lt = self.threads_home()
+        tid = lt.new("stale")
+        lt.set_session(tid, session_on=True)  # flagged, with a record whose host died long ago
+        ss.update_session(tid, host_pid=dead.pid, host_started=time.time() - 3600)
+        out = self.cli("thread", "sessions").stdout
+        self.assertNotIn(tid, out)
+        self.assertTrue(lt.load()["threads"][tid].get("session_on"))  # still meant to be open: only the host record is pruned
+        self.assertNotIn(tid, ss.session_rec("main").get("sessions") or {})
+        self.assertIn("started", self.cli("thread", "new", "first").stdout)
+        self.assertRegex(self.cli("thread", "sessions").stdout, r"t2\b")
+        self.cli("thread", "close", "t2")  # a closed session frees its slot at once, flag and record gone
+        self.assertNotIn("t2", self.cli("thread", "sessions").stdout)
+        self.assertIsNone(lt.load()["threads"]["t2"].get("session_on"))
+        self.assertNotIn("t2", ss.session_rec("main").get("sessions") or {})
+        self.cli("thread", "close", "t2")  # idempotent
+        self.assertIn("started", self.cli("thread", "new", "second").stdout)
+        p.terminate()
+        p.wait(timeout=30)
+
+    def test_record_without_a_host_pid_is_not_pending(self):
+        p, log, ss = self.start_up()
+        self.cli("config", "max-thread-sessions", "1")
+        ss.update_session("t9", host_pid=None, host_started=time.time(), pid=None)
+        self.assertNotIn("t9", self.cli("thread", "sessions").stdout)
+        self.assertIn("t1 started", self.cli("thread", "new", "first").stdout)
+        p.terminate()
+        p.wait(timeout=30)
+
+    def test_service_restart_resumes_open_sessions_with_stale_host_records_and_counts_them_once(self):
+        p, log, ss = self.start_up()
+        self.cli("config", "max-thread-sessions", "2")
+        lt = self.threads_home()
+        self.assertIn("t1 started", self.cli("thread", "new", "first").stdout)
+        p.terminate()
+        p.wait(timeout=30)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        ss.update_session("t1", host_pid=dead.pid, host_started=time.time() - 3600)  # stale record left by a crash
+        lt.set_session("t1", session_on=True)
+        self.cli("thread", "sessions", check=False)  # pruning the dead record keeps the intent
+        self.assertTrue(lt.load()["threads"]["t1"].get("session_on"))
+        p2, log2, ss2 = self.start_up()
+        self.wait_for(lambda: len(re.findall(r"^t1\b", self.cli("thread", "sessions", check=False).stdout, re.M)) == 1,
+                      "t1 resumed once")
+        self.assertTrue(lt.load()["threads"]["t1"].get("session_on"))
+        self.cli("thread", "close", "t1")
+        self.assertIsNone(lt.load()["threads"]["t1"].get("session_on"))
+        self.assertNotIn("t1", ss2.session_rec("main").get("sessions") or {})
+        p2.terminate()
+        p2.wait(timeout=30)
+
+    def test_at_the_cap_the_longest_idle_session_without_a_run_is_closed(self):
+        p, log, ss = self.start_up()
+        self.cli("config", "max-thread-sessions", "2")
+        lt = self.threads_home()
+        self.cli("thread", "new", "alpha topic")
+        self.wait_for(lambda: re.search(r"^t1\b.*idle [1-9]\d*s", self.cli("thread", "sessions").stdout, re.M),
+                      "alpha to be idle longer than beta will be")
+        self.cli("thread", "new", "beta topic")
+        out = self.cli("thread", "new", "gamma topic").stdout
+        self.assertRegex(out, r'closed t1 "alpha topic" \(idle \d+[mhd]\) to make room \u2014 reopen with lean-agent thread open t1')
+        self.assertIn("t3 started", out)
+        self.assertIsNone(lt.load()["threads"]["t1"].get("session_on"))
+        self.assertTrue(lt.load()["threads"]["t1"].get("closed"))
+        # every counted session busy: refuse and list them
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(os.path.join(home, "running"), exist_ok=True)
+        sleeper = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(sleeper.kill)
+        for i, tid in enumerate(("t2", "t3")):
+            with open(os.path.join(home, "running", f"k{i}.json"), "w") as fh:
+                json.dump({"pid": sleeper.pid, "run": f"0101-00000{i}-aaaa", "started": "2026-01-01T00:00:00", "task": "t",
+                           "model": "haiku", "project": "proj", "thread": tid}, fh)
+        r = self.cli("thread", "new", "delta topic", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        err = r.stderr + r.stdout
+        self.assertRegex(err, r't2 "beta topic" idle \d+[mhd], 1 running')
+        self.assertRegex(err, r't3 "gamma topic" idle \d+[mhd], 1 running')
+        p.terminate()
+        p.wait(timeout=30)
+
+    def lost_run_marker(self, rid="0101-000000-aaaa"):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(os.path.join(home, "running"), exist_ok=True)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        with open(os.path.join(home, "running", f"{rid}.json"), "w") as fh:
+            json.dump({"pid": dead.pid, "run": rid, "started": "2026-01-01T00:00:00", "task": "t", "model": "haiku",
+                       "project": "proj"}, fh)
+
+    def test_runs_running_hides_lost_runs_and_lost_lists_and_clears_them(self):
+        self.lost_run_marker("0101-000000-aaaa")
+        self.lost_run_marker("0101-000001-bbbb")
+        out = self.cli("runs", "--running").stdout
+        self.assertIn("2 lost runs \u2014 lean-agent runs --lost", out)
+        self.assertNotIn("0101-000000-aaaa", out)
+        lost = self.cli("runs", "--lost").stdout
+        self.assertIn("0101-000000-aaaa", lost)
+        self.assertIn("0101-000001-bbbb", lost)
+        self.assertIn("2 lost runs marked", self.cli("runs", "--lost", "--clear").stdout)
+        self.assertIn("No runs in progress.", self.cli("runs", "--running").stdout)
+        self.assertIn("No lost runs.", self.cli("runs", "--lost").stdout)
+        r = self.cli("runs", "--clear", check=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--clear goes with --lost", r.stderr)
+        stopped = self.cli("runs", "--stop", "0101-000000-aaaa", check=False)  # acknowledged, still stoppable by id
+        self.assertNotIn("no running run", stopped.stderr)
+
+    def test_routing_by_id_beats_topic_words(self):
+        lt = self.threads_home()
+        t0 = datetime.datetime.now().timestamp() - 5000
+        lt.route("Investigate ticket 4711 login failures", "s1", t0)  # t1
+        lt.route("Status dashboard design review notes", "s1", t0 + 10)  # t2
+        lt.route("Prepare release notes and changelog", "s1", t0 + 20)  # t3
+        self.assertEqual(lt.route("4711 status", "s1", t0 + 30)[0], "t1")
+        self.assertEqual(lt.advise("4711 status", "s1", t0 + 31)[0], "t1")
+        self.assertEqual(lt.route("PR 4711 needs a status dashboard review", "s1", t0 + 40)[0], "t1")
+        self.assertEqual(lt.route("create the release PR", "s1", t0 + 50)[0], "t3")
+        # several threads mention the id: the most recent mention wins
+        lt.route("Also ticket 4711 again", "s1", t0 + 60)  # t1 (4711)
+        lt.route("Dashboard colours", "s1", t0 + 70)
+        lt.pin("t2", "Dashboard ticket 4711 follow-up", "s1", t0 + 80)
+        self.assertEqual(lt.route("what about 4711", "s1", t0 + 90)[0], "t2")
+
+    def test_bare_numbers_are_ordinary_words_without_an_id_reference_in_history(self):
+        lt = self.threads_home()
+        t0 = datetime.datetime.now().timestamp() - 5000
+        lt.route("Investigate ticket 4711 login failures", "s1", t0)  # t1
+        lt.route("Check the proxy listening on port 8080", "s1", t0 + 10)  # t2, 8080 is just a port
+        self.assertEqual(lt.id_thread("port 8080 is busy", lt.load()), None)
+        self.assertEqual(lt.id_thread("4711 status", lt.load()), "t1")
+
+    def test_explicit_hash_number_creates_the_task_thread(self):
+        lt = self.threads_home()
+        t0 = datetime.datetime.now().timestamp() - 5000
+        for n in ("4711", "12"):
+            tid, how, _ = lt.route(f"Start on #{n} please", "s1", t0)
+            self.assertEqual((tid, how), (f"#{n}", "explicit"))
+            self.assertIn(f"#{n}", lt.load()["threads"])
+
+    def test_prompt_ids(self):
+        lt = self.threads_home()
+        self.assertEqual(lt.prompt_refs("fix #4711 and PR 4712 and AB#4713"), ({"4711", "4712", "4713"}, set()))
+        self.assertEqual(lt.prompt_refs("port 8080 returns 502"), (set(), {"8080", "502"}))
+        self.assertEqual(lt.prompt_refs("on feature/4711-login")[0], {"feature/4711-login"})
+        self.assertEqual(lt.prompt_ids("port 80 on feature/x-1"), {"feature/x-1"})
+        self.assertEqual(lt.prompt_ids("#4711 and 4711"), {"4711"})
+
+    def test_routing_by_branch_name(self):
+        lt = self.threads_home()
+        t0 = datetime.datetime.now().timestamp() - 5000
+        lt.route("Work on feature/login-redesign today", "s1", t0)  # t1
+        lt.route("Dashboard colours", "s1", t0 + 10)  # t2
+        self.assertEqual(lt.id_thread("rebase feature/login-redesign please", lt.load()), "t1")
 
     def test_a_run_whose_supervisor_died_is_lost_and_stop_closes_it(self):
         home = self.env["LEAN_AGENT_HOME"]
