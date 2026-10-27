@@ -6242,14 +6242,14 @@ class CliTest(unittest.TestCase):
         self.assertLessEqual(len(long.split("/", 1)[1]), 40)
         self.assertFalse(long.endswith("-"))
         # custom rules per project, and back
-        out = self.cli("config", "branch-rules", "-p", "proj", "feature=feat/{name}", "bugfix=fix/{task-id}/{name}").stdout
+        out = self.cli("config", "-p", "proj", "branch-rules", "feature=feat/{name}", "bugfix=fix/{task-id}/{name}").stdout
         self.assertIn("feature=feat/{name}", out)
         self.assertEqual(bn("Add x").stdout.strip(), "feat/add-x")
         self.assertEqual(bn("Fix y", "--task", "9").stdout.strip(), "fix/9/fix-y")
         self.assertEqual(bn("Release 1.0").stdout.strip(), "release/release-1.0")
-        p = self.cli("config", "branch-rules", "-p", "proj", "feature=a b/{name}", check=False)
+        p = self.cli("config", "-p", "proj", "branch-rules", "feature=a b/{name}", check=False)
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("feature=feature/{task-id}-{name}", self.cli("config", "branch-rules", "-p", "proj", "default").stdout)
+        self.assertIn("feature=feature/{task-id}-{name}", self.cli("config", "-p", "proj", "branch-rules", "default").stdout)
         self.assertIn("branch rules for proj: feature=feature/{task-id}-{name}", self.cli("doctor", self.proj, check=False).stdout)
         # collisions get -2, -3
         g("branch", "feature/add-x")
