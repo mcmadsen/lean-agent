@@ -105,6 +105,8 @@ lean-agent saves that part to a file and shows only its path. The LEAN-* lines s
 
 """
 
+BRANCH_RULE = ("New branches follow the project's branch rules: if you must create one yourself, get its name with\n"
+               "`lean-agent branch-name -p <project> [--type feature|bugfix|release] [--task ID] \"<title>\"`.\n")
 SHELL_RULE = "Run shell commands as `cd {project} && <command>`."
 MUTATING_WORDS = {"delete", "create", "update", "set", "apply", "push", "rm", "merge", "deploy", "remove", "add", "put",
                   "post", "patch", "install", "exec", "write", "reset", "approve", "complete", "abandon", "queue"}
@@ -1085,6 +1087,8 @@ def build_append(project, cards, read_only=False, allow_send=None, chrome=False,
         send_rule=ALLOW_SEND_RULE.format(approved=allow_send) if allow_send else SEND_RULE,
         browser_rule=BROWSER_RULE if chrome else "",
         role_rule=role_rule)]
+    if not read_only:
+        parts.append(BRANCH_RULE)
     tools = code_tools_note(project)
     if tools:
         parts.append(tools)
@@ -1508,6 +1512,15 @@ def _cmd_run(a):
     else:
         slug, project = resolve_project(a.project)
         sync_memory(slug)
+        if getattr(a, "worktree", None) == "auto":  # a new branch named by the project's branch rules
+            title = getattr(a, "why", None) or task.splitlines()[0]
+            a.worktree = new_branch_name(slug, project, getattr(a, "branch_type", None),
+                                         todo_task_id(getattr(a, "todo", None)), title,
+                                         getattr(a, "branch_version", None))
+            print(f"branch: {a.worktree}", flush=True)
+            note = release_note(slug, a.worktree)
+            if note:
+                print(note, flush=True)
         if getattr(a, "worktree", None):
             wt = ensure_worktree(slug, project, a.worktree, reset=getattr(a, "reset_worktree", False),
                                  base=getattr(a, "worktree_base", None))
@@ -4268,6 +4281,102 @@ def branch_names(repo):
     return list(dict.fromkeys(names))
 
 
+BRANCH_KINDS = ("feature", "bugfix", "release")
+DEFAULT_BRANCH_RULES = {"feature": "feature/{task-id}-{name}", "bugfix": "bugfix/{task-id}-{name}",
+                        "release": "release/release-{version}"}
+_BUGFIX_WORDS = re.compile(r"\b(fix(es|ed|ing)?|bugs?|hotfix(es)?|regressions?|defects?)\b", re.I)
+_RELEASE_TITLE = re.compile(r"^\s*release\b", re.I)
+_VERSION = re.compile(r"\bv?(\d+(?:\.\d+)+(?:[-+.\w]*\w)?|\d+)\b")
+
+
+def branch_rules(slug):
+    """The project's branch patterns: the saved ones over the defaults."""
+    saved = (projects().get(slug) or {}).get("branch_rules") or {}
+    return {k: saved.get(k) or DEFAULT_BRANCH_RULES[k] for k in BRANCH_KINDS}
+
+
+def branch_slug(title, limit=40):
+    """Lowercase ascii words joined by '-', cut at a word boundary (accents folded, other scripts dropped)."""
+    import unicodedata
+    text = unicodedata.normalize("NFKD", title or "").encode("ascii", "ignore").decode()
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    if len(slug) > limit:
+        cut = slug[:limit + 1].rfind("-")
+        slug = slug[:cut if cut > limit // 2 else limit]
+    return slug.strip("-")
+
+
+def infer_branch_kind(title):
+    """release for a release task (title starts with "release"), bugfix when fix/bug/hotfix/regression/defect is a
+    word in it, else feature."""
+    if _RELEASE_TITLE.match(title or ""):
+        return "release"
+    return "bugfix" if _BUGFIX_WORDS.search(title or "") else "feature"
+
+
+def title_version(title):
+    m = re.match(r"^\s*release\s+" + _VERSION.pattern, title or "", re.I)
+    return m.group(1) if m else None
+
+
+def task_id_of(ref):
+    """A tracker work item id out of a todo's ref ("PR 512", "ABC-12", "#7"); None when there is none."""
+    m = re.search(r"[A-Za-z][A-Za-z0-9]*-\d+|\d+", ref or "")
+    return m.group(0) if m else None
+
+
+def branch_name(project, kind, task_id, title, version=None, taken=()):
+    """The one place a branch name is made: the project's rule for `kind` (feature|bugfix|release; None infers it from
+    the title) with {task-id} (omitted with its '-' when there is none), {name} and {version} filled in. Always a valid
+    git ref; a name in `taken` gets -2, -3 ... Dies for a release without a version."""
+    kind = kind or infer_branch_kind(title)
+    if kind not in BRANCH_KINDS:
+        die(f"branch type is one of {', '.join(BRANCH_KINDS)}")
+    pattern = branch_rules(project)[kind]
+    version = version or (title_version(title) if kind == "release" else None)
+    if "{version}" in pattern and not version:
+        die(f"a release branch needs a version: add --version X (rule: {pattern})")
+    task_id = str(task_id).strip() if task_id not in (None, "") else ""
+    name = branch_slug(title) or "work"
+    out = pattern.replace("{version}", re.sub(r"[^A-Za-z0-9._+-]+", "-", version or "").strip("-"))
+    out = out.replace("{name}", name)
+    out = out.replace("{task-id}-", task_id + "-" if task_id else "").replace("{task-id}", task_id)
+    out = re.sub(r"/{2,}", "/", out).strip("/")
+    base, n = out, 1
+    blocker = next((t for t in taken if out.startswith(t + "/")), None)  # git can't hold both "a" and "a/b"
+    if blocker:
+        die(f"{out!r} can't be created: a branch named {blocker!r} exists (rename it, or change the rules: "
+            "lean-agent config branch-rules)")
+    clash = lambda o: o in taken or any(t.startswith(o + "/") for t in taken)
+    while clash(out):
+        n += 1
+        out = f"{base}-{n}"
+    if subprocess.run(["git", "check-ref-format", "--branch", out], capture_output=True).returncode != 0:
+        die(f"{out!r} is not a valid git branch name; fix the rules: lean-agent config branch-rules")
+    return out
+
+
+def todo_task_id(todo_id):
+    """The linked tracker item id of a todo (from its ref), else the lean-agent todo id, else None."""
+    if not isinstance(todo_id, int):
+        return None
+    item = next((t for t in todos()["items"] if t["id"] == todo_id), None)
+    return (task_id_of(item.get("ref")) if item else None) or todo_id
+
+
+def new_branch_name(slug, repo, kind, task_id, title, version=None):
+    """branch_name for a branch that is about to be created in `repo`: avoids names that already exist."""
+    return branch_name(slug, kind, task_id, title, version, taken=set(branch_names(repo)))
+
+
+def release_note(slug, name):
+    """Said when a new branch matches the push guard (release/* by default): local is fine, pushing stays blocked."""
+    if not push_guard.guarded(name, push_guard.project_patterns(slug)):
+        return ""
+    return (f"note: {name} is a guarded branch: created locally, but pushing it stays blocked unless you allow it "
+            "(lean-agent guard)")
+
+
 def ensure_worktree(slug, repo, ref, reset=False, base=None):
     """A shared worktree of `ref` for this project: reuse it (moved to the ref's tip when clean) or create it.
     A branch that exists neither locally nor on the remote is created from the base."""
@@ -6312,6 +6421,9 @@ def cmd_doctor(a):
                    f"lean-agent config project-rules off --project {pslug}")
         else:
             report(True, f"project rules: off for {pslug}, rule cards instead (lean-agent config project-rules on)")
+    if pslug:
+        report(True, f"branch rules for {pslug}: " + "  ".join(f"{k}={v}" for k, v in branch_rules(pslug).items())
+               + " (lean-agent config branch-rules)")
     ignored = []
     text = compaction_text(ignored)
     for msg in ignored:
@@ -7430,7 +7542,35 @@ def clear_at_text():
         + (f" · {up['clear_status']}" if up.get("clear_status") else "")
 
 
+def cmd_branch_name(a):
+    slug, repo = resolve_project(a.project or os.getcwd())
+    print(new_branch_name(slug, repo, a.type, a.task, a.title, a.version))
+    return 0
+
+
 def cmd_config(a):
+    if a.name == "branch-rules":
+        slug, _ = resolve_project(a.project or os.getcwd())
+        projs = projects()
+        if a.value:
+            saved = dict(projs[slug].get("branch_rules") or {})
+            for kv in [a.value] + (a.more or []):
+                if kv == "default":
+                    saved = {}
+                    continue
+                k, _, v = kv.partition("=")
+                if k not in BRANCH_KINDS or not v:
+                    die("branch-rules takes feature=<pattern> bugfix=<pattern> release=<pattern>, or default")
+                if "{task-id}" not in v and "{name}" not in v and "{version}" not in v:
+                    die(f"{k}: the pattern needs {{task-id}}, {{name}} or {{version}}")
+                probe = v.replace("{task-id}", "1").replace("{name}", "x").replace("{version}", "1.0")
+                if subprocess.run(["git", "check-ref-format", "--branch", probe], capture_output=True).returncode:
+                    die(f"{k}: {v!r} would not make a valid git branch name")
+                saved[k] = v
+            projs[slug] = {**projs[slug], "branch_rules": saved}
+            save_json(home("projects.json"), projs)
+        print(f"branch rules for {slug}: " + "  ".join(f"{k}={v}" for k, v in branch_rules(slug).items()))
+        return 0
     if a.name == "project-rules":
         slug, _ = resolve_project(a.project or os.getcwd())
         if a.value not in (None, "on", "off"):
@@ -8893,10 +9033,19 @@ def build_parser():
 
     s = sub.add_parser("config", help="switches: strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "max-thread-sessions N (thread sessions the service runs; default 8), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
-    s.add_argument("name", choices=["strict", "clear-at", "project-rules", "compact-window", "compact-pct", "max-thread-sessions"])
+    s.add_argument("name", choices=["strict", "clear-at", "project-rules", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions"])
     s.add_argument("--project", "-p", help="project-rules: the project (default: the current directory)")
-    s.add_argument("value", nargs="?", help="on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
+    s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
+    s.add_argument("more", nargs="*", help=argparse.SUPPRESS)
     s.set_defaults(fn=cmd_config)
+
+    s = sub.add_parser("branch-name", help="the branch name the project's branch rules give a task (read-only)")
+    s.add_argument("title")
+    s.add_argument("--project", "-p")
+    s.add_argument("--type", choices=BRANCH_KINDS, help="default: inferred from the title")
+    s.add_argument("--task", metavar="ID", help="the tracker work item id (else the name has none)")
+    s.add_argument("--version", metavar="X", help="release branches")
+    s.set_defaults(fn=cmd_branch_name)
 
     s = sub.add_parser("attribution", help="should commits and PRs credit Claude? ask the user once, then set on|off")
     s.add_argument("value", nargs="?", choices=["on", "off"])
@@ -8971,7 +9120,11 @@ def build_parser():
     s.add_argument("--resume", metavar="RUN_ID", help="continue a previous run's session (`last` = the latest run)")
     s.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="model effort for the worker")
     s.add_argument("--worktree", metavar="REF", help="run in a shared lean-agent git worktree of this branch/ref "
-                   "(your checkout is never touched; installed deps persist for the next worker)")
+                   "(your checkout is never touched; installed deps persist for the next worker); `auto` makes a new "
+                   "branch named by the project's branch rules (lean-agent config branch-rules)")
+    s.add_argument("--branch-type", choices=BRANCH_KINDS, help="--worktree auto: feature, bugfix or release "
+                   "(default: inferred from the task)")
+    s.add_argument("--branch-version", metavar="X", help="--worktree auto, release branches: the version")
     s.add_argument("--worktree-base", metavar="REF", help="--worktree: where a branch that doesn't exist yet is "
                    "created from (default: the project's `worktree base`, else origin/HEAD)")
     s.add_argument("--reset-worktree", action="store_true", help="--worktree: move it to the ref's tip even if it "
