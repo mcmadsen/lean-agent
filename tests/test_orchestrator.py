@@ -5846,11 +5846,14 @@ class CliTest(unittest.TestCase):
         calls = self.calls()
         second = next(c for c in calls if "search-only second opinion" in c["append"])
         main = next(c for c in calls if "Reuse and duplication. For every new file" in c["append"])
-        follow = calls[-1]  # sent back once, same session, to finish the reuse pass
-        self.assertIn("Your review isn't complete", follow["task"])
-        self.assertIn("useOverlayOpen", follow["task"])
-        self.assertIn("--resume", follow["argv"])
-        self.assertIn("sending the reviewer back once", out)
+        follow = calls[-1]  # the missing reuse entry is filled by the cheap run, the reviewer isn't resumed
+        self.assertIn("search-only second opinion", follow["append"])
+        self.assertIn("useOverlayOpen", follow["append"])
+        self.assertNotIn("--resume", follow["argv"])
+        self.assertEqual(follow["argv"][follow["argv"].index("--model") + 1], "haiku")
+        self.assertIn("filling them with a haiku search-only run instead of resuming the reviewer", out)
+        self.assertIn("Fill-in template", main["append"] + main["task"])
+        self.assertIn("coverage entry:", main["append"] + main["task"])
         self.assertEqual(second["argv"][second["argv"].index("--model") + 1], "haiku")
         self.assertIn("Reuse and duplication. For every new file", main["append"])
         self.assertIn("- createOverlayStore (src/dialogs/overlayStore.ts)", main["append"])
@@ -5905,7 +5908,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("declined: [scope] src/dialogs/overlayStore.ts", rr["task"])
         self.assertIn("the code it points at changed since", rr["task"])  # the fix rewrote that line
         self.assertIn("deferOverlay (src/dialogs/overlayStore.ts)", rr["append"])
-        self.assertIn("deferOverlay", self.calls()[-1]["task"])  # then sent back once for its reuse entry
+        self.assertIn("deferOverlay", self.calls()[-1]["append"])  # then its reuse entry is filled by the cheap run
 
     def test_review_learn_builds_checklist_cards(self):
         self.git_project()
@@ -7102,6 +7105,50 @@ class CliTest(unittest.TestCase):
         self.assertIn(f"diff --stat {reviewed} {newest}", call["append"])
         self.assertIn("rounding drops cents", call["task"])  # the earlier findings come along as context
         self.assertNotIn(fixes[:12], call["task"].split("Re-review")[0])
+
+
+class ReviewUnitTest(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent
+        self.agent = lean_agent
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def test_the_prompt_template_lists_every_symbol_and_edited_test(self):
+        t = self.agent.answer_template({"files": ["a/x.py"], "symbols": ["foo (a/x.py)"]},
+                                       {"tests": ["t.py: 'test_one' (assert edited)"]})
+        self.assertIn("- new file a/x.py", t)
+        self.assertIn("- foo (a/x.py)", t)
+        self.assertIn("- t.py: 'test_one'", t)
+        self.assertIn('"verdict": "extend|wraps-existing', t)
+        self.assertIn("coverage entry:", t)
+        self.assertEqual(self.agent.answer_template({"files": [], "symbols": []}, {"tests": []}), "")
+
+    def test_missing_entries_are_filled_by_the_cheap_run_not_by_resuming_the_reviewer(self):
+        agent, rp = self.agent, os.path.join(self.dir, "reviews.jsonl")
+        rec = {"run": "r1", "verdict": "needs-checks", "findings": [], "reuse": [], "gaps": [], "disputed": [],
+               "unchecked": ["foo (a/x.py)", "bar (a/x.py)"], "coverage_unchecked": ["t.py: 'test_one'"],
+               "checks": [{"what": "reuse not checked for: foo, bar"}, {"what": "coverage not checked for edited tests: t"}]}
+        with open(rp, "w") as fh:
+            fh.write(json.dumps(rec) + "\n")
+        got = [{"symbol": "foo", "candidates": [], "verdict": "justified-new", "why": "nothing similar"}]
+        a = argparse.Namespace(max_context=1000)
+        with mock.patch.object(agent, "reviews_path", return_value=rp), \
+                mock.patch.object(agent, "projects", return_value={"p": {"path": self.dir}}), \
+                mock.patch.object(agent, "fill_reuse", return_value=got) as fill, \
+                mock.patch.object(agent, "cmd_run") as run:
+            rc = agent.reuse_follow_up(a, "p", {"head": "abc", "mode": "ref"}, "high")
+        run.assert_not_called()  # the main reviewer isn't resumed
+        self.assertEqual(fill.call_args[0][4], ["foo (a/x.py)", "bar (a/x.py)"])
+        with open(rp) as fh:
+            now = json.loads(fh.read())
+        self.assertEqual(now["unchecked"], ["bar (a/x.py)"])
+        self.assertEqual(now["coverage_not_checked"], ["t.py: 'test_one'"])
+        self.assertEqual(now["coverage_unchecked"], [])
+        self.assertEqual([c["what"] for c in now["checks"]], ["reuse not checked for: bar (a/x.py)"])
+        self.assertEqual(now["verdict"], "needs-checks")
+        self.assertEqual(rc, 2)
 
 
 class RuleGlobTest(unittest.TestCase):
