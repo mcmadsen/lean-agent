@@ -429,6 +429,11 @@ _NOT_FOR_SERVERS = ("ANTHROPIC_", "CLAUDE", "LEAN_AGENT")  # the worker's own cr
 UNAUTH = re.compile(r"anonymous|not authori[sz]ed|unauthori[sz]ed|\b401\b|\b403\b|authentication required|access denied", re.I)
 
 
+SAFE_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT", "APPDATA",
+            "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "PROGRAMFILES", "TEMP", "TMP", "COMSPEC", "PATHEXT",
+            "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS")
+
+
 def is_auth_env(name):
     return bool(_AUTH_ENV.search(name)) and not name.upper().startswith(_NOT_FOR_SERVERS)
 
@@ -479,7 +484,7 @@ class _Session:
     """A stdio server started the way a worker's Claude Code would, spoken to directly."""
 
     def __init__(self, cfg, timeout):
-        env = dict(os.environ)
+        env = {k: v for k, v in os.environ.items() if k in SAFE_ENV}  # what Claude Code gives a stdio server
         env.update({k: os.path.expandvars(str(v)) for k, v in (with_auth_env(cfg).get("env") or {}).items()})
         cmd = [os.path.expandvars(cfg["command"])] + [os.path.expandvars(str(x)) for x in cfg.get("args") or []]
         try:

@@ -121,6 +121,14 @@ FAKE_CLAUDE = textwrap.dedent("""\
                 "input_tokens": 10, "cache_read_input_tokens": int(os.environ.get("FAKE_TURN_CTX", "1000"))}}}),
                 flush=True)
             time.sleep(float(os.environ.get("FAKE_TURN_SLEEP", "0")))
+    if os.environ.get("FAKE_MCP_RESULTS"):  # MCP calls on server "tracker" whose results are these texts, then keep going
+        for i, text in enumerate(json.loads(os.environ["FAKE_MCP_RESULTS"])):
+            print(json.dumps({"type": "assistant", "session_id": "sess-1", "message": {"id": "mm-%d" % i, "content": [
+                {"type": "tool_use", "id": "tu%d" % i, "name": "mcp__tracker__list_projects", "input": {}}],
+                "usage": {"input_tokens": 10}}}), flush=True)
+            print(json.dumps({"type": "user", "session_id": "sess-1", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "tu%d" % i, "content": [{"type": "text", "text": text}]}]}}), flush=True)
+            time.sleep(0.3)
     if os.environ.get("FAKE_SELF_KILL"):  # killed from outside, like the OOM killer
         import signal
         os.kill(os.getpid(), signal.SIGKILL)
@@ -1529,11 +1537,88 @@ class CliTest(unittest.TestCase):
         self.assertIn("--strict-mcp-config", argv)
         self.assertEqual(argv[argv.index("--disallowedTools") + 1], "mcp__tickets__search_tickets")
         self.assertIn("mcp__tickets__get_ticket", argv[argv.index("--allowedTools") + 1].split(","))
-        self.assertEqual(call["mcp"]["servers"], {"tickets": self.mcp_cfg})
+        sent = call["mcp"]["servers"]["tickets"]  # plus any auth-looking variables of the caller's environment
+        self.assertEqual({k: v for k, v in sent.items() if k != "env"}, {k: v for k, v in self.mcp_cfg.items() if k != "env"})
+        self.assertEqual(sent["env"]["TOKEN"], "s3cret")
         self.assertEqual(call["mcp"]["mode"], "0o600")
         self.assertFalse(os.path.exists(call["mcp"]["path"]))  # removed after the run
         with open(os.path.join(self.env["LEAN_AGENT_HOME"], "ledger.jsonl")) as fh:
             self.assertNotIn("s3cret", fh.read())
+
+    def use_tracker(self, env=None):
+        auth = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "fake_auth_mcp.py")
+        self.tracker_cfg = {"type": "stdio", "command": sys.executable, "args": [auth],
+                            "env": dict({"FAKE_AUTH_ENVLOG": os.path.join(self.tmp.name, "envlog.json")}, **(env or {}))}
+        path = os.path.join(self.tmp.name, "cfg", ".claude.json")
+        cfg = _load_json(path)
+        cfg["mcpServers"]["tracker"] = self.tracker_cfg
+        with open(path, "w") as fh:
+            json.dump(cfg, fh)
+
+    def test_mcp_check_classifies_and_passes_only_auth_variables_to_the_server(self):
+        self.use_tracker({"TRACKER_ORG": ""})
+        out = self.cli("mcp", "check", "tracker", check=False)
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("tracker: unauthorized", out.stdout)
+        self.assertIn("fix:", out.stdout)
+        self.assertIn("lean-agent mcp env", out.stdout)
+        out = self.cli("mcp", "check", "tracker", TRACKER_PAT="pat-value", TRACKER_ORG="acme-org", UNRELATED_VAR="x",
+                       ANTHROPIC_API_KEY="sk-ant")
+        self.assertIn("tracker: ok", out.stdout)
+        seen = _load_json(os.path.join(self.tmp.name, "envlog.json"))
+        self.assertIn("TRACKER_PAT", seen)
+        self.assertIn("TRACKER_ORG", seen)
+        self.assertNotIn("UNRELATED_VAR", seen)
+        self.assertNotIn("ANTHROPIC_API_KEY", seen)
+        self.assertNotIn("pat-value", out.stdout + out.stderr)
+        doctor = self.cli("doctor", check=False, TRACKER_PAT="pat-value").stdout
+        self.assertRegex(doctor, r"MCP tracker: authenticated")
+        self.cli("mcp", "check", "tracker", check=False)
+        self.assertRegex(self.cli("doctor", check=False).stdout, r"MCP tracker runs unauthenticated \(anonymous\)")
+
+    def test_run_gives_the_mcp_server_its_auth_variables_and_only_those(self):
+        self.use_tracker()
+        self.cli("learn", self.proj)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tracker:list_projects", "list them",
+                 TRACKER_PAT="pat-value", AZURE_DEVOPS_ORG="acme", UNRELATED_VAR="x", ANTHROPIC_API_KEY="sk-ant")
+        env = self.calls()[-1]["mcp"]["servers"]["tracker"]["env"]
+        self.assertEqual(env["TRACKER_PAT"], "pat-value")
+        self.assertEqual(env["AZURE_DEVOPS_ORG"], "acme")
+        self.assertNotIn("UNRELATED_VAR", env)
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertNotIn("pat-value", self.cli("runs").stdout)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "ledger.jsonl")) as fh:
+            self.assertNotIn("pat-value", fh.read())
+
+    def test_run_stops_early_when_the_mcp_server_is_unauthenticated_and_remembers_it_once(self):
+        self.use_tracker()
+        self.cli("learn", self.proj)
+        denied = json.dumps(["The anonymous identity is not authorized to list projects."])
+        args = ("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tracker:list_projects", "list them")
+        out = self.cli(*args, check=False, FAKE_MCP_RESULTS=denied, FAKE_HANG="1")
+        self.assertEqual(out.returncode, 1)
+        self.assertRegex(out.stdout, r"run \S+ failed: MCP tracker is not authenticated \(anonymous\) — lean-agent mcp check tracker")
+        self.assertEqual(self.ledger()[-1]["status"], "failed")
+        listed = self.cli("memory", "list").stdout
+        self.assertEqual(listed.count("MCP tracker runs unauthenticated in workers"), 1)
+        self.assertIn("reference", listed)
+        # known issue: the card is announced and sent on the next run that uses the server, and not written twice
+        out = self.cli(*args, check=False, FAKE_MCP_RESULTS=json.dumps(["ok", "denied: 403 Forbidden", "403 Forbidden"]),
+                       FAKE_HANG="1")
+        self.assertIn("known issue: MCP tracker runs unauthenticated in workers", out.stdout)
+        self.assertIn("MCP tracker runs unauthenticated in workers", self.calls()[-1]["append"] if self.calls()[-1].get("append") else "")
+        self.assertRegex(out.stdout, r"failed: MCP tracker is not authenticated")  # two denials after an ok call
+        self.assertEqual(self.cli("memory", "list").stdout.count("MCP tracker runs unauthenticated in workers"), 1)
+
+    def test_advise_gets_the_known_issue_cards_for_a_server_the_request_names(self):
+        self.use_tracker()
+        self.cli("learn", self.proj)
+        self.cli("memory", "add", "The tracker server runs anonymous in workers; fix: put its PAT in the env block.",
+                 "--type", "reference", "--name", "tracker auth problem", "-p", "proj")
+        self.cli("advise", "list the open items in tracker", FAKE_ANSWER="ADVICE\nunderstood: list items\nask the user first: no")
+        task = self.calls()[-1]["task"]
+        self.assertIn("Known issues", task)
+        self.assertIn("runs anonymous in workers", task)
 
     def test_run_mcp_whole_server_and_errors(self):
         self.cli("learn", self.proj)
