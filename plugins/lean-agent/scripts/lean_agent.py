@@ -3489,6 +3489,41 @@ def high_risk(path, rng_args, names):
     return why
 
 
+SECURITY_WORDS = {"auth", "authn", "authz", "authenticate", "authentication", "authorize", "authorization", "token",
+                  "tokens", "crypto", "cryptography", "secret", "secrets", "password", "passwords", "permission",
+                  "permissions", "cert", "certs", "certificate", "sign", "signed", "signing", "signature", "encrypt",
+                  "encrypted", "encryption", "sanitize", "sanitise", "sanitizer", "csp", "cors"}
+LARGE_REVIEW_LINES = 800
+SMALL_REVIEW_LINES = 150
+
+
+def choose_review_model(path, rng_args, names, explicit=None, rereview=False):
+    """(model, reason) for a review: an explicit choice wins; else by risk. Re-reviews, docs/test-only and small
+    diffs run on sonnet; security-sensitive or large (>= 800 lines) first reviews on opus; fable never by default."""
+    if explicit:
+        return explicit, "--reviewer-model" if explicit != os.environ.get("LEAN_AGENT_REVIEW_MODEL") else "LEAN_AGENT_REVIEW_MODEL"
+    cfg = config_json().get("review_model")
+    if cfg and cfg != "auto":
+        return cfg, "config review-model"
+    if rereview:
+        return "sonnet", "re-review"
+    names = [n for n in names if n]
+    if names and all(n.endswith(".md") or n.startswith("docs/") or TEST_FILE.search(n) for n in names):
+        return "sonnet", "docs/tests only"
+    stat = git(path, "diff", "--numstat", *rng_args) or ""
+    size = sum(int(x) for l in stat.splitlines() for x in l.split("\t")[:2] if x.isdigit())
+    diff = git(path, "diff", "-U0", "--no-color", *rng_args) or ""
+    text = " ".join(names) + "\n" + "\n".join(l for l in diff.splitlines()
+                                              if l[:1] in "+-" and not l.startswith(("+++", "---")))
+    tokens = {t.lower() for t in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])", text)}
+    hits = sorted(tokens & SECURITY_WORDS)
+    if hits:
+        return "opus", "security-sensitive: " + ", ".join(hits[:3])
+    if size >= LARGE_REVIEW_LINES:
+        return "opus", f"large diff, {size} lines"
+    return "sonnet", f"{size} lines" if size < SMALL_REVIEW_LINES else f"{size} lines, no sensitive paths"
+
+
 def earlier_review(slug, path, head):
     """The latest reviewer run this review continues: of the same branch (with or without origin/), or of a commit
     the new one builds on (an ancestor, or amended away on the same branch) that isn't merged into the base."""
@@ -3798,6 +3833,7 @@ def review_main(a):
     if gated is not None:
         return gated
     model = getattr(a, "reviewer_model", None) or os.environ.get("LEAN_AGENT_REVIEW_MODEL") or "sonnet"
+    explicit = getattr(a, "reviewer_model", None) or os.environ.get("LEAN_AGENT_REVIEW_MODEL")
     effort = os.environ.get("LEAN_AGENT_REVIEW_EFFORT") or "high"
     line, low = budget_line()
     if low:
@@ -3897,10 +3933,12 @@ def review_main(a):
         meta["since_hunks"] = changed_hunks(path, since)
         meta["earlier"] = [str(f.get("issue", "")) for f in last.get("findings") or []]
         risk = high_risk(path, since, changed) if since else []
-        delta_model = (getattr(a, "reviewer_model", None)
-                       or ((prev.get("model") or model) if risk else os.environ.get("LEAN_AGENT_DELTA_REVIEW_MODEL") or "sonnet"))
-        if risk and not getattr(a, "reviewer_model", None):
-            print(f"review: the changes since are high-risk ({'; '.join(risk)}): {delta_model} again", flush=True)
+        delta_model, why_model = choose_review_model(path, since, changed, os.environ.get("LEAN_AGENT_DELTA_REVIEW_MODEL")
+                                                     or explicit, rereview=True)
+        print(f"reviewer: {delta_model} ({why_model})", flush=True)
+        if risk and usage.model_rate(delta_model) <= 1:
+            print(f"review: the changes since are high-risk ({'; '.join(risk)}): --reviewer-model "
+                  f"{os.environ.get('LEAN_AGENT_STRONG_REVIEW_MODEL') or 'opus'} reviews them with a stronger model", flush=True)
         meta["after"] = {"run": prev["id"], "head": old_head}
         ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=delta_model,
                                 todo=(getattr(a, "todo", None) if getattr(a, "todo", None) not in (None, "new")
@@ -3964,8 +4002,9 @@ def review_main(a):
     if a.independent:
         a.second_opinion = "off"
         print("review: independent (no earlier findings, decisions or second opinion)", flush=True)
+    model, why_model = choose_review_model(path, [merge_base, sha] if mode == "ref" else [merge_base], names, explicit)
     cost, how = expected_review_cost(model)
-    print(f"reviewer: {model}, effort {effort} (expected ~${cost:.2f}, {how})", flush=True)
+    print(f"reviewer: {model} ({why_model}), effort {effort} (expected ~${cost:.2f}, {how})", flush=True)
     a._estimate = (cost, "scaled-review" if "price ratio" in how else "history-review")
     risk = high_risk(path, [merge_base, sha] if mode == "ref" else [merge_base], names)
     if risk and usage.model_rate(model) <= 1:
@@ -4150,9 +4189,8 @@ def reuse_follow_up(a, slug, meta, effort):
     """Once per review: reuse entries the reviewer left out are filled by the cheap reuse-check run, coverage and gap
     entries still missing are recorded as 'not checked'. The main reviewer is not resumed for them."""
     last = (list(read_jsonl(reviews_path(slug))) or [None])[-1]
-    if not last or not (last.get("unchecked") or last.get("coverage_unchecked")
-                        or any(g.get("unaddressed") for g in last.get("gaps") or [])):
-        return 2
+    if not last or not (last.get("unchecked") or last.get("coverage_unchecked")):
+        return 2  # open gaps are for `review --decide-gaps`, not for another turn
     path = (projects().get(slug) or {}).get("path") or ""
     unchecked = list(last.get("unchecked") or [])
     got = fill_reuse(a, slug, path, meta, unchecked) if unchecked and path and meta.get("head") else []
@@ -7916,6 +7954,17 @@ def cmd_config(a):
                                              or "off") + " · these changes get no review run, a `skipped (<reason>)` "
               "verdict that counts as approved; `review --force` reviews anyway")
         return 0
+    if a.name == "review-model":
+        if a.value is not None:
+            cfg = config_json()
+            if a.value.lower() in ("auto", "default"):
+                cfg.pop("review_model", None)
+            else:
+                cfg["review_model"] = a.value
+            save_json(home("config.json"), cfg)
+        print(f"review-model: {config_json().get('review_model') or 'auto'} · auto picks sonnet for re-reviews, docs/test-only "
+              "and small diffs, opus for large or security-sensitive first reviews; --reviewer-model overrides")
+        return 0
     if a.name == "review-max-rerounds":
         if a.value is not None:
             if not a.value.isdigit() and a.value.lower() != "default":
@@ -9403,9 +9452,9 @@ def build_parser():
     s.set_defaults(fn=cmd_advise)
 
     s = sub.add_parser("config", help="switches: strict on|off (the orchestrator only runs lean-agent commands; default on), "
-                       "max-thread-sessions N (thread sessions the service runs; default 8), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
+                       "max-thread-sessions N (thread sessions the service runs; default 8), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
     s.add_argument("name", choices=["strict", "clear-at", "project-rules", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
-                                           "review-max-rerounds", "review-skip"])
+                                           "review-max-rerounds", "review-skip", "review-model"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)
