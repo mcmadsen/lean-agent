@@ -5269,18 +5269,30 @@ def branch_holder(repo, branch):
     return next((w for w in worktree_porcelain(repo) if w["branch"] == branch), None)
 
 
-def sync_worktree_registry(slug, repo):
-    """The registry follows a branch renamed inside a worktree (`git branch -m`): registered paths take the branch git shows."""
-    idx = worktree_index()
+def sync_worktree_registry(slug, repo, write=True):
+    """The registry follows a branch renamed inside a worktree (`git branch -m`): registered paths take the branch git shows.
+    Returns the registry; with write=False it is only computed in memory (read-only commands), else saved under a lock."""
     by_path = {w["path"]: w for w in worktree_porcelain(repo)}
-    changed = False
-    for e in (idx.get(slug) or {}).values():
-        w = by_path.get(os.path.realpath(e.get("path") or ""))
-        if w and w["branch"] and w["branch"] != e.get("branch"):
-            e["branch"], e["ref"] = w["branch"], w["branch"]
-            changed = True
-    if changed:
-        save_json(home("worktrees.json"), idx)
+
+    def follow(idx):
+        changed = False
+        for e in (idx.get(slug) or {}).values():
+            w = by_path.get(os.path.realpath(e.get("path") or ""))
+            if w and w["branch"] and w["branch"] != e.get("branch"):
+                e["branch"], e["ref"] = w["branch"], w["branch"]
+                changed = True
+        return changed
+    if not write:
+        idx = worktree_index()
+        follow(idx)
+        return idx
+    path = home("worktrees.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with file_lock(path + ".lock"):
+        idx = worktree_index()  # read inside the lock: no other writer's entry is lost
+        if follow(idx):
+            save_json(path, idx)
+    return idx
 
 
 def worktree_after_run(slug, repo, wt, start_head):
@@ -5296,6 +5308,7 @@ def worktree_after_run(slug, repo, wt, start_head):
     held = branch_holder(repo, target)  # checked right before update-ref: a checked-out branch never moves under its checkout
     if not held and tip and git(repo, "merge-base", "--is-ancestor", tip, head) is not None and git(repo, "update-ref", "refs/heads/" + target, head, tip) is not None:
         git(path, "checkout", "-q", target)
+        sync_worktree_registry(slug, repo)  # the registry shows the branch the worktree is on now
         print(f"worktree: commits were on a detached HEAD; branch {target} fast-forwarded to {head[:10]}", flush=True)
         return None
     msg = (f"commits are on a detached HEAD {head[:10]}; branch {target} did not move (at {(tip or '?')[:10]}) — "
@@ -5504,8 +5517,7 @@ def cmd_worktrees(a):
     found = False
     for slug in slugs:
         if idx.get(slug) and (projects().get(slug) or {}).get("path"):
-            sync_worktree_registry(slug, projects()[slug]["path"])
-            idx = worktree_index()
+            idx = sync_worktree_registry(slug, projects()[slug]["path"], write=False)
         for name, w in sorted((idx.get(slug) or {}).items()):
             if not os.path.isdir(w["path"]):
                 continue
