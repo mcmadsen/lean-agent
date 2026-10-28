@@ -5254,6 +5254,11 @@ def worktree_porcelain(repo):
     return out
 
 
+def branch_holder(repo, branch):
+    """The worktree (main checkout included) that has `branch` checked out right now, else None."""
+    return next((w for w in worktree_porcelain(repo) if w["branch"] == branch), None)
+
+
 def sync_worktree_registry(slug, repo):
     """The registry follows a branch renamed inside a worktree (`git branch -m`): registered paths take the branch git shows."""
     idx = worktree_index()
@@ -5278,7 +5283,8 @@ def worktree_after_run(slug, repo, wt, start_head):
     if not head or not start_head or head == start_head or (git(path, "rev-list", "--count", f"{start_head}..{head}") or "0") == "0":
         return None
     tip = git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + target)
-    if tip and git(repo, "merge-base", "--is-ancestor", tip, head) is not None and git(repo, "update-ref", "refs/heads/" + target, head, tip) is not None:
+    held = branch_holder(repo, target)  # checked right before update-ref: a checked-out branch never moves under its checkout
+    if not held and tip and git(repo, "merge-base", "--is-ancestor", tip, head) is not None and git(repo, "update-ref", "refs/heads/" + target, head, tip) is not None:
         git(path, "checkout", "-q", target)
         print(f"worktree: commits were on a detached HEAD; branch {target} fast-forwarded to {head[:10]}", flush=True)
         return None
@@ -5307,6 +5313,9 @@ def worktree_attach(a):
     if tip and git(repo, "merge-base", "--is-ancestor", tip, head) is None:
         die(f"{a.ref} ({tip[:10]}) is not an ancestor of the worktree HEAD ({head[:10]}): not a fast-forward; "
             "merge or rebase by hand")
+    held = branch_holder(repo, a.ref)
+    if held:
+        die(f"branch {a.ref} is checked out in {held['path']}; switch it there first (attach never moves a checked-out branch)")
     if tip is None:
         git(repo, "branch", "-q", a.ref, head)
     elif git(repo, "update-ref", "refs/heads/" + a.ref, head, tip) is None:
@@ -5359,13 +5368,14 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True):
     path = home("worktrees", slug, name)
     if target:
         mine = os.path.realpath(home("worktrees", slug)) + os.sep
-        main_path = os.path.realpath(repo)
-        holder = next((w for w in worktree_porcelain(repo) if w["branch"] == target and w["path"] != main_path), None)
-        if holder and holder["path"].startswith(mine):
+        holder = branch_holder(repo, target)
+        if holder and remote_branch:
+            target = None  # an explicit remote ref: detached at the remote tip, whatever holds the local branch
+        elif holder and holder["path"].startswith(mine):
             path, name = holder["path"], os.path.basename(holder["path"])  # also after a rename inside the worktree
         elif holder:
-            die(f"branch {target} is checked out in {holder['path']}, which is not a lean-agent worktree: use that "
-                "checkout, or check out another branch there first")
+            die(f"branch {target} is checked out in {holder['path']}; switch it there, or start a new branch with "
+                f"--worktree-base {target}")
     reused = os.path.isdir(path) and git(path, "rev-parse", "--git-dir") is not None
     moved = None
     if reused:
