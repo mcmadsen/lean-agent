@@ -7592,6 +7592,27 @@ class CliTest(unittest.TestCase):
         self.assertIn("start failed: say why", row["reason"])
         self.assertEqual(glob.glob(os.path.join(self.env["LEAN_AGENT_HOME"], "running", "*.json")), [])
 
+    def test_an_exception_before_the_start_leaves_a_failed_row_with_the_reason(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "limits.json"), "w") as fh:
+            fh.write("[]")  # what the run trips over after it registered
+        p = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--", "t", check=False)
+        self.assertNotEqual(p.returncode, 0, p.stderr)
+        row = self.ledger()[-1]
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("start failed: ", row["reason"])
+        self.assertRegex(row["reason"], r"Error|Exception")
+        self.assertEqual(glob.glob(os.path.join(self.env["LEAN_AGENT_HOME"], "running", "*.json")), [])
+
+    def test_a_gate_is_logged_at_info_and_is_not_a_failed_run(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("run", "proj", "-m", "opus", "--why", "x", "--", "t", LEAN_AGENT_CONFIRM_PCT="0", check=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("add --yes", p.stderr)
+        self.assertNotIn("run failed", p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "ledger.jsonl")))
+        self.assertNotIn("run failed", self.cli("logs").stdout)
+
     def test_output_reads_a_background_task_file(self):
         base = os.path.join(self.tmp.name, "claude-0", "proj", "tasks")
         os.makedirs(base)
