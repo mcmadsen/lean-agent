@@ -3507,6 +3507,9 @@ class CliTest(unittest.TestCase):
         data["threads"]["t1"]["requests"][0]["ts"] = old
         with open(reg, "w") as fh:
             json.dump(data, fh)
+        self.assertIn("t1 ", self.cli("now", "--short").stdout)  # the short view never closes anything
+        with open(reg) as fh:
+            self.assertNotIn("auto_closed", fh.read())
         out = self.cli("now").stdout
         self.assertIn("Closed as idle (> 7 days): t1", out)
         self.assertNotIn("parser", out.split("Closed as idle")[0])

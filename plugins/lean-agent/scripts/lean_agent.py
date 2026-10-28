@@ -9623,7 +9623,7 @@ def cmd_thread(a):
 
 
 def cmd_now(a):
-    print(lean_threads.short_text(close_idle=True) if a.short else lean_threads.now_text())
+    print(lean_threads.short_text() if a.short else lean_threads.now_text())
 
 
 def cmd_schedule(a):
