@@ -1899,6 +1899,7 @@ def _cmd_run(a):
                 if t["id"] == todo_id and t["status"] == "open":
                     t["status"] = "doing"
             save_json(home("todo.json"), data)
+    mark_launching(thread_tag)
     rc = detach_run(workdir, run_id)
     if rc is not None:
         return rc
@@ -9113,18 +9114,78 @@ def thread_start_lock():
     return lean_common.file_lock(home("thread-start"))
 
 
+CLOSE_MIN_IDLE = 600  # seconds a session must have been idle (since its last turn ended) before the cap may close it
+LAUNCH_GRACE = 60  # seconds a run counts as live from the moment `run` starts, before its running marker exists
+
+
+def mark_launching(tid):
+    """Written by `run` before anything that can start a thread session: the thread counts as busy for the cap."""
+    if tid and tid != "none":
+        d = home("launching")
+        os.makedirs(d, exist_ok=True)
+        save_json(os.path.join(d, f"{os.getpid()}-{int(time.time() * 1000)}.json"), {"thread": tid, "ts": time.time()})
+
+
+def launching_threads():
+    """Threads with a `run` that started less than LAUNCH_GRACE seconds ago (its running marker may not exist yet)."""
+    out, now = set(), time.time()
+    for f in glob.glob(home("launching", "*.json")):
+        m = load_json(f, {})
+        if now - (m.get("ts") or 0) > LAUNCH_GRACE:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        elif m.get("thread"):
+            out.add(m["thread"])
+    return out
+
+
+def caller_thread():
+    """The thread session this command runs inside (the id before `--thread` re-tagged the environment), else None."""
+    return os.environ.get("LEAN_AGENT_CALLER_THREAD") or lean_threads.pinned_thread() or None
+
+
+def close_blockers(s, busy, launching, caller):
+    """Why the cap may not close session `s` (a list; empty = eligible)."""
+    tid, why = s["thread"], []
+    if tid == caller:
+        why.append("the calling session")
+    if busy.get(tid):
+        why.append(f"{len(busy[tid])} running ({', '.join(busy[tid])})")
+    elif tid in launching:
+        why.append("a run is starting")
+    if s["idle"] < CLOSE_MIN_IDLE_S():
+        why.append(f"idle under {CLOSE_MIN_IDLE_S() // 60} min")
+    path = service_session.info(tid).get("transcript") or service_session._load(service_session.service_record(tid)).get("transcript_path")
+    if path and os.path.exists(path) and os.path.getsize(path) and not service_session.transcript_state(path)["ended"]:
+        why.append("mid-turn (tool call, answer or prompt pending)")
+    return why
+
+
+def CLOSE_MIN_IDLE_S():
+    try:
+        return int(os.environ.get("LEAN_AGENT_CLOSE_MIN_IDLE", CLOSE_MIN_IDLE))
+    except ValueError:
+        return CLOSE_MIN_IDLE
+
+
 def make_room_for_thread_session(tid=None):
-    """Before a thread session starts: at max-thread-sessions, close the longest-idle open session that has no live run
-    tagged with its thread (checkpointed like `thread close`); when every one is busy, refuse and list them."""
+    """Before a thread session starts: at max-thread-sessions, close the longest-idle open session that is eligible
+    (see close_blockers: not the caller, not mid-turn, no live or starting run, idle at least CLOSE_MIN_IDLE),
+    checkpointed like `thread close`; when none is, refuse and list them with the reason."""
     cap = service_session.max_thread_sessions()
+    caller = caller_thread()
     sessions = [s for s in open_thread_sessions() if s["thread"] != tid]
     while len(sessions) >= cap:
         busy = lean_threads.running_by_thread(lean_threads.load())
-        free = [s for s in sessions if s["thread"] not in busy]
+        launching = launching_threads()
+        why = {s["thread"]: close_blockers(s, busy, launching, caller) for s in sessions}
+        free = [s for s in sessions if not why[s["thread"]]]
         if not free:
-            die(f"{len(sessions)} thread sessions are open (max-thread-sessions {cap}) and all are busy:\n" +
-                "\n".join(f'{s["thread"]} "{s["title"]}" idle {_idle_age(s["idle"])}, {len(busy[s["thread"]])} running ({", ".join(busy[s["thread"]])})'
-                          for s in sessions) + "\nwait for one, or `lean-agent config max-thread-sessions N`")
+            die(f"{len(sessions)} thread sessions are open (max-thread-sessions {cap}) and none can be closed to make room:\n" +
+                "\n".join(f'{s["thread"]} "{s["title"]}" idle {_idle_age(s["idle"])}, not eligible: {"; ".join(why[s["thread"]])}'
+                          for s in sessions) + "\nclose one (`lean-agent thread close tN`), or `lean-agent config max-thread-sessions N`")
         v = max(free, key=lambda s: s["idle"])
         try:
             close_thread_session(v["thread"])
@@ -9132,8 +9193,15 @@ def make_room_for_thread_session(tid=None):
             die(str(exc))
         if v["thread"] in lean_threads.load()["threads"]:
             lean_threads.set_closed(v["thread"], True)
-        print(f'closed {v["thread"]} "{v["title"]}" (idle {_idle_age(v["idle"])}) to make room \u2014 reopen with '
-              f'lean-agent thread open {v["thread"]}')
+        line = f'closed {v["thread"]} "{v["title"]}" (idle {_idle_age(v["idle"])}) to make room'
+        try:
+            os.makedirs(home("logs"), exist_ok=True)
+            with open(home("logs", "service.log"), "a", encoding="utf-8") as fh:
+                fh.write(f'{now_iso()} cap auto-close: {line}; reason: max-thread-sessions {cap} reached starting '
+                         f'{tid or "a new thread"}; idle {v["idle"]}s; caller {caller or "none"}\n')
+        except OSError:
+            pass
+        print(line + f' \u2014 reopen with lean-agent thread reopen {v["thread"]}')
         sessions.remove(v)
 
 
@@ -10657,6 +10725,7 @@ def main(argv=None):
         a.task += leftover  # task words given after options
     if a.cmd == "run" and not a.resume and not a.project:
         ap.error("run needs --project (or --resume)")
+    os.environ.setdefault("LEAN_AGENT_CALLER_THREAD", lean_threads.pinned_thread() or "")  # before --thread re-tags the environment
     if getattr(a, "thread_tag", None):  # --thread tN|none: every record this command makes (and its workers') carries it
         try:
             os.environ["LEAN_AGENT_THREAD"] = "none" if a.thread_tag.lower() == "none" else lean_threads.norm(a.thread_tag)

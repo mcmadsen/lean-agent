@@ -4061,6 +4061,7 @@ class CliTest(unittest.TestCase):
         self.stop_up(p, 30)
 
     def test_thread_new_refuses_above_max_thread_sessions(self):
+        self.env["LEAN_AGENT_CLOSE_MIN_IDLE"] = "0"
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "1")
         # a host record the service just wrote (host_pid of a live process) counts whether or not that host answers yet
@@ -5303,6 +5304,7 @@ class CliTest(unittest.TestCase):
         self.stop_up(p2, 30)
 
     def test_at_the_cap_the_longest_idle_session_without_a_run_is_closed(self):
+        self.env["LEAN_AGENT_CLOSE_MIN_IDLE"] = "0"
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "2")
         lt = self.threads_home()
@@ -5311,7 +5313,7 @@ class CliTest(unittest.TestCase):
                       "alpha to be idle longer than beta will be")
         self.cli("thread", "new", "beta topic")
         out = self.cli("thread", "new", "gamma topic").stdout
-        self.assertRegex(out, r'closed t1 "alpha topic" \(idle \d+[mhd]\) to make room \u2014 reopen with lean-agent thread open t1')
+        self.assertRegex(out, r'closed t1 "alpha topic" \(idle \d+[mhd]\) to make room \u2014 reopen with lean-agent thread reopen t1')
         self.assertIn("t3 started", out)
         self.assertIsNone(lt.load()["threads"]["t1"].get("session_on"))
         self.assertTrue(lt.load()["threads"]["t1"].get("closed"))
@@ -5327,9 +5329,88 @@ class CliTest(unittest.TestCase):
         r = self.cli("thread", "new", "delta topic", check=False)
         self.assertNotEqual(r.returncode, 0)
         err = r.stderr + r.stdout
-        self.assertRegex(err, r't2 "beta topic" idle \d+[mhd], 1 running')
-        self.assertRegex(err, r't3 "gamma topic" idle \d+[mhd], 1 running')
+        self.assertRegex(err, r't2 "beta topic" idle \d+[mhd], not eligible: 1 running')
+        self.assertRegex(err, r't3 "gamma topic" idle \d+[mhd], not eligible: 1 running')
         self.stop_up(p, 30)
+
+    def room_for(self, sessions, caller=None, busy=None, launching=(), mid_turn=(), cap=3, tid=None):
+        """Run make_room_for_thread_session on faked sessions; returns (closed ids, output, error text or None)."""
+        L = lean_agent_module()
+        import service_session
+        self.threads_home()
+        closed, out, home = [], io.StringIO(), self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        with mock.patch.dict(os.environ, self.env):
+            for t in launching:
+                L.mark_launching(t)
+        env = dict(self.env, LEAN_AGENT_CALLER_THREAD=caller or "")
+
+        def state(path):
+            return {"ended": os.path.basename(path) not in mid_turn}
+        with mock.patch.dict(os.environ, env), mock.patch.object(L, "open_thread_sessions", return_value=sessions), \
+                mock.patch.object(service_session, "max_thread_sessions", return_value=cap), \
+                mock.patch.object(L.lean_threads, "running_by_thread", return_value=busy or {}), \
+                mock.patch.object(service_session, "info", side_effect=lambda k: {"transcript": os.path.join(home, k)}), \
+                mock.patch.object(service_session, "transcript_state", side_effect=state), \
+                mock.patch.object(L, "close_thread_session", side_effect=lambda k: closed.append(k) or (True, True, False)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()) as err:
+            for k in {s["thread"] for s in sessions}:
+                open(os.path.join(home, k), "w").write("x")
+            try:
+                L.make_room_for_thread_session(tid)
+            except SystemExit:
+                return closed, out.getvalue(), err.getvalue() or "refused"
+        return closed, out.getvalue(), None
+
+    @staticmethod
+    def fake_sessions(*specs):
+        return [{"thread": t, "title": f"title {t}", "idle": idle, "pid": 1, "name": t, "started": 0} for t, idle in specs]
+
+    def test_cap_never_closes_the_calling_session_even_when_longest_idle(self):
+        ss = self.fake_sessions(("t10", 9000), ("t2", 1000), ("t3", 2000))
+        closed, out, err = self.room_for(ss, caller="t10")
+        self.assertEqual(closed, ["t3"])
+        # a thread session calling `run --thread tOther`: the caller is still the session it runs in
+        closed, out, err = self.room_for(ss, caller="t10", tid="t80")
+        self.assertNotIn("t10", closed)
+        closed, out, err = self.room_for(self.fake_sessions(("t10", 9000), ("t2", 1000), ("t3", 2000)), caller="t3", cap=2)
+        self.assertNotIn("t3", closed)
+
+    def test_cap_skips_a_mid_turn_session(self):
+        ss = self.fake_sessions(("t1", 9000), ("t2", 1000), ("t3", 2000))
+        closed, out, err = self.room_for(ss, mid_turn=("t1",))
+        self.assertEqual(closed, ["t3"])
+
+    def test_cap_skips_a_session_with_a_just_launched_run(self):
+        ss = self.fake_sessions(("t1", 9000), ("t2", 1000), ("t3", 2000))
+        closed, out, err = self.room_for(ss, launching=("t1",))
+        self.assertEqual(closed, ["t3"])
+
+    def test_cap_skips_a_session_idle_under_ten_minutes(self):
+        ss = self.fake_sessions(("t1", 599), ("t2", 700), ("t3", 650))
+        closed, out, err = self.room_for(ss)
+        self.assertEqual(closed, ["t2"])
+
+    def test_cap_closes_the_longest_idle_eligible_session_and_logs_it(self):
+        ss = self.fake_sessions(("t1", 700), ("t2", 3600), ("t3", 2000))
+        closed, out, err = self.room_for(ss, caller="t9")
+        self.assertEqual(closed, ["t2"])
+        self.assertRegex(out, r'closed t2 "title t2" \(idle \d+[mh]\) to make room \u2014 reopen with lean-agent thread reopen t2')
+        log = open(os.path.join(self.env["LEAN_AGENT_HOME"], "logs", "service.log")).read()
+        self.assertIn("cap auto-close: closed t2", log)
+        self.assertIn("idle 3600s", log)
+        self.assertIn("caller t9", log)
+
+    def test_cap_refuses_with_reasons_when_no_session_is_eligible(self):
+        ss = self.fake_sessions(("t1", 9000), ("t2", 100), ("t3", 8000))
+        closed, out, err = self.room_for(ss, caller="t1", mid_turn=("t3",))
+        self.assertEqual(closed, [])
+        self.assertIn("none can be closed", err)
+        self.assertRegex(err, r't1 "title t1" idle \d+[mh], not eligible: the calling session')
+        self.assertRegex(err, r't2 .*not eligible: idle under 10 min')
+        self.assertRegex(err, r't3 .*mid-turn')
+        self.assertIn("lean-agent thread close tN", err)
+        self.assertIn("max-thread-sessions", err)
 
     def lost_run_marker(self, rid="0101-000000-aaaa"):
         home = self.env["LEAN_AGENT_HOME"]
