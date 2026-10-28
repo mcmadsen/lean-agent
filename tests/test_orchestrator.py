@@ -88,6 +88,9 @@ FAKE_CLAUDE = textwrap.dedent("""\
         sys.exit(0)
     log = os.environ["FAKE_LOG"]
     append = sys.argv[sys.argv.index("--append-system-prompt-file") + 1]
+    if os.environ.get("FAKE_SHELL") and "--add-dir" in sys.argv:  # what a worker does in its worktree
+        import subprocess
+        subprocess.run(os.environ["FAKE_SHELL"], shell=True, cwd=sys.argv[sys.argv.index("--add-dir") + 1], check=True)
     mcp = None
     if "--mcp-config" in sys.argv:
         mp = sys.argv[sys.argv.index("--mcp-config") + 1]
@@ -7462,6 +7465,75 @@ class CliTest(unittest.TestCase):
         self.cli("worktree", "rm", "proj", "feature", "--force")
         self.assertFalse(os.path.exists(wt))
         self.assertNotIn("branch feature", self.cli("worktrees", "proj").stdout)
+
+    def test_worktree_follows_a_branch_renamed_inside_it(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("checkout", "-q", "main")
+        g("branch", "-m", "feature", "older")
+        self.cli("learn", self.proj, "--name", "proj")
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "auto", "--", "write code").stdout
+        auto = re.search(r"^branch: (\S+)", out, re.M).group(1)
+        wt = re.search(r"^worktree: \S+ at (\S+)", out, re.M).group(1)
+        git = lambda *x: subprocess.run(["git", "-C", wt, *x], capture_output=True, text=True).stdout.strip()
+        git("branch", "-m", "feature/renamed")  # what a worker did to its branch
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feature/renamed", "--", "go on").stdout
+        self.assertIn(f"worktree: feature/renamed at {wt} (reused, on branch feature/renamed", out)
+        self.assertNotIn(auto, self.cli("worktrees", "proj").stdout)
+        # a branch checked out in another (non-lean-agent) worktree is refused
+        other = os.path.join(self.tmp.name, "other-wt")
+        subprocess.run(["git", "-C", self.proj, "worktree", "add", "-q", "-b", "elsewhere", other], check=True)
+        p = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "elsewhere", "--", "t", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("is checked out in", p.stderr)
+        self.assertIn("not a lean-agent worktree", p.stderr)
+
+    def test_worktree_attaches_a_free_branch_and_detached_commits_move_it(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        wt = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", "feature")
+        tip = lambda b: subprocess.run(["git", "-C", self.proj, "rev-parse", b], capture_output=True, text=True).stdout.strip()
+        commit = "git -c user.name=t -c user.email=t@t commit -q --allow-empty -m w"
+        # a free branch is attached again, never left detached; a worker that detaches HEAD and commits: the branch follows
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feature", "--", "t")
+        subprocess.run(["git", "-C", wt, "checkout", "-q", "--detach"], check=True)
+        before = tip("feature")
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feature", "--again", "--", "t2",
+                       FAKE_SHELL="git checkout -q --detach && " + commit).stdout
+        self.assertIn("on branch feature", out)
+        self.assertIn("fast-forwarded", out)
+        self.assertNotEqual(tip("feature"), before)
+        self.assertEqual(subprocess.run(["git", "-C", wt, "symbolic-ref", "--short", "HEAD"], capture_output=True,
+                                        text=True).stdout.strip(), "feature")
+        # the branch moved elsewhere meanwhile: loud warning, and attach refuses
+        second = tip("feature")
+        subprocess.run(["git", "-C", wt, "checkout", "-q", "--detach"], check=True)
+        g("checkout", "-q", "-b", "side", "main")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "side")
+        g("checkout", "-q", "main")
+        g("branch", "-f", "feature", "side")  # someone else's commit on the branch
+        p = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feature", "--again", "--", "t3",
+                     FAKE_SHELL=commit + " && git checkout -q --detach")
+        self.assertIn("commits are on a detached HEAD", p.stdout)
+        self.assertIn("lean-agent worktree attach feature", p.stderr)
+        self.assertEqual(tip("feature"), tip("side"))
+        self.assertIn("detached_warning", self.ledger()[-1])
+        self.assertTrue(self.ledger()[-1]["detached_warning"])
+        self.assertIsNotNone(second)
+        subprocess.run(["git", "-C", wt, "checkout", "-q", "--detach"], check=True)
+        p = self.cli("worktree", "attach", "proj", "feature", check=False)  # diverged: refuses
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("not a fast-forward", p.stderr)
+        subprocess.run(["git", "-C", wt, "checkout", "-q", "--detach", "side"], check=True)
+        subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
+                        "-m", "y"], check=True)
+        self.cli("worktree", "attach", "proj", "feature")
+        self.assertEqual(tip("feature"), subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], capture_output=True,
+                                                         text=True).stdout.strip())
 
     def test_pr_branch_worktree_setup_and_push(self):
         g = self.git_project()

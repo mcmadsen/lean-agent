@@ -1766,6 +1766,7 @@ def _cmd_run(a):
                     note = release_note(slug, a.worktree)
                     if note:
                         print(note, flush=True)
+                wt_repo = project
                 wt = ensure_worktree(slug, project, a.worktree, reset=getattr(a, "reset_worktree", False),
                                      base=getattr(a, "worktree_base", None), typed=not auto_branch)
             project = wt["path"]
@@ -2031,6 +2032,12 @@ def _cmd_run(a):
         if os.path.exists(mcp_path):
             os.remove(mcp_path)  # may hold tokens; rebuilt from your config on --resume
     seconds = int((datetime.datetime.now() - started).total_seconds())
+    wt_warning = None
+    if wt and not read_only:
+        try:
+            wt_warning = worktree_after_run(slug, wt_repo, wt, wt["head"])
+        except Exception as e:  # a failed check never costs the run's result
+            lean_log.log("error", "cli", f"worktree check after run {run_id}: {e}")
 
     out, result_line = {}, ""
     for line in raw.splitlines():  # stream-json: the final "result" event, plus the plan's rate-limit events
@@ -2143,7 +2150,7 @@ def _cmd_run(a):
         "mcp_calls": {t: mcp_seq.count(t) for t in dict.fromkeys(mcp_seq)},
         "mcp_seq": mcp_seq[:60], "mcp_offered": {k: len(v) for k, v in offered.items()},
         "result_head": (summary or "")[:600],
-        "details": details_path,
+        "details": details_path, "detached_warning": wt_warning,
     })
     append_jsonl(home("ledger.jsonl"), entry)  # the budget line below counts this run
     LAST_RUN[:] = [entry]
@@ -5141,6 +5148,83 @@ def release_note(slug, name):
             "(lean-agent guard)")
 
 
+def worktree_porcelain(repo):
+    """[{path, branch, head}] of every worktree of `repo` as git lists it (branch None when detached)."""
+    out, cur = [], None
+    for line in (git(repo, "worktree", "list", "--porcelain") or "").splitlines():
+        if line.startswith("worktree "):
+            cur = {"path": os.path.realpath(line[9:]), "branch": None, "head": None}
+            out.append(cur)
+        elif cur is not None and line.startswith("HEAD "):
+            cur["head"] = line[5:]
+        elif cur is not None and line.startswith("branch refs/heads/"):
+            cur["branch"] = line[len("branch refs/heads/"):]
+    return out
+
+
+def sync_worktree_registry(slug, repo):
+    """The registry follows a branch renamed inside a worktree (`git branch -m`): registered paths take the branch git shows."""
+    idx = worktree_index()
+    by_path = {w["path"]: w for w in worktree_porcelain(repo)}
+    changed = False
+    for e in (idx.get(slug) or {}).values():
+        w = by_path.get(os.path.realpath(e.get("path") or ""))
+        if w and w["branch"] and w["branch"] != e.get("branch"):
+            e["branch"], e["ref"] = w["branch"], w["branch"]
+            changed = True
+    if changed:
+        save_json(home("worktrees.json"), idx)
+
+
+def worktree_after_run(slug, repo, wt, start_head):
+    """After a run in a worktree made for a branch: commits on a detached HEAD move the branch (fast-forward, safe) or
+    are reported loudly. Returns the warning text, else None."""
+    path, target = wt["path"], wt.get("target")
+    if not target or git(path, "symbolic-ref", "--quiet", "HEAD"):
+        return None
+    head = git(path, "rev-parse", "HEAD")
+    if not head or not start_head or head == start_head or (git(path, "rev-list", "--count", f"{start_head}..{head}") or "0") == "0":
+        return None
+    tip = git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + target)
+    if tip and git(repo, "merge-base", "--is-ancestor", tip, head) is not None and git(repo, "update-ref", "refs/heads/" + target, head, tip) is not None:
+        git(path, "checkout", "-q", target)
+        print(f"worktree: commits were on a detached HEAD; branch {target} fast-forwarded to {head[:10]}", flush=True)
+        return None
+    msg = (f"commits are on a detached HEAD {head[:10]}; branch {target} did not move (at {(tip or '?')[:10]}) — "
+           f"lean-agent worktree attach {target}")
+    lean_log.log("error", "cli", f"run: {msg}")
+    print(f"lean-agent: WARNING {msg}", file=sys.stderr, flush=True)
+    print(f"WARNING: {msg}", flush=True)
+    return msg
+
+
+def worktree_attach(a):
+    """Puts a worktree's detached HEAD under its branch: the branch moves to HEAD when that is a fast-forward."""
+    slug, repo = resolve_project(a.project)
+    if not a.ref:
+        die("which branch? lean-agent worktree attach <project> <branch>")
+    sync_worktree_registry(slug, repo)
+    w = next((w for w in (worktree_index().get(slug) or {}).values() if w.get("branch") == a.ref or w.get("ref") == a.ref), None)
+    path = w["path"] if w else None
+    if not path or not os.path.isdir(path):
+        die(f"no lean-agent worktree for {a.ref} in {slug} (see: lean-agent worktrees {slug})")
+    if git(path, "symbolic-ref", "--quiet", "HEAD"):
+        die(f"{path} is already on branch {git(path, 'symbolic-ref', '--quiet', '--short', 'HEAD')}")
+    head = git(path, "rev-parse", "HEAD")
+    tip = git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + a.ref)
+    if tip and git(repo, "merge-base", "--is-ancestor", tip, head) is None:
+        die(f"{a.ref} ({tip[:10]}) is not an ancestor of the worktree HEAD ({head[:10]}): not a fast-forward; "
+            "merge or rebase by hand")
+    if tip is None:
+        git(repo, "branch", "-q", a.ref, head)
+    elif git(repo, "update-ref", "refs/heads/" + a.ref, head, tip) is None:
+        die(f"could not move {a.ref} to {head[:10]}")
+    if git(path, "checkout", "-q", a.ref) is None:
+        die(f"{a.ref} now points at {head[:10]}, but checking it out in {path} failed")
+    sync_worktree_registry(slug, repo)
+    print(f"{a.ref} moved to {head[:10]}; {path} is on the branch")
+
+
 def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True):
     """A shared worktree of `ref` for this project: reuse it (moved to the ref's tip when clean) or create it.
     A branch that exists neither locally nor on the remote is created from the base. `typed` is False for a generated
@@ -5174,10 +5258,23 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True):
         if r.returncode != 0:
             die(f"could not create branch {ref!r} from {new_from}: {(r.stderr or r.stdout).strip()[:300]}")
         print(f"worktree: created {ref} from {new_from}", flush=True)
+    sync_worktree_registry(slug, repo)
+    remote_branch = ref[len("origin/"):] if ref.startswith("origin/") else None
+    target = remote_branch or ref
+    if not git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + target):
+        target = None
     name = slugify(ref.replace("/", "-"), 60)
     path = home("worktrees", slug, name)
+    if target:
+        mine = os.path.realpath(home("worktrees", slug)) + os.sep
+        main_path = os.path.realpath(repo)
+        holder = next((w for w in worktree_porcelain(repo) if w["branch"] == target and w["path"] != main_path), None)
+        if holder and holder["path"].startswith(mine):
+            path, name = holder["path"], os.path.basename(holder["path"])  # also after a rename inside the worktree
+        elif holder:
+            die(f"branch {target} is checked out in {holder['path']}, which is not a lean-agent worktree: use that "
+                "checkout, or check out another branch there first")
     reused = os.path.isdir(path) and git(path, "rev-parse", "--git-dir") is not None
-    remote_branch = ref[len("origin/"):] if ref.startswith("origin/") else None
     moved = None
     if reused:
         branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
@@ -5190,9 +5287,13 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True):
         elif git(path, "status", "--porcelain", "--untracked-files=no") and not reset:
             print(f"lean-agent: worktree {path} has uncommitted changes; using it as it is", file=sys.stderr)
         elif not branch:
-            if head != sha:
-                moved = (head, sha)
-            git(path, "checkout", "-q", *(["--force"] if reset else []), "--detach", sha)
+            if target and not remote_branch and git(path, "checkout", "-q", *(["--force"] if reset else []), target) is not None:
+                branch = target  # a detached worktree of a branch that is free: put it on the branch
+                head = git(path, "rev-parse", "HEAD") or head
+            else:
+                if head != sha:
+                    moved = (head, sha)
+                git(path, "checkout", "-q", *(["--force"] if reset else []), "--detach", sha)
         elif reset:
             moved = (head, sha) if head != sha else None
             git(path, "reset", "-q", "--hard", sha)
@@ -5211,6 +5312,8 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True):
         elif git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + local):
             p = subprocess.run(["git", "-C", repo, "worktree", "add", "-q", path, local], capture_output=True, text=True)
             branch = local if p.returncode == 0 else None  # fails when the branch is checked out elsewhere
+            if not branch and not any(w["branch"] == local for w in worktree_porcelain(repo)):
+                die(f"git worktree add failed for branch {local}: {(p.stderr or p.stdout).strip()[:300]}")
             if branch and remote_branch and git(path, "merge", "-q", "--ff-only", sha) is None:
                 print(f"lean-agent: local branch {local} has commits that aren't on {ref}; using it as it is",
                       file=sys.stderr)
@@ -5232,7 +5335,7 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True):
                    "pushes after review and the user's approval."
                    if branch else "It's a detached checkout: commits here are on no branch, so don't commit "
                    "unless the task asks you to.")
-    return {"path": path, "name": name, "ref": ref, "branch": branch, "reused": reused, "commit_rule": commit_rule,
+    return {"path": path, "name": name, "ref": ref, "branch": branch, "target": target, "reused": reused, "commit_rule": commit_rule,
             "head": git(path, "rev-parse", "HEAD") or "", "moved": moved}
 
 
@@ -5288,6 +5391,9 @@ def cmd_worktrees(a):
     slugs = [resolve_project(a.project)[0]] if a.project else sorted(idx)
     found = False
     for slug in slugs:
+        if idx.get(slug) and (projects().get(slug) or {}).get("path"):
+            sync_worktree_registry(slug, projects()[slug]["path"])
+            idx = worktree_index()
         for name, w in sorted((idx.get(slug) or {}).items()):
             if not os.path.isdir(w["path"]):
                 continue
@@ -5306,6 +5412,8 @@ def cmd_worktree(a):
         return worktree_push(a)
     if a.action == "base":
         return worktree_base_cmd(a)
+    if a.action == "attach":
+        return worktree_attach(a)
     if not a.ref:
         die("which worktree? lean-agent worktree rm <project> <ref>")
     slug, repo = resolve_project(a.project)
@@ -10745,8 +10853,8 @@ def build_parser():
     s = sub.add_parser("worktrees", help="list lean-agent's shared worktrees")
     s.add_argument("project", nargs="?")
     s.set_defaults(fn=cmd_worktrees)
-    s = sub.add_parser("worktree", help="shared worktrees: rm, setup (run on new ones), push (after review + approval)")
-    s.add_argument("action", choices=["rm", "setup", "push", "base"])
+    s = sub.add_parser("worktree", help="shared worktrees: rm, setup (run on new ones), push (after review + approval), attach (branch to a detached HEAD)")
+    s.add_argument("action", choices=["rm", "setup", "push", "base", "attach"])
     s.add_argument("project")
     s.add_argument("ref", nargs="?", help="the worktree's branch (setup: also run the command there now)")
     s.add_argument("--run", dest="command", metavar="COMMAND", help="setup: the command for new worktrees")
