@@ -64,7 +64,7 @@ lean-agent trust              # once: accept Claude Code's trust dialog for the 
 **Updating:** run `lean-agent sync` (or ask the orchestrator to). It:
 - pulls the clone (fast-forward only, and never with local changes) and re-runs itself on the new code
 - runs `claude plugin marketplace update` and `claude plugin update`
-- regenerates the orchestrator guide and settings
+- regenerates the orchestrator guides (the full guide for thread sessions in `CLAUDE.md`, a short front-desk guide for the main session in `.claude/rules/front-desk.md`) and settings; orchestrator sessions start with no MCP servers, no skills and no user custom agents
 - re-learns every project, keeping card stats, and refreshes the repo blocks.
 
 You don't need to close Claude Desktop or restart `lean-agent up`. The installed plugin's hooks and in-session

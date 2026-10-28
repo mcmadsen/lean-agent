@@ -940,17 +940,20 @@ class BudgetTest(Base):
         templates = os.path.join(ROOT, "..", "templates")
         with open(os.path.join(templates, "guide.md"), encoding="utf-8") as fh:
             guide = fh.read().replace("{{P}}", "shop")
+        with open(os.path.join(templates, "front-desk.md"), encoding="utf-8") as fh:
+            desk = fh.read().replace("{{P}}", "shop")
+        self.assertLess(len(desk), 6000)  # the main session's guide stays ~1.5k tokens at most
         with open(os.path.join(templates, "repo-block.md"), encoding="utf-8") as fh:
             block = fh.read().replace("{{P}}", "shop")
         examples = []
-        for m in re.finditer(r"^```(\w*)\n(.*?)^```", guide, re.S | re.M):
+        for m in re.finditer(r"^```(\w*)\n(.*?)^```", guide + "\n" + desk, re.S | re.M):
             if m.group(1) == "sh":
                 examples.append(m.group(2))
             elif m.group(1) == "text":
                 examples += [l for l in m.group(2).splitlines() if l.startswith("lean-agent ")]
         bash_event = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}}
         skipped = []
-        for doc in (guide, block):
+        for doc in (guide, desk, block):
             text = re.sub(r"^```.*?^```", "", doc, flags=re.S | re.M)
             for m in re.finditer(r"`(lean-agent [^`]+)`", text):
                 span = " ".join(m.group(1).split())  # a span may wrap over lines
