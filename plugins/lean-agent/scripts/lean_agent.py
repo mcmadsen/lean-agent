@@ -178,10 +178,19 @@ def report_failure(cmd, reason):
 
 def die(msg, code=1):
     if FAIL_CMD and code != 0:
-        report_failure(FAIL_CMD[0], msg)
+        report_failure(FAIL_CMD[0], msg)  # logs the error itself
     else:
         print(f"lean-agent: {msg}", file=sys.stderr)
-    lean_log.log("error" if code not in (0, 2, 3) else "debug", "cli", f"{' '.join(sys.argv[1:3])}: {msg}")
+        lean_log.log("error" if code not in (0, 2, 3) else "debug", "cli", f"{' '.join(sys.argv[1:3])}: {msg}")
+    sys.exit(code)
+
+
+def gate(msg, code=2):
+    """A decision the caller has to make (plan share, exhausted budget, a costly model needing --yes): said and logged at
+    info, not a failure: no failed run, no thread error."""
+    FAIL_CMD[:] = []
+    print(f"lean-agent: {msg}", file=sys.stderr)
+    lean_log.log("info", "cli", f"{' '.join(sys.argv[1:3])}: {msg}")
     sys.exit(code)
 
 
@@ -1511,7 +1520,7 @@ def expensive_run_check(a, model, task):
     print(line, file=sys.stderr, flush=True)
     limit = env_num("LEAN_AGENT_CONFIRM_PCT", 10)
     if not getattr(a, "yes", False) and ((share or 0) >= limit or (now_pct or 0) >= 50):
-        die(f"that's a large share of your plan: ask the user, then add --yes (or use -m sonnet)", 2)
+        gate("that's a large share of your plan: ask the user, then add --yes (or use -m sonnet)", 2)
 
 
 def duplicate_launch_guard(a, model, task):
@@ -1609,6 +1618,7 @@ def cmd_run(a):
         if SUPERVISOR:
             traceback.print_exc()
         if not RUN_CTX.get("id"):  # failed before a run existed: the caller sees the error as before
+            early_settle(f"{type(e).__name__}: {e}")  # before main()'s handler: the failed row carries the reason
             raise
         rc = record_internal_error(e, traceback.format_exc())
         return rc
@@ -1792,7 +1802,7 @@ def _cmd_run(a):
 
     hit = usage.exhausted_window()
     if hit:
-        die(usage.describe_exhausted(hit), 3)
+        gate(usage.describe_exhausted(hit), 3)
     launch_key = None
     if not prev and not getattr(a, "role", None) and os.environ.get("LEAN_AGENT_LAUNCH_GUARD") != "0":
         launch_key = duplicate_launch_guard(a, model, task)
@@ -4412,7 +4422,7 @@ def review_main(a):
             msg = (f"{len(busy)} worker(s) still running on {branch_of(path, a.head) or a.head} ({', '.join(busy)}): "
                    "review once, after all of them")
             if getattr(a, "for_push", False) and not getattr(a, "yes", False):
-                die(msg + " (or --yes to review now)", code=3)
+                gate(msg + " (or --yes to review now)", 3)
             print(f"lean-agent: note: {msg}.", file=sys.stderr)
     delta_max = env_num("LEAN_AGENT_DELTA_MAX_LINES", 800)
     if (not a.resume and not getattr(a, "full_review", False) and a.head and not a.independent and a.runs == 1
@@ -4576,8 +4586,8 @@ def review_main(a):
     a._estimate = (cost, "scaled-review" if "price ratio" in how else "history-review")
     if (any(m in model for m in ("opus", "fable")) and not getattr(a, "yes", False)
             and why_model not in ("--reviewer-model", "LEAN_AGENT_REVIEW_MODEL", "config review-model")):
-        die(f"this review would use {model} (~${cost:.2f}, {why_model}) — rerun with --yes to accept or "
-            "--reviewer-model sonnet", 2)
+        gate(f"this review would use {model} (~${cost:.2f}, {why_model}) — rerun with --yes to accept or "
+             "--reviewer-model sonnet", 2)
     risk = high_risk(path, [merge_base, sha] if mode == "ref" else [merge_base], names)
     if risk and usage.model_rate(model) <= 1:
         strong = os.environ.get("LEAN_AGENT_STRONG_REVIEW_MODEL") or "opus"
