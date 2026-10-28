@@ -1929,6 +1929,7 @@ def _cmd_run(a):
                                                       "branch": (wt or {}).get("branch") if isinstance(wt, dict) else None,
                                                       "role": getattr(a, "role", None)
                                                       or (prev or {}).get("role")})
+    clear_launching()  # the running marker above now keeps the thread busy
     for line in mcp_cost_lines(mcp_specs, chrome_spec):
         print(line, flush=True)
 
@@ -2068,6 +2069,7 @@ def _cmd_run(a):
     LAST_RUN[:] = [entry]
 
     def finish():  # once the whole summary is on disk: the run stops being "running" (what `runs --wait` waits for)
+        clear_launching()
         if running_key:
             try:
                 os.remove(home("running", running_key + ".json"))
@@ -9118,12 +9120,28 @@ CLOSE_MIN_IDLE = 600  # seconds a session must have been idle (since its last tu
 LAUNCH_GRACE = 60  # seconds a run counts as live from the moment `run` starts, before its running marker exists
 
 
+LAUNCH_MARKERS = []  # this process's launching markers, removed once its run is registered or has finished
+
+
 def mark_launching(tid):
-    """Written by `run` before anything that can start a thread session: the thread counts as busy for the cap."""
+    """Written by `run` before anything that can start a thread session: the thread (merge aliases followed, like
+    running_by_thread) counts as busy for the cap. Expired markers of other runs are pruned here."""
     if tid and tid != "none":
+        launching_threads()
         d = home("launching")
         os.makedirs(d, exist_ok=True)
-        save_json(os.path.join(d, f"{os.getpid()}-{int(time.time() * 1000)}.json"), {"thread": tid, "ts": time.time()})
+        path = os.path.join(d, f"{os.getpid()}-{int(time.time() * 1000)}.json")
+        save_json(path, {"thread": lean_threads.resolve(tid), "ts": time.time()})
+        LAUNCH_MARKERS.append(path)
+
+
+def clear_launching():
+    """Drops this process's launching markers (its running marker now stands in, or the run is over)."""
+    while LAUNCH_MARKERS:
+        try:
+            os.remove(LAUNCH_MARKERS.pop())
+        except OSError:
+            pass
 
 
 def launching_threads():
