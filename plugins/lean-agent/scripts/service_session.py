@@ -560,8 +560,10 @@ class AutoClear:
     def update(self, **fields):
         update_session(self.key, **fields)
 
+    log_tag = "auto-clear"
+
     def log(self, msg, level="debug"):
-        lean_log.log(level, "auto-clear", msg)
+        lean_log.log(level, self.log_tag, msg)
 
     def last_gap_start(self):
         """When the last clear (or checkpoint request) happened: the record survives a restart of `up`."""
@@ -787,6 +789,8 @@ class Reporter(AutoClear):
     work or asks the user something, and queues it; also reports a pending question or permission prompt. The main
     session's Host: types the queued reports into the session at its turn end (never mid-turn, never during a prompt)."""
 
+    log_tag = "reports"
+
     def __init__(self, host, now=time.time):
         super().__init__(host, now)
         self.born = now()
@@ -794,9 +798,6 @@ class Reporter(AutoClear):
         self.path = None
         self.alerted = None    # the pending question or prompt already reported
         self.delivered = None  # (transcript size, when) of the last message typed into the main session
-
-    def log(self, msg, level="debug"):
-        lean_log.log(level, "reports", msg)  # not "auto-clear": this class only borrows the transcript helpers
 
     def prompting(self):
         return bool(PROMPT_RE.search(self.host.tail_text()[-1500:]))
