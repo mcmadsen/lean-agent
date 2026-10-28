@@ -4122,7 +4122,10 @@ def review_gate(a, slug, path):
     match, _ = find_review(slug, path, a.head)
     if match and (match.get("verdict") in ("approve", "changes-requested") or is_skipped(match.get("verdict"))):
         print(f"review: no new commits since {sha[:12]} — verdict {match['verdict']} stands")
-        return stored_exit(slug, path, match, label, sha)[0]
+        _, open_gaps = stored_exit(slug, path, match, label, sha)
+        print(f"review {match['run']} of {label} @ {sha[:12]}: {match['verdict']}"
+              + (f", {len(open_gaps)} known gap(s) not acknowledged" if open_gaps else ""))
+        return 0  # nothing to review is not a failure; `review --status` is the gate
     base = a.base or default_base(path)
     mb = git(path, "merge-base", base, sha) if base else None
     if mode == "ref" and mb and git(path, "diff", "--name-only", mb, sha) == "":
@@ -4336,14 +4339,14 @@ def cmd_review(a):
 
 
 def stored_exit(slug, path, match, label, sha):
-    """(exit code, open gaps) of a stored review: 2 for an approve that still has open gaps, 1 for changes
-    requested, 0 for an approve; after a policy skip, what the last real review left."""
+    """(exit code, open gaps) of a stored review: 0 for an approve without open gaps, else 2 (changes requested,
+    needs checks, open gaps); after a policy skip, what the last real review left. 1 is for errors only."""
     open_gaps = [g for g in match.get("gaps") or [] if not gap_declined(g, declined_for(slug, match.get("ref"), path, sha))]
     if approved(match["verdict"]) and open_gaps:
         return 2, open_gaps
     if is_skipped(match["verdict"]):
         return skipped_status(slug, path, label, sha), open_gaps
-    return (0 if approved(match["verdict"]) else 1), open_gaps
+    return (0 if approved(match["verdict"]) else 2), open_gaps
 
 
 def skipped_status(slug, path, label, sha):
@@ -4355,7 +4358,7 @@ def skipped_status(slug, path, label, sha):
     if not open_gaps:
         return 0
     print(f"  the last real review ({real['run']}, {real['verdict']}) left {len(open_gaps)} known gap(s) not acknowledged")
-    return 2 if approved(real["verdict"]) else 1
+    return 2
 
 
 def review_main(a):
@@ -4380,7 +4383,7 @@ def review_main(a):
             print(f"not reviewed yet at {sha[:12]}: {branch_of(path, a.head) or a.head} was reviewed at {old[:12]} "
                   f"({was}); {size} lines changed since. Review just that: lean-agent review {slug} --head {a.head} "
                   f"(a delta review{', sonnet' if size <= env_num('LEAN_AGENT_DELTA_MAX_LINES', 800) else ''}).")
-            return 1
+            return 2
         last = (list(read_jsonl(reviews_path(slug))) or [None])[-1]
         if not last:
             print(f"No review yet. Run: lean-agent review {slug}" + (f" --head {a.head}" if a.head else ""))
@@ -4392,7 +4395,7 @@ def review_main(a):
                   f"({last['run']}, {last['verdict']}) was of {what}"
                   + ("" if a.head or last.get("mode") != "ref" else f"; check it with --status --head {last['ref']}")
                   + ".")
-        return 1
+        return 2
     gated = review_gate(a, slug, path)
     if gated is not None:
         return gated
@@ -4571,6 +4574,10 @@ def review_main(a):
     cost, how = expected_review_cost(model)
     print(f"reviewer: {model} ({why_model}), effort {effort} (expected ~${cost:.2f}, {how})", flush=True)
     a._estimate = (cost, "scaled-review" if "price ratio" in how else "history-review")
+    if (any(m in model for m in ("opus", "fable")) and not getattr(a, "yes", False)
+            and why_model not in ("--reviewer-model", "LEAN_AGENT_REVIEW_MODEL", "config review-model")):
+        die(f"this review would use {model} (~${cost:.2f}, {why_model}) — rerun with --yes to accept or "
+            "--reviewer-model sonnet", 2)
     risk = high_risk(path, [merge_base, sha] if mode == "ref" else [merge_base], names)
     if risk and usage.model_rate(model) <= 1:
         strong = os.environ.get("LEAN_AGENT_STRONG_REVIEW_MODEL") or "opus"
@@ -10864,7 +10871,7 @@ def build_parser():
     s.add_argument("--yes", action="store_true", help="--for-push: review even though workers still run")
     s.add_argument("--force", action="store_true", help="review even when nothing changed since the last review, the "
                    "re-review limit is reached, or the change is of a kind review-skip leaves out")
-    s.add_argument("--status", action="store_true", help="exit 0 only if the current code has an approve (or a skipped review)")
+    s.add_argument("--status", action="store_true", help="exit 0 only if the current code has an approve (or a skipped review); 2 if not approved (changes requested, open gaps, not reviewed); 1 only for errors")
     s.add_argument("--decide-gaps", action="store_true", help="a sonnet worker decides the open known gaps of the "
                    "branch's latest review from the project's cards and code: declines are recorded, fixes come back as "
                    "tasks, product choices as questions; exit 2 when something needs the user")

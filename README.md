@@ -513,7 +513,7 @@ uncommitted changes and new untracked files.
   branch; the review is recorded for the branch's new tip (also when the reviewer is resumed with `run --resume`).
   A fresh review of a branch that was reviewed before gets the earlier findings, so it says which are resolved
   instead of starting blind. `review <project> --status` exits 0 only if the
-  *current* code (HEAD plus uncommitted changes) has an approve. With `--head <branch>` it checks that branch's
+  *current* code (HEAD plus uncommitted changes) has an approve (no open gaps), 2 for changes requested, needs-checks, open gaps or no review of this code, and 1 only for errors. `review` on a head that was reviewed already says `no new commits since <sha> — verdict <X> stands` and exits 0. With `--head <branch>` it checks that branch's
   tip instead, whatever is checked out. The guide and repo block make that a hard rule
   before any PR.
 

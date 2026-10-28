@@ -4649,7 +4649,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("Role: you are the reviewer", call["append"])
         self.assertIn("including uncommitted changes", call["append"])
         self.assertIn("api/totals.py", call["task"])
-        self.assertEqual(self.cli("review", "proj", "--status", check=False).returncode, 1)
+        self.assertEqual(self.cli("review", "proj", "--status", check=False).returncode, 2)
         approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
         p = self.cli("review", "proj", "--resume", "--same-session", "--force", check=False, FAKE_REVIEW=approve)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
@@ -4660,7 +4660,7 @@ class CliTest(unittest.TestCase):
         with open(os.path.join(self.proj, "api", "totals.py"), "a") as fh:
             fh.write("# later edit\n")
         p = self.cli("review", "proj", "--status", check=False)
-        self.assertEqual(p.returncode, 1)
+        self.assertEqual(p.returncode, 2)
         self.assertIn("stale", p.stdout)
 
     def test_bounded_answer_and_details(self):
@@ -7074,7 +7074,7 @@ class CliTest(unittest.TestCase):
                                         capture_output=True, text=True).stdout.strip(), "main")  # untouched
         self.assertEqual(self.cli("review", "proj", "--status", "--head", "feature").returncode, 0)
         p = self.cli("review", "proj", "--status", check=False)  # the working tree (main) wasn't reviewed
-        self.assertEqual(p.returncode, 1)
+        self.assertEqual(p.returncode, 2)
         self.assertIn("--status --head feature", p.stdout)
         g("checkout", "-q", "feature")
         with open(os.path.join(self.proj, "api", "totals.py"), "a") as fh:
@@ -7082,7 +7082,7 @@ class CliTest(unittest.TestCase):
         g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "fix")
         g("checkout", "-q", "main")
         p = self.cli("review", "proj", "--status", "--head", "feature", check=False)
-        self.assertEqual(p.returncode, 1)
+        self.assertEqual(p.returncode, 2)
         self.assertIn("feature was reviewed at", p.stdout)  # points at the cheap way: a delta review
         self.assertIn("lines changed since. Review just that: lean-agent review proj --head feature", p.stdout)
         out = self.cli("review", "proj", "--resume", "--head", "feature", FAKE_REVIEW=approve).stdout
@@ -8266,9 +8266,12 @@ class CliTest(unittest.TestCase):
         self.assertEqual(len(self.reviewer_runs()), 1)
         p = self.review_feature()
         self.assertRegex(p.stdout, r"review: no new commits since [0-9a-f]{12} — verdict changes-requested stands")
-        self.assertEqual((p.returncode, len(self.reviewer_runs())), (1, 1))
+        self.assertEqual((p.returncode, len(self.reviewer_runs())), (0, 1))  # nothing to review is not a failure
+        self.assertIn("changes-requested", p.stdout.splitlines()[-1])  # the stored verdict line
+        self.assertEqual(self.review_feature("--status").returncode, 2)  # the gate stays closed
         p = self.review_feature("--resume")
         self.assertIn("no new commits since", p.stdout)
+        self.assertEqual(p.returncode, 0)
         self.assertEqual(len(self.reviewer_runs()), 1)
         self.review_feature("--force", FAKE_REVIEW=self.REQUEST)
         self.assertEqual(len(self.reviewer_runs()), 2)
@@ -8755,6 +8758,29 @@ class CliTest(unittest.TestCase):
         self.assertIn("review-model: opus", self.cli("config", "review-model", "opus").stdout)
         self.cli("config", "review-model", "auto")
         self.assertIn("review-model: auto", self.cli("config", "review-model").stdout)
+
+
+    def test_a_review_that_picks_opus_by_risk_needs_the_users_go(self):
+        g = self.git_project()
+        g("checkout", "-q", "feature")
+        with open(os.path.join(self.proj, "auth.py"), "w") as fh:
+            fh.write("def f(user):\n    return refresh_token(user)\n")
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "auth")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("review", "proj", "--head", "feature", "--base", "main", check=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertRegex(p.stdout, r"reviewer: opus \(security-sensitive: .*\), effort high \(expected ~\$[\d.]+")
+        self.assertRegex(p.stderr, r"this review would use opus \(~\$[\d.]+, security-sensitive.*\) — rerun with --yes to accept "
+                                   r"or --reviewer-model sonnet")
+        self.assertEqual(self.reviewer_runs(), [])
+        p = self.cli("review", "proj", "--head", "feature", "--base", "main", "--reviewer-model", "sonnet",
+                     FAKE_REVIEW=self.APPROVE, check=False)
+        self.assertIn("reviewer: sonnet (--reviewer-model)", p.stdout)
+        p = self.cli("review", "proj", "--head", "feature", "--base", "main", "--yes", "--force", FAKE_REVIEW=self.APPROVE,
+                     check=False)
+        self.assertIn("reviewer: opus (security-sensitive", p.stdout)
 
 
 class ReviewUnitTest(unittest.TestCase):
