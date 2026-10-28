@@ -5202,8 +5202,18 @@ or clean anything you didn't create.
 """
 
 
+def worktree_path(path):
+    """A worktree path in the one form git reports it (symlinks resolved: /var/... is /private/var/... on macOS)."""
+    return os.path.realpath(path) if path else path
+
+
 def worktree_index():
-    return load_json(home("worktrees.json"), {})
+    idx = load_json(home("worktrees.json"), {})
+    for entries in idx.values():
+        for e in entries.values():
+            if isinstance(e, dict) and e.get("path"):
+                e["path"] = worktree_path(e["path"])
+    return idx
 
 
 def worktree_base(slug, repo, flag=None):
@@ -5348,7 +5358,7 @@ def worktree_porcelain(repo):
     out, cur = [], None
     for line in (git(repo, "worktree", "list", "--porcelain") or "").splitlines():
         if line.startswith("worktree "):
-            cur = {"path": os.path.realpath(line[9:]), "branch": None, "head": None}
+            cur = {"path": worktree_path(line[9:]), "branch": None, "head": None}
             out.append(cur)
         elif cur is not None and line.startswith("HEAD "):
             cur["head"] = line[5:]
@@ -5370,7 +5380,7 @@ def sync_worktree_registry(slug, repo, write=True):
     def follow(idx):
         changed = False
         for e in (idx.get(slug) or {}).values():
-            w = by_path.get(os.path.realpath(e.get("path") or ""))
+            w = by_path.get(worktree_path(e.get("path") or ""))
             if w and w["branch"] and w["branch"] != e.get("branch"):
                 e["branch"], e["ref"] = w["branch"], w["branch"]
                 changed = True
@@ -5481,9 +5491,9 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True):
     if not git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + target):
         target = None
     name = slugify(ref.replace("/", "-"), 60)
-    path = home("worktrees", slug, name)
+    path = worktree_path(home("worktrees", slug, name))
     if target:
-        mine = os.path.realpath(home("worktrees", slug)) + os.sep
+        mine = worktree_path(home("worktrees", slug)) + os.sep
         holder = branch_holder(repo, target)
         if holder and remote_branch:
             target = None  # an explicit remote ref: detached at the remote tip, whatever holds the local branch

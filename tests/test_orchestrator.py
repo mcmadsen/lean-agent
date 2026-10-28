@@ -7529,6 +7529,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("worktree: feature at", out)
         self.assertIn("(created, on branch feature, HEAD ", out)
         wt = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", "feature")
+        wt = os.path.realpath(wt)  # git and lean-agent report symlink-free paths (/private/var on macOS)
         self.assertTrue(os.path.isfile(os.path.join(wt, "api", "totals.py")))  # the branch's files
         call = self.calls()[-1]
         argv = call["argv"]
@@ -7572,6 +7573,7 @@ class CliTest(unittest.TestCase):
         out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "auto", "--", "write code").stdout
         auto = re.search(r"^branch: (\S+)", out, re.M).group(1)
         wt = re.search(r"^worktree: \S+ at (\S+)", out, re.M).group(1)
+        wt = os.path.realpath(wt)
         git = lambda *x: subprocess.run(["git", "-C", wt, *x], capture_output=True, text=True).stdout.strip()
         git("branch", "-m", "feature/renamed")  # what a worker did to its branch
         reg = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees.json")
