@@ -57,7 +57,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `remember "<what>" [--project P] [--task-file -]` | b | allowed: starts the librarian worker; the only way to keep something |
 | `advise "<request>" [--project P] [--thread TAG] [--task-file -]` | b | allowed: starts a read-only haiku advisor worker; stores its short answer in `advice/` |
 | `run`, `review`, `do`, `tracker --discover` (all flags, `--mcp`, `--allow-cmd`, `--todo new\|N\|none`) | b | allowed, in the background; they start workers |
-| `now`, `thread list`, `thread show tN [--all]` | b | allowed: read-only |
+| `now`, `now --short`, `thread list`, `thread show tN [--all]` | b | allowed: read-only |
 | `thread new "title" [--prompt-file F\|-]`, `thread send tN --prompt-file F\|-`, `thread open tN`, `thread close tN [tM ...]|--all|--idle DUR`, `thread sessions` | b | allowed: each thread is its own Remote Control session (`lean-agent · tN <title>`) that `up` hosts next to the main one; they start, message, resume, checkpoint-and-stop and list those sessions; `max-thread-sessions` (default 8) caps the sessions hosted now; at the cap `thread new`/`open`/`send` closes the longest-idle session that has no running run (checkpointed, thread closed, reopen with `thread open`) and refuses, listing them, when every one is busy; a session meant to be open is resumed when the service starts |
 | `thread reopen tN [--resume-old]` | b | allowed: a closed thread starts a fresh session from a short brief (may close the longest-idle session without a running run to make room); `--resume-old` continues the previous transcript |
 | `thread merge\|unmerge\|move` | b | allowed: they only change the thread registry |
@@ -122,3 +122,18 @@ word, or `lean-agent run … -- 'memory add …'` is not affected: the hook read
 
 There is no Claude Code setting that disables a single built-in slash command or the `#` shortcut for one folder
 (`--disable-slash-commands` exists only as a launch flag, which workers use).
+
+## 5. The main session is the front desk
+
+In a service-hosted setup the main session (`LEAN_AGENT_SESSION_ROLE=main`) only lists the threads and hands work over.
+Thread sessions keep sections 1 to 4. `front_desk_denial` in `budget_hook.py` refuses, with "main is the front desk: hand
+it to a thread — lean-agent thread send tN --prompt-file - (or thread new "title")", whether or not strict mode is on:
+
+| Subcommand | Main session |
+| --- | --- |
+| `run`, `review` (also `review-learn`, `review-decline`), `do`, `handover`, `learn`, `tracker`, `optimize`, `sync`, `codemod`, `rules` | **denied** |
+| `worktree push`, any `publish` or `push` subcommand | **denied** |
+| `now` (also `now --short`), `thread new\|send\|close\|reopen\|open\|show\|list\|sessions\|move`, `advise`, `remember`, `clear`, `checkpoint`, `brief` | allowed |
+| `runs --show\|--wait\|--stop`, `logs`, `doctor`, `config` reads | allowed |
+
+The brief a main session gets after a compaction or `/clear` lists the threads with `now --short`.
