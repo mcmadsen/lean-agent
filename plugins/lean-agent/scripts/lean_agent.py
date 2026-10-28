@@ -1837,7 +1837,7 @@ def _cmd_run(a):
             # an auto name is chosen and its branch created under one lock, so parallel runs can't pick the same name
             with file_lock(home("worktrees", slug, ".auto-branch")) if auto_branch else contextlib.nullcontext():
                 if auto_branch:
-                    title = branch_title(getattr(a, "todo", None), task)
+                    title = branch_title(getattr(a, "todo", None), task, getattr(a, "branch_name", None))
                     a.worktree = new_branch_name(slug, project, getattr(a, "branch_type", None),
                                                  todo_task_id(getattr(a, "todo", None)), title,
                                                  getattr(a, "branch_version", None))
@@ -5218,13 +5218,22 @@ def todo_task_id(todo_id):
     return (task_id_of(item.get("ref")) if item else None) or todo_id
 
 
-def branch_title(todo_id, task):
-    """What a generated branch is named after: the todo's title, else the first line of the task text (never --why)."""
+TASK_LABEL = re.compile(r"^\s*(?:[#>*_\-\s]*)(?:goal|task|steps?|context|objective|todo|plan|part [a-z0-9]+)\s*[:\-]\s*", re.I)
+
+
+def branch_title(todo_id, task, override=None):
+    """What a generated branch is named after: --branch-name, else the todo's title, else the first line of the task
+    text with leading labels ("Goal:", "Task:", "Steps:") stripped (never --why). Dies when nothing usable is left."""
+    if override:
+        return override
     item = next((t for t in todos()["items"] if t["id"] == todo_id), None) if isinstance(todo_id, int) else None
     if item and item.get("text"):
         return item["text"]
-    lines = (task or "").strip().splitlines()
-    return lines[0] if lines else ""
+    for line in (task or "").strip().splitlines():
+        line = TASK_LABEL.sub("", line, count=1).strip()
+        if branch_slug(line):
+            return line
+    die("no title to name the branch after: pass --branch-name NAME (or --todo with a title)")
 
 
 def new_branch_name(slug, repo, kind, task_id, title, version=None):
@@ -10783,6 +10792,8 @@ def build_parser():
     s.add_argument("--worktree", metavar="REF", help="run in a shared lean-agent git worktree of this branch/ref "
                    "(your checkout is never touched; installed deps persist for the next worker); `auto` makes a new "
                    "branch named by the project's branch rules (lean-agent config branch-rules)")
+    s.add_argument("--branch-name", metavar="NAME", help="--worktree auto: name the branch after NAME instead of "
+                   "the todo title or the task text")
     s.add_argument("--branch-type", choices=BRANCH_KINDS, help="--worktree auto: feature, bugfix or release "
                    "(default: inferred from the task)")
     s.add_argument("--branch-version", metavar="X", help="--worktree auto, release branches: the version")
