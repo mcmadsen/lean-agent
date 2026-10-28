@@ -120,6 +120,12 @@ FAKE_CLAUDE = textwrap.dedent("""\
     model = sys.argv[sys.argv.index("--model") + 1] if "--model" in sys.argv else ""
     if os.environ.get("FAKE_FAIL_MODEL") and os.environ["FAKE_FAIL_MODEL"] in model:
         fb = '{"status": "failed", "used": [], "unneeded": []}'
+    if os.environ.get("FAKE_ODD"):  # stream-json lines that are not the usual objects
+        print(json.dumps({"type": "assistant", "session_id": "sess-odd", "message": "a string, not an object"}), flush=True)
+        print(json.dumps({"type": "user", "message": {"content": "plain text"}}), flush=True)
+        print(json.dumps({"type": "assistant", "message": {"id": "m0", "content": "text", "usage": {"input_tokens": 1}}}), flush=True)
+        print(json.dumps("assistant session_id"), flush=True)
+        print("[1, 2]", flush=True)
     if os.environ.get("FAKE_TURNS"):  # stream assistant turns, each re-reading FAKE_TURN_CTX tokens
         print(json.dumps({"type": "system", "subtype": "init", "session_id": "sess-1"}), flush=True)
         for i in range(int(os.environ["FAKE_TURNS"])):
@@ -4227,6 +4233,7 @@ class CliTest(unittest.TestCase):
         self.stop_up(p, 30)
 
     def test_thread_new_refuses_above_max_thread_sessions(self):
+        self.env["LEAN_AGENT_CLOSE_MIN_IDLE"] = "0"
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "1")
         # a host record the service just wrote (host_pid of a live process) counts whether or not that host answers yet
@@ -5288,6 +5295,39 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "inline", LEAN_AGENT_NO_DETACH="1"
                                   ).returncode, 0)
 
+    def test_odd_stream_events_do_not_crash_run_advise_read_only_or_ref_runs(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        subprocess.run(["git", "-C", self.proj, "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", self.proj, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                        "--allow-empty", "-m", "x"], check=True)
+        for extra in ((), ("--read-only",), ("--read-only", "--ref", "main")):
+            p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--again", *extra, "look", FAKE_ODD="1")
+            self.assertRegex(p.stdout, r"run \S+ · haiku · done")
+            self.assertNotIn("Traceback", p.stderr)
+        p = self.cli("advise", "Fix it", FAKE_ODD="1", FAKE_ANSWER="ADVICE\nknown: none")
+        self.assertIn("ADVICE", p.stdout)
+        self.assertNotIn("Traceback", p.stderr)
+        self.assertEqual({r["status"] for r in self.ledger()}, {"done"})
+
+    def test_an_exception_in_the_detached_supervisor_is_recorded_as_a_failed_run(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        code = ("import sys; sys.path.insert(0, %r); import lean_agent as L\n"
+                "def boom(*a, **k): raise RuntimeError('forced')\n"
+                "L.seed_collected = boom; L.CLI_ENTRY.append(True); sys.exit(L.main())" % os.path.dirname(CLI))
+        for args in (("run", "-p", "proj", "-m", "haiku", "--why", "x", "crash"),
+                     ("advise", "crash")):
+            p = subprocess.run([sys.executable, "-c", code, *args], capture_output=True, text=True,
+                               env=self.env, stdin=subprocess.DEVNULL)
+            row = self.ledger()[-1]
+            self.assertEqual(p.returncode, 1, p.stderr)
+            self.assertEqual((row["status"], row["reason"]), ("failed", "internal error: RuntimeError: forced"))
+            self.assertIn(f"run {row['id']} failed: internal error: RuntimeError: forced "
+                          f"(details: lean-agent runs --show {row['id']} --tail 40)", p.stdout)
+            with open(os.path.join(row["workdir"], "traceback.txt")) as fh:
+                self.assertIn("RuntimeError: forced", fh.read())
+            self.assertIn("RuntimeError", self.cli("runs", "--show", row["id"], "--tail", "40").stdout)
+        self.assertEqual(self.running_markers(), [])
+
     def test_a_missing_claude_binary_leaves_no_todo_new_item(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--todo", "new", "t", check=False,
@@ -5621,6 +5661,7 @@ class CliTest(unittest.TestCase):
         self.stop_up(p2, 30)
 
     def test_at_the_cap_the_longest_idle_session_without_a_run_is_closed(self):
+        self.env["LEAN_AGENT_CLOSE_MIN_IDLE"] = "0"
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "2")
         lt = self.threads_home()
@@ -5629,7 +5670,7 @@ class CliTest(unittest.TestCase):
                       "alpha to be idle longer than beta will be")
         self.cli("thread", "new", "beta topic")
         out = self.cli("thread", "new", "gamma topic").stdout
-        self.assertRegex(out, r'closed t1 "alpha topic" \(idle \d+[mhd]\) to make room \u2014 reopen with lean-agent thread open t1')
+        self.assertRegex(out, r'closed t1 "alpha topic" \(idle \d+[mhd]\) to make room \u2014 reopen with lean-agent thread reopen t1')
         self.assertIn("t3 started", out)
         self.assertIsNone(lt.load()["threads"]["t1"].get("session_on"))
         self.assertTrue(lt.load()["threads"]["t1"].get("closed"))
@@ -5645,9 +5686,144 @@ class CliTest(unittest.TestCase):
         r = self.cli("thread", "new", "delta topic", check=False)
         self.assertNotEqual(r.returncode, 0)
         err = r.stderr + r.stdout
-        self.assertRegex(err, r't2 "beta topic" idle \d+[mhd], 1 running')
-        self.assertRegex(err, r't3 "gamma topic" idle \d+[mhd], 1 running')
+        self.assertRegex(err, r't2 "beta topic" idle \d+[mhd], not eligible: 1 running')
+        self.assertRegex(err, r't3 "gamma topic" idle \d+[mhd], not eligible: 1 running')
         self.stop_up(p, 30)
+
+    def room_for(self, sessions, caller=None, busy=None, launching=(), mid_turn=(), cap=3, tid=None):
+        """Run make_room_for_thread_session on faked sessions; returns (closed ids, output, error text or None)."""
+        L = lean_agent_module()
+        import service_session
+        self.threads_home()
+        closed, out, home = [], io.StringIO(), self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        with mock.patch.dict(os.environ, self.env):
+            for t in launching:
+                L.mark_launching(t)
+        env = dict(self.env, LEAN_AGENT_CALLER_THREAD=caller or "")
+
+        def state(path):
+            return {"ended": os.path.basename(path) not in mid_turn}
+        with mock.patch.dict(os.environ, env), mock.patch.object(L, "open_thread_sessions", return_value=sessions), \
+                mock.patch.object(service_session, "max_thread_sessions", return_value=cap), \
+                mock.patch.object(L.lean_threads, "running_by_thread", return_value=busy or {}), \
+                mock.patch.object(service_session, "info", side_effect=lambda k: {"transcript": os.path.join(home, k)}), \
+                mock.patch.object(service_session, "transcript_state", side_effect=state), \
+                mock.patch.object(L, "close_thread_session", side_effect=lambda k: closed.append(k) or (True, True, False)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()) as err:
+            for k in {s["thread"] for s in sessions}:
+                open(os.path.join(home, k), "w").write("x")
+            try:
+                L.make_room_for_thread_session(tid)
+            except SystemExit:
+                return closed, out.getvalue(), err.getvalue() or "refused"
+        return closed, out.getvalue(), None
+
+    @staticmethod
+    def fake_sessions(*specs):
+        return [{"thread": t, "title": f"title {t}", "idle": idle, "pid": 1, "name": t, "started": 0} for t, idle in specs]
+
+    def test_cap_never_closes_the_calling_session_even_when_longest_idle(self):
+        ss = self.fake_sessions(("t10", 9000), ("t2", 1000), ("t3", 2000))
+        closed, out, err = self.room_for(ss, caller="t10")
+        self.assertEqual(closed, ["t3"])
+        # a thread session calling `run --thread tOther`: the caller is still the session it runs in
+        closed, out, err = self.room_for(ss, caller="t10", tid="t80")
+        self.assertNotIn("t10", closed)
+        closed, out, err = self.room_for(self.fake_sessions(("t10", 9000), ("t2", 1000), ("t3", 2000)), caller="t3", cap=2)
+        self.assertNotIn("t3", closed)
+
+    def test_thread_flag_never_changes_the_caller_identity(self):
+        L = lean_agent_module()
+        seen = []
+        ns = argparse.Namespace(cmd="x", thread_tag="t2", fn=lambda a: seen.append(L.caller_thread()))
+        env = dict(self.env, LEAN_AGENT_THREAD="t1", LEAN_AGENT_SESSION_ROLE="thread", LEAN_AGENT_CALLER_THREAD="")
+        with mock.patch.dict(os.environ, env), mock.patch.object(L.argparse.ArgumentParser, "parse_known_args",
+                                                                  return_value=(ns, [])):
+            L.main(["--thread", "t2", "x"])
+        self.assertEqual(seen, ["t1"])
+
+    def test_run_marks_its_thread_launching_then_clears_the_marker(self):
+        self.cli("learn", self.proj)
+        L = lean_agent_module()
+        home = self.env["LEAN_AGENT_HOME"]
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(L, "mark_launching", wraps=L.mark_launching) as spy, \
+                contextlib.redirect_stdout(io.StringIO()):
+            L.main(["run", "-p", "proj", "-m", "haiku", "--why", "x", "--thread", "t7", "task"])
+            spy.assert_called_once_with("t7")
+            self.assertEqual(glob.glob(os.path.join(home, "launching", "*.json")), [])
+            self.assertEqual(L.LAUNCH_MARKERS, [])
+
+    def test_launching_marker_expires_after_the_grace_and_is_pruned(self):
+        L = lean_agent_module()
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(os.path.join(home, "launching"))
+        old, fresh = (os.path.join(home, "launching", n) for n in ("old.json", "fresh.json"))
+        with open(old, "w") as fh: json.dump({"thread": "t1", "ts": time.time() - L.LAUNCH_GRACE - 5}, fh)
+        with open(fresh, "w") as fh: json.dump({"thread": "t2", "ts": time.time() - L.LAUNCH_GRACE + 30}, fh)
+        with mock.patch.dict(os.environ, self.env):
+            self.assertEqual(L.launching_threads(), {"t2"})
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.exists(fresh))
+
+    def test_cap_idle_of_exactly_ten_minutes_is_eligible(self):
+        closed, out, err = self.room_for(self.fake_sessions(("t1", 600), ("t2", 599), ("t3", 598)))
+        self.assertEqual(closed, ["t1"])
+
+    def test_cap_invalid_min_idle_falls_back_to_ten_minutes(self):
+        ss = self.fake_sessions(("t1", 599), ("t2", 601), ("t3", 100))
+        for bad in ("abc", ""):
+            self.env["LEAN_AGENT_CLOSE_MIN_IDLE"] = bad
+            closed, out, err = self.room_for(ss)
+            self.assertEqual(closed, ["t2"])
+
+    def test_cap_min_idle_override_lowers_the_threshold(self):
+        self.env["LEAN_AGENT_CLOSE_MIN_IDLE"] = "60"
+        closed, out, err = self.room_for(self.fake_sessions(("t1", 100), ("t2", 59), ("t3", 30)))
+        self.assertEqual(closed, ["t1"])
+
+    def test_cap_refuses_when_one_is_busy_and_another_is_launching(self):
+        ss = self.fake_sessions(("t1", 9000), ("t2", 8000), ("t3", 100))
+        closed, out, err = self.room_for(ss, busy={"t1": ["r1"]}, launching=("t2",))
+        self.assertEqual(closed, [])
+        self.assertRegex(err, r't1 .*not eligible: 1 running \(r1\)')
+        self.assertRegex(err, r't2 .*not eligible: a run is starting')
+
+    def test_cap_skips_a_mid_turn_session(self):
+        ss = self.fake_sessions(("t1", 9000), ("t2", 1000), ("t3", 2000))
+        closed, out, err = self.room_for(ss, mid_turn=("t1",))
+        self.assertEqual(closed, ["t3"])
+
+    def test_cap_skips_a_session_with_a_just_launched_run(self):
+        ss = self.fake_sessions(("t1", 9000), ("t2", 1000), ("t3", 2000))
+        closed, out, err = self.room_for(ss, launching=("t1",))
+        self.assertEqual(closed, ["t3"])
+
+    def test_cap_skips_a_session_idle_under_ten_minutes(self):
+        ss = self.fake_sessions(("t1", 599), ("t2", 700), ("t3", 650))
+        closed, out, err = self.room_for(ss)
+        self.assertEqual(closed, ["t2"])
+
+    def test_cap_closes_the_longest_idle_eligible_session_and_logs_it(self):
+        ss = self.fake_sessions(("t1", 700), ("t2", 3600), ("t3", 2000))
+        closed, out, err = self.room_for(ss, caller="t9")
+        self.assertEqual(closed, ["t2"])
+        self.assertRegex(out, r'closed t2 "title t2" \(idle \d+[mh]\) to make room \u2014 reopen with lean-agent thread reopen t2')
+        log = open(os.path.join(self.env["LEAN_AGENT_HOME"], "logs", "service.log")).read()
+        self.assertIn("cap auto-close: closed t2", log)
+        self.assertIn("idle 3600s", log)
+        self.assertIn("caller t9", log)
+
+    def test_cap_refuses_with_reasons_when_no_session_is_eligible(self):
+        ss = self.fake_sessions(("t1", 9000), ("t2", 100), ("t3", 8000))
+        closed, out, err = self.room_for(ss, caller="t1", mid_turn=("t3",))
+        self.assertEqual(closed, [])
+        self.assertIn("none can be closed", err)
+        self.assertRegex(err, r't1 "title t1" idle \d+[mh], not eligible: the calling session')
+        self.assertRegex(err, r't2 .*not eligible: idle under 10 min')
+        self.assertRegex(err, r't3 .*mid-turn')
+        self.assertIn("lean-agent thread close tN", err)
+        self.assertIn("max-thread-sessions", err)
 
     def lost_run_marker(self, rid="0101-000000-aaaa"):
         home = self.env["LEAN_AGENT_HOME"]

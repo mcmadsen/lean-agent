@@ -704,9 +704,11 @@ def mcp_call_sequence(workdir, session_id, since_utc):
                     entry = json.loads(line)
                 except ValueError:
                     continue
-                if entry.get("type") != "assistant" or (entry.get("timestamp") or "") < since_utc:
+                if not isinstance(entry, dict) or entry.get("type") != "assistant" or (entry.get("timestamp") or "") < since_utc:
                     continue
-                for block in (entry.get("message") or {}).get("content") or []:
+                m = entry.get("message")
+                blocks = m.get("content") if isinstance(m, dict) else None
+                for block in blocks if isinstance(blocks, list) else []:
                     if (isinstance(block, dict) and block.get("type") == "tool_use"
                             and str(block.get("name", "")).startswith("mcp__") and block.get("id") not in seen):
                         seen.add(block.get("id"))

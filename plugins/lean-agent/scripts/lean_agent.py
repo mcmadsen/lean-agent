@@ -737,6 +737,8 @@ def shorten_card(slug, cards, a):
             ev = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(ev, dict):
+            continue
         if ev.get("type") == "result":
             new = (ev.get("result") or "").strip()
         elif ev.get("type") == "rate_limit_event":
@@ -1508,6 +1510,40 @@ SUPERVISOR = []  # [True] in the detached process that does a run's real work
 CLI_ENTRY = []  # [True] when started as the program (see the __main__ block): only then may a run detach
 
 
+RUN_CTX = {}  # the launched run an unexpected exception is recorded against: id, workdir, running_key, fixed
+
+
+def record_internal_error(exc, tb):
+    """Records the run in RUN_CTX as failed (`internal error: <Type>: <msg>`), keeps the traceback in its work dir and
+    prints the one line the caller sees. Returns the exit code, 1."""
+    rid, workdir = RUN_CTX["id"], RUN_CTX.get("workdir") or home("work", RUN_CTX["id"])
+    reason = f"internal error: {type(exc).__name__}: {' '.join(str(exc).split())[:300]}"
+    line = f"run {rid} failed: {reason} (details: lean-agent runs --show {rid} --tail 40)"
+    try:
+        os.makedirs(workdir, exist_ok=True)
+        with open(os.path.join(workdir, "traceback.txt"), "w") as fh:
+            fh.write(tb)
+        if isinstance(sys.stdout, Tee):
+            sys.stdout.close()
+        with open(os.path.join(workdir, "summary-%d.txt" % (len(glob.glob(os.path.join(workdir, "summary-*.txt"))) + 1)), "w") as fh:
+            fh.write(line + "\n\n" + tb)
+        if not any(r.get("id") == rid and r.get("status") == "failed" for r in ledger()):
+            row = {"project": None, "project_path": None, "workdir": workdir, "model": "?", "task": "", "ts": now_iso()}
+            row.update(RUN_CTX.get("fixed") or {})
+            row.update(id=rid, ts=now_iso(), why=row.get("why") or "internal error", status="failed", reason=reason,
+                       turns=None, seconds=None, usage={}, units=0, cost_usd=None, cards=row.get("cards") or [],
+                       result_head=reason, details=None)
+            append_jsonl(home("ledger.jsonl"), row)
+        for f in glob.glob(home("running", "*.json")):
+            if load_json(f, {}).get("run") == rid:
+                os.remove(f)
+        clear_launching()
+    except Exception:
+        pass
+    print(line, flush=True)
+    return 1
+
+
 def cmd_run(a):
     """The run command; once the launch is cleared the work moves to a detached supervisor (see detach_run), which
     ends here when the run is done instead of returning to the caller."""
@@ -1518,6 +1554,14 @@ def cmd_run(a):
     except SystemExit as e:
         rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
         raise
+    except Exception as e:
+        import traceback
+        if SUPERVISOR:
+            traceback.print_exc()
+        if not RUN_CTX.get("id"):  # failed before a run existed: the caller sees the error as before
+            raise
+        rc = record_internal_error(e, traceback.format_exc())
+        return rc
     except BaseException:
         if SUPERVISOR:
             import traceback
@@ -1914,6 +1958,10 @@ def _cmd_run(a):
                 if t["id"] == todo_id and t["status"] == "open":
                     t["status"] = "doing"
             save_json(home("todo.json"), data)
+    mark_launching(thread_tag)
+    RUN_CTX.clear()
+    RUN_CTX.update(id=run_id, workdir=workdir, fixed={"project": slug, "project_path": project, "model": model, "task": task[:300],
+                                                       "why": a.why or (prev and "resume"), "role": getattr(a, "role", None)})
     rc = detach_run(workdir, run_id)
     if rc is not None:
         return rc
@@ -1936,6 +1984,7 @@ def _cmd_run(a):
         "estimate_usd": (getattr(a, "estimate", None) or (None, None))[0],
         "estimate_kind": (getattr(a, "estimate", None) or (None, None))[1],
         "answer_lines": answer_lines, "start_head": git(project, "rev-parse", "HEAD")}
+    RUN_CTX["fixed"] = fixed
     save_json(home("running", running_key + ".json"), {"fixed": fixed, "pid": os.getpid(), "started": now_iso(), "run": run_id,
                                                       "task": task[:2000], "model": model, "project": slug,
                                                       "path": project, "start_head": fixed["start_head"],
@@ -1943,6 +1992,7 @@ def _cmd_run(a):
                                                       "branch": (wt or {}).get("branch") if isinstance(wt, dict) else None,
                                                       "role": getattr(a, "role", None)
                                                       or (prev or {}).get("role")})
+    clear_launching()  # the running marker above now keeps the thread busy
     for line in mcp_cost_lines(mcp_specs, chrome_spec):
         print(line, flush=True)
 
@@ -2082,6 +2132,7 @@ def _cmd_run(a):
     LAST_RUN[:] = [entry]
 
     def finish():  # once the whole summary is on disk: the run stops being "running" (what `runs --wait` waits for)
+        clear_launching()
         if running_key:
             try:
                 os.remove(home("running", running_key + ".json"))
@@ -2226,7 +2277,8 @@ def mcp_unauthenticated(ev, tools, denied):
     """The MCP server whose tool results are errors saying unauthorized/anonymous twice (once for a run's first
     MCP call), or None. Successful results and browser tools' page text never count.
     `tools` {tool_use id: server} and `denied` {server: count} are the caller's state across events."""
-    content = (ev.get("message") or {}).get("content")
+    msg = ev.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
     if not isinstance(content, list):
         return None
     for c in content:
@@ -5456,6 +5508,8 @@ def _probe_session(extra, cwd):
             ev = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(ev, dict):
+            continue
         if ev.get("type") == "system" and ev.get("subtype") == "init":
             tools, servers = ev.get("tools") or [], ev.get("mcp_servers") or []
         elif ev.get("type") == "rate_limit_event":
@@ -7731,12 +7785,18 @@ def transcript_entries(path):
         return
 
 
+def _msg(e):
+    """An event's "message" when it is an object, else {} (some stream events carry a string)."""
+    m = e.get("message")
+    return m if isinstance(m, dict) else {}
+
+
 def tool_use_counts(paths):
     """{tool name: calls} over orchestrator transcripts (MCP and lean-agent commands included)."""
     used = {}
     for path in paths:
         for e in transcript_entries(path):
-            for c in ((e.get("message") or {}).get("content") or []) if e.get("type") == "assistant" else []:
+            for c in (_msg(e).get("content") or []) if e.get("type") == "assistant" and isinstance(_msg(e).get("content"), list) else []:
                 if isinstance(c, dict) and c.get("type") == "tool_use":
                     used[c.get("name")] = used.get(c.get("name"), 0) + 1
     return used
@@ -7760,10 +7820,10 @@ def message_items(path):
         if e.get("isCompactSummary") or e.get("subtype") == "compact_boundary":
             items = []  # earlier messages were replaced by the summary
             if e.get("isCompactSummary"):
-                items.append((est_tokens(_text_of((e.get("message") or {}).get("content"))), "summary",
+                items.append((est_tokens(_text_of(_msg(e).get("content"))), "summary",
                               "compaction summary"))
             continue
-        msg = e.get("message") or {}
+        msg = _msg(e)
         content = msg.get("content")
         if e.get("type") == "assistant":
             for c in content or []:
@@ -7821,6 +7881,8 @@ def probe_home(h):
         try:
             ev = json.loads(line)
         except ValueError:
+            continue
+        if not isinstance(ev, dict):
             continue
         if ev.get("type") == "system" and ev.get("subtype") == "init":
             init = ev
@@ -8321,6 +8383,8 @@ def measure_baseline(slug, path):
             ev = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(ev, dict):
+            continue
         if ev.get("type") == "rate_limit_event":
             usage.record_plan_usage(ev.get("rate_limit_info"))
         elif ev.get("type") == "result":
@@ -8721,7 +8785,7 @@ def run_result_text(entry):
         with open(os.path.join(entry["workdir"], "result.json")) as fh:
             lines = [l for l in fh if l.strip()]
         return json.loads(lines[-1]).get("result") or ""
-    except (OSError, ValueError, IndexError, KeyError):
+    except (OSError, ValueError, IndexError, KeyError, AttributeError):
         return ""
 
 
@@ -9234,18 +9298,93 @@ def thread_start_lock():
     return lean_common.file_lock(home("thread-start"))
 
 
+CLOSE_MIN_IDLE = 600  # seconds a session must have been idle (since its last turn ended) before the cap may close it
+LAUNCH_GRACE = 60  # seconds a run counts as live from the moment `run` starts, before its running marker exists
+
+
+LAUNCH_MARKERS = []  # this process's launching markers, removed once its run is registered or has finished
+
+
+def mark_launching(tid):
+    """Written by `run` before anything that can start a thread session: the thread (merge aliases followed, like
+    running_by_thread) counts as busy for the cap. Expired markers of other runs are pruned here."""
+    if tid and tid != "none":
+        launching_threads()
+        d = home("launching")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, f"{os.getpid()}-{int(time.time() * 1000)}.json")
+        save_json(path, {"thread": lean_threads.resolve(tid), "ts": time.time()})
+        LAUNCH_MARKERS.append(path)
+
+
+def clear_launching():
+    """Drops this process's launching markers (its running marker now stands in, or the run is over)."""
+    while LAUNCH_MARKERS:
+        try:
+            os.remove(LAUNCH_MARKERS.pop())
+        except OSError:
+            pass
+
+
+def launching_threads():
+    """Threads with a `run` that started less than LAUNCH_GRACE seconds ago (its running marker may not exist yet)."""
+    out, now = set(), time.time()
+    for f in glob.glob(home("launching", "*.json")):
+        m = load_json(f, {})
+        if now - (m.get("ts") or 0) > LAUNCH_GRACE:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        elif m.get("thread"):
+            out.add(m["thread"])
+    return out
+
+
+def caller_thread():
+    """The thread session this command runs inside (the id before `--thread` re-tagged the environment), else None."""
+    return os.environ.get("LEAN_AGENT_CALLER_THREAD") or lean_threads.pinned_thread() or None
+
+
+def close_blockers(s, busy, launching, caller):
+    """Why the cap may not close session `s` (a list; empty = eligible)."""
+    tid, why = s["thread"], []
+    if tid == caller:
+        why.append("the calling session")
+    if busy.get(tid):
+        why.append(f"{len(busy[tid])} running ({', '.join(busy[tid])})")
+    elif tid in launching:
+        why.append("a run is starting")
+    if s["idle"] < close_min_idle():
+        why.append(f"idle under {close_min_idle() // 60} min")
+    if service_session.mid_turn(tid):
+        why.append("mid-turn (tool call, answer or prompt pending)")
+    return why
+
+
+def close_min_idle():
+    try:
+        return int(os.environ.get("LEAN_AGENT_CLOSE_MIN_IDLE", CLOSE_MIN_IDLE))
+    except ValueError:
+        return CLOSE_MIN_IDLE
+
+
 def make_room_for_thread_session(tid=None):
-    """Before a thread session starts: at max-thread-sessions, close the longest-idle open session that has no live run
-    tagged with its thread (checkpointed like `thread close`); when every one is busy, refuse and list them."""
+    """Before a thread session starts: at max-thread-sessions, close the longest-idle open session that is eligible
+    (see close_blockers: not the caller, not mid-turn, no live or starting run, idle at least CLOSE_MIN_IDLE),
+    checkpointed like `thread close`; when none is, refuse and list them with the reason."""
     cap = service_session.max_thread_sessions()
+    caller = caller_thread()
     sessions = [s for s in open_thread_sessions() if s["thread"] != tid]
     while len(sessions) >= cap:
         busy = lean_threads.running_by_thread(lean_threads.load())
-        free = [s for s in sessions if s["thread"] not in busy]
+        launching = launching_threads()
+        why = {s["thread"]: close_blockers(s, busy, launching, caller) for s in sessions}
+        free = [s for s in sessions if not why[s["thread"]]]
         if not free:
-            die(f"{len(sessions)} thread sessions are open (max-thread-sessions {cap}) and all are busy:\n" +
-                "\n".join(f'{s["thread"]} "{s["title"]}" idle {_idle_age(s["idle"])}, {len(busy[s["thread"]])} running ({", ".join(busy[s["thread"]])})'
-                          for s in sessions) + "\nwait for one, or `lean-agent config max-thread-sessions N`")
+            die(f"{len(sessions)} thread sessions are open (max-thread-sessions {cap}) and none can be closed to make room:\n" +
+                "\n".join(f'{s["thread"]} "{s["title"]}" idle {_idle_age(s["idle"])}, not eligible: {"; ".join(why[s["thread"]])}'
+                          for s in sessions) + "\nclose one (`lean-agent thread close tN`), or `lean-agent config max-thread-sessions N`")
         v = max(free, key=lambda s: s["idle"])
         try:
             close_thread_session(v["thread"])
@@ -9253,8 +9392,15 @@ def make_room_for_thread_session(tid=None):
             die(str(exc))
         if v["thread"] in lean_threads.load()["threads"]:
             lean_threads.set_closed(v["thread"], True)
-        print(f'closed {v["thread"]} "{v["title"]}" (idle {_idle_age(v["idle"])}) to make room \u2014 reopen with '
-              f'lean-agent thread open {v["thread"]}')
+        line = f'closed {v["thread"]} "{v["title"]}" (idle {_idle_age(v["idle"])}) to make room'
+        try:
+            os.makedirs(home("logs"), exist_ok=True)
+            with open(home("logs", "service.log"), "a", encoding="utf-8") as fh:
+                fh.write(f'{now_iso()} cap auto-close: {line}; reason: max-thread-sessions {cap} reached starting '
+                         f'{tid or "a new thread"}; idle {v["idle"]}s; caller {caller or "none"}\n')
+        except OSError:
+            pass
+        print(line + f' \u2014 reopen with lean-agent thread reopen {v["thread"]}')
         sessions.remove(v)
 
 
@@ -9791,6 +9937,10 @@ def run_role(ns, quiet=False):
     if quiet:
         with contextlib.redirect_stdout(out):
             rc = cmd_run(ns)
+        crash = re.search(r"^run \S+ failed: internal error:.*$", out.getvalue(), re.M)
+        if crash:  # the role's own commands would swallow it
+            print(crash.group(0), flush=True)
+            sys.exit(1)
     else:
         rc = cmd_run(ns)
     return rc, out.getvalue(), LAST_RUN[0] if LAST_RUN else None
@@ -10780,6 +10930,8 @@ def main(argv=None):
         a.task += leftover  # task words given after options
     if a.cmd == "run" and not a.resume and not a.project:
         ap.error("run needs --project (or --resume)")
+    # the caller is the session's own pinned thread, captured before --thread re-tags the environment ('' = unset)
+    os.environ["LEAN_AGENT_CALLER_THREAD"] = os.environ.get("LEAN_AGENT_CALLER_THREAD") or lean_threads.pinned_thread() or ""
     if getattr(a, "thread_tag", None):  # --thread tN|none: every record this command makes (and its workers') carries it
         try:
             os.environ["LEAN_AGENT_THREAD"] = "none" if a.thread_tag.lower() == "none" else lean_threads.norm(a.thread_tag)
