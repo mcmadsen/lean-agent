@@ -7279,6 +7279,75 @@ def home_instruction_files(h):
     return out
 
 
+def _owner_name(uid):
+    try:
+        import pwd
+        return pwd.getpwuid(uid).pw_name
+    except Exception:
+        return str(uid)
+
+
+def claude_temp_problems(h, uid=None, bases=None):
+    """Claude Code keeps per-session task output under <tmp>/claude-<uid>/<project-slug>/<session>/tasks; when
+    that tree was created by root (sudo) or has odd permissions, every Bash call fails with EACCES.
+    Returns [(path, owner, why)] for the roots checked cheaply: two levels plus any 'tasks' dir."""
+    uid = os.getuid() if uid is None else uid
+    roots = []
+    for base in bases or (os.environ.get("TMPDIR"), "/tmp", "/private/tmp" if sys.platform == "darwin" else None):
+        if base:
+            r = os.path.join(base, f"claude-{uid}")
+            if r not in roots and os.path.isdir(r):
+                roots.append(r)
+    slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(h))
+    problems, seen = [], set()
+
+    def check(path):
+        if path in seen:
+            return
+        seen.add(path)
+        try:
+            st = os.stat(path)
+        except OSError:
+            return
+        if st.st_uid != uid:
+            problems.append((path, _owner_name(st.st_uid), "owned by another user"))
+        elif not os.access(path, os.W_OK | os.X_OK):
+            problems.append((path, _owner_name(st.st_uid), "not writable"))
+
+    for r in roots:
+        check(r)
+        try:
+            level1 = [e.path for e in os.scandir(r) if e.is_dir(follow_symlinks=False)]
+        except OSError:
+            continue
+        mine = os.path.join(r, slug)
+        for d in level1 + ([mine] if os.path.isdir(mine) and mine not in level1 else []):
+            check(d)
+            try:
+                level2 = [e.path for e in os.scandir(d) if e.is_dir(follow_symlinks=False)]
+            except OSError:
+                continue
+            for d2 in level2:
+                check(d2)
+                check(os.path.join(d2, "tasks"))
+    return problems, roots
+
+
+def service_root_problem(uid=None):
+    """Why the background service looks root-owned or started with sudo (None when fine)."""
+    uid = os.getuid() if uid is None else uid
+    f = service_file()
+    try:
+        if os.path.exists(f) and os.stat(f).st_uid != uid:
+            return f"the service file {f} is owned by {_owner_name(os.stat(f).st_uid)}"
+    except OSError:
+        pass
+    up = load_json(home("up.json"), {})
+    if up.get("uid") is not None and up.get("uid") != uid and pid_alive(up.get("pid")):
+        return f"`up` (pid {up.get('pid')}) runs as {_owner_name(up['uid'])}"
+    return None
+
+
 def cmd_doctor(a):
     path = os.path.realpath(os.path.expanduser(a.path or os.getcwd()))
     bad = []
@@ -7438,6 +7507,15 @@ def cmd_doctor(a):
             print(f"  MCP {name}: auth not checked directly (HTTP server)")
         elif not rec:
             report(None, f"MCP {name}: auth not checked", f"lean-agent mcp check {name}")
+    tmp_bad, _ = claude_temp_problems(h)
+    for tp, owner, why in tmp_bad:
+        report(False, f"Claude Code temp folder {tp} is owned by {owner}/not writable — the Bash tool will fail "
+               f"with EACCES ({why})",
+               f'sudo chown -R "$(id -un)" {tp}  (or chmod -R u+rwX {tp}), then lean-agent service restart')
+    root_why = service_root_problem()
+    if root_why:
+        report(None, f"lean-agent service runs as another user (root/sudo?): {root_why}",
+               "remove it and reinstall without sudo: lean-agent service uninstall; lean-agent service install")
     budgets = usage.window_budgets()
     parts = [f"{k}={v:,}" for k, v in budgets.items() if v]
     parts += [f"{k}={v}% of plan" for k, v in usage.pct_budgets().items()]
@@ -7591,7 +7669,7 @@ def cmd_up(a):
         fresh_start()
     prev = load_json(home("up.json"), {})
     save_json(home("up.json"), {"started": now_iso(), "server_env": orchestrator_env(), "name": a.name,
-                                "local": a.local,
+                                "local": a.local, "pid": os.getpid(), "uid": os.getuid(),
                                 **({} if a.fresh else {k: prev[k] for k in ("session_id", "fresh_sid") if prev.get(k)})})
     set_home_model(h, a.model)
     if a.fresh:

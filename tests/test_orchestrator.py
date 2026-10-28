@@ -519,6 +519,64 @@ class CliTest(unittest.TestCase):
         self.assertIn("project rules: off for proj", p.stdout)
         self.assertNotIn("isn't a learned project", p.stdout)
 
+    def test_doctor_flags_claude_temp_folder_owned_by_someone_else(self):
+        lean_agent = self.load_cli()
+        tmpdir = os.path.join(self.tmp.name, "tmpdir")
+        h = os.path.join(self.tmp.name, "orch")
+        slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(h))
+        tasks = os.path.join(tmpdir, "claude-4242", slug, "sess1", "tasks")
+        os.makedirs(tasks)
+        with mock.patch.dict(os.environ, {"TMPDIR": tmpdir}):
+            problems, roots = lean_agent.claude_temp_problems(h, uid=4242, bases=[tmpdir])  # the folders belong to the real uid
+        self.assertEqual(roots, [os.path.join(tmpdir, "claude-4242")])
+        self.assertIn(tasks, [p for p, _, _ in problems])
+        self.assertTrue(all(why == "owned by another user" for _, _, why in problems))
+
+    def load_cli(self):
+        if os.path.dirname(CLI) not in sys.path:
+            sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent
+        return lean_agent
+
+    def test_doctor_accepts_writable_claude_temp_folder_and_flags_readonly_one(self):
+        lean_agent = self.load_cli()
+        tmpdir = os.path.join(self.tmp.name, "tmpdir")
+        h = os.path.join(self.tmp.name, "orch")
+        uid = os.getuid()
+        tasks = os.path.join(tmpdir, f"claude-{uid}", "-some-slug", "sess1", "tasks")
+        os.makedirs(tasks)
+        with mock.patch.dict(os.environ, {"TMPDIR": tmpdir}):
+            self.assertEqual(lean_agent.claude_temp_problems(h, bases=[tmpdir])[0], [])
+            with mock.patch("os.access", side_effect=lambda p, m: not p.endswith("tasks")):
+                problems = lean_agent.claude_temp_problems(h, bases=[tmpdir])[0]
+        self.assertEqual([(p, why) for p, _, why in problems], [(tasks, "not writable")])
+
+    def test_doctor_prints_fix_for_unwritable_claude_temp_folder(self):
+        lean_agent = self.load_cli()
+        tmpdir = os.path.join(self.tmp.name, "tmpdir")
+        root = os.path.join(tmpdir, f"claude-{os.getuid()}")
+        os.makedirs(root)
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"TMPDIR": tmpdir, "LEAN_AGENT_HOME": self.env["LEAN_AGENT_HOME"]}), \
+                mock.patch.object(lean_agent, "claude_temp_problems", return_value=([(root, "root", "x")], [root])), \
+                contextlib.redirect_stdout(out):
+            lean_agent.cmd_doctor(types.SimpleNamespace(path=self.proj, fix=False))
+        self.assertIn(f"! Claude Code temp folder {root} is owned by root/not writable"[2:], out.getvalue())
+        self.assertIn("lean-agent service restart", out.getvalue())
+
+    def test_doctor_warns_when_service_or_up_runs_as_another_user(self):
+        lean_agent = self.load_cli()
+        unit = os.path.join(self.tmp.name, "lean-agent.service")
+        open(unit, "w").close()
+        with mock.patch.object(lean_agent, "service_file", return_value=unit):
+            self.assertIsNone(lean_agent.service_root_problem())
+            self.assertIn("owned by", lean_agent.service_root_problem(uid=os.getuid() + 1))
+        up = {"uid": 0, "pid": os.getpid()}
+        with mock.patch.object(lean_agent, "service_file", return_value=unit + ".none"), \
+                mock.patch.object(lean_agent, "load_json", return_value=up):
+            self.assertIn("runs as", lean_agent.service_root_problem(uid=os.getuid() + 1))
+            self.assertIsNone(lean_agent.service_root_problem(uid=0))
+
     def test_doctor_outside_any_project_prints_no_project_lines(self):
         self.cli("learn", self.proj, "--name", "proj")
         outside = os.path.join(self.tmp.name, "elsewhere")
