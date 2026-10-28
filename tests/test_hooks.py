@@ -1044,6 +1044,20 @@ class BudgetTest(Base):
             with mock.patch.dict(os.environ, env):
                 self.assertEqual(budget_hook.front_desk_denial(event("lean-agent run p -- 'x'")), "")
 
+    def test_main_session_strict_hints_point_at_the_hand_over_not_run(self):
+        sys.path.insert(0, ROOT)
+        import budget_hook
+        bash = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}}
+        cases = [{"tool_name": "Agent", "tool_input": {}}, {"tool_name": "WebFetch", "tool_input": {}},
+                 bash("lean-agent memory add x"), bash("lean-agent todo add x")]
+        for role, thread in (("main", False), ("thread", True)):
+            with mock.patch.dict(os.environ, {"LEAN_AGENT_SESSION_ROLE": role}):
+                for ev in cases:
+                    why = budget_hook.strict_denial(ev, "/home", "/home")
+                    self.assertTrue(why, ev)
+                    self.assertEqual("lean-agent run " in why, thread, (role, why))
+                    self.assertEqual("lean-agent thread send tN" in why, not thread, (role, why))
+
     def test_front_desk_denial_reaches_the_hook_only_for_the_main_role(self):
         home = self.env["LEAN_AGENT_HOME"]
         os.makedirs(home, exist_ok=True)
