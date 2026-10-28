@@ -41,7 +41,7 @@ denied for the orchestrator and workers use it. The enforcement is `strict_denia
 
 The redirect text is `TRACK_REDIRECT` in `budget_hook.py`. A new `lean-agent` command that reads or updates only
 lean-agent's own state (`now`, `thread`, `runs --show --tail|--wait|--stop`, `logs`, `handover`, `advise`, `learn`,
-`output` of a lean-agent command) needs no entry; one that takes a project file or arbitrary output file as input
+`output` of a lean-agent command, or of a Claude Code background task: `output <path|task-id>` reads only files under a claude temp `tasks/` dir and prints their first and last 20 lines) needs no entry; one that takes a project file or arbitrary output file as input
 must be added to the denied rows of section 2.
 
 Also off in the home settings: Claude Code auto memory (`autoMemoryEnabled: false`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`),
@@ -86,7 +86,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `count <project> add\|rm …` | c | **denied** |
 | `tracker <project>` (read), `tracker --discover` | a / b | allowed (`--discover` starts a worker that records identity it finds) |
 | `tracker <project> KEY=VALUE`, `--note`, `--rm-note`, `--supersede`, `--ack-email` | c | **denied** |
-| `worktree rm\|setup\|push\|reset`, `rules`, `codemod --apply` | c | **denied** (repo, branch, remote) |
+| `worktree rm\|setup\|push\|reset\|attach`, `rules`, `codemod --apply` | c | **denied** (repo, branch, remote) |
 | `branch-name` (prints a name from the project's branch rules, read-only), `worktrees`, `codemod` (throwaway copy), `map`, `slices`, `check`, `parity`, `grep-log`, `text-len` | a | allowed |
 | `slices --create`, `learn` | b | allowed: todos, cards and lean-agent's own repo rules block derived from the code by lean-agent, with no text from the user |
 | `optimize` (also `--apply`, `--accept`, `--reject`) | b | allowed: applies drafts a worker made from run feedback; no orchestrator text is stored. |

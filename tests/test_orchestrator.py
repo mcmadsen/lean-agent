@@ -7535,6 +7535,39 @@ class CliTest(unittest.TestCase):
         self.assertEqual(tip("feature"), subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], capture_output=True,
                                                          text=True).stdout.strip())
 
+    def test_failed_start_is_reported_logged_and_noted(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("run", "proj", "-m", "haiku", "--thread", "t7", "--", "t", check=False)  # no --why
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("lean-agent: run failed: say why you chose this model", p.stderr)
+        logs = self.cli("logs").stdout
+        self.assertIn("run failed: say why", logs)
+        self.assertIn("[thread t7]", logs)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "handoff-notes.json")) as fh:
+            notes = json.load(fh)
+        self.assertEqual(notes[-1]["thread"], "t7")
+        self.assertIn("run failed: say why", notes[-1]["text"])
+
+    def test_output_reads_a_background_task_file(self):
+        base = os.path.join(self.tmp.name, "claude-0", "proj", "tasks")
+        os.makedirs(base)
+        with open(os.path.join(base, "abc123.output"), "w") as fh:
+            fh.write("".join(f"line {i}\n" for i in range(1, 101)))
+        env = {"TMPDIR": self.tmp.name}
+        out = self.cli("output", os.path.join(base, "abc123.output"), **env).stdout
+        self.assertIn("line 20\n", out)
+        self.assertNotIn("line 21\n", out)
+        self.assertIn("line 81\n", out)
+        self.assertIn("line 100", out)
+        self.assertIn("60 lines not shown", out)
+        self.assertIn("line 1\n", self.cli("output", "abc123", **env).stdout)  # by task id
+        other = os.path.join(self.tmp.name, "plain.output")
+        with open(other, "w") as fh:
+            fh.write("secret\n")
+        p = self.cli("output", other, **env, check=False)  # not a claude tasks dir
+        self.assertNotEqual(p.returncode, 0)
+        self.assertNotIn("secret", p.stdout)
+
     def test_pr_branch_worktree_setup_and_push(self):
         g = self.git_project()
         g("add", "-A")
