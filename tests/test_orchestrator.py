@@ -2527,7 +2527,8 @@ class CliTest(unittest.TestCase):
         self.cli("up", "--name", "la", "--", "--debug", "--debug-file", "/tmp/rc.log",
                  check=False, LEAN_AGENT_CLAUDE=argv_dumper)
         with open(fake_log) as fh:
-            self.assertRegex(fh.read(), r"^--model sonnet --remote-control la --session-id [0-9a-f-]{36} "
+            self.assertRegex(fh.read(), r"^--model sonnet --strict-mcp-config --mcp-config \{\"mcpServers\": \{\}\} --disable-slash-commands --settings \{.*\} "
+                                        r"--remote-control la --session-id [0-9a-f-]{36} "
                                         r"--debug --debug-file /tmp/rc.log$")
 
     def test_up_fresh_removes_bridge_pointer(self):
@@ -2620,7 +2621,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("lean-agent run", self.cli("guide", "--cli").stdout)
         doc = self.cli("doctor", home, check=False).stdout
         self.assertRegex(doc, r"✓ orchestrator loads ~[\d,]+ tokens of instructions on every call: CLAUDE.md ~[\d,]+\n")
-        os.makedirs(os.path.join(home, ".claude", "rules"))
+        os.makedirs(os.path.join(home, ".claude", "rules"), exist_ok=True)
         with open(os.path.join(home, ".claude", "rules", "extra.md"), "w") as fh:
             fh.write("extra " * 100)
         doc = self.cli("doctor", home, check=False).stdout
@@ -2672,7 +2673,7 @@ class CliTest(unittest.TestCase):
             fh.write("".join(json.dumps(x) + "\n" for x in lines))
         with open(os.path.join(home, ".claude", "rules.md"), "w") as fh:
             fh.write("x")
-        os.makedirs(os.path.join(home, ".claude", "rules"))
+        os.makedirs(os.path.join(home, ".claude", "rules"), exist_ok=True)
         with open(os.path.join(home, ".claude", "rules", "extra.md"), "w") as fh:
             fh.write("extra rule " * 100)
         env = dict(FAKE_PROBE_TOOLS=json.dumps(["Bash", "Read", "KeepTool", "NotebookEdit2", "mcp__x__y"]),
