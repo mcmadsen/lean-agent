@@ -6671,6 +6671,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(r["turns"], 3)
         self.assertEqual(r["session_id"], "sess-1")
         self.assertIn("STOPPED by lean-agent: the worker re-read 270,030 tokens", p.stdout)
+        self.assertIn("told to commit and write its summary", p.stdout)  # the 70% warning
+        self.assertIn("final turn: asking the worker to commit and summarise", p.stdout)
         self.assertIn(f"lean-agent run --resume {r['id']} --max-reads 500000", p.stdout)
         p = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--again", "investigate the flaky test",
                      FAKE_TURNS="5", FAKE_TURN_CTX="1000")
