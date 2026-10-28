@@ -7698,6 +7698,12 @@ class CliTest(unittest.TestCase):
         out = self.cli("run", "proj", "-m", "haiku", "--why", "Ignored why", "--worktree", "auto",
                        "--worktree-base", "main", "--", "Fix the export crash\nmore detail").stdout
         self.assertIn("branch: bugfix/fix-the-export-crash", out)  # no todo: the task's first line
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "w", "--worktree", "auto", "--worktree-base", "main",
+                       "--", "Goal:\nTask: Add csv export").stdout
+        self.assertIn("branch: feature/add-csv-export", out)  # labels stripped
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "w", "--worktree", "auto", "--worktree-base", "main",
+                       "--branch-name", "Billing rewrite", "--", "Goal: something else").stdout
+        self.assertIn("branch: feature/billing-rewrite", out)
         out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "auto",
                        "--worktree-base", "main", "--", "Release 4.2").stdout
         self.assertIn("branch: release/release-4.2", out)
