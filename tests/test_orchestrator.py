@@ -3211,7 +3211,7 @@ class CliTest(unittest.TestCase):
         if p.poll() is not None:
             out, err = p.communicate()
             self.fail(f"up exited with {p.returncode}\nstdout (last lines):\n" + "\n".join(out.splitlines()[-15:])
-                      + "\nstderr (last lines):\n" + "\n".join(err.splitlines()[-25:]))
+                      + "\nstderr (last lines):\n" + "\n".join(err.splitlines()[-40:]))
         self.assertTrue(service_session.alive())
         return p, log, service_session
 
@@ -3287,6 +3287,20 @@ class CliTest(unittest.TestCase):
             else:
                 self.assertEqual(os.path.dirname(got), fb)
                 self.assertTrue(got.endswith(".sock"))
+
+    def test_sock_path_is_the_same_through_a_symlinked_home(self):
+        ss = self.with_home("/x")
+        real = os.path.join(self.tmp.name, "r" * 90)
+        os.makedirs(real)
+        link = os.path.join(self.tmp.name, "l")
+        os.symlink(real, link)
+        fb = os.path.join(self.tmp.name, "fb")
+        got = []
+        for home in (link, real):
+            os.environ["LEAN_AGENT_HOME"] = home
+            with mock.patch.object(ss, "fallback_dir", return_value=fb):
+                got.append(ss.sock_path())
+        self.assertEqual(got[0], got[1])
 
     def test_up_hosts_the_session_when_the_home_path_is_too_long_for_a_socket(self):
         home = os.path.join(self.tmp.name, *["long-directory-name-for-the-socket"] * 3, "home")
