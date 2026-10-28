@@ -1305,6 +1305,20 @@ def enforce_mcp_rules(cards, project, specs, force=False):
                                                                          "\nPass --force-mcp to run with it anyway."))
 
 
+def forbidding_rules(name, servers):
+    """[(project, rule card)] for the rules of any learned project that forbid the MCP server `name`."""
+    alias = lean_mcp.display_names(servers).get(name) or ""
+    out = []
+    for slug in sorted(projects()):
+        out += [(slug, c) for c, _ in rule_hits(project_rules(slug), name, alias)]
+    return out
+
+
+def forbidden_text(slug, c):
+    alt = c.get("alternative")
+    return f"rule {c['id']} in {slug}" + (f" (use {alt})" if alt else "")
+
+
 def projs_path(slug):
     return (projects().get(slug) or {}).get("path")
 
@@ -5569,6 +5583,9 @@ def cmd_mcp(a):
     if a.action == "check":
         if not a.server or a.server not in servers:
             unknown_server(a.server or "", servers)
+        for slug, c in forbidding_rules(a.server, servers):
+            print(f"lean-agent: warning: {a.server} is forbidden by {forbidden_text(slug, c)}; checking it anyway",
+                  file=sys.stderr)
         rec = run_mcp_check(a.server, servers[a.server]["config"])
         print(f"{a.server}: {rec['status']}" + (f" ({rec['detail']})" if rec["detail"] else ""))
         if rec.get("fix"):
@@ -7269,6 +7286,18 @@ def cmd_doctor(a):
     if not is_in_project and not is_home:
         report(None, f"{path} isn't a learned project, so the per-project checks are skipped (run doctor in a "
                "project's folder for them, or `lean-agent learn <repo root> --name <name>` if this should be one)")
+        for s_ in sorted(projs):
+            rules = project_rules(s_)
+            for c in rules:
+                alt = c.get("alternative")
+                for t in c.get("targets") or [None]:
+                    what = f"never use MCP {t}" if t else " ".join((c.get("text") or "").split())[:80]
+                    print(f"  {s_}: rule — {what}" + (f" (use {alt})" if alt else ""))
+            for msg in conflicting_files(projs_path(s_), [c for c in rules if c.get("targets")])[:3]:
+                report(None, f"{s_}: {msg}")
+            extra = len(conflicting_files(projs_path(s_), [c for c in rules if c.get("targets")])) - 3
+            if extra > 0:
+                print(f"  {s_}: +{extra} more")
     if is_in_project and a.fix and projs[slug].get("rules") != "off":
         install_block(slug)
 
@@ -7343,12 +7372,16 @@ def cmd_doctor(a):
         report(*diagnose_plugin_server(name, info, claude_view, plugin_srv))
     checks = mcp_checks()
     configured = {n: v["config"] for n, v in lean_mcp.discover().items() if n not in ignored}
+    all_servers = lean_mcp.discover()
     for name in sorted(set(load_json(home("mcp-presets.json"), {})) | set(checks) | set(configured)):
         rec = checks.get(name)
-        if rec and rec.get("status") != "skipped":
+        banned = forbidding_rules(name, all_servers)
+        if banned:
+            print(f"  MCP {name}: forbidden by {forbidden_text(*banned[0])}")
+        elif rec and rec.get("status") != "skipped":
             report(*mcp_check_line(name, rec))
         elif name in configured and lean_mcp.server_type(configured[name]) != "stdio":
-            report(None, f"MCP {name}: auth not checked (only stdio servers can be checked directly)")
+            print(f"  MCP {name}: auth not checked directly (HTTP server)")
         elif not rec:
             report(None, f"MCP {name}: auth not checked", f"lean-agent mcp check {name}")
     budgets = usage.window_budgets()
