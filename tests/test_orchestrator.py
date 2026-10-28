@@ -8359,7 +8359,7 @@ class CliTest(unittest.TestCase):
         return self.cli("review", "proj", "--head", "feature", "--base", "main", *extra, check=False,
                         **dict({"FAKE_REVIEW": self.APPROVE}, **env))
 
-    def test_review_of_an_unchanged_head_runs_nothing_and_exits_with_the_stored_status(self):
+    def test_review_of_an_unchanged_head_runs_nothing_and_exits_zero(self):
         self.git_project()
         self.cli("learn", self.proj, "--name", "proj")
         self.review_feature(FAKE_REVIEW=self.REQUEST)
@@ -8662,7 +8662,7 @@ class CliTest(unittest.TestCase):
         with mock.patch.object(L, "cmd_run", lambda ns: None), mock.patch.object(L, "ledger", lambda: [old]):
             self.assertEqual(L.run_reuse_check(a, "proj", "haiku", "why", [], "feat", "rule"), {})
 
-    def test_a_skip_exits_with_the_status_a_second_run_on_the_same_head_gives(self):
+    def test_a_skip_exits_2_with_open_gaps_and_a_second_run_on_the_same_head_exits_0_while_status_stays_2(self):
         g = self.skip_project()
         gaps = [{"what": "Retry the upload once", "file": "src/code.py", "line": 1, "blocks_goal": False, "scoped_out": ""}]
         with_gaps = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[], gaps=gaps))
@@ -8674,7 +8674,9 @@ class CliTest(unittest.TestCase):
         self.assertIn("skipped (tests-only)", first.stdout)
         second = self.review_branch("feat")
         self.assertEqual(first.returncode, 2, first.stdout)
-        self.assertEqual(second.returncode, first.returncode, second.stdout)
+        self.assertEqual(second.returncode, 0, second.stdout)  # nothing new to review is not a failure
+        self.assertIn("verdict skipped (tests-only) stands", second.stdout)
+        self.assertEqual(self.review_branch("feat", "--status").returncode, 2)  # the gate still reflects the open gap
 
     def test_release_branch_version_bump_only_and_merge_only_deltas_are_skipped(self):
         g = self.skip_project()
