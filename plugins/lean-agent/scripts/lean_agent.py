@@ -1495,6 +1495,40 @@ SUPERVISOR = []  # [True] in the detached process that does a run's real work
 CLI_ENTRY = []  # [True] when started as the program (see the __main__ block): only then may a run detach
 
 
+RUN_CTX = {}  # the launched run an unexpected exception is recorded against: id, workdir, running_key, fixed
+
+
+def record_internal_error(exc, tb):
+    """Records the run in RUN_CTX as failed (`internal error: <Type>: <msg>`), keeps the traceback in its work dir and
+    prints the one line the caller sees. Returns the exit code, 1."""
+    rid, workdir = RUN_CTX["id"], RUN_CTX.get("workdir") or home("work", RUN_CTX["id"])
+    reason = f"internal error: {type(exc).__name__}: {' '.join(str(exc).split())[:300]}"
+    line = f"run {rid} failed: {reason} (details: lean-agent runs --show {rid} --tail 40)"
+    try:
+        os.makedirs(workdir, exist_ok=True)
+        with open(os.path.join(workdir, "traceback.txt"), "w") as fh:
+            fh.write(tb)
+        if isinstance(sys.stdout, Tee):
+            sys.stdout.close()
+        with open(os.path.join(workdir, "summary-%d.txt" % (len(glob.glob(os.path.join(workdir, "summary-*.txt"))) + 1)), "w") as fh:
+            fh.write(line + "\n\n" + tb)
+        if not any(r.get("id") == rid and r.get("status") == "failed" for r in ledger()):
+            row = {"project": None, "project_path": None, "workdir": workdir, "model": "?", "task": "", "ts": now_iso()}
+            row.update(RUN_CTX.get("fixed") or {})
+            row.update(id=rid, ts=now_iso(), why=row.get("why") or "internal error", status="failed", reason=reason,
+                       turns=None, seconds=None, usage={}, units=0, cost_usd=None, cards=row.get("cards") or [],
+                       result_head=reason, details=None)
+            append_jsonl(home("ledger.jsonl"), row)
+        for f in glob.glob(home("running", "*.json")):
+            if load_json(f, {}).get("run") == rid:
+                os.remove(f)
+        clear_launching()
+    except Exception:
+        pass
+    print(line, flush=True)
+    return 1
+
+
 def cmd_run(a):
     """The run command; once the launch is cleared the work moves to a detached supervisor (see detach_run), which
     ends here when the run is done instead of returning to the caller."""
@@ -1505,6 +1539,14 @@ def cmd_run(a):
     except SystemExit as e:
         rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
         raise
+    except Exception as e:
+        import traceback
+        if SUPERVISOR:
+            traceback.print_exc()
+        if not RUN_CTX.get("id"):  # failed before a run existed: the caller sees the error as before
+            raise
+        rc = record_internal_error(e, traceback.format_exc())
+        return rc
     except BaseException:
         if SUPERVISOR:
             import traceback
@@ -1902,6 +1944,9 @@ def _cmd_run(a):
                     t["status"] = "doing"
             save_json(home("todo.json"), data)
     mark_launching(thread_tag)
+    RUN_CTX.clear()
+    RUN_CTX.update(id=run_id, workdir=workdir, fixed={"project": slug, "project_path": project, "model": model, "task": task[:300],
+                                                       "why": a.why or (prev and "resume"), "role": getattr(a, "role", None)})
     rc = detach_run(workdir, run_id)
     if rc is not None:
         return rc
@@ -1924,6 +1969,7 @@ def _cmd_run(a):
         "estimate_usd": (getattr(a, "estimate", None) or (None, None))[0],
         "estimate_kind": (getattr(a, "estimate", None) or (None, None))[1],
         "answer_lines": answer_lines, "start_head": git(project, "rev-parse", "HEAD")}
+    RUN_CTX["fixed"] = fixed
     save_json(home("running", running_key + ".json"), {"fixed": fixed, "pid": os.getpid(), "started": now_iso(), "run": run_id,
                                                       "task": task[:2000], "model": model, "project": slug,
                                                       "path": project, "start_head": fixed["start_head"],
@@ -9770,6 +9816,10 @@ def run_role(ns, quiet=False):
     if quiet:
         with contextlib.redirect_stdout(out):
             rc = cmd_run(ns)
+        crash = re.search(r"^run \S+ failed: internal error:.*$", out.getvalue(), re.M)
+        if crash:  # the role's own commands would swallow it
+            print(crash.group(0), flush=True)
+            sys.exit(1)
     else:
         rc = cmd_run(ns)
     return rc, out.getvalue(), LAST_RUN[0] if LAST_RUN else None
