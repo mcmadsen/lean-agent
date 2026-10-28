@@ -428,6 +428,17 @@ def _session_wait(name, value, default):
     return _knob("LEAN_AGENT_SESSION_" + name, default) if value == default else value
 
 
+def session_transcript(key="main"):
+    """The transcript file of session `key` (up.json, else its service record), or None."""
+    return info(key).get("transcript") or _load(service_record(key)).get("transcript_path")
+
+
+def mid_turn(key="main"):
+    """True when session `key` has a transcript whose last message is not the assistant's final one."""
+    path = session_transcript(key)
+    return bool(path and os.path.exists(path) and os.path.getsize(path) and not transcript_state(path)["ended"])
+
+
 def transcript_state(path, offset=0):
     """What the transcript at `path` (read from byte `offset`, else its last 512 KB) shows now:
     {"ended": the last message is the assistant's final one (no tool running), "ctx": tokens in the last usage
@@ -475,7 +486,7 @@ def transcript_state(path, offset=0):
         elif kind == "system" and rec.get("subtype") == "turn_duration" and last and last.get("type") == "assistant":
             last = dict(last, _ended=True)
     if last and last.get("type") == "assistant":
-        msg = last.get("message") or {}
+        msg = last.get("message") if isinstance(last.get("message"), dict) else {}
         content = msg.get("content") if isinstance(msg.get("content"), list) else []
         tools = any(isinstance(c, dict) and c.get("type") == "tool_use" for c in content)
         state["ended"] = not tools and (msg.get("stop_reason") == "end_turn" or bool(last.get("_ended")))

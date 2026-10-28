@@ -34,7 +34,8 @@ def last_context(transcript):
             e = json.loads(line)
         except ValueError:
             continue
-        u = (e.get("message") or {}).get("usage") if e.get("type") == "assistant" else None
+        m = e.get("message") if isinstance(e, dict) and e.get("type") == "assistant" else None
+        u = m.get("usage") if isinstance(m, dict) else None
         if isinstance(u, dict):
             return usage.context_tokens(u)
     return 0
