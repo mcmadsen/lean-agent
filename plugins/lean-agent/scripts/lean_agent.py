@@ -2285,8 +2285,15 @@ def _cmd_run(a):
         ext = tools_overhead(mcp_specs, mcp_allowed, chrome_spec)
         n_off, n_used = sum(len(v) for v in offered.values()), len(set(mcp_seq))
         tools_note = f" ({n_off} offered, {n_used} used)" if offered else ""
-        detail(f"  context per turn ~{per_turn:,}: lean-agent protocol + cards ~{own:,} · MCP/browser tools ~{ext:,}"
-              f"{tools_note} · Claude Code system prompt, built-in tools, conversation ~{max(0, per_turn - own - ext):,}")
+        first = reads.get("first_ctx") or 0
+        base = first or per_turn  # the start when the stream gave it, else the average
+        split = (f"lean-agent protocol + cards ~{own:,} · MCP/browser tools ~{ext:,}{tools_note} · Claude Code system "
+                 f"prompt, built-in tools, task ~{max(0, base - own - ext):,}")
+        if first:
+            detail(f"  context per turn ~{per_turn:,} (average over the run). Start ~{first:,}: {split}; the rest "
+                   f"(~{max(0, per_turn - first):,}) is what the worker read and ran")
+        else:
+            detail(f"  context per turn ~{per_turn:,}: {split}")
     for line in narrowing_hints(offered, mcp_seq):
         detail("  " + line)
     sv = run_savings(entry)
@@ -2505,6 +2512,7 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
                     for k in usage.FIELDS:
                         reads["usage"][k] += int(u.get(k) or 0)
                     reads["ctx"] += usage.context_tokens(u)
+                    reads.setdefault("first_ctx", usage.context_tokens(u))  # the start: before any tool result
                     if not reads.get("warned") and ((max_reads and reads["ctx"] > WRAPUP_AT * max_reads)
                                                     or (warn_turns and reads["turns"] > WRAPUP_AT * warn_turns)):
                         reads["warned"] = True  # the worker's next tool call carries the note (wrapup_hook.py)
