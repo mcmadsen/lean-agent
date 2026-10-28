@@ -756,6 +756,19 @@ class BudgetTest(Base):
             self.assertEqual(sorted(reg), ["t1", "t2"])
             self.assertEqual([len(t.get("requests", [])) for t in reg.values()], [0, 0])  # no request stored
 
+    def test_prompt_hook_thread_reports_attach_to_the_named_threads_silently(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        self.make_threads("Publish quarterly report through docs worker", "Fix export retry loop in billing service")
+        msg = "<thread-reports>\n[t2 done] Fixed the retry loop.\ndetails: lean-agent thread show tN\n</thread-reports>"
+        self.assertEqual(self.prompt_ctx(msg), "")  # no "belongs to", no "new topic", no guessed hint
+        sys.path.insert(0, ROOT)
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
+            import lean_threads
+            reg = lean_threads.load()["threads"]
+            self.assertEqual(sorted(reg), ["t1", "t2"])
+            self.assertEqual(reg["t2"]["report"]["text"], "Fixed the retry loop.")
+            self.assertNotIn("report", reg["t1"])
+
     def test_main_session_hook_tells_the_orchestrator_to_hand_over_or_start(self):
         home = self.env["LEAN_AGENT_HOME"]
         ctx = self.prompt_ctx

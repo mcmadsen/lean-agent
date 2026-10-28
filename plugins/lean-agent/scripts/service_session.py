@@ -616,6 +616,188 @@ class AutoClear:
             self.host.stopping.wait(poll)
 
 
+# ---------------------------------------------------------------- thread reports
+
+REPORT_BATCH = 60      # seconds: reports queued within this window reach the main session in one message
+REPORT_CHARS = 160
+REPORT_MODES = ("on", "questions-only", "off")
+REPORT_RUN_RE = re.compile(r"\blean-agent\s+(?:run|review|handover|push)\b")
+PROMPT_RE = re.compile(r"Esc to cancel|Do you want to (?:proceed|make|create|allow)|❯\s*1\.\s*Yes")
+
+
+def reports_mode():
+    """on (default), questions-only or off: LEAN_AGENT_THREAD_REPORTS, else `lean-agent config thread-reports`."""
+    raw = (os.environ.get("LEAN_AGENT_THREAD_REPORTS") or _load(lean_home("config.json")).get("thread_reports") or "on")
+    raw = str(raw).strip().lower()
+    return raw if raw in REPORT_MODES else "on"
+
+
+def reports_path():
+    return lean_home("thread-reports.json")
+
+
+def queue_report(tid, kind, text):
+    """Queue one thread report (kind: done | blocked | needs-you) for the main session; the mode filters it."""
+    mode = reports_mode()
+    if mode == "off" or (mode == "questions-only" and kind != "needs-you"):
+        return False
+    os.makedirs(lean_home(), exist_ok=True)
+    with lean_common.file_lock(reports_path()):
+        data = _load(reports_path())
+        items = data.get("items") if isinstance(data.get("items"), list) else []
+        items.append({"thread": tid, "kind": kind, "text": text, "ts": time.time()})
+        lean_common.write_json_atomic(reports_path(), {"items": items[-50:]})
+    return True
+
+
+def queued_reports():
+    items = _load(reports_path()).get("items")
+    return items if isinstance(items, list) else []
+
+
+def take_reports():
+    with lean_common.file_lock(reports_path()):
+        items = queued_reports()
+        if items:
+            lean_common.write_json_atomic(reports_path(), {"items": []})
+    return items
+
+
+def reports_message(items):
+    lines = [f"[{i['thread']} {i['kind']}] {i['text']}" for i in items]
+    return "\n".join(["<thread-reports>"] + lines + ["details: lean-agent thread show tN", "</thread-reports>"])
+
+
+def _short(text, n=REPORT_CHARS):
+    text = " ".join(str(text or "").replace("`", "").replace("*", "").split())
+    return text if len(text) <= n else text[:n - 1].rstrip() + "…"
+
+
+def _question(text):
+    """The last line of `text` ending in a question mark (the question the user is asked), else ''."""
+    qs = [l.strip() for l in str(text or "").splitlines() if l.strip().endswith("?")]
+    return qs[-1] if qs else ""
+
+
+def scan_turn(path, offset):
+    """What the transcript at `path` shows from byte `offset` on: {"runs": a lean-agent run/review/handover/push command
+    was issued, "err": the last lean-agent tool result was an error, "result": its first line, "ask": the open
+    AskUserQuestion's question (else None), "size": file size}."""
+    out = {"runs": False, "err": False, "result": "", "ask": None, "size": offset}
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            data = fh.read()
+    except OSError:
+        return out
+    out["size"] = offset + len(data)
+    ids = set()
+    for raw in data.split(b"\n"):
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        msg = rec.get("message") if isinstance(rec, dict) and isinstance(rec.get("message"), dict) else {}
+        body = msg.get("content")
+        for c in body if isinstance(body, list) else []:
+            if not isinstance(c, dict):
+                continue
+            if c.get("type") == "tool_use":
+                inp = c.get("input") if isinstance(c.get("input"), dict) else {}
+                if c.get("name") == "AskUserQuestion":
+                    qs = inp.get("questions")
+                    first = qs[0] if isinstance(qs, list) and qs and isinstance(qs[0], dict) else {}
+                    out["ask"] = first.get("question") or "a question"
+                elif c.get("name") == "Bash" and REPORT_RUN_RE.search(str(inp.get("command") or "")):
+                    out["runs"] = True
+                    ids.add(c.get("id"))
+            elif c.get("type") == "tool_result":
+                out["ask"] = None
+                if c.get("tool_use_id") in ids:
+                    res = c.get("content")
+                    if isinstance(res, list):
+                        res = " ".join(str(x.get("text") or "") for x in res if isinstance(x, dict))
+                    out["err"] = bool(c.get("is_error"))
+                    out["result"] = next((l.strip() for l in str(res or "").splitlines() if l.strip()), "")
+    return out
+
+
+class Reporter(AutoClear):
+    """A thread session's Host: at each turn end builds a report (done | blocked | needs-you) when the turn ran lean-agent
+    work or asks the user something, and queues it; also reports a pending question or permission prompt. The main
+    session's Host: types the queued reports into the session at its turn end (never mid-turn, never during a prompt)."""
+
+    def __init__(self, host, now=time.time):
+        super().__init__(host, now)
+        self.born = now()
+        self.seen = None       # byte offset of the transcript already reported on
+        self.path = None
+        self.alerted = None    # the pending question or prompt already reported
+        self.delivered = None  # (transcript size, when) of the last message typed into the main session
+
+    def prompting(self):
+        return bool(PROMPT_RE.search(self.host.tail_text()[-1500:]))
+
+    def thread_tick(self):
+        path = self.transcript()
+        if not path or reports_mode() == "off":
+            return
+        st = transcript_state(path)
+        if path != self.path or self.seen is None:
+            fresh = bool(st["user_ts"]) and st["user_ts"] >= self.born - 5
+            self.seen = 0 if fresh or self.path else st["size"]
+            self.path = path
+        scan = scan_turn(path, self.seen)
+        tid = self.key
+        if not st["ended"]:
+            ask = scan["ask"]
+            if ask or (self.prompting() and self.host.alive()):
+                what = "asks: " + _short(ask) if ask else "waits for your permission: " + _short(
+                    _question(self.host.tail_text()[-600:]) or "a tool needs approval", 110)
+                if self.alerted != what:
+                    self.alerted = what
+                    queue_report(tid, "needs-you", what)
+            else:
+                self.alerted = None
+            return
+        self.alerted = None
+        if scan["size"] <= self.seen:
+            return
+        self.seen = scan["size"]
+        text = st["text"]
+        ask = _question(text)
+        if ask:
+            queue_report(tid, "needs-you", _short(ask))
+        elif scan["err"]:
+            queue_report(tid, "blocked", _short(text or scan["result"]))
+        elif scan["runs"]:
+            queue_report(tid, "done", _short(text or scan["result"]))
+
+    def main_tick(self):
+        items = queued_reports()
+        if not items or not self.host.alive():
+            return
+        now = self.now()
+        if now - min(i.get("ts") or now for i in items) < _knob("LEAN_AGENT_REPORT_BATCH", REPORT_BATCH):
+            return
+        st = transcript_state(self.transcript())
+        if not st["ended"] or self.prompting() or now - self.host.last_input < _knob("LEAN_AGENT_REPORT_IDLE", 3):
+            return
+        if self.delivered and self.delivered[0] == st["size"] and now - self.delivered[1] < 60:
+            return  # the last message has not started a turn yet
+        items = take_reports()
+        if items:
+            self.delivered = (st["size"], now)
+            self.log(f"{len(items)} thread report(s) typed into the main session")
+            self.host.paste(reports_message(items))
+
+    def tick(self):
+        if self.key == "main":
+            self.main_tick()
+        else:
+            self.thread_tick()
+
+
 # ---------------------------------------------------------------- host (inside `up`)
 
 def child_env(env):
@@ -999,6 +1181,7 @@ class Sessions:
                 host.thread = threading.Thread(target=self._run, args=(tid, host), daemon=True)
                 host.thread.start()
                 threading.Thread(target=AutoClear(host).run, daemon=True).start()
+                threading.Thread(target=Reporter(host).run, daemon=True).start()
                 fresh = True
         if prompt:
             threading.Thread(target=self._first, args=(host, prompt, fresh), daemon=True).start()

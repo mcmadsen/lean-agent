@@ -7684,6 +7684,7 @@ def host_session(cmd, extra, env, h, name):
         except Exception as exc:
             print(f"lean-agent: could not start the session of {tid}: {exc}", file=sys.stderr)
     threading.Thread(target=service_session.AutoClear(host).run, daemon=True).start()
+    threading.Thread(target=service_session.Reporter(host).run, daemon=True).start()
 
     def stop_all(*_):
         sessions.stop_all()
@@ -8542,6 +8543,19 @@ def cmd_config(a):
             save_json(home("config.json"), cfg)
         print(f"review-max-rerounds: {review_max_rerounds()} · re-reviews of one branch's lineage before `review "
               "--resume` refuses (--force overrides)")
+        return 0
+    if a.name == "thread-reports":
+        if a.value is not None:
+            if a.value.lower() not in ("on", "questions-only", "off", "default"):
+                die("thread-reports takes on, questions-only, off or default")
+            cfg = config_json()
+            if a.value.lower() in ("default", "on"):
+                cfg.pop("thread_reports", None)
+            else:
+                cfg["thread_reports"] = a.value.lower()
+            save_json(home("config.json"), cfg)
+        print(f"thread-reports: {service_session.reports_mode()} \u00b7 a thread session's finished turn (run, error, question) is "
+              "typed into the main session at its turn end; questions-only sends only what needs you (on|questions-only|off|default)")
         return 0
     if a.name == "thread-fresh-after":
         if a.value is not None:
@@ -10215,7 +10229,7 @@ def build_parser():
     s = sub.add_parser("config", help="switches: strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "max-thread-sessions N (thread sessions the service runs; default 8), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
     s.add_argument("name", choices=["strict", "clear-at", "project-rules", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
-                                           "review-max-rerounds", "review-skip", "review-model", "thread-fresh-after"])
+                                           "review-max-rerounds", "review-skip", "review-model", "thread-fresh-after", "thread-reports"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)
