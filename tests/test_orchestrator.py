@@ -1813,6 +1813,31 @@ class CliTest(unittest.TestCase):
         with open(f) as fh:
             self.assertEqual(fh.read(), body)
 
+    def test_doctor_outside_a_project_lists_rules_and_marks_the_forbidden_server(self):
+        self.use_tracker()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.add_rule()
+        elsewhere = os.path.join(self.tmp.name, "elsewhere")
+        os.makedirs(elsewhere)
+        out = self.cli("doctor", elsewhere, check=False).stdout
+        self.assertIn("  proj: rule — never use MCP tracker (use trackercli)", out)
+        self.assertRegex(out, r"  MCP tracker: forbidden by rule \S+ in proj")
+        self.assertNotIn("lean-agent mcp check tracker", out)
+        self.assertNotRegex(out, r"! MCP tracker")
+        chk = self.cli("mcp", "check", "tracker", check=False)
+        self.assertIn("forbidden by rule", chk.stderr)
+
+    def test_doctor_shows_http_servers_as_info_not_warnings(self):
+        path = os.path.join(self.tmp.name, "cfg", ".claude.json")
+        cfg = _load_json(path)
+        cfg["mcpServers"]["webdocs"] = {"type": "http", "url": "https://example.invalid/mcp"}
+        with open(path, "w") as fh:
+            json.dump(cfg, fh)
+        self.cli("learn", self.proj, "--name", "proj")
+        out = self.cli("doctor", self.proj, check=False).stdout
+        self.assertIn("  MCP webdocs: auth not checked directly (HTTP server)", out)
+        self.assertNotIn("! MCP webdocs", out)
+
     def test_recording_a_near_identical_memory_updates_the_entry_and_dedupe_merges_old_ones(self):
         self.add_rule()
         self.add_rule(self.RULE + " Thanks.")
