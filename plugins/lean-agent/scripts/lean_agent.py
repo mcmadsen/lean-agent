@@ -623,6 +623,7 @@ def rule_fields(text, mtype):
 
 def sync_memory(slug):
     """Mirror the shared memory store into a project's cards (global memories + this project's)."""
+    lean_memory.heal(memory_store())
     mems = [m for m in lean_memory.read_all(memory_store()) if m["scope"] in (lean_memory.GLOBAL, slug)]
     fresh = {}
     for m in mems:
