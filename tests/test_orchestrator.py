@@ -5434,14 +5434,14 @@ class CliTest(unittest.TestCase):
                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                              start_new_session=True)
         self.addCleanup(lambda: p.poll() is None and p.kill())
-        self.wait_for(lambda: self.running_markers(), "the run's marker")
+        self.wait_for(lambda: [m for m in self.running_markers() if not m.get("early")], "the run's marker")
         self.addCleanup(lambda: [os.kill(m["pid"], signal.SIGKILL) for m in self.running_markers()
                                  if m.get("pid") and service_alive(m["pid"])])
         return p
 
     def test_a_run_survives_its_foreground_being_killed_and_is_recorded(self):
         p = self.start_run()
-        [m] = self.running_markers()
+        [m] = [m for m in self.running_markers() if not m.get("early")]
         self.assertTrue(m["detached"])
         self.assertNotEqual(m["pid"], p.pid)
         os.killpg(p.pid, signal.SIGTERM)
@@ -5624,7 +5624,7 @@ class CliTest(unittest.TestCase):
         g("add", "-A")
         g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
         p = self.start_run(turns="3", sleep="30")
-        [m] = self.running_markers()
+        [m] = [m for m in self.running_markers() if not m.get("early")]
         self.assertTrue(m["start_head"])
         self.assertTrue(os.path.isdir(m["path"]))
         with open(os.path.join(m["path"], "api", "totals.py"), "a") as fh:
