@@ -7620,24 +7620,58 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("run failed", self.cli("logs").stdout)
 
     def test_output_reads_a_background_task_file(self):
-        base = os.path.join(self.tmp.name, "claude-0", "proj", "tasks")
+        uid = os.getuid()
+        base = os.path.join(self.tmp.name, f"claude-{uid}", "proj", "sess1", "tasks")
         os.makedirs(base)
         with open(os.path.join(base, "abc123.output"), "w") as fh:
             fh.write("".join(f"line {i}\n" for i in range(1, 101)))
-        env = {"TMPDIR": self.tmp.name}
+        env = {"TMPDIR": self.tmp.name, "CLAUDE_CODE_SESSION_ID": "sess1"}
         out = self.cli("output", os.path.join(base, "abc123.output"), **env).stdout
         self.assertIn("line 20\n", out)
         self.assertNotIn("line 21\n", out)
         self.assertIn("line 81\n", out)
         self.assertIn("line 100", out)
         self.assertIn("60 lines not shown", out)
-        self.assertIn("line 1\n", self.cli("output", "abc123", **env).stdout)  # by task id
+        self.assertIn("line 1\n", self.cli("output", "abc123", **env).stdout)  # by task id, in this session
+        p = self.cli("output", "abc123", TMPDIR=self.tmp.name, CLAUDE_CODE_SESSION_ID="sess2", check=False)
+        self.assertNotEqual(p.returncode, 0)  # another session's tasks aren't searched
+        p = self.cli("output", "abc123", TMPDIR=self.tmp.name, check=False)
+        self.assertNotEqual(p.returncode, 0)  # no session, no id lookup
         other = os.path.join(self.tmp.name, "plain.output")
         with open(other, "w") as fh:
             fh.write("secret\n")
         p = self.cli("output", other, **env, check=False)  # not a claude tasks dir
         self.assertNotEqual(p.returncode, 0)
         self.assertNotIn("secret", p.stdout)
+        # another user's claude dir is refused, even when the path is given in full
+        theirs = os.path.join(self.tmp.name, f"claude-{uid + 1}", "proj", "sess1", "tasks")
+        os.makedirs(theirs)
+        with open(os.path.join(theirs, "x.output"), "w") as fh:
+            fh.write("theirs\n")
+        p = self.cli("output", os.path.join(theirs, "x.output"), **env, check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertNotIn("theirs", p.stdout)
+        # a file under the right dir that another uid owns is refused (chown needs root: checked where it can be)
+        if uid == 0:
+            os.chown(os.path.join(base, "abc123.output"), 12345, 12345)
+            p = self.cli("output", os.path.join(base, "abc123.output"), **env, check=False)
+            self.assertNotEqual(p.returncode, 0)
+            os.chown(os.path.join(base, "abc123.output"), 0, 0)
+
+    def test_output_of_a_big_task_file_reads_only_its_ends(self):
+        base = os.path.join(self.tmp.name, f"claude-{os.getuid()}", "proj", "sess1", "tasks")
+        os.makedirs(base)
+        big = os.path.join(base, "big.output")
+        with open(big, "w") as fh:
+            fh.write("".join(f"line {i}\n" for i in range(1, 200001)))
+        out = self.cli("output", big, TMPDIR=self.tmp.name).stdout
+        self.assertIn("line 20\n", out)
+        self.assertNotIn("line 21\n", out)
+        self.assertIn("line 200000", out)
+        self.assertIn("line 199981\n", out)
+        self.assertNotIn("line 199980\n", out)
+        self.assertIn("the middle is not shown", out)
+        self.assertNotIn("line 100000\n", out)
 
     def test_pr_branch_worktree_setup_and_push(self):
         g = self.git_project()

@@ -11338,38 +11338,62 @@ def brief_text(cmd, text):
 
 
 def claude_task_output(arg):
-    """The realpath of a Claude Code background task output file named by `arg` (a path, or a task id looked up under the
-    claude temp dirs), else None. Only files under /tmp/claude-*/ or $TMPDIR/claude-*/ ... /tasks/ count."""
-    roots = [r for r in dict.fromkeys(["/tmp", os.environ.get("TMPDIR") or ""]) if r]
-    roots = [os.path.realpath(r) for r in roots]
+    """The realpath of a Claude Code background task output file named by `arg` (a path, or a task id looked up in the
+    current session's tasks dir), else None. Only regular files owned by this user under /tmp/claude-<uid>/ or
+    $TMPDIR/claude-<uid>/ ... /tasks/ count: never another user's dir, and no recursive search."""
+    uid = os.getuid()
+    roots = [os.path.realpath(os.path.join(r, f"claude-{uid}")) for r in dict.fromkeys(["/tmp", os.environ.get("TMPDIR") or ""]) if r]
 
     def ok(path):
         rp = os.path.realpath(path)
         for root in roots:
-            if rp.startswith(root + os.sep):
-                parts = rp[len(root) + 1:].split(os.sep)
-                if parts[0].startswith("claude-") and "tasks" in parts[1:-1] and os.path.isfile(rp):
-                    return rp
+            if rp.startswith(root + os.sep) and "tasks" in rp[len(root) + 1:].split(os.sep)[:-1]:
+                try:
+                    if os.path.isfile(rp) and os.stat(rp).st_uid == uid:
+                        return rp
+                except OSError:
+                    pass
         return None
     if os.sep in arg or arg.endswith(".output"):
         return ok(arg)
-    if re.fullmatch(r"[A-Za-z0-9_-]+", arg):
+    session = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+    if re.fullmatch(r"[A-Za-z0-9_-]+", arg) and re.fullmatch(r"[A-Za-z0-9_-]+", session):
         found = []
-        for root in roots:
-            found += glob.glob(os.path.join(root, "claude-*", "**", "tasks", arg + ".output"), recursive=True)
-        found = [f for f in found if ok(f)]
-        return os.path.realpath(max(found, key=os.path.getmtime)) if found else None
+        for root in roots:  # <root>/<project>/<session>/tasks/<id>.output: one fixed level, this session only
+            found += glob.glob(os.path.join(glob.escape(root), "*", session, "tasks", arg + ".output"))
+        found = [ok(f) for f in found]
+        found = [f for f in found if f]
+        return max(found, key=os.path.getmtime) if found else None
     return None
+
+
+TASK_OUTPUT_CHUNK = 65536  # bytes read from each end of a task output file; its middle is never read
+
+
+def task_output_ends(path, n=20):
+    """The text of a task output file's first and last `n` lines, read with seek: never the whole file."""
+    with open(path, "rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
+        head = [fh.readline(8192) for _ in range(n)]
+        head = [l for l in head if l]
+        fh.seek(max(0, size - TASK_OUTPUT_CHUNK))
+        tail = fh.read(TASK_OUTPUT_CHUNK).splitlines(True)
+        whole = size <= TASK_OUTPUT_CHUNK
+        if not whole:
+            tail = tail[1:]  # the first line of a chunk cut in the middle is partial
+    dec = lambda ls: [l.decode("utf-8", "replace").rstrip("\r\n") for l in ls]
+    if whole:
+        lines = dec(tail)
+        if len(lines) <= 2 * n:
+            return "\n".join(lines) + ("\n" if lines else "")
+        return "\n".join(lines[:n] + [f"… {len(lines) - 2 * n} lines not shown ({path})"] + lines[-n:]) + "\n"
+    return "\n".join(dec(head) + [f"… the middle is not shown ({size:,} bytes in {path})"] + dec(tail[-n:])) + "\n"
 
 
 def cmd_output(a):
     task_file = claude_task_output(a.command)
     if task_file:  # a background task's output file: its start and end (the middle is in the file itself)
-        lines = read_text(task_file).splitlines()
-        if len(lines) <= 40:
-            sys.stdout.write("\n".join(lines) + ("\n" if lines else ""))
-        else:
-            sys.stdout.write("\n".join(lines[:20] + [f"… {len(lines) - 40} lines not shown ({task_file})"] + lines[-20:]) + "\n")
+        sys.stdout.write(task_output_ends(task_file))
         return 0
     path = home("output", f"{a.command}.txt")
     if not os.path.exists(path):
