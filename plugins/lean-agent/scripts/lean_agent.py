@@ -1320,12 +1320,14 @@ def enforce_mcp_rules(cards, project, specs, force=False):
                                                                          "\nPass --force-mcp to run with it anyway."))
 
 
-def forbidding_rules(name, servers):
-    """[(project, rule card)] for the rules of any learned project that forbid the MCP server `name`."""
+def forbidding_rules(name, servers, rules_of=None):
+    """[(project, rule card)] for the rules of any learned project that forbid the MCP server `name`.
+    `rules_of(slug)` replaces project_rules (doctor passes a cached one)."""
+    rules_of = rules_of or project_rules
     alias = lean_mcp.display_names(servers).get(name) or ""
     out = []
     for slug in sorted(projects()):
-        out += [(slug, c) for c, _ in rule_hits(project_rules(slug), name, alias)]
+        out += [(slug, c) for c, _ in rule_hits(rules_of(slug), name, alias)]
     return out
 
 
@@ -7379,6 +7381,13 @@ def cmd_doctor(a):
                "keep files other than lean-agent's guide out: lean-agent doctor --fix (refreshes the excludes)")
     report(is_trusted(h), "orchestrator home is trusted", "lean-agent trust")
     report(True, f"strict orchestrator: {'on' if strict_on() else 'off'} (lean-agent config strict on|off)")
+    rules_cache = {}
+
+    def rules_of(slug_):  # each project's rules (a memory sync) are computed once per doctor call
+        if slug_ not in rules_cache:
+            rules_cache[slug_] = project_rules(slug_)
+        return rules_cache[slug_]
+
     pslug = next((sl for sl, v in projects().items() if in_project(path, v)), None)
     if pslug:
         if project_rules_on(pslug):
@@ -7388,7 +7397,7 @@ def cmd_doctor(a):
         else:
             report(True, f"project rules: off for {pslug}, rule cards instead (lean-agent config project-rules on)")
     if pslug:
-        for msg in conflicting_files(projs_path(pslug) or path, [c for c in project_rules(pslug) if c.get("targets")]):
+        for msg in conflicting_files(projs_path(pslug) or path, [c for c in rules_of(pslug) if c.get("targets")]):
             report(None, msg, "update that file (lean-agent never edits it) or `lean-agent memory rm` the rule")
         report(True, f"branch rules for {pslug}: " + "  ".join(f"{k}={v}" for k, v in branch_rules(pslug).items())
                + " (lean-agent config branch-rules)")
@@ -7408,15 +7417,16 @@ def cmd_doctor(a):
         report(None, f"{path} isn't a learned project, so the per-project checks are skipped (run doctor in a "
                "project's folder for them, or `lean-agent learn <repo root> --name <name>` if this should be one)")
         for s_ in sorted(projs):
-            rules = project_rules(s_)
+            rules = rules_of(s_)
             for c in rules:
                 alt = c.get("alternative")
                 for t in c.get("targets") or [None]:
                     what = f"never use MCP {t}" if t else " ".join((c.get("text") or "").split())[:80]
                     print(f"  {s_}: rule — {what}" + (f" (use {alt})" if alt else ""))
-            for msg in conflicting_files(projs_path(s_), [c for c in rules if c.get("targets")])[:3]:
+            conflicts = conflicting_files(projs_path(s_), [c for c in rules if c.get("targets")])
+            for msg in conflicts[:3]:
                 report(None, f"{s_}: {msg}")
-            extra = len(conflicting_files(projs_path(s_), [c for c in rules if c.get("targets")])) - 3
+            extra = len(conflicts) - 3
             if extra > 0:
                 print(f"  {s_}: +{extra} more")
     if is_in_project and a.fix and projs[slug].get("rules") != "off":
@@ -7496,7 +7506,7 @@ def cmd_doctor(a):
     all_servers = lean_mcp.discover()
     for name in sorted(set(load_json(home("mcp-presets.json"), {})) | set(checks) | set(configured)):
         rec = checks.get(name)
-        banned = forbidding_rules(name, all_servers)
+        banned = forbidding_rules(name, all_servers, rules_of)
         if banned:
             print(f"  MCP {name}: forbidden by {forbidden_text(*banned[0])}")
         elif rec and rec.get("status") != "skipped":
