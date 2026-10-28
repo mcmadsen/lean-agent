@@ -4672,11 +4672,11 @@ class CliTest(unittest.TestCase):
         self.cli("thread", "close", "t9")
         self.cli("todo", "add", "Ship topic seven", "--thread", "t8")
         out = self.cli("brief").stdout
-        self.assertIn("  next todo #", out)  # the parallel work is in the brief too
-        self.assertIn("Open threads (8), latest first:", out)
-        self.assertIn("t8 ", out)
+        self.assertNotIn("  next todo #", out)  # the short form: one line per thread
+        self.assertNotIn("Open threads (8)", out)
+        self.assertRegex(out, r"(?m)^t8 .* · idle \d+m$")
         self.assertNotIn("zebra", out)
-        self.assertLessEqual(len(out.split("Full list")[0].splitlines()), 16)
+        self.assertLessEqual(len(out.split("Full list")[0].splitlines()), 12)
         self.assertIn("lean-agent thread show tN", out)
 
     def test_checkpoint_and_brief(self):

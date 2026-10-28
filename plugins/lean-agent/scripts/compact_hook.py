@@ -263,11 +263,11 @@ def cut_lines(text, limit):
     return (cut[:nl] if nl > 0 else cut).rstrip()
 
 
-def threads_summary(lines=16):
-    """The open threads with their parallel work (`lean-agent now`, without closing idle ones), so a fresh session knows the topics and what is still running."""
+def threads_summary(lines=12):
+    """The open threads, one line each (`lean-agent now --short`, without closing idle ones), so a fresh session knows the topics and what is still running."""
     try:
         import lean_threads
-        text = lean_threads.now_text(close_idle=False, max_lines=lines)
+        text = lean_threads.short_text(close_idle=False, max_lines=lines)
     except Exception:  # a broken registry must not break the brief
         return ""
     return "" if text.startswith("No open") else text + "\nFull list: lean-agent now; one topic: lean-agent thread show tN"
