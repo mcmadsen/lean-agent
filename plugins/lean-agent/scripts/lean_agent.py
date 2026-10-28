@@ -736,6 +736,8 @@ def shorten_card(slug, cards, a):
             ev = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(ev, dict):
+            continue
         if ev.get("type") == "result":
             new = (ev.get("result") or "").strip()
         elif ev.get("type") == "rate_limit_event":
@@ -2214,7 +2216,8 @@ def mcp_unauthenticated(ev, tools, denied):
     """The MCP server whose tool results are errors saying unauthorized/anonymous twice (once for a run's first
     MCP call), or None. Successful results and browser tools' page text never count.
     `tools` {tool_use id: server} and `denied` {server: count} are the caller's state across events."""
-    content = (ev.get("message") or {}).get("content")
+    msg = ev.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
     if not isinstance(content, list):
         return None
     for c in content:
@@ -5444,6 +5447,8 @@ def _probe_session(extra, cwd):
             ev = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(ev, dict):
+            continue
         if ev.get("type") == "system" and ev.get("subtype") == "init":
             tools, servers = ev.get("tools") or [], ev.get("mcp_servers") or []
         elif ev.get("type") == "rate_limit_event":
@@ -7626,12 +7631,18 @@ def transcript_entries(path):
         return
 
 
+def _msg(e):
+    """An event's "message" when it is an object, else {} (some stream events carry a string)."""
+    m = e.get("message")
+    return m if isinstance(m, dict) else {}
+
+
 def tool_use_counts(paths):
     """{tool name: calls} over orchestrator transcripts (MCP and lean-agent commands included)."""
     used = {}
     for path in paths:
         for e in transcript_entries(path):
-            for c in ((e.get("message") or {}).get("content") or []) if e.get("type") == "assistant" else []:
+            for c in (_msg(e).get("content") or []) if e.get("type") == "assistant" and isinstance(_msg(e).get("content"), list) else []:
                 if isinstance(c, dict) and c.get("type") == "tool_use":
                     used[c.get("name")] = used.get(c.get("name"), 0) + 1
     return used
@@ -7655,10 +7666,10 @@ def message_items(path):
         if e.get("isCompactSummary") or e.get("subtype") == "compact_boundary":
             items = []  # earlier messages were replaced by the summary
             if e.get("isCompactSummary"):
-                items.append((est_tokens(_text_of((e.get("message") or {}).get("content"))), "summary",
+                items.append((est_tokens(_text_of(_msg(e).get("content"))), "summary",
                               "compaction summary"))
             continue
-        msg = e.get("message") or {}
+        msg = _msg(e)
         content = msg.get("content")
         if e.get("type") == "assistant":
             for c in content or []:
@@ -7716,6 +7727,8 @@ def probe_home(h):
         try:
             ev = json.loads(line)
         except ValueError:
+            continue
+        if not isinstance(ev, dict):
             continue
         if ev.get("type") == "system" and ev.get("subtype") == "init":
             init = ev
@@ -8216,6 +8229,8 @@ def measure_baseline(slug, path):
             ev = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(ev, dict):
+            continue
         if ev.get("type") == "rate_limit_event":
             usage.record_plan_usage(ev.get("rate_limit_info"))
         elif ev.get("type") == "result":
@@ -8603,7 +8618,7 @@ def run_result_text(entry):
         with open(os.path.join(entry["workdir"], "result.json")) as fh:
             lines = [l for l in fh if l.strip()]
         return json.loads(lines[-1]).get("result") or ""
-    except (OSError, ValueError, IndexError, KeyError):
+    except (OSError, ValueError, IndexError, KeyError, AttributeError):
         return ""
 
 

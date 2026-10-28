@@ -486,7 +486,7 @@ def transcript_state(path, offset=0):
         elif kind == "system" and rec.get("subtype") == "turn_duration" and last and last.get("type") == "assistant":
             last = dict(last, _ended=True)
     if last and last.get("type") == "assistant":
-        msg = last.get("message") or {}
+        msg = last.get("message") if isinstance(last.get("message"), dict) else {}
         content = msg.get("content") if isinstance(msg.get("content"), list) else []
         tools = any(isinstance(c, dict) and c.get("type") == "tool_use" for c in content)
         state["ended"] = not tools and (msg.get("stop_reason") == "end_turn" or bool(last.get("_ended")))
