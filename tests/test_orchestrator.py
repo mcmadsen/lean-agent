@@ -7452,10 +7452,12 @@ class CliTest(unittest.TestCase):
         run_id = out.split("run ")[1].split()[0]
         self.cli("run", "--resume", run_id, "and the fixtures")
         self.assertEqual(self.calls()[-1]["argv"][self.calls()[-1]["argv"].index("--add-dir") + 1], wt)
-        # the branch checked out in the user's repo can't be attached again: detached worktree
-        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "main", "--", "t").stdout
-        self.assertIn("(created, detached, HEAD ", out)
-        self.assertIn("detached checkout", self.calls()[-1]["append"])
+        # the branch checked out in the user's main checkout is held: refused, never a silent detached worktree
+        p = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "main", "--", "t", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn(f"branch main is checked out in {os.path.realpath(self.proj)}; switch it there, or start a new "
+                      "branch with --worktree-base main", p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", "main")))
         listing = self.cli("worktrees", "proj").stdout
         self.assertIn("feature", listing)
         self.assertIn("branch feature", listing)
@@ -7488,7 +7490,7 @@ class CliTest(unittest.TestCase):
         p = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "elsewhere", "--", "t", check=False)
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("is checked out in", p.stderr)
-        self.assertIn("not a lean-agent worktree", p.stderr)
+        self.assertIn("--worktree-base elsewhere", p.stderr)
 
     def test_worktree_attaches_a_free_branch_and_detached_commits_move_it(self):
         g = self.git_project()
@@ -7511,7 +7513,6 @@ class CliTest(unittest.TestCase):
         self.assertEqual(subprocess.run(["git", "-C", wt, "symbolic-ref", "--short", "HEAD"], capture_output=True,
                                         text=True).stdout.strip(), "feature")
         # the branch moved elsewhere meanwhile: loud warning, and attach refuses
-        second = tip("feature")
         subprocess.run(["git", "-C", wt, "checkout", "-q", "--detach"], check=True)
         g("checkout", "-q", "-b", "side", "main")
         g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "side")
@@ -7524,7 +7525,6 @@ class CliTest(unittest.TestCase):
         self.assertEqual(tip("feature"), tip("side"))
         self.assertIn("detached_warning", self.ledger()[-1])
         self.assertTrue(self.ledger()[-1]["detached_warning"])
-        self.assertIsNotNone(second)
         subprocess.run(["git", "-C", wt, "checkout", "-q", "--detach"], check=True)
         p = self.cli("worktree", "attach", "proj", "feature", check=False)  # diverged: refuses
         self.assertNotEqual(p.returncode, 0)
@@ -7532,9 +7532,48 @@ class CliTest(unittest.TestCase):
         subprocess.run(["git", "-C", wt, "checkout", "-q", "--detach", "side"], check=True)
         subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
                         "-m", "y"], check=True)
+        # a branch checked out in the main checkout is never moved by attach
+        g("checkout", "-q", "feature")
+        before = tip("feature")
+        p = self.cli("worktree", "attach", "proj", "feature", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("is checked out in", p.stderr)
+        self.assertEqual(tip("feature"), before)
+        g("checkout", "-q", "main")
         self.cli("worktree", "attach", "proj", "feature")
         self.assertEqual(tip("feature"), subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], capture_output=True,
                                                          text=True).stdout.strip())
+
+    def test_after_run_never_moves_a_branch_checked_out_in_the_main_checkout(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        tip = lambda b: subprocess.run(["git", "-C", self.proj, "rev-parse", b], capture_output=True, text=True).stdout.strip()
+        commit = "git -c user.name=t -c user.email=t@t commit -q --allow-empty -m w"
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feature", "--", "t")
+        before = tip("feature")
+        # during the run the user switches the main checkout to the branch the worker left
+        p = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feature", "--again", "--", "t2",
+                     FAKE_SHELL=f"git checkout -q --detach && {commit} && git -C {self.proj} checkout -q feature",
+                     check=False)
+        self.assertEqual(tip("feature"), before)
+        self.assertIn("commits are on a detached HEAD", p.stdout + p.stderr)
+
+    def test_an_explicit_remote_ref_stays_detached_when_the_local_branch_is_held(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        self.cli("learn", self.proj, "--name", "proj")
+        remote = os.path.join(self.tmp.name, "remote.git")
+        subprocess.run(["git", "init", "-q", "--bare", remote], check=True)
+        g("remote", "add", "origin", remote)
+        g("push", "-q", "origin", "feature")
+        g("fetch", "-q", "origin")
+        g("checkout", "-q", "feature")  # held by the main checkout
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "origin/feature", "--", "t").stdout
+        self.assertIn("detached", out)
 
     def test_failed_start_is_reported_logged_and_noted(self):
         self.cli("learn", self.proj, "--name", "proj")
