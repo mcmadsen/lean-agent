@@ -2269,6 +2269,7 @@ def _cmd_run(a):
 
     def finish():  # once the whole summary is on disk: the run stops being "running" (what `runs --wait` waits for)
         clear_launching()
+        report_orphaned_run(thread_tag, run_id, entry["status"], summary)
         if running_key:
             try:
                 os.remove(home("running", running_key + ".json"))
@@ -9947,8 +9948,45 @@ def parse_idle(text):
     return lean_common.parse_duration(text)
 
 
+def report_orphaned_run(tid, run_id, status, summary):
+    """A run of thread `tid` finished while the thread's session is not up (closed with --force, or gone): no turn end
+    will report it, so queue its report for the main session here."""
+    try:
+        if not tid or tid not in lean_threads.load()["threads"] or service_session.alive(tid):
+            return
+        first = next((ln.strip() for ln in str(summary or "").splitlines() if ln.strip()), "")
+        bad = status in ("failed", "error") or status.startswith("stopped")
+        service_session.queue_report(tid, "blocked" if bad else "done", f"run {run_id} {status}" + (f": {first[:200]}" if first else ""))
+    except Exception:
+        pass
+
+
+def thread_live_runs(tid, data=None):
+    """[(run id, task, started)] of the live runs tagged with thread `tid`, oldest first."""
+    data = data or lean_threads.load()
+    out = []
+    for f in glob.glob(home("running", "*.json")):
+        m = load_json(f, {})
+        if m.get("thread") and pid_alive(m.get("pid")) and lean_threads.resolve(m["thread"], data["aliases"]) == tid:
+            out.append((m.get("run") or os.path.basename(f)[:-5], " ".join(str(m.get("task") or "").split()), m.get("started") or ""))
+    return sorted(out, key=lambda r: r[2])
+
+
+def close_hold(tid, data=None):
+    """What makes closing thread `tid` lose track of work: live runs (or a run just launching) and a mid-turn session.
+    Returns (text, run ids)."""
+    runs = thread_live_runs(tid, data)
+    parts = [f"run {r} ({task[:60]}) {lean_threads.age(st) if st else '?'}" for r, task, st in runs]
+    if not runs and tid in launching_threads():
+        parts.append("a run is starting")
+    if service_session.mid_turn(tid):
+        parts.append("session mid-turn (tool call, answer or prompt pending)")
+    return ", ".join(parts), [r for r, _, _ in runs]
+
+
 def close_threads(a):
-    """`thread close tN...|--all|--idle DUR`: one checkpoint-and-stop per thread, then a summary line."""
+    """`thread close tN...|--all|--idle DUR`: one checkpoint-and-stop per thread, then a summary line. An explicit id or
+    --all refuses a thread with a live run or a mid-turn session unless --force (the runs are detached and keep going)."""
     idle, all_ = getattr(a, "idle", None), getattr(a, "all", False)
     if sum(map(bool, (a.args, all_, idle))) != 1:
         die("usage: lean-agent thread close tN [tM ...] | --all | --idle DUR")
@@ -9967,8 +10005,17 @@ def close_threads(a):
             tid = thread_session_tid(ref)[0]
             if tid not in tids:
                 tids.append(tid)
-    done, failed = [], []
+    done, failed, held = [], [], []
+    force = getattr(a, "force", False)
     for tid in tids:
+        if not idle:
+            why, rids = close_hold(tid)
+            if why and not force:
+                print(f"{tid}: not closed \u2014 running: {why}; use --force to close anyway (the run keeps going detached)")
+                held.append(tid)
+                continue
+            if why:
+                print(f"{tid}: closing anyway \u2014 running: {why}" + ("; the runs keep going detached and report to main" if rids else ""))
         try:
             stopped, ok, stale = close_thread_session(tid)
         except RuntimeError as exc:
@@ -9983,8 +10030,9 @@ def close_threads(a):
         done.append(tid)
     if len(tids) != 1 or all_ or idle:
         print(f"closed {len(done)} thread{'s' * (len(done) != 1)}" + (f": {', '.join(done)}" if done else "")
+              + (f"; not closed (running): {', '.join(held)}" if held else "")
               + (f"; failed: {', '.join(failed)}" if failed else ""))
-    return 1 if failed else 0
+    return 1 if failed or held else 0
 
 
 def cmd_thread(a):
@@ -9995,7 +10043,9 @@ def cmd_thread(a):
             die("no service session is up (start it with `lean-agent up` or `lean-agent service start`)")
         sessions = open_thread_sessions()
         for x in sessions:
-            print(f"{x['thread']:<6}{x['name'] or '-':<42}pid {x['pid'] or '-':<8}idle {x['idle']}s")
+            runs = thread_live_runs(x["thread"])
+            extra = (f"  {len(runs)} running (first {runs[0][0]})" if runs else "") + ("  mid-turn" if service_session.mid_turn(x["thread"]) else "")
+            print(f"{x['thread']:<6}{x['name'] or '-':<42}pid {x['pid'] or '-':<8}idle {x['idle']}s{extra}")
         if not sessions:
             print("no thread sessions running (start one with `lean-agent thread new \"title\"`)")
         return 0
@@ -11402,6 +11452,7 @@ def build_parser():
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin)")
     s.add_argument("--json", action="store_true", help="list: as JSON")
     s.add_argument("--all", action="store_true", help="show: every entry (default: the latest 40); close: every open session")
+    s.add_argument("--force", action="store_true", help="close: close even with a live run or mid-turn (runs keep going detached)")
     s.add_argument("--idle", help="close: every session idle at least this long (e.g. 2h, 90m) without a running run")
     s.add_argument("--resume-old", action="store_true", help="reopen|send|open: continue the thread's previous Claude session "
                    "instead of starting a new one from a short brief")
