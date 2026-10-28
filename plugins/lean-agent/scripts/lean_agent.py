@@ -7281,7 +7281,10 @@ def claude_temp_problems(h, uid=None, bases=None):
     """Claude Code keeps per-session task output under <tmp>/claude-<uid>/<project-slug>/<session>/tasks; when
     that tree was created by root (sudo) or has odd permissions, every Bash call fails with EACCES.
     Returns [(path, owner, why)] for the roots checked cheaply: two levels plus any 'tasks' dir."""
-    uid = os.getuid() if uid is None else uid
+    if uid is None:
+        if not hasattr(os, "getuid"):
+            return [], []
+        uid = os.getuid()
     roots = []
     for base in bases or (os.environ.get("TMPDIR"), "/tmp", "/private/tmp" if sys.platform == "darwin" else None):
         if base:
@@ -7325,7 +7328,10 @@ def claude_temp_problems(h, uid=None, bases=None):
 
 def service_root_problem(uid=None):
     """Why the background service looks root-owned or started with sudo (None when fine)."""
-    uid = os.getuid() if uid is None else uid
+    if uid is None:
+        if not hasattr(os, "getuid"):
+            return None
+        uid = os.getuid()
     f = service_file()
     try:
         if os.path.exists(f) and os.stat(f).st_uid != uid:
