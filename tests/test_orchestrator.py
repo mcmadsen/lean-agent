@@ -7674,6 +7674,18 @@ class CliTest(unittest.TestCase):
         out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "origin/feature", "--", "t").stdout
         self.assertIn("detached", out)
 
+    def test_failing_run_and_guides_end_on_the_one_line_reason(self):
+        self.cli("learn", self.proj)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False, FAKE_SUBTYPE="error_max_turns")
+        self.assertEqual(p.stderr.strip().splitlines()[-1],
+                         "lean-agent: run failed: hit its turn limit (--max-turns)")
+        tpl = os.path.join(os.path.dirname(CLI), "..", "templates")
+        for name in ("guide.md", "front-desk.md"):
+            with open(os.path.join(tpl, name), encoding="utf-8") as fh:
+                text = fh.read()
+            self.assertIn("Never ask the user to run a lean-agent command", text)
+            self.assertIn("lean-agent output <file from the notification>", text)
+
     def test_failed_start_is_reported_logged_and_noted(self):
         self.cli("learn", self.proj, "--name", "proj")
         p = self.cli("run", "proj", "-m", "haiku", "--thread", "t7", "--", "t", check=False)  # no --why

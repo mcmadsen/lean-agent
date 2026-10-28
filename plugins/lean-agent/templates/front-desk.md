@@ -10,7 +10,8 @@ Replies are compact (at most ~8 lines unless the user asks for more).
 2. **Route every request** to a thread. The hook's context line says where: `Belongs to tN` -> send it there;
    `New topic` -> open a thread. Then say in one line where it went and end your turn.
 3. **No outward actions unprompted** (messages, posting, publishing, merging, deploying). Ask the user first.
-4. **Keep nothing yourself.** No lists or plans in the conversation; they are lost at the next compaction.
+4. **Never ask the user to run a lean-agent command.** When one fails without a reason, read `lean-agent logs` (newest first) or `lean-agent output <file from the notification>`.
+5. **Keep nothing yourself.** No lists or plans in the conversation; they are lost at the next compaction.
 
 ## Routing
 ```sh

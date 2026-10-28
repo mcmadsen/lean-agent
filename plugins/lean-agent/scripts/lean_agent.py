@@ -147,6 +147,7 @@ def env_num(name, default, cast=int):
 
 FAIL_CMD = []  # [command] while a run/review/role command runs: its refusals and errors are reported as failures
 FAILURE_COMMANDS = ("run", "review", "review-learn", "review-decline", "tracker", "do", "advise")
+FAIL_REASON = []  # [reason] a run/review noted for its own failure, said again as the last line by main()
 FAILURE_HOOKS = []  # called with the reason when such a command fails (e.g. to close the record of a run that never started)
 
 
@@ -1685,6 +1686,8 @@ def detach_run(workdir, run_id):
                 continue
             if data:
                 pos[i] += len(data)
+                for m in re.finditer(rf"^run {re.escape(run_id)} failed: (.+)$", data.decode("utf-8", "replace"), re.M):
+                    FAIL_REASON[:] = [m.group(1)]  # main() says it again as the last line
                 try:
                     out.write(data.decode("utf-8", "replace"))
                     out.flush()
@@ -2358,6 +2361,7 @@ def _cmd_run(a):
     why_failed = failure_reason(status, out, err, raw)
     if why_failed:  # the last line: a background-task notification shows only the output's tail
         print(f"run {run_id} failed: {why_failed}")
+        FAIL_REASON[:] = [why_failed]
     if role == "reviewer" and (review_meta or {}).get("multi"):
         print(f"review pass {review_meta['multi']}: {len((review or {}).get('findings') or [])} findings "
               f"(merged after the last pass)")
@@ -11506,10 +11510,14 @@ def main(argv=None):
     if a.cmd in FAILURE_COMMANDS:
         FAIL_CMD[:] = [a.cmd]
     try:
-        return a.fn(a) or 0
+        rc = a.fn(a) or 0
+        if rc != 0 and FAIL_CMD and isinstance(rc, int):  # failed without die(): still end on the one-line reason
+            sys.stdout.flush()
+            report_failure(FAIL_CMD[0], FAIL_REASON[0] if FAIL_REASON else f"exited with code {rc}")
+        return rc
     except SystemExit as e:
         if FAIL_CMD and isinstance(e.code, int) and e.code != 0:  # an exit that no die() explained
-            report_failure(FAIL_CMD[0], f"exited with code {e.code}")
+            report_failure(FAIL_CMD[0], FAIL_REASON[0] if FAIL_REASON else f"exited with code {e.code}")
         raise
     except Exception as e:
         if FAIL_CMD:
