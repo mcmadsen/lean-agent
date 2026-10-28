@@ -5289,6 +5289,83 @@ class CliTest(unittest.TestCase):
         reps["t1"].tick()
         self.assertEqual(len(ss.queued_reports()), 1)
 
+    def test_reports_stay_queued_when_typing_fails_and_stale_ones_are_dropped_with_a_count(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        write("main", user("hi"), assistant("ok"))
+        ss.queue_report("t1", "done", "Old news.")
+        with open(ss.reports_path()) as fh:
+            data = json.load(fh)
+        data["items"][0]["ts"] = clock[0] - 25 * 3600
+        with open(ss.reports_path(), "w") as fh:
+            json.dump(data, fh)
+        ss.queue_report("t1", "done", "Fresh news.")
+        clock[0] += 120
+        hosts["main"].paste = mock.Mock(side_effect=OSError("pty closed"))
+        reps["main"].tick()
+        self.assertEqual([i["text"] for i in ss.queued_reports()], ["Fresh news."])  # stale gone, fresh kept
+        hosts["main"].paste = lambda text: hosts["main"].pasted.append(text)
+        reps["main"].tick()
+        msg = hosts["main"].pasted[0]
+        self.assertIn("[t1 done] Fresh news.", msg)
+        self.assertNotIn("Old news", msg)
+        self.assertEqual(ss.queued_reports(), [])
+        ss.queue_report("t1", "done", "Older news.")
+        ss.queue_report("t1", "done", "Newer news.")
+        with open(ss.reports_path()) as fh:
+            data = json.load(fh)
+        data["items"][0]["ts"] = clock[0] - 30 * 3600
+        with open(ss.reports_path(), "w") as fh:
+            json.dump(data, fh)
+        items, dropped = ss.take_reports(clock[0])
+        self.assertEqual(([i["text"] for i in items], dropped), (["Newer news."], 1))
+        self.assertIn("1 older report(s) dropped", ss.reports_message(items, dropped))
+
+    def test_main_does_not_type_again_before_the_last_message_started_a_turn(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        write("main", user("hi"), assistant("ok"))
+        ss.queue_report("t1", "done", "First.")
+        clock[0] += 120
+        reps["main"].tick()
+        self.assertEqual(len(hosts["main"].pasted), 1)
+        ss.queue_report("t1", "done", "Second.")
+        clock[0] += 120
+        reps["main"].tick()
+        self.assertEqual(len(hosts["main"].pasted), 1)  # transcript unchanged: the paste has not begun a turn
+        clock[0] += 61
+        reps["main"].tick()
+        self.assertEqual(len(hosts["main"].pasted), 2)
+
+    def test_reporter_keeps_reporting_after_the_thread_session_restarts_on_a_new_transcript(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        reps["t1"].tick()
+        run_turn("t1", "First turn done.")
+        reps["t1"].tick()
+        self.assertEqual(len(ss.queued_reports()), 1)
+        home = os.environ["LEAN_AGENT_HOME"]
+        new = os.path.join(home, "t1-restarted.jsonl")
+        open(new, "w").close()
+        with open(os.path.join(home, "chat", "service-t1.json"), "w") as fh:
+            json.dump({"session_id": "t1b", "transcript_path": new, "source": "startup", "ts": 2}, fh)
+        reps["t1"].tick()
+        tid = "tu" + os.urandom(2).hex()
+        with open(new, "a") as fh:
+            for ev in (user(), assistant("", {"id": tid, "name": "Bash", "input": {"command": "lean-agent run --task y"}}),
+                       result(tid, "run 2 finished"), assistant("Second turn done.")):
+                fh.write(json.dumps(ev) + "\n")
+        reps["t1"].tick()
+        self.assertEqual([i["text"] for i in ss.queued_reports()], ["First turn done.", "Second turn done."])
+
+    def test_store_reports_keeps_the_last_five_per_thread_and_now_shows_the_latest(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        lt = self.threads_home()
+        lt.route("Publish the report via docs", "s1")  # t1
+        for n in range(1, 8):
+            lt.store_reports(f"<thread-reports>\n[t1 done] Report number {n}.\n</thread-reports>")
+        t = lt.load()["threads"]["t1"]
+        self.assertEqual([r["text"] for r in t["reports"]], [f"Report number {n}." for n in range(3, 8)])
+        self.assertEqual(t["report"]["text"], "Report number 7.")
+        self.assertIn("Report number 7.", self.cli("now").stdout)
+
     def test_main_prompt_hook_attaches_thread_reports_without_guessing_and_now_shows_them(self):
         self.cli("learn", self.proj, "--name", "proj")
         lt = self.threads_home()

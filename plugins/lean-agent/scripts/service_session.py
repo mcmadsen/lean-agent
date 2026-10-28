@@ -631,6 +631,7 @@ class AutoClear:
 
 REPORT_BATCH = 60      # seconds: reports queued within this window reach the main session in one message
 REPORT_CHARS = 160
+REPORT_MAX_AGE = 24 * 3600  # seconds: an older queued report is dropped, not delivered
 REPORT_MODES = ("on", "questions-only", "off")
 REPORT_RUN_RE = re.compile(r"\blean-agent\s+(?:run|review|handover|push)\b")
 PROMPT_RE = re.compile(r"Esc to cancel|Do you want to (?:proceed|make|create|allow)|❯\s*1\.\s*Yes")
@@ -666,16 +667,29 @@ def queued_reports():
     return items if isinstance(items, list) else []
 
 
-def take_reports():
+def take_reports(now=None):
+    """(items, dropped): the queued reports to deliver, none removed yet (see drop_reports). Reports older than
+    REPORT_MAX_AGE are discarded here and counted in `dropped`."""
+    now = time.time() if now is None else now
     with lean_common.file_lock(reports_path()):
         items = queued_reports()
-        if items:
-            lean_common.write_json_atomic(reports_path(), {"items": []})
-    return items
+        fresh = [i for i in items if now - (i.get("ts") or now) <= REPORT_MAX_AGE]
+        if len(fresh) != len(items):
+            lean_common.write_json_atomic(reports_path(), {"items": fresh})
+    return fresh, len(items) - len(fresh)
 
 
-def reports_message(items):
+def drop_reports(taken):
+    """Remove the reports that were delivered (reports queued meanwhile stay)."""
+    with lean_common.file_lock(reports_path()):
+        left = [i for i in queued_reports() if i not in taken]
+        lean_common.write_json_atomic(reports_path(), {"items": left})
+
+
+def reports_message(items, dropped=0):
     lines = [f"[{i['thread']} {i['kind']}] {i['text']}" for i in items]
+    if dropped:
+        lines.append(f"({dropped} older report(s) dropped: over {REPORT_MAX_AGE // 3600} h old)")
     return "\n".join(["<thread-reports>"] + lines + ["details: lean-agent thread show tN", "</thread-reports>"])
 
 
@@ -746,6 +760,9 @@ class Reporter(AutoClear):
         self.alerted = None    # the pending question or prompt already reported
         self.delivered = None  # (transcript size, when) of the last message typed into the main session
 
+    def log(self, msg, level="debug"):
+        lean_log.log(level, "reports", msg)  # not "auto-clear": this class only borrows the transcript helpers
+
     def prompting(self):
         return bool(PROMPT_RE.search(self.host.tail_text()[-1500:]))
 
@@ -796,11 +813,19 @@ class Reporter(AutoClear):
             return
         if self.delivered and self.delivered[0] == st["size"] and now - self.delivered[1] < 60:
             return  # the last message has not started a turn yet
-        items = take_reports()
+        items, dropped = take_reports(now)
         if items:
             self.delivered = (st["size"], now)
-            self.log(f"{len(items)} thread report(s) typed into the main session")
-            self.host.paste(reports_message(items))
+            try:
+                self.host.paste(reports_message(items, dropped))
+            except Exception as exc:  # noqa: BLE001 - the reports stay queued and go out on a later tick
+                self.log(f"typing {len(items)} thread report(s) failed, kept queued: {exc}")
+                self.delivered = None
+                return
+            drop_reports(items)
+            self.log(f"{len(items)} thread report(s) typed into the main session" + (f" ({dropped} stale dropped)" if dropped else ""))
+        elif dropped:
+            self.log(f"{dropped} stale thread report(s) dropped")
 
     def tick(self):
         if self.key == "main":
