@@ -3279,7 +3279,12 @@ class CliTest(unittest.TestCase):
         p, log, ss = self.start_up("--name", "la", "--model", "sonnet")
         [call] = self.read_jsonl(log)
         sid = call["argv"][call["argv"].index("--session-id") + 1]
-        self.assertEqual(call["argv"][:5], ["--model", "sonnet", "--remote-control", "la", "--session-id"])
+        argv = call["argv"]
+        self.assertEqual(argv[:2], ["--model", "sonnet"])
+        self.assertEqual(argv[argv.index("--remote-control"):][:4], ["--remote-control", "la", "--session-id", sid])
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertEqual(json.loads(argv[argv.index("--mcp-config") + 1]), {"mcpServers": {}})
+        self.assertIn("--disable-slash-commands", argv)
         self.assertEqual(call["service"], "1")        # the permission hook only acts in this session
         self.assertIsNone(call["leaked"])              # the parent session's variables don't reach it
         info = ss.info()
@@ -4127,6 +4132,38 @@ class CliTest(unittest.TestCase):
         self.wait_for(lambda: len(self.read_jsonl(log)) == n + 1 and ss.alive("t1"), "t1 again")
         self.assertEqual(self.read_jsonl(log)[-1]["argv"][-2:], ["--resume", old])
         self.stop_up(p, 30)
+
+    def test_orchestrator_session_flags_load_nothing_unused_and_only_the_guide_of_the_role(self):
+        L = lean_agent_module()
+        h = os.path.join(self.tmp.name, "orchhome")
+        agents = os.path.join(self.tmp.name, "cfg", "agents")
+        os.makedirs(agents)
+        open(os.path.join(agents, "reviewer.md"), "w").close()
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": os.path.join(self.tmp.name, "cfg")}):
+            main = L.session_flags(h, "main")
+            thread = L.session_flags(h, "thread")
+            with mock.patch.dict(os.environ, {"LEAN_AGENT_ORCHESTRATOR_TRIM": "0"}):
+                self.assertEqual(L.session_flags(h, "main"), [])
+        for flags in (main, thread):
+            self.assertIn("--strict-mcp-config", flags)
+            self.assertEqual(json.loads(flags[flags.index("--mcp-config") + 1]), {"mcpServers": {}})
+            self.assertIn("--disable-slash-commands", flags)
+        ms = json.loads(main[main.index("--settings") + 1])
+        ts = json.loads(thread[thread.index("--settings") + 1])
+        self.assertEqual(ms["claudeMdExcludes"][0], os.path.join(h, "CLAUDE.md"))
+        self.assertEqual(ts["claudeMdExcludes"][0], os.path.join(h, ".claude", "rules", "front-desk.md"))
+        self.assertEqual(ms["permissions"]["deny"], ["Agent(reviewer)"])
+
+    def test_home_gets_the_full_guide_and_a_short_front_desk_guide(self):
+        L = lean_agent_module()
+        h = os.path.join(self.tmp.name, "orchhome2")
+        os.makedirs(h, exist_ok=True)
+        L.write_home_guide(h)
+        full, desk = L.read_text(os.path.join(h, "CLAUDE.md")), L.read_text(L.front_desk_file(h))
+        self.assertGreater(len(full), 10000)
+        self.assertLess(len(desk), 6000)
+        self.assertIn("front desk", desk)
+        self.assertNotIn("lean-agent run", desk)
 
     def test_fresh_after_context_is_the_lower_of_tokens_and_share(self):
         ss = lean_agent_module().service_session
