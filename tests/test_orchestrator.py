@@ -1925,6 +1925,18 @@ class CliTest(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(store, "feedback_copy_2.md")))
         self.assertIn("no near-duplicate", self.cli("memory", "dedupe").stdout)
 
+    def test_read_only_commands_leave_numbered_copies_alone_and_import_heals_them(self):
+        self.add_rule()
+        store = self.cli("memory", "where").stdout.split(": ", 1)[1].splitlines()[0]
+        copy = os.path.join(store, "feedback_no_tracker_mcp_2.md")
+        shutil.copy(os.path.join(store, "feedback_no_tracker_mcp.md"), copy)
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("cards", "proj")
+        self.cli("doctor", self.proj, check=False)
+        self.assertTrue(os.path.exists(copy))
+        self.cli("memory", "add", "A separate note about deploy windows being on Tuesdays")
+        self.assertFalse(os.path.exists(copy))
+
     def test_run_mcp_whole_server_and_errors(self):
         self.cli("learn", self.proj)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tickets", "t")
@@ -8865,6 +8877,62 @@ class RuleUnitTest(unittest.TestCase):
                          "one two three four five six seven eight nine ten eleven twelve" + extra + "\n")
         groups = self.memory.clusters(self.dir)
         self.assertEqual([[m["stem"] for m in g] for g in groups], [["project_chain_0", "project_chain_1"]])
+
+
+    def _write_mem(self, stem, body, mtype="project", scope="global"):
+        with open(os.path.join(self.dir, stem + ".md"), "w") as fh:
+            fh.write(f"---\nname: {stem}\ntype: {mtype}\nscope: {scope}\ncreated: 2025-01-01\n---\n\n{body}\n")
+
+    def test_heal_merges_a_numbered_copy_and_is_idempotent(self):
+        body = "Always run the formatter before committing the changes to the repository"
+        self._write_mem("project_fmt", body)
+        self._write_mem("project_fmt_2", body)
+        self.assertEqual(self.memory.heal(self.dir), 1)
+        self.assertEqual([m["stem"] for m in self.memory.read_all(self.dir)], ["project_fmt"])
+        self.assertEqual(self.memory.heal(self.dir), 0)
+
+    def test_heal_does_not_merge_copies_of_another_scope_or_type(self):
+        body = "Always run the formatter before committing the changes to the repository"
+        self._write_mem("project_fmt", body)
+        self._write_mem("project_fmt_2", body, scope="some-project")
+        self._write_mem("project_fmt_3", body, mtype="feedback")
+        self.assertEqual(self.memory.heal(self.dir), 0)
+        self.assertEqual(len(self.memory.read_all(self.dir)), 3)
+
+    def test_concurrent_heals_merge_once_and_lose_nothing(self):
+        body = "Always run the formatter before committing the changes to the repository"
+        self._write_mem("project_fmt", body)
+        for i in range(2, 6):
+            self._write_mem(f"project_fmt_{i}", body)
+        results, errors = [], []
+
+        def run():
+            try:
+                results.append(self.memory.heal(self.dir))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+        threads = [threading.Thread(target=run) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(sum(results), 4)
+        self.assertEqual([m["stem"] for m in self.memory.read_all(self.dir)], ["project_fmt"])
+
+    def test_heal_tolerates_a_missing_store_and_vanishing_files(self):
+        self.assertEqual(self.memory.heal(os.path.join(self.dir, "nope")), 0)
+        body = "Always run the formatter before committing the changes to the repository"
+        self._write_mem("project_fmt", body)
+        self._write_mem("project_fmt_2", body)
+        real = self.memory.merge_cluster
+
+        def vanish(d, group):
+            os.remove(group[1]["file"])
+            return real(d, group)
+        with mock.patch.object(self.memory, "merge_cluster", side_effect=vanish):
+            self.memory.heal(self.dir)
+        self.assertEqual([m["stem"] for m in self.memory.read_all(self.dir)], ["project_fmt"])
 
 
 if __name__ == "__main__":

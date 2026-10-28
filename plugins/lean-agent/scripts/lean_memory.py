@@ -9,14 +9,21 @@ that are relevant, as context cards.
     type:  user | feedback | project | reference   (as in Claude Code auto memory)
     scope: global | <project name>                 (global memories reach every project)
 """
+import contextlib
 import datetime
 import glob
 import hashlib
 import json
 import os
 import re
+import threading
 
 import lean_rules
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
 
 TYPES = ("user", "feedback", "project", "reference")
 GLOBAL = "global"
@@ -114,8 +121,11 @@ def read_all(d):
     for f in sorted(glob.glob(os.path.join(d, "*.md"))):
         if os.path.basename(f) == "MEMORY.md":
             continue
-        with open(f, encoding="utf-8", errors="replace") as fh:
-            meta, body = parse(fh.read())
+        try:
+            with open(f, encoding="utf-8", errors="replace") as fh:
+                meta, body = parse(fh.read())
+        except FileNotFoundError:  # removed by a concurrent writer
+            continue
         if not body:
             continue
         stem = os.path.splitext(os.path.basename(f))[0]
@@ -341,7 +351,10 @@ def merge_cluster(d, group):
     keep, rest = group[0], group[1:]
     for m in rest:
         _append_detail(read_all_one(d, keep), m["body"], force=True)  # merged before the file goes
-        os.remove(m["file"])
+        try:
+            os.remove(m["file"])
+        except FileNotFoundError:
+            pass
     rebuild_index(d)
     return keep["stem"]
 
@@ -353,19 +366,50 @@ def read_all_one(d, m):
 _SUFFIXED = re.compile(r"^(.+)_(\d+)$")
 
 
+_held = {}
+_thread_lock = threading.RLock()
+
+
+@contextlib.contextmanager
+def store_lock(d):
+    """Serialise writers of the memory store across threads and processes (re-entrant for the holder)."""
+    with _thread_lock:
+        if _held.get(d):
+            yield
+            return
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, ".lock"), "w") as fh:
+            if fcntl:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+            _held[d] = True
+            try:
+                yield
+            finally:
+                _held[d] = False
+                if fcntl:
+                    fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def heal(d):
     """Merge `<name>` / `<name>_N` pairs that are exact or near-identical copies (same rules as dedupe). Returns the
-    number merged."""
-    by_stem = {m["stem"]: m for m in read_all(d)}
+    number merged. Write path only: takes the store lock, re-reads under it, tolerates files vanishing, and is a
+    no-op on a store that is already clean."""
+    if not os.path.isdir(d):
+        return 0
     merged = 0
-    for stem in sorted(by_stem):
-        m = _SUFFIXED.match(stem)
-        base = by_stem.get(m.group(1)) if m else None
-        dup = by_stem[stem]
-        if base and base["scope"] == dup["scope"] and base["type"] == dup["type"] and (
-                _digest(base["body"]) == _digest(dup["body"]) or _same(dup["body"], dup["name"], dup["type"], base)):
-            merge_cluster(d, [base, dup])
-            merged += 1
+    with store_lock(d):
+        for stem in sorted({m["stem"] for m in read_all(d)}):
+            by_stem = {m["stem"]: m for m in read_all(d)}  # fresh: an earlier merge may have changed the base
+            m = _SUFFIXED.match(stem)
+            base = by_stem.get(m.group(1)) if m else None
+            dup = by_stem.get(stem)
+            if base and dup and base["scope"] == dup["scope"] and base["type"] == dup["type"] and (
+                    _digest(base["body"]) == _digest(dup["body"]) or _same(dup["body"], dup["name"], dup["type"], base)):
+                try:
+                    merge_cluster(d, [base, dup])
+                except (FileNotFoundError, StopIteration):
+                    continue
+                merged += 1
     return merged
 
 
