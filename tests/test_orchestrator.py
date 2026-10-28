@@ -7481,6 +7481,12 @@ class CliTest(unittest.TestCase):
         wt = re.search(r"^worktree: \S+ at (\S+)", out, re.M).group(1)
         git = lambda *x: subprocess.run(["git", "-C", wt, *x], capture_output=True, text=True).stdout.strip()
         git("branch", "-m", "feature/renamed")  # what a worker did to its branch
+        reg = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees.json")
+        with open(reg) as fh:
+            before = fh.read()
+        self.assertIn("feature/renamed", self.cli("worktrees", "proj").stdout)
+        with open(reg) as fh:
+            self.assertEqual(fh.read(), before)  # listing is read-only: it computes the rename in memory
         out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feature/renamed", "--", "go on").stdout
         self.assertIn(f"worktree: feature/renamed at {wt} (reused, on branch feature/renamed", out)
         self.assertNotIn(auto, self.cli("worktrees", "proj").stdout)
