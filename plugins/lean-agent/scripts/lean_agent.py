@@ -1847,7 +1847,7 @@ def _cmd_run(a):
             # an auto name is chosen and its branch created under one lock, so parallel runs can't pick the same name
             with file_lock(home("worktrees", slug, ".auto-branch")) if auto_branch else contextlib.nullcontext():
                 if auto_branch:
-                    title = branch_title(getattr(a, "todo", None), task)
+                    title = branch_title(getattr(a, "todo", None), task, getattr(a, "branch_name", None))
                     a.worktree = new_branch_name(slug, project, getattr(a, "branch_type", None),
                                                  todo_task_id(getattr(a, "todo", None)), title,
                                                  getattr(a, "branch_version", None))
@@ -2033,6 +2033,8 @@ def _cmd_run(a):
         hooks["PostToolUse"] = [{"matcher": "mcp__.*", "hooks": [{
             "type": "command", "timeout": 20,
             "command": f"python3 {json.dumps(os.path.join(HERE, 'mcp_trim_hook.py'))}"}]}]
+    hooks["PreToolUse"].append({"matcher": "*", "hooks": [{  # one note at ~70% of the budget: commit, then summarise
+        "type": "command", "timeout": 10, "command": f"python3 {json.dumps(os.path.join(HERE, 'wrapup_hook.py'))}"}]})
     flag_settings["hooks"] = hooks
     if flag_settings:
         cmd += ["--settings", json.dumps(flag_settings)]
@@ -2116,11 +2118,15 @@ def _cmd_run(a):
         rec = load_json(home("running", running_key + ".json"), None)
         if isinstance(rec, dict):
             save_json(home("running", running_key + ".json"), dict(rec, session_id=sid))
+    env["LEAN_AGENT_WRAPUP_FLAG"] = os.path.join(workdir, "wrapup.flag")
+    for stale in ("wrapup.flag", "wrapup.flag.sent"):
+        if os.path.exists(os.path.join(workdir, stale)):
+            os.remove(os.path.join(workdir, stale))
     try:
         with wt_lock:
             raw, err, reads = stream_worker(cmd, today_line() + "\n\n" + task, workdir, env,
                                             env_num("LEAN_AGENT_RUN_TIMEOUT", 1800), max_reads, note_session,
-                                            cwd=project if native_rules else None)
+                                            cwd=project if native_rules else None, warn_turns=a.max_turns)
     except FileNotFoundError:
         die(f"'{claude}' not found on PATH")
     finally:
@@ -2146,6 +2152,11 @@ def _cmd_run(a):
             out, result_line = ev, line
         elif ev.get("type") == "rate_limit_event":
             usage.record_plan_usage(ev.get("rate_limit_info"))
+    final_text = None
+    if (not read_only and not role and (reads.get("stopped") or out.get("subtype") == "error_max_turns")
+            and (out.get("session_id") or reads.get("session_id"))):
+        final_text = final_turn(cmd, out.get("session_id") or reads["session_id"], workdir, env,
+                                project if native_rules else None, reads, out)
     with open(os.path.join(workdir, "result.json"), "a") as fh:
         fh.write((result_line or json.dumps({"stderr": err[-4000:], "stdout_tail": raw[-2000:]})) + "\n")
 
@@ -2181,6 +2192,9 @@ def _cmd_run(a):
     if reads.get("stopped") and not out.get("type"):  # stopped by lean-agent: no result event, so build one
         out = {"subtype": "error_max_context_reads", "session_id": reads.get("session_id"),
                "num_turns": reads["turns"], "usage": reads["usage"]}
+        if final_text:
+            out["result"] = final_text
+            summary, fb = parse_feedback(final_text)
     subtype = out.get("subtype") or "error"
     if subtype.startswith("error_max"):
         status = "stopped:" + subtype[len("error_"):]
@@ -2281,8 +2295,15 @@ def _cmd_run(a):
         ext = tools_overhead(mcp_specs, mcp_allowed, chrome_spec)
         n_off, n_used = sum(len(v) for v in offered.values()), len(set(mcp_seq))
         tools_note = f" ({n_off} offered, {n_used} used)" if offered else ""
-        detail(f"  context per turn ~{per_turn:,}: lean-agent protocol + cards ~{own:,} · MCP/browser tools ~{ext:,}"
-              f"{tools_note} · Claude Code system prompt, built-in tools, conversation ~{max(0, per_turn - own - ext):,}")
+        first = reads.get("first_ctx") or 0
+        base = first or per_turn  # the start when the stream gave it, else the average
+        split = (f"lean-agent protocol + cards ~{own:,} · MCP/browser tools ~{ext:,}{tools_note} · Claude Code system "
+                 f"prompt, built-in tools, task ~{max(0, base - own - ext):,}")
+        if first:
+            detail(f"  context per turn ~{per_turn:,} (average over the run). Start ~{first:,}: {split}; the rest "
+                   f"(~{max(0, per_turn - first):,}) is what the worker read and ran")
+        else:
+            detail(f"  context per turn ~{per_turn:,}: {split}")
     for line in narrowing_hints(offered, mcp_seq):
         detail("  " + line)
     sv = run_savings(entry)
@@ -2444,7 +2465,10 @@ def record_unauth_card(server, slug):
     return bool(lean_memory.add(store, body, "reference", scope=slug, name=title, source="mcp auth check"))
 
 
-def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd=None):
+WRAPUP_AT = 0.7
+
+
+def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd=None, warn_turns=0):
     """Run a worker and read its stream-json as it comes, so a run that keeps re-reading a large context
     can be stopped (after `max_reads` context tokens summed over its calls; 0 = never) and resumed later.
     `on_session(id)` is called once, when the first event carries the session id.
@@ -2498,6 +2522,15 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
                     for k in usage.FIELDS:
                         reads["usage"][k] += int(u.get(k) or 0)
                     reads["ctx"] += usage.context_tokens(u)
+                    reads.setdefault("first_ctx", usage.context_tokens(u))  # the start: before any tool result
+                    if not reads.get("warned") and ((max_reads and reads["ctx"] > WRAPUP_AT * max_reads)
+                                                    or (warn_turns and reads["turns"] > WRAPUP_AT * warn_turns)):
+                        reads["warned"] = True  # the worker's next tool call carries the note (wrapup_hook.py)
+                        flag = env.get("LEAN_AGENT_WRAPUP_FLAG")
+                        if flag:
+                            open(flag, "w").close()
+                        print(f"worker at ~{int(WRAPUP_AT * 100)}% of its read/turn budget: told to commit and write "
+                              "its summary", flush=True)
                     if max_reads and reads["ctx"] > max_reads:
                         reads["stopped"] = True
                         proc.terminate()
@@ -2523,6 +2556,46 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
 
 
 LAST_RUN = []  # the entry of the run this process made last
+
+
+FINAL_TURN_PROMPT = ("You are out of budget and must stop now. Do not read or explore anything more. Commit your "
+                     "finished work (git add, git commit) and reply with a short summary: what is done, what is left.")
+
+
+def final_turn(cmd, session_id, workdir, env, cwd, reads, out):
+    """One bounded last turn for a write worker stopped at its read or turn limit: resume it with only the instruction
+    to commit and summarise. Its usage is added to the run's; returns its text (also put in out["result"] when the
+    worker's own result event has none), else None."""
+    c, i = [], 0
+    while i < len(cmd):
+        if cmd[i] in ("--resume", "--max-turns", "--max-budget-usd"):
+            i += 2
+            continue
+        c.append(cmd[i])
+        i += 1
+    c += ["--resume", session_id, "--max-turns", "4"]
+    print("final turn: asking the worker to commit and summarise", flush=True)
+    try:
+        raw, _, _ = stream_worker(c, FINAL_TURN_PROMPT, workdir, env, env_num("LEAN_AGENT_FINAL_TURN_TIMEOUT", 300),
+                                  0, None, cwd=cwd)
+    except OSError:
+        return None
+    text = None
+    for line in raw.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and ev.get("type") == "result":
+            text = (ev.get("result") or "").strip() or None
+            for k, v in (ev.get("usage") or {}).items():
+                if k in reads["usage"] and isinstance(v, (int, float)):
+                    reads["usage"][k] += int(v)
+                    if isinstance(out.get("usage"), dict):
+                        out["usage"][k] = (out["usage"].get(k) or 0) + int(v)
+    if text and out.get("type") and not out.get("result"):
+        out["result"] = text
+    return text
 
 
 def run_escalating(a):
@@ -5228,13 +5301,22 @@ def todo_task_id(todo_id):
     return (task_id_of(item.get("ref")) if item else None) or todo_id
 
 
-def branch_title(todo_id, task):
-    """What a generated branch is named after: the todo's title, else the first line of the task text (never --why)."""
+TASK_LABEL = re.compile(r"^\s*(?:[#>*_\-\s]*)(?:goal|task|steps?|context|objective|todo|plan|part [a-z0-9]+)\s*[:\-]\s*", re.I)
+
+
+def branch_title(todo_id, task, override=None):
+    """What a generated branch is named after: --branch-name, else the todo's title, else the first line of the task
+    text with leading labels ("Goal:", "Task:", "Steps:") stripped (never --why). Dies when nothing usable is left."""
+    if override:
+        return override
     item = next((t for t in todos()["items"] if t["id"] == todo_id), None) if isinstance(todo_id, int) else None
     if item and item.get("text"):
         return item["text"]
-    lines = (task or "").strip().splitlines()
-    return lines[0] if lines else ""
+    for line in (task or "").strip().splitlines():
+        line = TASK_LABEL.sub("", line, count=1).strip()
+        if branch_slug(line):
+            return line
+    die("no title to name the branch after: pass --branch-name NAME (or --todo with a title)")
 
 
 def new_branch_name(slug, repo, kind, task_id, title, version=None):
@@ -7420,6 +7502,21 @@ def stop_run(target):
     return 0
 
 
+def norm_thread_tag(tag):
+    """'#3', 'T3' and '3' all become 't3'; empty stays ''."""
+    t = str(tag or "").strip().lstrip("#").lower()
+    return "t" + t if t.isdigit() else t
+
+
+def run_summary_line(r):
+    """The `run ...` line of a finished run's saved summary, else the one built from the ledger."""
+    for f in reversed(run_summary_files(r)):
+        for line in read_text(f).splitlines():
+            if line.startswith("run "):
+                return line
+    return run_line_from_ledger(r)
+
+
 def cmd_runs(a):
     if getattr(a, "wait", None):
         return wait_for_runs(a.wait, a.timeout)
@@ -7427,6 +7524,9 @@ def cmd_runs(a):
     if a.project:
         slug, _ = resolve_project(a.project)
         runs = [r for r in runs if r["project"] == slug]
+    if getattr(a, "thread_filter", None):
+        want = norm_thread_tag(a.thread_filter)
+        runs = [r for r in runs if norm_thread_tag(r.get("thread")) == want]
     if getattr(a, "stop", None):
         return stop_run(a.stop)
     if getattr(a, "clear", False) and not getattr(a, "lost", False):
@@ -7488,9 +7588,11 @@ def cmd_runs(a):
             print(f"({len(files)} turns of this run; this is the latest: {files[-1]})")
         return
     if a.last:
-        print(latest_run_id(runs))
+        rid = latest_run_id(runs)
+        r = next((x for x in reversed(runs) if x["id"] == rid), None)
+        print(f"{rid}  {run_summary_line(r)}" if r else rid)
         return
-    for r in runs[-a.n:]:
+    for r in runs[-(a.limit or a.n):]:
         print(f"{r['id']}  {r['status']:<22} {r['model']:<7} {r['project']:<16} {r['task'][:70]}")
     for rid, m in lost_runs(home()):
         if not a.project or m.get("project") == a.project:
@@ -9349,6 +9451,14 @@ def _cmd_todo(a):
             print(f"(start it: lean-agent todo start {t['id']}; done: lean-agent todo done {t['id']} \"<result>\")")
         return 0
     items = data["items"] if a.all else open_todos(data)
+    if getattr(a, "open", False):
+        items = [t for t in items if t["status"] in ("open", "doing")]
+    if getattr(a, "thread_tag", None):
+        want = norm_thread_tag(a.thread_tag)
+        items = [t for t in items if norm_thread_tag(t.get("thread")) == want]
+    if getattr(a, "grep", None):
+        items = [t for t in items if a.grep.lower() in (t.get("text") or "").lower()
+                 or any(a.grep.lower() in str(n).lower() for n in t.get("notes") or [])]
     if a.epic:
         items = [t for t in items if t.get("epic") == a.epic]
     if a.project:
@@ -10835,6 +10945,8 @@ def build_parser():
     s.add_argument("--worktree", metavar="REF", help="run in a shared lean-agent git worktree of this branch/ref "
                    "(your checkout is never touched; installed deps persist for the next worker); `auto` makes a new "
                    "branch named by the project's branch rules (lean-agent config branch-rules)")
+    s.add_argument("--branch-name", metavar="NAME", help="--worktree auto: name the branch after NAME instead of "
+                   "the todo title or the task text")
     s.add_argument("--branch-type", choices=BRANCH_KINDS, help="--worktree auto: feature, bugfix or release "
                    "(default: inferred from the task)")
     s.add_argument("--branch-version", metavar="X", help="--worktree auto, release branches: the version")
@@ -11051,7 +11163,9 @@ def build_parser():
 
     s = sub.add_parser("runs", help="recent worker runs (id, status, model, task)")
     s.add_argument("--project", "-p")
-    s.add_argument("--last", action="store_true", help="print only the id of the latest run")
+    s.add_argument("--last", action="store_true", help="print the latest run's id and its summary line")
+    s.add_argument("--thread", dest="thread_filter", metavar="tN", help="only the runs of this thread")
+    s.add_argument("--limit", type=int, metavar="N", help="the newest N runs (same as -n)")
     s.add_argument("--running", action="store_true", help="runs in progress right now")
     s.add_argument("--lost", action="store_true", help="list the lost runs (supervisor died without a result); with --clear mark them acknowledged")
     s.add_argument("--clear", action="store_true", help="with --lost: mark the lost runs lost-and-acknowledged so they stop appearing")
@@ -11088,6 +11202,8 @@ def build_parser():
     s.add_argument("--prio", choices=list(PRIOS))
     s.add_argument("--due", metavar="YYYY-MM-DD")
     s.add_argument("--all", action="store_true", help="list: include done ones")
+    s.add_argument("--open", action="store_true", help="list: only open and doing ones (with --all: not the done ones)")
+    s.add_argument("--grep", metavar="TEXT", help="list: only todos whose text or notes contain TEXT")
     s.add_argument("--epic", metavar="NAME", help="add: part of this epic; next/list: only this epic")
     s.add_argument("--after", metavar="N,N", help="add: ready only once these items are done")
     s.add_argument("--count", action="append", metavar="COUNTER", help="epic NAME: show this counter's progress "
