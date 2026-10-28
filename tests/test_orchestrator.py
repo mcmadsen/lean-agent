@@ -1929,7 +1929,7 @@ class CliTest(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(store, "feedback_copy_2.md")))
         self.assertIn("no near-duplicate", self.cli("memory", "dedupe").stdout)
 
-    def test_read_only_commands_leave_numbered_copies_alone_and_import_heals_them(self):
+    def test_read_only_commands_leave_numbered_copies_alone_and_a_memory_write_heals_them(self):
         self.add_rule()
         store = self.cli("memory", "where").stdout.split(": ", 1)[1].splitlines()[0]
         copy = os.path.join(store, "feedback_no_tracker_mcp_2.md")
@@ -2527,7 +2527,8 @@ class CliTest(unittest.TestCase):
         self.cli("up", "--name", "la", "--", "--debug", "--debug-file", "/tmp/rc.log",
                  check=False, LEAN_AGENT_CLAUDE=argv_dumper)
         with open(fake_log) as fh:
-            self.assertRegex(fh.read(), r"^--model sonnet --remote-control la --session-id [0-9a-f-]{36} "
+            self.assertRegex(fh.read(), r"^--model sonnet --strict-mcp-config --mcp-config \{\"mcpServers\": \{\}\} --disable-slash-commands --settings \{.*\} "
+                                        r"--remote-control la --session-id [0-9a-f-]{36} "
                                         r"--debug --debug-file /tmp/rc.log$")
 
     def test_up_fresh_removes_bridge_pointer(self):
@@ -2620,7 +2621,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("lean-agent run", self.cli("guide", "--cli").stdout)
         doc = self.cli("doctor", home, check=False).stdout
         self.assertRegex(doc, r"✓ orchestrator loads ~[\d,]+ tokens of instructions on every call: CLAUDE.md ~[\d,]+\n")
-        os.makedirs(os.path.join(home, ".claude", "rules"))
+        os.makedirs(os.path.join(home, ".claude", "rules"), exist_ok=True)
         with open(os.path.join(home, ".claude", "rules", "extra.md"), "w") as fh:
             fh.write("extra " * 100)
         doc = self.cli("doctor", home, check=False).stdout
@@ -2672,7 +2673,7 @@ class CliTest(unittest.TestCase):
             fh.write("".join(json.dumps(x) + "\n" for x in lines))
         with open(os.path.join(home, ".claude", "rules.md"), "w") as fh:
             fh.write("x")
-        os.makedirs(os.path.join(home, ".claude", "rules"))
+        os.makedirs(os.path.join(home, ".claude", "rules"), exist_ok=True)
         with open(os.path.join(home, ".claude", "rules", "extra.md"), "w") as fh:
             fh.write("extra rule " * 100)
         env = dict(FAKE_PROBE_TOOLS=json.dumps(["Bash", "Read", "KeepTool", "NotebookEdit2", "mcp__x__y"]),
@@ -3279,7 +3280,12 @@ class CliTest(unittest.TestCase):
         p, log, ss = self.start_up("--name", "la", "--model", "sonnet")
         [call] = self.read_jsonl(log)
         sid = call["argv"][call["argv"].index("--session-id") + 1]
-        self.assertEqual(call["argv"][:5], ["--model", "sonnet", "--remote-control", "la", "--session-id"])
+        argv = call["argv"]
+        self.assertEqual(argv[:2], ["--model", "sonnet"])
+        self.assertEqual(argv[argv.index("--remote-control"):][:4], ["--remote-control", "la", "--session-id", sid])
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertEqual(json.loads(argv[argv.index("--mcp-config") + 1]), {"mcpServers": {}})
+        self.assertIn("--disable-slash-commands", argv)
         self.assertEqual(call["service"], "1")        # the permission hook only acts in this session
         self.assertIsNone(call["leaked"])              # the parent session's variables don't reach it
         info = ss.info()
@@ -4128,12 +4134,55 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.read_jsonl(log)[-1]["argv"][-2:], ["--resume", old])
         self.stop_up(p, 30)
 
+    def test_orchestrator_session_flags_load_nothing_unused_and_only_the_guide_of_the_role(self):
+        L = lean_agent_module()
+        h = os.path.join(self.tmp.name, "orchhome")
+        agents = os.path.join(self.tmp.name, "cfg", "agents")
+        os.makedirs(agents)
+        open(os.path.join(agents, "reviewer.md"), "w").close()
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": os.path.join(self.tmp.name, "cfg")}):
+            main = L.session_flags(h, "main")
+            thread = L.session_flags(h, "thread")
+            with mock.patch.dict(os.environ, {"LEAN_AGENT_ORCHESTRATOR_TRIM": "0"}):
+                self.assertEqual(L.session_flags(h, "main"), [])
+        for flags in (main, thread):
+            self.assertIn("--strict-mcp-config", flags)
+            self.assertEqual(json.loads(flags[flags.index("--mcp-config") + 1]), {"mcpServers": {}})
+            self.assertIn("--disable-slash-commands", flags)
+        ms = json.loads(main[main.index("--settings") + 1])
+        ts = json.loads(thread[thread.index("--settings") + 1])
+        self.assertEqual(ms["claudeMdExcludes"][0], os.path.join(h, "CLAUDE.md"))
+        self.assertEqual(ts["claudeMdExcludes"][0], os.path.join(h, ".claude", "rules", "front-desk.md"))
+        self.assertEqual(ms["permissions"]["deny"], ["Agent(reviewer)"])
+
+    def test_home_gets_the_full_guide_and_a_short_front_desk_guide(self):
+        L = lean_agent_module()
+        h = os.path.join(self.tmp.name, "orchhome2")
+        os.makedirs(h, exist_ok=True)
+        L.write_home_guide(h)
+        full, desk = L.read_text(os.path.join(h, "CLAUDE.md")), L.read_text(L.front_desk_file(h))
+        self.assertGreater(len(full), 10000)
+        self.assertLess(len(desk), 6000)
+        self.assertIn("front desk", desk)
+        self.assertNotIn("lean-agent run", desk)
+
+    def test_fresh_after_context_is_the_lower_of_tokens_and_share(self):
+        ss = lean_agent_module().service_session
+        limits = ss.parse_fresh_after(None)[1]
+        self.assertEqual(ss.fresh_context_threshold(limits, 967000), 120000)  # 1M window
+        self.assertEqual(ss.fresh_context_threshold(limits, 200000), 100000)  # 200k window
+        self.assertEqual(ss.fresh_context_threshold(ss.parse_fresh_after("context=120k")[1], 200000), 120000)
+        self.assertEqual(ss.fresh_context_threshold(ss.parse_fresh_after("context=50%")[1], 967000), 483500)
+        self.assertEqual(ss.fresh_text(ss.parse_fresh_after("context=120k|50%")), "idle=30m,context=120k|50%")
+        with self.assertRaises(ValueError):
+            ss.parse_fresh_after("context=lots")
+
     def test_config_thread_fresh_after_default_and_off(self):
         self.cli("config", "thread-fresh-after", "idle=2h,context=10%")
         self.assertIn("idle=120m,context=10%", self.cli("config", "thread-fresh-after").stdout)
-        self.assertIn("idle=30m,context=50%", self.cli("config", "thread-fresh-after", "default").stdout)
+        self.assertIn("idle=30m,context=120k|50%", self.cli("config", "thread-fresh-after", "default").stdout)
         self.assertIn("thread-fresh-after: off", self.cli("config", "thread-fresh-after", "off").stdout)
-        self.assertIn("idle=30m,context=50%", self.cli("config", "thread-fresh-after", "default").stdout)
+        self.assertIn("idle=30m,context=120k|50%", self.cli("config", "thread-fresh-after", "default").stdout)
         self.assertNotEqual(self.cli("config", "thread-fresh-after", "idle=bogus", check=False).returncode, 0)
 
     def send_in_process(self, ages, prompt="more work"):
@@ -9252,6 +9301,37 @@ class RuleUnitTest(unittest.TestCase):
         self.assertEqual(self.memory.heal(self.dir), 1)
         self.assertEqual([m["stem"] for m in self.memory.read_all(self.dir)], ["project_fmt"])
         self.assertEqual(self.memory.heal(self.dir), 0)
+
+    def test_heal_reads_the_store_once(self):
+        body = "Always run the formatter before committing the changes to the repository"
+        for stem in ("project_fmt", "project_fmt_2", "project_fmt_3"):
+            self._write_mem(stem, body)
+        with mock.patch.object(self.memory, "read_all", wraps=self.memory.read_all) as ra:
+            self.assertEqual(self.memory.heal(self.dir), 2)
+        self.assertEqual(ra.call_count, 1 + 2 * 2)  # one read for the heal; each merge re-reads for its kept entry and the index
+
+    def test_restore_takes_the_newest_archived_copy(self):
+        arch = os.path.join(self.dir, "archive")
+        os.makedirs(arch)
+        for i, name in enumerate(("project_fmt.md", "project_fmt.2.md", "project_fmt.10.md", "project_fmt.9.md")):
+            with open(os.path.join(arch, name), "w") as fh:
+                fh.write(f"---\nname: fmt\ntype: project\n---\ncopy {name}\n")
+            os.utime(os.path.join(arch, name), (1000 + i, 1000 + i) if i < 3 else (1000 + 2, 1000 + 2))
+        self.assertEqual(self.memory.restore(self.dir, "project_fmt"), "project_fmt")
+        self.assertIn("project_fmt.10.md", self.memory.read_all(self.dir)[0]["body"])
+
+    def test_store_writers_take_the_lock_and_a_read_only_store_does_not_break_it(self):
+        taken = []
+        real = self.memory.store_lock
+        with mock.patch.object(self.memory, "store_lock", side_effect=lambda d: (taken.append(d), real(d))[1]):
+            path = self.memory.add(self.dir, "A note about the formatter being run first")
+            self.memory.edit(self.dir, os.path.basename(path)[:-3], "A note about the formatter being run second")
+            self.memory.remove(self.dir, os.path.basename(path)[:-3])
+            self.memory.heal(self.dir)
+        self.assertGreaterEqual(len(taken), 4)
+        with mock.patch("builtins.open", side_effect=PermissionError("read-only")):
+            with self.memory.store_lock(self.dir):
+                pass
 
     def test_heal_does_not_merge_copies_of_another_scope_or_type(self):
         body = "Always run the formatter before committing the changes to the repository"
