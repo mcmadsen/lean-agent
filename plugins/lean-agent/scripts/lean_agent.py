@@ -9173,15 +9173,14 @@ def close_blockers(s, busy, launching, caller):
         why.append(f"{len(busy[tid])} running ({', '.join(busy[tid])})")
     elif tid in launching:
         why.append("a run is starting")
-    if s["idle"] < CLOSE_MIN_IDLE_S():
-        why.append(f"idle under {CLOSE_MIN_IDLE_S() // 60} min")
-    path = service_session.info(tid).get("transcript") or service_session._load(service_session.service_record(tid)).get("transcript_path")
-    if path and os.path.exists(path) and os.path.getsize(path) and not service_session.transcript_state(path)["ended"]:
+    if s["idle"] < close_min_idle():
+        why.append(f"idle under {close_min_idle() // 60} min")
+    if service_session.mid_turn(tid):
         why.append("mid-turn (tool call, answer or prompt pending)")
     return why
 
 
-def CLOSE_MIN_IDLE_S():
+def close_min_idle():
     try:
         return int(os.environ.get("LEAN_AGENT_CLOSE_MIN_IDLE", CLOSE_MIN_IDLE))
     except ValueError:
