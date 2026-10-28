@@ -2056,6 +2056,17 @@ class CliTest(unittest.TestCase):
             json.dump({"enabledPlugins": {"obs@synced": False}}, fh)  # Claude Code's id for a synced plugin
         self.assertNotIn("plugin:obs", self.cli("mcp", "list").stdout)
 
+    def test_optimize_flags_a_card_a_workers_missing_note_contradicts(self):
+        self.cli("learn", self.proj)
+        self.cli("card", "add", "proj", "retry-notes", "--title", "Retry notes", "--text", "Set retry_policy in api/client.py.")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--cards", "retry-notes", "add retries",
+                 FAKE_FEEDBACK=json.dumps({"status": "done", "used": [], "unneeded": [],
+                                           "missing": "the code has no retry_policy at all", "remember": []}))
+        out = self.cli("optimize", "proj").stdout
+        self.assertRegex(out, r"stale   retry-notes\s+the card mentions retry_policy")
+        data = json.loads(self.cli("optimize", "proj", "--json").stdout)
+        self.assertEqual(data["stale"][0]["card"], "retry-notes")
+
     def test_optimize_drafts_cards_and_presets(self):
         cfg = self.env["CLAUDE_CONFIG_DIR"]
         root = os.path.join(cfg, "plugins", "cache", "mkt", "obs", "1")

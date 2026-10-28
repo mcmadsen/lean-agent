@@ -6745,6 +6745,35 @@ def _card_actions(slug, cards, a, skip):
     return actions, held
 
 
+CONTRADICTS_RE = re.compile(r"\b(?:has|have|had|there is|there's|are|is|was)\s+no\b|\bno such\b|\b(?:does|do|did)\s*n[o']?t?\s+"
+                            r"(?:exist|have|contain|define)|\bnot (?:exist|found|present|defined)|\bnon-?existent\b"
+                            r"|\bno longer\b|\bdoesn't exist\b|\bisn't (?:there|present|defined)\b", re.I)
+IDENT_RE = re.compile(r"`([^`]{3,60})`|\b([A-Za-z0-9]+(?:[_./-][A-Za-z0-9]+)+|[a-z]+[A-Z]\w+)\b")
+
+
+def stale_card_proposals(slug, cards, limit=5):
+    """Cards a worker's `missing=` note contradicts: the run was given the card, the note says something the card
+    states does not exist (e.g. 'the code has no retry_policy') and names an identifier the card mentions.
+    [{card, run, note, reason}] (nothing is edited: the proposal is for the user to confirm)."""
+    live = {c["id"]: c for c in cards if not c.get("archived") and not c.get("is_rule")}
+    given = {r["id"]: set(r.get("cards") or []) for r in ledger() if r.get("project") == slug}
+    out, seen = [], set()
+    for n in reversed(list(read_jsonl(home("library", slug, "missing.jsonl")))):
+        note = str(n.get("missing") or "")
+        if not CONTRADICTS_RE.search(note):
+            continue
+        idents = {(m.group(1) or m.group(2)).lower() for m in IDENT_RE.finditer(note)}
+        for cid in sorted(given.get(n.get("run"), set()) & set(live)):
+            text = ((live[cid].get("title") or "") + " " + (live[cid].get("text") or "")).lower()
+            hit = sorted(i for i in idents if i in text)
+            if hit and (cid, n.get("run")) not in seen:
+                seen.add((cid, n.get("run")))
+                out.append({"card": cid, "run": n.get("run"), "note": " ".join(note.split())[:200],
+                            "reason": f"the card mentions {', '.join(hit[:3])}, run {n.get('run')} reported: "
+                                      + " ".join(note.split())[:160]})
+    return out[:limit]
+
+
 def _suggestion_meta(c, t):
     """One line on what a card suggestion rests on: how often workers used the card (per task type when it is one)."""
     bt = (c.get("by_type") or {}).get(t) if t and t != "*" else None
@@ -6762,6 +6791,7 @@ def optimize_result(a, slug):
             "suggestions": [{"id": _action_id(act, c, t), "kind": act, "card": c["id"], "reason": why,
                              "used": c["used"], "offered": c["offered"], "meta": _suggestion_meta(c, t)}
                             for act, c, why, t in actions],
+            "stale": stale_card_proposals(slug, load_cards(slug)),
             "drafts": [{"id": d["id"], "kind": d["kind"], "title": d["title"] if d["kind"] == "card" else
                         f"Preset {d['server']}:{d['name']}",
                         "name": d["card_id"] if d["kind"] == "card" else d["name"],
@@ -6783,6 +6813,9 @@ def _cmd_optimize(a):
               "earlier --apply changes are already in). New-card and preset drafts follow below, if any.")
     for act, c, why, _ in actions:
         print(f"{act:<8}{c['id']:<34}{why}")
+    for st in stale_card_proposals(slug, cards):
+        print(f"stale   {st['card']:<34}{st['reason']}; check it, then correct or archive it: "
+              f"lean-agent card show {slug} {st['card']}")
     if a.apply:
         wanted = None if a.apply == "all" else {x for x in a.apply.split(",") if x}
         if wanted is not None:
