@@ -718,20 +718,16 @@ same headings. Output only the new card text, nothing else.
 """
 
 
-def shorten_card(slug, cards, a):
-    """Propose a shorter text for a card (one Haiku call) and check nothing important got lost."""
-    c = find_card(cards, a.id)
+def haiku_call(prompt, model, workdir):
+    """One read-only `claude -p` call (no tools, --safe-mode, stream-json); records rate_limit_event plan usage.
+    Returns the result text ("" when none); raises OSError / TimeoutExpired when claude can't run."""
     claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
-    d = home("work", "shorten")
+    d = home("work", workdir)
     os.makedirs(d, exist_ok=True)
-    try:
-        out = subprocess.run([claude, "-p", "--output-format", "stream-json", "--verbose", "--model", a.model or "haiku",
-                              "--max-turns", "1", "--tools", "", "--safe-mode"],
-                             input=SHORTEN_PROMPT.format(text=c["text"]), capture_output=True, text=True, cwd=d,
-                             timeout=180).stdout
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        die(f"couldn't run {claude}: {exc}")
-    new = ""
+    out = subprocess.run([claude, "-p", "--output-format", "stream-json", "--verbose", "--model", model,
+                          "--max-turns", "1", "--tools", "", "--safe-mode"],
+                         input=prompt, capture_output=True, text=True, cwd=d, timeout=180).stdout
+    text = ""
     for line in out.splitlines():
         try:
             ev = json.loads(line)
@@ -740,9 +736,19 @@ def shorten_card(slug, cards, a):
         if not isinstance(ev, dict):
             continue
         if ev.get("type") == "result":
-            new = (ev.get("result") or "").strip()
+            text = (ev.get("result") or "").strip()
         elif ev.get("type") == "rate_limit_event":
             usage.record_plan_usage(ev.get("rate_limit_info"))
+    return text
+
+
+def shorten_card(slug, cards, a):
+    """Propose a shorter text for a card (one Haiku call) and check nothing important got lost."""
+    c = find_card(cards, a.id)
+    try:
+        new = haiku_call(SHORTEN_PROMPT.format(text=c["text"]), a.model or "haiku", "shorten")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        die(f"couldn't run claude: {exc}")
     if not new:
         die("no shorter text came back")
     lost = sorted(key_tokens(c["text"]) - key_tokens(new) - {t for t in key_tokens(c["text"]) if t in new})
@@ -5906,26 +5912,10 @@ dated history list (`- YYYY-MM-DD: ...`, newest last). Keep every distinct fact,
 def consolidate_text(group, model="haiku"):
     """One Haiku call (read-only, no tools, --safe-mode) -> (title, body), or None when nothing usable came back."""
     entries = "\n\n".join(f"### {m['name']} ({m['type']}, {(m['modified'] or m['created'] or '')[:10]})\n{m['body']}" for m in group)
-    claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
-    d = home("work", "consolidate")
-    os.makedirs(d, exist_ok=True)
     try:
-        out = subprocess.run([claude, "-p", "--output-format", "stream-json", "--verbose", "--model", model,
-                              "--max-turns", "1", "--tools", "", "--safe-mode"],
-                             input=CONSOLIDATE_PROMPT.format(entries=entries), capture_output=True, text=True, cwd=d,
-                             timeout=180).stdout
+        text = haiku_call(CONSOLIDATE_PROMPT.format(entries=entries), model, "consolidate")
     except (OSError, subprocess.TimeoutExpired):
         return None
-    text = ""
-    for line in out.splitlines():
-        try:
-            ev = json.loads(line)
-        except ValueError:
-            continue
-        if ev.get("type") == "result":
-            text = (ev.get("result") or "").strip()
-        elif ev.get("type") == "rate_limit_event":
-            usage.record_plan_usage(ev.get("rate_limit_info"))
     if not text:
         return None
     m = re.match(r"TITLE:\s*(.+?)\s*\n+(.*)$", text, re.S)
