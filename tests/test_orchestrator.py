@@ -5815,6 +5815,84 @@ class CliTest(unittest.TestCase):
         self.assertEqual(L.parse_idle("2h"), 7200)
         self.assertRaises(ValueError, L.parse_idle, "soon")
 
+    def close_unit(self, args, runs, mid=(), launching=(), sessions=("t1", "t2", "t3")):
+        """close_threads with live runs {tid: [(id, task, started)]}, mid-turn threads and launching threads set by hand."""
+        L = lean_agent_module()
+        closed = []
+        with mock.patch.object(L, "open_thread_sessions", return_value=[{"thread": t, "idle": 9000} for t in sessions]), \
+                mock.patch.object(L, "thread_live_runs", side_effect=lambda t, d=None: runs.get(t, [])), \
+                mock.patch.object(L, "launching_threads", return_value=set(launching)), \
+                mock.patch.object(L.service_session, "mid_turn", side_effect=lambda t: t in mid), \
+                mock.patch.object(L, "thread_session_tid", side_effect=lambda r: (r, {})), \
+                mock.patch.object(L, "close_thread_session", side_effect=lambda t: closed.append(t) or (True, True, False)), \
+                mock.patch.object(L.lean_threads, "load", return_value={"threads": {}, "aliases": {}}), \
+                mock.patch.object(L.lean_threads, "cli", return_value=0), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = L.close_threads(argparse.Namespace(**dict({"args": [], "all": False, "idle": None, "json": False, "force": False}, **args)))
+        return rc, closed, out.getvalue()
+
+    def test_explicit_close_refuses_a_thread_with_a_live_run_unless_forced(self):
+        started = datetime.datetime.fromtimestamp(time.time() - 750).isoformat(timespec="seconds")
+        runs = {"t1": [("0101-aaaa", "refactor the parser " * 10, started)]}
+        rc, closed, out = self.close_unit({"args": ["t1", "t2"]}, runs)
+        self.assertEqual((rc, closed), (1, ["t2"]))
+        self.assertRegex(out, r"t1: not closed \u2014 running: run 0101-aaaa \(refactor the parser .{0,40}\) 12m; "
+                              r"use --force to close anyway \(the run keeps going detached\)")
+        self.assertIn("closed 1 thread: t2", out)
+        rc, closed, out = self.close_unit({"args": ["t1", "t2"], "force": True}, runs)
+        self.assertEqual((rc, closed), (0, ["t1", "t2"]))
+        self.assertIn("t1: closing anyway \u2014 running: run 0101-aaaa", out)
+        self.assertIn("keep going detached", out)
+
+    def test_close_all_and_mid_turn_and_launching_are_held_too(self):
+        rc, closed, out = self.close_unit({"all": True}, {"t1": [("r1", "x", "")]}, mid=("t2",), launching=("t3",))
+        self.assertEqual((rc, closed), (1, []))
+        self.assertIn("t1: not closed", out)
+        self.assertIn("t2: not closed \u2014 running: session mid-turn", out)
+        self.assertIn("t3: not closed \u2014 running: a run is starting", out)
+        rc, closed, out = self.close_unit({"all": True, "force": True}, {}, mid=("t2",))
+        self.assertEqual((rc, closed), (0, ["t1", "t2", "t3"]))
+
+    def test_thread_sessions_lists_running_runs_and_mid_turn(self):
+        p, log, ss = self.start_up()
+        self.cli("thread", "new", "one")
+        self.wait_for(lambda: re.search(r"^t1\b", self.cli("thread", "sessions").stdout, re.M), "t1 listed")
+        self.assertNotIn("running", self.cli("thread", "sessions").stdout)
+        run = self.start_run(turns="20", sleep="1", LEAN_AGENT_THREAD="t1")
+        [m] = [m for m in self.running_markers() if not m.get("early")]
+        line = next(x for x in self.cli("thread", "sessions").stdout.splitlines() if x.startswith("t1"))
+        self.assertIn(f"1 running (first {m['run']})", line)
+        self.cli("runs", "--stop", m["run"], LEAN_AGENT_STOP_WAIT="3")
+        run.communicate(timeout=scaled(30))
+        self.stop_up(p, 30)
+
+    def test_a_detached_run_survives_a_forced_close_is_recorded_done_and_reports_to_main(self):
+        p, log, ss = self.start_up()
+        self.cli("thread", "new", "one")
+        self.wait_for(lambda: ss.alive("t1"), "t1")
+        run = self.start_run(turns="4", sleep="1", LEAN_AGENT_THREAD="t1")
+        [m] = [m for m in self.running_markers() if not m.get("early")]
+        r = self.cli("thread", "close", "t1", check=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(f"t1: not closed \u2014 running: run {m['run']}", r.stdout)
+        self.assertTrue(ss.alive("t1"))
+        out = self.cli("thread", "close", "t1", "--force").stdout
+        self.assertIn("t1: session stopped", out)
+        self.assertFalse(ss.alive("t1"))
+        self.assertTrue(service_alive(m["pid"]))  # detached: the run keeps going
+        run.communicate(timeout=scaled(60))
+        self.wait_for(lambda: not self.running_markers(), "the run to finish", 60)
+        row = next(r for r in self.ledger() if r["id"] == m["run"])
+        self.assertEqual((row["status"], row["thread"]), ("done", "t1"))
+        self.assertNotRegex(self.cli("runs", "--lost").stdout, m["run"])
+        sys.path.insert(0, os.path.dirname(CLI))
+        import service_session
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": self.env["LEAN_AGENT_HOME"]}):
+            items = service_session.queued_reports()
+        self.assertEqual([(i["thread"], i["kind"]) for i in items], [("t1", "done")])
+        self.assertIn(f"run {m['run']} done", items[0]["text"])
+        self.stop_up(p, 30)
+
     def test_record_without_a_host_pid_is_not_pending(self):
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "1")
