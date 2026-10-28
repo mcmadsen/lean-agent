@@ -3537,6 +3537,41 @@ class CliTest(unittest.TestCase):
         self.assertIn("t2", self.cli("thread", "list").stdout)
         self.assertEqual(self.cli("thread", "unmerge", "t2", check=False).returncode, 1)
 
+    def test_now_short_orders_and_limits_the_open_threads(self):
+        lt = self.threads_home()
+        for n in range(1, 6):
+            lt.new(f"Thread number {n} with a rather long title that gets cut")
+        ago = lambda s: datetime.datetime.fromtimestamp(time.time() - s).isoformat(timespec="seconds")
+        data = lt.load()
+        th = data["threads"]
+        for t in th.values():
+            t["created"] = t["last_message"] = ago(4 * 86400)
+        th["t2"]["report"] = {"kind": "needs-you", "text": "Which plan should we use? " + "x" * 80, "ts": ago(120)}
+        th["t3"]["report"] = {"kind": "done", "text": "Shipped the fix", "ts": ago(300)}
+        th["t4"]["last_message"] = ago(3 * 3600)
+        th["t5"]["report"] = {"kind": "done", "text": "Old news", "ts": ago(3 * 86400)}
+        th["t5"]["last_message"] = ago(3 * 86400)
+        th["t1"]["last_message"] = ago(60)
+        with open(lt.path(), "w") as fh:
+            json.dump(data, fh)
+        run = os.path.join(os.environ["LEAN_AGENT_HOME"], "running")
+        os.makedirs(run, exist_ok=True)
+        with open(os.path.join(run, "0101-101010-ab12.json"), "w") as fh:
+            json.dump({"run": "0101-101010-ab12", "pid": os.getpid(), "thread": "t1", "started": ago(14 * 60)}, fh)
+        lines = self.cli("now", "--short").stdout.splitlines()
+        self.assertEqual(len(lines), 5)
+        self.assertRegex(lines[0], r'^t2 Thread number 2 with a rath… · needs you 2m · "Which plan should we use\? x+…"$')
+        self.assertLessEqual(len(lines[0].split(" · ")[2]), 62)
+        self.assertRegex(lines[1], r"^t1 .* · running run 0101-101010-ab12 14m$")
+        self.assertRegex(lines[2], r'^t3 .* · done 5m · "Shipped the fix"$')
+        self.assertRegex(lines[3], r"^t4 .* · idle 3h$")
+        self.assertRegex(lines[4], r"^t5 .* · idle 3d$")
+        for n in range(6, 20):
+            lt.new(f"Extra {n}")
+        out = self.cli("now", "--short").stdout.splitlines()
+        self.assertEqual(len(out), 13)
+        self.assertEqual(out[-1], "+7 more (lean-agent now)")
+
     def test_an_explicit_thread_id_reopens_a_closed_thread(self):
         lt = self.threads_home()
         lt.route("Old topic about the parser", "s1")

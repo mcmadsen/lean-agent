@@ -9401,7 +9401,7 @@ def cmd_thread(a):
 
 
 def cmd_now(a):
-    print(lean_threads.now_text())
+    print(lean_threads.short_text(close_idle=True) if a.short else lean_threads.now_text())
 
 
 def cmd_schedule(a):
@@ -10682,6 +10682,7 @@ def build_parser():
     s.set_defaults(fn=cmd_thread)
 
     s = sub.add_parser("now", help="what we are working on: the open threads by last activity, with state and last action")
+    s.add_argument("--short", action="store_true", help="one line per open thread: needs you, running, done, idle (the front desk's view)")
     s.set_defaults(fn=cmd_now)
 
     s = sub.add_parser("week", help="the last 7 days: pace, runs, reviews, pushes, todos, scheduled jobs")
