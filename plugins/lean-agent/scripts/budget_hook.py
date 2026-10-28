@@ -398,6 +398,9 @@ DELEGATE_CHANGE = ("A worker makes the change and reads the project's cards: lea
 DELEGATE_KEEP = ("Keep it with a worker: lean-agent remember \"<what to keep>\" [--project <p>] (memory, card, todo, "
                  "feedback rule or note, filed once), or lean-agent run <project> --cards auto -m <model> --why '…' -- "
                  "'<task>'.")
+DELEGATE_KEEP_MAIN = ("Keep it with lean-agent remember \"<what to keep>\" [--project <p>] (filed once as memory, card, todo, "
+                      "feedback rule or note), or hand it to a thread: lean-agent thread send tN --prompt-file - "
+                      "(or thread new \"title\").")
 DELEGATE_MCP = ("MCP servers are for workers: lean-agent run <project> --read-only --cards auto -m haiku --why '…' "
                 "[--mcp <server>:<tools>] [--allow-cmd 'lean-agent mcp'] -- '<which servers / what tool X returns>'.")
 
@@ -539,6 +542,8 @@ def strict_denial(event, cwd, lean_root):
     def hint(text):  # the main session hands work to a thread; only a thread session starts workers
         return FRONT_DESK_HINT + "." if main else text
     redirect = tracking_redirect(tool)
+    if main and redirect in (TRACK_RUN, TRACK_WORKER):
+        redirect = FRONT_DESK_HINT + "."
     if redirect:
         return f"strict mode: the orchestrator keeps track only with lean-agent, not with {tool[:40]}. " + redirect
     if tool == "Bash":
@@ -551,7 +556,7 @@ def strict_denial(event, cwd, lean_root):
                     f"(`lean-agent {what}`). " + hint(DELEGATE_CHANGE))
         if kind == "keep":
             return (f"strict mode: the orchestrator never writes memory, cards, rules, presets, todos or notes "
-                    f"itself (`lean-agent {what}`). " + DELEGATE_KEEP)
+                    f"itself (`lean-agent {what}`). " + (DELEGATE_KEEP_MAIN if main else DELEGATE_KEEP))
         if kind == "mcp":
             return f"strict mode: the orchestrator neither lists nor runs MCP servers (`lean-agent {what}`). " + hint(DELEGATE_MCP)
     elif tool and (tool.startswith("mcp__") or tool in MCP_RESOURCE_TOOLS):

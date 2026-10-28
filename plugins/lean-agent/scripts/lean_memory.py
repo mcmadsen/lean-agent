@@ -11,6 +11,7 @@ that are relevant, as context cards.
 """
 import contextlib
 import datetime
+import functools
 import glob
 import hashlib
 import json
@@ -220,6 +221,16 @@ def _append_detail(m, text, force=False):
     return m["file"]
 
 
+def _locked(fn):
+    """Run a store writer under store_lock(d): every writer takes it, so none interleaves with another (re-entrant)."""
+    @functools.wraps(fn)
+    def run(d, *args, **kw):
+        with store_lock(d):
+            return fn(d, *args, **kw)
+    return run
+
+
+@_locked
 def add(d, text, mtype="project", scope=GLOBAL, name=None, source=None, rebuild=True, description=None, stem=None,
         dedupe=True):
     """Write one memory unless the same text is already stored. Returns its path, or None for a duplicate.
@@ -269,6 +280,7 @@ def add(d, text, mtype="project", scope=GLOBAL, name=None, source=None, rebuild=
     return path
 
 
+@_locked
 def import_dirs(d, sources, scope=GLOBAL):
     """Copy memories from Claude auto-memory folders into the store. Returns (added, skipped)."""
     added = skipped = 0
@@ -298,6 +310,7 @@ def find(d, ref):
     return None
 
 
+@_locked
 def edit(d, ref, text=None, mtype=None, description=None, scope=None):
     """Rewrite one memory in place (same file, so its card id, stats and core flag survive)."""
     m = find(d, ref)
@@ -323,6 +336,7 @@ def edit(d, ref, text=None, mtype=None, description=None, scope=None):
     return m["file"]
 
 
+@_locked
 def remove(d, stem):
     path = os.path.join(d, stem + ".md")
     if not os.path.exists(path):
@@ -346,6 +360,7 @@ def clusters(d, scopes=None):
     return [g for g in groups if len(g) > 1]
 
 
+@_locked
 def merge_cluster(d, group):
     """Keep the oldest entry, append the others' extra detail (dated, short) and delete them. Returns the kept stem."""
     keep, rest = group[0], group[1:]
@@ -377,19 +392,23 @@ def store_lock(d):
         if _held.get(d):
             yield
             return
-        os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, ".lock"), "w") as fh:
-            if fcntl:
+        try:
+            os.makedirs(d, exist_ok=True)
+            fh = open(os.path.join(d, ".lock"), "w")
+        except OSError:  # a read-only store: the thread lock alone (its writes fail on their own, nothing else breaks)
+            fh = None
+        _held[d] = True
+        try:
+            if fh and fcntl:
                 fcntl.flock(fh, fcntl.LOCK_EX)
-            _held[d] = True
-            try:
-                yield
-            finally:
-                _held[d] = False
-                if fcntl:
-                    fcntl.flock(fh, fcntl.LOCK_UN)
+            yield
+        finally:
+            _held[d] = False
+            if fh:
+                fh.close()  # releases the flock
 
 
+@_locked
 def heal(d):
     """Merge `<name>` / `<name>_N` pairs that are exact or near-identical copies (same rules as dedupe). Returns the
     number merged. Write path only: takes the store lock, re-reads under it, tolerates files vanishing, and is a
@@ -397,19 +416,21 @@ def heal(d):
     if not os.path.isdir(d):
         return 0
     merged = 0
-    with store_lock(d):
-        for stem in sorted({m["stem"] for m in read_all(d)}):
-            by_stem = {m["stem"]: m for m in read_all(d)}  # fresh: an earlier merge may have changed the base
-            m = _SUFFIXED.match(stem)
-            base = by_stem.get(m.group(1)) if m else None
-            dup = by_stem.get(stem)
-            if base and dup and base["scope"] == dup["scope"] and base["type"] == dup["type"] and (
-                    _digest(base["body"]) == _digest(dup["body"]) or _same(dup["body"], dup["name"], dup["type"], base)):
-                try:
-                    merge_cluster(d, [base, dup])
-                except (FileNotFoundError, StopIteration):
-                    continue
-                merged += 1
+    by_stem = {m["stem"]: m for m in read_all(d)}  # read once; a merge updates the base entry below
+    for stem in sorted(by_stem):
+        m = _SUFFIXED.match(stem)
+        base = by_stem.get(m.group(1)) if m else None
+        dup = by_stem.get(stem)
+        if base and dup and base["scope"] == dup["scope"] and base["type"] == dup["type"] and (
+                _digest(base["body"]) == _digest(dup["body"]) or _same(dup["body"], dup["name"], dup["type"], base)):
+            try:
+                merge_cluster(d, [base, dup])
+                with open(base["file"], encoding="utf-8", errors="replace") as fh:
+                    base["body"] = parse(fh.read())[1]
+            except (FileNotFoundError, StopIteration):
+                continue
+            del by_stem[stem]
+            merged += 1
     return merged
 
 
@@ -478,6 +499,7 @@ def strongest_type(group):
     return next((t for t in KIND_ORDER if t in types), "project")
 
 
+@_locked
 def consolidate(d, group, title, body):
     """Replace a cluster by one entry (the strongest type, the rules' targets and alternative kept) and archive the
     originals with `merged_into`. Returns the new stem."""
@@ -519,10 +541,14 @@ def consolidate(d, group, title, body):
     return new
 
 
+@_locked
 def restore(d, ref):
     """Move an archived memory back into the store (by file stem, `mem-` card id or name). Returns its stem or None."""
     key = re.sub(r"[^a-z0-9]+", "-", (ref[4:] if ref.startswith("mem-") else ref).lower()).strip("-")
-    for f in sorted(glob.glob(os.path.join(archive_dir(d), "*.md"))):
+    def age(f):  # newest first: modification time, then the sequence number (<stem>.10.md is later than <stem>.9.md)
+        seq = re.search(r"\.(\d+)\.md$", f)
+        return os.stat(f).st_mtime_ns, int(seq.group(1)) if seq else 1
+    for f in sorted(glob.glob(os.path.join(archive_dir(d), "*.md")), key=age, reverse=True):
         with open(f, encoding="utf-8", errors="replace") as fh:
             meta, body = parse(fh.read())
         stem = re.sub(r"\.\d+$", "", os.path.splitext(os.path.basename(f))[0])  # <stem>.2.md: a later archive of the same stem

@@ -940,17 +940,20 @@ class BudgetTest(Base):
         templates = os.path.join(ROOT, "..", "templates")
         with open(os.path.join(templates, "guide.md"), encoding="utf-8") as fh:
             guide = fh.read().replace("{{P}}", "shop")
+        with open(os.path.join(templates, "front-desk.md"), encoding="utf-8") as fh:
+            desk = fh.read().replace("{{P}}", "shop")
+        self.assertLess(len(desk), 6000)  # the main session's guide stays ~1.5k tokens at most
         with open(os.path.join(templates, "repo-block.md"), encoding="utf-8") as fh:
             block = fh.read().replace("{{P}}", "shop")
         examples = []
-        for m in re.finditer(r"^```(\w*)\n(.*?)^```", guide, re.S | re.M):
+        for m in re.finditer(r"^```(\w*)\n(.*?)^```", guide + "\n" + desk, re.S | re.M):
             if m.group(1) == "sh":
                 examples.append(m.group(2))
             elif m.group(1) == "text":
                 examples += [l for l in m.group(2).splitlines() if l.startswith("lean-agent ")]
         bash_event = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}}
         skipped = []
-        for doc in (guide, block):
+        for doc in (guide, desk, block):
             text = re.sub(r"^```.*?^```", "", doc, flags=re.S | re.M)
             for m in re.finditer(r"`(lean-agent [^`]+)`", text):
                 span = " ".join(m.group(1).split())  # a span may wrap over lines
@@ -1040,6 +1043,20 @@ class BudgetTest(Base):
         for env in ({"LEAN_AGENT_SESSION_ROLE": "thread", "LEAN_AGENT_THREAD": "t1"}, {}):
             with mock.patch.dict(os.environ, env):
                 self.assertEqual(budget_hook.front_desk_denial(event("lean-agent run p -- 'x'")), "")
+
+    def test_main_session_strict_hints_point_at_the_hand_over_not_run(self):
+        sys.path.insert(0, ROOT)
+        import budget_hook
+        bash = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}}
+        cases = [{"tool_name": "Agent", "tool_input": {}}, {"tool_name": "WebFetch", "tool_input": {}},
+                 bash("lean-agent memory add x"), bash("lean-agent todo add x")]
+        for role, thread in (("main", False), ("thread", True)):
+            with mock.patch.dict(os.environ, {"LEAN_AGENT_SESSION_ROLE": role}):
+                for ev in cases:
+                    why = budget_hook.strict_denial(ev, "/home", "/home")
+                    self.assertTrue(why, ev)
+                    self.assertEqual("lean-agent run " in why, thread, (role, why))
+                    self.assertEqual("lean-agent thread send tN" in why, not thread, (role, why))
 
     def test_front_desk_denial_reaches_the_hook_only_for_the_main_role(self):
         home = self.env["LEAN_AGENT_HOME"]
