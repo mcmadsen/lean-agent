@@ -5386,6 +5386,52 @@ class CliTest(unittest.TestCase):
             L.main(["--thread", "t2", "x"])
         self.assertEqual(seen, ["t1"])
 
+    def test_run_marks_its_thread_launching_then_clears_the_marker(self):
+        self.cli("learn", self.proj)
+        L = lean_agent_module()
+        home = self.env["LEAN_AGENT_HOME"]
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(L, "mark_launching", wraps=L.mark_launching) as spy, \
+                contextlib.redirect_stdout(io.StringIO()):
+            L.main(["run", "-p", "proj", "-m", "haiku", "--why", "x", "--thread", "t7", "task"])
+            spy.assert_called_once_with("t7")
+            self.assertEqual(glob.glob(os.path.join(home, "launching", "*.json")), [])
+            self.assertEqual(L.LAUNCH_MARKERS, [])
+
+    def test_launching_marker_expires_after_the_grace_and_is_pruned(self):
+        L = lean_agent_module()
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(os.path.join(home, "launching"))
+        old, fresh = (os.path.join(home, "launching", n) for n in ("old.json", "fresh.json"))
+        with open(old, "w") as fh: json.dump({"thread": "t1", "ts": time.time() - L.LAUNCH_GRACE - 5}, fh)
+        with open(fresh, "w") as fh: json.dump({"thread": "t2", "ts": time.time() - L.LAUNCH_GRACE + 30}, fh)
+        with mock.patch.dict(os.environ, self.env):
+            self.assertEqual(L.launching_threads(), {"t2"})
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.exists(fresh))
+
+    def test_cap_idle_of_exactly_ten_minutes_is_eligible(self):
+        closed, out, err = self.room_for(self.fake_sessions(("t1", 600), ("t2", 599), ("t3", 598)))
+        self.assertEqual(closed, ["t1"])
+
+    def test_cap_invalid_min_idle_falls_back_to_ten_minutes(self):
+        ss = self.fake_sessions(("t1", 599), ("t2", 601), ("t3", 100))
+        for bad in ("abc", ""):
+            self.env["LEAN_AGENT_CLOSE_MIN_IDLE"] = bad
+            closed, out, err = self.room_for(ss)
+            self.assertEqual(closed, ["t2"])
+
+    def test_cap_min_idle_override_lowers_the_threshold(self):
+        self.env["LEAN_AGENT_CLOSE_MIN_IDLE"] = "60"
+        closed, out, err = self.room_for(self.fake_sessions(("t1", 100), ("t2", 59), ("t3", 30)))
+        self.assertEqual(closed, ["t1"])
+
+    def test_cap_refuses_when_one_is_busy_and_another_is_launching(self):
+        ss = self.fake_sessions(("t1", 9000), ("t2", 8000), ("t3", 100))
+        closed, out, err = self.room_for(ss, busy={"t1": ["r1"]}, launching=("t2",))
+        self.assertEqual(closed, [])
+        self.assertRegex(err, r't1 .*not eligible: 1 running \(r1\)')
+        self.assertRegex(err, r't2 .*not eligible: a run is starting')
+
     def test_cap_skips_a_mid_turn_session(self):
         ss = self.fake_sessions(("t1", 9000), ("t2", 1000), ("t3", 2000))
         closed, out, err = self.room_for(ss, mid_turn=("t1",))
