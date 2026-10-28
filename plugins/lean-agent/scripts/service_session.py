@@ -67,7 +67,8 @@ def fallback_dir():
 
 def sock_path(key="main"):
     """<home>/session.sock (a thread session: session-tN.sock), or a short private path when that is too long for AF_UNIX."""
-    path = lean_home("session.sock" if key == "main" else f"session-{key}.sock")
+    home = os.path.realpath(lean_home())  # one spelling for every process (macOS: /var -> /private/var)
+    path = os.path.join(home, "session.sock" if key == "main" else f"session-{key}.sock")
     if len(os.fsencode(path)) <= SOCK_MAX:
         return path
     d = fallback_dir()
@@ -78,7 +79,7 @@ def sock_path(key="main"):
     st = os.lstat(d)
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o700:
         raise RuntimeError(f"{d} must be a directory owned by you with mode 0700; remove or fix it")
-    digest = hashlib.sha256(os.fsencode(os.path.realpath(lean_home()))).hexdigest()[:12]
+    digest = hashlib.sha256(os.fsencode(home)).hexdigest()[:12]
     return os.path.join(d, digest + ("" if key == "main" else "-" + key) + ".sock")
 
 
