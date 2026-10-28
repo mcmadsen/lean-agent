@@ -2611,8 +2611,15 @@ def mcp_cost_lines(mcp_specs, chrome_spec):
         chosen = expand_tools(name, wanted, known) if wanted else list(known)
         cost, whole = sum(known.get(t, 0) for t in chosen), sum(known.values())
         line = f"mcp: {name} {len(chosen)}/{len(known)} tools ~{cost:,} tok per turn (whole server ~{whole:,})"
-        if not wanted and whole > 5000:
-            line += f"; narrow it: --mcp {name}:<preset|tool,...> (presets: lean-agent mcp preset {name})"
+        if not wanted and (whole > 5000 or len(known) >= 15):
+            fits = [(p, ts) for p, ts in mcp_presets(name, known).items() if 0 < len(ts) < len(known)]
+            if fits:
+                p, ts = min(fits, key=lambda x: sum(known.get(t, 0) for t in x[1]))
+                line += (f"; preset {name}:{p} ({len(ts)} tools) would cost ~{sum(known.get(t, 0) for t in ts):,} tok per turn"
+                         f" instead of ~{whole:,}: --mcp {name}:{p} (all presets: lean-agent mcp preset {name})")
+            else:
+                line += (f"; narrow it: --mcp {name}:<preset|tool,...> (presets: lean-agent mcp preset {name}; "
+                         f"save one: lean-agent mcp preset add {name} <name> <tool> ...)")
         lines.append(line)
     if chrome_spec:
         st = chrome_state()
@@ -5912,6 +5919,13 @@ def cmd_mcp(a):
               + ("" if a.probe else "  Fill in ? with --probe (http servers: one small Haiku call each)."))
         return
     if a.action == "preset":
+        if a.server == "add":  # `mcp preset add <server> <name> <tool> [<tool> ...]`
+            parts = [x for x in (a.preset_name, a.preset_tools, *(a.more or [])) if x]
+            if len(parts) < 3:
+                die("mcp preset add <server> <name> <tool> [<tool> ...]")
+            a.server, a.preset_name, a.preset_tools = parts[0], parts[1], ",".join(parts[2:])
+        elif a.more:
+            a.preset_tools = ",".join([a.preset_tools, *a.more])
         if not a.server:
             die("mcp preset needs a server: lean-agent mcp preset <server> [<name> <tool,tool>] [--rm]")
         known = mcp_cache().get(a.server, {}).get("tools")
@@ -10792,6 +10806,7 @@ def build_parser():
     s.add_argument("server", nargs="?", help="a server; for env: the variable name")
     s.add_argument("preset_name", nargs="?", help="preset: name to set or remove")
     s.add_argument("preset_tools", nargs="?", help="preset: comma-separated tools")
+    s.add_argument("more", nargs="*", help="preset: more tools (space separated)")
     s.add_argument("--rm", action="store_true", help="preset/env/ignore: remove it")
     s.add_argument("--command", metavar="CMD", help="env: a command that prints the value (run per worker, not stored)")
     s.add_argument("--project", "-p", help="include this project's .mcp.json and local-scope servers")
