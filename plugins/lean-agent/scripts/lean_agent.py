@@ -622,8 +622,8 @@ def rule_fields(text, mtype):
 
 
 def sync_memory(slug):
-    """Mirror the shared memory store into a project's cards (global memories + this project's)."""
-    lean_memory.heal(memory_store())
+    """Mirror the shared memory store into a project's cards (global memories + this project's). Read-only for
+    the store; write paths call heal_and_sync() so duplicates are merged first."""
     mems = [m for m in lean_memory.read_all(memory_store()) if m["scope"] in (lean_memory.GLOBAL, slug)]
     fresh = {}
     for m in mems:
@@ -648,6 +648,13 @@ def sync_memory(slug):
         if json.dumps(kept, sort_keys=True) != before:  # cards are updated in place, so compare snapshots
             save_cards(slug, kept)
     return kept
+
+
+def heal_and_sync():
+    """After a memory write: merge `<name>_N` copies once (under the store lock), then refresh every project's cards."""
+    lean_memory.heal(memory_store())
+    for slug in projects():
+        sync_memory(slug)
 
 
 def card_rate(c):
@@ -2116,6 +2123,8 @@ def _cmd_run(a):
         path = lean_memory.add(memory_store(), str(item["text"]), mtype, scope=scope, source=f"run {run_id}")
         if path:
             remembered.append(os.path.splitext(os.path.basename(path))[0])
+    if remembered:
+        lean_memory.heal(memory_store())
     missing_note = (fb.get("missing") or "").strip()
     if missing_note:
         append_jsonl(home("library", slug, "missing.jsonl"),
@@ -5939,8 +5948,7 @@ def memory_topics(a, store, scope):
         done += 1
         print(f"{head} -> {stem} ({len(g)} archived; restore with: lean-agent memory restore <name>)")
     if a.apply:
-        for slug in projects():
-            sync_memory(slug)
+        heal_and_sync()
     print((f"consolidated {done} of {len(groups)} cluster(s)" if a.apply else f"{len(groups)} cluster(s); run again with --apply to consolidate")
           if groups else "no memories on the same topic")
 
@@ -5966,8 +5974,7 @@ def cmd_memory(a):
         if added:
             print("Your original files are untouched. Once you're happy, stop Claude Code loading MEMORY.md into every "
                   "session: set \"autoMemoryEnabled\": false in ~/.claude/settings.json (and drop autoMemoryDirectory).")
-        for slug in projects():
-            sync_memory(slug)
+        heal_and_sync()
         return
     if a.action == "add":
         if not a.text:
@@ -5975,8 +5982,7 @@ def cmd_memory(a):
         mtype = a.type or "project"
         path = lean_memory.add(store, a.text, mtype, scope=scope, name=a.name, source="lean-agent memory add")
         print(f"saved {os.path.basename(path)}" if path else "already remembered")
-        for slug in projects():
-            sync_memory(slug)
+        heal_and_sync()
         return
     if a.action == "restore":
         if not a.text:
@@ -5984,8 +5990,7 @@ def cmd_memory(a):
         stem = lean_memory.restore(store, a.text)
         if not stem:
             die(f"no archived memory {a.text!r} (they are in {lean_memory.archive_dir(store)})")
-        for slug in projects():
-            sync_memory(slug)
+        heal_and_sync()
         print(f"restored {stem}")
         return
     if a.action == "dedupe" and a.topics:
@@ -5997,8 +6002,7 @@ def cmd_memory(a):
             if a.apply:
                 lean_memory.merge_cluster(store, g)
         if a.apply:
-            for slug in projects():
-                sync_memory(slug)
+            heal_and_sync()
         print((f"merged {len(groups)} cluster(s)" if a.apply else f"{len(groups)} cluster(s); run again with --apply to merge")
               if groups else "no near-duplicate memories")
         return
@@ -6007,8 +6011,7 @@ def cmd_memory(a):
             die('memory edit needs the memory name and the new text: lean-agent memory edit <name> "<text>"')
         if not lean_memory.edit(store, a.text, a.new_text, mtype=a.type, description=a.name):
             die(f"no memory {a.text!r} (see: lean-agent memory list)")
-        for slug in projects():
-            sync_memory(slug)
+        heal_and_sync()
         print(f"updated {a.text}")
         return
     if a.action == "rm":
@@ -6018,8 +6021,7 @@ def cmd_memory(a):
         matches = [m["stem"] for m in lean_memory.read_all(store) if slugify(m["stem"], 40) == slugify(stem, 40)]
         if not matches or not lean_memory.remove(store, matches[0]):
             die(f"no memory {a.text!r}")
-        for slug in projects():
-            sync_memory(slug)
+        heal_and_sync()
         print(f"removed {matches[0]}")
         return
     mems = lean_memory.read_all(store)
