@@ -10725,7 +10725,8 @@ def main(argv=None):
         a.task += leftover  # task words given after options
     if a.cmd == "run" and not a.resume and not a.project:
         ap.error("run needs --project (or --resume)")
-    os.environ.setdefault("LEAN_AGENT_CALLER_THREAD", lean_threads.pinned_thread() or "")  # before --thread re-tags the environment
+    # the caller is the session's own pinned thread, captured before --thread re-tags the environment ('' = unset)
+    os.environ["LEAN_AGENT_CALLER_THREAD"] = os.environ.get("LEAN_AGENT_CALLER_THREAD") or lean_threads.pinned_thread() or ""
     if getattr(a, "thread_tag", None):  # --thread tN|none: every record this command makes (and its workers') carries it
         try:
             os.environ["LEAN_AGENT_THREAD"] = "none" if a.thread_tag.lower() == "none" else lean_threads.norm(a.thread_tag)
