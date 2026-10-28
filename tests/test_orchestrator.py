@@ -6720,6 +6720,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(r["turns"], 3)
         self.assertEqual(r["session_id"], "sess-1")
         self.assertIn("STOPPED by lean-agent: the worker re-read 270,030 tokens", p.stdout)
+        self.assertIn("told to commit and write its summary", p.stdout)  # the 70% warning
+        self.assertIn("final turn: asking the worker to commit and summarise", p.stdout)
         self.assertIn(f"lean-agent run --resume {r['id']} --max-reads 500000", p.stdout)
         p = self.cli("run", "-p", "proj", "-m", "sonnet", "--why", "x", "--again", "investigate the flaky test",
                      FAKE_TURNS="5", FAKE_TURN_CTX="1000")
@@ -7847,6 +7849,12 @@ class CliTest(unittest.TestCase):
         out = self.cli("run", "proj", "-m", "haiku", "--why", "Ignored why", "--worktree", "auto",
                        "--worktree-base", "main", "--", "Fix the export crash\nmore detail").stdout
         self.assertIn("branch: bugfix/fix-the-export-crash", out)  # no todo: the task's first line
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "w", "--worktree", "auto", "--worktree-base", "main",
+                       "--", "Goal:\nTask: Add csv export").stdout
+        self.assertIn("branch: feature/add-csv-export", out)  # labels stripped
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "w", "--worktree", "auto", "--worktree-base", "main",
+                       "--branch-name", "Billing rewrite", "--", "Goal: something else").stdout
+        self.assertIn("branch: feature/billing-rewrite", out)
         out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "auto",
                        "--worktree-base", "main", "--", "Release 4.2").stdout
         self.assertIn("branch: release/release-4.2", out)

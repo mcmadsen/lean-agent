@@ -1291,6 +1291,18 @@ class BudgetTest(Base):
         self.assertIn("claude-small", p.stdout)
 
 
+class WrapupTest(Base):
+    def test_note_is_sent_once_after_the_flag_appears(self):
+        flag = os.path.join(self.tmp.name, "wrapup.flag")
+        env = dict(self.env, LEAN_AGENT_WRAPUP_FLAG=flag)
+        ev = {"tool_name": "Read", "tool_input": {}}
+        self.assertIsNone(run_hook("wrapup_hook.py", ev, **env))
+        open(flag, "w").close()
+        out = run_hook("wrapup_hook.py", ev, **env)
+        self.assertIn("Commit your finished work", out["hookSpecificOutput"]["additionalContext"])
+        self.assertIsNone(run_hook("wrapup_hook.py", ev, **env))
+
+
 if __name__ == "__main__":
     import gha_runner
     gha_runner.main(__file__)
