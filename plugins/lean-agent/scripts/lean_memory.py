@@ -367,3 +367,123 @@ def heal(d):
             merge_cluster(d, [base, dup])
             merged += 1
     return merged
+
+
+# ---------------------------------------------------------------- topics
+
+TOPIC_STOP = lean_rules.STOP | {"never", "always", "not", "dont", "don", "use", "using", "used", "must", "should", "memory",
+                                "note", "notes", "about", "is", "are", "be", "was", "has", "have", "do", "does", "no", "can", "will"}
+KIND_ORDER = ("feedback", "reference", "project", "user")  # strongest first; a rule is stored as feedback
+
+
+def _topic_words(m):
+    return {t for t in lean_rules.tokens(m["name"] + " " + m["description"]) if len(t) > 2 and t not in TOPIC_STOP}
+
+
+def _rule_targets(m):
+    r = lean_rules.classify(m["body"], m["type"])
+    return r["targets"] if r["rule"] else []
+
+
+def _same_topic(m, rep):
+    if m["scope"] != rep["scope"]:
+        return False
+    a, b = _rule_targets(m), _rule_targets(rep)
+    if any(lean_rules.matches(x, y) for x in a for y in b):
+        return True
+    if m["type"] != rep["type"]:
+        return False
+    wa, wb = _topic_words(m), _topic_words(rep)
+    shared = wa & wb
+    return bool(shared) and len(shared) / len(wa | wb) >= 0.5 and (len(shared) >= 2 or len(wa | wb) == 1)
+
+
+def topic_clusters(d, scopes=None):
+    """Groups (oldest first) of memories about one subject: the same rule target, or the same type with strongly
+    overlapping title words. Each is compared against the group's first entry only, so no chains."""
+    mems = sorted((m for m in read_all(d) if scopes is None or m["scope"] in scopes),
+                  key=lambda m: (m["created"] or "9", m["stem"]))
+    groups = []
+    for m in mems:
+        home = next((g for g in groups if _same_topic(m, g[0])), None)
+        if home:
+            home.append(m)
+        else:
+            groups.append([m])
+    return [g for g in groups if len(g) > 1]
+
+
+def archive_dir(d):
+    return os.path.join(d, "archive")
+
+
+def _card_id(stem):
+    return "mem-" + re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-")
+
+
+def strongest_type(group):
+    types = {m["type"] for m in group}
+    return next((t for t in KIND_ORDER if t in types), "project")
+
+
+def consolidate(d, group, title, body):
+    """Replace a cluster by one entry (the strongest type, the rules' targets and alternative kept) and archive the
+    originals with `merged_into`. Returns the new stem."""
+    mtype = strongest_type(group)
+    if any(_rule_targets(m) or m["type"] == "feedback" for m in group):
+        mtype = "feedback"
+    body = _trim_entries(body.strip())
+    targets, alt = [], ""
+    for m in group:
+        r = lean_rules.classify(m["body"], m["type"])
+        if r["rule"]:
+            targets += [t for t in r["targets"] if t not in targets]
+            alt = alt or r["alternative"]
+    got = lean_rules.classify(body, mtype)
+    missing = [t for t in targets if not any(lean_rules.matches(t, g) for g in got["targets"])]
+    if missing or (alt and not got["alternative"]):
+        extra = " ".join(f"Never use {t}." for t in missing) + (f" Use {alt}." if alt and not got["alternative"] else "")
+        body = body.rstrip() + "\n\nRule: " + extra.strip()
+    scope = group[0]["scope"]
+    stem = f"{mtype}_{_slug(title)}"
+    os.makedirs(archive_dir(d), exist_ok=True)
+    keep = {m["stem"] for m in group}
+    n, new = 2, stem
+    while os.path.exists(os.path.join(d, new + ".md")) and new not in keep or os.path.exists(os.path.join(archive_dir(d), new + ".md")):
+        new, n = f"{stem}_{n}", n + 1
+    for m in group:  # archived first: the new entry may take an original's file name
+        with open(m["file"], encoding="utf-8", errors="replace") as fh:
+            meta, text = parse(fh.read())
+        meta["merged_into"] = _card_id(new)
+        with open(os.path.join(archive_dir(d), m["stem"] + ".md"), "w") as fh:
+            fh.write(_frontmatter(meta) + "\n" + text + "\n")
+        os.remove(m["file"])
+    meta = {"name": title, "description": body.splitlines()[0][:120], "type": mtype, "scope": scope,
+            "created": min((m["created"] for m in group if m["created"]), default=_now()), "modified": _now(),
+            "source": "memory dedupe --topics"}
+    with open(os.path.join(d, new + ".md"), "w") as fh:
+        fh.write(_frontmatter(meta) + "\n" + body + "\n")
+    rebuild_index(d)
+    return new
+
+
+def restore(d, ref):
+    """Move an archived memory back into the store (by file stem, `mem-` card id or name). Returns its stem or None."""
+    key = re.sub(r"[^a-z0-9]+", "-", (ref[4:] if ref.startswith("mem-") else ref).lower()).strip("-")
+    for f in sorted(glob.glob(os.path.join(archive_dir(d), "*.md"))):
+        with open(f, encoding="utf-8", errors="replace") as fh:
+            meta, body = parse(fh.read())
+        stem = os.path.splitext(os.path.basename(f))[0]
+        names = {re.sub(r"[^a-z0-9]+", "-", x.lower()).strip("-") for x in (stem, meta.get("name", ""))}
+        names |= {n[len(meta.get("type", "")) + 1:] for n in list(names) if n.startswith(meta.get("type", "") + "-")}
+        if key in names:
+            meta.pop("merged_into", None)
+            new, n = stem, 2
+            while os.path.exists(os.path.join(d, new + ".md")):
+                new, n = f"{stem}_{n}", n + 1
+            with open(os.path.join(d, new + ".md"), "w") as fh:
+                fh.write(_frontmatter(meta) + "\n" + body + "\n")
+            os.remove(f)
+            rebuild_index(d)
+            return new
+    return None

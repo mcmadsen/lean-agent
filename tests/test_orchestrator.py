@@ -52,6 +52,12 @@ FAKE_CLAUDE = textwrap.dedent("""\
     if "--append-system-prompt-file" not in sys.argv and task.startswith("Rewrite this context card"):
         print(json.dumps({"type": "result", "result": os.environ.get("FAKE_SHORT", "## Testing\\nRun pytest -q in api/.")}))
         sys.exit(0)
+    if "--append-system-prompt-file" not in sys.argv and task.startswith("Consolidate these memory entries"):
+        if os.environ.get("FAKE_CONSOLIDATE_ARGS"):
+            with open(os.environ["FAKE_CONSOLIDATE_ARGS"], "w") as fh:
+                fh.write(" ".join(sys.argv) + "\\n" + task)
+        print(json.dumps({"type": "result", "result": os.environ.get("FAKE_CONSOLIDATE", "")}))
+        sys.exit(0)
     if "stream-json" in sys.argv and "--append-system-prompt-file" not in sys.argv:  # a session probe, not a worker
         chrome = "--chrome" in sys.argv and os.environ.get("FAKE_CHROME") == ("strict" if "--strict-mcp-config" in sys.argv else "loose") 
         tools = ["Read"] + (["mcp__claude-in-chrome__navigate", "mcp__claude-in-chrome__find",
@@ -2286,6 +2292,70 @@ class CliTest(unittest.TestCase):
         self.cli("cards", "proj", "memory")
         self.assertFalse(os.path.exists(os.path.join(store, "feedback_no_tracker_mcp_2.md")))
         self.assertTrue(os.path.exists(os.path.join(store, "feedback_no_tracker_mcp.md")))
+
+    def topic_store(self):
+        store = self.cli("memory", "where").stdout.split(": ", 1)[1].splitlines()[0]
+        os.makedirs(store, exist_ok=True)
+        return store
+
+    def write_mem(self, store, stem, name, mtype, text, created):
+        with open(os.path.join(store, stem + ".md"), "w") as fh:
+            fh.write(f"---\nname: {name}\ntype: {mtype}\nscope: global\ncreated: {created}\n---\n{text}\n")
+
+    def test_dedupe_topics_groups_by_rule_target_or_title_words_only(self):
+        store = self.topic_store()
+        self.write_mem(store, "feedback_a", "stay off the tracker server", "feedback", "Never use the tracker MCP server; use trackercli.", "2026-01-01")
+        self.write_mem(store, "feedback_b", "tracker outage notes", "feedback", "Do not call the tracker MCP, it timed out again.", "2026-02-01")
+        self.write_mem(store, "reference_c", "deploy runbook location", "reference", "The deploy runbook lives in the ops wiki.", "2026-01-05")
+        self.write_mem(store, "reference_d", "deploy runbook location moved", "reference", "The deploy runbook moved to the docs site.", "2026-03-01")
+        self.write_mem(store, "feedback_e", "small PRs", "feedback", "Keep pull requests small.", "2026-01-02")
+        self.write_mem(store, "reference_f", "deploy credentials vault", "reference", "Deploy credentials are in the vault.", "2026-01-06")
+        out = self.cli("memory", "dedupe", "--topics").stdout
+        self.assertIn("2 on one topic: stay off the tracker server; tracker outage notes", out)
+        self.assertIn("2 on one topic: deploy runbook location; deploy runbook location moved", out)
+        self.assertNotIn("small PRs", out)
+        self.assertNotIn("vault", out)
+        self.assertIn("2 cluster(s); run again with --apply", out)
+
+    def test_dedupe_topics_apply_archives_originals_and_keeps_the_rule(self):
+        store = self.topic_store()
+        self.write_mem(store, "feedback_a", "stay off the tracker server", "feedback", "Never use the tracker MCP server; use trackercli.", "2026-01-01")
+        self.write_mem(store, "reference_b", "tracker outage notes", "reference", "Do not use the tracker MCP, it timed out on 2026-02-01.", "2026-02-01")
+        reply = "TITLE: tracker server\n\nThe tracker server is unavailable.\n\n- 2026-01-01: it was banned.\n- 2026-02-01: it timed out."
+        args = os.path.join(self.tmp.name, "consolidate_args")
+        out = self.cli("memory", "dedupe", "--topics", "--apply", FAKE_CONSOLIDATE=reply, FAKE_CONSOLIDATE_ARGS=args).stdout
+        self.assertIn("-> feedback_tracker_server (2 archived", out)
+        with open(args) as fh:
+            self.assertIn("--safe-mode", fh.read().splitlines()[0])
+        self.assertEqual(sorted(f for f in os.listdir(store) if f.endswith(".md") and f != "MEMORY.md"), ["feedback_tracker_server.md"])
+        self.assertEqual(sorted(os.listdir(os.path.join(store, "archive"))), ["feedback_a.md", "reference_b.md"])
+        with open(os.path.join(store, "archive", "reference_b.md")) as fh:
+            self.assertIn("merged_into: mem-feedback-tracker-server", fh.read())
+        with open(os.path.join(store, "feedback_tracker_server.md")) as fh:
+            text = fh.read()
+        self.assertIn("type: feedback", text)
+        self.assertIn("Never use tracker", text)  # the target was missing from the reply, so the rule line is added
+        self.assertIn("trackercli", text)
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("cards", "proj", "memory")
+        card = [c for c in self.cards_json() if c["id"] == "mem-feedback-tracker-server"][0]
+        self.assertTrue(card["is_rule"])
+        self.assertIn("tracker", card["targets"])
+        self.assertFalse(card["archived"])
+        self.assertIn("no memories on the same topic", self.cli("memory", "dedupe", "--topics").stdout)
+        # restore one original
+        self.assertIn("restored reference_b", self.cli("memory", "restore", "reference_b").stdout)
+        self.assertTrue(os.path.exists(os.path.join(store, "reference_b.md")))
+        self.assertFalse(os.path.exists(os.path.join(store, "archive", "reference_b.md")))
+        self.assertEqual(self.cli("memory", "restore", "nothing", check=False).returncode, 1)
+
+    def test_dedupe_topics_apply_leaves_a_cluster_alone_when_no_text_comes_back(self):
+        store = self.topic_store()
+        self.write_mem(store, "reference_c", "deploy runbook location", "reference", "The deploy runbook lives in the ops wiki.", "2026-01-05")
+        self.write_mem(store, "reference_d", "deploy runbook location moved", "reference", "The deploy runbook moved to the docs site.", "2026-03-01")
+        out = self.cli("memory", "dedupe", "--topics", "--apply").stdout
+        self.assertIn("skipped", out)
+        self.assertTrue(os.path.exists(os.path.join(store, "reference_d.md")))
 
     def test_memory_add_rm_and_scope(self):
         self.cli("learn", self.proj)
