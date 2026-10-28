@@ -811,6 +811,20 @@ class CliTest(unittest.TestCase):
             self.cli("advise", f"r{i}", FAKE_ANSWER="ADVICE\nknown: none")
         self.assertEqual(len(glob.glob(os.path.join(adv, "*.json"))), 50)
 
+    def test_advise_warns_only_for_targets_the_request_names_and_lists_mcp_servers(self):
+        self.use_tracker()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.add_rule()
+        ans = "ADVICE\nunderstood: x\nask the user first: no"
+        out = self.cli("advise", "list the open items", FAKE_ANSWER=ans)
+        self.assertNotIn("the task asks for", out.stderr)
+        task = self.calls()[-1]["task"]
+        self.assertIn("MCP servers a worker can use", task)
+        self.assertIn("- tracker", task)
+        out = self.cli("advise", "check the tracker for open items", FAKE_ANSWER=ans)
+        self.assertIn("the task asks for tracker, which rule", out.stderr)
+        self.assertIn("never ask to confirm that scope again", lean_agent_module().ADVISE_RULE)
+
     def test_advise_gets_the_recent_requests_and_card_titles_and_echoes_how_it_understood(self):
         self.cli("learn", self.proj)
         self.cli("card", "add", "proj", "export-notes", "--title", "Export retry notes", "--text", "Short note.")
