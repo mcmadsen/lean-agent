@@ -4612,6 +4612,20 @@ class CliTest(unittest.TestCase):
         self.cli("mcp", "preset", "tickets", "lookup", "--rm")
         self.assertNotIn("lookup", self.cli("mcp", "preset", "tickets").stdout)
 
+    def test_mcp_preset_add_and_big_server_advice(self):
+        self.cli("learn", self.proj)
+        self.cli("mcp", "tools", "tickets")
+        self.cli("mcp", "preset", "add", "tickets", "mine", "get_ticket", "search_tickets")
+        self.assertIn("tickets:mine  2 tools", self.cli("mcp", "preset", "tickets").stdout)
+        p = self.cli("mcp", "preset", "add", "tickets", "x", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        agent = lean_agent_module()
+        tools = {f"t{i}": 400 for i in range(33)}
+        with unittest.mock.patch.object(agent, "mcp_cache", lambda: {"big": {"tools": tools}}), \
+                unittest.mock.patch.object(agent, "mcp_presets", lambda n, k=None: {"six": [f"t{i}" for i in range(6)]}):
+            line = agent.mcp_cost_lines(["big"], None)[0]
+        self.assertIn("preset big:six (6 tools) would cost ~2,400 tok per turn instead of ~13,200", line)
+
     def git_project(self):
         def g(*args):
             subprocess.run(["git", "-C", self.proj, *args], check=True, capture_output=True)
