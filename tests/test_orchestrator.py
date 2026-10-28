@@ -8166,7 +8166,10 @@ class CliTest(unittest.TestCase):
         self.assertIn("push_guard.py", argv[argv.index("--settings") + 1])
 
     def test_worktree_writers_take_turns(self):
-        self.git_project()
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("checkout", "-q", "main")  # feature must not be held by the main checkout
         self.cli("learn", self.proj, "--name", "proj")
         release = os.path.join(self.tmp.name, "release")
         env = dict(self.env, FAKE_RELEASE_FILE=release, FAKE_RELEASE_WAIT=str(scaled(30)))
