@@ -5263,6 +5263,16 @@ class CliTest(unittest.TestCase):
         reps["t1"].tick()
         self.assertTrue(ss.queued_reports()[-1]["text"].startswith("waits for your permission"))
 
+    def test_config_thread_reports_accepts_on_questions_only_off_and_default_and_rejects_others(self):
+        self.assertIn("thread-reports: on", self.cli("config", "thread-reports").stdout)
+        for value in ("questions-only", "off", "ON", "default"):
+            out = self.cli("config", "thread-reports", value).stdout
+            want = "on" if value in ("ON", "default") else value
+            self.assertIn(f"thread-reports: {want} ", out, value)
+        self.cli("config", "thread-reports", "off")
+        self.assertIn("thread-reports: off", self.cli("config", "thread-reports").stdout)
+        self.assertNotEqual(self.cli("config", "thread-reports", "sometimes", check=False).returncode, 0)
+
     def test_thread_reports_batch_and_questions_only_and_off(self):
         ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
         write("main", user("hi"), assistant("ok"))
@@ -8951,6 +8961,24 @@ class RuleUnitTest(unittest.TestCase):
         names = sorted(os.listdir(os.path.join(self.dir, "archive")))
         self.assertEqual(names, ["project_fmt.2.md", "project_fmt.md", "project_fmt_b.2.md", "project_fmt_b.md"])
         self.assertEqual(self.memory.restore(self.dir, "project_fmt"), "project_fmt")
+
+    def test_a_near_identical_add_in_another_scope_is_a_new_entry_not_an_in_place_update(self):
+        body = "Always run the formatter before committing the changes to the repository"
+        first = self.memory.add(self.dir, body, "feedback", scope="alpha", name="formatter")
+        second = self.memory.add(self.dir, body + " please", "feedback", scope="beta", name="formatter")
+        self.assertNotEqual(first, second)
+        self.assertEqual(sorted(m["scope"] for m in self.memory.read_all(self.dir)), ["alpha", "beta"])
+        self.assertNotIn("please", open(first).read())
+
+    def test_topic_consolidation_with_a_project_leaves_other_projects_alone_and_keeps_the_scope(self):
+        for scope in ("alpha", "beta"):
+            for i in (1, 2):
+                self._write_mem(f"feedback_{scope}_{i}", "Never use the tracker MCP server; use trackercli.", "feedback", scope)
+        groups = self.memory.topic_clusters(self.dir, {self.memory.GLOBAL, "alpha"})
+        self.assertEqual([[m["scope"] for m in g] for g in groups], [["alpha", "alpha"]])
+        stem = self.memory.consolidate(self.dir, groups[0], "tracker", "Never use the tracker MCP server; use trackercli.")
+        left = {m["stem"]: m["scope"] for m in self.memory.read_all(self.dir)}
+        self.assertEqual(left, {stem: "alpha", "feedback_beta_1": "beta", "feedback_beta_2": "beta"})
 
     def test_dedupe_needs_the_same_type_and_title_and_does_not_chain(self):
         body = "Always run the formatter before committing the changes to the repository"

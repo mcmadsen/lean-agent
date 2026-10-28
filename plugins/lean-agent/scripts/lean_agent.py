@@ -7284,7 +7284,8 @@ def _owner_name(uid):
 def claude_temp_problems(h, uid=None, bases=None):
     """Claude Code keeps per-session task output under <tmp>/claude-<uid>/<project-slug>/<session>/tasks; when
     that tree was created by root (sudo) or has odd permissions, every Bash call fails with EACCES.
-    Returns [(path, owner, why)] for the roots checked cheaply: two levels plus any 'tasks' dir."""
+    Returns (problems, roots): problems is [(path, owner, why)] found cheaply (two levels plus any 'tasks' dir), roots
+    the claude-<uid> folders looked at; ([], []) where os.getuid doesn't exist."""
     if uid is None:
         if not hasattr(os, "getuid"):
             return [], []
