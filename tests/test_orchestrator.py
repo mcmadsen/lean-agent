@@ -5040,6 +5040,158 @@ class CliTest(unittest.TestCase):
         ac.tick()
         self.assertEqual(len(host.pasted), 3)
 
+    class ReportHost(FakeHost):
+        def __init__(self, key):
+            super().__init__()
+            self.key, self.env, self.tail = key, {}, ""
+
+        def tail_text(self):
+            return self.tail
+
+    def reporter_unit(self, mode=None):
+        """Thread t1's and the main session's Reporter on stand-in hosts, transcripts this test writes, a clock it sets."""
+        sys.path.insert(0, os.path.dirname(CLI))
+        import service_session
+        home = tempfile.mkdtemp()
+        os.makedirs(os.path.join(home, "chat"))
+        keys = ("LEAN_AGENT_HOME", "LEAN_AGENT_THREAD_REPORTS", "LEAN_AGENT_REPORT_BATCH", "LEAN_AGENT_LOG_DIR")
+        old = {k: os.environ.get(k) for k in keys}
+        os.environ.update(LEAN_AGENT_HOME=home, LEAN_AGENT_LOG_DIR=os.path.join(home, "logs"), LEAN_AGENT_REPORT_BATCH="60")
+        os.environ.pop("LEAN_AGENT_THREAD_REPORTS", None)
+        if mode:
+            os.environ["LEAN_AGENT_THREAD_REPORTS"] = mode
+        self.addCleanup(lambda: [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+                                 for k, v in old.items()])
+        trs = {}
+        for key, name in (("main", "service.json"), ("t1", "service-t1.json")):
+            trs[key] = os.path.join(home, key + ".jsonl")
+            open(trs[key], "w").close()
+            with open(os.path.join(home, "chat", name), "w") as fh:
+                json.dump({"session_id": key, "transcript_path": trs[key], "source": "startup", "ts": 1}, fh)
+        clock = [time.time()]
+        hosts = {"t1": self.ReportHost("t1"), "main": self.ReportHost("main")}
+        reps = {k: service_session.Reporter(h, now=lambda: clock[0]) for k, h in hosts.items()}
+
+        def write(key, *recs):
+            with open(trs[key], "a") as fh:
+                for r in recs:
+                    fh.write(json.dumps(r) + "\n")
+
+        def user(text="go"):
+            return {"type": "user", "timestamp": "2026-01-01T00:00:00Z", "message": {"role": "user", "content": text}}
+
+        def assistant(text, tool=None):
+            c = [{"type": "text", "text": text}] if text else []
+            if tool:
+                c.append(dict(tool, type="tool_use"))
+            return {"type": "assistant", "message": {"role": "assistant", "id": os.urandom(4).hex(), "content": c,
+                    "stop_reason": "tool_use" if tool else "end_turn", "usage": {"input_tokens": 1}}}
+
+        def result(tid, text, err=False):
+            return {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tid, "content": text, "is_error": err}]}}
+
+        def run_turn(key, final, cmd="lean-agent run --task x", out="run 1 finished", err=False):
+            tid = "tu" + os.urandom(2).hex()
+            write(key, user(), assistant("", {"id": tid, "name": "Bash", "input": {"command": cmd}}),
+                  result(tid, out, err), assistant(final))
+        return service_session, reps, hosts, clock, write, run_turn, assistant, user, result
+
+    def test_thread_turn_with_a_finished_run_is_reported_to_main_at_its_turn_end(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        reps["t1"].tick()  # nothing yet
+        run_turn("t1", "Published the report to the wiki.\nAll checks pass.")
+        reps["t1"].tick()
+        items = ss.queued_reports()
+        self.assertEqual([(i["thread"], i["kind"]) for i in items], [("t1", "done")])
+        self.assertEqual(items[0]["text"], "Published the report to the wiki. All checks pass.")
+        reps["t1"].tick()
+        self.assertEqual(len(ss.queued_reports()), 1)  # one report per turn
+        write("main", user("hi"), assistant("", {"id": "m1", "name": "Bash", "input": {"command": "lean-agent now"}}))
+        clock[0] += 120
+        reps["main"].tick()
+        self.assertEqual(hosts["main"].pasted, [])  # the main session is mid-turn
+        write("main", result("m1", "ok"), assistant("Nothing else."))
+        hosts["main"].tail = "Do you want to proceed?\n Esc to cancel"
+        reps["main"].tick()
+        self.assertEqual(hosts["main"].pasted, [])  # a permission prompt is open
+        hosts["main"].tail = ""
+        reps["main"].tick()
+        msg = hosts["main"].pasted[0]
+        self.assertTrue(msg.startswith("<thread-reports>\n[t1 done] Published the report"))
+        self.assertTrue(msg.endswith("details: lean-agent thread show tN\n</thread-reports>"))
+        self.assertEqual(ss.queued_reports(), [])
+        reps["main"].tick()
+        self.assertEqual(len(hosts["main"].pasted), 1)
+
+    def test_thread_question_is_needs_you_error_is_blocked_and_chatter_is_silent(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        reps["t1"].tick()
+        write("t1", user("what is x?"), assistant("x is the retry limit."))  # chatter
+        reps["t1"].tick()
+        self.assertEqual(ss.queued_reports(), [])
+        write("t1", user(), assistant("Two options exist.\nShall I squash the branch before the push?"))
+        reps["t1"].tick()
+        run_turn("t1", "The push was rejected by the guard.", cmd="lean-agent push", out="refused", err=True)
+        reps["t1"].tick()
+        self.assertEqual([(i["kind"], i["text"]) for i in ss.queued_reports()],
+                         [("needs-you", "Shall I squash the branch before the push?"),
+                          ("blocked", "The push was rejected by the guard.")])
+        write("t1", user(), assistant("", {"id": "q1", "name": "AskUserQuestion",
+                                           "input": {"questions": [{"question": "Which database?"}]}}))
+        reps["t1"].tick()
+        reps["t1"].tick()  # reported once
+        self.assertEqual(ss.queued_reports()[-1]["text"], "asks: Which database?")
+        self.assertEqual(len(ss.queued_reports()), 3)
+        write("t1", result("q1", "pg"), assistant("", {"id": "q2", "name": "Bash", "input": {"command": "ls"}}))
+        hosts["t1"].tail = "Do you want to proceed?\n 1. Yes\n Esc to cancel"
+        reps["t1"].tick()
+        self.assertTrue(ss.queued_reports()[-1]["text"].startswith("waits for your permission"))
+
+    def test_thread_reports_batch_and_questions_only_and_off(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        write("main", user("hi"), assistant("ok"))
+        reps["t1"].tick()
+        run_turn("t1", "First done.")
+        reps["t1"].tick()
+        clock[0] += 30
+        run_turn("t1", "Second done.")
+        reps["t1"].tick()
+        reps["main"].tick()
+        self.assertEqual(hosts["main"].pasted, [])  # the window is still open
+        clock[0] += 31
+        reps["main"].tick()
+        self.assertEqual(len(hosts["main"].pasted), 1)
+        self.assertEqual(hosts["main"].pasted[0].count("[t1 done]"), 2)  # one message, one line each
+        os.environ["LEAN_AGENT_THREAD_REPORTS"] = "questions-only"
+        run_turn("t1", "Third done.")
+        reps["t1"].tick()
+        write("t1", user(), assistant("Which branch?"))
+        reps["t1"].tick()
+        self.assertEqual([i["kind"] for i in ss.queued_reports()], ["needs-you"])
+        os.environ["LEAN_AGENT_THREAD_REPORTS"] = "off"
+        run_turn("t1", "Fourth done.")
+        reps["t1"].tick()
+        self.assertEqual(len(ss.queued_reports()), 1)
+
+    def test_main_prompt_hook_attaches_thread_reports_without_guessing_and_now_shows_them(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        lt = self.threads_home()
+        lt.route("Publish the report via docs", "s1")  # t1
+        lt.route("Fix the export timeout in billing", "s1")  # t2
+        before = json.dumps(lt.load()["threads"], sort_keys=True)
+        msg = ("<thread-reports>\n[t2 needs-you] Shall I retry the export with a longer timeout?\n"
+               "[t1 done] Published the report.\n[t9 done] unknown thread\ndetails: lean-agent thread show tN\n</thread-reports>")
+        self.assertEqual(lt.store_reports(msg), ["t1", "t2", "t9"])
+        data = lt.load()
+        self.assertEqual(sorted(data["threads"]), ["t1", "t2"])  # no new thread
+        self.assertEqual(data["threads"]["t2"]["report"]["kind"], "needs-you")
+        self.assertEqual(len(data["threads"]["t1"].get("requests", [])), len(json.loads(before)["t1"].get("requests", [])))
+        out = self.cli("now").stdout
+        self.assertRegex(out, r"(?m)^  report \(0m ago\) needs-you: Shall I retry the export")
+        self.assertRegex(out, r"(?m)^  report \(0m ago\) done: Published the report\.$")
+        self.assertNotIn("guess", out.lower())
+
     def test_auto_clear_gives_up_a_round_while_the_turn_still_runs(self):
         ac, host, clock, turn, home = self.auto_clear_unit()
         turn("done")

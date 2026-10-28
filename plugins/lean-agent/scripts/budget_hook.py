@@ -561,6 +561,8 @@ def prompt_hook(event):
             if pinned:  # a thread session: everything belongs to its thread, nothing is guessed or announced
                 if not lean_threads.is_notification(prompt):
                     lean_threads.pin(pinned, prompt, event.get("session_id"))
+            elif lean_threads.is_reports(prompt):  # thread reports: stored on the threads they name, nothing guessed or announced
+                lean_threads.store_reports(prompt)
             elif lean_threads.is_notification(prompt):  # a background-task notification: never a new request or thread; attaches to its run's thread silently
                 lean_threads.notification_line(prompt)
             else:  # the main session is the front desk: one line saying what to do with the request

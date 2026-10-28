@@ -582,6 +582,39 @@ OUTPUT_FILE_RE = re.compile(r"<output-file>\s*([^<\s][^<]*?)\s*</output-file>|ou
 OUTPUT_READ = 200_000
 
 
+REPORTS_RE = re.compile(r"\s*<thread-reports>(.*?)</thread-reports>", re.S)
+REPORT_LINE_RE = re.compile(r"^\[(t\d+) (done|blocked|needs-you)\] (.+)$", re.M)
+
+
+def is_reports(prompt):
+    """A message the service typed into the main session: the reports of finished thread turns."""
+    return bool(REPORTS_RE.match(str(prompt or "")))
+
+
+def store_reports(prompt):
+    """Attach each report line to the thread it names (never guessed, no thread created) as the thread's latest report;
+    returns the ids stored."""
+    m = REPORTS_RE.match(str(prompt or ""))
+    if not m:
+        return []
+    got = {}
+    for tid, kind, text in REPORT_LINE_RE.findall(m.group(1)):
+        got[tid] = {"kind": kind, "text": text.strip(), "ts": now_iso()}
+    with _locked() as data:
+        for tid, rep in got.items():
+            t = data["threads"].get(resolve(tid, data["aliases"]))
+            if t is not None:
+                t["report"] = rep
+    return sorted(got)
+
+
+def report_lines(t, now=None):
+    r = t.get("report")
+    if not isinstance(r, dict) or not r.get("text"):
+        return []
+    return [f"  report ({age(r.get('ts'), now)} ago) {r.get('kind')}: {one_line(r['text'], 120)}"]
+
+
 def is_notification(prompt):
     """A prompt Claude Code (or a hook) wrote, not the user: a background-task notification or a system-tagged message."""
     text = str(prompt or "")
@@ -882,7 +915,7 @@ def now_text(now=None, close_idle=True, max_lines=NOW_LINES):
             last_ts = max([t.get("last_message") or t.get("created") or ""] + [e[1] for e in ev])
             act = next((e for e in reversed(ev) if e[2] != "request"), None) or (ev[-1] if ev else None)
             rows.append((_epoch(last_ts), last_ts, tid, t, act, _state(tid, ev, running, data),
-                         session_lines(tid, t) + _details(tid, ev, data, todos, live, waiting, now)))
+                         session_lines(tid, t) + report_lines(t, now) + _details(tid, ev, data, todos, live, waiting, now)))
     rows.sort(key=lambda r: (r[0], r[2]), reverse=True)
     lines = [f"Open threads ({len(rows)}), latest first:"] if rows else ["No open threads."]
     budget = max_lines - 2  # header and the footer line
