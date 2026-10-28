@@ -538,6 +538,10 @@ class BudgetTest(Base):
         out = read("/srv/shop/src/app.py")
         self.assertTrue(denied(out))
         self.assertIn("Delegate it:", out["hookSpecificOutput"]["permissionDecisionReason"])
+        main = run_hook("budget_hook.py", ev("Read", file_path="/srv/shop/src/app.py"), **dict(self.env, LEAN_AGENT_SESSION_ROLE="main"))
+        why = main["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("lean-agent thread send", why)
+        self.assertNotIn("lean-agent run", why)
         self.assertTrue(denied(read("/srv/shop", tool="Grep")))
         self.assertTrue(denied(run_hook("budget_hook.py", ev("Glob", pattern="/srv/shop/**/*.py"), **self.env)))
         self.assertIsNone(run_hook("budget_hook.py", ev("Glob", pattern=home + "/docs/*.md"), **self.env))

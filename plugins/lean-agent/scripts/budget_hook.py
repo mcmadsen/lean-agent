@@ -532,33 +532,37 @@ def own_path(path, cwd, lean_root):
 
 
 def strict_denial(event, cwd, lean_root):
-    """Why the strict orchestrator may not make this call, or ''."""
+    """Why the strict orchestrator may not make this call, or ''. In the main session the way out is the hand-over."""
     tool, tool_input = event.get("tool_name"), event.get("tool_input") or {}
+    main = os.environ.get("LEAN_AGENT_SESSION_ROLE") == "main"
+
+    def hint(text):  # the main session hands work to a thread; only a thread session starts workers
+        return FRONT_DESK_HINT + "." if main else text
     redirect = tracking_redirect(tool)
     if redirect:
         return f"strict mode: the orchestrator keeps track only with lean-agent, not with {tool[:40]}. " + redirect
     if tool == "Bash":
         command = str(tool_input.get("command") or "")
         if not lean_agent_only(command):
-            return f"strict mode: the orchestrator runs only lean-agent commands, not `{command.strip()[:60]}`. " + DELEGATE
+            return f"strict mode: the orchestrator runs only lean-agent commands, not `{command.strip()[:60]}`. " + hint(DELEGATE)
         kind, what = restricted_command(command)
         if kind == "change":
             return (f"strict mode: the orchestrator never changes a repo, branch, remote or tracker itself "
-                    f"(`lean-agent {what}`). " + DELEGATE_CHANGE)
+                    f"(`lean-agent {what}`). " + hint(DELEGATE_CHANGE))
         if kind == "keep":
             return (f"strict mode: the orchestrator never writes memory, cards, rules, presets, todos or notes "
                     f"itself (`lean-agent {what}`). " + DELEGATE_KEEP)
         if kind == "mcp":
-            return f"strict mode: the orchestrator neither lists nor runs MCP servers (`lean-agent {what}`). " + DELEGATE_MCP
+            return f"strict mode: the orchestrator neither lists nor runs MCP servers (`lean-agent {what}`). " + hint(DELEGATE_MCP)
     elif tool and (tool.startswith("mcp__") or tool in MCP_RESOURCE_TOOLS):
-        return f"strict mode: the orchestrator uses no MCP tool ({tool[:60]}). " + DELEGATE_MCP
+        return f"strict mode: the orchestrator uses no MCP tool ({tool[:60]}). " + hint(DELEGATE_MCP)
     elif tool in ("Read", "Grep", "Glob"):
         path = tool_input.get("file_path") if tool == "Read" else tool_input.get("path")
         pattern = str(tool_input.get("pattern") or "")
         if not path and tool == "Glob" and (os.path.isabs(os.path.expanduser(pattern)) or ".." in pattern.split("/")):
             path = pattern
         if path and not own_path(str(path), cwd, lean_root):
-            return f"strict mode: the orchestrator doesn't read project files ({str(path)[:80]}). " + DELEGATE
+            return f"strict mode: the orchestrator doesn't read project files ({str(path)[:80]}). " + hint(DELEGATE)
     return ""
 
 
