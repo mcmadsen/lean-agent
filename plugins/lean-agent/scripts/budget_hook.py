@@ -500,6 +500,31 @@ def restricted_command(command):
     return "", ""
 
 
+# The main session is the front desk: it lists the threads and hands work over, it does none. These lean-agent
+# subcommands are refused there (a thread session runs them); docs/orchestrator-surface.md section 5 lists both sides.
+FRONT_DESK_WORK = {"run", "review", "review-learn", "review-decline", "do", "handover", "learn", "tracker", "optimize",
+                   "sync", "codemod", "rules", "publish", "push"}
+FRONT_DESK_ACTIONS = {"worktree": {"push"}}
+FRONT_DESK_HINT = ("main is the front desk: hand it to a thread — lean-agent thread send tN --prompt-file - "
+                   "(or thread new \"title\")")
+
+
+def front_desk_denial(event):
+    """Why the main session (LEAN_AGENT_SESSION_ROLE=main) may not run this call, or ''. Only work commands are refused."""
+    if os.environ.get("LEAN_AGENT_SESSION_ROLE") != "main" or event.get("tool_name") != "Bash":
+        return ""
+    for words in commands_run(str((event.get("tool_input") or {}).get("command") or "")):
+        if os.path.basename(words[0]) != "lean-agent":
+            continue
+        args = [w for w in words[1:] if not w.startswith("-")]
+        name = args[0] if args else ""
+        if {"-h", "--help"} & set(words[1:]):
+            continue
+        if name in FRONT_DESK_WORK or (len(args) > 1 and args[1] in FRONT_DESK_ACTIONS.get(name, ())):
+            return f"`lean-agent {' '.join(args[:2]) if name in FRONT_DESK_ACTIONS else name}`: " + FRONT_DESK_HINT
+    return ""
+
+
 def own_path(path, cwd, lean_root):
     """Is `path` lean-agent's own (its home, which holds the docs folder and run files, or the plugin)?"""
     full = os.path.realpath(os.path.join(cwd, os.path.expanduser(path)))
@@ -611,6 +636,11 @@ def main():
 
     tool_input = event.get("tool_input") or {}
     worker_dir = cwd.startswith(os.path.join(home, "work") + os.sep)  # a worker's run folder is never the orchestrator
+    if (in_home or os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1") and not worker_dir:
+        why = front_desk_denial(event)
+        if why:
+            emit(permissionDecision="deny", permissionDecisionReason="lean-agent: " + why)
+            return 0
     if ((in_home or os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1") and not worker_dir
             and strict_on(usage.lean_home())):
         why = strict_denial(event, cwd, usage.lean_home())

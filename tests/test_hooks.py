@@ -627,7 +627,7 @@ class BudgetTest(Base):
             reason = out["hookSpecificOutput"]["permissionDecisionReason"]
             self.assertIn("never changes a repo, branch, remote or tracker", reason)
             self.assertIn("lean-agent run <project> --cards auto", reason)
-        bookkeeping = ("lean-agent todo list", "lean-agent handoff --note 'x' --kind fyi", "lean-agent handoff --note 'q?' --kind decision", "lean-agent thread list",
+        bookkeeping = ("lean-agent todo list", "lean-agent now --short", "lean-agent handoff --note 'x' --kind fyi", "lean-agent handoff --note 'q?' --kind decision", "lean-agent thread list",
                        "lean-agent now", "lean-agent thread show t1 --all", "lean-agent thread close t1", "lean-agent thread reopen t1",
                        "lean-agent thread move t2", "lean-agent checkpoint 'x' --thread t1", "lean-agent review proj --head b --thread none",
                        "lean-agent handoff --note 'x' --kind fyi --thread t1",
@@ -1016,6 +1016,48 @@ class BudgetTest(Base):
         for name, what in sorted(listed):
             self.assertTrue(any(w[1] == name and (not what or all(x in w[2:] for x in what.split())) for w in denied),
                             f"{name} {what} is denied by the hook but not listed as denied in the doc")
+
+    def test_main_session_is_the_front_desk(self):
+        sys.path.insert(0, ROOT)
+        import budget_hook
+        event = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}}
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_SESSION_ROLE": "main"}):
+            for cmd in ("lean-agent run p -- 'x'", "lean-agent review p 12", "lean-agent do p recipe", "lean-agent handover",
+                        "lean-agent learn", "lean-agent worktree push p", "lean-agent tracker p KEY=1", "cd /x && lean-agent run p"):
+                why = budget_hook.front_desk_denial(event(cmd))
+                self.assertIn("main is the front desk: hand it to a thread — lean-agent thread send tN --prompt-file - "
+                              "(or thread new \"title\")", why, cmd)
+            for cmd in ("lean-agent now", "lean-agent now --short", "lean-agent thread send t1 --prompt-file -",
+                        "lean-agent thread new 'x'", "lean-agent thread move t1 t2", "lean-agent advise 'x'", "lean-agent remember 'x'",
+                        "lean-agent clear", "lean-agent checkpoint", "lean-agent brief", "lean-agent runs --show abc",
+                        "lean-agent runs --wait all", "lean-agent runs --stop abc", "lean-agent logs", "lean-agent doctor",
+                        "lean-agent config", "lean-agent worktree list", "lean-agent run --help"):
+                self.assertEqual(budget_hook.front_desk_denial(event(cmd)), "", cmd)
+        for env in ({"LEAN_AGENT_SESSION_ROLE": "thread", "LEAN_AGENT_THREAD": "t1"}, {}):
+            with mock.patch.dict(os.environ, env):
+                self.assertEqual(budget_hook.front_desk_denial(event("lean-agent run p -- 'x'")), "")
+
+    def test_front_desk_denial_reaches_the_hook_only_for_the_main_role(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        ev = dict(self.ev, cwd=home, tool_name="Bash", tool_input={"command": "lean-agent run p -- 'x'", "run_in_background": True})
+        out = run_hook("budget_hook.py", ev, LEAN_AGENT_SESSION_ROLE="main", **self.env)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("main is the front desk", out["hookSpecificOutput"]["permissionDecisionReason"])
+        out = run_hook("budget_hook.py", ev, LEAN_AGENT_SESSION_ROLE="thread", LEAN_AGENT_THREAD="t1", **self.env)
+        self.assertNotIn("front desk", json.dumps(out))
+
+    def test_orchestrator_surface_doc_lists_the_front_desk_commands(self):
+        sys.path.insert(0, ROOT)
+        import budget_hook
+        with open(os.path.join(ROOT, "..", "..", "..", "docs", "orchestrator-surface.md"), encoding="utf-8") as fh:
+            section = fh.read().split("## 5.")[1]
+        denied_rows = [l for l in section.splitlines() if "**denied**" in l]
+        text = " ".join(denied_rows)
+        for name in budget_hook.FRONT_DESK_WORK - {"publish", "push", "review-learn", "review-decline"}:
+            self.assertIn(f"`{name}`", text)
+        self.assertIn("`worktree push`", text)
+        self.assertIn("`now --short`", section)
 
     def test_no_budget_tracks_only(self):
         self.assertIsNone(run_hook("budget_hook.py", self.ev, **self.env))
