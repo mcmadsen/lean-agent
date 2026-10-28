@@ -2391,6 +2391,8 @@ class CliTest(unittest.TestCase):
             fh.write("---\nname: no tracker mcp\ntype: feedback\nscope: global\n---\n" + self.RULE + "\n")
         self.cli("learn", self.proj)
         self.cli("cards", "proj", "memory")
+        self.assertTrue(os.path.exists(os.path.join(store, "feedback_no_tracker_mcp_2.md")))  # reading never rewrites the store
+        self.cli("memory", "add", "The staging database resets every night at two")  # a write heals
         self.assertFalse(os.path.exists(os.path.join(store, "feedback_no_tracker_mcp_2.md")))
         self.assertTrue(os.path.exists(os.path.join(store, "feedback_no_tracker_mcp.md")))
 
@@ -5338,10 +5340,10 @@ class CliTest(unittest.TestCase):
         reps["main"].tick()
         self.assertEqual(len(hosts["main"].pasted), 1)
         ss.queue_report("t1", "done", "Second.")
-        clock[0] += 120
+        clock[0] += 30
         reps["main"].tick()
         self.assertEqual(len(hosts["main"].pasted), 1)  # transcript unchanged: the paste has not begun a turn
-        clock[0] += 61
+        clock[0] += 31
         reps["main"].tick()
         self.assertEqual(len(hosts["main"].pasted), 2)
 
