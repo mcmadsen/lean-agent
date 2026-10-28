@@ -946,21 +946,15 @@ SHORT_LINES = 12
 SHORT_DONE_HOURS = 24  # a done report counts as recent this long; older, the thread is idle
 
 
-def short_text(now=None, max_lines=SHORT_LINES, close_idle=False):
+def short_text(now=None, max_lines=SHORT_LINES):
     """One line per open thread for the front desk, `now --short`: needs you (or blocked) first, then running, done
-    (recent), idle; at most `max_lines` lines, the rest counted in a last line."""
+    (recent), idle; at most `max_lines` lines, the rest counted in a last line. Read-only: never closes idle threads."""
     now = time.time() if now is None else now
-    days, todos = idle_days(), _todo_map()
-    started = {}
-    for f in glob.glob(lean_home("running", "*.json")):
-        m = lean_common.read_json(f, {})
-        if isinstance(m, dict) and lean_common.pid_alive(m.get("pid")):
-            started[m.get("run") or os.path.basename(f)[:-5]] = m.get("started")
+    todos = _todo_map()
+    started = {rid: m.get("started") for rid, m in lean_common.running_runs(lean_home())}
     with _locked() as data:
         evs = events(data, todos)
         running = running_by_thread(data)
-        if close_idle:
-            autoclose(data, evs, running, todos, days, now)
         rows = []
         for tid, t in data["threads"].items():
             if t.get("closed") or tid in data["aliases"] or tid in RESERVED:
