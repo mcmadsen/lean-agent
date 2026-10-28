@@ -2023,6 +2023,8 @@ def _cmd_run(a):
         hooks["PostToolUse"] = [{"matcher": "mcp__.*", "hooks": [{
             "type": "command", "timeout": 20,
             "command": f"python3 {json.dumps(os.path.join(HERE, 'mcp_trim_hook.py'))}"}]}]
+    hooks["PreToolUse"].append({"matcher": "*", "hooks": [{  # one note at ~70% of the budget: commit, then summarise
+        "type": "command", "timeout": 10, "command": f"python3 {json.dumps(os.path.join(HERE, 'wrapup_hook.py'))}"}]})
     flag_settings["hooks"] = hooks
     if flag_settings:
         cmd += ["--settings", json.dumps(flag_settings)]
@@ -2106,11 +2108,15 @@ def _cmd_run(a):
         rec = load_json(home("running", running_key + ".json"), None)
         if isinstance(rec, dict):
             save_json(home("running", running_key + ".json"), dict(rec, session_id=sid))
+    env["LEAN_AGENT_WRAPUP_FLAG"] = os.path.join(workdir, "wrapup.flag")
+    for stale in ("wrapup.flag", "wrapup.flag.sent"):
+        if os.path.exists(os.path.join(workdir, stale)):
+            os.remove(os.path.join(workdir, stale))
     try:
         with wt_lock:
             raw, err, reads = stream_worker(cmd, today_line() + "\n\n" + task, workdir, env,
                                             env_num("LEAN_AGENT_RUN_TIMEOUT", 1800), max_reads, note_session,
-                                            cwd=project if native_rules else None)
+                                            cwd=project if native_rules else None, warn_turns=a.max_turns)
     except FileNotFoundError:
         die(f"'{claude}' not found on PATH")
     finally:
@@ -2136,6 +2142,11 @@ def _cmd_run(a):
             out, result_line = ev, line
         elif ev.get("type") == "rate_limit_event":
             usage.record_plan_usage(ev.get("rate_limit_info"))
+    final_text = None
+    if (not read_only and not role and (reads.get("stopped") or out.get("subtype") == "error_max_turns")
+            and (out.get("session_id") or reads.get("session_id"))):
+        final_text = final_turn(cmd, out.get("session_id") or reads["session_id"], workdir, env,
+                                project if native_rules else None, reads, out)
     with open(os.path.join(workdir, "result.json"), "a") as fh:
         fh.write((result_line or json.dumps({"stderr": err[-4000:], "stdout_tail": raw[-2000:]})) + "\n")
 
@@ -2171,6 +2182,9 @@ def _cmd_run(a):
     if reads.get("stopped") and not out.get("type"):  # stopped by lean-agent: no result event, so build one
         out = {"subtype": "error_max_context_reads", "session_id": reads.get("session_id"),
                "num_turns": reads["turns"], "usage": reads["usage"]}
+        if final_text:
+            out["result"] = final_text
+            summary, fb = parse_feedback(final_text)
     subtype = out.get("subtype") or "error"
     if subtype.startswith("error_max"):
         status = "stopped:" + subtype[len("error_"):]
@@ -2434,7 +2448,10 @@ def record_unauth_card(server, slug):
     return bool(lean_memory.add(store, body, "reference", scope=slug, name=title, source="mcp auth check"))
 
 
-def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd=None):
+WRAPUP_AT = 0.7
+
+
+def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd=None, warn_turns=0):
     """Run a worker and read its stream-json as it comes, so a run that keeps re-reading a large context
     can be stopped (after `max_reads` context tokens summed over its calls; 0 = never) and resumed later.
     `on_session(id)` is called once, when the first event carries the session id.
@@ -2488,6 +2505,14 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
                     for k in usage.FIELDS:
                         reads["usage"][k] += int(u.get(k) or 0)
                     reads["ctx"] += usage.context_tokens(u)
+                    if not reads.get("warned") and ((max_reads and reads["ctx"] > WRAPUP_AT * max_reads)
+                                                    or (warn_turns and reads["turns"] > WRAPUP_AT * warn_turns)):
+                        reads["warned"] = True  # the worker's next tool call carries the note (wrapup_hook.py)
+                        flag = env.get("LEAN_AGENT_WRAPUP_FLAG")
+                        if flag:
+                            open(flag, "w").close()
+                        print(f"worker at ~{int(WRAPUP_AT * 100)}% of its read/turn budget: told to commit and write "
+                              "its summary", flush=True)
                     if max_reads and reads["ctx"] > max_reads:
                         reads["stopped"] = True
                         proc.terminate()
@@ -2513,6 +2538,46 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
 
 
 LAST_RUN = []  # the entry of the run this process made last
+
+
+FINAL_TURN_PROMPT = ("You are out of budget and must stop now. Do not read or explore anything more. Commit your "
+                     "finished work (git add, git commit) and reply with a short summary: what is done, what is left.")
+
+
+def final_turn(cmd, session_id, workdir, env, cwd, reads, out):
+    """One bounded last turn for a write worker stopped at its read or turn limit: resume it with only the instruction
+    to commit and summarise. Its usage is added to the run's; returns its text (also put in out["result"] when the
+    worker's own result event has none), else None."""
+    c, i = [], 0
+    while i < len(cmd):
+        if cmd[i] in ("--resume", "--max-turns", "--max-budget-usd"):
+            i += 2
+            continue
+        c.append(cmd[i])
+        i += 1
+    c += ["--resume", session_id, "--max-turns", "4"]
+    print("final turn: asking the worker to commit and summarise", flush=True)
+    try:
+        raw, _, _ = stream_worker(c, FINAL_TURN_PROMPT, workdir, env, env_num("LEAN_AGENT_FINAL_TURN_TIMEOUT", 300),
+                                  0, None, cwd=cwd)
+    except OSError:
+        return None
+    text = None
+    for line in raw.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and ev.get("type") == "result":
+            text = (ev.get("result") or "").strip() or None
+            for k, v in (ev.get("usage") or {}).items():
+                if k in reads["usage"] and isinstance(v, (int, float)):
+                    reads["usage"][k] += int(v)
+                    if isinstance(out.get("usage"), dict):
+                        out["usage"][k] = (out["usage"].get(k) or 0) + int(v)
+    if text and out.get("type") and not out.get("result"):
+        out["result"] = text
+    return text
 
 
 def run_escalating(a):
