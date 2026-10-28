@@ -8941,6 +8941,17 @@ class RuleUnitTest(unittest.TestCase):
             agent.load_cards("x")
             self.assertEqual(len(calls), 2)
 
+    def test_consolidate_never_overwrites_an_archived_memory_of_the_same_name(self):
+        body = "Always run the formatter before committing the changes to the repository"
+        for round_ in range(2):
+            self._write_mem("project_fmt", body + f" round {round_}")
+            self._write_mem("project_fmt_b", body + f" round {round_} again")
+            group = [m for m in self.memory.read_all(self.dir) if m["stem"] in ("project_fmt", "project_fmt_b")]
+            self.memory.consolidate(self.dir, group, f"Formatter {round_}", "Run the formatter first.")
+        names = sorted(os.listdir(os.path.join(self.dir, "archive")))
+        self.assertEqual(names, ["project_fmt.2.md", "project_fmt.md", "project_fmt_b.2.md", "project_fmt_b.md"])
+        self.assertEqual(self.memory.restore(self.dir, "project_fmt"), "project_fmt")
+
     def test_dedupe_needs_the_same_type_and_title_and_does_not_chain(self):
         body = "Always run the formatter before committing the changes to the repository"
         self.memory.add(self.dir, body, "feedback", name="formatter")
