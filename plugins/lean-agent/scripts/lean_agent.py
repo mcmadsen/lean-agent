@@ -7612,7 +7612,7 @@ def cmd_doctor(a):
     report(True, "guide sizes: thread sessions ~" + f"{est_tokens(current):,}" + " tokens (CLAUDE.md), main session ~"
            + f"{est_tokens(read_text(desk)) if os.path.exists(desk) else 0:,}" + " tokens (front-desk.md)")
     loaded = [(f, t) for f, t in (home_instruction_files(h) if os.path.isdir(h) else [])
-              if os.path.realpath(f) not in (os.path.realpath(guide_file), os.path.realpath(desk))]
+              if os.path.realpath(f) != os.path.realpath(desk)]  # thread sessions leave the front-desk guide out
     if loaded:
         total = sum(t for _, t in loaded)
         report(None if len(loaded) > 1 else True, f"orchestrator loads ~{total:,} tokens of instructions on every call: "
@@ -8242,7 +8242,8 @@ def cmd_context(a):
         print(f"Start-up context: ~{ctx:,} tokens (system prompt, tools, instruction files; one small Haiku call)")
     files = home_instruction_files(h)
     guide = os.path.join(h, "CLAUDE.md")
-    extra = [(f, t) for f, t in files if os.path.realpath(f) != os.path.realpath(guide)]
+    own = {os.path.realpath(guide), os.path.realpath(front_desk_file(h))}  # the guides of the two session roles
+    extra = [(f, t) for f, t in files if os.path.realpath(f) not in own]
     print("Instruction files: " + ", ".join(f"{os.path.basename(f)} ~{t:,}" for f, t in files))
     flagged_files = [f for f, _ in extra]
     for f, t in extra:
@@ -8303,11 +8304,12 @@ def orchestrator_context_lines(h):
     context (system prompt, tools, guide) and growth, measured from its transcript."""
     guide = os.path.join(h, "CLAUDE.md")
     desk = front_desk_file(h)
-    lines = [f"context: the guide (CLAUDE.md, thread sessions) is ~{est_tokens(read_text(guide)):,} tokens"
-             + (f", the main session's front desk ~{est_tokens(read_text(desk)):,}" if os.path.exists(desk) else "")
+    lines = [f"context: the guide (CLAUDE.md) is ~{est_tokens(read_text(guide)):,} tokens"
              if os.path.exists(guide) else "context: no guide yet"]
     others = [(f, t) for f, t in home_instruction_files(h)
               if os.path.realpath(f) not in (os.path.realpath(guide), os.path.realpath(front_desk_file(h)))]
+    if os.path.exists(desk):
+        lines.append(f"context: the main session loads the front-desk guide (~{est_tokens(read_text(desk)):,} tokens) instead of CLAUDE.md")
     if others:
         lines.append(f"context: also loaded on every call: " + ", ".join(f"{f} ~{t:,}" for f, t in others)
                      + " (keep them out: add them to claudeMdExcludes in " + os.path.join(h, ".claude", "settings.json") + ")")
