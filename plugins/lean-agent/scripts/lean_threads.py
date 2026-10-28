@@ -583,6 +583,7 @@ OUTPUT_READ = 200_000
 
 
 REPORTS_RE = re.compile(r"\s*<thread-reports>(.*?)</thread-reports>", re.S)
+REPORTS_KEPT = 5  # reports kept per thread; the latest is shown
 REPORT_LINE_RE = re.compile(r"^\[(t\d+) (done|blocked|needs-you)\] (.+)$", re.M)
 
 
@@ -599,12 +600,14 @@ def store_reports(prompt):
         return []
     got = {}
     for tid, kind, text in REPORT_LINE_RE.findall(m.group(1)):
-        got[tid] = {"kind": kind, "text": text.strip(), "ts": now_iso()}
+        got.setdefault(tid, []).append({"kind": kind, "text": text.strip(), "ts": now_iso()})
     with _locked() as data:
-        for tid, rep in got.items():
+        for tid, reps in got.items():
             t = data["threads"].get(resolve(tid, data["aliases"]))
             if t is not None:
-                t["report"] = rep
+                old = t.get("reports") if isinstance(t.get("reports"), list) else []
+                t["reports"] = (old + reps)[-REPORTS_KEPT:]
+                t["report"] = t["reports"][-1]  # `now` shows the latest
     return sorted(got)
 
 
