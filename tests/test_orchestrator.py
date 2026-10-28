@@ -4128,12 +4128,23 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.read_jsonl(log)[-1]["argv"][-2:], ["--resume", old])
         self.stop_up(p, 30)
 
+    def test_fresh_after_context_is_the_lower_of_tokens_and_share(self):
+        ss = lean_agent_module().service_session
+        limits = ss.parse_fresh_after(None)[1]
+        self.assertEqual(ss.fresh_context_threshold(limits, 967000), 120000)  # 1M window
+        self.assertEqual(ss.fresh_context_threshold(limits, 200000), 100000)  # 200k window
+        self.assertEqual(ss.fresh_context_threshold(ss.parse_fresh_after("context=120k")[1], 200000), 120000)
+        self.assertEqual(ss.fresh_context_threshold(ss.parse_fresh_after("context=50%")[1], 967000), 483500)
+        self.assertEqual(ss.fresh_text(ss.parse_fresh_after("context=120k|50%")), "idle=30m,context=120k|50%")
+        with self.assertRaises(ValueError):
+            ss.parse_fresh_after("context=lots")
+
     def test_config_thread_fresh_after_default_and_off(self):
         self.cli("config", "thread-fresh-after", "idle=2h,context=10%")
         self.assertIn("idle=120m,context=10%", self.cli("config", "thread-fresh-after").stdout)
-        self.assertIn("idle=30m,context=50%", self.cli("config", "thread-fresh-after", "default").stdout)
+        self.assertIn("idle=30m,context=120k|50%", self.cli("config", "thread-fresh-after", "default").stdout)
         self.assertIn("thread-fresh-after: off", self.cli("config", "thread-fresh-after", "off").stdout)
-        self.assertIn("idle=30m,context=50%", self.cli("config", "thread-fresh-after", "default").stdout)
+        self.assertIn("idle=30m,context=120k|50%", self.cli("config", "thread-fresh-after", "default").stdout)
         self.assertNotEqual(self.cli("config", "thread-fresh-after", "idle=bogus", check=False).returncode, 0)
 
     def send_in_process(self, ages, prompt="more work"):

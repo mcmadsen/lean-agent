@@ -7608,6 +7608,10 @@ def cmd_doctor(a):
         report(None, "compaction setting ignored: " + msg, "lean-agent config compact-window N|default, compact-pct P|default")
     report(True, text + " (lean-agent config compact-window N|default, compact-pct P|default)")
     report(True, f"auto clear: {clear_at_text()} (lean-agent config clear-at off|auto|N)")
+    fa = service_session.fresh_after()
+    report(True, "auto fresh: " + service_session.fresh_text(fa) + (
+        f" (thread sessions continue fresh at ~{kt(int(service_session.fresh_context_threshold(fa[1], service_session.up_compact_at())))} context)"
+        if fa else "") + " (lean-agent config thread-fresh-after)")
 
     slug = default_project(path)
     projs = projects()
@@ -8921,9 +8925,9 @@ def cmd_config(a):
                 cfg["thread_fresh_after"] = a.value.lower()
             save_json(home("config.json"), cfg)
         fa = service_session.fresh_after()
-        print("thread-fresh-after: " + (f"idle={fa[0] / 60:g}m,context={fa[1]:g}%" if fa else "off") + " \u00b7 `thread send` to an open "
+        print("thread-fresh-after: " + service_session.fresh_text(fa) + " \u00b7 `thread send` to an open "
               "session idle this long whose context is this share of the compaction point checkpoints it and continues in "
-              "a new session started from a short brief (idle=30m,context=50%|off|default)")
+              "a new session started from a short brief (idle=30m,context=120k|50%|off|default)")
         return 0
     if a.name == "clear-at":
         if a.value is not None:
@@ -9408,9 +9412,10 @@ def auto_fresh_reason(tid):
         return ""
     mine = next((x for x in open_thread_sessions() if x["thread"] == tid), None)
     ctx, point = service_session.session_context(tid), service_session.up_compact_at()
-    if not mine or mine["idle"] < limits[0] or not ctx or not point or ctx < point * limits[1] / 100:
+    need = service_session.fresh_context_threshold(limits[1], point)
+    if not mine or mine["idle"] < limits[0] or not ctx or not need or ctx < need:
         return ""
-    return f"idle {_idle_age(mine['idle'])}, context ~{kt(ctx)} is {ctx * 100 // point}% of the compaction point"
+    return f"idle {_idle_age(mine['idle'])}, context ~{kt(ctx)} reaches the {kt(int(need))} limit"
 
 
 def start_closed_thread(tid, t, prompt, resume_old, force=False):
