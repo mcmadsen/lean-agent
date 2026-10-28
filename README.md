@@ -647,6 +647,7 @@ lean-agent memory add "Never merge on Fridays" --type feedback        # global
 lean-agent memory add "Staging DB resets nightly" -p shop             # project-only
 lean-agent memory rm <name>
 lean-agent memory dedupe [-p shop] [--apply]   # list (or merge) near-identical memories
+lean-agent memory dedupe --topics [--apply]    # group memories on one subject, consolidate each (originals archived); `memory restore <name>` brings one back
 ```
 
 - **Same format as auto memory:** one topic file per memory with `type` (user, feedback, project, reference) and

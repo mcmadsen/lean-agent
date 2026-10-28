@@ -5823,6 +5823,67 @@ def measure_server(name, cfg):
     print(f"{name}: ~{sizes[1] - sizes[0]:,} tokens of context per worker turn (baseline {sizes[0]:,})")
 
 
+CONSOLIDATE_PROMPT = """Consolidate these memory entries about one subject into a single entry for an AI coding agent.
+Start with a line `TITLE: <short title>`, then a blank line, then the body: the current state or rule first, then a
+dated history list (`- YYYY-MM-DD: ...`, newest last). Keep every distinct fact, name, command and date, and every
+"never use X / use Y instead" rule with its names; drop only repetition. At most 1500 characters. Output only that.
+
+{entries}
+"""
+
+
+def consolidate_text(group, model="haiku"):
+    """One Haiku call (read-only, no tools, --safe-mode) -> (title, body), or None when nothing usable came back."""
+    entries = "\n\n".join(f"### {m['name']} ({m['type']}, {(m['modified'] or m['created'] or '')[:10]})\n{m['body']}" for m in group)
+    claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
+    d = home("work", "consolidate")
+    os.makedirs(d, exist_ok=True)
+    try:
+        out = subprocess.run([claude, "-p", "--output-format", "stream-json", "--verbose", "--model", model,
+                              "--max-turns", "1", "--tools", "", "--safe-mode"],
+                             input=CONSOLIDATE_PROMPT.format(entries=entries), capture_output=True, text=True, cwd=d,
+                             timeout=180).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = ""
+    for line in out.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") == "result":
+            text = (ev.get("result") or "").strip()
+        elif ev.get("type") == "rate_limit_event":
+            usage.record_plan_usage(ev.get("rate_limit_info"))
+    if not text:
+        return None
+    m = re.match(r"TITLE:\s*(.+?)\s*\n+(.*)$", text, re.S)
+    title, body = (m.group(1), m.group(2).strip()) if m else (group[0]["name"], text)
+    return (title[:60], body) if body else None
+
+
+def memory_topics(a, store, scope):
+    groups = lean_memory.topic_clusters(store, {lean_memory.GLOBAL, scope} if a.project else None)
+    done = 0
+    for g in groups:
+        head = f"{len(g)} on one topic: " + "; ".join(m["name"] for m in g)
+        if not a.apply:
+            print(head)
+            continue
+        got = consolidate_text(g)
+        if not got:
+            print(f"{head} -> skipped (no consolidated text came back)")
+            continue
+        stem = lean_memory.consolidate(store, g, *got)
+        done += 1
+        print(f"{head} -> {stem} ({len(g)} archived; restore with: lean-agent memory restore <name>)")
+    if a.apply:
+        for slug in projects():
+            sync_memory(slug)
+    print((f"consolidated {done} of {len(groups)} cluster(s)" if a.apply else f"{len(groups)} cluster(s); run again with --apply to consolidate")
+          if groups else "no memories on the same topic")
+
+
 def cmd_memory(a):
     store = memory_store()
     scope = lean_memory.GLOBAL
@@ -5856,6 +5917,18 @@ def cmd_memory(a):
         for slug in projects():
             sync_memory(slug)
         return
+    if a.action == "restore":
+        if not a.text:
+            die("memory restore needs the archived memory's name or id")
+        stem = lean_memory.restore(store, a.text)
+        if not stem:
+            die(f"no archived memory {a.text!r} (they are in {lean_memory.archive_dir(store)})")
+        for slug in projects():
+            sync_memory(slug)
+        print(f"restored {stem}")
+        return
+    if a.action == "dedupe" and a.topics:
+        return memory_topics(a, store, scope)
     if a.action == "dedupe":
         groups = lean_memory.clusters(store, {lean_memory.GLOBAL, scope} if a.project else None)
         for g in groups:
@@ -10243,15 +10316,16 @@ def build_parser():
     s.add_argument("--grep", metavar="TEXT", help="preset: only presets whose name, description or tools contain TEXT")
     s.set_defaults(fn=cmd_mcp)
 
-    s = sub.add_parser("memory", help="shared memory: where | import | list | add | edit | rm | dedupe")
-    s.add_argument("action", choices=["where", "import", "list", "add", "edit", "rm", "dedupe"])
-    s.add_argument("text", nargs="?", help="add: the memory text; edit/rm: the memory's name")
+    s = sub.add_parser("memory", help="shared memory: where | import | list | add | edit | rm | dedupe | restore")
+    s.add_argument("action", choices=["where", "import", "list", "add", "edit", "rm", "dedupe", "restore"])
+    s.add_argument("text", nargs="?", help="add: the memory text; edit/rm/restore: the memory's name")
     s.add_argument("new_text", nargs="?", help="edit: the new text")
     s.add_argument("--project", "-p", help="scope to a project (default: global)")
     s.add_argument("--type", choices=lean_memory.TYPES, help="add: memory type (default project)")
     s.add_argument("--name", help="add: short name (the type is added for you); edit: new description")
     s.add_argument("--from", dest="source", metavar="DIR", help="import: folder to import (default: Claude's)")
     s.add_argument("--apply", action="store_true", help="dedupe: merge the duplicate clusters (default: list them)")
+    s.add_argument("--topics", action="store_true", help="dedupe: group memories about the same subject and consolidate them")
     s.set_defaults(fn=cmd_memory)
 
     s = sub.add_parser("limits", help="usage in your plan's session and weekly windows; budgets for agents")
