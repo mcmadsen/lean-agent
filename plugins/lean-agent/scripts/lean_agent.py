@@ -1619,6 +1619,7 @@ def cmd_run(a):
         raise
     finally:
         try:
+            early_settle()  # a run that returned before it started (declined, escalated) leaves no marker behind
             if isinstance(sys.stdout, Tee):
                 sys.stdout.close()  # the summary file is complete, then the running marker goes (also without a detached supervisor)
         finally:
@@ -1719,6 +1720,47 @@ def detach_run(workdir, run_id):
     return rc if rc >= 0 else 128 - rc
 
 
+EARLY_RUN = {}  # the run registered as the first step of `run`: {"id", "path"} until the real running marker replaces it
+
+
+def early_register(a, task):
+    """A running marker (pid, thread, task) written before any preflight or worktree work, so a run that is killed with
+    its session shows up as lost instead of missing."""
+    rid = datetime.datetime.now().strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
+    tag = lean_threads.resolve_tag()
+    path = home("running", rid + ".json")
+    fixed = {"id": rid, "project": a.project, "task": task[:300], "why": getattr(a, "why", None), "model": a.model,
+             "thread": tag, "role": getattr(a, "role", None)}
+    save_json(path, {"fixed": fixed, "pid": os.getpid(), "started": now_iso(), "run": rid, "task": task[:2000],
+                     "model": a.model, "project": a.project, "thread": tag, "role": getattr(a, "role", None),
+                     "early": True})
+    EARLY_RUN.update(id=rid, path=path, fixed=fixed)
+
+
+def early_settle(reason=None):
+    """Drops the early marker; with a reason the run is recorded as failed (it never started)."""
+    if not EARLY_RUN:
+        return
+    rid, path, fixed = EARLY_RUN["id"], EARLY_RUN["path"], EARLY_RUN["fixed"]
+    EARLY_RUN.clear()
+    if not (load_json(path, None) or {}).get("early"):
+        return  # the real running marker has taken over (or the file is gone): nothing of ours to settle
+    if reason:
+        row = {"project": fixed.get("project"), "project_path": None, "workdir": None, "model": fixed.get("model") or "?",
+               "task": fixed.get("task") or "", "why": fixed.get("why") or "start failed", "role": fixed.get("role"),
+               "thread": fixed.get("thread")}
+        row.update(id=rid, ts=now_iso(), status="failed", reason=f"start failed: {reason}", turns=None, seconds=None,
+                   usage={}, units=0, cost_usd=None, cards=[], result_head=f"start failed: {reason}", details=None)
+        append_jsonl(home("ledger.jsonl"), row)
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+FAILURE_HOOKS.append(early_settle)
+
+
 def _cmd_run(a):
     if a.resume == "last":  # the latest run, so the command needs no `$(lean-agent runs --last)`
         a.resume = latest_run_id(ordinary=True)
@@ -1737,6 +1779,8 @@ def _cmd_run(a):
         task = sys.stdin.read().strip()
     elif a.task_file:
         task = read_text(a.task_file).strip()
+    if not prev:
+        early_register(a, task)
     if not task:
         die("no task given")
 
@@ -1843,7 +1887,7 @@ def _cmd_run(a):
             cards = cards + rule_cards_for(list(lib.values()), task, getattr(a, "files", None) or [],
                                            changed_files(project), a.max_context - sum(c["tokens"] for c in cards),
                                            {c["id"] for c in cards})
-        run_id = datetime.datetime.now().strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
+        run_id = EARLY_RUN.get("id") or datetime.datetime.now().strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
         workdir = home("work", run_id)
         os.makedirs(workdir, exist_ok=True)
         read_only = bool(a.read_only)
@@ -2043,6 +2087,12 @@ def _cmd_run(a):
                                                       "branch": (wt or {}).get("branch") if isinstance(wt, dict) else None,
                                                       "role": getattr(a, "role", None)
                                                       or (prev or {}).get("role")})
+    if EARLY_RUN and os.path.basename(EARLY_RUN["path"]) != running_key + ".json":  # a launch key names the real marker
+        try:
+            os.remove(EARLY_RUN["path"])
+        except OSError:
+            pass
+    EARLY_RUN.clear()
     clear_launching()  # the running marker above now keeps the thread busy
     for line in mcp_cost_lines(mcp_specs, chrome_spec):
         print(line, flush=True)

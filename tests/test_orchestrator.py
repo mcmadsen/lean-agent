@@ -938,7 +938,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.todo_count("#1"), 0)
         self.cli("advise", "Fix the export retry loop", FAKE_ANSWER="Here.\nADVICE\nline 1")
         self.cli("handover", "Weekly plan", "--task-file", "-", input="plan text", FAKE_ANSWER="body")
-        self.assertEqual([r.get("role") for r in self.ledger()], ["advisor", "composer"])
+        self.assertEqual([(r.get("role"), r["status"]) for r in self.ledger() if r["status"] != "failed"],
+                         [("advisor", "done"), ("composer", "done")])  # the refused start is recorded as failed
         self.assertEqual(self.todo_count("#1"), 0)
 
     def test_resume_last_skips_reviewer_runs_and_says_when_only_role_runs_exist(self):
@@ -7547,6 +7548,10 @@ class CliTest(unittest.TestCase):
             notes = json.load(fh)
         self.assertEqual(notes[-1]["thread"], "t7")
         self.assertIn("run failed: say why", notes[-1]["text"])
+        row = self.ledger()[-1]  # the run was registered first and is closed as failed, not left missing
+        self.assertEqual((row["status"], row["thread"]), ("failed", "t7"))
+        self.assertIn("start failed: say why", row["reason"])
+        self.assertEqual(glob.glob(os.path.join(self.env["LEAN_AGENT_HOME"], "running", "*.json")), [])
 
     def test_output_reads_a_background_task_file(self):
         base = os.path.join(self.tmp.name, "claude-0", "proj", "tasks")
