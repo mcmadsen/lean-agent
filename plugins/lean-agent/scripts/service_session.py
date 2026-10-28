@@ -371,17 +371,35 @@ def checkpoint_prompt():
                                 "(they go on after the clear)", 1)
 
 
-FRESH_AFTER = {"idle": 1800, "context": 50}  # thread-fresh-after defaults: idle seconds, % of the compaction point
+FRESH_AFTER = {"idle": 1800, "context": (120000, 50.0)}  # thread-fresh-after defaults: idle seconds, context tokens | % of the compaction point (the lower)
 
 
 def fresh_after():
-    """(idle seconds, context percent) a big idle thread session must reach before `thread send` starts it fresh,
-    or None when off: LEAN_AGENT_THREAD_FRESH_AFTER, else `lean-agent config thread-fresh-after idle=30m,context=50%|off`."""
+    """(idle seconds, context limits) a big idle thread session must reach before `thread send` starts it fresh,
+    or None when off: LEAN_AGENT_THREAD_FRESH_AFTER, else `lean-agent config thread-fresh-after idle=30m,context=120k|50%|off`.
+    The context limits are (absolute tokens or None, percent of the compaction point or None); the lower one applies."""
     raw = os.environ.get("LEAN_AGENT_THREAD_FRESH_AFTER") or _load(lean_home("config.json")).get("thread_fresh_after")
     try:
         return parse_fresh_after(raw)
     except ValueError:
         return parse_fresh_after(None)
+
+
+def _parse_context_limit(text):
+    """(tokens, percent) of one `context=` value such as 120k, 50% or 120k|50% (the lower applies)."""
+    tokens = pct = None
+    for part in text.split("|"):
+        part = part.strip()
+        if part.endswith("%"):
+            pct = float(part[:-1])
+        else:
+            m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([km]?)", part)
+            if not m:
+                raise ValueError(part)
+            tokens = float(m.group(1)) * {"": 1, "k": 1000, "m": 1000000}[m.group(2)]
+        if (pct is not None and pct <= 0) or (tokens is not None and tokens <= 0):
+            raise ValueError(part)
+    return int(tokens) if tokens is not None else None, pct
 
 
 def parse_fresh_after(raw):
@@ -397,12 +415,29 @@ def parse_fresh_after(raw):
             if k == "idle":
                 out["idle"] = lean_common.parse_duration(v)
             elif k == "context":
-                out["context"] = float(v.rstrip("%"))
+                out["context"] = _parse_context_limit(v)
             else:
                 raise ValueError(k)
         except ValueError:
-            raise ValueError(f"thread-fresh-after takes idle=30m,context=50% or off, not {raw!r}")
+            raise ValueError(f"thread-fresh-after takes idle=30m,context=120k|50% or off, not {raw!r}")
     return out["idle"], out["context"]
+
+
+def fresh_context_threshold(limits, point):
+    """Tokens of context at which a session is big enough to continue fresh: the lower of the absolute limit and the
+    percentage of the compaction point `point` (0 when neither can be computed)."""
+    tokens, pct = limits
+    found = ([tokens] if tokens else []) + ([point * pct / 100] if pct and point else [])
+    return min(found) if found else 0
+
+
+def fresh_text(fa):
+    """`idle=30m,context=120k|50%` for the parsed thread-fresh-after, or off."""
+    if not fa:
+        return "off"
+    tokens, pct = fa[1]
+    ctx = "|".join(([f"{tokens / 1000:g}k"] if tokens else []) + ([f"{pct:g}%"] if pct else []))
+    return f"idle={fa[0] / 60:g}m,context={ctx}"
 
 
 def session_context(tid):

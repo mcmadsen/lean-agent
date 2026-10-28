@@ -142,7 +142,7 @@ plus one line per new thread report. A new request -> route it (the hook's conte
 went. `<thread-reports>` needs-you -> ask the user, then pass the answer back with `lean-agent thread send tN --prompt-file -`. Never
 explain or do the work in main: work commands are refused there. Thread session = one deliverable (`Thread tN "..."`): do the work there with
 workers; everything you start is tagged tN. Each thread is its own Remote Control session: `thread sessions` lists them,
-`thread open tN` brings one back as a fresh session with a short brief (`--resume-old` continues the old transcript), `thread close tN` when the topic is done. `thread send` to a long-idle, big session continues fresh on its own (`config thread-fresh-after idle=30m,context=50%|off|default`; `--resume-old` keeps the transcript).
+`thread open tN` brings one back as a fresh session with a short brief (`--resume-old` continues the old transcript), `thread close tN` when the topic is done. `thread send` to a long-idle, big session continues fresh on its own (`config thread-fresh-after idle=30m,context=120k|50%|off|default`; `--resume-old` keeps the transcript).
 Many at once: `thread close t10 t20`, `--all`, or `--idle 2h`.
 At `max-thread-sessions`, starting a session closes the longest-idle one that is eligible: not the one you are in, not mid-turn, no running or just-launched run, idle 10+ min (`LEAN_AGENT_CLOSE_MIN_IDLE` seconds changes that); if none is, it refuses and lists why.
 "What did we do for X": `lean-agent thread show tN` (`--all` for everything). `thread move rN tN` fixes a wrongly filed request.
