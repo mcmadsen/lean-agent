@@ -465,6 +465,14 @@ def _card_id(stem):
     return "mem-" + re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-")
 
 
+def _free_archive_name(d, stem):
+    """Path of an unused archive file: <stem>.md, else <stem>.2.md, <stem>.3.md ... (never overwrites an archived memory)."""
+    path, n = os.path.join(archive_dir(d), stem + ".md"), 2
+    while os.path.exists(path):
+        path, n = os.path.join(archive_dir(d), f"{stem}.{n}.md"), n + 1
+    return path
+
+
 def strongest_type(group):
     types = {m["type"] for m in group}
     return next((t for t in KIND_ORDER if t in types), "project")
@@ -499,7 +507,7 @@ def consolidate(d, group, title, body):
         with open(m["file"], encoding="utf-8", errors="replace") as fh:
             meta, text = parse(fh.read())
         meta["merged_into"] = _card_id(new)
-        with open(os.path.join(archive_dir(d), m["stem"] + ".md"), "w") as fh:
+        with open(_free_archive_name(d, m["stem"]), "w") as fh:
             fh.write(_frontmatter(meta) + "\n" + text + "\n")
         os.remove(m["file"])
     meta = {"name": title, "description": body.splitlines()[0][:120], "type": mtype, "scope": scope,
@@ -517,7 +525,7 @@ def restore(d, ref):
     for f in sorted(glob.glob(os.path.join(archive_dir(d), "*.md"))):
         with open(f, encoding="utf-8", errors="replace") as fh:
             meta, body = parse(fh.read())
-        stem = os.path.splitext(os.path.basename(f))[0]
+        stem = re.sub(r"\.\d+$", "", os.path.splitext(os.path.basename(f))[0])  # <stem>.2.md: a later archive of the same stem
         names = {re.sub(r"[^a-z0-9]+", "-", x.lower()).strip("-") for x in (stem, meta.get("name", ""))}
         names |= {n[len(meta.get("type", "")) + 1:] for n in list(names) if n.startswith(meta.get("type", "") + "-")}
         if key in names:
