@@ -2251,6 +2251,42 @@ class CliTest(unittest.TestCase):
         with open(os.path.join(mem, "feedback_small_prs.md")) as fh:  # originals untouched
             self.assertIn("type: feedback", fh.read())
 
+    def test_importing_a_changed_memory_again_updates_it_without_a_twin(self):
+        mem = self.make_auto_memory()
+        self.cli("memory", "import")
+        store = self.cli("memory", "where").stdout.split(": ", 1)[1].splitlines()[0]
+        with open(os.path.join(mem, "feedback_small_prs.md"), "w") as fh:
+            fh.write("---\nname: small PRs\ndescription: Prefers small focused PRs\ntype: feedback\n---\n"
+                     "Keep pull requests under 300 lines; review each one the same day.\n")
+        self.cli("memory", "import")
+        self.cli("memory", "import")
+        files = sorted(f for f in os.listdir(store) if f.startswith("feedback_small"))
+        self.assertEqual(files, ["feedback_small_prs.md"])
+        with open(os.path.join(store, files[0])) as fh:
+            self.assertIn("under 300 lines", fh.read())
+        # a different memory that only collides on the name still gets a suffix
+        with open(os.path.join(mem, "feedback_small_prs.md"), "w") as fh:
+            fh.write("---\nname: small PRs\ntype: feedback\n---\nAlways squash on merge.\n")
+        self.cli("memory", "import")
+        self.assertIn("feedback_small_prs.md", os.listdir(store))
+
+    def test_adding_the_same_named_memory_twice_keeps_one_file(self):
+        self.cli("memory", "add", "Staging resets every night at 02:00.", "--type", "reference", "--name", "staging reset")
+        self.cli("memory", "add", "Staging resets every Sunday at 04:00; the nightly reset was dropped.", "--type", "reference",
+                 "--name", "staging reset")
+        store = self.cli("memory", "where").stdout.split(": ", 1)[1].splitlines()[0]
+        self.assertEqual([f for f in os.listdir(store) if f.startswith("reference_")], ["reference_staging_reset.md"])
+
+    def test_loading_merges_existing_name_and_name_2_copies(self):
+        self.cli("memory", "add", self.RULE, "--type", "feedback", "--name", "no tracker mcp")
+        store = self.cli("memory", "where").stdout.split(": ", 1)[1].splitlines()[0]
+        with open(os.path.join(store, "feedback_no_tracker_mcp_2.md"), "w") as fh:
+            fh.write("---\nname: no tracker mcp\ntype: feedback\nscope: global\n---\n" + self.RULE + "\n")
+        self.cli("learn", self.proj)
+        self.cli("cards", "proj", "memory")
+        self.assertFalse(os.path.exists(os.path.join(store, "feedback_no_tracker_mcp_2.md")))
+        self.assertTrue(os.path.exists(os.path.join(store, "feedback_no_tracker_mcp.md")))
+
     def test_memory_add_rm_and_scope(self):
         self.cli("learn", self.proj)
         self.cli("memory", "add", "Always run the linter before committing", "--type", "feedback")

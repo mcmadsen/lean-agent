@@ -125,7 +125,7 @@ def read_all(d):
             "description": meta.get("description") or titles.get(os.path.basename(f), ""),
             "type": meta.get("type") if meta.get("type") in TYPES else "project",
             "scope": meta.get("scope") or GLOBAL,
-            "modified": meta.get("modified", ""),
+            "modified": meta.get("modified", ""), "source": meta.get("source", ""),
             "created": meta.get("created") or meta.get("modified", ""),  # backfilled from `modified` when missing
         })
     return out
@@ -230,6 +230,18 @@ def add(d, text, mtype="project", scope=GLOBAL, name=None, source=None, rebuild=
             if rebuild:
                 rebuild_index(d)
             return path
+    if source and name:  # the same source and name is the same memory: refresh it instead of adding a `_2` twin
+        same = next((m for m in existing if m["source"] == source and m["name"] == name and m["scope"] == (scope or GLOBAL)), None)
+        if same:
+            with open(same["file"], encoding="utf-8", errors="replace") as fh:
+                meta, _ = parse(fh.read())
+            meta.update(type=mtype, modified=_now(), description=(description or text.splitlines()[0])[:120])
+            meta.setdefault("created", same["created"])
+            with open(same["file"], "w") as fh:
+                fh.write(_frontmatter(meta) + "\n" + text + "\n")
+            if rebuild:
+                rebuild_index(d)
+            return same["file"]
     name = name or text.splitlines()[0][:60]
     base = _slug(name)
     if base.startswith(mtype + "_"):  # `--name feedback_x` must not become feedback_feedback_x
@@ -336,3 +348,22 @@ def merge_cluster(d, group):
 
 def read_all_one(d, m):
     return next(x for x in read_all(d) if x["file"] == m["file"])
+
+
+_SUFFIXED = re.compile(r"^(.+)_(\d+)$")
+
+
+def heal(d):
+    """Merge `<name>` / `<name>_N` pairs that are exact or near-identical copies (same rules as dedupe). Returns the
+    number merged."""
+    by_stem = {m["stem"]: m for m in read_all(d)}
+    merged = 0
+    for stem in sorted(by_stem):
+        m = _SUFFIXED.match(stem)
+        base = by_stem.get(m.group(1)) if m else None
+        dup = by_stem[stem]
+        if base and base["scope"] == dup["scope"] and base["type"] == dup["type"] and (
+                _digest(base["body"]) == _digest(dup["body"]) or _same(dup["body"], dup["name"], dup["type"], base)):
+            merge_cluster(d, [base, dup])
+            merged += 1
+    return merged
