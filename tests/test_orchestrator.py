@@ -114,6 +114,12 @@ FAKE_CLAUDE = textwrap.dedent("""\
     model = sys.argv[sys.argv.index("--model") + 1] if "--model" in sys.argv else ""
     if os.environ.get("FAKE_FAIL_MODEL") and os.environ["FAKE_FAIL_MODEL"] in model:
         fb = '{"status": "failed", "used": [], "unneeded": []}'
+    if os.environ.get("FAKE_ODD"):  # stream-json lines that are not the usual objects
+        print(json.dumps({"type": "assistant", "session_id": "sess-odd", "message": "a string, not an object"}), flush=True)
+        print(json.dumps({"type": "user", "message": {"content": "plain text"}}), flush=True)
+        print(json.dumps({"type": "assistant", "message": {"id": "m0", "content": "text", "usage": {"input_tokens": 1}}}), flush=True)
+        print(json.dumps("assistant session_id"), flush=True)
+        print("[1, 2]", flush=True)
     if os.environ.get("FAKE_TURNS"):  # stream assistant turns, each re-reading FAKE_TURN_CTX tokens
         print(json.dumps({"type": "system", "subtype": "init", "session_id": "sess-1"}), flush=True)
         for i in range(int(os.environ["FAKE_TURNS"])):
@@ -4970,6 +4976,39 @@ class CliTest(unittest.TestCase):
                                   FAKE_FAIL_MODEL="haiku").returncode, 1)
         self.assertEqual(self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "inline", LEAN_AGENT_NO_DETACH="1"
                                   ).returncode, 0)
+
+    def test_odd_stream_events_do_not_crash_run_advise_read_only_or_ref_runs(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        subprocess.run(["git", "-C", self.proj, "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", self.proj, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                        "--allow-empty", "-m", "x"], check=True)
+        for extra in ((), ("--read-only",), ("--read-only", "--ref", "main")):
+            p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--again", *extra, "look", FAKE_ODD="1")
+            self.assertRegex(p.stdout, r"run \S+ · haiku · done")
+            self.assertNotIn("Traceback", p.stderr)
+        p = self.cli("advise", "Fix it", FAKE_ODD="1", FAKE_ANSWER="ADVICE\nknown: none")
+        self.assertIn("ADVICE", p.stdout)
+        self.assertNotIn("Traceback", p.stderr)
+        self.assertEqual({r["status"] for r in self.ledger()}, {"done"})
+
+    def test_an_exception_in_the_detached_supervisor_is_recorded_as_a_failed_run(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        code = ("import sys; sys.path.insert(0, %r); import lean_agent as L\n"
+                "def boom(*a, **k): raise RuntimeError('forced')\n"
+                "L.seed_collected = boom; L.CLI_ENTRY.append(True); sys.exit(L.main())" % os.path.dirname(CLI))
+        for args in (("run", "-p", "proj", "-m", "haiku", "--why", "x", "crash"),
+                     ("advise", "crash")):
+            p = subprocess.run([sys.executable, "-c", code, *args], capture_output=True, text=True,
+                               env=self.env, stdin=subprocess.DEVNULL)
+            row = self.ledger()[-1]
+            self.assertEqual(p.returncode, 1, p.stderr)
+            self.assertEqual((row["status"], row["reason"]), ("failed", "internal error: RuntimeError: forced"))
+            self.assertIn(f"run {row['id']} failed: internal error: RuntimeError: forced "
+                          f"(details: lean-agent runs --show {row['id']} --tail 40)", p.stdout)
+            with open(os.path.join(row["workdir"], "traceback.txt")) as fh:
+                self.assertIn("RuntimeError: forced", fh.read())
+            self.assertIn("RuntimeError", self.cli("runs", "--show", row["id"], "--tail", "40").stdout)
+        self.assertEqual(self.running_markers(), [])
 
     def test_a_missing_claude_binary_leaves_no_todo_new_item(self):
         self.cli("learn", self.proj)
