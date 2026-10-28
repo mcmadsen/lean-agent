@@ -7356,6 +7356,21 @@ def stop_run(target):
     return 0
 
 
+def norm_thread_tag(tag):
+    """'#3', 'T3' and '3' all become 't3'; empty stays ''."""
+    t = str(tag or "").strip().lstrip("#").lower()
+    return "t" + t if t.isdigit() else t
+
+
+def run_summary_line(r):
+    """The `run ...` line of a finished run's saved summary, else the one built from the ledger."""
+    for f in reversed(run_summary_files(r)):
+        for line in read_text(f).splitlines():
+            if line.startswith("run "):
+                return line
+    return run_line_from_ledger(r)
+
+
 def cmd_runs(a):
     if getattr(a, "wait", None):
         return wait_for_runs(a.wait, a.timeout)
@@ -7363,6 +7378,9 @@ def cmd_runs(a):
     if a.project:
         slug, _ = resolve_project(a.project)
         runs = [r for r in runs if r["project"] == slug]
+    if getattr(a, "thread_filter", None):
+        want = norm_thread_tag(a.thread_filter)
+        runs = [r for r in runs if norm_thread_tag(r.get("thread")) == want]
     if getattr(a, "stop", None):
         return stop_run(a.stop)
     if getattr(a, "clear", False) and not getattr(a, "lost", False):
@@ -7424,9 +7442,11 @@ def cmd_runs(a):
             print(f"({len(files)} turns of this run; this is the latest: {files[-1]})")
         return
     if a.last:
-        print(latest_run_id(runs))
+        rid = latest_run_id(runs)
+        r = next((x for x in reversed(runs) if x["id"] == rid), None)
+        print(f"{rid}  {run_summary_line(r)}" if r else rid)
         return
-    for r in runs[-a.n:]:
+    for r in runs[-(a.limit or a.n):]:
         print(f"{r['id']}  {r['status']:<22} {r['model']:<7} {r['project']:<16} {r['task'][:70]}")
     for rid, m in lost_runs(home()):
         if not a.project or m.get("project") == a.project:
@@ -9270,6 +9290,14 @@ def _cmd_todo(a):
             print(f"(start it: lean-agent todo start {t['id']}; done: lean-agent todo done {t['id']} \"<result>\")")
         return 0
     items = data["items"] if a.all else open_todos(data)
+    if getattr(a, "open", False):
+        items = [t for t in items if t["status"] in ("open", "doing")]
+    if getattr(a, "thread_tag", None):
+        want = norm_thread_tag(a.thread_tag)
+        items = [t for t in items if norm_thread_tag(t.get("thread")) == want]
+    if getattr(a, "grep", None):
+        items = [t for t in items if a.grep.lower() in (t.get("text") or "").lower()
+                 or any(a.grep.lower() in str(n).lower() for n in t.get("notes") or [])]
     if a.epic:
         items = [t for t in items if t.get("epic") == a.epic]
     if a.project:
@@ -10971,7 +10999,9 @@ def build_parser():
 
     s = sub.add_parser("runs", help="recent worker runs (id, status, model, task)")
     s.add_argument("--project", "-p")
-    s.add_argument("--last", action="store_true", help="print only the id of the latest run")
+    s.add_argument("--last", action="store_true", help="print the latest run's id and its summary line")
+    s.add_argument("--thread", dest="thread_filter", metavar="tN", help="only the runs of this thread")
+    s.add_argument("--limit", type=int, metavar="N", help="the newest N runs (same as -n)")
     s.add_argument("--running", action="store_true", help="runs in progress right now")
     s.add_argument("--lost", action="store_true", help="list the lost runs (supervisor died without a result); with --clear mark them acknowledged")
     s.add_argument("--clear", action="store_true", help="with --lost: mark the lost runs lost-and-acknowledged so they stop appearing")
@@ -11008,6 +11038,8 @@ def build_parser():
     s.add_argument("--prio", choices=list(PRIOS))
     s.add_argument("--due", metavar="YYYY-MM-DD")
     s.add_argument("--all", action="store_true", help="list: include done ones")
+    s.add_argument("--open", action="store_true", help="list: only open and doing ones (with --all: not the done ones)")
+    s.add_argument("--grep", metavar="TEXT", help="list: only todos whose text or notes contain TEXT")
     s.add_argument("--epic", metavar="NAME", help="add: part of this epic; next/list: only this epic")
     s.add_argument("--after", metavar="N,N", help="add: ready only once these items are done")
     s.add_argument("--count", action="append", metavar="COUNTER", help="epic NAME: show this counter's progress "
