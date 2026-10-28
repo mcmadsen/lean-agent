@@ -114,7 +114,8 @@ MUTATING_WORDS = {"delete", "create", "update", "set", "apply", "push", "rm", "m
                   "post", "patch", "install", "exec", "write", "reset", "approve", "complete", "abandon", "queue"}
 CLI_RE = re.compile(r"(?<![\w/-])(az|gh|kubectl|aws|gcloud|curl|wget|docker|terraform|helm|psql|sqlcmd|glab|jq)(?=\s)")
 READONLY_SHELL_RULE = ("You are read-only. The only shell commands you can run are read-only git commands, written as\n"
-                       "`git -C {project} <show|log|grep|diff|blame|status|ls-files|ls-tree|cat-file|rev-parse|branch|fetch> ...`\n"
+                       "`git -C {project} <show|log|grep|diff|blame|status|ls-files|ls-tree|cat-file|rev-parse|branch|fetch|describe> ...`,\n"
+                       "`git -C {project} tag --list ...` and `git -C {project} merge-base --is-ancestor ...` (release questions)\n"
                        "(no `cd`, no pipes to other programs). Everything else is refused.")
 SEND_RULE = ("Outward actions: do NOT do anything that leaves this machine and can't be undone, such as\n"
              "sending or posting a message, submitting a form, publishing, merging, deploying, or deleting\n"
@@ -127,7 +128,7 @@ BROWSER_RULE = ("Browser: you control the user's real Chrome (signed in as them)
                 "tools. Always work in a new tab and never touch the user's existing tabs. If a login, MFA,\n"
                 "CAPTCHA or account picker appears, stop with status \"needs-input\".\n")
 READONLY_GIT = ("show", "log", "grep", "diff", "blame", "status", "ls-files", "ls-tree", "cat-file", "rev-parse",
-                "branch", "fetch")
+                "branch", "fetch", "describe", "tag --list", "merge-base --is-ancestor")
 CHROME = "claude-in-chrome"
 
 
@@ -1428,11 +1429,10 @@ def advise_rules(slug, path):
 
 
 def task_rule_warnings(cards, task):
-    """Warn (no refusal) when the task text asks for a tool that a rule forbids."""
+    """Warn (no refusal) when the task text itself names a tool that a rule forbids, as a whole word."""
     for c in cards:
         for t in (c.get("targets") or []) if c.get("is_rule") else []:
-            if re.search(r"\b(?:use|using|call|calling|run|via|with|through)\s+(?:the\s+)?`?" + re.escape(t) + r"\b|\b"
-                         + re.escape(t) + r"\s+(?:mcp|cli)\b", task, re.I):
+            if re.search(r"(?<![\w-])" + re.escape(t) + r"(?![\w-])", task, re.I):
                 print(f"lean-agent: warning: the task asks for {t}, which rule {c['id']} forbids: "
                       f"{lean_rules.rule_line(c)}", file=sys.stderr)
                 break
@@ -1973,7 +1973,7 @@ def _cmd_run(a):
     mcp_specs = prev.get("mcp") if prev else canonical_specs(project, a.mcp or [])
     if mcp_specs and not prev:
         enforce_mcp_rules(list(lib.values()), project, mcp_specs, getattr(a, "force_mcp", False))
-    task_rule_warnings(list(lib.values()), task)
+    task_rule_warnings(list(lib.values()), getattr(a, "warn_text", None) or task)
     mcp_servers, mcp_allowed, mcp_disallowed = resolve_mcp(project, mcp_specs) if mcp_specs else ({}, [], [])
     for sname, scfg in mcp_servers.items():
         for problem in lean_mcp.config_problems(scfg):
@@ -2693,8 +2693,15 @@ def mcp_cost_lines(mcp_specs, chrome_spec):
         chosen = expand_tools(name, wanted, known) if wanted else list(known)
         cost, whole = sum(known.get(t, 0) for t in chosen), sum(known.values())
         line = f"mcp: {name} {len(chosen)}/{len(known)} tools ~{cost:,} tok per turn (whole server ~{whole:,})"
-        if not wanted and whole > 5000:
-            line += f"; narrow it: --mcp {name}:<preset|tool,...> (presets: lean-agent mcp preset {name})"
+        if not wanted and (whole > 5000 or len(known) >= 15):
+            fits = [(p, ts) for p, ts in mcp_presets(name, known).items() if 0 < len(ts) < len(known)]
+            if fits:
+                p, ts = min(fits, key=lambda x: sum(known.get(t, 0) for t in x[1]))
+                line += (f"; preset {name}:{p} ({len(ts)} tools) would cost ~{sum(known.get(t, 0) for t in ts):,} tok per turn"
+                         f" instead of ~{whole:,}: --mcp {name}:{p} (all presets: lean-agent mcp preset {name})")
+            else:
+                line += (f"; narrow it: --mcp {name}:<preset|tool,...> (presets: lean-agent mcp preset {name}; "
+                         f"save one: lean-agent mcp preset add {name} <name> <tool> ...)")
         lines.append(line)
     if chrome_spec:
         st = chrome_state()
@@ -6025,6 +6032,13 @@ def cmd_mcp(a):
               + ("" if a.probe else "  Fill in ? with --probe (http servers: one small Haiku call each)."))
         return
     if a.action == "preset":
+        if a.server == "add":  # `mcp preset add <server> <name> <tool> [<tool> ...]`
+            parts = [x for x in (a.preset_name, a.preset_tools, *(a.more or [])) if x]
+            if len(parts) < 3:
+                die("mcp preset add <server> <name> <tool> [<tool> ...]")
+            a.server, a.preset_name, a.preset_tools = parts[0], parts[1], ",".join(parts[2:])
+        elif a.more:
+            a.preset_tools = ",".join([a.preset_tools, *a.more])
         if not a.server:
             die("mcp preset needs a server: lean-agent mcp preset <server> [<name> <tool,tool>] [--rm]")
         known = mcp_cache().get(a.server, {}).get("tools")
@@ -6845,6 +6859,35 @@ def _card_actions(slug, cards, a, skip):
     return actions, held
 
 
+CONTRADICTS_RE = re.compile(r"\b(?:has|have|had|there is|there's|are|is|was)\s+no\b|\bno such\b|\b(?:does|do|did)\s*n[o']?t?\s+"
+                            r"(?:exist|have|contain|define)|\bnot (?:exist|found|present|defined)|\bnon-?existent\b"
+                            r"|\bno longer\b|\bdoesn't exist\b|\bisn't (?:there|present|defined)\b", re.I)
+IDENT_RE = re.compile(r"`([^`]{3,60})`|\b([A-Za-z0-9]+(?:[_./-][A-Za-z0-9]+)+|[a-z]+[A-Z]\w+)\b")
+
+
+def stale_card_proposals(slug, cards, limit=5):
+    """Cards a worker's `missing=` note contradicts: the run was given the card, the note says something the card
+    states does not exist (e.g. 'the code has no retry_policy') and names an identifier the card mentions.
+    [{card, run, note, reason}] (nothing is edited: the proposal is for the user to confirm)."""
+    live = {c["id"]: c for c in cards if not c.get("archived") and not c.get("is_rule")}
+    given = {r["id"]: set(r.get("cards") or []) for r in ledger() if r.get("project") == slug}
+    out, seen = [], set()
+    for n in reversed(list(read_jsonl(home("library", slug, "missing.jsonl")))):
+        note = str(n.get("missing") or "")
+        if not CONTRADICTS_RE.search(note):
+            continue
+        idents = {(m.group(1) or m.group(2)).lower() for m in IDENT_RE.finditer(note)}
+        for cid in sorted(given.get(n.get("run"), set()) & set(live)):
+            text = ((live[cid].get("title") or "") + " " + (live[cid].get("text") or "")).lower()
+            hit = sorted(i for i in idents if i in text)
+            if hit and (cid, n.get("run")) not in seen:
+                seen.add((cid, n.get("run")))
+                out.append({"card": cid, "run": n.get("run"), "note": " ".join(note.split())[:200],
+                            "reason": f"the card mentions {', '.join(hit[:3])}, run {n.get('run')} reported: "
+                                      + " ".join(note.split())[:160]})
+    return out[:limit]
+
+
 def _suggestion_meta(c, t):
     """One line on what a card suggestion rests on: how often workers used the card (per task type when it is one)."""
     bt = (c.get("by_type") or {}).get(t) if t and t != "*" else None
@@ -6862,6 +6905,7 @@ def optimize_result(a, slug):
             "suggestions": [{"id": _action_id(act, c, t), "kind": act, "card": c["id"], "reason": why,
                              "used": c["used"], "offered": c["offered"], "meta": _suggestion_meta(c, t)}
                             for act, c, why, t in actions],
+            "stale": stale_card_proposals(slug, load_cards(slug)),
             "drafts": [{"id": d["id"], "kind": d["kind"], "title": d["title"] if d["kind"] == "card" else
                         f"Preset {d['server']}:{d['name']}",
                         "name": d["card_id"] if d["kind"] == "card" else d["name"],
@@ -6883,6 +6927,9 @@ def _cmd_optimize(a):
               "earlier --apply changes are already in). New-card and preset drafts follow below, if any.")
     for act, c, why, _ in actions:
         print(f"{act:<8}{c['id']:<34}{why}")
+    for st in stale_card_proposals(slug, cards):
+        print(f"stale   {st['card']:<34}{st['reason']}; check it, then correct or archive it: "
+              f"lean-agent card show {slug} {st['card']}")
     if a.apply:
         wanted = None if a.apply == "all" else {x for x in a.apply.split(",") if x}
         if wanted is not None:
@@ -10454,14 +10501,18 @@ nothing and start nothing: never run `{lean} run` or any worker. The project's c
 review and the user's recent requests in this thread are in the task. For the rest run exactly
 `{lean} <memory list|todo list|brief>` (memory list takes `-p <project>`; no other flags). Look for earlier decisions on the
 same topic in the memories and notes.
-If the user's recent requests already explicitly asked for the action (e.g. "create the work item and the PR"), do not
-advise asking again: put `user already asked: proceed` in `ask the user first:`.
+If the user's recent requests already explicitly asked for the action or state the scope (e.g. "create the work item and
+the PR", "in project x, only the docs"), never ask to confirm that scope again: put `user already asked: proceed` in
+`ask the user first:`; ask only about what the requests leave open.
+When the task needs a tool or server (a card, a preset or an earlier run of a similar task shows it, or the request names
+the service), the suggested command carries `--mcp <server>:<preset>` from the MCP list in the task (a preset, not the
+whole server).
 Answer with at most 15 lines, the first one exactly `ADVICE`, then one short line each:
 `understood:` the request in one line, in your own words
 `ambiguous:` only when the request has two plausible readings: `<reading A> | <reading B>` (leave the line out otherwise)
 `known:` facts and earlier decisions that apply (or none)
 `project:` the project slug and the card ids (--cards) that fit
-`suggested:` ONE exact command: `{lean} run <project> --cards auto|<ids> -m <model> --effort <low|medium|high> [--todo N|new] [--worktree <name>] --why "..." -- "<task>"`,
+`suggested:` ONE exact command: `{lean} run <project> --cards auto|<ids> -m <model> --effort <low|medium|high> [--mcp <server>[:<preset>]] [--todo N|new] [--worktree <name>] --why "..." -- "<task>"`,
   or `{lean} remember "<text>"`, or `answer from state` when nothing needs doing
 `risks:` open review gaps on that branch, a decision that contradicts the request, a run still working on it, and any
   "Known issues" listed in the task that apply (say what to do first, e.g. the fix it names) (or none)
@@ -10533,6 +10584,33 @@ def advise_cards(slug, request, project, limit=40):
     return out
 
 
+def advise_mcp(slug, path, request):
+    """The MCP servers (with presets and per-turn cost) the advisor may put in `--mcp`, and the specs earlier runs of
+    this project used, so the suggested command carries the right server."""
+    try:
+        servers = lean_mcp.discover(path)
+    except Exception:
+        servers = {}
+    cache, lines = mcp_cache(), []
+    for name in sorted(servers):
+        known = (cache.get(name) or {}).get("tools") or {}
+        pres = mcp_presets(name, known)
+        named = bool(re.search(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])", request, re.I))
+        lines.append(f"- {name}" + (" (named in the request)" if named else "")
+                     + (f": whole ~{sum(known.values()):,} tok/turn" if known else "")
+                     + (", presets " + ", ".join(f"{p} ~{sum(known.get(t, 0) for t in ts):,}" for p, ts in sorted(pres.items()))
+                        if pres else ""))
+    earlier = [f"- {str(r.get('task', ''))[:70]!r}: " + " ".join(f"--mcp {m}" for m in r["mcp"])
+               for r in [r for r in ledger() if r.get("project") == slug and r.get("mcp")][-5:]]
+    out = ""
+    if lines:
+        out += ("\nMCP servers a worker can use (when the task needs one, or the request names the service, the suggested "
+                "command includes `--mcp <server>:<preset>`; prefer a preset over the whole server):\n" + "\n".join(lines[:15]))
+    if earlier:
+        out += "\nEarlier runs of this project that used MCP:\n" + "\n".join(earlier)
+    return out
+
+
 def shape_advice(lines, limit=15):
     """The advisor's ADVICE block as printed: `Understood as:` first, `Ambiguous:` second when it found two readings
     (then the user is asked before a worker starts), then the rest of the block."""
@@ -10569,12 +10647,12 @@ def cmd_advise(a):
             + ("\n\nRules to respect (the user's standing rules; say so in ADVICE when the request touches one):\n"
                + "\n".join(rule_lines) if rule_lines else "")
             + "\n\nProjects: " + ", ".join(sorted(projs)) + "\n" + advise_state(slug, path, a.thread)
-            + "\n" + advise_cards(slug, request=what, project=path) + ("\n" + advise_requests(a.thread)).rstrip())
+            + "\n" + advise_cards(slug, request=what, project=path) + advise_mcp(slug, path, what) + ("\n" + advise_requests(a.thread)).rstrip())
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model="haiku",
                             why="advise on a new request", cards="auto", card_list=None, project=slug,
                             read_only=True, chrome=None, mcp=None, tools=None, allow_send=None, max_turns=15,
                             max_usd=0.3, max_context=3000, max_cards=5, ttype="read", role="advisor",
-                            effort="low", role_rule=ADVISE_RULE.format(lean=lean), todo=None,
+                            effort="low", role_rule=ADVISE_RULE.format(lean=lean), todo=None, warn_text=what,
                             internal_cmd=[f"{lean} {c}" for c in ("memory list", "todo list", "brief")])
     rc, out, run = run_role(ns, quiet=True)
     reply = parse_feedback(run_result_text(run))[0] if run else ""
@@ -10983,6 +11061,7 @@ def build_parser():
     s.add_argument("server", nargs="?", help="a server; for env: the variable name")
     s.add_argument("preset_name", nargs="?", help="preset: name to set or remove")
     s.add_argument("preset_tools", nargs="?", help="preset: comma-separated tools")
+    s.add_argument("more", nargs="*", help="preset: more tools (space separated)")
     s.add_argument("--rm", action="store_true", help="preset/env/ignore: remove it")
     s.add_argument("--command", metavar="CMD", help="env: a command that prints the value (run per worker, not stored)")
     s.add_argument("--project", "-p", help="include this project's .mcp.json and local-scope servers")

@@ -811,6 +811,20 @@ class CliTest(unittest.TestCase):
             self.cli("advise", f"r{i}", FAKE_ANSWER="ADVICE\nknown: none")
         self.assertEqual(len(glob.glob(os.path.join(adv, "*.json"))), 50)
 
+    def test_advise_warns_only_for_targets_the_request_names_and_lists_mcp_servers(self):
+        self.use_tracker()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.add_rule()
+        ans = "ADVICE\nunderstood: x\nask the user first: no"
+        out = self.cli("advise", "list the open items", FAKE_ANSWER=ans)
+        self.assertNotIn("the task asks for", out.stderr)
+        task = self.calls()[-1]["task"]
+        self.assertIn("MCP servers a worker can use", task)
+        self.assertIn("- tracker", task)
+        out = self.cli("advise", "check the tracker for open items", FAKE_ANSWER=ans)
+        self.assertIn("the task asks for tracker, which rule", out.stderr)
+        self.assertIn("never ask to confirm that scope again", lean_agent_module().ADVISE_RULE)
+
     def test_advise_gets_the_recent_requests_and_card_titles_and_echoes_how_it_understood(self):
         self.cli("learn", self.proj)
         self.cli("card", "add", "proj", "export-notes", "--title", "Export retry notes", "--text", "Short note.")
@@ -1344,6 +1358,9 @@ class CliTest(unittest.TestCase):
             self.assertEqual(argv[argv.index("--tools") + 1], "Read,Glob,Grep,Bash")
             allowed = argv[argv.index("--allowedTools") + 1].split(",")
             self.assertIn(f"Bash(git -C {self.proj} show:*)", allowed)
+            for sub in ("describe", "tag --list", "merge-base --is-ancestor", "branch"):
+                self.assertIn(f"Bash(git -C {self.proj} {sub}:*)", allowed)
+            self.assertNotIn(f"Bash(git -C {self.proj} tag:*)", allowed)
             self.assertNotIn("Bash", allowed)  # only the read-only git patterns
             self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
             self.assertIn(f"git -C {self.proj}", call["append"])
@@ -2038,6 +2055,17 @@ class CliTest(unittest.TestCase):
         with open(os.path.join(cfg, "settings.json"), "w") as fh:
             json.dump({"enabledPlugins": {"obs@synced": False}}, fh)  # Claude Code's id for a synced plugin
         self.assertNotIn("plugin:obs", self.cli("mcp", "list").stdout)
+
+    def test_optimize_flags_a_card_a_workers_missing_note_contradicts(self):
+        self.cli("learn", self.proj)
+        self.cli("card", "add", "proj", "retry-notes", "--title", "Retry notes", "--text", "Set retry_policy in api/client.py.")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--cards", "retry-notes", "add retries",
+                 FAKE_FEEDBACK=json.dumps({"status": "done", "used": [], "unneeded": [],
+                                           "missing": "the code has no retry_policy at all", "remember": []}))
+        out = self.cli("optimize", "proj").stdout
+        self.assertRegex(out, r"stale   retry-notes\s+the card mentions retry_policy")
+        data = json.loads(self.cli("optimize", "proj", "--json").stdout)
+        self.assertEqual(data["stale"][0]["card"], "retry-notes")
 
     def test_optimize_drafts_cards_and_presets(self):
         cfg = self.env["CLAUDE_CONFIG_DIR"]
@@ -4657,6 +4685,20 @@ class CliTest(unittest.TestCase):
         self.assertIn("presets: lookup, read", p.stderr)
         self.cli("mcp", "preset", "tickets", "lookup", "--rm")
         self.assertNotIn("lookup", self.cli("mcp", "preset", "tickets").stdout)
+
+    def test_mcp_preset_add_and_big_server_advice(self):
+        self.cli("learn", self.proj)
+        self.cli("mcp", "tools", "tickets")
+        self.cli("mcp", "preset", "add", "tickets", "mine", "get_ticket", "search_tickets")
+        self.assertIn("tickets:mine  2 tools", self.cli("mcp", "preset", "tickets").stdout)
+        p = self.cli("mcp", "preset", "add", "tickets", "x", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        agent = lean_agent_module()
+        tools = {f"t{i}": 400 for i in range(33)}
+        with unittest.mock.patch.object(agent, "mcp_cache", lambda: {"big": {"tools": tools}}), \
+                unittest.mock.patch.object(agent, "mcp_presets", lambda n, k=None: {"six": [f"t{i}" for i in range(6)]}):
+            line = agent.mcp_cost_lines(["big"], None)[0]
+        self.assertIn("preset big:six (6 tools) would cost ~2,400 tok per turn instead of ~13,200", line)
 
     def git_project(self):
         def g(*args):
