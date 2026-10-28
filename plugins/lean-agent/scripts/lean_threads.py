@@ -942,6 +942,57 @@ def now_text(now=None, close_idle=True, max_lines=NOW_LINES):
     return "\n".join(lines)
 
 
+SHORT_LINES = 12
+SHORT_DONE_HOURS = 24  # a done report counts as recent this long; older, the thread is idle
+
+
+def short_text(now=None, max_lines=SHORT_LINES, close_idle=False):
+    """One line per open thread for the front desk, `now --short`: needs you (or blocked) first, then running, done
+    (recent), idle; at most `max_lines` lines, the rest counted in a last line."""
+    now = time.time() if now is None else now
+    days, todos = idle_days(), _todo_map()
+    started = {}
+    for f in glob.glob(lean_home("running", "*.json")):
+        m = lean_common.read_json(f, {})
+        if isinstance(m, dict) and lean_common.pid_alive(m.get("pid")):
+            started[m.get("run") or os.path.basename(f)[:-5]] = m.get("started")
+    with _locked() as data:
+        evs = events(data, todos)
+        running = running_by_thread(data)
+        if close_idle:
+            autoclose(data, evs, running, todos, days, now)
+        rows = []
+        for tid, t in data["threads"].items():
+            if t.get("closed") or tid in data["aliases"] or tid in RESERVED:
+                continue
+            last = max([_epoch(t.get("last_message") or t.get("created"))] + [e[0] for e in evs.get(tid, [])])
+            rep = t.get("report") if isinstance(t.get("report"), dict) and t["report"].get("text") else None
+            rep_ts = _epoch(rep.get("ts")) if rep else 0
+            title = one_line(t.get("title"), 28)
+            if rep and rep.get("kind") in ("needs-you", "blocked") and rep_ts >= last - 5:
+                label = "needs you" if rep["kind"] == "needs-you" else "blocked"
+                rows.append((0, -rep_ts, tid, f'{tid} {title} · {label} {age(rep["ts"], now)} · "{one_line(rep["text"], 60)}"'))
+            elif running.get(tid):
+                rid = sorted(running[tid])[0]
+                rows.append((1, -last, tid, f"{tid} {title} · running run {rid} {age(_iso_of(started.get(rid), last), now)}"))
+            elif rep and rep.get("kind") == "done" and now - rep_ts < SHORT_DONE_HOURS * 3600:
+                rows.append((2, -rep_ts, tid, f'{tid} {title} · done {age(rep["ts"], now)} · "{one_line(rep["text"], 60)}"'))
+            else:
+                rows.append((3, -last, tid, f"{tid} {title} · idle {age(_iso_of(None, last), now)}"))
+    if not rows:
+        return "No open threads."
+    rows.sort()
+    lines = [r[3] for r in rows[:max_lines]]
+    if len(rows) > max_lines:
+        lines.append(f"+{len(rows) - max_lines} more (lean-agent now)")
+    return "\n".join(lines)
+
+
+def _iso_of(ts, fallback_epoch):
+    """`ts` if it is a timestamp, else the ISO time of the epoch `fallback_epoch`."""
+    return ts or datetime.datetime.fromtimestamp(fallback_epoch).isoformat(timespec="seconds")
+
+
 def show_text(tid, all_=False, limit=40):
     tid = resolve(norm(tid))
     data = load()
