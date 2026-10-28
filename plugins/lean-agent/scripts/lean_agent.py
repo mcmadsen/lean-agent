@@ -114,7 +114,8 @@ MUTATING_WORDS = {"delete", "create", "update", "set", "apply", "push", "rm", "m
                   "post", "patch", "install", "exec", "write", "reset", "approve", "complete", "abandon", "queue"}
 CLI_RE = re.compile(r"(?<![\w/-])(az|gh|kubectl|aws|gcloud|curl|wget|docker|terraform|helm|psql|sqlcmd|glab|jq)(?=\s)")
 READONLY_SHELL_RULE = ("You are read-only. The only shell commands you can run are read-only git commands, written as\n"
-                       "`git -C {project} <show|log|grep|diff|blame|status|ls-files|ls-tree|cat-file|rev-parse|branch|fetch> ...`\n"
+                       "`git -C {project} <show|log|grep|diff|blame|status|ls-files|ls-tree|cat-file|rev-parse|branch|fetch|describe> ...`,\n"
+                       "`git -C {project} tag --list ...` and `git -C {project} merge-base --is-ancestor ...` (release questions)\n"
                        "(no `cd`, no pipes to other programs). Everything else is refused.")
 SEND_RULE = ("Outward actions: do NOT do anything that leaves this machine and can't be undone, such as\n"
              "sending or posting a message, submitting a form, publishing, merging, deploying, or deleting\n"
@@ -127,7 +128,7 @@ BROWSER_RULE = ("Browser: you control the user's real Chrome (signed in as them)
                 "tools. Always work in a new tab and never touch the user's existing tabs. If a login, MFA,\n"
                 "CAPTCHA or account picker appears, stop with status \"needs-input\".\n")
 READONLY_GIT = ("show", "log", "grep", "diff", "blame", "status", "ls-files", "ls-tree", "cat-file", "rev-parse",
-                "branch", "fetch")
+                "branch", "fetch", "describe", "tag --list", "merge-base --is-ancestor")
 CHROME = "claude-in-chrome"
 
 

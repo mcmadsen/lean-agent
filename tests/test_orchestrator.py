@@ -1344,6 +1344,9 @@ class CliTest(unittest.TestCase):
             self.assertEqual(argv[argv.index("--tools") + 1], "Read,Glob,Grep,Bash")
             allowed = argv[argv.index("--allowedTools") + 1].split(",")
             self.assertIn(f"Bash(git -C {self.proj} show:*)", allowed)
+            for sub in ("describe", "tag --list", "merge-base --is-ancestor", "branch"):
+                self.assertIn(f"Bash(git -C {self.proj} {sub}:*)", allowed)
+            self.assertNotIn(f"Bash(git -C {self.proj} tag:*)", allowed)
             self.assertNotIn("Bash", allowed)  # only the read-only git patterns
             self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
             self.assertIn(f"git -C {self.proj}", call["append"])
