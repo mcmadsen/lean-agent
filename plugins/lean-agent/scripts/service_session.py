@@ -428,6 +428,17 @@ def _session_wait(name, value, default):
     return _knob("LEAN_AGENT_SESSION_" + name, default) if value == default else value
 
 
+def transcript_path(key="main"):
+    """The transcript file of session `key` (up.json, else its service record), or None."""
+    return info(key).get("transcript") or _load(service_record(key)).get("transcript_path")
+
+
+def mid_turn(key="main"):
+    """True when session `key` has a transcript whose last message is not the assistant's final one."""
+    path = transcript_path(key)
+    return bool(path and os.path.exists(path) and os.path.getsize(path) and not transcript_state(path)["ended"])
+
+
 def transcript_state(path, offset=0):
     """What the transcript at `path` (read from byte `offset`, else its last 512 KB) shows now:
     {"ended": the last message is the assistant's final one (no tool running), "ctx": tokens in the last usage
