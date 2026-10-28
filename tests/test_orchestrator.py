@@ -5376,6 +5376,16 @@ class CliTest(unittest.TestCase):
         closed, out, err = self.room_for(self.fake_sessions(("t10", 9000), ("t2", 1000), ("t3", 2000)), caller="t3", cap=2)
         self.assertNotIn("t3", closed)
 
+    def test_thread_flag_never_changes_the_caller_identity(self):
+        L = lean_agent_module()
+        seen = []
+        ns = argparse.Namespace(cmd="x", thread_tag="t2", fn=lambda a: seen.append(L.caller_thread()))
+        env = dict(self.env, LEAN_AGENT_THREAD="t1", LEAN_AGENT_SESSION_ROLE="thread", LEAN_AGENT_CALLER_THREAD="")
+        with mock.patch.dict(os.environ, env), mock.patch.object(L.argparse.ArgumentParser, "parse_known_args",
+                                                                  return_value=(ns, [])):
+            L.main(["--thread", "t2", "x"])
+        self.assertEqual(seen, ["t1"])
+
     def test_cap_skips_a_mid_turn_session(self):
         ss = self.fake_sessions(("t1", 9000), ("t2", 1000), ("t3", 2000))
         closed, out, err = self.room_for(ss, mid_turn=("t1",))
