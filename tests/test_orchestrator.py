@@ -12,6 +12,7 @@ import os
 import subprocess
 import re
 import signal
+import socket
 import sys
 import tempfile
 import textwrap
@@ -3188,6 +3189,23 @@ class CliTest(unittest.TestCase):
         self.addCleanup(newer.close)
         late.close()
         self.assertTrue(os.path.exists(path))
+
+    def test_claim_socket_keeps_a_listener_that_never_replies(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import service_session
+        path = os.path.join(self.tmp.name, "mute.sock")
+        mute = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(mute.close)
+        mute.bind(path)
+        mute.listen(8)  # accepts connections (kernel-side) but nobody ever answers
+        host = service_session.Host(lambda: ([], "x"), {}, self.tmp.name)
+        with self.assertRaisesRegex(RuntimeError, "did not stop within 1 s"):
+            host.claim_socket(path, wait=1)
+        self.assertTrue(os.path.exists(path))
+        mute.close()  # bound but closed: the file stays behind and nobody listens
+        self.assertTrue(os.path.exists(path))
+        host.claim_socket(path, wait=1)
+        self.assertFalse(os.path.exists(path))
 
     def start_up(self, *args):
         """`lean-agent up` with the fake interactive claude; returns (process, session log path) once the

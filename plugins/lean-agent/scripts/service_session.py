@@ -287,6 +287,22 @@ def request(msg, timeout=5, key="main"):
         s.close()
 
 
+def _socket_listening(path, timeout=2):
+    """False only when nobody can be connected to at `path` (refused, gone or reset): a stale socket file. A connect
+    that succeeds or times out means a live, possibly busy bridge."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(timeout)
+        s.connect(path)
+        return True
+    except (ConnectionRefusedError, FileNotFoundError, ConnectionResetError):
+        return False
+    except OSError:
+        return True
+    finally:
+        s.close()
+
+
 def send(text, key="main"):
     r = request({"text": text}, key=key)
     return bool(r.get("ok")), r.get("error", "")
@@ -1031,7 +1047,7 @@ class Host:
         wait = _session_wait("SOCKET_WAIT", wait, SOCKET_WAIT)
         end = time.time() + wait
         while os.path.exists(path):
-            if not request({"ping": True}, timeout=2, key=self.key).get("ok"):  # a bridge that is closing down still answers
+            if not _socket_listening(path):  # a bridge that is closing down or slow to answer still accepts
                 try:
                     os.remove(path)  # stale: nobody listens
                 except OSError:
