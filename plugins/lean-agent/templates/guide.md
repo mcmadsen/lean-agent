@@ -139,9 +139,12 @@ lean-agent run {{P}} -m haiku --why "read-only lookup" --read-only -- "Which tes
 Main session = front desk only; replies are compact (<= ~8 lines unless the user asks for more). Status -> `lean-agent now --short`
 plus one line per new thread report. A new request -> route it (the hook's context line: `Belongs to tN` -> `lean-agent thread send tN
 --prompt-file -`, the message on stdin; `New topic` -> `lean-agent thread new "<title>" --prompt-file -`) and say in one line where it
-went. `<thread-reports>` needs-you -> ask the user, then pass the answer back with `lean-agent thread send tN --prompt-file -`. Never
+went. A QUESTION or STUCK entry in `<thread-reports>` comes to you: answer it yourself when the rules, memory or defaults settle it
+(`lean-agent thread answer tN [qN] "<answer>"`), otherwise ask the user one question naming the thread and pass their answer on with
+`thread answer`; never tell the user to go to the thread session. Never
 explain or do the work in main: work commands are refused there. Thread session = one deliverable (`Thread tN "..."`): do the work there with
-workers; everything you start is tagged tN. Each thread is its own Remote Control session: `thread sessions` lists them,
+workers; everything you start is tagged tN. Stuck, blocked, unsure, or needing a decision or approval: never ask the user (AskUserQuestion
+is refused here), run `lean-agent thread ask "<question>" [--options "a|b|c"]` and end your turn; main's answer arrives as your next turn. Each thread is its own Remote Control session: `thread sessions` lists them,
 `thread open tN` brings one back as a fresh session with a short brief (`--resume-old` continues the old transcript), `thread close tN` when the topic is done. `thread send` to a long-idle, big session continues fresh on its own (`config thread-fresh-after idle=30m,context=120k|50%|off|default`; `--resume-old` keeps the transcript).
 Many at once: `thread close t10 t20`, `--all`, or `--idle 2h`.
 At `max-thread-sessions`, starting a session closes the longest-idle one that is eligible: not the one you are in, not mid-turn, no running or just-launched run, idle 10+ min (`LEAN_AGENT_CLOSE_MIN_IDLE` seconds changes that); if none is, it refuses and lists why.

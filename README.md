@@ -318,6 +318,7 @@ push that follows; `--thread tN|none` overrides it, workers inherit it through `
 | `lean-agent thread close tN [tM ...]` / `--all` / `--idle 2h` / `reopen tN` | Hide finished topics from `now` and from matching (one checkpoint per thread, a summary line at the end; `--idle` skips sessions with a running run; at `max-thread-sessions` a new session closes only an eligible one: not the caller, not mid-turn, no running or just-launched run, idle 10+ min, `LEAN_AGENT_CLOSE_MIN_IDLE` seconds overrides) / bring one back: a closed thread starts a new session from a short brief built from its record, `--resume-old` continues the previous transcript instead |
 | `lean-agent thread new "<title>" [--prompt-file F\|-]` / `list` | Start a thread with its own Remote Control session (with a first message) / list threads |
 | `lean-agent thread send tN --prompt-file F\|-` / `open tN` / `sessions` | Hand a message to the thread's session (starting or resuming it) / bring its session back / list the running sessions |
+| `lean-agent thread ask "<question>" [--options "a\|b\|c"]` / `answer tN [qN] "<answer>"` | A thread session asks main instead of the user (the thread waits, status "waiting on main"); main answers it or asks the user, and `answer` sends the reply into the thread session as its next turn |
 | `lean-agent thread merge tB tA` / `unmerge tB` | Fold thread B into A / give B its own tag back |
 | `lean-agent thread move tN` | Wrong thread: move the latest request, the current thread and the work recorded since to tN |
 

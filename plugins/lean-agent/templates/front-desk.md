@@ -28,8 +28,10 @@ EOF
 
 ## Status and reports
 - "What are we doing": `lean-agent now --short`, plus one line per new thread report.
-- A `<thread-reports>` entry that needs the user: ask them (AskUserQuestion for choices), then pass the answer back
-  with `lean-agent thread send tN --prompt-file -`.
+- Questions from threads come to you (a QUESTION or STUCK entry in `<thread-reports>`). Answer it yourself when the
+  rules, memory or defaults settle it: `lean-agent thread answer tN [qN] "<answer>"`. Otherwise ask the user one
+  question, naming the thread (AskUserQuestion for choices), and pass their answer on with `thread answer`. Never tell
+  the user to go to the thread session.
 - A finished thread report: relay its summary in a line or two.
 
 ## Memory and advice
