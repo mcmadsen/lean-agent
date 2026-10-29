@@ -584,7 +584,7 @@ OUTPUT_READ = 200_000
 
 REPORTS_RE = re.compile(r"\s*<thread-reports>(.*?)</thread-reports>", re.S)
 REPORTS_KEPT = 5  # reports kept per thread; the latest is shown
-REPORT_LINE_RE = re.compile(r"^\[(t\d+) (done|blocked|needs-you)\] (.+)$", re.M)
+REPORT_LINE_RE = re.compile(r"^\[(t\d+) (done|blocked|needs-you|question)\] (.+)$", re.M)
 
 
 def is_reports(prompt):
@@ -609,6 +609,63 @@ def store_reports(prompt):
                 t["reports"] = (old + reps)[-REPORTS_KEPT:]
                 t["report"] = t["reports"][-1]  # `now` shows the latest
     return sorted(got)
+
+
+QUESTION_CHARS = 600
+
+
+def open_questions(t):
+    qs = t.get("questions") if isinstance(t.get("questions"), list) else []
+    return [q for q in qs if isinstance(q, dict) and not q.get("answered")]
+
+
+def ask(tid, text, options=None):
+    """Record an open question on thread `tid` (status "waiting on main"); returns its id qN."""
+    text = " ".join(str(text or "").split())
+    if not text:
+        raise ValueError('usage: lean-agent thread ask "<question>" [--options "a|b|c"]')
+    opts = [o.strip() for o in str(options or "").split("|") if o.strip()]
+    with _locked() as data:
+        t = data["threads"].get(resolve(tid, data["aliases"]))
+        if t is None:
+            raise ValueError(f"no such thread {tid}")
+        qs = t["questions"] = t.get("questions") if isinstance(t.get("questions"), list) else []
+        qid = "q%d" % (1 + max([int(q["id"][1:]) for q in qs if str(q.get("id", "")).startswith("q") and q["id"][1:].isdigit()] + [0]))
+        qs.append({"id": qid, "text": text[:QUESTION_CHARS], "options": opts, "ts": now_iso()})
+    return qid
+
+
+def answer(tid, qid, text):
+    """Close question `qid` (default: the only open one) of thread `tid`; returns (tid, the question record)."""
+    with _locked() as data:
+        tid = resolve(norm(tid), data["aliases"])
+        t = data["threads"].get(tid)
+        if t is None:
+            raise ValueError(f"no such thread {tid}")
+        opened = open_questions(t)
+        if qid:
+            q = next((x for x in opened if x["id"] == qid), None)
+            if q is None:
+                raise ValueError(f"{tid} has no open question {qid}" + (f" (open: {', '.join(x['id'] for x in opened)})" if opened else ""))
+        elif len(opened) == 1:
+            q = opened[0]
+        else:
+            raise ValueError(f"{tid} has " + (f"{len(opened)} open questions ({', '.join(x['id'] for x in opened)}): name one" if opened else "no open question"))
+        q["answered"] = now_iso()
+        q["answer"] = str(text or "")[:QUESTION_CHARS]
+        return tid, dict(q)
+
+
+def reopen_question(tid, qid):
+    with _locked() as data:
+        for q in (data["threads"].get(tid) or {}).get("questions") or []:
+            if q.get("id") == qid:
+                q.pop("answered", None)
+                q.pop("answer", None)
+
+
+def question_lines(t, now=None):
+    return [f'  waiting on main: {q["id"]} "{one_line(q["text"], 100)}" {age(q.get("ts"), now)}' for q in open_questions(t)]
 
 
 def report_lines(t, now=None):
@@ -918,7 +975,7 @@ def now_text(now=None, close_idle=True, max_lines=NOW_LINES):
             last_ts = max([t.get("last_message") or t.get("created") or ""] + [e[1] for e in ev])
             act = next((e for e in reversed(ev) if e[2] != "request"), None) or (ev[-1] if ev else None)
             rows.append((_epoch(last_ts), last_ts, tid, t, act, _state(tid, ev, running, data),
-                         session_lines(tid, t) + report_lines(t, now) + _details(tid, ev, data, todos, live, waiting, now)))
+                         session_lines(tid, t) + question_lines(t, now) + report_lines(t, now) + _details(tid, ev, data, todos, live, waiting, now)))
     rows.sort(key=lambda r: (r[0], r[2]), reverse=True)
     lines = [f"Open threads ({len(rows)}), latest first:"] if rows else ["No open threads."]
     budget = max_lines - 2  # header and the footer line
@@ -966,7 +1023,10 @@ def short_text(now=None, max_lines=SHORT_LINES):
             rep = t.get("report") if isinstance(t.get("report"), dict) and t["report"].get("text") else None
             rep_ts = _epoch(rep.get("ts")) if rep else 0
             title = one_line(t.get("title"), 28)
-            if rep and rep.get("kind") in ("needs-you", "blocked") and rep_ts >= last - 5:
+            oq = open_questions(t)
+            if oq:
+                rows.append((0, -_epoch(oq[0].get("ts")), tid, f'{tid} {title} · waiting on main {age(oq[0]["ts"], now)} · {oq[0]["id"]} "{one_line(oq[0]["text"], 60)}"'))
+            elif rep and rep.get("kind") in ("needs-you", "blocked") and rep_ts >= last - 5:
                 label = "needs you" if rep["kind"] == "needs-you" else "blocked"
                 rows.append((0, -rep_ts, tid, f'{tid} {title} · {label} {age(rep["ts"], now)} · "{one_line(rep["text"], 60)}"'))
             elif running.get(tid):
@@ -1001,7 +1061,7 @@ def show_text(tid, all_=False, limit=40):
     merged = sorted(s for s, d in data["aliases"].items() if resolve(d, data["aliases"]) == tid)
     if merged:
         head += f" (includes {', '.join(merged)})"
-    lines = [head]
+    lines = [head] + [l.strip() for l in question_lines(t)]
     shown = ev if all_ or len(ev) <= limit else ev[-limit:]
     if len(shown) < len(ev):
         lines.append(f"... {len(ev) - len(shown)} earlier (lean-agent thread show {tid} --all)")

@@ -9680,6 +9680,8 @@ def start_closed_thread(tid, t, prompt, resume_old, force=False):
 
 
 def thread_prompt(a):
+    if getattr(a, "prompt_text", None):
+        return a.prompt_text
     if not a.prompt_file:
         return None
     return (sys.stdin.read() if a.prompt_file == "-" else read_text(a.prompt_file)).strip() or None
@@ -10044,11 +10046,46 @@ def cmd_thread(a):
         sessions = open_thread_sessions()
         for x in sessions:
             runs = thread_live_runs(x["thread"])
-            extra = (f"  {len(runs)} running (first {runs[0][0]})" if runs else "") + ("  mid-turn" if service_session.mid_turn(x["thread"]) else "")
+            qs = lean_threads.open_questions(lean_threads.load()["threads"].get(x["thread"]) or {})
+            extra = ("".join(f'  waiting on main: {q["id"]} "{lean_threads.one_line(q["text"], 60)}" {lean_threads.age(q.get("ts"))}' for q in qs)
+                     + (f"  {len(runs)} running (first {runs[0][0]})" if runs else "") + ("  mid-turn" if service_session.mid_turn(x["thread"]) else ""))
             print(f"{x['thread']:<6}{x['name'] or '-':<42}pid {x['pid'] or '-':<8}idle {x['idle']}s{extra}")
         if not sessions:
             print("no thread sessions running (start one with `lean-agent thread new \"title\"`)")
         return 0
+    if act == "ask":
+        tid = caller_thread()
+        if not tid:
+            die("thread ask works only inside a thread session (main asks the user directly)")
+        if len(a.args) != 1:
+            die('usage: lean-agent thread ask "<question>" [--options "a|b|c"]')
+        try:
+            qid = lean_threads.ask(tid, a.args[0], getattr(a, "options", None))
+        except ValueError as exc:
+            die(str(exc))
+        opts = [o.strip() for o in str(getattr(a, "options", None) or "").split("|") if o.strip()]
+        text = " ".join(a.args[0].split())[:lean_threads.QUESTION_CHARS]
+        service_session.queue_report(tid, "question", f"QUESTION {qid}: {text}" + (f" [options: {' | '.join(opts)}]" if opts else ""))
+        print(f"{tid} is waiting on main ({qid}). End your turn now and do not ask the user: main's answer arrives as your next turn.")
+        return 0
+    if act == "answer":
+        args = list(a.args)
+        if len(args) < 2 or len(args) > 3 or (len(args) == 3 and not re.fullmatch(r"q\d+", args[1])):
+            die('usage: lean-agent thread answer tN [qN] "<answer>"')
+        text = args[-1].strip()
+        qid = args[1] if len(args) == 3 else None
+        if not text:
+            die("thread answer needs the answer text")
+        try:
+            tid, q = lean_threads.answer(args[0], qid, text)
+        except ValueError as exc:
+            die(str(exc))
+        a.action, a.args, a.prompt_text = "send", [tid], f'Answer from main to your question {q["id"]} ("{lean_threads.one_line(q["text"], 120)}"): {text}'
+        try:
+            return cmd_thread(a)
+        except SystemExit:  # not delivered: the question stays open
+            lean_threads.reopen_question(tid, q["id"])
+            raise
     if act == "new":
         if len(a.args) != 1:
             die('usage: lean-agent thread new "title" [--prompt-file F|-]')
@@ -11446,9 +11483,10 @@ def build_parser():
     s.add_argument("args", nargs=argparse.REMAINDER, help="add: the lean-agent command, e.g. do <project> <recipe>")
     s.set_defaults(fn=cmd_schedule)
 
-    s = sub.add_parser("thread", help="threads: new \"title\" [--prompt-file F|-] (its own Remote Control session) | send tN --prompt-file F|- | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
-    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions"])
+    s = sub.add_parser("thread", help="threads: new \"title\" [--prompt-file F|-] (its own Remote Control session) | send tN --prompt-file F|- | ask \"question\" [--options \"a|b|c\"] (from inside a thread session: the question goes to main; end the turn, the answer arrives as your next turn) | answer tN [qN] \"answer\" (main: pass an answer into the thread session) | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
+    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "answer"])
     s.add_argument("args", nargs="*")
+    s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin)")
     s.add_argument("--json", action="store_true", help="list: as JSON")
     s.add_argument("--all", action="store_true", help="show: every entry (default: the latest 40); close: every open session")
