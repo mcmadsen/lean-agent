@@ -5384,7 +5384,7 @@ class CliTest(unittest.TestCase):
         reps["main"].tick()
         msg = hosts["main"].pasted[0]
         self.assertTrue(msg.startswith("<thread-reports>\n[t1 done] Published the report"))
-        self.assertTrue(msg.endswith("details: lean-agent thread show tN\n</thread-reports>"))
+        self.assertTrue(msg.endswith("details: lean-agent thread show t1\n</thread-reports>"))
         self.assertEqual(ss.queued_reports(), [])
         reps["main"].tick()
         self.assertEqual(len(hosts["main"].pasted), 1)
@@ -5427,10 +5427,45 @@ class CliTest(unittest.TestCase):
         self.assertIn("old | new", items[0]["text"])
         msg = service_session.reports_message(items)
         self.assertIn(f"[{tid} question] QUESTION q1", msg)
-        self.assertIn("thread answer tN", msg)
+        self.assertIn(f"thread answer {tid} [qN]", msg)
         self.assertIn("waiting on main: q1", lt.show_text(tid))
         self.assertIn("waiting on main", lt.short_text())
         self.assertIn("waiting on main: q1", lt.now_text(close_idle=False))
+
+    def test_report_hint_names_the_thread_and_long_text_is_cut_at_a_sentence(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import service_session as ss
+        msg = ss.reports_message([{"thread": "t18", "kind": "done", "text": "ok"}])
+        self.assertIn("details: lean-agent thread show t18\n", msg)
+        self.assertIn("Check before relaying: lean-agent thread show t18", msg)
+        self.assertNotIn("show tN", msg)
+        text = "The worker fixed eight findings and left one alone. " * 40
+        short = ss._short(text, tid="t18")
+        self.assertTrue(short.endswith("(cut \u2014 full report: lean-agent thread show t18)"))
+        body = short.split(" (cut")[0]
+        self.assertTrue(body.endswith("alone."))
+        self.assertLessEqual(len(body), 1200)
+        self.assertEqual(ss._short("short one.", tid="t1"), "short one.")
+        self.assertTrue(ss._short("word " * 500, 50).endswith("word \u2026"))
+
+    def test_thread_show_prints_the_full_last_report(self):
+        lt = self.threads_home()
+        import service_session as ss
+        tid = lt.route("Fix the diff", "s1")[0]
+        full = "Finding 5 left unchanged on purpose. " * 80
+        ss.save_last_report(tid, "done", full)
+        out = lt.show_text(tid)
+        self.assertIn("Last report (done,", out)
+        self.assertTrue(out.endswith(full.strip()))
+
+    def test_guides_tell_main_to_check_before_relaying(self):
+        L = lean_agent_module()
+        h = os.path.join(self.tmp.name, "orchhome3")
+        os.makedirs(h, exist_ok=True)
+        L.write_home_guide(h)
+        for text in (L.read_text(os.path.join(h, "CLAUDE.md")), L.read_text(L.front_desk_file(h))):
+            self.assertIn("Before relaying a thread report", text)
+            self.assertIn("thread show tN", text)
 
     def test_thread_ask_outside_a_thread_errors_in_one_line(self):
         r = self.cli("thread", "ask", "Which?", check=False, LEAN_AGENT_CALLER_THREAD="", LEAN_AGENT_SESSION_ROLE="main")
@@ -5612,7 +5647,7 @@ class CliTest(unittest.TestCase):
         lt.route("Fix the export timeout in billing", "s1")  # t2
         before = json.dumps(lt.load()["threads"], sort_keys=True)
         msg = ("<thread-reports>\n[t2 needs-you] Shall I retry the export with a longer timeout?\n"
-               "[t1 done] Published the report.\n[t9 done] unknown thread\ndetails: lean-agent thread show tN\n</thread-reports>")
+               "[t1 done] Published the report.\n[t9 done] unknown thread\ndetails: lean-agent thread show t2 (or t1, t9)\n</thread-reports>")
         self.assertEqual(lt.store_reports(msg), ["t1", "t2", "t9"])
         data = lt.load()
         self.assertEqual(sorted(data["threads"]), ["t1", "t2"])  # no new thread

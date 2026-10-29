@@ -684,7 +684,7 @@ class AutoClear:
 # ---------------------------------------------------------------- thread reports
 
 REPORT_BATCH = 60      # seconds: reports queued within this window reach the main session in one message
-REPORT_CHARS = 160
+REPORT_CHARS = 1200    # a report's text reaches main whole up to this; longer is cut at a sentence or line end
 REPORT_MAX_AGE = 24 * 3600  # seconds: an older queued report is dropped, not delivered
 REPORT_MODES = ("on", "questions-only", "off")
 REPORT_RUN_RE = re.compile(r"\blean-agent\s+(?:run|review|handover|push)\b")
@@ -752,13 +752,36 @@ def reports_message(items, dropped=0):
     asking = sorted({i["thread"] for i in items if i["kind"] in ("question", "needs-you")})
     if asking:
         lines.append(f"questions from {', '.join(asking)}: answer them (or ask the user, naming the thread) with "
-                     'lean-agent thread answer tN [qN] "<answer>"')
-    return "\n".join(["<thread-reports>"] + lines + ["details: lean-agent thread show tN", "</thread-reports>"])
+                     f'lean-agent thread answer {asking[0]} [qN] "<answer>"')
+    tids = list(dict.fromkeys(i["thread"] for i in items)) or ["tN"]
+    more = f" (or {', '.join(tids[1:])})" if len(tids) > 1 else ""
+    return "\n".join(["<thread-reports>"] + lines + [
+        f"Check before relaying: lean-agent thread show {tids[0]}{more}; cut, unclear or open question: run it, then ask the thread",
+        f"details: lean-agent thread show {tids[0]}{more}", "</thread-reports>"])
 
 
-def _short(text, n=REPORT_CHARS):
+def _short(text, n=REPORT_CHARS, tid=None):
+    """`text` on one line, whole up to `n` chars; longer is cut at the last sentence end (else word end) before `n`."""
     text = " ".join(str(text or "").replace("`", "").replace("*", "").split())
-    return text if len(text) <= n else text[:n - 1].rstrip() + "…"
+    if len(text) <= n:
+        return text
+    cut = text[:n]
+    ends = [m.end() for m in re.finditer(r"[.!?](?=\s)", cut)]
+    cut = cut[:ends[-1]] if ends and ends[-1] > n // 3 else cut.rsplit(" ", 1)[0]
+    return cut.rstrip() + (f" (cut \u2014 full report: lean-agent thread show {tid})" if tid else " \u2026")
+
+
+def last_reports_path():
+    return lean_home("last-reports.json")
+
+
+def save_last_report(tid, kind, text):
+    """Keep a thread's latest full report text (the queue holds the cut one) for `lean-agent thread show`."""
+    os.makedirs(lean_home(), exist_ok=True)
+    with lean_common.file_lock(last_reports_path()):
+        data = _load(last_reports_path())
+        data[tid] = {"kind": kind, "text": str(text or ""), "ts": time.time()}
+        lean_common.write_json_atomic(last_reports_path(), data)
 
 
 def _question(text):
@@ -861,11 +884,14 @@ class Reporter(AutoClear):
         if scan["asked"]:
             return
         if ask:
-            queue_report(tid, "needs-you", _short(ask))
+            save_last_report(tid, "needs-you", text)
+            queue_report(tid, "needs-you", _short(ask, tid=tid))
         elif scan["err"]:
-            queue_report(tid, "blocked", _short(text or scan["result"]))
+            save_last_report(tid, "blocked", text or scan["result"])
+            queue_report(tid, "blocked", _short(text or scan["result"], tid=tid))
         elif scan["runs"]:
-            queue_report(tid, "done", _short(text or scan["result"]))
+            save_last_report(tid, "done", text or scan["result"])
+            queue_report(tid, "done", _short(text or scan["result"], tid=tid))
 
     def main_tick(self):
         items = queued_reports()
