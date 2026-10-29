@@ -672,6 +672,7 @@ REPORT_CHARS = 160
 REPORT_MAX_AGE = 24 * 3600  # seconds: an older queued report is dropped, not delivered
 REPORT_MODES = ("on", "questions-only", "off")
 REPORT_RUN_RE = re.compile(r"\blean-agent\s+(?:run|review|handover|push)\b")
+ASK_RE = re.compile(r"\blean-agent\s+thread\s+ask\b")
 PROMPT_RE = re.compile(r"Esc to cancel|Do you want to (?:proceed|make|create|allow)|❯\s*1\.\s*Yes")
 
 
@@ -687,9 +688,10 @@ def reports_path():
 
 
 def queue_report(tid, kind, text):
-    """Queue one thread report (kind: done | blocked | needs-you) for the main session; the mode filters it."""
+    """Queue one thread report (kind: done | blocked | needs-you | question) for the main session; the mode filters it,
+    except an explicit question (`thread ask`), which always goes through."""
     mode = reports_mode()
-    if mode == "off" or (mode == "questions-only" and kind != "needs-you"):
+    if kind != "question" and (mode == "off" or (mode == "questions-only" and kind != "needs-you")):
         return False
     os.makedirs(lean_home(), exist_ok=True)
     with lean_common.file_lock(reports_path()):
@@ -724,10 +726,17 @@ def drop_reports(taken):
         lean_common.write_json_atomic(reports_path(), {"items": left})
 
 
+REPORT_LABELS = {"needs-you": "QUESTION: ", "blocked": "STUCK: "}
+
+
 def reports_message(items, dropped=0):
-    lines = [f"[{i['thread']} {i['kind']}] {i['text']}" for i in items]
+    lines = [f"[{i['thread']} {i['kind']}] {REPORT_LABELS.get(i['kind'], '')}{i['text']}" for i in items]
     if dropped:
         lines.append(f"({dropped} older report(s) dropped: over {REPORT_MAX_AGE // 3600} h old)")
+    asking = sorted({i["thread"] for i in items if i["kind"] in ("question", "needs-you")})
+    if asking:
+        lines.append(f"questions from {', '.join(asking)}: answer them (or ask the user, naming the thread) with "
+                     'lean-agent thread answer tN [qN] "<answer>"')
     return "\n".join(["<thread-reports>"] + lines + ["details: lean-agent thread show tN", "</thread-reports>"])
 
 
@@ -746,7 +755,7 @@ def scan_turn(path, offset):
     """What the transcript at `path` shows from byte `offset` on: {"runs": a lean-agent run/review/handover/push command
     was issued, "err": the last lean-agent tool result was an error, "result": its first line, "ask": the open
     AskUserQuestion's question (else None), "size": file size}."""
-    out = {"runs": False, "err": False, "result": "", "ask": None, "size": offset}
+    out = {"runs": False, "err": False, "result": "", "ask": None, "asked": False, "size": offset}
     try:
         with open(path, "rb") as fh:
             fh.seek(offset)
@@ -771,6 +780,8 @@ def scan_turn(path, offset):
                     qs = inp.get("questions")
                     first = qs[0] if isinstance(qs, list) and qs and isinstance(qs[0], dict) else {}
                     out["ask"] = first.get("question") or "a question"
+                elif c.get("name") == "Bash" and ASK_RE.search(str(inp.get("command") or "")):
+                    out["asked"] = True  # `thread ask` already put the question in front of main
                 elif c.get("name") == "Bash" and REPORT_RUN_RE.search(str(inp.get("command") or "")):
                     out["runs"] = True
                     ids.add(c.get("id"))
@@ -831,6 +842,8 @@ class Reporter(AutoClear):
         self.seen = scan["size"]
         text = st["text"]
         ask = _question(text)
+        if scan["asked"]:
+            return
         if ask:
             queue_report(tid, "needs-you", _short(ask))
         elif scan["err"]:
