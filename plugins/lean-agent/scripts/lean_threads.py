@@ -1070,6 +1070,14 @@ def show_text(tid, all_=False, limit=40):
               for _, ts, kind, text in shown]
     if not ev:
         lines.append("(nothing recorded yet)")
+    last = {}
+    for src in [tid] + merged:
+        e = (lean_common.read_json(lean_home("last-reports.json"), {}) or {}).get(src)
+        if isinstance(e, dict) and e.get("text") and e.get("ts", 0) >= last.get("ts", 0):
+            last = e
+    if last:
+        when = datetime.datetime.fromtimestamp(last["ts"]).strftime("%Y-%m-%d %H:%M")
+        lines += ["", f"Last report ({last.get('kind')}, {when}):", last["text"].strip()]
     return "\n".join(lines)
 
 
