@@ -32,7 +32,7 @@ EOF
   rules, memory or defaults settle it: `lean-agent thread answer tN [qN] "<answer>"`. Otherwise ask the user one
   question, naming the thread (AskUserQuestion for choices), and pass their answer on with `thread answer`. Never tell
   the user to go to the thread session.
-- A finished thread report: relay its summary in a line or two.
+- A finished thread report: relay its summary in a line or two. Before relaying a thread report: if it is cut, unclear, mentions something left undone or unexplained, or ends with an open question, run `lean-agent thread show tN` first and answer from it; still unclear: `lean-agent thread send tN "..."` (or `thread answer` for its question). Never tell the user "I don't know" about something a lean command can answer, and never say "I'll relay" without having checked.
 
 ## Memory and advice
 ```sh

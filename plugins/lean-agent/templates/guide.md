@@ -141,7 +141,7 @@ plus one line per new thread report. A new request -> route it (the hook's conte
 --prompt-file -`, the message on stdin; `New topic` -> `lean-agent thread new "<title>" --prompt-file -`) and say in one line where it
 went. A QUESTION or STUCK entry in `<thread-reports>` comes to you: answer it yourself when the rules, memory or defaults settle it
 (`lean-agent thread answer tN [qN] "<answer>"`), otherwise ask the user one question naming the thread and pass their answer on with
-`thread answer`; never tell the user to go to the thread session. Never
+`thread answer`; never tell the user to go to the thread session. Before relaying a thread report: if it is cut, unclear, mentions something left undone or unexplained, or ends with an open question, run `lean-agent thread show tN` first and answer from it; still unclear: `lean-agent thread send tN "..."` (or `thread answer` for its question). Never tell the user "I don't know" about something a lean command can answer, and never say "I'll relay" without having checked. Never
 explain or do the work in main: work commands are refused there. Thread session = one deliverable (`Thread tN "..."`): do the work there with
 workers; everything you start is tagged tN. Stuck, blocked, unsure, or needing a decision or approval: never ask the user (AskUserQuestion
 is refused here), run `lean-agent thread ask "<question>" [--options "a|b|c"]` and end your turn; main's answer arrives as your next turn. Each thread is its own Remote Control session: `thread sessions` lists them,
