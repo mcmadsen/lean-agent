@@ -9767,6 +9767,20 @@ def start_thread_session(tid, t, prompt=None, msg=None):
     return r.get("name") or service_session.thread_session_name(tid, t.get("title"))
 
 
+NEW_HOST_WAIT = 5  # seconds `thread new` waits for the host to answer before it reports the thread as queued; LEAN_AGENT_SESSION_NEW_WAIT overrides
+
+
+def wait_for_host(secs):
+    """True when the `up` host answers within `secs` seconds."""
+    deadline = time.time() + secs
+    while True:
+        if service_session.alive():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.5)
+
+
 THREAD_START_PENDING = 60  # seconds a just-started thread session counts before its host has to answer
 
 
@@ -10090,10 +10104,16 @@ def cmd_thread(a):
         if len(a.args) != 1:
             die('usage: lean-agent thread new "title" [--prompt-file F|-]')
         prompt = thread_prompt(a)
-        if not service_session.alive():
+        if not wait_for_host(service_session._session_wait("NEW_WAIT", NEW_HOST_WAIT, NEW_HOST_WAIT)):
             if prompt:
                 die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
-            return lean_threads.cli("new", a.args, a.json)
+            if a.json:
+                return lean_threads.cli("new", a.args, a.json)
+            with thread_start_lock():
+                tid = lean_threads.new(a.args[0])
+                lean_threads.set_session(tid, session_id=str(uuid.uuid4()), session_on=True)  # the service resumes it when it is up
+            print(f"{tid} queued \u2014 the session host has not picked it up yet; it opens shortly (lean-agent thread sessions)")
+            return 0
         with thread_start_lock():  # the cap check and the start are one step: parallel `thread new` cannot exceed the cap
             make_room_for_thread_session()
             tid = lean_threads.new(a.args[0])

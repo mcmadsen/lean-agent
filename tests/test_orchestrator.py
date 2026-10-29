@@ -3695,12 +3695,12 @@ class CliTest(unittest.TestCase):
         self.assertIn("#1 ", out.split("Closed as idle")[0])  # still open after `now`
 
     def test_thread_cli(self):
-        self.assertEqual(self.cli("thread", "new", "Pricing page").stdout.strip(), "t1")
-        self.assertEqual(self.cli("thread", "new", "Billing").stdout.strip(), "t2")
+        self.assertRegex(self.cli("thread", "new", "Pricing page", LEAN_AGENT_SESSION_NEW_WAIT="0").stdout, r"^t1 queued\b")  # no host is up: reported as queued, not as a bare id
+        self.assertRegex(self.cli("thread", "new", "Billing", LEAN_AGENT_SESSION_NEW_WAIT="0").stdout, r"^t2 queued\b")
         self.assertEqual(self.cli("thread", "merge", "t2", "T1").stdout.strip(), "t2 -> t1")  # prints the normalized id
         self.assertEqual(self.cli("thread", "merge", "t1", "t2", check=False).returncode, 1)
         self.assertEqual(self.cli("thread", "merge", "t1", "t1", check=False).returncode, 1)
-        self.cli("thread", "new", "Four")
+        self.cli("thread", "new", "Four", LEAN_AGENT_SESSION_NEW_WAIT="0")
         self.cli("thread", "merge", "t3", "#4")
         listed = json.loads(self.cli("thread", "list", "--json").stdout)
         self.assertEqual(sorted((t["id"], t["kind"]) for t in listed if t["id"] != "optimize"), [("#4", "task"), ("t1", "free")])
@@ -4460,12 +4460,12 @@ class CliTest(unittest.TestCase):
                          self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"))["threads"])
         os.remove(marker)
         ss.update_session("t9", host_pid=None)  # the host stopped
-        self.assertIn("t1 started", self.cli("thread", "new", "first").stdout)
+        self.assertRegex(self.cli("thread", "new", "first").stdout, r"\bt1 (started|queued)\b")
         r = self.cli("thread", "new", "third")  # at the cap the idle t1 makes room
         self.assertIn('closed t1 "first"', r.stdout)
         self.assertIn("t2 started", r.stdout)
         self.cli("thread", "close", "t2")
-        self.assertIn("t3 started", self.cli("thread", "new", "fourth").stdout)
+        self.assertRegex(self.cli("thread", "new", "fourth").stdout, r"\bt3 (started|queued)\b")
         self.stop_up(p, 30)
 
     def test_wrapper_non_push_git_spawns_no_extra_git(self):
@@ -5917,7 +5917,7 @@ class CliTest(unittest.TestCase):
         self.assertNotIn(tid, out)
         self.assertTrue(lt.load()["threads"][tid].get("session_on"))  # still meant to be open: only the host record is pruned
         self.assertNotIn(tid, ss.session_rec("main").get("sessions") or {})
-        self.assertIn("started", self.cli("thread", "new", "first").stdout)  # printed when the host takes it, not when it is up
+        self.assertRegex(self.cli("thread", "new", "first").stdout, r"\bt2 (started|queued)\b")  # started when the host takes it, queued when it is slow
         self.wait_for(lambda: re.search(r"^t2\b", self.cli("thread", "sessions").stdout, re.M),
                       "the first session to be listed", secs=120)
         self.cli("thread", "close", "t2")  # a closed session frees its slot at once, flag and record gone
@@ -5925,7 +5925,7 @@ class CliTest(unittest.TestCase):
         self.assertIsNone(lt.load()["threads"]["t2"].get("session_on"))
         self.assertNotIn("t2", ss.session_rec("main").get("sessions") or {})
         self.cli("thread", "close", "t2")  # idempotent
-        self.assertIn("started", self.cli("thread", "new", "second").stdout)
+        self.assertRegex(self.cli("thread", "new", "second").stdout, r"\bt3 (started|queued)\b")
         # shut down only once the new session is up, so stopping `up` never races its start
         self.wait_for(lambda: re.search(r"^t3\b", self.cli("thread", "sessions").stdout, re.M),
                       "the second session to be listed", secs=120)
@@ -5933,8 +5933,8 @@ class CliTest(unittest.TestCase):
 
     def test_close_takes_several_threads_all_or_idle(self):
         p, log, ss = self.start_up()
-        for title in ("one", "two", "three", "four"):
-            self.assertIn("started", self.cli("thread", "new", title).stdout)
+        for n, title in enumerate(("one", "two", "three", "four"), 1):
+            self.assertRegex(self.cli("thread", "new", title).stdout, rf"\bt{n} (started|queued)\b")
         self.wait_for(lambda: len(re.findall(r"^t\d", self.cli("thread", "sessions").stdout, re.M)) == 4, "four sessions", secs=60)
         out = self.cli("thread", "close", "t1", "t2").stdout
         self.assertIn("t1: session stopped", out)
@@ -6051,7 +6051,7 @@ class CliTest(unittest.TestCase):
         self.cli("config", "max-thread-sessions", "1")
         ss.update_session("t9", host_pid=None, host_started=time.time(), pid=None)
         self.assertNotIn("t9", self.cli("thread", "sessions").stdout)
-        self.assertIn("t1 started", self.cli("thread", "new", "first").stdout)
+        self.assertRegex(self.cli("thread", "new", "first").stdout, r"\bt1 (started|queued)\b")
         self.stop_up(p, 30)
 
     def test_close_of_a_thread_the_service_does_not_host_only_clears_the_record(self):
@@ -6145,7 +6145,7 @@ class CliTest(unittest.TestCase):
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "2")
         lt = self.threads_home()
-        self.assertIn("t1 started", self.cli("thread", "new", "first").stdout)
+        self.assertRegex(self.cli("thread", "new", "first").stdout, r"\bt1 (started|queued)\b")
         self.stop_up(p, 30)
         dead = subprocess.Popen(["true"])
         dead.wait()
