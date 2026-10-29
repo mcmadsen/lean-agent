@@ -237,7 +237,14 @@ class CliTest(unittest.TestCase):
                     up.kill()
             up.communicate()
         self.stop_detached_runs()  # a run that outlives its test keeps writing into the folder removed next
-        self.tmp.cleanup()
+        for attempt in range(5):  # a just-killed run may still be writing into the folder
+            try:
+                self.tmp.cleanup()
+                break
+            except OSError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.2)
 
     def stop_detached_runs(self):
         pids = []
@@ -263,11 +270,25 @@ class CliTest(unittest.TestCase):
 
     @staticmethod
     def running_process(pid):
-        try:
-            with open(f"/proc/{pid}/stat") as fh:
-                return fh.read().rsplit(")", 1)[1].split()[0] != "Z"  # a zombie nobody reaped is gone
-        except (OSError, IndexError):
+        if os.path.isdir("/proc/self"):
+            try:
+                with open(f"/proc/{pid}/stat") as fh:
+                    return fh.read().rsplit(")", 1)[1].split()[0] != "Z"  # a zombie nobody reaped is gone
+            except (OSError, IndexError):
+                return False
+        try:  # no /proc (macOS)
+            os.kill(pid, 0)
+        except ProcessLookupError:
             return False
+        except PermissionError:
+            return True
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:  # our own child, now reaped
+                return False
+        except ChildProcessError:
+            pass
+        ps = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+        return bool(ps.stdout.strip()) and not ps.stdout.strip().startswith("Z")
 
     def cli(self, *args, check=True, input=None, **env):
         p = subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True, input=input,
