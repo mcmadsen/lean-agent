@@ -643,6 +643,11 @@ def main():
                  "briefly what is done and what remains, then end your turn.")
             return 0
 
+    if event.get("tool_name") == "AskUserQuestion" and os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread":
+        emit(permissionDecision="deny", permissionDecisionReason=(
+            "lean-agent: a thread session never asks the user directly. Use `lean-agent thread ask \"<question>\" "
+            "[--options \"a|b|c\"]` so main gets the question, then end your turn: main's answer arrives as your next turn."))
+        return 0
     tool_input = event.get("tool_input") or {}
     worker_dir = cwd.startswith(os.path.join(home, "work") + os.sep)  # a worker's run folder is never the orchestrator
     if (in_home or os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1") and not worker_dir:
