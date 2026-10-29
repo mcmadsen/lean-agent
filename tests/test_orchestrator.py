@@ -5374,6 +5374,85 @@ class CliTest(unittest.TestCase):
         reps["t1"].tick()
         self.assertTrue(ss.queued_reports()[-1]["text"].startswith("waits for your permission"))
 
+    def test_thread_ask_records_the_question_and_reaches_mains_report_channel(self):
+        lt = self.threads_home()
+        tid = lt.new("topic")
+        r = self.cli("thread", "ask", "Use the old or new API?", "--options", "old|new", LEAN_AGENT_CALLER_THREAD=tid)
+        self.assertIn("end your turn", r.stdout.lower())
+        qs = lt.load()["threads"][tid]["questions"]
+        self.assertEqual([(q["id"], q["options"]) for q in qs], [("q1", ["old", "new"])])
+        import service_session
+        items = service_session.queued_reports()
+        self.assertEqual([(i["thread"], i["kind"]) for i in items], [(tid, "question")])
+        self.assertIn("QUESTION q1: Use the old or new API?", items[0]["text"])
+        self.assertIn("old | new", items[0]["text"])
+        msg = service_session.reports_message(items)
+        self.assertIn(f"[{tid} question] QUESTION q1", msg)
+        self.assertIn("thread answer tN", msg)
+        self.assertIn("waiting on main: q1", lt.show_text(tid))
+        self.assertIn("waiting on main", lt.short_text())
+        self.assertIn("waiting on main: q1", lt.now_text(close_idle=False))
+
+    def test_thread_ask_outside_a_thread_errors_in_one_line(self):
+        r = self.cli("thread", "ask", "Which?", check=False, LEAN_AGENT_CALLER_THREAD="", LEAN_AGENT_SESSION_ROLE="main")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1)
+        self.assertIn("only inside a thread session", r.stderr)
+
+    def test_thread_answer_sends_into_the_thread_and_closes_the_question(self):
+        L = lean_agent_module()
+        lt = self.threads_home()
+        tid = lt.new("topic")
+        lt.ask(tid, "Use the old or new API?")
+        lt.ask(tid, "Second?")
+        sent = []
+        import service_session
+        a = argparse.Namespace(action="answer", args=[tid, "q1", "new"], prompt_file=None, json=False, resume_old=False)
+        with mock.patch.object(service_session, "alive", return_value=True), \
+                mock.patch.object(service_session, "send", side_effect=lambda text, t: sent.append((t, text)) or (True, "")), \
+                mock.patch.object(L, "auto_fresh_reason", return_value=""), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(L.cmd_thread(a), 0)
+        self.assertEqual(sent[0][0], tid)
+        self.assertIn("question q1", sent[0][1])
+        self.assertTrue(sent[0][1].endswith(": new"))
+        left = [q["id"] for q in lt.open_questions(lt.load()["threads"][tid])]
+        self.assertEqual(left, ["q2"])
+        a = argparse.Namespace(action="answer", args=[tid, "q1", "again"], prompt_file=None, json=False, resume_old=False)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            L.cmd_thread(a)
+
+    def test_hook_denies_ask_user_question_in_a_thread_session_and_allows_it_in_main(self):
+        home = self.cli("home").stdout.strip()
+        hook = os.path.join(os.path.dirname(CLI), "budget_hook.py")
+        transcript = os.path.join(self.tmp.name, "t.jsonl")
+        open(transcript, "w").close()
+
+        def call(role):
+            ev = {"session_id": "s", "transcript_path": transcript, "cwd": home, "tool_name": "AskUserQuestion",
+                  "tool_input": {"questions": [{"question": "Which?"}]}}
+            p = subprocess.run([sys.executable, hook], input=json.dumps(ev), capture_output=True, text=True,
+                               env=dict(self.env, LEAN_AGENT_SESSION_ROLE=role, LEAN_AGENT_THREAD="t1"))
+            return json.loads(p.stdout)["hookSpecificOutput"] if p.stdout.strip() else {}
+        out = call("thread")
+        self.assertEqual(out.get("permissionDecision"), "deny")
+        self.assertIn("lean-agent thread ask", out["permissionDecisionReason"])
+        self.assertNotEqual(call("main").get("permissionDecision"), "deny")
+
+    def test_reporter_turns_a_trailing_question_into_a_question_entry_for_main(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        reps["t1"].tick()
+        write("t1", user(), assistant("I found two configs.\n\nWhich one should I change?"))
+        reps["t1"].tick()
+        items = ss.queued_reports()
+        self.assertEqual([i["kind"] for i in items], ["needs-you"])
+        self.assertIn("[t1 needs-you] QUESTION: Which one should I change?", ss.reports_message(items))
+        # a turn that already used `thread ask` is not reported twice
+        tid = "tu1"
+        write("t1", user(), assistant("", {"id": tid, "name": "Bash", "input": {"command": 'lean-agent thread ask "Which?"'}}),
+              result(tid, "waiting"), assistant("Asked main; waiting. Anything else?"))
+        reps["t1"].tick()
+        self.assertEqual(len(ss.queued_reports()), 1)
+
     def test_config_thread_reports_accepts_on_questions_only_off_and_default_and_rejects_others(self):
         self.assertIn("thread-reports: on", self.cli("config", "thread-reports").stdout)
         for value in ("questions-only", "off", "ON", "default"):
