@@ -9800,6 +9800,74 @@ class RuleUnitTest(unittest.TestCase):
         self.assertEqual([m["stem"] for m in self.memory.read_all(self.dir)], ["project_fmt"])
 
 
+class SessionContextTest(unittest.TestCase):
+    """The per-session context table: main first in `thread sessions`, sorted largest first with a total."""
+
+    def setUp(self):
+        self.L = lean_agent_module()
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def transcript(self, name, ctx):
+        path = os.path.join(self.dir, name + ".jsonl")
+        with open(path, "w") as fh:
+            fh.write(json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 1, "cache_read_input_tokens": 5, "cache_creation_input_tokens": 2}}}) + "\n")
+            fh.write(json.dumps({"type": "assistant", "message": {"stop_reason": "end_turn", "usage": {
+                "input_tokens": 10, "cache_read_input_tokens": ctx - 15, "cache_creation_input_tokens": 5, "output_tokens": 9}}}) + "\n")
+        return path
+
+    def patched(self, fresh="idle=1m,context=120k|50%"):
+        ss, L = self.L.service_session, self.L
+        paths = {"main": self.transcript("main", 48000), "t1": self.transcript("t1", 150000), "t2": self.transcript("t2", 20000)}
+        sessions = [{"thread": "t1", "title": "Big", "name": "n1", "pid": 1, "idle": 3600}, {"thread": "t2", "title": "Small", "name": "n2", "pid": 2, "idle": 60}]
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.dict(os.environ, {"LEAN_AGENT_THREAD_FRESH_AFTER": fresh}))
+        stack.enter_context(mock.patch.object(ss, "session_transcript", side_effect=paths.get))
+        stack.enter_context(mock.patch.object(ss, "up_compact_at", return_value=1000000))
+        stack.enter_context(mock.patch.object(ss, "mid_turn", return_value=False))
+        stack.enter_context(mock.patch.object(ss, "alive", return_value=True))
+        stack.enter_context(mock.patch.object(L, "open_thread_sessions", return_value=sessions))
+        self.addCleanup(stack.close)
+
+    def test_context_is_the_last_usage_of_the_transcript(self):
+        self.patched()
+        rows = {r["session"]: r for r in self.L.session_contexts()}
+        self.assertEqual(rows["main"]["ctx"], 48000)
+        self.assertEqual(rows["main"]["pct"], 5)
+        self.assertEqual(rows["t1"]["ctx"], 150000)
+
+    def test_main_row_comes_first_in_thread_sessions(self):
+        self.patched()
+        args = argparse.Namespace(action="sessions", args=[], context=False)
+        with mock.patch.object(self.L, "thread_live_runs", return_value=[]), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.L.cmd_thread(args)
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines[0].startswith("main"))
+        self.assertIn("context 48k \u00b7 5%", lines[0])
+        self.assertIn("context 150k \u00b7 15%", lines[1])
+        self.assertIn("fresh on next send", lines[1])
+        self.assertNotIn("fresh on next send", lines[2])
+
+    def test_context_table_sorted_largest_first_with_total_and_mark(self):
+        self.patched()
+        out = self.L.context_table().splitlines()
+        self.assertEqual(out[0].split(), ["Session", "Title", "Context", "%", "of", "compact", "Idle", "State"])
+        self.assertEqual([l.split()[0] for l in out[1:4]], ["t1", "main", "t2"])
+        self.assertIn("fresh on next send", out[1])
+        self.assertNotIn("fresh on next send", out[2] + out[3])
+        self.assertIn("Total: 218k across 3 sessions", out[4])
+
+    def test_no_mark_when_fresh_after_is_off(self):
+        self.patched("off")
+        self.assertNotIn("fresh on next send", self.L.context_table())
+
+    def test_now_shows_main_and_the_biggest_thread(self):
+        self.patched()
+        with mock.patch.object(self.L.lean_threads, "now_text", return_value="No open threads."), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.L.cmd_now(argparse.Namespace(short=False))
+        self.assertIn("Context: main 48k \u00b7 5% \u00b7 t1 150k \u00b7 15%", out.getvalue())
+
+
 if __name__ == "__main__":
     import gha_runner
     gha_runner.main(__file__)
