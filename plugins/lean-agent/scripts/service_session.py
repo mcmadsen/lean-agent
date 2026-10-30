@@ -459,8 +459,8 @@ def fresh_text(fa):
 
 def session_context(tid):
     """Tokens in the last usage record of the thread session's transcript (0 when unknown)."""
-    path = (info(tid) or {}).get("transcript")
-    return transcript_state(path)["ctx"] if path else 0
+    path = session_transcript(tid)
+    return transcript_state(path)["ctx"] if path and os.path.exists(path) else 0
 
 
 def running_runs():

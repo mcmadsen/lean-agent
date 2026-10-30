@@ -10051,19 +10051,58 @@ def close_threads(a):
     return 1 if failed or held else 0
 
 
+def session_contexts():
+    """Context of main and every open thread session, largest first: [{session, title, ctx, pct, idle, state, fresh}].
+    ctx is the last usage in the session's transcript (service_session.session_context, as thread-fresh-after reads it),
+    pct its share of the compaction point, fresh whether a `thread send` would continue it fresh."""
+    point, limits = service_session.up_compact_at(), service_session.fresh_after()
+    need = service_session.fresh_context_threshold(limits[1], point) if limits else 0
+    path = service_session.session_transcript("main")
+    main_idle = int(time.time() - os.path.getmtime(path)) if path and os.path.exists(path) else 0
+    rows = [("main", "main", main_idle, service_session.mid_turn("main"))]
+    rows += [(x["thread"], x["title"], x["idle"], service_session.mid_turn(x["thread"])) for x in open_thread_sessions()]
+    out = []
+    for key, title, idle, busy in rows:
+        ctx = service_session.session_context(key)
+        out.append({"session": key, "title": title, "ctx": ctx, "pct": round(ctx * 100 / point) if point else 0,
+                    "idle": idle, "state": "mid-turn" if busy else "idle", "fresh": bool(key != "main" and need and ctx >= need)})
+    return out
+
+
+def context_cell(r):
+    return f"{kt(r['ctx'])} \u00b7 {r['pct']}%" if r["ctx"] else "-"
+
+
+def context_table():
+    rows = sorted(session_contexts(), key=lambda r: -r["ctx"])
+    lines = [f"{'Session':<9}{'Title':<34}{'Context':<14}{'% of compact':<14}{'Idle':<8}State"]
+    for r in rows:
+        lines.append(f"{r['session']:<9}{lean_threads.one_line(r['title'], 32):<34}{kt(r['ctx']) if r['ctx'] else '-':<14}"
+                     f"{str(r['pct']) + '%' if r['ctx'] else '-':<14}{_idle_age(r['idle']):<8}{r['state']}"
+                     + ("  fresh on next send" if r["fresh"] else ""))
+    lines.append(f"Total: {kt(sum(r['ctx'] for r in rows))} across {len(rows)} sessions (compaction point {kt(service_session.up_compact_at())})")
+    return "\n".join(lines)
+
+
 def cmd_thread(a):
     act = a.action
     resume_old = getattr(a, "resume_old", False)
     if act == "sessions":
         if not service_session.alive():
             die("no service session is up (start it with `lean-agent up` or `lean-agent service start`)")
+        if getattr(a, "context", False):
+            print(context_table())
+            return 0
         sessions = open_thread_sessions()
+        ctxs = {r["session"]: r for r in session_contexts()}
+        print(f"{'main':<6}{'main session':<42}{'':<12}context {context_cell(ctxs['main'])}")
         for x in sessions:
             runs = thread_live_runs(x["thread"])
             qs = lean_threads.open_questions(lean_threads.load()["threads"].get(x["thread"]) or {})
             extra = ("".join(f'  waiting on main: {q["id"]} "{lean_threads.one_line(q["text"], 60)}" {lean_threads.age(q.get("ts"))}' for q in qs)
                      + (f"  {len(runs)} running (first {runs[0][0]})" if runs else "") + ("  mid-turn" if service_session.mid_turn(x["thread"]) else ""))
-            print(f"{x['thread']:<6}{x['name'] or '-':<42}pid {x['pid'] or '-':<8}idle {x['idle']}s{extra}")
+            print(f"{x['thread']:<6}{x['name'] or '-':<42}pid {x['pid'] or '-':<8}idle {x['idle']}s  context {context_cell(ctxs[x['thread']])}"
+                  + ("  fresh on next send" if ctxs[x["thread"]]["fresh"] else "") + extra)
         if not sessions:
             print("no thread sessions running (start one with `lean-agent thread new \"title\"`)")
         return 0
@@ -10200,6 +10239,10 @@ def cmd_thread(a):
 
 def cmd_now(a):
     print(lean_threads.short_text() if a.short else lean_threads.now_text())
+    if service_session.alive():
+        rows = session_contexts()
+        big = max(rows[1:], key=lambda r: r["ctx"], default=None)
+        print("Context: " + " \u00b7 ".join(f"{r['session']} {context_cell(r)}" for r in [rows[0]] + ([big] if big and big["ctx"] else [])))
 
 
 def cmd_schedule(a):
@@ -11598,6 +11641,7 @@ def build_parser():
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin)")
     s.add_argument("--json", action="store_true", help="list: as JSON")
+    s.add_argument("--context", action="store_true", help="sessions: just the context table (Session | Title | Context | % of compact | Idle | State), largest first")
     s.add_argument("--all", action="store_true", help="show: every entry (default: the latest 40); close: every open session")
     s.add_argument("--force", action="store_true", help="close: close even with a live run or mid-turn (runs keep going detached)")
     s.add_argument("--idle", help="close: every session idle at least this long (e.g. 2h, 90m) without a running run")
