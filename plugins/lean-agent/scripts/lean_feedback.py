@@ -32,7 +32,9 @@ def scrub(text):
 
 
 def thread():
-    return os.environ.get("LEAN_AGENT_CALLER_THREAD") or "main"
+    """The thread session recording this, else "main": the session's identity, not the thread tag of the request."""
+    tid = os.environ.get("LEAN_AGENT_THREAD") or ""
+    return tid if os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread" and tid else "main"
 
 
 def _load():
