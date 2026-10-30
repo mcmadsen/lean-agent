@@ -4246,6 +4246,10 @@ class CliTest(unittest.TestCase):
         self.assertLess(len(desk), 6000)
         self.assertIn("front desk", desk)
         self.assertNotIn("lean-agent run", desk)
+        for text in (desk, full):
+            self.assertIn("Markdown table", text)
+            self.assertIn("Thread | State | Result | Next", text)
+            self.assertIn("AskUserQuestion", text)
 
     def test_fresh_after_context_is_the_lower_of_tokens_and_share(self):
         ss = lean_agent_module().service_session
@@ -5382,12 +5386,31 @@ class CliTest(unittest.TestCase):
         self.assertEqual(hosts["main"].pasted, [])  # a permission prompt is open
         hosts["main"].tail = ""
         reps["main"].tick()
-        msg = hosts["main"].pasted[0]
+        line = hosts["main"].pasted[0]
+        self.assertRegex(line, r"^lean-agent: 1 thread report \(t1 done\) \[r[0-9a-f]{6}\]$")  # one short visible line
+        msg = ss.take_pending(line)  # the full block reaches main through the prompt hook, once
+        self.assertIsNone(ss.take_pending(line))
         self.assertTrue(msg.startswith("<thread-reports>\n[t1 done] Published the report"))
         self.assertTrue(msg.endswith("details: lean-agent thread show t1\n</thread-reports>"))
         self.assertEqual(ss.queued_reports(), [])
         reps["main"].tick()
         self.assertEqual(len(hosts["main"].pasted), 1)
+
+    def test_staged_block_not_taken_by_the_prompt_hook_is_typed_in_full(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        reps["t1"].tick()
+        run_turn("t1", "Published the report.")
+        reps["t1"].tick()
+        write("main", user("hi"), assistant("Nothing else."))
+        clock[0] += 120
+        reps["main"].tick()
+        self.assertEqual(len(hosts["main"].pasted), 1)
+        reps["main"].tick()
+        self.assertEqual(len(hosts["main"].pasted), 1)  # staged, waiting for the hook
+        clock[0] += ss.PENDING_FALLBACK + 1
+        reps["main"].tick()
+        self.assertTrue(hosts["main"].pasted[1].startswith("<thread-reports>\n[t1 done] Published the report"))
+        self.assertFalse(os.path.exists(ss.pending_path()))
 
     def test_thread_question_is_needs_you_error_is_blocked_and_chatter_is_silent(self):
         ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
@@ -5551,7 +5574,7 @@ class CliTest(unittest.TestCase):
         clock[0] += 31
         reps["main"].tick()
         self.assertEqual(len(hosts["main"].pasted), 1)
-        self.assertEqual(hosts["main"].pasted[0].count("[t1 done]"), 2)  # one message, one line each
+        self.assertEqual(ss.take_pending(hosts["main"].pasted[0]).count("[t1 done]"), 2)  # one message, one line each
         os.environ["LEAN_AGENT_THREAD_REPORTS"] = "questions-only"
         run_turn("t1", "Third done.")
         reps["t1"].tick()
@@ -5579,7 +5602,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual([i["text"] for i in ss.queued_reports()], ["Fresh news."])  # stale gone, fresh kept
         hosts["main"].paste = lambda text: hosts["main"].pasted.append(text)
         reps["main"].tick()
-        msg = hosts["main"].pasted[0]
+        msg = ss.take_pending(hosts["main"].pasted[0])
         self.assertIn("[t1 done] Fresh news.", msg)
         self.assertNotIn("Old news", msg)
         self.assertEqual(ss.queued_reports(), [])

@@ -67,6 +67,7 @@ import push_guard  # noqa: E402
 import lean_common  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
+import service_session  # noqa: E402
 
 
 def compaction_point():
@@ -595,6 +596,11 @@ def prompt_hook(event):
             if pinned:  # a thread session: everything belongs to its thread, nothing is guessed or announced
                 if not lean_threads.is_notification(prompt):
                     lean_threads.pin(pinned, prompt, event.get("session_id"))
+            elif service_session.SUMMARY_RE.match(prompt.strip()):  # the one-line summary of staged thread reports: the full block rides along as hidden context
+                block = service_session.take_pending(prompt)
+                if block:
+                    lean_threads.store_reports(block)
+                    lines.append(block)
             elif lean_threads.is_reports(prompt):  # thread reports: stored on the threads they name, nothing guessed or announced
                 lean_threads.store_reports(prompt)
             elif lean_threads.is_notification(prompt):  # a background-task notification: never a new request or thread; attaches to its run's thread silently
@@ -610,6 +616,57 @@ def prompt_hook(event):
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "\n".join(lines)}}))
 
 
+ASKING_RE = re.compile(r"\b(should I|do you want|would you like|let me know|waiting (?:for|on) you|your call|which (?:one|option) )", re.I)
+STOP_REASON = "Ask this with AskUserQuestion so it can't be missed."
+
+
+def turn_of(path):
+    """(last assistant text, AskUserQuestion was called) for the turn at the end of the transcript at `path`."""
+    text, asked = "", False
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return text, asked
+    for line in raw.split(b"\n"):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        msg = rec.get("message") if isinstance(rec, dict) and isinstance(rec.get("message"), dict) else {}
+        body = msg.get("content")
+        if rec.get("type") == "user":
+            if isinstance(body, str) or any(isinstance(c, dict) and c.get("type") == "text" for c in body or []):
+                text, asked = "", False  # a new turn starts with the user's own message
+        elif rec.get("type") == "assistant":
+            parts = []
+            for c in body if isinstance(body, list) else []:
+                if isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") == "AskUserQuestion":
+                    asked = True
+                elif isinstance(c, dict) and c.get("type") == "text":
+                    parts.append(str(c.get("text") or ""))
+            if parts:
+                text = "\n".join(parts)
+    return text, asked
+
+
+def asks_user(text):
+    paras = [p.strip() for p in re.split(r"\n\s*\n", str(text or "")) if p.strip()]
+    if not paras:
+        return False
+    return paras[-1].endswith("?") or bool(ASKING_RE.search(paras[-1]))
+
+
+def stop_hook(event):
+    """Stop in the main session: a turn that ends asking the user something in prose, without AskUserQuestion, is sent
+    back once (stop_hook_active ends the loop). Thread sessions ask with `thread ask` and are left alone."""
+    if event.get("stop_hook_active") or os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread":
+        return
+    text, asked = turn_of(event.get("transcript_path") or "")
+    if not asked and asks_user(text):
+        print(json.dumps({"decision": "block", "reason": STOP_REASON}))
+
+
 def main():
     try:
         event = json.loads(STDIN) if STDIN is not None else json.load(sys.stdin)
@@ -620,6 +677,12 @@ def main():
         home = os.path.realpath(usage.lean_home())
         if in_home_or_service(cwd, home) and not cwd.startswith(os.path.join(home, "work") + os.sep):
             prompt_hook(event)
+        return 0
+    if event.get("hook_event_name") == "Stop":
+        cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+        home = os.path.realpath(usage.lean_home())
+        if in_home_or_service(cwd, home) and not cwd.startswith(os.path.join(home, "work") + os.sep):
+            stop_hook(event)
         return 0
     transcript = event.get("transcript_path")
     session_id = event.get("session_id")
