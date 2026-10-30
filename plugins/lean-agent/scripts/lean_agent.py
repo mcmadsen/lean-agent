@@ -9901,7 +9901,8 @@ def launching_threads():
 def caller_thread():
     """The thread session this command runs inside, else None (the main session). Decided by the session's identity
     (the role `up` gives it), never by the thread tag of the request being worked on."""
-    return lean_threads.pinned_thread()
+    kept = os.environ.get("LEAN_AGENT_CALLER_THREAD") if os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread" else ""
+    return kept or lean_threads.pinned_thread()  # `--thread` re-tags LEAN_AGENT_THREAD; main() kept the session's own id
 
 
 def close_blockers(s, busy, launching, caller):
