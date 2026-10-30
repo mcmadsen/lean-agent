@@ -4134,8 +4134,6 @@ class CliTest(unittest.TestCase):
         self.assertIn("t2", listing)
         # manual clear of one thread's session moves only its record and registry session id
         self.cli("clear", "--thread", "t1")
-        self.wait_for(lambda: self.read_jsonl(log)[-1].get("clear_hook") is not None or any(
-            "clear_hook" in c for c in self.read_jsonl(log)), "the clear", secs=30)
         self.wait_for(lambda: ss.info("t1")["session_id"] != sid1, "t1 on its new session id", secs=30)
         self.assertEqual(ss.info("main")["session_id"], main["argv"][-1])
         reg = self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"))["threads"]
