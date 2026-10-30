@@ -71,3 +71,5 @@ lean-agent advise "the user's new request"
 ## Context
 When the conversation is long, or the user asks: `lean-agent clear` (it checkpoints first). `lean-agent checkpoint "..."`
 before a long break.
+When the user asks to restart, clear, "fresh start" or reset the context of main and/or the threads: run `lean-agent clear --all`
+(add `--restart` when they say restart, or after an update/sync), show its table, and never ask the user to run anything in a terminal.

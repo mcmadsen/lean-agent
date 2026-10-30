@@ -275,6 +275,10 @@ Every orchestrator turn re-reads the whole conversation, so it's kept short:
 - **Restart with a clean context:** `lean-agent service restart --clear` and `lean-agent up --clear` have a live
   session checkpoint first (the same prompt as `lean-agent clear`, up to 120 s for 'checkpointed'), then the next session
   is a new one (a new session id in `up.json`) that starts from the brief, like after a clear.
+- **Clear everything from the chat:** `lean-agent clear --all` checkpoints and clears every open thread session (one with a
+  live run is listed and skipped; `--force` clears it too, its runs keep going), then main at the end of the turn, and prints
+  a Thread | Result table. `--restart` instead restarts `up` with clean contexts once the turn has ended (a detached helper;
+  the threads come back fresh from their brief). Run from main only; the front desk uses it when you ask to restart or reset.
 - **Short answers in:** workers answer in at most 25 lines and put the rest in a details file; lean-agent's
   report commands print one line per item (brief mode); reviews print the verdict and one line per finding.
 - **No MCP servers of its own:** `lean-agent up` switches your user-scope and plugin MCP servers off for the
