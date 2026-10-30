@@ -1707,6 +1707,8 @@ def detach_run(workdir, run_id):
             sys.stderr = open(2, "w", buffering=1, closefd=False)
             own_marker(run_id, supervisor=True)  # the caller's pid in the early marker is not this run's
         except BaseException:
+            for sig, handler in held.items():
+                signal.signal(sig, handler)  # when this copy is not a real fork (a test) the caller must not stay deaf to them
             os._exit(1)  # never back into the caller: this is a copy of it
         SUPERVISOR.append(True)  # cmd_run's finally ends this process with os._exit
         return None
