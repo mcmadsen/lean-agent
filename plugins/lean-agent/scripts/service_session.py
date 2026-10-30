@@ -256,8 +256,32 @@ def request_clear(key="main"):
     False when that session is not up."""
     if not alive(key):
         return False
-    update_session(key, clear_requested=time.time(), clear_status=None)
+    now = time.time()
+    update_session(key, clear_requested=now, clear_status=None, clear_pending_since=now)
     return True
+
+
+def clear_pending(key="main"):
+    """Epoch seconds since a clear of session `key` has been queued or under way (None when none is). Past
+    CLEAR_HOLD_MAX it no longer counts, so a stuck clear never keeps reports away for good."""
+    rec = session_rec(key)
+    since = rec.get("clear_pending_since") or (rec.get("clear_requested") if _num(rec.get("clear_requested")) else None)
+    if _num(since) and time.time() - since < _knob("LEAN_AGENT_CLEAR_HOLD_MAX", CLEAR_HOLD_MAX):
+        return since
+    return None
+
+
+def clear_state(key="main"):
+    """One line for `clear --status` and the context table: "cleared HH:MM", or "clear pending since HH:MM: <reason>",
+    or the last outcome ('' when nothing was ever asked)."""
+    rec = session_rec(key)
+    since = clear_pending(key)
+    if since:
+        why = rec.get("clear_hold") or rec.get("clear_status") or CLEAR_PENDING
+        return f"clear pending since {time.strftime('%H:%M', time.localtime(since))}: {why}"
+    if _num(rec.get("cleared_at")):
+        return f"cleared {time.strftime('%H:%M', time.localtime(rec['cleared_at']))}"
+    return rec.get("clear_status") or ""
 
 
 # ---------------------------------------------------------------- client
@@ -339,6 +363,9 @@ CLEAR_PENDING = "clear requested: waiting for the turn to end"
 CLEAR_WAIT = 120       # seconds to wait for the checkpoint before clearing anyway
 CLEAR_GAP = 600        # seconds between two clears
 CLEAR_IDLE = 30        # seconds since the user last typed
+CLEAR_HOLD_MAX = 900   # seconds a queued clear keeps thread reports back
+CLEAR_VERIFY = 30      # seconds a typed /clear has to show a new session before the session is replaced instead
+FRESH_MARK = 2.0       # main-fresh-at default: times the compaction point
 TAIL_READ = 512 * 1024  # how much of the transcript's end is read
 
 
@@ -457,6 +484,34 @@ def fresh_text(fa):
     return f"idle={fa[0] / 60:g}m,context={ctx}"
 
 
+def parse_main_fresh_at(raw):
+    """("x", multiple of the compaction point) | ("n", tokens) | None (off) for 2x, 800k, 800000, off or default."""
+    raw = str(raw if raw is not None else "").strip().lower()
+    if raw in ("", "default"):
+        return ("x", FRESH_MARK)
+    if raw in ("off", "no", "0"):
+        return None
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(x|k|m)?", raw)
+    if not m or float(m.group(1)) <= 0:
+        raise ValueError(f"main-fresh-at takes 2x (times the compaction point), a number of tokens like 800k, off or default, not {raw!r}")
+    if m.group(2) == "x":
+        return ("x", float(m.group(1)))
+    return ("n", int(float(m.group(1)) * {None: 1, "k": 1000, "m": 1000000}[m.group(2)]))
+
+
+def main_fresh_at(point=None):
+    """Tokens of context above which main (and a thread session) is replaced by a fresh session at its next turn end
+    (0 = off): LEAN_AGENT_MAIN_FRESH_AT, else `lean-agent config main-fresh-at`, default 2x the compaction point."""
+    raw = os.environ.get("LEAN_AGENT_MAIN_FRESH_AT") or _load(lean_home("config.json")).get("main_fresh_at")
+    try:
+        parsed = parse_main_fresh_at(raw)
+    except ValueError:
+        parsed = parse_main_fresh_at(None)
+    if not parsed:
+        return 0
+    return int(parsed[1] * (point or up_compact_at())) if parsed[0] == "x" else parsed[1]
+
+
 def session_context(tid):
     """Tokens in the last usage record of the thread session's transcript (0 when unknown)."""
     path = session_transcript(tid)
@@ -560,6 +615,8 @@ class AutoClear:
         self.waiting = None   # (transcript offset, when) once the prompt is out
         self.held = None      # why a due clear waits (running workers)
         self.manual = False   # the clear in progress was asked for with `lean-agent clear`
+        self.verify = None    # (session id, transcript, when, context) of a typed /clear that must show a new session
+        self.reason = None    # why the clear in progress was started, when not the user
 
     def record(self):
         """The hook's record of the transcript this session writes now (chat/service.json, thread: service-tN.json)."""
@@ -594,6 +651,90 @@ class AutoClear:
                 self.log(f"holding the clear: {why}")
             self.update(clear_hold=why)
 
+    def clear_now(self, because="checkpointed"):
+        """The checkpoint is saved (or was not answered in time): do the clear. By default the session is replaced by a
+        fresh one; LEAN_AGENT_CLEAR_MODE=slash types /clear instead and `verify_clear` checks it took."""
+        self.waiting = None
+        if os.environ.get("LEAN_AGENT_CLEAR_MODE", "replace") == "slash":
+            st = transcript_state(self.transcript())
+            self.verify = (self.session_id(), self.transcript(), self.now(), st["ctx"])
+            self.log(f"/clear sent ({because})")
+            self.host.paste("/clear")
+            return
+        self.log(f"replacing the session ({because})")
+        self.replace()
+
+    def replace(self, how="replaced"):
+        """Checkpoint done: point the session at a new id (the brief starts it) and restart its host. Main takes the
+        brief from the SessionStart hook; a thread session is sent its brief once the new session is up."""
+        old_sid, st = self.session_id(), transcript_state(self.transcript())
+        sid = str(uuid.uuid4())
+        if self.key == "main":
+            update_up(session_id=sid, transcript=transcript_path(self.host.cwd, sid), fresh_sid=sid)
+        else:
+            import lean_threads
+            hist = list((lean_threads.load()["threads"].get(self.key) or {}).get("session_history") or [])
+            lean_threads.set_session(self.key, session_id=sid, session_history=(hist + [old_sid] if old_sid else hist)[-20:])
+        old_proc = self.host.proc
+        self.finish(old_sid, sid, st["ctx"], how)
+        self.host.terminate_for("restart")
+        if self.key != "main":
+            threading.Thread(target=self.brief_new_session, args=(old_proc,), daemon=True).start()
+
+    def finish(self, old_sid, new_sid, ctx, how):
+        now = self.now()
+        why = f" ({self.reason})" if self.reason else ""
+        self.waiting = self.verify = self.started = None
+        self.manual, self.reason = False, None
+        self.hold(None)
+        self.update(clear_requested=None, clear_pending_since=None, cleared_at=now, clear_hold=None,
+                    clear_status=f"{self.key} was {ctx // 1000}k, {how} as session {str(new_sid)[:8]} at "
+                                 f"{time.strftime('%H:%M', time.localtime(now))}{why}")
+        self.log(f"{self.key} cleared: {old_sid} ({ctx:,} tokens) -> {new_sid}, {how}{why}", "info")
+
+    def brief_new_session(self, old_proc):
+        """A replaced thread session starts from its brief: sent once the new process is up and quiet."""
+        end = time.time() + 30
+        while time.time() < end and (self.host.proc is old_proc or not self.host.alive()):
+            time.sleep(0.2)
+        try:
+            import compact_hook
+            import lean_threads
+            if not wait_ready(self.host):
+                self.log("the fresh session was not ready for its brief", "warn")
+            self.host.last_input = time.time()
+            self.host.paste(compact_hook.fresh_brief(self.key) + "\n" + lean_threads.BRIEF_END
+                            + "\n\n(No message yet: wait for the user.)")
+        except Exception as exc:  # noqa: BLE001 - the session works without the brief
+            self.log(f"brief for the fresh {self.key} session not delivered: {exc}", "error")
+
+    def verify_clear(self, now):
+        """A typed /clear counts once the hook's record shows a new session id or transcript; without it within
+        CLEAR_VERIFY seconds the session is replaced instead. True while still checking."""
+        old_sid, old_path, since, ctx = self.verify
+        if self.session_id() != old_sid or self.transcript() != old_path:
+            self.finish(old_sid, self.session_id(), ctx, "cleared with /clear")
+            return True
+        if now - since >= _knob("LEAN_AGENT_CLEAR_VERIFY", CLEAR_VERIFY):
+            self.log("/clear was not acted on: replacing the session instead", "warn")
+            self.verify = None
+            self.replace("replaced, /clear did not take")
+        return True
+
+    def safety_net(self, st):
+        """A session whose context passed main-fresh-at (default 2x the compaction point) is replaced at this turn end:
+        the checkpoint, then a fresh session; reports wait meanwhile. True when it started one."""
+        mark = main_fresh_at(compact_at(getattr(self.host, "env", None)) if getattr(self.host, "env", None) else None)
+        if not mark or not st["ended"] or st["ctx"] <= mark:
+            return False
+        self.reason = f"context {st['ctx'] // 1000}k passed main-fresh-at {mark // 1000}k"
+        now = self.now()
+        self.update(clear_requested=now, clear_pending_since=now, clear_status=None)
+        print(f"lean-agent: {self.key} context {st['ctx']:,} passed {mark:,}: continuing in a fresh session after a checkpoint",
+              file=sys.stderr, flush=True)
+        self.log(self.reason, "warn")
+        return True
+
     def blocked(self, st):
         idle = _knob("LEAN_AGENT_CLEAR_IDLE", CLEAR_IDLE)
         now = self.now()
@@ -608,6 +749,9 @@ class AutoClear:
             return
         now = self.now()
         path = self.transcript()
+        if self.verify:
+            self.verify_clear(now)
+            return
         if self.waiting:
             offset, since = self.waiting
             st = transcript_state(path, offset)
@@ -625,10 +769,8 @@ class AutoClear:
                     self.log("no reply in time and a turn is running: giving up this round")
                 return
             if answered or timed_out:
-                self.waiting = None
                 self.hold(None)
-                self.log(f"/clear sent ({'checkpointed' if answered else 'no reply in time'})")
-                self.host.paste("/clear")
+                self.clear_now("checkpointed" if answered else "no reply in time")
             return
         if self.up().get("clear_requested"):
             # asked for by the user: ignores the threshold, the gap, the idle time and live runs (they are detached
@@ -639,11 +781,12 @@ class AutoClear:
                 asked = self.up().get("clear_requested")
                 if not os.path.exists(path) and isinstance(asked, (int, float)) \
                         and now - asked >= _knob("LEAN_AGENT_CLEAR_WAIT", CLEAR_WAIT):
-                    self.update(clear_requested=None, clear_status="clear not done: the transcript was not found")
+                    self.update(clear_requested=None, clear_pending_since=None,
+                                clear_status="clear not done: the transcript was not found")
                     self.hold(None)
                     self.log("clear not done: the transcript was not found")
                 return
-            self.update(clear_requested=None, clear_status=None)
+            self.update(clear_requested=None, clear_status=None, clear_pending_since=self.up().get("clear_pending_since") or now)
             self.hold(CLEAR_PENDING)
             self.manual = True
             self.started = now
@@ -652,6 +795,8 @@ class AutoClear:
             self.host.paste(checkpoint_prompt())
             return
         self.manual = False
+        if self.safety_net(transcript_state(path)):
+            return
         limit = clear_at(getattr(self.host, "env", None))
         if not limit or now - self.last_gap_start() < _knob("LEAN_AGENT_CLEAR_GAP", CLEAR_GAP):
             self.hold(None)
@@ -668,6 +813,7 @@ class AutoClear:
         self.hold(None)
         self.started = now
         self.waiting = (st["size"], now)
+        self.update(clear_pending_since=now)
         self.log(f"context {st['ctx']:,} tokens is above {limit:,}: asking for a checkpoint")
         self.host.paste(checkpoint_prompt())
 
@@ -889,6 +1035,15 @@ def scan_turn(path, offset):
     return out
 
 
+def main_fresh_pending(reporter):
+    """True when main's last finished turn left it above main-fresh-at: the safety net replaces it first."""
+    mark = main_fresh_at()
+    if not mark:
+        return False
+    st = transcript_state(reporter.transcript())
+    return bool(st["ended"] and st["ctx"] > mark)
+
+
 class Reporter(AutoClear):
     """A thread session's Host: at each turn end builds a report (done | blocked | needs-you) when the turn ran lean-agent
     work or asks the user something, and queues it; also reports a pending question or permission prompt. The main
@@ -972,10 +1127,19 @@ class Reporter(AutoClear):
         items = queued_reports()
         if not items or not self.host.alive():
             return
+        if clear_pending("main") or main_fresh_pending(self):
+            return  # a queued clear goes first: the reports reach the fresh session after it
         now = self.now()
         if now - min(i.get("ts") or now for i in items) < _knob("LEAN_AGENT_REPORT_BATCH", REPORT_BATCH):
             return
-        st = transcript_state(self.transcript())
+        quiet = now - getattr(self.host, "last_output", 0)
+        if self.record().get("session_id") != info("main").get("session_id") and quiet < 10:
+            return  # a replaced session whose start the hook has not recorded yet
+        path = self.transcript()
+        st = transcript_state(path)
+        new_session = not (path and os.path.exists(path) and os.path.getsize(path))  # a fresh session has no turn yet
+        if new_session:
+            st["ended"] = quiet > _knob("LEAN_AGENT_READY_QUIET", READY_QUIET)
         if not st["ended"] or self.prompting() or now - self.host.last_input < _knob("LEAN_AGENT_REPORT_IDLE", 3):
             return
         if self.delivered and self.delivered[0] == st["size"] and now - self.delivered[1] < PENDING_FALLBACK:

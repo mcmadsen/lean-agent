@@ -9153,6 +9153,23 @@ def cmd_config(a):
         print(f"thread-reports: {service_session.reports_mode()} \u00b7 a thread session's finished turn (run, error, question) is "
               "typed into the main session at its turn end; questions-only sends only what needs you (on|questions-only|off|default)")
         return 0
+    if a.name == "main-fresh-at":
+        if a.value is not None:
+            try:
+                service_session.parse_main_fresh_at(a.value)
+            except ValueError as exc:
+                die(str(exc))
+            cfg = config_json()
+            if a.value.lower() in ("default", ""):
+                cfg.pop("main_fresh_at", None)
+            else:
+                cfg["main_fresh_at"] = a.value.lower()
+            save_json(home("config.json"), cfg)
+        mark = service_session.main_fresh_at()
+        print("main-fresh-at: " + (f"{mark:,} tokens" if mark else "off") + " \u00b7 a main or thread session whose context is "
+              "above this at a turn end gets a checkpoint and is replaced by a fresh session; thread reports wait "
+              "meanwhile (2x = times the compaction point, 800k, off, default)")
+        return 0
     if a.name == "thread-fresh-after":
         if a.value is not None:
             try:
@@ -9655,16 +9672,17 @@ def cmd_doc(a):
 
 
 def auto_fresh_reason(tid):
-    """Why a running thread session should continue fresh (idle and big, per thread-fresh-after), else ''."""
+    """Why a running thread session should continue fresh (its context reaches the thread-fresh-after limit, as
+    `thread sessions --context` shows), else ''. A session in the middle of a turn is not replaced under it."""
     limits = service_session.fresh_after()
     if not limits:
         return ""
     mine = next((x for x in open_thread_sessions() if x["thread"] == tid), None)
     ctx, point = service_session.session_context(tid), service_session.up_compact_at()
     need = service_session.fresh_context_threshold(limits[1], point)
-    if not mine or mine["idle"] < limits[0] or not ctx or not need or ctx < need:
+    if not mine or not ctx or not need or ctx < need or service_session.mid_turn(tid):
         return ""
-    return f"idle {_idle_age(mine['idle'])}, context ~{kt(ctx)} reaches the {kt(int(need))} limit"
+    return kt(ctx)
 
 
 def start_closed_thread(tid, t, prompt, resume_old, force=False):
@@ -10069,7 +10087,8 @@ def session_contexts():
     for key, title, idle, busy in rows:
         ctx = service_session.session_context(key)
         out.append({"session": key, "title": title, "ctx": ctx, "pct": round(ctx * 100 / point) if point else 0,
-                    "idle": idle, "state": "mid-turn" if busy else "idle", "fresh": bool(key != "main" and need and ctx >= need)})
+                    "idle": idle, "state": "mid-turn" if busy else "idle", "fresh": bool(key != "main" and need and ctx >= need),
+                    "clear": service_session.clear_state(key)})
     return out
 
 
@@ -10083,7 +10102,8 @@ def context_table():
     for r in rows:
         lines.append(f"{r['session']:<9}{lean_threads.one_line(r['title'], 32):<34}{kt(r['ctx']) if r['ctx'] else '-':<14}"
                      f"{str(r['pct']) + '%' if r['ctx'] else '-':<14}{_idle_age(r['idle']):<8}{r['state']}"
-                     + ("  fresh on next send" if r["fresh"] else ""))
+                     + ("  fresh on next send" if r["fresh"] and r["state"] == "idle" else "")
+                     + (f"  {r['clear']}" if r["clear"] else ""))
     lines.append(f"Total: {kt(sum(r['ctx'] for r in rows))} across {len(rows)} sessions (compaction point {kt(service_session.up_compact_at())})")
     return "\n".join(lines)
 
@@ -10219,7 +10239,8 @@ def cmd_thread(a):
                 name, line = start_closed_thread(tid, t, prompt, resume_old, force)
             except RuntimeError as exc:
                 die(str(exc))
-        print((line or f"thread {tid} started") + (f" ({why})" if why else "") + f': Remote Control "{name}"'
+        print((f"{tid} was {why} \u2014 continued in a fresh session" if why else line or f"thread {tid} started")
+              + f': Remote Control "{name}"'
               + (": message sent" if prompt else ""))
         return 0
     if act == "close":
@@ -11002,6 +11023,25 @@ def spawn_restart_helper():
     return proc.pid
 
 
+def clear_status():
+    """`clear --status`: for main and every open thread session, when its last clear ran or why one is pending."""
+    keys = ["main"] + [s["thread"] for s in open_thread_sessions()]
+    for key in keys:
+        rec = service_session.session_rec(key)
+        print(f"{key:<6}{service_session.clear_state(key) or 'no clear asked for'}"
+              + (f" \u00b7 {rec['clear_status']}" if rec.get("clear_status") and not service_session.clear_pending(key) else ""))
+    return 0
+
+
+def print_context_after():
+    """The context table as it is now, and when the fresh sessions get measured."""
+    try:
+        print(context_table())
+    except Exception:  # noqa: BLE001 - the table is a courtesy
+        pass
+    print("the fresh session is measured once it has answered its first turn (`lean-agent thread sessions --context`)")
+
+
 def clear_all(a):
     """`clear --all [--restart] [--force]`: every open thread session (not one with a live run or mid-turn unless
     --force) gets checkpoint + /clear, then the calling main session at the end of its turn. With --restart the `up`
@@ -11033,11 +11073,13 @@ def clear_all(a):
     if restart:
         spawn_restart_helper()
         print(clear_all_table(rows, "main: restarts when this turn ends"))
+        print_context_after()
         return 0
     if not service_session.request_clear("main"):
         print(clear_all_table(rows, "main: not cleared (no service session is up)"))
         return 1
     print(clear_all_table(rows, "main: clears when this turn ends"))
+    print_context_after()
     return 1 if held else 0
 
 
@@ -11046,6 +11088,8 @@ def cmd_clear(a):
     if getattr(a, "restart_helper", False):
         restart_when_idle()
         return 0
+    if getattr(a, "status", False):
+        return clear_status()
     if getattr(a, "all", False):
         return clear_all(a)
     if a.restart or a.force:
@@ -11056,7 +11100,10 @@ def cmd_clear(a):
               "`lean-agent service start`" + (f"; a thread's session: `lean-agent thread open {tid}`" if a.thread else "") + ")",
               file=sys.stderr)
         return 1
-    print("clear queued: runs at the end of this turn; running workers keep going (collect with `lean-agent runs --wait all`); check with `lean-agent service status`")
+    print("clear queued: runs at the end of this turn (the session is replaced by a fresh one from its checkpoint; thread "
+          "reports wait until then); running workers keep going (collect with `lean-agent runs --wait all`); "
+          "`lean-agent clear --status` shows when it ran")
+    print_context_after()
     return 0
 
 
@@ -11180,6 +11227,7 @@ def build_parser():
     s.add_argument("--all", action="store_true", help="clear every open thread session, then main at the end of this turn")
     s.add_argument("--restart", action="store_true", help="with --all: restart `up` with clean contexts after this turn")
     s.add_argument("--force", action="store_true", help="with --all: also clear threads with a live run or mid-turn")
+    s.add_argument("--status", action="store_true", help="when each session was last cleared, or why a clear is pending")
     s.add_argument("--restart-helper", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(fn=cmd_clear)
     s = sub.add_parser("checkpoint", help="save your soft state (promises, decisions, next steps) for after a /clear")
@@ -11223,9 +11271,9 @@ def build_parser():
     s.set_defaults(fn=cmd_advise)
 
     s = sub.add_parser("config", help="switches: strict on|off (the orchestrator only runs lean-agent commands; default on), "
-                       "max-thread-sessions N (thread sessions the service runs; default 8), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
+                       "max-thread-sessions N (thread sessions the service runs; default 8), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
     s.add_argument("name", choices=["strict", "clear-at", "project-rules", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
-                                           "review-max-rerounds", "review-skip", "review-model", "thread-fresh-after", "thread-reports"])
+                                           "review-max-rerounds", "review-skip", "review-model", "thread-fresh-after", "thread-reports", "main-fresh-at"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)

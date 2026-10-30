@@ -4291,20 +4291,17 @@ class CliTest(unittest.TestCase):
             L.cmd_thread(args)
         return out.getvalue()
 
-    def test_send_to_a_big_idle_open_session_continues_fresh_only_when_both_limits_hold(self):
+    def test_send_to_a_big_idle_open_session_continues_fresh_when_its_context_reaches_the_limit_whatever_its_idle_time(self):
         p, log, ss, old = self.closed_thread_with_history(ctx=150000)
         n = len(self.read_jsonl(log))
-        self.cli("config", "thread-fresh-after", "idle=1h,context=50%")  # not idle long enough
-        self.assertIn("t1 is running", self.send_in_process(1800))
         self.cli("config", "thread-fresh-after", "idle=1m,context=99%")  # idle, but the context is below 99% of the compaction point
         self.assertIn("t1 is running", self.send_in_process(600))
         self.cli("config", "thread-fresh-after", "off")
         self.assertIn("t1 is running", self.send_in_process(99999))
         self.assertEqual(len(self.read_jsonl(log)), n)
-        self.cli("config", "thread-fresh-after", "idle=1m,context=1%")
-        out = self.send_in_process(600)
-        self.assertIn("t1 started fresh", out)
-        self.assertIn("idle ", out)
+        self.cli("config", "thread-fresh-after", "idle=1h,context=1%")
+        out = self.send_in_process(5)
+        self.assertRegex(out, r"t1 was 150k \u2014 continued in a fresh session")
         self.wait_for(lambda: len(self.read_jsonl(log)) == n + 1 and ss.alive("t1"), "t1 fresh")
         argv = self.read_jsonl(log)[-1]["argv"]
         self.assertNotIn("--resume", argv)
@@ -5063,7 +5060,7 @@ class CliTest(unittest.TestCase):
     def auto_clear_up(self, ctx, **env):
         """`up` with the fake session whose turns leave `ctx` tokens of context; fast clocks for the auto clear."""
         self.env.update(dict(FAKE_CTX=str(ctx), LEAN_AGENT_CLEAR_POLL="0.1", LEAN_AGENT_CLEAR_IDLE="0",
-                             LEAN_AGENT_CLEAR_AT="40000"), **env)
+                             LEAN_AGENT_CLEAR_AT="40000", LEAN_AGENT_CLEAR_MODE="slash"), **env)  # the fake session answers /clear
         return self.start_up("--name", "la")
 
     def clears(self, log):
@@ -5253,6 +5250,10 @@ class CliTest(unittest.TestCase):
     class FakeHost:
         def __init__(self):
             self.last_input, self.pasted, self.stopping = 0, [], threading.Event()
+            self.terminated, self.proc, self.cwd, self.last_output = [], None, tempfile.gettempdir(), 0.0
+
+        def terminate_for(self, reason):
+            self.terminated.append(reason)
 
         def alive(self):
             return True
@@ -5300,6 +5301,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(len(host.pasted), 1)
         self.assertIn("Checkpoint now", host.pasted[0])
         turn("checkpointed")
+        os.environ["LEAN_AGENT_CLEAR_MODE"] = "slash"
+        self.addCleanup(os.environ.pop, "LEAN_AGENT_CLEAR_MODE", None)
         ac.tick()
         self.assertEqual(host.pasted[-1], "/clear")
         # the hook records the clear; a long turn in the new session does not clear again for 10 minutes
@@ -5318,6 +5321,132 @@ class CliTest(unittest.TestCase):
         clock[0] += 2
         ac.tick()
         self.assertEqual(len(host.pasted), 3)
+
+    def test_a_queued_clear_replaces_the_session_and_records_when(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        clock[0] = time.time()
+        os.environ["LEAN_AGENT_CLEAR_AT"] = "off"
+        import service_session as ss
+        turn("done", ctx=90000)
+        ss.update_session("main", session_id="s1", clear_requested=clock[0], clear_pending_since=clock[0])
+        ac.tick()
+        self.assertIn("Checkpoint now", host.pasted[0])
+        self.assertRegex(ss.clear_state("main"), r"^clear pending since \d\d:\d\d: ")
+        turn("checkpointed", ctx=90000)
+        ac.tick()
+        self.assertEqual(host.terminated, ["restart"])
+        self.assertEqual(host.pasted[1:], [])  # no /clear typed
+        up = ss.session_rec("main")
+        self.assertNotEqual(up["session_id"], "s1")
+        self.assertEqual(up["fresh_sid"], up["session_id"])
+        self.assertRegex(ss.clear_state("main"), r"^cleared \d\d:\d\d$")
+        self.assertIn("main was 90k", up["clear_status"])
+        self.assertIsNone(ss.clear_pending("main"))
+
+    def test_a_typed_clear_that_is_not_acted_on_falls_back_to_replacing_the_session(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        clock[0] = time.time()
+        os.environ.update(LEAN_AGENT_CLEAR_AT="off", LEAN_AGENT_CLEAR_MODE="slash")
+        self.addCleanup(os.environ.pop, "LEAN_AGENT_CLEAR_MODE", None)
+        import service_session as ss
+        turn("done")
+        ss.update_session("main", session_id="s1", clear_requested=clock[0], clear_pending_since=clock[0])
+        ac.tick()
+        turn("checkpointed")
+        ac.tick()
+        self.assertEqual(host.pasted[-1], "/clear")
+        clock[0] += 10
+        ac.tick()
+        self.assertEqual(host.terminated, [])  # still waiting for the hook to show a new session
+        clock[0] += 25
+        ac.tick()
+        self.assertEqual(host.terminated, ["restart"])
+        self.assertNotEqual(ss.session_rec("main")["session_id"], "s1")
+        self.assertIn("/clear did not take", ss.session_rec("main")["clear_status"])
+
+    def test_a_typed_clear_that_took_is_recorded_without_a_replacement(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        clock[0] = time.time()
+        os.environ.update(LEAN_AGENT_CLEAR_AT="off", LEAN_AGENT_CLEAR_MODE="slash")
+        self.addCleanup(os.environ.pop, "LEAN_AGENT_CLEAR_MODE", None)
+        import service_session as ss
+        turn("done")
+        ss.update_session("main", clear_requested=clock[0], clear_pending_since=clock[0])
+        ac.tick()
+        turn("checkpointed")
+        ac.tick()
+        with open(os.path.join(home, "chat", "service.json"), "w") as fh:
+            json.dump({"session_id": "s2", "transcript_path": os.path.join(home, "s2.jsonl"), "source": "clear", "ts": clock[0]}, fh)
+        ac.tick()
+        self.assertEqual(host.terminated, [])
+        self.assertRegex(ss.clear_state("main"), r"^cleared ")
+
+    def test_main_safety_net_replaces_main_at_twice_the_compaction_point_and_not_below(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        clock[0] = time.time()  # compaction at 67,000
+        os.environ["LEAN_AGENT_CLEAR_AT"] = "off"
+        import service_session as ss
+        self.assertEqual(ss.main_fresh_at(67000), 134000)
+        turn("done", ctx=133000)
+        ac.tick()
+        self.assertEqual(host.pasted, [])
+        turn("done", ctx=135000)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            ac.tick()
+        self.assertIn("fresh session", err.getvalue())
+        ac.tick()
+        self.assertIn("Checkpoint now", host.pasted[0])
+        turn("checkpointed", ctx=135000)
+        ac.tick()
+        self.assertEqual(host.terminated, ["restart"])
+        self.assertIn("passed main-fresh-at", ss.session_rec("main")["clear_status"])
+
+    def test_main_safety_net_is_off_with_config_off_and_follows_a_set_mark(self):
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        os.environ["LEAN_AGENT_CLEAR_AT"] = "off"
+        import service_session as ss
+        os.environ["LEAN_AGENT_MAIN_FRESH_AT"] = "off"
+        self.addCleanup(os.environ.pop, "LEAN_AGENT_MAIN_FRESH_AT", None)
+        self.assertEqual(ss.main_fresh_at(67000), 0)
+        turn("done", ctx=900000)
+        ac.tick()
+        self.assertEqual(host.pasted, [])
+        os.environ["LEAN_AGENT_MAIN_FRESH_AT"] = "800k"
+        self.assertEqual(ss.main_fresh_at(67000), 800000)
+        os.environ["LEAN_AGENT_MAIN_FRESH_AT"] = "1.5x"
+        self.assertEqual(ss.main_fresh_at(67000), 100500)
+
+    def test_a_queued_clear_runs_before_a_pending_report_is_pasted_and_reports_reach_the_fresh_session(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        write("main", user("hi"), assistant("ok"))
+        ss.queue_report("t1", "done", "Finished.")
+        ss.update_session("main", session_id="main", clear_requested=clock[0], clear_pending_since=clock[0])
+        clock[0] += 120
+        reps["main"].tick()
+        self.assertEqual(hosts["main"].pasted, [])  # held while the clear is queued
+        # the clear ran: a new session id, no transcript yet; the host has printed and been quiet
+        ss.update_session("main", session_id="main2", clear_requested=None, clear_pending_since=None, cleared_at=clock[0])
+        with open(os.path.join(os.environ["LEAN_AGENT_HOME"], "chat", "service.json"), "w") as fh:
+            json.dump({"session_id": "main2", "transcript_path": os.path.join(os.environ["LEAN_AGENT_HOME"], "main2.jsonl"),
+                       "source": "startup", "ts": clock[0]}, fh)
+        clock[0] += 5
+        reps["main"].tick()
+        self.assertEqual(len(hosts["main"].pasted), 1)
+        self.assertIn("t1", hosts["main"].pasted[0])
+
+    def test_clear_status_and_the_context_table_show_when_a_clear_ran_or_is_pending(self):
+        L = lean_agent_module()
+        import service_session as ss
+        home = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": home}):
+            ss.update_session("main", clear_requested=time.time(), clear_pending_since=time.time(), clear_hold=ss.CLEAR_PENDING)
+            self.assertRegex(ss.clear_state("main"), r"^clear pending since \d\d:\d\d: clear requested")
+            ss.update_session("main", clear_requested=None, clear_pending_since=None, cleared_at=time.time())
+            with mock.patch.object(L, "open_thread_sessions", return_value=[]):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    L.clear_status()
+            self.assertRegex(out.getvalue(), r"main +cleared \d\d:\d\d")
 
     class ReportHost(FakeHost):
         def __init__(self, key):
