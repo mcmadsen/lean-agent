@@ -761,7 +761,7 @@ def reports_message(items, dropped=0):
 
 
 SUMMARY_RE = re.compile(r"^lean-agent: \d+ thread reports? \(.*\) \[r([0-9a-f]{6})\]$")
-PENDING_FALLBACK = 90  # seconds: a staged block the prompt hook has not taken by then is typed in full instead
+PENDING_FALLBACK = 60  # seconds: the one wait after a paste; a paste that began no turn (the prompt hook never took the staged block) is retried then, typed in full
 REPORT_LOG_KEPT = 10
 
 
@@ -978,7 +978,7 @@ class Reporter(AutoClear):
         st = transcript_state(self.transcript())
         if not st["ended"] or self.prompting() or now - self.host.last_input < _knob("LEAN_AGENT_REPORT_IDLE", 3):
             return
-        if self.delivered and self.delivered[0] == st["size"] and now - self.delivered[1] < 60:
+        if self.delivered and self.delivered[0] == st["size"] and now - self.delivered[1] < PENDING_FALLBACK:
             return  # the last message has not started a turn yet
         items, dropped = take_reports(now)
         if items:

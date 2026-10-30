@@ -5630,7 +5630,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(len(hosts["main"].pasted), 1)  # transcript unchanged: the paste has not begun a turn
         clock[0] += 31
         reps["main"].tick()
-        self.assertEqual(len(hosts["main"].pasted), 2)
+        self.assertEqual(len(hosts["main"].pasted), 2)  # retried after the wait, with the full block as the fallback
+        self.assertTrue(hosts["main"].pasted[1].startswith("<thread-reports>\n[t1 done] First."))
 
     def test_reporter_keeps_reporting_after_the_thread_session_restarts_on_a_new_transcript(self):
         ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
