@@ -65,7 +65,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `thread merge\|unmerge\|move` | b | allowed: they only change the thread registry |
 | `config thread-fresh-after idle=30m,context=120k|50%\|off\|default` | b | allowed: `thread send` to an open session idle that long and at that many tokens (or share of the compaction point, the lower) checkpoints it and continues in a fresh session (on by default; `LEAN_AGENT_THREAD_FRESH_AFTER` overrides; `thread send tN --resume-old` skips it) |
 | `checkpoint`, `brief` | b | allowed |
-| `clear [--thread tN]` | b | allowed: queues a checkpoint and /clear of the service session (or the thread's own session) at the end of the turn; only when the user asks |
+| `clear [--thread tN]`, `clear --all [--restart] [--force]` | b | allowed: queues a checkpoint and /clear of the service session (or the thread's own session) at the end of the turn; `--all` does it for every open thread session first (one with a live run is skipped unless `--force`), `--restart` restarts `up` with clean contexts after the turn; only when the user asks |
 | `handoff` (read), `handoff --done N`, `handoff --note … --kind checkpoint\|fyi\|decision` | b | allowed: the orchestrator's own state; a `decision` note is how it asks the user something asynchronously |
 | `handoff --note …` with no kind, or kind reminder | c | **denied**: user content; `remember` |
 | `todo list\|next\|start\|done` | b | allowed: status that follows a run it started |
