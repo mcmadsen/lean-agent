@@ -10889,8 +10889,86 @@ def cmd_handoff(a):
     print(f"(saved {home('handoff.md')}; a new or compacted orchestrator session starts with this note)")
 
 
+def clear_all_table(rows, main_line):
+    w = max([6] + [len(t) for t, _ in rows])
+    return "\n".join([f"{'Thread':<{w}}  Result"] + [f"{t:<{w}}  {r}" for t, r in rows] + [main_line])
+
+
+def restart_when_idle(wait=None, now=time.time, sleep=time.sleep):
+    """Detached helper of `clear --all --restart`: wait until main's turn has ended (never restart under it), then do
+    what `service restart --clear` does. Returns the command run, or None when the turn did not end in time."""
+    limit = now() + (env_num("LEAN_AGENT_CLEAR_RESTART_WAIT", 900) if wait is None else wait)
+    calm = 0
+    while now() < limit:
+        calm = 0 if service_session.mid_turn("main") else calm + 1
+        if calm >= 2:
+            break
+        sleep(1)
+    else:
+        return None
+    if os.path.exists(service_file()):
+        subprocess.run([sys.executable, os.path.abspath(__file__), "service", "restart", "--clear", "--yes"], check=False)
+        return "service restart --clear"
+    service_session.go_fresh(restart_host=True)
+    return "up restart"
+
+
+def spawn_restart_helper():
+    """Start the detached restart helper (own session, so it outlives this turn). Returns its pid."""
+    log = open(home("restart-helper.log"), "ab")
+    proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "clear", "--restart-helper"], stdin=subprocess.DEVNULL,
+                            stdout=log, stderr=log, start_new_session=True)
+    return proc.pid
+
+
+def clear_all(a):
+    """`clear --all [--restart] [--force]`: every open thread session (not one with a live run or mid-turn unless
+    --force) gets checkpoint + /clear, then the calling main session at the end of its turn. With --restart the `up`
+    host restarts with clean contexts once the turn ended (a detached helper), and the threads come back fresh from
+    their brief. Refused from a thread session (it would clear itself first)."""
+    if lean_threads.resolve_tag():
+        die("clear --all runs from the main session only; ask main to run it")
+    force, restart = getattr(a, "force", False), getattr(a, "restart", False)
+    rows, held = [], []
+    for s in open_thread_sessions():
+        tid = s["thread"]
+        why, _ = close_hold(tid)
+        if why and not force:
+            rows.append((tid, f"not cleared: running: {why}"))
+            held.append(tid)
+        elif restart:
+            service_session.checkpoint_session(tid)
+            prepare_thread_session(tid, False, force=True)  # a new session id: it starts from its brief, not the old transcript
+            rows.append((tid, "restarts fresh"))
+        elif service_session.request_clear(tid):
+            rows.append((tid, "cleared" + (" (runs keep going)" if why else "")))
+        else:
+            rows.append((tid, "not cleared: session not up"))
+            held.append(tid)
+    if restart and held:
+        print(clear_all_table(rows, "main: not restarted"))
+        print(f"restart not scheduled: {len(held)} thread(s) busy; retry when idle or add --force (runs are detached and keep going)")
+        return 1
+    if restart:
+        spawn_restart_helper()
+        print(clear_all_table(rows, "main: restarts when this turn ends"))
+        return 0
+    if not service_session.request_clear("main"):
+        print(clear_all_table(rows, "main: not cleared (no service session is up)"))
+        return 1
+    print(clear_all_table(rows, "main: clears when this turn ends"))
+    return 1 if held else 0
+
+
 def cmd_clear(a):
     """Ask the service session to checkpoint and /clear at the end of its current turn (see service_session.AutoClear)."""
+    if getattr(a, "restart_helper", False):
+        restart_when_idle()
+        return 0
+    if getattr(a, "all", False):
+        return clear_all(a)
+    if a.restart or a.force:
+        die("--restart and --force go with --all")
     tid = lean_threads.norm(a.thread) if a.thread else "main"
     if not service_session.request_clear(tid):
         print(f"no service session is up for {tid if a.thread else 'the orchestrator'} (start it with `lean-agent up` or "
@@ -11018,6 +11096,10 @@ def build_parser():
     s = sub.add_parser("clear", help="clear the service session (checkpoint, then /clear) at the end of this turn; "
                                      "only when the user asks")
     s.add_argument("--thread", metavar="tN", help="clear that thread's own session instead of the main one")
+    s.add_argument("--all", action="store_true", help="clear every open thread session, then main at the end of this turn")
+    s.add_argument("--restart", action="store_true", help="with --all: restart `up` with clean contexts after this turn")
+    s.add_argument("--force", action="store_true", help="with --all: also clear threads with a live run or mid-turn")
+    s.add_argument("--restart-helper", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(fn=cmd_clear)
     s = sub.add_parser("checkpoint", help="save your soft state (promises, decisions, next steps) for after a /clear")
     s.add_argument("text", nargs="*", help="the soft state, 15 lines or fewer")
