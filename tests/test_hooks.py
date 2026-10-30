@@ -773,6 +773,44 @@ class BudgetTest(Base):
             self.assertEqual(reg["t2"]["report"]["text"], "Fixed the retry loop.")
             self.assertNotIn("report", reg["t1"])
 
+    def test_prompt_hook_delivers_the_staged_report_block_once_as_hidden_context(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        self.make_threads("Publish quarterly report through docs worker", "Fix export retry loop in billing service")
+        block = "<thread-reports>\n[t2 done] Fixed the retry loop.\ndetails: lean-agent thread show t2\n</thread-reports>"
+        sys.path.insert(0, ROOT)
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
+            import service_session
+            service_session.stage_block("abc123", "x", block)
+        line = "lean-agent: 1 thread report (t2 done) [rabc123]"
+        self.assertEqual(self.prompt_ctx(line), block)
+        self.assertEqual(self.prompt_ctx(line), "")  # delivered once
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
+            import lean_threads
+            self.assertEqual(lean_threads.load()["threads"]["t2"]["report"]["text"], "Fixed the retry loop.")
+            self.assertEqual(sorted(lean_threads.load()["threads"]), ["t1", "t2"])
+
+    def stop_event(self, texts, ask=False, active=False, **env):
+        tr = os.path.join(self.env["LEAN_AGENT_HOME"], "stop.jsonl")
+        recs = [{"type": "user", "message": {"role": "user", "content": "go"}}]
+        for t in texts:
+            recs.append({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": t}]}})
+        if ask:
+            recs.append({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "q1", "name": "AskUserQuestion", "input": {"questions": [{"question": "Which?"}]}}]}})
+        with open(tr, "w") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in recs))
+        return run_hook("budget_hook.py", {"hook_event_name": "Stop", "cwd": self.env["LEAN_AGENT_HOME"], "session_id": "s1",
+                                          "transcript_path": tr, "stop_hook_active": active}, **dict(self.env, **env))
+
+    def test_stop_hook_blocks_a_main_turn_ending_in_a_prose_question_once(self):
+        out = self.stop_event(["Two options.\n\nShould I squash the branch first?"])
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("AskUserQuestion", out["reason"])
+        self.assertIsNone(self.stop_event(["Two options.\n\nShould I squash the branch first?"], ask=True))
+        self.assertIsNone(self.stop_event(["Should I squash the branch first?"], active=True))
+        self.assertIsNone(self.stop_event(["Should I squash the branch first?"], LEAN_AGENT_SESSION_ROLE="thread"))
+        self.assertIsNone(self.stop_event(["Routed to t3."]))
+
     def test_main_session_hook_tells_the_orchestrator_to_hand_over_or_start(self):
         home = self.env["LEAN_AGENT_HOME"]
         ctx = self.prompt_ctx

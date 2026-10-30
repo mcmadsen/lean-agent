@@ -760,6 +760,60 @@ def reports_message(items, dropped=0):
         f"details: lean-agent thread show {tids[0]}{more}", "</thread-reports>"])
 
 
+SUMMARY_RE = re.compile(r"^lean-agent: \d+ thread reports? \(.*\) \[r([0-9a-f]{6})\]$")
+PENDING_FALLBACK = 90  # seconds: a staged block the prompt hook has not taken by then is typed in full instead
+REPORT_LOG_KEPT = 10
+
+
+def pending_path():
+    return lean_home("reports-pending.json")
+
+
+def reports_log_path():
+    return lean_home("reports-log.json")
+
+
+def summary_line(items, rid):
+    """The one visible line for a batch of reports: `lean-agent: 2 thread reports (t18 done, t21 question) [r1a2b3c]`."""
+    tags = list(dict.fromkeys(f"{i['thread']} {'question' if i['kind'] in ('question', 'needs-you') else i['kind']}" for i in items))
+    return f"lean-agent: {len(items)} thread report{'s' if len(items) != 1 else ''} ({', '.join(tags)}) [r{rid}]"
+
+
+def stage_block(rid, line, block, now=None):
+    """Queue the full block on disk for the main session's prompt hook, and keep it in the log for `thread reports`."""
+    os.makedirs(lean_home(), exist_ok=True)
+    lean_common.write_json_atomic(pending_path(), {"id": rid, "line": line, "block": block, "ts": time.time() if now is None else now})
+    log_block(block)
+
+
+def log_block(block):
+    with lean_common.file_lock(reports_log_path()):
+        items = _load(reports_log_path()).get("items")
+        items = (items if isinstance(items, list) else []) + [{"ts": time.time(), "block": block}]
+        lean_common.write_json_atomic(reports_log_path(), {"items": items[-REPORT_LOG_KEPT:]})
+
+
+def logged_blocks():
+    items = _load(reports_log_path()).get("items")
+    return items if isinstance(items, list) else []
+
+
+def take_pending(line):
+    """The staged full block for a summary `line` typed into main (once: the file is removed), else None."""
+    m = SUMMARY_RE.match(str(line or "").strip())
+    if not m:
+        return None
+    with lean_common.file_lock(pending_path()):
+        data = _load(pending_path())
+        if data.get("id") != m.group(1) or not data.get("block"):
+            return None
+        try:
+            os.remove(pending_path())
+        except OSError:
+            return None
+    return data["block"]
+
+
 def _short(text, n=REPORT_CHARS, tid=None):
     """`text` on one line, whole up to `n` chars; longer is cut at the last sentence end (else word end) before `n`."""
     text = " ".join(str(text or "").replace("`", "").replace("*", "").split())
@@ -893,7 +947,28 @@ class Reporter(AutoClear):
             save_last_report(tid, "done", text or scan["result"])
             queue_report(tid, "done", _short(text or scan["result"], tid=tid))
 
+    def fallback_pending(self):
+        """A staged block the prompt hook never took (hook not active): type it in full, as before."""
+        data = _load(pending_path())
+        if not data.get("block") or self.now() - (data.get("ts") or 0) < PENDING_FALLBACK:
+            return
+        st = transcript_state(self.transcript())
+        if not st["ended"] or self.prompting():
+            return
+        try:
+            self.host.paste(data["block"])
+        except Exception as exc:  # noqa: BLE001 - stays staged, retried on a later tick
+            self.log(f"typing the staged thread reports failed, kept: {exc}")
+            return
+        try:
+            os.remove(pending_path())
+        except OSError:
+            pass
+        self.log("staged thread reports not taken by the prompt hook: typed in full")
+
     def main_tick(self):
+        if os.path.exists(pending_path()):
+            return self.fallback_pending()
         items = queued_reports()
         if not items or not self.host.alive():
             return
@@ -908,11 +983,19 @@ class Reporter(AutoClear):
         items, dropped = take_reports(now)
         if items:
             self.delivered = (st["size"], now)
+            block = reports_message(items, dropped)
+            rid = f"{int(now * 1000) & 0xffffff:06x}"
+            line = summary_line(items, rid)
             try:
-                self.host.paste(reports_message(items, dropped))
+                stage_block(rid, line, block, now)
+                self.host.paste(line)
             except Exception as exc:  # noqa: BLE001 - the reports stay queued and go out on a later tick
                 self.log(f"typing {len(items)} thread report(s) failed, kept queued: {exc}")
                 self.delivered = None
+                try:
+                    os.remove(pending_path())
+                except OSError:
+                    pass
                 return
             drop_reports(items)
             self.log(f"{len(items)} thread report(s) typed into the main session" + (f" ({dropped} stale dropped)" if dropped else ""))

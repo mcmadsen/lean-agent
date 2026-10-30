@@ -10067,6 +10067,13 @@ def cmd_thread(a):
         if not sessions:
             print("no thread sessions running (start one with `lean-agent thread new \"title\"`)")
         return 0
+    if act == "reports":
+        blocks = service_session.logged_blocks()
+        if not blocks:
+            print("no thread reports delivered yet")
+        for b in blocks[-3:]:
+            print(f"-- {time.strftime('%Y-%m-%d %H:%M', time.localtime(b.get('ts') or 0))}\n{b.get('block')}")
+        return 0
     if act == "ask":
         tid = caller_thread()
         if not tid:
@@ -11504,7 +11511,7 @@ def build_parser():
     s.set_defaults(fn=cmd_schedule)
 
     s = sub.add_parser("thread", help="threads: new \"title\" [--prompt-file F|-] (its own Remote Control session) | send tN --prompt-file F|- | ask \"question\" [--options \"a|b|c\"] (from inside a thread session: the question goes to main; end the turn, the answer arrives as your next turn) | answer tN [qN] \"answer\" (main: pass an answer into the thread session) | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
-    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "answer"])
+    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "answer", "reports"])
     s.add_argument("args", nargs="*")
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin)")
