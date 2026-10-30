@@ -40,6 +40,7 @@ import lean_rules  # noqa: E402
 import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
+import lean_feedback  # noqa: E402
 import service_session  # noqa: E402
 import lean_common
 from lean_common import glob_match, compact_overrides, compaction_label, compaction_point, pid_alive, signal_group, lost_runs, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
@@ -1578,6 +1579,7 @@ def record_internal_error(exc, tb):
     prints the one line the caller sees. Returns the exit code, 1."""
     rid, workdir = RUN_CTX["id"], RUN_CTX.get("workdir") or home("work", RUN_CTX["id"])
     reason = f"internal error: {type(exc).__name__}: {' '.join(str(exc).split())[:300]}"
+    lean_feedback.record_crash(["run", rid], exc)
     line = f"run {rid} failed: {reason} (details: lean-agent runs --show {rid} --tail 40)"
     try:
         os.makedirs(workdir, exist_ok=True)
@@ -10237,8 +10239,42 @@ def cmd_thread(a):
     return lean_threads.cli(act, a.args + (["--all"] if getattr(a, "all", False) else []), a.json)
 
 
+def cmd_feedback(a):
+    text = " ".join(a.text)
+    if a.action == "add":
+        if not text:
+            die("feedback add needs the text of what happened")
+        fid, added = lean_feedback.add(text, a.kind or "friction", a.severity, a.repro)
+        print(f"feedback {fid} added" if added else f"feedback {fid}: +1")
+    elif a.action == "list":
+        items = lean_feedback.list_items(a.open, a.kind, a.since)
+        print(lean_feedback.table(items) if items else "No feedback.")
+    elif a.action in ("rm", "done"):
+        if not lean_feedback.mark(text, None if a.action == "rm" else "done"):
+            die(f"no feedback {text or '(give fN)'}")
+        print(f"feedback {text} {'removed' if a.action == 'rm' else 'done'}")
+    else:
+        path, n = lean_feedback.export(a.all, a.out)
+        print(f"feedback: {path} ({n} items)")
+    return 0
+
+
+def feedback_line():
+    """`feedback: N open (M high)` for `now`, or '' when nothing is open; says when the export offer is due (once a day)."""
+    n, high = lean_feedback.counts()
+    if not n:
+        return ""
+    line = f"feedback: {n} open ({high} high)"
+    if lean_feedback.offer_due():
+        line += " - offer the user to export it for lean-agent (AskUserQuestion)"
+    return line
+
+
 def cmd_now(a):
     print(lean_threads.short_text() if a.short else lean_threads.now_text())
+    line = feedback_line()
+    if line:
+        print(line)
     if service_session.alive():
         rows = session_contexts()
         big = max(rows[1:], key=lambda r: r["ctx"], default=None)
@@ -11516,6 +11552,18 @@ def build_parser():
     s.add_argument("-n", type=int, default=10)
     s.set_defaults(fn=cmd_runs)
 
+    s = sub.add_parser("feedback", help="feedback about lean-agent itself: add|list|rm|done|export")
+    s.add_argument("action", choices=["add", "list", "rm", "done", "export"])
+    s.add_argument("text", nargs="*", help="add: what happened; rm|done: fN")
+    s.add_argument("--kind", choices=lean_feedback.KINDS, help="add (default friction); list: only this kind")
+    s.add_argument("--severity", choices=lean_feedback.SEVERITIES, default="normal")
+    s.add_argument("--repro", default="", help="add: the command or steps that show it")
+    s.add_argument("--open", action="store_true", help="list: only open items")
+    s.add_argument("--since", metavar="DATE", help="list: from this date (YYYY-MM-DD)")
+    s.add_argument("--all", action="store_true", help="export: also items already exported or done")
+    s.add_argument("--out", metavar="PATH", help="export: write here instead of <home>/feedback/feedback-DATE.md")
+    s.set_defaults(fn=cmd_feedback)
+
     s = sub.add_parser("context", help="what fills the orchestrator's context and what goes unused; --apply removes it")
     s.add_argument("--apply", action="store_true", help="deny the never-used tools and exclude extra instruction files")
     s.add_argument("--keep", action="append", metavar="TOOL", help="never take this tool out (repeatable)")
@@ -11761,6 +11809,7 @@ def main(argv=None):
         real, sys.stdout = sys.stdout, io.StringIO()
     if a.cmd in FAILURE_COMMANDS:
         FAIL_CMD[:] = [a.cmd]
+    lean_feedback.remember_command(argv)
     try:
         rc = a.fn(a) or 0
         if rc != 0 and FAIL_CMD and isinstance(rc, int):  # failed without die(): still end on the one-line reason
@@ -11774,6 +11823,7 @@ def main(argv=None):
     except Exception as e:
         if FAIL_CMD:
             report_failure(FAIL_CMD[0], f"{type(e).__name__}: {e}")
+        lean_feedback.record_crash(argv, e)
         raise
     finally:
         if isinstance(sys.stdout, Tee):
