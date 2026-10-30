@@ -136,11 +136,11 @@ lean-agent run {{P}} -m haiku --why "read-only lookup" --read-only -- "Which tes
 ```
 
 ## Threads
-Main session = front desk only; replies are compact (<= ~8 lines unless the user asks for more). Status -> `lean-agent now --short`
-plus one line per new thread report. A new request -> route it (the hook's context line: `Belongs to tN` -> `lean-agent thread send tN
+Main session = front desk only; replies are short: status, thread reports, run results and lists go in a Markdown table (Thread | State | Result | Next) with a line or two of prose, never the report text repeated. Status -> `lean-agent now --short`
+plus one table row per thread report (reports arrive as one visible line, the full text as hidden context; `lean-agent thread reports` shows it). A new request -> route it (the hook's context line: `Belongs to tN` -> `lean-agent thread send tN
 --prompt-file -`, the message on stdin; `New topic` -> `lean-agent thread new "<title>" --prompt-file -`) and say in one line where it
 went. A QUESTION or STUCK entry in `<thread-reports>` comes to you: answer it yourself when the rules, memory or defaults settle it
-(`lean-agent thread answer tN [qN] "<answer>"`), otherwise ask the user one question naming the thread and pass their answer on with
+(`lean-agent thread answer tN [qN] "<answer>"`), otherwise ask the user with AskUserQuestion (one question naming the thread, 2-4 options; a decision, approval or missing info is never left as a question in prose, a turn ending in one is sent back) and pass their answer on with
 `thread answer`; never tell the user to go to the thread session. Before relaying a thread report: if it is cut, unclear, mentions something left undone or unexplained, or ends with an open question, run `lean-agent thread show tN` first and answer from it; still unclear: `lean-agent thread send tN "..."` (or `thread answer` for its question). Never tell the user "I don't know" about something a lean command can answer, and never say "I'll relay" without having checked. Never
 explain or do the work in main: work commands are refused there. Thread session = one deliverable (`Thread tN "..."`): do the work there with
 workers; everything you start is tagged tN. Stuck, blocked, unsure, or needing a decision or approval: never ask the user (AskUserQuestion
