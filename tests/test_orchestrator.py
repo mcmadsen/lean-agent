@@ -6040,6 +6040,41 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.wait_for(lambda: not service_alive(m["pid"]), "the run to stop", 40)
 
+    def test_a_run_survives_sigkill_and_sighup_to_its_callers_group_and_runs_stop_still_stops_it(self):
+        for sig in (signal.SIGKILL, signal.SIGHUP):
+            with self.subTest(sig=sig.name):
+                p = self.start_run(turns="3", sleep="30")
+                [m] = [m for m in self.running_markers() if not m.get("early")]
+                self.assertEqual(os.getpgid(m["pid"]), m["pid"])  # a group and session of its own
+                self.assertNotEqual(os.getsid(m["pid"]), os.getsid(p.pid))
+                os.killpg(p.pid, sig)
+                p.wait(timeout=scaled(20))
+                self.assertTrue(service_alive(m["pid"]))
+                self.assertIn(m["run"], self.cli("runs", "--running").stdout)
+                self.cli("runs", "--stop", m["run"], LEAN_AGENT_STOP_WAIT="3")
+                row = next(r for r in self.ledger() if r["id"] == m["run"])
+                self.assertEqual(row["status"], "stopped")
+                self.assertFalse(service_alive(m["pid"]))
+
+    def test_a_terminated_supervisor_records_why_and_runs_lost_shows_it(self):
+        self.start_run(turns="3", sleep="30")
+        [m] = [m for m in self.running_markers() if not m.get("early")]
+        os.kill(m["pid"], signal.SIGTERM)
+        self.wait_for(lambda: not service_alive(m["pid"]), "the supervisor to end")
+        out = self.cli("runs", "--lost").stdout
+        self.assertIn(m["run"], out)
+        self.assertIn("killed by signal 15 (SIGTERM)", out)
+
+    def test_a_lost_run_without_a_recorded_signal_still_says_what_is_known(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(os.path.join(home, "running"), exist_ok=True)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        with open(os.path.join(home, "running", "k2.json"), "w") as fh:
+            json.dump({"pid": dead.pid, "run": "0101-000000-bbbb", "started": "2999-01-01T00:00:00", "task": "t",
+                       "detached": True, "model": "haiku", "project": "proj"}, fh)
+        self.assertIn("supervisor killed without a trace", self.cli("runs", "--lost").stdout)
+
     def test_runs_stop_ends_the_run_marks_it_stopped_and_lists_its_changes(self):
         g = self.git_project()
         g("add", "-A")
@@ -6687,6 +6722,19 @@ class CliTest(unittest.TestCase):
         self.wait_for(lambda: not service_alive(claude), "the hosted claude to stop", 20)
         self.assertTrue(service_alive(m["pid"]))
         self.assertEqual([x["run"] for x in self.running_markers()], [m["run"]])
+
+    def test_stopping_up_leaves_a_run_started_from_a_thread_session_alive_and_says_so(self):
+        p, log, ss = self.start_up()
+        self.cli("thread", "new", "one")
+        self.wait_for(lambda: ss.alive("t1"), "t1")
+        run = self.start_run(turns="20", sleep="1", LEAN_AGENT_THREAD="t1")
+        [m] = [m for m in self.running_markers() if not m.get("early")]
+        os.kill(p.pid, signal.SIGTERM)
+        _, err = p.communicate(timeout=scaled(40))
+        self.assertFalse(ss.alive("t1"))
+        self.assertTrue(service_alive(m["pid"]))
+        self.assertIn(f"still running: run {m['run']}", err or "")
+        self.assertIn("keeps going", err or "")
 
     def test_runs_wait_exits_nonzero_for_a_failed_run_and_on_timeout(self):
         p = self.start_run(turns="3", sleep="0.5", FAKE_FAIL_MODEL="haiku")

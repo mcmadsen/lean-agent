@@ -1645,6 +1645,30 @@ def cmd_run(a):
                 os._exit(rc if isinstance(rc, int) else 0)
 
 
+def own_marker(run_id, **extra):
+    """Puts this process's pid (and `extra`) into the run's running marker(s)."""
+    for f in glob.glob(home("running", "*.json")):
+        m = load_json(f, {})
+        if m.get("run") == run_id:
+            m.update(pid=os.getpid(), detached=True, **extra)
+            save_json(f, m)
+
+
+def supervisor_term(signum, frame):
+    """SIGTERM to a supervisor: records why the run ended (a `runs --stop` records its own stopped row and removes the
+    marker), then dies of the signal as before."""
+    try:
+        rid = RUN_CTX.get("id")
+        for f in glob.glob(home("running", "*.json")):
+            m = load_json(f, {})
+            if rid and m.get("run") == rid:
+                m["lost_reason"] = f"killed by signal {signum} ({signal.Signals(signum).name})"
+                save_json(f, m)
+    finally:
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+
 def detach_run(workdir, run_id):
     """Moves the rest of a run into a detached process (own session, stdin /dev/null, output in the run's work dir),
     so it survives whatever kills this command: the orchestrator's /clear, its shell tool ending, a closed terminal.
@@ -1659,19 +1683,29 @@ def detach_run(workdir, run_id):
             f.flush()
         except (OSError, ValueError):
             pass
+    held = {}
+    for sig in (signal.SIGTERM, signal.SIGHUP):  # ignored across the fork: a group signal between fork and setsid cannot reach the copy
+        try:
+            held[sig] = signal.signal(sig, signal.SIG_IGN)
+        except ValueError:  # not the main thread
+            break
     pid = os.fork()
+    if pid:
+        for sig, handler in held.items():
+            signal.signal(sig, handler)
     if pid == 0:
         try:
             os.setsid()
             signal.signal(signal.SIGINT, signal.default_int_handler)
-            signal.signal(signal.SIGTERM, signal.SIG_DFL)
-            signal.signal(signal.SIGHUP, signal.SIG_DFL)
+            signal.signal(signal.SIGTERM, supervisor_term)
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)  # the caller's session ending is not a reason to stop
             for fd, path, flags in ((0, os.devnull, os.O_RDONLY), (1, paths[0], os.O_WRONLY | os.O_CREAT | os.O_TRUNC),
                                     (2, paths[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC)):
                 os.dup2(os.open(path, flags, 0o644), fd)
             sys.stdin = open(os.devnull)
             sys.stdout = open(1, "w", buffering=1, closefd=False)
             sys.stderr = open(2, "w", buffering=1, closefd=False)
+            own_marker(run_id, supervisor=True)  # the caller's pid in the early marker is not this run's
         except BaseException:
             os._exit(1)  # never back into the caller: this is a copy of it
         SUPERVISOR.append(True)  # cmd_run's finally ends this process with os._exit
@@ -7415,6 +7449,32 @@ def cmd_logs(a):
     return 0
 
 
+def lost_reason(m):
+    """Why a lost run's supervisor is gone, as far as it can be known."""
+    if m.get("detached"):
+        boot = boot_time()
+        if boot and (m.get("started") or "") < datetime.datetime.fromtimestamp(boot).strftime("%Y-%m-%dT%H:%M:%S"):
+            return "host restarted"
+        return "supervisor killed without a trace (SIGKILL?)"
+    return "its caller was stopped before the run detached (session or shell ended)"
+
+
+def boot_time():
+    try:
+        with open("/proc/stat") as fh:
+            return next((int(l.split()[1]) for l in fh if l.startswith("btime")), None)
+    except (OSError, ValueError):
+        return None
+
+
+def print_still_running(thread=None, file=None):
+    """Says which runs are alive and unaffected by what was just done to a session or the service."""
+    runs = thread_live_runs(thread) if thread else [
+        (r, " ".join(str(m.get("task") or "").split()), m.get("started") or "") for r, m in live_runs()]
+    for rid, task, _ in runs:
+        print(f"still running: run {rid} ({task[:60]}) \u2014 keeps going", file=file or sys.stdout, flush=True)
+
+
 def live_runs():
     """[(run id, marker)] of the runs in progress, oldest first (running/*.json whose process is alive)."""
     return running_runs(home())
@@ -7604,7 +7664,7 @@ def cmd_runs(a):
             print(f"{len(lost)} lost runs marked lost and acknowledged")
             return
         for rid, m in lost:
-            print(f"{rid}  lost  (supervisor died; close it: lean-agent runs --stop {rid})  {m.get('model', '?'):<7} "
+            print(f"{rid}  lost  ({m.get('lost_reason') or lost_reason(m)}; close it: lean-agent runs --stop {rid})  {m.get('model', '?'):<7} "
                   f"{m.get('project', '?'):<16} {m.get('task', '')[:50]}")
         if not lost:
             print("No lost runs.")
@@ -8284,6 +8344,7 @@ def host_session(cmd, extra, env, h, name):
         rc = 0
     finally:
         sessions.stop_all(wait=20)
+        print_still_running(file=sys.stderr)
     return rc
 
 
@@ -10065,6 +10126,7 @@ def close_threads(a):
         elif stale:
             print(f"{tid}: no running session; record cleared")
         lean_threads.cli("close", [tid], a.json)
+        print_still_running(tid)
         done.append(tid)
     if len(tids) != 1 or all_ or idle:
         print(f"closed {len(done)} thread{'s' * (len(done) != 1)}" + (f": {', '.join(done)}" if done else "")
@@ -10531,6 +10593,7 @@ def cmd_service(a):
         if running and not a.yes:
             die(f"{len(running)} worker(s) still running (lean-agent runs --running) that are not detached; they'd be "
                 f"stopped with it. Wait for them, or: lean-agent service {a.action} --yes")
+        print_still_running()
     if a.action == "restart" and getattr(a, "clear", False):
         fresh_start()
     if plat == "mac":
@@ -11073,12 +11136,14 @@ def clear_all(a):
     if restart:
         spawn_restart_helper()
         print(clear_all_table(rows, "main: restarts when this turn ends"))
+        print_still_running()
         print_context_after()
         return 0
     if not service_session.request_clear("main"):
         print(clear_all_table(rows, "main: not cleared (no service session is up)"))
         return 1
     print(clear_all_table(rows, "main: clears when this turn ends"))
+    print_still_running()
     print_context_after()
     return 1 if held else 0
 
@@ -11100,6 +11165,7 @@ def cmd_clear(a):
               "`lean-agent service start`" + (f"; a thread's session: `lean-agent thread open {tid}`" if a.thread else "") + ")",
               file=sys.stderr)
         return 1
+    print_still_running(tid if a.thread else None)
     print("clear queued: runs at the end of this turn (the session is replaced by a fresh one from its checkpoint; thread "
           "reports wait until then); running workers keep going (collect with `lean-agent runs --wait all`); "
           "`lean-agent clear --status` shows when it ran")
