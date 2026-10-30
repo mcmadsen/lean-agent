@@ -1075,6 +1075,17 @@ class BudgetTest(Base):
                 self.assertEqual(budget_hook.front_desk_denial(event(cmd)), "", cmd)
                 self.assertEqual(budget_hook.strict_denial(event(cmd), "/home", "/home"), "", cmd)
 
+    def test_front_desk_may_list_thread_context(self):
+        sys.path.insert(0, ROOT)
+        import budget_hook
+        with open(os.path.join(ROOT, "..", "templates", "front-desk.md"), encoding="utf-8") as fh:
+            self.assertIn("lean-agent thread sessions --context", fh.read())
+        event = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}}
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_SESSION_ROLE": "main"}):
+            for cmd in ("lean-agent thread sessions", "lean-agent thread sessions --context"):
+                self.assertEqual(budget_hook.front_desk_denial(event(cmd)), "", cmd)
+                self.assertEqual(budget_hook.strict_denial(event(cmd), "/home", "/home"), "", cmd)
+
     def test_main_session_is_the_front_desk(self):
         sys.path.insert(0, ROOT)
         import budget_hook
