@@ -5,6 +5,7 @@ import sys
 import unittest
 
 MAX_ANNOTATIONS = 20
+MAX_MESSAGE = 4000  # characters; GitHub cuts longer annotation messages
 
 
 def _escape(text):
@@ -27,7 +28,9 @@ def _annotation(test, err, test_file):
     # the exception message starts at the first unindented line after "Traceback"
     start = next((i for i, l in enumerate(lines)
                   if i and l and not l[0].isspace() and not l.startswith("Traceback")), 0)
-    msg = "\n".join(lines[start:start + 3])
+    msg = "\n".join(lines[start:start + 80])
+    if len(msg) > MAX_MESSAGE:  # keep the end: assertion helpers put the useful output (stderr) last
+        msg = msg[:600] + "\n...\n" + msg[-(MAX_MESSAGE - 610):]
     title = f"{cls.__name__}.{name}"
     return (f"::error file={_escape_prop(test_file)}{line},"
             f"title={_escape_prop(title)}::{_escape(msg)}")
