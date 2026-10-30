@@ -11689,7 +11689,7 @@ def build_parser():
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin)")
     s.add_argument("--json", action="store_true", help="list: as JSON")
-    s.add_argument("--context", action="store_true", help="sessions: just the context table (Session | Title | Context | % of compact | Idle | State), largest first")
+    s.add_argument("--context", action="store_true", help="sessions: just the context table (Session | Title | Context | %% of compact | Idle | State), largest first")
     s.add_argument("--all", action="store_true", help="show: every entry (default: the latest 40); close: every open session")
     s.add_argument("--force", action="store_true", help="close: close even with a live run or mid-turn (runs keep going detached)")
     s.add_argument("--idle", help="close: every session idle at least this long (e.g. 2h, 90m) without a running run")

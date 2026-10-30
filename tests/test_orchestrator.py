@@ -3150,6 +3150,16 @@ class CliTest(unittest.TestCase):
         p = self.cli("up", LEAN_AGENT_CLAUDE=fake, check=False)
         self.assertIn("often the Claude desktop app", p.stdout)
 
+    def test_every_command_help_renders(self):
+        # Python 3.14 checks help strings when an argument is added; older versions only when help is printed
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent
+        ap = lean_agent.build_parser()
+        ap.format_help()
+        for name, sub in ap._subparsers._group_actions[0].choices.items():
+            with self.subTest(command=name):
+                sub.format_help()
+
     def test_session_wait_overrides_are_read_at_use_time(self):
         sys.path.insert(0, os.path.dirname(CLI))
         import service_session as ss
