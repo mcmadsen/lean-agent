@@ -9277,6 +9277,89 @@ class CliTest(unittest.TestCase):
         self.assertIn("reviewer: opus (security-sensitive", p.stdout)
 
 
+class ClearAllUnitTest(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        self.agent = lean_agent_module()
+        self.queued, self.fresh, self.spawned = [], [], []
+        a = self.agent
+        self.sessions = [{"thread": "t1"}, {"thread": "t84"}]
+        self.hold = {"t84": ("run r9 (build) 12m", ["r9"])}
+        for obj, name, val in (
+                (a, "open_thread_sessions", lambda: self.sessions),
+                (a, "close_hold", lambda tid, data=None: self.hold.get(tid, ("", []))),
+                (a, "prepare_thread_session", lambda tid, resume, force=False: self.fresh.append(tid)),
+                (a, "spawn_restart_helper", lambda: self.spawned.append(len(self.queued)) or 1),
+                (a.service_session, "request_clear", lambda key="main": self.queued.append(key) or True),
+                (a.service_session, "checkpoint_session", lambda key="main", **kw: True),
+                (a.lean_threads, "resolve_tag", lambda: None)):
+            p = mock.patch.object(obj, name, val)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_clear(self, **kw):
+        ns = argparse.Namespace(**dict(dict(all=True, restart=False, force=False), **kw))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = self.agent.clear_all(ns)
+        return rc, buf.getvalue()
+
+    def test_all_clears_threads_and_queues_main_last_skipping_a_running_one(self):
+        rc, out = self.run_clear()
+        self.assertEqual(self.queued, ["t1", "main"])
+        self.assertRegex(out, r"t84 +not cleared: running: run r9 \(build\) 12m")
+        self.assertIn("main: clears when this turn ends", out)
+        self.assertEqual(rc, 1)
+
+    def test_force_clears_the_running_thread_too(self):
+        rc, out = self.run_clear(force=True)
+        self.assertEqual(self.queued, ["t1", "t84", "main"])
+        self.assertIn("runs keep going", out)
+        self.assertEqual(rc, 0)
+
+    def test_restart_hands_off_to_the_helper_and_stops_nothing_now(self):
+        self.hold.clear()
+        rc, out = self.run_clear(restart=True)
+        self.assertEqual(self.queued, [])  # no /clear: the restart replaces it
+        self.assertEqual(self.fresh, ["t1", "t84"])
+        self.assertEqual(self.spawned, [0])
+        self.assertIn("main: restarts when this turn ends", out)
+        self.assertEqual(rc, 0)
+
+    def test_restart_with_a_busy_thread_is_not_scheduled(self):
+        rc, out = self.run_clear(restart=True)
+        self.assertEqual(self.spawned, [])
+        self.assertEqual(rc, 1)
+        self.assertIn("restart not scheduled", out)
+
+    def test_helper_waits_for_the_turn_to_end_before_restarting(self):
+        a = self.agent
+        turns = iter([True, True, False, False])
+        calls = []
+        with mock.patch.object(a.service_session, "mid_turn", lambda key="main": next(turns)), \
+                mock.patch.object(a, "service_file", lambda: "/nonexistent"), \
+                mock.patch.object(a.service_session, "go_fresh", lambda **kw: calls.append(kw)):
+            sleeps = []
+            res = a.restart_when_idle(wait=100, now=lambda: len(sleeps), sleep=sleeps.append)
+        self.assertEqual(res, "up restart")
+        self.assertEqual(calls, [{"restart_host": True}])
+        self.assertGreaterEqual(len(sleeps), 3)  # it polled while the turn ran
+
+    def test_helper_gives_up_when_the_turn_never_ends(self):
+        a = self.agent
+        with mock.patch.object(a.service_session, "mid_turn", lambda key="main": True), \
+                mock.patch.object(a.service_session, "go_fresh") as gf:
+            n = []
+            self.assertIsNone(a.restart_when_idle(wait=5, now=lambda: len(n), sleep=n.append))
+        gf.assert_not_called()
+
+    def test_refused_from_a_thread_session(self):
+        with mock.patch.object(self.agent.lean_threads, "resolve_tag", lambda: "t3"):
+            with self.assertRaises(SystemExit):
+                self.run_clear()
+        self.assertEqual(self.queued, [])
+
+
 class ReviewUnitTest(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0, os.path.dirname(CLI))
