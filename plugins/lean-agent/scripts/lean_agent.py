@@ -9899,8 +9899,9 @@ def launching_threads():
 
 
 def caller_thread():
-    """The thread session this command runs inside (the id before `--thread` re-tagged the environment), else None."""
-    return os.environ.get("LEAN_AGENT_CALLER_THREAD") or lean_threads.pinned_thread() or None
+    """The thread session this command runs inside, else None (the main session). Decided by the session's identity
+    (the role `up` gives it), never by the thread tag of the request being worked on."""
+    return lean_threads.pinned_thread()
 
 
 def close_blockers(s, busy, launching, caller):
@@ -11005,7 +11006,7 @@ def clear_all(a):
     --force) gets checkpoint + /clear, then the calling main session at the end of its turn. With --restart the `up`
     host restarts with clean contexts once the turn ended (a detached helper), and the threads come back fresh from
     their brief. Refused from a thread session (it would clear itself first)."""
-    if lean_threads.resolve_tag():
+    if caller_thread():
         die("clear --all runs from the main session only; ask main to run it")
     force, restart = getattr(a, "force", False), getattr(a, "restart", False)
     rows, held = [], []
@@ -11798,7 +11799,7 @@ def main(argv=None):
     if a.cmd == "run" and not a.resume and not a.project:
         ap.error("run needs --project (or --resume)")
     # the caller is the session's own pinned thread, captured before --thread re-tags the environment ('' = unset)
-    os.environ["LEAN_AGENT_CALLER_THREAD"] = os.environ.get("LEAN_AGENT_CALLER_THREAD") or lean_threads.pinned_thread() or ""
+    os.environ["LEAN_AGENT_CALLER_THREAD"] = lean_threads.pinned_thread() or ""
     if getattr(a, "thread_tag", None):  # --thread tN|none: every record this command makes (and its workers') carries it
         try:
             os.environ["LEAN_AGENT_THREAD"] = "none" if a.thread_tag.lower() == "none" else lean_threads.norm(a.thread_tag)

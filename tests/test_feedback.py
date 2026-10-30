@@ -38,7 +38,7 @@ class FeedbackTest(unittest.TestCase):
 
     def test_add_dedupes_and_counts(self):
         out = self.cli("feedback", "add", "run hangs after the second retry", "--kind", "bug", "--severity", "high",
-                       "--repro", "lean-agent run p -- x", LEAN_AGENT_CALLER_THREAD="t3")
+                       "--repro", "lean-agent run p -- x", LEAN_AGENT_THREAD="t3", LEAN_AGENT_SESSION_ROLE="thread")
         self.assertEqual(out.stdout.strip(), "feedback f1 added", out.stderr)
         self.assertEqual(self.cli("feedback", "add", "run hangs after the second retry!", "--kind", "bug").stdout.strip(),
                          "feedback f1: +1")
@@ -126,7 +126,7 @@ class FeedbackTest(unittest.TestCase):
     def test_hook_allows_it_for_main_and_a_thread(self):
         import budget_hook
         event = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}}
-        for role, extra in (("main", {}), ("thread", {"LEAN_AGENT_CALLER_THREAD": "t1"})):
+        for role, extra in (("main", {}), ("thread", {"LEAN_AGENT_THREAD": "t1"})):
             with mock.patch.dict(os.environ, dict(extra, LEAN_AGENT_SESSION_ROLE=role)):
                 for act in ("add 'x'", "list", "export", "done f1", "rm f1"):
                     cmd = f"lean-agent feedback {act}"

@@ -5449,7 +5449,7 @@ class CliTest(unittest.TestCase):
     def test_thread_ask_records_the_question_and_reaches_mains_report_channel(self):
         lt = self.threads_home()
         tid = lt.new("topic")
-        r = self.cli("thread", "ask", "Use the old or new API?", "--options", "old|new", LEAN_AGENT_CALLER_THREAD=tid)
+        r = self.cli("thread", "ask", "Use the old or new API?", "--options", "old|new", LEAN_AGENT_THREAD=tid, LEAN_AGENT_SESSION_ROLE="thread")
         self.assertIn("end your turn", r.stdout.lower())
         qs = lt.load()["threads"][tid]["questions"]
         self.assertEqual([(q["id"], q["options"]) for q in qs], [("q1", ["old", "new"])])
@@ -6236,7 +6236,7 @@ class CliTest(unittest.TestCase):
         with mock.patch.dict(os.environ, self.env):
             for t in launching:
                 L.mark_launching(t)
-        env = dict(self.env, LEAN_AGENT_CALLER_THREAD=caller or "")
+        env = dict(self.env, LEAN_AGENT_THREAD=caller or "", LEAN_AGENT_SESSION_ROLE="thread" if caller else "main")
 
         def state(path):
             return {"ended": os.path.basename(path) not in mid_turn}
@@ -9301,8 +9301,7 @@ class ClearAllUnitTest(unittest.TestCase):
                 (a, "prepare_thread_session", lambda tid, resume, force=False: self.fresh.append(tid)),
                 (a, "spawn_restart_helper", lambda: self.spawned.append(len(self.queued)) or 1),
                 (a.service_session, "request_clear", lambda key="main": self.queued.append(key) or True),
-                (a.service_session, "checkpoint_session", lambda key="main", **kw: True),
-                (a.lean_threads, "resolve_tag", lambda: None)):
+                (a.service_session, "checkpoint_session", lambda key="main", **kw: True)):
             p = mock.patch.object(obj, name, val)
             p.start()
             self.addCleanup(p.stop)
@@ -9320,6 +9319,15 @@ class ClearAllUnitTest(unittest.TestCase):
         self.assertRegex(out, r"t84 +not cleared: running: run r9 \(build\) 12m")
         self.assertIn("main: clears when this turn ends", out)
         self.assertEqual(rc, 1)
+
+    def test_main_with_a_request_thread_tag_may_clear_all_but_a_thread_session_may_not(self):
+        main_env = {"LEAN_AGENT_SESSION_ROLE": "main", "LEAN_AGENT_THREAD": "t97", "LEAN_AGENT_CALLER_THREAD": "t97"}
+        with mock.patch.dict(os.environ, main_env):
+            rc, out = self.run_clear()
+        self.assertIn("main: clears when this turn ends", out)
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_SESSION_ROLE": "thread", "LEAN_AGENT_THREAD": "t97"}), \
+                self.assertRaises(SystemExit):
+            self.run_clear()
 
     def test_force_clears_the_running_thread_too(self):
         rc, out = self.run_clear(force=True)
@@ -9364,7 +9372,7 @@ class ClearAllUnitTest(unittest.TestCase):
         gf.assert_not_called()
 
     def test_refused_from_a_thread_session(self):
-        with mock.patch.object(self.agent.lean_threads, "resolve_tag", lambda: "t3"):
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_SESSION_ROLE": "thread", "LEAN_AGENT_THREAD": "t3"}):
             with self.assertRaises(SystemExit):
                 self.run_clear()
         self.assertEqual(self.queued, [])
