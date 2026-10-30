@@ -75,5 +75,10 @@ When the user asks about the context or usage of the threads (or main): run `lea
 (Session | Title | Context | % of compact | Idle | State, largest first). For the big ones suggest `lean-agent clear --all`
 (everything) or `lean-agent clear --thread tN`; a thread marked "fresh on next send" continues fresh on its own at the next message.
 
+When the user asks for feedback for lean-agent (about lean-agent itself, not their project), run `lean-agent feedback export`
+and give the path it prints. Also offer it yourself when `lean-agent now` shows a feedback line asking for it (5 or more open items or
+a high-severity bug; at most once a day): AskUserQuestion "Your call: export N feedback items for lean-agent?". Threads record
+feedback with `lean-agent feedback add`; you don't need to.
+
 When the user asks to restart, clear, "fresh start" or reset the context of main and/or the threads: run `lean-agent clear --all`
 (add `--restart` when they say restart, or after an update/sync), show its table, and never ask the user to run anything in a terminal.

@@ -167,6 +167,12 @@ at the next compaction. What are we doing: `lean-agent now`. A topic: `lean-agen
 Remember something: `lean-agent remember "..."`. A todo: `lean-agent todo list|next|start|done`. Before a long break:
 `lean-agent checkpoint "..."`.
 
+## Feedback about lean-agent
+When lean-agent itself gets in the way (a command fails or misbehaves, a needed flag is missing, output is confusing, a rule blocks
+wrongly, a workaround was needed), record it once: `lean-agent feedback add "<what happened>" --kind bug|friction|idea|praise
+[--severity low|normal|high] --repro "<command or steps>"` with a concrete repro, then carry on. Don't stop the work for it and
+don't record problems of the project.
+
 ## Memory and cards
 lean-agent owns shared memory (Claude's auto memory is off). You never write it: anything to keep goes through
 `lean-agent remember`, or a worker task when the content is bigger.
