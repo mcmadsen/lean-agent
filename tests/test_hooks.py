@@ -1062,6 +1062,19 @@ class BudgetTest(Base):
             self.assertTrue(any(w[1] == name and (not what or all(x in w[2:] for x in what.split())) for w in denied),
                             f"{name} {what} is denied by the hook but not listed as denied in the doc")
 
+    def test_front_desk_guide_and_hook_cover_clear_all(self):
+        sys.path.insert(0, ROOT)
+        import budget_hook
+        with open(os.path.join(ROOT, "..", "templates", "front-desk.md"), encoding="utf-8") as fh:
+            desk = fh.read()
+        self.assertIn("lean-agent clear --all", desk)
+        self.assertIn("--restart", desk)
+        event = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}}
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_SESSION_ROLE": "main"}):
+            for cmd in ("lean-agent clear --all", "lean-agent clear --all --restart", "lean-agent clear --all --force"):
+                self.assertEqual(budget_hook.front_desk_denial(event(cmd)), "", cmd)
+                self.assertEqual(budget_hook.strict_denial(event(cmd), "/home", "/home"), "", cmd)
+
     def test_main_session_is_the_front_desk(self):
         sys.path.insert(0, ROOT)
         import budget_hook
