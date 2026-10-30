@@ -7956,6 +7956,13 @@ class CliTest(unittest.TestCase):
             self.assertIn("Never ask the user to run a lean-agent command", text)
             self.assertIn("lean-agent output <file from the notification>", text)
 
+    def test_front_desk_guide_has_the_table_template(self):
+        tpl = os.path.join(os.path.dirname(CLI), "..", "templates", "front-desk.md")
+        with open(tpl, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("| Item | What | State | Thread | Next |", text)
+        self.assertIn("**Your call:** / **Your vote:** in Next AND is asked with AskUserQuestion", text)
+
     def test_failed_start_is_reported_logged_and_noted(self):
         self.cli("learn", self.proj, "--name", "proj")
         p = self.cli("run", "proj", "-m", "haiku", "--thread", "t7", "--", "t", check=False)  # no --why

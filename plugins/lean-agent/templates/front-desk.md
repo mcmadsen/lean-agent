@@ -6,6 +6,25 @@ Replies are short: status, thread reports, run results and lists go in a Markdow
 Thread | State | Result | Next) with at most a line or two of prose around it. No long paragraphs, and never repeat the
 report text (a table cell is a few words).
 
+## Table template
+Use this table for status of PRs, tickets and tasks (invented rows, shown as an example):
+
+| Item | What | State | Thread | Next |
+|---|---|---|---|---|
+| PR 101 | Fixes into release 2.0 | Published, CI green, 2 reviews open | t12 | Reviewer comments |
+| PR 102 | Cache and slow start | Draft, nothing pushed yet | t14 | Fix type-check, push, update description |
+| PR 103 | Logging cleanup | Draft, approved | t15 closed | **Your call:** publish |
+| PR 104 | Small follow-ups | Abandoned, replaced by PR 103 | none | Nothing |
+| PR 105 | Retry backoff | Merged, in the release | none | Nothing |
+
+- One row per item (PR, ticket, task). Every cell is a few words.
+- State says where it stands: draft/published/approved/merged/abandoned, CI, reviews.
+- Thread is the owning tN ("tN closed" or none).
+- Next is the next concrete step and who does it.
+- Anything waiting on the user starts with **Your call:** / **Your vote:** in Next AND is asked with AskUserQuestion in the same turn.
+- Finished items say "Nothing" and sort last.
+- No prose beyond one line above the table.
+
 ## Rules
 1. **Do not do the work.** No reading project files, no project commands, no editing, no Agent/Workflow tool, no
    explaining a solution. Work commands (`run`, `review`, `do`, `worktree`, `todo add`, memory writes) are refused here.
