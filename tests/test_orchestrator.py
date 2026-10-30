@@ -7057,9 +7057,11 @@ class CliTest(unittest.TestCase):
         self.assertIsNone(json.load(open(os.path.join(home, "up.json"))).get("clear_requested"))
         turn("checkpointed", ctx=5000)
         ac.tick()
-        self.assertEqual(host.pasted[-1], "/clear")
+        self.assertEqual(host.terminated, ["restart"])  # replaced by a fresh session, no /clear typed
+        self.assertEqual(len(host.pasted), 1)
+        self.assertRegex(json.load(open(os.path.join(home, "up.json")))["clear_status"], r"^main was 5k, replaced")
         ac.tick()
-        self.assertEqual(len(host.pasted), 2)  # once
+        self.assertEqual((len(host.pasted), host.terminated), (1, ["restart"]))  # once
 
     def test_a_clear_request_with_a_missing_transcript_gives_up_with_a_status(self):
         ac, host, clock, turn, home = self.auto_clear_unit()
@@ -7099,9 +7101,16 @@ class CliTest(unittest.TestCase):
         turn("done", ctx=5000)
         ac.tick()
         self.assertIn("Checkpoint now", host.pasted[0])
+        import service_session
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": home}):
+            self.assertTrue(service_session.clear_pending("main"))  # reports wait while the clear is queued
         turn("checkpointed", ctx=5000)
         ac.tick()
-        self.assertEqual(host.pasted[-1], "/clear")
+        self.assertEqual(host.terminated, ["restart"])
+        self.assertEqual(len(host.pasted), 1)
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": home}):
+            self.assertIsNone(service_session.clear_pending("main"))
+            self.assertNotEqual(service_session.session_rec("main")["session_id"], "s1")
 
     def test_a_clear_request_still_clears_when_a_turn_starts_after_the_checkpoint_prompt(self):
         ac, host, clock, turn, home = self.auto_clear_unit()
@@ -7127,7 +7136,8 @@ class CliTest(unittest.TestCase):
             self.assertIn("clear held: clear requested: waiting for the turn to end", lean_agent.clear_at_text())
         turn("done", ctx=5000)
         ac.tick()
-        self.assertEqual(host.pasted[-1], "/clear")
+        self.assertEqual(len(host.pasted), 1)
+        self.assertEqual(host.terminated, ["restart"])  # the turn that began after the prompt ended: session replaced
         with open(os.path.join(home, "up.json")) as fh:
             self.assertIsNone(json.load(fh)["clear_hold"])
 
