@@ -4431,6 +4431,100 @@ class CliTest(unittest.TestCase):
         lt.discard(empty)
         self.assertEqual(list(lt.load()["threads"]), ["t1"])
 
+    def thread_send_delivered(self, argv):
+        """Parse `thread ...` argv with the real parser and run cmd_thread against a mocked live session; returns the sent texts."""
+        L = lean_agent_module()
+        import service_session
+        sent = []
+        ns = L.build_parser().parse_args(argv)
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(service_session, "alive", return_value=True), \
+                mock.patch.object(L, "auto_fresh_reason", return_value=""), \
+                mock.patch.object(service_session, "send", side_effect=lambda text, key="main": sent.append(text) or (True, "")):
+            self.assertEqual(L.cmd_thread(ns), 0)
+        return sent
+
+    def test_thread_send_positional_message_equals_prompt_file(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.threads_home().route("Publish the report via docs", "s1")  # t1
+        text = "a message with spaces and 'quotes'"
+        pf = os.path.join(self.env["LEAN_AGENT_HOME"], "msg.txt")
+        with open(pf, "w") as fh:
+            fh.write(text + "\n")
+        a = self.thread_send_delivered(["thread", "send", "t1", text])
+        b = self.thread_send_delivered(["thread", "send", "t1", "--prompt-file", pf])
+        self.assertEqual(a, [text])
+        self.assertEqual(a, b)
+
+    def test_thread_send_needs_exactly_one_message_source(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.threads_home().route("Publish the report via docs", "s1")  # t1
+        pf = os.path.join(self.env["LEAN_AGENT_HOME"], "msg.txt")
+        with open(pf, "w") as fh:
+            fh.write("hi")
+        both = self.cli("thread", "send", "t1", "hi", "--prompt-file", pf, check=False)
+        self.assertNotEqual(both.returncode, 0)
+        self.assertIn("not both", both.stderr)
+        self.assertEqual(len(both.stderr.strip().splitlines()), 1)
+        none = self.cli("thread", "send", "t1", check=False)
+        self.assertNotEqual(none.returncode, 0)
+        self.assertIn("thread send needs the message", none.stderr)
+        self.assertEqual(len(none.stderr.strip().splitlines()), 1)
+
+    def test_schedule_add_refuses_an_invalid_command(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        r = self.cli("schedule", "add", "daily 09:00", "thread", "send", "t1", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not scheduled", r.stderr)
+        r = self.cli("schedule", "add", "daily 09:00", "stats", "--nonsense", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("usage:", r.stderr)
+        self.assertEqual(self.cli("schedule").stdout.count("#1 "), 0)
+        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "schedule.json"))
+                         and json.load(open(os.path.join(self.env["LEAN_AGENT_HOME"], "schedule.json"))))
+
+    def test_scheduled_thread_send_keeps_its_message_and_old_jobs_work(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.threads_home().route("Publish the report via docs", "s1")  # t1
+        text = "a message with spaces and 'quotes'"
+        self.cli("schedule", "add", "daily 09:00", "thread", "send", "t1", text)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "schedule.json")) as fh:
+            job = json.load(fh)[0]
+        self.assertEqual(job["args"], ["thread", "send", "t1", text])  # argv list, not a joined string
+        self.assertEqual(self.thread_send_delivered(job["args"]), [text])
+        # a job stored in the old positional form (before this change) parses the same way
+        old = ["thread", "send", "t1", "continue after the limit"]
+        self.assertEqual(self.thread_send_delivered(old), ["continue after the limit"])
+        self.assertEqual(lean_agent_module().validate_job_args(old), "")
+
+    def test_failed_scheduled_job_reaches_main_reports_and_list(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.threads_home().route("Publish the report via docs", "s1")  # t1
+        self.cli("schedule", "add", "every 30m", "thread", "send", "t1", "wake up")  # no service session: exits 1
+        path = os.path.join(self.env["LEAN_AGENT_HOME"], "schedule.json")
+        with open(path) as fh:
+            jobs = json.load(fh)
+        jobs[0]["created"] = "2020-01-01T00:00:00"
+        with open(path, "w") as fh:
+            json.dump(jobs, fh)
+        self.cli("schedule", "run-due")
+        import service_session
+        with mock.patch.dict(os.environ, self.env):
+            items = service_session.queued_reports()
+            msg = service_session.reports_message(items)
+        self.assertEqual(len(items), 1)
+        self.assertIn("scheduled job #1 failed: ", items[0]["text"])
+        self.assertIn("lean-agent schedule run 1", items[0]["text"])
+        self.assertIn("scheduled job #1 failed", msg)
+        out = self.cli("schedule").stdout
+        self.assertIn("last result: exit 1 FAILED", out)
+
+    def test_thread_send_help_renders(self):
+        out = self.cli("thread", "--help").stdout
+        self.assertIn("send tN", out)
+        self.assertIn("--prompt-file", out)
+        self.assertIn("send tN", self.cli("--help").stdout)
+
     def test_failed_thread_send_leaves_session_on_unset(self):
         self.cli("learn", self.proj, "--name", "proj")
         lt = self.threads_home()

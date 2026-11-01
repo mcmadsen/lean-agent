@@ -172,7 +172,20 @@ def run_due(log=print):
         rec = record(job["id"], job["args"], rc, text, out_path)
         log(f"scheduled job {job['id']} ({' '.join(job['args'])}): exit {rc}, output {out_path}")
         done.append(rec)
+        if rc != 0:
+            report_failure(job["id"], rc, text)
     return done
+
+
+def report_failure(job_id, rc, text):
+    """A failed scheduled job is never silent: queue a thread-report style entry for the main session."""
+    last = next((l.strip() for l in reversed(text.splitlines()) if l.strip()), f"exit {rc}")
+    try:
+        import service_session
+        service_session.queue_report("schedule", "job-failed",
+                                     f"scheduled job #{job_id} failed: {last[:200]} (re-run: lean-agent schedule run {job_id})")
+    except Exception:  # reporting must not stop the other jobs
+        pass
 
 
 def record(job_id, args, rc, text, out_path=None):

@@ -9850,6 +9850,22 @@ def start_closed_thread(tid, t, prompt, resume_old, force=False):
     return name, line
 
 
+def thread_positional_message(a, act):
+    """`thread send tN "<text>"` / `thread new "title" "<text>"`: the message as a second positional argument or --prompt-file
+    F|-, exactly one source (for `send`; `new` may have none). Moves it to a.prompt_text and trims a.args to the id/title."""
+    usage = (f'usage: lean-agent thread {act} ' + ('tN' if act == "send" else '"title"') + ' ("<text>" | --prompt-file F|-)')
+    if len(a.args) > 2 or not a.args:
+        die(usage)
+    if len(a.args) == 2:
+        if a.prompt_file:
+            die(f"thread {act}: give the message as an argument or with --prompt-file, not both")
+        if not a.args[1].strip():
+            die(f"thread {act}: the message is empty")
+        a.prompt_text = a.args[1].strip()
+        a.args = a.args[:1]
+    return a
+
+
 def thread_prompt(a):
     if getattr(a, "prompt_text", None):
         return a.prompt_text
@@ -10323,8 +10339,9 @@ def cmd_thread(a):
             lean_threads.reopen_question(tid, q["id"])
             raise
     if act == "new":
+        thread_positional_message(a, "new")
         if len(a.args) != 1:
-            die('usage: lean-agent thread new "title" [--prompt-file F|-]')
+            die('usage: lean-agent thread new "title" ["<text>" | --prompt-file F|-]')
         prompt = thread_prompt(a)
         if not wait_for_host(service_session._session_wait("NEW_WAIT", NEW_HOST_WAIT, NEW_HOST_WAIT)):
             if prompt:
@@ -10348,12 +10365,14 @@ def cmd_thread(a):
         print(f'thread {tid} started: Remote Control "{name}"')
         return 0
     if act in ("send", "open"):
+        if act == "send":
+            thread_positional_message(a, "send")
         if len(a.args) != 1:
-            die(f"usage: lean-agent thread {act} tN" + (" --prompt-file F|-" if act == "send" else ""))
+            die(f"usage: lean-agent thread {act} tN" + (' ("<text>" | --prompt-file F|-)' if act == "send" else ""))
         tid, t = thread_session_tid(a.args[0])
         prompt = thread_prompt(a)
         if act == "send" and not prompt:
-            die("thread send needs the message: --prompt-file F|-")
+            die('thread send needs the message: "<text>" or --prompt-file F|-')
         if not service_session.alive():
             die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
         running = service_session.alive(tid)
@@ -10456,6 +10475,24 @@ def cmd_now(a):
         print("Context: " + " \u00b7 ".join(f"{r['session']} {context_cell(r)}" for r in [rows[0]] + ([big] if big and big["ctx"] else [])))
 
 
+def validate_job_args(args):
+    """Parse a job's argv with the real parser (nothing runs); returns the one-line problem, or "" when it is valid."""
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            ns = build_parser().parse_args(list(args))
+            if ns.cmd == "thread" and ns.action in ("send", "new"):
+                thread_positional_message(ns, ns.action)
+                if ns.action == "send" and not (getattr(ns, "prompt_text", None) or ns.prompt_file):
+                    die('thread send needs the message: "<text>" or --prompt-file F|-')
+    except SystemExit:
+        lines = [l.strip() for l in err.getvalue().splitlines() if l.strip()]
+        usage_line = next((l for l in lines if l.startswith("usage:")), "")
+        msg = next((l for l in reversed(lines) if not l.startswith("usage:")), "")
+        return (msg.replace("lean-agent: ", "", 1) + (f" ({usage_line})" if usage_line else "")) or "invalid command"
+    return ""
+
+
 def cmd_schedule(a):
     if a.when in ("-h", "--help") or any(x in ("-h", "--help") for x in a.args or []):
         build_parser()._subparsers._group_actions[0].choices["schedule"].print_help()
@@ -10490,6 +10527,9 @@ def cmd_schedule(a):
             die(f"a schedule runs a lean-agent command (do, run, review, week, ...), not {args[0]!r}")
         if args[0] == "run" and "--why" not in args:
             args += ["--why", f"scheduled: {a.when}"]
+        bad = validate_job_args(args)
+        if bad:
+            die(f"not scheduled, the command is invalid: {bad}")
         job = {"id": max([j["id"] for j in items] + [0]) + 1, "when": a.when, "args": args,
                "created": now_iso(), "enabled": True}
         items.append(job)
@@ -10517,11 +10557,15 @@ def cmd_schedule(a):
         return 0
     if not items:
         print('No scheduled jobs. Add one: lean-agent schedule add "weekdays 08:45" do <project> <recipe>')
+    latest = {r.get("id"): r for r in lean_schedule.results_since("")}
     for j in items:
         nxt = lean_schedule.next_run(j) if j.get("enabled", True) else None
-        print(f"#{j['id']}  {j['when']:<16} lean-agent {' '.join(j['args'])}"
+        print(f"#{j['id']}  {j['when']:<16} lean-agent {' '.join(shlex.quote(x) for x in j['args'])}"
               + (f"  (next {nxt:%a %H:%M}" if nxt else "  (paused")
               + (f", last {j['last'][5:16].replace('T', ' ')})" if j.get("last") else ")"))
+        r = latest.get(j["id"])
+        if r:
+            print(f"      last result: exit {r['rc']}" + (" FAILED" if r["rc"] else "") + f": {r['first'][:90]}")
     recent = lean_schedule.results_since((datetime.datetime.now() - datetime.timedelta(days=2)).isoformat())
     for r in recent[-5:]:
         print(f"  ran #{r['id']} {r['ts'][5:16].replace('T', ' ')}: exit {r['rc']}: {r['first'][:90]}  ({r['output']})")
@@ -11891,11 +11935,11 @@ def build_parser():
     s.add_argument("args", nargs=argparse.REMAINDER, help="add: the lean-agent command, e.g. do <project> <recipe>")
     s.set_defaults(fn=cmd_schedule)
 
-    s = sub.add_parser("thread", help="threads: new \"title\" [--prompt-file F|-] (its own Remote Control session) | send tN --prompt-file F|- | ask \"question\" [--options \"a|b|c\"] (from inside a thread session: the question goes to main; end the turn, the answer arrives as your next turn) | answer tN [qN] \"answer\" (main: pass an answer into the thread session) | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
+    s = sub.add_parser("thread", help="threads: new \"title\" [\"<text>\"|--prompt-file F|-] (its own Remote Control session) | send tN \"<text>\"|--prompt-file F|- | ask \"question\" [--options \"a|b|c\"] (from inside a thread session: the question goes to main; end the turn, the answer arrives as your next turn) | answer tN [qN] \"answer\" (main: pass an answer into the thread session) | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
     s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "answer", "reports"])
-    s.add_argument("args", nargs="*")
+    s.add_argument("args", nargs="*", help='new "title" ["<text>"]; send tN "<text>"; answer tN [qN] "<answer>"; other actions: ids')
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
-    s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin)")
+    s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin); or give it as a positional argument, not both")
     s.add_argument("--json", action="store_true", help="list: as JSON")
     s.add_argument("--context", action="store_true", help="sessions: just the context table (Session | Title | Context | %% of compact | Idle | State), largest first")
     s.add_argument("--all", action="store_true", help="show: every entry (default: the latest 40); close: every open session")

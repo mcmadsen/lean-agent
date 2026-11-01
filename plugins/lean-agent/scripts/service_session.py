@@ -853,7 +853,7 @@ def queue_report(tid, kind, text):
     """Queue one thread report (kind: done | blocked | needs-you | question) for the main session; the mode filters it,
     except an explicit question (`thread ask`), which always goes through."""
     mode = reports_mode()
-    if kind != "question" and (mode == "off" or (mode == "questions-only" and kind != "needs-you")):
+    if kind not in ("question", "job-failed") and (mode == "off" or (mode == "questions-only" and kind != "needs-you")):
         return False
     os.makedirs(lean_home(), exist_ok=True)
     with lean_common.file_lock(reports_path()):
@@ -888,7 +888,7 @@ def drop_reports(taken):
         lean_common.write_json_atomic(reports_path(), {"items": left})
 
 
-REPORT_LABELS = {"needs-you": "QUESTION: ", "blocked": "STUCK: "}
+REPORT_LABELS = {"needs-you": "QUESTION: ", "blocked": "STUCK: ", "job-failed": "FAILED: "}
 
 
 def reports_message(items, dropped=0):
@@ -899,7 +899,9 @@ def reports_message(items, dropped=0):
     if asking:
         lines.append(f"questions from {', '.join(asking)}: answer them (or ask the user, naming the thread) with "
                      f'lean-agent thread answer {asking[0]} [qN] "<answer>"')
-    tids = list(dict.fromkeys(i["thread"] for i in items)) or ["tN"]
+    tids = list(dict.fromkeys(i["thread"] for i in items if i["kind"] != "job-failed"))
+    if not tids:
+        return "\n".join(["<thread-reports>"] + lines + ["</thread-reports>"])
     more = f" (or {', '.join(tids[1:])})" if len(tids) > 1 else ""
     return "\n".join(["<thread-reports>"] + lines + [
         f"Check before relaying: lean-agent thread show {tids[0]}{more}; cut, unclear or open question: run it, then ask the thread",
