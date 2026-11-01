@@ -124,7 +124,7 @@ Other ways to run the orchestrator:
 | `lean-agent do <project> <recipe> [key=value ...] [--apply [--allow-send "<approved>"]]` | Run a recipe in one command. `--apply` runs its apply step with the last check's answer as its plan (`--from <run-id>`, or `--fresh` to re-derive); outward changes stop with the list until the user approves them. A recipe saved with `--fields id,title,state` tells workers to fetch only those; with `--complete` every item must be listed (OK / change / unclear) or the run fails. |
 | `lean-agent text-len <file> [-p project]` | Characters, words, lines, checked against limits named in the project's tracker notes (e.g. a description limit). |
 | `lean-agent card shorten <project> <id> [--save]` | A shorter text for a card (one Haiku call); lists headings, `code`, paths, names and numbers that would be lost, and saves only if none are. |
-| `lean-agent runs --running` | Runs in progress. Every run prints `run <id> started` first, so a background launch is visible. A run's work happens in a detached process, so killing the command (or a `/clear`) doesn't stop it; Ctrl-C does. |
+| `lean-agent runs --running` | Runs in progress. Every run prints `run <id> started` first, so a background launch is visible. A run's work happens in a detached process, so killing the command (or a clear) doesn't stop it; Ctrl-C does. |
 | `lean-agent runs --lost [--clear]` | Runs whose supervisor died without a result (hidden from `--running`). `--lost --clear` marks them acknowledged so they stop appearing; `runs --stop <id>` still closes one by id. `--clear` alone is a usage error. |
 | `lean-agent runs --wait <id\|all\|last> [--timeout S]` | Blocks until those runs are recorded, then prints each result as `run` printed it. Exit 1 if one failed, 124 on timeout. After a clear: `lean-agent runs --wait all`. |
 | `lean-agent run --resume <run-id> "<follow-up>"` | Continue a worker's session (cheap: its context is cached). |
@@ -151,7 +151,7 @@ Other ways to run the orchestrator:
 | `lean-agent handover --list [--project P]` | Existing handovers, newest first: path, title, date |
 | `lean-agent remember "<what>" [--project P] [--task-file -]` | Files something to keep through a small librarian worker (sonnet, `--cards auto`, read-only to project code, may run only lean-agent's memory/card/todo/handoff commands): memory, project card, todo, feedback rule or hand-off note, updating an existing entry instead of duplicating and reporting a conflict instead of overwriting. Prints `REMEMBERED <where> <id>`, `UNCHANGED ...` or `CONFLICT ...` lines (exit 1 on a conflict). |
 | `lean-agent advise "<request>" [--project P] [--thread TAG] [--task-file -]` | Before the orchestrator acts on a NEW user request: a cheap worker (haiku, `--cards auto`, read-only) reads the memories, open todos, hand-off notes and latest checkpoint, and is given the card titles, the last ~10 runs, the latest review of the project and the user's last 5 requests in the thread (it starts no runs). It prints `Understood as: <one line>` first (plus `Ambiguous: <two readings>` and an "ask the user first: yes" when the request has two readings: show it to the user before starting a worker), then at most 15 lines starting with `ADVICE`, with `user already asked: proceed` instead of a question when the user already asked for the action explicitly: `known` (facts and earlier decisions), `project` and cards, `suggested` (one exact `lean-agent run ...` or `remember ...` command, or "answer from state"), `risks` (e.g. open review gaps, a decision the request contradicts) and `ask the user first` (yes + the question, or no). Printed and stored in `~/.lean-agent/advice/` (last 50) with the thread tag. The guide has the orchestrator run it for every new request (not for follow-ups in a thread, answers, status checks or resumes), deviate only with a one-line reason, and ask with AskUserQuestion about a risk or conflict unless the user's own request already answers it. |
-| `lean-agent service install\|status\|start\|restart\|stop\|logs\|uninstall` | Optional: keep `lean-agent up` running across logins, restarts and closed terminals (a macOS LaunchAgent, or a systemd user unit on Linux; it restarts `up` if it stops). Everything else works without it. After `lean-agent sync`, `service restart` starts `lean-agent up` again with the new settings (it waits while workers are running; `--yes` restarts anyway). `service restart --clear` (or `lean-agent up --clear`) also starts the orchestrator on a fresh context after a checkpoint. |
+| `lean-agent service install\|status\|start\|stop\|restart [--clear] [--yes]\|logs\|uninstall` | Optional: keep `lean-agent up` running across logins, restarts and closed terminals. See [Run it as a service](#run-it-as-a-service). |
 | `lean-agent context [--apply] [--keep TOOL] [--undo] [--no-probe]` | What fills the orchestrator's context and what goes unused: its start-up size (one small Haiku call; `--no-probe` skips it), the instruction files it loads, the tools it never called in its recent sessions, agents, skills and MCP servers that load anyway, and the biggest items in the current conversation's messages (worker answers, command output, file reads, long replies, pasted text) with what to change. `--apply` denies the never-used tools and excludes the extra files in the home's settings (from the next session or /clear; `--keep` protects a tool, `--undo` reverts). Standing rule: at 80% of the compaction point the orchestrator is told to run it, save open items with `handoff --note` and tell you, before Claude Code compacts. |
 | `lean-agent guard list\|add\|rm [<project>] [push-deny <pattern> ...]` | Branches lean-agent never pushes to, per project (globs; default `release/*`, `develop`, `main`, `master`). Matched against the remote branch a push would update, not the local branch name. `worktree push` refuses them whatever was approved (exit 3; only `--override-guard "<why>"`, logged in `pushes.jsonl`, gets past). Workers and the orchestrator run git with lean-agent's hooks folder (`core.hooksPath` via `GIT_CONFIG_*`), whose pre-push refuses guarded destinations however the push is written (`HEAD:<branch>`, `--force`, `--all`, `--mirror`); every other hook runs the repository's own. A guarded `git` first on their PATH checks every push too, so `--no-verify` doesn't get past. `require-pr` is accepted as the same kind (`guard add <project> require-pr develop`). `doctor` shows the guards; `sync` keeps them. `worktree push` names the files when the shared worktree has uncommitted changes; `--only-commits` pushes what is committed. |
 | `lean-agent mcp preset <server> [<name> <tool,...>] [--desc TEXT] [--grep TEXT]` | Presets with a description; `--grep pull` finds the presets whose name, description or tools match. `--mcp server:a,server:b` means `server:a,b`. |
@@ -160,6 +160,50 @@ Other ways to run the orchestrator:
 | `lean-agent --version` | The installed version (`sync` prints it last too). |
 | `lean-agent output <command> [--grep TEXT]` | In brief mode (`LEAN_AGENT_BRIEF=1`, set for the orchestrator, or `--brief`), `optimize`, `tracker`, `stats`, `budget`, `cards`, `limits`, `projects`, `recipes` and `savings` print one line per item (at most 20); this prints what was left out. `--full` prints a command in full. `lean-agent output <path|task-id>` also reads a Claude Code background task's output file (only under a claude temp `tasks/` dir) and prints its first and last 20 lines. Reviews in brief mode print the verdict and one line per finding; `runs --show <id>` has the rest. |
 | `lean-agent savings [--days 7] [-p project] [--measure]` | Estimated tokens saved: worker context (vs a normal Claude Code turn in that project: measured with `--measure`, one tiny Haiku call, else assumed 30,000), model choice (vs Sonnet for every worker), and output the squeezer shortened. Each run's summary also has a `saved ~N` line. |
+
+## Run it as a service
+
+Why: `lean-agent up` (the front desk and the thread sessions) keeps running across logins, restarts and closed
+terminals, so Remote Control always shows lean-agent in the Claude app. Everything works without it.
+
+```sh
+lean-agent trust               # once, if you haven't (see Install): Remote Control can't show the trust dialog
+lean-agent service install     # [--name NAME]: the session name in the Claude app (default: the name `up` uses)
+lean-agent service status
+```
+
+`install` writes the unit file, enables it and starts it. It runs `lean-agent up --name NAME` at login and restarts it
+60 seconds after it stops.
+
+| Platform | Unit file | Manager |
+|---|---|---|
+| macOS | `~/Library/LaunchAgents/com.lean-agent.up.plist` (LaunchAgent, `RunAtLoad`, `KeepAlive`) | `launchctl` (`gui/<uid>`) |
+| Linux | `~/.config/systemd/user/lean-agent.service` (`Restart=always`, `WantedBy=default.target`) | `systemctl --user` |
+
+Output of `up` goes to `~/.lean-agent/logs/service.log` (under `LEAN_AGENT_HOME` if you set it).
+
+| Command | What it does |
+|---|---|
+| `lean-agent service install [--name NAME]` | Write the unit file, enable it and start it. Running it again rewrites the file. |
+| `lean-agent service status` | Whether the unit is running, loaded or not loaded, plus the compaction setting and `clear-at`. |
+| `lean-agent service start` | Start it (says so if it is already running). |
+| `lean-agent service stop [--yes]` | Stop it; the orchestrator session shuts down, which can take up to a minute. |
+| `lean-agent service restart [--clear] [--yes]` | Stop and start it so `up` picks up new settings. It refuses while workers that are not detached are running; `--yes` restarts anyway. `--clear` has the orchestrator checkpoint first (up to 120 s) and starts a new session from the brief. |
+| `lean-agent service logs [-n N]` | The last N lines of `service.log`. |
+| `lean-agent service uninstall` | Stop the service and remove the unit file. `~/.lean-agent` is kept. |
+
+Runs are detached, in their own session, so they survive a restart; `lean-agent runs --wait all` collects them.
+
+**Updating:** `lean-agent sync`, then `lean-agent service restart` when `sync` says a restart is needed (only if the
+server's own settings changed, or to apply `config` changes such as `compact-window`). Hooks, the guide and the
+`lean-agent` command pick up pulled code without a restart.
+
+**Is it healthy?** `lean-agent service status` (running), `lean-agent doctor` (setup, trust, guide, guards), and
+`lean-agent thread sessions` (the main session and the thread sessions that are up; it needs `up` to be running). If it isn't running,
+`lean-agent service logs`.
+
+**Stop using it:** `lean-agent service uninstall`. **Without the service:** run `lean-agent up` in a terminal; it
+lasts until you close it or log out, and a restart of `up` continues the conversation.
 
 ## MCP servers in workers
 
@@ -295,7 +339,7 @@ Every orchestrator turn re-reads the whole conversation, so it's kept short:
 - **Paced for the week:** `limits`, `week` and the hand-off note compare your weekly plan usage with the share of
   the week gone ("48% used, 43% of the week gone: on pace"); ahead of pace, `suggest` recommends haiku.
 - **Fresh conversations:** after a conversation's second compaction, the orchestrator is asked to suggest a fresh
-  one (/clear) at the next stopping point; the hand-off note and the work queue carry everything over.
+  one (`lean-agent clear`) at the next stopping point; the hand-off note and the work queue carry everything over.
 - **Routing:** `lean-agent up --model haiku` runs a pure routing session on Haiku (switch up with `/model` when
   a step needs judgement); `--escalate haiku,sonnet` does the same for workers.
 
@@ -305,13 +349,19 @@ with the opt-in `clear-at`).
 
 ## Threads
 
-Each thread is its own Remote Control session. The main session is the front desk: its prompt hook scores every request
+Each thread is its own Remote Control session. The main session is the front desk: it gets a short guide
+(`.claude/rules/front-desk.md`), does no project work (work commands such as `run`, `review` and `do` are refused
+there), answers in short tables, asks anything that waits on you with AskUserQuestion, and a Stop hook sends back a
+turn that ends with a prose question. Thread reports (a thread's finished turn, error or question) arrive in main
+collapsed as one line, `lean-agent: 2 thread reports (t18 done, t21 question) [r1a2b3c]`; `lean-agent thread reports`
+prints the full text again, and `lean-agent config thread-reports on|questions-only|off|default` sets what is sent.
+Its prompt hook scores every request its prompt hook scores every request
 against the open threads without a model call (title, aliases and recent requests; rare words weigh more, recent threads
 get a small boost, a score of 0.4 or more matches; an explicit `t7` or `#7` wins) and adds one line saying what to do:
 `Belongs to t7 "..."` (hand it over with `lean-agent thread send t7 --prompt-file -`), `New topic` (start it with
 `lean-agent thread new "<title>" --prompt-file -`), or `Status question` (answered in main with `lean-agent now`).
 Notifications of background work attach to their run's thread silently. A thread session never guesses: every prompt
-belongs to its thread, its context line is just `Thread t7 "..."` (once, at session start and after a `/clear`), and
+belongs to its thread, its context line is just `Thread t7 "..."` (once, at session start and after a clear), and
 everything started there is tagged t7. The thread is stored in the state of every run, review, todo, note, handover and
 push that follows; `--thread tN|none` overrides it, workers inherit it through `LEAN_AGENT_THREAD`.
 
@@ -320,16 +370,46 @@ push that follows; `--thread tN|none` overrides it, workers inherit it through `
 | `lean-agent feedback add "<what happened>" [--kind bug\|friction\|idea\|praise] [--severity low\|normal\|high] [--repro "<steps>"]`, `list [--open] [--kind K] [--since DATE]`, `done fN`, `rm fN`, `export [--all] [--out PATH]` | Feedback about lean-agent itself, kept in `<home>/feedback/feedback.jsonl` (near-duplicates bump a count; a crashing command adds a `bug` by itself). `export` writes `feedback-DATE.md` (bugs first, high severity first) and marks the items exported; `now` shows `feedback: N open (M high)`, and the front desk offers an export at 5 open items or a high-severity bug, once a day. |
 | `lean-agent now` | Open threads by last activity (at most 25 lines): state (running, open review, open todos, idle), last action, age. Closes threads idle for 7 days (`LEAN_AGENT_THREAD_IDLE_DAYS` or `thread_idle_days` in config.json); nothing is deleted |
 | `lean-agent thread show tN [--all]` | Everything for the topic in time order: requests, runs, reviews, todos, notes, handovers, pushes |
-| `lean-agent thread close tN [tM ...]` / `--all` / `--idle 2h` / `reopen tN` | Hide finished topics from `now` and from matching (one checkpoint per thread, a summary line at the end; `--idle` skips sessions with a running run; at `max-thread-sessions` a new session closes only an eligible one: not the caller, not mid-turn, no running or just-launched run, idle 10+ min, `LEAN_AGENT_CLOSE_MIN_IDLE` seconds overrides) / bring one back: a closed thread starts a new session from a short brief built from its record, `--resume-old` continues the previous transcript instead |
+| `lean-agent thread close tN [tM ...] [--force]` / `--all` / `--idle 2h` / `reopen tN` | Hide finished topics from `now` and from matching (one checkpoint per thread, a summary line at the end; a thread with a live run or mid-turn is not closed unless `--force` (its runs keep going, detached); `--idle` skips sessions with a running run; at `max-thread-sessions` a new session closes only an eligible one: not the caller, not mid-turn, no running or just-launched run, idle 10+ min, `LEAN_AGENT_CLOSE_MIN_IDLE` seconds overrides) / bring one back: a closed thread starts a new session from a short brief built from its record, `--resume-old` continues the previous transcript instead |
 | `lean-agent thread new "<title>" [--prompt-file F\|-]` / `list` | Start a thread with its own Remote Control session (with a first message) / list threads |
-| `lean-agent thread send tN --prompt-file F\|-` / `open tN` / `sessions` | Hand a message to the thread's session (starting or resuming it) / bring its session back / list the running sessions |
+| `lean-agent thread send tN --prompt-file F\|-` / `open tN` / `sessions [--context]` | Hand a message to the thread's session (starting or resuming it) / bring its session back / list main and the running thread sessions: pid, idle time, context, `waiting on main` questions, running runs (`N running`), `mid-turn`, `fresh on next send`. `--context` prints only the table Session \| Title \| Context \| % of compact \| Idle \| State, largest first. Needs `up` running |
+| `lean-agent thread reports` | The thread reports delivered to main, in full |
 | `lean-agent thread ask "<question>" [--options "a\|b\|c"]` / `answer tN [qN] "<answer>"` | A thread session asks main instead of the user (the thread waits, status "waiting on main"); main answers it or asks the user, and `answer` sends the reply into the thread session as its next turn |
 | `lean-agent thread merge tB tA` / `unmerge tB` | Fold thread B into A / give B its own tag back |
 | `lean-agent thread move tN` | Wrong thread: move the latest request, the current thread and the work recorded since to tN |
 
-`now` and `doctor` show each thread's session (running or closed, with its Remote Control name). The brief after a `/clear`
+`now` and `doctor` show each thread's session (running or closed, with its Remote Control name). The brief after a clear
 in the main session starts with the open threads; in a thread session it covers only that thread. Strict mode allows all of these: they only read or change
 the registry.
+
+### Clearing
+
+| Command | What it does |
+|---|---|
+| `lean-agent clear` | Main: checkpoint, then at the end of the turn replace the session with a new one that starts from the brief. |
+| `lean-agent clear --thread tN` | The same for that thread's own session. |
+| `lean-agent clear --all [--restart] [--force]` | Every open thread session, then main at the end of the turn; prints a Thread \| Result table. A thread with a live run or mid-turn is skipped unless `--force`. `--restart` restarts `up` with clean contexts after the turn. Run it from main. |
+| `lean-agent clear --status` | When each session was last cleared, or why a clear is pending. |
+
+A clear replaces the session from a checkpoint; it never kills running workers. Runs are detached, in their own
+session, so they keep going and `lean-agent runs --wait all` collects them. No one types `/clear`.
+
+Two settings clear a session without being asked. `lean-agent config thread-fresh-after idle=30m,context=120k|50%|off|default`:
+`thread send` to an open session that has been idle that long, with that much context, checkpoints it and continues
+in a new session started from a short brief ("fresh on next send" in `thread sessions`). `lean-agent config main-fresh-at
+2x|800k|off|default` is the safety net: a main or thread session above that many tokens at a turn end gets a checkpoint
+and is replaced by a fresh session (thread reports wait meanwhile).
+
+### Asking the front desk
+
+Say it in the chat; main runs the command and shows the result as a table.
+
+| You say | It runs |
+|---|---|
+| "Restart and clear everything" | `lean-agent clear --all --restart` (`clear --all` for a clear without a restart) |
+| "How much context do the threads use?" | `lean-agent thread sessions --context` |
+| "Make a feedback file" | `lean-agent feedback export` (prints the path) |
+| "What's waiting on me?" | `lean-agent now --short` and the thread reports |
 
 ## Handovers
 
