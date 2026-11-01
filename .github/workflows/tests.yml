@@ -2,7 +2,13 @@ name: tests
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Existing version to (re)create a missing release for, e.g. 0.45.8 (default: plugin.json)"
+        required: false
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -28,3 +34,45 @@ jobs:
           env -i HOME="$T" PATH=/usr/bin:/bin:"$(dirname "$(command -v python3)")" sh -c ". \"$T/.zshrc\"; cd /; lean-agent home"
           env -i HOME="$T" SHELL=/bin/zsh PATH=/usr/bin:/bin ./install --uninstall
           ! grep -q "lean-agent" "$T/.zshrc"
+  release:
+    needs: test
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create the release if this version has none
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -eu
+          if [ -n "$INPUT_VERSION" ]; then
+            version="${INPUT_VERSION#v}"
+            git rev-parse -q --verify "refs/tags/v$version" >/dev/null \
+              || { echo "no tag v$version; dispatch only recreates releases for existing tags"; exit 1; }
+            commit=$(git rev-list -n1 "v$version")
+          else
+            version=$(python3 -c 'import json; print(json.load(open("plugins/lean-agent/.claude-plugin/plugin.json"))["version"])')
+            commit=$(git rev-parse HEAD)
+          fi
+          tag="v$version"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists"; exit 0
+          fi
+          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            git tag "$tag" "$commit"
+            git push origin "refs/tags/$tag"
+          fi
+          prev=$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -vx "$tag" | while read -r t; do
+            git merge-base --is-ancestor "$t" "$tag^{commit}" && { echo "$t"; break; }; done || true)
+          range="${prev:+$prev..}$tag"
+          {
+            git log --reverse --no-merges --format='- %s' "$range"
+            echo
+            echo "Update: lean-agent sync, then lean-agent service restart"
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$tag" --verify-tag --title "lean-agent $tag" --notes-file "$RUNNER_TEMP/notes.md"
