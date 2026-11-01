@@ -24,7 +24,37 @@ argv = sys.argv[1:]
 sid = argv[argv.index("--session-id") + 1] if "--session-id" in argv else argv[argv.index("--resume") + 1]
 cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 tdir = os.path.join(cfg, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(os.getcwd())))
-os.makedirs(tdir, exist_ok=True)
+
+
+def make_transcript_dir(path):
+    """Several hosted sessions share one cwd and so create the same directory at the same moment; on macOS a mkdir that
+    loses that race can fail with EACCES instead of EEXIST. Retry, and when it really is a permission problem say which
+    directory in the chain has what mode and owner."""
+    for attempt in range(50):
+        try:
+            os.makedirs(path, exist_ok=True)
+            return
+        except PermissionError as exc:
+            if os.path.isdir(path):
+                return
+            if attempt < 49:
+                time.sleep(0.05)
+                continue
+            chain, cur = [], path
+            while True:
+                try:
+                    st = os.lstat(cur)
+                    chain.append(f"{cur}: mode {oct(st.st_mode & 0o7777)} uid {st.st_uid} (euid {os.geteuid()}, umask {oct(os.umask(0))})")
+                except OSError as err:
+                    chain.append(f"{cur}: {err}")
+                if os.path.dirname(cur) == cur:
+                    break
+                cur = os.path.dirname(cur)
+            sys.stderr.write(f"fake claude: cannot create {path}: {exc}\n" + "\n".join(chain) + "\n")
+            raise
+
+
+make_transcript_dir(tdir)
 transcript = os.path.join(tdir, sid + ".jsonl")
 with open(os.environ["FAKE_SESSION_LOG"], "a") as fh:
     fh.write(json.dumps({"argv": argv, "cwd": os.getcwd(), "pid": os.getpid(),
