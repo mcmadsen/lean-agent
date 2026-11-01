@@ -61,6 +61,8 @@ git clone https://github.com/mcmadsen/lean-agent ~/lean-agent
 lean-agent trust              # once: accept Claude Code's trust dialog for the orchestrator folder
 ```
 
+**Releases and updates:** every version that passes CI gets a GitHub release (`v<version>`); a version whose tests fail gets none. `lean-agent sync` follows releases: it fast-forwards to the newest release that descends from your checkout, and stays put when you are already ahead of it (for example on main). `lean-agent sync --main` follows main once, and `lean-agent config update-channel release|main` sets the default (release). `lean-agent sync --check` shows the current version, the latest release and whether an update is available. After a rewrite of the remote history `sync` can't fast-forward; with a clean working tree run `lean-agent sync --reset` (fetch + reset --hard to the target).
+
 **Updating:** run `lean-agent sync` (or ask the orchestrator to). It:
 - pulls the clone (fast-forward only, and never with local changes) and re-runs itself on the new code
 - runs `claude plugin marketplace update` and `claude plugin update`

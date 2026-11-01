@@ -101,7 +101,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `config strict on`, `config branch-rules`, `config review-skip`, `config review-max-rerounds`, `config review-model`, `attribution`, `limits`, `budget`, `context` | b | allowed: switches and limits |
 | `config strict off` | c | **denied**: the orchestrator doesn't lift its own guardrail |
 | `runs` (also `runs --wait <id\|all\|last>`, which blocks until those runs are recorded and prints their results; `runs --stop <id\|last>`, which ends one of lean-agent's own runs, records it as `stopped` and lists what it changed in its worktree; a run whose supervisor died shows as `lost`: `runs --lost` lists them, `runs --lost --clear` acknowledges them, and `runs --stop <id>` still closes one by id; `--clear` needs `--lost`), `logs`, `output`, `stats`, `savings`, `week`, `guide`, `doctor` | a | allowed |
-| `up`, `install`, `trust`, `home`, `env`, `sync`, `service` | b | allowed: lean-agent's own setup and updates |
+| `up`, `install`, `trust`, `home`, `env`, `sync`, `service` | b | allowed: lean-agent's own setup and updates (`sync` follows releases; `--check`, `--main`, `--reset`) |
 
 A lean-agent command with the same name as a denied one but another first word, a quoted text that merely contains the
 word, or `lean-agent run … -- 'memory add …'` is not affected: the hook reads the command, not the task text.
