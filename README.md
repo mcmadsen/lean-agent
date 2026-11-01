@@ -194,9 +194,10 @@ Output of `up` goes to `~/.lean-agent/logs/service.log` (under `LEAN_AGENT_HOME`
 
 Runs are detached, in their own session, so they survive a restart; `lean-agent runs --wait all` collects them.
 
-**Updating:** `lean-agent sync`, then `lean-agent service restart` when `sync` says a restart is needed (only if the
-server's own settings changed, or to apply `config` changes such as `compact-window`). Hooks, the guide and the
-`lean-agent` command pick up pulled code without a restart.
+**Updating:** `lean-agent sync`, then `lean-agent service restart`. Hooks, the guide and the `lean-agent` command
+pick up pulled code without a restart, but the running `up` process (the session bridge, thread reports, clears) keeps
+the code it started with until it restarts, and `config` changes such as `compact-window` also need one. Detached runs
+survive the restart.
 
 **Is it healthy?** `lean-agent service status` (running), `lean-agent doctor` (setup, trust, guide, guards), and
 `lean-agent thread sessions` (the main session and the thread sessions that are up; it needs `up` to be running). If it isn't running,
