@@ -13,6 +13,7 @@ import subprocess
 import re
 import signal
 import socket
+import stat
 import sys
 import tempfile
 import textwrap
@@ -3187,6 +3188,46 @@ class CliTest(unittest.TestCase):
             host.thread.join.assert_called_with(timeout=4.0)
             sessions.stop("t1", wait=1)
             host.thread.join.assert_called_with(timeout=1)
+
+    def test_serve_leaves_the_process_umask_alone_and_binds_a_private_socket(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import service_session
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        self.addCleanup(os.environ.pop, "LEAN_AGENT_HOME", None)
+        before = os.umask(0o022)
+        self.addCleanup(os.umask, before)
+        host = service_session.Host(lambda: ([], "x"), {}, self.tmp.name)
+        host.serve()
+        self.addCleanup(host.close)
+        self.assertEqual(os.umask(0o022), 0o022)
+        path = service_session.sock_path()
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode), 0o700)
+
+    def test_a_process_spawned_while_another_thread_serves_gets_the_users_umask(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_common
+        import service_session
+        os.environ["LEAN_AGENT_HOME"] = self.env["LEAN_AGENT_HOME"]
+        self.addCleanup(os.environ.pop, "LEAN_AGENT_HOME", None)
+        stop = threading.Event()
+
+        def serve_loop():
+            while not stop.is_set():
+                h = service_session.Host(lambda: ([], "x"), {}, self.tmp.name)
+                h.serve()
+                h.close()
+        t = threading.Thread(target=serve_loop, daemon=True)
+        t.start()
+        code = "import os;m=os.umask(0);print(oct(m))"
+        try:
+            for _ in range(15):
+                out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                     **lean_common.popen_umask()).stdout.strip()
+                self.assertEqual(out, oct(lean_common.USER_UMASK))
+        finally:
+            stop.set()
+            t.join(10)
 
     def test_a_second_up_waits_for_the_previous_one_to_let_go_of_the_socket(self):
         sys.path.insert(0, os.path.dirname(CLI))

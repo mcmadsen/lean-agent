@@ -1335,14 +1335,17 @@ class Host:
 
     def serve(self):
         path = sock_path(self.key)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        sdir = os.path.dirname(path)
+        # The process umask is shared by every hosted session's thread and is never changed here: the socket is bound
+        # inside a private (0700) directory with the normal umask, then narrowed to 0600.
+        try:
+            os.makedirs(sdir, mode=0o700, exist_ok=True)
+            os.chmod(sdir, 0o700)
+        except OSError as exc:
+            raise RuntimeError(f"cannot make {sdir} private (mode 0700) for the session socket: {exc}") from exc
         self.claim_socket(path)
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        old = os.umask(0o177)
-        try:
-            srv.bind(path)
-        finally:
-            os.umask(old)
+        srv.bind(path)
         os.chmod(path, 0o600)
         self.sock_ino = os.stat(path).st_ino
         srv.listen(8)
@@ -1378,7 +1381,7 @@ class Host:
                        clear_hold=None)
         try:
             proc = subprocess.Popen(argv, env=self.env, cwd=self.cwd, stdin=slave, stdout=slave, stderr=slave,
-                                    start_new_session=True)
+                                    start_new_session=True, **lean_common.popen_umask())
         finally:
             os.close(slave)  # only the session holds it now, so reading ends when it exits
         self.proc, self.master = proc, master

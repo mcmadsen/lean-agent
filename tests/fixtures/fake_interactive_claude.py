@@ -27,17 +27,16 @@ tdir = os.path.join(cfg, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpa
 
 
 def make_transcript_dir(path):
-    """Several hosted sessions share one cwd and so create the same directory at the same moment; on macOS a mkdir that
-    loses that race can fail with EACCES instead of EEXIST. Retry, and when it really is a permission problem say which
-    directory in the chain has what mode and owner."""
-    for attempt in range(50):
+    """Create the directory (a short retry, at most 1 s, for sessions creating the same one at the same moment); on a
+    permission error say which directory in the chain has what mode and owner."""
+    for attempt in range(20):
         try:
             os.makedirs(path, exist_ok=True)
             return
         except PermissionError as exc:
             if os.path.isdir(path):
                 return
-            if attempt < 49:
+            if attempt < 19:
                 time.sleep(0.05)
                 continue
             chain, cur = [], path

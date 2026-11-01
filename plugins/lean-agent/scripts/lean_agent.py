@@ -2523,7 +2523,7 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
     seen, lines, mcp_tools, mcp_denied = set(), [], {}, {}
     with tempfile.TemporaryFile("w+") as errf:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True,
-                                cwd=cwd or workdir, env=env)
+                                cwd=cwd or workdir, env=env, **lean_common.popen_umask())
         timed_out = []
 
         def on_timer():
@@ -8733,7 +8733,7 @@ def start_watched(cmd, env):
                     pass
             resize()
             try:
-                proc = subprocess.Popen(cmd, env=env, stdout=slave, stderr=slave)
+                proc = subprocess.Popen(cmd, env=env, stdout=slave, stderr=slave, **lean_common.popen_umask())
             except FileNotFoundError:
                 return None, []
             finally:
@@ -8743,7 +8743,7 @@ def start_watched(cmd, env):
         except (ImportError, OSError, AttributeError):
             pass
     try:
-        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **lean_common.popen_umask())
     except FileNotFoundError:
         return None, []
     return proc, [(proc.stdout.fileno(), sys.stdout, proc.stdout.close),

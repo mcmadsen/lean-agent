@@ -5,6 +5,7 @@ import glob
 import json
 import os
 import re
+import sys
 import time
 import uuid
 
@@ -14,6 +15,24 @@ except ImportError:  # Windows
     fcntl = None
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _read_umask():
+    old = os.umask(0o077)
+    os.umask(old)
+    return old
+
+
+# The user's umask, read once at import (the main thread, before any thread starts). The process umask is never changed
+# afterwards; children get this value explicitly so none can inherit a transient one.
+USER_UMASK = _read_umask()
+
+
+def popen_umask():
+    """Popen keyword arguments that give a child the user's umask (Python 3.9+; older versions inherit the unchanged one)."""
+    return {"umask": USER_UMASK} if sys.version_info >= (3, 9) and os.name == "posix" else {}
+
+
 STANDARD_WINDOW = 200000  # a model's context window unless it is a 1M one
 LONG_WINDOW = 1000000
 
