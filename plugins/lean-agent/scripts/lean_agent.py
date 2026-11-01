@@ -8800,37 +8800,114 @@ def forward_old_hooks(dry=False):
     return changed
 
 
+def update_channel():
+    """'release' (default) or 'main': what `lean-agent sync` follows."""
+    return "main" if config_json().get("update_channel") == "main" else "release"
+
+
+def tag_key(tag):
+    m = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def release_tags(root):
+    """The clone's v<major>.<minor>.<patch> tags, newest (semver order) first."""
+    tags = [t for t in (git(root, "tag", "--list", "v*") or "").split() if tag_key(t)]
+    return sorted(tags, key=tag_key, reverse=True)
+
+
+def is_ancestor(root, a, b):
+    return subprocess.run(["git", "-C", root, "merge-base", "--is-ancestor", a, b], capture_output=True).returncode == 0
+
+
+def pick_release(root):
+    """(latest, target, state). latest: newest v* tag. target: the newest tag that is HEAD or a descendant of it.
+    state: 'none' (no tags), 'behind' (target is past HEAD), 'current' (HEAD is the latest release), 'ahead' (HEAD
+    is past the latest release) or 'diverged' (no fast-forward path to any release)."""
+    tags = release_tags(root)
+    if not tags:
+        return None, None, "none"
+    latest = tags[0]
+    for t in tags:
+        if is_ancestor(root, "HEAD", t):
+            same = git(root, "rev-parse", "HEAD") == git(root, "rev-parse", t + "^{commit}")
+            return latest, t, "current" if same else "behind"
+    return latest, None, ("ahead" if is_ancestor(root, latest, "HEAD") else "diverged")
+
+
 def cmd_sync(a):
     root = clone_root()
     if not root:
         die("this lean-agent isn't running from a git clone, so there's nothing to pull; "
             "update the plugin with: claude plugin update " + PLUGIN_ID)
     claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
+    follow_main = bool(a.main) or update_channel() == "main"
+    if a.check or not a.no_pull:
+        f = subprocess.run(["git", "-C", root, "fetch", "-q", "--tags", "--force", "origin"], capture_output=True, text=True)
+        if f.returncode != 0 and a.check:
+            print(f"lean-agent: git fetch failed: {(f.stderr or f.stdout).strip()[:300]}")
+            return 1
+    upstream = git(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") or "origin/main"
+    latest, target, state = (None, None, "none") if follow_main else pick_release(root)
+    on_main = follow_main or state == "none"
     if a.check:  # look, don't touch
-        git(root, "fetch", "-q", "origin")
-        upstream = git(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") or "origin/main"
-        behind = int(git(root, "rev-list", "--count", f"HEAD..{upstream}") or 0)
-        if not behind:
-            print(f"lean-agent {plugin_version()} is up to date")
+        if on_main:
+            behind = int(git(root, "rev-list", "--count", f"HEAD..{upstream}") or 0)
+            print(f"lean-agent {plugin_version()}; following main" + ("" if follow_main else " (no releases yet)"))
+            if not behind:
+                print(f"lean-agent {plugin_version()} is up to date")
+                return 0
+            theirs = git(root, "show", f"{upstream}:plugins/lean-agent/.claude-plugin/plugin.json") or "{}"
+            try:
+                new_version = json.loads(theirs).get("version", "?")
+            except ValueError:
+                new_version = "?"
+            print(f"update available: lean-agent {plugin_version()} -> {new_version} ({behind} commit(s)). "
+                  "Install it: lean-agent sync")
+            for line in (git(root, "log", "--format=  %s", f"HEAD..{upstream}") or "").splitlines()[:6]:
+                print(line[:140])
             return 0
-        theirs = git(root, "show", f"{upstream}:plugins/lean-agent/.claude-plugin/plugin.json") or "{}"
-        try:
-            new_version = json.loads(theirs).get("version", "?")
-        except ValueError:
-            new_version = "?"
-        print(f"update available: lean-agent {plugin_version()} -> {new_version} ({behind} commit(s)). "
-              "Install it: lean-agent sync")
-        for line in (git(root, "log", "--format=  %s", f"HEAD..{upstream}") or "").splitlines()[:6]:
-            print(line[:140])
+        print(f"current: lean-agent {plugin_version()}; latest release: {latest}")
+        if state == "behind":
+            print(f"update available: {plugin_version()} -> {target[1:]}. Install it: lean-agent sync")
+        elif state == "ahead":
+            print(f"no update: ahead of the latest release {latest}")
+        elif state == "diverged":
+            print("no fast-forward to a release (history was rewritten?). Fix: lean-agent sync --reset")
+        else:
+            print("no update available (up to date)")
         return 0
     if not a.no_pull:
         old = git(root, "rev-parse", "HEAD")
+        goal = upstream if on_main else (target or latest)
+        ok = True
         if git(root, "status", "--porcelain", "--untracked-files=no"):
             print(f"lean-agent: {root} has local changes; not pulling (commit or stash them, then sync again)")
+            ok = False
+        elif a.reset:
+            p = subprocess.run(["git", "-C", root, "reset", "--hard", "-q", goal], capture_output=True, text=True)
+            if p.returncode != 0:
+                print(f"lean-agent: git reset failed: {(p.stderr or p.stdout).strip()[:300]}")
+            else:
+                print(f"reset {root} to {goal} ({(git(root, 'rev-parse', '--short', 'HEAD') or '?')}), was {(old or '?')[:7]} "
+                      "(git fetch + reset --hard)")
+        elif state == "ahead" and not on_main:
+            print(f"lean-agent: ahead of the latest release {latest}; staying")
+            ok = False
         else:
-            p = subprocess.run(["git", "-C", root, "pull", "--ff-only", "-q"], capture_output=True, text=True)
+            if on_main:
+                p = subprocess.run(["git", "-C", root, "pull", "--ff-only", "-q"], capture_output=True, text=True)
+            elif target:
+                p = subprocess.run(["git", "-C", root, "merge", "--ff-only", "-q", target], capture_output=True, text=True)
+            else:
+                p = subprocess.CompletedProcess([], 1, "", "no release to fast-forward to")
             if p.returncode != 0:
                 print(f"lean-agent: git pull failed: {(p.stderr or p.stdout).strip()[:300]}")
+                if state == "diverged" or (goal and not is_ancestor(root, "HEAD", goal)):
+                    print("lean-agent: this clone no longer fast-forwards (the remote history was rewritten). "
+                          f"If you have nothing local to keep, run: lean-agent sync --reset  (git fetch + reset --hard {goal})")
+                ok = False
+        if ok:
             new = git(root, "rev-parse", "HEAD")
             if new and old and new != old:
                 log = git(root, "log", "--oneline", f"{old}..{new}") or ""
@@ -8841,7 +8918,7 @@ def cmd_sync(a):
                 script = os.path.join(root, "plugins", "lean-agent", "scripts", "lean_agent.py")
                 os.execv(sys.executable, [sys.executable, script, "sync", "--no-pull", "--pulled"]
                          + (["--no-learn"] if a.no_learn else []))
-            elif p.returncode == 0:
+            else:
                 print(f"code: already up to date ({(new or '?')[:7]})")
 
     plugin = "skipped (claude not found)"
@@ -9215,6 +9292,17 @@ def cmd_config(a):
             save_json(home("config.json"), cfg)
         print(f"thread-reports: {service_session.reports_mode()} \u00b7 a thread session's finished turn (run, error, question) is "
               "typed into the main session at its turn end; questions-only sends only what needs you (on|questions-only|off|default)")
+        return 0
+    if a.name == "update-channel":
+        if a.value is not None:
+            if a.value not in ("release", "main"):
+                die("update-channel takes release or main")
+            cfg = config_json()
+            cfg["update_channel"] = a.value
+            save_json(home("config.json"), cfg)
+        print(f"update-channel: {update_channel()} \u00b7 sync follows "
+              + ("the newest release (only versions that passed CI)" if update_channel() == "release" else "main")
+              + "; one-off: lean-agent sync --main")
         return 0
     if a.name == "main-fresh-at":
         if a.value is not None:
@@ -11338,10 +11426,10 @@ def build_parser():
     s.add_argument("--thread", help="the thread tag of the message (#N or tN; default main)")
     s.set_defaults(fn=cmd_advise)
 
-    s = sub.add_parser("config", help="switches: strict on|off (the orchestrator only runs lean-agent commands; default on), "
+    s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "max-thread-sessions N (thread sessions the service runs; default 8), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
     s.add_argument("name", choices=["strict", "clear-at", "project-rules", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
-                                           "review-max-rerounds", "review-skip", "review-model", "thread-fresh-after", "thread-reports", "main-fresh-at"])
+                                           "review-max-rerounds", "review-skip", "review-model", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)
@@ -11617,6 +11705,8 @@ def build_parser():
     s.add_argument("--no-pull", action="store_true", help="don't git pull; just refresh everything")
     s.add_argument("--no-learn", action="store_true", help="don't re-learn projects")
     s.add_argument("--check", action="store_true", help="only say whether an update is available (installs nothing)")
+    s.add_argument("--main", action="store_true", help="follow main this once (default: the newest release; see config update-channel)")
+    s.add_argument("--reset", action="store_true", help="after a remote history rewrite: fetch + reset --hard to the target (refuses with local changes)")
     s.add_argument("--pulled", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(fn=cmd_sync)
 

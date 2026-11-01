@@ -8873,6 +8873,80 @@ class CliTest(unittest.TestCase):
             fh.write("local edit\n")
         self.assertIn("has local changes; not pulling", run("sync", "--no-learn"))
 
+    def sync_cli(self, clone):
+        cli = os.path.join(clone, "bin", "lean-agent")
+
+        def run(*args, ok=True):
+            p = subprocess.run([cli, *args], capture_output=True, text=True, env=dict(self.env), stdin=subprocess.DEVNULL)
+            if ok:
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            return p.stdout + p.stderr
+        return run
+
+    def test_sync_follows_releases_not_main(self):
+        clone, other, g = self.make_clone()
+        run = self.sync_cli(clone)
+
+        def commit(msg):
+            g(other, "commit", "-q", "--allow-empty", "-m", msg)
+            g(other, "push", "-q")
+        g(other, "tag", "v0.0.9")
+        g(other, "push", "-q", "--tags")
+        commit("after nine")          # not released
+        g(other, "tag", "v0.0.10")    # semver: 10 > 9
+        g(other, "push", "-q", "--tags")
+        commit("unreleased on main")
+        out = run("sync", "--check")
+        self.assertIn("latest release: v0.0.10", out)
+        self.assertIn("update available", out)
+        head = subprocess.run(["git", "-C", clone, "rev-parse", "HEAD"], capture_output=True, text=True).stdout
+        self.assertEqual(subprocess.run(["git", "-C", clone, "rev-parse", "HEAD"], capture_output=True, text=True).stdout, head)
+        out = run("sync", "--no-learn")
+        self.assertIn("pulled 1 commit(s)", out)  # v1 -> v0.0.10, not the unreleased commit
+        self.assertEqual(subprocess.run(["git", "-C", clone, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip(),
+                         subprocess.run(["git", "-C", clone, "rev-parse", "v0.0.10^{commit}"], capture_output=True, text=True).stdout.strip())
+        # main moves on, HEAD past the release: stay
+        g(clone, "pull", "-q", "--ff-only")
+        out = run("sync", "--no-learn")
+        self.assertIn("ahead of the latest release v0.0.10; staying", out)
+        self.assertIn("no update: ahead", run("sync", "--check"))
+        # update-channel main follows main
+        g(clone, "reset", "-q", "--hard", "v0.0.10")
+        self.assertIn("update-channel: release", run("config", "update-channel"))
+        run("config", "update-channel", "main")
+        self.assertIn("pulled 1 commit(s)", run("sync", "--no-learn"))
+        g(clone, "reset", "-q", "--hard", "v0.0.10")
+        run("config", "update-channel", "release")
+        self.assertIn("pulled 1 commit(s)", run("sync", "--main", "--no-learn"))
+
+    def test_sync_reset_after_history_rewrite(self):
+        clone, other, g = self.make_clone()
+        run = self.sync_cli(clone)
+        # make the remote history unrelated to the clone's
+        g(other, "checkout", "-q", "--orphan", "fresh")
+        g(other, "commit", "-q", "--allow-empty", "-m", "fresh root")
+        g(other, "tag", "-f", "v0.0.3")
+        g(other, "push", "-q", "--force", "origin", "fresh:main", "v0.0.3")
+        old = subprocess.run(["git", "-C", clone, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        out = run("sync", "--no-learn")
+        self.assertIn("lean-agent sync --reset", out)
+        self.assertEqual(subprocess.run(["git", "-C", clone, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip(), old)
+        # local changes block even --reset
+        with open(os.path.join(clone, "README.md"), "a") as fh:
+            fh.write("local edit\n")
+        self.assertIn("has local changes", run("sync", "--reset", "--no-learn"))
+        g(clone, "checkout", "-q", "--", "README.md")
+        self.assertIn("reset ", run("sync", "--reset", "--no-learn", ok=False))
+        new = subprocess.run(["git", "-C", clone, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(new, subprocess.run(["git", "-C", clone, "rev-parse", "v0.0.3^{commit}"], capture_output=True, text=True).stdout.strip())
+
+    def test_sync_help_renders(self):
+        clone, _, _ = self.make_clone()
+        out = self.sync_cli(clone)("sync", "--help")
+        for flag in ("--check", "--main", "--reset"):
+            self.assertIn(flag, out)
+        self.assertIn("update-channel", self.sync_cli(clone)("config", "--help"))
+
     def test_trampoline_runs_the_clone(self):
         clone, _, _ = self.make_clone()
         with open(os.path.join(clone, "plugins", "lean-agent", "scripts", "squeeze_hook.py"), "w") as fh:
