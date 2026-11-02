@@ -449,6 +449,42 @@ class CliTest(unittest.TestCase):
         self.assertRegex(out, r"proj-\w+: a normal Claude Code turn carries ~8,000 tokens of context")
         self.assertIn("(measured)", out)
 
+    def test_savings_survives_odd_ledger_rows(self):
+        self.cli("learn", self.proj)
+        h = self.cli("home").stdout.strip()
+        h = os.path.dirname(h) if os.path.basename(h) == "home" else h
+        ts = "2999-01-01T00:00:00"
+        rows = [
+            {"ts": ts, "project": "proj", "model": "haiku", "turns": 3, "units": 1000,
+             "usage": {"input_tokens": 100, "cache_read_input_tokens": 5000}},
+            {"ts": ts, "project": "proj", "model": None, "turns": None, "units": None, "usage": None,
+             "status": "failed", "role": None},
+            {"ts": ts, "project": "proj", "model": "?", "turns": "4", "units": "1,200", "usage": {},
+             "cost_usd": None, "status": "start failed"},
+            {"ts": ts, "project": "other", "model": "opus", "turns": 2, "units": 50, "weighted": "900",
+             "usage": {"input_tokens": None, "output_tokens": "7"}, "status": "timeout"},
+            {"ts": ts, "project": None, "turns": {"x": 1}, "units": [], "usage": "bad"},
+            {"ts": None, "project": "other"},
+            {"project": "other", "units": 5},
+            "not a dict",
+        ]
+        with open(os.path.join(h, "ledger.jsonl"), "w") as fh:
+            fh.write("\n".join(json.dumps(r) for r in rows) + "\n")
+        with open(os.path.join(h, "baselines.json"), "w") as fh:
+            json.dump({"proj": {"ctx": 38000}, "other": "38000"}, fh)
+        with open(os.path.join(h, "savings.jsonl"), "w") as fh:
+            for e in ({"ts": ts, "before": None, "after": 5}, {"ts": ts}, {"ts": ts, "before": "4000", "after": 0},
+                      {"ts": None, "before": 9}):
+                fh.write(json.dumps(e) + "\n")
+        p = self.cli("savings", check=False)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn("Traceback", p.stdout + p.stderr)
+        for part in ("worker context", "model choice", "output squeezing", "total"):
+            self.assertIn(part, p.stdout)
+        self.assertNotIn("n/a", p.stdout)
+        self.assertIn("~38,000 tokens/turn normal (measured)", p.stdout)
+        self.assertRegex(p.stdout, r"output squeezing\s+1,000 ")
+
     def test_attribution_asked_once_and_enforced(self):
         self.cli("learn", self.proj)
         p = self.cli("attribution", check=False)
