@@ -18,6 +18,7 @@ Socket protocol: one JSON object per connection, newline-terminated; one JSON li
     anything wrong    -> {"ok": false, "error": "..."}
 """
 import collections
+import datetime
 import glob
 import hashlib
 import json
@@ -861,7 +862,123 @@ def queue_report(tid, kind, text):
         items = data.get("items") if isinstance(data.get("items"), list) else []
         items.append({"thread": tid, "kind": kind, "text": text, "ts": time.time()})
         lean_common.write_json_atomic(reports_path(), {"items": items[-50:]})
+    if kind != RUN_AUTO_KIND:
+        with lean_common.file_lock(reported_path()):
+            seen = _load(reported_path())
+            seen[tid] = time.time()
+            lean_common.write_json_atomic(reported_path(), seen)
     return True
+
+
+def reported_path():
+    return lean_home("thread-reported.json")
+
+
+def reported_at(tid):
+    """When thread `tid` last queued a report for main (epoch), else 0."""
+    try:
+        return float(_load(reported_path()).get(tid) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+RUN_AUTO_KIND = "run done"   # the report lean-agent queues itself when a thread's finished run went unreported
+RUN_REPORT_FALLBACK = 120    # seconds a finished run's thread has to report to main before lean-agent does; LEAN_AGENT_RUN_REPORT_FALLBACK overrides
+RUN_WATCH_DAYS = 2           # ledger rows older than this are never followed up
+FINISHED = ("done", "failed", "stopped")
+
+
+def runs_state_path():
+    return lean_home("run-followups.json")
+
+
+def finished_thread_runs(now=None):
+    """Ledger rows of finished runs tagged to a thread, newest 50, each with `fin` (epoch of the row)."""
+    now = time.time() if now is None else now
+    rows = []
+    try:
+        with open(lean_home("ledger.jsonl"), errors="replace") as fh:
+            lines = fh.readlines()[-400:]
+    except OSError:
+        return rows
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        tag = str(r.get("thread") or "").strip().lstrip("#").lower()
+        tag = "t" + tag if tag.isdigit() else tag
+        if not tag or r.get("status") not in FINISHED or not r.get("id"):
+            continue
+        try:
+            fin = datetime.datetime.fromisoformat(str(r.get("ts"))).timestamp()
+        except ValueError:
+            continue
+        if now - fin <= RUN_WATCH_DAYS * 86400:
+            rows.append(dict(r, thread=tag, fin=fin))
+    return rows[-50:]
+
+
+def run_state_update(rid, **fields):
+    with lean_common.file_lock(runs_state_path()):
+        data = _load(runs_state_path())
+        data.setdefault(rid, {}).update(fields)
+        init = data.pop("_init", None)
+        keep = dict(sorted(data.items(), key=lambda kv: kv[1].get("seen") or 0)[-200:])
+        if init:
+            keep["_init"] = init
+        lean_common.write_json_atomic(runs_state_path(), keep)
+
+
+def run_result_sentence(r):
+    """The first sentence of a finished run's saved result, else ''."""
+    files = sorted(glob.glob(os.path.join(r.get("workdir") or "", "summary-*.txt")),
+                   key=lambda f: int(re.sub(r"\D", "", os.path.basename(f)) or 0))
+    if not files:
+        return ""
+    try:
+        with open(files[-1], errors="replace") as fh:
+            lines = [l.strip() for l in fh.read().splitlines()]
+    except OSError:
+        return ""
+    body = " ".join(l for l in lines if l and not l.startswith("run "))
+    m = re.match(r"(.+?[.!?])(?:\s|$)", body)
+    return _short(m.group(1) if m else body, 200)
+
+
+def run_auto_text(r):
+    sentence = run_result_sentence(r)
+    return f"run {r['id']}: {r.get('status')}" + (f" \u00b7 {sentence}" if sentence else "") + \
+        f" (details: lean-agent runs --show {r['id']})"
+
+
+def run_fallback(now=None):
+    """Queue the automatic report for each finished thread run whose thread did not report to main within
+    LEAN_AGENT_RUN_REPORT_FALLBACK seconds of the run finishing (or has no live session). Once per run."""
+    now = time.time() if now is None else now
+    wait = _knob("LEAN_AGENT_RUN_REPORT_FALLBACK", RUN_REPORT_FALLBACK)
+    state = _load(runs_state_path())
+    if not isinstance(state.get("_init"), dict):  # first look: runs that ended long before are history, not follow-ups
+        run_state_update("_init", seen=now)
+        state = _load(runs_state_path())
+    start = (state.get("_init") or {}).get("seen") or now
+    for r in finished_thread_runs(now):
+        rid = r["id"]
+        if r["fin"] < start - wait:
+            continue
+        st = state.get(rid) or {}
+        if st.get("reported"):
+            continue
+        if not st:  # first sight: a run that ended before the service saw the ledger gets the full window from now
+            run_state_update(rid, seen=now)
+            st = {"seen": now}
+        if reported_at(r["thread"]) >= r["fin"]:
+            run_state_update(rid, reported="thread")
+            continue
+        if now - (r["fin"] if r["fin"] >= start else max(r["fin"], st.get("seen") or 0)) < wait:
+            continue
+        run_state_update(rid, reported="auto")
+        queue_report(r["thread"], RUN_AUTO_KIND, run_auto_text(r))
 
 
 def queued_reports():
@@ -1060,6 +1177,8 @@ class Reporter(AutoClear):
         self.path = None
         self.alerted = None    # the pending question or prompt already reported
         self.delivered = None  # (transcript size, when) of the last message typed into the main session
+        self.woken = False     # a finished run's wake-up turn was typed in and its report is due
+        self.waked = None      # run ids already woken for (None: not yet read at start)
 
     def prompting(self):
         return bool(PROMPT_RE.search(self.host.tail_text()[-1500:]))
@@ -1075,6 +1194,8 @@ class Reporter(AutoClear):
             self.path = path
         scan = scan_turn(path, self.seen)
         tid = self.key
+        if st["ended"] and not self.prompting():
+            self.wake_for_runs(st)
         if not st["ended"]:
             ask = scan["ask"]
             if ask or (self.prompting() and self.host.alive()):
@@ -1100,9 +1221,29 @@ class Reporter(AutoClear):
         elif scan["err"]:
             save_last_report(tid, "blocked", text or scan["result"])
             queue_report(tid, "blocked", _short(text or scan["result"], tid=tid))
-        elif scan["runs"]:
+        elif scan["runs"] or self.woken:
+            self.woken = False
             save_last_report(tid, "done", text or scan["result"])
             queue_report(tid, "done", _short(text or scan["result"], tid=tid))
+
+    def wake_for_runs(self, st):
+        """A run tagged to this thread finished: type a short turn into the idle session so it reports to main."""
+        mine = [r for r in finished_thread_runs(self.now()) if r["thread"] == self.key]
+        if self.waked is None:  # runs that ended before this session started are not its to report
+            self.waked = {r["id"] for r in mine if r["fin"] < self.born}
+        todo = [r for r in mine if r["id"] not in self.waked and not (_load(runs_state_path()).get(r["id"]) or {}).get("reported")]
+        if not todo or not self.host.alive() or self.now() - self.host.last_input < _knob("LEAN_AGENT_REPORT_IDLE", 3):
+            return
+        r = todo[0]
+        task = " ".join(str(r.get("task") or "").split())[:80]
+        try:
+            self.host.paste(f"run {r['id']} ({task}) finished: {r.get('status')}. Report the result to main now with what the user needs.")
+        except Exception as exc:  # noqa: BLE001 - retried on a later tick
+            self.log(f"typing the wake-up for run {r['id']} failed: {exc}")
+            return
+        self.waked.add(r["id"])
+        self.woken = True
+        self.log(f"run {r['id']} finished: woke the thread session")
 
     def fallback_pending(self):
         """A staged block the prompt hook never took (hook not active): type it in full, as before."""
@@ -1124,6 +1265,10 @@ class Reporter(AutoClear):
         self.log("staged thread reports not taken by the prompt hook: typed in full")
 
     def main_tick(self):
+        try:
+            run_fallback(self.now())
+        except Exception as exc:  # noqa: BLE001 - the report queue must keep going
+            self.log(f"run follow-up failed: {exc}", "error")
         if os.path.exists(pending_path()):
             return self.fallback_pending()
         items = queued_reports()

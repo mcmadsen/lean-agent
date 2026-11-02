@@ -297,6 +297,33 @@ def brief(cap=None):
     return head + rest + (("\n" + BRIEF_MORE) if more else "")
 
 
+def inflight_lines(tid):
+    """What a thread's new session has promised or is waiting on: its runs still in flight (and any it has not yet
+    reported), with the rule that their results go to main."""
+    home = usage.lean_home()
+    norm = lambda t: ("t" + str(t).strip().lstrip("#").lower()) if str(t).strip().lstrip("#").isdigit() else str(t or "").strip().lower()
+    lines = []
+    try:
+        for rid, m in lean_common.running_runs(home):
+            if norm(m.get("thread")) == tid:
+                lines.append(f"run {rid} ({' '.join(str(m.get('task') or '').split())[:80]}): running")
+    except Exception:
+        pass
+    try:
+        import service_session
+        state = service_session._load(service_session.runs_state_path())
+        for r in service_session.finished_thread_runs():
+            if r["thread"] == tid and not (state.get(r["id"]) or {}).get("reported"):
+                lines.append(f"run {r['id']} ({' '.join(str(r.get('task') or '').split())[:80]}): finished {r.get('status')}, not yet reported to main")
+    except Exception:
+        pass
+    follow = [n for n in load_notes() if n.get("thread") == tid and n.get("kind") in ("followup", "promise")][-3:]
+    lines += [f"promised: {' '.join(str(n.get('text') or '').split())[:160]}" for n in follow]
+    if not lines:
+        return []
+    return ["In flight (when these finish, report to main in your reply; do not wait to be asked):"] + lines
+
+
 def thread_brief(tid, cap=None):
     """What a cleared thread session starts from: its thread line, its own latest checkpoint and notes, and its own work
     (`thread show`): nothing of the other threads."""
@@ -308,6 +335,7 @@ def thread_brief(tid, cap=None):
     if cps:
         lines.append(f"Checkpoint of {str(cps[-1].get('ts', ''))[:16].replace('T', ' ')} (your own soft state before the clear; continue from it):")
         lines.append(str(cps[-1].get("text", "")))
+    lines += inflight_lines(tid)
     notes = [n for n in mine if n.get("kind") != "checkpoint"][-5:]
     if notes:
         lines.append("Notes: " + " | ".join(" ".join(str(n.get("text") or "").split())[:200] for n in notes))
@@ -333,6 +361,7 @@ def fresh_brief(tid, max_tokens=FRESH_BRIEF_TOKENS):
     if cps:
         head.append(f"Latest checkpoint ({str(cps[-1].get('ts', ''))[:16].replace('T', ' ')}; continue from it):")
         head.append(cut_lines(str(cps[-1].get("text", "")), CHECKPOINT_CAP))
+    head += inflight_lines(tid)
     tail = f"For more: lean-agent thread show {tid}"
     items = []  # (epoch, line)
     ev = lean_threads.events(data).get(tid, [])

@@ -5668,6 +5668,88 @@ class CliTest(unittest.TestCase):
         reps["main"].tick()
         self.assertEqual(len(hosts["main"].pasted), 1)
 
+    def ledger_row(self, ss, rid, at, status="done", thread="t1", summary="Fixed the parser. Tests pass."):
+        import datetime
+        wd = os.path.join(os.environ["LEAN_AGENT_HOME"], "work", rid)
+        os.makedirs(wd, exist_ok=True)
+        with open(os.path.join(wd, "summary-1.txt"), "w") as fh:
+            fh.write(f"run {rid} · x\n\n{summary}\n")
+        with open(os.path.join(os.environ["LEAN_AGENT_HOME"], "ledger.jsonl"), "a") as fh:
+            fh.write(json.dumps({"id": rid, "status": status, "thread": thread, "task": "fix the parser", "workdir": wd,
+                                 "ts": datetime.datetime.fromtimestamp(at).isoformat(timespec="seconds")}) + "\n")
+
+    def test_run_finishing_in_a_thread_wakes_an_idle_live_session_which_then_reports(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        p = mock.patch.object(ss.time, "time", lambda: clock[0])
+        p.start()
+        self.addCleanup(p.stop)
+        write("t1", user(), assistant("Started the run; I will report when it ends."))
+        reps["t1"].tick()
+        reps["main"].tick()
+        clock[0] += 5
+        self.ledger_row(ss, "r1", clock[0])
+        reps["t1"].tick()
+        self.assertEqual(hosts["t1"].pasted, ["run r1 (fix the parser) finished: done. Report the result to main now with what the user needs."])
+        reps["t1"].tick()
+        self.assertEqual(len(hosts["t1"].pasted), 1)  # woken once
+        write("t1", user("wake"), assistant("The parser is fixed; tests pass."))
+        reps["t1"].tick()
+        self.assertEqual([(i["thread"], i["kind"]) for i in ss.queued_reports()], [("t1", "done")])
+        clock[0] += 300  # the thread reported in time: no automatic report
+        reps["main"].tick()
+        reps["main"].tick()
+        self.assertEqual(len(hosts["main"].pasted), 1)
+        self.assertIn("(t1 done)", hosts["main"].pasted[0])  # the thread's own report only
+
+    def test_no_thread_report_in_the_window_queues_one_automatic_report(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        p = mock.patch.object(ss.time, "time", lambda: clock[0])
+        p.start()
+        self.addCleanup(p.stop)
+        reps["main"].tick()  # the service has looked at the ledger once
+        clock[0] += 5
+        self.ledger_row(ss, "r2", clock[0], status="failed", summary="Could not build the image. More text.")
+        clock[0] += 60
+        reps["main"].tick()
+        self.assertEqual((ss.queued_reports(), hosts["main"].pasted), ([], []))  # still inside the window
+        clock[0] += 70
+        reps["main"].tick()
+        reps["main"].tick()
+        self.assertEqual(len(ss.queued_reports()), 1)  # queued once
+        clock[0] += 61
+        reps["main"].tick()
+        self.assertEqual(len(hosts["main"].pasted), 1)  # t1 has no live session here: lean-agent reports itself, once
+        self.assertIn("(t1 run done)", hosts["main"].pasted[0])
+        msg = ss.take_pending(hosts["main"].pasted[0])
+        self.assertIn("[t1 run done] run r2: failed \u00b7 Could not build the image. (details: lean-agent runs --show r2)", msg)
+        clock[0] += 500
+        reps["main"].tick()
+        self.assertEqual((ss.queued_reports(), len(hosts["main"].pasted)), ([], 1))
+
+    def test_runs_that_ended_before_the_service_looked_are_not_reported(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        self.ledger_row(ss, "old", clock[0] - 3600)
+        reps["main"].tick()
+        clock[0] += 500
+        reps["main"].tick()
+        self.assertEqual(ss.queued_reports(), [])
+
+    def test_fresh_session_brief_lists_the_threads_runs_in_flight(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import compact_hook
+        home = tempfile.mkdtemp()
+        os.makedirs(os.path.join(home, "running"))
+        with open(os.path.join(home, "running", "r9.json"), "w") as fh:
+            json.dump({"run": "r9", "pid": os.getpid(), "thread": "t1", "task": "build the report", "started": "x"}, fh)
+        with open(os.path.join(home, "running", "r8.json"), "w") as fh:
+            json.dump({"run": "r8", "pid": os.getpid(), "thread": "t2", "task": "other", "started": "x"}, fh)
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": home}):
+            for brief in (compact_hook.fresh_brief("t1"), compact_hook.thread_brief("t1")):
+                self.assertIn("run r9 (build the report): running", brief)
+                self.assertIn("when these finish, report to main", brief)
+                self.assertNotIn("r8", brief)
+            self.assertNotIn("In flight", compact_hook.fresh_brief("t3"))
+
     def test_staged_block_not_taken_by_the_prompt_hook_is_typed_in_full(self):
         ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
         reps["t1"].tick()
