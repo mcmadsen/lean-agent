@@ -151,6 +151,11 @@ FAKE_CLAUDE = textwrap.dedent("""\
     if os.environ.get("FAKE_SELF_KILL"):  # killed from outside, like the OOM killer
         import signal
         os.kill(os.getpid(), signal.SIGKILL)
+    if os.environ.get("FAKE_SAY"):  # a last turn with some words and a tool call, then (with FAKE_HANG) no result
+        print(json.dumps({"type": "assistant", "session_id": "sess-1", "message": {"id": "say-1", "content": [
+            {"type": "text", "text": os.environ["FAKE_SAY"]},
+            {"type": "tool_use", "id": "tus", "name": "Bash", "input": {"command": "git merge topic-b"}}],
+            "usage": {"input_tokens": 20, "output_tokens": 30}}}), flush=True)
     if os.environ.get("FAKE_HANG"):
         time.sleep(60)
     second = "search-only second opinion" in open(append).read()
@@ -2935,9 +2940,147 @@ class CliTest(unittest.TestCase):
         p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "look around", check=False,
                      FAKE_TURNS="1", FAKE_HANG="1", LEAN_AGENT_RUN_TIMEOUT="2")
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("timed out after 2 s", p.stdout)
+        self.assertIn("timed out", p.stdout)
         self.assertNotIn("killed by signal", p.stdout)
         self.assertEqual(self.ledger()[-1]["session_id"], "sess-1")
+
+    def test_timed_out_run_keeps_tokens_a_partial_summary_and_the_uncommitted_files(self):
+        subprocess.run(["git", "-C", self.proj, "init", "-q"], check=True)
+        self.cli("learn", self.proj, "--name", "proj")
+        with open(os.path.join(self.proj, "wip.txt"), "w") as fh:
+            fh.write("half done\n")
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "merge and check", check=False,
+                     FAKE_TURNS="2", FAKE_SAY="Merging topic b into the branch now", FAKE_HANG="1",
+                     LEAN_AGENT_RUN_TIMEOUT="3")
+        self.assertNotEqual(p.returncode, 0)
+        e = self.ledger()[-1]
+        self.assertEqual((e["status"], e["turns"], e["timed_out"]), ("timed out", 3, True))
+        self.assertEqual(e["usage"]["input_tokens"], 40)
+        self.assertGreater(e["units"], 0)
+        self.assertIn("Merging topic b into the branch now", e["result_head"])
+        self.assertIn("run " + e["id"] + " · haiku · timed out · 3 turns", p.stdout)
+        self.assertIn("Bash: git merge topic-b", p.stdout)
+        self.assertIn("TIMED OUT by lean-agent", p.stdout)
+        self.assertTrue(any("wip.txt" in u for u in e["uncommitted"]), e["uncommitted"])
+        os.remove(os.path.join(self.proj, "wip.txt"))
+        open(os.path.join(self.proj, "later.txt"), "w").close()
+        shown = self.cli("runs", "--show", e["id"]).stdout
+        self.assertIn("Merging topic b", shown)
+        self.assertIn("uncommitted now in", shown)
+        self.assertIn("later.txt", shown)
+
+    def test_worker_is_warned_at_80_percent_of_the_run_timeout(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "slow job", check=False,
+                     FAKE_TURNS="1", FAKE_HANG="1", LEAN_AGENT_RUN_TIMEOUT="5")
+        self.assertIn("~80% of its time limit", p.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.ledger()[-1]["workdir"], "timewarn.flag")))
+
+    def test_run_timeout_option_and_config(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        for bad in ("banana", "99h", "5s"):
+            p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--timeout", bad, "job", check=False)
+            self.assertEqual(p.returncode, 1, bad)
+            self.assertIn("--timeout", p.stdout + p.stderr)
+        self.assertFalse(os.path.exists(self.log) and self.calls())  # nothing was started
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--timeout", "45m", "job")
+        self.assertEqual(self.ledger()[-1]["status"], "done")
+        self.assertIn("run-timeout: 30m", self.cli("config", "run-timeout").stdout)
+        self.assertIn("run-timeout: 2h00m", self.cli("config", "run-timeout", "2h").stdout)
+        self.assertEqual(self.cli("config", "run-timeout", "1d", check=False).returncode, 1)
+        mod = lean_agent_module()
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": self.env["LEAN_AGENT_HOME"]}, clear=False):
+            os.environ.pop("LEAN_AGENT_RUN_TIMEOUT", None)
+            self.assertEqual(mod.run_timeout(), 7200)
+            self.assertEqual(mod.run_timeout("90m"), 5400)
+        self.assertIn("run-timeout: 30m", self.cli("config", "run-timeout", "default").stdout)
+
+    def test_allow_cmd_without_read_only_is_refused_up_front_and_advise_keeps_them_together(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--allow-cmd", "az pipelines runs show", "look",
+                     check=False)
+        self.assertEqual(p.returncode, 1)
+        msg = p.stdout + p.stderr
+        self.assertIn("--allow-cmd needs --read-only", msg)
+        self.assertFalse(os.path.exists(self.log) and self.calls())
+        self.assertEqual(self.running_markers(), [])
+        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "ledger.jsonl")))
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "--allow-cmd", "az pipelines runs show", "look")
+        mod = lean_agent_module()
+        self.assertEqual(mod.fix_allow_cmd("suggested: lean-agent run p -m haiku --allow-cmd 'az x show' -- 't'"),
+                         "suggested: lean-agent run p -m haiku --read-only --allow-cmd 'az x show' -- 't'")
+        self.assertEqual(mod.fix_allow_cmd("suggested: run p --read-only --allow-cmd 'az x show'"),
+                         "suggested: run p --read-only --allow-cmd 'az x show'")
+        self.assertIn("only goes with `--read-only`", mod.ADVISE_RULE)
+        out = self.cli("advise", "Check the pipeline run", FAKE_ANSWER="ADVICE\nunderstood: look up a run\n"
+                       "suggested: lean-agent run proj --cards auto -m haiku --allow-cmd 'az pipelines runs show' --why \"x\" -- \"look\"").stdout
+        self.assertIn("--read-only --allow-cmd 'az pipelines runs show'", out)
+
+    def test_wait_for_a_resumed_run_waits_for_the_new_attempt(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "first job", FAKE_ANSWER="First answer")
+        rid = self.ledger()[-1]["id"]
+        p = subprocess.Popen([sys.executable, CLI, "run", "--resume", rid, "go on"],
+                             env=dict(self.env, FAKE_TURNS="3", FAKE_TURN_SLEEP="0.7", FAKE_ANSWER="Second answer"),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: p.poll() is None and p.kill())
+        self.wait_for(lambda: [m for m in self.running_markers() if m.get("run") == rid], "the resumed run's marker")
+        w = self.cli("runs", "--wait", rid, LEAN_AGENT_WAIT_POLL="0.2")
+        self.assertIn("Second answer", w.stdout)
+        self.assertNotIn("First answer", w.stdout)
+        p.communicate(timeout=scaled(30))
+
+    def test_output_of_a_resumed_background_run_shows_the_new_result(self):
+        mod = lean_agent_module()
+        d = os.path.join(self.env["LEAN_AGENT_HOME"], "work", "r1")
+        os.makedirs(d)
+        for n, body in ((1, "run r1 · haiku · needs-input\nOld question?\n"), (2, "run r1 · haiku · done · 3 turns\nNew result.\n")):
+            with open(os.path.join(d, f"summary-{n}.txt"), "w") as fh:
+                fh.write(body)
+        f = os.path.join(self.env["LEAN_AGENT_HOME"], "task.output")
+        with open(f, "w") as fh:
+            fh.write("run r1 · haiku · needs-input\nOld question?\nrun r1 started · haiku · proj (resumed) · see it later\n")
+        row = {"id": "r1", "workdir": d}
+        with mock.patch.object(mod, "live_runs", return_value=[]), mock.patch.object(mod, "ledger", return_value=[row]):
+            text = mod.resumed_output(f)
+        self.assertNotIn("Old question?", text)
+        self.assertIn("started", text)
+        self.assertIn("New result.", text)
+        with mock.patch.object(mod, "live_runs", return_value=[("r1", {})]):
+            self.assertIn("still running: lean-agent runs --wait r1", mod.resumed_output(f))
+        with open(f, "w") as fh:
+            fh.write("run r2 started · haiku · proj · see it later\n")
+        self.assertIsNone(mod.resumed_output(f))
+
+    def test_details_always_prints_the_full_final_report(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "report", FAKE_ANSWER="Merged both parts.\n| part | state |\n| a | ok |")
+        rid = self.ledger()[-1]["id"]
+        self.assertIsNone(self.ledger()[-1]["details"])  # no details file: the whole answer was short
+        out = self.cli("runs", "--show", rid, "--details").stdout
+        self.assertIn("Merged both parts.", out)
+        self.assertIn("| a | ok |", out)
+        self.assertNotIn("LEAN-FEEDBACK", out)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--again", "--answer-lines", "5", "report",
+                 FAKE_ANSWER="Head line.\n=== DETAILS ===\n| row | ok |")
+        out = self.cli("runs", "--show", "--details").stdout
+        self.assertIn("Head line.", out)
+        self.assertIn("| row | ok |", out)
+
+    def test_worker_is_told_about_a_watcher_running_in_the_worktree(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "no watcher yet", )
+        self.assertNotIn("a watcher is running", self.calls()[-1]["task"])
+        w = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "vite", "--port", "5173"], cwd=self.proj)
+        self.addCleanup(w.kill)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--again", "build it")
+        self.assertIn("a watcher is running in this worktree: builds there may conflict; use a separate worktree for builds",
+                      self.calls()[-1]["task"])
+        self.assertIn("a watcher is running in this worktree", p.stdout)
+        w.kill()
+        w.wait()
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--again", "build again")
+        self.assertNotIn("a watcher is running", self.calls()[-1]["task"])
 
     def test_running_record_gets_the_session_id_at_once(self):
         self.cli("learn", self.proj, "--name", "proj")
