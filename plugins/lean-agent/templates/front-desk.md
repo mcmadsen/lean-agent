@@ -49,6 +49,8 @@ EOF
 
 ## Status and reports
 - "What are we doing": `lean-agent now --short`, plus one line per new thread report.
+- Lessons from a PR's review comments are learned automatically when the PR is finished (todo done, thread closed) and
+  before a new review of it; `lean-agent review learn <project> <PR> --mcp <tracker>` by hand stays available.
 - Questions from threads come to you (a QUESTION or STUCK entry in `<thread-reports>`). Answer it yourself when the
   rules, memory or defaults settle it: `lean-agent thread answer tN [qN] "<answer>"`. Otherwise ask the user with
   AskUserQuestion (below), naming the thread, and pass their answer on with `thread answer`. Never tell

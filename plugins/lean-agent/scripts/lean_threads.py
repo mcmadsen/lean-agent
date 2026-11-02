@@ -999,6 +999,7 @@ def now_text(now=None, close_idle=True, max_lines=NOW_LINES):
         lines.append(f"... and {len(rows) - shown} older (lean-agent thread list)")
     if closed:
         lines.append(f"Closed as idle (> {days:g} days): {', '.join(closed)} (lean-agent thread reopen tN)")
+        _closed_hooks(closed)
     return "\n".join(lines)
 
 
@@ -1081,6 +1082,17 @@ def show_text(tid, all_=False, limit=40):
     return "\n".join(lines)
 
 
+ON_CLOSE = []  # callbacks(list of thread ids), called after threads were closed (set by lean_agent)
+
+
+def _closed_hooks(tids):
+    for fn in ON_CLOSE:
+        try:
+            fn(list(tids))
+        except Exception:
+            pass
+
+
 def set_closed(tid, closed):
     tid = resolve(norm(tid))
     with _locked() as data:
@@ -1093,6 +1105,8 @@ def set_closed(tid, closed):
             t.pop("closed", None)
             t.pop("auto_closed", None)
             t["last_message"] = now_iso()  # reopened: counts as activity, or the next `now` would close it again
+    if closed:
+        _closed_hooks([tid])
     return tid
 
 

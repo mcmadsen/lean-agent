@@ -42,7 +42,8 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      approval. False positive: `lean-agent review decline <project> <n> --head <branch> --why "..."`, then
      `--resume`. An `unverified -> delegate a read-only check` item goes to a `-m haiku --read-only` worker. A human
      found what it missed: `lean-agent review learn <project> <PR> --mcp <tracker>`; a lesson you were told in words goes to
-     `lean-agent remember "..."`, never `review learn --text`.
+     `lean-agent remember "..."`, never `review learn --text`. Lessons from PR comments are learned automatically
+     when a PR is finished (its todo done, its thread closed) and before a new review of it; `review learn` by hand stays available.
    - Approval with "known gaps" (things the change says aren't done or doesn't deliver): before calling the work
      ready or opening a PR run `lean-agent review <project> --decide-gaps` (a worker declines what cards and code
      settle, returns fix tasks, lists what needs the user) and show the user only its summary. Ask about each "needs

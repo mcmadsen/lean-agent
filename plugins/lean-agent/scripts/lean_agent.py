@@ -3576,7 +3576,7 @@ The project's review cards already say this (don't repeat it; to correct a line,
    Skip style nits.
 
 Before the LEAN-FEEDBACK line, add one line exactly like this (valid JSON, one line):
-LEAN-CHECKLIST {{"checklist": ["..."], "helpers": [{{"name": "...", "where": "path/in/repo", "what": "..."}}], "replace": [{{"old": "existing line", "new": "corrected line"}}], "declined": [{{"file": "path", "category": "scope|duplication|platform|correctness|tests|style", "issue": "...", "why": "..."}}], "threads_read": [1, 2]}}
+LEAN-CHECKLIST {{"checklist": ["..."], "helpers": [{{"name": "...", "where": "path/in/repo", "what": "..."}}], "replace": [{{"old": "existing line", "new": "corrected line"}}], "declined": [{{"file": "path", "category": "scope|duplication|platform|correctness|tests|style", "issue": "...", "why": "..."}}], "threads_read": [1, 2], "last_comment": "id or time of the newest human comment you read"}}
 """
 
 
@@ -3936,6 +3936,190 @@ def cmd_tracker(a):
     return 0
 
 
+PR_WORD_RE = re.compile(r"(?i)\b(?:PR|pull request|MR|merge request)\s*[#!]?\s*(\d+)|^\s*!(\d+)\s*$")
+LEARN_RECHECK_SECS = 600
+LEARN_SYNC_TIMEOUT = 300
+
+
+def review_learn_auto_on():
+    """Automatic learning from PR comments: LEAN_AGENT_REVIEW_LEARN_AUTO=0|1 wins, else `config review-learn-auto` (default on)."""
+    env = (os.environ.get("LEAN_AGENT_REVIEW_LEARN_AUTO") or "").strip().lower()
+    if env:
+        return env not in ("0", "off", "false", "no")
+    return config_json().get("review_learn_auto", True) is not False
+
+
+def pr_of_ref(ref):
+    """The PR number in a todo ref ("PR 123", "pull request #123", "!123"); the id comes from task_id_of. None when the ref isn't a PR."""
+    return task_id_of(ref) if PR_WORD_RE.search(ref or "") else None
+
+
+def review_learned_path(slug):
+    return home(slug, "review-learned.json")
+
+
+def review_learned(slug):
+    d = load_json(review_learned_path(slug), {})
+    return d if isinstance(d, dict) else {}
+
+
+def update_review_learned(slug, pr, **fields):
+    with file_lock(review_learned_path(slug)):
+        d = review_learned(slug)
+        ent = d.get(str(pr)) if isinstance(d.get(str(pr)), dict) else {}
+        ent.update({k: v for k, v in fields.items() if v is not None})
+        d[str(pr)] = ent
+        save_json(review_learned_path(slug), d)
+    return ent
+
+
+def learn_mcp(slug):
+    """The tracker MCP server specs for a project: the one saved by `review learn --mcp`, else the one of its last tracker run."""
+    saved = (projects().get(slug) or {}).get("review_learn_mcp")
+    if saved:
+        return list(saved)
+    run = next((r for r in reversed(ledger()) if r.get("project") == slug and r.get("mcp")
+                and r.get("role") in ("review-learn", "tracker-discover")), None)
+    return list(run["mcp"]) if run else []
+
+
+def note_learn_unconfigured(slug, pr):
+    """No tracker/MCP for the project: one todo per PR, one line."""
+    ent = review_learned(slug).get(str(pr)) or {}
+    if ent.get("todo"):
+        return
+    n = new_todo(slug, f"learn from PR {pr}'s review comments: configure the tracker "
+                       f"(lean-agent review learn {slug} {pr} --mcp <server>)")
+    update_review_learned(slug, pr, todo=n)
+    print(f"review learn: no tracker configured for {slug}; todo #{n} added to learn from PR {pr}", flush=True)
+
+
+def learn_pr_in_background(slug, pr, thread=None, head=None):
+    """A PR is finished: start `review learn` for it once, detached, tagged with the thread. Never raises."""
+    try:
+        pr = str(pr)
+        if not review_learn_auto_on() or slug not in projects() or (review_learned(slug).get(pr) or {}).get("finished_at"):
+            return False
+        mcp = learn_mcp(slug)
+        if not mcp:
+            note_learn_unconfigured(slug, pr)
+            return False
+        update_review_learned(slug, pr, finished_at=now_iso(), head=head)
+        cmd = [sys.executable, os.path.abspath(__file__), "review", "learn", slug, pr, "--model", "sonnet"]
+        for m in mcp:
+            cmd += ["--mcp", m]
+        if head:
+            cmd += ["--head", head]
+        env = dict(os.environ, LEAN_AGENT_THREAD=thread or "none")
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, env=env)
+        print(f"review learn: started for PR {pr} of {slug} in the background", flush=True)
+        return True
+    except Exception as exc:  # a learning step never breaks the command it follows
+        print(f"review learn: not started ({exc})", file=sys.stderr)
+        return False
+
+
+def thread_pr_refs(tid):
+    """[(project, PR, head or None)] a thread's todos, runs and reviews refer to."""
+    out = []
+
+    def add(slug, pr, head=None):
+        if slug and pr and (slug, str(pr)) not in [(s, p) for s, p, _ in out]:
+            out.append((slug, str(pr), head))
+    for t in todos()["items"]:
+        if norm_thread_tag(t.get("thread")) == norm_thread_tag(tid):
+            add(t.get("project"), pr_of_ref(t.get("ref")), t.get("branch"))
+    for r in ledger():
+        if norm_thread_tag(r.get("thread")) == norm_thread_tag(tid):
+            m = PR_WORD_RE.search(str(r.get("task") or ""))
+            add(r.get("project"), m and (m.group(1) or m.group(2)), r.get("branch"))
+    for slug in projects():
+        for r in read_jsonl(reviews_path(slug)):
+            if norm_thread_tag(r.get("thread")) == norm_thread_tag(tid):
+                add(slug, pr_of_ref(r.get("ref")), r.get("branch"))
+    return out
+
+
+def learn_on_threads_closed(tids):
+    if not review_learn_auto_on():
+        return
+    for tid in tids:
+        try:
+            for slug, pr, head in thread_pr_refs(tid):
+                learn_pr_in_background(slug, pr, tid, head)
+        except Exception as exc:
+            print(f"review learn: skipped for {tid} ({exc})", file=sys.stderr)
+
+
+lean_threads.ON_CLOSE.append(learn_on_threads_closed)
+
+
+def learn_on_todo_done(num):
+    try:
+        t = next((x for x in todos()["items"] if str(x["id"]) == str(num).lstrip("#")), None)
+        pr = t and t.get("status") == "done" and pr_of_ref(t.get("ref"))
+        if pr:
+            learn_pr_in_background(t.get("project"), pr, t.get("thread"), t.get("branch"))
+    except Exception as exc:
+        print(f"review learn: skipped ({exc})", file=sys.stderr)
+
+
+def pr_for_branch(slug, path, head):
+    """The PR number of a branch: named in the ref (pull/N, pr-N), else a run of that branch whose task names a PR,
+    else a PR learned earlier for this head."""
+    br = bare_ref(head) if head else git(path, "rev-parse", "--abbrev-ref", "HEAD")
+    m = re.search(r"(?i)pull/(\d+)|(?:^|/)pr[-_/]?(\d+)\b", br or "")
+    if m:
+        return m.group(1) or m.group(2)
+    for pr, ent in review_learned(slug).items():
+        if br and isinstance(ent, dict) and ent.get("head") and bare_ref(ent["head"]) == br:
+            return pr
+    for t in reversed(todos()["items"]):
+        if t.get("project") == slug and br and bare_ref(t.get("branch")) == br and pr_of_ref(t.get("ref")):
+            return pr_of_ref(t["ref"])
+    for r in reversed(ledger()):
+        m = PR_WORD_RE.search(str(r.get("task") or ""))
+        if m and r.get("project") == slug and br and bare_ref(r.get("branch")) == br:
+            return m.group(1) or m.group(2)
+    return None
+
+
+def learn_before_review(a):
+    """Before a new review of a PR's branch: learn from its human comments not learned yet, in the foreground and bounded,
+    so the review uses the lessons. A tracker that can't be reached is one warning line."""
+    try:
+        if not review_learn_auto_on() or getattr(a, "status", False):
+            return
+        slug, path = resolve_project(a.project)
+        pr = pr_for_branch(slug, path, a.head)
+        if not pr:
+            return
+        ent = review_learned(slug).get(pr) or {}
+        if ent.get("finished_at") and ent.get("learned_at"):
+            return
+        if ent.get("learned_at") and time.time() - datetime.datetime.fromisoformat(ent["learned_at"]).timestamp() < LEARN_RECHECK_SECS:
+            return
+        mcp = learn_mcp(slug)
+        if not mcp:
+            note_learn_unconfigured(slug, pr)
+            return
+        print(f"review learn: reading new comments of PR {pr} before this review", flush=True)
+        cmd = [sys.executable, os.path.abspath(__file__), "review", "learn", slug, pr, "--model", "sonnet"]
+        for m in mcp:
+            cmd += ["--mcp", m]
+        if a.head:
+            cmd += ["--head", a.head]
+        try:
+            p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=LEARN_SYNC_TIMEOUT)
+            if p.returncode:
+                print(f"warning: review learn for PR {pr} failed (tracker unreachable?); reviewing without new lessons", flush=True)
+        except subprocess.TimeoutExpired:
+            print(f"warning: review learn for PR {pr} timed out; reviewing without new lessons", flush=True)
+    except Exception as exc:
+        print(f"warning: review learn skipped ({exc})", flush=True)
+
+
 def cmd_review_learn(a):
     slug, path = resolve_project(a.project)
     a.pr = a.pr or a.pr_id
@@ -3961,8 +4145,14 @@ def cmd_review_learn(a):
         helpers.append({"name": name.strip(), "where": where.strip() or "?", "what": what.strip()})
     if a.pr:
         if not a.mcp:
+            a.mcp = learn_mcp(slug)
+        if not a.mcp:
             die("reading a pull request's threads needs its tracker: --mcp <server>:<preset or tools> "
                 "(see: lean-agent mcp list)")
+        projs = projects()
+        if slug in projs and projs[slug].get("review_learn_mcp") != list(a.mcp):
+            projs[slug]["review_learn_mcp"] = list(a.mcp)
+            save_json(home("projects.json"), projs)
         last = next((r for r in reversed(list(read_jsonl(reviews_path(slug))))
                      if is_real_review(r) and (not a.head or r.get("ref") == a.head)), None)
         ours = "\n".join(f"- [{f.get('severity')}] {f.get('file')}: {f.get('issue')}"
@@ -3973,6 +4163,10 @@ def cmd_review_learn(a):
         lib = {c["id"]: c for c in load_cards(slug)}
         existing = "\n".join(lib[c]["text"] for c in REVIEW_CARDS if c in lib) or "(nothing yet)"
         seen_threads = load_json(home("reviews", slug + ".threads.json"), {}).get(str(a.pr)) or []
+        prev_learn = review_learned(slug).get(str(a.pr)) or {}
+        if prev_learn.get("last_comment_id"):
+            ours += (f"\n\nThe newest comment learned from so far: {prev_learn['last_comment_id']}. If nothing is newer, "
+                     "return empty lists.")
         if seen_threads:
             ours += ("\n\nThreads already learned from: " + ", ".join(map(str, seen_threads[:100])) + ". Fetch only "
                      "the others (by thread id if the tool takes one), unless one of these has new comments.")
@@ -3995,6 +4189,9 @@ def cmd_review_learn(a):
                 continue
             helpers.append(dict(h, where=where))
         replace = [r for r in got.get("replace") or [] if isinstance(r, dict)]
+        update_review_learned(slug, a.pr, learned_at=now_iso(), run=run and run.get("id"),
+                              last_comment_id=str(got["last_comment"]) if got.get("last_comment") else None,
+                              head=a.head)
         if got.get("threads_read"):
             tp = home("reviews", slug + ".threads.json")
             th = load_json(tp, {})
@@ -4462,6 +4659,7 @@ def cmd_review(a):
         die("review needs a project (or --costs)")
     if a.decide_gaps:
         return decide_gaps(a)
+    learn_before_review(a)
     rc = review_main(a)
     if getattr(a, "for_push", False) and not a.status:
         print("Before the push: fix everything this review found in ONE worker (or one worktree session), then run "
@@ -9280,6 +9478,20 @@ def cmd_config(a):
         print(f"review-max-rerounds: {review_max_rerounds()} · re-reviews of one branch's lineage before `review "
               "--resume` refuses (--force overrides)")
         return 0
+    if a.name == "review-learn-auto":
+        if a.value is not None:
+            if a.value.lower() not in ("on", "off", "default"):
+                die("review-learn-auto takes on, off or default")
+            cfg = config_json()
+            if a.value.lower() == "off":
+                cfg["review_learn_auto"] = False
+            else:
+                cfg.pop("review_learn_auto", None)
+            save_json(home("config.json"), cfg)
+        print(f"review-learn-auto: {'on' if review_learn_auto_on() else 'off'} \u00b7 lessons from a PR's review comments are learned "
+              "when the PR is finished (todo done, thread closed) and before a new review of it; "
+              "LEAN_AGENT_REVIEW_LEARN_AUTO=0 turns it off; `review learn` by hand always works")
+        return 0
     if a.name == "thread-reports":
         if a.value is not None:
             if a.value.lower() not in ("on", "questions-only", "off", "default"):
@@ -9579,7 +9791,10 @@ def open_todos(data=None):
 def cmd_todo(a):
     if a.action in ("add", "start", "done", "note", "rm", "reopen", "edit") or (a.action == "epic" and a.count):
         with file_lock(home("todo.json")):  # these read, change and rewrite todo.json (thread move retags it too)
-            return _cmd_todo(a)
+            rc = _cmd_todo(a)
+        if a.action == "done" and a.args and not rc:
+            learn_on_todo_done(a.args[0])
+        return rc
     return _cmd_todo(a)
 
 
@@ -11473,7 +11688,7 @@ def build_parser():
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "max-thread-sessions N (thread sessions the service runs; default 8), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
     s.add_argument("name", choices=["strict", "clear-at", "project-rules", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
-                                           "review-max-rerounds", "review-skip", "review-model", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel"])
+                                           "review-max-rerounds", "review-skip", "review-model", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)

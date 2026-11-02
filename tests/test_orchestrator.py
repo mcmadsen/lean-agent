@@ -7998,6 +7998,108 @@ class CliTest(unittest.TestCase):
         self.assertIn("deferOverlay (src/dialogs/overlayStore.ts)", rr["append"])
         self.assertIn("deferOverlay", self.calls()[-1]["append"])  # then its reuse entry is filled by the cheap run
 
+    def learn_runs(self):
+        try:
+            return [r for r in self.ledger() if r.get("role") == "review-learn"]
+        except OSError:
+            return []
+
+    def wait_learn_runs(self, n):
+        end = time.time() + scaled(30)
+        while time.time() < end and len(self.learn_runs()) < n:
+            time.sleep(0.1)
+        time.sleep(0.5)  # a second, wrongly started run would show up by now
+        return self.learn_runs()
+
+    def setup_learn_tracker(self):
+        self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        with open(os.path.join(self.proj, ".mcp.json"), "w") as fh:
+            json.dump({"mcpServers": {"tracker": {"command": "true"}}}, fh)
+        lesson = json.dumps({"checklist": ["Check the sibling dialogs too"], "threads_read": [1], "last_comment": "c9"})
+        self.fb = '{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-CHECKLIST ' + lesson
+        self.cli("review", "learn", "proj", "40", "--mcp", "tracker", FAKE_FEEDBACK=self.fb)
+
+    def test_review_learn_auto_at_todo_done_and_thread_close(self):
+        self.setup_learn_tracker()
+        self.assertEqual(1, len(self.learn_runs()))
+        learned = os.path.join(self.env["LEAN_AGENT_HOME"], "proj", "review-learned.json")
+        with open(learned) as fh:
+            self.assertEqual("c9", json.load(fh)["40"]["last_comment_id"])
+        self.cli("thread", "new", "PR work")
+        self.cli("todo", "add", "Fix dialogs", "-p", "proj", "--ref", "PR 43", LEAN_AGENT_THREAD="t1")
+        out = self.cli("todo", "done", "1", FAKE_FEEDBACK=self.fb).stdout
+        self.assertIn("started for PR 43", out)
+        runs = self.wait_learn_runs(2)
+        self.assertEqual(2, len(runs))
+        self.assertEqual("sonnet", runs[-1]["model"])
+        self.assertEqual("t1", runs[-1]["thread"])
+        self.assertIn("pull request 43", self.calls()[-1]["append"])
+        # done again / reopened / thread closed: the PR is not learned a second time
+        self.cli("todo", "reopen", "1")
+        self.cli("todo", "done", "1", FAKE_FEEDBACK=self.fb)
+        self.cli("thread", "close", "t1", FAKE_FEEDBACK=self.fb)
+        self.assertEqual(2, len(self.wait_learn_runs(3)))
+        # a thread with a PR in a todo, closed: one run for that PR
+        self.cli("thread", "new", "Other")
+        self.cli("todo", "add", "More", "-p", "proj", "--ref", "PR 44", LEAN_AGENT_THREAD="t2")
+        self.cli("thread", "close", "t2", FAKE_FEEDBACK=self.fb)
+        self.cli("thread", "reopen", "t2")
+        self.cli("thread", "close", "t2", FAKE_FEEDBACK=self.fb)
+        runs = self.wait_learn_runs(3)
+        self.assertEqual(3, len(runs))
+        self.assertIn("44", self.calls()[-1]["append"])
+
+    def test_review_learn_auto_off_and_no_tracker(self):
+        self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("todo", "add", "Fix", "-p", "proj", "--ref", "PR 50")
+        out = self.cli("todo", "done", "1").stdout
+        self.assertIn("todo #2 added to learn from PR 50", out)
+        self.cli("todo", "reopen", "1")
+        self.assertNotIn("todo #3", self.cli("todo", "done", "1").stdout)
+        todo = self.cli("todo", "list", "--all").stdout
+        self.assertEqual(1, todo.count("learn from PR 50's review comments: configure the tracker"))
+        self.assertEqual([], self.learn_runs())
+        # off: nothing happens, by config and by the environment
+        self.cli("config", "review-learn-auto", "off")
+        self.cli("todo", "add", "Fix", "-p", "proj", "--ref", "PR 51")
+        self.assertNotIn("review learn", self.cli("todo", "done", "3").stdout)
+        self.cli("config", "review-learn-auto", "on")
+        self.cli("todo", "add", "Fix", "-p", "proj", "--ref", "PR 52")
+        self.assertNotIn("review learn", self.cli("todo", "done", "4", LEAN_AGENT_REVIEW_LEARN_AUTO="0").stdout)
+        self.assertEqual([], self.learn_runs())
+
+    def test_review_learns_new_comments_first(self):
+        self.setup_learn_tracker()
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        g = lambda *a_: subprocess.run(["git", "-C", self.proj, "-c", "user.name=t", "-c", "user.email=t@t", *a_],
+                                       check=True, capture_output=True)
+        g("checkout", "-qb", "pr-77")
+        with open(os.path.join(self.proj, "x.txt"), "w") as fh:
+            fh.write("x\n")
+        g("add", "x.txt")
+        g("commit", "-qm", "x")
+        out = self.cli("review", "proj", "--head", "pr-77", "--second-opinion", "off", "--force", check=False,
+                       FAKE_REVIEW=approve, FAKE_FEEDBACK=self.fb).stdout
+        self.assertIn("reading new comments of PR 77 before this review", out)
+        self.assertEqual(2, len(self.learn_runs()))
+        self.assertTrue(any("Check the sibling dialogs too" in c["append"] and "Review checklist" in c["append"]
+                            for c in self.calls()))  # the review already had the lesson
+        out = self.cli("review", "proj", "--head", "pr-77", "--second-opinion", "off", "--force", check=False,
+                       FAKE_REVIEW=approve, FAKE_FEEDBACK=self.fb).stdout
+        self.assertNotIn("reading new comments", out)
+        self.assertEqual(2, len(self.learn_runs()))
+
+    def test_review_learn_before_review_tracker_unreachable_warns(self):
+        self.setup_learn_tracker()
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        subprocess.run(["git", "-C", self.proj, "checkout", "-qb", "pr-78"], check=True, capture_output=True)
+        out = self.cli("review", "proj", "--head", "pr-78", "--second-opinion", "off", "--force", check=False,
+                       FAKE_REVIEW=approve, FAKE_FEEDBACK='{"status": "failed", "used": [], "unneeded": [], "missing": ""}').stdout
+        self.assertIn("warning: review learn for PR 78 failed", out)
+        self.assertIn("REVIEW:", out)  # the review went on
+
     def test_review_learn_builds_checklist_cards(self):
         self.git_project()
         self.cli("learn", self.proj, "--name", "proj")
