@@ -9,16 +9,23 @@ import sys
 MESSAGE = ("lean-agent: you have used about 70% of your budget (context reads or turns). Commit your finished work "
            "now and write your summary soon; keep what is left for finishing, not for new exploration.")
 
+TIME_MESSAGE = ("lean-agent: about 80% of your time limit is gone and the run will be stopped at the limit. Commit your "
+                "work now (git add, git commit) and summarise: what is done, what is left. No new exploration.")
+
 
 def main():
-    flag = os.environ.get("LEAN_AGENT_WRAPUP_FLAG")
-    if not flag or not os.path.exists(flag) or os.path.exists(flag + ".sent"):
-        return 0
-    try:
-        open(flag + ".sent", "w").close()
-    except OSError:
-        return 0
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": MESSAGE}}))
+    notes = []
+    for var, message in (("LEAN_AGENT_WRAPUP_FLAG", MESSAGE), ("LEAN_AGENT_TIMEWARN_FLAG", TIME_MESSAGE)):
+        flag = os.environ.get(var)
+        if not flag or not os.path.exists(flag) or os.path.exists(flag + ".sent"):
+            continue
+        try:
+            open(flag + ".sent", "w").close()
+        except OSError:
+            continue
+        notes.append(message)
+    if notes:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": " ".join(notes)}}))
     return 0
 
 

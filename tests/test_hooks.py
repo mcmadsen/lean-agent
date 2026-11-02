@@ -1402,6 +1402,16 @@ class WrapupTest(Base):
         self.assertIn("Commit your finished work", out["hookSpecificOutput"]["additionalContext"])
         self.assertIsNone(run_hook("wrapup_hook.py", ev, **env))
 
+    def test_time_warning_is_sent_once_and_apart_from_the_budget_note(self):
+        flag = os.path.join(self.tmp.name, "timewarn.flag")
+        env = dict(self.env, LEAN_AGENT_TIMEWARN_FLAG=flag)
+        ev = {"tool_name": "Read", "tool_input": {}}
+        self.assertIsNone(run_hook("wrapup_hook.py", ev, **env))
+        open(flag, "w").close()
+        out = run_hook("wrapup_hook.py", ev, **env)
+        self.assertIn("80% of your time limit", out["hookSpecificOutput"]["additionalContext"])
+        self.assertIsNone(run_hook("wrapup_hook.py", ev, **env))
+
 
 if __name__ == "__main__":
     import gha_runner

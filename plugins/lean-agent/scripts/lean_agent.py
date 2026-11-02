@@ -1775,16 +1775,17 @@ def detach_run(workdir, run_id):
 EARLY_RUN = {}  # the run registered as the first step of `run`: {"id", "path"} until the real running marker replaces it
 
 
-def early_register(a, task):
+def early_register(a, task, prev=None):
     """A running marker (pid, thread, task) written before any preflight or worktree work, so a run that is killed with
     its session shows up as lost instead of missing."""
-    rid = datetime.datetime.now().strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
+    rid = (prev or {}).get("id") or datetime.datetime.now().strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
     tag = lean_threads.resolve_tag()
     path = home("running", rid + ".json")
-    fixed = {"id": rid, "project": a.project, "task": task[:300], "why": getattr(a, "why", None), "model": a.model,
+    project, model = a.project or (prev or {}).get("project"), a.model or (prev or {}).get("model")
+    fixed = {"id": rid, "project": project, "task": task[:300], "why": getattr(a, "why", None), "model": model,
              "thread": tag, "role": getattr(a, "role", None)}
     save_json(path, {"fixed": fixed, "pid": os.getpid(), "started": now_iso(), "run": rid, "task": task[:2000],
-                     "model": a.model, "project": a.project, "thread": tag, "role": getattr(a, "role", None),
+                     "model": model, "project": project, "thread": tag, "role": getattr(a, "role", None),
                      "early": True})
     EARLY_RUN.update(id=rid, path=path, fixed=fixed)
 
@@ -1813,6 +1814,17 @@ def early_settle(reason=None):
 FAILURE_HOOKS.append(early_settle)
 
 
+def check_allow_cmd(allow_cmd, read_only):
+    """--allow-cmd only goes with --read-only, and only for commands that read; a clear one-line refusal."""
+    if allow_cmd and not read_only:
+        die("--allow-cmd needs --read-only (other workers run any command): add --read-only or drop --allow-cmd")
+    for c in allow_cmd:
+        bad = set(re.findall(r"[a-z]+", c.lower())) & MUTATING_WORDS
+        if bad:
+            die(f"--allow-cmd {c!r}: {', '.join(sorted(bad))} changes something; a read-only worker only gets "
+                "commands that read (show, list, get, view, log)")
+
+
 def preflight_run_args(a, slug, project, read_only):
     """Every cheap argument check of a new run, before a worktree or its setup command exists: a refused start leaves
     nothing behind."""
@@ -1821,14 +1833,7 @@ def preflight_run_args(a, slug, project, read_only):
         missing = [x for x in (a.cards or "").split(",") if x and x not in ("none", "auto") and x not in lib]
         if missing:
             die(f"unknown card(s): {', '.join(missing)} (see: lean-agent cards {slug})")
-    allow_cmd = [c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()]
-    if allow_cmd and not read_only:
-        die("--allow-cmd is for --read-only workers (other workers run any command)")
-    for c in allow_cmd:
-        bad = set(re.findall(r"[a-z]+", c.lower())) & MUTATING_WORDS
-        if bad:
-            die(f"--allow-cmd {c!r}: {', '.join(sorted(bad))} changes something; a read-only worker only gets "
-                "commands that read (show, list, get, view, log)")
+    check_allow_cmd([c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()], read_only)
     base = getattr(a, "worktree_base", None)
     if base and getattr(a, "worktree", None):
         if base.startswith("origin/"):
@@ -1843,9 +1848,15 @@ def preflight_run_args(a, slug, project, read_only):
 def _cmd_run(a):
     if a.resume == "last":  # the latest run, so the command needs no `$(lean-agent runs --last)`
         a.resume = latest_run_id(ordinary=True)
+    if not a.resume:  # refused before anything starts (no marker, no worktree, no escalation)
+        check_allow_cmd([c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()], bool(getattr(a, "read_only", False)))
     if getattr(a, "escalate", None) and not a.resume:
         return run_escalating(a)
     prev = None
+    try:
+        run_seconds = run_timeout(getattr(a, "timeout", None))
+    except ValueError as exc:
+        die(f"--timeout: {exc}")
     if a.resume:
         prev = next((r for r in reversed(ledger()) if r["id"] == a.resume), None)
         if not prev or not prev.get("session_id"):
@@ -1858,8 +1869,7 @@ def _cmd_run(a):
         task = sys.stdin.read().strip()
     elif a.task_file:
         task = read_text(a.task_file).strip()
-    if not prev:
-        early_register(a, task)
+    early_register(a, task, prev)  # a resumed run is "running" again from here (runs --wait waits for it)
     if not task:
         die("no task given")
 
@@ -2018,13 +2028,7 @@ def _cmd_run(a):
                 t["status"] = "doing"
                 save_json(home("todo.json"), data)
     allow_cmd = (prev or {}).get("allow_cmd") or [c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()]
-    if allow_cmd and not read_only:
-        die("--allow-cmd is for --read-only workers (other workers run any command)")
-    for c in allow_cmd:
-        bad = set(re.findall(r"[a-z]+", c.lower())) & MUTATING_WORDS
-        if bad:
-            die(f"--allow-cmd {c!r}: {', '.join(sorted(bad))} changes something; a read-only worker only gets "
-                "commands that read (show, list, get, view, log)")
+    check_allow_cmd(allow_cmd, read_only)
     internal_cmd = list(getattr(a, "internal_cmd", None) or []) if not prev and read_only else []
     if (allow_cmd or internal_cmd) and not prev:  # tell the worker, now and on a resume (role.md is read again then)
         note = ("\nBesides read-only git you may run exactly these commands (and nothing else): "
@@ -2178,6 +2182,9 @@ def _cmd_run(a):
         print(line, flush=True)
 
     wt_lock = worktree_lock(slug, wt_name, read_only) if wt_name else contextlib.nullcontext()
+    watchers = [] if read_only or role else worktree_watchers(project)
+    if watchers:
+        print(f"lean-agent: {WATCHER_NOTE} ({', '.join(c[:50] for _, c in watchers[:3])})", flush=True)
     started = datetime.datetime.now()
     started_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     max_reads = 0 if role else (a.max_reads if getattr(a, "max_reads", None) is not None
@@ -2187,13 +2194,14 @@ def _cmd_run(a):
         if isinstance(rec, dict):
             save_json(home("running", running_key + ".json"), dict(rec, session_id=sid))
     env["LEAN_AGENT_WRAPUP_FLAG"] = os.path.join(workdir, "wrapup.flag")
-    for stale in ("wrapup.flag", "wrapup.flag.sent"):
+    env["LEAN_AGENT_TIMEWARN_FLAG"] = os.path.join(workdir, "timewarn.flag")
+    for stale in ("wrapup.flag", "wrapup.flag.sent", "timewarn.flag", "timewarn.flag.sent"):
         if os.path.exists(os.path.join(workdir, stale)):
             os.remove(os.path.join(workdir, stale))
     try:
         with wt_lock:
-            raw, err, reads = stream_worker(cmd, today_line() + "\n\n" + task, workdir, env,
-                                            env_num("LEAN_AGENT_RUN_TIMEOUT", 1800), max_reads, note_session,
+            raw, err, reads = stream_worker(cmd, today_line() + "\n\n" + (f"Note: {WATCHER_NOTE}.\n\n" if watchers else "") + task, workdir, env,
+                                            run_seconds, max_reads, note_session,
                                             cwd=project if native_rules else None, warn_turns=a.max_turns)
     except FileNotFoundError:
         die(f"'{claude}' not found on PATH")
@@ -2263,8 +2271,23 @@ def _cmd_run(a):
         if final_text:
             out["result"] = final_text
             summary, fb = parse_feedback(final_text)
+    timeout_dirty = None
+    if reads.get("timed_out") and not out.get("type"):  # killed by lean-agent's timer: keep what the stream showed
+        prior = out.get("usage") or {}
+        keep = prior if sum(prior.get(k, 0) or 0 for k in usage.FIELDS) > sum(reads["usage"].values()) else reads["usage"]
+        timeout_dirty = [] if read_only else (git(project, "status", "--porcelain") or "").splitlines()
+        summary = timeout_summary(run_seconds, reads, timeout_dirty)
+        fb = {}
+        out = {"subtype": "timeout", "session_id": reads.get("session_id"), "num_turns": reads["turns"], "usage": keep,
+               "is_error": True, "result": summary, "total_cost_usd": round(usage.estimate_usd(keep, model), 4)}
     subtype = out.get("subtype") or "error"
-    if subtype.startswith("error_max"):
+    if subtype == "timeout":
+        status = "timed out"
+        if timeout_dirty:
+            print(f"lean-agent: run {run_id} timed out with {len(timeout_dirty)} uncommitted file(s) in {project}: "
+                  f"resume it to commit and go on (lean-agent run --resume {run_id} \"commit what is finished, then "
+                  "continue\")", file=sys.stderr)
+    elif subtype.startswith("error_max"):
         status = "stopped:" + subtype[len("error_"):]
         dirty = (git(project, "status", "--porcelain") or "").splitlines() if wt_name or (prev or {}).get("worktree") else []
         if dirty:
@@ -2329,6 +2352,8 @@ def _cmd_run(a):
         "result_head": (summary or "")[:600],
         "details": details_path, "detached_warning": wt_warning,
     })
+    if status == "timed out":
+        entry.update(timed_out=True, timeout_seconds=run_seconds, cost_estimated=True, uncommitted=(timeout_dirty or [])[:30])
     append_jsonl(home("ledger.jsonl"), entry)  # the budget line below counts this run
     LAST_RUN[:] = [entry]
 
@@ -2346,13 +2371,15 @@ def _cmd_run(a):
         sys.stdout.close()
     sys.stdout = Tee(sys.stdout, os.path.join(workdir, f"summary-{len(glob.glob(os.path.join(workdir, 'summary-*.txt'))) + 1}.txt"),
                      on_close=finish)
-    lean_log.log("error" if entry["status"] in ("failed", "error") or entry["status"].startswith("stopped") else "debug",
+    lean_log.log("error" if entry["status"] in ("failed", "error", "timed out") or entry["status"].startswith("stopped") else "debug",
                  "run", f"{run_id} {slug} {model} {entry['status']} {entry.get('turns') or '?'} turns "
                  f"{entry.get('units', 0):,} sonnet-eq ${entry.get('cost_usd') or 0:.2f}"
                  f"{' role ' + role if role else ''}: {task[:160]!r}"
                  + (f"; worker said: {str(out.get('result') or '')[:300]!r}" if entry["status"] in ("failed", "error") else ""))
 
     cost = f"${entry['cost_usd']:.2f}" if isinstance(entry["cost_usd"], (int, float)) else "$?"
+    if entry.get("cost_estimated"):
+        cost = "~" + cost
     print(f"run {run_id} · {model} · {status} · {entry['turns'] or '?'} turns · {seconds}s · "
           f"{entry['units']:,} sonnet-eq tok · {cost}")
     detail(f"  tokens: input {u.get('input_tokens', 0):,} · cache write {u.get('cache_creation_input_tokens', 0):,}"
@@ -2411,6 +2438,10 @@ def _cmd_run(a):
               f"(~{reads['ctx'] // max(1, turns_n):,} per turn), past --max-reads {max_reads:,}. Split the task into "
               "smaller workers (one per file, item or question; -m haiku to gather, one more to combine), or let it "
               f"go on: lean-agent run --resume {run_id} --max-reads {max_reads * 2} \"continue\"")
+    elif status == "timed out":
+        print(f"TIMED OUT by lean-agent after {duration_text(run_seconds)}: the tokens and the partial summary above are "
+              f"kept. Go on: lean-agent run --resume {run_id} --timeout {duration_text(min(run_seconds * 2, RUN_TIMEOUT_MAX))} "
+              "\"commit what is finished, then continue\"")
     elif status in ("done", "partial") and turns_n >= 40 and ctx // max(1, turns_n) >= 60000:
         print(f"  heavy run: {turns_n} turns at ~{ctx // turns_n:,} context each. Next time split it into "
               "smaller parallel workers and one that combines their answers.")
@@ -2462,8 +2493,8 @@ def failure_reason(status, out, err, raw):
     return sub or "no result from the worker"
 
 
-def note_progress(workdir, turn, msg, u):
-    """One line per worker turn in progress.jsonl (what it did, its context), for watching a run while it runs."""
+def msg_steps(msg):
+    """What one assistant message did: `Tool: what` per tool call and `says: text`, each cut short."""
     steps = []
     for c in msg.get("content") or []:
         if not isinstance(c, dict):
@@ -2475,6 +2506,12 @@ def note_progress(workdir, turn, msg, u):
             steps.append(f"{c.get('name')}: {' '.join(what.split())[:140]}")
         elif c.get("type") == "text" and str(c.get("text") or "").strip():
             steps.append("says: " + " ".join(str(c["text"]).split())[:140])
+    return steps
+
+
+def note_progress(workdir, turn, msg, u):
+    """One line per worker turn in progress.jsonl (what it did, its context), for watching a run while it runs."""
+    steps = msg_steps(msg)
     ctx = usage.context_tokens(u)
     try:
         with open(os.path.join(workdir, "progress.jsonl"), "a") as fh:
@@ -2536,6 +2573,10 @@ def record_unauth_card(server, slug):
 
 
 WRAPUP_AT = 0.7
+TIME_WARN_AT = 0.8  # of the run timeout: the worker is told to commit and summarise
+RUN_TIMEOUT_DEFAULT = 1800
+RUN_TIMEOUT_MAX = 12 * 3600
+RUN_TIMEOUT_MIN = 30
 
 
 def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd=None, warn_turns=0):
@@ -2546,7 +2587,7 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
     import tempfile
     import threading
     reads = {"ctx": 0, "turns": 0, "usage": {k: 0 for k in usage.FIELDS}, "session_id": None, "stopped": False,
-             "unauth": None}
+             "unauth": None, "timed_out": False, "last_text": "", "last_tools": []}
     seen, lines, mcp_tools, mcp_denied = set(), [], {}, {}
     with tempfile.TemporaryFile("w+") as errf:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True,
@@ -2558,6 +2599,18 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
             proc.kill()
         timer = threading.Timer(timeout, on_timer)
         timer.start()
+        time_flag = env.get("LEAN_AGENT_TIMEWARN_FLAG")
+
+        def on_time_warn():  # ~80% of the time is gone: the worker's next tool call carries the note (wrapup_hook.py)
+            try:
+                open(time_flag, "w").close()
+                print(f"worker at ~{int(TIME_WARN_AT * 100)}% of its time limit ({timeout:g} s): told to commit and "
+                      "write its summary", flush=True)
+            except OSError:
+                pass
+        warn_timer = threading.Timer(timeout * TIME_WARN_AT, on_time_warn) if time_flag and timeout else None
+        if warn_timer:
+            warn_timer.start()
         try:
             try:
                 proc.stdin.write(prompt)
@@ -2588,6 +2641,12 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
                     seen.add(msg.get("id"))
                     u = msg["usage"]
                     reads["turns"] += 1
+                    for step in msg_steps(msg):
+                        if step.startswith("says: "):
+                            reads["last_text"] = " ".join(str(c.get("text") or "") for c in msg.get("content") or []
+                                                          if isinstance(c, dict) and c.get("type") == "text").strip()
+                        else:
+                            reads["last_tools"] = (reads["last_tools"] + [step])[-5:]
                     note_progress(workdir, reads["turns"], msg, u)
                     for k in usage.FIELDS:
                         reads["usage"][k] += int(u.get(k) or 0)
@@ -2614,9 +2673,12 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
             proc.wait()
         finally:
             timer.cancel()
+            if warn_timer:
+                warn_timer.cancel()
         errf.seek(0)
         err = errf.read()
     if timed_out:
+        reads["timed_out"] = True
         err = (err + f"\ntimed out after {timeout:g} s").strip()
     elif proc.returncode < 0 and not reads["stopped"] and not reads["unauth"]:
         n = -proc.returncode
@@ -2630,6 +2692,20 @@ LAST_RUN = []  # the entry of the run this process made last
 
 FINAL_TURN_PROMPT = ("You are out of budget and must stop now. Do not read or explore anything more. Commit your "
                      "finished work (git add, git commit) and reply with a short summary: what is done, what is left.")
+
+
+def timeout_summary(seconds, reads, dirty):
+    """The partial summary of a run lean-agent stopped at its time limit: the worker's last words and tool calls."""
+    lines = [f"Timed out after {duration_text(seconds)} ({reads['turns']} turns); no final report. Partial summary:"]
+    if reads.get("last_text"):
+        lines.append("last said: " + reads["last_text"][:1500])
+    if reads.get("last_tools"):
+        lines.append("last tool calls:")
+        lines += [f"- {t}" for t in reads["last_tools"]]
+    if dirty:
+        lines.append(f"uncommitted in the worktree: {len(dirty)} file(s)")
+        lines += [f"  {d}" for d in dirty[:15]] + ([f"  … {len(dirty) - 15} more"] if len(dirty) > 15 else [])
+    return "\n".join(lines)
 
 
 def final_turn(cmd, session_id, workdir, env, cwd, reads, out):
@@ -4587,6 +4663,27 @@ def skip_reason(slug, path, label, mode, sha, mb, base):
         # a release branch is waved through only while it just takes version bumps, merges and docs
         return "branch " + sorted(names)[0] if any(checks[c]() for c in ("version-bump", "merge-only", "docs-only")) else ""
     return next((c for c in classes if checks[c]()), "")
+
+
+def run_timeout(value=None):
+    """The run timeout in seconds: `run --timeout` (e.g. 45m, 2h), else LEAN_AGENT_RUN_TIMEOUT (seconds), else the
+    run-timeout config, else 30m. A value that is not a duration, or is below 30 s or above 12 h, raises ValueError."""
+    if value in (None, ""):
+        value = os.environ.get("LEAN_AGENT_RUN_TIMEOUT")
+        if value not in (None, ""):
+            return env_num("LEAN_AGENT_RUN_TIMEOUT", RUN_TIMEOUT_DEFAULT, float)
+        value = config_json().get("run_timeout")
+        if value in (None, ""):
+            return RUN_TIMEOUT_DEFAULT
+    secs = lean_common.parse_duration(value)
+    if not RUN_TIMEOUT_MIN <= secs <= RUN_TIMEOUT_MAX:
+        raise ValueError(f"run timeout {value!r} is outside {RUN_TIMEOUT_MIN} s .. {RUN_TIMEOUT_MAX // 3600} h")
+    return secs
+
+
+def duration_text(secs):
+    secs = int(secs)
+    return f"{secs // 3600}h{secs % 3600 // 60:02d}m" if secs >= 3600 else f"{secs // 60}m" if secs >= 120 else f"{secs}s"
 
 
 def review_max_rerounds():
@@ -7785,6 +7882,25 @@ def run_summary_files(r, prefix="summary", ext="txt"):
     return files
 
 
+def full_report(r):
+    """The worker's whole final report of a run (what it answered, with the part that went to the details file),
+    else its details file; None when neither was saved."""
+    path = os.path.join(r.get("workdir") or "", "result.json")
+    if os.path.exists(path):
+        for line in reversed(read_text(path).splitlines()):
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(ev, dict) and str(ev.get("result") or "").strip():
+                body = parse_feedback(ev["result"])[0].strip()
+                if body:
+                    return body + "\n"
+            break
+    det = run_summary_files(r, "details", "md")
+    return read_text(det[-1]) if det else None
+
+
 def run_line_from_ledger(r):
     cost = f"${r['cost_usd']:.2f}" if isinstance(r.get("cost_usd"), (int, float)) else "$?"
     return (f"run {r['id']} · {r['model']} · {r['status']} · {r.get('turns') or '?'} turns · "
@@ -7981,11 +8097,11 @@ def cmd_runs(a):
             mark_collected(r["id"])
             return
         if a.details:
-            det = run_summary_files(r, "details", "md")
-            if not det:
-                die(f"run {r['id']} has no details file (its whole answer is in `lean-agent runs --show {r['id']}`)")
-            files = det
-        text = read_text(files[-1])
+            text = full_report(r)
+            if text is None:
+                die(f"run {r['id']} has no report saved (its whole answer is in `lean-agent runs --show {r['id']}`)")
+        else:
+            text = read_text(files[-1])
         mark_collected(r["id"])
         if a.tail:
             text = "".join(text.splitlines(True)[-a.tail:])
@@ -7996,7 +8112,12 @@ def cmd_runs(a):
             text = "".join(l for l in text.splitlines(True)
                            if l.startswith(("run ", "  tokens:", "  context per turn", "  mcp:", "  budget left")))
         sys.stdout.write(text)
-        if len(files) > 1:
+        if r.get("status") == "timed out" and not a.details:
+            dirty = (git(r["project_path"], "status", "--porcelain") or "").splitlines() if r.get("project_path") else []
+            print(f"uncommitted now in {r.get('project_path')}: " + (f"{len(dirty)} file(s)" if dirty else "nothing"))
+            for d in dirty[:20]:
+                print(f"  {d}")
+        if len(files) > 1 and not a.details:
             print(f"({len(files)} turns of this run; this is the latest: {files[-1]})")
         return
     if a.last:
@@ -9568,6 +9689,22 @@ def cmd_config(a):
         print(f"review-model: {config_json().get('review_model') or 'auto'} · auto picks sonnet for re-reviews, docs/test-only "
               "and small diffs, opus for large or security-sensitive first reviews; --reviewer-model overrides")
         return 0
+    if a.name == "run-timeout":
+        if a.value is not None:
+            if a.value.lower() != "default":
+                try:
+                    run_timeout(a.value)
+                except ValueError as exc:
+                    die(str(exc))
+            cfg = config_json()
+            if a.value.lower() == "default":
+                cfg.pop("run_timeout", None)
+            else:
+                cfg["run_timeout"] = a.value.lower()
+            save_json(home("config.json"), cfg)
+        print(f"run-timeout: {duration_text(run_timeout())} \u00b7 how long a worker may run before lean-agent stops it "
+              "(`run --timeout DUR` per run; 45m, 2h; 30 s to 12 h; default 30m). At 80% the worker is told to commit and summarise")
+        return 0
     if a.name == "review-max-rerounds":
         if a.value is not None:
             if not a.value.isdigit() and a.value.lower() != "default":
@@ -10593,7 +10730,7 @@ def report_orphaned_run(tid, run_id, status, summary):
         if not tid or tid not in lean_threads.load()["threads"] or service_session.alive(tid):
             return
         first = next((ln.strip() for ln in str(summary or "").splitlines() if ln.strip()), "")
-        bad = status in ("failed", "error") or status.startswith("stopped")
+        bad = status in ("failed", "error", "timed out") or status.startswith("stopped")
         service_session.queue_report(tid, "blocked" if bad else "done", f"run {run_id} {status}" + (f": {first[:200]}" if first else ""))
     except Exception:
         pass
@@ -11382,6 +11519,7 @@ Answer with at most 15 lines, the first one exactly `ADVICE`, then one short lin
 `risks:` open review gaps on that branch, a decision that contradicts the request, a run still working on it, and any
   "Known issues" listed in the task that apply (say what to do first, e.g. the fix it names) (or none)
 `ask the user first:` `yes: <the question>`, `user already asked: proceed`, or `no`; an ambiguous request is always `yes`
+`--allow-cmd` only goes with `--read-only`: never put it in a command for a worker that edits.
 Pick the cheapest model that fits (haiku for reading, sonnet for edits, opus only for hard design). No other text.
 """
 ADVICE_KEEP = 50
@@ -11497,6 +11635,13 @@ def shape_advice(lines, limit=15):
     return "\n".join((head + rest)[:limit])
 
 
+def fix_allow_cmd(line):
+    """An advised `run` command that has --allow-cmd gets --read-only too (the run refuses it otherwise)."""
+    if "--allow-cmd" in line and "--read-only" not in line:
+        return line.replace("--allow-cmd", "--read-only --allow-cmd", 1)
+    return line
+
+
 def cmd_advise(a):
     """Ask a cheap read-only worker what to do with a new request; prints (and stores) its short ADVICE block."""
     what = sys.stdin.read().strip() if a.task_file == "-" else read_text(a.task_file).strip() if a.task_file \
@@ -11526,7 +11671,7 @@ def cmd_advise(a):
     if start is None:
         print(out, file=sys.stderr)
         die("the advisor didn't answer with an ADVICE block; see its reply above", rc or 1)
-    block = [l for l in lines[start:start + 16] if l.strip()]
+    block = [fix_allow_cmd(l) for l in lines[start:start + 16] if l.strip()]
     text = shape_advice(block)
     if rule_lines:
         text = "\n".join(rule_lines) + "\n" + text
@@ -11909,9 +12054,9 @@ def build_parser():
     s.set_defaults(fn=cmd_advise)
 
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
-                       "max-thread-sessions N (thread sessions the service runs; default 8), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
+                       "max-thread-sessions N (thread sessions the service runs; default 8), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
     s.add_argument("name", choices=["strict", "clear-at", "project-rules", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
-                                           "review-max-rerounds", "review-skip", "review-model", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel"])
+                                           "review-max-rerounds", "review-skip", "review-model", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)
@@ -12024,6 +12169,9 @@ def build_parser():
                    "works on (an open item becomes doing)")
     s.add_argument("--allow-cmd", action="append", metavar="PREFIX", help="--read-only: also allow this read-only "
                    "command prefix, e.g. \"az pipelines runs show\" (repeatable; commands that change things are refused)")
+    s.add_argument("--timeout", metavar="DUR", help="stop the worker after this long, e.g. 45m or 2h (30 s to 12 h; default the "
+                   "run-timeout config, 30m). At 80%% it is told to commit and summarise; on a timeout the run keeps its "
+                   "tokens and a partial summary and is marked timed out")
     s.add_argument("--max-reads", type=int, metavar="TOKENS", help="stop the worker once it has re-read this many "
                    "context tokens over all its calls (default LEAN_AGENT_RUN_MAX_READS, 6,000,000; 0 = no limit)")
     s.add_argument("--answer-lines", type=int, metavar="N", help="the worker answers in at most N lines and puts "
@@ -12653,10 +12801,86 @@ def task_output_ends(path, n=20):
     return "\n".join(dec(head) + [f"… the middle is not shown ({size:,} bytes in {path})"] + dec(tail[-n:])) + "\n"
 
 
+WATCHER_RE = re.compile(r"\bdotnet\s+watch\b|\b(?:npm|yarn|pnpm|bun)\s+(?:run\s+)?(?:dev|watch)\b|\bvite\b|\bnext\s+dev\b"
+                        r"|\bwebpack(?:-dev-server)?\b.*(?:--watch|\bserve\b)|\bnodemon\b", re.I)
+WATCHER_NOTE = ("a watcher is running in this worktree: builds there may conflict; use a separate worktree for builds")
+
+
+def process_cwds(pids):
+    """{pid: cwd} for the given pids: /proc/<pid>/cwd on Linux, lsof on macOS. Best effort."""
+    out = {}
+    for pid in pids:
+        try:
+            out[pid] = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            pass
+    rest = [p for p in pids if p not in out]
+    if rest and shutil.which("lsof"):
+        try:
+            res = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(map(str, rest))],
+                                 capture_output=True, text=True, timeout=3, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired):
+            return out
+        cur = None
+        for line in res.stdout.splitlines():
+            if line.startswith("p") and line[1:].isdigit():
+                cur = int(line[1:])
+            elif line.startswith("n") and cur:
+                out[cur] = line[1:]
+    return out
+
+
+def worktree_watchers(path):
+    """The dev servers / file watchers (dotnet watch, npm run dev, vite, next dev, webpack --watch, ...) whose working
+    directory is inside `path`, as [(pid, command)]. Best effort and quick: [] when ps or the cwd cannot be read."""
+    try:
+        res = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=3,
+                             stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    found = {}
+    for line in res.stdout.splitlines():
+        pid, _, cmd = line.strip().partition(" ")
+        if pid.isdigit() and int(pid) != os.getpid() and WATCHER_RE.search(cmd) and "lean-agent" not in cmd \
+                and not cmd.lstrip().startswith(("ps ", "grep ", "rg ")):
+            found[int(pid)] = cmd.strip()
+    root = os.path.realpath(path)
+    return [(pid, found[pid]) for pid, cwd in sorted(process_cwds(list(found)).items())
+            if os.path.realpath(cwd) == root or os.path.realpath(cwd).startswith(root + os.sep)]
+
+
+def resumed_output(path, n=20):
+    """For a background `run --resume` task: the output from its own `started (resumed)` line on (not what an earlier
+    attempt printed before it), with the new result appended when the run has finished and the file lacks it, or a
+    pointer when it still runs. None when the file holds no resumed run."""
+    with open(path, "rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
+        fh.seek(max(0, size - 4 * TASK_OUTPUT_CHUNK))
+        text = fh.read().decode("utf-8", "replace")
+    marks = list(re.finditer(r"^run (\S+) started .*\(resumed\).*$", text, re.M))
+    if not marks:
+        return None
+    rid = marks[-1].group(1)
+    text = text[marks[-1].start():].rstrip("\n") + "\n"
+    if rid in {x for x, _ in live_runs()}:
+        text += f"(still running: lean-agent runs --wait {rid})\n"
+    else:
+        r = next((x for x in reversed(ledger()) if x["id"] == rid), None)
+        files = run_summary_files(r) if r else []
+        if files:
+            result = read_text(files[-1])
+            if result.splitlines()[:1] and result.splitlines()[0] not in text:
+                text += result
+    lines = text.splitlines()
+    if len(lines) > 2 * n:
+        lines = lines[:n] + [f"… {len(lines) - 2 * n} lines not shown (lean-agent runs --show {rid})"] + lines[-n:]
+    return "\n".join(lines) + "\n"
+
+
 def cmd_output(a):
     task_file = claude_task_output(a.command)
     if task_file:  # a background task's output file: its start and end (the middle is in the file itself)
-        sys.stdout.write(task_output_ends(task_file))
+        sys.stdout.write(resumed_output(task_file) or task_output_ends(task_file))
         return 0
     path = home("output", f"{a.command}.txt")
     if not os.path.exists(path):

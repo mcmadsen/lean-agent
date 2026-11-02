@@ -380,6 +380,14 @@ def model_rate(model):
     return 1.0
 
 
+def estimate_usd(usage_dict, model):
+    """A rough USD cost from token counts at the model's input price (for a run that ended without a result event)."""
+    m = (model or "").lower()
+    m = ALIASES.get(m.split("[")[0], m)
+    price = next((p for prefix, p in PRICE_PER_MTOK if m.startswith(prefix)), SONNET_PRICE)
+    return weighted(usage_dict) * price / 1e6
+
+
 def units(usage_dict, model):
     """Sonnet-equivalent tokens: weighted tokens scaled by the model's price."""
     return weighted(usage_dict) * model_rate(model)
