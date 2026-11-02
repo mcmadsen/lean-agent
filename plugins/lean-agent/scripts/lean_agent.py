@@ -6587,23 +6587,28 @@ def cmd_memory(a):
         print((f"merged {len(groups)} cluster(s)" if a.apply else f"{len(groups)} cluster(s); run again with --apply to merge")
               if groups else "no near-duplicate memories")
         return
-    if a.action == "edit":
-        if not a.text or not a.new_text:
-            die('memory edit needs the memory name and the new text: lean-agent memory edit <name> "<text>"')
-        if not lean_memory.edit(store, a.text, a.new_text, mtype=a.type, description=a.name):
-            die(f"no memory {a.text!r} (see: lean-agent memory list)")
+    if a.action in ("edit", "rm"):
+        if not a.text or (a.action == "edit" and not a.new_text):
+            die('memory edit needs the memory name and the new text: lean-agent memory edit <name> "<text>"'
+                if a.action == "edit" else "memory rm needs the memory name (file name without .md)")
+        m, cands = lean_memory.resolve(store, a.text)
+        if not m:
+            if cands:
+                die(f"{a.text!r} matches {len(cands)} memories, give more of the name:\n"
+                    + "\n".join("  mem-" + slugify(c["stem"], 200) for c in cands[:10]))
+            die(f"no memory {a.text!r}; nothing changed (see: lean-agent memory list; `memory add` creates one)")
+        if a.action == "rm":
+            if not lean_memory.remove(store, m["stem"]):
+                die(f"no memory {a.text!r}")
+            heal_and_sync()
+            print(f"removed {m['stem']}")
+            return
+        if len(a.new_text.strip()) < 10 and not getattr(a, "force", False):
+            die(f"the new text is only {len(a.new_text.strip())} characters; it would replace the body of {m['stem']}. "
+                "Add --force if that is intended")
+        lean_memory.edit(store, m["stem"], a.new_text, mtype=a.type, description=a.name)
         heal_and_sync()
-        print(f"updated {a.text}")
-        return
-    if a.action == "rm":
-        if not a.text:
-            die("memory rm needs the memory name (file name without .md)")
-        stem = a.text[4:] if a.text.startswith("mem-") else a.text
-        matches = [m["stem"] for m in lean_memory.read_all(store) if slugify(m["stem"], 40) == slugify(stem, 40)]
-        if not matches or not lean_memory.remove(store, matches[0]):
-            die(f"no memory {a.text!r}")
-        heal_and_sync()
-        print(f"removed {matches[0]}")
+        print(f"updated {m['stem']}")
         return
     mems = lean_memory.read_all(store)
     if a.project:
@@ -6613,7 +6618,7 @@ def cmd_memory(a):
         return
     for m in mems:
         sc = "" if m["scope"] == lean_memory.GLOBAL else f" [{m['scope']}]"
-        print(f"mem-{slugify(m['stem'], 40):<44}{m['type']:<10}{est_tokens(m['body']):>5} tok{sc}  {(m['description'] or m['name'])[:60]}")
+        print(f"mem-{slugify(m['stem'], 200)}  {m['type']:<10}{est_tokens(m['body']):>5} tok{sc}  {(m['description'] or m['name'])[:60]}")
     print(f"{len(mems)} memories in {store}")
 
 
@@ -11827,7 +11832,7 @@ def build_parser():
 
     s = sub.add_parser("memory", help="shared memory: where | import | list | add | edit | rm | dedupe | restore")
     s.add_argument("action", choices=["where", "import", "list", "add", "edit", "rm", "dedupe", "restore"])
-    s.add_argument("text", nargs="?", help="add: the memory text; edit/rm/restore: the memory's name")
+    s.add_argument("text", nargs="?", help="add: the memory text; edit/rm/restore: the memory's name (a unique prefix is enough)")
     s.add_argument("new_text", nargs="?", help="edit: the new text")
     s.add_argument("--project", "-p", help="scope to a project (default: global)")
     s.add_argument("--type", choices=lean_memory.TYPES, help="add: memory type (default project)")
@@ -11835,6 +11840,7 @@ def build_parser():
     s.add_argument("--from", dest="source", metavar="DIR", help="import: folder to import (default: Claude's)")
     s.add_argument("--apply", action="store_true", help="dedupe: merge the duplicate clusters (default: list them)")
     s.add_argument("--topics", action="store_true", help="dedupe: group memories about the same subject and consolidate them")
+    s.add_argument("--force", action="store_true", help="edit: allow a body shorter than 10 characters")
     s.set_defaults(fn=cmd_memory)
 
     s = sub.add_parser("limits", help="usage in your plan's session and weekly windows; budgets for agents")

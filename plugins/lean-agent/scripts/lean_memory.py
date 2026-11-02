@@ -336,6 +336,23 @@ def edit(d, ref, text=None, mtype=None, description=None, scope=None):
     return m["file"]
 
 
+def resolve(d, ref):
+    """(memory, candidates): the memory `ref` names exactly, or the one it is a unique prefix of; else (None, matches)."""
+    m = find(d, ref)
+    if m:
+        return m, []
+    key = re.sub(r"[^a-z0-9]+", "-", (ref[4:] if ref.startswith("mem-") else ref).lower()).strip("-")
+    if not key:
+        return None, []
+    hits = []
+    for x in read_all(d):
+        names = {re.sub(r"[^a-z0-9]+", "-", n.lower()).strip("-") for n in (x["stem"], x["name"])}
+        names |= {n[len(x["type"]) + 1:] for n in list(names) if n.startswith(x["type"] + "-")}
+        if any(n.startswith(key) for n in names):
+            hits.append(x)
+    return (hits[0], []) if len(hits) == 1 else (None, hits)
+
+
 @_locked
 def remove(d, stem):
     path = os.path.join(d, stem + ".md")

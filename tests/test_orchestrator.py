@@ -4778,6 +4778,30 @@ class CliTest(unittest.TestCase):
         self.assertIn("doctor: all good", self.cli("doctor", self.proj, **env).stdout)
         self.assertIn("lean-agent:precedence", open(os.path.join(self.tmp.name, "CLAUDE.md")).read())
 
+    def test_memory_edit_rm_prefix_and_refusals(self):
+        self.cli("memory", "add", "Prefer small reviewable changes always.", "--type", "feedback", "--name", "small-changes-please-review-first-and-often-in-every-single-case")
+        self.cli("memory", "add", "Prefer small commits when possible.", "--type", "feedback", "--name", "small-commits-please")
+        listing = self.cli("memory", "list").stdout
+        stem = [f[:-3] for f in os.listdir(os.path.join(self.env["LEAN_AGENT_HOME"], "memory")) if f.startswith("feedback") and "changes" in f][0]
+        self.assertIn("mem-" + stem.replace("_", "-"), listing)  # the full file-derived name
+        before = self.cli("memory", "list").stdout
+        bad = self.cli("memory", "edit", "no-such-dummy", "Some long enough text here.", check=False)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertEqual(self.cli("memory", "list").stdout, before)  # unknown name creates and overwrites nothing
+        amb = self.cli("memory", "edit", "feedback-small", "Some long enough text here.", check=False)
+        self.assertNotEqual(amb.returncode, 0)
+        self.assertIn("small-commits-please", amb.stderr + amb.stdout)
+        short = self.cli("memory", "edit", "small-commits", "x", check=False)
+        self.assertNotEqual(short.returncode, 0)
+        self.assertIn("--force", short.stderr + short.stdout)
+        self.cli("memory", "edit", "small-commits", "Prefer small commits, always.")  # unique prefix
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "memory", [f for f in os.listdir(os.path.join(self.env["LEAN_AGENT_HOME"], "memory")) if "commits" in f][0])) as fh:
+            self.assertIn("always.", fh.read())
+        self.cli("memory", "edit", "small-commits", "x", "--force")
+        self.assertNotEqual(self.cli("memory", "rm", "feedback-small", check=False).returncode, 0)
+        self.cli("memory", "rm", "small-changes")
+        self.assertNotIn("small-changes", self.cli("memory", "list").stdout)
+
     def test_memory_and_card_edits_persist(self):
         self.cli("learn", self.proj, "--name", "proj")
         self.cli("memory", "add", "Prefer small PRs.", "--type", "feedback", "--name", "feedback_small-prs")
