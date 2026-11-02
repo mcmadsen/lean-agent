@@ -1430,14 +1430,45 @@ def advise_rules(slug, path):
     return lines
 
 
-def task_rule_warnings(cards, task):
-    """Warn (no refusal) when the task text itself names a tool that a rule forbids, as a whole word."""
+COMMON_TARGETS = set(lean_rules.STOP) | {
+    "polling", "poll", "new", "build", "builds", "fetch", "fetching", "be", "update", "updates", "updating", "while",
+    "unrelated", "azure", "get", "set", "make", "do", "does", "done", "add", "remove", "delete", "create", "check",
+    "read", "write", "open", "close", "start", "stop", "send", "push", "pull", "merge", "change", "changes", "file",
+    "files", "code", "data", "work", "working", "task", "tasks", "one", "all", "any", "other", "same", "way", "ways",
+    "thing", "things", "git", "shell", "script", "scripts", "api", "web", "local", "remote", "main", "default",
+    "old", "existing", "real", "separate", "different", "extra", "full", "long", "short", "wait", "waiting", "retry",
+    "loop", "loops", "sleep", "time", "now", "before", "after", "so", "not", "no", "is", "are", "was", "has", "have",
+    "can", "will", "should", "would", "you", "your", "we", "i", "he", "she", "they", "what", "which", "how", "why"}
+
+
+def _target_strength(c, t):
+    """0 when the rule target is too generic to warn on, else how specific it is (higher = stronger)."""
+    words = [w for w in re.split(r"[\s_]+", t.lower()) if w]
+    if len(t) < 3 or not words or all(w in COMMON_TARGETS for w in words):
+        return 0
+    score = 1 + (len(words) > 1) + bool(re.search(r"[-./:]", t)) + bool(c.get("alternative"))
+    return score + (len(t) >= 6)
+
+
+def task_rule_warnings(cards, task, limit=2):
+    """Warn (no refusal) when the task names the target of a rule (an MCP server, branch, repo, named system or
+    multi-word phrase) as a whole word. Generic words and common verbs never match; at most `limit` warnings, the
+    most specific rule first. `cards` are the run's project cards."""
+    hits = []
     for c in cards:
-        for t in (c.get("targets") or []) if c.get("is_rule") else []:
-            if re.search(r"(?<![\w-])" + re.escape(t) + r"(?![\w-])", task, re.I):
-                print(f"lean-agent: warning: the task asks for {t}, which rule {c['id']} forbids: "
-                      f"{lean_rules.rule_line(c)}", file=sys.stderr)
-                break
+        if not c.get("is_rule"):
+            continue
+        best = None
+        for t in c.get("targets") or []:
+            st = _target_strength(c, t)
+            if st and re.search(r"(?<![\w-])" + re.escape(t) + r"(?![\w-])", task, re.I) and (not best or st > best[0]):
+                best = (st, t)
+        if best:
+            hits.append((best[0], best[1], c))
+    hits.sort(key=lambda h: -h[0])
+    for _, t, c in hits[:limit]:
+        print(f"lean-agent: warning: the task asks for {t}, which rule {c['id']} forbids: "
+              f"{lean_rules.rule_line(c)}", file=sys.stderr)
 
 
 def resolve_mcp(project, specs):

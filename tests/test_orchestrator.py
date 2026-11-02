@@ -10168,6 +10168,32 @@ class RuleUnitTest(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, True)
 
+    def test_task_rule_warnings_ignore_generic_words_and_cap_at_two(self):
+        import lean_agent
+        texts = ["Never use polling to wait; use webhooks.", "Don't use new branches for fixes.",
+                 "Do not use build scripts for releases.", "Never use the tracker MCP server; use trackercli.",
+                 "Avoid using the legacy-billing system.", "Never use fetch while offline.",
+                 "Do not use the staging-db database.", "Never use update to sync."]
+        cards = []
+        for i, tx in enumerate(texts):
+            c = self.rules.classify(tx, "project")
+            cards.append({"id": f"r{i}", "is_rule": True, "text": tx, "title": tx, "targets": c["targets"],
+                          "alternative": c["alternative"]})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            lean_agent.task_rule_warnings(cards, "Add a new build step that fetches data while polling for an update, unrelated to azure")
+        self.assertEqual(err.getvalue(), "")
+        with contextlib.redirect_stderr(err):
+            lean_agent.task_rule_warnings(cards, "use the tracker to list items, also check legacy-billing and staging-db")
+        lines = err.getvalue().strip().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("tracker", lines[0])  # the rule with an alternative is the strongest
+        self.assertIn("legacy-billing", lines[1])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            lean_agent.task_rule_warnings(cards, "use the tracker to list items")
+        self.assertIn("asks for tracker", err.getvalue())
+
     def test_classification_finds_targets_and_the_alternative(self):
         c = self.rules.classify("Never use the tracker MCP server; use trackercli instead.", "project")
         self.assertEqual((c["rule"], c["targets"], c["alternative"]), (True, ["tracker"], "trackercli"))
