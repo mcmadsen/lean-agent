@@ -1353,6 +1353,34 @@ class BudgetTest(Base):
         self.assertIn("claude-small", p.stdout)
 
 
+class UnlinkedWorkerTest(unittest.TestCase):
+    def test_todo_found_in_any_position(self):
+        sys.path.insert(0, ROOT)
+        try:
+            import budget_hook
+        finally:
+            sys.path.remove(ROOT)
+        linked = [
+            "lean-agent run proj --todo 119 -m sonnet --why x",
+            "lean-agent run proj -m sonnet --why x --read-only --thread t105 --todo 119 --max-usd 8 --task-file - <<EOF\nbody\nEOF",
+            "lean-agent run -p proj -m sonnet --why x --todo=new --task-file - <<'EOF'\nbody $(x)\nEOF",
+            "lean-agent run proj --why 'a; b && c | d' -m haiku --todo none -- do it",
+            'lean-agent run proj --why "multi word why" --todo 5 -- task',
+            "cd /tmp && lean-agent run proj -m haiku --why x --todo new 'q'",
+            "lean-agent run proj --why x --todo 3 -- fix the thing",
+        ]
+        for cmd in linked:
+            self.assertEqual(budget_hook.unlinked_worker(cmd), "", cmd)
+        unlinked = [
+            "lean-agent run proj -m sonnet --why x",
+            "lean-agent run -p proj --why 'a; --todo 5' -- task",
+            "lean-agent run proj --why x -- fix --todo 5 here",
+            "lean-agent run proj --why x --task-file - <<EOF\nuse --todo 5\nEOF",
+        ]
+        for cmd in unlinked:
+            self.assertEqual(budget_hook.unlinked_worker(cmd), "lean-agent run", cmd)
+
+
 class WrapupTest(Base):
     def test_note_is_sent_once_after_the_flag_appears(self):
         flag = os.path.join(self.tmp.name, "wrapup.flag")

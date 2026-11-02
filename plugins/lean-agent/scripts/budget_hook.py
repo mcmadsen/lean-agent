@@ -143,6 +143,32 @@ def split_heredocs(command):
     return None if pending else "".join(out)
 
 
+def split_segments(text):
+    """`text` cut at the shell operators (&& || ; | & newline) that are outside quotes; `>&` and `&>` stay whole."""
+    out, cur, quote, i, n = [], [], None, 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\" and quote != "'" and i + 1 < n:
+            cur.append(text[i:i + 2])
+            i += 2
+            continue
+        if quote:
+            quote = None if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        elif c in ";|\n" or (c == "&" and not (i + 1 < n and text[i + 1] == ">") and not (i and text[i - 1] in "><")):
+            out.append("".join(cur))
+            cur = []
+            while i + 1 < n and text[i + 1] == c and c in "&|":
+                i += 1
+            i += 1
+            continue
+        cur.append(c)
+        i += 1
+    out.append("".join(cur))
+    return out
+
+
 def commands_run(command):
     """The word lists of the commands a shell line runs: heredoc bodies and quoted text are data, not
     commands; `cd x &&`, VAR=value, nohup, timeout N and env in front are skipped."""
@@ -155,7 +181,7 @@ def commands_run(command):
         if "<<" in text or "`" in text or "$(" in text:
             text = re.split(r"<<|`|\$\(", text, maxsplit=1)[0]
     out = []
-    for segment in re.split(r"&&|\|\||;|\||\n|&", text):
+    for segment in split_segments(text):
         try:
             words = shlex.split(segment)
         except ValueError:
@@ -195,6 +221,10 @@ def unlinked_worker(command):
             continue  # decisions about a review, not work for the board
         if {"-h", "--help"} & set(rest):
             continue
+        for k, w in enumerate(rest):  # the options end at `--` (the task follows) or a heredoc
+            if w == "--" or w.startswith("<<"):
+                rest = rest[:k]
+                break
         if "--resume" in rest or any(w == "--todo" or w.startswith("--todo=") for w in rest):
             continue  # a resumed run keeps its item
         return f"lean-agent {words[1]}"
