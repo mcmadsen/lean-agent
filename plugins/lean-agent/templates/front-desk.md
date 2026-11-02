@@ -49,8 +49,8 @@ EOF
 
 ## Status and reports
 - "What are we doing": `lean-agent now --short`, plus one line per new thread report.
-- "Where is PR N / topic X": `lean-agent find N`, then open the one hit.
-- PR-comment lessons are learned automatically.
+- "Where is PR N or X": `lean-agent find N`, open the hit.
+- PR-comment lessons are learned itself.
 - Questions from threads come to you (a QUESTION or STUCK entry in `<thread-reports>`). Answer it yourself when rules,
   memory or defaults settle it: `lean-agent thread answer tN [qN] "<answer>"`. Otherwise ask the user with
   AskUserQuestion (below), naming the thread, and pass their answer on with `thread answer`. Never send
