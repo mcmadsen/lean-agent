@@ -2160,7 +2160,8 @@ def _cmd_run(a):
     if mcp_servers or chrome_spec:
         if mcp_servers:
             lean_mcp.write_config(mcp_path, mcp_servers)
-        # --safe-mode disables MCP and Chrome; this keeps the same isolation but admits exactly these servers
+        # no user/project settings, plugins or MCP; admits exactly these servers (and, unlike --safe-mode, keeps the
+        # worker hooks passed with --settings)
         isolation = ["--setting-sources", "project" if native_rules else ""]
         if chrome_profile != "loose":
             isolation += ["--strict-mcp-config"]
@@ -2173,7 +2174,10 @@ def _cmd_run(a):
     elif native_rules:  # the repo's CLAUDE.md, rules, and .claude/settings.json (hooks, permissions, plugins) load
         isolation = ["--setting-sources", "project"]
     else:
-        isolation = ["--safe-mode"]
+        # NOT --safe-mode: it also disables every hook, including those in --settings (push guard, wrap-up note,
+        # --allow-edit approval). No settings sources + strict MCP keeps out the same: user/project CLAUDE.md and
+        # rules, plugins, custom agents, output style, user hooks and MCP servers.
+        isolation = ["--setting-sources", "", "--strict-mcp-config"]
     lean_json = os.path.join(PLUGIN_ROOT, "bin", "lean-json")
     if read_only:
         allowed = READONLY_TOOLS.split(",") + [f"Bash(git -C {project} {sub}:*)" for sub in READONLY_GIT]

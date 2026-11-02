@@ -710,10 +710,13 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.calls()[-1]["argv"][self.calls()[-1]["argv"].index("--setting-sources") + 1], "project")
         # a role run keeps the isolation
         self.cli("handover", "Plan", "-p", "proj", "--task-file", "-", input="x", FAKE_ANSWER="## A")
-        self.assertIn("--safe-mode", self.calls()[-1]["argv"])
+        argv = self.calls()[-1]["argv"]
+        self.assertNotIn("--safe-mode", argv)
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "")
         self.cli("config", "project-rules", "off", "-p", "proj")
         self.cli("run", "proj", "-m", "haiku", "--why", "x", "--cards", "auto", "--", "fix src/Order.cs")
-        self.assertIn("--safe-mode", self.calls()[-1]["argv"])
+        self.assertNotIn("--safe-mode", self.calls()[-1]["argv"])
+        self.assertEqual(self.calls()[-1]["argv"][self.calls()[-1]["argv"].index("--setting-sources") + 1], "")
 
     def test_handover_writes_a_markdown_file_with_header_from_a_read_only_worker(self):
         self.cli("learn", self.proj, "--name", "proj")
@@ -726,7 +729,7 @@ class CliTest(unittest.TestCase):
         self.assertRegex(lines[2], r"^_\d{4}-\d\d-\d\d(?: \u00b7 thread t\d+)?_$")
         self.assertIn("## Open", lines)
         call = self.calls()[-1]
-        self.assertIn("--safe-mode", call["argv"])
+        self.assertNotIn("--safe-mode", call["argv"])
         self.assertEqual(call["argv"][call["argv"].index("--tools") + 1], "Read,Glob,Grep")
         self.assertIn("open questions", call["task"])
         self.assertEqual(self.ledger()[-1]["role"], "composer")
@@ -1413,8 +1416,9 @@ class CliTest(unittest.TestCase):
 
         call = self.calls()[0]
         argv = call["argv"]
-        for flag in ("--safe-mode", "--disable-slash-commands", "--add-dir"):
+        for flag in ("--strict-mcp-config", "--disable-slash-commands", "--add-dir"):
             self.assertIn(flag, argv)
+        self.assertNotIn("--safe-mode", argv)
         self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
         self.assertEqual(argv[argv.index("--add-dir") + 1], self.proj)
         self.assertNotEqual(os.path.realpath(call["cwd"]), os.path.realpath(self.proj))
@@ -2044,6 +2048,34 @@ class CliTest(unittest.TestCase):
         self.cli("memory", "add", "A separate note about deploy windows being on Tuesdays")
         self.assertFalse(os.path.exists(copy))
 
+    def test_worker_hooks_are_present_in_every_isolation_branch(self):
+        self.cli("learn", self.proj, "--name", "proj")
+
+        def hooks_of(argv):
+            self.assertNotIn("--safe-mode", argv)
+            return json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"]
+
+        def check(argv):
+            cmds = [h["command"] for g in hooks_of(argv) for h in g["hooks"]]
+            self.assertTrue(any("push_guard.py" in c for c in cmds), cmds)
+            self.assertTrue(any("wrapup_hook.py" in c for c in cmds), cmds)
+
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "default")
+        argv = self.calls()[-1]["argv"]
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "")
+        check(argv)
+        self.assertNotIn("PermissionRequest", argv[argv.index("--settings") + 1])
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tickets", "mcp")
+        check(self.calls()[-1]["argv"])
+        self.cli("config", "project-rules", "on", "-p", "proj")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--allow-edit", "CLAUDE.md", "native rules")
+        argv = self.calls()[-1]["argv"]
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "project")
+        check(argv)
+        self.assertIn("PermissionRequest", argv[argv.index("--settings") + 1])
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "lookup")
+        check(self.calls()[-1]["argv"])
+
     def test_run_mcp_whole_server_and_errors(self):
         self.cli("learn", self.proj)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tickets", "t")
@@ -2055,7 +2087,10 @@ class CliTest(unittest.TestCase):
         p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tickets:missing_tool", "t", check=False)
         self.assertIn("has no tool", p.stderr)
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t")
-        self.assertIn("--safe-mode", self.calls()[-1]["argv"])  # no MCP -> safe mode as before
+        argv = self.calls()[-1]["argv"]  # no MCP: no settings sources, strict MCP; never --safe-mode (it disables hooks)
+        self.assertNotIn("--safe-mode", argv)
+        self.assertEqual((argv[argv.index("--setting-sources") + 1], "--strict-mcp-config" in argv, "--mcp-config" in argv),
+                         ("", True, False))
 
     def test_plugin_mcp_servers(self):
         cfg = self.env["CLAUDE_CONFIG_DIR"]

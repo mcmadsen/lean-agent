@@ -28,7 +28,7 @@ plugins), your plugins' hooks, MCP servers and dozens of tool schemas, and resen
 lean-agent workers run with:
 
 ```
-claude -p --safe-mode --disable-slash-commands --tools Bash,Read,Edit,Write,Glob,Grep \
+claude -p --setting-sources "" --strict-mcp-config --disable-slash-commands --tools Bash,Read,Edit,Write,Glob,Grep \
           --add-dir <project> --append-system-prompt-file <protocol + selected cards> \
           --model <chosen> --max-turns N --max-budget-usd X
 ```
@@ -222,9 +222,10 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
     --mcp tickets:get_ticket "Fetch ticket T-42 and say which file is responsible"
 ```
 
-- `--safe-mode` turns MCP off, so a run with `--mcp` uses `--setting-sources "" --strict-mcp-config
-  --mcp-config <file>` instead. Measured: same 8,070-token baseline and the same isolation (no user or project
-  CLAUDE.md, settings, plugins or hooks), plus exactly the chosen servers.
+- Workers run with `--setting-sources "" --strict-mcp-config` (no user or project CLAUDE.md, rules, settings, plugins,
+  custom agents, output style or MCP servers; the hooks lean-agent passes with `--settings` still run). Not `--safe-mode`:
+  it also disables every hook, so the push guard, the wrap-up note and `--allow-edit` would never run. A run with `--mcp`
+  adds `--mcp-config <file>`: the same isolation plus exactly the chosen servers.
 - `server:tool,tool` blocks every other tool of that server with `--disallowedTools`, which removes their
   definitions from context. Example server: all tools ~2,150 tokens per turn, only `get_ticket` ~90.
 - `mcp tools` asks stdio servers for their tool list directly, with no model call. The estimates were
@@ -660,7 +661,7 @@ home; your normal sessions in a repo are untouched.
 `paths:` globs and description. A rule card comes along when the task text, `run --files`, or the worktree's changed
 files match a glob; a rule without `paths:` and the root `CLAUDE.md`'s opening section are always candidates within the card budget.
 `lean-agent config project-rules on|off [-p project]` (default off) lets workers load them natively instead: they run
-in their worktree (or the project) with `--setting-sources project` rather than `--safe-mode`, rule cards are skipped,
+in their worktree (or the project) with `--setting-sources project` rather than the default `--setting-sources ""`, rule cards are skipped,
 and the repo's `.claude/settings.json` (hooks, permissions, plugins, env) applies too; `doctor` shows the mode. Advisor,
 reviewer, composer and gap-decider runs stay isolated.
 
@@ -717,7 +718,7 @@ lean-agent run proj -m sonnet --why "reply in Teams" --chrome --cards mem-recipe
     -- "Draft a reply to Alex's last message in Teams: 'Thanks, I'll look at it today.'"
 ```
 
-- **How it's isolated:** a `--chrome` run swaps `--safe-mode` for `--setting-sources "" --strict-mcp-config --chrome`.
+- **How it's isolated:** a `--chrome` run adds `--chrome` to `--setting-sources "" --strict-mcp-config` (`--chrome=loose` drops the strict flag).
   You keep the same isolation, and the only extra tools are the browser's. `--chrome=navigate,find` narrows it
   further, removing the other browser tools from context. `chrome check` tests whether the strict setup exposes the
   browser on your machine. If it doesn't, check falls back to a setup without `--strict-mcp-config` that blocks your
