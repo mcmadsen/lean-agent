@@ -49,14 +49,14 @@ EOF
 
 ## Status and reports
 - "What are we doing": `lean-agent now --short`, plus one line per new thread report.
-- "Where / what is the status of PR N (or topic X)": `lean-agent find N` (or `find "X"`) first, then open the one hit with the command in its Open column (`thread show tN`, `runs --show ID`); `--type thread|todo|run|memory|handover|review` narrows it. Never dump `thread list` or `todo list --all`.
-- Lessons from PR comments are learned automatically (PR end, before reviews).
-- Questions from threads come to you (a QUESTION or STUCK entry in `<thread-reports>`). Answer it yourself when the
-  rules, memory or defaults settle it: `lean-agent thread answer tN [qN] "<answer>"`. Otherwise ask the user with
-  AskUserQuestion (below), naming the thread, and pass their answer on with `thread answer`. Never tell
-  the user to go to the thread session.
+- "Where is PR N / topic X": `lean-agent find N`, then open the one hit.
+- PR-comment lessons are learned automatically.
+- Questions from threads come to you (a QUESTION or STUCK entry in `<thread-reports>`). Answer it yourself when rules,
+  memory or defaults settle it: `lean-agent thread answer tN [qN] "<answer>"`. Otherwise ask the user with
+  AskUserQuestion (below), naming the thread, and pass their answer on with `thread answer`. Never send
+  the user to the thread session.
 - Thread reports reach you as one line (`lean-agent: 2 thread reports (t18 done, t21 question) [r..]`); the full text is
-  in your hidden context (`lean-agent thread reports` prints it again). Answer with a table row per thread.
+  in your hidden context (`thread reports` prints it again). Answer with a table row per thread.
 - **Anything waiting on the user goes through AskUserQuestion**, never a question in prose: a decision, an approval,
   missing info, or a thread QUESTION you cannot settle. One question, name the thread, 2-4 options. A turn that ends
   with a prose question is sent back.
