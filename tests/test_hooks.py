@@ -1413,6 +1413,55 @@ class WrapupTest(Base):
         self.assertIsNone(run_hook("wrapup_hook.py", ev, **env))
 
 
+class AllowEditHookTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.root = os.path.realpath(os.path.join(self.tmp.name, "wt"))
+        for d in (".claude/rules", ".claude/hooks", "src"):
+            os.makedirs(os.path.join(self.root, d))
+        self.outside = os.path.join(self.tmp.name, "outside")
+        os.makedirs(self.outside)
+        os.symlink(self.outside, os.path.join(self.root, ".claude", "rules", "link"))
+        self.log = os.path.join(self.tmp.name, "allow.log")
+
+    def ask(self, path, globs, tool="Edit", raw=None):
+        cfg = os.path.join(self.tmp.name, "cfg.json")
+        with open(cfg, "w") as fh:
+            json.dump({"root": self.root, "globs": globs, "log": self.log}, fh)
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "allow_edit_hook.py"), cfg],
+                           input=raw if raw is not None else json.dumps(
+                               {"tool_name": tool, "tool_input": {"file_path": path}, "cwd": self.root}),
+                           capture_output=True, text=True, env=base_env())
+        self.assertEqual((p.returncode, p.stderr), (0, ""))
+        return json.loads(p.stdout)["hookSpecificOutput"]["decision"]["behavior"] if p.stdout.strip() else None
+
+    def test_allows_matching_files_inside_the_worktree_and_logs_them(self):
+        g = [".claude/rules/**", "CLAUDE.md"]
+        self.assertEqual(self.ask(os.path.join(self.root, ".claude/rules/x.md"), g), "allow")
+        self.assertEqual(self.ask(os.path.join(self.root, ".claude/rules/a/b/x.md"), g, "Write"), "allow")
+        self.assertEqual(self.ask("CLAUDE.md", g, "MultiEdit"), "allow")
+        self.assertIsNone(self.ask(os.path.join(self.root, "src/x.py"), g))
+        self.assertIsNone(self.ask(os.path.join(self.root, "sub/CLAUDE.md"), g))
+        self.assertIsNone(self.ask(os.path.join(self.root, "../x.md"), g))
+        self.assertIsNone(self.ask("/etc/passwd", ["**"]))
+        paths = [json.loads(l)["path"] for l in open(self.log)]
+        self.assertEqual(paths, [".claude/rules/x.md", ".claude/rules/a/b/x.md", "CLAUDE.md"])
+
+    def test_settings_and_hooks_need_the_exact_file_named(self):
+        for rel in (".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/h.py"):
+            self.assertIsNone(self.ask(os.path.join(self.root, rel), [".claude/**"]), rel)
+        self.assertEqual(self.ask(os.path.join(self.root, ".claude/settings.json"),
+                                  [".claude/**", ".claude/settings.json"]), "allow")
+        self.assertIsNone(self.ask(os.path.join(self.root, ".claude/settings.local.json"),
+                                   [".claude/settings.json"]))
+
+    def test_symlink_escape_other_tools_and_bad_input_give_no_answer(self):
+        self.assertIsNone(self.ask(os.path.join(self.root, ".claude/rules/link/x.md"), [".claude/rules/**"]))
+        self.assertIsNone(self.ask(os.path.join(self.root, ".claude/rules/x.md"), ["**"], tool="Bash"))
+        self.assertIsNone(self.ask(os.path.join(self.root, "x"), ["**"], raw="not json"))
+        self.assertIsNone(self.ask("x", ["**"], raw=""))
+
+
 if __name__ == "__main__":
     import gha_runner
     gha_runner.main(__file__)

@@ -3089,11 +3089,17 @@ class CliTest(unittest.TestCase):
         argv = self.calls()[-1]["argv"]
         allowed = argv[argv.index("--allowedTools") + 1].split(",")
         root = os.path.realpath(self.proj)
-        for tool in ("Edit", "Write", "MultiEdit"):
-            self.assertTrue(any(r == f"{tool}(//{root.lstrip('/')}/.claude/rules/**)" or
-                                r.startswith(f"{tool}(/") and r.endswith("/.claude/rules/**)") for r in allowed), tool)
-            self.assertTrue(any(r.startswith(f"{tool}(/") and r.endswith("/CLAUDE.md)") for r in allowed), tool)
+        self.assertFalse([r for r in allowed if "claude/rules" in r or "CLAUDE.md" in r])
         settings = json.loads(argv[argv.index("--settings") + 1])
+        hook = settings["hooks"]["PermissionRequest"][0]
+        self.assertEqual(hook["matcher"], "Edit|Write|MultiEdit|NotebookEdit")
+        self.assertIn("allow_edit_hook.py", hook["hooks"][0]["command"])
+        cfg = json.load(open(self.ledger()[-1]["workdir"] + "/allow_edit.json"))
+        self.assertEqual(cfg["globs"], [".claude/rules/**", "CLAUDE.md"])
+        self.assertEqual(cfg["root"], os.path.realpath(self.proj))
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "plain")
+        argv = self.calls()[-1]["argv"]
+        self.assertNotIn("PermissionRequest", argv[argv.index("--settings") + 1])
         deny = settings["permissions"]["deny"]
         self.assertTrue(any(r.endswith("/.claude/settings*.json)") for r in deny))
         self.assertTrue(any(r.endswith("/.claude/hooks/**)") for r in deny))
@@ -3102,7 +3108,7 @@ class CliTest(unittest.TestCase):
         self.assertFalse(any("settings" in r for r in deny))
         self.assertTrue(any("hooks" in r for r in deny))
         allow, deny = mod.allow_edit_rules("/w", [".claude/**"])
-        self.assertIn("Edit(//w/.claude/**)", allow)
+        self.assertEqual(allow, [])
         self.assertTrue(any("settings*.json" in r for r in deny))
 
     def test_config_allow_edit_is_stored_per_project_and_used_by_runs(self):
@@ -3112,7 +3118,8 @@ class CliTest(unittest.TestCase):
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "edit")
         argv = self.calls()[-1]["argv"]
         allowed = argv[argv.index("--allowedTools") + 1]
-        self.assertIn("/.claude/rules/**)", allowed)
+        self.assertNotIn("claude/rules", allowed)
+        self.assertIn("allow_edit_hook.py", argv[argv.index("--settings") + 1])
         self.assertEqual(self.ledger()[-1]["allow_edit"], [".claude/rules/**", "CLAUDE.md"])
         self.assertIn("none", self.cli("config", "allow-edit", "proj", "--clear").stdout)
         p = self.cli("config", "allow-edit", "proj", "/etc/x", check=False)

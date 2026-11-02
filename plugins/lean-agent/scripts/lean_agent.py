@@ -1872,6 +1872,7 @@ def early_settle(reason=None):
 FAILURE_HOOKS.append(early_settle)
 
 
+ALLOW_EDIT_LOG = "allow_edit.log"
 ALLOW_EDIT_PROTECTED = (".claude/settings*.json", ".claude/hooks/**")
 
 
@@ -1897,11 +1898,11 @@ def clean_allow_edit(paths, read_only=False):
 
 
 def allow_edit_rules(project, globs):
-    """(allow, deny) permission rules for Edit/Write/MultiEdit on these worktree-relative globs. `//` makes the path
-    absolute for Claude Code. Settings and hooks stay denied unless an entry names that file itself."""
+    """(allow, deny) permission rules for --allow-edit globs: no allow rules (a PermissionRequest hook allows), and
+    deny rules that keep settings and hooks closed unless an entry names that file itself."""
     root = os.path.abspath(project).rstrip("/")
     tools = ("Edit", "Write", "MultiEdit")
-    allow = [f"{t}(/{root}/{g})" for g in globs for t in tools]
+    allow = []  # Claude Code refuses these files whatever allow rules say; allow_edit_hook.py answers instead
     deny = []
     if globs:
         for pat in ALLOW_EDIT_PROTECTED:
@@ -2182,7 +2183,6 @@ def _cmd_run(a):
     else:
         allowed = [tools]
         edit_allow, edit_deny = allow_edit_rules(project, allow_edit)
-        allowed += edit_allow
         permission_mode = os.environ.get("LEAN_AGENT_WORKER_PERMISSION_MODE") or "acceptEdits"
 
     claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
@@ -2215,6 +2215,13 @@ def _cmd_run(a):
             "command": f"python3 {json.dumps(os.path.join(HERE, 'mcp_trim_hook.py'))}"}]}]
     hooks["PreToolUse"].append({"matcher": "*", "hooks": [{  # one note at ~70% of the budget: commit, then summarise
         "type": "command", "timeout": 10, "command": f"python3 {json.dumps(os.path.join(HERE, 'wrapup_hook.py'))}"}]})
+    if allow_edit and not read_only:  # answers Claude Code's permission prompt for the named repo files only
+        cfg_path = os.path.join(workdir, "allow_edit.json")
+        with open(cfg_path, "w") as fh:
+            json.dump({"root": os.path.realpath(project), "globs": allow_edit, "log": os.path.join(workdir, ALLOW_EDIT_LOG)}, fh)
+        hooks["PermissionRequest"] = [{"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{
+            "type": "command", "timeout": 10,
+            "command": f"python3 {json.dumps(os.path.join(HERE, 'allow_edit_hook.py'))} {json.dumps(cfg_path)}"}]}]
     flag_settings["hooks"] = hooks
     if flag_settings:
         cmd += ["--settings", json.dumps(flag_settings)]
@@ -8404,6 +8411,13 @@ def cmd_runs(a):
             text = "".join(l for l in text.splitlines(True)
                            if l.startswith(("run ", "  tokens:", "  context per turn", "  mcp:", "  budget left")))
         sys.stdout.write(text)
+        if not a.details and r.get("workdir"):
+            try:
+                seen = [json.loads(l)["path"] for l in read_text(os.path.join(r["workdir"], ALLOW_EDIT_LOG)).splitlines() if l.strip()]
+            except (OSError, ValueError, KeyError):
+                seen = []
+            for p in dict.fromkeys(seen):
+                print(f"edited (allowed): {p}")
         needs = sorted(set(re.findall(r"needs:\s*(--allow-edit\s+\S+)", text)))
         if needs and not a.details:
             print("blocked on permission: rerun with `lean-agent run ... --resume " + r["id"] + " "
