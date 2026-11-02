@@ -40,6 +40,7 @@ import lean_rules  # noqa: E402
 import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
+import lean_find  # noqa: E402
 import lean_feedback  # noqa: E402
 import service_session  # noqa: E402
 import lean_common
@@ -6587,23 +6588,34 @@ def cmd_memory(a):
         print((f"merged {len(groups)} cluster(s)" if a.apply else f"{len(groups)} cluster(s); run again with --apply to merge")
               if groups else "no near-duplicate memories")
         return
-    if a.action == "edit":
-        if not a.text or not a.new_text:
-            die('memory edit needs the memory name and the new text: lean-agent memory edit <name> "<text>"')
-        if not lean_memory.edit(store, a.text, a.new_text, mtype=a.type, description=a.name):
-            die(f"no memory {a.text!r} (see: lean-agent memory list)")
-        heal_and_sync()
-        print(f"updated {a.text}")
+    if a.action == "show":
+        m, cands = lean_memory.resolve(store, a.text or "")
+        if not m:
+            die(f"no memory {a.text!r}" + ("; matches: " + ", ".join("mem-" + slugify(c["stem"], 200) for c in cands[:10]) if cands else " (see: lean-agent memory list)"))
+        print(f"mem-{slugify(m['stem'], 200)}  {m['type']}  {m['scope']}\n\n{m['body']}")
         return
-    if a.action == "rm":
-        if not a.text:
-            die("memory rm needs the memory name (file name without .md)")
-        stem = a.text[4:] if a.text.startswith("mem-") else a.text
-        matches = [m["stem"] for m in lean_memory.read_all(store) if slugify(m["stem"], 40) == slugify(stem, 40)]
-        if not matches or not lean_memory.remove(store, matches[0]):
-            die(f"no memory {a.text!r}")
+    if a.action in ("edit", "rm"):
+        if not a.text or (a.action == "edit" and not a.new_text):
+            die('memory edit needs the memory name and the new text: lean-agent memory edit <name> "<text>"'
+                if a.action == "edit" else "memory rm needs the memory name (file name without .md)")
+        m, cands = lean_memory.resolve(store, a.text)
+        if not m:
+            if cands:
+                die(f"{a.text!r} matches {len(cands)} memories, give more of the name:\n"
+                    + "\n".join("  mem-" + slugify(c["stem"], 200) for c in cands[:10]))
+            die(f"no memory {a.text!r}; nothing changed (see: lean-agent memory list; `memory add` creates one)")
+        if a.action == "rm":
+            if not lean_memory.remove(store, m["stem"]):
+                die(f"no memory {a.text!r}")
+            heal_and_sync()
+            print(f"removed {m['stem']}")
+            return
+        if len(a.new_text.strip()) < 10 and not getattr(a, "force", False):
+            die(f"the new text is only {len(a.new_text.strip())} characters; it would replace the body of {m['stem']}. "
+                "Add --force if that is intended")
+        lean_memory.edit(store, m["stem"], a.new_text, mtype=a.type, description=a.name)
         heal_and_sync()
-        print(f"removed {matches[0]}")
+        print(f"updated {m['stem']}")
         return
     mems = lean_memory.read_all(store)
     if a.project:
@@ -6613,7 +6625,7 @@ def cmd_memory(a):
         return
     for m in mems:
         sc = "" if m["scope"] == lean_memory.GLOBAL else f" [{m['scope']}]"
-        print(f"mem-{slugify(m['stem'], 40):<44}{m['type']:<10}{est_tokens(m['body']):>5} tok{sc}  {(m['description'] or m['name'])[:60]}")
+        print(f"mem-{slugify(m['stem'], 200)}  {m['type']:<10}{est_tokens(m['body']):>5} tok{sc}  {(m['description'] or m['name'])[:60]}")
     print(f"{len(mems)} memories in {store}")
 
 
@@ -7916,6 +7928,14 @@ def cmd_runs(a):
         r = next((x for x in reversed(runs) if x["id"] == rid), None)
         print(f"{rid}  {run_summary_line(r)}" if r else rid)
         return
+    if a.pr or a.item or a.grep:
+        q = a.pr or a.item or a.grep
+        match = lean_find.matcher(q, pr=bool(a.pr), item=bool(a.item))
+        runs = [r for r in runs if lean_find.first_hit(match, [
+            ("ref", r.get("ref"), True), ("branch", r.get("branch"), True), ("task", str(r.get("task") or "").split("\n")[0], False),
+            ("why", r.get("why"), False), ("result", r.get("result_head"), False)])]
+        if not runs:
+            print("No run matches.")
     for r in runs[-(a.limit or a.n):]:
         print(f"{r['id']}  {r['status']:<22} {r['model']:<7} {r['project']:<16} {r['task'][:70]}")
     for rid, m in lost_runs(home()):
@@ -9788,6 +9808,118 @@ def open_todos(data=None):
                                         t.get("due") or "9999", t["id"]))
 
 
+def thread_fields(data, tid, notes=None):
+    """(name, text, is_ref) fields of a thread and of the threads merged into it, for find/list filters."""
+    out = []
+    for k, t in data["threads"].items():
+        if k != tid and lean_threads.resolve(k, data["aliases"]) != tid:
+            continue
+        out.append(("title", t.get("title"), False))
+        out += [("request", r.get("text"), False) for r in t.get("requests") or []]
+        out += [("report", r.get("text"), False) for r in (t.get("reports") or []) if isinstance(r, dict)]
+        out += [("note", n.get("text"), False) for n in (notes or []) if isinstance(n, dict) and n.get("thread") == k]
+    return out
+
+
+def thread_list(a):
+    """`thread list` with --grep/--pr/--item/--open; the full title, last."""
+    data = lean_threads.load()
+    notes = read_json(home("handoff-notes.json"), [])
+    notes = notes if isinstance(notes, list) else []
+    query = getattr(a, "grep", None) or getattr(a, "pr", None) or getattr(a, "item", None)
+    match = lean_find.matcher(query, pr=bool(getattr(a, "pr", None)), item=bool(getattr(a, "item", None))) if query else None
+    items = lean_threads.threads()
+    if getattr(a, "open", False):
+        items = [t for t in items if not t.get("closed")]
+    if match:
+        items = [t for t in items if lean_find.first_hit(match, thread_fields(data, t["id"], notes))]
+    if a.json:
+        print(json.dumps(items, indent=1))
+        return 0
+    for t in items:
+        print(f"{t['id']:<9}{t['kind']:<6}{(t.get('last_message') or '-'):<21}{t['title']}" + (" [closed]" if t.get("closed") else ""))
+    if not items and match:
+        print("No thread matches.")
+    return 0
+
+
+def find_records(a):
+    """Every searchable record as {type, id, date, state, open, fields:[(name, text, is_ref)], project}."""
+    want = {a.type} if a.type else set(lean_find.TYPES)
+    slug = resolve_project(a.project)[0] if a.project else None
+    recs = []
+    if "todo" in want:
+        for t in todos()["items"]:
+            if slug and t.get("project") != slug:
+                continue
+            recs.append({"type": "todo", "id": f"#{t['id']}", "date": t.get("done_at") or t.get("created"), "state": t["status"],
+                         "fields": [("ref", t.get("ref"), True), ("text", t.get("text"), False)]
+                         + [("note", n, False) for n in t.get("notes") or []],
+                         "open": "lean-agent todo list --all --" + ("ref" if t.get("ref") else "grep") + " " + shlex.quote(str(t.get("ref") or t["text"][:30]))})
+    if "thread" in want and not slug:
+        data = lean_threads.load()
+        notes = read_json(home("handoff-notes.json"), [])
+        for tid, t in data["threads"].items():
+            if tid in data["aliases"]:
+                continue
+            recs.append({"type": "thread", "id": tid, "date": t.get("last_message") or t.get("created"),
+                         "state": "closed" if t.get("closed") else "open", "fields": thread_fields(data, tid, notes if isinstance(notes, list) else []),
+                         "open": f"lean-agent thread show {tid}"})
+    if "run" in want:
+        for r in ledger():
+            if slug and r.get("project") != slug:
+                continue
+            recs.append({"type": "run", "id": r["id"], "date": r.get("ts"), "state": r.get("status"), "open": f"lean-agent runs --show {r['id']}",
+                         "fields": [("ref", r.get("ref"), True), ("branch", r.get("branch"), True),
+                                    ("task", str(r.get("task") or "").split("\n")[0], False), ("why", r.get("why"), False),
+                                    ("result", re.split(r"(?<=[.!?])\s", str(r.get("result_head") or ""), maxsplit=1)[0], False)]})
+    if "memory" in want:
+        for m in lean_memory.read_all(memory_store()):
+            if slug and m["scope"] not in (lean_memory.GLOBAL, slug):
+                continue
+            recs.append({"type": "memory", "id": "mem-" + slugify(m["stem"], 200), "date": m.get("modified"), "state": m["type"],
+                         "fields": [("title", m.get("description") or m["name"], False), ("body", m["body"], False)],
+                         "open": f"lean-agent memory show mem-{slugify(m['stem'], 200)}"})
+    if "handover" in want:
+        for f in glob.glob(os.path.join(handover_dir(slug or "*"), "*.md")):
+            if f.endswith(".prev.md"):
+                continue
+            head = read_text(f).split("\n")
+            recs.append({"type": "handover", "id": os.path.basename(os.path.dirname(os.path.dirname(f))),
+                         "date": datetime.datetime.fromtimestamp(os.path.getmtime(f)).isoformat(), "state": "",
+                         "fields": [("title", head[0].lstrip("# "), False), ("text", " ".join(head[1:12]), False)],
+                         "open": f"lean-agent read {shlex.quote(f)}"})
+    if "review" in want:
+        for f in glob.glob(home("reviews", "*.jsonl")):
+            base = os.path.basename(f)[:-6]
+            if base.endswith((".declined", ".threads")) or (slug and base != slug):
+                continue
+            for r in read_jsonl(f):
+                run = r.get("run")
+                recs.append({"type": "review", "id": run if run and run != "skipped" else base, "date": r.get("ts"), "state": r.get("verdict"),
+                             "fields": [("pr", r.get("pr"), True), ("ref", r.get("ref"), True), ("branch", r.get("branch"), True),
+                                        ("goal", r.get("goal"), False)],
+                             "open": f"lean-agent runs --show {run}" if run and run != "skipped" else f"lean-agent review {base} --status"})
+    return recs
+
+
+def cmd_find(a):
+    query = " ".join(a.query).strip()
+    if not query:
+        die("find what? lean-agent find 123  |  lean-agent find \"export timeout\" [--type todo|thread|run|memory|handover|review]")
+    match = lean_find.matcher(query)
+    rows = []
+    for r in find_records(a):
+        hit = lean_find.first_hit(match, r["fields"])
+        if hit:
+            rows.append(dict(r, match=f"{hit[0]}: {hit[1]}" if hit[0] not in ("title", "text") else hit[1]))
+    if not rows:
+        print(f"No match for {query!r} in {a.type or 'todos, threads, runs, memories, handovers, reviews'}.")
+        return 0
+    print(lean_find.table(rows, a.all))
+    return 0
+
+
 def cmd_todo(a):
     if a.action in ("add", "start", "done", "note", "rm", "reopen", "edit") or (a.action == "epic" and a.count):
         with file_lock(home("todo.json")):  # these read, change and rewrite todo.json (thread move retags it too)
@@ -9911,6 +10043,9 @@ def _cmd_todo(a):
     if a.project:
         slug = resolve_project(a.project)[0]
         items = [t for t in items if t.get("project") == slug]
+    if a.ref:  # list: filter on the ref field (a PR number matches 'PR 12', '!12', branch names ...)
+        match = lean_find.matcher(a.ref)
+        items = [t for t in items if match(t.get("ref"), True)]
     if not items:
         print("No open todos." if not a.all else "No todos.")
     for t in items:
@@ -10645,6 +10780,8 @@ def cmd_thread(a):
                     die(str(exc))
             print(line + f': Remote Control "{name}"')
             return 0
+    if act == "list":
+        return thread_list(a)
     return lean_threads.cli(act, a.args + (["--all"] if getattr(a, "all", False) else []), a.json)
 
 
@@ -11826,8 +11963,8 @@ def build_parser():
     s.set_defaults(fn=cmd_mcp)
 
     s = sub.add_parser("memory", help="shared memory: where | import | list | add | edit | rm | dedupe | restore")
-    s.add_argument("action", choices=["where", "import", "list", "add", "edit", "rm", "dedupe", "restore"])
-    s.add_argument("text", nargs="?", help="add: the memory text; edit/rm/restore: the memory's name")
+    s.add_argument("action", choices=["where", "import", "list", "show", "add", "edit", "rm", "dedupe", "restore"])
+    s.add_argument("text", nargs="?", help="add: the memory text; edit/rm/restore: the memory's name (a unique prefix is enough)")
     s.add_argument("new_text", nargs="?", help="edit: the new text")
     s.add_argument("--project", "-p", help="scope to a project (default: global)")
     s.add_argument("--type", choices=lean_memory.TYPES, help="add: memory type (default project)")
@@ -11835,7 +11972,16 @@ def build_parser():
     s.add_argument("--from", dest="source", metavar="DIR", help="import: folder to import (default: Claude's)")
     s.add_argument("--apply", action="store_true", help="dedupe: merge the duplicate clusters (default: list them)")
     s.add_argument("--topics", action="store_true", help="dedupe: group memories about the same subject and consolidate them")
+    s.add_argument("--force", action="store_true", help="edit: allow a body shorter than 10 characters")
     s.set_defaults(fn=cmd_memory)
+
+    s = sub.add_parser("find", help="one search across todos, threads, runs, memories, handovers and reviews (no model): "
+                       "find 123 | find \"export timeout\" [--type T] [--all]")
+    s.add_argument("query", nargs="*", help="text, or a PR / work-item number (matches PR 123, !123, #123, pullrequest/123, feature/123-...)")
+    s.add_argument("--type", choices=list(lean_find.TYPES), help="only this kind of record")
+    s.add_argument("--project", "-p")
+    s.add_argument("--all", action="store_true", help=f"every hit (default: the newest {lean_find.LIMIT})")
+    s.set_defaults(fn=cmd_find)
 
     s = sub.add_parser("limits", help="usage in your plan's session and weekly windows; budgets for agents")
     s.add_argument("action", nargs="?", choices=["show", "plan", "calibrate"],
@@ -12013,7 +12159,9 @@ def build_parser():
     s.add_argument("--show", nargs="?", const="last", metavar="RUN_ID",
                    help="print a run's whole summary again (default: the latest run)")
     s.add_argument("--details", action="store_true", help="with --show: the run's details file instead")
-    s.add_argument("--grep", metavar="TEXT", help="with --show/--details: only lines containing TEXT")
+    s.add_argument("--grep", metavar="TEXT", help="with --show/--details: only lines containing TEXT; in the list: only runs mentioning TEXT")
+    s.add_argument("--pr", metavar="N", help="only runs about this pull request (task, summary, ref or branch)")
+    s.add_argument("--item", metavar="N", help="only runs about this work item (ref or branch such as feature/N-...)")
     s.add_argument("--tail", type=int, nargs="?", const=20, default=0, metavar="N",
                    help="with --show: only the last N lines of the output (default 20), the failure reason is the last")
     s.add_argument("-n", type=int, default=10)
@@ -12045,7 +12193,7 @@ def build_parser():
                    choices=["add", "list", "next", "start", "done", "note", "rm", "reopen", "edit", "epic"])
     s.add_argument("args", nargs="*", help="add: the text; start/done/note/rm: the number (done/note: then text)")
     s.add_argument("--project", "-p")
-    s.add_argument("--ref", help="the tracker item, PR or branch it's about")
+    s.add_argument("--ref", help="add: the tracker item, PR or branch it's about; list: only todos whose ref matches (a PR number too)")
     s.add_argument("--prio", choices=list(PRIOS))
     s.add_argument("--due", metavar="YYYY-MM-DD")
     s.add_argument("--all", action="store_true", help="list: include done ones")
@@ -12156,6 +12304,10 @@ def build_parser():
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin); or give it as a positional argument, not both")
     s.add_argument("--json", action="store_true", help="list: as JSON")
+    s.add_argument("--grep", metavar="TEXT", help="list: only threads whose title, requests, reports or notes contain TEXT")
+    s.add_argument("--pr", metavar="N", help="list: only threads that mention this pull request (PR N, !N, #N, pullrequest/N)")
+    s.add_argument("--item", metavar="N", help="list: only threads that mention this work item (#N, ...-N, item N)")
+    s.add_argument("--open", action="store_true", help="list: hide closed threads")
     s.add_argument("--context", action="store_true", help="sessions: just the context table (Session | Title | Context | %% of compact | Idle | State), largest first")
     s.add_argument("--all", action="store_true", help="show: every entry (default: the latest 40); close: every open session")
     s.add_argument("--force", action="store_true", help="close: close even with a live run or mid-turn (runs keep going detached)")

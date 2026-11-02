@@ -402,7 +402,7 @@ def lean_agent_only(command):
 #             orchestrator's bookkeeping and the user's content (todo add, handoff --note), it is denied; the
 #             orchestrator links a run with `--todo new` and keeps its own state with checkpoint / handoff --kind fyi.
 #   "mcp"     lists or runs MCP servers or presets: the whole `mcp` subcommand, `chrome check`.
-# Bookkeeping stays allowed: todo list|next|start|done, handoff (read, --done, --kind checkpoint|fyi|decision), thread
+# Bookkeeping stays allowed: find (one read-only search of the local records), todo list [--ref|--grep]|next|start|done, memory list|show, handoff (read, --done, --kind checkpoint|fyi|decision), thread
 # (also new|send|open|close [tN ...|--all|--idle DUR]|sessions [--context]: they start, message and stop the thread's own session, never project work),
 # feedback add|list|export|done|rm (lean-agent's own feedback file, never project data),
 # checkpoint, clear [--thread tN] and clear --all [--restart] [--force] (queue a /clear, or a restart, for the end of the turn), brief, runs (also `runs --wait`, which blocks until runs finish, and `runs --stop`, which only ends lean-agent's own runs), review (it starts its own worker), handover (writes only under LEAN_AGENT_HOME), sync, doctor, optimize and the like.
@@ -410,7 +410,7 @@ CHANGING_ACTIONS = {"worktree": {"rm", "setup", "push", "reset", "base", "attach
 CHANGING_ALWAYS = {"rules"}
 CHANGING_FLAGS = {"codemod": {"--apply"}, "tracker": {"--note", "--rm-note", "--supersede", "--ack-email"}}
 KEEP_ACTIONS = {
-    "memory": ({"where", "import", "list", "add", "edit", "rm"}, {"import", "add", "edit", "rm"}),
+    "memory": ({"where", "import", "list", "show", "add", "edit", "rm"}, {"import", "add", "edit", "rm"}),
     "card": ({"show", "add", "rm", "core", "shorten", "unarchive", "protect"}, {"add", "rm", "core", "shorten",
                                                                                "unarchive", "protect"}),
     "todo": ({"add", "list", "next", "start", "done", "note", "rm", "reopen", "edit", "epic"},
