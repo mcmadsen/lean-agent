@@ -117,7 +117,7 @@ Other ways to run the orchestrator:
 
 | Command | |
 |---|---|
-| `lean-agent projects` / `learn <path> [--name n]` | Register a project, or refresh its cards after CLAUDE.md changes. Card stats survive. |
+| `lean-agent projects` / `learn <path> [--name n] [--as-worktree]` | Register a project, or refresh its cards after CLAUDE.md changes. Card stats survive. `learn` indexes code and docs (CLAUDE.md, rules, skills) into cards; lessons from PR comments are `review learn`. `--as-worktree` with `--name <existing>` refreshes that project from another checkout (a worktree) without moving its registration. |
 | `lean-agent cards <project> [filter]` | Cards with size and hit rate (`used/sent`). `*` = core. Filter by id, title or path, e.g. `cards shop infra`. |
 | `lean-agent suggest <project> "<task>"` | Task type (read/change/browser), recommended model (from your `stats` per type, else defaults; Haiku when a budget is low), a gather/judge split hint, then core cards plus relevant cards with cost and reason, or an explicit "No relevant cards". |
 | `lean-agent run <project> -m <model> --why "..." [--cards a,b \| auto] [--read-only] [--chrome[=tools]] [--mcp s:t] [--max-usd X] [--max-turns N] -- "<task>"` | Run an isolated worker. Model and reason are **required**. `--read-only` allows Read/Glob/Grep and read-only `git -C <project> show/log/grep/diff/blame/fetch`. |
@@ -580,7 +580,12 @@ uncommitted changes and new untracked files.
   The worker has to open the code for every helper: one whose path isn't in the repository is left out. It gets
   the cards' current text, so near-duplicates are skipped, a known helper's line is updated, and wrong lines are
   corrected (`replace`). Threads that ended in a decision to leave something out become declined findings, not
-  lessons. `review learn <project> --verify [--head <branch>]` lists helper lines whose code can't be found, with
+  lessons. Without the tracker's MCP (for example when a rule forbids it): `review learn <project> --pr <id>
+  --threads-file <file or ->` takes the PR's threads as JSON or plain text (from the tracker's CLI), or
+  `--threads-cmd "<cli> {pr}"` runs a command and is saved as the project's route; the automatic learning uses the
+  configured route and, when only a forbidden MCP exists, adds one todo instead. `review learn <project> --list`
+  numbers the learned lines, `--rm N|text` removes one, `--undo` undoes the last learn batch or removal.
+  `review learn <project> --verify [--head <branch>]` lists helper lines whose code can't be found, with
   the reason; `--apply` removes them. It checks `--head`, HEAD, the default branch and every base branch your
   reviews used, matches partial paths (relative to a package folder, in backticks, with `:line`), and keeps a
   line whose symbol is found even when its path is wrong.
