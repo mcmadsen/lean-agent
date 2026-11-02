@@ -8927,6 +8927,96 @@ class CliTest(unittest.TestCase):
                        "--worktree-base", "develop", "--", "t").stdout
         self.assertIn("worktree: created develop2 from develop", out)
 
+    def _commit_project(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        return g
+
+    def _rev(self, path, ref):
+        return subprocess.run(["git", "-C", path, "rev-parse", ref], capture_output=True, text=True).stdout.strip()
+
+    def test_worktree_base_takes_local_branch_tag_remote_ref_and_sha(self):
+        g = self._commit_project()
+        remote = os.path.join(self.tmp.name, "remote.git")
+        subprocess.run(["git", "init", "-q", "--bare", remote], check=True)
+        g("remote", "add", "origin", remote)
+        g("branch", "unpushed", "feature")
+        g("tag", "v-one", "main")
+        g("push", "-q", "origin", "feature:shared")
+        g("fetch", "-q", "origin")
+        sha = self._rev(self.proj, "main")
+        for i, base in enumerate(["unpushed", "v-one", "origin/shared", sha]):
+            out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", f"nb{i}", "--worktree-base", base,
+                           "--", "t").stdout
+            want = self._rev(self.proj, base + "^{commit}")
+            self.assertIn(f"worktree: created nb{i} from {base} ({want[:10]})", out)
+            self.assertEqual(self._rev(self.proj, f"nb{i}"), want)
+
+    def test_refused_run_start_leaves_no_worktree_or_setup_behind(self):
+        self._commit_project()
+        marker = os.path.join(self.tmp.name, "setup-ran")
+        self.cli("worktree", "setup", "proj", "--run", f"touch {marker}")
+        wts = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj")
+        bad = [("--cards", "nosuchcard"), ("--allow-cmd", "tool show"), ("--worktree-base", "nope-ref")]
+        for flag in bad:
+            p = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "refused", *flag, "--", "t", check=False)
+            self.assertNotEqual(p.returncode, 0, flag)
+            self.assertFalse(os.path.exists(os.path.join(wts, "refused")), flag)
+            self.assertFalse(os.path.exists(marker), flag)
+            self.assertNotEqual(subprocess.run(["git", "-C", self.proj, "rev-parse", "--verify", "-q", "refused"],
+                                               capture_output=True).returncode, 0, flag)
+
+    def test_run_cards_auto_plus_named(self):
+        self._commit_project()
+        self.cli("cards", "proj")  # the library exists
+        p = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--cards", "auto,no-such-card", "--", "t", check=False)
+        self.assertIn("unknown card(s): no-such-card", p.stderr)
+        self.assertNotIn("auto", p.stderr.replace("--cards auto", ""))
+        p = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--cards", "auto,none", "--", "t", check=False)
+        self.assertNotIn("unknown card", p.stderr)
+
+    def test_worktree_create_adopt_and_setup_show(self):
+        g = self._commit_project()
+        remote = os.path.join(self.tmp.name, "remote.git")
+        subprocess.run(["git", "init", "-q", "--bare", remote], check=True)
+        g("remote", "add", "origin", remote)
+        g("branch", "release/r1", "feature")
+        self.assertIn("none", self.cli("worktree", "setup", "proj", "--show").stdout)
+        self.assertIn("was: none", self.cli("worktree", "setup", "proj", "--run", "true").stdout)
+        self.assertIn("true", self.cli("worktree", "setup", "proj", "--show").stdout)
+        out = self.cli("worktree", "create", "proj", "chore/new-thing", "--from", "release/r1").stdout
+        path = out.strip().splitlines()[-1]
+        self.assertTrue(os.path.isfile(os.path.join(path, "api", "totals.py")))
+        self.assertIn("created chore/new-thing from release/r1", out)
+        self.assertIn("worktree setup: true", out)
+        p = self.cli("worktree", "create", "proj", "chore/new-thing", "--from", "main", check=False)
+        self.assertIn("already exists", p.stderr)
+        self.assertIn("(was: true)", self.cli("worktree", "setup", "proj", "--off").stdout)
+        # a plain git worktree is refused by push until it is adopted
+        plain = os.path.join(self.tmp.name, "plain")
+        g("worktree", "add", "-q", "-b", "plain-branch", plain, "main")
+        p = self.cli("worktree", "push", "proj", "plain-branch", check=False)
+        self.assertIn("no lean-agent worktree for plain-branch", p.stderr)
+        self.assertIn("registered", self.cli("worktree", "adopt", "proj", plain).stdout)
+        p = self.cli("worktree", "push", "proj", "plain-branch", check=False)
+        self.assertNotIn("no lean-agent worktree", p.stderr)
+        self.assertIn("already registered", self.cli("worktree", "adopt", "proj", plain).stdout)
+        p = self.cli("worktree", "adopt", "proj", self.proj, check=False)
+        self.assertNotEqual(p.returncode, 0)
+
+    def test_branch_name_with_base_follows_the_type_rule(self):
+        g = self._commit_project()
+        g("branch", "-m", "feature", "old-work")
+        g("branch", "release/release-1.0", "old-work")
+        out = self.cli("branch-name", "Add export totals", "-p", "proj", "--type", "feature", "--base", "release/release-1.0")
+        self.assertEqual(out.stdout.strip(), "feature/add-export-totals")
+        self.assertIn("worktree create proj feature/add-export-totals --from release/release-1.0", out.stderr)
+        out = self.cli("branch-name", "Fix crash", "-p", "proj", "--base", "release/release-1.0").stdout.strip()
+        self.assertEqual(out, "bugfix/fix-crash")
+
     def test_push_credit_check_looks_only_at_the_pushed_commits(self):
         g = self.git_project()
         ident = ["-c", "user.name=t", "-c", "user.email=t@t"]

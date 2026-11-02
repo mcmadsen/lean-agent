@@ -93,7 +93,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `count <project> add\|rm …` | c | **denied** |
 | `tracker <project>` (read), `tracker --discover` | a / b | allowed (`--discover` starts a worker that records identity it finds) |
 | `tracker <project> KEY=VALUE`, `--note`, `--rm-note`, `--supersede`, `--ack-email` | c | **denied** |
-| `worktree rm\|setup\|push\|reset\|attach`, `rules`, `codemod --apply` | c | **denied** (repo, branch, remote) |
+| `worktree rm\|setup\|push\|reset\|attach\|create\|adopt`, `rules`, `codemod --apply` | c | **denied** (repo, branch, remote) |
 | `branch-name` (prints a name from the project's branch rules, read-only), `worktrees`, `codemod` (throwaway copy), `map`, `slices`, `check`, `parity`, `grep-log`, `text-len` | a | allowed |
 | `slices --create`, `learn` | b | allowed: todos, cards and lean-agent's own repo rules block derived from the code by lean-agent, with no text from the user |
 | `optimize` (also `--apply`, `--accept`, `--reject`) | b | allowed: applies drafts a worker made from run feedback; no orchestrator text is stored. |

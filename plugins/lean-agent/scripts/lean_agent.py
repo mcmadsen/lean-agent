@@ -1813,6 +1813,33 @@ def early_settle(reason=None):
 FAILURE_HOOKS.append(early_settle)
 
 
+def preflight_run_args(a, slug, project, read_only):
+    """Every cheap argument check of a new run, before a worktree or its setup command exists: a refused start leaves
+    nothing behind."""
+    lib = {c["id"]: c for c in load_cards(slug)}
+    if getattr(a, "card_list", None) is None:
+        missing = [x for x in (a.cards or "").split(",") if x and x not in ("none", "auto") and x not in lib]
+        if missing:
+            die(f"unknown card(s): {', '.join(missing)} (see: lean-agent cards {slug})")
+    allow_cmd = [c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()]
+    if allow_cmd and not read_only:
+        die("--allow-cmd is for --read-only workers (other workers run any command)")
+    for c in allow_cmd:
+        bad = set(re.findall(r"[a-z]+", c.lower())) & MUTATING_WORDS
+        if bad:
+            die(f"--allow-cmd {c!r}: {', '.join(sorted(bad))} changes something; a read-only worker only gets "
+                "commands that read (show, list, get, view, log)")
+    base = getattr(a, "worktree_base", None)
+    if base and getattr(a, "worktree", None):
+        if base.startswith("origin/"):
+            git(project, "fetch", "-q", "origin")
+        if not git(project, "rev-parse", "--verify", "--quiet", base + "^{commit}"):
+            die(f"--worktree-base {base!r} is unknown in {project} (a local branch, tag, origin/<branch> or commit)")
+    specs = [x for x in (a.mcp or []) if x.split(":", 1)[0] != CHROME]
+    if specs:
+        enforce_mcp_rules(list(lib.values()), project, canonical_specs(project, specs), getattr(a, "force_mcp", False))
+
+
 def _cmd_run(a):
     if a.resume == "last":  # the latest run, so the command needs no `$(lean-agent runs --last)`
         a.resume = latest_run_id(ordinary=True)
@@ -1879,6 +1906,7 @@ def _cmd_run(a):
     else:
         slug, project = resolve_project(a.project)
         sync_memory(slug)
+        preflight_run_args(a, slug, project, read_only=bool(a.read_only))
         auto_branch = getattr(a, "worktree", None) == "auto"
         if auto_branch and a.read_only:  # a read-only worker changes nothing, so it gets no new branch
             print("branch: --worktree auto makes a branch for a worker that writes; this read-only worker gets none "
@@ -1913,14 +1941,12 @@ def _cmd_run(a):
         wanted = [x for x in (a.cards or "").split(",") if x and x != "none"]
         if getattr(a, "card_list", None) is not None:  # chosen by the caller (e.g. `review`)
             cards = a.card_list
-        elif a.cards == "auto":
+        elif "auto" in wanted:
             cards = suggest(slug, task, a.max_context,
                             getattr(a, "ttype", None) or task_type(task, a.read_only, bool(a.chrome)),
                             strict=True, limit=a.max_cards)
+            cards += [lib[x] for x in wanted if x != "auto" and lib[x] not in cards]  # `auto,<name>`: the named ones on top
         else:
-            missing = [x for x in wanted if x not in lib]
-            if missing:
-                die(f"unknown card(s): {', '.join(missing)} (see: lean-agent cards {slug})")
             ttype = getattr(a, "ttype", None) or task_type(task, a.read_only, bool(a.chrome))
             cards = [c for c in lib.values() if is_core(c, ttype) and not c.get("archived") and not c.get("is_rule")]
             cards += [lib[x] for x in wanted if lib[x] not in cards]
@@ -5722,7 +5748,7 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True):
         r = subprocess.run(["git", "-C", repo, "branch", "-q", "--no-track", ref, sha], capture_output=True, text=True)
         if r.returncode != 0:
             die(f"could not create branch {ref!r} from {new_from}: {(r.stderr or r.stdout).strip()[:300]}")
-        print(f"worktree: created {ref} from {new_from}", flush=True)
+        print(f"worktree: created {ref} from {new_from} ({sha[:10]})", flush=True)
     sync_worktree_registry(slug, repo)
     remote_branch = ref[len("origin/"):] if ref.startswith("origin/") else None
     target = remote_branch or ref
@@ -5879,6 +5905,10 @@ def cmd_worktree(a):
         return worktree_base_cmd(a)
     if a.action == "attach":
         return worktree_attach(a)
+    if a.action == "create":
+        return worktree_create(a)
+    if a.action == "adopt":
+        return worktree_adopt(a)
     if not a.ref:
         die("which worktree? lean-agent worktree rm <project> <ref>")
     slug, repo = resolve_project(a.project)
@@ -5896,6 +5926,47 @@ def cmd_worktree(a):
     del idx[slug][name]
     save_json(home("worktrees.json"), idx)
     print(f"removed {w['path']}")
+
+
+def worktree_create(a):
+    """A new branch in a registered worktree, like `run --worktree` makes it (setup command included); prints the path."""
+    slug, repo = resolve_project(a.project)
+    if not a.ref or not a.from_ref:
+        die("lean-agent worktree create <project> <new-branch> --from <ref>   (ref: a local branch, tag, origin/<x> or commit)")
+    if git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + a.ref):
+        die(f"branch {a.ref} already exists in {repo}; use `run --worktree {a.ref}` to work on it")
+    if a.from_ref.startswith("origin/"):
+        git(repo, "fetch", "-q", "origin")
+    if not git(repo, "rev-parse", "--verify", "--quiet", a.from_ref + "^{commit}"):
+        die(f"--from {a.from_ref!r} is unknown in {repo} (a local branch, tag, origin/<branch> or commit)")
+    wt = ensure_worktree(slug, repo, a.ref, base=a.from_ref, typed=False)
+    print(f"{wt['path']}")
+    return 0
+
+
+def worktree_adopt(a):
+    """Registers a plain `git worktree add` checkout of the project, so `worktree push` and its guards cover it."""
+    slug, repo = resolve_project(a.project)
+    if not a.ref:
+        die("which path? lean-agent worktree adopt <project> <path>")
+    path = worktree_path(os.path.abspath(os.path.expanduser(a.ref)))
+    found = next((w for w in worktree_porcelain(repo) if worktree_path(w["path"]) == path), None)
+    if not found or path == worktree_path(repo):
+        die(f"{path} is not a linked git worktree of {slug} (see: git -C {repo} worktree list)")
+    idx = worktree_index()
+    for n, e in (idx.get(slug) or {}).items():
+        if e.get("path") == path:
+            print(f"{path} is already registered as {n}")
+            return 0
+    branch = found["branch"]
+    name = slugify((branch or os.path.basename(path)).replace("/", "-"), 60)
+    if name in (idx.get(slug) or {}):
+        die(f"a different worktree is registered as {name}; remove it first (lean-agent worktree rm {slug} {branch or name})")
+    idx.setdefault(slug, {})[name] = {"created": now_iso(), "path": path, "ref": branch or path, "branch": branch,
+                                      "sha": git(path, "rev-parse", "HEAD") or "", "repo": repo, "last_used": now_iso()}
+    save_json(home("worktrees.json"), idx)
+    print(f"registered {path} ({'branch ' + branch if branch else 'detached'}) as {name}")
+    return 0
 
 
 def worktree_base_cmd(a):
@@ -5917,14 +5988,19 @@ def worktree_setup_cmd(a):
     slug, _ = resolve_project(a.project)
     projs = projects()
     command = a.command
+    was = projs[slug].get("worktree_setup")
+    if getattr(a, "show", False):
+        print(f"{slug}: setup command: {was or 'none'}")
+        return 0
     if a.off:
         projs[slug].pop("worktree_setup", None)
         save_json(home("projects.json"), projs)
-        print(f"{slug}: no setup command for new worktrees")
+        print(f"{slug}: no setup command for new worktrees (was: {was or 'none'})")
         return 0
     if command:
         projs[slug]["worktree_setup"] = command
         save_json(home("projects.json"), projs)
+        print(f"{slug}: setup command changed (was: {was or 'none'})")
     cur = projs[slug].get("worktree_setup")
     print(f"{slug}: new worktrees run: {cur}" if cur else
           f"{slug}: no setup command. Set one: lean-agent worktree setup {slug} --run \"npm ci && npm run build\"")
@@ -9373,7 +9449,14 @@ def clear_at_text():
 
 def cmd_branch_name(a):
     slug, repo = resolve_project(a.project or os.getcwd())
-    print(new_branch_name(slug, repo, a.type, a.task, a.title, a.version))
+    kind = a.type
+    if a.base and not kind:  # a branch that starts from a base (even a release one) is a feature/bugfix of its own
+        kind = infer_branch_kind(a.title)
+        kind = "feature" if kind == "release" and not a.version else kind
+    name = new_branch_name(slug, repo, kind, a.task, a.title, a.version)
+    print(name)
+    if a.base:
+        print(f"lean-agent: start it from {a.base}: lean-agent worktree create {slug} {name} --from {a.base}", file=sys.stderr)
     return 0
 
 
@@ -11286,6 +11369,9 @@ the PR", "in project x, only the docs"), never ask to confirm that scope again: 
 When the task needs a tool or server (a card, a preset or an earlier run of a similar task shows it, or the request names
 the service), the suggested command carries `--mcp <server>:<preset>` from the MCP list in the task (a preset, not the
 whole server).
+When the task mentions merging into, or starting from, a branch (possibly an unpushed local one, a tag or a commit), the
+suggested command carries `--worktree <new-branch> --worktree-base <that ref>`; without it a new branch starts from the
+project's default base.
 Answer with at most 15 lines, the first one exactly `ADVICE`, then one short line each:
 `understood:` the request in one line, in your own words
 `ambiguous:` only when the request has two plausible readings: `<reading A> | <reading B>` (leave the line out otherwise)
@@ -11837,6 +11923,8 @@ def build_parser():
     s.add_argument("--type", choices=BRANCH_KINDS, help="default: inferred from the title")
     s.add_argument("--task", metavar="ID", help="the tracker work item id (else the name has none)")
     s.add_argument("--version", metavar="X", help="release branches")
+    s.add_argument("--base", metavar="REF", help="the branch the new one will start from (e.g. a release branch): the name "
+                   "still follows the type's rule, and the start command is shown")
     s.set_defaults(fn=cmd_branch_name)
 
     s = sub.add_parser("attribution", help="should commits and PRs credit Claude? ask the user once, then set on|off")
@@ -12118,8 +12206,10 @@ def build_parser():
     s = sub.add_parser("worktrees", help="list lean-agent's shared worktrees")
     s.add_argument("project", nargs="?")
     s.set_defaults(fn=cmd_worktrees)
-    s = sub.add_parser("worktree", help="shared worktrees: rm, setup (run on new ones), push (after review + approval), attach (branch to a detached HEAD)")
-    s.add_argument("action", choices=["rm", "setup", "push", "base", "attach"])
+    s = sub.add_parser("worktree", help="shared worktrees: rm, create <new> --from <ref>, adopt <path>, setup (run on new ones; --show), push (after review + approval), attach (branch to a detached HEAD)")
+    s.add_argument("action", choices=["rm", "setup", "push", "base", "attach", "create", "adopt"])
+    s.add_argument("--from", dest="from_ref", metavar="REF", help="create: where the new branch starts (a local branch, tag, origin/<x> or commit)")
+    s.add_argument("--show", action="store_true", help="setup: print the stored command (or none)")
     s.add_argument("project")
     s.add_argument("ref", nargs="?", help="the worktree's branch (setup: also run the command there now)")
     s.add_argument("--run", dest="command", metavar="COMMAND", help="setup: the command for new worktrees")
