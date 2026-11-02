@@ -103,6 +103,10 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      `lean-agent chrome check`; it is refused for you, `lean-agent chrome status` is not).
    - New branches follow the project's branch rules: get a name with `lean-agent branch-name` or let lean-agent create
      it (`--worktree auto [--branch-type feature|bugfix|release]`).
+   - `--worktree <new-branch> --worktree-base <ref>`: a branch that doesn't exist yet starts from `<ref>` (a local, even
+     unpushed branch, a tag, `origin/<x>` or a commit), else from the project's base; the start line says "created <branch>
+     from <ref> (<sha>)". Use it when the task starts from, or merges into, a particular branch. A worker can also
+     do `worktree create` (same, without a run) or `worktree adopt` (registers a plain git worktree for `worktree push`).
    - `--worktree <branch>`: shared lean-agent git worktree of that branch (e.g. a reviewer's checks on a PR branch);
      the user's checkout is untouched. Reuse the name for the next worker (dependencies and builds stay). Read-only
      workers share one; file-changing workers take turns. `lean-agent worktrees` lists them; removing one, pushing

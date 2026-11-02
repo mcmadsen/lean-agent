@@ -391,7 +391,7 @@ def lean_agent_only(command):
 
 # The lean-agent subcommands the strict orchestrator may not run. docs/orchestrator-surface.md lists every one with
 # its class; workers are not affected (they start with `lean-agent run <p> --cards auto ... -- "<task>"`).
-#   "change"  changes a project repo, branch, remote or tracker: worktree rm|setup|push|reset|attach (reset: kept in case it
+#   "change"  changes a project repo, branch, remote or tracker: worktree rm|setup|push|reset|attach|create|adopt (reset: kept in case it
 #             becomes a subcommand), rules (writes or with --off removes lean-agent's block in the repo's rules file),
 #             codemod --apply (runs on the checkout itself; without --apply: a throwaway copy), tracker with a value,
 #             --note, --rm-note, --supersede or --ack-email (--discover alone starts a worker). PR and tracker writes
@@ -406,7 +406,7 @@ def lean_agent_only(command):
 # (also new|send|open|close [tN ...|--all|--idle DUR]|sessions [--context]: they start, message and stop the thread's own session, never project work),
 # feedback add|list|export|done|rm (lean-agent's own feedback file, never project data),
 # checkpoint, clear [--thread tN] and clear --all [--restart] [--force] (queue a /clear, or a restart, for the end of the turn), brief, runs (also `runs --wait`, which blocks until runs finish, and `runs --stop`, which only ends lean-agent's own runs), review (it starts its own worker), handover (writes only under LEAN_AGENT_HOME), sync, doctor, optimize and the like.
-CHANGING_ACTIONS = {"worktree": {"rm", "setup", "push", "reset", "base", "attach"}}
+CHANGING_ACTIONS = {"worktree": {"rm", "setup", "push", "reset", "base", "attach", "create", "adopt"}}
 CHANGING_ALWAYS = {"rules"}
 CHANGING_FLAGS = {"codemod": {"--apply"}, "tracker": {"--note", "--rm-note", "--supersede", "--ack-email"}}
 KEEP_ACTIONS = {
