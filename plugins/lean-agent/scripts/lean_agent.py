@@ -2428,7 +2428,7 @@ def _cmd_run(a):
     if entry.get("cost_estimated"):
         cost = "~" + cost
     print(f"run {run_id} · {model} · {status} · {entry['turns'] or '?'} turns · {seconds}s · "
-          f"{entry['units']:,} sonnet-eq tok · {cost}")
+          f"{int(num(entry['units'])):,} sonnet-eq tok · {cost}")
     detail(f"  tokens: input {u.get('input_tokens', 0):,} · cache write {u.get('cache_creation_input_tokens', 0):,}"
           f" · cache read {u.get('cache_read_input_tokens', 0):,} · output {u.get('output_tokens', 0):,}")
     ctx = usage.context_tokens(u)
@@ -9658,10 +9658,28 @@ def top_runs_lines(runs, n):
 ASSUMED_BASELINE_CTX = 30000  # a normal Claude Code turn in a project: system prompt, tools, CLAUDE.md, skills, MCP
 
 
+def num(v, default=0):
+    """v as a number: ints/floats and numeric strings pass, None/bool/dicts/junk give `default`."""
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, (int, float)):
+        return v if v == v and abs(v) != float("inf") else default
+    if isinstance(v, str):
+        try:
+            return num(float(v.replace(",", "").strip()), default)
+        except ValueError:
+            return default
+    return default
+
+
 def baseline_ctx(slug):
     """(context tokens of one normal Claude Code turn in this project, measured?)."""
-    b = load_json(home("baselines.json"), {}).get(slug) or {}
-    return (b["ctx"], True) if b.get("ctx") else (ASSUMED_BASELINE_CTX, False)
+    all_b = load_json(home("baselines.json"), {})
+    b = all_b.get(slug) if isinstance(all_b, dict) else None
+    if isinstance(b, dict):
+        b = b.get("ctx")
+    ctx = num(b)  # a bare number, a numeric string or {"ctx": n}; anything else counts as not measured
+    return (int(ctx), True) if ctx > 0 else (ASSUMED_BASELINE_CTX, False)
 
 
 def measure_baseline(slug, path):
@@ -9695,14 +9713,15 @@ def measure_baseline(slug, path):
 
 def run_savings(r):
     """{"context": sonnet-eq saved by the lean worker context, "model": saved by the model choice} for a run."""
-    u = r.get("usage") or {}
-    turns = max(1, r.get("turns") or 1)
+    u = r.get("usage")
+    u = {k: num(v) for k, v in u.items()} if isinstance(u, dict) else {}
+    turns = max(1, int(num(r.get("turns"), 1)))
     ctx = usage.context_tokens(u)
     base, _ = baseline_ctx(r.get("project"))
     extra = max(0, base - ctx / turns)
-    rate = usage.model_rate(r.get("model"))
+    rate = usage.model_rate(r.get("model") if isinstance(r.get("model"), str) else None)
     context = extra * (1.25 + 0.1 * (turns - 1)) * rate  # first turn written to the cache, later turns re-read it
-    weighted = r.get("weighted") or usage.weighted(u)
+    weighted = num(r.get("weighted")) or usage.weighted(u)
     return {"context": int(context), "model": int(weighted - weighted * rate)}
 
 
@@ -9714,33 +9733,69 @@ def cmd_savings(a):
             print(f"{slug}: a normal Claude Code turn carries ~{ctx:,} tokens of context" if ctx else
                   f"{slug}: couldn't measure (is `claude` signed in?)")
     since = (datetime.datetime.now() - datetime.timedelta(days=a.days)).isoformat()
-    runs = [r for r in ledger() if r.get("ts", "") >= since and (not a.project or r["project"] == resolve_project(a.project)[0])]
+    want = resolve_project(a.project)[0] if a.project else None
+    partial = []
+
+    def fail(name, e):
+        partial.append(name)
+        return f"  {name:<17} n/a ({type(e).__name__}: {str(e)[:80]}; please report)"
+
+    runs = []
+    try:
+        runs = [r for r in ledger() if isinstance(r, dict) and str(r.get("ts") or "") >= since
+                and (not want or r.get("project") == want)]
+    except Exception as e:  # noqa: BLE001 - reported below, each section stands alone
+        partial.append("ledger")
+        print(fail("worker context", e))
     ctx_saved = model_saved = used = 0
     per_project = {}
+    lines = {}
+    for name in ("context", "model"):
+        try:
+            tot = 0
+            for r in runs:
+                try:
+                    tot += run_savings(r)[name]
+                except Exception:  # noqa: BLE001 - one odd row must not hide the rest
+                    pass
+            if name == "context":
+                ctx_saved = tot
+            else:
+                model_saved = tot
+        except Exception as e:  # noqa: BLE001
+            lines[name] = fail("worker context" if name == "context" else "model choice", e)
     for r in runs:
-        sv = run_savings(r)
-        ctx_saved += sv["context"]
-        model_saved += sv["model"]
-        used += r.get("units", 0)
-        per_project.setdefault(r["project"], [0, 0])
-        per_project[r["project"]][0] += 1
-        per_project[r["project"]][1] += sv["context"]
+        try:
+            used += int(num(r.get("units")))
+            slug = str(r.get("project") or "?")
+            p = per_project.setdefault(slug, [0, 0])
+            p[0] += 1
+            p[1] += run_savings(r)["context"]
+        except Exception:  # noqa: BLE001
+            pass
     sq_n = sq_saved = 0
-    for e in read_jsonl(os.path.join(os.path.dirname(lean_log.log_dir()), "savings.jsonl")):
-        if e.get("ts", "") >= since:
-            sq_n += 1
-            sq_saved += max(0, e.get("before", 0) - e.get("after", 0)) // 4
+    sq_err = None
+    try:
+        for e in read_jsonl(os.path.join(os.path.dirname(lean_log.log_dir()), "savings.jsonl")):
+            if isinstance(e, dict) and str(e.get("ts") or "") >= since:
+                sq_n += 1
+                sq_saved += int(max(0, num(e.get("before")) - num(e.get("after"))) // 4)
+    except Exception as e:  # noqa: BLE001
+        sq_err = fail("output squeezing", e)
     total = ctx_saved + model_saved + sq_saved
     print(f"Estimated tokens saved, last {a.days} days (sonnet-eq; estimates, not measurements):")
-    print(f"  worker context    {ctx_saved:>12,}  ({len(runs)} runs in a lean folder instead of the project)")
-    for slug, (n, sv) in sorted(per_project.items(), key=lambda kv: -kv[1][1]):
-        base, measured = baseline_ctx(slug)
-        print(f"    {slug:<20} {n:>4} runs  vs ~{base:,} tokens/turn normal "
-              + ("(measured)" if measured else "(assumed; measure: lean-agent savings --measure)"))
-    print(f"  model choice      {model_saved:>12,}  (vs running every worker on Sonnet; Opus runs count negative)")
-    print(f"  output squeezing  {sq_saved:>12,}  ({sq_n} long outputs shortened, counted once)")
-    print(f"  total             {total:>12,}  · workers used {used:,}"
-          + (f" · without lean-agent ~{used + total:,} ({(used + total) / used:.1f}x)" if used else ""))
+    print(lines.get("context") or f"  worker context    {ctx_saved:>12,}  ({len(runs)} runs in a lean folder instead of the project)")
+    try:
+        for slug, (n, sv) in sorted(per_project.items(), key=lambda kv: -kv[1][1]):
+            base, measured = baseline_ctx(slug)
+            print(f"    {slug:<20} {n:>4} runs  vs ~{base:,} tokens/turn normal "
+                  + ("(measured)" if measured else "(assumed; measure: lean-agent savings --measure)"))
+    except Exception as e:  # noqa: BLE001
+        print(fail("per-project", e))
+    print(lines.get("model") or f"  model choice      {model_saved:>12,}  (vs running every worker on Sonnet; Opus runs count negative)")
+    print(sq_err or f"  output squeezing  {sq_saved:>12,}  ({sq_n} long outputs shortened, counted once)")
+    print(f"  total             {total:>12,}{' (partial)' if partial else ''}  · workers used {used:,}"
+          + (f" · without lean-agent ~{used + total:,} ({(used + total) / used:.1f}x)" if used > 0 else ""))
     return 0
 
 
