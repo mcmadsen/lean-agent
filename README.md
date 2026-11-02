@@ -117,7 +117,7 @@ Other ways to run the orchestrator:
 
 | Command | |
 |---|---|
-| `lean-agent projects` / `learn <path> [--name n]` | Register a project, or refresh its cards after CLAUDE.md changes. Card stats survive. |
+| `lean-agent projects` / `learn <path> [--name n] [--as-worktree]` | Register a project, or refresh its cards after CLAUDE.md changes. Card stats survive. `learn` indexes code and docs (CLAUDE.md, rules, skills) into cards; lessons from PR comments are `review learn`. `--as-worktree` with `--name <existing>` refreshes that project from another checkout (a worktree) without moving its registration. |
 | `lean-agent cards <project> [filter]` | Cards with size and hit rate (`used/sent`). `*` = core. Filter by id, title or path, e.g. `cards shop infra`. |
 | `lean-agent suggest <project> "<task>"` | Task type (read/change/browser), recommended model (from your `stats` per type, else defaults; Haiku when a budget is low), a gather/judge split hint, then core cards plus relevant cards with cost and reason, or an explicit "No relevant cards". |
 | `lean-agent run <project> -m <model> --why "..." [--cards a,b \| auto] [--read-only] [--chrome[=tools]] [--mcp s:t] [--max-usd X] [--max-turns N] -- "<task>"` | Run an isolated worker. Model and reason are **required**. `--read-only` allows Read/Glob/Grep and read-only `git -C <project> show/log/grep/diff/blame/fetch`. |

@@ -551,7 +551,7 @@ def project_rules_on(slug):
     return projects().get(slug, {}).get("project_rules") == "on"
 
 
-def learn(path, include_user_skills=False, quiet=False, name=None, rules=None):
+def learn(path, include_user_skills=False, quiet=False, name=None, rules=None, as_worktree=False):
     path = os.path.abspath(os.path.expanduser(path))
     if not os.path.isdir(path):
         die(f"not a directory: {path}")
@@ -560,7 +560,14 @@ def learn(path, include_user_skills=False, quiet=False, name=None, rules=None):
         slug = slugify(name, 32)
         other = projects().get(slug)
         if other and not same_path(other["path"], path):
-            die(f"project name {slug!r} is already used for {other['path']}")
+            if not as_worktree:
+                die(f"project name {slug!r} is already used for {other['path']}. To refresh its cards from this "
+                    f"other checkout (e.g. a worktree) without moving the registration: "
+                    f"lean-agent learn {path} --name {slug} --as-worktree")
+        elif as_worktree and not other:
+            die(f"--as-worktree needs an existing project: no project named {slug!r} (see `lean-agent projects`)")
+    elif as_worktree:
+        die("--as-worktree needs --name <existing project>")
     slug = slug or project_slug(path)
 
     fresh, ids = [], set()
@@ -634,6 +641,14 @@ def learn(path, include_user_skills=False, quiet=False, name=None, rules=None):
 
     projs = projects()
     kept = dict(projs.get(slug) or {})
+    if as_worktree and kept.get("path") and not same_path(kept["path"], path):
+        projs[slug] = {**kept, "learned": now_iso()}  # the registration (path, rules) stays with the main checkout
+        save_json(home("projects.json"), projs)
+        cards = sync_memory(slug)
+        if not quiet:
+            print(f"Refreshed '{slug}' from {path}: {len(cards)} cards, ~{sum(c['tokens'] for c in cards):,} tokens. "
+                  f"The project stays registered at {kept['path']}; no rules block was written here.")
+        return slug
     for other in [s for s, v in projs.items() if same_path(v["path"], path) and s != slug]:
         kept = {**projs.pop(other), **kept}  # renamed with --name: keep its settings
     rules = "off" if rules is False else kept.get("rules")
@@ -711,7 +726,8 @@ def card_rate(c):
 # ---------------------------------------------------------------- commands: library
 
 def cmd_learn(a):
-    learn(a.path, include_user_skills=a.user_skills, name=a.name, rules=False if a.no_rules else None)
+    learn(a.path, include_user_skills=a.user_skills, name=a.name, rules=False if a.no_rules else None,
+          as_worktree=a.as_worktree)
 
 
 def cmd_projects(a):
@@ -11753,11 +11769,17 @@ def build_parser():
                    "worker runs")
     s.set_defaults(fn=cmd_budget)
 
-    s = sub.add_parser("learn", help="index a project's CLAUDE.md, rules and skills into context cards")
+    s = sub.add_parser("learn", help="index a project's CLAUDE.md, rules, skills and docs into context cards (code and "
+                                     "docs only; lessons from pull request comments are `review learn`)",
+                       description="Index a project's CLAUDE.md files, rules, skills and docs into context cards. "
+                                   "It does not read pull request comments: lessons from those are `review learn`.")
     s.add_argument("path")
     s.add_argument("--no-rules", action="store_true", help="don't write the lean-agent block into the repo")
     s.add_argument("--name", help="short project name to use instead of <folder>-<hash>")
     s.add_argument("--user-skills", action="store_true", help="also index ~/.claude/skills")
+    s.add_argument("--as-worktree", action="store_true",
+                   help="with --name <existing project>: refresh that project's cards from this other checkout "
+                        "(a worktree of a PR branch) without moving its registration")
     s.set_defaults(fn=cmd_learn)
     s = sub.add_parser("projects", help="list learned projects")
     s.set_defaults(fn=cmd_projects)

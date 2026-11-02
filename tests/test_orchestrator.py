@@ -317,6 +317,28 @@ class CliTest(unittest.TestCase):
         for cid in ("testing", "style", "web-frontend-build", "skill-deploy"):
             self.assertIn(cid, cards)
 
+    def test_learn_as_worktree_refreshes_the_existing_project_without_moving_it(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        wt = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, wt, True)
+        shutil.copytree(self.proj, os.path.join(wt, "w"), ignore=shutil.ignore_patterns(".git"))
+        wt = os.path.join(wt, "w")
+        with open(os.path.join(wt, "CLAUDE.md"), "a") as fh:
+            fh.write("\n## Branch notes\nBranch only text.\n")
+        bad = self.cli("learn", wt, "--name", "proj", check=False)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("--as-worktree", bad.stderr)
+        self.assertNotIn("branch-notes", self.cli("cards", "proj").stdout)
+        out = self.cli("learn", wt, "--name", "proj", "--as-worktree").stdout
+        self.assertIn("stays registered at", out)
+        self.assertIn("branch-notes", self.cli("cards", "proj").stdout)
+        projs = self.cli("projects").stdout
+        self.assertIn(self.proj, projs)
+        self.assertNotIn(wt, projs)
+        self.assertEqual(len([l for l in projs.splitlines() if l.startswith("proj")]), 1)
+        self.assertNotEqual(self.cli("learn", wt, "--name", "nope", "--as-worktree", check=False).returncode, 0)
+        self.assertIn("review learn", self.cli("learn", "--help").stdout)
+
     def test_learn_monorepo_layout(self):
         def write(rel, text):
             path = os.path.join(self.proj, rel)
