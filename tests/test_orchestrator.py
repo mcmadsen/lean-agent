@@ -2759,7 +2759,7 @@ class CliTest(unittest.TestCase):
         self.assertTrue(self.cli("todo", "next").stdout.startswith("#2 [open] high Reply to the release thread"))
         self.cli("todo", "start", "1")
         self.assertTrue(self.cli("todo", "next").stdout.startswith("#1 [doing]"))  # what's in progress first
-        self.cli("todo", "done", "1", "fixed in the worker run")
+        self.cli("todo", "done", "1", "fixed in the worker run", LEAN_AGENT_REVIEW_LEARN_AUTO="0")
         out = self.cli("todo").stdout
         self.assertNotIn("#1", out)
         self.assertIn("(1 done in the last 7 days", out)
