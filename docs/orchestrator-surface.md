@@ -56,7 +56,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | --- | --- | --- |
 | `remember "<what>" [--project P] [--task-file -]` | b | allowed: starts the librarian worker; the only way to keep something |
 | `advise "<request>" [--project P] [--thread TAG] [--task-file -]` | b | allowed: starts a read-only haiku advisor worker; stores its short answer in `advice/` |
-| `run`, `review`, `do`, `tracker --discover` (all flags, `--mcp`, `--allow-cmd`, `--todo new\|N\|none`) | b | allowed, in the background; they start workers |
+| `run`, `review`, `do`, `tracker --discover` (all flags, `--mcp`, `--allow-cmd`, `--allow-edit`, `--todo new\|N\|none`) | b | allowed, in the background; they start workers |
 | `now`, `now --short`, `thread list`, `thread show tN [--all]` | b | allowed: read-only |
 | `find <query> [--type todo\|thread\|run\|memory\|handover\|review] [--project P] [--all]` | b | allowed: read-only, no model call; one search across todos, threads, runs, memories, handovers and review records; a PR or work-item number also matches `PR 12`, `!12`, `#12`, `pullrequest/12` and branch names such as `feature/12-...`; one table (Type, Id, Date, State, Match, Open), newest first, 15 rows unless `--all` |
 | `thread list [--grep TEXT] [--pr N] [--item N] [--open]`, `todo list --ref X`, `runs [--pr N] [--item N] [--grep TEXT]`, `memory show NAME` | b | allowed: read-only filters of the lists (`todo list --ref` filters on the ref field, PR-number aware); thread titles are printed in full |
@@ -101,6 +101,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `review learn <p> --text "…"` / `--helper "…"` | c | **denied**: text the orchestrator supplies is knowledge; `remember` (or a worker) |
 | `handover` (also `--list`) | b | allowed: a worker writes a Markdown file; it only writes under LEAN_AGENT_HOME |
 | `config strict on`, `config branch-rules`, `config review-skip`, `config review-max-rerounds`, `config review-model`, `config review-learn-auto`, `config run-timeout`, `attribution`, `limits`, `budget`, `context` | b | allowed: switches and limits |
+| `config allow-edit <project> <glob>... [--clear]` | b | allowed: repo-owned paths (e.g. `.claude/rules/**`, `CLAUDE.md`) every editing worker of the project may change; same as `run --allow-edit` |
 | `config strict off` | c | **denied**: the orchestrator doesn't lift its own guardrail |
 | `runs` (also `runs --wait <id\|all\|last>`, which blocks until those runs are recorded and prints their results; `runs --stop <id\|last>`, which ends one of lean-agent's own runs, records it as `stopped` and lists what it changed in its worktree; a run whose supervisor died shows as `lost`: `runs --lost` lists them, `runs --lost --clear` acknowledges them, and `runs --stop <id>` still closes one by id; `--clear` needs `--lost`), `logs`, `output`, `stats`, `savings`, `week`, `guide`, `doctor` | a | allowed |
 | `up`, `install`, `trust`, `home`, `env`, `sync`, `service` | b | allowed: lean-agent's own setup and updates (`sync` follows releases; `--check`, `--main`, `--reset`) |

@@ -3074,6 +3074,50 @@ class CliTest(unittest.TestCase):
                        "suggested: lean-agent run proj --cards auto -m haiku --allow-cmd 'az pipelines runs show' --why \"x\" -- \"look\"").stdout
         self.assertIn("--read-only --allow-cmd 'az pipelines runs show'", out)
 
+    def test_allow_edit_adds_allow_rules_keeps_settings_denied_and_refuses_outside_paths(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        for bad in ("/etc/passwd", "../other/x.md", "sub/../../x"):
+            p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--allow-edit", bad, "edit", check=False)
+            self.assertEqual(p.returncode, 1, bad)
+            self.assertIn("only paths inside the worktree", p.stdout + p.stderr)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "--allow-edit", "CLAUDE.md", "look", check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertFalse(os.path.exists(self.log) and self.calls())
+        self.assertEqual(self.running_markers(), [])
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--allow-edit", ".claude/rules/**",
+                 "--allow-edit", "CLAUDE.md", "edit")
+        argv = self.calls()[-1]["argv"]
+        allowed = argv[argv.index("--allowedTools") + 1].split(",")
+        root = os.path.realpath(self.proj)
+        for tool in ("Edit", "Write", "MultiEdit"):
+            self.assertTrue(any(r == f"{tool}(//{root.lstrip('/')}/.claude/rules/**)" or
+                                r.startswith(f"{tool}(/") and r.endswith("/.claude/rules/**)") for r in allowed), tool)
+            self.assertTrue(any(r.startswith(f"{tool}(/") and r.endswith("/CLAUDE.md)") for r in allowed), tool)
+        settings = json.loads(argv[argv.index("--settings") + 1])
+        deny = settings["permissions"]["deny"]
+        self.assertTrue(any(r.endswith("/.claude/settings*.json)") for r in deny))
+        self.assertTrue(any(r.endswith("/.claude/hooks/**)") for r in deny))
+        mod = lean_agent_module()
+        _, deny = mod.allow_edit_rules("/w", [".claude/settings.json"])
+        self.assertFalse(any("settings" in r for r in deny))
+        self.assertTrue(any("hooks" in r for r in deny))
+        allow, deny = mod.allow_edit_rules("/w", [".claude/**"])
+        self.assertIn("Edit(//w/.claude/**)", allow)
+        self.assertTrue(any("settings*.json" in r for r in deny))
+
+    def test_config_allow_edit_is_stored_per_project_and_used_by_runs(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        out = self.cli("config", "allow-edit", "proj", ".claude/rules/**", "CLAUDE.md").stdout
+        self.assertIn(".claude/rules/**, CLAUDE.md", out)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "edit")
+        argv = self.calls()[-1]["argv"]
+        allowed = argv[argv.index("--allowedTools") + 1]
+        self.assertIn("/.claude/rules/**)", allowed)
+        self.assertEqual(self.ledger()[-1]["allow_edit"], [".claude/rules/**", "CLAUDE.md"])
+        self.assertIn("none", self.cli("config", "allow-edit", "proj", "--clear").stdout)
+        p = self.cli("config", "allow-edit", "proj", "/etc/x", check=False)
+        self.assertEqual(p.returncode, 1)
+
     def test_wait_for_a_resumed_run_waits_for_the_new_attempt(self):
         self.cli("learn", self.proj, "--name", "proj")
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "first job", FAKE_ANSWER="First answer")

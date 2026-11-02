@@ -92,6 +92,10 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      checked out: `--ref origin/<branch>` (the worker uses `git show <sha>:<path>`; no `git archive`). A lookup
      needing a CLI (a CI run, a cloud resource) gets exactly that command: `--allow-cmd "az pipelines runs show"`
      (repeatable; commands that change things are refused).
+   - `--allow-edit <path-or-glob>` (repeatable, worktree-relative, e.g. `.claude/rules/**`, `CLAUDE.md`): Claude Code
+     refuses worker edits to the repo's `.claude/` files and CLAUDE.md. A worker that reports `needs: --allow-edit <path>`
+     was refused: rerun (or `--resume`) with exactly that flag. `.claude/settings*.json` and `.claude/hooks/**` only
+     when named exactly. For a project that always needs it: `lean-agent config allow-edit <project> <glob>...`.
    - `--mcp <server>:<preset or tool>,...`: only for an external system. You neither list nor run MCP servers:
      "which servers do we have", "what does tool X return" is a small read-only worker (`--read-only --allow-cmd
      "lean-agent mcp"`, `--mcp <server>` to call it). Its commands are (worker: `lean-agent mcp list -p <project>`),
