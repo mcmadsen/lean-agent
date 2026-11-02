@@ -497,7 +497,13 @@ without touching your checkout.
 - **Pushing fixes:** `lean-agent worktree push <project> <branch>` pushes the worktree's branch to origin, but only
   when its tip has an approving review (`review --head <branch>`), there are no uncommitted changes, and nobody
   else pushed in between (it never force-pushes). Without `--allow-send "<what the user approved>"` it only shows
-  the commits it would push, because pushing is an outward action.
+  the commits it would push, because pushing is an outward action. It pushes to the remote branch recorded when
+  the worktree was made from `origin/<x>` (`worktree create --from origin/<x>`, `run --worktree-base origin/<x>`,
+  a PR worktree, an adopted worktree with an upstream), else to the same name. When the PR's source branch has
+  another name than the local branch, say so: `--remote-branch <name>` (alias `--to`) pushes `HEAD` to
+  `refs/heads/<name>`; the push guard, review gate and base-merge check apply to that remote name. A remote branch
+  that doesn't exist yet is refused unless `--new-branch` is given. The result line reads
+  `pushed <local> -> origin/<remote>`.
 - **Parallel workers:** read-only workers share a worktree at the same time. Workers that change files take turns.
 - **Housekeeping:** `lean-agent worktrees [project]` lists them, and `lean-agent worktree rm <project> <branch>
   [--force]` removes one.
