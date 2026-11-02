@@ -3598,11 +3598,9 @@ REVIEW_CARDS = {
 }
 
 LEARN_RULE = """\
-Role: you turn a human code review into lessons for an automated reviewer. You can only read: the pull
-request threads (MCP tools) and the code (Read/Grep/Glob, read-only git in {project}).
-Read the review threads of pull request {pr} (all threads people wrote; skip system/status threads). If the
-tools return no threads, check the identifiers you used against the repository identity below; don't report
-"no comments" unless the pull request itself was found.
+Role: you turn a human code review into lessons for an automated reviewer. You can only read: {source}
+and the code (Read/Grep/Glob, read-only git in {project}).
+{reading}
 
 Here is what lean-agent's own reviewer found for this change. Its claims are not facts: only the code and the
 humans' final words are.
@@ -3627,6 +3625,137 @@ LEAN-CHECKLIST {{"checklist": ["..."], "helpers": [{{"name": "...", "where": "pa
 """
 
 
+LEARN_READING_MCP = ("Read the review threads of pull request {pr} (all threads people wrote; skip system/status threads). If the\n"
+                     "tools return no threads, check the identifiers you used against the repository identity below; don't report\n"
+                     "\"no comments\" unless the pull request itself was found.")
+LEARN_READING_TEXT = ("The review threads of pull request {pr} are given below (all text people wrote; skip system/status\n"
+                      "threads). Nothing else is available about the pull request; don't look it up.\n"
+                      "<threads>\n{threads}\n</threads>")
+THREADS_CAP = 40000
+
+
+def threads_text(raw):
+    """The PR's review threads as compact text: JSON is re-serialised without whitespace, plain text kept; capped."""
+    raw = (raw or "").strip()
+    if not raw:
+        die("the threads input is empty")
+    try:
+        raw = json.dumps(json.loads(raw), ensure_ascii=False, separators=(",", ":"))
+    except ValueError:
+        pass
+    return raw[:THREADS_CAP] + ("\n(cut: the input was longer)" if len(raw) > THREADS_CAP else "")
+
+
+def read_threads(a, slug):
+    """The PR's threads from --threads-file (F or -) or from the saved/given --threads-cmd ({pr} is replaced); None
+    when neither is set."""
+    if a.threads_file:
+        return threads_text(sys.stdin.read() if a.threads_file == "-" else read_text(a.threads_file))
+    cmd = a.threads_cmd or (projects().get(slug) or {}).get("review_learn_threads_cmd")
+    if not cmd or a.mcp:
+        return None
+    argv = [t.replace("{pr}", str(a.pr)) for t in shlex.split(cmd)]
+    try:
+        p = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        die(f"the threads command failed: {exc}")
+    if p.returncode:
+        die(f"the threads command exited {p.returncode}: {(p.stderr or '').strip()[:200]}")
+    return threads_text(p.stdout)
+
+
+def mcp_forbidden(slug, specs):
+    """[(server, rule card)] for the --mcp specs a rule of the project forbids."""
+    cards = project_rules(slug)
+    available = lean_mcp.discover((projects().get(slug) or {}).get("path"))
+    aliases = lean_mcp.display_names(available)
+    return [(n, c) for n, _ in lean_mcp.parse_specs(specs) for c, _t in rule_hits(cards, n, aliases.get(n) or "")]
+
+
+def learn_route(slug):
+    """Arguments for `review learn <slug> <pr>` that read the PR by the configured route, or None when there is none:
+    the saved threads command, else the saved tracker MCP unless a rule forbids it."""
+    cmd = (projects().get(slug) or {}).get("review_learn_threads_cmd")
+    if cmd:
+        return ["--threads-cmd", cmd]
+    mcp = learn_mcp(slug)
+    if mcp and not mcp_forbidden(slug, mcp):
+        return [x for m in mcp for x in ("--mcp", m)]
+    return None
+
+
+def review_lines(cards):
+    """[(card id, line)] numbered in this order by `review learn --list`."""
+    return [(c["id"], l) for cid in REVIEW_CARDS for c in cards if c["id"] == cid
+            for l in c["text"].splitlines() if l.startswith("- ")]
+
+
+def batches_path(slug):
+    return home(slug, "review-learn-batches.json")
+
+
+def log_batch(slug, ops):
+    if not ops:
+        return
+    with file_lock(batches_path(slug)):
+        d = load_json(batches_path(slug), [])
+        d = (d if isinstance(d, list) else []) + [{"ts": now_iso(), "ops": ops}]
+        save_json(batches_path(slug), d[-30:])
+
+
+def set_card_lines(c, lines):
+    c.update(text="\n".join(lines), tokens=est_tokens("\n".join(lines)), updated=now_iso())
+
+
+def remove_review_line(slug, which):
+    """Remove one learned line, by its number in `--list` or by a unique piece of its text; logged for --undo."""
+    cards = load_cards(slug)
+    numbered = review_lines(cards)
+    if which.strip().isdigit():
+        n = int(which)
+        if not 1 <= n <= len(numbered):
+            die(f"no line {n}: {len(numbered)} line(s) (see: lean-agent review learn {slug} --list)")
+        hit = numbered[n - 1]
+    else:
+        found = [x for x in numbered if which.lower() in x[1].lower()]
+        if len(found) != 1:
+            die(f"{len(found)} lines contain {which!r}; use the number from --list" if found else f"no line contains {which!r}")
+        hit = found[0]
+    c = next(x for x in cards if x["id"] == hit[0])
+    lines = c["text"].splitlines()
+    at = lines.index(hit[1])
+    del lines[at]
+    set_card_lines(c, lines)
+    save_cards(slug, cards)
+    log_batch(slug, [{"kind": "rm", "id": c["id"], "line": hit[1], "at": at}])
+    return hit
+
+
+def undo_review_learn(slug):
+    """Undo the last learn batch (added lines removed, corrected lines restored, removed lines put back)."""
+    with file_lock(batches_path(slug)):
+        d = load_json(batches_path(slug), [])
+        if not isinstance(d, list) or not d:
+            return None
+        batch = d.pop()
+        save_json(batches_path(slug), d)
+    cards = load_cards(slug)
+    for op in reversed(batch["ops"]):
+        c = next((x for x in cards if x["id"] == op["id"]), None)
+        if not c:
+            continue
+        lines = c["text"].splitlines()
+        if op["kind"] == "add" and op["line"] in lines:
+            lines.remove(op["line"])
+        elif op["kind"] == "update" and op["new"] in lines:
+            lines[lines.index(op["new"])] = op["old"]
+        elif op["kind"] == "rm":
+            lines.insert(min(op["at"], len(lines)), op["line"])
+        set_card_lines(c, lines)
+    save_cards(slug, cards)
+    return batch
+
+
 def _similar(a, b, cut=0.6):
     return _jaccard(_words(a), _words(b)) >= cut
 
@@ -3635,7 +3764,7 @@ def add_to_review_cards(slug, checklist=(), helpers=(), replace=()):
     """Add lessons to the project's review-checklist and shared-helpers cards (core for reviews): near-duplicates
     of existing lines are skipped, a helper with a known name updates its line, and `replace` corrects lines."""
     cards = load_cards(slug)
-    added = []
+    added, ops = [], []
     for rp in replace:
         if not isinstance(rp, dict) or not rp.get("old") or not rp.get("new"):
             continue
@@ -3645,6 +3774,7 @@ def add_to_review_cards(slug, checklist=(), helpers=(), replace=()):
             lines = c["text"].splitlines()
             best = max(range(len(lines)), key=lambda i: _jaccard(_words(lines[i]), _words(rp["old"])), default=None)
             if best is not None and _similar(lines[best], rp["old"], 0.5):
+                ops.append({"kind": "update", "id": c["id"], "old": lines[best], "new": "- " + str(rp["new"]).lstrip("- ")})
                 lines[best] = "- " + str(rp["new"]).lstrip("- ")
                 c.update(text="\n".join(lines), tokens=est_tokens("\n".join(lines)), updated=now_iso())
                 added.append((c["id"], "corrected: " + lines[best]))
@@ -3669,6 +3799,7 @@ def add_to_review_cards(slug, checklist=(), helpers=(), replace=()):
                 at = next((i for i, l in enumerate(lines) if l[2:].split(" (")[0].strip().lower() == name), None)
                 if at is not None:
                     if lines[at] != item:
+                        ops.append({"kind": "update", "id": cid, "old": lines[at], "new": item})
                         lines[at] = item
                         added.append((cid, "updated: " + item))
                     continue
@@ -3678,7 +3809,9 @@ def add_to_review_cards(slug, checklist=(), helpers=(), replace=()):
         lines += new
         c.update(text="\n".join(lines), tokens=est_tokens("\n".join(lines)), updated=now_iso(), archived=False)
         added += [(cid, i) for i in new]
+        ops += [{"kind": "add", "id": cid, "line": i} for i in new]
     save_cards(slug, cards)
+    log_batch(slug, ops)
     return added
 
 
@@ -4031,12 +4164,14 @@ def learn_mcp(slug):
 
 
 def note_learn_unconfigured(slug, pr):
-    """No tracker/MCP for the project: one todo per PR, one line."""
+    """No usable route to read the PR (no tracker, or the tracker MCP is forbidden by a rule and no --threads-cmd is
+    saved): one todo per PR, one line. The MCP is not tried."""
     ent = review_learned(slug).get(str(pr)) or {}
     if ent.get("todo"):
         return
     n = new_todo(slug, f"learn from PR {pr}'s review comments: configure the tracker "
-                       f"(lean-agent review learn {slug} {pr} --mcp <server>)")
+                       f"(lean-agent review learn {slug} {pr} --mcp <server>, or --threads-file F / --threads-cmd \"<cli> {{pr}}\" "
+                       f"when a rule forbids the tracker MCP)")
     update_review_learned(slug, pr, todo=n)
     print(f"review learn: no tracker configured for {slug}; todo #{n} added to learn from PR {pr}", flush=True)
 
@@ -4047,14 +4182,12 @@ def learn_pr_in_background(slug, pr, thread=None, head=None):
         pr = str(pr)
         if not review_learn_auto_on() or slug not in projects() or (review_learned(slug).get(pr) or {}).get("finished_at"):
             return False
-        mcp = learn_mcp(slug)
-        if not mcp:
+        route = learn_route(slug)
+        if not route:
             note_learn_unconfigured(slug, pr)
             return False
         update_review_learned(slug, pr, finished_at=now_iso(), head=head)
-        cmd = [sys.executable, os.path.abspath(__file__), "review", "learn", slug, pr, "--model", "sonnet"]
-        for m in mcp:
-            cmd += ["--mcp", m]
+        cmd = [sys.executable, os.path.abspath(__file__), "review", "learn", slug, pr, "--model", "sonnet"] + route
         if head:
             cmd += ["--head", head]
         env = dict(os.environ, LEAN_AGENT_THREAD=thread or "none")
@@ -4147,14 +4280,12 @@ def learn_before_review(a):
             return
         if ent.get("learned_at") and time.time() - datetime.datetime.fromisoformat(ent["learned_at"]).timestamp() < LEARN_RECHECK_SECS:
             return
-        mcp = learn_mcp(slug)
-        if not mcp:
+        route = learn_route(slug)
+        if not route:
             note_learn_unconfigured(slug, pr)
             return
         print(f"review learn: reading new comments of PR {pr} before this review", flush=True)
-        cmd = [sys.executable, os.path.abspath(__file__), "review", "learn", slug, pr, "--model", "sonnet"]
-        for m in mcp:
-            cmd += ["--mcp", m]
+        cmd = [sys.executable, os.path.abspath(__file__), "review", "learn", slug, pr, "--model", "sonnet"] + route
         if a.head:
             cmd += ["--head", a.head]
         try:
@@ -4172,6 +4303,22 @@ def cmd_review_learn(a):
     a.pr = a.pr or a.pr_id
     if a.verify:
         return verify_review_cards(slug, path, a.head, apply=a.apply)
+    if a.list:
+        rows = review_lines(load_cards(slug))
+        for i, (cid, line) in enumerate(rows, 1):
+            print(f"{i:>3}. [{cid}] {line[2:]}")
+        print(f"{len(rows)} line(s)." if rows else "No learned lines yet.")
+        return 0
+    if a.rm:
+        cid, line = remove_review_line(slug, a.rm)
+        print(f"removed from {cid}: {line[2:]}  (undo: lean-agent review learn {slug} --undo)")
+        return 0
+    if a.undo:
+        batch = undo_review_learn(slug)
+        print(f"undid the learn batch of {batch['ts']} ({len(batch['ops'])} change(s))" if batch else "Nothing to undo.")
+        return 0 if batch else 1
+    if (a.threads_cmd or a.threads_file) and not a.pr:
+        die("--threads-cmd and --threads-file need --pr <id>")
     if a.tracker:
         projs = projects()
         conf = projs[slug].setdefault("tracker", {})
@@ -4190,15 +4337,25 @@ def cmd_review_learn(a):
         name, _, rest = h.partition("|")
         where, _, what = rest.partition("|")
         helpers.append({"name": name.strip(), "where": where.strip() or "?", "what": what.strip()})
+    threads = None
     if a.pr:
-        if not a.mcp:
-            a.mcp = learn_mcp(slug)
-        if not a.mcp:
-            die("reading a pull request's threads needs its tracker: --mcp <server>:<preset or tools> "
-                "(see: lean-agent mcp list)")
+        threads = read_threads(a, slug)
+        if threads is None:
+            if not a.mcp:
+                a.mcp = learn_mcp(slug)
+                bad = mcp_forbidden(slug, a.mcp) if a.mcp else []
+                if bad:
+                    die(f"the tracker MCP {bad[0][0]} is forbidden by rule {bad[0][1]['id']}. Read the PR another way: "
+                        f"--threads-file <file or -> (the PR's threads as JSON or text) or --threads-cmd \"<cli> {{pr}}\"")
+            if not a.mcp:
+                die("reading a pull request's threads needs its tracker: --mcp <server>:<preset or tools> "
+                    "(see: lean-agent mcp list), or --threads-file <file or -> / --threads-cmd \"<cli> {pr}\"")
         projs = projects()
-        if slug in projs and projs[slug].get("review_learn_mcp") != list(a.mcp):
+        if slug in projs and threads is None and projs[slug].get("review_learn_mcp") != list(a.mcp):
             projs[slug]["review_learn_mcp"] = list(a.mcp)
+            save_json(home("projects.json"), projs)
+        if slug in projs and a.threads_cmd and projs[slug].get("review_learn_threads_cmd") != a.threads_cmd:
+            projs[slug]["review_learn_threads_cmd"] = a.threads_cmd
             save_json(home("projects.json"), projs)
         last = next((r for r in reversed(list(read_jsonl(reviews_path(slug))))
                      if is_real_review(r) and (not a.head or r.get("ref") == a.head)), None)
@@ -4219,10 +4376,15 @@ def cmd_review_learn(a):
                      "the others (by thread id if the tool takes one), unless one of these has new comments.")
         ns = argparse.Namespace(resume=None, task=[f"Learn from the human review of pull request {a.pr}."],
                                 task_file=None, model=a.model, why="turn human review findings into checklist lines",
-                                cards="none", card_list=None, project=slug, read_only=True, chrome=None, mcp=a.mcp,
+                                cards="none", card_list=None, project=slug, read_only=True, chrome=None,
+                                mcp=None if threads is not None else a.mcp,
                                 tools=None, allow_send=None, max_turns=25, max_usd=1.5, max_context=2000,
                                 max_cards=4, ttype="read", role="review-learn", effort="medium",
-                                role_rule=LEARN_RULE.format(pr=a.pr, ours=ours, existing=existing[:6000], project=path))
+                                role_rule=LEARN_RULE.format(
+                                    pr=a.pr, ours=ours, existing=existing[:6000], project=path,
+                                    source="the pull request threads given below" if threads is not None else "the pull request threads (MCP tools)",
+                                    reading=(LEARN_READING_TEXT.format(pr=a.pr, threads=threads) if threads is not None
+                                             else LEARN_READING_MCP.format(pr=a.pr))))
         rc = cmd_run(ns)
         run = next((r for r in reversed(ledger()) if r.get("role") == "review-learn" and r["project"] == slug), None)
         got = load_json(os.path.join(run["workdir"], "checklist.json"), {}) if run else {}
@@ -12001,7 +12163,15 @@ def build_parser():
     s.add_argument("--text", help="one checklist line, e.g. \"Before adding overlay state, check the shared surface counter\"")
     s.add_argument("--file", help="checklist lines, one per line")
     s.add_argument("--helper", action="append", metavar="NAME | WHERE | WHAT", help="an existing helper to reuse (repeatable)")
-    s.add_argument("--pr", help="read this pull request's review threads (needs --mcp) and learn what the review missed")
+    s.add_argument("--pr", help="read this pull request's review threads (--mcp, --threads-file or --threads-cmd) and learn "
+                   "what the review missed")
+    s.add_argument("--threads-file", metavar="F|-", help="--pr without an MCP: the PR's review threads as JSON or plain "
+                   "text from this file (or - for stdin), e.g. from the tracker's CLI")
+    s.add_argument("--threads-cmd", metavar="CMD", help="--pr without an MCP: a command that prints the threads, {pr} "
+                   "replaced by the PR id (saved for the project; used by the automatic learning)")
+    s.add_argument("--list", action="store_true", help="list the learned checklist and helper lines, numbered")
+    s.add_argument("--rm", metavar="N|TEXT", help="remove a learned line by its --list number or a unique piece of its text")
+    s.add_argument("--undo", action="store_true", help="undo the last learn batch (or removal)")
     s.add_argument("--mcp", action="append", metavar="SERVER[:TOOLS]", help="the tracker's MCP server, for --pr")
     s.add_argument("--head", metavar="REF", help="--pr: the branch the PR is for (to compare with its lean-agent review)")
     s.add_argument("--verify", action="store_true", help="list card lines whose helper can't be found (path or symbol) "

@@ -8092,6 +8092,80 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("review learn", self.cli("todo", "done", "4", LEAN_AGENT_REVIEW_LEARN_AUTO="0").stdout)
         self.assertEqual([], self.learn_runs())
 
+    def test_review_learn_list_rm_and_undo(self):
+        self.setup_learn_tracker()
+        out = self.cli("review", "learn", "proj", "--list").stdout
+        self.assertIn("1. [review-checklist] Check the sibling dialogs too", out)
+        self.cli("review", "learn", "proj", "--text", "Before adding a cache, look for the shared one")
+        self.cli("review", "learn", "proj", "--helper", "formatDate | src/util/dates.ts | formats dates")
+        out = self.cli("review", "learn", "proj", "--list").stdout
+        self.assertIn("2. [review-checklist] Before adding a cache", out)
+        self.assertIn("3. [shared-helpers] formatDate", out)
+        self.cli("review", "learn", "proj", "--undo")  # the helper batch
+        self.assertNotIn("formatDate", self.cli("review", "learn", "proj", "--list").stdout)
+        self.cli("review", "learn", "proj", "--undo")  # the text batch
+        self.assertNotIn("shared one", self.cli("review", "learn", "proj", "--list").stdout)
+        out = self.cli("review", "learn", "proj", "--rm", "sibling dialogs").stdout
+        self.assertIn("removed from review-checklist", out)
+        self.assertIn("No learned lines", self.cli("review", "learn", "proj", "--list").stdout)
+        self.cli("review", "learn", "proj", "--undo")  # puts the removed line back
+        self.assertIn("1. [review-checklist] Check the sibling dialogs too", self.cli("review", "learn", "proj", "--list").stdout)
+        bad = self.cli("review", "learn", "proj", "--rm", "7", check=False)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("no line 7", bad.stderr)
+        self.cli("review", "learn", "proj", "--undo")  # the first batch, from the tracker
+        self.assertIn("No learned lines", self.cli("review", "learn", "proj", "--list").stdout)
+        none = self.cli("review", "learn", "proj", "--undo", check=False)
+        self.assertNotEqual(none.returncode, 0)
+        self.assertIn("Nothing to undo", none.stdout)
+
+    def test_review_learn_threads_file_needs_no_mcp(self):
+        self.setup_learn_tracker()
+        thr = os.path.join(self.tmp.name, "threads.json")
+        with open(thr, "w") as fh:
+            json.dump([{"id": 7, "comments": ["Please reuse the shared retry wrapper"]}], fh)
+        lesson = json.dumps({"checklist": ["Before adding retry code, check the shared retry wrapper"], "threads_read": [7],
+                             "last_comment": "c10"})
+        fb = '{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-CHECKLIST ' + lesson
+        n = len(self.calls())
+        self.cli("review", "learn", "proj", "--pr", "44", "--threads-file", thr, FAKE_FEEDBACK=fb)
+        call = self.calls()[n]
+        self.assertIn("shared retry wrapper", json.dumps(call))
+        self.assertNotIn("--mcp-config", json.dumps(call))
+        self.assertIn("Before adding retry code", self.cli("review", "learn", "proj", "--list").stdout)
+        # plain text on stdin works the same
+        self.cli("review", "learn", "proj", "--pr", "45", "--threads-file", "-", input="reviewer: use the shared wrapper\n",
+                 FAKE_FEEDBACK=fb)
+        self.assertIn("reviewer: use the shared wrapper", json.dumps(self.calls()[-1]))
+        bad = self.cli("review", "learn", "proj", "--threads-file", thr, check=False)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("--pr", bad.stderr)
+
+    def test_review_learn_does_not_try_a_forbidden_mcp_and_uses_the_threads_command(self):
+        self.setup_learn_tracker()
+        self.add_rule("Never use the tracker MCP server; use trackercli instead.")
+        before = len(self.learn_runs())
+        self.cli("todo", "add", "Fix", "-p", "proj", "--ref", "PR 60")
+        out = self.cli("todo", "done", "1", FAKE_FEEDBACK=self.fb).stdout
+        self.assertIn("todo #2 added to learn from PR 60", out)
+        time.sleep(0.5)
+        self.assertEqual(before, len(self.learn_runs()))
+        refused = self.cli("review", "learn", "proj", "--pr", "61", check=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("--threads-file", refused.stderr)
+        # a saved threads command is a configured route that respects the rule
+        script = os.path.join(self.tmp.name, "threads.sh")
+        with open(script, "w") as fh:
+            fh.write("#!/bin/sh\necho \"thread for PR $1: use the shared formatter\"\n")
+        os.chmod(script, 0o755)
+        self.cli("review", "learn", "proj", "--pr", "62", "--threads-cmd", script + " {pr}", FAKE_FEEDBACK=self.fb)
+        self.assertIn("thread for PR 62: use the shared formatter", json.dumps(self.calls()[-1]))
+        self.cli("todo", "add", "Fix", "-p", "proj", "--ref", "PR 63")
+        out = self.cli("todo", "done", "3", FAKE_FEEDBACK=self.fb).stdout
+        self.assertIn("started for PR 63", out)
+        self.wait_learn_runs(before + 2)
+        self.assertIn("thread for PR 63", json.dumps(self.calls()[-1]))
+
     def test_review_learns_new_comments_first(self):
         self.setup_learn_tracker()
         approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
