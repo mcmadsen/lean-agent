@@ -6030,6 +6030,7 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True):
         git(repo, "fetch", "-q", "origin")
     sha = git(repo, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
     new_from = None
+    rec_upstream = None  # the remote branch this worktree's commits belong to (a later `worktree push` uses it)
     if not sha:
         if git(repo, "remote") and not ref.startswith("origin/"):
             git(repo, "fetch", "-q", "origin")
@@ -6055,8 +6056,11 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True):
         if r.returncode != 0:
             die(f"could not create branch {ref!r} from {new_from}: {(r.stderr or r.stdout).strip()[:300]}")
         print(f"worktree: created {ref} from {new_from} ({sha[:10]})", flush=True)
+        if base and base.startswith("origin/"):
+            rec_upstream = base[len("origin/"):]
     sync_worktree_registry(slug, repo)
     remote_branch = ref[len("origin/"):] if ref.startswith("origin/") else None
+    rec_upstream = rec_upstream or remote_branch
     target = remote_branch or ref
     if not git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + target):
         target = None
@@ -6127,6 +6131,8 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True):
     idx = worktree_index()
     entry = idx.setdefault(slug, {}).get(name, {"created": now_iso()})
     entry.update(path=path, ref=ref, sha=sha, branch=branch, repo=repo, last_used=now_iso())
+    if rec_upstream:
+        entry["upstream"] = rec_upstream
     idx[slug][name] = entry
     save_json(home("worktrees.json"), idx)
     commit_rule = (f"It's on branch {branch}, so commits you make land on that branch. Never push: lean-agent "
@@ -6270,6 +6276,9 @@ def worktree_adopt(a):
         die(f"a different worktree is registered as {name}; remove it first (lean-agent worktree rm {slug} {branch or name})")
     idx.setdefault(slug, {})[name] = {"created": now_iso(), "path": path, "ref": branch or path, "branch": branch,
                                       "sha": git(path, "rev-parse", "HEAD") or "", "repo": repo, "last_used": now_iso()}
+    up = branch and git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if up and up.startswith("origin/"):
+        idx[slug][name]["upstream"] = up[len("origin/"):]
     save_json(home("worktrees.json"), idx)
     print(f"registered {path} ({'branch ' + branch if branch else 'detached'}) as {name}")
     return 0
@@ -6363,9 +6372,16 @@ def worktree_push(a):
             f"lean-agent worktree push {slug} {a.ref} --only-commits ...")
     if dirty:
         print(f"note: {len(dirty.splitlines())} uncommitted change(s) stay in the worktree; only commits are pushed")
-    upstream = git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") or (
-        w["ref"] if w.get("ref", "").startswith("origin/") else None)
-    remote_ref = upstream or f"origin/{branch}"
+    explicit = re.sub(r"^(refs/heads/|origin/)", "", (a.remote_branch or "").strip())
+    if a.remote_branch is not None and not explicit:
+        die("--remote-branch needs a branch name")
+    own_upstream = git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if explicit:
+        upstream, remote_ref = None, f"origin/{explicit}"
+    else:
+        upstream = (f"origin/{w['upstream']}" if w.get("upstream") else None) or own_upstream or (
+            w["ref"] if w.get("ref", "").startswith("origin/") else None)
+        remote_ref = upstream or f"origin/{branch}"
     if not a.no_fetch:
         git(path, "fetch", "-q", "origin")
     has_remote = git(path, "rev-parse", "--verify", "--quiet", remote_ref) is not None
@@ -6416,7 +6432,13 @@ def worktree_push(a):
             "upstream to a new remote branch).", 3)
     if hit:
         print(f"push guard {hit!r} overridden: {a.override_guard}")
-    print(f"push {branch} @ {sha[:12]} to origin/{target}" + ("" if has_remote else " (a new remote branch)")
+    on_remote = bool(subprocess.run(["git", "-C", path, "ls-remote", "--heads", "origin", target],
+                                    capture_output=True, text=True).stdout.strip())
+    if not on_remote and not a.new_branch:
+        die(f"refused: {branch} would create a NEW remote branch origin/{target}, which isn't on the remote yet. "
+            f"To push to an existing branch (e.g. the PR's source branch): lean-agent worktree push {slug} {a.ref} "
+            f"--remote-branch <existing> --allow-send ...; to really create origin/{target}: add --new-branch", 3)
+    print(f"push {branch} @ {sha[:12]} to origin/{target}" + ("" if on_remote else " (a new remote branch)")
           + f", reviewed in {match['run']}:\n" + "\n".join("  " + c for c in commits.splitlines()))
     if not a.allow_send:
         print("ACTION NEEDED: pushing is an outward action and was NOT done. Show the user the commits above. Only if "
@@ -6433,9 +6455,9 @@ def worktree_push(a):
                                         "ok": p.returncode == 0})
     if p.returncode != 0:
         die(f"git push failed: {(p.stderr or p.stdout).strip()[:400]}")
-    if not upstream:
+    if not upstream and not own_upstream:
         git(path, "branch", "-q", f"--set-upstream-to=origin/{target}")
-    print(f"pushed {branch} @ {sha[:12]} to origin/{target}")
+    print(f"pushed {branch} -> origin/{target} @ {sha[:12]}")
     return 0
 
 
@@ -12644,6 +12666,10 @@ def build_parser():
     s.add_argument("--allow-send", metavar="APPROVED", help="push: what the user approved (the push happens only with this). "
                    "A push needs an approving review of the commit (lean-agent review --head <branch>); a clean merge of "
                    "the base branch that touches none of the PR's files keeps the earlier approval")
+    s.add_argument("--remote-branch", "--to", dest="remote_branch", metavar="NAME", help="push: the remote branch to push to "
+                   "(HEAD -> refs/heads/NAME), when it differs from the local branch; all guards apply to NAME. Default: "
+                   "the upstream recorded when the worktree was made from origin/<x>, else the same name")
+    s.add_argument("--new-branch", action="store_true", help="push: allow creating a remote branch that doesn't exist yet")
     s.add_argument("--no-fetch", action="store_true", help="push: don't fetch origin first")
     s.add_argument("--only-commits", action="store_true", help="push: push the commits even when the shared "
                    "worktree has uncommitted changes (they aren't pushed)")

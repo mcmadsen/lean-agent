@@ -114,6 +114,8 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      PR: `--worktree origin/<branch>` (a local branch tracking it), review with `--head <branch>`, then
      `lean-agent run <p> --worktree origin/<branch> --cards auto -m sonnet --why "push the fixes" -- "push the branch
      with worktree push (show me the commits first); send only with --allow-send '<what the user approved>'"`.
+     When the local branch name differs from the PR's source branch, add `--remote-branch <the PR's branch>`;
+     a new remote branch is refused unless `--new-branch` is approved.
      Save an install/build once the same way: `lean-agent run <p> --worktree <branch> --cards auto -m haiku --why
      "save the install" -- "run worktree setup with --run '<command>'"`.
    - `--max-usd`, `--max-turns`: size them to the task.
