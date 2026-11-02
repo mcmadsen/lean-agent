@@ -82,6 +82,10 @@ repeated warnings), keeps every error with its stack trace and the closing summa
 the exit code, and saves the full output and an errors-only copy (paths in its first line).
 Don't pipe those commands through `tail`/`head`: that cuts off the errors.
 
+If Edit or Write is refused on a repo file such as .claude/rules/**, CLAUDE.md, .claude/commands, agents or skills,
+stop and don't work around it (no shell redirects, no copies): put the line `needs: --allow-edit <path>` in your
+reply and return status "partial".
+
 Ask, don't guess: if the task's target (a person, chat, channel, ticket, branch or
 file) or its intent is not uniquely clear from the task and what you find, stop and
 return status "needs-input" with your question and the candidates you found.
@@ -672,6 +676,13 @@ def learn(path, include_user_skills=False, quiet=False, name=None, rules=None, a
         total = sum(c["tokens"] for c in cards)
         print(f"Learned {path} as '{slug}': {len(cards)} cards, ~{total:,} tokens if loaded in full.")
         print(f"Workers get only the cards you pick. List them: lean-agent cards {slug}")
+        have = [g for g, rel in (((".claude/rules/**"), os.path.join(".claude", "rules")), ("CLAUDE.md", "CLAUDE.md"),
+                                 (".claude/CLAUDE.md", os.path.join(".claude", "CLAUDE.md")))
+                if os.path.exists(os.path.join(path, rel))]
+        if have and not (projs.get(slug) or {}).get("allow_edit"):
+            print("hint: Claude Code refuses worker edits to these repo files; to allow them for every run: "
+                  f"lean-agent config allow-edit {slug} " + " ".join(shlex.quote(g) for g in have)
+                  + " (or per run: --allow-edit <path>)")
     return slug
 
 
@@ -1861,6 +1872,47 @@ def early_settle(reason=None):
 FAILURE_HOOKS.append(early_settle)
 
 
+ALLOW_EDIT_LOG = "allow_edit.log"
+ALLOW_EDIT_PROTECTED = (".claude/settings*.json", ".claude/hooks/**")
+
+
+def clean_allow_edit(paths, read_only=False):
+    """--allow-edit values as worktree-relative globs; a path outside the worktree (absolute, `..`) is refused."""
+    out = []
+    for p in paths or []:
+        p = (p or "").strip()
+        if not p:
+            continue
+        norm = os.path.normpath(p)
+        if os.path.isabs(p) or p.startswith("~") or norm == ".." or norm.startswith(".." + os.sep):
+            die(f"--allow-edit {p!r}: only paths inside the worktree are allowed; give it relative to the worktree, "
+                "e.g. .claude/rules/**")
+        norm = norm.replace(os.sep, "/")
+        if norm in (".", "**", "*"):
+            die(f"--allow-edit {p!r}: name the files that may be edited (e.g. .claude/rules/**), not the whole worktree")
+        if norm not in out:
+            out.append(norm)
+    if out and read_only:
+        die("--allow-edit needs a worker that edits: drop --read-only or --allow-edit")
+    return out
+
+
+def allow_edit_rules(project, globs):
+    """(allow, deny) permission rules for --allow-edit globs: no allow rules (a PermissionRequest hook allows), and
+    deny rules that keep settings and hooks closed unless an entry names that file itself."""
+    root = os.path.abspath(project).rstrip("/")
+    tools = ("Edit", "Write", "MultiEdit")
+    allow = []  # Claude Code refuses these files whatever allow rules say; allow_edit_hook.py answers instead
+    deny = []
+    if globs:
+        for pat in ALLOW_EDIT_PROTECTED:
+            named = any(not re.search(r"[*?\[]", g) and fnmatch.fnmatchcase(g, pat.replace("/**", "/*") if pat.endswith("/**") else pat)
+                        for g in globs)
+            if not named:
+                deny += [f"{t}(/{root}/{pat})" for t in tools]
+    return allow, deny
+
+
 def check_allow_cmd(allow_cmd, read_only):
     """--allow-cmd only goes with --read-only, and only for commands that read; a clear one-line refusal."""
     if allow_cmd and not read_only:
@@ -1881,6 +1933,7 @@ def preflight_run_args(a, slug, project, read_only):
         if missing:
             die(f"unknown card(s): {', '.join(missing)} (see: lean-agent cards {slug})")
     check_allow_cmd([c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()], read_only)
+    clean_allow_edit(getattr(a, "allow_edit", None), read_only)
     base = getattr(a, "worktree_base", None)
     if base and getattr(a, "worktree", None):
         if base.startswith("origin/"):
@@ -1897,6 +1950,7 @@ def _cmd_run(a):
         a.resume = latest_run_id(ordinary=True)
     if not a.resume:  # refused before anything starts (no marker, no worktree, no escalation)
         check_allow_cmd([c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()], bool(getattr(a, "read_only", False)))
+        clean_allow_edit(getattr(a, "allow_edit", None), bool(getattr(a, "read_only", False)))
     if getattr(a, "escalate", None) and not a.resume:
         return run_escalating(a)
     prev = None
@@ -2076,6 +2130,10 @@ def _cmd_run(a):
                 save_json(home("todo.json"), data)
     allow_cmd = (prev or {}).get("allow_cmd") or [c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()]
     check_allow_cmd(allow_cmd, read_only)
+    allow_edit = clean_allow_edit(list((prev or {}).get("allow_edit") or (None if prev else projects().get(slug, {}).get("allow_edit")) or [])
+                                  + list(getattr(a, "allow_edit", None) or []))
+    if read_only:
+        allow_edit = []
     internal_cmd = list(getattr(a, "internal_cmd", None) or []) if not prev and read_only else []
     if (allow_cmd or internal_cmd) and not prev:  # tell the worker, now and on a resume (role.md is read again then)
         note = ("\nBesides read-only git you may run exactly these commands (and nothing else): "
@@ -2102,7 +2160,8 @@ def _cmd_run(a):
     if mcp_servers or chrome_spec:
         if mcp_servers:
             lean_mcp.write_config(mcp_path, mcp_servers)
-        # --safe-mode disables MCP and Chrome; this keeps the same isolation but admits exactly these servers
+        # no user/project settings, plugins or MCP; admits exactly these servers (and, unlike --safe-mode, keeps the
+        # worker hooks passed with --settings)
         isolation = ["--setting-sources", "project" if native_rules else ""]
         if chrome_profile != "loose":
             isolation += ["--strict-mcp-config"]
@@ -2115,7 +2174,10 @@ def _cmd_run(a):
     elif native_rules:  # the repo's CLAUDE.md, rules, and .claude/settings.json (hooks, permissions, plugins) load
         isolation = ["--setting-sources", "project"]
     else:
-        isolation = ["--safe-mode"]
+        # NOT --safe-mode: it also disables every hook, including those in --settings (push guard, wrap-up note,
+        # --allow-edit approval). No settings sources + strict MCP keeps out the same: user/project CLAUDE.md and
+        # rules, plugins, custom agents, output style, user hooks and MCP servers.
+        isolation = ["--setting-sources", "", "--strict-mcp-config"]
     lean_json = os.path.join(PLUGIN_ROOT, "bin", "lean-json")
     if read_only:
         allowed = READONLY_TOOLS.split(",") + [f"Bash(git -C {project} {sub}:*)" for sub in READONLY_GIT]
@@ -2124,6 +2186,7 @@ def _cmd_run(a):
         permission_mode = "default"
     else:
         allowed = [tools]
+        edit_allow, edit_deny = allow_edit_rules(project, allow_edit)
         permission_mode = os.environ.get("LEAN_AGENT_WORKER_PERMISSION_MODE") or "acceptEdits"
 
     claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
@@ -2144,6 +2207,8 @@ def _cmd_run(a):
     if a.max_usd > 0:
         cmd += ["--max-budget-usd", str(a.max_usd)]
     flag_settings = {}
+    if not read_only and allow_edit and edit_deny:
+        flag_settings["permissions"] = {"deny": edit_deny}
     if attribution() == "off":  # Claude Code's own commit/PR attribution, switched off for this worker
         flag_settings["attribution"] = NO_ATTRIBUTION
     hooks = {"PreToolUse": [{"matcher": "Bash", "hooks": [{  # never a push to a guarded branch (lean-agent guard)
@@ -2154,6 +2219,13 @@ def _cmd_run(a):
             "command": f"python3 {json.dumps(os.path.join(HERE, 'mcp_trim_hook.py'))}"}]}]
     hooks["PreToolUse"].append({"matcher": "*", "hooks": [{  # one note at ~70% of the budget: commit, then summarise
         "type": "command", "timeout": 10, "command": f"python3 {json.dumps(os.path.join(HERE, 'wrapup_hook.py'))}"}]})
+    if allow_edit and not read_only:  # answers Claude Code's permission prompt for the named repo files only
+        cfg_path = os.path.join(workdir, "allow_edit.json")
+        with open(cfg_path, "w") as fh:
+            json.dump({"root": os.path.realpath(project), "globs": allow_edit, "log": os.path.join(workdir, ALLOW_EDIT_LOG)}, fh)
+        hooks["PermissionRequest"] = [{"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{
+            "type": "command", "timeout": 10,
+            "command": f"python3 {json.dumps(os.path.join(HERE, 'allow_edit_hook.py'))} {json.dumps(cfg_path)}"}]}]
     flag_settings["hooks"] = hooks
     if flag_settings:
         cmd += ["--settings", json.dumps(flag_settings)]
@@ -2203,7 +2275,7 @@ def _cmd_run(a):
         "native_rules": native_rules or None, "session_id": prev["session_id"] if prev else None,
         "resumed": bool(prev), "task": task[:300], "mcp": mcp_specs,
         "read_only": read_only, "auto_branch": auto_branch, "chrome": chrome_spec, "allow_send": bool(a.allow_send), "type": run_type,
-        "allow_cmd": allow_cmd, "todo": todo_id, "thread": thread_tag,
+        "allow_cmd": allow_cmd, "allow_edit": allow_edit or None, "todo": todo_id, "thread": thread_tag,
         "role": role, "effort": effort, "worktree": wt_name, "review_meta": review_meta, "launch_key": launch_key,
         "recipe": (getattr(a, "recipe", None) or (None, None))[0],
         "recipe_step": (getattr(a, "recipe", None) or (None, None))[1],
@@ -8343,6 +8415,17 @@ def cmd_runs(a):
             text = "".join(l for l in text.splitlines(True)
                            if l.startswith(("run ", "  tokens:", "  context per turn", "  mcp:", "  budget left")))
         sys.stdout.write(text)
+        if not a.details and r.get("workdir"):
+            try:
+                seen = [json.loads(l)["path"] for l in read_text(os.path.join(r["workdir"], ALLOW_EDIT_LOG)).splitlines() if l.strip()]
+            except (OSError, ValueError, KeyError):
+                seen = []
+            for p in dict.fromkeys(seen):
+                print(f"edited (allowed): {p}")
+        needs = sorted(set(re.findall(r"needs:\s*(--allow-edit\s+\S+)", text)))
+        if needs and not a.details:
+            print("blocked on permission: rerun with `lean-agent run ... --resume " + r["id"] + " "
+                  + " ".join(needs) + "`")
         if r.get("status") == "timed out" and not a.details:
             dirty = (git(r["project_path"], "status", "--porcelain") or "").splitlines() if r.get("project_path") else []
             print(f"uncommitted now in {r.get('project_path')}: " + (f"{len(dirty)} file(s)" if dirty else "nothing"))
@@ -9889,6 +9972,25 @@ def cmd_config(a):
             projs[slug] = {**projs[slug], "branch_rules": saved}
             save_json(home("projects.json"), projs)
         print(f"branch rules for {slug}: " + "  ".join(f"{k}={v}" for k, v in branch_rules(slug).items()))
+        return 0
+    if a.name == "allow-edit":
+        vals = [v for v in [a.value] + list(a.more or []) if v]
+        proj = a.project
+        if not proj and vals and vals[0] in projects():
+            proj, vals = vals[0], vals[1:]
+        slug, _ = resolve_project(proj or os.getcwd())
+        projs = projects()
+        if a.clear or vals:
+            saved = {k: v for k, v in projs[slug].items() if k != "allow_edit"}
+            globs = [] if a.clear else clean_allow_edit(list(projs[slug].get("allow_edit") or []) + vals)
+            if globs:
+                saved["allow_edit"] = globs
+            projs[slug] = saved
+            save_json(home("projects.json"), projs)
+        cur = projs[slug].get("allow_edit") or []
+        print(f"allow-edit for {slug}: " + (", ".join(cur) or "none") + " · every worker that edits may edit these "
+              "worktree-relative paths (Claude Code otherwise refuses .claude/ and CLAUDE.md); "
+              "set: lean-agent config allow-edit <project> <glob>...  clear: --clear")
         return 0
     if a.name == "project-rules":
         slug, _ = resolve_project(a.project or os.getcwd())
@@ -12340,12 +12442,14 @@ def build_parser():
     s.set_defaults(fn=cmd_advise)
 
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
+                       "allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
                        "max-thread-sessions N (thread sessions the service runs; default 8), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
-    s.add_argument("name", choices=["strict", "clear-at", "project-rules", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
+    s.add_argument("name", choices=["strict", "clear-at", "project-rules", "allow-edit", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
                                            "review-max-rerounds", "review-skip", "review-model", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)
+    s.add_argument("--clear", action="store_true", help="allow-edit: remove the project's paths")
     s.set_defaults(fn=cmd_config)
 
     s = sub.add_parser("branch-name", help="the branch name the project's branch rules give a task (read-only)")
@@ -12461,6 +12565,9 @@ def build_parser():
                    "works on (an open item becomes doing)")
     s.add_argument("--allow-cmd", action="append", metavar="PREFIX", help="--read-only: also allow this read-only "
                    "command prefix, e.g. \"az pipelines runs show\" (repeatable; commands that change things are refused)")
+    s.add_argument("--allow-edit", action="append", metavar="PATH", help="let the worker edit this repo-owned path "
+                   "(worktree-relative file or glob, e.g. \".claude/rules/**\", CLAUDE.md; repeatable; Claude Code otherwise "
+                   "refuses edits to .claude/ and CLAUDE.md). .claude/settings*.json and .claude/hooks/** only when named exactly")
     s.add_argument("--timeout", metavar="DUR", help="stop the worker after this long, e.g. 45m or 2h (30 s to 12 h; default the "
                    "run-timeout config, 30m). At 80%% it is told to commit and summarise; on a timeout the run keeps its "
                    "tokens and a partial summary and is marked timed out")

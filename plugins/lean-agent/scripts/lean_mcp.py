@@ -1,9 +1,9 @@
 """MCP support for lean-agent workers: find configured servers, measure their tools, build per-run configs.
 
-Workers normally run in --safe-mode, which turns MCP off. A run that asks for MCP
-servers uses `--setting-sources ""` + `--strict-mcp-config` instead: the same
-isolation (no user/project settings, CLAUDE.md, plugins or hooks), plus exactly the
-servers and tools the orchestrator picked.
+Workers normally run with `--setting-sources ""` + `--strict-mcp-config`: no user/project
+settings, CLAUDE.md, plugins or MCP servers, but the hooks lean-agent passes with --settings
+still run (--safe-mode would disable them). A run that asks for MCP servers adds exactly the
+servers and tools the orchestrator picked (--mcp-config).
 """
 import glob
 import json

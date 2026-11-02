@@ -28,7 +28,7 @@ plugins), your plugins' hooks, MCP servers and dozens of tool schemas, and resen
 lean-agent workers run with:
 
 ```
-claude -p --safe-mode --disable-slash-commands --tools Bash,Read,Edit,Write,Glob,Grep \
+claude -p --setting-sources "" --strict-mcp-config --disable-slash-commands --tools Bash,Read,Edit,Write,Glob,Grep \
           --add-dir <project> --append-system-prompt-file <protocol + selected cards> \
           --model <chosen> --max-turns N --max-budget-usd X
 ```
@@ -145,6 +145,7 @@ Other ways to run the orchestrator:
 | `lean-agent grep-log <file> [PATTERN] [-C N]` | The lines that matter in a saved CI or build log (plain text, or JSON such as `{"value": [lines]}`): errors and failures by default, with context, at most 80 lines. |
 | `lean-agent run ... --todo N` | The run works on work-queue item N: an open item becomes doing, and the run is listed on that item. A resumed run keeps it. `review` and `do` take it too; `--todo none` marks a quick lookup that isn't queue work. In the orchestrator, a worker start with neither is refused with the open items listed, so the queue stays current (`LEAN_AGENT_TODO_REMINDER=0` turns that off); the guide has the rest: every request is an item with its `--ref`, finished items are closed, decisions you owe are hand-off notes. |
 | `lean-agent run ... --timeout DUR` | Stops the worker after DUR (e.g. `45m`, `2h`; 30 s to 12 h; default the `config run-timeout`, 30m). At 80% the worker is told to commit and summarise. A timed-out run keeps its tokens, an estimated cost and a partial summary (last words, last tool calls), is marked `timed out`, and `runs --show` lists what is still uncommitted. |
+| `lean-agent run ... --allow-edit "<path-or-glob>"` | The worker may edit this repo-owned path (worktree-relative, repeatable), e.g. `.claude/rules/**` or `CLAUDE.md`, which Claude Code otherwise refuses in a worker. Claude Code ignores allow rules for these files, so the run registers a PermissionRequest hook that approves only edit-tool calls on files inside the worktree that match the globs; each approval is logged and `runs --show` lists it as `edited (allowed): <path>`. `.claude/settings*.json`, `.claude/hooks/**` and `.git` stay refused unless named exactly. A refused worker reports `needs: --allow-edit <path>`. Per project: `lean-agent config allow-edit <project> <glob>... [--clear]` (`learn` hints at it). |
 | `lean-agent run ... --read-only --allow-cmd "<prefix>"` | A read-only worker may also run exactly this read-only command (e.g. `az pipelines runs show`); prefixes with a changing verb are refused. A read-only task that names a CLI without it gets a warning. |
 | `lean-agent find <query> [--type T] [--project P] [--all]` | One search, no model call, across todos (text, notes, ref), threads, runs, memories, handovers and review records. A PR or work-item number also matches `PR 123`, `!123`, `#123`, `pullrequest/123` and branch names like `feature/123-...`. One table, newest first (Type, Id, Date, State, Match, Open: the exact command to open the hit), 15 rows unless `--all`. Narrower lists: `todo list --ref X`, `thread list --grep TEXT --pr N --item N --open`, `runs --pr N --item N --grep TEXT`. |
 | `lean-agent todo add\|list\|next\|start\|done\|note\|edit\|rm` | The work queue across sessions and days: `todo add "<text>" -p <project> --ref "PR 512" --prio high --due 2026-10-24`; `next` picks what's in progress, then by priority and due date. The hand-off note shows the open items, so a new conversation picks up the queue. |
@@ -221,9 +222,10 @@ lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
     --mcp tickets:get_ticket "Fetch ticket T-42 and say which file is responsible"
 ```
 
-- `--safe-mode` turns MCP off, so a run with `--mcp` uses `--setting-sources "" --strict-mcp-config
-  --mcp-config <file>` instead. Measured: same 8,070-token baseline and the same isolation (no user or project
-  CLAUDE.md, settings, plugins or hooks), plus exactly the chosen servers.
+- Workers run with `--setting-sources "" --strict-mcp-config` (no user or project CLAUDE.md, rules, settings, plugins,
+  custom agents, output style or MCP servers; the hooks lean-agent passes with `--settings` still run). Not `--safe-mode`:
+  it also disables every hook, so the push guard, the wrap-up note and `--allow-edit` would never run. A run with `--mcp`
+  adds `--mcp-config <file>`: the same isolation plus exactly the chosen servers.
 - `server:tool,tool` blocks every other tool of that server with `--disallowedTools`, which removes their
   definitions from context. Example server: all tools ~2,150 tokens per turn, only `get_ticket` ~90.
 - `mcp tools` asks stdio servers for their tool list directly, with no model call. The estimates were
@@ -659,7 +661,7 @@ home; your normal sessions in a repo are untouched.
 `paths:` globs and description. A rule card comes along when the task text, `run --files`, or the worktree's changed
 files match a glob; a rule without `paths:` and the root `CLAUDE.md`'s opening section are always candidates within the card budget.
 `lean-agent config project-rules on|off [-p project]` (default off) lets workers load them natively instead: they run
-in their worktree (or the project) with `--setting-sources project` rather than `--safe-mode`, rule cards are skipped,
+in their worktree (or the project) with `--setting-sources project` rather than the default `--setting-sources ""`, rule cards are skipped,
 and the repo's `.claude/settings.json` (hooks, permissions, plugins, env) applies too; `doctor` shows the mode. Advisor,
 reviewer, composer and gap-decider runs stay isolated.
 
@@ -716,7 +718,7 @@ lean-agent run proj -m sonnet --why "reply in Teams" --chrome --cards mem-recipe
     -- "Draft a reply to Alex's last message in Teams: 'Thanks, I'll look at it today.'"
 ```
 
-- **How it's isolated:** a `--chrome` run swaps `--safe-mode` for `--setting-sources "" --strict-mcp-config --chrome`.
+- **How it's isolated:** a `--chrome` run adds `--chrome` to `--setting-sources "" --strict-mcp-config` (`--chrome=loose` drops the strict flag).
   You keep the same isolation, and the only extra tools are the browser's. `--chrome=navigate,find` narrows it
   further, removing the other browser tools from context. `chrome check` tests whether the strict setup exposes the
   browser on your machine. If it doesn't, check falls back to a setup without `--strict-mcp-config` that blocks your
