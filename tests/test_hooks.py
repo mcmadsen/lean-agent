@@ -568,6 +568,16 @@ class BudgetTest(Base):
         self.assertIsNone(read("/srv/shop/src/app.py"))
 
 
+    def test_strict_orchestrator_allows_find_and_list_filters(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        self.set_strict("on")
+        for cmd in ("lean-agent find 123", "lean-agent find 'export timeout' --type thread --all",
+                    "lean-agent thread list --pr 123 --open", "lean-agent thread list --grep export --item 7",
+                    "lean-agent todo list --all --ref 123", "lean-agent runs --pr 123", "lean-agent memory show mem-x"):
+            out = run_hook("budget_hook.py", dict(self.ev, cwd=home, tool_name="Bash", tool_input={"command": cmd, "run_in_background": True}),
+                           LEAN_AGENT_TODO_REMINDER="0", **self.env)
+            self.assertIsNone(out, cmd)
+
     def test_strict_orchestrator_keeps_track_only_with_lean_agent(self):
         home = self.env["LEAN_AGENT_HOME"]
         self.set_strict("on")

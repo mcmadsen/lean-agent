@@ -4778,6 +4778,87 @@ class CliTest(unittest.TestCase):
         self.assertIn("doctor: all good", self.cli("doctor", self.proj, **env).stdout)
         self.assertIn("lean-agent:precedence", open(os.path.join(self.tmp.name, "CLAUDE.md")).read())
 
+    def _seed_find(self):
+        h = self.env["LEAN_AGENT_HOME"]
+        self.cli("todo", "add", "Fix the export timeout", "-p", "proj", "--ref", "PR 4711")
+        self.cli("todo", "add", "Unrelated cleanup", "-p", "proj", "--ref", "PR 77")
+        self.cli("todo", "add", "Mentions pullrequest/4711 only in text", "-p", "proj")
+        tid = self.cli("thread", "new", "Export timeout, fix in !4711").stdout.split()[0]
+        self.cli("thread", "new", "Something else entirely about invoices")
+        with open(os.path.join(h, "ledger.jsonl"), "a") as fh:
+            for rid, task, branch in (("r1", "Review the export change", "feature/4711-export"),
+                                      ("r2", "Plain run about invoices", "main")):
+                fh.write(json.dumps({"id": rid, "project": "proj", "task": task, "branch": branch, "status": "done", "model": "haiku",
+                                     "ts": "2026-10-30T10:00:00", "result_head": "All good. More."}) + "\n")
+        os.makedirs(os.path.join(h, "reviews"), exist_ok=True)
+        with open(os.path.join(h, "reviews", "proj.jsonl"), "w") as fh:
+            fh.write(json.dumps({"ts": "2026-10-31T10:00:00", "run": "r9", "verdict": "approve", "ref": "origin/feature/4711-export",
+                                 "goal": "export timeout"}) + "\n")
+        os.makedirs(os.path.join(h, "proj", "handovers"), exist_ok=True)
+        with open(os.path.join(h, "proj", "handovers", "export.md"), "w") as fh:
+            fh.write("# Export handover\n\n_2026-10-29_\n\nContinues PR #4711 next week.\n")
+        self.cli("memory", "add", "The export of PR 4711 needs the batch flag.", "--type", "project")
+        return tid
+
+    def test_find_across_record_types_and_spellings(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        tid = self._seed_find()
+        out = self.cli("find", "4711").stdout
+        for kind in ("todo", "thread", "run", "memory", "handover", "review"):
+            self.assertIn(kind + " ", out, kind)
+        self.assertIn(f"lean-agent thread show {tid}", out)
+        self.assertIn("lean-agent runs --show r1", out)
+        self.assertNotIn("invoices", out)
+        self.assertNotIn("PR 77", out)
+        self.assertEqual(self.cli("find", "PR 4711").stdout, out)
+        self.assertEqual(self.cli("find", "!4711").stdout, out)
+        self.assertEqual(out.splitlines()[0].split("|")[0].strip(), "Type")
+        only = self.cli("find", "4711", "--type", "thread").stdout
+        self.assertEqual(len(only.strip().splitlines()), 2)
+        self.assertIn("No match", self.cli("find", "9999").stdout)
+        self.assertIn("invoices", self.cli("find", "invoices", "--type", "run").stdout)
+
+    def test_find_caps_rows_unless_all(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        for i in range(20):
+            self.cli("todo", "add", f"Chore {i} for PR 321", "-p", "proj")
+        out = self.cli("find", "321").stdout.strip().splitlines()
+        self.assertEqual(len(out), 1 + 15 + 1)
+        self.assertEqual(out[-1], "5 more: --all")
+        self.assertEqual(len(self.cli("find", "321", "--all").stdout.strip().splitlines()), 21)
+
+    def test_todo_list_ref_filters(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self._seed_find()
+        out = self.cli("todo", "list", "--all", "--ref", "4711").stdout
+        self.assertIn("Fix the export timeout", out)
+        self.assertNotIn("Unrelated cleanup", out)
+        self.assertNotIn("pullrequest/4711 only", out)  # the ref field only
+        self.assertIn("PR 77", self.cli("todo", "list", "--ref", "pr 77").stdout)
+
+    def test_thread_list_filters_and_runs_pr(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        self._seed_find()
+        long = "A long thread title that used to be cut somewhere around here and stays whole..."[:80]
+        self.cli("thread", "new", long)
+        full = self.cli("thread", "list").stdout
+        self.assertIn(long, full)
+        self.assertEqual(len(self.cli("thread", "list", "--pr", "4711").stdout.strip().splitlines()), 1)
+        self.assertIn("!4711", self.cli("thread", "list", "--grep", "export").stdout)
+        self.assertNotIn("invoices", self.cli("thread", "list", "--grep", "export").stdout)
+        t = self.cli("thread", "list", "--grep", "invoices").stdout.split()[0]
+        self.cli("thread", "close", t)
+        self.assertNotIn("invoices", self.cli("thread", "list", "--open").stdout)
+        self.assertIn("invoices", self.cli("thread", "list").stdout)
+        runs = self.cli("runs", "--pr", "4711").stdout
+        self.assertIn("r1 ", runs)
+        self.assertNotIn("r2 ", runs)
+        self.assertIn("r2 ", self.cli("runs", "--grep", "invoices").stdout)
+
+    def test_find_help_renders(self):
+        self.assertIn("--type", self.cli("find", "--help").stdout)
+        self.assertIn("--pr", self.cli("thread", "--help").stdout)
+
     def test_memory_edit_rm_prefix_and_refusals(self):
         self.cli("memory", "add", "Prefer small reviewable changes always.", "--type", "feedback", "--name", "small-changes-please-review-first-and-often-in-every-single-case")
         self.cli("memory", "add", "Prefer small commits when possible.", "--type", "feedback", "--name", "small-commits-please")
