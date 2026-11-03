@@ -1570,6 +1570,64 @@ class AllowEditHookTest(Base):
         self.assertIsNone(self.ask("x", ["**"], raw=""))
 
 
+class ReadOnlyHookTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.proj = os.path.realpath(os.path.join(self.tmp.name, "proj"))
+        os.makedirs(self.proj)
+        self.log = os.path.join(self.tmp.name, "refused.log")
+        self.cfg = os.path.join(self.tmp.name, "ro.json")
+        with open(self.cfg, "w") as fh:
+            json.dump({"project": self.proj, "allow_cmd": ["pkg why"], "log": self.log}, fh)
+
+    def ask(self, command, cwd=None, tool="Bash"):
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "readonly_hook.py"), self.cfg],
+                           input=json.dumps({"tool_name": tool, "cwd": cwd or self.tmp.name, "tool_input": {"command": command}}),
+                           capture_output=True, text=True, env=base_env())
+        self.assertEqual((p.returncode, p.stderr), (0, ""))
+        return json.loads(p.stdout)["hookSpecificOutput"] if p.stdout.strip() else None
+
+    def decision(self, command, **kw):
+        out = self.ask(command, **kw)
+        return out and out["permissionDecision"]
+
+    def test_read_only_git_with_dash_c_or_cwd_in_the_project_is_allowed(self):
+        for c in ("reflog", "log -g", "show-ref", "for-each-ref", "describe --tags", "rev-list HEAD", "merge-base a b",
+                  "blame f", "ls-files", "cat-file -p HEAD", "branch -a", "branch --list", "tag --list", "remote -v",
+                  "status", "diff", "show HEAD"):
+            self.assertEqual(self.decision(f"git -C {self.proj} {c}"), "allow", c)
+        self.assertEqual(self.decision("git reflog", cwd=self.proj), "allow")
+        self.assertEqual(self.decision(f"cd {self.proj} && git log -g | head -5"), "allow")
+        self.assertEqual(self.decision("git reflog"), "deny")  # cwd is not the project
+        self.assertEqual(self.decision("git -C /somewhere/else log"), "deny")
+
+    def test_mutating_git_is_refused(self):
+        for c in ("reset --hard", "branch -D x", "branch x", "tag v1", "checkout x", "commit -m x", "push", "reflog expire --all",
+                  "remote add x y", "diff --output=f", "stash drop", "config user.name x"):
+            self.assertEqual(self.decision(f"git -C {self.proj} {c}"), "deny", c)
+
+    def test_find_without_mutating_flags_is_allowed_and_with_them_refused(self):
+        self.assertEqual(self.decision(f"find {self.proj} -name '*.json' -maxdepth 3"), "allow")
+        for flag in ("-delete", "-exec rm {} ;", "-execdir rm {} ;", "-ok rm {} ;", "-fprint out"):
+            self.assertEqual(self.decision(f"find {self.proj} -name x {flag}"), "deny", flag)
+        self.assertEqual(self.decision(f"ls {self.proj} | head -3; stat {self.proj}; wc -l f"), "allow")
+
+    def test_allow_cmd_prefix_works_with_cd_and_pipes_and_every_segment_is_checked(self):
+        for c in ("pkg why axios", "pkg why axios --recursive", f"cd {self.proj} && pkg why axios",
+                  f"cd {self.proj} && pkg why axios 2>&1 | head -50", "pkg why axios | grep x"):
+            self.assertEqual(self.decision(c), "allow", c)
+        for c in ("pkg add axios", "pkg why axios && touch f", "pkg why axios > out", "pkg why $(whoami)", "X=1 pkg why a",
+                  "pkg why a | sh", "ls `pwd`", "sort -o f f"):
+            self.assertEqual(self.decision(c), "deny", c)
+
+    def test_refusal_names_the_segment_the_allow_cmd_hint_and_is_logged(self):
+        out = self.ask("ls && pkg add axios")
+        self.assertIn("not allowed for a read-only worker: pkg add axios", out["permissionDecisionReason"])
+        self.assertIn("--allow-cmd", out["permissionDecisionReason"])
+        self.assertEqual([json.loads(l)["command"] for l in open(self.log)], ["pkg add axios"])
+        self.assertIsNone(self.ask("x", tool="Read"))
+
+
 if __name__ == "__main__":
     import gha_runner
     gha_runner.main(__file__)

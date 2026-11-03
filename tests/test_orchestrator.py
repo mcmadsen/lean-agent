@@ -1449,13 +1449,35 @@ class CliTest(unittest.TestCase):
             self.assertEqual(argv[argv.index("--tools") + 1], "Read,Glob,Grep,Bash")
             allowed = argv[argv.index("--allowedTools") + 1].split(",")
             self.assertIn(f"Bash(git -C {self.proj} show:*)", allowed)
-            for sub in ("describe", "tag --list", "merge-base --is-ancestor", "branch"):
+            for sub in ("describe", "tag --list", "merge-base", "branch --list", "reflog", "show-ref", "for-each-ref",
+                        "rev-list", "remote -v", "cat-file -p"):
                 self.assertIn(f"Bash(git -C {self.proj} {sub}:*)", allowed)
+                self.assertIn(f"Bash(git {sub}:*)", allowed)
+            for rule in ("find", "stat", "ls", "wc", "head", "tail", "grep", "rg", "cat", "du", "file", "realpath"):
+                self.assertIn(f"Bash({rule}:*)", allowed)
             self.assertNotIn(f"Bash(git -C {self.proj} tag:*)", allowed)
-            self.assertNotIn("Bash", allowed)  # only the read-only git patterns
+            self.assertNotIn(f"Bash(git -C {self.proj} branch:*)", allowed)
+            self.assertNotIn("Bash", allowed)  # only the read-only patterns
+            hooks = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"]
+            self.assertTrue(any("readonly_hook.py" in h["hooks"][0]["command"] for h in hooks))
             self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
             self.assertIn(f"git -C {self.proj}", call["append"])
         self.assertEqual(second["argv"][second["argv"].index("--resume") + 1], "sess-1")
+
+    def test_read_only_hook_config_and_refused_lines_in_runs_show(self):
+        self.cli("learn", self.proj)
+        out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "search", "--read-only", "--allow-cmd", "pkg why",
+                       "find x").stdout
+        run_id = out.split()[1]
+        workdir = next(r for r in self.ledger() if r["id"] == run_id)["workdir"]
+        cfg = json.load(open(os.path.join(workdir, "readonly.json")))
+        self.assertEqual(cfg["project"], os.path.realpath(self.proj))
+        self.assertIn("pkg why", cfg["allow_cmd"])
+        with open(os.path.join(workdir, "refused.log"), "w") as fh:
+            fh.write(json.dumps({"command": "pkg audit"}) + "\n" + json.dumps({"command": "pkg audit"}) + "\n")
+        shown = self.cli("runs", "--show", run_id).stdout
+        self.assertEqual(shown.count("refused: pkg audit"), 1)
+        self.assertIn("--allow-cmd", shown)
 
     def test_task_file_dash_reads_stdin_and_resume_last(self):
         self.cli("learn", self.proj)
