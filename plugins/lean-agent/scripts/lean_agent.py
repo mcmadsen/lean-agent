@@ -42,6 +42,7 @@ import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
 import lean_find  # noqa: E402
 import lean_feedback  # noqa: E402
+import lean_waiting  # noqa: E402
 import service_session  # noqa: E402
 import lean_common
 from lean_common import glob_match, compact_overrides, compaction_label, compaction_point, pid_alive, signal_group, lost_runs, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
@@ -5763,6 +5764,12 @@ def report_review(slug, project, entry, review, meta):
                                       "after": meta.get("after"), "delta": bool(meta.get("resume"))})
     order = {"blocker": 0, "major": 1, "minor": 2, "nit": 3}
     label = meta.get("ref") or "the working tree"
+    if meta.get("mode") == "ref" and entry.get("thread") and entry.get("thread") != "none" and verdict in ("approve", "changes-requested"):
+        try:  # a review a thread asked for ends in a vote or posting findings: that is the user's call
+            lean_waiting.add(f"review of {label} finished: {verdict}, {len(findings)} findings; vote or post?", "review",
+                             thread=entry["thread"], ref=str(meta.get("ref") or ""))
+        except Exception:
+            pass
     reuse = [r for r in review.get("reuse") or [] if isinstance(r, dict)]
     print(f"\nREVIEW: {verdict.upper()} · {len(findings)} findings · {len(checks)} checks to run"
           f" · recorded for {label} @ {head[:12]}" + (" + uncommitted changes" if dirty else ""))
@@ -11424,7 +11431,29 @@ def feedback_line():
     return line
 
 
+def cmd_waiting(a):
+    args = list(a.args or [])
+    act = args.pop(0) if args and args[0] in ("add", "done", "list") else "list"
+    if act == "add":
+        if len(args) != 1:
+            die('usage: lean-agent waiting add "<summary>" [--options "a|b|c"] [--thread tN] [--ref X] [--kind review|question|permission|other]')
+        opts = [o for o in str(a.options).split("|")] if a.options is not None else None
+        print(lean_waiting.add(args[0], a.kind, opts, a.thread or "", a.ref or ""))
+    elif act == "done":
+        if len(args) != 1:
+            die("usage: lean-agent waiting done <id> [--answer TEXT]")
+        if not lean_waiting.done(args[0], a.answer):
+            die(f"no open waiting item {args[0]}")
+        print(f"{args[0]} done")
+    else:
+        print(lean_waiting.text() or "Nothing is waiting on the user.")
+    return 0
+
+
 def cmd_now(a):
+    waiting = lean_waiting.text()
+    if waiting:
+        print(waiting)
     print(lean_threads.short_text() if a.short else lean_threads.now_text())
     line = feedback_line()
     if line:
@@ -12964,6 +12993,15 @@ def build_parser():
     s.add_argument("--resume-old", action="store_true", help="reopen|send|open: continue the thread's previous Claude session "
                    "instead of starting a new one from a short brief")
     s.set_defaults(fn=cmd_thread)
+
+    s = sub.add_parser("waiting", help="what waits on the user (list), `add \"<summary>\"`, `done <id> [--answer TEXT]`; the front desk asks each with AskUserQuestion")
+    s.add_argument("args", nargs="*", help="[list] | add <summary> | done <id>")
+    s.add_argument("--options", help="add: the answers to offer, a|b|c")
+    s.add_argument("--thread", help="add: the thread it belongs to")
+    s.add_argument("--ref", help="add: the PR, ticket or run it is about")
+    s.add_argument("--kind", choices=lean_waiting.KINDS, default="other", help="add: review, question, permission or other")
+    s.add_argument("--answer", help="done: what the user answered")
+    s.set_defaults(fn=cmd_waiting)
 
     s = sub.add_parser("now", help="what we are working on: the open threads by last activity, with state and last action")
     s.add_argument("--short", action="store_true", help="one line per open thread: needs you, running, done, idle (the front desk's view)")
