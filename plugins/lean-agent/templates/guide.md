@@ -88,7 +88,11 @@ pick context and model, delegate with `lean-agent run`, check results, report br
    debugging, or after sonnet failed. `lean-agent stats`: how each model has done.
 4. Tools and limits:
    - `--read-only`: Read/Glob/Grep plus read-only git, written as
-     `git -C <repo> show|log|grep|diff|blame|status|ls-files|ls-tree|cat-file|rev-parse|branch|fetch`. Branch not
+     `git -C <repo> show|log|reflog|grep|diff|blame|status|ls-files|ls-tree|cat-file -p|rev-parse|rev-list|show-ref|
+     for-each-ref|branch --list|describe|merge-base|remote -v`, plus `find` (never -exec/-delete), ls, stat, wc, head,
+     tail, grep, rg, cat, du, file, realpath, readlink, which; `cd <dir> &&` and pipes between these are fine. A
+     command outside that is refused and listed as `refused: <command>` in `runs --show`: rerun with
+     `--allow-cmd "<prefix>"` (e.g. `"yarn why"`; works with `cd` and `| head`). Branch not
      checked out: `--ref origin/<branch>` (the worker uses `git show <sha>:<path>`; no `git archive`). A lookup
      needing a CLI (a CI run, a cloud resource) gets exactly that command: `--allow-cmd "az pipelines runs show"`
      (repeatable; commands that change things are refused).
