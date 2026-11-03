@@ -539,6 +539,7 @@ def restricted_command(command):
 # subcommands are refused there (a thread session runs them); docs/orchestrator-surface.md section 5 lists both sides.
 FRONT_DESK_WORK = {"run", "review", "review-learn", "review-decline", "do", "handover", "learn", "tracker", "optimize",
                    "sync", "codemod", "rules", "publish", "push"}
+HANDOVER_NO_WORKER = {"--as-is", "--list", "--show"}
 FRONT_DESK_ACTIONS = {"worktree": {"push"}}
 FRONT_DESK_HINT = ("main is the front desk: hand it to a thread — lean-agent thread send tN --prompt-file - "
                    "(or thread new \"title\")")
@@ -555,6 +556,8 @@ def front_desk_denial(event):
         name = args[0] if args else ""
         if {"-h", "--help"} & set(words[1:]):
             continue
+        if name == "handover" and (HANDOVER_NO_WORKER & set(words[1:]) or (len(args) > 1 and args[1] == "copy")):
+            continue  # saves the given text / lists / copies: no model call, writes only the paths the user named
         if name in FRONT_DESK_WORK or (len(args) > 1 and args[1] in FRONT_DESK_ACTIONS.get(name, ())):
             return f"`lean-agent {' '.join(args[:2]) if name in FRONT_DESK_ACTIONS else name}`: " + FRONT_DESK_HINT
     return ""

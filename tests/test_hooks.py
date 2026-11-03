@@ -1260,6 +1260,20 @@ class BudgetTest(Base):
         self.assertIn("`worktree push`", text)
         self.assertIn("`now --short`", section)
 
+    def test_front_desk_may_run_handover_without_a_worker_but_not_the_worker_form(self):
+        sys.path.insert(0, ROOT)
+        import budget_hook
+        os.environ["LEAN_AGENT_SESSION_ROLE"] = "main"
+        try:
+            deny = lambda c: budget_hook.front_desk_denial({"tool_name": "Bash", "tool_input": {"command": c}})
+            self.assertEqual(deny("lean-agent handover Plan --project p --as-is --task-file - --out ~/Downloads"), "")
+            self.assertEqual(deny("lean-agent handover --show plan --out /tmp/x.md"), "")
+            self.assertEqual(deny("lean-agent handover copy plan /tmp/x.md"), "")
+            self.assertEqual(deny("lean-agent handover --list"), "")
+            self.assertIn("front desk", deny("lean-agent handover Plan --task-file -"))
+        finally:
+            del os.environ["LEAN_AGENT_SESSION_ROLE"]
+
     def test_no_budget_tracks_only(self):
         self.assertIsNone(run_hook("budget_hook.py", self.ev, **self.env))
 

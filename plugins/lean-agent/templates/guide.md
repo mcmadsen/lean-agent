@@ -68,7 +68,8 @@ pick context and model, delegate with `lean-agent run`, check results, report br
    write it with `lean-agent handover "<title>" [--project P] --task-file - <<'EOF'` (what it should cover, by name,
    e.g. "all open questions in the plan", not a count; or the text itself with `--as-is`), never with your own tools:
    a small worker writes a Markdown file and the command prints `handover: <path>`; tell the user to open that path.
-   The same title keeps the old file as `.prev.md`. `handover --list` shows them. No secrets, tokens or credentials in it.
+   The same title keeps the old file as `.prev.md`. `handover --list` shows them. When the user names a place (e.g.
+   ~/Downloads), add `--out <path>` (a file or an existing folder; `--force` to replace); `handover --show <name> --out <path>` copies an existing one. No secrets, tokens or credentials in it.
 
 ## For every task
 0. A NEW user request: first `lean-agent advise "<request>" --thread <tag>` (`--task-file -` for long text) and follow its

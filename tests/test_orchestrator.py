@@ -748,6 +748,32 @@ class CliTest(unittest.TestCase):
         self.cli("handover", "Plan", "-p", "proj", "--as-is", "--task-file", "-", input="third text")
         self.assertIn("second text", open(os.path.join(self.handover_dir(), "plan.prev.md")).read())
 
+    def test_handover_out_copies_to_a_file_or_folder_refuses_overwrite_and_copies_existing(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        dl = os.path.join(self.env["LEAN_AGENT_HOME"], "dl")
+        os.makedirs(dl)
+        out = self.cli("handover", "Plan B", "-p", "proj", "--as-is", "--task-file", "-", "--out", dl, input="body one").stdout
+        dest = os.path.join(dl, "plan-b.md")
+        self.assertEqual(out.strip().splitlines(), [f"handover: {os.path.join(self.handover_dir(), 'plan-b.md')}", f"copy: {dest}"])
+        self.assertIn("body one", open(dest).read())
+        p = self.cli("handover", "Plan B", "-p", "proj", "--as-is", "--task-file", "-", "--to", dest, input="body two", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("--force", p.stderr)
+        self.assertIn("body one", open(dest).read())
+        self.cli("handover", "Plan B", "-p", "proj", "--as-is", "--task-file", "-", "--to", dest, "--force", input="body two")
+        self.assertIn("body two", open(dest).read())
+        p = self.cli("handover", "Plan B", "-p", "proj", "--as-is", "--task-file", "-", "--out", os.path.join(dl, "no", "x.md"),
+                     input="b", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(dl, "no")))
+        c = os.path.join(dl, "copy.md")
+        self.cli("handover", "--show", "plan-b", "--out", c)
+        self.assertIn("body two", open(c).read())
+        self.cli("handover", "copy", "plan-b", os.path.join(dl, "again.md"))
+        self.assertIn("body two", open(os.path.join(dl, "again.md")).read())
+        self.assertNotEqual(self.cli("handover", "copy", "plan-b", c, check=False).returncode, 0)
+        self.assertNotEqual(self.cli("handover", "--show", "nope", "--out", dl, check=False).returncode, 0)
+
     def test_handover_with_an_empty_reply_is_an_error_and_writes_no_file(self):
         self.cli("learn", self.proj, "--name", "proj")
         p = self.cli("handover", "Empty", "-p", "proj", "--task-file", "-", input="x", check=False, FAKE_ANSWER="")
@@ -1034,6 +1060,22 @@ class CliTest(unittest.TestCase):
                      "t", check=False)  # --allow-cmd without --read-only: refused
         self.assertNotEqual(p.returncode, 0)
         self.assertEqual(self.todo_count("#1"), 0)
+
+    def test_advise_is_an_internal_run_hidden_from_runs_threads_wait_and_week_counts(self):
+        self.cli("learn", self.proj)
+        p = self.cli("advise", "Fix the export retry loop", "--thread", "t3", FAKE_ANSWER="ADVICE\nline 1")
+        self.assertNotIn("started", p.stderr)
+        self.assertEqual(self.ledger()[-1]["role"], "advisor")
+        self.assertEqual(self.cli("runs").stdout.strip(), "")
+        self.assertIn("new request", self.cli("runs", "--internal").stdout)
+        self.assertIn("new request", self.cli("runs", "--all").stdout)
+        self.assertIn("Nothing to collect", self.cli("runs", "--wait", "all").stdout)
+        w = self.cli("week").stdout
+        self.assertIn("Runs: none", w)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "look")
+        w = self.cli("week").stdout
+        self.assertIn("Runs: 1 (1 done)", w)
+        self.assertIn("helpers (cost included): advisor 1", w)
 
     def test_a_refused_todo_new_launch_leaves_no_item_and_advise_handover_have_their_own_run(self):
         self.cli("learn", self.proj)
