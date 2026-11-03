@@ -35,6 +35,7 @@ import uuid
 
 import lean_common
 import lean_log
+import lean_waiting
 import usage
 
 PASTE_START, PASTE_END = b"\x1b[200~", b"\x1b[201~"
@@ -862,6 +863,13 @@ def queue_report(tid, kind, text):
         items = data.get("items") if isinstance(data.get("items"), list) else []
         items.append({"thread": tid, "kind": kind, "text": text, "ts": time.time()})
         lean_common.write_json_atomic(reports_path(), {"items": items[-50:]})
+    if kind in ("question", "needs-you"):
+        try:  # waiting on the user is recorded by lean-agent, not left to the front desk's memory
+            m = re.match(r"QUESTION (q\d+): (.*?)(?: \[options: (.*)\])?$", str(text))
+            opts = [o.strip() for o in m.group(3).split("|")] if m and m.group(3) else None
+            lean_waiting.add(m.group(2) if m else text, "question", (opts or []) + ["Other"] if opts else None, tid)
+        except Exception:
+            pass
     if kind != RUN_AUTO_KIND:
         with lean_common.file_lock(reported_path()):
             seen = _load(reported_path())

@@ -821,6 +821,43 @@ class BudgetTest(Base):
         self.assertIsNone(self.stop_event(["Should I squash the branch first?"], LEAN_AGENT_SESSION_ROLE="thread"))
         self.assertIsNone(self.stop_event(["Routed to t3."]))
 
+    def test_stop_hook_front_desk_asks_for_waiting_rows_once(self):
+        row = ["| Item | State | Next |\n|---|---|---|\n| PR 1 | Reviewed | **Your call:** no vote cast |"]
+        main = {"LEAN_AGENT_SESSION_ROLE": "main"}
+        out = self.stop_event(row, **main)
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("AskUserQuestion", out["reason"])
+        self.assertIsNone(self.stop_event(row, ask=True, **main))
+        self.assertIsNone(self.stop_event(row, active=True, **main))
+        self.assertIsNone(self.stop_event(row, LEAN_AGENT_SESSION_ROLE="thread"))
+        self.assertIsNone(self.stop_event(["Routed to t3."], **main))
+
+    def test_stop_hook_front_desk_blocks_on_open_waiting_items_until_asked(self):
+        sys.path.insert(0, ROOT)
+        main = {"LEAN_AGENT_SESSION_ROLE": "main"}
+        env = dict(self.env, **main)
+        code = ("import sys; sys.path.insert(0, %r); import lean_waiting; "
+                "print(lean_waiting.add('review finished: approve', 'review', thread='t1'))" % ROOT)
+        subprocess.run([sys.executable, "-c", code], env=dict(os.environ, **env), check=True, capture_output=True)
+        out = self.stop_event(["Routed to t3."], **main)
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("review finished: approve", out["reason"])
+        self.assertIn("Approve", out["reason"])
+        self.assertIsNone(self.stop_event(["Done."], ask=True, **main))  # asked: allowed, and the item is marked
+        self.assertIsNone(self.stop_event(["Routed to t3."], **main))
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "waiting.json")) as fh:
+            self.assertTrue(json.load(fh)["items"][0]["asked_at"])
+
+    def test_stop_hook_front_desk_fails_open_on_a_malformed_transcript(self):
+        tr = os.path.join(self.env["LEAN_AGENT_HOME"], "bad.jsonl")
+        with open(tr, "w") as fh:
+            fh.write("not json\n{\n")
+        out = run_hook("budget_hook.py", {"hook_event_name": "Stop", "cwd": self.env["LEAN_AGENT_HOME"], "session_id": "s1",
+                                         "transcript_path": tr}, **dict(self.env, LEAN_AGENT_SESSION_ROLE="main"))
+        self.assertIsNone(out)
+        self.assertIsNone(run_hook("budget_hook.py", {"hook_event_name": "Stop", "cwd": self.env["LEAN_AGENT_HOME"], "session_id": "s1",
+                                                     "transcript_path": "/nonexistent"}, **dict(self.env, LEAN_AGENT_SESSION_ROLE="main")))
+
     def test_main_session_hook_tells_the_orchestrator_to_hand_over_or_start(self):
         home = self.env["LEAN_AGENT_HOME"]
         ctx = self.prompt_ctx

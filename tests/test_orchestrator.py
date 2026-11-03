@@ -6182,6 +6182,30 @@ class CliTest(unittest.TestCase):
         reps["t1"].tick()
         self.assertTrue(ss.queued_reports()[-1]["text"].startswith("waits for your permission"))
 
+    def test_waiting_store_and_commands(self):
+        self.assertIn("Nothing is waiting", self.cli("waiting").stdout)
+        wid = self.cli("waiting", "add", "Deploy the staging build?", "--options", "Deploy|Wait", "--thread", "t2", "--ref", "build 7",
+                       "--kind", "permission").stdout.strip()
+        self.assertEqual(wid, "w1")
+        self.assertEqual(self.cli("waiting", "add", "Deploy the staging build?", "--thread", "t2", "--kind", "permission").stdout.strip(), "w1")
+        out = self.cli("waiting").stdout
+        self.assertIn("w1 permission t2 build 7: Deploy the staging build? [options: Deploy | Wait] (not asked yet)", out)
+        self.assertTrue(self.cli("now").stdout.startswith("Waiting on you:\n  w1 permission"))
+        self.assertIn("w1 done", self.cli("waiting", "done", "w1", "--answer", "Deploy").stdout)
+        self.assertIn("Nothing is waiting", self.cli("waiting").stdout)
+        self.assertNotIn("Waiting on you", self.cli("now").stdout)
+        self.assertNotEqual(self.cli("waiting", "done", "w1", check=False).returncode, 0)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "waiting.json")) as fh:
+            item = json.load(fh)["items"][0]
+        self.assertEqual((item["answer"], bool(item["answered_at"])), ("Deploy", True))
+
+    def test_thread_ask_adds_a_waiting_item(self):
+        lt = self.threads_home()
+        tid = lt.new("topic")
+        self.cli("thread", "ask", "Use the old or new API?", "--options", "old|new", LEAN_AGENT_THREAD=tid, LEAN_AGENT_SESSION_ROLE="thread")
+        out = self.cli("waiting").stdout
+        self.assertIn(f"question {tid}: Use the old or new API? [options: old | new | Other]", out)
+
     def test_thread_ask_records_the_question_and_reaches_mains_report_channel(self):
         lt = self.threads_home()
         tid = lt.new("topic")
@@ -8361,10 +8385,14 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("duplicates existing code", out)  # wraps-existing is reuse done right
         self.assertIn("declined 1. [major/scope]", self.cli("review", "decline", "proj", "1", "--head", "feature",
                                                              "--why", "other dialogs: separate ticket").stdout)
-        out = self.cli("review", "proj", "--head", "feature", "--base", "main", "--second-opinion", "on", "--force", check=False,
+        out = self.cli("review", "proj", "--head", "feature", "--base", "main", "--second-opinion", "on", "--force", "--thread", "t1", check=False,
                        FAKE_REUSE=reuse, FAKE_REVIEW=scope).stdout
         self.assertIn("left out 1 finding(s) declined earlier", out)
         self.assertIn("REVIEW: APPROVE", out)
+        waiting = json.load(open(os.path.join(self.env["LEAN_AGENT_HOME"], "waiting.json")))["items"]
+        self.assertEqual([(w["kind"], w["thread"], w["ref"]) for w in waiting], [("review", "t1", "feature")])
+        self.assertIn("approve", waiting[0]["summary"])
+        self.assertIn("No vote", waiting[0]["options"])
         calls = self.calls()
         self.assertIn("declined: [scope] src/dialogs/overlayStore.ts", calls[-1]["task"])
         self.assertIn("other dialogs: separate ticket", calls[-2]["append"])  # the second opinion knows too

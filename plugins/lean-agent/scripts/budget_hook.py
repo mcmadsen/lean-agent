@@ -688,12 +688,40 @@ def asks_user(text):
     return paras[-1].endswith("?") or bool(ASKING_RE.search(paras[-1]))
 
 
+WAITING_RE = re.compile(r"your call|your vote|waiting on you|needs you|no vote|approve\?|your decision|pending your|awaiting your", re.I)
+
+
+def waiting_reason(items):
+    lines = []
+    for i in items:
+        opts = " | ".join(i.get("options") or []) or "concrete options"
+        lines.append(f"{i.get('id')}: {i.get('summary')} [{opts}]")
+    return ("Something waits on the user and a table row is not asking. Ask it now with AskUserQuestion, with options (at most 4 "
+            "questions): " + "; ".join(lines) if lines else
+            "Something waits on the user and a table row is not asking. Ask it now with AskUserQuestion, with concrete options.")
+
+
 def stop_hook(event):
     """Stop in the main session: a turn that ends asking the user something in prose, without AskUserQuestion, is sent
-    back once (stop_hook_active ends the loop). Thread sessions ask with `thread ask` and are left alone."""
-    if event.get("stop_hook_active") or os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread":
+    back once (stop_hook_active ends the loop). The front desk (role main) is also sent back once when lean-agent
+    holds open waiting items not yet asked, or the turn's text says something waits on the user (a table row). A turn
+    that called AskUserQuestion marks the open items asked. Thread sessions ask with `thread ask` and are left alone."""
+    role = os.environ.get("LEAN_AGENT_SESSION_ROLE")
+    if event.get("stop_hook_active") or role == "thread":
         return
     text, asked = turn_of(event.get("transcript_path") or "")
+    if role == "main":
+        try:
+            import lean_waiting
+            if asked:
+                lean_waiting.mark_asked()
+            else:
+                unasked = lean_waiting.unasked()
+                if unasked or WAITING_RE.search(text):
+                    print(json.dumps({"decision": "block", "reason": waiting_reason(unasked)}))
+                    return
+        except Exception:
+            return
     if not asked and asks_user(text):
         print(json.dumps({"decision": "block", "reason": STOP_REASON}))
 

@@ -416,7 +416,9 @@ Say it in the chat; main runs the command and shows the result as a table.
 | "Restart and clear everything" | `lean-agent clear --all --restart` (`clear --all` for a clear without a restart) |
 | "How much context do the threads use?" | `lean-agent thread sessions --context` |
 | "Make a feedback file" | `lean-agent feedback export` (prints the path) |
-| "What's waiting on me?" | `lean-agent now --short` and the thread reports |
+| "What's waiting on me?" | `lean-agent waiting`, `lean-agent now --short` and the thread reports |
+
+Anything that needs you (a finished review to vote on, a thread question, an approval) is asked with a prompt in the same turn, with options; the table row is only the record. lean-agent keeps these in `<home>/waiting.json` (`lean-agent waiting`, `waiting add`, `waiting done <id>`), and a Stop hook sends the front desk back once if a turn ended without asking.
 
 ## Handovers
 
