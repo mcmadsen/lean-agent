@@ -868,8 +868,9 @@ class CliTest(unittest.TestCase):
         block = "ADVICE\n" + "\n".join(f"line {i}" for i in range(1, 21))  # 21 lines: the command keeps 15
         out = self.cli("advise", "Fix the export retry loop", "--thread", "#7", FAKE_ANSWER="Here.\n" + block).stdout
         lines = out.strip().splitlines()
-        self.assertEqual((len(lines), lines[0], lines[-1]), (15, "Understood as: (not stated)", "line 13"))
-        self.assertEqual(lines[1], "ADVICE")
+        self.assertEqual((len(lines), lines[0], lines[1], lines[-1]),
+                         (16, "New topic \u2014 start it: lean-agent thread new \"<title>\" --prompt-file -", "Understood as: (not stated)", "line 13"))
+        self.assertEqual(lines[2], "ADVICE")
         call = self.calls()[-1]
         argv = call["argv"]
         self.assertIn("Fix the export retry loop", call["task"])
@@ -889,7 +890,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual((kept["thread"], kept["text"]), ("7", out.strip()))
         self.assertTrue(kept["project"].startswith("proj"))
         self.assertEqual(self.cli("advise", "--task-file", "-", input="again", FAKE_ANSWER="ADVICE\nsuggested: answer from state").stdout.strip(),
-                         "Understood as: (not stated)\nADVICE\nsuggested: answer from state")
+                         "New topic \u2014 start it: lean-agent thread new \"<title>\" --prompt-file -\nUnderstood as: (not stated)\nADVICE\nsuggested: answer from state")
         with open(sorted(glob.glob(os.path.join(adv, "*.json")))[-1]) as fh:
             self.assertEqual(json.load(fh)["thread"], "main")
         p = self.cli("advise", "x", check=False, FAKE_ANSWER="No idea.")
@@ -1868,6 +1869,44 @@ class CliTest(unittest.TestCase):
         self.assertRegex(out.stdout, r"failed: MCP tracker is not authenticated")  # two denials after an ok call
         self.assertEqual(self.cli("memory", "list").stdout.count("MCP tracker runs unauthenticated in workers"), 1)
 
+    def advise_owner_setup(self):
+        self.cli("learn", self.proj)
+        lt = self.threads_home()
+        lt.route("Investigate PR 4711 login failures", "s1")  # t1 owns PR 4711
+        lt.route("Status dashboard design review notes", "s1")  # t2
+
+    def test_advise_prints_the_reference_owner_and_passes_it_to_the_advisor(self):
+        self.advise_owner_setup()
+        out = self.cli("advise", "PR 4711 status dashboard check", FAKE_ANSWER="ADVICE\nunderstood: check\nsuggested: answer from state").stdout
+        first = out.splitlines()[0]
+        self.assertTrue(first.startswith("Belongs to t1 (owns PR 4711)"), first)
+        task = self.calls()[-1]["task"]
+        self.assertIn("Routing (from references/ownership): Belongs to t1 (owns PR 4711)", task)
+        self.assertIn("authoritative", task)
+        self.assertNotIn("advisor suggested", out)
+
+    def test_advise_front_desk_job_is_routed_to_no_thread(self):
+        self.advise_owner_setup()
+        out = self.cli("advise", "show my usage", FAKE_ANSWER="ADVICE\nsuggested: answer from state").stdout
+        self.assertTrue(out.splitlines()[0].startswith("Front desk job (budget)"), out)
+        self.assertNotIn("Belongs to", out.splitlines()[0])
+        self.assertIn("Routing (from references/ownership): Front desk job (budget)", self.calls()[-1]["task"])
+
+    def test_advise_model_failure_still_prints_the_routing_line(self):
+        self.advise_owner_setup()
+        p = self.cli("advise", "PR 4711 status", check=False, FAKE_ANSWER="No idea.")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertTrue(p.stdout.startswith("Belongs to t1 (owns PR 4711)"), p.stdout)
+        self.assertIn("ADVICE block", p.stderr)
+
+    def test_advise_keeps_the_reference_owner_when_the_advisor_suggests_another_thread(self):
+        self.advise_owner_setup()
+        out = self.cli("advise", "PR 4711 status", FAKE_ANSWER="ADVICE\nsuggested: lean-agent thread send t2 -- x").stdout
+        lines = out.splitlines()
+        self.assertTrue(lines[0].startswith("advisor suggested t2; kept t1 (owns PR 4711)") or
+                        lines[1].startswith("advisor suggested t2; kept t1 (owns PR 4711)"), out)
+        self.assertTrue(any(l.startswith("Belongs to t1 (owns PR 4711)") for l in lines[:2]), out)
+
     def test_advise_gets_the_known_issue_cards_for_a_server_the_request_names(self):
         self.use_tracker()
         self.cli("learn", self.proj)
@@ -1968,8 +2007,8 @@ class CliTest(unittest.TestCase):
         self.cli("learn", self.proj, "--name", "proj")
         self.add_rule()
         out = self.cli("advise", "list the open items", FAKE_ANSWER="ADVICE\nunderstood: list items\nask the user first: no")
-        self.assertTrue(out.stdout.startswith("Rule: Never use the tracker MCP server"))
-        self.assertIn("; use trackercli", out.stdout.splitlines()[0])
+        self.assertIn("\nRule: Never use the tracker MCP server", out.stdout)
+        self.assertIn("; use trackercli", out.stdout.splitlines()[1])
         self.assertIn("Rules to respect", self.calls()[-1]["task"])
 
     def test_conflicting_project_files_are_flagged_by_doctor_and_advise_and_not_edited(self):

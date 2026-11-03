@@ -12059,6 +12059,39 @@ def fix_allow_cmd(line):
     return line
 
 
+ADVISE_ROUTE_RULE = ("A routing from references/ownership or a front-desk job is authoritative: never override it because "
+                     "another thread's title looks similar. You may only refine an 'Unsure' or title-similarity result; "
+                     "if you disagree with it, say why in `risks:`.")
+
+
+def advise_routing(what):
+    """(line printed first, fact for the advisor prompt, (owner thread, why) when a reference names the owner) from
+    lean_threads.decide, the routing the hook uses."""
+    try:
+        tid, line, kind = lean_threads.decide(what, lean_threads.load(), os.environ.get("CLAUDE_SESSION_ID"))
+    except Exception as e:  # routing is an extra: never stop advise
+        return "", "Routing: unavailable.", None
+    short = line.split(" \u2014 ")[0]
+    owner = None
+    m = re.search(r"\((?:closed; )?(owns [^;)]+)", line)
+    if kind == "thread" and tid and m:
+        owner = (tid, m.group(1))
+    auth = bool(owner) or kind == "job"
+    fact = "Routing (from references/ownership): " + short + (" " + ADVISE_ROUTE_RULE if auth else
+            " (not authoritative: refine it if you can; say why if you disagree)")
+    return line, fact, owner
+
+
+def advise_other_thread(block, owner):
+    """A thread id other than the owner in the advisor's suggested line (or --thread flag), else None."""
+    for l in block:
+        if l.strip().lower().startswith("suggested") or "--thread" in l:
+            for m in re.finditer(r"\bt(\d+)\b", l):
+                if "t" + m.group(1) != owner:
+                    return "t" + m.group(1)
+    return None
+
+
 def cmd_advise(a):
     """Ask a cheap read-only worker what to do with a new request; prints (and stores) its short ADVICE block."""
     what = sys.stdin.read().strip() if a.task_file == "-" else read_text(a.task_file).strip() if a.task_file \
@@ -12070,9 +12103,11 @@ def cmd_advise(a):
     thread = thread_key(a.thread) or "main"
     lean = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
     rule_lines = advise_rules(slug, path)
+    route_line, route_fact, owner = advise_routing(what)
     task = (f"The user's new request (project {slug}" + (f", thread {a.thread}" if a.thread else "") + "):\n" + what
             + ("\n\nRules to respect (the user's standing rules; say so in ADVICE when the request touches one):\n"
                + "\n".join(rule_lines) if rule_lines else "")
+            + "\n\n" + route_fact
             + "\n\nProjects: " + ", ".join(sorted(projs)) + "\n" + advise_state(slug, path, a.thread)
             + "\n" + advise_cards(slug, request=what, project=path) + advise_mcp(slug, path, what) + ("\n" + advise_requests(a.thread)).rstrip())
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model="haiku",
@@ -12086,12 +12121,19 @@ def cmd_advise(a):
     lines = reply.strip().splitlines()
     start = next((i for i, l in enumerate(lines) if l.strip().startswith("ADVICE")), None)
     if start is None:
+        if route_line:
+            print(route_line)  # the front desk still gets the routing when the model part fails
         print(out, file=sys.stderr)
         die("the advisor didn't answer with an ADVICE block; see its reply above", rc or 1)
     block = [fix_allow_cmd(l) for l in lines[start:start + 16] if l.strip()]
     text = shape_advice(block)
     if rule_lines:
         text = "\n".join(rule_lines) + "\n" + text
+    if owner:
+        other = advise_other_thread(block, owner[0])
+        if other:
+            text = f"advisor suggested {other}; kept {owner[0]} ({owner[1]})\n" + text
+    text = (route_line + "\n" if route_line else "") + text
     store_advice({"ts": now_iso(), "thread": thread, "project": slug, "request": what[:300], "text": text})
     print(text)
     return 0
