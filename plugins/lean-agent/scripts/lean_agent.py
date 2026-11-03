@@ -1609,6 +1609,9 @@ def duplicate_launch_guard(a, model, task):
     return key
 
 
+INTERNAL_ROLES = ("librarian", "advisor", "composer", "gap-decider", "tracker-discover", "review-learn", "reuse-check")
+# helper runs behind another command: not shown as workers (runs list, thread lists, --wait all, week counts, "started" line)
+
 NO_RESUME_ROLES = ("librarian", "advisor", "composer", "gap-decider")  # one-shot helpers with their own grants
 
 
@@ -2279,8 +2282,9 @@ def _cmd_run(a):
     rc = detach_run(workdir, run_id)
     if rc is not None:
         return rc
-    print(f"run {run_id} started · {model} · {slug}" + (" (resumed)" if prev else "") +
-          f" · see it later with `lean-agent runs --show {run_id}`", file=sys.stderr, flush=True)
+    if (getattr(a, "role", None) or (prev or {}).get("role")) not in INTERNAL_ROLES:
+        print(f"run {run_id} started · {model} · {slug}" + (" (resumed)" if prev else "") +
+              f" · see it later with `lean-agent runs --show {run_id}`", file=sys.stderr, flush=True)
     seed_collected(home())  # runs recorded from here on can be told apart from a ledger older than collected.json
     running_key = launch_key or run_id  # every run is listed while it runs (the status line)
     wt_name = (prev or {}).get("worktree") or (wt and wt["name"])
@@ -8247,7 +8251,7 @@ def wait_for_runs(target, timeout):
     Exit 0 when every one ended well, 1 when one failed or vanished, 124 on the timeout."""
     live = live_runs()
     if target == "all":
-        live_ids = [rid for rid, _ in live]
+        live_ids = [rid for rid, m in live if m.get("role") not in INTERNAL_ROLES]
         ids = uncollected_runs(live_ids) + live_ids
         if not ids:
             print("Nothing to collect.")
@@ -8477,6 +8481,8 @@ def cmd_runs(a):
             ("why", r.get("why"), False), ("result", r.get("result_head"), False)])]
         if not runs:
             print("No run matches.")
+    if not getattr(a, "all", False):
+        runs = [r for r in runs if r.get("role") not in INTERNAL_ROLES]
     for r in runs[-(a.limit or a.n):]:
         print(f"{r['id']}  {r['status']:<22} {r['model']:<7} {r['project']:<16} {r['task'][:70]}")
     for rid, m in lost_runs(home()):
@@ -11154,12 +11160,14 @@ def report_orphaned_run(tid, run_id, status, summary):
         pass
 
 
-def thread_live_runs(tid, data=None):
+def thread_live_runs(tid, data=None, internal=False):
     """[(run id, task, started)] of the live runs tagged with thread `tid`, oldest first."""
     data = data or lean_threads.load()
     out = []
     for f in glob.glob(home("running", "*.json")):
         m = load_json(f, {})
+        if m.get("role") in INTERNAL_ROLES and not internal:
+            continue
         if m.get("thread") and pid_alive(m.get("pid")) and lean_threads.resolve(m["thread"], data["aliases"]) == tid:
             out.append((m.get("run") or os.path.basename(f)[:-5], " ".join(str(m.get("task") or "").split()), m.get("started") or ""))
     return sorted(out, key=lambda r: r[2])
@@ -11600,6 +11608,8 @@ def cmd_week(a):
     if a.project:
         slug = resolve_project(a.project)[0]
         runs = [r for r in runs if r["project"] == slug]
+    helpers = [r for r in runs if r.get("role") in INTERNAL_ROLES]
+    runs = [r for r in runs if r.get("role") not in INTERNAL_ROLES]  # workers; the helpers' cost is added below
     print(f"lean-agent, the last {days} days" + (f" ({a.project})" if a.project else ""))
     line, _ = pace_line()
     if line:
@@ -11607,8 +11617,13 @@ def cmd_week(a):
     if runs:
         ok = sum(r["status"] == "done" for r in runs)
         units = sum(r.get("units", 0) for r in runs)
-        cost = sum(r.get("cost_usd") or 0 for r in runs)
+        cost = sum(r.get("cost_usd") or 0 for r in runs + helpers)
         print(f"Runs: {len(runs)} ({ok} done) · {units:,} sonnet-eq · ${cost:.2f} API price")
+        if helpers:
+            hroles = {}
+            for r in helpers:
+                hroles[r["role"]] = hroles.get(r["role"], 0) + 1
+            print("  helpers (cost included): " + ", ".join(f"{k} {n}" for k, n in sorted(hroles.items())))
         by = {}
         for r in runs:
             m = by.setdefault(model_family(r["model"]), [0, 0])
@@ -12184,10 +12199,53 @@ def handover_list(a):
     return 0
 
 
+def handover_out_path(out, name, force):
+    """Where `--out` puts the copy: `out` (~ expanded) as a file, or <dir>/<slug>.md when it is a folder. Creates no
+    folder; refuses to replace a file unless `force`."""
+    out = os.path.abspath(os.path.expanduser(out))
+    if os.path.isdir(out):
+        out = os.path.join(out, slugify(name) + ".md")
+    if not os.path.isdir(os.path.dirname(out)):
+        die(f"--out: the folder {os.path.dirname(out)} doesn't exist (nothing is created for you)")
+    if os.path.exists(out) and not force:
+        die(f"--out: {out} already exists (add --force to replace it)")
+    return out
+
+
+def handover_copy(src, out):
+    import shutil
+    shutil.copyfile(src, out)
+    print(f"copy: {out}")
+
+
+def handover_show_copy(a, name):
+    """`handover --show <name> --out PATH` / `handover copy <name> PATH`: copy an existing handover."""
+    if not a.out:
+        die("copy where? lean-agent handover --show <name> --out <path>   (or: handover copy <name> <path>)")
+    slug = resolve_project(a.project)[0] if a.project else "*"
+    files = [f for f in glob.glob(os.path.join(handover_dir(slug), slugify(name) + ".md"))]
+    if not files:
+        die(f"no handover {name!r} (lean-agent handover --list)")
+    if len(files) > 1:
+        die(f"several handovers are called {name!r}: " + ", ".join(sorted(files)) + " (pick one with --project)")
+    out = handover_out_path(a.out, name, a.force)
+    print(f"handover: {files[0]}")
+    handover_copy(files[0], out)
+    return 0
+
+
 def cmd_handover(a):
     """Write a handover document as a plain Markdown file under the lean-agent home and print its path."""
     if a.list:
         return handover_list(a)
+    rest = list(getattr(a, "rest", None) or [])
+    if a.title == "copy" and rest:  # handover copy <name> <path>
+        a.title, a.show = rest.pop(0), True
+        a.out = a.out or (rest.pop(0) if rest else None)
+    elif rest:
+        die("too many words: quote the title, lean-agent handover \"<title>\" ...")
+    if getattr(a, "show", False):
+        return handover_show_copy(a, a.title or "")
     title = " ".join((a.title or "").split())
     if not title:
         die("handover needs a title (or --list)")
@@ -12209,6 +12267,7 @@ def cmd_handover(a):
             die("the worker returned no document; no handover written", rc or 1)
     thread = lean_threads.resolve_tag()
     path = os.path.abspath(os.path.join(handover_dir(slug), slugify(title) + ".md"))
+    copy_to = handover_out_path(a.out, title, a.force) if a.out else None
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if os.path.exists(path):
         os.replace(path, path[:-3] + ".prev.md")
@@ -12227,6 +12286,8 @@ def cmd_handover(a):
             recs[i] = rec  # the same file again: one record, with the new title, date and thread
         save_json(reg, recs)
     print(f"handover: {path}")
+    if copy_to:
+        handover_copy(path, copy_to)
     return 0
 
 
@@ -12509,6 +12570,12 @@ def build_parser():
                        "saves the given text. The same title again keeps the old file as <slug>.prev.md. --list shows "
                        "the existing ones, newest first")
     s.add_argument("title", nargs="?")
+    s.add_argument("rest", nargs="*", help=argparse.SUPPRESS)
+    s.add_argument("--out", "--to", metavar="PATH", help="also write a copy here (a file, or a folder: <folder>/<slug>.md; "
+                   "~ is expanded, no folder is created, an existing file needs --force); with --show or `handover copy "
+                   "<name> <path>`: copy an existing handover")
+    s.add_argument("--force", action="store_true", help="with --out: replace an existing file")
+    s.add_argument("--show", action="store_true", help="the title names an existing handover: copy it to --out")
     s.add_argument("--project", "-p", help="the project the worker runs in (default: the latest run's)")
     s.add_argument("--task-file", help="the request, or the text itself with --as-is ('-' = stdin)")
     s.add_argument("--as-is", action="store_true", help="the input is the document: save it unchanged")
@@ -12890,6 +12957,8 @@ def build_parser():
     s.add_argument("--last", action="store_true", help="print the latest run's id and its summary line")
     s.add_argument("--thread", dest="thread_filter", metavar="tN", help="only the runs of this thread")
     s.add_argument("--limit", type=int, metavar="N", help="the newest N runs (same as -n)")
+    s.add_argument("--all", "--internal", dest="all", action="store_true",
+                   help="also list helper runs (advisor, librarian, composer, review-learn ...), hidden by default")
     s.add_argument("--running", action="store_true", help="runs in progress right now")
     s.add_argument("--lost", action="store_true", help="list the lost runs (supervisor died without a result); with --clear mark them acknowledged")
     s.add_argument("--clear", action="store_true", help="with --lost: mark the lost runs lost-and-acknowledged so they stop appearing")

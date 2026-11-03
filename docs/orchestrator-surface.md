@@ -101,6 +101,7 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 | `review --costs`, `review decline <p> <n>…` (also `review-decline`), `review learn <p> <PR> --mcp <tracker>` or `--pr <PR> --threads-file F|-` / `--threads-cmd` (also `review-learn`), `review learn <p> --list` / `--rm` / `--undo` | b | allowed: review state, and lessons a worker derives from human reviews |
 | `review learn <p> --text "…"` / `--helper "…"` | c | **denied**: text the orchestrator supplies is knowledge; `remember` (or a worker) |
 | `handover` (also `--list`) | b | allowed: a worker writes a Markdown file; it only writes under LEAN_AGENT_HOME |
+| `handover "<name>" --as-is --task-file - [--out PATH\|--to PATH] [--force]`, `handover --show <name> --out PATH`, `handover copy <name> PATH` | b | allowed: no model call; writes under LEAN_AGENT_HOME plus one copy at the path the user named (`~` expanded; a file, or a folder → `<folder>/<slug>.md`; no folder is created; an existing file needs `--force`) |
 | `config strict on`, `config branch-rules`, `config review-skip`, `config review-max-rerounds`, `config review-model`, `config review-learn-auto`, `config run-timeout`, `attribution`, `limits`, `budget`, `context` | b | allowed: switches and limits |
 | `config allow-edit <project> <glob>... [--clear]` | b | allowed: repo-owned paths (e.g. `.claude/rules/**`, `CLAUDE.md`) every editing worker of the project may change; same as `run --allow-edit` |
 | `config strict off` | c | **denied**: the orchestrator doesn't lift its own guardrail |
@@ -142,6 +143,7 @@ it to a thread — lean-agent thread send tN --prompt-file - (or thread new "tit
 | --- | --- |
 | `run`, `review` (also `review-learn`, `review-decline`), `do`, `handover`, `learn`, `tracker`, `optimize`, `sync`, `codemod`, `rules` | **denied** |
 | `worktree push`, any `publish` or `push` subcommand | **denied** |
+| `handover --as-is`, `handover --show\|copy <name> PATH` (no worker; writes only under LEAN_AGENT_HOME and the `--out` path the user named) | allowed |
 | `now` (also `now --short`), `thread new\|send\|close\|reopen\|open\|show\|list\|sessions\|move`, `advise`, `remember`, `clear`, `checkpoint`, `brief` | allowed |
 | `runs --show\|--wait\|--stop`, `logs`, `doctor`, `config` reads | allowed |
 
