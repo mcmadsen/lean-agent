@@ -312,13 +312,13 @@ def _doc(t, data):
     return title, body
 
 
-def score_threads(prompt, now=None, current=None, data=None):
+def score_threads(prompt, now=None, current=None, data=None, recency=True, drop=()):
     """[(score, thread id)] best first for the open threads. Prompt words are weighted by rarity across the threads (idf);
     the score is the weighted share of the prompt's words the thread has (title words count 2x), times a recency
     boost (up to +30%, fading over a day) and +0.1 for the thread the last prompt went to."""
     data = data or load()
     now = time.time() if now is None else now
-    pw = words(prompt)
+    pw = words(prompt) - set(drop)
     if not pw:
         return []
     open_ = [t for k, t in data["threads"].items() if k not in data["aliases"] and k not in RESERVED and not t.get("closed")]
@@ -334,7 +334,8 @@ def score_threads(prompt, now=None, current=None, data=None):
             continue  # one shared word out of a long prompt is a coincidence
         got = sum(idf[w] * (2.0 if w in ti else 1.0) for w in shared) / total
         age_h = max(0.0, now - _epoch(t.get("last_message") or t.get("created"))) / 3600
-        sc = min(1.0, got) * (1 + 0.3 * math.exp(-age_h / 24)) + (0.1 if t["id"] == current else 0)
+        sc = min(1.0, got) * (1 + 0.3 * math.exp(-age_h / 24)) + (0.1 if t["id"] == current else 0) if recency \
+            else min(1.0, got) + 0.01 * math.exp(-age_h / 24)  # routing hint: recency only breaks a tie
         out.append((sc, t["id"]))
     return sorted(out, reverse=True)
 
@@ -440,22 +441,220 @@ def pin(tid, prompt, session=None, now=None):
     return True
 
 
+GENERIC = {stem(w) for w in """review reviews pr prs pull request requests check checks fix fixes test tests testing quick look
+task tasks thread threads work item items bug status issue change changes update run job please""".split()}
+FRONT_DESK_JOBS = (
+    ("feedback", re.compile(r"\bfeedback\b", re.I)),
+    ("budget", re.compile(r"\b(?:budget|savings?|usage|limits?|quota|spend(?:ing)?)\b", re.I)),
+    ("memory", re.compile(r"\b(?:remember|memor(?:y|ies))\b", re.I)),
+    ("schedule", re.compile(r"\b(?:schedules?|scheduled|scheduling)\b", re.I)),
+    ("threads overview", re.compile(r"\b(?:(?:all|my|open|list(?: of)?) threads|threads (?:overview|list|status)|overview of (?:the )?threads|status of all)\b", re.I)),
+    ("maintenance", re.compile(r"^\s*(?:please\s+)?(?:lean-agent\s+)?(?:sync|update|restart|clear)(?:\s+(?:the\s+)?(?:plugin|lean-agent|front desk|session|context|templates?|everything))?\s*[.!?]?\s*$", re.I)),
+)
+NEW_WORDS_RE = re.compile(r"\b(?:new (?:thread|topic)|separate thread|start (?:a )?(?:new|fresh) (?:thread|topic))\b", re.I)
+SAME_WORDS_RE = re.compile(r"\b(?:resume|continue|same|that|this|existing|old) (?:that |the |this )?(?:thread|topic)\b|\b(?:resume|continue)\b", re.I)
+SEND_TAIL = "lean-agent thread send {t} --prompt-file -"
+NEW_TAIL = 'lean-agent thread new "<title>" --prompt-file -'
+
+
+def _tid_of(tag, data):
+    try:
+        return resolve(norm(tag), data["aliases"])
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return None
+
+
+def _tail_jsonl(path, tail=3000):
+    out = []
+    try:
+        with open(path) as fh:
+            for line in fh.readlines()[-tail:]:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict):
+                    out.append(r)
+    except OSError:
+        pass
+    return out
+
+
+def thread_owner_index(data):
+    """What each thread owns, from the same records `lean-agent find` searches: {tid: {"own": [(text, is_ref)],
+    "mention": [text], "runs": [run ids], "todos": [todo ids]}}. Owned: the thread's title and ref(s), the refs and text
+    of its linked todos, the task/branch/worktree/ref of its runs, its reviews' pr/ref/branch, its pushed branches.
+    Mentioned: request and report texts, todo notes, handoff notes."""
+    idx = {}
+
+    def slot(tag):
+        tid = _tid_of(tag, data) if tag else None
+        if not tid or tid not in data["threads"]:
+            return None
+        return idx.setdefault(tid, {"own": [], "mention": [], "runs": [], "todos": []})
+    for k, t in data["threads"].items():
+        if k in data["aliases"] or k in RESERVED:
+            continue
+        sl = slot(k)
+        sl["own"].append((t.get("title"), False))
+        for key in ("ref", "refs", "branch", "pr"):
+            v = t.get(key)
+            for x in (v if isinstance(v, list) else [v]):
+                if x:
+                    sl["own"].append((str(x), True))
+        sl["mention"] += [str(r.get("text")) for r in t.get("requests") or []]
+        sl["mention"] += [str(r.get("text")) for r in t.get("reports") or [] if isinstance(r, dict)]
+    for src, dst in data["aliases"].items():  # merged-in threads count for the thread they were merged into
+        sl, st = slot(dst), data["threads"].get(src) or {}
+        if sl is not None:
+            sl["own"].append((st.get("title"), False))
+            sl["mention"] += [str(r.get("text")) for r in st.get("requests") or []]
+    todo = lean_common.read_json(lean_home("todo.json"), {})
+    for t in (todo.get("items") or []) if isinstance(todo, dict) else []:
+        sl = slot(t.get("thread")) if isinstance(t, dict) else None
+        if sl is not None:
+            sl["own"] += [(t.get("ref"), True), (t.get("text"), False)]
+            sl["mention"] += [str(n) for n in t.get("notes") or []]
+            sl["todos"].append(str(t.get("id")))
+    for r in _tail_jsonl(lean_home("ledger.jsonl")):
+        sl = slot(r.get("thread"))
+        if sl is not None:
+            sl["own"] += [(r.get("ref"), True), (r.get("branch"), True), (r.get("worktree"), True),
+                          (str(r.get("task") or "").split("\n")[0], False)]
+            sl["runs"].append(str(r.get("id")))
+    for r in _tail_jsonl(lean_home("pushes.jsonl")):
+        sl = slot(r.get("thread"))
+        if sl is not None:
+            sl["own"].append((r.get("branch"), True))
+    for f in glob.glob(lean_home("reviews", "*.jsonl")):
+        if f.endswith((".declined.jsonl", ".threads.jsonl")):
+            continue
+        for r in _tail_jsonl(f, 500):
+            sl = slot(r.get("thread"))
+            if sl is not None:
+                sl["own"] += [(r.get("pr"), True), (r.get("ref"), True), (r.get("branch"), True), (r.get("goal"), False)]
+    notes = lean_common.read_json(lean_home("handoff-notes.json"), [])
+    for n in notes if isinstance(notes, list) else []:
+        sl = slot(n.get("thread")) if isinstance(n, dict) else None
+        if sl is not None:
+            sl["mention"].append(str(n.get("text")))
+    return idx
+
+
+def reference_owners(refs, data, idx=None):
+    """[(kind, value, owners, mentioners)] per reference: thread ids owning it and thread ids that only mention it."""
+    import lean_find
+    idx = thread_owner_index(data) if idx is None else idx
+    out = []
+    for kind, value in refs:
+        own, men = [], []
+        for tid, sl in idx.items():
+            if kind == "run":
+                hit = value in sl["runs"]
+            elif kind == "todo":
+                hit = value in sl["todos"]
+            else:
+                hit = any(lean_find.reference_in(kind, value, x, ir) for x, ir in sl["own"])
+            if hit:
+                own.append(tid)
+            elif kind not in ("run", "todo") and any(lean_find.reference_in(kind, value, x, True) for x in sl["mention"]):
+                men.append(tid)
+        out.append((kind, value, own, men))
+    return out
+
+
+def _closed(data, tid):
+    return bool((data["threads"].get(tid) or {}).get("closed"))
+
+
+def _send(tid, data):
+    if (data["threads"].get(tid) or {}).get("session_on"):
+        return f"hand it over: {SEND_TAIL.format(t=tid)}"
+    return f"hand it over (this starts its session): {SEND_TAIL.format(t=tid)}"
+
+
+def decide(text, data, session=None, now=None, idx=None):
+    """Where a front-desk prompt goes, no model call. Order: explicit references (thread id, PR, work item, branch, run,
+    todo) against what threads own; the user's words (new topic / that thread); front-desk jobs; topic similarity, only
+    with a clear margin. Returns (thread id or None, line, kind), kind in thread|new|unsure|job|status."""
+    import lean_find
+    text = " ".join(str(text or "").split())
+    ids = list(EXPLICIT_RE.finditer(text))
+    for m in ids:  # a thread id: tN, or a small #N
+        cand = resolve(f"#{int(m.group(1))}" if m.group(1) else f"t{int(m.group(2))}", data["aliases"])
+        if cand in data["threads"] or (cand.startswith("#") and int(m.group(1)) < 100):
+            return cand, f"Belongs to {cand} (named in the message) \u2014 {_send(cand, data)}", "thread"
+    refs = lean_find.prompt_references(text)
+    results = reference_owners(refs, data, idx) if refs else []
+    owned = []
+    for k, v, own, men in results:
+        if own and k != "num":
+            owned.append((k, v, [o for o in own if not _closed(data, o)] or own, men))
+    label = lean_find.reference_label
+    if owned:
+        tids = []
+        for k, v, own, men in owned:
+            tids += [o for o in own if o not in tids]
+        k, v, own, men = owned[0]
+        if len(tids) == 1:
+            tid = tids[0]
+            extra = [x for x in men if x != tid]
+            why = ("closed; " if _closed(data, tid) else "") + f"owns {label(k, v)}" + (f"; also mentioned in {', '.join(extra)}" if extra else "")
+            return tid, f"Belongs to {tid} ({why}) \u2014 {_send(tid, data)}", "thread"
+        extra = [x for x in men if x not in tids]
+        return None, f"Unsure: {label(k, v)} is owned by {', '.join(t + (' (closed)' if _closed(data, t) else '') for t in tids)}" \
+            + (f", also mentioned in {', '.join(extra)}" if extra else "") + " \u2014 ask which one", "unsure"
+    ment = [(k, v, men) for k, v, own, men in results if men and k != "num"]
+    if ment:
+        k, v, men = ment[0]
+        return None, f"Unsure: {label(k, v)} has no thread, only mentioned in {', '.join(men)} \u2014 new topic unless it follows up there", "unsure"
+    if NEW_WORDS_RE.search(text):
+        return None, f"New topic (you asked for a new thread) \u2014 start it: {NEW_TAIL}", "new"
+    if is_status_question(text) and not ids:
+        return None, "Status question \u2014 answer it here: lean-agent now", "status"
+    for name, rx in FRONT_DESK_JOBS:
+        if rx.search(text):
+            return None, f"Front desk job ({name}) \u2014 do it here, no thread", "job"
+    cur = None
+    try:
+        with open(state_path()) as fh:
+            st = json.load(fh)
+        cur = ((st.get("sessions") or {}).get(session or "") or st.get("latest") or {}).get("thread")
+    except (OSError, ValueError):
+        pass
+    cur = resolve(cur, data["aliases"]) if cur else None
+    cur_open = bool(cur and cur in data["threads"] and not _closed(data, cur))
+    if SAME_WORDS_RE.search(text) and cur_open:
+        return cur, f"Belongs to {cur} (you said to continue; the last thread) \u2014 {_send(cur, data)}", "thread"
+    ranked = score_threads(text, now, cur, data, recency=False, drop=GENERIC)
+    if ranked and ranked[0][0] >= MATCH_THRESHOLD:
+        top = ranked[0][1]
+        if len(ranked) == 1 or ranked[0][0] - ranked[1][0] >= CONFIDENT_MARGIN:
+            return top, f"Belongs to {top} (title: {str(data['threads'][top].get('title'))[:40]}) \u2014 {_send(top, data)}", "thread"
+        s2 = ranked[1][1]
+        sh = sorted((words(text) & (_doc(data["threads"][top], data)[0] | _doc(data["threads"][s2], data)[0])) - GENERIC)
+        return None, f"Unsure: {top} or {s2} ({', '.join(sh[:3]) or 'similar topic'}) \u2014 ask, or start a new thread", "unsure"
+    if not words(text) and cur_open:
+        return cur, f"Belongs to {cur} (continues the last topic) \u2014 {_send(cur, data)}", "thread"
+    nolink = [label(k, v) for k, v, own, men in results if k != "num" and not own and not men]
+    if nolink:
+        return None, f"New topic ({nolink[0]} has no thread) \u2014 start it: {NEW_TAIL}", "new"
+    return None, f"New topic \u2014 start it: {NEW_TAIL}", "new"
+
+
 def advise(prompt, session=None, now=None):
-    """The main session is the front desk: what the orchestrator should do with a user prompt, in one line. A status
-    question is answered there (`now`); a prompt that belongs to an open thread is handed to its session; anything else
-    is a new topic for a new thread session. Matched requests are stored under their thread; a new topic creates nothing
-    (`thread new` does). Returns (thread id or None, line)."""
+    """The main session is the front desk: what the orchestrator should do with a user prompt, in one line saying why
+    (see decide). A matched request is stored under its thread; a new topic creates nothing (`thread new` does).
+    Returns (thread id or None, line)."""
     text = " ".join(str(prompt or "").split())
-    if is_status_question(text) and not EXPLICIT_RE.search(text) and not (prompt_ids(text) and id_thread(text, load())):
-        return None, "Status question \u2014 answer it here: lean-agent now"
-    tid, how, _ = route(text, session, now, create=False)
-    if tid is None:
-        return None, 'New topic \u2014 start it: lean-agent thread new "<title>" --prompt-file -'
-    t = load()["threads"].get(tid) or {}
-    title = t.get("title") or tid
-    if t.get("session_on"):
-        return tid, f'Belongs to {tid} "{title}" \u2014 hand it over: lean-agent thread send {tid} --prompt-file -'
-    return tid, f'Belongs to {tid} "{title}" \u2014 hand it over (this starts its session): lean-agent thread send {tid} --prompt-file -'
+    data = load()
+    tid, line, kind = decide(text, data, session, now)
+    if kind == "thread" and tid:
+        if tid in data["threads"]:
+            pin(tid, text, session, now)
+        else:
+            route(text, session, now, create=False)  # a small #N names a thread that route creates
+    return tid, line
 
 
 ID_REF_RE = re.compile(r"(\bPR\s*#?|[A-Za-z]+-?#|#|(?<![\w.-]))(\d{3,})\b", re.I)  # 4711, #4711, PR 4711, AB#4711

@@ -71,3 +71,61 @@ def table(rows, show_all=False):
     if len(rows) > len(shown):
         lines.append(f"{len(rows) - len(shown)} more: --all")
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------------ references in a prompt (thread routing)
+
+_PR_WORD = r"(?:pr|pull\s*requests?|pullrequests?|pull|mr|merge\s*requests?)"
+_ITEM_WORD = (r"(?:\b(?!(?:pr|mr)\s*-?#)[A-Za-z]{1,10}-?#|(?-i:\b[A-Z]{2,10}-)|\bwork\s*items?[\s#:]*|"
+              r"\b(?:bug|task|item|ticket|issue|story)[\s#:]*)")
+_PROMPT_REFS = (
+    ("pr", re.compile(r"(?:\b" + _PR_WORD + r"[\s#:/_-]*|(?<![A-Za-z0-9])!|/pull/)(\d{1,9})(?!\d)", re.I)),
+    ("item", re.compile(_ITEM_WORD + r"(\d{1,9})(?!\d)", re.I)),
+    ("hash", re.compile(r"(?<![\w&/])#(\d{3,9})(?!\d)")),
+    ("run", re.compile(r"\b(\d{4}-\d{6}-[0-9a-f]{4})\b")),
+    ("todo", re.compile(r"\b(?:todo|to-do)\s*#?(\d{1,6})(?!\d)", re.I)),
+    ("branch", re.compile(r"\b((?:feature|bugfix|hotfix|release|fix|chore|users?)/[\w.-]+)", re.I)),
+    ("num", re.compile(r"(?<![\w.#!/-])(\d{4,9})(?![\w.-])")),
+)
+
+
+def prompt_references(text):
+    """[(kind, value)] the identifiers a prompt names: pr, item (AB#1, work item 1, bug 1, task 1), hash (#1234: PR or item),
+    run, todo, branch, and bare 4+ digit numbers (num; weak). A number is listed once, under its strongest kind."""
+    text = str(text or "")
+    out, seen_num = [], set()
+    for kind, rx in _PROMPT_REFS:
+        for m in rx.finditer(text):
+            v = m.group(1)
+            if kind in ("pr", "item", "hash", "num"):
+                if v in seen_num:
+                    continue
+                seen_num.add(v)
+            if (kind, v.lower()) not in [(k, x.lower()) for k, x in out]:
+                out.append((kind, v))
+    return out
+
+
+def reference_in(kind, value, text, is_ref=False):
+    """Whether a record field (free text, or a ref/branch field when is_ref) names the reference. A number in a ref field
+    matches either kind unless the field spells out the other one (a PR is not a work item with the same number)."""
+    text = str(text or "")
+    if not text:
+        return False
+    if kind in ("run", "todo"):
+        return False
+    if kind == "branch":
+        return value.lower() in text.lower()
+    n = value
+    pr = re.search(r"(?:\b" + _PR_WORD + r"[\s#:/_-]*|(?<![A-Za-z0-9])[!#]|/pull/)" + n + r"(?!\d)", text, re.I)
+    item = re.search(_ITEM_WORD + n + r"(?!\d)", text, re.I) and not pr
+    if kind == "pr":
+        return bool(pr or (is_ref and not item and ref_rx(n).search(text)))
+    if kind == "item":
+        return bool(item or (is_ref and not pr and ref_rx(n).search(text)))
+    return bool(pr or item or (is_ref and ref_rx(n).search(text)))  # hash / num
+
+
+def reference_label(kind, value):
+    return {"pr": f"PR {value}", "item": f"work item {value}", "hash": f"#{value}", "run": f"run {value}",
+            "todo": f"todo #{value}"}.get(kind, value)
