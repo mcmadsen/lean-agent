@@ -362,11 +362,18 @@ there), answers in short tables, asks anything that waits on you with AskUserQue
 turn that ends with a prose question. Thread reports (a thread's finished turn, error or question) arrive in main
 collapsed as one line, `lean-agent: 2 thread reports (t18 done, t21 question) [r1a2b3c]`; `lean-agent thread reports`
 prints the full text again, and `lean-agent config thread-reports on|questions-only|off|default` sets what is sent.
-Its prompt hook scores every request its prompt hook scores every request
-against the open threads without a model call (title, aliases and recent requests; rare words weigh more, recent threads
-get a small boost, a score of 0.4 or more matches; an explicit `t7` or `#7` wins) and adds one line saying what to do:
-`Belongs to t7 "..."` (hand it over with `lean-agent thread send t7 --prompt-file -`), `New topic` (start it with
-`lean-agent thread new "<title>" --prompt-file -`), or `Status question` (answered in main with `lean-agent now`).
+Its prompt hook adds one line per request, without a model call, and says why. The order: (1) explicit references
+(`t7`, PR numbers as `PR 4711` / `!4711` / `.../pullrequest/4711`, work items as `AB#12` / `bug 12`, branches, run and
+todo ids) are looked up in what threads own, with the same records `lean-agent find` searches (thread title and refs,
+linked todos, runs, reviews, pushes); a unique owner wins (`Belongs to t5 (owns PR 4711)`), several owners are listed
+(`Unsure: ...`), none gives `New topic (PR 4720 has no thread)`; a closed thread is only suggested when the reference is
+unique to it; (2) the user's words (`new thread`, `resume that thread`); (3) front-desk jobs that never go to a thread
+(`Front desk job (feedback)`: feedback, budget/savings/limits/usage, memory, schedule, sync/update/restart/clear, thread
+overviews); (4) only then topic similarity on distinctive title words (generic words like review, PR, check, fix, test
+count for nothing, recency barely), and only with a clear margin: otherwise `Unsure: t2 or t6 (digest)`. Hand a
+`Belongs to` request over with `lean-agent thread send t7 --prompt-file -`, start a `New topic` with
+`lean-agent thread new "<title>" --prompt-file -`; `Status question` is answered in main with `lean-agent now`. The line is
+a hint: a reference the user named wins over it.
 Notifications of background work attach to their run's thread silently. A thread session never guesses: every prompt
 belongs to its thread, its context line is just `Thread t7 "..."` (once, at session start and after a clear), and
 everything started there is tagged t7. The thread is stored in the state of every run, review, todo, note, handover and

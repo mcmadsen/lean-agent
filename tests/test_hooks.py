@@ -821,6 +821,77 @@ class BudgetTest(Base):
         self.assertIsNone(self.stop_event(["Should I squash the branch first?"], LEAN_AGENT_SESSION_ROLE="thread"))
         self.assertIsNone(self.stop_event(["Routed to t3."]))
 
+    def routing_fixture(self):
+        """Threads, todos, runs and reviews of a made-up day; returns (lean_threads, data) for decide()."""
+        home = self.env["LEAN_AGENT_HOME"]
+        sys.path.insert(0, ROOT)
+        titles = {"t1": "Plan the offline cache", "t2": "Digest of weekly tasks and notes", "t3": "Review job for the cache PR",
+                  "t4": "Refactor logging setup", "t5": "Secrets manager rollout", "t6": "Grid layout for dashboards",
+                  "t7": "Docs for the importer", "t8": "Review of PR 4701 about timeouts", "t9": "Review of PR 4730 and the tests",
+                  "t10": "Closed cleanup of old fixtures"}
+        now = "2026-11-02T10:00:00"
+        threads = {k: {"id": k, "title": v, "created": now, "last_message": now, "kind": "free", "requests": []} for k, v in titles.items()}
+        threads["t5"]["ref"] = "PR 4711"
+        threads["t8"]["requests"] = [{"id": "r1", "ts": now, "text": "also glance at PR 4711 later"}]
+        threads["t9"]["last_message"] = "2026-11-03T06:00:00"
+        threads["t10"]["closed"] = "2026-11-01T10:00:00"
+        with open(os.path.join(home, "threads.json"), "w") as fh:
+            json.dump({"threads": threads, "aliases": {}, "overrides": {}}, fh)
+        with open(os.path.join(home, "todo.json"), "w") as fh:
+            json.dump({"next": 4, "items": [
+                {"id": 1, "text": "Wire the sync", "ref": "AB#4750", "thread": "t7", "status": "open", "notes": []},
+                {"id": 2, "text": "Check the numbers", "ref": "PR 4750", "thread": "t4", "status": "open", "notes": []},
+                {"id": 3, "text": "Old fixture sweep", "ref": "PR 4760", "thread": "t10", "status": "done", "notes": []}]}, fh)
+        with open(os.path.join(home, "ledger.jsonl"), "w") as fh:
+            fh.write(json.dumps({"id": "1101-100000-abcd", "thread": "t6", "task": "tune grid", "branch": "feature/grid-fix"}) + "\n")
+        os.makedirs(os.path.join(home, "reviews"), exist_ok=True)
+        with open(os.path.join(home, "reviews", "proj.jsonl"), "w") as fh:
+            fh.write(json.dumps({"run": "x", "thread": "t3", "pr": "4781", "ref": "PR 4780"}) + "\n")
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
+            import lean_threads
+            return lean_threads, lean_threads.load()
+
+    def test_routing_hint_prefers_what_a_thread_owns_over_similar_titles(self):
+        lt, data = self.routing_fixture()
+        home = self.env["LEAN_AGENT_HOME"]
+
+        def d(text):
+            with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
+                tid, line, kind = lt.decide(text, data)
+            return tid, line
+
+        self.assertEqual(d("PR 4711 secrets manager, resume that thread")[0], "t5")  # owner t5, also mentioned in t8
+        self.assertIn("owns PR 4711", d("PR 4711 secrets manager, resume that thread")[1])
+        self.assertIn("also mentioned in t8", d("what is up with !4711")[1])
+        self.assertEqual(d("what happened to PR 4730")[0], "t9")
+        self.assertEqual(d("see https://dev.example/proj/pullrequest/4730")[0], "t9")
+        tid, line = d("pull request 4720 quick check")  # nobody owns 4720 (t9 is only the last review thread)
+        self.assertIsNone(tid)
+        self.assertTrue(line.startswith("New topic (PR 4720 has no thread)"), line)
+        self.assertEqual(d("digest tasks in New")[0], "t2")
+        self.assertEqual(d("digest testing")[0], "t2")
+        for text, job in (("write the feedback", "feedback"), ("budget and savings", "budget"), ("show my usage", "budget"),
+                          ("remember that I like short answers", "memory"), ("restart", "maintenance"), ("list all threads", "threads overview")):
+            tid, line = d(text)
+            self.assertIsNone(tid, text)
+            self.assertTrue(line.startswith(f"Front desk job ({job})"), line)
+        self.assertEqual(d("bug 4750 again")[0], "t7")  # a work item, not PR 4750 of t4
+        self.assertEqual(d("PR 4750 again")[0], "t4")
+        self.assertEqual(d("#4750")[0], None)  # PR or item: t4 and t7 both own it, listed
+        self.assertIn("t4", d("#4750")[1]); self.assertIn("t7", d("#4750")[1])
+        self.assertEqual(d("branch feature/grid-fix is red")[0], "t6")
+        self.assertEqual(d("what did run 1101-100000-abcd do")[0], "t6")
+        self.assertEqual(d("todo 2 is wrong")[0], "t4")
+        self.assertEqual(d("PR 4780 follow up")[0], "t3")  # from the review record
+        tid, line = d("PR 4760 once more")  # unique to a closed thread
+        self.assertEqual(tid, "t10")
+        self.assertIn("closed", line)
+        self.assertEqual(d("t6 please")[0], "t6")
+        self.assertEqual(d("start a new thread for the pager")[1][:9], "New topic")
+        tid, line = d("tests for the cache review")  # only generic words besides 'cache': t1 and t3 tie
+        self.assertTrue(tid is None and line.startswith("Unsure: t") and "t1" in line and "t3" in line and "(cache)" in line, line)
+        self.assertTrue(d("grid layout needs padding")[1].startswith("Belongs to t6 (title: Grid layout"))
+
     def test_main_session_hook_tells_the_orchestrator_to_hand_over_or_start(self):
         home = self.env["LEAN_AGENT_HOME"]
         ctx = self.prompt_ctx
@@ -828,9 +899,9 @@ class BudgetTest(Base):
         self.assertEqual(ctx("Publish the quarterly report through the docs worker"), new_topic)
         self.make_threads("Publish quarterly report through docs worker", "Fix export retry loop in billing service", session_on=["t1"])
         self.assertEqual(ctx("the quarterly report needs a chart in the docs"),
-                         'Belongs to t1 "Publish quarterly report through docs worker" \u2014 hand it over: lean-agent thread send t1 --prompt-file -')
+                         'Belongs to t1 (title: Publish quarterly report through docs wo) \u2014 hand it over: lean-agent thread send t1 --prompt-file -')
         again = ctx("what about t2 now?")  # explicit wins over words; its session is not running: send starts it
-        self.assertTrue(again.startswith('Belongs to t2 "Fix export retry loop in billing service" \u2014 hand it over'), again)
+        self.assertTrue(again.startswith('Belongs to t2 (named in the message) \u2014 hand it over'), again)
         self.assertTrue(again.endswith("lean-agent thread send t2 --prompt-file -"), again)
         self.assertTrue(ctx("why does the task-id column stay empty in the quarterly report?").startswith("Belongs to t1"))  # not a notification
         self.assertTrue(ctx("#7 is failing").startswith('Belongs to #7'))  # an explicit #N names its own thread

@@ -28,8 +28,8 @@ Use this table for status of PRs, tickets and tasks (invented rows, shown as an 
 ## Rules
 1. **Do not do the work.** No reading project files, no project commands, no editing, no Agent/Workflow tool, no
    explaining a solution. Work commands (`run`, `review`, `do`, `worktree`, `todo add`, memory writes) are refused here.
-2. **Route every request** to a thread. The hook's context line says where: `Belongs to tN` -> send it there;
-   `New topic` -> open a thread. Then say in one line where it went and end your turn.
+2. **Route every request** to a thread. The hook's line is a hint: `Belongs to tN` -> send it there; `New topic` -> open a thread;
+   `Unsure`/`Front desk job` -> you decide. A reference the user names (PR, item, branch, tN) wins. Then say in one line where it went and end your turn.
 3. **No outward actions unprompted** (messages, posting, publishing, merging, deploying). Ask the user first.
 4. **Never ask the user to run a lean-agent command.** When one fails without a reason, read `lean-agent logs` (newest first) or `lean-agent output <file from the notification>`.
 5. **Keep nothing yourself.** No lists or plans in the conversation; they are lost at the next compaction.
