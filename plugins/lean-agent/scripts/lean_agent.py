@@ -121,9 +121,10 @@ MUTATING_WORDS = {"delete", "create", "update", "set", "apply", "push", "rm", "m
                   "post", "patch", "install", "exec", "write", "reset", "approve", "complete", "abandon", "queue"}
 CLI_RE = re.compile(r"(?<![\w/-])(az|gh|kubectl|aws|gcloud|curl|wget|docker|terraform|helm|psql|sqlcmd|glab|jq)(?=\s)")
 READONLY_SHELL_RULE = ("You are read-only. The only shell commands you can run are read-only git commands, written as\n"
-                       "`git -C {project} <show|log|grep|diff|blame|status|ls-files|ls-tree|cat-file|rev-parse|branch|fetch|describe> ...`,\n"
-                       "`git -C {project} tag --list ...` and `git -C {project} merge-base --is-ancestor ...` (release questions)\n"
-                       "(no `cd`, no pipes to other programs). Everything else is refused.")
+                       "`git -C {project} <show|log|log -g|reflog|grep|diff|blame|status|ls-files|ls-tree|cat-file -p|rev-parse|rev-list|\n"
+                       "show-ref|for-each-ref|branch --list/-a/-r/-v|fetch|describe|merge-base|tag --list|remote -v> ...`,\n"
+                       "plus find (never -exec/-delete), ls, stat, wc, head, tail, grep, rg, cat, du, file, realpath, readlink, which.\n"
+                       "`cd <dir> && ...` and pipes between these are fine. Everything else is refused.")
 SEND_RULE = ("Outward actions: do NOT do anything that leaves this machine and can't be undone, such as\n"
              "sending or posting a message, submitting a form, publishing, merging, deploying, or deleting\n"
              "remote data. Do the work up to that point (e.g. type the draft), then stop with status\n"
@@ -134,8 +135,12 @@ ALLOW_SEND_RULE = ("Outward actions: the user explicitly approved this outward a
 BROWSER_RULE = ("Browser: you control the user's real Chrome (signed in as them) through the Claude in Chrome\n"
                 "tools. Always work in a new tab and never touch the user's existing tabs. If a login, MFA,\n"
                 "CAPTCHA or account picker appears, stop with status \"needs-input\".\n")
-READONLY_GIT = ("show", "log", "grep", "diff", "blame", "status", "ls-files", "ls-tree", "cat-file", "rev-parse",
-                "branch", "fetch", "describe", "tag --list", "merge-base --is-ancestor")
+READONLY_GIT = ("show", "log", "grep", "diff", "blame", "status", "ls-files", "ls-tree", "cat-file -p", "rev-parse",
+                "branch --list", "branch -a", "branch -r", "branch -v", "branch --show-current", "fetch", "describe",
+                "tag --list", "merge-base", "reflog", "show-ref", "for-each-ref", "rev-list", "remote -v")
+READONLY_BUILTINS = ("find", "stat", "ls", "wc", "head", "tail", "grep", "rg", "cat", "du", "file", "realpath",
+                     "readlink", "which")  # find -exec/-delete/... is refused by readonly_hook.py
+REFUSED_LOG = "refused.log"
 CHROME = "claude-in-chrome"
 
 
@@ -2182,6 +2187,8 @@ def _cmd_run(a):
     lean_json = os.path.join(PLUGIN_ROOT, "bin", "lean-json")
     if read_only:
         allowed = READONLY_TOOLS.split(",") + [f"Bash(git -C {project} {sub}:*)" for sub in READONLY_GIT]
+        allowed += [f"Bash(git {sub}:*)" for sub in READONLY_GIT]  # cwd = project (readonly_hook.py checks)
+        allowed += [f"Bash({b}:*)" for b in READONLY_BUILTINS]
         allowed.append(f"Bash({lean_json}:*)")  # reads a file, prints a compact view
         allowed += [f"Bash({c}:*)" for c in allow_cmd + internal_cmd]  # read-only commands the orchestrator named, and the role's own
         permission_mode = "default"
@@ -2218,6 +2225,14 @@ def _cmd_run(a):
         hooks["PostToolUse"] = [{"matcher": "mcp__.*", "hooks": [{
             "type": "command", "timeout": 20,
             "command": f"python3 {json.dumps(os.path.join(HERE, 'mcp_trim_hook.py'))}"}]}]
+    if read_only:  # allows a command only when every && | ; segment is read-only; names what it refused
+        ro_cfg = os.path.join(workdir, "readonly.json")
+        with open(ro_cfg, "w") as fh:
+            json.dump({"project": os.path.realpath(project), "allow_cmd": allow_cmd + internal_cmd + [lean_json],
+                       "log": os.path.join(workdir, REFUSED_LOG)}, fh)
+        hooks["PreToolUse"].append({"matcher": "Bash", "hooks": [{
+            "type": "command", "timeout": 10,
+            "command": f"python3 {json.dumps(os.path.join(HERE, 'readonly_hook.py'))} {json.dumps(ro_cfg)}"}]})
     hooks["PreToolUse"].append({"matcher": "*", "hooks": [{  # one note at ~70% of the budget: commit, then summarise
         "type": "command", "timeout": 10, "command": f"python3 {json.dumps(os.path.join(HERE, 'wrapup_hook.py'))}"}]})
     if allow_edit and not read_only:  # answers Claude Code's permission prompt for the named repo files only
@@ -8429,6 +8444,14 @@ def cmd_runs(a):
                 seen = []
             for p in dict.fromkeys(seen):
                 print(f"edited (allowed): {p}")
+        if not a.details and r.get("workdir"):
+            try:
+                refused = [json.loads(l).get("command", "") for l in read_text(os.path.join(r["workdir"], REFUSED_LOG)).splitlines()
+                           if l.strip().startswith("{")]
+            except (OSError, ValueError):
+                refused = []
+            for c in list(dict.fromkeys(refused))[:20]:
+                print(f"refused: {c}  (add --allow-cmd '<prefix>' if it is read-only)")
         needs = sorted(set(re.findall(r"needs:\s*(--allow-edit\s+\S+)", text)))
         if needs and not a.details:
             print("blocked on permission: rerun with `lean-agent run ... --resume " + r["id"] + " "
