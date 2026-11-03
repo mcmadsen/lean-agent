@@ -604,6 +604,11 @@ def decide(text, data, session=None, now=None, idx=None):
         extra = [x for x in men if x not in tids]
         return None, f"Unsure: {label(k, v)} is owned by {', '.join(t + (' (closed)' if _closed(data, t) else '') for t in tids)}" \
             + (f", also mentioned in {', '.join(extra)}" if extra else "") + " \u2014 ask which one", "unsure"
+    for k, v, own, men in results:  # a bare number counts as a reference only when a thread owns it as an id reference
+        if k == "num" and own:
+            cands = [o for o in own if not _closed(data, o)] or own
+            tid = max(cands, key=lambda o: _epoch(data["threads"][o].get("last_message") or data["threads"][o].get("created")))
+            return tid, f"Belongs to {tid} (owns {v}" + (f"; most recent of {', '.join(cands)}" if len(cands) > 1 else "") + f") \u2014 {_send(tid, data)}", "thread"
     ment = [(k, v, men) for k, v, own, men in results if men and k != "num"]
     if ment:
         k, v, men = ment[0]
