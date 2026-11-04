@@ -8627,6 +8627,55 @@ class CliTest(unittest.TestCase):
         self.assertIn("usage: lean-agent schedule", self.cli("schedule", "defaults", "--help").stdout)
         self.assertIn("No scheduled jobs", self.cli("schedule").stdout)
 
+    def _crash_items(self):
+        p = os.path.join(self.env["LEAN_AGENT_HOME"], "feedback", "feedback.jsonl")
+        if not os.path.exists(p):
+            return []
+        with open(p) as fh:
+            return [l for l in fh if "crash:" in l]
+
+    def test_grep_log_missing_file_is_one_clean_line(self):
+        gone = os.path.join("/tmp", "somedir-gone", "24.txt")
+        p = self.cli("grep-log", gone, check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertNotIn("Traceback", p.stderr)
+        self.assertIn(f"lean-agent: grep-log: no such file: {gone}", p.stderr)
+        self.assertIn("worker temp files are gone after the run", p.stderr)
+        self.assertEqual(self._crash_items(), [])
+        # a path that is not a worker temp path gets no hint
+        L = lean_agent_module()
+        self.assertNotIn("hint:", L.user_file_error("grep-log", "/home/user/proj/build.log", "no such file"))
+        self.assertIn("hint:", L.user_file_error("grep-log", "/private/tmp/x/1.txt", "no such file"))
+        # a folder is not a log either
+        p = self.cli("grep-log", self.tmp.name, check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertNotIn("Traceback", p.stderr)
+        # --run with an unknown run id
+        p = self.cli("grep-log", "--run", "nope", check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertNotIn("Traceback", p.stderr)
+
+    def test_missing_user_files_never_show_a_traceback(self):
+        gone = os.path.join(self.tmp.name, "gone", "f.txt")
+        for args in (("remember", "--task-file", gone), ("thread", "send", "t1", "--prompt-file", gone),
+                     ("handover", "T", "--task-file", gone)):
+            p = self.cli(*args, check=False)
+            self.assertEqual(p.returncode, 1, args)
+            self.assertNotIn("Traceback", p.stderr, args)
+            self.assertIn(gone, p.stderr, args)
+        self.assertEqual(self._crash_items(), [])
+
+    def test_main_net_tells_user_paths_from_internal_ones(self):
+        L = lean_agent_module()
+        err = FileNotFoundError(2, "No such file or directory", "/x/user.txt")
+        self.assertEqual(L.user_path_error(err, ["grep-log", "/x/user.txt"]), "/x/user.txt")
+        self.assertEqual(L.user_path_error(err, ["run", "--task-file=/x/user.txt"]), "/x/user.txt")
+        self.assertEqual(L.user_path_error(FileNotFoundError(2, "No such file", "/x"), ["feedback", "export", "--out", "/x/f"]), "/x")
+        self.assertIsNone(L.user_path_error(err, ["grep-log", "/x/other.txt"]))  # an internal file
+        self.assertIsNone(L.user_path_error(ValueError("x"), ["/x/user.txt"]))
+        self.assertIsNone(L.user_path_error(OSError(5, "I/O error", "/x/user.txt"), ["/x/user.txt"]))
+        self.assertIsNone(L.user_path_error(FileNotFoundError(2, "No such file"), ["/x/user.txt"]))
+
     def test_review_ci_sparse_checkout_parity(self):
         g = self.git_project()
         os.makedirs(os.path.join(self.proj, "infrastructure"))

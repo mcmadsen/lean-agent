@@ -12598,8 +12598,47 @@ def log_lines(text):
     return out
 
 
+TEMP_PATH_RE = re.compile(r"^(/private)?/tmp/|^(/var/folders/|/private/var/folders/)|/worktrees/|/\.lean-agent/work/")
+WORKER_TEMP_HINT = ("worker temp files are gone after the run; use `lean-agent output <run>` / "
+                    "`runs --show <run> --tail N` or `grep-log --run <run>`")
+
+
+def user_file_error(cmd, path, err):
+    """The one-line message for a user-supplied file that cannot be read (a hint for a worker's temp path)."""
+    p = str(path)
+    line = f"lean-agent: {cmd}: {err}: {p}"
+    if TEMP_PATH_RE.search(os.path.abspath(p)):
+        line += f"\n  hint: {WORKER_TEMP_HINT}"
+    return line
+
+
 def cmd_grep_log(a):
-    text = sys.stdin.read() if a.file == "-" else read_text(a.file)
+    if a.run:
+        r = next((x for x in reversed(ledger()) if x["id"] == a.run), None)
+        if not r:
+            die(f"grep-log: no run {a.run!r}")
+        files = run_summary_files(r)
+        text = read_text(files[-1]) if files else full_report(r)
+        if text is None:
+            die(f"grep-log: run {a.run} has no saved output")
+        if a.file and not a.pattern:  # `grep-log --run N PATTERN`: the one positional is the pattern
+            a.pattern, a.file = a.file, None
+    elif not a.file:
+        die("grep-log: give a log file, - for stdin, or --run <run>", 2)
+    elif a.file == "-":
+        text = sys.stdin.read()
+    else:
+        if not os.path.exists(a.file):
+            print(user_file_error("grep-log", a.file, "no such file"), file=sys.stderr)
+            return 1
+        try:
+            text = read_text(a.file)
+        except IsADirectoryError:
+            print(user_file_error("grep-log", a.file, "is a directory"), file=sys.stderr)
+            return 1
+        except OSError:
+            print(user_file_error("grep-log", a.file, "not readable"), file=sys.stderr)
+            return 1
     lines = [re.sub(r"\x1b\[[0-9;]*m", "", l) for l in log_lines(text)]
     rx = re.compile(a.pattern, re.I) if a.pattern else LOG_ERROR_RE
     hits = [i for i, l in enumerate(lines) if rx.search(l)]
@@ -13990,7 +14029,8 @@ def build_parser():
 
     s = sub.add_parser("grep-log", help="the lines that matter in a saved CI or build log (text, or JSON like "
                        "{\"value\": [lines]}): errors and failures, or a PATTERN")
-    s.add_argument("file", help="the log file, or - for stdin")
+    s.add_argument("file", nargs="?", help="the log file, or - for stdin")
+    s.add_argument("--run", metavar="ID", help="search that run's saved output instead of a file")
     s.add_argument("pattern", nargs="?", help="a regular expression (default: errors and failures)")
     s.add_argument("-C", "--context", type=int, default=2, help="lines around each match (default 2)")
     s.add_argument("--max", type=int, default=80, help="lines to print at most (default 80)")
@@ -14028,6 +14068,25 @@ def build_parser():
                    "stops checking it (same as `lean-agent mcp ignore SERVER`; repeatable)")
     s.set_defaults(fn=cmd_doctor)
     return ap
+
+
+def user_path_error(exc, argv):
+    """The filename when exc is a file error on a path the user typed on the command line, else None."""
+    if not isinstance(exc, (FileNotFoundError, PermissionError, IsADirectoryError, NotADirectoryError)):
+        return None
+    name = exc.filename
+    if not isinstance(name, (str, bytes, os.PathLike)) or not name:
+        return None
+    name = os.fsdecode(name)
+    norm = lambda p: os.path.abspath(os.path.expanduser(p))
+    for x in argv:
+        for cand in (x, x.split("=", 1)[1] if x.startswith("-") and "=" in x else None):
+            if not cand:
+                continue
+            # the path itself, or a folder on the way to it (makedirs of the user's output path)
+            if cand == name or norm(cand) == norm(name) or norm(cand).startswith(norm(name).rstrip(os.sep) + os.sep):
+                return name
+    return None
 
 
 def main(argv=None):
@@ -14087,6 +14146,10 @@ def main(argv=None):
             report_failure(FAIL_CMD[0], FAIL_REASON[0] if FAIL_REASON else f"exited with code {e.code}")
         raise
     except Exception as e:
+        bad = user_path_error(e, argv)
+        if bad:
+            print(user_file_error(a.cmd, bad, e.strerror or type(e).__name__), file=sys.stderr)
+            return 1
         if FAIL_CMD:
             report_failure(FAIL_CMD[0], f"{type(e).__name__}: {e}")
         lean_feedback.record_crash(argv, e)
