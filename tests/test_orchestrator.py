@@ -6869,8 +6869,9 @@ class CliTest(unittest.TestCase):
         out = []
         for f in glob.glob(os.path.join(self.env["LEAN_AGENT_HOME"], "running", "*.json")):
             try:
-                out.append(json.load(open(f)))
-            except ValueError:
+                with open(f) as fh:
+                    out.append(json.load(fh))
+            except (ValueError, OSError):  # a marker can go between the listing and the read (early markers are short-lived)
                 pass
         return out
 
