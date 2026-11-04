@@ -42,6 +42,7 @@ import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
 import lean_find  # noqa: E402
 import lean_feedback  # noqa: E402
+import lean_goals  # noqa: E402
 import lean_waiting  # noqa: E402
 import service_session  # noqa: E402
 import lean_common
@@ -1858,6 +1859,11 @@ def early_register(a, task, prev=None):
     its session shows up as lost instead of missing."""
     rid = (prev or {}).get("id") or datetime.datetime.now().strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
     tag = lean_threads.resolve_tag()
+    if tag:
+        try:  # a run on a PR is work on its goal
+            lean_goals.note_text(task, tag)
+        except Exception:
+            pass
     path = home("running", rid + ".json")
     project, model = a.project or (prev or {}).get("project"), a.model or (prev or {}).get("model")
     fixed = {"id": rid, "project": project, "task": task[:300], "why": getattr(a, "why", None), "model": model,
@@ -11181,6 +11187,8 @@ def _cmd_todo(a):
         data["items"].append(t)
         data["next"] += 1
         save_json(home("todo.json"), data)
+        if a.ref and t.get("thread"):
+            lean_goals.note_text(str(a.ref), t["thread"])
         print(f"added {todo_line(t)}")
         return 0
     if a.action in ("start", "done", "note", "rm", "reopen", "edit"):
@@ -12039,6 +12047,7 @@ def thread_action(a):
             except RuntimeError as exc:
                 lean_threads.discard(tid)  # a thread nobody can talk to is not left behind
                 die(f"{exc} (thread {tid} was removed)")
+            lean_goals.note_text(f"{a.args[0]} {prompt or ''}", tid)
         print(f'thread {tid} started: Remote Control "{name}"')
         return 0
     if act == "park":
@@ -12068,6 +12077,8 @@ def thread_action(a):
         prompt = thread_prompt(a)
         if act == "send" and not prompt:
             die('thread send needs the message: "<text>" or --prompt-file F|-')
+        if act == "send" and prompt:
+            lean_goals.note_text(prompt, tid)
         if not service_session.alive():
             die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
         running = service_session.alive(tid)
@@ -12182,10 +12193,36 @@ def cmd_waiting(a):
     return 0
 
 
+def cmd_goals(a):
+    print(lean_goals.table() or "No open goals.")
+    return 0
+
+
+def cmd_goal(a):
+    args = list(a.args or [])
+    act = args.pop(0) if args else ""
+    if act == "add" and 1 <= len(args) <= 2:
+        print(lean_goals.add(args[0], args[1] if len(args) > 1 else (lean_threads.resolve_tag() or "")))
+    elif act in ("done", "drop") and len(args) == 1:
+        if not (lean_goals.done if act == "done" else lean_goals.drop)(args[0]):
+            die(f"no goal {args[0]} (lean-agent goals)")
+        print(f"{args[0]} {act}")
+    elif act == "next" and len(args) == 2:
+        if not lean_goals.set_next(args[0], args[1]):
+            die(f"no goal {args[0]} (lean-agent goals)")
+        print(f"{args[0]} next: {args[1]}")
+    else:
+        die('usage: lean-agent goal add "<ref>" [tN] | done <id> | drop <id> | next <id> "<text>"')
+    return 0
+
+
 def cmd_now(a):
     waiting = lean_waiting.text()
     if waiting:
         print(waiting)
+    goals = lean_goals.now_text()
+    if goals:
+        print(goals)
     short = a.short or (os.environ.get("LEAN_AGENT_SESSION_ROLE") == "main" and not FULL)  # the front desk gets the short view unless it asks --full
     print(lean_threads.short_text() if short else lean_threads.now_text())
     line = feedback_line()
@@ -13917,6 +13954,13 @@ def build_parser():
     s.add_argument("--kind", choices=lean_waiting.KINDS, default="other", help="add: review, question, permission or other")
     s.add_argument("--answer", help="done: what the user answered")
     s.set_defaults(fn=cmd_waiting)
+
+    s = sub.add_parser("goals", help="the open goals (one per PR, work item or branch the front desk owns): Goal | Ref | Thread | State | Quiet | Next")
+    s.set_defaults(fn=cmd_goals)
+
+    s = sub.add_parser("goal", help="`add \"<ref>\" [tN]`, `done <id>`, `drop <id>`, `next <id> \"<text>\"`")
+    s.add_argument("args", nargs="*")
+    s.set_defaults(fn=cmd_goal)
 
     s = sub.add_parser("now", help="what we are working on: the open threads by last activity, with state and last action")
     s.add_argument("--short", action="store_true", help="one line per open thread: needs you, running, done, idle (the front desk's view)")
