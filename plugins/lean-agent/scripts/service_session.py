@@ -867,7 +867,8 @@ def queue_report(tid, kind, text):
         try:  # waiting on the user is recorded by lean-agent, not left to the front desk's memory
             m = re.match(r"QUESTION (q\d+): (.*?)(?: \[options: (.*)\])?$", str(text))
             opts = [o.strip() for o in m.group(3).split("|")] if m and m.group(3) else None
-            lean_waiting.add(m.group(2) if m else text, "question", (opts or []) + ["Other"] if opts else None, tid)
+            lean_waiting.add(m.group(2) if m else text, "question", (opts or []) + ["Other"] if opts else None, tid,
+                            qid=m.group(1) if m else "")
         except Exception:
             pass
     if kind != RUN_AUTO_KIND:

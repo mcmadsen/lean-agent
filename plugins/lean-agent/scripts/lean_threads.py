@@ -823,8 +823,13 @@ def open_questions(t):
     return [q for q in qs if isinstance(q, dict) and not q.get("answered")]
 
 
-def ask(tid, text, options=None):
-    """Record an open question on thread `tid` (status "waiting on main"); returns its id qN."""
+def _qnorm(text):
+    return " ".join("".join(c if c.isalnum() else " " for c in str(text or "").lower()).split())
+
+
+def ask(tid, text, options=None, info=None):
+    """Record an open question on thread `tid` (status "waiting on main"); returns its id qN. The same question
+    (normalised text) asked again while open is merged into the open one (count + 1; `info["merged"]` is set)."""
     text = " ".join(str(text or "").split())
     if not text:
         raise ValueError('usage: lean-agent thread ask "<question>" [--options "a|b|c"]')
@@ -834,6 +839,12 @@ def ask(tid, text, options=None):
         if t is None:
             raise ValueError(f"no such thread {tid}")
         qs = t["questions"] = t.get("questions") if isinstance(t.get("questions"), list) else []
+        same = next((q for q in qs if not q.get("answered") and _qnorm(q.get("text")) == _qnorm(text[:QUESTION_CHARS])), None)
+        if same is not None:
+            same["count"] = int(same.get("count") or 1) + 1
+            if info is not None:
+                info["merged"] = True
+            return same["id"]
         qid = "q%d" % (1 + max([int(q["id"][1:]) for q in qs if str(q.get("id", "")).startswith("q") and q["id"][1:].isdigit()] + [0]))
         qs.append({"id": qid, "text": text[:QUESTION_CHARS], "options": opts, "ts": now_iso()})
     return qid

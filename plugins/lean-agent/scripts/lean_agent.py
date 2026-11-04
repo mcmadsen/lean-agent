@@ -11337,7 +11337,51 @@ def context_table():
     return "\n".join(lines)
 
 
+def close_waiting(tid, qids, answer):
+    """Mark the waiting items raised by the questions `qids` of `tid` done with `answer`; returns their ids."""
+    try:
+        return lean_waiting.close_for(tid, set(qids), answer)
+    except Exception:
+        return []
+
+
+def close_for_send(tid, text):
+    """`thread send` relays the user's answer: close the open question it answers (the one it names, the only one,
+    else the newest) and its waiting items. Returns the report line, or ''."""
+    t = lean_threads.load()["threads"].get(tid) or {}
+    opened = lean_threads.open_questions(t)
+    if not opened:
+        return ""
+    named = [q for q in opened if re.search(r"\b%s\b" % re.escape(q["id"]), text)]
+    q = named[0] if named else opened[0] if len(opened) == 1 else opened[-1]
+    try:
+        _, q = lean_threads.answer(tid, q["id"], text)
+    except ValueError:
+        return ""
+    waits = close_waiting(tid, [q["id"]], text)
+    return f"closed {q['id']}" + (f", waiting {', '.join(waits)}" if waits else "")
+
+
 def cmd_thread(a):
+    if a.action != "send" or getattr(a, "answered", False):
+        return thread_action(a)
+    thread_positional_message(a, "send")
+    text = thread_prompt(a) if len(a.args) == 1 else ""
+    if text:
+        a.prompt_text = text  # stdin is read once
+    rc = thread_action(a)
+    if not rc and text:
+        try:
+            tid, _ = thread_session_tid(a.args[0])
+            line = close_for_send(tid, text)
+        except BaseException:  # noqa: BLE001 - closing is a courtesy; the message is delivered
+            line = ""
+        if line:
+            print(line)
+    return rc
+
+
+def thread_action(a):
     act = a.action
     resume_old = getattr(a, "resume_old", False)
     if act == "sessions":
@@ -11372,10 +11416,18 @@ def cmd_thread(a):
             die("thread ask works only inside a thread session (main asks the user directly)")
         if len(a.args) != 1:
             die('usage: lean-agent thread ask "<question>" [--options "a|b|c"]')
+        merged = {}
         try:
-            qid = lean_threads.ask(tid, a.args[0], getattr(a, "options", None))
+            qid = lean_threads.ask(tid, a.args[0], getattr(a, "options", None), merged)
         except ValueError as exc:
             die(str(exc))
+        if merged.get("merged"):  # the same question is already open: counted, not reported again
+            try:
+                lean_waiting.add(" ".join(a.args[0].split())[:lean_threads.QUESTION_CHARS], "question", None, tid, qid=qid)
+            except Exception:
+                pass
+            print(f"{tid} is already waiting on main with this question ({qid}); not reported again. End your turn now.")
+            return 0
         opts = [o.strip() for o in str(getattr(a, "options", None) or "").split("|") if o.strip()]
         text = " ".join(a.args[0].split())[:lean_threads.QUESTION_CHARS]
         service_session.queue_report(tid, "question", f"QUESTION {qid}: {text}" + (f" [options: {' | '.join(opts)}]" if opts else ""))
@@ -11393,6 +11445,9 @@ def cmd_thread(a):
             tid, q = lean_threads.answer(args[0], qid, text)
         except ValueError as exc:
             die(str(exc))
+        waits = close_waiting(tid, [q["id"]], text)
+        print(f"closed {q['id']}" + (f", waiting {', '.join(waits)}" if waits else ""))
+        a.answered = True
         a.action, a.args, a.prompt_text = "send", [tid], f'Answer from main to your question {q["id"]} ("{lean_threads.one_line(q["text"], 120)}"): {text}'
         try:
             return cmd_thread(a)

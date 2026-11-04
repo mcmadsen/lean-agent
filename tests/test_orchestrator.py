@@ -6342,7 +6342,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(wid, "w1")
         self.assertEqual(self.cli("waiting", "add", "Deploy the staging build?", "--thread", "t2", "--kind", "permission").stdout.strip(), "w1")
         out = self.cli("waiting").stdout
-        self.assertIn("w1 permission t2 build 7: Deploy the staging build? [options: Deploy | Wait] (not asked yet)", out)
+        self.assertIn("w1 permission t2 build 7: Deploy the staging build? [options: Deploy | Wait] (reported 2x) (not asked yet)", out)
         self.assertTrue(self.cli("now").stdout.startswith("Waiting on you:\n  w1 permission"))
         self.assertIn("w1 done", self.cli("waiting", "done", "w1", "--answer", "Deploy").stdout)
         self.assertIn("Nothing is waiting", self.cli("waiting").stdout)
@@ -6440,6 +6440,61 @@ class CliTest(unittest.TestCase):
         a = argparse.Namespace(action="answer", args=[tid, "q1", "again"], prompt_file=None, json=False, resume_old=False)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             L.cmd_thread(a)
+
+    def _send_ns(self, tid, text):
+        return argparse.Namespace(action="send", args=[tid, text], prompt_file=None, json=False, resume_old=False)
+
+    def _send(self, tid, text):
+        L = lean_agent_module()
+        import service_session
+        out = io.StringIO()
+        with mock.patch.object(service_session, "alive", return_value=True), \
+                mock.patch.object(service_session, "send", return_value=(True, "")), \
+                mock.patch.object(L, "auto_fresh_reason", return_value=""), contextlib.redirect_stdout(out):
+            self.assertEqual(L.cmd_thread(self._send_ns(tid, text)), 0)
+        return out.getvalue()
+
+    def test_thread_send_closes_the_only_open_question_and_its_waiting_item(self):
+        import service_session
+        lt = self.threads_home()
+        tid = lt.new("topic")
+        qid = lt.ask(tid, "Use the old or new API?")
+        service_session.queue_report(tid, "question", f"QUESTION {qid}: Use the old or new API?")
+        out = self._send(tid, "use the new one")
+        self.assertIn("closed q1, waiting w1", out)
+        self.assertEqual(lt.open_questions(lt.load()["threads"][tid]), [])
+        self.assertIn("Nothing is waiting", self.cli("waiting").stdout)
+
+    def test_thread_send_with_several_open_questions_closes_the_named_or_newest(self):
+        lt = self.threads_home()
+        tid = lt.new("topic")
+        lt.ask(tid, "First?")
+        lt.ask(tid, "Second?")
+        lt.ask(tid, "Third?")
+        self.assertIn("closed q1", self._send(tid, "q1: yes"))
+        self.assertIn("closed q3", self._send(tid, "go ahead"))
+        self.assertEqual([q["id"] for q in lt.open_questions(lt.load()["threads"][tid])], ["q2"])
+
+    def test_same_open_question_is_merged_and_counted(self):
+        lt = self.threads_home()
+        tid = lt.new("topic")
+        env = dict(LEAN_AGENT_THREAD=tid, LEAN_AGENT_SESSION_ROLE="thread")
+        self.cli("thread", "ask", "Use the old or new API?", **env)
+        r = self.cli("thread", "ask", "use the OLD or new api", **env)
+        self.assertIn("already waiting", r.stdout)
+        self.assertEqual(len(lt.open_questions(lt.load()["threads"][tid])), 1)
+        self.assertEqual(lt.load()["threads"][tid]["questions"][0]["count"], 2)
+        self.assertIn("(reported 2x)", self.cli("waiting").stdout)
+        import service_session
+        self.assertEqual(len(service_session.queued_reports()), 1)
+
+    def test_question_answered_a_moment_ago_is_not_raised_again(self):
+        self.threads_home()
+        import lean_waiting
+        wid = lean_waiting.add("Deploy now?", "question", None, "t1", qid="q1")
+        lean_waiting.close_for("t1", {"q1"}, "yes")
+        self.assertEqual(lean_waiting.add("deploy now", "question", None, "t1"), wid)
+        self.assertEqual(lean_waiting.open_items(), [])
 
     def test_hook_denies_ask_user_question_in_a_thread_session_and_allows_it_in_main(self):
         home = self.cli("home").stdout.strip()
