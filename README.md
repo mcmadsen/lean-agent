@@ -646,7 +646,7 @@ reviewer with a small context, on sonnet (`LEAN_AGENT_DELTA_REVIEW_MODEL`) unles
 on the earlier model. A commit counts as the same branch when it builds on the reviewed one, when the branch's reflog
 had the reviewed commit (an amend or rebase), or when it's on that branch; `--resume` uses the same lookup. Above
 `LEAN_AGENT_DELTA_MAX_LINES` (800) changed lines it's a full review again, unless `--delta-only`; `--full-review`
-always reviews the whole change. What the user declined (`review decline ... --head <branch or commit>`) is kept
+always reviews the whole change (`--full` does the same on `review`). A delta needs the new head to descend from the reviewed one; after a rewrite it falls back to a full review and says so. A tiny low-risk delta (test-only, docs-only, comment-only, rename-only, under `review_light_max_lines` / `LEAN_AGENT_LIGHT_MAX_LINES`, 40 lines) is a "light re-review" on the cheap model. From the `review_warn_after` (`LEAN_AGENT_REVIEW_WARN_AFTER`, 3) review of a branch in a day the cost so far is printed; `week` and `review --costs` compare delta with full reviews. `review learn --pr` reads human-written threads only (`--all-authors` adds bots), in chunks of `LEAN_AGENT_LEARN_CHUNK_CHARS` (30000), and starts no run when every thread was learned already. What the user declined (`review decline ... --head <branch or commit>`) is kept
 for the branch, so it isn't asked again on later commits, until the code it points at changes (then the reviewer
 is told it was declined but may raise it again). `review --status` on a newer commit says how much changed since the
 last review and gives the command for a delta review. `--for-push` is the gate before a push: it refuses while

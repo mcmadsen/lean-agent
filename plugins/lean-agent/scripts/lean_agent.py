@@ -3975,7 +3975,7 @@ def record_learned_hashes(slug, pr, hashes):
 def chunk_threads(items, cap=None):
     """Slices of threads whose serialised size stays within `cap` characters each; one thread over the cap is cut
     to it (and says so) rather than sent whole."""
-    cap = cap or LEARN_CHUNK_CHARS
+    cap = cap or env_num("LEAN_AGENT_LEARN_CHUNK_CHARS", LEARN_CHUNK_CHARS)
     chunks, cur, size = [], [], 0
     for t in items:
         txt = t if isinstance(t, str) else json.dumps(t, ensure_ascii=False, separators=(",", ":"))
@@ -5567,11 +5567,12 @@ def review_main(a):
                                                      or os.environ.get("LEAN_AGENT_DELTA_REVIEW_MODEL") or explicit,
                                                      rereview=True)
         light, light_lines = classify_delta(path, old_head, meta["head"]) if meta.get("mode") == "ref" else ("", 0)
-        if light and not getattr(a, "reviewer_model", None):  # tiny and low-risk: the cheap model, never the strong one
-            delta_model = os.environ.get("LEAN_AGENT_LIGHT_REVIEW_MODEL") or "sonnet"
-            why_model = f"light re-review ({light} delta, {light_lines} lines)"
+        if light and not (getattr(a, "reviewer_model", None) or explicit):  # tiny, low-risk: never dearer than the cheap model
+            cheap = os.environ.get("LEAN_AGENT_LIGHT_REVIEW_MODEL") or "sonnet"
+            if usage.model_rate(delta_model) > usage.model_rate(cheap):
+                delta_model, why_model = cheap, f"light re-review ({light} delta, {light_lines} lines)"
             risk = []
-            print(f"review: light re-review ({light} delta): no second opinion, {delta_model}", flush=True)
+            print(f"light re-review ({light} delta): no second opinion, {delta_model}", flush=True)
         meta["scope"] = "light" if light else "delta"
         meta["delta_base"] = old_head
         print(f"reviewer: {delta_model} ({why_model})", flush=True)
