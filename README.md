@@ -480,7 +480,10 @@ orchestrator before the first commit or PR (`lean-agent attribution` says "not s
   Claude Code", no session link), and so does the orchestrator;
 - workers and the orchestrator are told not to mention Claude or AI in commits, PR titles and descriptions, or
   comments;
-- `lean-agent worktree push` refuses commits that still credit Claude.
+- `lean-agent worktree push` refuses your own commits that still credit Claude. Only your commits are checked: those
+  whose author or committer email is your git `user.email` (worktree or global) or one set with
+  `lean-agent config attribution-emails <email>...`. Credited commits by anyone else (e.g. a merged-in base branch)
+  only print a warning and the push goes ahead.
 
 ## Branch names
 
