@@ -1056,8 +1056,8 @@ class CliTest(unittest.TestCase):
 
     def test_a_refused_launch_leaves_no_todo(self):
         self.cli("learn", self.proj)
-        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--todo", "new", "--allow-cmd", "x",
-                     "t", check=False)  # --allow-cmd without --read-only: refused
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--todo", "new", "--read-only",
+                     "--allow-cmd", "x delete", "t", check=False)  # a mutating --allow-cmd: refused
         self.assertNotEqual(p.returncode, 0)
         self.assertEqual(self.todo_count("#1"), 0)
 
@@ -3191,16 +3191,50 @@ class CliTest(unittest.TestCase):
             self.assertEqual(mod.run_timeout("90m"), 5400)
         self.assertIn("run-timeout: 30m", self.cli("config", "run-timeout", "default").stdout)
 
-    def test_allow_cmd_without_read_only_is_refused_up_front_and_advise_keeps_them_together(self):
+    def test_allow_cmd_without_read_only_is_noted_and_the_run_starts(self):
         self.cli("learn", self.proj, "--name", "proj")
-        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--allow-cmd", "az pipelines runs show", "look",
-                     check=False)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--allow-cmd", "az pipelines runs show", "look")
+        self.assertEqual(p.returncode, 0)
+        self.assertIn("--allow-cmd ignored (only read-only workers are limited", p.stderr)
+        self.assertTrue(self.calls())
+
+    def test_mutating_allow_cmd_on_read_only_is_refused_with_a_try_line(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "--allow-cmd", "az pipelines delete",
+                     "look", check=False)
         self.assertEqual(p.returncode, 1)
         msg = p.stdout + p.stderr
-        self.assertIn("--allow-cmd needs --read-only", msg)
+        self.assertIn("changes something", msg)
+        self.assertIn("try: lean-agent run -p proj -m haiku --why x --read-only look", msg)
         self.assertFalse(os.path.exists(self.log) and self.calls())
         self.assertEqual(self.running_markers(), [])
-        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "ledger.jsonl")))
+
+    def test_allow_edit_with_read_only_and_unknown_card_get_try_lines_and_worktree_base_alone_is_a_note(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "--allow-edit", "CLAUDE.md", "look",
+                     check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("try: lean-agent run -p proj -m haiku --why x --read-only look", p.stdout + p.stderr)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--cards", "no-such-card", "look", check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("try: lean-agent run -p proj -m haiku --why x look", p.stdout + p.stderr)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--worktree-base", "main", "look")
+        self.assertIn("--worktree-base ignored", p.stderr)
+
+    def test_stats_lists_the_top_start_failure_reasons_of_the_last_week(self):
+        mod = lean_agent_module()
+        now = datetime.datetime.now()
+        old = (now - datetime.timedelta(days=9)).isoformat()
+        rows = [{"status": "failed", "reason": "start failed: unknown card(s): zz", "ts": now.isoformat()}] * 2 + [
+            {"status": "failed", "reason": "start failed: old one", "ts": old},
+            {"status": "done", "reason": "", "ts": now.isoformat()}]
+        text = "\n".join(mod.start_failure_lines(rows))
+        self.assertIn("2x  unknown card(s): zz", text)
+        self.assertNotIn("old one", text)
+        self.assertEqual(mod.start_failure_lines([]), [])
+
+    def test_advise_keeps_allow_cmd_with_read_only(self):
+        self.cli("learn", self.proj, "--name", "proj")
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "--allow-cmd", "az pipelines runs show", "look")
         mod = lean_agent_module()
         self.assertEqual(mod.fix_allow_cmd("suggested: lean-agent run p -m haiku --allow-cmd 'az x show' -- 't'"),
@@ -9452,7 +9486,7 @@ class CliTest(unittest.TestCase):
         marker = os.path.join(self.tmp.name, "setup-ran")
         self.cli("worktree", "setup", "proj", "--run", f"touch {marker}")
         wts = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj")
-        bad = [("--cards", "nosuchcard"), ("--allow-cmd", "tool show"), ("--worktree-base", "nope-ref")]
+        bad = [("--cards", "nosuchcard"), ("--allow-edit", "x.md", "--read-only"), ("--worktree-base", "nope-ref")]
         for flag in bad:
             p = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "refused", *flag, "--", "t", check=False)
             self.assertNotEqual(p.returncode, 0, flag)
