@@ -392,6 +392,15 @@ def up_compact_at():
     return point if isinstance(point, int) and point > 0 else compact_at()
 
 
+def clear_explicit():
+    """True when a general clear-at (even `off`/0) is set: the front desk's own threshold then does not apply."""
+    for raw in (os.environ.get("LEAN_AGENT_CLEAR_AT"), _load(lean_home("config.json")).get("clear_at")):
+        raw = str(raw).strip().lower() if raw is not None else ""
+        if raw in ("auto", "off") or raw.isdigit():
+            return True
+    return False
+
+
 def clear_setting():
     """What is set: LEAN_AGENT_CLEAR_AT, else `lean-agent config clear-at`, else off (0); "auto" or a number of tokens opt in."""
     for raw in (os.environ.get("LEAN_AGENT_CLEAR_AT"), _load(lean_home("config.json")).get("clear_at")):
@@ -406,6 +415,21 @@ def clear_at(env=None):
     setting = clear_setting()
     point = compact_at(env) if env is not None else up_compact_at()  # outside `up`: the point `up` recorded
     return max(0, point - CLEAR_MARGIN) if setting == "auto" else setting
+
+
+DESK_CLEAR_AT = 100000  # the front desk's own threshold (checkpoint, then clear) when `clear-at` is not set; thread sessions keep theirs
+
+
+def desk_clear_at():
+    """Tokens above which the front desk (main) is checkpointed and cleared after a finished turn when no general
+    clear-at is set: LEAN_AGENT_DESK_CLEAR_AT, else `lean-agent config desk-clear-at N|off`, else DESK_CLEAR_AT (0 = off)."""
+    for raw in (os.environ.get("LEAN_AGENT_DESK_CLEAR_AT"), _load(lean_home("config.json")).get("desk_clear_at")):
+        raw = str(raw).strip().lower() if raw is not None else ""
+        if raw == "off":
+            return 0
+        if raw.isdigit():
+            return int(raw)
+    return DESK_CLEAR_AT
 
 
 def checkpoint_prompt():
@@ -800,6 +824,8 @@ class AutoClear:
         if self.safety_net(transcript_state(path)):
             return
         limit = clear_at(getattr(self.host, "env", None))
+        if not limit and self.key == "main" and not clear_explicit():
+            limit = desk_clear_at()
         if not limit or now - self.last_gap_start() < _knob("LEAN_AGENT_CLEAR_GAP", CLEAR_GAP):
             self.hold(None)
             return

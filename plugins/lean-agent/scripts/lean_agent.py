@@ -10279,6 +10279,21 @@ def cmd_config(a):
               "session idle this long whose context is this share of the compaction point checkpoints it and continues in "
               "a new session started from a short brief (idle=30m,context=120k|50%|off|default)")
         return 0
+    if a.name == "desk-clear-at":
+        if a.value is not None:
+            if not (a.value.isdigit() or a.value.lower() in ("off", "default")):
+                die("desk-clear-at takes a number of tokens, off, or default")
+            cfg = config_json()
+            if a.value.lower() == "default":
+                cfg.pop("desk_clear_at", None)
+            else:
+                cfg["desk_clear_at"] = "off" if a.value.lower() == "off" else int(a.value)
+            save_json(home("config.json"), cfg)
+        n = service_session.desk_clear_at()
+        print(f"desk-clear-at: {f'{n:,} tokens' if n else 'off'} \u00b7 the front desk is checkpointed and cleared when a finished turn "
+              f"leaves its context above this (default {service_session.DESK_CLEAR_AT:,}; a general clear-at wins; thread sessions are not affected)"
+              + (" (LEAN_AGENT_DESK_CLEAR_AT is set and wins)" if os.environ.get("LEAN_AGENT_DESK_CLEAR_AT") else ""))
+        return 0
     if a.name == "clear-at":
         if a.value is not None:
             if not (a.value.isdigit() or a.value.lower() in ("auto", "off")):
@@ -12724,8 +12739,8 @@ def build_parser():
 
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
-                       "max-thread-sessions N (thread sessions the service runs; default 8), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
-    s.add_argument("name", choices=["strict", "clear-at", "project-rules", "allow-edit", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
+                       "max-thread-sessions N (thread sessions the service runs; default 8), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
+    s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "allow-edit", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
                                            "review-max-rerounds", "review-skip", "review-model", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")

@@ -5727,6 +5727,33 @@ class CliTest(unittest.TestCase):
         self.assertIn("12,000", self.cli("config", "clear-at", LEAN_AGENT_CLEAR_AT="12000").stdout)
         self.assertEqual(self.cli("config", "clear-at", "x", check=False).returncode, 1)
 
+    def test_desk_clear_at_default_is_configurable_and_only_for_the_front_desk(self):
+        self.threads_home()
+        import service_session
+        self.assertEqual(service_session.desk_clear_at(), 100000)
+        self.assertIn("100,000", self.cli("config", "desk-clear-at").stdout)
+        self.assertIn("60,000", self.cli("config", "desk-clear-at", "60000").stdout)
+        self.assertIn("off", self.cli("config", "desk-clear-at", "off").stdout)
+        self.assertIn("100,000", self.cli("config", "desk-clear-at", "default").stdout)
+        self.assertEqual(self.cli("config", "desk-clear-at", "x", check=False).returncode, 1)
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_CLEAR_AT": "70000"}):
+            self.assertEqual(service_session.desk_clear_at(), 70000)
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_CLEAR_AT": "off"}):
+            self.assertTrue(service_session.clear_explicit())
+        self.assertFalse(service_session.clear_explicit())
+
+    def test_auto_clear_fires_for_the_front_desk_at_the_desk_threshold_not_for_threads(self):
+        self.threads_home()
+        import service_session
+        host = mock.Mock(key="main", env=None, last_input=0)
+        tmp = os.path.join(self.tmp.name, "tr.jsonl")
+        open(tmp, "w").close()
+        ac = service_session.AutoClear(host)
+        self.assertEqual(service_session.clear_at(), 0)
+        self.assertEqual(ac.key, "main")
+        host2 = mock.Mock(key="t1", env=None, last_input=0)
+        self.assertEqual(service_session.AutoClear(host2).key, "t1")
+
     def test_clear_at_reads_the_compaction_point_up_recorded(self):
         os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
         with open(os.path.join(self.env["LEAN_AGENT_HOME"], "up.json"), "w") as fh:
