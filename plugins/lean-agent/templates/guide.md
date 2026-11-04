@@ -93,10 +93,11 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      for-each-ref|branch --list|describe|merge-base|remote -v`, plus `find` (never -exec/-delete), ls, stat, wc, head,
      tail, grep, rg, cat, du, file, realpath, readlink, which; `cd <dir> &&` and pipes between these are fine. A
      command outside that is refused and listed as `refused: <command>` in `runs --show`: rerun with
-     `--allow-cmd "<prefix>"` (e.g. `"yarn why"`; works with `cd` and `| head`). Branch not
-     checked out: `--ref origin/<branch>` (the worker uses `git show <sha>:<path>`; no `git archive`). A lookup
-     needing a CLI (a CI run, a cloud resource) gets exactly that command: `--allow-cmd "az pipelines runs show"`
-     (repeatable; commands that change things are refused). `--allow-cmd` is only for `--read-only` workers; editing/posting workers need no `--allow-cmd`.
+     `--allow-cmd "<prefix>"` (READ-ONLY workers only; e.g. `"yarn why"`; works with `cd` and `| head`). Branch not
+     checked out: `--ref origin/<branch>` (the worker uses `git show <sha>:<path>`; no `git archive`). A READ-ONLY
+     lookup needing a CLI (a CI run, a cloud resource) gets exactly that command: `--read-only --allow-cmd "az pipelines runs show"`
+     (repeatable; commands that change things are refused). `--allow-cmd` is for `--read-only` workers only; a worker that edits or posts needs none.
+     Unsure about flags? `lean-agent run --check <args>` first (free, starts nothing).
    - `--allow-edit <path-or-glob>` (repeatable, worktree-relative, e.g. `.claude/rules/**`, `CLAUDE.md`): Claude Code
      refuses worker edits to the repo's `.claude/` files and CLAUDE.md. A worker that reports `needs: --allow-edit <path>`
      was refused: rerun (or `--resume`) with exactly that flag. `.claude/settings*.json` and `.claude/hooks/**` only

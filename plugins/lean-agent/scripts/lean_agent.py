@@ -157,6 +157,15 @@ def env_num(name, default, cast=int):
         return cast(default)
 
 
+CHECKING = []  # [True] during `run --check`: die() raises CheckRefused instead of exiting, nothing is logged
+CHECK_ARGV = []  # the run command's tokens the try: line is built from, when not sys.argv
+MAIN_ARGV = []  # main()'s argv (after the run project rewrite)
+
+
+class CheckRefused(Exception):
+    pass
+
+
 FAIL_CMD = []  # [command] while a run/review/role command runs: its refusals and errors are reported as failures
 FAILURE_COMMANDS = ("run", "review", "review-learn", "review-decline", "tracker", "do", "advise")
 FAIL_REASON = []  # [reason] a run/review noted for its own failure, said again as the last line by main()
@@ -191,6 +200,8 @@ def report_failure(cmd, reason):
 
 
 def die(msg, code=1):
+    if CHECKING:
+        raise CheckRefused(msg)
     if FAIL_CMD and code != 0:
         report_failure(FAIL_CMD[0], msg)  # logs the error itself
     else:
@@ -300,7 +311,7 @@ def project_slug(path):
     return f"{name}-{hashlib.sha1(path.encode()).hexdigest()[:6]}"
 
 
-def resolve_project(ref):
+def resolve_project(ref, register=True):
     projs = projects()
     if ref in projs:
         return ref, projs[ref]["path"]
@@ -312,7 +323,7 @@ def resolve_project(ref):
         for s, v in projs.items():
             if same_path(v["path"], path):
                 return s, v["path"]
-        return learn(path, quiet=True), path
+        return (learn(path, quiet=True) if register else os.path.basename(path)), path
     die(f"unknown project {ref!r}; register it with: lean-agent learn <path>")
 
 
@@ -1935,7 +1946,7 @@ def note_once(key, msg):
 def try_line(drop=(), card=None):
     """'try: lean-agent ...' built from the actual argv minus the offending flags (a flag with its value), for a
     refusal the caller can fix by copy and paste."""
-    args, out, i = list(sys.argv[1:]), [], 0
+    args, out, i = [x for x in (CHECK_ARGV or sys.argv[1:]) if x != "--check"], [], 0
     while i < len(args):
         a = args[i]
         name = a.split("=", 1)[0]
@@ -1974,6 +1985,154 @@ def check_allow_cmd(allow_cmd, read_only):
     return allow_cmd
 
 
+def read_only_cli_warning(task):
+    """The warning for a READ-ONLY worker whose task names a CLI (az, gh, ...), else ''. Only a read-only worker has
+    --allow-cmd; an editing or posting worker may run any command and needs none."""
+    named = CLI_RE.findall(task)
+    if not named:
+        return ""
+    return (f"lean-agent: warning: a --read-only worker can only run read-only git, and this task names `{named[0]}`. "
+            f"For a READ-ONLY worker allow exactly what it needs, e.g. --allow-cmd \"{named[0]} <read-only subcommand>\", "
+            "or look it up yourself. A worker that edits or posts (no --read-only) needs no --allow-cmd: "
+            "it may run any command.")
+
+
+def find_todo(data, todo_id):
+    t = next((x for x in data["items"] if x["id"] == todo_id), None)
+    if not t:
+        die(f"no todo #{todo_id} (lean-agent todo list)")
+    return t
+
+
+def early_arg_checks(a):
+    """The checks of --allow-cmd and --allow-edit, shared by the early run check and `run --check`."""
+    ro = bool(getattr(a, "read_only", False))
+    check_allow_cmd([c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()], ro)
+    clean_allow_edit(getattr(a, "allow_edit", None), ro)
+
+
+def check_timeout(a):
+    """The run timeout in seconds; a bad --timeout is refused with a try: line."""
+    try:
+        return run_timeout(getattr(a, "timeout", None))
+    except ValueError as exc:
+        die_try(f"--timeout: {exc}", drop=("--timeout",))
+
+
+def check_model_why(a, prev=None):
+    """The model of the run (from --model or the resumed run); a new run also needs --why."""
+    model = a.model or (prev and prev["model"])
+    if not model:
+        die("choose a model for this worker: --model haiku|sonnet|opus (and say why with --why)")
+    if not prev and not a.why:
+        die("say why you chose this model and context: --why \"...\"")
+    return model
+
+
+def normalise_run_argv(argv):
+    """`run <project> ...` is `run -p <project> ...` (main() and `run --check` both)."""
+    if (len(argv) > 2 and argv[0] == "run" and not argv[1].startswith("-")
+            and not {"-p", "--project", "--resume"} & set(argv) and is_project_ref(argv[1])):
+        return ["run", "-p", argv[1]] + argv[2:]
+    return argv
+
+
+def finish_run_parse(ap, a, leftover):
+    """The rest of parsing a `run` command: words after the options are the task; a new run needs a project."""
+    if leftover:
+        if any(x.startswith("-") for x in leftover):
+            ap.error("unrecognized arguments: " + " ".join(leftover))
+        a.task += leftover
+    if not a.resume and not a.project:
+        ap.error("run needs --project (or --resume)")
+
+
+def check_launch(a):
+    """Every argument check of a new run that starts nothing: `run --check` runs exactly these (and run runs the same
+    helpers). Raises through die()."""
+    early_arg_checks(a)
+    check_timeout(a)
+    if a.resume:
+        if not any(r["id"] == a.resume for r in ledger()) and a.resume != "last":
+            die(f"no resumable run {a.resume!r}")
+        return
+    if not a.task and not a.task_file:
+        die("no task given")
+    if not a.escalate:
+        check_model_why(a)
+    elif not [m for m in a.escalate.split(",") if m.strip()]:
+        die_try("--escalate needs models, e.g. haiku,sonnet", drop=("--escalate",))
+    slug, project = resolve_project(a.project, register=False)
+    preflight_run_args(a, slug, project, read_only=bool(a.read_only))
+    if a.todo is not None and a.todo != "new":
+        find_todo(todos(), a.todo)
+    if a.read_only and getattr(a, "worktree", None) == "auto":
+        note_once("wt_auto", "--worktree auto makes a branch for a worker that writes; this read-only worker gets none")
+    warn = read_only_cli_warning(" ".join(a.task)) if a.read_only and not a.allow_cmd else ""
+    if warn:
+        note_once("cli", warn.replace("lean-agent: warning: ", "", 1))
+
+
+def normalised_run_tokens(a, tokens):
+    """The run tokens as `run` would act on them: flags it ignores are dropped."""
+    drop = []
+    if not a.read_only and a.allow_cmd:
+        drop.append("--allow-cmd")
+    if a.worktree_base and not a.worktree:
+        drop.append("--worktree-base")
+    global CHECK_ARGV
+    saved = CHECK_ARGV[:]
+    CHECK_ARGV[:] = tokens
+    try:
+        return try_line(drop)[len("try: "):]
+    finally:
+        CHECK_ARGV[:] = saved
+
+
+def check_run_argv(tokens):
+    """(ok, text, normalised command) for the tokens of a `run` command (without the `lean-agent` word): parsed with the
+    real parser and put through check_launch. Creates nothing. text is the refusal (with its try: line) or the notes."""
+    tokens = [t for t in tokens if t != "--check"]
+    argv = normalise_run_argv(["run"] + tokens)
+    err = io.StringIO()
+    saved_notes = set(_NOTED)
+    _NOTED.clear()
+    CHECKING[:] = [True]
+    CHECK_ARGV[:] = argv
+    try:
+        with contextlib.redirect_stderr(err):
+            try:
+                a, leftover = build_parser().parse_known_args(argv)
+                if a.cmd != "run":
+                    raise CheckRefused("not a run command")
+                finish_run_parse(build_parser(), a, leftover)
+            except SystemExit:
+                msg = [l for l in err.getvalue().splitlines() if l.strip()]
+                raise CheckRefused((msg[-1] if msg else "bad arguments").replace("lean-agent: ", "", 1))
+            check_launch(a)
+        notes = [l.replace("lean-agent: ", "", 1) for l in err.getvalue().splitlines() if l.strip()]
+        return True, "\n".join(notes), normalised_run_tokens(a, argv)
+    except CheckRefused as e:
+        return False, str(e), ""
+    finally:
+        CHECKING[:] = []
+        CHECK_ARGV[:] = []
+        _NOTED.clear()
+        _NOTED.update(saved_notes)
+
+
+def run_check_cli(argv):
+    """`lean-agent run --check <args>`: prints `ok: <command>` (exit 0) or the refusal with its try: line (exit 1)."""
+    ok, text, cmd = check_run_argv(argv[1:])
+    if ok:
+        print(f"ok: {cmd}")
+        if text:
+            print(text)
+        return 0
+    print(f"refused: {text}")
+    return 1
+
+
 def preflight_run_args(a, slug, project, read_only):
     """Every cheap argument check of a new run, before a worktree or its setup command exists: a refused start leaves
     nothing behind."""
@@ -2003,16 +2162,12 @@ def _cmd_run(a):
         a.resume = latest_run_id(ordinary=True)
     if not a.resume:  # refused before anything starts (no worktree, no escalation); a refusal is still a "start failed" row
         early_register(a, " ".join(a.task).strip())
-        check_allow_cmd([c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()], bool(getattr(a, "read_only", False)))
-        clean_allow_edit(getattr(a, "allow_edit", None), bool(getattr(a, "read_only", False)))
+        early_arg_checks(a)
         early_settle()  # passed: the marker is registered again, with the task, further down
     if getattr(a, "escalate", None) and not a.resume:
         return run_escalating(a)
     prev = None
-    try:
-        run_seconds = run_timeout(getattr(a, "timeout", None))
-    except ValueError as exc:
-        die_try(f"--timeout: {exc}", drop=("--timeout",))
+    run_seconds = check_timeout(a)
     if a.resume:
         prev = next((r for r in reversed(ledger()) if r["id"] == a.resume), None)
         if not prev or not prev.get("session_id"):
@@ -2029,11 +2184,7 @@ def _cmd_run(a):
     if not task:
         die("no task given")
 
-    model = a.model or (prev and prev["model"])
-    if not model:
-        die("choose a model for this worker: --model haiku|sonnet|opus (and say why with --why)")
-    if not prev and not a.why:
-        die("say why you chose this model and context: --why \"...\"")
+    model = check_model_why(a, prev)
 
     hit = usage.exhausted_window()
     if hit:
@@ -2177,9 +2328,7 @@ def _cmd_run(a):
     if todo_id is not None and todo_id != "new" and not (prev or {}).get("todo"):
         with file_lock(home("todo.json")):
             data = todos()
-            t = next((x for x in data["items"] if x["id"] == todo_id), None)
-            if not t:
-                die(f"no todo #{todo_id} (lean-agent todo list)")
+            t = find_todo(data, todo_id)
             if t["status"] == "open":  # working on it now: the board shows it in progress
                 t["status"] = "doing"
                 save_json(home("todo.json"), data)
@@ -2197,11 +2346,9 @@ def _cmd_run(a):
             with open(os.path.join(workdir, f), "a") as fh:
                 fh.write(note)
     if read_only and not allow_cmd and not internal_cmd and not prev:
-        named = CLI_RE.findall(task)
-        if named:
-            print(f"lean-agent: warning: a --read-only worker can only run read-only git, and this task names "
-                  f"`{named[0]}`. Allow exactly what it needs, e.g. --allow-cmd \"{named[0]} <read-only subcommand>\", "
-                  "or look it up yourself.", file=sys.stderr)
+        warn = read_only_cli_warning(task)
+        if warn:
+            print(warn, file=sys.stderr)
     mcp_specs = prev.get("mcp") if prev else canonical_specs(project, a.mcp or [])
     if mcp_specs and not prev:
         enforce_mcp_rules(list(lib.values()), project, mcp_specs, getattr(a, "force_mcp", False))
@@ -12155,11 +12302,82 @@ def shape_advice(lines, limit=15):
     return "\n".join((head + rest)[:limit])
 
 
+ALLOW_CMD_RE = re.compile(r"""\s--allow-cmd(?:=|\s+)(?:'[^']*'|"[^"]*"|\S+)""")
+CHANGE_RE = re.compile(r"\b(post|comment|push|edit|fix|create|vote|approve|merge|update)\b", re.I)
+
+
 def fix_allow_cmd(line):
-    """An advised `run` command that has --allow-cmd gets --read-only too (the run refuses it otherwise)."""
+    """--allow-cmd only limits a read-only worker. An advised command that has it without --read-only is an editing or
+    posting worker, which may run any command: drop --allow-cmd (never add --read-only, that worker couldn't do its job)."""
     if "--allow-cmd" in line and "--read-only" not in line:
-        return line.replace("--allow-cmd", "--read-only --allow-cmd", 1)
+        return ALLOW_CMD_RE.sub("", line)
     return line
+
+
+def drop_flag_tokens(tokens, flags):
+    out, i = [], 0
+    while i < len(tokens):
+        name = tokens[i].split("=", 1)[0]
+        if name in flags and tokens[i] != "--":
+            i += 1 if "=" in tokens[i] or name == "--read-only" else 2
+            continue
+        out.append(tokens[i])
+        i += 1
+    return out
+
+
+def vet_suggested(line, request=""):
+    """(line, note) for an advisor `suggested:` line: it must pass `run --check`. Bad flags are repaired
+    (--allow-cmd without --read-only dropped; a read-only worker whose task changes or posts something becomes an editing
+    one; the refusal's try: command taken); a command that still fails is replaced by a line saying so. note is a
+    `risks:` text or ''."""
+    head, _, cmd = line.partition(":")
+    cmd = fix_allow_cmd(cmd.strip().strip("`"))
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return line, ""
+    i = next((k for k, t in enumerate(tokens) if t == "run"), None)
+    if i is None:
+        return line, ""
+    toks, notes = tokens[i + 1:], []
+    task = " ".join(toks[toks.index("--") + 1:]) if "--" in toks else " ".join(t for t in toks if not t.startswith("-"))
+    if "--read-only" in toks and CHANGE_RE.search(task + " " + request):
+        toks = drop_flag_tokens(toks, {"--read-only", "--allow-cmd"})
+        notes.append("the task changes or posts something, so the worker is not --read-only (it may run any command)")
+    for _ in range(3):
+        ok, text, norm = check_run_argv(toks)
+        if ok:
+            for flag in ("--worktree-base", "--allow-cmd"):
+                if flag in toks and flag not in norm:
+                    notes.append(f"{flag} was dropped (run ignores it here)")
+            return f"{head}: {norm}", "; ".join(notes)
+        fix = next((l for l in text.splitlines() if l.startswith("try: lean-agent ")), None)
+        if not fix:
+            break
+        notes.append(text.splitlines()[0][:160])
+        try:
+            toks = shlex.split(fix[len("try: lean-agent "):])[1:]
+        except ValueError:
+            break
+    reason = text.splitlines()[0][:200] if text else "refused"
+    return f"{head}: (none: the suggested command fails `run --check`: {reason})", "; ".join(notes)
+
+
+def vet_advice_block(block, request=""):
+    """The ADVICE block with its suggested: command vetted by vet_suggested (a risks: line added or extended)."""
+    out, note = [], ""
+    for l in block:
+        if l.strip().lower().startswith("suggested"):
+            l, note = vet_suggested(l.strip(), request)
+        out.append(l)
+    if note:
+        k = next((i for i, l in enumerate(out) if l.strip().lower().startswith("risks")), None)
+        if k is None:
+            out.append("risks: " + note)
+        else:
+            out[k] = out[k].rstrip() + "; " + note
+    return out
 
 
 ADVISE_ROUTE_RULE = ("A routing from references/ownership or a front-desk job is authoritative: never override it because "
@@ -12228,7 +12446,7 @@ def cmd_advise(a):
             print(route_line)  # the front desk still gets the routing when the model part fails
         print(out, file=sys.stderr)
         die("the advisor didn't answer with an ADVICE block; see its reply above", rc or 1)
-    block = [fix_allow_cmd(l) for l in lines[start:start + 16] if l.strip()]
+    block = vet_advice_block([l for l in lines[start:start + 16] if l.strip()], what)
     text = shape_advice(block)
     if rule_lines:
         text = "\n".join(rule_lines) + "\n" + text
@@ -12802,6 +13020,8 @@ def build_parser():
     s.add_argument("--answer-lines", type=int, metavar="N", help="the worker answers in at most N lines and puts "
                    "the rest in a details file (0 = whole answer; default LEAN_AGENT_ANSWER_LINES, 25 in the orchestrator)")
     s.add_argument("--thread", dest="thread_tag", metavar="tN|none", help=THREAD_HELP)
+    s.add_argument("--check", action="store_true", help="dry run: check these arguments with every launch check and "
+                   "print `ok: <command>` or the refusal and its try: line; starts and creates nothing (exit 0 ok / 1 refused)")
     s.set_defaults(fn=cmd_run)
 
     s = sub.add_parser("chrome", help="Claude in Chrome for workers: check (once) | status")
@@ -13277,9 +13497,7 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:2] in (["review", "learn"], ["review", "decline"]):
         argv = ["review-" + argv[1]] + argv[2:]
-    if (len(argv) > 2 and argv[0] == "run" and not argv[1].startswith("-")
-            and not {"-p", "--project", "--resume"} & set(argv) and is_project_ref(argv[1])):
-        argv = ["run", "-p", argv[1]] + argv[2:]  # `lean-agent run <project> ...` like `cards <project>`
+    argv = normalise_run_argv(argv)  # `lean-agent run <project> ...` like `cards <project>`
     global BRIEF
     global VERBOSE
     flags = {"--brief", "--full", "--verbose"} & set(argv[1:]) if argv[:1] != ["up"] else set()
@@ -13296,12 +13514,12 @@ def main(argv=None):
         if a.cmd == "guard" and leftover:
             a.patterns = list(a.patterns or []) + leftover
             leftover = []
-    if leftover:
-        if a.cmd != "run" or any(x.startswith("-") for x in leftover):
-            ap.error("unrecognized arguments: " + " ".join(leftover))
-        a.task += leftover  # task words given after options
-    if a.cmd == "run" and not a.resume and not a.project:
-        ap.error("run needs --project (or --resume)")
+    if a.cmd == "run":
+        if getattr(a, "check", False):
+            return run_check_cli(argv)
+        finish_run_parse(ap, a, leftover)
+    elif leftover:
+        ap.error("unrecognized arguments: " + " ".join(leftover))
     # the caller is the session's own pinned thread, captured before --thread re-tags the environment ('' = unset)
     os.environ["LEAN_AGENT_CALLER_THREAD"] = lean_threads.pinned_thread() or ""
     if getattr(a, "thread_tag", None):  # --thread tN|none: every record this command makes (and its workers') carries it
