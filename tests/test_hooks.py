@@ -799,14 +799,17 @@ class BudgetTest(Base):
             self.assertEqual(lean_threads.load()["threads"]["t2"]["report"]["text"], "Fixed the retry loop.")
             self.assertEqual(sorted(lean_threads.load()["threads"]), ["t1", "t2"])
 
-    def stop_event(self, texts, ask=False, active=False, **env):
+    def stop_event(self, texts, ask=False, active=False, answer=None, question="Which?", **env):
         tr = os.path.join(self.env["LEAN_AGENT_HOME"], "stop.jsonl")
         recs = [{"type": "user", "message": {"role": "user", "content": "go"}}]
         for t in texts:
             recs.append({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": t}]}})
         if ask:
             recs.append({"type": "assistant", "message": {"role": "assistant", "content": [
-                {"type": "tool_use", "id": "q1", "name": "AskUserQuestion", "input": {"questions": [{"question": "Which?"}]}}]}})
+                {"type": "tool_use", "id": "q1", "name": "AskUserQuestion", "input": {"questions": [{"question": question}]}}]}})
+            if answer is not None:
+                recs.append({"type": "user", "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "q1", "content": answer}]}})
         with open(tr, "w") as fh:
             fh.write("".join(json.dumps(r) + "\n" for r in recs))
         return run_hook("budget_hook.py", {"hook_event_name": "Stop", "cwd": self.env["LEAN_AGENT_HOME"], "session_id": "s1",
@@ -847,6 +850,29 @@ class BudgetTest(Base):
         self.assertIsNone(self.stop_event(["Routed to t3."], **main))
         with open(os.path.join(self.env["LEAN_AGENT_HOME"], "waiting.json")) as fh:
             self.assertTrue(json.load(fh)["items"][0]["asked_at"])
+
+    def _waiting(self, code):
+        sys.path.insert(0, ROOT)
+        full = "import sys; sys.path.insert(0, %r); import lean_waiting, json; " % ROOT + code
+        r = subprocess.run([sys.executable, "-c", full], env=dict(os.environ, **self.env), check=True, capture_output=True, text=True)
+        return r.stdout.strip()
+
+    def test_stop_hook_marks_items_answered_when_the_transcript_has_the_answer(self):
+        main = {"LEAN_AGENT_SESSION_ROLE": "main"}
+        self._waiting("lean_waiting.add('Use the old or new API?', 'question', thread='t1'); lean_waiting.add('Ship the release?', 'question', thread='t2')")
+        self.assertIsNone(self.stop_event(["Asking."], ask=True, answer="old", question="Use the old or new API?", **main))
+        items = json.loads(self._waiting("print(json.dumps(lean_waiting._load()))"))
+        self.assertTrue(items[0]["answered_at"] and items[0]["answer"] == "old")
+        self.assertFalse(items[1]["answered_at"])  # not covered by the question
+        self.assertTrue(items[1]["asked_at"] == "")
+
+    def test_stop_hook_does_not_ask_again_what_was_answered_a_moment_ago(self):
+        main = {"LEAN_AGENT_SESSION_ROLE": "main"}
+        self._waiting("w = lean_waiting.add('Use the old or new API?', 'question', thread='t1'); lean_waiting.done(w, 'old')")
+        row = ["| PR 1 | Reviewed | no vote cast |"]
+        self.assertIsNone(self.stop_event(row, **main))  # the answer is a minute old: no extra round
+        self.assertEqual(self._waiting("print(lean_waiting.add('use the old or new api?', 'question', thread='t1'))"), "w1")
+        self.assertIsNone(self.stop_event(["Routed."], **main))
 
     def test_stop_hook_front_desk_fails_open_on_a_malformed_transcript(self):
         tr = os.path.join(self.env["LEAN_AGENT_HOME"], "bad.jsonl")

@@ -102,6 +102,22 @@ def close_for(thread, qids, answer=None):
     return _mark("answered_at", ids, answer) if ids else []
 
 
+def recent(minutes=RECENT_MIN):
+    """Items asked or answered within the last `minutes`: the Stop hook does not send the turn back for these."""
+    return [i for i in _load() if _within(i.get("answered_at") or "", minutes) or _within(i.get("asked_at") or "", minutes)]
+
+
+def answered_by(questions, answer):
+    """The user answered AskUserQuestion `questions` (texts) with `answer`: the open items they cover (by id or by
+    summary; when none can be matched, every open one) are marked asked and answered. Returns their ids."""
+    blob = norm(" ".join(questions))
+    opened = open_items()
+    hit = [i["id"] for i in opened if norm(i.get("id")) in blob.split() or (norm(i.get("summary"))[:40] and norm(i.get("summary"))[:40] in blob)]
+    ids = set(hit or [i["id"] for i in opened])
+    _mark("asked_at", ids)
+    return _mark("answered_at", ids, answer)
+
+
 def mark_asked(ids=None):
     """Set asked_at on the open items `ids` (all open items when None)."""
     return _mark("asked_at", ids)
