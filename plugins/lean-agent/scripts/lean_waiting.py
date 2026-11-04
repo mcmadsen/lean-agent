@@ -9,11 +9,12 @@ import time
 
 import lean_common
 
-KINDS = ("review", "question", "permission", "other")
+KINDS = ("review", "question", "permission", "push", "other")
 DEFAULT_OPTIONS = {
     "review": ["Approve", "Approve with suggestions (post the nit)", "Wait for author", "No vote"],
     "question": ["Other"],
     "permission": ["Yes", "No"],
+    "push": ["Push", "Push and post", "Post only", "Hold"],
     "other": [],
 }
 KEEP = 100
@@ -50,6 +51,13 @@ def add(summary, kind="other", options=None, thread="", ref="", qid=""):
     opts = [str(o).strip() for o in (options if options is not None else DEFAULT_OPTIONS[kind]) if str(o).strip()]
     with lean_common.file_lock(path()):
         items = _load()
+        if kind == "push" and ref:  # one push question per goal: a newer report of the same ref replaces the open one
+            for i in items:
+                if not i.get("answered_at") and i.get("kind") == "push" and norm(i.get("ref")) == norm(ref):
+                    i.update(summary=summary, options=opts, thread=thread or i.get("thread", ""))
+                    i["count"] = int(i.get("count") or 1) + 1
+                    lean_common.write_json_atomic(path(), {"items": items})
+                    return i["id"]
         for i in items:
             if not i.get("answered_at") and (i.get("kind"), i.get("thread"), norm(i.get("summary"))) == (kind, thread or "", norm(summary)):
                 i["count"] = int(i.get("count") or 1) + 1
@@ -88,6 +96,14 @@ def _mark(field, ids, answer=None):
             done.append(i["id"])
         if done:
             lean_common.write_json_atomic(path(), {"items": items})
+    if field == "answered_at":
+        for i in items:
+            if i["id"] in done and i.get("kind") == "push" and i.get("thread"):
+                try:  # the goal behind a push question is the thread's again
+                    import lean_goals
+                    lean_goals.answered(i["thread"])
+                except Exception:
+                    pass
     return done
 
 

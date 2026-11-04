@@ -430,6 +430,20 @@ Say it in the chat; main runs the command and shows the result as a table.
 
 Anything that needs you (a finished review to vote on, a thread question, an approval) is asked with a prompt in the same turn, with options; the table row is only the record. lean-agent keeps these in `<home>/waiting.json` (`lean-agent waiting`, `waiting add`, `waiting done <id>`), and a Stop hook sends the front desk back once if a turn ended without asking.
 
+## Goals and follow-up
+The front desk owns every deliverable until it is done. `lean-agent goals` lists the open goals (Goal | Ref | Thread | State | Quiet | Next);
+`lean-agent goal add "<ref>" [tN]`, `goal done <id>`, `goal drop <id>`, `goal next <id> "<text>"` edit them, and `lean-agent now` shows them after
+what waits on the user. A goal (`<home>/goals.json`) is created when a thread is given work naming a PR or work item (`thread new/send`, `todo add --ref`,
+a run on a PR), is kept fresh by thread reports and runs, waits on the user when a final report proposes a push/post, and is done once that happened.
+
+A watchdog in the service looks at the active goals every few minutes (it only messages threads, it never starts workers): a thread with a lost
+worker is asked to resume or restart it and send ONE consolidated final report; a quiet thread (no worker, no open question, longer than `LEAN_AGENT_GOAL_QUIET`
+or config `goal_quiet`, default 30m) or a parked session is woken with a status nudge. At most one chase per goal per quiet period; after 3 chases the goal is
+"stuck" and the user gets one question. No chase while the plan limit is near. Every chase reaches the front desk as a one-line `CHASED:` digest.
+
+A thread's consolidated final report (Ref, Head sha, Review, Checks, Left, Proposed action) becomes exactly one waiting item of kind `push` per goal with the
+options Push / Push and post / Post only / Hold; a newer report of the same PR replaces it instead of adding a second question.
+
 ## Handovers
 
 `lean-agent handover "<title>"` turns a request (or, with `--as-is`, ready text) into a plain Markdown file under

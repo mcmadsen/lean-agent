@@ -34,6 +34,7 @@ import time
 import uuid
 
 import lean_common
+import lean_goals
 import lean_log
 import lean_waiting
 import usage
@@ -873,6 +874,23 @@ def reports_mode():
     return raw if raw in REPORT_MODES else "on"
 
 
+GOAL_TICK = 180  # seconds between goal watchdog passes
+
+
+def alive_thread(tid):
+    try:
+        return bool(alive(tid))
+    except Exception:
+        return False
+
+
+def goal_send(tid, text):
+    """Message a thread like `lean-agent thread send` (a parked or ended session is started by it)."""
+    exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lean_agent.py")
+    r = subprocess.run([sys.executable, exe, "thread", "send", tid, text], capture_output=True, text=True, timeout=120)
+    return r.returncode == 0, (r.stderr or r.stdout).strip()[-200:]
+
+
 def reports_path():
     return lean_home("thread-reports.json")
 
@@ -881,9 +899,14 @@ def queue_report(tid, kind, text):
     """Queue one thread report (kind: done | blocked | needs-you | question) for the main session; the mode filters it,
     except an explicit question (`thread ask`), which always goes through."""
     mode = reports_mode()
-    if kind not in ("question", "job-failed") and (mode == "off" or (mode == "questions-only" and kind != "needs-you")):
+    if kind not in ("question", "job-failed", "chase") and (mode == "off" or (mode == "questions-only" and kind != "needs-you")):
         return False
     os.makedirs(lean_home(), exist_ok=True)
+    if kind != "chase":
+        try:  # a report is activity on the thread's goals (and answers a chase)
+            lean_goals.touch(tid, reset=kind in ("done", "needs-you", "question"))
+        except Exception:
+            pass
     with lean_common.file_lock(reports_path()):
         data = _load(reports_path())
         items = data.get("items") if isinstance(data.get("items"), list) else []
@@ -1040,7 +1063,7 @@ def drop_reports(taken):
         lean_common.write_json_atomic(reports_path(), {"items": left})
 
 
-REPORT_LABELS = {"needs-you": "QUESTION: ", "blocked": "STUCK: ", "job-failed": "FAILED: "}
+REPORT_LABELS = {"needs-you": "QUESTION: ", "blocked": "STUCK: ", "job-failed": "FAILED: ", "chase": "CHASED: "}
 
 
 def reports_message(items, dropped=0):
@@ -1051,7 +1074,7 @@ def reports_message(items, dropped=0):
     if asking:
         lines.append(f"questions from {', '.join(asking)}: answer them (or ask the user, naming the thread) with "
                      f'lean-agent thread answer {asking[0]} [qN] "<answer>"')
-    tids = list(dict.fromkeys(i["thread"] for i in items if i["kind"] != "job-failed"))
+    tids = list(dict.fromkeys(i["thread"] for i in items if i["kind"] not in ("job-failed", "chase")))
     if not tids:
         return "\n".join(["<thread-reports>"] + lines + ["</thread-reports>"])
     more = f" (or {', '.join(tids[1:])})" if len(tids) > 1 else ""
@@ -1082,7 +1105,7 @@ def reports_digest(items, dropped=0, rid=""):
     asking = sorted({i["thread"] for i in items if i["kind"] in ("question", "needs-you")})
     if asking:
         lines.append(f'questions: answer them (or ask the user) with lean-agent thread answer {asking[0]} [qN] "<answer>"')
-    tids = list(dict.fromkeys(i["thread"] for i in items if i["kind"] != "job-failed"))
+    tids = list(dict.fromkeys(i["thread"] for i in items if i["kind"] not in ("job-failed", "chase")))
     if tids:
         lines.append(f"Relay these digests, do not paste reports. Full text only when needed: lean-agent thread reports {tids[0]}"
                      + (f" r{rid}" if rid else ""))
@@ -1282,6 +1305,11 @@ class Reporter(AutoClear):
         ask = _question(text)
         if scan["asked"]:
             return
+        try:  # a consolidated final report: the goal waits on the user with one push question
+            lean_goals.final_report(tid, text)
+            lean_goals.finished(tid, text)
+        except Exception as exc:  # noqa: BLE001 - goals must not stop the report
+            self.log(f"goal update for {tid} failed: {exc}", "error")
         if ask:
             save_last_report(tid, "needs-you", text)
             queue_report(tid, "needs-you", _short(ask, tid=tid))
@@ -1331,7 +1359,21 @@ class Reporter(AutoClear):
             pass
         self.log("staged thread reports not taken by the prompt hook: typed in full")
 
+    def goals_tick(self):
+        """The goals watchdog, every GOAL_TICK seconds: chase quiet or lost threads, tell the front desk."""
+        now = self.now()
+        if now - getattr(self, "goals_at", 0) < _knob("LEAN_AGENT_GOAL_TICK", GOAL_TICK):
+            return
+        self.goals_at = now
+        lines = lean_goals.watchdog(now, goal_send, lambda tid: alive_thread(tid), log=self.log)
+        for line in lines:
+            queue_report(re.search(r"\b(t\d+)\b", line).group(1) if re.search(r"\b(t\d+)\b", line) else "main", "chase", line)
+
     def main_tick(self):
+        try:
+            self.goals_tick()
+        except Exception as exc:  # noqa: BLE001 - the report queue must keep going
+            self.log(f"goals watchdog failed: {exc}", "error")
         try:
             run_fallback(self.now())
         except Exception as exc:  # noqa: BLE001 - the report queue must keep going
