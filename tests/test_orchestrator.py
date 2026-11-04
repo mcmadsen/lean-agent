@@ -5782,6 +5782,26 @@ class CliTest(unittest.TestCase):
         self.assertIn("More. More. More. More. More. More. More. More. More. More. More. More. More. More. More. More. More. More. More. More.", out)
         self.assertIn("no thread reports", self.cli("thread", "reports", "t9").stdout)
 
+    def test_thread_show_is_short_by_default_and_full_on_request(self):
+        lt = self.threads_home()
+        tid = lt.new("topic")
+        import service_session as ss
+        ss.save_last_report(tid, "done", "Result. " + "Long text here. " * 100)
+        lt.ask(tid, "Which API?")
+        short = self.cli("thread", "show", tid).stdout
+        full = self.cli("thread", "show", tid, "--full").stdout
+        self.assertIn("waiting on main: q1", short)
+        self.assertIn("Last report", short)
+        self.assertIn("--full", short)
+        self.assertLess(len(short), len(full))
+        self.assertLess(len(short), 1600)
+        self.assertEqual(self.cli("thread", "show", tid, "--tail", "1").returncode, 0)
+
+    def test_front_desk_now_defaults_to_the_short_view(self):
+        lt = self.threads_home()
+        lt.new("topic")
+        self.assertEqual(self.cli("now", LEAN_AGENT_SESSION_ROLE="main").stdout, self.cli("now", "--short").stdout)
+
     def test_clear_at_reads_the_compaction_point_up_recorded(self):
         os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
         with open(os.path.join(self.env["LEAN_AGENT_HOME"], "up.json"), "w") as fh:

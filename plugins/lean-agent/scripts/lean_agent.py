@@ -11571,7 +11571,9 @@ def thread_action(a):
             return 0
     if act == "list":
         return thread_list(a)
-    return lean_threads.cli(act, a.args + (["--all"] if getattr(a, "all", False) else []), a.json)
+    extra = (["--all"] if getattr(a, "all", False) else []) + (["--full"] if FULL else []) \
+        + (["--tail", str(a.tail)] if getattr(a, "tail", None) is not None else [])
+    return lean_threads.cli(act, a.args + extra, a.json)
 
 
 def cmd_feedback(a):
@@ -11628,7 +11630,8 @@ def cmd_now(a):
     waiting = lean_waiting.text()
     if waiting:
         print(waiting)
-    print(lean_threads.short_text() if a.short else lean_threads.now_text())
+    short = a.short or (os.environ.get("LEAN_AGENT_SESSION_ROLE") == "main" and not FULL)  # the front desk gets the short view unless it asks --full
+    print(lean_threads.short_text() if short else lean_threads.now_text())
     line = feedback_line()
     if line:
         print(line)
@@ -13264,7 +13267,8 @@ def build_parser():
     s.add_argument("--item", metavar="N", help="list: only threads that mention this work item (#N, ...-N, item N)")
     s.add_argument("--open", action="store_true", help="list: hide closed threads")
     s.add_argument("--context", action="store_true", help="sessions: just the context table (Session | Title | Context | %% of compact | Idle | State), largest first")
-    s.add_argument("--all", action="store_true", help="show: every entry (default: the latest 40); close: every open session")
+    s.add_argument("--all", action="store_true", help="show: every entry and the whole last report (same as --full); close: every open session")
+    s.add_argument("--tail", type=int, metavar="N", help="show: the latest N entries (default 5)")
     s.add_argument("--force", action="store_true", help="close: close even with a live run or mid-turn (runs keep going detached)")
     s.add_argument("--idle", help="close: every session idle at least this long (e.g. 2h, 90m) without a running run")
     s.add_argument("--resume-old", action="store_true", help="reopen|send|open: continue the thread's previous Claude session "
@@ -13359,10 +13363,11 @@ def main(argv=None):
             and not {"-p", "--project", "--resume"} & set(argv) and is_project_ref(argv[1])):
         argv = ["run", "-p", argv[1]] + argv[2:]  # `lean-agent run <project> ...` like `cards <project>`
     global BRIEF
-    global VERBOSE
+    global VERBOSE, FULL
     flags = {"--brief", "--full", "--verbose"} & set(argv[1:]) if argv[:1] != ["up"] else set()
     argv = [x for i, x in enumerate(argv) if not (i and x in flags)]
     VERBOSE = "--verbose" in flags
+    FULL = "--full" in flags  # also read by `thread show` and `now` (the global flag is stripped before parsing)
     BRIEF = "--brief" in flags or (os.environ.get("LEAN_AGENT_BRIEF") == "1" and "--full" not in flags)
     a, leftover = ap.parse_known_args(argv)
     if leftover and a.cmd in ("mcp", "guard") and not any(x.startswith("-") for x in leftover):
@@ -13416,6 +13421,7 @@ def main(argv=None):
             sys.stdout.write(brief_text(a.cmd, text))
 
 
+FULL = False  # set in main(): --full (also read by `thread show` and `now`)
 VERBOSE = False  # set in main(): --verbose keeps brief mode but prints the detail lines
 BRIEF = False  # set in main(): --brief, or LEAN_AGENT_BRIEF=1 (orchestrator sessions) unless --full
 BRIEF_COMMANDS = ("optimize", "tracker", "stats", "budget", "cards", "limits", "projects", "recipes", "savings")

@@ -57,8 +57,7 @@ EOF
   memory or defaults settle it: `lean-agent thread answer tN [qN] "<answer>"`. Otherwise ask the user with
   AskUserQuestion (one question naming the thread, 2-4 options), and pass their answer on with `thread answer`. Never send
   the user to the thread session.
-- Thread reports reach you as one line; the full text is in your hidden context (`thread reports` prints it again).
-- A finished thread report: relay its summary as a table row. Before relaying a thread report: if it is cut, unclear, mentions something left undone or unexplained, or ends with an open question, run `lean-agent thread show tN` first and answer from it; still unclear: `lean-agent thread send tN "..."` (or `thread answer` for its question). Never say "I don't know" about what a lean command can answer.
+- Reports arrive as one line plus a short digest (hidden context): relay the digest as a table row, never paste a report. Before relaying a thread report: if it is cut, unclear, mentions something left undone, or ends with an open question, run `lean-agent thread reports tN [rId]` (full text) or `thread show tN` (short; `--full`) first and answer from it; still unclear: `lean-agent thread send tN "..."` (or `thread answer` for its question). Never say "I don't know" about what a lean command can answer.
 
 ## Memory and advice
 ```sh
