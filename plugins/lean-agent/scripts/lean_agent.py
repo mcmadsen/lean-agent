@@ -1885,13 +1885,47 @@ ALLOW_EDIT_LOG = "allow_edit.log"
 ALLOW_EDIT_PROTECTED = (".claude/settings*.json", ".claude/hooks/**")
 
 
+def allow_edit_outside_roots():
+    """Directories an --allow-edit path outside the worktree may be under: ~/Downloads and `config allow-edit-outside`."""
+    roots = [os.path.realpath(os.path.expanduser("~/Downloads"))]
+    for d in config_json().get("allow_edit_outside") or []:
+        if isinstance(d, str) and os.path.isabs(d):
+            roots.append(os.path.realpath(d))
+    return roots
+
+
+def outside_allow_edit(p):
+    """The real path of an explicit file `p` (absolute or ~/...) allowed outside the worktree, else None: it lies under
+    ~/Downloads or an allow-edit-outside dir, names one file (no wildcards), no part below that dir starts with a dot,
+    and it is never inside a .git directory."""
+    full = os.path.realpath(os.path.expanduser(p))
+    if re.search(r"[*?\[]", p) or ".git" in full.split(os.sep):
+        return None
+    for root in allow_edit_outside_roots():
+        if full.startswith(root.rstrip(os.sep) + os.sep):
+            below = full[len(root):].split(os.sep)
+            if not any(part.startswith(".") for part in below if part):
+                return full
+    return None
+
+
 def clean_allow_edit(paths, read_only=False):
-    """--allow-edit values as worktree-relative globs; a path outside the worktree (absolute, `..`) is refused."""
+    """--allow-edit values as worktree-relative globs; a path outside the worktree (absolute, `..`) is refused, except an
+    explicit file under ~/Downloads or an allow-edit-outside dir (kept as its absolute real path)."""
     out = []
     for p in paths or []:
         p = (p or "").strip()
         if not p:
             continue
+        if p.startswith("~") or os.path.isabs(p):
+            full = outside_allow_edit(p)
+            if full:
+                if full not in out:
+                    out.append(full)
+                continue
+            die(f"--allow-edit {p!r}: only paths inside the worktree are allowed, or an explicit file under ~/Downloads "
+                "(or a dir from `lean-agent config allow-edit-outside <dir>`; never dotfiles or .git). Give it relative "
+                "to the worktree, e.g. .claude/rules/**; for files meant for the user use `lean-agent handover --out`")
         norm = os.path.normpath(p)
         if os.path.isabs(p) or p.startswith("~") or norm == ".." or norm.startswith(".." + os.sep):
             die(f"--allow-edit {p!r}: only paths inside the worktree are allowed; give it relative to the worktree, "
@@ -2252,6 +2286,7 @@ def _cmd_run(a):
            "--tools", tools, "--allowedTools", ",".join(allowed + mcp_allowed + chrome_allowed),
            "--permission-mode", permission_mode,
            "--add-dir", project,
+           *[x for g in allow_edit if os.path.isabs(g) for x in ("--add-dir", os.path.dirname(g))],
            "--append-system-prompt-file", os.path.join(workdir, "append.md"),
            "--max-turns", str(a.max_turns)]
     role = getattr(a, "role", None) or (prev or {}).get("role")
@@ -2287,7 +2322,8 @@ def _cmd_run(a):
     if allow_edit and not read_only:  # answers Claude Code's permission prompt for the named repo files only
         cfg_path = os.path.join(workdir, "allow_edit.json")
         with open(cfg_path, "w") as fh:
-            json.dump({"root": os.path.realpath(project), "globs": allow_edit, "log": os.path.join(workdir, ALLOW_EDIT_LOG)}, fh)
+            json.dump({"root": os.path.realpath(project), "globs": [g for g in allow_edit if not os.path.isabs(g)],
+                       "outside": [g for g in allow_edit if os.path.isabs(g)], "log": os.path.join(workdir, ALLOW_EDIT_LOG)}, fh)
         hooks["PermissionRequest"] = [{"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{
             "type": "command", "timeout": 10,
             "command": f"python3 {json.dumps(os.path.join(HERE, 'allow_edit_hook.py'))} {json.dumps(cfg_path)}"}]}]
@@ -6352,6 +6388,24 @@ def cmd_worktrees(a):
         print("No lean-agent worktrees. Workers get one with: lean-agent run <project> --worktree <branch> ...")
 
 
+def resolve_worktree(slug, ref):
+    """(name, record) of the project's lean-agent worktree that `ref` names: its worktree name, or else its branch (the
+    checked-out one, or the registered ref); (name, None) when none; dies naming the candidates when several match."""
+    entries = worktree_index().get(slug) or {}
+    name = slugify(ref.replace("/", "-"), 60)
+    if name in entries:
+        return name, entries[name]
+    bare = re.sub(r"^(refs/heads/|origin/)", "", ref)
+    hits = []
+    for n, w in sorted(entries.items()):
+        cur = git(w["path"], "symbolic-ref", "--quiet", "--short", "HEAD") if os.path.isdir(w["path"]) else None
+        if ref in (w.get("branch"), w.get("ref"), cur) or bare in (w.get("branch"), cur):
+            hits.append(n)
+    if len(hits) > 1:
+        die(f"{ref} matches several worktrees in {slug}: {', '.join(hits)}; give the worktree name")
+    return (hits[0], entries[hits[0]]) if hits else (name, None)
+
+
 def cmd_worktree(a):
     if a.action == "setup":
         return worktree_setup_cmd(a)
@@ -6369,8 +6423,7 @@ def cmd_worktree(a):
         die("which worktree? lean-agent worktree rm <project> <ref>")
     slug, repo = resolve_project(a.project)
     idx = worktree_index()
-    name = slugify(a.ref.replace("/", "-"), 60)
-    w = (idx.get(slug) or {}).get(name)
+    name, w = resolve_worktree(slug, a.ref)
     if not w:
         die(f"no lean-agent worktree for {a.ref} in {slug} (see: lean-agent worktrees {slug})")
     if os.path.isdir(w["path"]) and git(w["path"], "status", "--porcelain") and not a.force:
@@ -6464,10 +6517,10 @@ def worktree_setup_cmd(a):
     print(f"{slug}: new worktrees run: {cur}" if cur else
           f"{slug}: no setup command. Set one: lean-agent worktree setup {slug} --run \"npm ci && npm run build\"")
     if command and a.ref:
-        w = (worktree_index().get(slug) or {}).get(slugify(a.ref.replace("/", "-"), 60))
+        name, w = resolve_worktree(slug, a.ref)
         if not w:
             die(f"no lean-agent worktree for {a.ref} in {slug}")
-        run_worktree_setup(slug, slugify(a.ref.replace("/", "-"), 60), w["path"], command)
+        run_worktree_setup(slug, name, w["path"], command)
     return 0
 
 
@@ -6500,7 +6553,7 @@ def worktree_push(a):
     slug, repo = resolve_project(a.project)
     if not a.ref:
         die("which branch? lean-agent worktree push <project> <ref>")
-    w = (worktree_index().get(slug) or {}).get(slugify(a.ref.replace("/", "-"), 60))
+    _, w = resolve_worktree(slug, a.ref)
     if not w or not os.path.isdir(w["path"]):
         die(f"no lean-agent worktree for {a.ref} in {slug} (see: lean-agent worktrees {slug})")
     path, branch = w["path"], git(w["path"], "symbolic-ref", "--quiet", "--short", "HEAD")
@@ -10167,6 +10220,28 @@ def cmd_config(a):
                                              or "off") + " · these changes get no review run, a `skipped (<reason>)` "
               "verdict that counts as approved; `review --force` reviews anyway")
         return 0
+    if a.name == "allow-edit-outside":
+        cfg = config_json()
+        dirs = list(cfg.get("allow_edit_outside") or [])
+        if a.value is not None:
+            if a.value == "clear":
+                dirs = []
+            else:
+                d = os.path.realpath(os.path.expanduser(a.value))
+                if not os.path.isdir(d) or d == os.path.realpath(os.path.expanduser("~")) or d == os.sep:
+                    die(f"allow-edit-outside {a.value!r}: give an existing directory below your home (not home or /)")
+                if os.path.basename(d).startswith("."):
+                    die(f"allow-edit-outside {a.value!r}: dot-directories are never allowed")
+                if d not in dirs:
+                    dirs.append(d)
+            if dirs:
+                cfg["allow_edit_outside"] = dirs
+            else:
+                cfg.pop("allow_edit_outside", None)
+            save_json(home("config.json"), cfg)
+        print("allow-edit-outside: ~/Downloads" + "".join(", " + d for d in dirs) + " \u00b7 a worker may be given --allow-edit "
+              "<explicit file> under these (never dotfiles or .git); add: config allow-edit-outside <dir>, remove all: clear")
+        return 0
     if a.name == "review-model":
         if a.value is not None:
             cfg = config_json()
@@ -12725,9 +12800,9 @@ def build_parser():
     s.set_defaults(fn=cmd_advise)
 
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
-                       "allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
+                       "allow-edit-outside <dir>|clear (extra dirs, besides ~/Downloads, where --allow-edit may name an explicit file outside the worktree), allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
                        "max-thread-sessions N (thread sessions the service runs; default 8), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
-    s.add_argument("name", choices=["strict", "clear-at", "project-rules", "allow-edit", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
+    s.add_argument("name", choices=["strict", "clear-at", "project-rules", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
                                            "review-max-rerounds", "review-skip", "review-model", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
