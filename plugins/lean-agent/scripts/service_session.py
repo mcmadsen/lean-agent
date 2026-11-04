@@ -392,6 +392,15 @@ def up_compact_at():
     return point if isinstance(point, int) and point > 0 else compact_at()
 
 
+def clear_explicit():
+    """True when a general clear-at (even `off`/0) is set: the front desk's own threshold then does not apply."""
+    for raw in (os.environ.get("LEAN_AGENT_CLEAR_AT"), _load(lean_home("config.json")).get("clear_at")):
+        raw = str(raw).strip().lower() if raw is not None else ""
+        if raw in ("auto", "off") or raw.isdigit():
+            return True
+    return False
+
+
 def clear_setting():
     """What is set: LEAN_AGENT_CLEAR_AT, else `lean-agent config clear-at`, else off (0); "auto" or a number of tokens opt in."""
     for raw in (os.environ.get("LEAN_AGENT_CLEAR_AT"), _load(lean_home("config.json")).get("clear_at")):
@@ -406,6 +415,21 @@ def clear_at(env=None):
     setting = clear_setting()
     point = compact_at(env) if env is not None else up_compact_at()  # outside `up`: the point `up` recorded
     return max(0, point - CLEAR_MARGIN) if setting == "auto" else setting
+
+
+DESK_CLEAR_AT = 100000  # the front desk's own threshold (checkpoint, then clear) when `clear-at` is not set; thread sessions keep theirs
+
+
+def desk_clear_at():
+    """Tokens above which the front desk (main) is checkpointed and cleared after a finished turn when no general
+    clear-at is set: LEAN_AGENT_DESK_CLEAR_AT, else `lean-agent config desk-clear-at N|off`, else DESK_CLEAR_AT (0 = off)."""
+    for raw in (os.environ.get("LEAN_AGENT_DESK_CLEAR_AT"), _load(lean_home("config.json")).get("desk_clear_at")):
+        raw = str(raw).strip().lower() if raw is not None else ""
+        if raw == "off":
+            return 0
+        if raw.isdigit():
+            return int(raw)
+    return DESK_CLEAR_AT
 
 
 def checkpoint_prompt():
@@ -800,6 +824,8 @@ class AutoClear:
         if self.safety_net(transcript_state(path)):
             return
         limit = clear_at(getattr(self.host, "env", None))
+        if not limit and self.key == "main" and not clear_explicit():
+            limit = desk_clear_at()
         if not limit or now - self.last_gap_start() < _knob("LEAN_AGENT_CLEAR_GAP", CLEAR_GAP):
             self.hold(None)
             return
@@ -867,7 +893,8 @@ def queue_report(tid, kind, text):
         try:  # waiting on the user is recorded by lean-agent, not left to the front desk's memory
             m = re.match(r"QUESTION (q\d+): (.*?)(?: \[options: (.*)\])?$", str(text))
             opts = [o.strip() for o in m.group(3).split("|")] if m and m.group(3) else None
-            lean_waiting.add(m.group(2) if m else text, "question", (opts or []) + ["Other"] if opts else None, tid)
+            lean_waiting.add(m.group(2) if m else text, "question", (opts or []) + ["Other"] if opts else None, tid,
+                            qid=m.group(1) if m else "")
         except Exception:
             pass
     if kind != RUN_AUTO_KIND:
@@ -1033,6 +1060,35 @@ def reports_message(items, dropped=0):
         f"details: lean-agent thread show {tids[0]}{more}", "</thread-reports>"])
 
 
+DIGEST_CHARS = 240      # a plain report's digest in the hidden context (a question keeps up to DIGEST_Q_CHARS)
+DIGEST_Q_CHARS = 600
+DIGEST_TURN_CHARS = 2000
+
+
+def reports_digest(items, dropped=0, rid=""):
+    """The hidden context for a batch of reports: one short line per report with the batch id, questions whole up to
+    DIGEST_Q_CHARS, 2k in all. The full text stays in the log: `lean-agent thread reports tN [rId]`."""
+    lines, used = [], 0
+    for n, i in enumerate(items):
+        ask = i["kind"] in ("question", "needs-you")
+        line = f"[{i['thread']} {i['kind']}] {REPORT_LABELS.get(i['kind'], '')}" + _short(i["text"], DIGEST_Q_CHARS if ask else DIGEST_CHARS)
+        if used + len(line) > DIGEST_TURN_CHARS and lines:
+            lines.append(f"(+{len(items) - n} more report(s): `lean-agent thread reports`)")
+            break
+        lines.append(line)
+        used += len(line)
+    if dropped:
+        lines.append(f"({dropped} older report(s) dropped: over {REPORT_MAX_AGE // 3600} h old)")
+    asking = sorted({i["thread"] for i in items if i["kind"] in ("question", "needs-you")})
+    if asking:
+        lines.append(f'questions: answer them (or ask the user) with lean-agent thread answer {asking[0]} [qN] "<answer>"')
+    tids = list(dict.fromkeys(i["thread"] for i in items if i["kind"] != "job-failed"))
+    if tids:
+        lines.append(f"Relay these digests, do not paste reports. Full text only when needed: lean-agent thread reports {tids[0]}"
+                     + (f" r{rid}" if rid else ""))
+    return "\n".join(["<thread-reports>"] + lines + ["</thread-reports>"])
+
+
 SUMMARY_RE = re.compile(r"^lean-agent: \d+ thread reports? \(.*\) \[r([0-9a-f]{6})\]$")
 PENDING_FALLBACK = 60  # seconds: the one wait after a paste; a paste that began no turn (the prompt hook never took the staged block) is retried then, typed in full
 REPORT_LOG_KEPT = 10
@@ -1052,17 +1108,19 @@ def summary_line(items, rid):
     return f"lean-agent: {len(items)} thread report{'s' if len(items) != 1 else ''} ({', '.join(tags)}) [r{rid}]"
 
 
-def stage_block(rid, line, block, now=None):
-    """Queue the full block on disk for the main session's prompt hook, and keep it in the log for `thread reports`."""
+def stage_block(rid, line, block, now=None, full=None):
+    """Queue the block (the digest) on disk for the main session's prompt hook; the full text (default: the block)
+    goes to the log for `thread reports` and to the threads' stored reports."""
     os.makedirs(lean_home(), exist_ok=True)
-    lean_common.write_json_atomic(pending_path(), {"id": rid, "line": line, "block": block, "ts": time.time() if now is None else now})
-    log_block(block)
+    full = block if full is None else full
+    lean_common.write_json_atomic(pending_path(), {"id": rid, "line": line, "block": block, "full": full, "ts": time.time() if now is None else now})
+    log_block(full, rid)
 
 
-def log_block(block):
+def log_block(block, rid=""):
     with lean_common.file_lock(reports_log_path()):
         items = _load(reports_log_path()).get("items")
-        items = (items if isinstance(items, list) else []) + [{"ts": time.time(), "block": block}]
+        items = (items if isinstance(items, list) else []) + [{"ts": time.time(), "block": block, "id": rid}]
         lean_common.write_json_atomic(reports_log_path(), {"items": items[-REPORT_LOG_KEPT:]})
 
 
@@ -1071,8 +1129,9 @@ def logged_blocks():
     return items if isinstance(items, list) else []
 
 
-def take_pending(line):
-    """The staged full block for a summary `line` typed into main (once: the file is removed), else None."""
+def take_pending(line, with_full=False):
+    """The staged block (digest) for a summary `line` typed into main (once: the file is removed), else None;
+    with `with_full` a (digest, full text) pair."""
     m = SUMMARY_RE.match(str(line or "").strip())
     if not m:
         return None
@@ -1084,7 +1143,7 @@ def take_pending(line):
             os.remove(pending_path())
         except OSError:
             return None
-    return data["block"]
+    return (data["block"], data.get("full") or data["block"]) if with_full else data["block"]
 
 
 def _short(text, n=REPORT_CHARS, tid=None):
@@ -1302,11 +1361,11 @@ class Reporter(AutoClear):
         items, dropped = take_reports(now)
         if items:
             self.delivered = (st["size"], now)
-            block = reports_message(items, dropped)
+            full = reports_message(items, dropped)
             rid = f"{int(now * 1000) & 0xffffff:06x}"
             line = summary_line(items, rid)
             try:
-                stage_block(rid, line, block, now)
+                stage_block(rid, line, reports_digest(items, dropped, rid), now, full)
                 self.host.paste(line)
             except Exception as exc:  # noqa: BLE001 - the reports stay queued and go out on a later tick
                 self.log(f"typing {len(items)} thread report(s) failed, kept queued: {exc}")

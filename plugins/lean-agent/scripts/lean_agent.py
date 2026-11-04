@@ -10699,6 +10699,21 @@ def cmd_config(a):
               "session idle this long whose context is this share of the compaction point checkpoints it and continues in "
               "a new session started from a short brief (idle=30m,context=120k|50%|off|default)")
         return 0
+    if a.name == "desk-clear-at":
+        if a.value is not None:
+            if not (a.value.isdigit() or a.value.lower() in ("off", "default")):
+                die("desk-clear-at takes a number of tokens, off, or default")
+            cfg = config_json()
+            if a.value.lower() == "default":
+                cfg.pop("desk_clear_at", None)
+            else:
+                cfg["desk_clear_at"] = "off" if a.value.lower() == "off" else int(a.value)
+            save_json(home("config.json"), cfg)
+        n = service_session.desk_clear_at()
+        print(f"desk-clear-at: {f'{n:,} tokens' if n else 'off'} \u00b7 the front desk is checkpointed and cleared when a finished turn "
+              f"leaves its context above this (default {service_session.DESK_CLEAR_AT:,}; a general clear-at wins; thread sessions are not affected)"
+              + (" (LEAN_AGENT_DESK_CLEAR_AT is set and wins)" if os.environ.get("LEAN_AGENT_DESK_CLEAR_AT") else ""))
+        return 0
     if a.name == "clear-at":
         if a.value is not None:
             if not (a.value.isdigit() or a.value.lower() in ("auto", "off")):
@@ -11757,7 +11772,51 @@ def context_table():
     return "\n".join(lines)
 
 
+def close_waiting(tid, qids, answer):
+    """Mark the waiting items raised by the questions `qids` of `tid` done with `answer`; returns their ids."""
+    try:
+        return lean_waiting.close_for(tid, set(qids), answer)
+    except Exception:
+        return []
+
+
+def close_for_send(tid, text):
+    """`thread send` relays the user's answer: close the open question it answers (the one it names, the only one,
+    else the newest) and its waiting items. Returns the report line, or ''."""
+    t = lean_threads.load()["threads"].get(tid) or {}
+    opened = lean_threads.open_questions(t)
+    if not opened:
+        return ""
+    named = [q for q in opened if re.search(r"\b%s\b" % re.escape(q["id"]), text)]
+    q = named[0] if named else opened[0] if len(opened) == 1 else opened[-1]
+    try:
+        _, q = lean_threads.answer(tid, q["id"], text)
+    except ValueError:
+        return ""
+    waits = close_waiting(tid, [q["id"]], text)
+    return f"closed {q['id']}" + (f", waiting {', '.join(waits)}" if waits else "")
+
+
 def cmd_thread(a):
+    if a.action != "send" or getattr(a, "answered", False):
+        return thread_action(a)
+    thread_positional_message(a, "send")
+    text = thread_prompt(a) if len(a.args) == 1 else ""
+    if text:
+        a.prompt_text = text  # stdin is read once
+    rc = thread_action(a)
+    if not rc and text:
+        try:
+            tid, _ = thread_session_tid(a.args[0])
+            line = close_for_send(tid, text)
+        except BaseException:  # noqa: BLE001 - closing is a courtesy; the message is delivered
+            line = ""
+        if line:
+            print(line)
+    return rc
+
+
+def thread_action(a):
     act = a.action
     resume_old = getattr(a, "resume_old", False)
     if act == "sessions":
@@ -11781,6 +11840,14 @@ def cmd_thread(a):
         return 0
     if act == "reports":
         blocks = service_session.logged_blocks()
+        want = [x for x in a.args if re.fullmatch(r"t\d+", x)]
+        rid = next((x[1:] for x in a.args if re.fullmatch(r"r[0-9a-f]{6}", x)), "")
+        if rid:
+            blocks = [b for b in blocks if b.get("id") == rid]
+        if want:  # one thread's lines only
+            blocks = [dict(b, block="\n".join(l for l in str(b.get("block")).splitlines()
+                                                if any(l.startswith(f"[{w} ") for w in want))) for b in blocks]
+            blocks = [b for b in blocks if b["block"]]
         if not blocks:
             print("no thread reports delivered yet")
         for b in blocks[-3:]:
@@ -11792,10 +11859,18 @@ def cmd_thread(a):
             die("thread ask works only inside a thread session (main asks the user directly)")
         if len(a.args) != 1:
             die('usage: lean-agent thread ask "<question>" [--options "a|b|c"]')
+        merged = {}
         try:
-            qid = lean_threads.ask(tid, a.args[0], getattr(a, "options", None))
+            qid = lean_threads.ask(tid, a.args[0], getattr(a, "options", None), merged)
         except ValueError as exc:
             die(str(exc))
+        if merged.get("merged"):  # the same question is already open: counted, not reported again
+            try:
+                lean_waiting.add(" ".join(a.args[0].split())[:lean_threads.QUESTION_CHARS], "question", None, tid, qid=qid)
+            except Exception:
+                pass
+            print(f"{tid} is already waiting on main with this question ({qid}); not reported again. End your turn now.")
+            return 0
         opts = [o.strip() for o in str(getattr(a, "options", None) or "").split("|") if o.strip()]
         text = " ".join(a.args[0].split())[:lean_threads.QUESTION_CHARS]
         service_session.queue_report(tid, "question", f"QUESTION {qid}: {text}" + (f" [options: {' | '.join(opts)}]" if opts else ""))
@@ -11813,6 +11888,9 @@ def cmd_thread(a):
             tid, q = lean_threads.answer(args[0], qid, text)
         except ValueError as exc:
             die(str(exc))
+        waits = close_waiting(tid, [q["id"]], text)
+        print(f"closed {q['id']}" + (f", waiting {', '.join(waits)}" if waits else ""))
+        a.answered = True
         a.action, a.args, a.prompt_text = "send", [tid], f'Answer from main to your question {q["id"]} ("{lean_threads.one_line(q["text"], 120)}"): {text}'
         try:
             return cmd_thread(a)
@@ -11913,7 +11991,9 @@ def cmd_thread(a):
             return 0
     if act == "list":
         return thread_list(a)
-    return lean_threads.cli(act, a.args + (["--all"] if getattr(a, "all", False) else []), a.json)
+    extra = (["--all"] if getattr(a, "all", False) else []) + (["--full"] if FULL else []) \
+        + (["--tail", str(a.tail)] if getattr(a, "tail", None) is not None else [])
+    return lean_threads.cli(act, a.args + extra, a.json)
 
 
 def cmd_feedback(a):
@@ -11970,7 +12050,8 @@ def cmd_now(a):
     waiting = lean_waiting.text()
     if waiting:
         print(waiting)
-    print(lean_threads.short_text() if a.short else lean_threads.now_text())
+    short = a.short or (os.environ.get("LEAN_AGENT_SESSION_ROLE") == "main" and not FULL)  # the front desk gets the short view unless it asks --full
+    print(lean_threads.short_text() if short else lean_threads.now_text())
     line = feedback_line()
     if line:
         print(line)
@@ -13163,8 +13244,8 @@ def build_parser():
 
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
-                       "max-thread-sessions N (thread sessions the service runs; default 8), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
-    s.add_argument("name", choices=["strict", "clear-at", "project-rules", "allow-edit", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
+                       "max-thread-sessions N (thread sessions the service runs; default 8), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
+    s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "allow-edit", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
                                            "review-max-rerounds", "review-skip", "review-model", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
@@ -13684,7 +13765,8 @@ def build_parser():
     s.add_argument("--item", metavar="N", help="list: only threads that mention this work item (#N, ...-N, item N)")
     s.add_argument("--open", action="store_true", help="list: hide closed threads")
     s.add_argument("--context", action="store_true", help="sessions: just the context table (Session | Title | Context | %% of compact | Idle | State), largest first")
-    s.add_argument("--all", action="store_true", help="show: every entry (default: the latest 40); close: every open session")
+    s.add_argument("--all", action="store_true", help="show: every entry and the whole last report (same as --full); close: every open session")
+    s.add_argument("--tail", type=int, metavar="N", help="show: the latest N entries (default 5)")
     s.add_argument("--force", action="store_true", help="close: close even with a live run or mid-turn (runs keep going detached)")
     s.add_argument("--idle", help="close: every session idle at least this long (e.g. 2h, 90m) without a running run")
     s.add_argument("--resume-old", action="store_true", help="reopen|send|open: continue the thread's previous Claude session "
@@ -13777,12 +13859,13 @@ def main(argv=None):
         argv = ["review-" + argv[1]] + argv[2:]
     argv = normalise_run_argv(argv)  # `lean-agent run <project> ...` like `cards <project>`
     global BRIEF
-    global VERBOSE
+    global VERBOSE, FULL
     flags = {"--brief", "--full", "--verbose"} & set(argv[1:]) if argv[:1] != ["up"] else set()
     argv = [x for i, x in enumerate(argv) if not (i and x in flags)]
     VERBOSE = "--verbose" in flags
     if argv[:1] == ["review"] and "--full" in flags:
         argv.append("--full-review")  # on `review`, --full means: no delta, review the whole change
+    FULL = "--full" in flags  # also read by `thread show` and `now` (the global flag is stripped before parsing)
     BRIEF = "--brief" in flags or (os.environ.get("LEAN_AGENT_BRIEF") == "1" and "--full" not in flags)
     a, leftover = ap.parse_known_args(argv)
     if leftover and a.cmd in ("mcp", "guard") and not any(x.startswith("-") for x in leftover):
@@ -13836,6 +13919,7 @@ def main(argv=None):
             sys.stdout.write(brief_text(a.cmd, text))
 
 
+FULL = False  # set in main(): --full (also read by `thread show` and `now`)
 VERBOSE = False  # set in main(): --verbose keeps brief mode but prints the detail lines
 BRIEF = False  # set in main(): --brief, or LEAN_AGENT_BRIEF=1 (orchestrator sessions) unless --full
 BRIEF_COMMANDS = ("optimize", "tracker", "stats", "budget", "cards", "limits", "projects", "recipes", "savings")

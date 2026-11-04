@@ -5795,6 +5795,81 @@ class CliTest(unittest.TestCase):
         self.assertIn("12,000", self.cli("config", "clear-at", LEAN_AGENT_CLEAR_AT="12000").stdout)
         self.assertEqual(self.cli("config", "clear-at", "x", check=False).returncode, 1)
 
+    def test_desk_clear_at_default_is_configurable_and_only_for_the_front_desk(self):
+        self.threads_home()
+        import service_session
+        self.assertEqual(service_session.desk_clear_at(), 100000)
+        self.assertIn("100,000", self.cli("config", "desk-clear-at").stdout)
+        self.assertIn("60,000", self.cli("config", "desk-clear-at", "60000").stdout)
+        self.assertIn("off", self.cli("config", "desk-clear-at", "off").stdout)
+        self.assertIn("100,000", self.cli("config", "desk-clear-at", "default").stdout)
+        self.assertEqual(self.cli("config", "desk-clear-at", "x", check=False).returncode, 1)
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_CLEAR_AT": "70000"}):
+            self.assertEqual(service_session.desk_clear_at(), 70000)
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_CLEAR_AT": "off"}):
+            self.assertTrue(service_session.clear_explicit())
+        self.assertFalse(service_session.clear_explicit())
+
+    def test_auto_clear_fires_for_the_front_desk_at_the_desk_threshold_not_for_threads(self):
+        self.threads_home()
+        import service_session
+        host = mock.Mock(key="main", env=None, last_input=0)
+        tmp = os.path.join(self.tmp.name, "tr.jsonl")
+        open(tmp, "w").close()
+        ac = service_session.AutoClear(host)
+        self.assertEqual(service_session.clear_at(), 0)
+        self.assertEqual(ac.key, "main")
+        host2 = mock.Mock(key="t1", env=None, last_input=0)
+        self.assertEqual(service_session.AutoClear(host2).key, "t1")
+
+    def test_reports_digest_is_short_capped_and_keeps_questions(self):
+        self.threads_home()
+        import service_session as ss
+        long_text = "Finished the work. " + "Detail sentence goes here. " * 80
+        items = [{"thread": "t5", "kind": "done", "text": long_text}, {"thread": "t6", "kind": "question", "text": "QUESTION q1: " + "x" * 900}]
+        d = ss.reports_digest(items, 0, "abc123")
+        full = ss.reports_message(items)
+        self.assertLess(len(d), len(full) // 2)
+        self.assertLess(len(d), 2000)
+        self.assertTrue(all(len(l) <= 700 for l in d.splitlines()))
+        self.assertIn("[t5 done] Finished the work.", d)
+        self.assertIn("thread reports t5 rabc123", d)
+        many = [{"thread": "t%d" % n, "kind": "done", "text": "y" * 230} for n in range(1, 30)]
+        self.assertLess(len(ss.reports_digest(many, 0, "abc123")), 2600)
+        self.assertIn("more report(s)", ss.reports_digest(many, 0, "abc123"))
+
+    def test_staged_digest_is_hidden_context_and_full_text_is_kept_for_thread_reports(self):
+        self.threads_home()
+        import service_session as ss
+        items = [{"thread": "t5", "kind": "done", "text": "Done. " + "More. " * 200}]
+        full = ss.reports_message(items)
+        ss.stage_block("abc123", "lean-agent: 1 thread report (t5 done) [rabc123]", ss.reports_digest(items, 0, "abc123"), full=full)
+        digest, kept = ss.take_pending("lean-agent: 1 thread report (t5 done) [rabc123]", with_full=True)
+        self.assertLess(len(digest), len(kept))
+        out = self.cli("thread", "reports", "t5", "rabc123").stdout
+        self.assertIn("More. More. More. More. More. More. More. More. More. More. More. More. More. More. More. More. More. More. More. More.", out)
+        self.assertIn("no thread reports", self.cli("thread", "reports", "t9").stdout)
+
+    def test_thread_show_is_short_by_default_and_full_on_request(self):
+        lt = self.threads_home()
+        tid = lt.new("topic")
+        import service_session as ss
+        ss.save_last_report(tid, "done", "Result. " + "Long text here. " * 100)
+        lt.ask(tid, "Which API?")
+        short = self.cli("thread", "show", tid).stdout
+        full = self.cli("thread", "show", tid, "--full").stdout
+        self.assertIn("waiting on main: q1", short)
+        self.assertIn("Last report", short)
+        self.assertIn("--full", short)
+        self.assertLess(len(short), len(full))
+        self.assertLess(len(short), 1600)
+        self.assertEqual(self.cli("thread", "show", tid, "--tail", "1").returncode, 0)
+
+    def test_front_desk_now_defaults_to_the_short_view(self):
+        lt = self.threads_home()
+        lt.new("topic")
+        self.assertEqual(self.cli("now", LEAN_AGENT_SESSION_ROLE="main").stdout, self.cli("now", "--short").stdout)
+
     def test_clear_at_reads_the_compaction_point_up_recorded(self):
         os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
         with open(os.path.join(self.env["LEAN_AGENT_HOME"], "up.json"), "w") as fh:
@@ -6276,7 +6351,8 @@ class CliTest(unittest.TestCase):
         msg = ss.take_pending(line)  # the full block reaches main through the prompt hook, once
         self.assertIsNone(ss.take_pending(line))
         self.assertTrue(msg.startswith("<thread-reports>\n[t1 done] Published the report"))
-        self.assertTrue(msg.endswith("details: lean-agent thread show t1\n</thread-reports>"))
+        self.assertIn("lean-agent thread reports t1 r", msg.splitlines()[-2])
+        self.assertTrue(msg.endswith("</thread-reports>"))
         self.assertEqual(ss.queued_reports(), [])
         reps["main"].tick()
         self.assertEqual(len(hosts["main"].pasted), 1)
@@ -6410,7 +6486,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(wid, "w1")
         self.assertEqual(self.cli("waiting", "add", "Deploy the staging build?", "--thread", "t2", "--kind", "permission").stdout.strip(), "w1")
         out = self.cli("waiting").stdout
-        self.assertIn("w1 permission t2 build 7: Deploy the staging build? [options: Deploy | Wait] (not asked yet)", out)
+        self.assertIn("w1 permission t2 build 7: Deploy the staging build? [options: Deploy | Wait] (reported 2x) (not asked yet)", out)
         self.assertTrue(self.cli("now").stdout.startswith("Waiting on you:\n  w1 permission"))
         self.assertIn("w1 done", self.cli("waiting", "done", "w1", "--answer", "Deploy").stdout)
         self.assertIn("Nothing is waiting", self.cli("waiting").stdout)
@@ -6508,6 +6584,61 @@ class CliTest(unittest.TestCase):
         a = argparse.Namespace(action="answer", args=[tid, "q1", "again"], prompt_file=None, json=False, resume_old=False)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             L.cmd_thread(a)
+
+    def _send_ns(self, tid, text):
+        return argparse.Namespace(action="send", args=[tid, text], prompt_file=None, json=False, resume_old=False)
+
+    def _send(self, tid, text):
+        L = lean_agent_module()
+        import service_session
+        out = io.StringIO()
+        with mock.patch.object(service_session, "alive", return_value=True), \
+                mock.patch.object(service_session, "send", return_value=(True, "")), \
+                mock.patch.object(L, "auto_fresh_reason", return_value=""), contextlib.redirect_stdout(out):
+            self.assertEqual(L.cmd_thread(self._send_ns(tid, text)), 0)
+        return out.getvalue()
+
+    def test_thread_send_closes_the_only_open_question_and_its_waiting_item(self):
+        import service_session
+        lt = self.threads_home()
+        tid = lt.new("topic")
+        qid = lt.ask(tid, "Use the old or new API?")
+        service_session.queue_report(tid, "question", f"QUESTION {qid}: Use the old or new API?")
+        out = self._send(tid, "use the new one")
+        self.assertIn("closed q1, waiting w1", out)
+        self.assertEqual(lt.open_questions(lt.load()["threads"][tid]), [])
+        self.assertIn("Nothing is waiting", self.cli("waiting").stdout)
+
+    def test_thread_send_with_several_open_questions_closes_the_named_or_newest(self):
+        lt = self.threads_home()
+        tid = lt.new("topic")
+        lt.ask(tid, "First?")
+        lt.ask(tid, "Second?")
+        lt.ask(tid, "Third?")
+        self.assertIn("closed q1", self._send(tid, "q1: yes"))
+        self.assertIn("closed q3", self._send(tid, "go ahead"))
+        self.assertEqual([q["id"] for q in lt.open_questions(lt.load()["threads"][tid])], ["q2"])
+
+    def test_same_open_question_is_merged_and_counted(self):
+        lt = self.threads_home()
+        tid = lt.new("topic")
+        env = dict(LEAN_AGENT_THREAD=tid, LEAN_AGENT_SESSION_ROLE="thread")
+        self.cli("thread", "ask", "Use the old or new API?", **env)
+        r = self.cli("thread", "ask", "use the OLD or new api", **env)
+        self.assertIn("already waiting", r.stdout)
+        self.assertEqual(len(lt.open_questions(lt.load()["threads"][tid])), 1)
+        self.assertEqual(lt.load()["threads"][tid]["questions"][0]["count"], 2)
+        self.assertIn("(reported 2x)", self.cli("waiting").stdout)
+        import service_session
+        self.assertEqual(len(service_session.queued_reports()), 1)
+
+    def test_question_answered_a_moment_ago_is_not_raised_again(self):
+        self.threads_home()
+        import lean_waiting
+        wid = lean_waiting.add("Deploy now?", "question", None, "t1", qid="q1")
+        lean_waiting.close_for("t1", {"q1"}, "yes")
+        self.assertEqual(lean_waiting.add("deploy now", "question", None, "t1"), wid)
+        self.assertEqual(lean_waiting.open_items(), [])
 
     def test_hook_denies_ask_user_question_in_a_thread_session_and_allows_it_in_main(self):
         home = self.cli("home").stdout.strip()

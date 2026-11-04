@@ -823,8 +823,13 @@ def open_questions(t):
     return [q for q in qs if isinstance(q, dict) and not q.get("answered")]
 
 
-def ask(tid, text, options=None):
-    """Record an open question on thread `tid` (status "waiting on main"); returns its id qN."""
+def _qnorm(text):
+    return " ".join("".join(c if c.isalnum() else " " for c in str(text or "").lower()).split())
+
+
+def ask(tid, text, options=None, info=None):
+    """Record an open question on thread `tid` (status "waiting on main"); returns its id qN. The same question
+    (normalised text) asked again while open is merged into the open one (count + 1; `info["merged"]` is set)."""
     text = " ".join(str(text or "").split())
     if not text:
         raise ValueError('usage: lean-agent thread ask "<question>" [--options "a|b|c"]')
@@ -834,6 +839,12 @@ def ask(tid, text, options=None):
         if t is None:
             raise ValueError(f"no such thread {tid}")
         qs = t["questions"] = t.get("questions") if isinstance(t.get("questions"), list) else []
+        same = next((q for q in qs if not q.get("answered") and _qnorm(q.get("text")) == _qnorm(text[:QUESTION_CHARS])), None)
+        if same is not None:
+            same["count"] = int(same.get("count") or 1) + 1
+            if info is not None:
+                info["merged"] = True
+            return same["id"]
         qid = "q%d" % (1 + max([int(q["id"][1:]) for q in qs if str(q.get("id", "")).startswith("q") and q["id"][1:].isdigit()] + [0]))
         qs.append({"id": qid, "text": text[:QUESTION_CHARS], "options": opts, "ts": now_iso()})
     return qid
@@ -1255,7 +1266,11 @@ def _iso_of(ts, fallback_epoch):
     return ts or datetime.datetime.fromtimestamp(fallback_epoch).isoformat(timespec="seconds")
 
 
-def show_text(tid, all_=False, limit=40):
+SHOW_TAIL = 5          # `thread show` default: the latest entries
+SHOW_REPORT_CHARS = 800  # `thread show` default: the latest report, cut here (--full for all of it)
+
+
+def show_text(tid, all_=False, limit=40, report_chars=None):
     tid = resolve(norm(tid))
     data = load()
     t = data["threads"].get(tid)
@@ -1282,7 +1297,10 @@ def show_text(tid, all_=False, limit=40):
             last = e
     if last:
         when = datetime.datetime.fromtimestamp(last["ts"]).strftime("%Y-%m-%d %H:%M")
-        lines += ["", f"Last report ({last.get('kind')}, {when}):", last["text"].strip()]
+        body = last["text"].strip()
+        if report_chars and len(body) > report_chars:
+            body = body[:report_chars].rsplit(" ", 1)[0] + f" \u2026 (cut; `lean-agent thread show {tid} --full` for all)"
+        lines += ["", f"Last report ({last.get('kind')}, {when}):", body]
     return "\n".join(lines)
 
 
@@ -1415,10 +1433,21 @@ def cli(action, args, as_json=False, out=print):
             for t in ([] if as_json else items):
                 out(f"{t['id']:<9}{t['kind']:<6}{(t.get('last_message') or '-'):<21}{t['title']}" + (" [closed]" if t.get("closed") else ""))
         elif action == "show":
+            tail = None
+            if "--tail" in args:
+                k = args.index("--tail")
+                if k + 1 >= len(args) or not args[k + 1].isdigit():
+                    raise ValueError("usage: lean-agent thread show tN [--full] [--tail N]")
+                tail = int(args[k + 1])
+                args = args[:k] + args[k + 2:]
             ids = [a for a in args if not a.startswith("--")]
             if len(ids) != 1:
-                raise ValueError("usage: lean-agent thread show tN [--all]")
-            out(show_text(ids[0], "--all" in args))
+                raise ValueError("usage: lean-agent thread show tN [--full] [--tail N]")
+            full = "--full" in args or "--all" in args
+            if full:
+                out(show_text(ids[0], True))
+            else:  # short by default: state, open questions, the last few entries, the latest report cut
+                out(show_text(ids[0], False, tail if tail is not None else SHOW_TAIL, SHOW_REPORT_CHARS))
         elif action in ("close", "reopen"):
             if len(args) != 1:
                 raise ValueError(f"usage: lean-agent thread {action} tN")

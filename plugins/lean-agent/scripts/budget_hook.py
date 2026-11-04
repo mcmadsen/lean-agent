@@ -631,10 +631,10 @@ def prompt_hook(event):
                 if not lean_threads.is_notification(prompt):
                     lean_threads.pin(pinned, prompt, event.get("session_id"))
             elif service_session.SUMMARY_RE.match(prompt.strip()):  # the one-line summary of staged thread reports: the full block rides along as hidden context
-                block = service_session.take_pending(prompt)
-                if block:
-                    lean_threads.store_reports(block)
-                    lines.append(block)
+                got = service_session.take_pending(prompt, with_full=True)
+                if got:  # the digest rides along as hidden context; the threads keep the full text
+                    lean_threads.store_reports(got[1])
+                    lines.append(got[0])
             elif lean_threads.is_reports(prompt):  # thread reports: stored on the threads they name, nothing guessed or announced
                 lean_threads.store_reports(prompt)
             elif lean_threads.is_notification(prompt):  # a background-task notification: never a new request or thread; attaches to its run's thread silently
@@ -684,6 +684,40 @@ def turn_of(path):
     return text, asked
 
 
+def ask_answers(path):
+    """(question texts, answer text) of the last AskUserQuestion of the turn at the end of the transcript at `path`;
+    the answer is None while no tool_result for it is there (declined or not answered)."""
+    asks, qs, ans = {}, [], None
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return qs, ans
+    for line in raw.split(b"\n"):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        msg = rec.get("message") if isinstance(rec, dict) and isinstance(rec.get("message"), dict) else {}
+        body = msg.get("content")
+        if rec.get("type") == "user" and (isinstance(body, str) or any(isinstance(c, dict) and c.get("type") == "text" for c in body or [])):
+            asks, qs, ans = {}, [], None
+            continue
+        for c in body if isinstance(body, list) else []:
+            if not isinstance(c, dict):
+                continue
+            if rec.get("type") == "assistant" and c.get("type") == "tool_use" and c.get("name") == "AskUserQuestion":
+                inp = c.get("input") if isinstance(c.get("input"), dict) else {}
+                asks[c.get("id")] = [str(q.get("question") or "") for q in inp.get("questions") or [] if isinstance(q, dict)]
+                qs, ans = asks[c.get("id")], None
+            elif rec.get("type") == "user" and c.get("type") == "tool_result" and c.get("tool_use_id") in asks and not c.get("is_error"):
+                out = c.get("content")
+                out = out if isinstance(out, str) else " ".join(str(x.get("text") or "") for x in out or [] if isinstance(x, dict))
+                if out.strip() and "declined" not in out.lower()[:80] and "doesn't want to proceed" not in out.lower():
+                    qs, ans = asks[c.get("tool_use_id")], out.strip()[:300]
+    return qs, ans
+
+
 def asks_user(text):
     paras = [p.strip() for p in re.split(r"\n\s*\n", str(text or "")) if p.strip()]
     if not paras:
@@ -717,10 +751,14 @@ def stop_hook(event):
         try:
             import lean_waiting
             if asked:
-                lean_waiting.mark_asked()
+                qs, ans = ask_answers(event.get("transcript_path") or "")
+                if ans is not None:
+                    lean_waiting.answered_by(qs, ans)
+                else:
+                    lean_waiting.mark_asked()
             else:
                 unasked = lean_waiting.unasked()
-                if unasked or WAITING_RE.search(text):
+                if unasked or (WAITING_RE.search(text) and not lean_waiting.recent()):
                     print(json.dumps({"decision": "block", "reason": waiting_reason(unasked)}))
                     return
         except Exception:
