@@ -11,6 +11,7 @@ import shutil
 import os
 import subprocess
 import re
+import shlex
 import signal
 import socket
 import stat
@@ -3249,18 +3250,85 @@ class CliTest(unittest.TestCase):
         self.assertIn("Start failures, last 7 days (2)", out)
         self.assertIn("unknown card(s): no-such-card", out)
 
-    def test_advise_keeps_allow_cmd_with_read_only(self):
+    def test_advise_drops_allow_cmd_from_editing_worker_and_never_adds_read_only(self):
         self.cli("learn", self.proj, "--name", "proj")
-        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "--allow-cmd", "az pipelines runs show", "look")
         mod = lean_agent_module()
         self.assertEqual(mod.fix_allow_cmd("suggested: lean-agent run p -m haiku --allow-cmd 'az x show' -- 't'"),
-                         "suggested: lean-agent run p -m haiku --read-only --allow-cmd 'az x show' -- 't'")
+                         "suggested: lean-agent run p -m haiku -- 't'")
         self.assertEqual(mod.fix_allow_cmd("suggested: run p --read-only --allow-cmd 'az x show'"),
                          "suggested: run p --read-only --allow-cmd 'az x show'")
         self.assertIn("only goes with `--read-only`", mod.ADVISE_RULE)
+        out = self.cli("advise", "Post a comment on the pull request", FAKE_ANSWER="ADVICE\nunderstood: post a comment\n"
+                       "suggested: lean-agent run proj --cards auto -m haiku --allow-cmd 'az repos pr show' --worktree-base main "
+                       "--why \"x\" -- \"post the comment\"").stdout
+        sug = next(l for l in out.splitlines() if l.startswith("suggested:"))
+        self.assertNotIn("--read-only", sug)
+        self.assertNotIn("--allow-cmd", sug)
+        self.assertNotIn("--worktree-base", sug)
+        self.assertIn("risks:", out)
+        self.assertEqual(self.cli("run", "--check", *shlex.split(sug.split(":", 1)[1])[2:]).returncode, 0)
+
+    def test_advise_read_only_suggestion_for_a_posting_task_becomes_editing(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        out = self.cli("advise", "Check the run", FAKE_ANSWER="ADVICE\nunderstood: x\n"
+                       "suggested: lean-agent run proj --cards auto -m haiku --read-only --allow-cmd 'az pipelines runs show' "
+                       "--why \"x\" -- \"fix the pipeline and push\"").stdout
+        sug = next(l for l in out.splitlines() if l.startswith("suggested:"))
+        self.assertNotIn("--read-only", sug)
+        self.assertNotIn("--allow-cmd", sug)
+        self.assertIn("not --read-only", out)
+
+    def test_advise_keeps_allow_cmd_for_a_read_only_lookup(self):
+        self.cli("learn", self.proj, "--name", "proj")
         out = self.cli("advise", "Check the pipeline run", FAKE_ANSWER="ADVICE\nunderstood: look up a run\n"
-                       "suggested: lean-agent run proj --cards auto -m haiku --allow-cmd 'az pipelines runs show' --why \"x\" -- \"look\"").stdout
+                       "suggested: lean-agent run proj --cards auto -m haiku --read-only --allow-cmd 'az pipelines runs show' --why \"x\" -- \"look\"").stdout
         self.assertIn("--read-only --allow-cmd 'az pipelines runs show'", out)
+
+    def test_advise_prints_none_when_the_suggestion_cannot_pass_check(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        out = self.cli("advise", "Look at it", FAKE_ANSWER="ADVICE\nunderstood: x\n"
+                       "suggested: lean-agent run proj --cards no-such-card -m haiku --why \"x\" -- \"look\"").stdout
+        self.assertNotIn("no-such-card -m", out.split("risks:")[0])
+        self.assertIn("suggested:", out)
+
+    def test_run_check_creates_nothing_and_reports_ok_refusal_and_try(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        before = sorted(os.path.join(d, f) for d, _, fs in os.walk(self.env['LEAN_AGENT_HOME']) for f in fs
+                        if not f.endswith(".log") and "feedback" not in f)
+        ok = self.cli("run", "--check", "-p", "proj", "-m", "haiku", "--why", "x", "--allow-cmd", "az x show", "look")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertTrue(ok.stdout.startswith("ok: lean-agent run"), ok.stdout)
+        self.assertNotIn("--allow-cmd", ok.stdout.splitlines()[0])
+        bad = self.cli("run", "--check", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only",
+                       "--allow-cmd", "az x delete", "look", check=False)
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("refused:", bad.stdout)
+        self.assertIn("try: lean-agent run", bad.stdout)
+        self.assertNotIn("--check", bad.stdout)
+        card = self.cli("run", "--check", "-p", "proj", "-m", "haiku", "--why", "x", "--cards", "nope", "look", check=False)
+        self.assertEqual(card.returncode, 1)
+        self.assertIn("unknown card", card.stdout)
+        self.assertEqual(self.cli("run", "--check", "-p", "proj", "look", check=False).returncode, 1)
+        after = sorted(os.path.join(d, f) for d, _, fs in os.walk(self.env['LEAN_AGENT_HOME']) for f in fs
+                       if not f.endswith(".log") and "feedback" not in f)
+        self.assertEqual(before, after)
+        self.assertEqual(self.cli("runs").stdout.count("look"), 0)
+
+    def test_printed_hint_commands_pass_run_check(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        sys.path.insert(0, os.path.dirname(CLI))
+        import budget_hook
+        for text in (budget_hook.DELEGATE, budget_hook.DELEGATE_CHANGE, budget_hook.DELEGATE_KEEP, budget_hook.DELEGATE_MCP,
+                     budget_hook.TRACK_RUN, budget_hook.TRACK_WORKER):
+            m = re.search(r"lean-agent run <project>(.*?)(?:\.$|`|\) \(| \(|$)", text)
+            self.assertTrue(m, text)
+            cmd = m.group(1).replace("[--mcp <server>:<tools>] ", "").replace("<model>", "haiku")
+            cmd = re.sub(r"<[^>]*>", "x", cmd)
+            r = self.cli("run", "--check", "-p", "proj", *shlex.split(cmd.replace("--why '…'", "--why 'x'")))
+            self.assertEqual(r.returncode, 0, (text, r.stdout, r.stderr))
+        warn = lean_agent_module().read_only_cli_warning("run az pipelines runs show")
+        self.assertIn("READ-ONLY", warn)
+        self.assertIn("needs no --allow-cmd", warn)
 
     def test_allow_edit_adds_allow_rules_keeps_settings_denied_and_refuses_outside_paths(self):
         self.cli("learn", self.proj, "--name", "proj")
