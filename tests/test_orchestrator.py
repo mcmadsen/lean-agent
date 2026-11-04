@@ -8760,6 +8760,33 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(bad.returncode, 0)
         self.assertIn("--pr", bad.stderr)
 
+    def test_review_learn_filters_bots_slices_and_skips_when_nothing_is_new(self):
+        self.setup_learn_tracker()
+        thr = os.path.join(self.tmp.name, "threads2.json")
+        human = [{"id": i, "comments": [{"author": {"displayName": "Sam Dev"}, "content": "use the shared wrapper %d " % i + "x" * 400}]}
+                 for i in range(1, 7)]
+        bots = [{"id": 90, "comments": [{"author": {"displayName": "Build Service"}, "content": "CI passed"}]},
+                {"id": 91, "comments": [{"author": {"displayName": "Sam Dev"}, "content": "LEAN-REVIEW verdict approve"}]}]
+        with open(thr, "w") as fh:
+            json.dump(bots + human, fh)
+        lesson = json.dumps({"checklist": ["Check the shared wrapper first"], "threads_read": [1]})
+        fb = '{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-CHECKLIST ' + lesson
+        n = len(self.calls())
+        out = self.cli("review", "learn", "proj", "--pr", "70", "--threads-file", thr, FAKE_FEEDBACK=fb,
+                       LEAN_AGENT_LEARN_CHUNK_CHARS="1500").stdout
+        runs = self.calls()[n:]
+        self.assertGreater(len(runs), 1, out)  # sliced into several runs inside one command
+        self.assertIn("skipped 2 bot/CI/own thread(s)", out)
+        self.assertNotIn("CI passed", json.dumps(runs))
+        again = len(self.calls())
+        out = self.cli("review", "learn", "proj", "--pr", "70", "--threads-file", thr, FAKE_FEEDBACK=fb,
+                       LEAN_AGENT_LEARN_CHUNK_CHARS="1500").stdout
+        self.assertIn("nothing new to learn (6 threads already learned)", out)
+        self.assertEqual(len(self.calls()), again)  # no model run started
+        n = len(self.calls())
+        self.cli("review", "learn", "proj", "--pr", "71", "--threads-file", thr, "--all-authors", FAKE_FEEDBACK=fb)
+        self.assertIn("CI passed", json.dumps(self.calls()[n:]))
+
     def test_review_learn_does_not_try_a_forbidden_mcp_and_uses_the_threads_command(self):
         self.setup_learn_tracker()
         self.add_rule("Never use the tracker MCP server; use trackercli instead.")
@@ -10721,6 +10748,102 @@ class CliTest(unittest.TestCase):
         p = self.cli("review", "proj", "--head", "feature", "--base", "main", "--yes", "--force", FAKE_REVIEW=self.APPROVE,
                      check=False)
         self.assertIn("reviewer: opus (security-sensitive", p.stdout)
+
+
+class RevCostTest(unittest.TestCase):
+    """Delta selection, light re-review, the day-cost warning and learn's filter/slicing."""
+    def setUp(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        self.agent = lean_agent_module()
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.g("init", "-q", "-b", "main")
+        self.commit("src/app.py", "def f():\n    return 1\n", "first")
+
+    def g(self, *args):
+        return subprocess.run(["git", "-C", self.dir, "-c", "user.name=T", "-c", "user.email=t@example.com", *args],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def commit(self, name, text, msg):
+        f = os.path.join(self.dir, name)
+        os.makedirs(os.path.dirname(f), exist_ok=True)
+        with open(f, "w") as fh:
+            fh.write(text)
+        self.g("add", "-A")
+        self.g("commit", "-q", "-m", msg)
+        return self.g("rev-parse", "HEAD")
+
+    def test_delta_needs_ancestry(self):
+        old = self.g("rev-parse", "HEAD")
+        new = self.commit("src/app.py", "def f():\n    return 2\n", "fix")
+        self.assertTrue(self.agent.delta_is_descendant(self.dir, old, new))
+        self.g("reset", "-q", "--hard", old)  # history rewritten: the reviewed commit is no longer an ancestor
+        rewritten = self.commit("src/app.py", "def f():\n    return 3\n", "other fix")
+        self.assertFalse(self.agent.delta_is_descendant(self.dir, new, rewritten))
+
+    def test_classify_tiny_deltas(self):
+        a = self.agent
+        base = self.g("rev-parse", "HEAD")
+        t = self.commit("tests/test_app.py", "def test_f():\n    assert 1\n", "test")
+        self.assertEqual(a.classify_delta(self.dir, base, t)[0], "test-only")
+        d = self.commit("docs/guide.md", "# guide\nmore\n", "docs")
+        self.assertEqual(a.classify_delta(self.dir, t, d)[0], "docs-only")
+        c = self.commit("src/app.py", "def f():\n    # explains the value\n    return 1\n", "comment")
+        self.assertEqual(a.classify_delta(self.dir, d, c)[0], "comment-only")
+        r = self.commit("src/app.py", "def f():\n    # explains the value\n    return 2\n", "logic")
+        self.assertEqual(a.classify_delta(self.dir, c, r)[0], "")
+        self.g("mv", "src/app.py", "src/main.py")
+        self.g("commit", "-q", "-m", "rename")
+        mv = self.g("rev-parse", "HEAD")
+        self.assertEqual(a.classify_delta(self.dir, r, mv)[0], "rename-only")
+        self.assertEqual(a.classify_delta(self.dir, base, t, max_lines=1)[0], "")  # over the configurable limit
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_LIGHT_MAX_LINES": "1"}):
+            self.assertEqual(a.light_max_lines(), 1)
+
+    def test_cap_warning_from_the_nth_review_of_the_day(self):
+        a = self.agent
+        today = datetime.date.today().isoformat()
+        runs = [{"project": "p", "role": "reviewer", "ts": today + "T10:00:00", "cost_usd": 1.5,
+                 "review_meta": {"ref": "feat"}} for _ in range(2)]
+        with mock.patch.object(a, "ledger", return_value=runs), mock.patch.object(a, "config_json", return_value={}):
+            warn = a.review_cap_warning("p", "feat")
+            self.assertIn("review 3 of feat today", warn)
+            self.assertIn("$3.00 so far", warn)
+            self.assertIn("--full", warn)
+            self.assertEqual(a.review_cap_warning("p", "other"), "")
+        with mock.patch.object(a, "ledger", return_value=runs[:1]), mock.patch.object(a, "config_json", return_value={}):
+            self.assertEqual(a.review_cap_warning("p", "feat"), "")
+        with mock.patch.object(a, "ledger", return_value=runs[:1]), \
+                mock.patch.object(a, "config_json", return_value={"review_warn_after": 2}):
+            self.assertIn("review 2 of feat", a.review_cap_warning("p", "feat"))
+
+    def test_saving_line_compares_delta_with_full(self):
+        a = self.agent
+        rows = [{"run": "r1", "verdict": "approve", "head": "a"}, {"run": "r2", "verdict": "approve", "head": "b", "scope": "delta"},
+                {"run": "r3", "verdict": "approve", "head": "c", "scope": "light"}]
+        line = a.saving_line(a.review_scope_stats(rows, {"r1": 4.0, "r2": 1.0, "r3": 0.5}))
+        self.assertIn("1 full ($4.00)", line)
+        self.assertIn("2 delta/light ($1.50", line)
+        self.assertIn("saved ~$6.50", line)
+
+    def test_learn_filter_slicing_and_hashes(self):
+        a = self.agent
+        items = a.split_threads(json.dumps([
+            {"id": 1, "comments": [{"author": {"displayName": "Azure DevOps Pipeline"}, "content": "build ok"}]},
+            {"id": 2, "comments": [{"author": {"login": "dependabot[bot]"}, "content": "bump"},
+                                   {"author": {"login": "sam"}, "content": "please rename"}]},
+            {"id": 3, "comments": [{"author": {"login": "sam"}, "content": "LEAN-REVIEW approve"}]},
+            {"id": 4, "comments": [{"author": {"login": "sam"}, "content": "x" * 500}]}]))
+        kept, dropped = a.human_threads(items)
+        self.assertEqual([t["id"] for t in kept], [2, 4])
+        self.assertEqual(dropped, 2)
+        self.assertEqual(len(kept[0]["comments"]), 1)  # the bot comment of a mixed thread is removed
+        self.assertEqual(len(a.human_threads(items, all_authors=True)[0]), 4)
+        chunks = a.chunk_threads(kept, 300)
+        self.assertEqual(len(chunks), 2)
+        self.assertTrue(all(sum(map(len, c)) <= 300 for c in chunks))  # the long thread is cut, not sent whole
+        self.assertEqual(a.thread_hash(kept[0]), a.thread_hash(dict(kept[0])))
+        self.assertNotEqual(a.thread_hash(kept[0]), a.thread_hash(kept[1]))
 
 
 class ClearAllUnitTest(unittest.TestCase):

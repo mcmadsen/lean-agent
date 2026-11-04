@@ -4019,7 +4019,6 @@ LEARN_READING_MCP = ("Read the review threads of pull request {pr} (all threads 
 LEARN_READING_TEXT = ("The review threads of pull request {pr} are given below (all text people wrote; skip system/status\n"
                       "threads). Nothing else is available about the pull request; don't look it up.\n"
                       "<threads>\n{threads}\n</threads>")
-THREADS_CAP = 40000
 
 
 def threads_text(raw):
@@ -4031,7 +4030,112 @@ def threads_text(raw):
         raw = json.dumps(json.loads(raw), ensure_ascii=False, separators=(",", ":"))
     except ValueError:
         pass
-    return raw[:THREADS_CAP] + ("\n(cut: the input was longer)" if len(raw) > THREADS_CAP else "")
+    return raw  # sliced into chunks by chunk_threads (LEARN_CHUNK_CHARS), never cut
+
+
+LEARN_CHUNK_CHARS = 30000  # input per learn run: a run is never fed more, a big PR becomes several runs
+BOT_WORDS = ("[bot]", "bot", "pipeline", "build service", "continuous integration", "github-actions", "dependabot",
+             "azure-devops", "lean-agent", "system")
+OWN_MARKERS = ("lean-review", "lean-agent review", "reviewed by lean-agent")
+
+
+def comment_is_bot(c):
+    """A comment written by a bot, CI, a system/status event or this tool's own review."""
+    if not isinstance(c, dict):
+        return False
+    au = c.get("author") or c.get("user") or c.get("createdBy") or {}
+    if isinstance(au, dict):
+        name = " ".join(str(au.get(k) or "") for k in ("login", "name", "displayName", "uniqueName", "type")).lower()
+        if au.get("isBot") or au.get("is_bot") or str(au.get("type") or "").lower() in ("bot", "app", "service"):
+            return True
+    else:
+        name = str(au).lower()
+    if c.get("isBot") or str(c.get("commentType") or c.get("type") or "").lower() == "system":
+        return True
+    if any(w in name for w in BOT_WORDS):
+        return True
+    body = str(c.get("content") or c.get("body") or c.get("text") or "").lower()
+    return any(m in body[:400] for m in OWN_MARKERS)
+
+
+def split_threads(text):
+    """The PR's threads as a list of items: the thread objects of a JSON list (or of its threads/value/comments key),
+    else the blank-line separated blocks of plain text."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        data = next((data[k] for k in ("threads", "value", "comments", "items") if isinstance(data.get(k), list)), [data])
+    if isinstance(data, list):
+        return [t for t in data if t not in (None, "", {}, [])]
+    return [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
+
+
+def human_threads(items, all_authors=False):
+    """(kept, dropped): without --all-authors threads whose every comment is a bot/CI/system/own-review one are
+    dropped, and the bot comments of mixed threads are removed."""
+    if all_authors:
+        return list(items), 0
+    kept, dropped = [], 0
+    for t in items:
+        if not isinstance(t, dict):
+            kept.append(t)
+            continue
+        key = next((k for k in ("comments", "messages") if isinstance(t.get(k), list)), None)
+        if key:
+            humans = [c for c in t[key] if not comment_is_bot(c)]
+            if not humans:
+                dropped += 1
+                continue
+            kept.append(dict(t, **{key: humans}) if len(humans) != len(t[key]) else t)
+        elif comment_is_bot(t):
+            dropped += 1
+        else:
+            kept.append(t)
+    return kept, dropped
+
+
+def thread_hash(t):
+    """A stable id of one thread's content: a thread with new comments gets a new hash and is learned again."""
+    raw = t if isinstance(t, str) else json.dumps(t, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def learned_hashes_path(slug):
+    return home(slug, "review-learned-threads.json")
+
+
+def learned_hashes(slug, pr):
+    d = load_json(learned_hashes_path(slug), {})
+    return set(d.get(str(pr)) or []) if isinstance(d, dict) else set()
+
+
+def record_learned_hashes(slug, pr, hashes):
+    with file_lock(learned_hashes_path(slug)):
+        d = load_json(learned_hashes_path(slug), {})
+        d = d if isinstance(d, dict) else {}
+        d[str(pr)] = sorted(set(d.get(str(pr)) or []) | set(hashes))
+        save_json(learned_hashes_path(slug), d)
+
+
+def chunk_threads(items, cap=None):
+    """Slices of threads whose serialised size stays within `cap` characters each; one thread over the cap is cut
+    to it (and says so) rather than sent whole."""
+    cap = cap or env_num("LEAN_AGENT_LEARN_CHUNK_CHARS", LEARN_CHUNK_CHARS)
+    chunks, cur, size = [], [], 0
+    for t in items:
+        txt = t if isinstance(t, str) else json.dumps(t, ensure_ascii=False, separators=(",", ":"))
+        if len(txt) > cap:
+            txt = txt[:cap - 40] + "\n(cut: one thread was longer)"
+        if cur and size + len(txt) + 1 > cap:
+            chunks.append(cur)
+            cur, size = [], 0
+        cur.append(txt)
+        size += len(txt) + 1
+    if cur:
+        chunks.append(cur)
+    return chunks
 
 
 def read_threads(a, slug):
@@ -4762,20 +4866,58 @@ def cmd_review_learn(a):
         if seen_threads:
             ours += ("\n\nThreads already learned from: " + ", ".join(map(str, seen_threads[:100])) + ". Fetch only "
                      "the others (by thread id if the tool takes one), unless one of these has new comments.")
-        ns = argparse.Namespace(resume=None, task=[f"Learn from the human review of pull request {a.pr}."],
-                                task_file=None, model=a.model, why="turn human review findings into checklist lines",
-                                cards="none", card_list=None, project=slug, read_only=True, chrome=None,
-                                mcp=None if threads is not None else a.mcp,
-                                tools=None, allow_send=None, max_turns=25, max_usd=1.5, max_context=2000,
-                                max_cards=4, ttype="read", role="review-learn", effort="medium",
-                                role_rule=LEARN_RULE.format(
-                                    pr=a.pr, ours=ours, existing=existing[:6000], project=path,
-                                    source="the pull request threads given below" if threads is not None else "the pull request threads (MCP tools)",
-                                    reading=(LEARN_READING_TEXT.format(pr=a.pr, threads=threads) if threads is not None
-                                             else LEARN_READING_MCP.format(pr=a.pr))))
-        rc = cmd_run(ns)
-        run = next((r for r in reversed(ledger()) if r.get("role") == "review-learn" and r["project"] == slug), None)
-        got = load_json(os.path.join(run["workdir"], "checklist.json"), {}) if run else {}
+        all_authors = bool(getattr(a, "all_authors", False))
+        chunks, hashes_by_chunk = [None], [[]]
+        if threads is not None:
+            items = split_threads(threads)
+            items, dropped = human_threads(items, all_authors)
+            known = learned_hashes(slug, a.pr)
+            fresh = [t for t in items if thread_hash(t) not in known]
+            if dropped:
+                print(f"review learn: skipped {dropped} bot/CI/own thread(s) (--all-authors includes them)", flush=True)
+            if not fresh:
+                print(f"nothing new to learn ({len(items) - len(fresh)} threads already learned)", flush=True)
+                if not (checklist or helpers):
+                    return 0
+                chunks = []
+            else:
+                chunks = chunk_threads(fresh)
+                hashes_by_chunk = []
+                pos = 0
+                for ch in chunks:  # the hashes of the threads each chunk holds (chunks keep the order of `fresh`)
+                    hashes_by_chunk.append([thread_hash(t) for t in fresh[pos:pos + len(ch)]])
+                    pos += len(ch)
+                if len(chunks) > 1:
+                    print(f"review learn: {len(fresh)} new threads in {len(chunks)} parts", flush=True)
+        else:
+            ours += "\n\nLearn only from comments written by people, not bots, CI or tool-generated ones." if not all_authors else ""
+        got = {"checklist": [], "helpers": [], "replace": [], "declined": [], "threads_read": [], "last_comment": None}
+        rc, run = 0, None
+        for n, chunk in enumerate(chunks, 1):
+            label = f" (part {n} of {len(chunks)})" if len(chunks) > 1 else ""
+            ns = argparse.Namespace(resume=None, task=[f"Learn from the human review of pull request {a.pr}{label}."],
+                                    task_file=None, model=a.model, why="turn human review findings into checklist lines",
+                                    cards="none", card_list=None, project=slug, read_only=True, chrome=None,
+                                    mcp=None if threads is not None else a.mcp,
+                                    tools=None, allow_send=None, max_turns=25, max_usd=1.5, max_context=2000,
+                                    max_cards=4, ttype="read", role="review-learn", effort="medium",
+                                    role_rule=LEARN_RULE.format(
+                                        pr=a.pr, ours=ours, existing=existing[:6000], project=path,
+                                        source="the pull request threads given below" if threads is not None else "the pull request threads (MCP tools)",
+                                        reading=(LEARN_READING_TEXT.format(pr=a.pr, threads="\n".join(chunk)) if threads is not None
+                                                 else LEARN_READING_MCP.format(pr=a.pr))))
+            rc_n = cmd_run(ns)
+            rc = rc or rc_n
+            run = next((r for r in reversed(ledger()) if r.get("role") == "review-learn" and r["project"] == slug), None)
+            g = load_json(os.path.join(run["workdir"], "checklist.json"), {}) if run else {}
+            for k in ("checklist", "helpers", "replace", "declined", "threads_read"):
+                got[k] += [x for x in g.get(k) or [] if x not in got[k]]
+            got["last_comment"] = g.get("last_comment") or got["last_comment"]
+            if threads is not None and (g or not rc_n):  # a part that answered is not read again
+                record_learned_hashes(slug, a.pr, hashes_by_chunk[n - 1])
+        if not got["last_comment"]:
+            got.pop("last_comment")
+        got = got if any(got.values()) else {}
         checklist += [c for c in got.get("checklist") or [] if isinstance(c, str) and "not confirmed" not in c.lower()]
         for h in got.get("helpers") or []:
             if not isinstance(h, dict) or not h.get("name"):
@@ -4786,9 +4928,10 @@ def cmd_review_learn(a):
                 continue
             helpers.append(dict(h, where=where))
         replace = [r for r in got.get("replace") or [] if isinstance(r, dict)]
-        update_review_learned(slug, a.pr, learned_at=now_iso(), run=run and run.get("id"),
-                              last_comment_id=str(got["last_comment"]) if got.get("last_comment") else None,
-                              head=a.head)
+        if run:
+            update_review_learned(slug, a.pr, learned_at=now_iso(), run=run.get("id"),
+                                  last_comment_id=str(got["last_comment"]) if got.get("last_comment") else None,
+                                  head=a.head)
         if got.get("threads_read"):
             tp = home("reviews", slug + ".threads.json")
             th = load_json(tp, {})
@@ -5218,6 +5361,102 @@ def record_skip(slug, path, a, sha, label, mode, base, reason):
     return skipped_status(slug, path, label, sha)  # what a second run on this head exits with
 
 
+LIGHT_MAX_LINES = 40
+COMMENT_LINE = re.compile(r"^\s*(#|//|/\*|\*|\*/|--|<!--|\"\"\")")
+
+
+def light_max_lines():
+    """Largest delta (changed lines) that can still be a light re-review: config review_light_max_lines, else
+    LEAN_AGENT_LIGHT_MAX_LINES, else 40."""
+    v = config_json().get("review_light_max_lines")
+    return v if isinstance(v, int) and v >= 0 else env_num("LEAN_AGENT_LIGHT_MAX_LINES", LIGHT_MAX_LINES)
+
+
+def delta_is_descendant(path, old, new):
+    """True when `new` builds on `old` (so old..new is exactly what was added since the reviewed commit)."""
+    return git(path, "merge-base", "--is-ancestor", old, new) is not None
+
+
+def classify_delta(path, old, new, max_lines=None):
+    """(kind, lines): kind is 'test-only', 'docs-only', 'comment-only' or 'rename-only' when the delta old..new is
+    small (<= max_lines changed lines) and low-risk, else ''. lines is the number of changed lines."""
+    limit = light_max_lines() if max_lines is None else max_lines
+    stat = git(path, "diff", "-M", "--numstat", old, new) or ""
+    rows = [l.split("\t") for l in stat.splitlines() if l.count("\t") >= 2]
+    lines = sum(int(r[0]) + int(r[1]) for r in rows if r[0].isdigit() and r[1].isdigit())
+    names = [r[2] for r in rows]
+    if not names or lines > limit:
+        return "", lines
+    if lines == 0:
+        return "rename-only", lines
+    if all(TEST_FILE.search(n) for n in names):
+        return "test-only", lines
+    if all(is_docs_file(n) for n in names):
+        return "docs-only", lines
+    diff = git(path, "diff", "-U0", "--no-color", old, new) or ""
+    body = [l[1:] for l in diff.splitlines() if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+    if body and all(not l.strip() or COMMENT_LINE.match(l) for l in body):
+        return "comment-only", lines
+    return "", lines
+
+
+def review_warn_after():
+    """The nth review of one branch in a day that starts the cost warning: config review_warn_after, else
+    LEAN_AGENT_REVIEW_WARN_AFTER, else 3."""
+    v = config_json().get("review_warn_after")
+    return v if isinstance(v, int) and v >= 1 else env_num("LEAN_AGENT_REVIEW_WARN_AFTER", 3)
+
+
+def branch_day_cost(slug, label, day=None):
+    """(reviews, dollars) a branch's reviewer runs cost on `day` (default today), from the ledger."""
+    day = day or datetime.date.today().isoformat()
+    runs = [r for r in ledger() if r.get("project") == slug and r.get("role") in ("reviewer", "reuse-check")
+            and (r.get("review_meta") or {}).get("ref") == label and str(r.get("ts", "")).startswith(day)]
+    n = sum(1 for r in runs if r.get("role") == "reviewer" and not r.get("resumed"))
+    return n, sum(r.get("cost_usd") or 0 for r in runs)
+
+
+def review_cap_warning(slug, label, day=None):
+    """The warning line for the review about to start when it is the nth (>= warn threshold) of the branch today."""
+    n, cost = branch_day_cost(slug, label, day)
+    if n + 1 < review_warn_after():
+        return ""
+    return (f"review: this is review {n + 1} of {label} today (${cost:.2f} so far). Batch fixes before re-reviewing; "
+            "--full only when the delta review is not enough (threshold: config review_warn_after).")
+
+
+def review_scope_stats(rows, cost_by_run):
+    """{scope: [count, dollars]} for review rows (scope full/delta/light; rows without one count as full)."""
+    out = {}
+    for r in rows:
+        if is_skipped(r.get("verdict")) or not r.get("head"):
+            continue
+        sc = r.get("scope") or ("delta" if r.get("delta") else "full")
+        e = out.setdefault(sc, [0, 0.0])
+        e[0] += 1
+        e[1] += cost_by_run.get(r.get("run"), 0) or 0
+    return out
+
+
+def saving_line(stats):
+    """One line comparing delta/light reviews with full ones, or ''."""
+    full = stats.get("full") or [0, 0.0]
+    cheap = [sum(stats[k][i] for k in ("delta", "light") if k in stats) for i in (0, 1)]
+    if not cheap[0]:
+        return ""
+    avg_full = full[1] / full[0] if full[0] else None
+    line = (f"{full[0]} full (${full[1]:.2f}), {int(cheap[0])} delta/light (${cheap[1]:.2f}, "
+            f"avg ${cheap[1] / cheap[0]:.2f})")
+    if avg_full:
+        line += f"; vs full avg ${avg_full:.2f}: saved ~${avg_full * cheap[0] - cheap[1]:.2f}"
+    return line
+
+
+def review_saving(rows):
+    cost = {r.get("id"): r.get("cost_usd") or 0 for r in ledger()}
+    return saving_line(review_scope_stats(rows, cost))
+
+
 def review_costs(a):
     """`review --costs`: what the reviews of the last N days cost, from the ledger: per branch and per model, runs,
     second turns (the reviewer resumed, or the cheap fill-in run), re-review rounds and skipped reviews by reason."""
@@ -5267,6 +5506,11 @@ def review_costs(a):
         for key, (n, cost) in sorted(table.items(), key=lambda kv: -kv[1][1]):
             print(f"    {key}: ${cost:.2f} ({n} run(s))")
     print("  skipped: " + (", ".join(f"{n} {w}" for w, n in sorted(skips.items())) if skips else "none"))
+    rows = [rec for sl in ([slug] if slug else list(projects())) for rec in read_jsonl(reviews_path(sl))
+            if rec.get("ts", "") >= cutoff]
+    sv = review_saving(rows)
+    if sv:
+        print("  delta vs full: " + sv)
     return 0
 
 
@@ -5380,6 +5624,19 @@ def review_main(a):
             else:
                 print(f"review: {size} changed lines since the review at {old[:12]} (over {delta_max}, "
                       "LEAN_AGENT_DELTA_MAX_LINES): a full review", flush=True)
+    a._fallback = ""
+    if a.resume and a.head and not a.independent:  # a delta is only meaningful when the head builds on the reviewed one
+        prev_ = earlier_review(slug, path, a.head)
+        old = reviewed_baseline(slug, path, a.head, prev_) if prev_ else None
+        new = git(path, "rev-parse", "--verify", "--quiet", a.head + "^{commit}")
+        if old and new and old != new and not delta_is_descendant(path, old, new):
+            a._fallback = f"history was rewritten ({old[:12]} is not an ancestor of {new[:12]})"
+            print(f"review: {a._fallback}: a full review instead of a delta", flush=True)
+            a.resume = False
+    if not a.status and (not a.head or git(path, "rev-parse", "--verify", "--quiet", a.head + "^{commit}")):
+        warn = review_cap_warning(slug, review_target(path, a.head)[2])
+        if warn:
+            print(warn, flush=True)
     if (a.resume and not getattr(a, "force", False) and not a.independent
             and (not a.head or git(path, "rev-parse", "--verify", "--quiet", a.head + "^{commit}"))):
         sha, _, label, _ = review_target(path, a.head)
@@ -5441,7 +5698,11 @@ def review_main(a):
         read_rule = (f"These files are NOT checked out. Read them at the reviewed commit with `git -C {path} show "
                      f"{meta['head']}:<path>`, search with `git -C {path} grep -n <pattern> {meta['head']}`."
                      if meta.get("mode") == "ref" else "")
-        task = ("Re-review after fixes. The earlier review's open items (say for each: fixed / still open, with "
+        summary = (f"Earlier review {last.get('run', prev['id'])}: {last.get('verdict', '?')}, "
+                   f"{len(last.get('findings') or [])} finding(s), {len(last.get('checks') or [])} check(s). "
+                   f"Review only the delta {old_head[:12]}..{meta['head'][:12]}; read surrounding code only where "
+                   "the delta touches it.\n\n")
+        task = (summary + "Re-review after fixes. The earlier review's open items (say for each: fixed / still open, with "
                 "file:line):\n" + ("\n".join(open_items[:25]) or "- none") + "\n\nGive the changes since then the full "
                 "passes; don't re-review code that didn't change. " + decisions_text(slug, meta.get("ref"), path, meta["head"])
                 + (a.focus or "") + answer_template(ns_syms, focus))
@@ -5452,6 +5713,15 @@ def review_main(a):
         delta_model, why_model = choose_review_model(path, since, changed, getattr(a, "reviewer_model", None)
                                                      or os.environ.get("LEAN_AGENT_DELTA_REVIEW_MODEL") or explicit,
                                                      rereview=True)
+        light, light_lines = classify_delta(path, old_head, meta["head"]) if meta.get("mode") == "ref" else ("", 0)
+        if light and not (getattr(a, "reviewer_model", None) or explicit):  # tiny, low-risk: never dearer than the cheap model
+            cheap = os.environ.get("LEAN_AGENT_LIGHT_REVIEW_MODEL") or "sonnet"
+            if usage.model_rate(delta_model) > usage.model_rate(cheap):
+                delta_model, why_model = cheap, f"light re-review ({light} delta, {light_lines} lines)"
+            risk = []
+            print(f"light re-review ({light} delta): no second opinion, {delta_model}", flush=True)
+        meta["scope"] = "light" if light else "delta"
+        meta["delta_base"] = old_head
         print(f"reviewer: {delta_model} ({why_model})", flush=True)
         if risk and usage.model_rate(delta_model) <= 1:
             print(f"review: the changes since are high-risk ({'; '.join(risk)}): --reviewer-model "
@@ -5563,7 +5833,8 @@ def review_main(a):
             "second_opinion": getattr(a, "_second", []),
             "hunks": changed_hunks(path, [merge_base, sha] if mode == "ref" else [merge_base]),
             "edited_tests": focus["tests"], "independent": bool(a.independent), "gaps": focus.get("gaps") or [],
-            "goal": getattr(a, "goal", None), "ci_parity": focus.get("ci_parity") or []}
+            "goal": getattr(a, "goal", None), "ci_parity": focus.get("ci_parity") or [],
+            "scope": "full", "fallback": getattr(a, "_fallback", "")}
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=model, estimate=getattr(a, "_estimate", None),
                             todo=getattr(a, "todo", None),
                             why=f"pre-PR review ({effort} effort)", cards=None, card_list=cards, project=slug,
@@ -5973,7 +6244,9 @@ def report_review(slug, project, entry, review, meta):
                                       "coverage_unchecked": review.get("_no_cov") or [],
                                       "gaps": review.get("_gaps") or [], "goal": review.get("_goal"),
                                       "branch": branch_of(root, meta.get("ref")) if meta.get("mode") == "ref" else "",
-                                      "after": meta.get("after"), "delta": bool(meta.get("resume"))})
+                                      "after": meta.get("after"), "delta": bool(meta.get("resume")),
+                                      "scope": meta.get("scope") or ("delta" if meta.get("resume") else "full"),
+                                      "delta_base": meta.get("delta_base"), "fallback": meta.get("fallback") or ""})
     order = {"blocker": 0, "major": 1, "minor": 2, "nit": 3}
     label = meta.get("ref") or "the working tree"
     if meta.get("mode") == "ref" and entry.get("thread") and entry.get("thread") != "none" and verdict in ("approve", "changes-requested"):
@@ -11861,6 +12134,9 @@ def cmd_week(a):
         for r in reviews:
             verdicts[r.get("verdict")] = verdicts.get(r.get("verdict"), 0) + 1
         print("Reviews: " + ", ".join(f"{v} {n}" for v, n in verdicts.items()))
+        sv = review_saving(reviews)
+        if sv:
+            print("  review cost: " + sv)
     pushes = [p_ for p_ in read_jsonl(home("pushes.jsonl")) if p_.get("ts", "") >= cutoff and p_.get("ok")]
     if pushes:
         print("Pushed: " + ", ".join(f"{p_['branch']} -> {p_['to']}" for p_ in pushes[-8:]))
@@ -13181,6 +13457,8 @@ def build_parser():
                    "text from this file (or - for stdin), e.g. from the tracker's CLI")
     s.add_argument("--threads-cmd", metavar="CMD", help="--pr without an MCP: a command that prints the threads, {pr} "
                    "replaced by the PR id (saved for the project; used by the automatic learning)")
+    s.add_argument("--all-authors", action="store_true", help="--pr: also learn from bot, CI, system and this tool's own "
+                   "comments (default: human-written threads only)")
     s.add_argument("--list", action="store_true", help="list the learned checklist and helper lines, numbered")
     s.add_argument("--rm", metavar="N|TEXT", help="remove a learned line by its --list number or a unique piece of its text")
     s.add_argument("--undo", action="store_true", help="undo the last learn batch (or removal)")
@@ -13503,6 +13781,8 @@ def main(argv=None):
     flags = {"--brief", "--full", "--verbose"} & set(argv[1:]) if argv[:1] != ["up"] else set()
     argv = [x for i, x in enumerate(argv) if not (i and x in flags)]
     VERBOSE = "--verbose" in flags
+    if argv[:1] == ["review"] and "--full" in flags:
+        argv.append("--full-review")  # on `review`, --full means: no delta, review the whole change
     BRIEF = "--brief" in flags or (os.environ.get("LEAN_AGENT_BRIEF") == "1" and "--full" not in flags)
     a, leftover = ap.parse_known_args(argv)
     if leftover and a.cmd in ("mcp", "guard") and not any(x.startswith("-") for x in leftover):
