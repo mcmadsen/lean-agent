@@ -10899,10 +10899,17 @@ def start_closed_thread(tid, t, prompt, resume_old, force=False):
     """Start the session of a thread that is not running: a new one from the brief, or with `resume_old` (and for a
     thread that never closed) the previous one. Returns (Remote Control name, the line saying which)."""
     fresh, line, t = prepare_thread_session(tid, resume_old, force)
-    msg = None
-    if fresh:
+    msg, parked = None, t.get("parked")
+    if fresh and parked and t.get("parked_summary"):  # parked, its session gone: seeded with the parked summary, not the brief
+        msg = t["parked_summary"] + "\n" + lean_threads.BRIEF_END + ("\n\n" + prompt if prompt else "\n\n(No message yet: wait for the user.)")
+        line = f"{tid} woken from parked summary (~{kt(max(1, len(t['parked_summary']) // 4))} tokens; its old session is gone)"
+    elif fresh:
         msg, tokens = fresh_message(tid, prompt)
         line = f"{tid} started fresh (brief ~{kt(tokens)} tokens)"
+    elif parked:
+        line = f"{tid} woken: resumed its parked session"
+    if parked:
+        lean_threads.set_session(tid, parked=None, parked_summary=None)
     if t.get("closed"):
         lean_threads.set_closed(tid, False)
     name = start_thread_session(tid, t, prompt, msg)
@@ -10975,7 +10982,7 @@ def prepare_thread_session(tid, resume_old, force=False):
             has = True
         ctx = service_session.transcript_state(transcript_of(sid))["ctx"] if has else 0
         return False, f"{tid} resumed old session {sid[:8]}" + (f" (context ~{kt(ctx)})" if ctx else ""), t
-    if has and (t.get("closed") or force):
+    if has and (t.get("closed") or force) and not (t.get("parked") and not force):
         lean_threads.set_session(tid, session_id=str(uuid.uuid4()), session_history=(hist + [sid])[-20:])
         t = lean_threads.load()["threads"].get(tid) or {}
         return True, None, t
@@ -11162,7 +11169,32 @@ def close_blockers(s, busy, launching, caller):
         why.append(f"idle under {close_min_idle() // 60} min")
     if service_session.mid_turn(tid):
         why.append("mid-turn (tool call, answer or prompt pending)")
+    if lean_threads.open_questions(lean_threads.load()["threads"].get(tid) or {}):
+        why.append("an open question waits on main")
     return why
+
+
+def parked_summary(tid):
+    """What a parked thread keeps instead of its live session: the fresh-session brief (checkpoint, recent requests,
+    runs, handovers), the last report and the open questions."""
+    import compact_hook
+    t = lean_threads.load()["threads"].get(tid) or {}
+    parts = [compact_hook.fresh_brief(tid)]
+    rep_ = service_session._load(service_session.last_reports_path()).get(tid) or {}
+    if rep_.get("text"):
+        parts.append(f'Last report ({rep_.get("kind")}):\n' + str(rep_["text"])[:1500])
+    qs = lean_threads.open_questions(t)
+    if qs:
+        parts.append("Open questions:\n" + "\n".join(f'{q["id"]}: {q["text"]}' for q in qs))
+    return "\n\n".join(parts)
+
+
+def park_thread_session(tid):
+    """Stop a thread's live session but keep it: summary stored, session id kept (resumable). Not closed."""
+
+    close_thread_session(tid)
+    summary = parked_summary(tid)
+    lean_threads.set_session(tid, parked=now_iso(), parked_summary=summary)
 
 
 def close_min_idle():
@@ -11185,25 +11217,24 @@ def make_room_for_thread_session(tid=None):
         why = {s["thread"]: close_blockers(s, busy, launching, caller) for s in sessions}
         free = [s for s in sessions if not why[s["thread"]]]
         if not free:
-            die(f"{len(sessions)} thread sessions are open (max-thread-sessions {cap}) and none can be closed to make room:\n" +
+            die(f"{len(sessions)} thread sessions are open (max-thread-sessions {cap}) and none can be parked to make room:\n" +
                 "\n".join(f'{s["thread"]} "{s["title"]}" idle {_idle_age(s["idle"])}, not eligible: {"; ".join(why[s["thread"]])}'
-                          for s in sessions) + "\nclose one (`lean-agent thread close tN`), or `lean-agent config max-thread-sessions N`")
-        v = max(free, key=lambda s: s["idle"])
+                          for s in sessions) + "\npark or close one (`lean-agent thread park tN`, `thread close tN`), or `lean-agent config max-thread-sessions N`")
+        v = max(free, key=lambda s: s["idle"])  # the least recently used idle thread
+        line = f'parking {v["thread"]} (idle {_idle_age(v["idle"])}) to make room'
+        print(line, flush=True)
         try:
-            close_thread_session(v["thread"])
+            park_thread_session(v["thread"])
         except RuntimeError as exc:
             die(str(exc))
-        if v["thread"] in lean_threads.load()["threads"]:
-            lean_threads.set_closed(v["thread"], True)
-        line = f'closed {v["thread"]} "{v["title"]}" (idle {_idle_age(v["idle"])}) to make room'
         try:
             os.makedirs(home("logs"), exist_ok=True)
             with open(home("logs", "service.log"), "a", encoding="utf-8") as fh:
-                fh.write(f'{now_iso()} cap auto-close: {line}; reason: max-thread-sessions {cap} reached starting '
+                fh.write(f'{now_iso()} cap auto-park: {line}; reason: max-thread-sessions {cap} reached starting '
                          f'{tid or "a new thread"}; idle {v["idle"]}s; caller {caller or "none"}\n')
         except OSError:
             pass
-        print(line + f' \u2014 reopen with lean-agent thread reopen {v["thread"]}')
+        print(f'parked {v["thread"]} "{v["title"]}" \u2014 wake with lean-agent thread wake {v["thread"]} (or thread send)')
         sessions.remove(v)
 
 
@@ -11356,6 +11387,14 @@ def cmd_thread(a):
                      + (f"  {len(runs)} running (first {runs[0][0]})" if runs else "") + ("  mid-turn" if service_session.mid_turn(x["thread"]) else ""))
             print(f"{x['thread']:<6}{x['name'] or '-':<42}pid {x['pid'] or '-':<8}idle {x['idle']}s  context {context_cell(ctxs[x['thread']])}"
                   + ("  fresh on next send" if ctxs[x["thread"]]["fresh"] else "") + extra)
+        live = {x["thread"] for x in sessions}
+        for k, t in sorted(lean_threads.load()["threads"].items(), key=lambda kv: int(kv[0][1:]) if kv[0][1:].isdigit() else 0):
+            if k in live or k in lean_threads.load()["aliases"] or k in lean_threads.RESERVED:
+                continue
+            if t.get("parked"):
+                print(f"{k:<6}{t.get('title') or '-':<42}parked {lean_threads.age(t['parked'])}  (wake: lean-agent thread wake {k})")
+            elif t.get("closed") and t.get("session_id"):
+                print(f"{k:<6}{t.get('title') or '-':<42}closed (reopen: lean-agent thread reopen {k})")
         if not sessions:
             print("no thread sessions running (start one with `lean-agent thread new \"title\"`)")
         return 0
@@ -11425,6 +11464,24 @@ def cmd_thread(a):
                 die(f"{exc} (thread {tid} was removed)")
         print(f'thread {tid} started: Remote Control "{name}"')
         return 0
+    if act == "park":
+        if len(a.args) != 1:
+            die("usage: lean-agent thread park tN")
+        tid, t = thread_session_tid(a.args[0])
+        mine = next((x for x in open_thread_sessions() if x["thread"] == tid), None)
+        if not mine:
+            die(f"{tid} has no live session to park" + (" (already parked)" if t.get("parked") else ""))
+        why = close_blockers(dict(mine, idle=10 ** 9), lean_threads.running_by_thread(lean_threads.load()), launching_threads(), caller_thread())
+        if why:
+            die(f"{tid} can't be parked now: {'; '.join(why)}")
+        try:
+            park_thread_session(tid)
+        except RuntimeError as exc:
+            die(str(exc))
+        print(f"parked {tid} \u2014 wake with lean-agent thread wake {tid} (or thread send)")
+        return 0
+    if act == "wake":
+        act, a.action = "open", "open"
     if act in ("send", "open"):
         if act == "send":
             thread_positional_message(a, "send")
@@ -13176,7 +13233,7 @@ def build_parser():
     s.set_defaults(fn=cmd_schedule)
 
     s = sub.add_parser("thread", help="threads: new \"title\" [\"<text>\"|--prompt-file F|-] (its own Remote Control session) | send tN \"<text>\"|--prompt-file F|- | ask \"question\" [--options \"a|b|c\"] (from inside a thread session: the question goes to main; end the turn, the answer arrives as your next turn) | answer tN [qN] \"answer\" (main: pass an answer into the thread session) | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
-    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "answer", "reports"])
+    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "answer", "reports", "park", "wake"])
     s.add_argument("args", nargs="*", help='new "title" ["<text>"]; send tN "<text>"; answer tN [qN] "<answer>"; other actions: ids')
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin); or give it as a positional argument, not both")
