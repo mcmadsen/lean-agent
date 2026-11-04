@@ -1060,6 +1060,35 @@ def reports_message(items, dropped=0):
         f"details: lean-agent thread show {tids[0]}{more}", "</thread-reports>"])
 
 
+DIGEST_CHARS = 240      # a plain report's digest in the hidden context (a question keeps up to DIGEST_Q_CHARS)
+DIGEST_Q_CHARS = 600
+DIGEST_TURN_CHARS = 2000
+
+
+def reports_digest(items, dropped=0, rid=""):
+    """The hidden context for a batch of reports: one short line per report with the batch id, questions whole up to
+    DIGEST_Q_CHARS, 2k in all. The full text stays in the log: `lean-agent thread reports tN [rId]`."""
+    lines, used = [], 0
+    for n, i in enumerate(items):
+        ask = i["kind"] in ("question", "needs-you")
+        line = f"[{i['thread']} {i['kind']}] {REPORT_LABELS.get(i['kind'], '')}" + _short(i["text"], DIGEST_Q_CHARS if ask else DIGEST_CHARS)
+        if used + len(line) > DIGEST_TURN_CHARS and lines:
+            lines.append(f"(+{len(items) - n} more report(s): `lean-agent thread reports`)")
+            break
+        lines.append(line)
+        used += len(line)
+    if dropped:
+        lines.append(f"({dropped} older report(s) dropped: over {REPORT_MAX_AGE // 3600} h old)")
+    asking = sorted({i["thread"] for i in items if i["kind"] in ("question", "needs-you")})
+    if asking:
+        lines.append(f'questions: answer them (or ask the user) with lean-agent thread answer {asking[0]} [qN] "<answer>"')
+    tids = list(dict.fromkeys(i["thread"] for i in items if i["kind"] != "job-failed"))
+    if tids:
+        lines.append(f"Relay these digests, do not paste reports. Full text only when needed: lean-agent thread reports {tids[0]}"
+                     + (f" r{rid}" if rid else ""))
+    return "\n".join(["<thread-reports>"] + lines + ["</thread-reports>"])
+
+
 SUMMARY_RE = re.compile(r"^lean-agent: \d+ thread reports? \(.*\) \[r([0-9a-f]{6})\]$")
 PENDING_FALLBACK = 60  # seconds: the one wait after a paste; a paste that began no turn (the prompt hook never took the staged block) is retried then, typed in full
 REPORT_LOG_KEPT = 10
@@ -1079,17 +1108,19 @@ def summary_line(items, rid):
     return f"lean-agent: {len(items)} thread report{'s' if len(items) != 1 else ''} ({', '.join(tags)}) [r{rid}]"
 
 
-def stage_block(rid, line, block, now=None):
-    """Queue the full block on disk for the main session's prompt hook, and keep it in the log for `thread reports`."""
+def stage_block(rid, line, block, now=None, full=None):
+    """Queue the block (the digest) on disk for the main session's prompt hook; the full text (default: the block)
+    goes to the log for `thread reports` and to the threads' stored reports."""
     os.makedirs(lean_home(), exist_ok=True)
-    lean_common.write_json_atomic(pending_path(), {"id": rid, "line": line, "block": block, "ts": time.time() if now is None else now})
-    log_block(block)
+    full = block if full is None else full
+    lean_common.write_json_atomic(pending_path(), {"id": rid, "line": line, "block": block, "full": full, "ts": time.time() if now is None else now})
+    log_block(full, rid)
 
 
-def log_block(block):
+def log_block(block, rid=""):
     with lean_common.file_lock(reports_log_path()):
         items = _load(reports_log_path()).get("items")
-        items = (items if isinstance(items, list) else []) + [{"ts": time.time(), "block": block}]
+        items = (items if isinstance(items, list) else []) + [{"ts": time.time(), "block": block, "id": rid}]
         lean_common.write_json_atomic(reports_log_path(), {"items": items[-REPORT_LOG_KEPT:]})
 
 
@@ -1098,8 +1129,9 @@ def logged_blocks():
     return items if isinstance(items, list) else []
 
 
-def take_pending(line):
-    """The staged full block for a summary `line` typed into main (once: the file is removed), else None."""
+def take_pending(line, with_full=False):
+    """The staged block (digest) for a summary `line` typed into main (once: the file is removed), else None;
+    with `with_full` a (digest, full text) pair."""
     m = SUMMARY_RE.match(str(line or "").strip())
     if not m:
         return None
@@ -1111,7 +1143,7 @@ def take_pending(line):
             os.remove(pending_path())
         except OSError:
             return None
-    return data["block"]
+    return (data["block"], data.get("full") or data["block"]) if with_full else data["block"]
 
 
 def _short(text, n=REPORT_CHARS, tid=None):
@@ -1329,11 +1361,11 @@ class Reporter(AutoClear):
         items, dropped = take_reports(now)
         if items:
             self.delivered = (st["size"], now)
-            block = reports_message(items, dropped)
+            full = reports_message(items, dropped)
             rid = f"{int(now * 1000) & 0xffffff:06x}"
             line = summary_line(items, rid)
             try:
-                stage_block(rid, line, block, now)
+                stage_block(rid, line, reports_digest(items, dropped, rid), now, full)
                 self.host.paste(line)
             except Exception as exc:  # noqa: BLE001 - the reports stay queued and go out on a later tick
                 self.log(f"typing {len(items)} thread report(s) failed, kept queued: {exc}")

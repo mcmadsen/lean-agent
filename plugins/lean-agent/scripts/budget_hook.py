@@ -631,10 +631,10 @@ def prompt_hook(event):
                 if not lean_threads.is_notification(prompt):
                     lean_threads.pin(pinned, prompt, event.get("session_id"))
             elif service_session.SUMMARY_RE.match(prompt.strip()):  # the one-line summary of staged thread reports: the full block rides along as hidden context
-                block = service_session.take_pending(prompt)
-                if block:
-                    lean_threads.store_reports(block)
-                    lines.append(block)
+                got = service_session.take_pending(prompt, with_full=True)
+                if got:  # the digest rides along as hidden context; the threads keep the full text
+                    lean_threads.store_reports(got[1])
+                    lines.append(got[0])
             elif lean_threads.is_reports(prompt):  # thread reports: stored on the threads they name, nothing guessed or announced
                 lean_threads.store_reports(prompt)
             elif lean_threads.is_notification(prompt):  # a background-task notification: never a new request or thread; attaches to its run's thread silently

@@ -5754,6 +5754,34 @@ class CliTest(unittest.TestCase):
         host2 = mock.Mock(key="t1", env=None, last_input=0)
         self.assertEqual(service_session.AutoClear(host2).key, "t1")
 
+    def test_reports_digest_is_short_capped_and_keeps_questions(self):
+        self.threads_home()
+        import service_session as ss
+        long_text = "Finished the work. " + "Detail sentence goes here. " * 80
+        items = [{"thread": "t5", "kind": "done", "text": long_text}, {"thread": "t6", "kind": "question", "text": "QUESTION q1: " + "x" * 900}]
+        d = ss.reports_digest(items, 0, "abc123")
+        full = ss.reports_message(items)
+        self.assertLess(len(d), len(full) // 2)
+        self.assertLess(len(d), 2000)
+        self.assertTrue(all(len(l) <= 700 for l in d.splitlines()))
+        self.assertIn("[t5 done] Finished the work.", d)
+        self.assertIn("thread reports t5 rabc123", d)
+        many = [{"thread": "t%d" % n, "kind": "done", "text": "y" * 230} for n in range(1, 30)]
+        self.assertLess(len(ss.reports_digest(many, 0, "abc123")), 2600)
+        self.assertIn("more report(s)", ss.reports_digest(many, 0, "abc123"))
+
+    def test_staged_digest_is_hidden_context_and_full_text_is_kept_for_thread_reports(self):
+        self.threads_home()
+        import service_session as ss
+        items = [{"thread": "t5", "kind": "done", "text": "Done. " + "More. " * 200}]
+        full = ss.reports_message(items)
+        ss.stage_block("abc123", "lean-agent: 1 thread report (t5 done) [rabc123]", ss.reports_digest(items, 0, "abc123"), full=full)
+        digest, kept = ss.take_pending("lean-agent: 1 thread report (t5 done) [rabc123]", with_full=True)
+        self.assertLess(len(digest), len(kept))
+        out = self.cli("thread", "reports", "t5", "rabc123").stdout
+        self.assertIn("More. More. More. More. More. More. More. More. More. More. More. More. More. More. More. More. More. More. More. More.", out)
+        self.assertIn("no thread reports", self.cli("thread", "reports", "t9").stdout)
+
     def test_clear_at_reads_the_compaction_point_up_recorded(self):
         os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
         with open(os.path.join(self.env["LEAN_AGENT_HOME"], "up.json"), "w") as fh:
@@ -6235,7 +6263,8 @@ class CliTest(unittest.TestCase):
         msg = ss.take_pending(line)  # the full block reaches main through the prompt hook, once
         self.assertIsNone(ss.take_pending(line))
         self.assertTrue(msg.startswith("<thread-reports>\n[t1 done] Published the report"))
-        self.assertTrue(msg.endswith("details: lean-agent thread show t1\n</thread-reports>"))
+        self.assertIn("lean-agent thread reports t1 r", msg.splitlines()[-2])
+        self.assertTrue(msg.endswith("</thread-reports>"))
         self.assertEqual(ss.queued_reports(), [])
         reps["main"].tick()
         self.assertEqual(len(hosts["main"].pasted), 1)

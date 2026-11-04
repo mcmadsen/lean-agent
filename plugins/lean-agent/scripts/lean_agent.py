@@ -11420,6 +11420,14 @@ def thread_action(a):
         return 0
     if act == "reports":
         blocks = service_session.logged_blocks()
+        want = [x for x in a.args if re.fullmatch(r"t\d+", x)]
+        rid = next((x[1:] for x in a.args if re.fullmatch(r"r[0-9a-f]{6}", x)), "")
+        if rid:
+            blocks = [b for b in blocks if b.get("id") == rid]
+        if want:  # one thread's lines only
+            blocks = [dict(b, block="\n".join(l for l in str(b.get("block")).splitlines()
+                                                if any(l.startswith(f"[{w} ") for w in want))) for b in blocks]
+            blocks = [b for b in blocks if b["block"]]
         if not blocks:
             print("no thread reports delivered yet")
         for b in blocks[-3:]:
