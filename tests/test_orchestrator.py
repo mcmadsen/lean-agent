@@ -3233,6 +3233,22 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("old one", text)
         self.assertEqual(mod.start_failure_lines([]), [])
 
+    def test_refused_preflight_start_is_one_start_failed_row_and_shows_in_stats(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        for extra in (["--read-only", "--allow-cmd", "az x delete"], ["--cards", "no-such-card"]):
+            p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", *extra, "look", check=False)
+            self.assertEqual(p.returncode, 1)
+            self.assertIn("try: lean-agent run", p.stdout + p.stderr)
+        self.assertEqual(self.running_markers(), [])
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "ledger.jsonl")) as fh:
+            rows = [json.loads(l) for l in fh if l.strip()]
+        self.assertEqual([r["status"] for r in rows], ["failed", "failed"])
+        self.assertTrue(rows[0]["reason"].startswith("start failed: --allow-cmd"))
+        self.assertEqual((rows[0]["project"], rows[0]["model"], rows[0]["task"]), ("proj", "haiku", "look"))
+        out = self.cli("stats").stdout
+        self.assertIn("Start failures, last 7 days (2)", out)
+        self.assertIn("unknown card(s): no-such-card", out)
+
     def test_advise_keeps_allow_cmd_with_read_only(self):
         self.cli("learn", self.proj, "--name", "proj")
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "--allow-cmd", "az pipelines runs show", "look")

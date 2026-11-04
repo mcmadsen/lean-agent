@@ -2001,9 +2001,11 @@ def preflight_run_args(a, slug, project, read_only):
 def _cmd_run(a):
     if a.resume == "last":  # the latest run, so the command needs no `$(lean-agent runs --last)`
         a.resume = latest_run_id(ordinary=True)
-    if not a.resume:  # refused before anything starts (no marker, no worktree, no escalation)
+    if not a.resume:  # refused before anything starts (no worktree, no escalation); a refusal is still a "start failed" row
+        early_register(a, " ".join(a.task).strip())
         check_allow_cmd([c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()], bool(getattr(a, "read_only", False)))
         clean_allow_edit(getattr(a, "allow_edit", None), bool(getattr(a, "read_only", False)))
+        early_settle()  # passed: the marker is registered again, with the task, further down
     if getattr(a, "escalate", None) and not a.resume:
         return run_escalating(a)
     prev = None
