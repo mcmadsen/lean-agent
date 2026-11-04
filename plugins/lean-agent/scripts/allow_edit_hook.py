@@ -51,6 +51,8 @@ def decide(event, cfg):
     if not os.path.isabs(path):
         path = os.path.join(event.get("cwd") or root, path)
     real = os.path.realpath(path)
+    if real in [os.path.realpath(o) for o in cfg.get("outside") or [] if isinstance(o, str)]:
+        return real  # an explicit file outside the worktree the run was given
     try:
         if os.path.commonpath([root, real]) != root or real == root:
             return None

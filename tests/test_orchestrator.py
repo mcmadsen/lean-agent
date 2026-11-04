@@ -3367,6 +3367,49 @@ class CliTest(unittest.TestCase):
         self.assertEqual(allow, [])
         self.assertTrue(any("settings*.json" in r for r in deny))
 
+    def test_allow_edit_outside_the_worktree_only_for_explicit_downloads_files(self):
+        mod = lean_agent_module()
+        fake_home = os.path.join(self.env["LEAN_AGENT_HOME"], "fakehome")
+        dl = os.path.join(fake_home, "Downloads")
+        os.makedirs(os.path.join(dl, ".hidden"), exist_ok=True)
+        extra = os.path.join(self.env["LEAN_AGENT_HOME"], "shared")
+        os.makedirs(extra, exist_ok=True)
+        os.makedirs(self.env["LEAN_AGENT_HOME"], exist_ok=True)
+        with mock.patch.dict(os.environ, {"HOME": fake_home, "LEAN_AGENT_HOME": self.env["LEAN_AGENT_HOME"]}):
+            ok = mod.clean_allow_edit([os.path.join(dl, "notes.md"), "~/Downloads/other.txt", ".claude/rules/**"])
+            real_dl = os.path.realpath(dl)
+            self.assertEqual(ok, [os.path.join(real_dl, "notes.md"), os.path.join(real_dl, "other.txt"), ".claude/rules/**"])
+            for bad in (os.path.join(dl, ".hidden", "x.md"), os.path.join(dl, ".bashrc"), os.path.join(dl, "*.md"), dl,
+                        os.path.join(fake_home, ".ssh", "config"), os.path.join(fake_home, "notes.md"),
+                        os.path.join(dl, ".git", "config"), os.path.join(extra, "a.txt")):
+                with self.assertRaises(SystemExit, msg=bad), contextlib.redirect_stderr(io.StringIO()) as err:
+                    mod.clean_allow_edit([bad])
+                self.assertIn("handover --out", err.getvalue())
+            mod.save_json(os.path.join(self.env["LEAN_AGENT_HOME"], "config.json"), {"allow_edit_outside": [extra]})
+            self.assertEqual(mod.clean_allow_edit([os.path.join(extra, "a.txt")]), [os.path.join(os.path.realpath(extra), "a.txt")])
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                mod.clean_allow_edit([os.path.join(extra, ".secret")])
+
+    def test_allow_edit_outside_path_gets_add_dir_and_the_hook_approves_only_that_file(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        fake_home = os.path.join(self.env["LEAN_AGENT_HOME"], "fakehome")
+        dl = os.path.join(fake_home, "Downloads")
+        os.makedirs(dl, exist_ok=True)
+        self.env["HOME"] = fake_home
+        target = os.path.join(dl, "notes.md")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--allow-edit", target, "edit")
+        argv = self.calls()[-1]["argv"]
+        dirs = [argv[i + 1] for i, x in enumerate(argv) if x == "--add-dir"]
+        self.assertIn(os.path.realpath(dl), [os.path.realpath(d) for d in dirs])
+        cfg = json.load(open(self.ledger()[-1]["workdir"] + "/allow_edit.json"))
+        self.assertEqual(cfg["outside"], [os.path.realpath(target)])
+        self.assertEqual(cfg["globs"], [])
+        sys.path.insert(0, os.path.dirname(CLI))
+        import allow_edit_hook
+        ev = lambda path: {"tool_name": "Write", "tool_input": {"file_path": path}}
+        self.assertTrue(allow_edit_hook.decide(ev(target), cfg))
+        self.assertIsNone(allow_edit_hook.decide(ev(os.path.join(dl, "other.md")), cfg))
+
     def test_config_allow_edit_is_stored_per_project_and_used_by_runs(self):
         self.cli("learn", self.proj, "--name", "proj")
         out = self.cli("config", "allow-edit", "proj", ".claude/rules/**", "CLAUDE.md").stdout
@@ -4701,7 +4744,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("t1: session stopped", out)
         self.assertFalse(ss.alive("t1"))
         self.assertTrue(ss.alive("t2"))
-        self.assertNotIn("t1", self.cli("thread", "sessions").stdout)
+        self.assertIsNone(re.search(r"(?m)^t1\b", self.cli("thread", "sessions").stdout))
         reg = self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"))["threads"]
         self.assertEqual((reg["t1"]["session_id"], bool(reg["t1"].get("closed")), reg["t1"].get("session_on")), (sids["t1"], True, None))
         self.assertIn("resumed old session", self.cli("thread", "open", "t1", "--resume-old").stdout)
@@ -5114,7 +5157,7 @@ class CliTest(unittest.TestCase):
         ss.update_session("t9", host_pid=None)  # the host stopped
         self.assertRegex(self.cli("thread", "new", "first").stdout, r"\bt1 (started|queued)\b")
         r = self.cli("thread", "new", "third")  # at the cap the idle t1 makes room
-        self.assertIn('closed t1 "first"', r.stdout)
+        self.assertIn("parking t1 (idle", r.stdout)
         self.assertIn("t2 started", r.stdout)
         self.cli("thread", "close", "t2")
         self.assertRegex(self.cli("thread", "new", "fourth").stdout, r"\bt3 (started|queued)\b")
@@ -7353,10 +7396,10 @@ class CliTest(unittest.TestCase):
                       "alpha to be idle longer than beta will be")
         self.cli("thread", "new", "beta topic")
         out = self.cli("thread", "new", "gamma topic").stdout
-        self.assertRegex(out, r'closed t1 "alpha topic" \(idle \d+[mhd]\) to make room \u2014 reopen with lean-agent thread reopen t1')
+        self.assertRegex(out, r'parking t1 \(idle \d+[mhd]\) to make room')
         self.assertIn("t3 started", out)
         self.assertIsNone(lt.load()["threads"]["t1"].get("session_on"))
-        self.assertTrue(lt.load()["threads"]["t1"].get("closed"))
+        self.assertTrue(lt.load()["threads"]["t1"].get("parked"))
         # every counted session busy: refuse and list them
         home = self.env["LEAN_AGENT_HOME"]
         os.makedirs(os.path.join(home, "running"), exist_ok=True)
@@ -7482,6 +7525,91 @@ class CliTest(unittest.TestCase):
         closed, out, err = self.room_for(ss, launching=("t1",))
         self.assertEqual(closed, ["t3"])
 
+    def test_cap_parks_the_least_recently_used_thread_and_keeps_its_session_id_and_summary(self):
+        lt = self.threads_home()
+        for i in range(1, 4):
+            lt.set_session(lt.new(f"title t{i}"), session_id=f"sid-{i}", session_on=True)
+        ss = self.fake_sessions(("t1", 700), ("t2", 3600), ("t3", 2000))
+        closed, out, err = self.room_for(ss, caller="t9")
+        self.assertEqual(closed, ["t2"])
+        self.assertIn("parking t2 (idle 1h) to make room", out)
+        t = lt.load()["threads"]["t2"]
+        self.assertTrue(t.get("parked"))
+        self.assertEqual(t["session_id"], "sid-2")
+        self.assertIn("title t2", t["parked_summary"])
+        self.assertFalse(t.get("closed"))  # parked is not closed
+
+    def test_cap_never_parks_a_thread_with_an_open_question(self):
+        lt = self.threads_home()
+        for i in range(1, 4):
+            lt.new(f"title t{i}")
+        lt.ask("t2", "which database?")
+        ss = self.fake_sessions(("t1", 700), ("t2", 3600), ("t3", 2000))
+        closed, out, err = self.room_for(ss, caller="t9")
+        self.assertEqual(closed, ["t3"])
+        closed, out, err = self.room_for(self.fake_sessions(("t2", 3600), ("t3", 2000)), caller="t3", cap=2)
+        self.assertEqual(closed, [])
+        self.assertIn("an open question waits on main", err)
+
+    def wake_message(self, t_fields, transcript):
+        """start_closed_thread on a parked thread: returns (first message passed to the host, line, session id used)."""
+        L = lean_agent_module()
+        lt = self.threads_home()
+        tid = lt.new("woken topic")
+        lt.set_session(tid, session_id="sid-old", parked="2026-01-01T00:00:00", parked_summary="PARKED SUMMARY TEXT", **t_fields)
+        got = {}
+
+        def start(tid_, t, prompt=None, msg=None):
+            got["msg"], got["sid"] = msg, t.get("session_id")
+            return "name"
+        with mock.patch.object(L, "transcript_of", return_value=transcript), \
+                mock.patch.object(L, "start_thread_session", side_effect=start):
+            _, line = L.start_closed_thread(tid, lt.load()["threads"][tid], "go on", False)
+        return got, line, lt.load()["threads"][tid]
+
+    def test_waking_a_parked_thread_resumes_the_same_session_when_it_is_still_valid(self):
+        tr = os.path.join(self.tmp_dir(), "sid-old.jsonl") if hasattr(self, "tmp_dir") else os.path.join(self.env["LEAN_AGENT_HOME"], "sid-old.jsonl")
+        os.makedirs(os.path.dirname(tr), exist_ok=True)
+        open(tr, "w").close()
+        got, line, t = self.wake_message({}, tr)
+        self.assertIsNone(got["msg"])  # no brief, no summary: the resumed session has it all
+        self.assertEqual(got["sid"], "sid-old")
+        self.assertIn("resumed its parked session", line)
+        self.assertFalse(t.get("parked"))
+        self.assertFalse(t.get("parked_summary"))
+
+    def test_waking_a_parked_thread_whose_session_is_gone_seeds_a_fresh_one_with_the_parked_summary(self):
+        got, line, t = self.wake_message({}, os.path.join(self.env["LEAN_AGENT_HOME"], "missing.jsonl"))
+        self.assertIn("PARKED SUMMARY TEXT", got["msg"])
+        self.assertIn("go on", got["msg"])
+        self.assertIn("woken from parked summary", line)
+        self.assertFalse(t.get("parked"))
+
+    def test_thread_park_refuses_a_thread_without_a_live_session(self):
+        lt = self.threads_home()
+        lt.new("idle one")
+        p, log, ss = self.start_up()
+        r = self.cli("thread", "park", "t1", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no live session to park", r.stdout + r.stderr)
+        self.stop_up(p, 30)
+
+    def test_thread_park_then_wake_and_sessions_shows_parked(self):
+        p, log, ss = self.start_up()
+        lt = self.threads_home()
+        self.cli("thread", "new", "alpha topic")
+        self.env["LEAN_AGENT_CLOSE_MIN_IDLE"] = "0"
+        out = self.cli("thread", "park", "t1").stdout
+        self.assertIn("parked t1", out)
+        t = lt.load()["threads"]["t1"]
+        self.assertTrue(t.get("parked") and t.get("session_id") and not t.get("session_on"))
+        self.assertRegex(self.cli("thread", "sessions").stdout, r"(?m)^parked  t1\b.*thread wake t1")
+        out = self.cli("thread", "wake", "t1").stdout
+        self.assertIn("t1", out)
+        self.assertFalse(lt.load()["threads"]["t1"].get("parked"))
+        self.assertRegex(self.cli("thread", "sessions").stdout, r"(?m)^t1\b")
+        self.stop_up(p, 30)
+
     def test_cap_skips_a_session_idle_under_ten_minutes(self):
         ss = self.fake_sessions(("t1", 599), ("t2", 700), ("t3", 650))
         closed, out, err = self.room_for(ss)
@@ -7491,9 +7619,9 @@ class CliTest(unittest.TestCase):
         ss = self.fake_sessions(("t1", 700), ("t2", 3600), ("t3", 2000))
         closed, out, err = self.room_for(ss, caller="t9")
         self.assertEqual(closed, ["t2"])
-        self.assertRegex(out, r'closed t2 "title t2" \(idle \d+[mh]\) to make room \u2014 reopen with lean-agent thread reopen t2')
+        self.assertRegex(out, r'parking t2 \(idle \d+[mhd]\) to make room')
         log = open(os.path.join(self.env["LEAN_AGENT_HOME"], "logs", "service.log")).read()
-        self.assertIn("cap auto-close: closed t2", log)
+        self.assertIn("cap auto-park: parking t2", log)
         self.assertIn("idle 3600s", log)
         self.assertIn("caller t9", log)
 
@@ -7501,7 +7629,7 @@ class CliTest(unittest.TestCase):
         ss = self.fake_sessions(("t1", 9000), ("t2", 100), ("t3", 8000))
         closed, out, err = self.room_for(ss, caller="t1", mid_turn=("t3",))
         self.assertEqual(closed, [])
-        self.assertIn("none can be closed", err)
+        self.assertIn("none can be parked", err)
         self.assertRegex(err, r't1 "title t1" idle \d+[mh], not eligible: the calling session')
         self.assertRegex(err, r't2 .*not eligible: idle under 10 min')
         self.assertRegex(err, r't3 .*mid-turn')
@@ -7516,6 +7644,21 @@ class CliTest(unittest.TestCase):
         with open(os.path.join(home, "running", f"{rid}.json"), "w") as fh:
             json.dump({"pid": dead.pid, "run": rid, "started": "2026-01-01T00:00:00", "task": "t", "model": "haiku",
                        "project": "proj"}, fh)
+
+    def test_resolve_worktree_accepts_the_worktree_name_or_the_branch_and_names_ambiguous_ones(self):
+        L = lean_agent_module()
+        idx = {"proj": {"feature-x": {"path": "/nonexistent/a", "ref": "feature/x", "branch": "feature/x"},
+                        "origin-rel": {"path": "/nonexistent/b", "ref": "origin/rel", "branch": None},
+                        "dup-one": {"path": "/nonexistent/c", "ref": "same", "branch": "same"},
+                        "dup-two": {"path": "/nonexistent/d", "ref": "same", "branch": "same"}}}
+        with mock.patch.object(L, "worktree_index", return_value=idx):
+            self.assertEqual(L.resolve_worktree("proj", "feature-x")[0], "feature-x")  # the worktree name
+            self.assertEqual(L.resolve_worktree("proj", "feature/x")[0], "feature-x")  # the branch name
+            self.assertEqual(L.resolve_worktree("proj", "rel")[0], "origin-rel")  # a detached origin/<branch> worktree
+            self.assertIsNone(L.resolve_worktree("proj", "nope")[1])
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()) as err:
+                L.resolve_worktree("proj", "same")
+            self.assertIn("dup-one, dup-two", err.getvalue())
 
     def test_runs_running_hides_lost_runs_and_lost_lists_and_clears_them(self):
         self.lost_run_marker("0101-000000-aaaa")
@@ -9470,6 +9613,9 @@ class CliTest(unittest.TestCase):
         subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "fix"],
                        check=True)
         p = self.cli("worktree", "push", "proj", "origin/feature", check=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("no approving review", p.stderr)
+        p = self.cli("worktree", "push", "proj", "feature", check=False)  # the branch name, not the worktree name
         self.assertEqual(p.returncode, 2)
         self.assertIn("no approving review", p.stderr)
         approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
