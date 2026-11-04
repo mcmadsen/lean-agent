@@ -1902,7 +1902,7 @@ def clean_allow_edit(paths, read_only=False):
         if norm not in out:
             out.append(norm)
     if out and read_only:
-        die("--allow-edit needs a worker that edits: drop --read-only or --allow-edit")
+        die_try("--allow-edit needs a worker that edits: drop --read-only or --allow-edit", drop=("--allow-edit",))
     return out
 
 
@@ -1922,15 +1922,56 @@ def allow_edit_rules(project, globs):
     return allow, deny
 
 
+_NOTED = set()
+
+
+def note_once(key, msg):
+    """One stderr note per kind per process (the early checks and the later ones see the same flags)."""
+    if key not in _NOTED:
+        _NOTED.add(key)
+        print(f"lean-agent: note: {msg}", file=sys.stderr, flush=True)
+
+
+def try_line(drop=(), card=None):
+    """'try: lean-agent ...' built from the actual argv minus the offending flags (a flag with its value), for a
+    refusal the caller can fix by copy and paste."""
+    args, out, i = list(sys.argv[1:]), [], 0
+    while i < len(args):
+        a = args[i]
+        name = a.split("=", 1)[0]
+        if name in drop:
+            i += 1
+            if "=" not in a and i < len(args) and not args[i].startswith("-"):
+                i += 1  # its value
+            continue
+        if card and name == "--cards":
+            val = a.split("=", 1)[1] if "=" in a else (args[i + 1] if i + 1 < len(args) else "")
+            keep = [x for x in val.split(",") if x and x not in card]
+            i += 1 if "=" in a else 2
+            if keep:
+                out += ["--cards", ",".join(keep)]
+            continue
+        out.append(a)
+        i += 1
+    return "try: lean-agent " + " ".join(shlex.quote(x) for x in out)
+
+
+def die_try(msg, drop=(), card=None):
+    die(f"{msg}\n{try_line(drop, card)}")
+
+
 def check_allow_cmd(allow_cmd, read_only):
-    """--allow-cmd only goes with --read-only, and only for commands that read; a clear one-line refusal."""
+    """--allow-cmd limits read-only workers only: elsewhere it is ignored with one note; for a read-only worker the
+    commands must read."""
     if allow_cmd and not read_only:
-        die("--allow-cmd needs --read-only (other workers run any command): add --read-only or drop --allow-cmd")
+        note_once("allow_cmd", "--allow-cmd ignored (only read-only workers are limited; this worker may run any command)")
+        return []
     for c in allow_cmd:
         bad = set(re.findall(r"[a-z]+", c.lower())) & MUTATING_WORDS
         if bad:
-            die(f"--allow-cmd {c!r}: {', '.join(sorted(bad))} changes something; a read-only worker only gets "
-                "commands that read (show, list, get, view, log)")
+            die_try(f"--allow-cmd {c!r}: {', '.join(sorted(bad))} changes something; a read-only worker only gets "
+                    "commands that read (show, list, get, view, log)", drop=("--allow-cmd",))
+    return allow_cmd
 
 
 def preflight_run_args(a, slug, project, read_only):
@@ -1940,7 +1981,7 @@ def preflight_run_args(a, slug, project, read_only):
     if getattr(a, "card_list", None) is None:
         missing = [x for x in (a.cards or "").split(",") if x and x not in ("none", "auto") and x not in lib]
         if missing:
-            die(f"unknown card(s): {', '.join(missing)} (see: lean-agent cards {slug})")
+            die_try(f"unknown card(s): {', '.join(missing)} (see: lean-agent cards {slug})", card=set(missing))
     check_allow_cmd([c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()], read_only)
     clean_allow_edit(getattr(a, "allow_edit", None), read_only)
     base = getattr(a, "worktree_base", None)
@@ -1948,7 +1989,10 @@ def preflight_run_args(a, slug, project, read_only):
         if base.startswith("origin/"):
             git(project, "fetch", "-q", "origin")
         if not git(project, "rev-parse", "--verify", "--quiet", base + "^{commit}"):
-            die(f"--worktree-base {base!r} is unknown in {project} (a local branch, tag, origin/<branch> or commit)")
+            die_try(f"--worktree-base {base!r} is unknown in {project} (a local branch, tag, origin/<branch> or commit)",
+                    drop=("--worktree-base",))
+    elif base:
+        note_once("wt_base", "--worktree-base ignored (it only applies with --worktree)")
     specs = [x for x in (a.mcp or []) if x.split(":", 1)[0] != CHROME]
     if specs:
         enforce_mcp_rules(list(lib.values()), project, canonical_specs(project, specs), getattr(a, "force_mcp", False))
@@ -1957,16 +2001,18 @@ def preflight_run_args(a, slug, project, read_only):
 def _cmd_run(a):
     if a.resume == "last":  # the latest run, so the command needs no `$(lean-agent runs --last)`
         a.resume = latest_run_id(ordinary=True)
-    if not a.resume:  # refused before anything starts (no marker, no worktree, no escalation)
+    if not a.resume:  # refused before anything starts (no worktree, no escalation); a refusal is still a "start failed" row
+        early_register(a, " ".join(a.task).strip())
         check_allow_cmd([c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()], bool(getattr(a, "read_only", False)))
         clean_allow_edit(getattr(a, "allow_edit", None), bool(getattr(a, "read_only", False)))
+        early_settle()  # passed: the marker is registered again, with the task, further down
     if getattr(a, "escalate", None) and not a.resume:
         return run_escalating(a)
     prev = None
     try:
         run_seconds = run_timeout(getattr(a, "timeout", None))
     except ValueError as exc:
-        die(f"--timeout: {exc}")
+        die_try(f"--timeout: {exc}", drop=("--timeout",))
     if a.resume:
         prev = next((r for r in reversed(ledger()) if r["id"] == a.resume), None)
         if not prev or not prev.get("session_id"):
@@ -2138,7 +2184,7 @@ def _cmd_run(a):
                 t["status"] = "doing"
                 save_json(home("todo.json"), data)
     allow_cmd = (prev or {}).get("allow_cmd") or [c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()]
-    check_allow_cmd(allow_cmd, read_only)
+    allow_cmd = check_allow_cmd(allow_cmd, read_only)
     allow_edit = clean_allow_edit(list((prev or {}).get("allow_edit") or (None if prev else projects().get(slug, {}).get("allow_edit")) or [])
                                   + list(getattr(a, "allow_edit", None) or []))
     if read_only:
@@ -7158,8 +7204,27 @@ def cmd_stats(a):
         print(f"\nBiggest {min(a.top, len(runs))} runs:")
         for line in top_runs_lines(runs, a.top):
             print("  " + line)
+    for line in start_failure_lines(ledger()):
+        print(line)
     print()
     print_limits()
+
+
+def start_failure_lines(rows, days=7, top=5):
+    """The most common reasons a launch was refused in the last `days` days (ledger rows 'start failed: ...')."""
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).isoformat()
+    count = {}
+    for r in rows:
+        reason = r.get("reason") or ""
+        if r.get("status") == "failed" and reason.startswith("start failed: ") and r.get("ts", "") >= cutoff:
+            key = re.sub(r"\s+", " ", reason[len("start failed: "):].split("\n")[0])[:100]
+            count[key] = count.get(key, 0) + 1
+    if not count:
+        return []
+    out = [f"\nStart failures, last {days} days ({sum(count.values())}):"]
+    for key, n in sorted(count.items(), key=lambda kv: -kv[1])[:top]:
+        out.append(f"  {n:>3}x  {key}")
+    return out
 
 
 def print_plan_line():
