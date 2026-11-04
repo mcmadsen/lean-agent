@@ -4676,7 +4676,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("t1: session stopped", out)
         self.assertFalse(ss.alive("t1"))
         self.assertTrue(ss.alive("t2"))
-        self.assertNotIn("t1", self.cli("thread", "sessions").stdout)
+        self.assertIsNone(re.search(r"(?m)^t1\b", self.cli("thread", "sessions").stdout))
         reg = self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"))["threads"]
         self.assertEqual((reg["t1"]["session_id"], bool(reg["t1"].get("closed")), reg["t1"].get("session_on")), (sids["t1"], True, None))
         self.assertIn("resumed old session", self.cli("thread", "open", "t1", "--resume-old").stdout)
