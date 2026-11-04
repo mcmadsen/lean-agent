@@ -7028,14 +7028,25 @@ def worktree_push(a):
             unique = (git(path, "rev-list", f"{mb}..HEAD") if mb else
                       git(path, "rev-list", "HEAD", "--not", "--remotes") if git(path, "remote") else
                       git(path, "rev-list", "HEAD", "--not", w.get("ref") or "HEAD~20")) or ""
-        bodies = git(path, "log", "--no-walk=unsorted", "--format=%H%n%B%n--END--", *unique.split()) if unique.strip() else ""
-        bodies = bodies or ""
-        credited = [sha_[:12] for sha_, body in re.findall(r"(?s)([0-9a-f]{40})\n(.*?)--END--", bodies)
-                    if CLAUDE_CREDIT_RE.search(body)]
+        mine_emails = my_emails(path)
+        recs = git(path, "log", "--no-walk=unsorted", "--format=%H%x1f%ae%x1f%ce%x1f%an%x1f%B%x1e", *unique.split()) if unique.strip() else ""
+        credited, foreign = [], []
+        for rec in (recs or "").split("\x1e"):
+            parts = rec.strip("\n").split("\x1f", 4)
+            if len(parts) < 5 or not CLAUDE_CREDIT_RE.search(parts[4]):
+                continue
+            if {parts[1].lower(), parts[2].lower()} & mine_emails:
+                credited.append(parts[0][:12])
+            else:
+                foreign.append((parts[0][:12], parts[3] or parts[1]))
         if credited:
             die(f"commit(s) {', '.join(credited)} credit Claude, but attribution is off (lean-agent attribution). "
                 "Have a worker reword them (git commit --amend / rebase -i is not available to workers: ask for "
                 "`git rebase` with an exec that rewrites the message), or turn attribution on.")
+        if foreign:
+            print(f"lean-agent: warning: commit(s) {', '.join(c for c, _ in foreign)} ("
+                  f"{', '.join(sorted({n for _, n in foreign}))}) credit Claude but aren't yours; pushing anyway "
+                  "(attribution only applies to your commits)", file=sys.stderr)
     match, _ = find_review(slug, path, "HEAD")
     inherited = None
     if not match or not approved(match["verdict"]):
@@ -8533,6 +8544,18 @@ descriptions, code comments, or review/PR comments.
 """
 CLAUDE_CREDIT_RE = re.compile(r"(?im)^\s*co-authored-by:.*\b(claude|anthropic)\b|generated with \[?claude code|"
                               r"claude\.ai/code/session")
+
+
+def my_emails(path):
+    """Lower-cased emails that count as the user's: the worktree's and the global git user.email, plus
+    `config attribution-emails`."""
+    out = set()
+    for e in (git(path, "config", "user.email"),
+              subprocess.run(["git", "config", "--global", "user.email"], capture_output=True, text=True).stdout.strip()):
+        if e:
+            out.add(e.lower())
+    out |= {str(e).lower() for e in config_json().get("attribution_emails") or []}
+    return out
 
 
 def attribution():
@@ -10501,7 +10524,7 @@ def cmd_attribution(a):
         return 2
     print(f"attribution: {v} · " + ("commits and PRs may credit Claude (Claude Code's default lines)" if v == "on" else
           "no Claude co-author lines or mentions in commits, PRs or comments; workers get Claude Code's attribution "
-          "switched off, and worktree push refuses commits that credit Claude"))
+          "switched off, and worktree push refuses your own commits that credit Claude (others' only warn)"))
     return 0
 
 
@@ -10553,6 +10576,21 @@ def cmd_config(a):
             projs[slug] = {**projs[slug], "branch_rules": saved}
             save_json(home("projects.json"), projs)
         print(f"branch rules for {slug}: " + "  ".join(f"{k}={v}" for k, v in branch_rules(slug).items()))
+        return 0
+    if a.name == "attribution-emails":
+        vals = [v.strip() for v in [a.value] + list(a.more or []) if v and v.strip()]
+        cfg = config_json()
+        if vals == ["clear"]:
+            cfg.pop("attribution_emails", None)
+            save_json(home("config.json"), cfg)
+        elif vals:
+            if any("@" not in v for v in vals):
+                die("attribution-emails takes email addresses (or clear)")
+            cfg["attribution_emails"] = sorted({v.lower() for v in vals})
+            save_json(home("config.json"), cfg)
+        print("attribution-emails: " + (", ".join(cfg.get("attribution_emails") or []) or "none") + " \u00b7 besides git's "
+              "user.email, these author/committer emails count as yours when attribution is off; credited commits "
+              "by anyone else only warn. set: lean-agent config attribution-emails <email>...  clear: ... clear")
         return 0
     if a.name == "allow-edit":
         vals = [v for v in [a.value] + list(a.more or []) if v]
@@ -13456,8 +13494,8 @@ def build_parser():
 
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "allow-edit-outside <dir>|clear (extra dirs, besides ~/Downloads, where --allow-edit may name an explicit file outside the worktree), allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
-                       "max-thread-sessions N (thread sessions the service runs; default 8), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
-    s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
+                       "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), max-thread-sessions N (thread sessions the service runs; default 8), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
+    s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
                                            "review-max-rerounds", "review-skip", "review-model", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")

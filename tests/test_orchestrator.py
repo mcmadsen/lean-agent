@@ -5557,6 +5557,7 @@ class CliTest(unittest.TestCase):
         def g(*args):
             subprocess.run(["git", "-C", self.proj, *args], check=True, capture_output=True)
         g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
         g("-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
         g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
         g("checkout", "-qb", "feature")
@@ -10014,6 +10015,73 @@ class CliTest(unittest.TestCase):
         self.assertIn("credit Claude", p.stderr)
         self.assertIn(flagged, p.stderr)
         self.assertEqual(len(re.findall(r"[0-9a-f]{12}", p.stderr.split("credit Claude")[0])), 1)
+
+    def test_push_attribution_checks_only_my_commits(self):
+        g = self.git_project()
+        ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+        other = ["-c", "user.name=Sam Example", "-c", "user.email=sam@example.com"]
+        credit = "\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+        g("add", "-A")
+        g(*ident, "commit", "-qm", "page")
+        g("checkout", "-q", "main")
+        origin = os.path.join(self.tmp.name, "origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+        g("remote", "add", "origin", origin)
+        g("push", "-q", "origin", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("attribution", "off")
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "topic", "--", "t")
+        wt = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", "topic")
+        wg = lambda *a: subprocess.run(["git", "-C", wt, *a], check=True, capture_output=True, text=True)
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        def push():
+            self.cli("review", "proj", "--head", "topic", "--base", "main", FAKE_REVIEW=approve)
+            return self.cli("worktree", "push", "proj", "topic", "--new-branch", "--allow-send", "push it", check=False)
+        def commit(who, name, msg, empty=False):
+            if not empty:
+                with open(os.path.join(wt, "web", "page.txt"), "a") as fh:
+                    fh.write(name + "\n")
+                wg("add", "-A")
+            wg(*who, "commit", "-q", *(["--allow-empty"] if empty else []), "-m", msg)
+            return wg("rev-parse", "HEAD").stdout.strip()[:12]
+        # mine, credited: refused
+        mine = commit(ident, "a", "mine" + credit)
+        p = push()
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("credit Claude, but attribution is off", p.stderr)
+        self.assertIn(mine, p.stderr)
+        # someone else's credited commit (author and committer): a warning, the push goes through
+        wg("reset", "-q", "--hard", "HEAD~1")
+        theirs = commit(other, "b", "theirs" + credit)
+        p = push()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(f"lean-agent: warning: commit(s) {theirs} (Sam Example) credit Claude but aren't yours; pushing anyway", p.stderr)
+        self.assertNotIn("attribution is off", p.stderr)
+        # a merge bringing in someone else's credited commit: judged by its own author
+        wg("checkout", "-q", "-b", "side", "main")
+        side = commit(other, "c", "side" + credit, empty=True)
+        wg("checkout", "-q", "topic")
+        wg(*ident, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+        p = push()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(f"warning: commit(s) {side} (Sam Example)", p.stderr)
+        # a merge commit by me whose own message credits Claude: refused
+        wg("checkout", "-q", "-b", "side2", "main")
+        commit(other, "d", "side2", empty=True)
+        wg("checkout", "-q", "topic")
+        wg(*ident, "merge", "-q", "--no-ff", "-m", "merge side2" + credit, "side2")
+        p = push()
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("credit Claude, but attribution is off", p.stderr)
+        wg("reset", "-q", "--hard", "HEAD~1")
+        # attribution-emails: the other identity counts as me
+        more = commit(other, "e", "more" + credit)
+        self.assertIn("none", self.cli("config", "attribution-emails").stdout)
+        self.assertIn("sam@example.com", self.cli("config", "attribution-emails", "Sam@Example.com").stdout)
+        p = push()
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn(more, p.stderr)
+        self.assertIn("credit Claude, but attribution is off", p.stderr)
 
     def test_detached_worktree_keeps_commits_and_clean_merge_keeps_approval(self):
         g = self.git_project()

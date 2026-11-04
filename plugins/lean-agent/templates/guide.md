@@ -61,7 +61,8 @@ pick context and model, delegate with `lean-agent run`, check results, report br
 8. **Attribution, asked once.** Before the first commit, PR or PR comment run `lean-agent attribution`. If "not set",
    ask the user once whether commits and PRs should credit Claude as co-author; save it with
    `lean-agent attribution on|off`. When off, never mention Claude or AI in commit messages, PR titles, descriptions
-   or comments (no Co-Authored-By or "Generated with Claude Code" lines).
+   or comments (no Co-Authored-By or "Generated with Claude Code" lines). `worktree push` checks only the user's own
+   commits (their git email, or `config attribution-emails`); credited commits by others just warn.
 9. **Ask, don't guess.** If the target (a person, chat, ticket, branch or file) is unclear, ask the user before
    starting a worker. A worker returning `needs-input` is asking you: ask the user, then resume it with the answer.
 10. **Handovers for things to read or share.** When the user asks for a handover, report, plan or review summary,
