@@ -6399,7 +6399,8 @@ def resolve_worktree(slug, ref):
     hits = []
     for n, w in sorted(entries.items()):
         cur = git(w["path"], "symbolic-ref", "--quiet", "--short", "HEAD") if os.path.isdir(w["path"]) else None
-        if ref in (w.get("branch"), w.get("ref"), cur) or bare in (w.get("branch"), cur):
+        wref = re.sub(r"^(refs/heads/|origin/)", "", w.get("ref") or "")
+        if ref in (w.get("branch"), w.get("ref"), cur) or bare in (w.get("branch"), cur, wref):
             hits.append(n)
     if len(hits) > 1:
         die(f"{ref} matches several worktrees in {slug}: {', '.join(hits)}; give the worktree name")
@@ -11269,7 +11270,10 @@ def park_thread_session(tid):
 
     close_thread_session(tid)
     summary = parked_summary(tid)
-    lean_threads.set_session(tid, parked=now_iso(), parked_summary=summary)
+    try:
+        lean_threads.set_session(tid, parked=now_iso(), parked_summary=summary)
+    except ValueError:  # the thread no longer exists
+        pass
 
 
 def close_min_idle():
@@ -11294,7 +11298,7 @@ def make_room_for_thread_session(tid=None):
         if not free:
             die(f"{len(sessions)} thread sessions are open (max-thread-sessions {cap}) and none can be parked to make room:\n" +
                 "\n".join(f'{s["thread"]} "{s["title"]}" idle {_idle_age(s["idle"])}, not eligible: {"; ".join(why[s["thread"]])}'
-                          for s in sessions) + "\npark or close one (`lean-agent thread park tN`, `thread close tN`), or `lean-agent config max-thread-sessions N`")
+                          for s in sessions) + "\npark or close one (`lean-agent thread park tN` or `lean-agent thread close tN`), or `lean-agent config max-thread-sessions N`")
         v = max(free, key=lambda s: s["idle"])  # the least recently used idle thread
         line = f'parking {v["thread"]} (idle {_idle_age(v["idle"])}) to make room'
         print(line, flush=True)
@@ -11467,9 +11471,9 @@ def cmd_thread(a):
             if k in live or k in lean_threads.load()["aliases"] or k in lean_threads.RESERVED:
                 continue
             if t.get("parked"):
-                print(f"{k:<6}{t.get('title') or '-':<42}parked {lean_threads.age(t['parked'])}  (wake: lean-agent thread wake {k})")
+                print(f"parked  {k:<5}{t.get('title') or '-':<42}{lean_threads.age(t['parked'])}  (wake: lean-agent thread wake {k})")
             elif t.get("closed") and t.get("session_id"):
-                print(f"{k:<6}{t.get('title') or '-':<42}closed (reopen: lean-agent thread reopen {k})")
+                print(f"closed  {k:<5}{t.get('title') or '-':<42}(reopen: lean-agent thread reopen {k})")
         if not sessions:
             print("no thread sessions running (start one with `lean-agent thread new \"title\"`)")
         return 0
