@@ -9,12 +9,13 @@ import time
 
 import lean_common
 
-KINDS = ("review", "question", "permission", "push", "other")
+KINDS = ("review", "question", "permission", "push", "auth", "other")
 DEFAULT_OPTIONS = {
     "review": ["Approve", "Approve with suggestions (post the nit)", "Wait for author", "No vote"],
     "question": ["Other"],
     "permission": ["Yes", "No"],
     "push": ["Push", "Push and post", "Post only", "Hold"],
+    "auth": ["Signed in"],
     "other": [],
 }
 KEEP = 100
@@ -64,7 +65,7 @@ def add(summary, kind="other", options=None, thread="", ref="", qid=""):
                 lean_common.write_json_atomic(path(), {"items": items})
                 return i["id"]
         for i in items:  # answered a moment ago: the same question reported again is the stale copy of that one
-            if i.get("answered_at") and (i.get("kind"), i.get("thread"), norm(i.get("summary"))) == (kind, thread or "", norm(summary)) \
+            if kind != "auth" and i.get("answered_at") and (i.get("kind"), i.get("thread"), norm(i.get("summary"))) == (kind, thread or "", norm(summary)) \
                     and _within(i["answered_at"], RECENT_MIN):
                 return i["id"]
         nid = "w%d" % (max([int(str(i.get("id", "w0"))[1:] or 0) for i in items if str(i.get("id", "")).startswith("w")] + [0]) + 1)

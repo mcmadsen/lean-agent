@@ -49,6 +49,17 @@ FAKE_CLAUDE = textwrap.dedent("""\
         with open(os.environ["FAKE_LOG"], "a") as fh:
             fh.write(json.dumps({"plugin": sys.argv[1:]}) + "\\n")
         sys.exit(0)
+    if sys.argv[1:2] == ["setup-token"]:
+        print("Opening browser to sign in...")
+        print("Your OAuth token (valid for 1 year):\\n\\n" + os.environ.get("FAKE_SETUP_TOKEN", "sk-ant-oat01-FAKEFAKEFAKEFAKEFAKEFAKE_fake-1234567890"))
+        sys.exit(0)
+    if sys.argv[1:3] == ["auth", "status"]:
+        print(json.dumps({"loggedIn": os.environ.get("FAKE_LOGGED_IN", "1") == "1", "authMethod": "oauth_token"}))
+        sys.exit(0)
+    if os.environ.get("FAKE_AUTH_FAIL") and "--append-system-prompt-file" in sys.argv:
+        sys.stdin.read()
+        sys.stderr.write("Invalid API key \\u00b7 Please run /login\\n")
+        sys.exit(1)
     if os.environ.get("LEAN_AGENT_SERVICE_SESSION"):  # the interactive session `up` hosts: ends at once
         sys.exit(0)
     task = sys.stdin.read()
@@ -114,6 +125,7 @@ FAKE_CLAUDE = textwrap.dedent("""\
                              "automem": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
                              "bash_out": os.environ.get("BASH_MAX_OUTPUT_LENGTH"),
                              "service": os.environ.get("LEAN_AGENT_SERVICE_SESSION"),
+                             "oauth": os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"),
                              "addclaudemd": os.environ.get("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD")}) + "\\n")
     import time
     if os.environ.get("FAKE_RELEASE_FILE"):  # hold until the test says go
@@ -11434,6 +11446,114 @@ class CliTest(unittest.TestCase):
         p = self.cli("review", "proj", "--head", "feature", "--base", "main", "--yes", "--force", FAKE_REVIEW=self.APPROVE,
                      check=False)
         self.assertIn("reviewer: opus (security-sensitive", p.stdout)
+
+    # ---- sign-in (lean_auth)
+    FAKE_TOKEN = "sk-ant-oat01-FAKEFAKEFAKEFAKEFAKEFAKE_fake-1234567890"
+
+    def auth_env(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        env = {"LEAN_AGENT_TOKEN_BACKEND": "file"}
+        os.environ.update(env, LEAN_AGENT_HOME=home, LEAN_AGENT_CLAUDE=self.env["LEAN_AGENT_CLAUDE"],
+                          FAKE_LOG=self.log)
+        self.addCleanup(lambda: [os.environ.pop(k, None) for k in ("LEAN_AGENT_TOKEN_BACKEND", "FAKE_AUTH_FAIL")])
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins", "lean-agent", "scripts"))
+        import lean_auth
+        return lean_auth, home
+
+    def test_login_captures_the_token_from_setup_token_output_and_stores_it_privately(self):
+        lean_auth, home = self.auth_env()
+        out = io.StringIO()
+        token, rc = lean_auth.run_setup_token(os.environ["LEAN_AGENT_CLAUDE"], out)
+        self.assertEqual((token, rc), (self.FAKE_TOKEN, 0))
+        self.assertNotIn(self.FAKE_TOKEN, out.getvalue())  # the mirrored screen hides it
+        lean_auth.store(token)
+        f = os.path.join(home, "secrets", "claude-oauth-token")
+        self.assertEqual(os.stat(f).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(os.path.dirname(f)).st_mode & 0o777, 0o700)
+        self.assertEqual(lean_auth.load(), self.FAKE_TOKEN)
+        self.assertEqual(lean_auth.age_days(), 0)
+        for root, _, names in os.walk(home):  # only the secret file holds it
+            for n in names:
+                if os.path.join(root, n) != f:
+                    with open(os.path.join(root, n), errors="replace") as fh:
+                        self.assertNotIn(self.FAKE_TOKEN, fh.read(), n)
+        status = self.cli("login", "--status", LEAN_AGENT_TOKEN_BACKEND="file")
+        self.assertIn("stored token: yes", status.stdout)
+        self.assertIn("loggedIn=True", status.stdout)
+        self.assertNotIn(self.FAKE_TOKEN, status.stdout + status.stderr)
+        self.assertIn("stored token removed", self.cli("login", "--forget", LEAN_AGENT_TOKEN_BACKEND="file").stdout)
+        self.assertEqual(lean_auth.load(), "")
+
+    def test_login_token_stdin_and_refused_without_a_terminal(self):
+        env = dict(LEAN_AGENT_TOKEN_BACKEND="file")
+        p = self.cli("login", check=False, **env)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("needs a terminal", p.stdout + p.stderr)
+        p = self.cli("login", "--token-stdin", input="junk\nno token\n", check=False, **env)
+        self.assertNotEqual(p.returncode, 0)
+        p = self.cli("login", "--token-stdin", input=self.FAKE_TOKEN + "\n", **env)
+        self.assertNotIn(self.FAKE_TOKEN, p.stdout + p.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "secrets", "claude-oauth-token")))
+
+    def test_login_token_reaches_workers_and_session_spawns_but_not_env_or_doctor_output(self):
+        lean_auth, home = self.auth_env()
+        lean_auth.store(self.FAKE_TOKEN)
+        self.cli("learn", self.proj)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", LEAN_AGENT_TOKEN_BACKEND="file")
+        self.assertEqual(self.calls()[-1]["oauth"], self.FAKE_TOKEN)
+        import service_session
+        env = service_session.child_env({"PATH": "/usr/bin"})
+        self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], self.FAKE_TOKEN)
+        for args in (("env",), ("env", "--json"), ("doctor",)):
+            p = self.cli(*args, check=False, LEAN_AGENT_TOKEN_BACKEND="file")
+            self.assertNotIn(self.FAKE_TOKEN, p.stdout + p.stderr, args)
+        self.assertIn("CLAUDE_CODE_OAUTH_TOKEN=(hidden)", self.cli("env", LEAN_AGENT_TOKEN_BACKEND="file").stdout)
+        self.assertIn("sign-in: stored long-lived token", self.cli("doctor", check=False, LEAN_AGENT_TOKEN_BACKEND="file").stdout)
+
+    def test_auth_failure_makes_one_waiting_item_pauses_chases_and_recovery_closes_it(self):
+        lean_auth, home = self.auth_env()
+        import lean_waiting
+        import service_session
+        self.cli("learn", self.proj)
+        self.assertTrue(lean_auth.detect("Claude Code on the computer running this session needs to sign in again"))
+        self.assertTrue(lean_auth.detect("OAuth token has expired"))
+        self.assertFalse(lean_auth.detect("all good"))
+        self.assertTrue(service_session.report_auth_failure("session main"))
+        self.assertFalse(service_session.report_auth_failure("session main"))  # one line only
+        items = [i for i in lean_waiting.open_items() if i["kind"] == "auth"]
+        self.assertEqual(len(items), 1)
+        self.assertIn("lean-agent login", items[0]["summary"])
+        self.assertTrue(lean_auth.is_broken())
+        queued = [r for r in service_session.queued_reports() if "lean-agent login" in r.get("text", "")]
+        self.assertEqual(len(queued), 1)
+
+        class Host:
+            key = "main"
+        watch = service_session.StuckWatch(Host(), now=lambda: 10 ** 9, workers=lambda k: [], long_tool=lambda p: False)
+        st = {"ended": False, "size": 5}
+        self.assertIsNone(watch.tick("/x", st, mtime=0))  # long idle, but paused
+        # a worker whose output says sign-in failed also records it (already open: no second item)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False, FAKE_AUTH_FAIL="1")
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertTrue(lean_auth.is_broken(), p.stdout + p.stderr)
+        lean_auth.mark_ok("test")
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False, FAKE_AUTH_FAIL="1")
+        self.assertTrue(lean_auth.is_broken(), p.stdout + p.stderr)
+        self.assertIn("lean-agent login", p.stdout + p.stderr)
+        self.assertEqual(len([i for i in lean_waiting.open_items() if i["kind"] == "auth"]), 1)
+        # a new login closes it; so does a worker that succeeds
+        lean_auth.store(self.FAKE_TOKEN)
+        st = lean_auth.state()
+        st["checked"] = 0
+        st["since"] = 1
+        import lean_common
+        lean_common.write_json_atomic(os.path.join(home, "auth-state.json"), st)
+        self.assertTrue(lean_auth.recheck(now=10 ** 10))
+        self.assertFalse(lean_auth.is_broken())
+        self.assertEqual([i for i in lean_waiting.open_items() if i["kind"] == "auth"], [])
+        lean_auth.mark_broken("worker")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t")  # succeeds
+        self.assertFalse(lean_auth.is_broken())
 
 
 class RevCostTest(unittest.TestCase):

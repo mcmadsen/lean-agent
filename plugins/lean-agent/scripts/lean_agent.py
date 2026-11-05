@@ -45,6 +45,7 @@ import lean_find  # noqa: E402
 import lean_feedback  # noqa: E402
 import lean_goals  # noqa: E402
 import lean_waiting  # noqa: E402
+import lean_auth  # noqa: E402
 import service_session  # noqa: E402
 import lean_common
 from lean_common import glob_match, compact_overrides, compaction_label, compaction_point, pid_alive, signal_group, lost_runs, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
@@ -3179,6 +3180,19 @@ RUN_TIMEOUT_MAX = 12 * 3600
 RUN_TIMEOUT_MIN = 30
 
 
+def note_auth(returncode, err, lines, source):
+    """A failed run whose output says the sign-in failed: one visible line, one waiting item, chases paused. A run that
+    succeeded closes it."""
+    try:
+        if returncode == 0:
+            lean_auth.mark_ok(f"{source} succeeded")
+        elif lean_auth.detect((err or "") + "\n" + "".join(lines)[-4000:]):
+            if lean_auth.mark_broken(source):
+                print(lean_auth.fix_line(), flush=True)
+    except Exception:  # noqa: BLE001 - never break a run over the bookkeeping
+        pass
+
+
 def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd=None, warn_turns=0):
     """Run a worker and read its stream-json as it comes, so a run that keeps re-reading a large context
     can be stopped (after `max_reads` context tokens summed over its calls; 0 = never) and resumed later.
@@ -3284,6 +3298,7 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
         n = -proc.returncode
         err = (err + f"\nkilled by signal {n}" + (" (outside lean-agent, e.g. out of memory)" if n == 9 else
                                                     " (outside lean-agent)")).strip()
+    note_auth(proc.returncode, err, lines, "worker")
     return "".join(lines), err, reads
 
 
@@ -9773,6 +9788,20 @@ def cmd_doctor(a):
             elif note:
                 report(None, f"card {c['id']} is ~{c['tokens']:,} tokens, above the ~{CARD_SPLIT_TOKENS} learnings are kept to",
                        f"lean-agent cards {pslug} --split {c['id']}")
+    tok_days = lean_auth.days_left()
+    if lean_auth.load():
+        report(None if tok_days is not None and tok_days <= lean_auth.WARN_DAYS else True,
+               f"sign-in: stored long-lived token ({lean_auth.backend()})" +
+               (f", {lean_auth.age_days()} days old, ~{max(tok_days, 0)} days left" if tok_days is not None else ""),
+               "lean-agent login  (in a terminal on this machine; one browser step)")
+    else:
+        report(True, "sign-in: no stored long-lived token (the stored Claude Code login is used; `lean-agent login` makes the service independent of it)")
+    st = lean_auth.auth_status()
+    if st:
+        report(True if st.get("loggedIn") else None, f"claude auth status: loggedIn={st.get('loggedIn')}, authMethod={st.get('authMethod')}",
+               "lean-agent login")
+    if lean_auth.is_broken():
+        report(False, "Claude Code sign-in failed recently; chases and restarts are paused", "lean-agent login")
     ignored = []
     text = compaction_text(ignored)
     for msg in ignored:
@@ -10856,11 +10885,54 @@ def cmd_install(a):
     sys.exit(r.returncode)
 
 
-def cmd_env(a):
-    if a.json:
-        print(json.dumps({"env": orchestrator_env()}, indent=2))
+def cmd_login(a):
+    """Sign the service in with a long-lived token (`claude setup-token`), kept in the keychain or a 0600 file."""
+    if a.status:
+        for ln in lean_auth.status_lines():
+            print(ln)
+        if lean_auth.is_broken():
+            print("sign-in failure recorded: chases and restarts paused until `lean-agent login`")
+        return 0
+    if a.forget:
+        print("stored token removed" if lean_auth.forget() else "no stored token")
+        return 0
+    if not a.token_stdin and (os.environ.get("LEAN_AGENT_SESSION_ROLE") or os.environ.get("LEAN_AGENT_SERVICE_SESSION")
+                              or not (sys.stdin.isatty() and sys.stdout.isatty())):
+        die("`lean-agent login` needs a terminal on the machine (the sign-in opens a browser): run it there, not in Remote "
+            "Control. From here only `lean-agent login --status` works.")
+    if a.token_stdin:
+        token = lean_auth.extract(sys.stdin.read())
+        if not token:
+            die("no token found on stdin (expected sk-ant-oat…)")
     else:
-        for k, v in orchestrator_env().items():
+        claude = os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
+        if not shutil.which(claude):
+            die("'claude' not found on PATH")
+        token, rc = lean_auth.run_setup_token(claude)
+        if not token:
+            die(f"`claude setup-token` ended (exit {rc}) without a token lean-agent could read. Run `claude setup-token` yourself, "
+                "then: `lean-agent login --token-stdin` and paste the token (read from stdin, not from the command line).")
+    try:
+        lean_auth.store(token)
+    except OSError as exc:
+        die(f"could not store the token: {lean_auth.mask(exc)}")
+    where = "the macOS Keychain" if lean_auth.backend() == "keychain" else lean_common.lean_home("secrets") + " (0600)"
+    print(f"signed in: token stored in {where}; it lasts about a year (lean-agent doctor warns {lean_auth.WARN_DAYS} days before)")
+    if lean_auth.mark_ok("new login"):
+        print("sign-in failure cleared: chases and restarts resume")
+    print("New sessions and workers use it at once. Running sessions get it on their restart: "
+          "`lean-agent service restart` (or `lean-agent clear --all --restart`).")
+    return 0
+
+
+def cmd_env(a):
+    env = orchestrator_env()
+    if lean_auth.load():
+        env[lean_auth.ENV_VAR] = lean_auth.masked(True)  # passed to every spawn from the store; never printed
+    if a.json:
+        print(json.dumps({"env": env}, indent=2))
+    else:
+        for k, v in env.items():
             print(f"export {k}={v}")
 
 
@@ -14181,6 +14253,11 @@ def build_parser():
     s.set_defaults(fn=cmd_trust)
     s = sub.add_parser("home", help="create (if needed) and print the orchestrator home folder")
     s.set_defaults(fn=cmd_home)
+    s = sub.add_parser("login", help="sign the service in with a long-lived token (`claude setup-token`; run in a terminal on the machine) | --status | --forget | --token-stdin")
+    s.add_argument("--status", action="store_true", help="stored token (age, expiry) and `claude auth status`")
+    s.add_argument("--forget", action="store_true", help="remove the stored token")
+    s.add_argument("--token-stdin", action="store_true", help="store a token pasted on stdin (when capture fails)")
+    s.set_defaults(fn=cmd_login)
     s = sub.add_parser("env", help="print orchestrator env defaults")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_env)
@@ -14973,6 +15050,8 @@ def main(argv=None):
 def _main(argv=None):
     # the CLI is never the service session; its claude spawns must not inherit the marker
     os.environ.pop("LEAN_AGENT_SERVICE_SESSION", None)
+    if sys.argv[1:2] != ["login"] and (argv is None or list(argv)[:1] != ["login"]):
+        lean_auth.apply_env(os.environ)  # every claude this command spawns signs in with the stored token (env only)
     ap = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:2] in (["review", "learn"], ["review", "decline"]):

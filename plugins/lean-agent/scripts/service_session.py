@@ -33,6 +33,7 @@ import threading
 import time
 import uuid
 
+import lean_auth
 import lean_common
 import lean_goals
 import lean_log
@@ -1071,6 +1072,14 @@ def reports_path():
     return lean_home("thread-reports.json")
 
 
+def report_auth_failure(source):
+    """The one visible line (to the front desk) and the waiting item when sign-in fails; only the first call acts."""
+    if lean_auth.mark_broken(source):
+        queue_report("main", "chase", lean_auth.fix_line())
+        return True
+    return False
+
+
 def queue_report(tid, kind, text, tag="", force=False):
     """Queue one thread report (kind: done | blocked | needs-you | question) for the main session; the mode filters it,
     except an explicit question (`thread ask`) or an explicit report (`thread report`, force), which always go through.
@@ -1544,7 +1553,7 @@ class StuckWatch:
         """Returns "nudge" / "restart" when it stepped in, else None."""
         limit = stuck_limit()
         now = self.now()
-        if not limit or not path:
+        if not limit or not path or lean_auth.is_broken():  # signed out: nudges and restarts would all fail
             return None
         if st["ended"]:
             self.stage, self.mark = 0, None
@@ -1722,13 +1731,20 @@ class Reporter(AutoClear):
 
     def main_tick(self):
         try:
-            self.goals_tick()
-        except Exception as exc:  # noqa: BLE001 - the report queue must keep going
-            self.log(f"goals watchdog failed: {exc}", "error")
-        try:
-            run_fallback(self.now())
-        except Exception as exc:  # noqa: BLE001 - the report queue must keep going
-            self.log(f"run follow-up failed: {exc}", "error")
+            if lean_auth.recheck(self.now()):
+                self.log("sign-in works again: chases and restarts resumed")
+                queue_report("main", "chase", "Claude Code sign-in works again; chases resumed.")
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"auth check failed: {exc}", "error")
+        if not lean_auth.is_broken():  # signed out: chasing and starting follow-ups would all fail
+            try:
+                self.goals_tick()
+            except Exception as exc:  # noqa: BLE001 - the report queue must keep going
+                self.log(f"goals watchdog failed: {exc}", "error")
+            try:
+                run_fallback(self.now())
+            except Exception as exc:  # noqa: BLE001 - the report queue must keep going
+                self.log(f"run follow-up failed: {exc}", "error")
         items = queued_reports()
         limit = stuck_limit()
         if items and limit and self.now() - min(i.get("ts") or self.now() for i in items) > limit \
@@ -1805,6 +1821,7 @@ class Reporter(AutoClear):
 def child_env(env):
     out = {k: v for k, v in env.items() if not PARENT_SESSION_VARS.match(k)}
     out["LEAN_AGENT_SERVICE_SESSION"] = "1"
+    lean_auth.apply_env(out)  # the stored long-lived sign-in, read now (a new `lean-agent login` reaches new spawns)
     out.setdefault("TERM", "xterm-256color")
     return out
 
@@ -1815,6 +1832,7 @@ class Host:
     def __init__(self, build_cmd, env, cwd, remote_control=False, on_text=None, on_stale=None, key="main", on_message=None):
         self.build_cmd = build_cmd  # () -> (argv, session_id): resume or start by whether the transcript exists
         self.env, self.cwd = child_env(env), cwd
+        self._auth_tail = ""
         self.remote_control = remote_control
         self.key = key  # "main", or the thread id of a thread session
         self.on_message = on_message  # (msg) -> reply or None: session management requests (the main host's bridge)
@@ -1847,6 +1865,17 @@ class Host:
         with self.lock:
             return b"".join(self.tail).decode("utf-8", "replace")[-TAIL_BYTES:]
 
+    def _auth_scan(self, raw):
+        """A sign-in failure line in the session's terminal output: one visible line, chases paused (lean_auth)."""
+        try:
+            text = self._auth_tail + raw.decode("utf-8", "replace")
+            self._auth_tail = text[-200:]
+            if lean_auth.detect(text):
+                self._auth_tail = ""
+                report_auth_failure(f"session {self.key}")
+        except Exception:  # noqa: BLE001 - watching never stops the pump
+            pass
+
     def _pump(self, master):
         while True:
             try:
@@ -1857,6 +1886,7 @@ class Host:
                 break
             self._remember(raw)
             self.last_output = time.time()
+            self._auth_scan(raw)
             if self.log:
                 try:
                     self.log.write(raw)
@@ -1997,6 +2027,7 @@ class Host:
         import struct
         import termios
         argv, sid = self.build_cmd()
+        lean_auth.apply_env(self.env)  # read at each spawn: a restart after `lean-agent login` signs in
         master, slave = pty.openpty()
         try:
             size = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"\0" * 8) if self.mirror else None

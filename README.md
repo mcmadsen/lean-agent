@@ -214,6 +214,30 @@ survive the restart.
 **Stop using it:** `lean-agent service uninstall`. **Without the service:** run `lean-agent up` in a terminal; it
 lasts until you close it or log out, and a restart of `up` continues the conversation.
 
+## Sign-in
+
+Claude Code's browser login (`/login`) does not work from Remote Control, and the stored login can expire while the
+service runs ("Claude Code ... needs to sign in again"). lean-agent therefore signs in with a long-lived token:
+
+```
+lean-agent login            # in a terminal on the machine: runs `claude setup-token`, one browser step
+lean-agent login --status   # stored token (age, expiry estimate) and `claude auth status`
+lean-agent login --forget   # remove the stored token
+lean-agent login --token-stdin   # if capture fails: paste the token from `claude setup-token` on stdin
+```
+
+The token (about a year) goes to the macOS Keychain (service `lean-agent`), elsewhere to `~/.lean-agent/secrets/` (0600);
+only its creation date is recorded. It is passed as `CLAUDE_CODE_OAUTH_TOKEN` in the environment (never on a command line)
+to the front desk, thread sessions, workers and helper runs, read at each spawn: a new login reaches new spawns at once and
+running sessions on their restart (`lean-agent service restart`). `env` and `doctor` never print it; `doctor` warns 30 days
+before the expiry estimate.
+
+When a sign-in failure shows up (a session's terminal, a worker's output: "needs to sign in again", "OAuth token has
+expired", "Invalid API key"), lean-agent shows one line, adds a waiting item of kind `auth` and pauses the watchdog chases,
+stuck restarts and follow-up starts, since they would all fail. Run `lean-agent login` in a terminal on the machine; they
+resume by themselves and the item closes once a new token is stored and `claude auth status` says loggedIn (or a run succeeds).
+`lean-agent login` is refused in Remote Control sessions; the front desk may run `login --status`.
+
 ## MCP servers in workers
 
 Workers get **no MCP servers** unless the orchestrator asks for them, and then only the tools it names:
