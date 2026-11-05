@@ -773,6 +773,8 @@ def cmd_projects(a):
 def cmd_cards(a):
     slug, _ = resolve_project(a.project)
     sync_memory(slug)
+    if a.split:
+        return cmd_cards_split(slug, load_cards(slug), a)
     cards = [c for c in load_cards(slug) if a.all or not c.get("archived")]
     if a.filter:
         f = a.filter.lower()
@@ -785,8 +787,23 @@ def cmd_cards(a):
     for c in cards:
         flag = "*" if c.get("core") else ("x" if c.get("archived") else " ")
         print(f"{flag}{c['id']:<{w}}{c['kind']:<10}{c['tokens']:>6}  {card_rate(c):>6}  {c['title'][:70]}")
+        note = card_size_note(c)
+        if note:
+            print(f"{'':>{w + 11 + 6}}  ! {note}")
     print(f"{len(cards)} cards, ~{sum(c['tokens'] for c in cards):,} tokens.  * = core (always sent)   "
           "used = times a worker used it / times it was sent")
+
+
+def card_size_note(c):
+    """Why a card is too big for workers: cut when loaded, or above the size learnings are kept to."""
+    if c.get("archived") or c.get("is_rule"):
+        return ""
+    if c["tokens"] > CARD_LOAD_CAP:
+        return (f"trimmed when loaded ({CARD_LOAD_CAP:,} of {c['tokens']:,} tokens); "
+                f"split it: lean-agent cards <project> --split {c['id']}")
+    if c["tokens"] > CARD_SPLIT_TOKENS and c.get("source") == "learned":
+        return f"above ~{CARD_SPLIT_TOKENS} tokens; split it: lean-agent cards <project> --split {c['id']}"
+    return ""
 
 
 def find_card(cards, cid):
@@ -1009,10 +1026,10 @@ def suggest(slug, task, max_tokens, ttype=None, explain=False, strict=False, lim
             if closest is None:
                 closest = (score, c, why + "; weaker than the best matches")
             continue
-        if c["tokens"] <= budget:
+        if load_tokens(c) <= budget:
             picked.append(c)
             reasons[c["id"]] = why
-            budget -= c["tokens"]
+            budget -= load_tokens(c)
             matches += not pref
     if explain:
         return picked, reasons, closest
@@ -1113,13 +1130,22 @@ def cmd_suggest(a):
         hint = f" (closest: {closest[1]['id']}, {closest[2]}, not distinctive enough)" if closest else ""
         print(f"No relevant cards{hint}. Run without --cards.")
         return
-    total = 0
     for c in picked:
-        total += c["tokens"]
         label = "core" if reasons[c["id"]].startswith("core") else "match"
-        print(f"{label:<6}{c['id']:<36}~{c['tokens']:>5,} tok  used {card_rate(c):>5}  {reasons[c['id']]}")
+        note = card_size_note(c)
+        print(f"{label:<6}{c['id']:<36}~{load_tokens(c):>5,} tok  used {card_rate(c):>5}  {reasons[c['id']]}"
+              + (f"  [trimmed from {c['tokens']:,}]" if c["tokens"] > CARD_LOAD_CAP else ""))
+    total = sum(load_tokens(c) for c in picked)
     print(f"total ~{total:,} tok of {a.max_tokens:,} budget")
     extra = [c["id"] for c in picked if not reasons[c["id"]].startswith("core")]
+    allc = load_cards(slug)
+    for base in REVIEW_CARDS:
+        fam = family(allc, base)
+        if any(topic_of_card(c) for c in fam):
+            hit = review_family(allc, base, [], a.task)
+            print(f"{base} topic cards a review of this task would load: "
+                  + (", ".join(f"{c['id']} (~{c['tokens']:,})" for c in hit) or "none")
+                  + "; not loaded: " + (", ".join(c["id"] for c in fam if c not in hit) or "none"))
     print(f"--cards {','.join(extra)}   (core cards are sent anyway)" if extra else "Only core cards apply; leave out --cards.")
 
 
@@ -1310,7 +1336,7 @@ def build_append(project, cards, read_only=False, allow_send=None, chrome=False,
     if cards:
         parts.append("# Project context (selected for this task)\n")
         for c in cards:
-            parts.append(f"## [{c['id']}] {c['title']}\n{c['text']}\n")
+            parts.append(f"## [{c['id']}] {c['title']}\n{trim_for_load(c)[0]}\n")
     return "\n".join(parts)
 
 
@@ -4167,6 +4193,201 @@ REVIEW_CARDS = {
                        "Reuse these before adding new code with the same job (name, where, what it does).\n"),
 }
 
+# ---- topic cards: a learnings card stays small by splitting into <base>-<topic> cards
+
+CARD_SPLIT_TOKENS = 800    # learn/--split keep each learnings card at or under this
+CARD_LOAD_CAP = 1500       # a card above this is cut to it when loaded into a worker (see trim_for_load)
+TOPICS = {  # topic: (keywords in a learning, regex on a changed file path, trigger words for the card title)
+    "security": (r"\b(security|auth\w*|token|secrets?|password|credential\w*|permission\w*|sanitiz\w*|escap\w*|injection|csrf|xss|encrypt\w*)\b",
+                 r"auth|security|secret|crypt|permission", "security, auth, secrets, permissions"),
+    "cache-sync": (r"\b(cache[sd]?|caching|sync\w*|stale|invalidat\w*|refresh\w*|race|locks?|locking|concurren\w*|queues?|retry|retries)\b",
+                   r"cache|sync|queue|lock", "cache, sync, stale data, concurrency"),
+    "tests": (r"\b(tests?|specs?|fixtures?|mocks?|assert\w*|coverage|pytest|unittest|jest)\b",
+              r"(^|/)(tests?|__tests__|spec)(/|$)|test_|_test\.|\.spec\.|\.test\.", "tests, specs, fixtures, mocks"),
+    "docs": (r"\b(docs?|documentation|readme|changelog|comments?|docstrings?|release notes)\b",
+             r"\.(md|rst|txt)$|(^|/)docs?/|readme|changelog", "docs, readme, changelog, comments"),
+    "frontend": (r"\b(frontend|ui|css|html|components?|react|vue|svelte|dom|styles?|layout|accessib\w*|aria|button|dialogs?|modal|overlay|browser)\b",
+                 r"\.(css|scss|html|jsx|tsx|vue|svelte)$|(^|/)(ui|frontend|web|components?)/", "frontend, ui, css, components"),
+    "build-ci": (r"\b(build|ci|pipeline|workflow|docker\w*|deploy\w*|lint\w*|version|release|dependenc\w*|package|install\w*|makefile)\b",
+                 r"(^|/)(\.github|\.gitlab|ci)/|dockerfile|makefile|\.ya?ml$|package\.json|requirements|pyproject|\.toml$|\.lock$",
+                 "build, ci, deploy, dependencies"),
+    "api": (r"\b(api|endpoints?|routes?|handlers?|requests?|responses?|backend|server|database|db|sql|quer(y|ies)|schema|migrations?|models?|services?|http)\b",
+            r"(^|/)(api|server|backend|services?|routes|models|db|migrations)/", "api, backend, database, services"),
+    "other": ("", "", "everything else"),
+}
+
+
+def topic_of_line(line):
+    """The topic a learning is about, from paths and keywords in its text (the first of the best-scoring topics)."""
+    low = line.lower()
+    paths = [w for w in re.findall(r"[\w./-]+", low) if "/" in w or re.search(r"\.\w{1,5}$", w)]
+    best, score = "other", 0
+    for t, (kw, pat, _) in TOPICS.items():
+        if not kw:
+            continue
+        s = len(re.findall(kw, low)) + 2 * sum(bool(re.search(pat, p)) for p in paths)
+        if s > score:
+            best, score = t, s
+    return best
+
+
+def topic_of_card(c):
+    return c.get("topic") or next((t for t in TOPICS if c["id"].endswith("-" + t)
+                                   or re.search(r"-" + re.escape(t) + r"-\d+$", c["id"])), None)
+
+
+def family(cards, base, active=True):
+    """The base card and its topic cards (<base>-<topic>[-n])."""
+    return [c for c in cards if (c["id"] == base or (c["id"].startswith(base + "-") and topic_of_card(c)))
+            and not (active and c.get("archived"))]
+
+
+def pack_lines(lines, cap=CARD_SPLIT_TOKENS):
+    """Chunks of lines, each at most `cap` tokens (a single longer line gets its own chunk)."""
+    chunks, cur, tok = [], [], 0
+    for l in lines:
+        t = est_tokens(l) + 1
+        if cur and tok + t > cap:
+            chunks.append(cur)
+            cur, tok = [], 0
+        cur.append(l)
+        tok += t
+    return chunks + ([cur] if cur else [])
+
+
+def topic_card(base, title, topic, n, lines, src=None):
+    cid = f"{base}-{topic}" + (f"-{n}" if n > 1 else "")
+    intro = (f"{title}, {topic} part: apply when the change involves {TOPICS[topic][2]}." if topic != "other"
+             else f"{title}, other part: lessons that fit no single area.")
+    text = "\n".join([intro] + lines)
+    return {"id": cid, "kind": "note", "title": f"{title}: {topic} ({TOPICS[topic][2]})", "source": "learned",
+            "text": text, "tokens": est_tokens(text), "core": False, "core_types": [], "topic": topic,
+            "archived": False, "offered": 0, "used": 0, "unneeded": 0, "updated": now_iso(),
+            **({"split_from": src} if src else {})}
+
+
+def card_title_base(card):
+    return REVIEW_CARDS[card["id"]][0] if card["id"] in REVIEW_CARDS else (
+        re.sub(r"[:(].*$", "", card["title"]).strip() or card["id"])
+
+
+def split_plan(card):
+    """Topic cards that hold every '- ' line of `card` exactly once, each at most CARD_SPLIT_TOKENS."""
+    lines = [l for l in card["text"].splitlines() if l.startswith("- ")]
+    if not lines:
+        die(f"card {card['id']} has no '- ' learning lines to group by topic")
+    by = {}
+    for l in lines:
+        by.setdefault(topic_of_line(l), []).append(l)
+    return [topic_card(card["id"], card_title_base(card), t, n, chunk, card["id"])
+            for t in TOPICS for n, chunk in enumerate(pack_lines(by.get(t, [])), 1)]
+
+
+def trim_for_load(c):
+    """(text, kept tokens, total tokens): a card above CARD_LOAD_CAP is cut at a line to fit it when loaded."""
+    total = est_tokens(c["text"])
+    if total <= CARD_LOAD_CAP or c.get("is_rule"):
+        return c["text"], total, total
+    kept, tok = [], 0
+    for l in c["text"].splitlines():
+        if tok + est_tokens(l) + 1 > CARD_LOAD_CAP:
+            break
+        kept.append(l)
+        tok += est_tokens(l) + 1
+    kept.append(f"[trimmed: {tok} of {total} tokens loaded; split it: lean-agent cards <project> --split {c['id']}]")
+    return "\n".join(kept), tok, total
+
+
+def load_tokens(c):
+    return c["tokens"] if c.get("is_rule") else min(c["tokens"], CARD_LOAD_CAP)
+
+
+def cmd_cards_split(slug, cards, a):
+    c = next((x for x in cards if x["id"] == a.split), None)
+    if not c:
+        die(f"no card {a.split!r} (see: lean-agent cards {slug})")
+    plan = split_plan(c)
+    ids = {p["id"] for p in plan}
+    clash = [x["id"] for x in cards if x["id"] in ids and not x.get("archived")]
+    print(f"{c['id']}: ~{c['tokens']:,} tokens -> {len(plan)} cards")
+    for p in plan:
+        print(f"  {p['id']:<36}~{p['tokens']:>5,} tok  {sum(l.startswith('- ') for l in p['text'].splitlines())} lines")
+    if not a.apply:
+        print(f"dry run: write them and retire {c['id']} with: lean-agent cards {slug} --split {c['id']} --apply")
+        return
+    if clash:
+        die("these cards already exist: " + ", ".join(clash))
+    cards[:] = [x for x in cards if x["id"] not in ids]
+    cards.extend(plan)
+    c.update(archived=True, core=False, core_types=[], updated=now_iso(), retired_by="split")
+    save_cards(slug, cards)
+    print(f"wrote {len(plan)} cards, retired {c['id']}")
+
+
+def review_family(cards, base, names, text):
+    """The cards of `base` for a change: an unsplit card whole; topic cards when a changed path or the text mentions
+    their topic ('other' always)."""
+    fam = family(cards, base)
+    if not any(topic_of_card(c) for c in fam):
+        return fam
+    out = []
+    for c in fam:
+        t = topic_of_card(c)
+        if t is None:
+            continue
+        kw, pat, _ = TOPICS[t]
+        if not kw or any(re.search(pat, n.lower()) for n in names) or re.search(kw, text.lower()):
+            out.append(c)
+    return out
+
+
+def add_checklist_items(cards, base, items, ops, added):
+    """Add learnings to the `base` family of cards: into the base card while it fits CARD_SPLIT_TOKENS, else (or once
+    split) into topic cards. A base card that outgrows the cap is split on the spot."""
+    title = REVIEW_CARDS[base][0]
+    fam = family(cards, base)
+    known = [l for c in fam for l in c["text"].splitlines() if l.startswith("- ")]
+    new = []
+    for item in items:
+        if not any(_similar(item, l) for l in known + new):
+            new.append(item)
+    if not new:
+        return
+    split = any(topic_of_card(c) for c in fam)
+    root = next((c for c in fam if c["id"] == base), None)
+    if not split and (root is None or est_tokens(root["text"] + "".join(new)) + len(new) <= CARD_SPLIT_TOKENS):
+        if root is None:
+            root = {"id": base, "kind": "note", "title": title, "source": "learned", "text": REVIEW_CARDS[base][1].strip(),
+                    "tokens": 0, "core": False, "core_types": ["review"] + (["change"] if base == "shared-helpers" else []),
+                    "archived": False, "offered": 0, "used": 0, "unneeded": 0}
+            cards.append(root)
+        set_card_lines(root, root["text"].splitlines() + new)
+        root["archived"] = False
+        target = {base: new}
+    else:
+        if not split:  # grow past the cap: group the old lines by topic, then place the new ones
+            old = split_plan(root)
+            cards[:] = [x for x in cards if x["id"] not in {p["id"] for p in old}]
+            cards.extend(old)
+            root.update(archived=True, core=False, core_types=[], retired_by="split")
+        target = {}
+        for item in new:
+            target.setdefault(topic_of_line(item), []).append(item)
+        for t, its in target.items():
+            for item in its:
+                cs = sorted((c for c in family(cards, base) if topic_of_card(c) == t), key=lambda c: c["id"])
+                c = cs[-1] if cs else None
+                if c is None or est_tokens(c["text"] + item) + 1 > CARD_SPLIT_TOKENS:
+                    c = topic_card(base, title, t, len(cs) + 1, [])
+                    cards.append(c)
+                set_card_lines(c, c["text"].splitlines() + [item])
+                ops.append({"kind": "add", "id": c["id"], "line": item})
+                added.append((c["id"], item))
+        return
+    ops.extend({"kind": "add", "id": base, "line": i} for i in new)
+    added.extend((base, i) for i in new)
+
+
 LEARN_RULE = """\
 Role: you turn a human code review into lessons for an automated reviewer. You can only read: {source}
 and the code (Read/Grep/Glob, read-only git in {project}).
@@ -4360,7 +4581,7 @@ def learn_route(slug):
 
 def review_lines(cards):
     """[(card id, line)] numbered in this order by `review learn --list`."""
-    return [(c["id"], l) for cid in REVIEW_CARDS for c in cards if c["id"] == cid
+    return [(c["id"], l) for cid in REVIEW_CARDS for c in sorted(family(cards, cid), key=lambda x: x["id"])
             for l in c["text"].splitlines() if l.startswith("- ")]
 
 
@@ -4415,7 +4636,9 @@ def undo_review_learn(slug):
         save_json(batches_path(slug), d)
     cards = load_cards(slug)
     for op in reversed(batch["ops"]):
-        c = next((x for x in cards if x["id"] == op["id"]), None)
+        c = next((x for x in cards if x["id"] == op["id"] and not x.get("archived")), None)
+        if not c and op["kind"] != "rm":  # the card was split since: the line is in a topic card
+            c = next((x for x in cards if x.get("topic") and op.get("line", op.get("new")) in x["text"].splitlines()), None)
         if not c:
             continue
         lines = c["text"].splitlines()
@@ -4442,9 +4665,7 @@ def add_to_review_cards(slug, checklist=(), helpers=(), replace=()):
     for rp in replace:
         if not isinstance(rp, dict) or not rp.get("old") or not rp.get("new"):
             continue
-        for c in cards:
-            if c["id"] not in REVIEW_CARDS:
-                continue
+        for c in [x for b in REVIEW_CARDS for x in family(cards, b)]:
             lines = c["text"].splitlines()
             best = max(range(len(lines)), key=lambda i: _jaccard(_words(lines[i]), _words(rp["old"])), default=None)
             if best is not None and _similar(lines[best], rp["old"], 0.5):
@@ -4453,37 +4674,26 @@ def add_to_review_cards(slug, checklist=(), helpers=(), replace=()):
                 c.update(text="\n".join(lines), tokens=est_tokens("\n".join(lines)), updated=now_iso())
                 added.append((c["id"], "corrected: " + lines[best]))
                 break
-    for cid, items in (("review-checklist", [f"- {c.strip()}" for c in checklist if str(c).strip()]),
-                       ("shared-helpers", [f"- {h['name']} ({h.get('where', '?')}): {h.get('what', '')}".strip()
-                                           if isinstance(h, dict) else f"- {h}" for h in helpers if h])):
-        if not items:
+    items = [f"- {c.strip()}" for c in checklist if str(c).strip()]
+    add_checklist_items(cards, "review-checklist", items, ops, added)
+    hl = [f"- {h['name']} ({h.get('where', '?')}): {h.get('what', '')}".strip() if isinstance(h, dict) else f"- {h}"
+          for h in helpers if h]
+    fresh = []
+    for item in hl:  # same helper name: update its line
+        name = item[2:].split(" (")[0].strip().lower()
+        hit = next(((c, k) for c in family(cards, "shared-helpers") for k, l in enumerate(c["text"].splitlines())
+                    if l.startswith("- ") and l[2:].split(" (")[0].strip().lower() == name), None)
+        if not hit:
+            fresh.append(item)
             continue
-        title, intro = REVIEW_CARDS[cid]
-        c = next((x for x in cards if x["id"] == cid), None)
-        if not c:
-            c = {"id": cid, "kind": "note", "title": title, "source": "learned", "text": intro.strip(), "tokens": 0,
-                 "core": False, "core_types": ["review"] + (["change"] if cid == "shared-helpers" else []),
-                 "archived": False, "offered": 0, "used": 0, "unneeded": 0}
-            cards.append(c)
+        c, at = hit
         lines = c["text"].splitlines()
-        new = []
-        for item in items:
-            if cid == "shared-helpers":  # same helper name: update its line
-                name = item[2:].split(" (")[0].strip().lower()
-                at = next((i for i, l in enumerate(lines) if l[2:].split(" (")[0].strip().lower() == name), None)
-                if at is not None:
-                    if lines[at] != item:
-                        ops.append({"kind": "update", "id": cid, "old": lines[at], "new": item})
-                        lines[at] = item
-                        added.append((cid, "updated: " + item))
-                    continue
-            if any(_similar(item, l) for l in lines + new):
-                continue
-            new.append(item)
-        lines += new
-        c.update(text="\n".join(lines), tokens=est_tokens("\n".join(lines)), updated=now_iso(), archived=False)
-        added += [(cid, i) for i in new]
-        ops += [{"kind": "add", "id": cid, "line": i} for i in new]
+        if lines[at] != item:
+            ops.append({"kind": "update", "id": c["id"], "old": lines[at], "new": item})
+            lines[at] = item
+            set_card_lines(c, lines)
+            added.append((c["id"], "updated: " + item))
+    add_checklist_items(cards, "shared-helpers", fresh, ops, added)
     save_cards(slug, cards)
     log_batch(slug, ops)
     return added
@@ -5231,7 +5441,11 @@ def review_cards(slug, path, rng_args, names, goal, focus, max_tokens):
     """Cards for a reviewer prompt: the learned review checklist, rules whose globs match a changed file, then cards whose keywords appear in the
     diff, the goal or the focus; at most MAX_REVIEW_CARDS, never the generic core cards of the project."""
     lib = [c for c in load_cards(slug) if not c.get("archived")]
-    chosen = [c for c in lib if c["id"] in REVIEW_CARDS]  # the review's own learned checklist
+    chosen = []
+    own = " ".join(re.split(r"[/._-]+", " ".join(names))) + " " + (goal or "") + " " + (focus or "")
+    for base in REVIEW_CARDS:  # the review's own learned checklist: the topic cards that match the change
+        chosen += review_family(lib, base, names, own)
+    nfam = len(chosen)
     chosen += [c for c in lib if is_rule_card(c) and c.get("globs") and any(glob_match(g, f) for g in c["globs"] for f in names)]
     diff = (git(path, "diff", "-U0", "--no-color", *rng_args) or "")[:30000]
     added = " ".join(l[1:] for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++"))
@@ -5241,10 +5455,10 @@ def review_cards(slug, path, rng_args, names, goal, focus, max_tokens):
         if c not in chosen and not reasons.get(c["id"], "").startswith("core") and not is_rule_card(c):
             chosen.append(c)
     out, used = [], 0
-    for c in chosen[:MAX_REVIEW_CARDS]:
-        if used + c["tokens"] <= max_tokens:
+    for c in chosen[:max(nfam - 1, 0) + MAX_REVIEW_CARDS]:  # topic cards beyond the first are not capped
+        if used + load_tokens(c) <= max_tokens:
             out.append(c)
-            used += c["tokens"]
+            used += load_tokens(c)
     return out
 
 
@@ -8440,7 +8654,7 @@ def _cmd_optimize(a):
             used = sorted(m["calls"], key=lambda t: -m["calls"][t])
             print(f"mcp     {name:<34}called in {m['used_runs']}/{m['runs']} runs; tools used: "
                   f"{', '.join(used)} -> --mcp {name}:{','.join(used)}")
-    if list(read_jsonl(reviews_path(slug))) and not any(c["id"] == "review-checklist" for c in load_cards(slug)):
+    if list(read_jsonl(reviews_path(slug))) and not family(load_cards(slug), "review-checklist"):
         print(f"review  after a human review of a PR, teach the reviewer what it missed: "
               f"lean-agent review learn {slug} <PR> --mcp <tracker>  (or --text \"...\")")
     acked_path = home("library", slug, "gaps-acked.json")
@@ -9392,6 +9606,15 @@ def cmd_doctor(a):
             report(None, msg, "update that file (lean-agent never edits it) or `lean-agent memory rm` the rule")
         report(True, f"branch rules for {pslug}: " + "  ".join(f"{k}={v}" for k, v in branch_rules(pslug).items())
                + " (lean-agent config branch-rules)")
+    if pslug:
+        for c in load_cards(pslug):
+            note = card_size_note(c)
+            if note and c["tokens"] > CARD_LOAD_CAP:
+                report(None, f"card {c['id']} is ~{c['tokens']:,} tokens: {note.split('; ')[0]}",
+                       f"lean-agent cards {pslug} --split {c['id']}")
+            elif note:
+                report(None, f"card {c['id']} is ~{c['tokens']:,} tokens, above the ~{CARD_SPLIT_TOKENS} learnings are kept to",
+                       f"lean-agent cards {pslug} --split {c['id']}")
     ignored = []
     text = compaction_text(ignored)
     for msg in ignored:
@@ -13963,6 +14186,9 @@ def build_parser():
     s.add_argument("project")
     s.add_argument("filter", nargs="?", help="only cards whose id, title or source contains this")
     s.add_argument("--all", action="store_true", help="include archived cards")
+    s.add_argument("--split", metavar="CARD", help="split an oversized learnings card into topic cards "
+                   "(<card>-<topic>); a dry run unless --apply")
+    s.add_argument("--apply", action="store_true", help="--split: write the topic cards and retire the old card")
     s.set_defaults(fn=cmd_cards)
     s = sub.add_parser("card", help="show/add/rm/core one card")
     s.add_argument("action", choices=["show", "add", "rm", "core", "shorten", "unarchive", "protect"])

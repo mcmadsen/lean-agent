@@ -11716,6 +11716,120 @@ class ReviewUnitTest(unittest.TestCase):
         self.dir = old
 
 
+class TopicCardsTest(unittest.TestCase):
+    AREAS = [("tests", "Add a test in tests/test_{n}.py for the {n} fixture and mock case"),
+             ("docs", "Update docs/{n}.md and the changelog when the {n} option changes"),
+             ("frontend", "Check the {n} dialog component css and aria labels in ui/{n}.tsx"),
+             ("cache-sync", "Invalidate the {n} cache after a sync, avoid stale reads and races"),
+             ("api", "The {n} endpoint handler must validate the request schema in api/{n}.py"),
+             ("security", "Escape the {n} input and never log the auth token or secrets"),
+             ("build-ci", "Pin the {n} dependency version in the build pipeline workflow"),
+             ("other", "Keep the {n} sibling surfaces consistent with each other")]
+
+    def setUp(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        self.agent = lean_agent_module()
+        self.store = []
+        for p in (mock.patch.object(self.agent, "load_cards", lambda slug: self.store),
+                  mock.patch.object(self.agent, "save_cards", lambda slug, cards: None),
+                  mock.patch.object(self.agent, "log_batch", lambda *a: None),
+                  mock.patch.object(self.agent, "resolve_project", lambda p: ("p", "/x")),
+                  mock.patch.object(self.agent, "sync_memory", lambda slug: None)):
+            p.start()
+            self.addCleanup(p.stop)
+        self.lines = [("- " + self.AREAS[i % 8][1].format(n=f"item{i}") + f" because reason{i}a reason{i}b reason{i}c reason{i}d reason{i}e reason{i}f").strip()
+                      for i in range(96)]
+        text = "Things reviewers caught.\n" + "\n".join(self.lines)
+        self.big = {"id": "review-checklist", "kind": "note", "title": "Review checklist (lessons from human reviews)",
+                    "source": "learned", "text": text, "tokens": self.agent.est_tokens(text), "core": False,
+                    "core_types": ["review"], "archived": False, "offered": 0, "used": 0, "unneeded": 0}
+        self.store.append(self.big)
+
+    def args(self, **kw):
+        return types.SimpleNamespace(**dict(dict(project="p", filter=None, all=False, split=None, apply=False), **kw))
+
+    def run_cards(self, **kw):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.agent.cmd_cards(self.args(**kw))
+        return out.getvalue()
+
+    def test_the_card_is_over_the_cap_and_the_listing_says_it_is_trimmed(self):
+        agent = self.agent
+        self.assertGreater(self.big["tokens"], agent.CARD_LOAD_CAP)
+        out = self.run_cards()
+        self.assertIn(f"trimmed when loaded ({agent.CARD_LOAD_CAP:,} of {self.big['tokens']:,} tokens)", out)
+        text, kept, total = agent.trim_for_load(self.big)
+        self.assertLessEqual(kept, agent.CARD_LOAD_CAP)
+        self.assertIn("[trimmed:", text)
+        self.assertEqual(total, self.big["tokens"])
+
+    def test_split_dry_run_writes_nothing_and_apply_covers_every_learning_once(self):
+        agent = self.agent
+        out = self.run_cards(split="review-checklist")
+        self.assertIn("dry run", out)
+        self.assertEqual([c["id"] for c in self.store], ["review-checklist"])
+        self.assertFalse(self.big["archived"])
+        out = self.run_cards(split="review-checklist", apply=True)
+        self.assertIn("retired review-checklist", out)
+        self.assertTrue(self.big["archived"])
+        topic = [c for c in self.store if c is not self.big]
+        self.assertGreaterEqual(len(topic), 6)
+        got = [l for c in topic for l in c["text"].splitlines() if l.startswith("- ")]
+        self.assertEqual(sorted(got), sorted(self.lines))
+        for c in topic:
+            self.assertLessEqual(c["tokens"], agent.CARD_SPLIT_TOKENS + 40, c["id"])
+            self.assertTrue(c["id"].startswith("review-checklist-"))
+        self.assertIn("review-checklist-tests", [c["id"] for c in topic])
+        self.assertNotIn("trimmed when loaded", self.run_cards())
+
+    def test_review_loads_only_the_topic_cards_matching_the_changed_paths(self):
+        agent = self.agent
+        self.run_cards(split="review-checklist", apply=True)
+        with mock.patch.object(agent, "git", return_value=""):
+            got = [c["id"] for c in agent.review_cards("p", "/x", [], ["tests/test_a.py", "docs/guide.md"], "", None, 4000)]
+        self.assertIn("review-checklist-tests", got)
+        self.assertIn("review-checklist-docs", got)
+        self.assertIn("review-checklist-other", got)
+        self.assertNotIn("review-checklist-frontend", got)
+        self.assertNotIn("review-checklist-security", got)
+        self.assertNotIn("review-checklist", got)
+        with mock.patch.object(agent, "git", return_value=""):
+            got = [c["id"] for c in agent.review_cards("p", "/x", [], ["web/ui/panel.tsx"], "", None, 4000)]
+        self.assertIn("review-checklist-frontend", got)
+        self.assertNotIn("review-checklist-tests", got)
+
+    def test_learning_past_the_cap_splits_the_card_and_undo_finds_the_line(self):
+        agent = self.agent
+        self.store.clear()
+        small = dict(self.big, text="Things reviewers caught.\n" + "\n".join(self.lines[:8]), archived=False)
+        small["tokens"] = agent.est_tokens(small["text"])
+        self.store.append(small)
+        fresh = [l[2:] for l in self.lines[8:40]]
+        added = agent.add_to_review_cards("p", checklist=fresh)
+        self.assertEqual(len(added), 32)
+        self.assertTrue(small["archived"])
+        topics = [c for c in self.store if c is not small and not c["archived"]]
+        for c in topics:
+            self.assertLessEqual(c["tokens"], agent.CARD_SPLIT_TOKENS + 40)
+        got = [l for c in topics for l in c["text"].splitlines() if l.startswith("- ")]
+        self.assertEqual(len(got), 40)
+        self.assertEqual(len(set(got)), 40)
+        again = agent.add_to_review_cards("p", checklist=["Add a test in tests/test_new.py for the retry case"])
+        self.assertEqual(again[0][0], "review-checklist-tests")
+
+    def test_suggest_lists_the_topic_cards_a_review_would_load(self):
+        self.run_cards(split="review-checklist", apply=True)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(self.agent, "recommend_model", lambda *a: ("haiku", "x")):
+            self.agent.cmd_suggest(types.SimpleNamespace(project="p", task="review the docs and changelog update",
+                                                         max_tokens=2000, max_cards=4))
+        text = out.getvalue()
+        self.assertRegex(text, r"review-checklist-docs\s+~\s*[\d,]+ tok")
+        self.assertIn("review-checklist topic cards a review of this task would load:", text)
+        self.assertIn("not loaded:", text)
+
+
 class RuleGlobTest(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0, os.path.dirname(CLI))

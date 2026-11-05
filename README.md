@@ -626,6 +626,12 @@ uncommitted changes and new untracked files.
   the reason; `--apply` removes them. It checks `--head`, HEAD, the default branch and every base branch your
   reviews used, matches partial paths (relative to a package folder, in backticks, with `:line`), and keeps a
   line whose symbol is found even when its path is wrong.
+- **Card size:** a card above ~1,500 tokens is cut to that when loaded into a worker (the cut is marked in the
+  text); `lean-agent cards <project>` flags such cards ("trimmed when loaded (1,500 of N tokens)") and `doctor` warns.
+  `review learn` keeps its cards at ~800 tokens by grouping lessons by topic into `review-checklist-<topic>` cards
+  (tests, docs, frontend, cache-sync, api, security, build-ci, other); a review loads the topic cards that match the
+  changed paths, and `suggest` lists them with sizes. Split an existing big card once with
+  `lean-agent cards <project> --split review-checklist` (dry run; `--apply` writes the cards and retires the old one).
 - **Cheaper reviews:** the reviewer prompt carries a fill-in template listing every new symbol (reuse) and edited or
   removed test (coverage) with the answer format; entries still missing are filled by the cheap haiku reuse run (coverage
   is recorded as "not checked") instead of resuming the main reviewer. The model is chosen by risk unless
