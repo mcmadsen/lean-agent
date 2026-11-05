@@ -130,6 +130,64 @@ class SpoolTest(unittest.TestCase):
         self.assertLess(time.time() - t0, 1)
         self.assertEqual(len(ss.spool_pending(self.tid)), 1)
 
+    def slow_chaser(self, sleep, out, timeout=60, clock=time.time):
+        code = ("import sys,time,json; time.sleep(%s); print(json.dumps(%r))" % (sleep, out))
+        return ss.Chaser(timeout=timeout, clock=clock, argv=[sys.executable, "-c", code + "#"])
+
+    def test_chaser_never_blocks_the_tick_and_its_result_is_applied_later(self):
+        gid = lean_goals.ensure("PR 512", self.tid)
+        old = lean_goals._iso(time.time() - 7200)
+        lean_goals._set(gid, last_activity=old, created=old)
+        info = lambda t: {"lost": [], "running": [], "question": False, "last": 0}
+        chaser = self.slow_chaser(1.0, {"decisions": {gid: {"action": "chase", "message": "Status of PR 512?", "why": "quiet"}}, "_cost": 0.003})
+        sent = []
+        tick = lambda: lean_goals.watchdog(time.time(), lambda t, x: (sent.append(x) or (True, "")), lambda t: True, info, lambda: False,
+                                           decide=chaser.decide, is_paused=lambda n: False)
+        t0 = time.time()
+        self.assertEqual(tick(), [])  # starts the helper and returns at once
+        self.assertLess(time.time() - t0, 0.7)
+        first = chaser.job["proc"]
+        self.assertEqual(tick(), [])  # still running: no second helper, nothing decided
+        self.assertIs(chaser.job["proc"], first)
+        self.assertEqual(sent, [])
+        first.wait(10)
+        out = tick()  # a later tick applies the result
+        self.assertEqual(len(out), 1)
+        self.assertEqual(sent, ["Status of PR 512?"])
+        self.assertIsNone(chaser.job)
+        self.assertAlmostEqual(lean_goals.chase_log()[0]["cost"], 0.003)
+
+    def test_chaser_timeout_kills_it_and_means_no_decision(self):
+        now = [1000.0]
+        chaser = self.slow_chaser(30, {"decisions": {}}, timeout=60, clock=lambda: now[0])
+        ctx = [{"id": "g1"}]
+        self.assertIsNone(chaser.decide(ctx))
+        proc = chaser.job["proc"]
+        now[0] += 30
+        self.assertIsNone(chaser.decide(ctx))
+        now[0] += 31
+        self.assertEqual(chaser.decide(ctx), {})
+        self.assertIsNotNone(proc.poll())  # killed
+        self.assertIsNone(chaser.job)
+
+    def test_timed_out_chaser_lost_worker_gets_the_plain_chase_quiet_is_skipped(self):
+        a, b = lean_goals.ensure("PR 1", self.tid), lean_goals.ensure("PR 2", self.tid)
+        old = lean_goals._iso(time.time() - 7200)
+        for g in (a, b):
+            lean_goals._set(g, last_activity=old, created=old)
+        lost = [("0105-0900-aa11", {"started": "2026-01-05T09:00:00"})]
+        info = lambda t: {"lost": lost, "running": [], "question": False, "last": 0}
+        sent = []
+        out = lean_goals.watchdog(time.time(), lambda t, x: (sent.append(x) or (True, "")), lambda t: True, info, lambda: False,
+                                  decide=lambda ctxs: {}, is_paused=lambda n: False)
+        self.assertEqual(len(out), 2)  # both are lost-kind here: plain chase
+        info = lambda t: {"lost": [], "running": [], "question": False, "last": 0}
+        lean_goals._set(a, chased_at="", last_decision="", decided_at="", chase_count=0)
+        sent.clear()
+        out = lean_goals.watchdog(time.time(), lambda t, x: (sent.append(x) or (True, "")), lambda t: True, info, lambda: False,
+                                  decide=lambda ctxs: {}, is_paused=lambda n: False)
+        self.assertEqual((out, sent), ([], []))
+
     def test_no_service_is_still_an_error(self):
         ns = lean_agent.build_parser().parse_args(["thread", "send", self.tid, "hi"])
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

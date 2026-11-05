@@ -1069,24 +1069,60 @@ def goal_send(tid, text):
         return False, str(exc)
 
 
-def chase_decide(contexts):
-    """One haiku helper run (`lean-agent chase-decide`, role chaser, hidden from runs) for a batch of quiet or lost goals:
-    {goal id: {action, message, why}, "_cost": usd}."""
-    exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lean_agent.py")
-    fd, p = tempfile.mkstemp(suffix=".json", dir=lean_home())
-    try:
+class Chaser:
+    """The haiku chase check (`lean-agent chase-decide`, role chaser) in the background: `decide` never waits. The first call
+    starts one subprocess (at most one in flight) and returns None; later calls return None while it runs, then its
+    decisions {goal id: {...}, "_cost": usd}. Past `timeout` seconds it is killed and the answer is {} (no decision)."""
+
+    def __init__(self, timeout=90, clock=time.time, argv=None):
+        self.timeout, self.clock, self.argv = timeout, clock, argv
+        self.job = None
+
+    def _start(self, contexts):
+        fd, inp = tempfile.mkstemp(suffix=".json", dir=lean_home())
         with os.fdopen(fd, "w") as fh:
             json.dump(contexts, fh)
-        r = subprocess.run([sys.executable, exe, "chase-decide", p], capture_output=True, text=True, timeout=90)
-        out = json.loads(r.stdout.strip().splitlines()[-1])
-    finally:
+        out = inp + ".out"
+        exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lean_agent.py")
+        argv = (self.argv or [sys.executable, exe, "chase-decide"]) + [inp]
+        with open(out, "w") as fh:
+            proc = subprocess.Popen(argv, stdout=fh, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+        self.job = {"proc": proc, "in": inp, "out": out, "started": self.clock(), "ids": {c["id"] for c in contexts}}
+
+    def _finish(self):
+        job, self.job = self.job, None
+        got = {}
         try:
-            os.remove(p)
-        except OSError:
+            with open(job["out"]) as fh:
+                data = json.loads(fh.read().strip().splitlines()[-1])
+            got = dict(data.get("decisions") or {})
+            got["_cost"] = data.get("_cost") or 0
+        except (OSError, ValueError, IndexError):
             pass
-    got = dict(out.get("decisions") or {})
-    got["_cost"] = out.get("_cost") or 0
-    return got
+        for p in (job["in"], job["out"]):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        return got, job["ids"]
+
+    def decide(self, contexts):
+        want = {c["id"] for c in contexts}
+        if self.job is None:
+            self._start(contexts)
+            return None
+        if self.job["proc"].poll() is None:
+            if self.clock() - self.job["started"] < self.timeout:
+                return None
+            self.job["proc"].kill()
+            self.job["proc"].wait()
+            got, _ = self._finish()
+            return {}  # timed out: no decision
+        got, ids = self._finish()
+        if not want <= ids:  # the goals changed meanwhile: ask again for these
+            self._start(contexts)
+            return None
+        return got
 
 
 def reports_path():
@@ -1748,7 +1784,9 @@ class Reporter(AutoClear):
         if now - getattr(self, "goals_at", 0) < _knob("LEAN_AGENT_GOAL_TICK", GOAL_TICK):
             return
         self.goals_at = now
-        lines = lean_goals.watchdog(now, goal_send, lambda tid: alive_thread(tid), log=self.log, decide=chase_decide)
+        if not hasattr(self, "chaser"):
+            self.chaser = Chaser()
+        lines = lean_goals.watchdog(now, goal_send, lambda tid: alive_thread(tid), log=self.log, decide=self.chaser.decide)
         for line in lines:
             queue_report(re.search(r"\b(t\d+)\b", line).group(1) if re.search(r"\b(t\d+)\b", line) else "main", "chase", line)
 

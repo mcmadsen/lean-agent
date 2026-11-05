@@ -531,7 +531,7 @@ def _context(g, i, kind, rid, now):
 
 def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, decide=None, is_paused=paused):
     """One pass over the active goals. `send(tid, text) -> (ok, err)` messages a thread (starting a parked one),
-    `alive(tid)` says whether its session runs. `decide(contexts) -> {goal id: {action, message}, "_cost": usd}` is the cheap
+    `alive(tid)` says whether its session runs. `decide(contexts) -> {goal id: {action, message}, "_cost": usd}` (None: not ready yet, asked again next pass; {}: no decision) is the cheap
     model check for goals that still look quiet/lost after the deterministic pre-checks (None: chase them as before).
     Returns the digest lines (wakes and drops; also logged)."""
     if is_paused(now):
@@ -565,22 +565,27 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
                 continue  # one decision per quiet period
             cands.append((g, i, kind, rid, _context(g, i, kind, rid, now)))
         # the cheap check: one batched helper call for the goals without a pending nudge
-        decisions, cost, called = {}, 0.0, False
+        decisions, cost, called, waiting_on_helper = {}, 0.0, False, False
         todo = [c for c in cands if not c[0].get("pending_chase")]
         if todo and decide is not None:
             if chaser_calls_last_hour(now) < chaser_per_hour():
                 try:
-                    got = decide([c[4] for c in todo]) or {}
+                    got = decide([c[4] for c in todo])
                 except Exception as exc:  # noqa: BLE001 - fall back to the plain rules
                     got = {}
                     if log:
                         log(f"chaser check failed: {exc}")
+                if got is None:  # the helper is still running in the background: decide on a later tick
+                    waiting_on_helper = True
+                    got = {}
                 cost = float(got.pop("_cost", 0) or 0) if isinstance(got, dict) else 0.0
-                decisions, called = got if isinstance(got, dict) else {}, True
+                decisions, called = got if isinstance(got, dict) else {}, not waiting_on_helper
             else:
                 decisions = {c[0]["id"]: {"action": "chase" if c[2] == "lost" else "defer", "message": "", "why": "chaser cap per hour"} for c in todo}
         for g, i, kind, rid, ctx in cands:
             tid, ref = g["thread"], g.get("ref", "")
+            if waiting_on_helper and not g.get("pending_chase"):
+                continue
             d = decisions.get(g["id"]) or {}
             action = str(d.get("action") or ("chase" if decide is None or kind == "lost" else "skip")).lower()
             if g.get("pending_chase"):
