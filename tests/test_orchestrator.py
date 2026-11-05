@@ -126,6 +126,9 @@ FAKE_CLAUDE = textwrap.dedent("""\
     model = sys.argv[sys.argv.index("--model") + 1] if "--model" in sys.argv else ""
     if os.environ.get("FAKE_FAIL_MODEL") and os.environ["FAKE_FAIL_MODEL"] in model:
         fb = '{"status": "failed", "used": [], "unneeded": []}'
+    if os.environ.get("FAKE_INIT_MODEL"):  # the init event names the model that really answers
+        print(json.dumps({"type": "system", "subtype": "init", "session_id": "sess-1",
+                          "model": os.environ["FAKE_INIT_MODEL"]}), flush=True)
     if os.environ.get("FAKE_ODD"):  # stream-json lines that are not the usual objects
         print(json.dumps({"type": "assistant", "session_id": "sess-odd", "message": "a string, not an object"}), flush=True)
         print(json.dumps({"type": "user", "message": {"content": "plain text"}}), flush=True)
@@ -1106,6 +1109,34 @@ class CliTest(unittest.TestCase):
         self.cli("run", "--resume", "last", "and then y")
         ordinary = [r for r in self.ledger() if not r.get("role")][0]
         self.assertEqual(self.calls()[-1]["argv"][self.calls()[-1]["argv"].index("--resume") + 1], ordinary["session_id"])
+
+    def test_resumed_run_applies_model_and_labels_the_model_the_stream_reports(self):
+        self.cli("learn", self.proj)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "look")
+        first = self.ledger()[-1]
+        self.cli("run", "--resume", first["id"], "-m", "sonnet", "go on", FAKE_INIT_MODEL="claude-sonnet-9-9")
+        argv = self.calls()[-1]["argv"]
+        self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
+        self.assertIn("--resume", argv)
+        row = self.ledger()[-1]
+        self.assertEqual(row["model"], "sonnet")
+        self.cli("run", "--resume", first["id"], "-m", "sonnet", "again", FAKE_INIT_MODEL="claude-haiku-9-9")
+        self.assertEqual(self.ledger()[-1]["model"], "claude-haiku-9-9")  # what answered, not what was asked
+
+    def test_worker_rule_says_execute_but_helper_roles_do_not_get_it(self):
+        self.cli("learn", self.proj)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "do the steps")
+        self.assertIn("EXECUTE the task", self.calls()[-1]["append"])
+        self.cli("advise", "do the steps", "--project", "proj", check=False)
+        self.assertNotIn("EXECUTE the task", self.calls()[-1]["append"])
+
+    def test_worker_reply_in_advisor_format_is_flagged_and_partial(self):
+        self.cli("learn", self.proj)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "do the steps",
+                     FAKE_ANSWER="Understood as: set the state.\nOutcome: the advisor made no changes")
+        row = self.ledger()[-1]
+        self.assertEqual(row["status"], "partial")
+        self.assertIn("worker returned advice, nothing executed", p.stdout)
 
     def test_role_runs_are_not_resumable_and_never_leave_their_commands_in_the_record(self):
         self.cli("learn", self.proj)

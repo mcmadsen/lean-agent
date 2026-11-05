@@ -95,7 +95,7 @@ return status "needs-input" with your question and the candidates you found.
 
 {send_rule}
 {browser_rule}
-{role_rule}{answer_rule}Start your reply with a one or two sentence summary of the outcome. Then give the result
+{worker_rule}{role_rule}{answer_rule}Start your reply with a one or two sentence summary of the outcome. Then give the result
 (what you did, files changed, anything unresolved), then one final line exactly like this:
 "used" lists only cards whose content changed what you did, not cards you merely received.
 LEAN-FEEDBACK {{"status": "done|partial|failed|needs-input|awaiting-confirmation", "used": ["card-id"], "unneeded": ["card-id"], "missing": "context you had to discover that should have been given up front, or empty", "remember": []}}
@@ -105,6 +105,48 @@ only for a durable fact that can't be derived from the code or git history, such
 user correction, a decision, or where external info lives:
 {{"type": "feedback|project|reference|user", "text": "one or two sentences"}}
 """
+
+WORKER_RULE = (
+    "You are the worker, not an advisor or planner: EXECUTE the task with your tools (run the commands, make the edits,\n"
+    "call the services it names) and report what you did. Never answer with a plan, an \"Understood as:\" line or an\n"
+    "ADVICE block instead of doing the work; if you can't do a step, say which and why (status partial or failed).\n\n")
+ADVICE_REPLY_RE = re.compile(r"(?im)^\s*(understood as:|advice\s*$)|outcome:\s*the advisor made no changes")
+ADVICE_NOTE = "worker returned advice, nothing executed"
+
+
+def looks_like_advice(text):
+    """A worker reply in the advisor's format (`Understood as:`, an ADVICE block, 'the advisor made no changes')."""
+    return bool(ADVICE_REPLY_RE.search(text or ""))
+
+
+def stream_models(raw):
+    """The model(s) a stream-json run reported: the init event's model, else the result's modelUsage keys."""
+    init, used = None, []
+    for line in (raw or "").splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("type") == "system" and ev.get("subtype") == "init" and ev.get("model") and not init:
+            init = str(ev["model"])
+        elif ev.get("type") == "result" and isinstance(ev.get("modelUsage"), dict):
+            used = [str(k) for k in ev["modelUsage"]]
+    return init, used
+
+
+def model_label(asked, raw):
+    """The model to show for a run: what the stream says it used, else what was asked for. A stream model that
+    contains the alias asked for (sonnet in claude-sonnet-...) keeps the short alias."""
+    init, used = stream_models(raw)
+    seen = init or (used[0] if used else None)
+    if not seen:
+        return asked
+    if asked and asked.lower() in seen.lower():
+        return asked
+    return seen
+
 
 DETAILS_MARK = "=== DETAILS ==="
 ANSWER_RULE = """\
@@ -1291,14 +1333,16 @@ def check_claims(claims, reply, calls):
 
 
 def build_append(project, cards, read_only=False, allow_send=None, chrome=False, role_rule="", answer_lines=0,
-                 *, branch_rule, claims=None):
-    """branch_rule: the worker may create a branch itself (it writes, and no branch was made for it)."""
+                 *, branch_rule, claims=None, internal=False):
+    """internal: a helper role (advisor, reviewer ...) with its own rules, not a worker that executes a task.
+    branch_rule: the worker may create a branch itself (it writes, and no branch was made for it)."""
     parts = [WORKER_PROTOCOL.format(
         answer_rule=ANSWER_RULE.format(n=answer_lines, mark=DETAILS_MARK) if answer_lines else "",
         project=project, sq=os.path.join(PLUGIN_ROOT, "bin", "lean-sq"),
         shell_rule=(READONLY_SHELL_RULE if read_only else SHELL_RULE).format(project=project),
         send_rule=ALLOW_SEND_RULE.format(approved=allow_send) if allow_send else SEND_RULE,
         browser_rule=BROWSER_RULE if chrome else "",
+        worker_rule="" if internal else WORKER_RULE,
         role_rule=role_rule)]
     if branch_rule:
         parts.append(BRANCH_RULE)
@@ -1747,6 +1791,11 @@ def record_internal_error(exc, tb):
         pass
     print(line, flush=True)
     return 1
+
+
+def role_rule_internal(a, prev=None):
+    """True for a run with a helper role (advisor, reviewer, librarian ...): it has its own rules instead of the worker's."""
+    return (getattr(a, "role", None) or (prev or {}).get("role")) is not None
 
 
 def cmd_run(a):
@@ -2393,7 +2442,8 @@ def _cmd_run(a):
         with open(os.path.join(workdir, "append.md"), "w") as fh:  # same context, current send/browser rules
             fh.write(build_append(project, [lib[c] for c in prev.get("cards", []) if c in lib], read_only,
                                   a.allow_send, bool(chrome_spec), role_rule, answer_lines,
-                                  branch_rule=not read_only and not auto_branch, claims=claims))
+                                  branch_rule=not read_only and not auto_branch, claims=claims,
+                                  internal=role_rule_internal(a, prev)))
     else:
         slug, project = resolve_project(a.project)
         sync_memory(slug)
@@ -2495,7 +2545,8 @@ def _cmd_run(a):
                 fh.write(role_rule)
         with open(os.path.join(workdir, "append.md"), "w") as fh:
             fh.write(build_append(project, cards, read_only, a.allow_send, bool(chrome_spec), role_rule, answer_lines,
-                                  branch_rule=not read_only and not auto_branch, claims=claims))
+                                  branch_rule=not read_only and not auto_branch, claims=claims,
+                                  internal=role_rule_internal(a, prev)))
         tools = a.tools or (READONLY_TOOLS + ",Bash" if read_only else WORKER_TOOLS)
 
     todo_id = (prev or {}).get("todo") or getattr(a, "todo", None)
@@ -2811,6 +2862,15 @@ def _cmd_run(a):
         status = "error"
     else:
         status = fb.get("status") or "done"
+    if not role and status != "failed" and looks_like_advice(summary_full or out.get("result")):
+        status = "partial" if status in ("done", "partial") else status
+        summary = ADVICE_NOTE + ("\n" + summary if summary else "")
+        fb = dict(fb, status=status)
+    shown_model = model_label(model, raw)
+    if shown_model != model:
+        lean_log.log("info", "run", f"{run_id} asked for {model}, the stream reports {shown_model}")
+        model = shown_model
+        fixed["model"] = model
     u = out.get("usage") or {}
     weighted = usage.weighted(u)
 
