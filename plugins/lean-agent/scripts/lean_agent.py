@@ -1793,7 +1793,10 @@ def record_internal_error(exc, tb):
     prints the one line the caller sees. Returns the exit code, 1."""
     rid, workdir = RUN_CTX["id"], RUN_CTX.get("workdir") or home("work", RUN_CTX["id"])
     reason = f"internal error: {type(exc).__name__}: {' '.join(str(exc).split())[:300]}"
-    lean_feedback.record_crash(["run", rid], exc)
+    try:
+        lean_feedback.record_crash(["run", rid], exc)
+    except Exception:  # the bookkeeping itself must not stop the final row
+        pass
     line = f"run {rid} failed: {reason} (details: lean-agent runs --show {rid} --tail 40)"
     try:
         os.makedirs(workdir, exist_ok=True)
@@ -1851,6 +1854,8 @@ def cmd_run(a):
         raise
     finally:
         try:
+            if SUPERVISOR:
+                ensure_final_row(rc)
             early_settle()  # a run that returned before it started (declined, escalated) leaves no marker behind
             if isinstance(sys.stdout, Tee):
                 sys.stdout.close()  # the summary file is complete, then the running marker goes (also without a detached supervisor)
@@ -1862,6 +1867,45 @@ def cmd_run(a):
                     except (OSError, ValueError):
                         pass
                 os._exit(rc if isinstance(rc, int) else 0)
+
+
+PRELOAD_MODULES = ("compact_hook", "fe_tools")  # lean-agent modules imported inside functions: loaded now, not at finish
+
+
+def pin_code(workdir):
+    """Makes a run independent of the source moving under it (`lean-agent sync`, a pull, an update): the lazily imported
+    modules are loaded now, so the supervisor finishes on the code it started with, and the scripts are copied into the
+    run's work dir (a copy, not a link: an in-place edit must not reach it) for the worker's hooks, which run per tool
+    call. Returns the directory the hook commands point at; HERE if the copy cannot be made."""
+    for name in PRELOAD_MODULES:
+        try:
+            __import__(name)
+        except Exception:
+            pass
+    dest = os.path.join(workdir, "code")
+    try:
+        os.makedirs(dest, exist_ok=True)
+        for f in glob.glob(os.path.join(HERE, "*.py")):
+            shutil.copyfile(f, os.path.join(dest, os.path.basename(f)))
+        return dest
+    except OSError:
+        return HERE
+
+
+def ensure_final_row(rc):
+    """The supervisor is about to exit: a run that still has its marker but no ledger row (its bookkeeping raised, or it
+    died past the handlers) gets a failed row with a summary instead of turning up as lost. Never raises."""
+    try:
+        rid = RUN_CTX.get("id")
+        if not rid or any(r.get("id") == rid for r in ledger()):
+            return
+        if not any(load_json(f, {}).get("run") == rid for f in glob.glob(home("running", "*.json"))):
+            return
+        import traceback
+        exc = sys.exc_info()[1] or RuntimeError(f"the supervisor ended (exit code {rc}) without recording the result")
+        record_internal_error(exc, traceback.format_exc() if sys.exc_info()[0] else str(exc) + "\n")
+    except BaseException:
+        pass
 
 
 def own_marker(run_id, **extra):
@@ -1924,7 +1968,7 @@ def detach_run(workdir, run_id):
             sys.stdin = open(os.devnull)
             sys.stdout = open(1, "w", buffering=1, closefd=False)
             sys.stderr = open(2, "w", buffering=1, closefd=False)
-            own_marker(run_id, supervisor=True)  # the caller's pid in the early marker is not this run's
+            own_marker(run_id, supervisor=True, version=plugin_version())  # the caller's pid in the early marker is not this run's
         except BaseException:
             for sig, handler in held.items():
                 signal.signal(sig, handler)  # when this copy is not a real fork (a test) the caller must not stay deaf to them
@@ -2668,12 +2712,13 @@ def _cmd_run(a):
         flag_settings["permissions"] = {"deny": edit_deny}
     if attribution() == "off":  # Claude Code's own commit/PR attribution, switched off for this worker
         flag_settings["attribution"] = NO_ATTRIBUTION
+    hook_dir = pin_code(workdir)  # the worker's hooks run per tool call: from a copy that a later sync does not change
     hooks = {"PreToolUse": [{"matcher": "Bash", "hooks": [{  # never a push to a guarded branch (lean-agent guard)
-        "type": "command", "timeout": 20, "command": f"python3 {json.dumps(os.path.join(HERE, 'push_guard.py'))}"}]}]}
+        "type": "command", "timeout": 20, "command": f"python3 {json.dumps(os.path.join(hook_dir, 'push_guard.py'))}"}]}]}
     if mcp_specs:  # trim big MCP results before the model reads them
         hooks["PostToolUse"] = [{"matcher": "mcp__.*", "hooks": [{
             "type": "command", "timeout": 20,
-            "command": f"python3 {json.dumps(os.path.join(HERE, 'mcp_trim_hook.py'))}"}]}]
+            "command": f"python3 {json.dumps(os.path.join(hook_dir, 'mcp_trim_hook.py'))}"}]}]
     if read_only:  # allows a command only when every && | ; segment is read-only; names what it refused
         ro_cfg = os.path.join(workdir, "readonly.json")
         with open(ro_cfg, "w") as fh:
@@ -2681,9 +2726,9 @@ def _cmd_run(a):
                        "log": os.path.join(workdir, REFUSED_LOG)}, fh)
         hooks["PreToolUse"].append({"matcher": "Bash", "hooks": [{
             "type": "command", "timeout": 10,
-            "command": f"python3 {json.dumps(os.path.join(HERE, 'readonly_hook.py'))} {json.dumps(ro_cfg)}"}]})
+            "command": f"python3 {json.dumps(os.path.join(hook_dir, 'readonly_hook.py'))} {json.dumps(ro_cfg)}"}]})
     hooks["PreToolUse"].append({"matcher": "*", "hooks": [{  # one note at ~70% of the budget: commit, then summarise
-        "type": "command", "timeout": 10, "command": f"python3 {json.dumps(os.path.join(HERE, 'wrapup_hook.py'))}"}]})
+        "type": "command", "timeout": 10, "command": f"python3 {json.dumps(os.path.join(hook_dir, 'wrapup_hook.py'))}"}]})
     if allow_edit and not read_only:  # answers Claude Code's permission prompt for the named repo files only
         cfg_path = os.path.join(workdir, "allow_edit.json")
         with open(cfg_path, "w") as fh:
@@ -2691,7 +2736,7 @@ def _cmd_run(a):
                        "outside": [g for g in allow_edit if os.path.isabs(g)], "log": os.path.join(workdir, ALLOW_EDIT_LOG)}, fh)
         hooks["PermissionRequest"] = [{"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{
             "type": "command", "timeout": 10,
-            "command": f"python3 {json.dumps(os.path.join(HERE, 'allow_edit_hook.py'))} {json.dumps(cfg_path)}"}]}]
+            "command": f"python3 {json.dumps(os.path.join(hook_dir, 'allow_edit_hook.py'))} {json.dumps(cfg_path)}"}]}]
     flag_settings["hooks"] = hooks
     if flag_settings:
         cmd += ["--settings", json.dumps(flag_settings)]
@@ -2753,7 +2798,7 @@ def _cmd_run(a):
     save_json(home("running", running_key + ".json"), {"fixed": fixed, "pid": os.getpid(), "started": now_iso(), "run": run_id,
                                                       "task": task[:2000], "model": model, "project": slug,
                                                       "path": project, "start_head": fixed["start_head"],
-                                                      "workdir": workdir, "todo": todo_id, "thread": thread_tag, "effort": effort, "detached": bool(SUPERVISOR),
+                                                      "workdir": workdir, "todo": todo_id, "thread": thread_tag, "effort": effort, "detached": bool(SUPERVISOR), "version": plugin_version(),
                                                       "branch": (wt or {}).get("branch") if isinstance(wt, dict) else None,
                                                       "role": getattr(a, "role", None)
                                                       or (prev or {}).get("role")})
@@ -9267,11 +9312,26 @@ def cmd_logs(a):
 def lost_reason(m):
     """Why a lost run's supervisor is gone, as far as it can be known."""
     if m.get("detached"):
+        crash = supervisor_crash(m)
+        if crash:
+            return f"supervisor crashed with {crash}"
         boot = boot_time()
         if boot and (m.get("started") or "") < datetime.datetime.fromtimestamp(boot).strftime("%Y-%m-%dT%H:%M:%S"):
             return "host restarted"
-        return "supervisor killed without a trace (SIGKILL?)"
+        return "process gone (supervisor killed without a trace, SIGKILL?)"
     return "its caller was stopped before the run detached (session or shell ended)"
+
+
+def supervisor_crash(m):
+    """The last line of the traceback in a lost run's supervisor.err (`ValueError: ...`), or None."""
+    try:
+        with open(os.path.join(m.get("workdir") or home("work", m.get("run") or "?"), "supervisor.err")) as fh:
+            lines = [l.strip() for l in fh.read().splitlines() if l.strip()]
+    except OSError:
+        return None
+    if any(l.startswith("Traceback (most recent call last)") for l in lines):
+        return lines[-1][:200]
+    return None
 
 
 def boot_time():
@@ -9515,7 +9575,8 @@ def cmd_runs(a):
             state = m.get("state") or ("starting" if m.get("early") else "running")
             print(f"{m.get('run', '?')}  {state} since {m.get('started', '?')[11:19]}  {(m.get('thread') or '-'):<4} "
                   f"{m.get('model', '?'):<7} {m.get('project', '?'):<16} {m.get('task', '')[:70]}"
-                  + (f"  [{m['reason']}]" if m.get("reason") else ""))
+                  + (f"  [{m['reason']}]" if m.get("reason") else "")
+                  + (f"  (lean-agent {m['version']})" if m.get("version") else ""))
         lost = lost_runs(home())
         if lost:
             found = True
@@ -10871,7 +10932,19 @@ def cmd_sync(a):
               "the server keeps running). A session that's already open can re-read the rules with `lean-agent guide`.")
     else:
         print("Nothing changed for running sessions.")
+    print_workers_on_old_version()
     print(f"lean-agent {plugin_version()}")
+
+
+def print_workers_on_old_version():
+    """sync never stops a worker: says how many are still running on a version other than the current one."""
+    now, by_version = plugin_version(), {}
+    for _, m in live_runs():
+        v = m.get("version") or "an older version"
+        if v != now:
+            by_version[v] = by_version.get(v, 0) + 1
+    for v, n in sorted(by_version.items()):
+        print(f"{n} worker{'s' if n != 1 else ''} still running on {v}; they finish on it")
 
 
 def cmd_install(a):
