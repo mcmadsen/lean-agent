@@ -1423,6 +1423,124 @@ def main_fresh_pending(reporter):
     return bool(st["ended"] and st["ctx"] > mark)
 
 
+SESSION_STUCK = 10  # minutes without transcript progress in a running turn before the service steps in; config session-stuck / LEAN_AGENT_SESSION_STUCK
+LONG_TOOL_RE = re.compile(r"--wait\b|\bruns\s+wait\b|\bsleep\s+\d|\bwatch\b")  # a tool call that is legitimately long
+NUDGE_MAIN = ("Your last turn stalled. Continue: answer the user's last message and relay any pending thread reports "
+              "(always end with visible text).")
+NUDGE_THREAD = "Your last turn stalled; continue where you left off and finish with a short status line."
+
+
+def stuck_limit():
+    """Seconds of stall before an intervention (0: off)."""
+    raw = os.environ.get("LEAN_AGENT_SESSION_STUCK") or _load(lean_home("config.json")).get("session_stuck")
+    if str(raw).lower() in ("off", "0"):
+        return 0
+    try:
+        m = float(raw) if raw not in (None, "", "default") else SESSION_STUCK
+    except ValueError:
+        m = SESSION_STUCK
+    return (m if m > 0 else SESSION_STUCK) * 60
+
+
+def pending_long_tool(path):
+    """True when the transcript ends in a tool call (still without its result) that is legitimately long."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 65536))
+            data = fh.read()
+    except OSError:
+        return False
+    open_calls = {}
+    for raw in data.split(b"\n"):
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        msg = rec.get("message") if isinstance(rec, dict) and isinstance(rec.get("message"), dict) else {}
+        body = msg.get("content")
+        for c in body if isinstance(body, list) else []:
+            if not isinstance(c, dict):
+                continue
+            if c.get("type") == "tool_use":
+                inp = c.get("input") if isinstance(c.get("input"), dict) else {}
+                open_calls[c.get("id")] = str(inp.get("command") or "") if c.get("name") == "Bash" else ""
+            elif c.get("type") == "tool_result":
+                open_calls.pop(c.get("tool_use_id"), None)
+    return any(LONG_TOOL_RE.search(cmd) for cmd in open_calls.values())
+
+
+def session_workers(key):
+    """Run ids of the workers a session started that are running now (main: any run)."""
+    if key == "main":
+        return running_runs()
+    try:
+        import lean_threads
+        return lean_threads.running_by_thread(lean_threads.load()).get(key, [])
+    except Exception:  # noqa: BLE001
+        return []
+
+
+class StuckWatch:
+    """Per session: a turn with no transcript progress for `stuck_limit()` (no worker of its own running, no legitimately
+    long tool call, no permission prompt) is interrupted and nudged; still stuck one limit later, the session is
+    restarted (resumed). Every intervention is logged, queued to the front desk as one visible line and noted in the
+    session record (`thread sessions`)."""
+
+    def __init__(self, host, now=time.time, sleep=time.sleep, workers=None, long_tool=None):
+        self.host, self.now, self.sleep = host, now, sleep
+        self.workers = workers or session_workers
+        self.long_tool = long_tool or pending_long_tool
+        self.stage = 0
+        self.since = 0.0
+        self.mark = None
+
+    def note(self, text):
+        key = self.host.key
+        update_session(key, stuck=text, stuck_at=self.now())
+        lean_log.log("warn", "stuck", f"{key}: {text}")
+
+    def tick(self, path, st, prompting=False, mtime=None):
+        """Returns "nudge" / "restart" when it stepped in, else None."""
+        limit = stuck_limit()
+        now = self.now()
+        if not limit or not path:
+            return None
+        if st["ended"]:
+            self.stage, self.mark = 0, None
+            return None
+        if self.stage and st["size"] != self.mark:  # the session moved again after our intervention
+            self.stage, self.mark = 0, None
+        if prompting or self.long_tool(path) or self.workers(self.host.key):
+            return None  # waiting for the user, or legitimately busy
+        if mtime is None:
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                return None
+        idle = now - max(mtime, self.since if self.stage else 0)
+        if idle < limit:
+            return None
+        key = self.host.key
+        mins = round(idle / 60)
+        if self.stage == 0:
+            try:
+                self.host.write(b"\x1b")  # Escape interrupts the stalled turn
+                self.sleep(1.5)
+                self.host.paste(NUDGE_MAIN if key == "main" else NUDGE_THREAD)
+            except (OSError, ValueError) as exc:
+                lean_log.log("warn", "stuck", f"{key}: nudge failed: {exc}")
+            self.stage, self.since, self.mark = 1, now, st["size"]
+            self.note(f"nudged after {mins}m stall")
+            return "nudge"
+        self.host.terminate_for("stalled")
+        self.stage, self.mark = 0, None
+        text = f"restarted after {round((now - self.since + limit) / 60)}m stall"
+        self.note(text)
+        queue_report("main" if key == "main" else key, "chase", f"{key}: {text}")
+        return "restart"
+
+
 class Reporter(AutoClear):
     """A thread session's Host: at each turn end builds a report (done | blocked | needs-you) when the turn ran lean-agent
     work or asks the user something, and queues it; also reports a pending question or permission prompt. The main
@@ -1439,6 +1557,8 @@ class Reporter(AutoClear):
         self.delivered = None  # (transcript size, when) of the last message typed into the main session
         self.woken = False     # a finished run's wake-up turn was typed in and its report is due
         self.waked = None      # run ids already woken for (None: not yet read at start)
+        self.stuck = StuckWatch(host, now)
+        self.redelivered = 0.0
 
     def prompting(self):
         return bool(PROMPT_RE.search(self.host.tail_text()[-1500:]))
@@ -1548,9 +1668,20 @@ class Reporter(AutoClear):
             run_fallback(self.now())
         except Exception as exc:  # noqa: BLE001 - the report queue must keep going
             self.log(f"run follow-up failed: {exc}", "error")
+        items = queued_reports()
+        limit = stuck_limit()
+        if items and limit and self.now() - min(i.get("ts") or self.now() for i in items) > limit \
+                and self.now() - self.redelivered > limit:
+            self.redelivered = self.now()  # queued for a whole limit and still not typed in: try again from scratch
+            self.delivered = None
+            try:
+                os.remove(pending_path())
+            except OSError:
+                pass
+            self.log(f"{len(items)} queued report(s) undelivered for {round(limit / 60)}m: redelivering", "warn")
+            lean_log.log("warn", "stuck", f"main: {len(items)} queued report(s) undelivered for {round(limit / 60)}m, redelivering")
         if os.path.exists(pending_path()):
             return self.fallback_pending()
-        items = queued_reports()
         if not items or not self.host.alive():
             return
         if clear_pending("main") or main_fresh_pending(self):
@@ -1592,11 +1723,20 @@ class Reporter(AutoClear):
         elif dropped:
             self.log(f"{dropped} stale thread report(s) dropped")
 
+    def stuck_tick(self):
+        path = self.transcript()
+        if path and os.path.exists(path):
+            self.stuck.tick(path, transcript_state(path), self.prompting())
+
     def tick(self):
         if self.key == "main":
             self.main_tick()
         else:
             self.thread_tick()
+        try:
+            self.stuck_tick()
+        except Exception as exc:  # noqa: BLE001 - watching never stops the reporter
+            self.log(f"stall check failed: {exc}", "error")
 
 
 # ---------------------------------------------------------------- host (inside `up`)

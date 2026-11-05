@@ -10652,6 +10652,21 @@ def cmd_config(a):
         env_name = "LEAN_AGENT_" + key.upper()
         print(compaction_text() + (f" ({env_name} is set and wins)" if os.environ.get(env_name) else ""))
         return 0
+    if a.name == "session-stuck":
+        if a.value is not None:
+            v = a.value.lower()
+            if v not in ("off", "default") and not re.fullmatch(r"\d+(\.\d+)?", v):
+                die("session-stuck takes minutes, off or default")
+            cfg = config_json()
+            if v == "default":
+                cfg.pop("session_stuck", None)
+            else:
+                cfg["session_stuck"] = v if v == "off" else float(v)
+            save_json(home("config.json"), cfg)
+        lim = service_session.stuck_limit()
+        print("session-stuck: " + (f"{lim / 60:g} minutes" if lim else "off") + " · a turn with no transcript progress that long "
+              "(no worker of its own running) is interrupted and nudged; still stuck after as long again, the session restarts")
+        return 0
     if a.name == "max-thread-sessions":
         if a.value is not None:
             if not (a.value.isdigit() and int(a.value) > 0) and a.value.lower() != "default":
@@ -12142,12 +12157,14 @@ def thread_action(a):
             return 0
         sessions = open_thread_sessions()
         ctxs = {r["session"]: r for r in session_contexts()}
-        print(f"{'main':<6}{'main session':<42}{'':<12}context {context_cell(ctxs['main'])}")
+        print(f"{'main':<6}{'main session':<42}{'':<12}context {context_cell(ctxs['main'])}"
+              + (f"  main: {st}" if (st := service_session.session_rec("main").get("stuck")) else ""))
         for x in sessions:
             runs = thread_live_runs(x["thread"])
             qs = lean_threads.open_questions(lean_threads.load()["threads"].get(x["thread"]) or {})
             extra = ("".join(f'  waiting on main: {q["id"]} "{lean_threads.one_line(q["text"], 60)}" {lean_threads.age(q.get("ts"))}' for q in qs)
-                     + (f"  {len(runs)} running (first {runs[0][0]})" if runs else "") + ("  mid-turn" if service_session.mid_turn(x["thread"]) else ""))
+                     + (f"  {len(runs)} running (first {runs[0][0]})" if runs else "") + ("  mid-turn" if service_session.mid_turn(x["thread"]) else "")
+                     + (f'  {x["thread"]}: {st}' if (st := service_session.session_rec(x["thread"]).get("stuck")) else ""))
             print(f"{x['thread']:<6}{x['name'] or '-':<42}pid {x['pid'] or '-':<8}idle {x['idle']}s  context {context_cell(ctxs[x['thread']])}"
                   + ("  fresh on next send" if ctxs[x["thread"]]["fresh"] else "") + extra)
         live = {x["thread"] for x in sessions}
@@ -13633,7 +13650,7 @@ def build_parser():
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "allow-edit-outside <dir>|clear (extra dirs, besides ~/Downloads, where --allow-edit may name an explicit file outside the worktree), allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
                        "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), max-thread-sessions N (thread sessions the service runs; default 8), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
-    s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
+    s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions", "session-stuck",
                                            "review-max-rerounds", "review-skip", "review-model", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
