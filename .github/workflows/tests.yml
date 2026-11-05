@@ -64,16 +64,14 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "release $tag already exists"; exit 0
           fi
-          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            git tag "$tag" "$commit"
-            git push origin "refs/tags/$tag"
-          fi
+          # the release API creates the tag: a tag pushed with the workflow token is refused when the commit
+          # changes a workflow file (no `workflows` permission)
           prev=$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -vx "$tag" | while read -r t; do
-            git merge-base --is-ancestor "$t" "$tag^{commit}" && { echo "$t"; break; }; done || true)
-          range="${prev:+$prev..}$tag"
+            git merge-base --is-ancestor "$t" "$commit" && { echo "$t"; break; }; done || true)
+          range="${prev:+$prev..}$commit"
           {
             git log --reverse --no-merges --format='- %s' "$range"
             echo
             echo "Update: lean-agent sync, then lean-agent service restart"
           } > "$RUNNER_TEMP/notes.md"
-          gh release create "$tag" --verify-tag --title "lean-agent $tag" --notes-file "$RUNNER_TEMP/notes.md"
+          gh release create "$tag" --target "$commit" --title "lean-agent $tag" --notes-file "$RUNNER_TEMP/notes.md"
