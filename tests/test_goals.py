@@ -35,6 +35,7 @@ class GoalsTest(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {**clean_environ(), "LEAN_AGENT_HOME": self.tmp}, clear=True)
         self.env.start()
         self.sent = []
+        self.asked = []
         self.info_by = {}
 
     def tearDown(self):
@@ -156,15 +157,156 @@ class GoalsTest(unittest.TestCase):
         self.assertTrue(items[0]["options"])
         self.assertEqual(self.watch(300), [])  # stuck goals are not chased again
 
-    def test_near_limit_no_chase_and_says_so_once(self):
+    # -- the cheap chase (pre-checks, one batched helper decision, limit pacing)
+    def decide(self, answers=None, cost=0.002):
+        def fn(ctxs):
+            self.asked.append([c["id"] for c in ctxs])
+            out = {c["id"]: dict((answers or {}).get(c["id"]) or {"action": "chase", "message": "Status of PR 512?", "why": "quiet"}) for c in ctxs}
+            out["_cost"] = cost
+            return out
+        return fn
+
+    def cheap(self, minutes, decide, near=False, alive=True, paused=False):
+        return lean_goals.watchdog(T0 + minutes * MIN, self.send, lambda t: alive, self.info, lambda: near, decide=decide,
+                                   is_paused=lambda now: paused)
+
+    def second_goal(self):
+        gid = lean_goals.ensure("PR 600", "t22")
+        lean_goals._set(gid, last_activity=lean_goals._iso(T0), created=lean_goals._iso(T0))
+        return gid
+
+    def test_finished_or_replaced_run_is_not_lost(self):
+        self.goal()
+        self.asked = []
+        self.info_by["t21"] = {"lost": [("0105-0900-aa11", {"started": "2026-01-05T09:00:00"})],
+                               "runs": [{"id": "0105-0950-bb22", "started": "2026-01-05T09:50:00", "task": "finish PR 512"}]}
+        self.assertEqual(self.cheap(2, self.decide()), [])
+        self.assertEqual((self.sent, self.asked), ([], []))  # a newer run of the same goal: no chase, no helper call
+        self.info_by["t21"]["runs"][0]["task"] = "review PR 999"  # a run for another goal is no replacement
+        self.assertEqual(len(self.cheap(3, self.decide({"g1": {"action": "chase"}}))), 1)
+        self.assertIn("lean-agent run --resume 0105-0900-aa11", self.sent[0][1])
+
+    def test_waiting_item_closed_thread_and_running_are_not_quiet(self):
+        self.goal()
+        self.asked = []
+        for st in ({"waiting": True}, {"closed": True}, {"running": ["r1"]}):
+            self.info_by["t21"] = st
+            self.assertEqual(self.cheap(300, self.decide()), [])
+        self.assertEqual(self.asked, [])
+
+    def test_superseded_reply_is_remembered_and_never_chased_again(self):
         gid = self.goal()
-        out = self.watch(40, near=True)
+        self.asked = []
+        lost = [("0105-0900-aa11", {"started": "2026-01-05T09:00:00"})]
+        self.info_by["t21"] = {"lost": lost}
+        self.assertEqual(len(self.cheap(2, self.decide({"g1": {"action": "chase"}}))), 1)
+        lean_goals.acknowledge("t21", "Ignoring 0105-0900-aa11: superseded by the restart")
+        skip = self.decide({"g1": {"action": "skip", "why": "thread said superseded"}})
+        self.assertEqual(self.cheap(80, skip), [])
+        self.assertEqual(self.cheap(200, skip), [])
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.asked[-1], ["g1"])  # only a quiet check remains; the run itself is not a lost worker
+        self.assertIn("0105-0900-aa11", lean_goals.memory()["runs"])
+        self.assertEqual(self.get(gid)["state"], "active")
+
+    def test_any_reply_to_a_chase_acknowledges_the_chased_run(self):
+        self.goal()
+        self.info_by["t21"] = {"lost": [("0105-0900-aa11", {"started": "2026-01-05T09:00:00"})]}
+        self.assertEqual(len(self.cheap(2, None)), 1)
+        lean_goals.acknowledge("t21", "restarted it, working")
+        self.info_by["t21"]["last"] = T0 + 110 * MIN  # the reply is activity
+        self.assertEqual(lean_goals.memory()["runs"]["0105-0900-aa11"]["why"], "chase answered")
+        self.assertEqual(self.cheap(120, None), [])
+
+    def test_abandoned_or_merged_reply_closes_the_goal(self):
+        gid = self.goal()
+        self.assertEqual(lean_goals.acknowledge("t21", "PR 512 was abandoned, the branch is closed"), [gid])
+        self.assertEqual(self.get(gid)["state"], "dropped")
+        self.assertIn(gid, lean_goals.memory()["goals"])
+        g2 = lean_goals.ensure("PR 700", "t30")
+        self.assertEqual(lean_goals.acknowledge("t30", "PR 700 merged"), [g2])
+        self.assertEqual(self.get(g2)["state"], "done")
+        g3 = lean_goals.ensure("PR 701", "t31")
+        self.assertEqual(lean_goals.acknowledge("t31", "tests finished for the other task, PR 999 is merged"), [])
+        self.assertEqual(self.get(g3)["state"], "active")
+
+    def test_helper_drop_and_done_decisions_close_the_goal(self):
+        a, b = self.goal(), self.second_goal()
+        self.asked = []
+        out = self.cheap(40, self.decide({a: {"action": "drop-goal", "why": "PR closed"}, b: {"action": "done-goal", "why": "merged"}}))
         self.assertEqual(len(out), 1)
-        self.assertIn("plan limit is near", out[0])
+        self.assertIn("dropped goal", out[0])
+        self.assertEqual((self.get(a)["state"], self.get(b)["state"]), ("dropped", "done"))
         self.assertEqual(self.sent, [])
-        self.assertEqual(self.get(gid)["chase_count"], 0)
-        self.assertEqual(self.watch(45, near=True), [])
-        self.assertEqual(len(self.watch(46)), 1)  # limit gone: the chase happens
+        self.assertEqual(self.cheap(300, self.decide()), [])
+
+    def test_pause_means_nothing_at_all(self):
+        self.goal()
+        self.asked = []
+        self.info_by["t21"] = {"lost": [("0105-0900-aa11", {"started": "2026-01-05T09:00:00"})]}
+        self.assertEqual(self.cheap(300, self.decide(), paused=True), [])
+        self.assertEqual((self.sent, self.asked), ([], []))
+        lean_goals.pause(T0 + 60 * MIN)
+        self.assertTrue(lean_goals.paused(T0 + 30 * MIN))
+        self.assertFalse(lean_goals.paused(T0 + 61 * MIN))
+        self.assertEqual(lean_goals.watchdog(T0 + 40 * MIN, self.send, lambda t: True, self.info, lambda: False), [])
+        lean_goals.pause()
+        self.assertTrue(lean_goals.paused(T0 + 9999 * MIN))
+        self.assertTrue(lean_goals.resume())
+        self.assertFalse(lean_goals.paused())
+        self.assertEqual(lean_goals.parse_until("2h", T0), T0 + 7200)
+
+    def test_near_limit_check_runs_quiet_nudge_waits_lost_worker_wakes(self):
+        quiet, lost = self.goal(), self.second_goal()
+        self.asked = []
+        self.info_by["t22"] = {"lost": [("0105-0900-aa11", {"started": "2026-01-05T09:00:00"})]}
+        out = self.cheap(40, self.decide(), near=True)
+        self.assertEqual(self.asked, [[quiet, lost]])  # the cheap check still ran
+        self.assertEqual([t for t, _ in self.sent], ["t22"])  # only the lost worker woke its thread
+        self.assertEqual(len(out), 1)
+        self.assertEqual(self.get(quiet)["last_decision"], "defer")
+        self.assertEqual(self.cheap(45, self.decide(), near=True), [])
+        self.assertEqual(len(self.sent), 1)
+        out = self.cheap(50, self.decide(), near=False)  # the window allows it: the deferred nudge goes, no new helper call
+        self.assertEqual(len(out), 1)
+        self.assertEqual(self.asked, [[quiet, lost]])
+        self.assertEqual([t for t, _ in self.sent], ["t22", "t21"])
+        self.assertEqual(self.sent[1][1], "Status of PR 512?")
+
+    def test_one_batched_call_and_one_decision_per_quiet_period(self):
+        a, b = self.goal(), self.second_goal()
+        self.asked = []
+        out = self.cheap(40, self.decide({a: {"action": "skip", "why": "superseded"}, b: {"action": "skip", "why": "nothing pending"}}, cost=0.004))
+        self.assertEqual((out, self.asked, self.sent), ([], [[a, b]], []))
+        self.assertEqual(self.cheap(50, self.decide()), [])  # same quiet period: no new decision
+        self.assertEqual(self.asked, [[a, b]])
+        self.assertEqual(self.get(a)["last_decision"], "skip")
+        rows = lean_goals.chase_log()
+        self.assertEqual(len(rows), 2)
+        self.assertAlmostEqual(sum(r["cost"] for r in rows), 0.004)
+        self.assertEqual(sum(1 for r in rows if r.get("call")), 1)
+        text = lean_goals.log_text()
+        self.assertIn("skip", text)
+        self.assertIn("superseded", text)
+        self.assertIn("skip: superseded", lean_goals.table(T0 + 50 * MIN, detail=True))
+        self.assertEqual(len(self.cheap(80, self.decide())), 2)  # the next quiet period decides again
+
+    def test_per_hour_cap_defers_quiet_goals_but_not_lost_workers(self):
+        os.environ["LEAN_AGENT_CHASER_PER_HOUR"] = "1"
+        a = self.goal()
+        self.asked = []
+        self.cheap(40, self.decide({a: {"action": "skip", "why": "x"}}))
+        self.assertEqual(len(self.asked), 1)
+        b = self.second_goal()
+        self.cheap(45, self.decide())
+        self.assertEqual(len(self.asked), 1)  # cap reached
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.get(b)["last_decision"], "defer")
+        self.info_by["t22"] = {"lost": [("0105-0900-aa11", {"started": "2026-01-05T09:00:00"})]}
+        self.assertEqual(len(self.cheap(46, self.decide())), 1)  # a lost worker still wakes
+        self.assertEqual(len(self.asked), 1)
+        self.cheap(120, self.decide({b: {"action": "skip", "why": "y"}}))  # an hour later the helper may run again
+        self.assertEqual(len(self.asked), 2)
 
     def test_waiting_user_and_done_goals_are_not_chased(self):
         self.goal(state="waiting-user")
