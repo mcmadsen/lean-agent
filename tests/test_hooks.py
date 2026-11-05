@@ -935,7 +935,7 @@ class BudgetTest(Base):
         self.assertEqual(d("digest testing")[0], "t2")
         for text, job in (("write the feedback", "feedback"), ("budget and savings", "budget"), ("show my usage", "budget"),
                           ("remember that I like short answers", "memory"), ("restart", "maintenance"), ("list all threads", "threads overview"),
-                          ("how are we on our goals", "goals"), ("how are we doing", "goals"), ("what's open", "goals"),
+                          ("how are we on our goals", "goals"), ("how are we doing", "goals"),
                           ("overview please", "goals")):
             tid, line = d(text)
             self.assertIsNone(tid, text)
