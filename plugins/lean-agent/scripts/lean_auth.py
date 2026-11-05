@@ -84,6 +84,7 @@ def store(token):
         with os.fdopen(fd, "w") as fh:
             fh.write(token + "\n")
         os.chmod(_file(), 0o600)
+    os.makedirs(os.path.dirname(_meta()), exist_ok=True)  # the keychain path never made the home folder
     lean_common.write_json_atomic(_meta(), {"created": datetime.datetime.now().isoformat(timespec="seconds"),
                                             "backend": backend()})
 
