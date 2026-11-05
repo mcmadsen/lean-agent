@@ -126,6 +126,9 @@ FAKE_CLAUDE = textwrap.dedent("""\
     model = sys.argv[sys.argv.index("--model") + 1] if "--model" in sys.argv else ""
     if os.environ.get("FAKE_FAIL_MODEL") and os.environ["FAKE_FAIL_MODEL"] in model:
         fb = '{"status": "failed", "used": [], "unneeded": []}'
+    if os.environ.get("FAKE_INIT_MODEL"):  # the init event names the model that really answers
+        print(json.dumps({"type": "system", "subtype": "init", "session_id": "sess-1",
+                          "model": os.environ["FAKE_INIT_MODEL"]}), flush=True)
     if os.environ.get("FAKE_ODD"):  # stream-json lines that are not the usual objects
         print(json.dumps({"type": "assistant", "session_id": "sess-odd", "message": "a string, not an object"}), flush=True)
         print(json.dumps({"type": "user", "message": {"content": "plain text"}}), flush=True)
@@ -1106,6 +1109,34 @@ class CliTest(unittest.TestCase):
         self.cli("run", "--resume", "last", "and then y")
         ordinary = [r for r in self.ledger() if not r.get("role")][0]
         self.assertEqual(self.calls()[-1]["argv"][self.calls()[-1]["argv"].index("--resume") + 1], ordinary["session_id"])
+
+    def test_resumed_run_applies_model_and_labels_the_model_the_stream_reports(self):
+        self.cli("learn", self.proj)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "look")
+        first = self.ledger()[-1]
+        self.cli("run", "--resume", first["id"], "-m", "sonnet", "go on", FAKE_INIT_MODEL="claude-sonnet-9-9")
+        argv = self.calls()[-1]["argv"]
+        self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
+        self.assertIn("--resume", argv)
+        row = self.ledger()[-1]
+        self.assertEqual(row["model"], "sonnet")
+        self.cli("run", "--resume", first["id"], "-m", "sonnet", "again", FAKE_INIT_MODEL="claude-haiku-9-9")
+        self.assertEqual(self.ledger()[-1]["model"], "claude-haiku-9-9")  # what answered, not what was asked
+
+    def test_worker_rule_says_execute_but_helper_roles_do_not_get_it(self):
+        self.cli("learn", self.proj)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "do the steps")
+        self.assertIn("EXECUTE the task", self.calls()[-1]["append"])
+        self.cli("advise", "do the steps", "--project", "proj", check=False)
+        self.assertNotIn("EXECUTE the task", self.calls()[-1]["append"])
+
+    def test_worker_reply_in_advisor_format_is_flagged_and_partial(self):
+        self.cli("learn", self.proj)
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "do the steps",
+                     FAKE_ANSWER="Understood as: set the state.\nOutcome: the advisor made no changes")
+        row = self.ledger()[-1]
+        self.assertEqual(row["status"], "partial")
+        self.assertIn("worker returned advice, nothing executed", p.stdout)
 
     def test_role_runs_are_not_resumable_and_never_leave_their_commands_in_the_record(self):
         self.cli("learn", self.proj)
@@ -8763,6 +8794,45 @@ class CliTest(unittest.TestCase):
         out = self.cli("feedback", "list").stdout
         self.assertIn("pipe probe entry", out)  # the side effect stayed
         self.assertNotIn("crash:", out)  # and the closed pipe is not recorded as a crash
+
+    def test_thread_send_with_closed_stdout_and_slow_service_leaves_no_crash(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        driver = os.path.join(self.tmp.name, "slow_send.py")
+        with open(driver, "w") as fh:
+            fh.write("import sys, time, threading\n"
+                     f"sys.path.insert(0, {os.path.dirname(CLI)!r})\n"
+                     "import lean_agent, service_session\n"
+                     "service_session.alive = lambda key='main': True\n"
+                     "def slow(*a, **k):\n    time.sleep(1.5)\n    print('late output from the delivery thread')\n"
+                     "    return {'ok': False, 'error': 'slow'}\n"
+                     "service_session.sessions_request = slow\n"
+                     "sys.exit(lean_agent.main(sys.argv[1:]))\n")
+        tid = self.threads_home().new("pipe topic")
+        r, w = os.pipe()
+        os.close(r)
+        try:
+            p = subprocess.run([sys.executable, driver, "thread", "send", tid, "a long message " * 200], stdout=w,
+                               stderr=subprocess.PIPE, text=True, env=self.env, stdin=subprocess.DEVNULL, timeout=scaled(60))
+        finally:
+            os.close(w)
+        self.assertIn(p.returncode, (0, 1, 141), p.stderr)
+        self.assertNotIn("no such thread", p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+        self.assertNotIn("BrokenPipe", p.stderr)
+        self.assertNotIn("crash:", self.cli("feedback", "list").stdout)
+
+    def test_pipe_errors_from_any_thread_are_not_crashes(self):
+        lean_agent_module()
+        import lean_feedback
+        with mock.patch.dict(os.environ, self.env):
+            exc = BrokenPipeError(32, "Broken pipe")
+            lean_feedback.record_crash(["thread", "send", "t1"], exc)
+            lean_feedback.record_crash(["x"], OSError(32, "Broken pipe"))
+            self.assertEqual(lean_feedback._load(), [])
+            chained = ValueError("outer")
+            chained.__cause__ = exc
+            self.assertTrue(lean_feedback.is_pipe_error(chained))
+            self.assertFalse(lean_feedback.is_pipe_error(ValueError("other")))
 
     def test_feedback_v021_small_things(self):
         self.cli("learn", self.proj, "--name", "proj")
