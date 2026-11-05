@@ -343,8 +343,19 @@ def keys(k, key="main"):
 
 
 def alive(key="main"):
-    r = request({"ping": True}, timeout=2, key=key)
-    return bool(r.get("ok") and r.get("alive"))
+    """Whether session `key` is up. A busy bridge (the ping times out, e.g. while it starts a thread session) is up:
+    only a socket nobody can connect to (gone, refused) means down. A failed ping is tried once more."""
+    for attempt in range(2):
+        r = request({"ping": True}, timeout=2, key=key)
+        if r.get("ok"):
+            return bool(r.get("alive"))
+        err = str(r.get("error") or "")
+        if "timed out" in err:
+            return _socket_listening(client_sock_path(key))
+        if "No such file" in err or "refused" in err.lower():
+            return False
+        time.sleep(0.3)
+    return False
 
 
 def tail(key="main"):
