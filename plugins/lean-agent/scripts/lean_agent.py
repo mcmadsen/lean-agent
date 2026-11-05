@@ -14138,6 +14138,24 @@ def user_path_error(exc, argv):
 
 
 def main(argv=None):
+    """The CLI. A closed pipe (the caller timed out, was interrupted or cut the output) ends quietly: whatever the
+    command already did (message queued, file written) stays, nothing is printed or recorded as a crash."""
+    try:
+        return _main(argv)
+    except BrokenPipeError:
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)  # so the flush at interpreter exit can't fail again
+            for stream in (sys.stdout, sys.stderr):
+                try:
+                    os.dup2(devnull, stream.fileno())
+                except (OSError, ValueError, AttributeError):
+                    pass
+        except OSError:
+            pass
+        return 141
+
+
+def _main(argv=None):
     # the CLI is never the service session; its claude spawns must not inherit the marker
     os.environ.pop("LEAN_AGENT_SERVICE_SESSION", None)
     ap = build_parser()
@@ -14189,6 +14207,8 @@ def main(argv=None):
             sys.stdout.flush()
             report_failure(FAIL_CMD[0], FAIL_REASON[0] if FAIL_REASON else f"exited with code {rc}")
         return rc
+    except BrokenPipeError:
+        raise  # the reader went away: main() ends quietly, not a crash
     except SystemExit as e:
         if FAIL_CMD and isinstance(e.code, int) and e.code != 0:  # an exit that no die() explained
             report_failure(FAIL_CMD[0], FAIL_REASON[0] if FAIL_REASON else f"exited with code {e.code}")

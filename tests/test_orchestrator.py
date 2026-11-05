@@ -8601,6 +8601,20 @@ class CliTest(unittest.TestCase):
         self.assertIn("[major/completeness] docs/DISTRIBUTION.md:9: the change doesn't deliver: the second browser's package", p.stdout)
         self.assertIn("NOT approved", p.stdout)
 
+    def test_closed_output_pipe_ends_quietly_and_keeps_side_effects(self):
+        r, w = os.pipe()
+        os.close(r)  # the reader is gone: every write fails with EPIPE
+        try:
+            p = subprocess.run([sys.executable, CLI, "feedback", "add", "pipe probe entry"], stdout=w, stderr=subprocess.PIPE,
+                               text=True, env=self.env, stdin=subprocess.DEVNULL)
+        finally:
+            os.close(w)
+        self.assertEqual(p.returncode, 141, p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+        out = self.cli("feedback", "list").stdout
+        self.assertIn("pipe probe entry", out)  # the side effect stayed
+        self.assertNotIn("crash:", out)  # and the closed pipe is not recorded as a crash
+
     def test_feedback_v021_small_things(self):
         self.cli("learn", self.proj, "--name", "proj")
         # read-only workers and CLIs
