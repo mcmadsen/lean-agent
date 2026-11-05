@@ -11455,7 +11455,7 @@ class CliTest(unittest.TestCase):
         env = {"LEAN_AGENT_TOKEN_BACKEND": "file"}
         os.environ.update(env, LEAN_AGENT_HOME=home, LEAN_AGENT_CLAUDE=self.env["LEAN_AGENT_CLAUDE"],
                           FAKE_LOG=self.log)
-        self.addCleanup(lambda: [os.environ.pop(k, None) for k in ("LEAN_AGENT_TOKEN_BACKEND", "FAKE_AUTH_FAIL")])
+        self.addCleanup(lambda: [os.environ.pop(k, None) for k in ("LEAN_AGENT_TOKEN_BACKEND", "FAKE_AUTH_FAIL", "FAKE_LOGGED_IN")])
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins", "lean-agent", "scripts"))
         import lean_auth
         return lean_auth, home
@@ -11484,6 +11484,26 @@ class CliTest(unittest.TestCase):
         self.assertIn("stored token removed", self.cli("login", "--forget", LEAN_AGENT_TOKEN_BACKEND="file").stdout)
         self.assertEqual(lean_auth.load(), "")
 
+    def test_keychain_write_keeps_the_token_out_of_argv(self):
+        lean_auth, home = self.auth_env()
+        d = os.path.join(self.tmp.name, "bin")
+        os.makedirs(d)
+        rec = os.path.join(self.tmp.name, "security.json")
+        with open(os.path.join(d, "security"), "w") as fh:
+            fh.write("#!/usr/bin/env python3\nimport json, sys\nwith open(%r, 'a') as f:\n"
+                     "    f.write(json.dumps({'argv': sys.argv[1:], 'stdin': sys.stdin.read()}) + '\\n')\n" % rec)
+        os.chmod(os.path.join(d, "security"), 0o755)
+        os.environ["LEAN_AGENT_TOKEN_BACKEND"] = "keychain"
+        with mock.patch.dict(os.environ, {"PATH": d + os.pathsep + os.environ.get("PATH", "")}):
+            lean_auth.store(self.FAKE_TOKEN)
+        with open(rec) as fh:
+            calls = [json.loads(l) for l in fh]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["argv"], ["-i"])
+        self.assertNotIn(self.FAKE_TOKEN, " ".join(calls[0]["argv"]))
+        self.assertIn("add-generic-password -U -s lean-agent -a claude-oauth-token -w", calls[0]["stdin"])
+        self.assertIn(self.FAKE_TOKEN, calls[0]["stdin"])
+
     def test_login_token_stdin_and_refused_without_a_terminal(self):
         env = dict(LEAN_AGENT_TOKEN_BACKEND="file")
         p = self.cli("login", check=False, **env)
@@ -11510,6 +11530,13 @@ class CliTest(unittest.TestCase):
         self.assertIn("CLAUDE_CODE_OAUTH_TOKEN=(hidden)", self.cli("env", LEAN_AGENT_TOKEN_BACKEND="file").stdout)
         self.assertIn("sign-in: stored long-lived token", self.cli("doctor", check=False, LEAN_AGENT_TOKEN_BACKEND="file").stdout)
 
+    def test_auth_structured_error_alarms_without_confirmation(self):
+        lean_auth, home = self.auth_env()
+        os.environ["FAKE_LOGGED_IN"] = "1"
+        self.assertTrue(lean_auth.structured('{"type":"error","error":{"type":"authentication_error"}}'))
+        self.assertFalse(lean_auth.structured("needs to sign in again"))
+        self.assertTrue(lean_auth.mark_broken("worker", True))
+
     def test_auth_failure_makes_one_waiting_item_pauses_chases_and_recovery_closes_it(self):
         lean_auth, home = self.auth_env()
         import lean_waiting
@@ -11518,6 +11545,11 @@ class CliTest(unittest.TestCase):
         self.assertTrue(lean_auth.detect("Claude Code on the computer running this session needs to sign in again"))
         self.assertTrue(lean_auth.detect("OAuth token has expired"))
         self.assertFalse(lean_auth.detect("all good"))
+        os.environ["FAKE_LOGGED_IN"] = "1"  # a quoted phrase while signed in: only a hint, no alarm
+        self.assertFalse(service_session.report_auth_failure("session main"))
+        self.assertFalse(lean_auth.is_broken())
+        self.assertEqual([i for i in lean_waiting.open_items() if i["kind"] == "auth"], [])
+        os.environ["FAKE_LOGGED_IN"] = "0"  # auth status confirms
         self.assertTrue(service_session.report_auth_failure("session main"))
         self.assertFalse(service_session.report_auth_failure("session main"))  # one line only
         items = [i for i in lean_waiting.open_items() if i["kind"] == "auth"]
@@ -11533,11 +11565,11 @@ class CliTest(unittest.TestCase):
         st = {"ended": False, "size": 5}
         self.assertIsNone(watch.tick("/x", st, mtime=0))  # long idle, but paused
         # a worker whose output says sign-in failed also records it (already open: no second item)
-        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False, FAKE_AUTH_FAIL="1")
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False, FAKE_AUTH_FAIL="1", FAKE_LOGGED_IN="0")
         self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertTrue(lean_auth.is_broken(), p.stdout + p.stderr)
         lean_auth.mark_ok("test")
-        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False, FAKE_AUTH_FAIL="1")
+        p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False, FAKE_AUTH_FAIL="1", FAKE_LOGGED_IN="0")
         self.assertTrue(lean_auth.is_broken(), p.stdout + p.stderr)
         self.assertIn("lean-agent login", p.stdout + p.stderr)
         self.assertEqual(len([i for i in lean_waiting.open_items() if i["kind"] == "auth"]), 1)
@@ -11548,6 +11580,7 @@ class CliTest(unittest.TestCase):
         st["since"] = 1
         import lean_common
         lean_common.write_json_atomic(os.path.join(home, "auth-state.json"), st)
+        os.environ["FAKE_LOGGED_IN"] = "1"
         self.assertTrue(lean_auth.recheck(now=10 ** 10))
         self.assertFalse(lean_auth.is_broken())
         self.assertEqual([i for i in lean_waiting.open_items() if i["kind"] == "auth"], [])

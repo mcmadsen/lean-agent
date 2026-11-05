@@ -3187,7 +3187,7 @@ def note_auth(returncode, err, lines, source):
         if returncode == 0:
             lean_auth.mark_ok(f"{source} succeeded")
         elif lean_auth.detect((err or "") + "\n" + "".join(lines)[-4000:]):
-            if lean_auth.mark_broken(source):
+            if lean_auth.mark_broken(source, lean_auth.structured((err or "") + "\n" + "".join(lines)[-4000:])):
                 print(lean_auth.fix_line(), flush=True)
     except Exception:  # noqa: BLE001 - never break a run over the bookkeeping
         pass

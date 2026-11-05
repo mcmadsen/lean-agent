@@ -70,9 +70,11 @@ def load():
 def store(token):
     """Keep `token` (keychain or 0600 file) and record only the creation date. Raises OSError on failure."""
     if backend() == "keychain":
-        r = subprocess.run(["security", "add-generic-password", "-U", "-s", SERVICE, "-a", ACCOUNT, "-w", token],
+        # `security -i` reads its commands from stdin: the token never appears in an argument list
+        quoted = '"' + token.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        r = subprocess.run(["security", "-i"], input=f"add-generic-password -U -s {SERVICE} -a {ACCOUNT} -w {quoted}\n",
                            capture_output=True, text=True, timeout=30)
-        if r.returncode != 0:
+        if r.returncode != 0 or "error" in (r.stderr or "").lower():
             raise OSError("keychain write failed: " + (r.stderr or "").replace(token, "***").strip())
     else:
         d = os.path.dirname(_file())
@@ -249,14 +251,38 @@ def is_broken():
     return bool(state().get("broken"))
 
 
+STRUCT_RE = re.compile(r'authentication_error|"status"\s*:\s*401|API Error: 401', re.I)
+
+
+def structured(text):
+    """A structured authentication error (401 / authentication_error) in a worker's stream-json or stderr."""
+    return bool(STRUCT_RE.search(text or ""))
+
+
+def confirmed(claude=None):
+    """True only when `claude auth status --json` (with the stored token in its environment) says not logged in."""
+    claude = claude or os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
+    env = apply_env(dict(os.environ))
+    try:
+        r = subprocess.run([claude, "auth", "status", "--json"], capture_output=True, text=True, timeout=30,
+                           stdin=subprocess.DEVNULL, env=env)
+        data = json.loads(r.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return isinstance(data, dict) and data.get("loggedIn") is False
+
+
 def detect(text):
     return bool(FAIL_RE.search(ANSI_RE.sub("", text or "")))
 
 
-def mark_broken(source=""):
-    """Record the failure. True the first time only (the caller shows the one line); opens one waiting item."""
+def mark_broken(source="", is_structured=False):
+    """Record the failure. True the first time only (the caller shows the one line); opens one waiting item. Free text
+    (a hint) only counts when `claude auth status` confirms the sign-in is gone; a structured error counts by itself."""
     st = state()
     if st.get("broken"):
+        return False
+    if not is_structured and not confirmed():
         return False
     import lean_waiting
     wid = ""

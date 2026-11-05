@@ -1072,9 +1072,10 @@ def reports_path():
     return lean_home("thread-reports.json")
 
 
-def report_auth_failure(source):
-    """The one visible line (to the front desk) and the waiting item when sign-in fails; only the first call acts."""
-    if lean_auth.mark_broken(source):
+def report_auth_failure(source, is_structured=False):
+    """The one visible line (to the front desk) and the waiting item when sign-in fails; only the first call acts.
+    Free text is a hint: `claude auth status` must confirm it first."""
+    if lean_auth.mark_broken(source, is_structured):
         queue_report("main", "chase", lean_auth.fix_line())
         return True
     return False
@@ -1872,7 +1873,10 @@ class Host:
             self._auth_tail = text[-200:]
             if lean_auth.detect(text):
                 self._auth_tail = ""
-                report_auth_failure(f"session {self.key}")
+                now = time.time()
+                if now - getattr(self, "_auth_hint_at", 0) > 60 and not lean_auth.is_broken():
+                    self._auth_hint_at = now  # a quoted phrase is only a hint: confirm off the pump thread
+                    threading.Thread(target=report_auth_failure, args=(f"session {self.key}",), daemon=True).start()
         except Exception:  # noqa: BLE001 - watching never stops the pump
             pass
 
