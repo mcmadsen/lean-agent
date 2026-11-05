@@ -7029,6 +7029,89 @@ class CliTest(unittest.TestCase):
             self.assertIn("RuntimeError", self.cli("runs", "--show", row["id"], "--tail", "40").stdout)
         self.assertEqual(self.running_markers(), [])
 
+    def test_a_run_finishes_on_the_code_it_started_with_after_the_source_is_swapped(self):
+        tree = os.path.join(self.tmp.name, "tree")
+        shutil.copytree(os.path.dirname(os.path.dirname(CLI)), tree)
+        cli = os.path.join(tree, "scripts", "lean_agent.py")
+        self.cli("learn", self.proj, "--name", "proj")
+        p = subprocess.Popen([sys.executable, cli, "run", "-p", "proj", "-m", "haiku", "--why", "x", "look around"],
+                             env=dict(self.env, FAKE_TURNS="5", FAKE_TURN_SLEEP="0.7"), stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        self.addCleanup(lambda: p.poll() is None and p.kill())
+        self.wait_for(lambda: [m for m in self.running_markers() if m.get("version")], "the supervisor's marker")
+        [m] = [m for m in self.running_markers() if m.get("version")]
+        self.addCleanup(lambda: service_alive(m["pid"]) and os.kill(m["pid"], signal.SIGKILL))
+        self.assertIn(f"(lean-agent {m['version']})", self.cli("runs", "--running").stdout)
+        # the sync: the foreground goes, the source is replaced by a version without the helpers the finish used
+        os.killpg(p.pid, signal.SIGTERM)
+        p.wait(timeout=scaled(20))
+        for name in ("compact_hook.py", "fe_tools.py"):
+            os.remove(os.path.join(tree, "scripts", name))
+        with open(os.path.join(tree, "scripts", "lean_find.py"), "a") as fh:
+            fh.write("\nraise RuntimeError('new version')\n")
+        with open(os.path.join(tree, ".claude-plugin", "plugin.json"), "w") as fh:
+            json.dump({"name": "lean-agent", "version": "9.9.9"}, fh)
+        out = self.cli("runs", "--running").stdout
+        self.assertIn(f"(lean-agent {m['version']})", out)
+        self.wait_for(lambda: not self.running_markers(), "the run to finish", 60)
+        last = self.ledger()[-1]
+        self.assertEqual((last["id"], last["status"]), (m["run"], "done"))
+        hooks = glob.glob(os.path.join(last["workdir"], "code", "*_hook.py"))
+        self.assertTrue(hooks)  # the worker's hooks run from a copy
+
+    def test_hook_commands_point_into_the_runs_own_copy_of_the_scripts(self):
+        L = lean_agent_module()
+        wd = os.path.join(self.tmp.name, "wd")
+        d = L.pin_code(wd)
+        self.assertEqual(d, os.path.join(wd, "code"))
+        for n in ("push_guard.py", "wrapup_hook.py", "readonly_hook.py", "allow_edit_hook.py", "mcp_trim_hook.py", "lean_common.py"):
+            self.assertTrue(os.path.exists(os.path.join(d, n)), n)
+        code = ("import sys; sys.path.insert(0, %r); import lean_agent as L\n"
+                "assert 'compact_hook' not in sys.modules and 'fe_tools' not in sys.modules\n"
+                "L.pin_code(%r); assert 'compact_hook' in sys.modules and 'fe_tools' in sys.modules" % (os.path.dirname(CLI), wd))
+        subprocess.run([sys.executable, "-c", code], check=True, env=self.env)  # lazily imported modules are loaded at the start
+
+    def test_a_supervisor_that_cannot_finish_its_bookkeeping_still_leaves_a_failed_row(self):
+        L = lean_agent_module()
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(os.path.join(home, "running"))
+        with open(os.path.join(home, "running", "r9.json"), "w") as fh:
+            json.dump({"pid": 1, "run": "r9", "detached": True}, fh)
+        old = dict(L.RUN_CTX)
+        self.addCleanup(lambda: (L.RUN_CTX.clear(), L.RUN_CTX.update(old)))
+        L.RUN_CTX.clear()
+        L.RUN_CTX.update(id="r9", workdir=os.path.join(self.tmp.name, "w9"), fixed={"project": "proj", "model": "haiku", "task": "t"})
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": home}):
+            L.ensure_final_row(3)
+        row = [r for r in self.ledger() if r["id"] == "r9"][0]
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("without recording the result", row["reason"])
+        self.assertEqual(self.running_markers(), [])
+
+    def test_lost_runs_say_why(self):
+        L = lean_agent_module()
+        wd = os.path.join(self.tmp.name, "wd")
+        os.makedirs(wd)
+        with open(os.path.join(wd, "supervisor.err"), "w") as fh:
+            fh.write("Traceback (most recent call last):\n  File x\nAttributeError: no attribute 'foo'\n")
+        self.assertEqual(L.lost_reason({"detached": True, "workdir": wd, "started": "2999-01-01T00:00:00"}),
+                         "supervisor crashed with AttributeError: no attribute 'foo'")
+        os.remove(os.path.join(wd, "supervisor.err"))
+        self.assertIn("process gone", L.lost_reason({"detached": True, "workdir": wd, "started": "2999-01-01T00:00:00"}))
+
+    def test_sync_says_which_workers_keep_running_on_the_old_version(self):
+        L = lean_agent_module()
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(os.path.join(home, "running"))
+        for i, v in enumerate(("0.0.1", "0.0.1", None)):
+            with open(os.path.join(home, "running", f"r{i}.json"), "w") as fh:
+                json.dump({"pid": os.getpid(), "run": f"r{i}", "started": f"2026-01-01T00:00:0{i}", **({"version": v} if v else {})}, fh)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": home}), contextlib.redirect_stdout(buf):
+            L.print_workers_on_old_version()
+        self.assertIn("2 workers still running on 0.0.1; they finish on it", buf.getvalue())
+        self.assertIn("1 worker still running on an older version; they finish on it", buf.getvalue())
+
     def test_a_missing_claude_binary_leaves_no_todo_new_item(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--todo", "new", "t", check=False,
