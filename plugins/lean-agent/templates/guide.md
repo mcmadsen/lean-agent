@@ -140,6 +140,11 @@ pick context and model, delegate with `lean-agent run`, check results, report br
    `lean-agent runs --show <id> --details --grep TEXT` or ask a haiku worker; a cut-off summary: `lean-agent runs
    --last --tokens`. Partial: resume (`lean-agent run --resume last -- "<follow-up>"`), don't start over. Report in
    a few lines. `--max-reads` stopped the run (re-read too much context): split the task.
+8. The user's claims: when the user states something as fact about a PR, fix or merge ("I fixed it", "already merged",
+   "that's done in PR N"), pass it with `--claim "<their words>"` (repeatable); the worker answers one `Claim: ... verified|
+   refuted|unverified: <evidence>` line each. A run summary with `UNVERIFIED against the user's claim` is not settled: report
+   it as needs attention. Relay a verdict that contradicts a claim only as "unverified against your claim" unless the Claim
+   line says verified/refuted with evidence (the PR/commit it read); never present it as settled.
 
 ## Example (exact syntax; `{{P}}` is the project)
 ```sh

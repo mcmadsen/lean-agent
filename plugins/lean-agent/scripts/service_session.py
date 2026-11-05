@@ -1369,11 +1369,14 @@ def _question(text):
     return qs[-1] if qs else ""
 
 
+UNVERIFIED_MARK = "UNVERIFIED against the user's claim"
+
+
 def scan_turn(path, offset):
     """What the transcript at `path` shows from byte `offset` on: {"runs": a lean-agent run/review/handover/push command
     was issued, "err": the last lean-agent tool result was an error, "result": its first line, "ask": the open
     AskUserQuestion's question (else None), "size": file size}."""
-    out = {"runs": False, "err": False, "result": "", "ask": None, "asked": False, "size": offset}
+    out = {"runs": False, "err": False, "result": "", "ask": None, "asked": False, "size": offset, "unverified": False}
     try:
         with open(path, "rb") as fh:
             fh.seek(offset)
@@ -1405,10 +1408,12 @@ def scan_turn(path, offset):
                     ids.add(c.get("id"))
             elif c.get("type") == "tool_result":
                 out["ask"] = None
+                res = c.get("content")
+                if isinstance(res, list):
+                    res = " ".join(str(x.get("text") or "") for x in res if isinstance(x, dict))
+                if c.get("tool_use_id") in ids and UNVERIFIED_MARK in str(res or ""):
+                    out["unverified"] = True  # a run's claim check failed: the turn is not "done"
                 if c.get("tool_use_id") in ids:
-                    res = c.get("content")
-                    if isinstance(res, list):
-                        res = " ".join(str(x.get("text") or "") for x in res if isinstance(x, dict))
                     out["err"] = bool(c.get("is_error"))
                     out["result"] = next((l.strip() for l in str(res or "").splitlines() if l.strip()), "")
     return out
@@ -1606,6 +1611,11 @@ class Reporter(AutoClear):
         elif scan["err"]:
             save_last_report(tid, "blocked", text or scan["result"])
             queue_report(tid, "blocked", _short(text or scan["result"], tid=tid))
+        elif scan["unverified"]:
+            self.woken = False
+            note = "a user claim is UNVERIFIED by the worker: " + (text or scan["result"])
+            save_last_report(tid, "needs-you", note)
+            queue_report(tid, "needs-you", _short(note, tid=tid))
         elif scan["runs"] or self.woken:
             self.woken = False
             save_last_report(tid, "done", text or scan["result"])
