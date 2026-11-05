@@ -449,6 +449,7 @@ FRONT_DESK_JOBS = (
     ("memory", re.compile(r"\b(?:remember|memor(?:y|ies))\b", re.I)),
     ("schedule", re.compile(r"\b(?:schedules?|scheduled|scheduling)\b", re.I)),
     ("threads overview", re.compile(r"\b(?:(?:all|my|open|list(?: of)?) threads|threads (?:overview|list|status)|overview of (?:the )?threads|status of all)\b", re.I)),
+    ("goals", re.compile(r"\b(?:goals?|how are we (?:doing|on)\b|status of (?:everything|all)|what(?:'s| is) open|overview|where are we)\b", re.I)),
     ("maintenance", re.compile(r"^\s*(?:please\s+)?(?:lean-agent\s+)?(?:sync|update|restart|clear)(?:\s+(?:the\s+)?(?:plugin|lean-agent|front desk|session|context|templates?|everything))?\s*[.!?]?\s*$", re.I)),
 )
 NEW_WORDS_RE = re.compile(r"\b(?:new (?:thread|topic)|separate thread|start (?:a )?(?:new|fresh) (?:thread|topic))\b", re.I)
@@ -619,7 +620,8 @@ def decide(text, data, session=None, now=None, idx=None):
         return None, "Status question \u2014 answer it here: lean-agent now", "status"
     for name, rx in FRONT_DESK_JOBS:
         if rx.search(text):
-            return None, f"Front desk job ({name}) \u2014 do it here, no thread", "job"
+            tip = ": lean-agent goals / lean-agent now" if name == "goals" else ""
+            return None, f"Front desk job ({name}) \u2014 do it here, no thread{tip}", "job"
     cur = None
     try:
         with open(state_path()) as fh:

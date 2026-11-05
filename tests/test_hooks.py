@@ -934,10 +934,13 @@ class BudgetTest(Base):
         self.assertEqual(d("digest tasks in New")[0], "t2")
         self.assertEqual(d("digest testing")[0], "t2")
         for text, job in (("write the feedback", "feedback"), ("budget and savings", "budget"), ("show my usage", "budget"),
-                          ("remember that I like short answers", "memory"), ("restart", "maintenance"), ("list all threads", "threads overview")):
+                          ("remember that I like short answers", "memory"), ("restart", "maintenance"), ("list all threads", "threads overview"),
+                          ("how are we on our goals", "goals"), ("how are we doing", "goals"), ("what's open", "goals"),
+                          ("overview please", "goals")):
             tid, line = d(text)
             self.assertIsNone(tid, text)
             self.assertTrue(line.startswith(f"Front desk job ({job})"), line)
+        self.assertEqual(d("how are we on PR 4730")[0], "t9")  # a named reference still routes by it
         self.assertEqual(d("bug 4750 again")[0], "t7")  # a work item, not PR 4750 of t4
         self.assertEqual(d("PR 4750 again")[0], "t4")
         self.assertEqual(d("#4750")[0], None)  # PR or item: t4 and t7 both own it, listed
