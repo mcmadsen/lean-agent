@@ -11680,6 +11680,73 @@ class ReviewUnitTest(unittest.TestCase):
         g("commit", "-qm", "change")
         return list(files)
 
+    def _merged_base_repo(self):
+        def g(*args):
+            return subprocess.run(["git", "-C", self.dir, "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+
+        def put(rel, text):
+            os.makedirs(os.path.dirname(os.path.join(self.dir, rel)) or self.dir, exist_ok=True)
+            with open(os.path.join(self.dir, rel), "w") as fh:
+                fh.write(text)
+        g("init", "-q", "-b", "main")
+        put("keep.txt", "x\n")
+        g("add", "-A")
+        g("commit", "-qm", "start")
+        g("checkout", "-qb", "feature")
+        put("src/own.py", "# TODO: wire the retry\nx = 1\n")
+        g("add", "-A")
+        g("commit", "-qm", "own change")
+        g("checkout", "-q", "main")
+        put("docs/other.md", "Search is not done yet\n")
+        g("add", "-A")
+        g("commit", "-qm", "other team work, not done yet")
+        g("checkout", "-q", "feature")
+        g("merge", "-q", "--no-ff", "-m", "Merge main", "main")
+        return g("rev-parse", "HEAD"), g
+
+    def test_gaps_come_only_from_the_branchs_own_commits_after_a_base_merge(self):
+        agent = self.agent
+        head, g = self._merged_base_repo()
+        mb = g("merge-base", "main", "feature")
+        gaps = agent.self_declared_gaps(self.dir, [mb, head], base="main")
+        self.assertTrue(any(x.startswith("src/own.py") for x in gaps), gaps)
+        self.assertFalse(any("other.md" in x or "other team" in x for x in gaps), gaps)
+        # an older merge base (the base moved on or was rewritten) still leaves the base's work out
+        old = g("rev-list", "--max-parents=0", "HEAD")
+        gaps = agent.self_declared_gaps(self.dir, [old, head], base="main")
+        self.assertFalse(any("other.md" in x or "other team" in x for x in gaps), gaps)
+
+    def test_stored_base_gaps_are_dropped_and_status_is_clean(self):
+        agent = self.agent
+        head, g = self._merged_base_repo()
+        rec = {"run": "r1", "verdict": "approve", "head": head, "base": "main", "ref": "feature",
+               "gaps": [{"what": "Search is not done yet", "file": "docs/other.md", "line": 1},
+                        {"what": "other team work, not done yet", "file": "commit message", "line": 0}]}
+        keep, dropped = agent.split_base_gaps(self.dir, rec, rec["gaps"])
+        self.assertEqual((keep, len(dropped)), ([], 2))
+        with mock.patch.object(agent, "declined_for", return_value=[]):
+            code, open_gaps = agent.stored_exit("proj", self.dir, rec, "feature", head)
+            self.assertEqual((code, open_gaps), (0, []))
+            own = {"what": "wire the retry", "file": "src/own.py", "line": 1}
+            code, open_gaps = agent.stored_exit("proj", self.dir, dict(rec, gaps=rec["gaps"] + [own]), "feature", head)
+            self.assertEqual((code, open_gaps), (2, [own]))
+
+    def test_gap_listing_has_full_text_source_and_excerpt(self):
+        agent = self.agent
+        head, g = self._merged_base_repo()
+        long_text = "wire the retry " + "and keep going " * 30
+        rec = {"head": head, "base": "main"}
+        out = agent.gap_listing(self.dir, rec, [("g1", {"what": long_text, "file": "src/own.py", "line": 1}),
+                                                ("g2", {"what": "own change", "file": "commit message", "line": 0})])
+        self.assertIn(long_text, out)
+        self.assertIn("own commits touching it:", out)
+        self.assertIn("own change", out)
+        self.assertIn("+# TODO: wire the retry", out)
+        self.assertIn("commit ", out)
+        capped = agent.gap_listing(self.dir, rec, [("g1", {"what": "x", "file": "src/own.py"})], per_gap=10)
+        self.assertLess(len(capped), 400)
+
     def test_reviewer_model_by_risk(self):
         agent = self.agent
         with mock.patch.object(agent, "config_json", return_value={}), mock.patch.dict(os.environ, {}, clear=False):

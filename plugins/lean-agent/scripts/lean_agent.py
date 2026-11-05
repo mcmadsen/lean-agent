@@ -3741,14 +3741,82 @@ def gap_line(rel, body):
     return bool((note and (CODE_GAP_RE.search(note) or GAP_MARK_RE.search(note))) or NOT_IMPLEMENTED_RE.search(body))
 
 
-def self_declared_gaps(path, rng_args, new_files=()):
+def pr_own(path, base, head="HEAD"):
+    """(shas, files) of the branch's own work: commits reachable from head but not from base, merges left out (what a
+    merged-in base brought is not the branch's), and the files those commits touched. None when it can't be told."""
+    if not base:
+        return None
+    out = git(path, "rev-list", "--no-merges", head, "--not", base)
+    if out is None:
+        return None
+    shas = out.split()
+    files = set((git(path, "log", "--no-merges", "--format=", "--name-only", head, "--not", base) or "").split("\n")) - {""}
+    return shas, files
+
+
+def merged_in(path, base, head):
+    """(files, messages) of the base commits the branch's merge commits brought in: the commits of each merge's
+    second parent that its first parent did not have."""
+    files, msgs = set(), []
+    for m in (git(path, "rev-list", "--merges", "--parents", head, "--not", base) or "").splitlines():
+        parts = m.split()
+        if len(parts) < 3:
+            continue
+        for p2 in parts[2:]:
+            files |= set((git(path, "log", "--no-merges", "--format=", "--name-only", p2, "--not", parts[1]) or "").split("\n")) - {""}
+            msgs.append(git(path, "log", "--no-merges", "--format=%B", p2, "--not", parts[1]) or "")
+    return files, " ".join(msgs)
+
+
+def own_messages(path, base, head):
+    """{sha: full message} of the branch's own commits."""
+    own = pr_own(path, base, head)
+    return {s: git(path, "log", "-1", "--format=%B", s) or "" for s in own[0]} if own else {}
+
+
+def split_base_gaps(path, rec, gaps):
+    """(own gaps, gaps from the base branch) of a stored review: a gap whose file only the merged-in base commits
+    touched, or whose commit-message text is only in those, came from the base branch."""
+    base, head = rec.get("base"), rec.get("head")
+    own = pr_own(path, base, head) if base and head else None
+    if not own or not gaps:
+        return list(gaps), []
+    msgs = None
+    mfiles, mmsgs = merged_in(path, base, head)
+    keep, dropped = [], []
+    for g in gaps:
+        f, what = str(g.get("file") or ""), str(g.get("what") or "")
+        if f.startswith("commit message") or f == "commit":
+            if msgs is None:
+                msgs = " ".join(own_messages(path, base, head).values())
+            (dropped if what and what[:60] not in msgs and what[:60] in mmsgs else keep).append(g)
+        elif f and f not in own[1] and f in mfiles:
+            dropped.append(g)
+        else:
+            keep.append(g)
+    return keep, dropped
+
+
+def open_gaps_of(slug, path, rec, sha=None):
+    """The known gaps of a stored review the branch's own changes left open (not declined, not from the base branch)."""
+    declined = declined_for(slug, rec.get("ref"), path, sha or rec.get("head"))
+    own, _ = split_base_gaps(path, rec, rec.get("gaps") or [])
+    return [g for g in own if not gap_declined(g, declined)]
+
+
+def self_declared_gaps(path, rng_args, new_files=(), base=None):
     """Lines the change adds (code, docs, comments) and its commit messages that say something isn't done:
     "not done yet", "not yet wired", TODO, placeholder, stub, "<host>" in a doc, ... A change can document its own
     gap; the reviewer has to say whether that gap keeps the change from doing what it promises."""
     out, cur, line_no = [], None, 0
+    own = pr_own(path, base, rng_args[1] if len(rng_args) == 2 else "HEAD") if base else None
+    own_files = set(own[1]) | set((git(path, "diff", "--name-only", *rng_args[:1]) or "").split()
+                                  if len(rng_args) == 1 else ()) if own else None
     for line in (git(path, "diff", "-U0", "--no-color", *rng_args) or "").splitlines():
         if line.startswith("+++ "):
             cur = line[6:] if line.startswith("+++ b/") else None
+            if cur and own_files is not None and cur not in own_files:
+                cur = None  # only touched by what the base brought in
             continue
         m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)", line)
         if m:
@@ -3768,7 +3836,9 @@ def self_declared_gaps(path, rng_args, new_files=()):
         except (OSError, UnicodeDecodeError):
             pass
     rng = rng_args[0] + ".." + rng_args[1] if len(rng_args) == 2 else (rng_args[0] + "..HEAD" if rng_args else "")
-    for msg in (git(path, "log", "--format=%s%n%b", rng) or "").splitlines() if rng else []:
+    msgs = ((git(path, "log", "--no-merges", "--format=%s%n%b", rng_args[1] if len(rng_args) == 2 else "HEAD",
+                 "--not", base) or "") if own is not None else (git(path, "log", "--format=%s%n%b", rng) or "" if rng else ""))
+    for msg in msgs.splitlines():
         if GAP_RE.search(msg) or GAP_MARK_RE.search(msg):
             out.append(f"commit message: {msg.strip()[:160]}")
     return list(dict.fromkeys(out))[:25]
@@ -5296,6 +5366,9 @@ around each gap, and the tracker if the cards name one, then decide each gap:
 - "ask": only a product or preference choice you can't settle from the cards, the code or the tracker. Give the
   question and 2-4 short options.
 Prefer deciding over asking. Don't change any file.
+Use the data given below (full gap text, source commits, diff excerpt). If you need more, run plain read-only git
+commands (no $(...), no pipes), e.g. `git -C {project} show <sha>`, `git -C {project} log -1 <sha>`,
+`git -C {project} diff <a>..<b> -- <file>`.
 
 The open known gaps:
 {gaps}
@@ -5303,6 +5376,30 @@ The open known gaps:
 Before the LEAN-FEEDBACK line, add one line exactly like this (valid JSON, one line, one entry per gap above):
 LEAN-GAPS {{"decisions": [{{"gap": "g1", "action": "decline|fix|ask", "why": "reason", "task": "fix task (fix only)", "question": "one question (ask only)", "options": ["a", "b"]}}]}}
 """
+
+
+def gap_listing(path, rec, open_gaps, per_gap=1500, total=9000):
+    """The open gaps for the decider, each with its full text, its source (the branch's own commits that touched the
+    file, or the commit and its message) and a capped diff excerpt, so it needn't run git."""
+    base, head = rec.get("base"), rec.get("head") or "HEAD"
+    msgs = own_messages(path, base, head) if base else {}
+    out, used = [], 0
+    for gid, g in open_gaps:
+        f, what = str(g.get("file") or "?"), str(g.get("what") or "")
+        loc = f + (":" + str(g["line"]) if g.get("line") else "")
+        src, excerpt = "unknown", ""
+        if f.startswith("commit message") or f == "commit":
+            hit = next(((s, m) for s, m in msgs.items() if what[:60] in m), None)
+            if hit:
+                src = f"commit {hit[0]}, message: {hit[1].strip()}"
+        elif base:
+            log = git(path, "log", "--no-merges", "--format=%h %s", head, "--not", base, "--", f) or ""
+            src = ("own commits touching it: " + "; ".join(log.splitlines()[:6])) if log else "no own commit touched it"
+            if used < total:
+                excerpt = (git(path, "diff", "-U2", "--no-color", f"{base}...{head}", "--", f) or "")[:min(per_gap, total - used)]
+                used += len(excerpt)
+        out.append(f"- {gid} {loc}: {what}\n  source: {src}" + (f"\n  diff excerpt:\n{excerpt}" if excerpt else ""))
+    return "\n".join(out)
 
 
 def decide_gaps(a):
@@ -5313,12 +5410,13 @@ def decide_gaps(a):
     if not last:
         die(f"no review of {a.head or slug} yet")
     declined = declined_for(slug, last.get("ref"), path, last.get("head"))
-    open_gaps = [(f"g{i}", g) for i, g in enumerate(last.get("gaps") or [], 1) if not gap_declined(g, declined)]
+    _, from_base = split_base_gaps(path, last, last.get("gaps") or [])
+    open_gaps = [(f"g{i}", g) for i, g in enumerate(last.get("gaps") or [], 1)
+                 if not gap_declined(g, declined) and not any(g is b for b in from_base)]
     if not open_gaps:
         print(f"review {last['run']} has no open known gaps")
         return 0
-    listing = "\n".join(f"- {gid} {g.get('file', '?')}{':' + str(g['line']) if g.get('line') else ''}: "
-                        f"{str(g.get('what', ''))[:300]}" for gid, g in open_gaps)
+    listing = gap_listing(path, last, open_gaps)
     ns = argparse.Namespace(resume=None, task=[f"Decide the open known gaps of review {last['run']} "
                                                f"({last.get('branch') or last.get('ref') or slug})."],
                             task_file=None, model="sonnet", todo=getattr(a, "todo", None),
@@ -5467,8 +5565,7 @@ def skip_reason(slug, path, label, mode, sha, mb, base):
     earlier = last_review(slug, path, label)
     # only a clean approval narrows the range to what came in since it; after changes-requested, needs-checks or
     # open gaps the whole branch diff is judged, so a docs-only follow-up does not wave findings through
-    settled = bool(earlier and approved(earlier.get("verdict")) and not
-                   [g for g in earlier.get("gaps") or [] if not gap_declined(g, declined_for(slug, earlier.get("ref"), path, sha))])
+    settled = bool(earlier and approved(earlier.get("verdict")) and not open_gaps_of(slug, path, earlier, sha))
     lo = mb
     if settled and git(path, "merge-base", "--is-ancestor", earlier["head"], sha) is not None:
         lo = earlier["head"]
@@ -5716,7 +5813,7 @@ def cmd_review(a):
 def stored_exit(slug, path, match, label, sha):
     """(exit code, open gaps) of a stored review: 0 for an approve without open gaps, else 2 (changes requested,
     needs checks, open gaps); after a policy skip, what the last real review left. 1 is for errors only."""
-    open_gaps = [g for g in match.get("gaps") or [] if not gap_declined(g, declined_for(slug, match.get("ref"), path, sha))]
+    open_gaps = open_gaps_of(slug, path, match, sha)
     if approved(match["verdict"]) and open_gaps:
         return 2, open_gaps
     if is_skipped(match["verdict"]):
@@ -5729,7 +5826,7 @@ def skipped_status(slug, path, label, sha):
     real = last_review(slug, path, label)
     if not real:
         return 0
-    open_gaps = [g for g in real.get("gaps") or [] if not gap_declined(g, declined_for(slug, real.get("ref"), path, sha))]
+    open_gaps = open_gaps_of(slug, path, real, sha)
     if not open_gaps:
         return 0
     print(f"  the last real review ({real['run']}, {real['verdict']}) left {len(open_gaps)} known gap(s) not acknowledged")
@@ -5845,7 +5942,8 @@ def review_main(a):
         mb = meta.get("merge_base")
         if mb:  # gaps are about the whole change, not only what changed since the last review
             meta["gaps"] = self_declared_gaps(path, [mb, meta["head"]] if meta.get("mode") == "ref" else [mb],
-                                              untracked_files(path) if meta.get("mode") != "ref" else ())
+                                              untracked_files(path) if meta.get("mode") != "ref" else (),
+                                              base=meta.get("base"))
             focus["gaps"] = meta["gaps"]
         if getattr(a, "goal", None):
             meta["goal"] = a.goal
@@ -5962,7 +6060,7 @@ def review_main(a):
     ns_syms = new_symbols(path, [merge_base, sha] if mode == "ref" else [merge_base], new)
     focus = change_focus(path, [merge_base, sha] if mode == "ref" else [merge_base])
     focus["gaps"] = self_declared_gaps(path, [merge_base, sha] if mode == "ref" else [merge_base],
-                                       untracked_files(path) if mode != "ref" else ())
+                                       untracked_files(path) if mode != "ref" else (), base=base)
     focus["ci_parity"] = ci_parity(path, [merge_base, sha] if mode == "ref" else [merge_base],
                                    sha if mode == "ref" else "HEAD")
     grep_ref = sha if mode == "ref" else ""
