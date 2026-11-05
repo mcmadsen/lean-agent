@@ -392,6 +392,8 @@ def resolve_tag(value=None):
             return resolve(norm(value))
         except ValueError:
             return None
+    if os.environ.get("LEAN_AGENT_SESSION_ROLE") == "main":  # the front desk records as itself, never on a thread
+        return None
     return current()
 
 

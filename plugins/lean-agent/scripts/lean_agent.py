@@ -12105,12 +12105,23 @@ def thread_action(a):
         print(f"parked {tid} \u2014 wake with lean-agent thread wake {tid} (or thread send)")
         return 0
     if act == "wake":
-        act, a.action = "open", "open"
+        if len(a.args) > 1:  # `thread wake t1 t2 t3`: each in turn, one line each
+            import copy
+            rcs = []
+            for x in a.args:
+                one = copy.copy(a)
+                one.args = [x]
+                try:
+                    rcs.append(thread_action(one) or 0)
+                except SystemExit as exc:
+                    rcs.append(exc.code if isinstance(exc.code, int) else 1)
+            return max(rcs)
+        act, a.action, a._wake = "open", "open", True
     if act in ("send", "open"):
         if act == "send":
             thread_positional_message(a, "send")
         if len(a.args) != 1:
-            die(f"usage: lean-agent thread {act} tN" + (' ("<text>" | --prompt-file F|-)' if act == "send" else ""))
+            die(f"usage: lean-agent thread {'wake' if getattr(a, '_wake', False) else act} tN" + (' ("<text>" | --prompt-file F|-)' if act == "send" else ""))
         tid, t = thread_session_tid(a.args[0])
         prompt = thread_prompt(a)
         if act == "send" and not prompt:
@@ -13332,8 +13343,10 @@ def cmd_checkpoint(a):
         die('checkpoint needs the soft state: lean-agent checkpoint "<promises, decisions, next steps>" (or --file -)')
     with file_lock(compact_hook.notes_path()):
         notes = compact_hook.load_notes()
-        notes.append({"ts": now_iso(), "text": text, "kind": "checkpoint", "thread": lean_threads.resolve_tag()})
-        old = [i for i, n in enumerate(notes) if n.get("kind") == "checkpoint"][:-3]
+        tag = lean_threads.resolve_tag()
+        notes.append({"ts": now_iso(), "text": text, "kind": "checkpoint", "thread": tag, "source": tag or "main"})
+        owner = tag or "main"  # the last 3 of this owner are kept: the front desk and threads don't push each other out
+        old = [i for i, n in enumerate(notes) if n.get("kind") == "checkpoint" and compact_hook.checkpoint_owner(n) == owner][:-3]
         save_json(compact_hook.notes_path(), [n for i, n in enumerate(notes) if i not in old])
     print(f"checkpoint saved ({len(text.splitlines())} lines); `lean-agent brief` shows it first")
     return 0

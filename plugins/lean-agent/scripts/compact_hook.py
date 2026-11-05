@@ -73,6 +73,20 @@ def load_notes():
         return []
 
 
+FRONT_DESK_RE = re.compile(r"^\W*(main\b|front[- ]desk\b|the front desk\b)", re.I)
+
+
+def checkpoint_owner(n):
+    """Whose checkpoint a note is: "main" (the front desk) or a thread id. Notes from before 0.45.21 have no source,
+    and the front desk's were filed on its current thread: a text that starts like a front-desk one is main's."""
+    src = n.get("source")
+    if src:
+        return src
+    if FRONT_DESK_RE.match(str(n.get("text") or "")):
+        return "main"
+    return n.get("thread") or "main"
+
+
 def recent(runs, hours):
     cutoff = (datetime.datetime.now() - datetime.timedelta(hours=hours)).isoformat(timespec="seconds")
     return [r for r in runs if str(r.get("ts", "")) >= cutoff]
@@ -276,7 +290,7 @@ def threads_summary(lines=12):
 def brief(cap=None):
     """What a fresh orchestrator session starts from: the latest checkpoint (its soft state), then the hand-off.
     With `cap`, the checkpoint gets up to CHECKPOINT_CAP characters and the hand-off the rest."""
-    cps = [n for n in load_notes() if n.get("kind") == "checkpoint"]
+    cps = [n for n in load_notes() if n.get("kind") == "checkpoint" and checkpoint_owner(n) == "main"]
     head, more = "", False
     if cps:
         body = str(cps[-1].get("text", ""))
@@ -329,8 +343,8 @@ def thread_brief(tid, cap=None):
     (`thread show`): nothing of the other threads."""
     import lean_threads
     t = lean_threads.load()["threads"].get(tid) or {}
-    lines = [f'Thread {tid} "{t.get("title") or tid}"']
-    mine = [n for n in load_notes() if n.get("thread") == tid]
+    lines = [f'Thread {tid} "{t.get("title") or tid}". You are the session of this thread, not the front desk.']
+    mine = [n for n in load_notes() if n.get("thread") == tid and checkpoint_owner(n) == tid]
     cps = [n for n in mine if n.get("kind") == "checkpoint"]
     if cps:
         lines.append(f"Checkpoint of {str(cps[-1].get('ts', ''))[:16].replace('T', ' ')} (your own soft state before the clear; continue from it):")
@@ -356,8 +370,9 @@ def fresh_brief(tid, max_tokens=FRESH_BRIEF_TOKENS):
     import lean_threads
     data = lean_threads.load()
     t = data["threads"].get(tid) or {}
-    head = [f'Thread {tid} "{t.get("title") or tid}" (a new session: the old conversation is not carried over)']
-    cps = [n for n in load_notes() if n.get("thread") == tid and n.get("kind") == "checkpoint"]
+    head = [f'Thread {tid} "{t.get("title") or tid}" (a new session: the old conversation is not carried over). '
+            "You are the session of this thread, not the front desk."]
+    cps = [n for n in load_notes() if n.get("kind") == "checkpoint" and checkpoint_owner(n) == tid]
     if cps:
         head.append(f"Latest checkpoint ({str(cps[-1].get('ts', ''))[:16].replace('T', ' ')}; continue from it):")
         head.append(cut_lines(str(cps[-1].get("text", "")), CHECKPOINT_CAP))
