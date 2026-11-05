@@ -884,11 +884,181 @@ def alive_thread(tid):
         return False
 
 
+# ---------------------------------------------------------------- message spool
+# `thread send/new/answer/wake` and the goals watchdog never wait for a session: they write the message into the spool
+# (one file per message, name = time + random) and the service delivers it in order (waking the session when it is
+# idle, parked or ended). A deliverer claims a message by renaming its file, so a message is delivered once.
+
+SEND_WAIT = 10  # seconds a caller waits for a delivery before leaving the message to the service; LEAN_AGENT_SEND_WAIT overrides
+SPOOL_RETRY = 5  # seconds before the service retries a delivery that failed
+
+
+def send_wait():
+    try:
+        v = float(os.environ.get("LEAN_AGENT_SEND_WAIT") or _load(lean_home("config.json")).get("send_wait") or SEND_WAIT)
+    except (TypeError, ValueError):
+        v = SEND_WAIT
+    return v if v > 0 else SEND_WAIT
+
+
+def spool_dir(tid):
+    return lean_home("thread-inbox", tid)
+
+
+def spool_add(tid, text=None, new=False):
+    """Queue `text` for thread `tid` (None: only wake it). Returns the spool file name."""
+    d = spool_dir(tid)
+    os.makedirs(d, exist_ok=True)
+    name = f"{time.time_ns():020d}-{uuid.uuid4().hex[:8]}.json"
+    tmp = os.path.join(d, name + ".tmp")
+    with open(tmp, "w") as fh:
+        json.dump({"text": text, "ts": time.time(), "new": new}, fh)
+    os.replace(tmp, os.path.join(d, name))
+    return name
+
+
+def spool_pending(tid):
+    try:
+        return sorted(n for n in os.listdir(spool_dir(tid)) if n.endswith(".json"))
+    except OSError:
+        return []
+
+
+def spool_threads():
+    try:
+        return sorted(t for t in os.listdir(lean_home("thread-inbox")) if spool_pending(t))
+    except OSError:
+        return []
+
+
+def spool_claim(tid, name):
+    """The message in spool file `name`, claimed (the file is renamed, so no other deliverer gets it); None if taken."""
+    src = os.path.join(spool_dir(tid), name)
+    dst = src[:-5] + ".sending"
+    try:
+        os.rename(src, dst)
+    except OSError:
+        return None
+    msg = _load(dst)
+    try:
+        with open(dst, "w") as fh:
+            json.dump(dict(msg, claimed_by=os.getpid()), fh)
+    except OSError:
+        pass
+    return msg
+
+
+def spool_done(tid, name):
+    try:
+        os.remove(os.path.join(spool_dir(tid), name[:-5] + ".sending"))
+    except OSError:
+        pass
+
+
+def spool_withdraw(tid, name):
+    """Remove an unclaimed message from the spool; False when a deliverer has it (or it was delivered)."""
+    try:
+        os.remove(os.path.join(spool_dir(tid), name))
+        return True
+    except OSError:
+        return False
+
+
+def spool_release(tid, name):
+    """A claimed message that could not be delivered goes back (same place in the order)."""
+    try:
+        os.rename(os.path.join(spool_dir(tid), name[:-5] + ".sending"), os.path.join(spool_dir(tid), name))
+    except OSError:
+        pass
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def spool_reclaim_stale(tid, dead_age=5, age=300):
+    """A claim left by a deliverer that died (or hangs for `age` seconds) goes back to the queue."""
+    d = spool_dir(tid)
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for n in names:
+        if not n.endswith(".sending"):
+            continue
+        path = os.path.join(d, n)
+        try:
+            old = time.time() - os.path.getmtime(path)
+            if old > age or (old > dead_age and not _pid_alive(_load(path).get("claimed_by"))):
+                os.rename(path, os.path.join(d, n[:-8] + ".json"))
+        except OSError:
+            pass
+
+
+class SpoolDeliverer:
+    """Service side: delivers spooled messages by running `lean-agent thread deliver tN` (the blocking start/resume path)
+    in a background thread per thread, so a slow session never stalls a tick."""
+
+    def __init__(self, run=None, now=time.time):
+        self.run = run or self._subprocess
+        self.now = now
+        self.busy = {}
+        self.failed = {}
+        self.lock = threading.Lock()
+
+    @staticmethod
+    def _subprocess(tid):
+        exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lean_agent.py")
+        r = subprocess.run([sys.executable, exe, "thread", "deliver", tid], capture_output=True, text=True, timeout=180)
+        return r.returncode == 0, (r.stderr or r.stdout).strip()[-200:]
+
+    def tick(self):
+        started = []
+        for tid in spool_threads():
+            spool_reclaim_stale(tid)
+            with self.lock:
+                if self.busy.get(tid) or self.now() - self.failed.get(tid, 0) < SPOOL_RETRY:
+                    continue
+                self.busy[tid] = True
+            t = threading.Thread(target=self._deliver, args=(tid,), daemon=True)
+            t.start()
+            started.append(t)
+        return started
+
+    def _deliver(self, tid):
+        try:
+            ok, err = self.run(tid)
+        except Exception as exc:
+            ok, err = False, str(exc)
+        with self.lock:
+            self.busy[tid] = False
+            if ok:
+                self.failed.pop(tid, None)
+            else:
+                self.failed[tid] = self.now()
+        if not ok:
+            lean_log.log("warn", "spool", f"{tid}: delivery failed, will retry: {err}")
+
+    def loop(self, stop, interval=1.0):
+        while not stop.is_set():
+            try:
+                self.tick()
+            except Exception as exc:
+                lean_log.log("error", "spool", str(exc))
+            stop.wait(interval)
+
+
 def goal_send(tid, text):
-    """Message a thread like `lean-agent thread send` (a parked or ended session is started by it)."""
-    exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lean_agent.py")
-    r = subprocess.run([sys.executable, exe, "thread", "send", tid, text], capture_output=True, text=True, timeout=120)
-    return r.returncode == 0, (r.stderr or r.stdout).strip()[-200:]
+    """Message a thread like `lean-agent thread send`, without waiting: queued for the service to deliver."""
+    try:
+        spool_add(tid, text)
+        return True, "queued"
+    except OSError as exc:
+        return False, str(exc)
 
 
 def reports_path():
