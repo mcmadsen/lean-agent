@@ -14309,7 +14309,10 @@ def main(argv=None):
     """The CLI. A closed pipe (the caller timed out, was interrupted or cut the output) ends quietly: whatever the
     command already did (message queued, file written) stays, nothing is printed or recorded as a crash."""
     try:
-        return _main(argv)
+        rc = _main(argv)
+        sys.stdout.flush()  # buffered output meets a closed pipe here, not at interpreter exit (where it can't be caught)
+        sys.stderr.flush()
+        return rc
     except BrokenPipeError:
         try:
             devnull = os.open(os.devnull, os.O_WRONLY)  # so the flush at interpreter exit can't fail again
