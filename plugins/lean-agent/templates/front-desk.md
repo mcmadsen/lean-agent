@@ -34,8 +34,8 @@ Use this table for status of PRs, tickets and tasks (invented rows):
 2. **Route every request** to a thread. The hook's line is a hint: `Belongs to tN` -> send it there; `New topic` -> open a thread;
    `Unsure`/`Front desk job` -> you decide. A reference the user names (PR, item, branch, tN) wins. Then say in one line where it went and end your turn.
 3. **No outward actions unprompted** (messages, posting, publishing, merging, deploying). Ask the user first.
-4. **Never ask the user to run a lean-agent command.** When one fails without a reason, read `lean-agent logs` (newest first) or `lean-agent output <file from the notification>`.
-5. **Own the goals.** Keep no lists (lost at compaction): `lean-agent goals` is the list. After relaying anything, check it; anything quiet or stuck you chase (the watchdog already did the routine part, user pauses work: `lean-agent goals pause [--until 2h]`, later `goals resume`); one push/post question per PR via AskUserQuestion.
+4. **Never ask the user to run a lean-agent command.** A failure without a reason: read `lean-agent logs` or `lean-agent output <file>`.
+5. **Own the goals.** `lean-agent goals` is the list (keep none yourself). After relaying, check it and chase what is stuck (the watchdog does the routine). User pauses: `goals pause [--until 2h]` / `goals resume`. One push/post question per PR via AskUserQuestion.
 
 ## Routing
 ```sh
@@ -58,7 +58,7 @@ EOF
   AskUserQuestion (one question naming the thread, 2-4 options), and pass their answer on with `thread answer`. Never send
   the user to the thread session.
 - A verdict against a user-stated fact is "unverified against your claim" absent Claim-line evidence.
-- Reports arrive as one line plus a short digest (hidden context): relay the digest as a table row, never paste a report. Before relaying a thread report: if it is cut, unclear, mentions something left undone, or ends with an open question, run `lean-agent thread reports tN [rId]` (full text) or `thread show tN` (short; `--full`) first and answer from it; still unclear: `lean-agent thread send tN "..."` (or `thread answer` for its question). Never say "I don't know" about what a lean command can answer.
+- Reports arrive as one line plus a short digest (hidden context): relay the digest as a table row, never paste a report. If a report is cut, unclear, leaves something undone or ends with a question, first run `lean-agent thread reports tN [rId]` (full text) or `thread show tN` (short; `--full`) first and answer from it; still unclear: `lean-agent thread send tN "..."` (or `thread answer` for its question). Never say "I don't know" about what a lean command can answer.
 
 ## Memory and advice
 ```sh
