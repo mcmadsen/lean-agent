@@ -83,7 +83,12 @@ def compaction_point():
     return lean_common.compaction_point(window, pct)
 
 
+ALLOW_REASON = ""  # set once the deny checks have passed for a plain lean-agent command
+
+
 def emit(**fields):
+    if ALLOW_REASON and "permissionDecision" not in fields:
+        fields.update(permissionDecision="allow", permissionDecisionReason=ALLOW_REASON)
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", **fields}}))
 
 
@@ -354,6 +359,45 @@ def split_stages(command):
             words.append(tok)
     stages.append(words)
     return stages, glued
+
+
+def single_lean_agent(command):
+    """True when `command` is exactly one lean-agent invocation (first word `lean-agent` or the plugin's bin path),
+    optionally with one heredoc whose body is data and a trailing 2>&1: no other shell segment, operator,
+    substitution, comment or redirection outside quotes and the heredoc body."""
+    import shlex
+    text = split_heredocs(command)
+    if text is None or text.count("<<DATA") > 1:
+        return False
+    seg, quote, i = text.strip(), None, 0
+    while i < len(seg):
+        c = seg[i]
+        if c == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote:
+            quote = None if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        elif seg.startswith("<<DATA", i):
+            i += 6
+            continue
+        elif seg.startswith("2>&1", i):
+            i += 4
+            continue
+        elif c in ";|&<>(){}`$\n":
+            return False
+        i += 1
+    if quote:
+        return False
+    try:
+        words = [w for w in shlex.split(seg) if w != "<<DATA"]
+    except ValueError:
+        return False
+    if not words:
+        return False
+    bin_dir = os.path.join(PLUGIN_ROOT, "bin") + os.sep
+    return words[0] == "lean-agent" or os.path.realpath(os.path.expanduser(words[0])) == bin_dir + "lean-agent"
 
 
 def lean_agent_only(command):
@@ -889,6 +933,12 @@ def main():
                 "read the file and answer the question. Never paste worker output into your reply."))
             return 0
 
+    global ALLOW_REASON
+    role = os.environ.get("LEAN_AGENT_SESSION_ROLE")
+    if (event.get("tool_name") == "Bash" and not worker_dir and role in (None, "", "main", "thread")
+            and (in_home or role in ("main", "thread")) and single_lean_agent(command)):
+        ALLOW_REASON = "lean-agent command"  # the deny checks above passed; no permission prompt for a plain lean-agent call
+
     state = usage.load_state(session_id)
     usage.update(state, transcript)
 
@@ -975,6 +1025,8 @@ def main():
         return 0
 
     usage.save_state(session_id, state)
+    if ALLOW_REASON:
+        emit()
     return 0
 
 
