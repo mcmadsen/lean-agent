@@ -14927,26 +14927,47 @@ def user_path_error(exc, argv):
     return None
 
 
+def _quiet_streams():
+    """Point stdout and stderr at devnull, so the flush at interpreter exit can't fail on a closed pipe."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                os.dup2(devnull, stream.fileno())
+            except (OSError, ValueError, AttributeError):
+                pass
+    except OSError:
+        pass
+
+
+def _flush_or_quiet():
+    """Flush stdout/stderr now; on a closed pipe, silence them. False when the pipe was closed."""
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        return True
+    except (BrokenPipeError, ValueError):
+        _quiet_streams()
+        return False
+
+
 def main(argv=None):
     """The CLI. A closed pipe (the caller timed out, was interrupted or cut the output) ends quietly: whatever the
-    command already did (message queued, file written) stays, nothing is printed or recorded as a crash."""
-    lean_feedback.install_excepthooks()
+    command already did (message queued, file written) stays, nothing is printed or recorded as a crash. Every way
+    out (a return, die()/SystemExit) flushes here, where a closed pipe can still be caught."""
+    try:
+        lean_feedback.install_excepthooks()
+    except Exception:  # noqa: BLE001 - the hooks are a safety net
+        pass
     try:
         rc = _main(argv)
-        sys.stdout.flush()  # buffered output meets a closed pipe here, not at interpreter exit (where it can't be caught)
-        sys.stderr.flush()
-        return rc
+    except SystemExit:
+        _flush_or_quiet()
+        raise
     except BrokenPipeError:
-        try:
-            devnull = os.open(os.devnull, os.O_WRONLY)  # so the flush at interpreter exit can't fail again
-            for stream in (sys.stdout, sys.stderr):
-                try:
-                    os.dup2(devnull, stream.fileno())
-                except (OSError, ValueError, AttributeError):
-                    pass
-        except OSError:
-            pass
+        _quiet_streams()
         return 141
+    return rc if _flush_or_quiet() else 141
 
 
 def _main(argv=None):
