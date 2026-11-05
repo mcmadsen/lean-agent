@@ -7029,24 +7029,34 @@ def worktree_push(a):
                       git(path, "rev-list", "HEAD", "--not", "--remotes") if git(path, "remote") else
                       git(path, "rev-list", "HEAD", "--not", w.get("ref") or "HEAD~20")) or ""
         mine_emails = my_emails(path)
+        # commits already on any remote branch (e.g. arriving through a merge of origin/develop) are published
+        # and can't be reworded: warn-only whoever wrote them
+        unpublished = set((git(path, "rev-list", "HEAD", "--not", "--remotes") or "").split()) if git(path, "remote") else None
         recs = git(path, "log", "--no-walk=unsorted", "--format=%H%x1f%ae%x1f%ce%x1f%an%x1f%B%x1e", *unique.split()) if unique.strip() else ""
         credited, foreign = [], []
         for rec in (recs or "").split("\x1e"):
             parts = rec.strip("\n").split("\x1f", 4)
             if len(parts) < 5 or not CLAUDE_CREDIT_RE.search(parts[4]):
                 continue
-            if {parts[1].lower(), parts[2].lower()} & mine_emails:
+            if unpublished is not None and parts[0] not in unpublished:
+                foreign.append((parts[0][:12], parts[3] or parts[1], "already on the remote"))
+            elif {parts[1].lower(), parts[2].lower()} & mine_emails:
                 credited.append(parts[0][:12])
             else:
-                foreign.append((parts[0][:12], parts[3] or parts[1]))
+                foreign.append((parts[0][:12], parts[3] or parts[1], "not yours"))
         if credited:
             die(f"commit(s) {', '.join(credited)} credit Claude, but attribution is off (lean-agent attribution). "
                 "Have a worker reword them (git commit --amend / rebase -i is not available to workers: ask for "
                 "`git rebase` with an exec that rewrites the message), or turn attribution on.")
         if foreign:
-            print(f"lean-agent: warning: commit(s) {', '.join(c for c, _ in foreign)} ("
-                  f"{', '.join(sorted({n for _, n in foreign}))}) credit Claude but aren't yours; pushing anyway "
-                  "(attribution only applies to your commits)", file=sys.stderr)
+            for why in ("already on the remote", "not yours"):
+                grp = [(c, n) for c, n, w_ in foreign if w_ == why]
+                if grp:
+                    print(f"lean-agent: warning: commit(s) {', '.join(c for c, _ in grp)} ("
+                          f"{', '.join(sorted({n for _, n in grp}))}) credit Claude but "
+                          + ("are already on the remote (e.g. origin/develop) and can't be reworded" if why != "not yours" else
+                             "aren't yours") + "; pushing anyway (attribution only applies to your unpublished commits)",
+                          file=sys.stderr)
     match, _ = find_review(slug, path, "HEAD")
     inherited = None
     if not match or not approved(match["verdict"]):

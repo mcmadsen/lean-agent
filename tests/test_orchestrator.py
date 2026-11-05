@@ -10075,6 +10075,16 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("credit Claude, but attribution is off", p.stderr)
         wg("reset", "-q", "--hard", "HEAD~1")
+        # my own credited commit that is already on a remote branch (arriving via a merge of origin/develop): warn-only
+        wg("checkout", "-q", "-b", "develop", "main")
+        pub = commit(ident, "f", "published" + credit, empty=True)
+        wg("push", "-q", "origin", "develop")
+        wg("checkout", "-q", "topic")
+        wg(*ident, "merge", "-q", "--no-ff", "-m", "merge develop", "origin/develop")
+        p = push()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(f"warning: commit(s) {pub} (t) credit Claude but are already on the remote", p.stderr)
+        self.assertNotIn("attribution is off", p.stderr)
         # attribution-emails: the other identity counts as me
         more = commit(other, "e", "more" + credit)
         self.assertIn("none", self.cli("config", "attribution-emails").stdout)
