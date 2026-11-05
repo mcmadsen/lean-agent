@@ -105,8 +105,38 @@ def add(text, kind="friction", severity="normal", repro="", commands=None):
         return f"f{n}", True
 
 
+def is_pipe_error(exc):
+    """A closed output pipe (BrokenPipeError, EPIPE), also as the cause of another exception: never a crash."""
+    seen = 0
+    while exc is not None and seen < 8:
+        if isinstance(exc, BrokenPipeError) or (isinstance(exc, OSError) and exc.errno == 32):
+            return True
+        exc = exc.__cause__ or exc.__context__
+        seen += 1
+    return False
+
+
+def install_excepthooks():
+    """sys.excepthook and threading.excepthook that stay silent about a closed pipe (a thread or exit handler that
+    writes after main() returned) and delegate everything else to the previous hook."""
+    import sys
+    import threading
+    prev_sys, prev_thr = sys.excepthook, threading.excepthook
+
+    def sys_hook(etype, value, tb):
+        if not is_pipe_error(value):
+            prev_sys(etype, value, tb)
+
+    def thread_hook(args):
+        if not is_pipe_error(args.exc_value):
+            prev_thr(args)
+    sys.excepthook, threading.excepthook = sys_hook, thread_hook
+
+
 def record_crash(argv, exc):
     """A `bug` entry for a command that ended in an uncaught exception. Never raises."""
+    if is_pipe_error(exc):
+        return
     try:
         line = f"{type(exc).__name__}: {' '.join(str(exc).split())[:200]}"
         cmd = scrub("lean-agent " + " ".join(argv))[:300]

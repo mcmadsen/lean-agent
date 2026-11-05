@@ -8795,6 +8795,45 @@ class CliTest(unittest.TestCase):
         self.assertIn("pipe probe entry", out)  # the side effect stayed
         self.assertNotIn("crash:", out)  # and the closed pipe is not recorded as a crash
 
+    def test_thread_send_with_closed_stdout_and_slow_service_leaves_no_crash(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        driver = os.path.join(self.tmp.name, "slow_send.py")
+        with open(driver, "w") as fh:
+            fh.write("import sys, time, threading\n"
+                     f"sys.path.insert(0, {os.path.dirname(CLI)!r})\n"
+                     "import lean_agent, service_session\n"
+                     "service_session.alive = lambda key='main': True\n"
+                     "def slow(*a, **k):\n    time.sleep(1.5)\n    print('late output from the delivery thread')\n"
+                     "    return {'ok': False, 'error': 'slow'}\n"
+                     "service_session.sessions_request = slow\n"
+                     "sys.exit(lean_agent.main(sys.argv[1:]))\n")
+        tid = self.threads_home().new("pipe topic")
+        r, w = os.pipe()
+        os.close(r)
+        try:
+            p = subprocess.run([sys.executable, driver, "thread", "send", tid, "a long message " * 200], stdout=w,
+                               stderr=subprocess.PIPE, text=True, env=self.env, stdin=subprocess.DEVNULL, timeout=scaled(60))
+        finally:
+            os.close(w)
+        self.assertIn(p.returncode, (0, 1, 141), p.stderr)
+        self.assertNotIn("no such thread", p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+        self.assertNotIn("BrokenPipe", p.stderr)
+        self.assertNotIn("crash:", self.cli("feedback", "list").stdout)
+
+    def test_pipe_errors_from_any_thread_are_not_crashes(self):
+        lean_agent_module()
+        import lean_feedback
+        with mock.patch.dict(os.environ, self.env):
+            exc = BrokenPipeError(32, "Broken pipe")
+            lean_feedback.record_crash(["thread", "send", "t1"], exc)
+            lean_feedback.record_crash(["x"], OSError(32, "Broken pipe"))
+            self.assertEqual(lean_feedback._load(), [])
+            chained = ValueError("outer")
+            chained.__cause__ = exc
+            self.assertTrue(lean_feedback.is_pipe_error(chained))
+            self.assertFalse(lean_feedback.is_pipe_error(ValueError("other")))
+
     def test_feedback_v021_small_things(self):
         self.cli("learn", self.proj, "--name", "proj")
         # read-only workers and CLIs
