@@ -5136,7 +5136,7 @@ class CliTest(unittest.TestCase):
         self.assertFalse(ss.alive(tid))
         self.stop_up(p, 30)
 
-    def test_thread_new_refuses_above_max_thread_sessions(self):
+    def test_thread_new_queues_for_a_slot_above_max_thread_sessions(self):
         self.env["LEAN_AGENT_CLOSE_MIN_IDLE"] = "0"
         p, log, ss = self.start_up()
         self.cli("config", "max-thread-sessions", "1")
@@ -5148,19 +5148,15 @@ class CliTest(unittest.TestCase):
         with open(marker, "w") as fh:
             json.dump({"pid": os.getpid(), "run": "0101-000009-aaaa", "started": "2026-01-01T00:00:00", "task": "t",
                        "model": "haiku", "project": "proj", "thread": "t9"}, fh)
-        r = self.cli("thread", "new", "second", check=False)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("max-thread-sessions 1", r.stderr + r.stdout)
-        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json")) and
-                         self.read_json(os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json"))["threads"])
+        r = self.cli("thread", "new", "second", "go on")
+        self.assertRegex(r.stdout, r"t1 created, queued for a session slot \(1/1 busy: t9 ")
+        self.assertTrue(self.threads_home().load()["threads"]["t1"].get("waiting_slot"))
         os.remove(marker)
-        ss.update_session("t9", host_pid=None)  # the host stopped
-        self.assertRegex(self.cli("thread", "new", "first").stdout, r"\bt1 (started|queued)\b")
+        ss.update_session("t9", host_pid=None)  # the host stopped: the slot is free, the service starts t1 by itself
+        self.wait_for(lambda: ss.alive("t1") or not self.threads_home().load()["threads"]["t1"].get("waiting_slot"),
+                      "the queued thread to start", secs=60)
         r = self.cli("thread", "new", "third")  # at the cap the idle t1 makes room
-        self.assertIn("parking t1 (idle", r.stdout)
         self.assertIn("t2 started", r.stdout)
-        self.cli("thread", "close", "t2")
-        self.assertRegex(self.cli("thread", "new", "fourth").stdout, r"\bt3 (started|queued)\b")
         self.stop_up(p, 30)
 
     def test_wrapper_non_push_git_spawns_no_extra_git(self):
@@ -6370,6 +6366,60 @@ class CliTest(unittest.TestCase):
                   result(tid, out, err), assistant(final))
         return service_session, reps, hosts, clock, write, run_turn, assistant, user, result
 
+    def test_thread_final_message_without_a_run_is_queued_once_as_an_automatic_done_report(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        reps["t1"].tick()
+        text = "Audit finished: no findings of note. Local commit abc1234 holds the notes. " * 3
+        write("t1", user(), assistant(text))
+        reps["t1"].tick()
+        reps["t1"].tick()
+        items = ss.queued_reports()
+        self.assertEqual([(i["thread"], i["kind"], i.get("tag")) for i in items], [("t1", "done", "auto")])
+        self.assertRegex(ss.turn_status("t1"), r"last turn ended \S+ ago; report queued \(done, automatic\)")
+        self.assertEqual(ss._load(ss.last_reports_path())["t1"]["kind"], "done")
+
+    def test_thread_short_final_message_without_a_report_is_flagged_as_no_report_in_turn_status(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        reps["t1"].tick()
+        write("t1", user(), assistant("ok"))
+        reps["t1"].tick()
+        self.assertEqual(ss.queued_reports(), [])
+        self.assertRegex(ss.turn_status("t1"), r"no report produced")
+
+    def test_explicit_thread_report_is_queued_even_when_mode_is_questions_only_and_the_turn_end_adds_no_second(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit(mode="questions-only")
+        reps["t1"].tick()
+        env = {"LEAN_AGENT_SESSION_ROLE": "thread", "LEAN_AGENT_THREAD": "t1", "LEAN_AGENT_HOME": os.environ["LEAN_AGENT_HOME"]}
+        r = subprocess.run([sys.executable, CLI, "thread", "report", "Audit done. Commit abc1234."], env=dict(os.environ, **env),
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        tid = "tu9"
+        write("t1", user(), assistant("", {"id": tid, "name": "Bash", "input": {"command": 'lean-agent thread report "Audit done."'}}),
+              result(tid, "queued"), assistant("Audit done and reported to the front desk, nothing else is pending here. " * 3))
+        reps["t1"].tick()
+        items = ss.queued_reports()
+        self.assertEqual([(i["kind"], i.get("tag")) for i in items], [("done", "explicit")])
+        self.assertRegex(ss.turn_status("t1"), r"report queued \(done\)")
+
+    def test_explicit_thread_report_refused_outside_a_thread_session(self):
+        self.threads_home()
+        env = dict(os.environ, **self.env)
+        for k in ("LEAN_AGENT_SESSION_ROLE", "LEAN_AGENT_CALLER_THREAD", "LEAN_AGENT_THREAD"):
+            env.pop(k, None)
+        r = subprocess.run([sys.executable, CLI, "thread", "report", "x"], env=env, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("only inside a thread session", r.stderr + r.stdout)
+
+    def test_final_report_shape_through_thread_report_still_creates_the_push_waiting_item(self):
+        ss, reps, *_ = self.reporter_unit()
+        import lean_waiting
+        env = dict(os.environ, LEAN_AGENT_SESSION_ROLE="thread", LEAN_AGENT_THREAD="t1")
+        txt = "Ref: PR 7\nHead sha: abc1234\nReview: approved\nChecks: green\nLeft: nothing\nProposed action: push"
+        r = subprocess.run([sys.executable, CLI, "thread", "report", txt], env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue([i for i in lean_waiting.open_items() if i.get("thread") == "t1"])
+        self.assertEqual([i["kind"] for i in ss.queued_reports()], ["done"])
+
     def test_thread_turn_with_a_finished_run_is_reported_to_main_at_its_turn_end(self):
         ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
         reps["t1"].tick()  # nothing yet
@@ -7411,11 +7461,18 @@ class CliTest(unittest.TestCase):
             with open(os.path.join(home, "running", f"k{i}.json"), "w") as fh:
                 json.dump({"pid": sleeper.pid, "run": f"0101-00000{i}-aaaa", "started": "2026-01-01T00:00:00", "task": "t",
                            "model": "haiku", "project": "proj", "thread": tid}, fh)
-        r = self.cli("thread", "new", "delta topic", check=False)
-        self.assertNotEqual(r.returncode, 0)
-        err = r.stderr + r.stdout
-        self.assertRegex(err, r't2 "beta topic" idle \d+[mhd], not eligible: 1 running')
-        self.assertRegex(err, r't3 "gamma topic" idle \d+[mhd], not eligible: 1 running')
+        r = self.cli("thread", "new", "delta topic", "first message", check=False)
+        self.assertEqual(r.returncode, 0, r.stderr)  # not refused: created and queued for a session slot
+        out = r.stdout
+        self.assertRegex(out, r"t4 created, queued for a session slot \(2/2 busy: t2 1 running.*t3 1 running")
+        t4 = lt.load()["threads"]["t4"]
+        self.assertTrue(t4.get("waiting_slot"))
+        self.assertEqual(len(ss.spool_pending("t4")), 1)
+        # a slot frees (the workers end): the service starts the queued thread by itself
+        sleeper.kill()
+        sleeper.wait()
+        self.wait_for(lambda: not lt.load()["threads"]["t4"].get("waiting_slot") and lt.load()["threads"]["t4"].get("session_on")
+                      and not ss.spool_pending("t4"), "the queued thread to start when a slot frees", secs=60)
         self.stop_up(p, 30)
 
     def room_for(self, sessions, caller=None, busy=None, launching=(), mid_turn=(), cap=3, tid=None):
@@ -7445,6 +7502,8 @@ class CliTest(unittest.TestCase):
                 L.make_room_for_thread_session(tid)
             except SystemExit:
                 return closed, out.getvalue(), err.getvalue() or "refused"
+            except L.NoSlot as exc:
+                return closed, out.getvalue(), exc.full
         return closed, out.getvalue(), None
 
     @staticmethod
@@ -7612,8 +7671,8 @@ class CliTest(unittest.TestCase):
         self.assertRegex(self.cli("thread", "sessions").stdout, r"(?m)^t1\b")
         self.stop_up(p, 30)
 
-    def test_cap_skips_a_session_idle_under_ten_minutes(self):
-        ss = self.fake_sessions(("t1", 599), ("t2", 700), ("t3", 650))
+    def test_cap_skips_a_session_idle_under_two_minutes(self):
+        ss = self.fake_sessions(("t1", 119), ("t2", 700), ("t3", 650))
         closed, out, err = self.room_for(ss)
         self.assertEqual(closed, ["t2"])
 
@@ -7627,13 +7686,34 @@ class CliTest(unittest.TestCase):
         self.assertIn("idle 3600s", log)
         self.assertIn("caller t9", log)
 
+    def test_cap_parks_a_finished_thread_before_a_longer_idle_one_and_regardless_of_min_idle(self):
+        import service_session
+        ss = self.fake_sessions(("t1", 5000), ("t2", 30), ("t3", 4000))
+        self.threads_home()
+        with mock.patch.dict(os.environ, self.env):
+            service_session.save_last_report("t2", "done", "All finished.")
+        closed, out, err = self.room_for(ss)
+        self.assertEqual(closed, ["t2"])
+        self.assertIn("finished", out)
+
+    def test_cap_never_parks_a_finished_looking_thread_that_is_mid_turn_or_has_a_worker(self):
+        import service_session
+        ss = self.fake_sessions(("t1", 30), ("t2", 30), ("t3", 30))
+        self.threads_home()
+        with mock.patch.dict(os.environ, self.env):
+            for k in ("t1", "t2"):
+                service_session.save_last_report(k, "done", "All finished.")
+        closed, out, err = self.room_for(ss, mid_turn=("t1",), busy={"t2": ["r1"]})
+        self.assertEqual(closed, [])
+        self.assertIn("none can be parked", err)
+
     def test_cap_refuses_with_reasons_when_no_session_is_eligible(self):
         ss = self.fake_sessions(("t1", 9000), ("t2", 100), ("t3", 8000))
         closed, out, err = self.room_for(ss, caller="t1", mid_turn=("t3",))
         self.assertEqual(closed, [])
         self.assertIn("none can be parked", err)
         self.assertRegex(err, r't1 "title t1" idle \d+[mh], not eligible: the calling session')
-        self.assertRegex(err, r't2 .*not eligible: idle under 10 min')
+        self.assertRegex(err, r't2 .*not eligible: idle under 2 min')
         self.assertRegex(err, r't3 .*mid-turn')
         self.assertIn("lean-agent thread close tN", err)
         self.assertIn("max-thread-sessions", err)

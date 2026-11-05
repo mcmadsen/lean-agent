@@ -864,6 +864,8 @@ REPORT_MAX_AGE = 24 * 3600  # seconds: an older queued report is dropped, not de
 REPORT_MODES = ("on", "questions-only", "off")
 REPORT_RUN_RE = re.compile(r"\blean-agent\s+(?:run|review|handover|push)\b")
 ASK_RE = re.compile(r"\blean-agent\s+thread\s+ask\b")
+REPORT_CMD_RE = re.compile(r"\blean-agent\s+thread\s+report\b")
+AUTO_REPORT_MIN = 120  # characters: a turn-ending text this long with no report queued is queued as a done report
 PROMPT_RE = re.compile(r"Esc to cancel|Do you want to (?:proceed|make|create|allow)|❯\s*1\.\s*Yes")
 
 
@@ -1014,6 +1016,8 @@ class SpoolDeliverer:
     def _subprocess(tid):
         exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lean_agent.py")
         r = subprocess.run([sys.executable, exe, "thread", "deliver", tid], capture_output=True, text=True, timeout=180)
+        if r.returncode == 0 and "session slot" in r.stdout:
+            return True, "slot"
         return r.returncode == 0, (r.stderr or r.stdout).strip()[-200:]
 
     def tick(self):
@@ -1036,7 +1040,9 @@ class SpoolDeliverer:
             ok, err = False, str(exc)
         with self.lock:
             self.busy[tid] = False
-            if ok:
+            if ok and err == "slot":  # waiting for a session slot: look again after SPOOL_RETRY seconds
+                self.failed[tid] = self.now()
+            elif ok:
                 self.failed.pop(tid, None)
             else:
                 self.failed[tid] = self.now()
@@ -1065,11 +1071,12 @@ def reports_path():
     return lean_home("thread-reports.json")
 
 
-def queue_report(tid, kind, text):
+def queue_report(tid, kind, text, tag="", force=False):
     """Queue one thread report (kind: done | blocked | needs-you | question) for the main session; the mode filters it,
-    except an explicit question (`thread ask`), which always goes through."""
+    except an explicit question (`thread ask`) or an explicit report (`thread report`, force), which always go through.
+    `tag` marks where it came from (explicit | auto)."""
     mode = reports_mode()
-    if kind not in ("question", "job-failed", "chase") and (mode == "off" or (mode == "questions-only" and kind != "needs-you")):
+    if not force and kind not in ("question", "job-failed", "chase") and (mode == "off" or (mode == "questions-only" and kind != "needs-you")):
         return False
     os.makedirs(lean_home(), exist_ok=True)
     if kind != "chase":
@@ -1080,7 +1087,7 @@ def queue_report(tid, kind, text):
     with lean_common.file_lock(reports_path()):
         data = _load(reports_path())
         items = data.get("items") if isinstance(data.get("items"), list) else []
-        items.append({"thread": tid, "kind": kind, "text": text, "ts": time.time()})
+        items.append(dict({"thread": tid, "kind": kind, "text": text, "ts": time.time()}, **({"tag": tag} if tag else {})))
         lean_common.write_json_atomic(reports_path(), {"items": items[-50:]})
     if kind in ("question", "needs-you"):
         try:  # waiting on the user is recorded by lean-agent, not left to the front desk's memory
@@ -1363,6 +1370,31 @@ def save_last_report(tid, kind, text):
         lean_common.write_json_atomic(last_reports_path(), data)
 
 
+def turns_path():
+    return lean_home("thread-turns.json")
+
+
+def note_turn(tid, reported, kind="", auto=False):
+    """Record that thread `tid`'s turn ended now, and whether a report was queued for it (`thread reports tN` shows it)."""
+    os.makedirs(lean_home(), exist_ok=True)
+    with lean_common.file_lock(turns_path()):
+        data = _load(turns_path())
+        data[tid] = {"ts": time.time(), "reported": bool(reported), "kind": kind, "auto": bool(auto)}
+        lean_common.write_json_atomic(turns_path(), data)
+
+
+def turn_status(tid):
+    """One line: when thread `tid`'s last turn ended and whether it produced a report."""
+    rec = _load(turns_path()).get(tid)
+    if not rec:
+        return f"{tid}: no turn end seen by the service yet"
+    ago = max(0, int(time.time() - float(rec.get("ts") or 0)))
+    age = f"{ago // 3600}h" if ago >= 3600 else f"{ago // 60}m" if ago >= 60 else f"{ago}s"
+    if rec.get("reported"):
+        return f"{tid}: last turn ended {age} ago; report queued ({rec.get('kind') or 'done'}{', automatic' if rec.get('auto') else ''})"
+    return f"{tid}: last turn ended {age} ago; no report produced for it (ask the thread to `lean-agent thread report`)"
+
+
 def _question(text):
     """The last line of `text` ending in a question mark (the question the user is asked), else ''."""
     qs = [l.strip() for l in str(text or "").splitlines() if l.strip().endswith("?")]
@@ -1373,7 +1405,7 @@ def scan_turn(path, offset):
     """What the transcript at `path` shows from byte `offset` on: {"runs": a lean-agent run/review/handover/push command
     was issued, "err": the last lean-agent tool result was an error, "result": its first line, "ask": the open
     AskUserQuestion's question (else None), "size": file size}."""
-    out = {"runs": False, "err": False, "result": "", "ask": None, "asked": False, "size": offset}
+    out = {"runs": False, "err": False, "result": "", "ask": None, "asked": False, "reported": False, "size": offset}
     try:
         with open(path, "rb") as fh:
             fh.seek(offset)
@@ -1400,6 +1432,8 @@ def scan_turn(path, offset):
                     out["ask"] = first.get("question") or "a question"
                 elif c.get("name") == "Bash" and ASK_RE.search(str(inp.get("command") or "")):
                     out["asked"] = True  # `thread ask` already put the question in front of main
+                elif c.get("name") == "Bash" and REPORT_CMD_RE.search(str(inp.get("command") or "")):
+                    out["reported"] = True  # `thread report` already queued this turn's report
                 elif c.get("name") == "Bash" and REPORT_RUN_RE.search(str(inp.get("command") or "")):
                     out["runs"] = True
                     ids.add(c.get("id"))
@@ -1594,6 +1628,10 @@ class Reporter(AutoClear):
         text = st["text"]
         ask = _question(text)
         if scan["asked"]:
+            note_turn(tid, True, "question")
+            return
+        if scan["reported"]:  # the explicit report is the channel; it also did the goal bookkeeping
+            note_turn(tid, True, "done")
             return
         try:  # a consolidated final report: the goal waits on the user with one push question
             lean_goals.final_report(tid, text)
@@ -1603,13 +1641,23 @@ class Reporter(AutoClear):
         if ask:
             save_last_report(tid, "needs-you", text)
             queue_report(tid, "needs-you", _short(ask, tid=tid))
+            note_turn(tid, True, "needs-you")
         elif scan["err"]:
             save_last_report(tid, "blocked", text or scan["result"])
             queue_report(tid, "blocked", _short(text or scan["result"], tid=tid))
+            note_turn(tid, True, "blocked")
         elif scan["runs"] or self.woken:
             self.woken = False
             save_last_report(tid, "done", text or scan["result"])
             queue_report(tid, "done", _short(text or scan["result"], tid=tid))
+            note_turn(tid, True, "done")
+        elif len(str(text or "").strip()) >= AUTO_REPORT_MIN:  # safety net: a final message nobody reported
+            save_last_report(tid, "done", text)
+            queued = queue_report(tid, "done", _short(text, tid=tid), tag="auto")
+            note_turn(tid, queued, "done", auto=True)
+            self.log(f"{tid}: turn ended with a final message and no report: " + ("queued it as a done report" if queued else "report mode filtered it"))
+        else:
+            note_turn(tid, False)
 
     def wake_for_runs(self, st):
         """A run tagged to this thread finished: type a short turn into the idle session so it reports to main."""
