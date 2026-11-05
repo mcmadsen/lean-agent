@@ -8601,6 +8601,20 @@ class CliTest(unittest.TestCase):
         self.assertIn("[major/completeness] docs/DISTRIBUTION.md:9: the change doesn't deliver: the second browser's package", p.stdout)
         self.assertIn("NOT approved", p.stdout)
 
+    def test_closed_output_pipe_ends_quietly_and_keeps_side_effects(self):
+        r, w = os.pipe()
+        os.close(r)  # the reader is gone: every write fails with EPIPE
+        try:
+            p = subprocess.run([sys.executable, CLI, "feedback", "add", "pipe probe entry"], stdout=w, stderr=subprocess.PIPE,
+                               text=True, env=self.env, stdin=subprocess.DEVNULL)
+        finally:
+            os.close(w)
+        self.assertEqual(p.returncode, 141, p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+        out = self.cli("feedback", "list").stdout
+        self.assertIn("pipe probe entry", out)  # the side effect stayed
+        self.assertNotIn("crash:", out)  # and the closed pipe is not recorded as a crash
+
     def test_feedback_v021_small_things(self):
         self.cli("learn", self.proj, "--name", "proj")
         # read-only workers and CLIs
@@ -10075,6 +10089,16 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("credit Claude, but attribution is off", p.stderr)
         wg("reset", "-q", "--hard", "HEAD~1")
+        # my own credited commit that is already on a remote branch (arriving via a merge of origin/develop): warn-only
+        wg("checkout", "-q", "-b", "develop", "main")
+        pub = commit(ident, "f", "published" + credit, empty=True)
+        wg("push", "-q", "origin", "develop")
+        wg("checkout", "-q", "topic")
+        wg(*ident, "merge", "-q", "--no-ff", "-m", "merge develop", "origin/develop")
+        p = push()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(f"warning: commit(s) {pub} (t) credit Claude but are already on the remote", p.stderr)
+        self.assertNotIn("attribution is off", p.stderr)
         # attribution-emails: the other identity counts as me
         more = commit(other, "e", "more" + credit)
         self.assertIn("none", self.cli("config", "attribution-emails").stdout)
