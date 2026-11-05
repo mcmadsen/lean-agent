@@ -7344,7 +7344,7 @@ class CliTest(unittest.TestCase):
             return "name"
         args = argparse.Namespace(action="new", args=["parallel"], prompt_file=None, json=False, all=False)
         with mock.patch.dict(os.environ, self.env), mock.patch.object(L, "thread_prompt", return_value=None), \
-                mock.patch.object(service_session, "alive", return_value=True), \
+                mock.patch.object(service_session, "alive", side_effect=lambda key="main": key == "main"), \
                 mock.patch.object(L, "make_room_for_thread_session", side_effect=enter), \
                 mock.patch.object(L, "start_thread_session", side_effect=start), \
                 contextlib.redirect_stdout(io.StringIO()):

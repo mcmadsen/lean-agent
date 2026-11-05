@@ -22,6 +22,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -9661,8 +9662,11 @@ def host_session(cmd, extra, env, h, name):
             print(f"lean-agent: could not start the session of {tid}: {exc}", file=sys.stderr)
     threading.Thread(target=service_session.AutoClear(host).run, daemon=True).start()
     threading.Thread(target=service_session.Reporter(host).run, daemon=True).start()
+    spool_stop = threading.Event()
+    threading.Thread(target=service_session.SpoolDeliverer().loop, args=(spool_stop,), daemon=True).start()
 
     def stop_all(*_):
+        spool_stop.set()
         sessions.stop_all()
         host.stop()
 
@@ -10648,6 +10652,21 @@ def cmd_config(a):
         env_name = "LEAN_AGENT_" + key.upper()
         print(compaction_text() + (f" ({env_name} is set and wins)" if os.environ.get(env_name) else ""))
         return 0
+    if a.name == "session-stuck":
+        if a.value is not None:
+            v = a.value.lower()
+            if v not in ("off", "default") and not re.fullmatch(r"\d+(\.\d+)?", v):
+                die("session-stuck takes minutes, off or default")
+            cfg = config_json()
+            if v == "default":
+                cfg.pop("session_stuck", None)
+            else:
+                cfg["session_stuck"] = v if v == "off" else float(v)
+            save_json(home("config.json"), cfg)
+        lim = service_session.stuck_limit()
+        print("session-stuck: " + (f"{lim / 60:g} minutes" if lim else "off") + " · a turn with no transcript progress that long "
+              "(no worker of its own running) is interrupted and nudged; still stuck after as long again, the session restarts")
+        return 0
     if a.name == "max-thread-sessions":
         if a.value is not None:
             if not (a.value.isdigit() and int(a.value) > 0) and a.value.lower() != "default":
@@ -11473,6 +11492,161 @@ def start_closed_thread(tid, t, prompt, resume_old, force=False):
     return name, line
 
 
+DELIVER_LOCK_WAIT = 120  # seconds the service's delivery waits for another delivery of the same thread
+
+
+def send_wait_secs():
+    return service_session.send_wait()
+
+
+_START_LOCK = []
+
+
+def thread_start_lock_try(wait):
+    """Take the thread-start lock, waiting at most `wait` seconds; False when it stayed busy."""
+    import fcntl
+    os.makedirs(os.path.dirname(home("thread-start")) or ".", exist_ok=True)
+    fh = open(home("thread-start") + ".lock", "a")
+    end = time.time() + wait
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _START_LOCK.append(fh)
+            return True
+        except OSError:
+            if time.time() >= end:
+                fh.close()
+                return False
+            time.sleep(0.1)
+
+
+def release_start_lock():
+    if _START_LOCK:
+        fh = _START_LOCK.pop()
+        fh.close()
+
+
+def deliver_one(tid, prompt, resume_old=False, new=False):
+    """Deliver one message to thread `tid` (None: only wake it), starting or resuming its session when it is not running.
+    May wait for the session; only the service and the capped caller below run it. Returns the one-line result;
+    raises RuntimeError when it could not be delivered."""
+    tid, t = thread_session_tid(tid)
+    running = service_session.alive(tid)
+    force, why = False, ""
+    if running and prompt and not resume_old:
+        why = auto_fresh_reason(tid)
+    if running and not why:
+        if t.get("closed"):
+            lean_threads.set_closed(tid, False)
+        if prompt:
+            ok, err = service_session.send(prompt, tid)
+            if not ok:
+                raise RuntimeError(f"{tid}: {err}")
+        return f"thread {tid} started" if new else f"{tid}: " + ("sent (session live)" if prompt else "session live")
+    with thread_start_lock():
+        if why:  # decided again under the lock: a concurrent send may have restarted it fresh already
+            why = auto_fresh_reason(tid) if service_session.alive(tid) else ""
+        if why:
+            close_thread_session(tid)
+            force = True
+            prepare_thread_session(tid, False, True)  # new session id now: a failed start below still retries fresh
+        if service_session.alive(tid):  # another call started it while this one waited
+            if prompt:
+                ok, err = service_session.send(prompt, tid)
+                if not ok:
+                    raise RuntimeError(f"{tid}: {err}")
+            return f"thread {tid} started" if new else f"{tid}: " + ("sent (session live)" if prompt else "session live")
+        make_room_for_thread_session(tid)
+        if new:
+            name, line = start_thread_session(tid, t, prompt), ""
+            lean_threads.set_closed(tid, False) if t.get("closed") else None
+        else:
+            name, line = start_closed_thread(tid, t, prompt, resume_old, force)
+    if new:
+        return f'thread {tid} started: Remote Control "{name}"'
+    return ((f"{tid} was {why} \u2014 continued in a fresh session" if why else line or f"thread {tid} started")
+            + f': Remote Control "{name}"' + (": message sent" if prompt else ""))
+
+
+def deliver_spool(tid, lock_wait=0, resume_old=False):
+    """Deliver the spooled messages of `tid` oldest first. Returns ("ok", line) / ("busy", "") when another delivery of
+    this thread is running and `lock_wait` ran out / ("error", why) with the failed message back in the spool."""
+    import fcntl
+    os.makedirs(service_session.lean_home("thread-inbox"), exist_ok=True)
+    with open(os.path.join(service_session.lean_home("thread-inbox"), tid + ".deliver.lock"), "a") as fh:
+        end = time.time() + lock_wait
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.time() >= end:
+                    return "busy", ""
+                time.sleep(0.1)
+        line = ""
+        for name in service_session.spool_pending(tid):
+            msg = service_session.spool_claim(tid, name)
+            if msg is None:
+                continue
+            try:
+                line = deliver_one(tid, msg.get("text"), resume_old, bool(msg.get("new")))
+            except (RuntimeError, SystemExit) as exc:
+                service_session.spool_release(tid, name)
+                return "error", str(exc) or "not delivered"
+            except BaseException:
+                service_session.spool_release(tid, name)
+                raise
+            service_session.spool_done(tid, name)
+    return "ok", line
+
+
+def queued_line(tid):
+    t = lean_threads.load()["threads"].get(tid) or {}
+    if service_session.alive(tid):
+        return f"{tid}: queued (service busy), will deliver"
+    state = "parked" if t.get("parked") else "ended" if t.get("closed") else "idle"
+    return f"{tid}: queued, waking ({state})"
+
+
+def deliver_with_cap(tid, own=None, new=False, resume_old=False):
+    """Deliver the spooled messages of `tid` but wait at most the send cap; what is not done stays queued for the
+    service. Returns the one line to print."""
+    out = {}
+
+    def work():
+        try:
+            out["r"] = deliver_spool(tid, 0, resume_old)
+        except BaseException as exc:
+            out["r"] = ("error", str(exc) or type(exc).__name__)
+
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    th.join(send_wait_secs())
+    if th.is_alive():
+        if any(n.endswith(".sending") for n in os.listdir(service_session.spool_dir(tid))):
+            th.join(6)  # a message claimed right now is sent within the socket timeout
+            if not th.is_alive() and out.get("r", ("",))[0] == "ok":
+                return out["r"][1]
+        return queued_line(tid)
+    kind, line = out.get("r", ("error", ""))
+    if kind == "ok":
+        return line
+    if kind == "busy":
+        return f"{tid}: queued (service busy), will deliver"
+    # a definite failure inside the cap: withdraw the message (unless the service took it meanwhile) and report it
+    if own and service_session.spool_withdraw(tid, own):
+        if new:
+            lean_threads.discard(tid)  # a thread nobody can talk to is not left behind
+            die(f"{line} (thread {tid} was removed)")
+        die(line)
+    return queued_line(tid)
+
+
+def queue_and_deliver(tid, prompt, resume_old=False):
+    own = service_session.spool_add(tid, prompt)
+    return deliver_with_cap(tid, own, False, resume_old)
+
+
 def thread_positional_message(a, act):
     """`thread send tN "<text>"` / `thread new "title" "<text>"`: the message as a second positional argument or --prompt-file
     F|-, exactly one source (for `send`; `new` may have none). Moves it to a.prompt_text and trims a.args to the id/title."""
@@ -11511,7 +11685,7 @@ def thread_session_tid(raw):
     return tid, t
 
 
-START_GRACE = 10  # seconds a host may take to come up after a failed or timed-out start request
+START_GRACE = 4  # seconds a host may take to come up after a failed or timed-out start request
 
 
 def transcript_of(sid):
@@ -11983,12 +12157,14 @@ def thread_action(a):
             return 0
         sessions = open_thread_sessions()
         ctxs = {r["session"]: r for r in session_contexts()}
-        print(f"{'main':<6}{'main session':<42}{'':<12}context {context_cell(ctxs['main'])}")
+        print(f"{'main':<6}{'main session':<42}{'':<12}context {context_cell(ctxs['main'])}"
+              + (f"  main: {st}" if (st := service_session.session_rec("main").get("stuck")) else ""))
         for x in sessions:
             runs = thread_live_runs(x["thread"])
             qs = lean_threads.open_questions(lean_threads.load()["threads"].get(x["thread"]) or {})
             extra = ("".join(f'  waiting on main: {q["id"]} "{lean_threads.one_line(q["text"], 60)}" {lean_threads.age(q.get("ts"))}' for q in qs)
-                     + (f"  {len(runs)} running (first {runs[0][0]})" if runs else "") + ("  mid-turn" if service_session.mid_turn(x["thread"]) else ""))
+                     + (f"  {len(runs)} running (first {runs[0][0]})" if runs else "") + ("  mid-turn" if service_session.mid_turn(x["thread"]) else "")
+                     + (f'  {x["thread"]}: {st}' if (st := service_session.session_rec(x["thread"]).get("stuck")) else ""))
             print(f"{x['thread']:<6}{x['name'] or '-':<42}pid {x['pid'] or '-':<8}idle {x['idle']}s  context {context_cell(ctxs[x['thread']])}"
                   + ("  fresh on next send" if ctxs[x["thread"]]["fresh"] else "") + extra)
         live = {x["thread"] for x in sessions}
@@ -12076,17 +12252,26 @@ def thread_action(a):
                 lean_threads.set_session(tid, session_id=str(uuid.uuid4()), session_on=True)  # the service resumes it when it is up
             print(f"{tid} queued \u2014 the session host has not picked it up yet; it opens shortly (lean-agent thread sessions)")
             return 0
-        with thread_start_lock():  # the cap check and the start are one step: parallel `thread new` cannot exceed the cap
-            make_room_for_thread_session()
-            tid = lean_threads.new(a.args[0])
-            t = lean_threads.load()["threads"][tid]
+        made = {}
+
+        def create():
+            if not thread_start_lock_try(send_wait_secs()):
+                return
             try:
-                name = start_thread_session(tid, t, prompt)
-            except RuntimeError as exc:
-                lean_threads.discard(tid)  # a thread nobody can talk to is not left behind
-                die(f"{exc} (thread {tid} was removed)")
-            lean_goals.note_text(f"{a.args[0]} {prompt or ''}", tid)
-        print(f'thread {tid} started: Remote Control "{name}"')
+                tid = lean_threads.new(a.args[0])
+                lean_threads.set_session(tid, session_id=str(uuid.uuid4()), session_on=True)
+                made["tid"] = tid
+            finally:
+                release_start_lock()
+            made["own"] = service_session.spool_add(made["tid"], prompt, new=True)
+            lean_goals.note_text(f"{a.args[0]} {prompt or ''}", made["tid"])
+
+        th = threading.Thread(target=create, daemon=True)
+        th.start()
+        th.join(send_wait_secs())
+        if "tid" not in made:
+            die("the service is busy: no thread was created; try again in a moment")
+        print(deliver_with_cap(made["tid"], made.get("own"), True))
         return 0
     if act == "park":
         if len(a.args) != 1:
@@ -12117,6 +12302,13 @@ def thread_action(a):
                     rcs.append(exc.code if isinstance(exc.code, int) else 1)
             return max(rcs)
         act, a.action, a._wake = "open", "open", True
+    if act == "deliver":  # internal: the service delivers the spooled messages of one thread (may wait for the session)
+        if len(a.args) != 1:
+            die("usage: lean-agent thread deliver tN")
+        res = deliver_spool(a.args[0], lock_wait=DELIVER_LOCK_WAIT)
+        if res[0] == "error":
+            die(res[1])
+        return 0
     if act in ("send", "open"):
         if act == "send":
             thread_positional_message(a, "send")
@@ -12128,46 +12320,9 @@ def thread_action(a):
             die('thread send needs the message: "<text>" or --prompt-file F|-')
         if act == "send" and prompt:
             lean_goals.note_text(prompt, tid)
-        if not service_session.alive():
+        if not service_session._socket_listening(service_session.client_sock_path()) and not service_session.alive():
             die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
-        running = service_session.alive(tid)
-        force, why = False, ""
-        if running and prompt and not resume_old:
-            why = auto_fresh_reason(tid)
-        if running and not why:
-            if t.get("closed"):
-                lean_threads.set_closed(tid, False)
-            if prompt:
-                ok, err = service_session.send(prompt, tid)
-                if not ok:
-                    die(f"{tid}: {err}")
-            print(f"{tid} is running" + (": message sent" if prompt else ""))
-            return 0
-        with thread_start_lock():
-            if why:  # decided again under the lock: a concurrent send may have restarted it fresh already
-                why = auto_fresh_reason(tid) if service_session.alive(tid) else ""
-            if why:
-                try:
-                    close_thread_session(tid)
-                except RuntimeError as exc:
-                    die(str(exc))
-                force = True
-                prepare_thread_session(tid, False, True)  # new session id now: a failed start below still retries fresh
-            if service_session.alive(tid):  # another call started it while this one waited
-                if prompt:
-                    ok, err = service_session.send(prompt, tid)
-                    if not ok:
-                        die(f"{tid}: {err}")
-                print(f"{tid} is running" + (": message sent" if prompt else ""))
-                return 0
-            make_room_for_thread_session(tid)
-            try:
-                name, line = start_closed_thread(tid, t, prompt, resume_old, force)
-            except RuntimeError as exc:
-                die(str(exc))
-        print((f"{tid} was {why} \u2014 continued in a fresh session" if why else line or f"thread {tid} started")
-              + f': Remote Control "{name}"'
-              + (": message sent" if prompt else ""))
+        print(queue_and_deliver(tid, prompt, resume_old))
         return 0
     if act == "close":
         return close_threads(a)
@@ -13508,7 +13663,7 @@ def build_parser():
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "allow-edit-outside <dir>|clear (extra dirs, besides ~/Downloads, where --allow-edit may name an explicit file outside the worktree), allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
                        "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), max-thread-sessions N (thread sessions the service runs; default 8), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
-    s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions",
+    s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions", "session-stuck",
                                            "review-max-rerounds", "review-skip", "review-model", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
@@ -14018,7 +14173,7 @@ def build_parser():
     s.set_defaults(fn=cmd_schedule)
 
     s = sub.add_parser("thread", help="threads: new \"title\" [\"<text>\"|--prompt-file F|-] (its own Remote Control session) | send tN \"<text>\"|--prompt-file F|- | ask \"question\" [--options \"a|b|c\"] (from inside a thread session: the question goes to main; end the turn, the answer arrives as your next turn) | answer tN [qN] \"answer\" (main: pass an answer into the thread session) | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
-    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "answer", "reports", "park", "wake"])
+    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "answer", "reports", "park", "wake", "deliver"])
     s.add_argument("args", nargs="*", help='new "title" ["<text>"]; send tN "<text>"; answer tN [qN] "<answer>"; other actions: ids')
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin); or give it as a positional argument, not both")
