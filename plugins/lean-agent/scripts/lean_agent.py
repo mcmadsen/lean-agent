@@ -359,7 +359,7 @@ def library_lock(slug):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as fh:
         if fcntl:
-            fcntl.flock(fh, fcntl.LOCK_EX)
+            lean_common.flock_waiting(fh, fcntl.LOCK_EX, f"cards of {slug}", path)
         _held_locks[slug] = 1
         try:
             yield
@@ -1855,6 +1855,70 @@ def detach_run(workdir, run_id):
 EARLY_RUN = {}  # the run registered as the first step of `run`: {"id", "path"} until the real running marker replaces it
 
 
+def set_run_state(state, reason=None):
+    """Marks this run's marker as `state` (starting | queued | waiting; None = running) with the reason, so
+    `runs --running` shows what it is doing before the worker starts."""
+    rid = EARLY_RUN.get("id") or RUN_CTX.get("id")
+    if not rid:
+        return
+    for f in glob.glob(home("running", "*.json")):
+        m = load_json(f, {})
+        if isinstance(m, dict) and m.get("run") == rid:
+            if state:
+                m.update(state=state, reason=reason)
+            else:
+                m.pop("state", None)
+                m.pop("reason", None)
+            save_json(f, m)
+
+
+def run_wait_notice(text):
+    """What a run waits for (a lock, a slot): said at once on stdout and put on the run's marker."""
+    print(f"lean-agent: {text}", file=sys.stderr, flush=True)
+    set_run_state("waiting", text)
+
+
+def max_workers():
+    """LEAN_AGENT_MAX_WORKERS: how many workers may run at once (0 or unset: no limit)."""
+    try:
+        return max(0, int(os.environ.get("LEAN_AGENT_MAX_WORKERS", "0")))
+    except ValueError:
+        return 0
+
+
+def wait_for_slot(a, every=None):
+    """With a worker limit, a new run waits here (marker state `queued`) until fewer than the limit are running."""
+    limit = max_workers()
+    if limit <= 0 or getattr(a, "role", None) in INTERNAL_ROLES:
+        return
+    me = EARLY_RUN.get("id") or RUN_CTX.get("id")
+    every = LOCK_NOTICE_EVERY_RUN if every is None else every
+    start = last = None
+    while True:
+        with file_lock(home("slots")):
+            others = [(rid, m) for rid, m in live_runs() if rid != me and m.get("state") != "queued"
+                      and m.get("role") not in INTERNAL_ROLES]
+            if len(others) < limit:
+                set_run_state(None)
+                break
+            names = ", ".join(f"{m.get('thread') or '-'} {rid}" for rid, m in others[:6])
+            text = f"queued: {len(others)}/{limit} workers running ({names}); waiting for a slot"
+            if start is None:
+                start = last = time.time()
+                set_run_state("queued", text)
+                print(f"lean-agent: {text}", file=sys.stderr, flush=True)
+            elif time.time() - last >= every:
+                last = time.time()
+                set_run_state("queued", text)
+                print(f"lean-agent: {text} ({int(time.time() - start)}s)", file=sys.stderr, flush=True)
+        time.sleep(0.2)
+    if start is not None:
+        print(f"lean-agent: slot free after {int(time.time() - start)}s; starting", file=sys.stderr, flush=True)
+
+
+LOCK_NOTICE_EVERY_RUN = 60  # seconds between repeats of a queued message
+
+
 def early_register(a, task, prev=None):
     """A running marker (pid, thread, task) written before any preflight or worktree work, so a run that is killed with
     its session shows up as lost instead of missing."""
@@ -1890,6 +1954,7 @@ def early_settle(reason=None):
         row.update(id=rid, ts=now_iso(), status="failed", reason=f"start failed: {reason}", turns=None, seconds=None,
                    usage={}, units=0, cost_usd=None, cards=[], result_head=f"start failed: {reason}", details=None)
         append_jsonl(home("ledger.jsonl"), row)
+        print(f"run {rid} failed to start: {reason}", flush=True)  # the run's own output says why, not only the ledger
     try:
         os.remove(path)
     except OSError:
@@ -2199,6 +2264,10 @@ def preflight_run_args(a, slug, project, read_only):
 
 
 def _cmd_run(a):
+    lean_common.WAIT_NOTICE[:] = [run_wait_notice]
+    tag = lean_threads.resolve_tag()
+    print(f"lean-agent run: starting" + (f" (thread {tag})" if tag else "") + (f" · {a.project}" if a.project else "")
+          + " · checking the arguments", file=sys.stderr, flush=True)
     if a.resume == "last":  # the latest run, so the command needs no `$(lean-agent runs --last)`
         a.resume = latest_run_id(ordinary=True)
     if not a.resume:  # refused before anything starts (no worktree, no escalation); a refusal is still a "start failed" row
@@ -2226,6 +2295,7 @@ def _cmd_run(a):
         die("no task given")
 
     model = check_model_why(a, prev)
+    wait_for_slot(a)
 
     hit = usage.exhausted_window()
     if hit:
@@ -6785,11 +6855,7 @@ def worktree_lock(slug, name, shared):
     with open(path, "w") as fh:
         if fcntl:
             mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
-            try:
-                fcntl.flock(fh, mode | fcntl.LOCK_NB)
-            except OSError:
-                print(f"lean-agent: waiting for another worker using worktree {name}...", file=sys.stderr, flush=True)
-                fcntl.flock(fh, mode)
+            lean_common.flock_waiting(fh, mode, f"worktree {name} (another worker uses it)", path, timeout=0)
         try:
             yield
         finally:
@@ -8811,8 +8877,11 @@ def full_report(r):
 
 def run_line_from_ledger(r):
     cost = f"${r['cost_usd']:.2f}" if isinstance(r.get("cost_usd"), (int, float)) else "$?"
-    return (f"run {r['id']} · {r['model']} · {r['status']} · {r.get('turns') or '?'} turns · "
+    line = (f"run {r['id']} · {r['model']} · {r['status']} · {r.get('turns') or '?'} turns · "
             f"{r.get('units', 0):,} sonnet-eq tok · {cost}")
+    if r.get("status") == "failed" and str(r.get("reason") or "").startswith("start failed"):
+        line += f"\n{r['reason']}"  # a run that never started has no summary: the reason is the summary
+    return line
 
 
 def print_finished_run(r):
@@ -8981,12 +9050,16 @@ def cmd_runs(a):
         if not lost:
             print("No lost runs.")
         return
-    if a.running:
+    if a.running or getattr(a, "queued", False):
         found = False
         for _, m in live_runs():
+            if getattr(a, "queued", False) and m.get("state") not in ("queued", "starting", "waiting") and not m.get("early"):
+                continue
             found = True
-            print(f"{m.get('run', '?')}  running since {m.get('started', '?')[11:19]}  {m.get('model', '?'):<7} "
-                  f"{m.get('project', '?'):<16} {m.get('task', '')[:70]}")
+            state = m.get("state") or ("starting" if m.get("early") else "running")
+            print(f"{m.get('run', '?')}  {state} since {m.get('started', '?')[11:19]}  {(m.get('thread') or '-'):<4} "
+                  f"{m.get('model', '?'):<7} {m.get('project', '?'):<16} {m.get('task', '')[:70]}"
+                  + (f"  [{m['reason']}]" if m.get("reason") else ""))
         lost = lost_runs(home())
         if lost:
             found = True
@@ -14031,7 +14104,8 @@ def build_parser():
     s.add_argument("--limit", type=int, metavar="N", help="the newest N runs (same as -n)")
     s.add_argument("--all", "--internal", dest="all", action="store_true",
                    help="also list helper runs (advisor, librarian, composer, review-learn ...), hidden by default")
-    s.add_argument("--running", action="store_true", help="runs in progress right now")
+    s.add_argument("--running", action="store_true", help="runs in progress right now, all threads (state: starting, queued, waiting, running)")
+    s.add_argument("--queued", action="store_true", help="with --running: only runs that have not started their worker yet")
     s.add_argument("--lost", action="store_true", help="list the lost runs (supervisor died without a result); with --clear mark them acknowledged")
     s.add_argument("--clear", action="store_true", help="with --lost: mark the lost runs lost-and-acknowledged so they stop appearing")
     s.add_argument("--stop", metavar="RUN_ID|last", help="stop a run in progress (only lean-agent's own run), mark it "

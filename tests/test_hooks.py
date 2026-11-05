@@ -1406,6 +1406,17 @@ class BudgetTest(Base):
         self.assertIsNone(run_hook("budget_hook.py", ev("lean-agent run -p shop -m haiku x"),
                                    LEAN_AGENT_BACKGROUND_RUNS="0", LEAN_AGENT_TODO_REMINDER="0", **self.env))
 
+    def test_run_check_and_help_are_allowed_in_the_foreground(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        ev = lambda cmd: dict(self.ev, cwd=home, tool_name="Bash", tool_input={"command": cmd, "run_in_background": False})
+        for cmd in ('lean-agent run --check shop -m haiku --why x --read-only --allow-cmd "tool sub" "look"',
+                    "lean-agent run shop --check -m haiku --why x", "lean-agent run --help"):
+            out = run_hook("budget_hook.py", ev(cmd), **self.env)
+            self.assertIsNone(out, cmd)
+        out = run_hook("budget_hook.py", ev('lean-agent run shop -m haiku --why x -- "--check the logs"'), **self.env)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
     def test_workers_name_their_work_queue_item(self):
         home = self.env["LEAN_AGENT_HOME"]
         os.makedirs(home, exist_ok=True)

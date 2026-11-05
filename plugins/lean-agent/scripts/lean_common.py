@@ -124,13 +124,71 @@ def read_json(path, default):
         return default
 
 
+WAIT_NOTICE = []  # [callable(text)] set by lean_agent: says what a run waits for (prints it, marks the run)
+LOCK_NOTICE_EVERY = 60  # seconds between repeats of a wait message
+
+
+def lock_wait_timeout():
+    """Seconds a lock may be waited for before giving up (LEAN_AGENT_LOCK_TIMEOUT, default 600; 0 = forever)."""
+    try:
+        return float(os.environ.get("LEAN_AGENT_LOCK_TIMEOUT", "600"))
+    except ValueError:
+        return 600.0
+
+
+def lock_holder(path):
+    """The pid that wrote itself into the lock file (best effort), else ''."""
+    try:
+        with open(path) as fh:
+            return fh.read().strip().split()[0]
+    except (OSError, IndexError):
+        return ""
+
+
+def flock_waiting(fh, mode, what, path, timeout=None, every=None):
+    """flock(fh, mode) that says at once what it waits for ("waiting for lock X held by pid N"), repeats it every
+    `every` seconds, and gives up after `timeout` seconds (None: lock_wait_timeout(); 0: never) with TimeoutError."""
+    try:
+        fcntl.flock(fh, mode | fcntl.LOCK_NB)
+        return
+    except OSError:
+        pass
+    timeout = lock_wait_timeout() if timeout is None else timeout
+    every = LOCK_NOTICE_EVERY if every is None else every
+    holder = lock_holder(path)
+    start = last = time.time()
+    while True:
+        text = f"waiting for lock {what}" + (f" held by pid {holder}" if holder else "")
+        if WAIT_NOTICE and (last == start or time.time() - last >= every):
+            WAIT_NOTICE[0](text + f" ({int(time.time() - start)}s)")
+            last = time.time()
+        elif not WAIT_NOTICE and last == start:
+            print(f"lean-agent: {text}", file=sys.stderr, flush=True)
+            last = time.time() + 1e9
+        try:
+            fcntl.flock(fh, mode | fcntl.LOCK_NB)
+            return
+        except OSError:
+            pass
+        if timeout and time.time() - start >= timeout:
+            raise TimeoutError(f"gave up waiting for lock {what}{' held by pid ' + holder if holder else ''} "
+                               f"after {int(time.time() - start)}s (LEAN_AGENT_LOCK_TIMEOUT sets the limit)")
+        time.sleep(0.05)
+
+
 @contextlib.contextmanager
 def file_lock(path):
     """Exclusive advisory lock on `path` + '.lock' (read-modify-write of a shared json file)."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path + ".lock", "a") as lock:
         if fcntl:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            flock_waiting(lock, fcntl.LOCK_EX, os.path.basename(path), path + ".lock")
+            try:
+                lock.truncate(0)
+                lock.write(f"{os.getpid()}\n")
+                lock.flush()
+            except OSError:
+                pass
         try:
             yield
         finally:

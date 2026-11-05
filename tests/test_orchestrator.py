@@ -7042,6 +7042,70 @@ class CliTest(unittest.TestCase):
         self.assertEqual(sent, [signal.SIGINT, signal.SIGINT])
         self.assertIs(signal.getsignal(signal.SIGINT), old)
 
+    def test_a_run_over_the_worker_limit_is_queued_visibly_and_starts_when_a_slot_frees(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        env = dict(self.env, LEAN_AGENT_MAX_WORKERS="2", FAKE_TURNS="40", FAKE_TURN_SLEEP="1")
+        procs = []
+
+        def start(thread):
+            p = subprocess.Popen([sys.executable, CLI, "run", "-p", "proj", "-m", "haiku", "--why", "x", "--thread", thread,
+                                  f"look {thread}"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, start_new_session=True)
+            procs.append(p)
+            self.addCleanup(lambda: p.poll() is None and p.kill())
+            return p
+
+        def live(thread):
+            return [m for m in self.running_markers() if m.get("thread") == thread]
+        for t in ("t1", "t2"):
+            start(t)
+            self.wait_for(lambda t=t: [m for m in live(t) if not m.get("early")], f"{t} to run", 30)
+        self.addCleanup(lambda: [os.kill(m["pid"], signal.SIGKILL) for m in self.running_markers()
+                                 if m.get("pid") and service_alive(m["pid"])])
+        third = start("t3")
+        self.wait_for(lambda: [m for m in live("t3") if m.get("state") == "queued"], "t3 to show as queued", 30)
+        [m] = [m for m in live("t3") if m.get("state") == "queued"]
+        self.assertIn("2/2 workers running", m["reason"])
+        out = self.cli("runs", "--running", LEAN_AGENT_THREAD="t3").stdout  # the caller's own thread's runs are listed too
+        for t in ("t1", "t2", "t3"):
+            self.assertRegex(out, rf"\b{t}\b")
+        self.assertRegex(out, r"queued since")
+        queued = self.cli("runs", "--running", "--queued").stdout
+        self.assertIn("t3", queued)
+        self.assertNotIn("running since", queued)
+        [first] = [m for m in live("t1") if not m.get("early")]
+        self.cli("runs", "--stop", first["run"], LEAN_AGENT_STOP_WAIT="3")
+        self.wait_for(lambda: [m for m in live("t3") if not m.get("early") and not m.get("state")], "t3 to start", 40)
+        third.kill()
+
+    def test_lock_wait_says_what_it_waits_for_and_gives_up(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_common as lc
+        path = os.path.join(self.tmp.name, "things.json")
+        said = []
+        with mock.patch.object(lc, "WAIT_NOTICE", [said.append]), lc.file_lock(path):
+            with open(path + ".lock", "a") as other:
+                with self.assertRaises(TimeoutError) as cm:
+                    lc.flock_waiting(other, lc.fcntl.LOCK_EX, "things.json", path + ".lock", timeout=0.3, every=0.1)
+        self.assertIn(f"held by pid {os.getpid()}", said[0])
+        self.assertIn("things.json", str(cm.exception))
+        self.assertGreaterEqual(len(said), 2)  # repeated while waiting
+
+    def test_a_run_refused_before_it_starts_says_why_in_its_output_and_summary(self):
+        self.use_tracker()
+        self.cli("learn", self.proj, "--name", "proj")
+        self.add_rule()
+        out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--mcp", "tracker:read", "--thread", "t5", "list",
+                       check=False)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("forbidden by rule", out.stdout)  # the run's output file, not only stderr
+        self.assertIn("failed to start", out.stdout)
+        row = self.ledger()[-1]
+        self.assertEqual((row["status"], row["thread"]), ("failed", "t5"))
+        self.assertTrue(row["reason"].startswith("start failed: --mcp tracker is forbidden"))
+        self.assertIn("forbidden by rule", self.cli("runs", "--show", row["id"]).stdout)
+        self.assertEqual(self.running_markers(), [])
+
     def test_no_detach_run_removes_its_running_marker_when_the_tee_closes(self):
         self.cli("learn", self.proj, "--name", "proj")
         self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "inline", LEAN_AGENT_NO_DETACH="1")
@@ -10386,13 +10450,13 @@ class CliTest(unittest.TestCase):
         procs = []
         for e in errs:
             with open(e, "w") as fh:
-                procs.append(subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=fh, text=True,
+                procs.append(subprocess.Popen(cmd, env=env, stdout=fh, stderr=subprocess.STDOUT, text=True,
                                               stdin=subprocess.DEVNULL))
 
         def waited():
             for e in errs:
                 with open(e) as fh:
-                    if "waiting for another worker" in fh.read():
+                    if "waiting for lock worktree" in fh.read():
                         return True
             return False
         end = time.time() + scaled(30)

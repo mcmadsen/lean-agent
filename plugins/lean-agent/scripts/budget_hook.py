@@ -203,6 +203,8 @@ def foreground_worker(command):
         sub, rest = words[1], words[2:]
         if sub not in ("run", "review", "do", "tracker") or {"-h", "--help"} & set(rest):
             continue  # help text starts nothing
+        if sub == "run" and "--check" in rest[:next((k for k, w in enumerate(rest) if w == "--" or w.startswith("<<")), len(rest))]:
+            continue  # `run --check` is a dry run: it starts nothing
         if sub == "review" and (rest[:1] == ["decline"] or {"--status", "--costs"} & set(rest)):
             continue  # instant
         if sub == "tracker" and "--discover" not in rest:
@@ -225,6 +227,8 @@ def unlinked_worker(command):
             if w == "--" or w.startswith("<<"):
                 rest = rest[:k]
                 break
+        if words[1] == "run" and "--check" in rest:
+            continue  # a dry run starts nothing, so it needs no board item
         if "--resume" in rest or any(w == "--todo" or w.startswith("--todo=") for w in rest):
             continue  # a resumed run keeps its item
         return f"lean-agent {words[1]}"
