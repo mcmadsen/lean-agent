@@ -11600,6 +11600,13 @@ def deliver_spool(tid, lock_wait=0, resume_old=False):
                 continue
             try:
                 line = deliver_one(tid, msg.get("text"), resume_old, bool(msg.get("new")))
+            except NoSlot as exc:  # the message stays spooled; the service retries on its tick
+                service_session.spool_release(tid, name)
+                try:
+                    lean_threads.set_session(tid, waiting_slot=now_iso(), slot_note=str(exc))
+                except ValueError:
+                    pass
+                return "slot", str(exc)
             except (RuntimeError, SystemExit) as exc:
                 service_session.spool_release(tid, name)
                 return "error", str(exc) or "not delivered"
@@ -11607,7 +11614,16 @@ def deliver_spool(tid, lock_wait=0, resume_old=False):
                 service_session.spool_release(tid, name)
                 raise
             service_session.spool_done(tid, name)
+            try:
+                if (lean_threads.load()["threads"].get(tid) or {}).get("waiting_slot"):
+                    lean_threads.set_session(tid, waiting_slot=None, slot_note=None)
+            except ValueError:
+                pass
     return "ok", line
+
+
+def slot_line(tid, why, new=False):
+    return f"{tid} created, queued for a session slot ({why})" if new else f"{tid}: queued for a session slot ({why})"
 
 
 def queued_line(tid):
@@ -11641,6 +11657,8 @@ def deliver_with_cap(tid, own=None, new=False, resume_old=False):
     kind, line = out.get("r", ("error", ""))
     if kind == "ok":
         return line
+    if kind == "slot":
+        return slot_line(tid, line, new)
     if kind == "busy":
         return f"{tid}: queued (service busy), will deliver"
     # a definite failure inside the cap: withdraw the message (unless the service took it meanwhile) and report it
@@ -11847,7 +11865,7 @@ def thread_start_lock():
     return lean_common.file_lock(home("thread-start"))
 
 
-CLOSE_MIN_IDLE = 600  # seconds a session must have been idle (since its last turn ended) before the cap may close it
+CLOSE_MIN_IDLE = 120  # seconds a session must have been idle (since its last turn ended) before the cap may close it
 LAUNCH_GRACE = 60  # seconds a run counts as live from the moment `run` starts, before its running marker exists
 
 
@@ -11897,7 +11915,30 @@ def caller_thread():
     return kept or lean_threads.pinned_thread()  # `--thread` re-tags LEAN_AGENT_THREAD; main() kept the session's own id
 
 
-def close_blockers(s, busy, launching, caller):
+class NoSlot(Exception):
+    """No thread session can be freed for a new one: the start waits for a slot (the message stays spooled).
+    str() is the short reason list; .full lists every session with its reason."""
+    full = ""
+
+
+def thread_finished(tid, t=None):
+    """A thread whose work is over: all its goals done/dropped, or its last report is a done report that its last turn
+    produced (the caller still checks for an open question, a running worker and a mid-turn session)."""
+    try:
+        goals = [g for g in lean_goals.open_goals() if g.get("thread") == tid]
+        allg = [g for g in lean_goals._load() if g.get("thread") == tid]
+        if allg and not goals:
+            return True
+    except Exception:
+        pass
+    rep_ = service_session._load(service_session.last_reports_path()).get(tid) or {}
+    if rep_.get("kind") != "done":
+        return False
+    turn = service_session._load(service_session.turns_path()).get(tid) or {}
+    return not turn or float(rep_.get("ts") or 0) >= float(turn.get("ts") or 0) - 30
+
+
+def close_blockers(s, busy, launching, caller, ignore_idle=False):
     """Why the cap may not close session `s` (a list; empty = eligible)."""
     tid, why = s["thread"], []
     if tid == caller:
@@ -11906,7 +11947,7 @@ def close_blockers(s, busy, launching, caller):
         why.append(f"{len(busy[tid])} running ({', '.join(busy[tid])})")
     elif tid in launching:
         why.append("a run is starting")
-    if s["idle"] < close_min_idle():
+    if s["idle"] < close_min_idle() and not ignore_idle:
         why.append(f"idle under {close_min_idle() // 60} min")
     if service_session.mid_turn(tid):
         why.append("mid-turn (tool call, answer or prompt pending)")
@@ -11960,12 +12001,16 @@ def make_room_for_thread_session(tid=None):
         launching = launching_threads()
         why = {s["thread"]: close_blockers(s, busy, launching, caller) for s in sessions}
         free = [s for s in sessions if not why[s["thread"]]]
-        if not free:
-            die(f"{len(sessions)} thread sessions are open (max-thread-sessions {cap}) and none can be parked to make room:\n" +
-                "\n".join(f'{s["thread"]} "{s["title"]}" idle {_idle_age(s["idle"])}, not eligible: {"; ".join(why[s["thread"]])}'
-                          for s in sessions) + "\npark or close one (`lean-agent thread park tN` or `lean-agent thread close tN`), or `lean-agent config max-thread-sessions N`")
-        v = max(free, key=lambda s: s["idle"])  # the least recently used idle thread
-        line = f'parking {v["thread"]} (idle {_idle_age(v["idle"])}) to make room'
+        done_ = [s for s in sessions if thread_finished(s["thread"]) and not close_blockers(s, busy, launching, caller, True)]
+        if not free and not done_:
+            exc = NoSlot(f"{len(sessions)}/{cap} busy: " + ", ".join(
+                f'{s["thread"]} {"; ".join(why[s["thread"]])}' for s in sessions))
+            exc.full = (f"{len(sessions)} thread sessions are open (max-thread-sessions {cap}) and none can be parked to make room:\n" +
+                        "\n".join(f'{s["thread"]} "{s["title"]}" idle {_idle_age(s["idle"])}, not eligible: {"; ".join(why[s["thread"]])}'
+                                  for s in sessions) + "\npark or close one (`lean-agent thread park tN` or `lean-agent thread close tN`), or `lean-agent config max-thread-sessions N`")
+            raise exc
+        v = max(done_ or free, key=lambda s: s["idle"])  # a finished thread first, else the least recently used idle one
+        line = f'parking {v["thread"]} ({"finished, " if done_ else ""}idle {_idle_age(v["idle"])}) to make room'
         print(line, flush=True)
         try:
             park_thread_session(v["thread"])
@@ -12198,6 +12243,8 @@ def thread_action(a):
             blocks = [dict(b, block="\n".join(l for l in str(b.get("block")).splitlines()
                                                 if any(l.startswith(f"[{w} ") for w in want))) for b in blocks]
             blocks = [b for b in blocks if b["block"]]
+        for w in want:
+            print(service_session.turn_status(lean_threads.resolve(w, lean_threads.load()["aliases"])))
         if not blocks:
             print("no thread reports delivered yet")
         for b in blocks[-3:]:
@@ -12225,6 +12272,25 @@ def thread_action(a):
         text = " ".join(a.args[0].split())[:lean_threads.QUESTION_CHARS]
         service_session.queue_report(tid, "question", f"QUESTION {qid}: {text}" + (f" [options: {' | '.join(opts)}]" if opts else ""))
         print(f"{tid} is waiting on main ({qid}). End your turn now and do not ask the user: main's answer arrives as your next turn.")
+        return 0
+    if act == "report":
+        tid = caller_thread()
+        if not tid:
+            die("thread report works only inside a thread session")
+        if len(a.args) > 1 or (a.args and a.prompt_file):
+            die('usage: lean-agent thread report ("<text>" | --prompt-file F|-)')
+        text = (a.args[0].strip() if a.args else thread_prompt(a)) or ""
+        if not text:
+            die('thread report needs the report text: "<text>" or --prompt-file -')
+        try:  # the consolidated final report (Ref/Head/Review/Checks/Left/Proposed action): the push question for the user
+            lean_goals.final_report(tid, text)
+            lean_goals.finished(tid, text)
+        except Exception:
+            pass
+        service_session.save_last_report(tid, "done", text)
+        service_session.queue_report(tid, "done", service_session._short(text, tid=tid), tag="explicit", force=True)
+        service_session.note_turn(tid, True, "done")
+        print(f"report for {tid} queued for the front desk. End your turn.")
         return 0
     if act == "answer":
         args = list(a.args)
@@ -12318,6 +12384,8 @@ def thread_action(a):
         res = deliver_spool(a.args[0], lock_wait=DELIVER_LOCK_WAIT)
         if res[0] == "error":
             die(res[1])
+        if res[0] == "slot":
+            print(slot_line(thread_session_tid(a.args[0])[0], res[1]))
         return 0
     if act in ("send", "open"):
         if act == "send":
@@ -12343,7 +12411,10 @@ def thread_action(a):
                 prepare_thread_session(tid, resume_old)  # the next `send` starts as decided here
                 return lean_threads.cli("reopen", [tid], a.json)
             with thread_start_lock():
-                make_room_for_thread_session(tid)
+                try:
+                    make_room_for_thread_session(tid)
+                except NoSlot as exc:
+                    die(exc.full or str(exc))
                 try:
                     name, line = start_closed_thread(tid, t, None, resume_old)
                 except RuntimeError as exc:
@@ -14183,7 +14254,7 @@ def build_parser():
     s.set_defaults(fn=cmd_schedule)
 
     s = sub.add_parser("thread", help="threads: new \"title\" [\"<text>\"|--prompt-file F|-] (its own Remote Control session) | send tN \"<text>\"|--prompt-file F|- | ask \"question\" [--options \"a|b|c\"] (from inside a thread session: the question goes to main; end the turn, the answer arrives as your next turn) | answer tN [qN] \"answer\" (main: pass an answer into the thread session) | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
-    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "answer", "reports", "park", "wake", "deliver"])
+    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "report", "answer", "reports", "park", "wake", "deliver"])
     s.add_argument("args", nargs="*", help='new "title" ["<text>"]; send tN "<text>"; answer tN [qN] "<answer>"; other actions: ids')
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin); or give it as a positional argument, not both")
