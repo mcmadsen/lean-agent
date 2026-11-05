@@ -824,6 +824,20 @@ class BudgetTest(Base):
         self.assertIsNone(self.stop_event(["Should I squash the branch first?"], LEAN_AGENT_SESSION_ROLE="thread"))
         self.assertIsNone(self.stop_event(["Routed to t3."]))
 
+    def test_stop_hook_front_desk_turn_ending_without_text_is_sent_back_once_to_answer_visibly(self):
+        main = {"LEAN_AGENT_SESSION_ROLE": "main"}
+        out = self.stop_event(["Checking.", ""], **main)  # text earlier in the turn, an empty final message
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("visible text", out["reason"])
+        self.assertIsNone(self.stop_event(["Checking.", ""], active=True, **main))
+        self.assertIsNone(self.stop_event(["Checking.", ""], LEAN_AGENT_SESSION_ROLE="thread"))
+        self.assertIsNone(self.stop_event(["Checking.", "Done: t3 is idle."], **main))
+
+    def test_stop_hook_waiting_block_reason_asks_for_visible_text_too(self):
+        row = ["| Item | State | Next |\n|---|---|---|\n| PR 1 | Reviewed | **Your call:** no vote cast |"]
+        out = self.stop_event(row, LEAN_AGENT_SESSION_ROLE="main")
+        self.assertIn("visible text", out["reason"])
+
     def test_stop_hook_front_desk_asks_for_waiting_rows_once(self):
         row = ["| Item | State | Next |\n|---|---|---|\n| PR 1 | Reviewed | **Your call:** no vote cast |"]
         main = {"LEAN_AGENT_SESSION_ROLE": "main"}

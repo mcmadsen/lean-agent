@@ -651,7 +651,7 @@ def prompt_hook(event):
 
 
 ASKING_RE = re.compile(r"\b(should I|do you want|would you like|let me know|waiting (?:for|on) you|your call|which (?:one|option) )", re.I)
-STOP_REASON = "Ask this with AskUserQuestion so it can't be missed."
+STOP_REASON = "Ask this with AskUserQuestion so it can't be missed, and add one visible sentence stating the question."
 
 
 def turn_of(path):
@@ -682,6 +682,36 @@ def turn_of(path):
             if parts:
                 text = "\n".join(parts)
     return text, asked
+
+
+def silent_ending(path):
+    """True when the turn at the end of the transcript at `path` ended with an assistant message without any text (after
+    tool calls, or only thinking): the user, e.g. in Remote Control, sees nothing of the answer."""
+    last, seen = "", False
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return False
+    for line in raw.split(b"\n"):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        msg = rec.get("message") if isinstance(rec, dict) and isinstance(rec.get("message"), dict) else {}
+        body = msg.get("content")
+        if rec.get("type") == "user":
+            if isinstance(body, str) or any(isinstance(c, dict) and c.get("type") == "text" for c in body or []):
+                last, seen = "", False
+        elif rec.get("type") == "assistant":
+            seen = True
+            last = "".join(str(c.get("text") or "") for c in body if isinstance(c, dict) and c.get("type") == "text") \
+                if isinstance(body, list) else str(body or "")
+    return seen and not last.strip()
+
+
+SILENT_REASON = ("Your turn ended without visible text, so the user sees nothing. Reply now in one or two sentences: answer "
+                 "the user's last message or relay the pending thread reports as a table row.")
 
 
 def ask_answers(path):
@@ -733,9 +763,9 @@ def waiting_reason(items):
     for i in items:
         opts = " | ".join(i.get("options") or []) or "concrete options"
         lines.append(f"{i.get('id')}: {i.get('summary')} [{opts}]")
-    return ("Something waits on the user and a table row is not asking. Ask it now with AskUserQuestion, with options (at most 4 "
-            "questions): " + "; ".join(lines) if lines else
-            "Something waits on the user and a table row is not asking. Ask it now with AskUserQuestion, with concrete options.")
+    base = "Something waits on the user and a table row is not asking. Ask it now with AskUserQuestion, with "
+    base += ("options (at most 4 questions): " + "; ".join(lines)) if lines else "concrete options."
+    return base + " Also write the question as visible text: never answer with only a tool call."
 
 
 def stop_hook(event):
@@ -760,6 +790,9 @@ def stop_hook(event):
                 unasked = lean_waiting.unasked()
                 if unasked or (WAITING_RE.search(text) and not lean_waiting.recent()):
                     print(json.dumps({"decision": "block", "reason": waiting_reason(unasked)}))
+                    return
+                if silent_ending(event.get("transcript_path") or ""):
+                    print(json.dumps({"decision": "block", "reason": SILENT_REASON}))
                     return
         except Exception:
             return
