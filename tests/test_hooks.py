@@ -30,6 +30,11 @@ def run_hook(script, event, **env):
     return json.loads(p.stdout) if p.stdout.strip() else None
 
 
+def no_block(out):
+    """True when a PreToolUse output neither denies nor asks: nothing, or the allow for a plain lean-agent command."""
+    return out is None or out["hookSpecificOutput"].get("permissionDecision") == "allow"
+
+
 def assistant_line(mid, inp, cw, cr, out, model="claude-test"):
     return json.dumps({"type": "assistant", "message": {"id": mid, "model": model, "usage": {
         "input_tokens": inp, "cache_creation_input_tokens": cw,
@@ -534,7 +539,7 @@ class BudgetTest(Base):
                     "lean-agent runs | grep -nw foo", "lean-agent runs | grep -m 5 -A2 -B 3 foo", "lean-agent runs | grep -oxH x",
                     "lean-agent runs | tail -n +5", "lean-agent runs | tail -20", "lean-agent runs | tail -c 100",
                     "lean-agent runs | head -c 10", "lean-agent runs | wc -w", "lean-agent runs | wc -m"):
-            self.assertIsNone(bash(cmd), cmd)
+            self.assertTrue(no_block(bash(cmd)), cmd)
         out = read("/srv/shop/src/app.py")
         self.assertTrue(denied(out))
         self.assertIn("Delegate it:", out["hookSpecificOutput"]["permissionDecisionReason"])
@@ -576,7 +581,7 @@ class BudgetTest(Base):
                     "lean-agent todo list --all --ref 123", "lean-agent runs --pr 123", "lean-agent memory show mem-x"):
             out = run_hook("budget_hook.py", dict(self.ev, cwd=home, tool_name="Bash", tool_input={"command": cmd, "run_in_background": True}),
                            LEAN_AGENT_TODO_REMINDER="0", **self.env)
-            self.assertIsNone(out, cmd)
+            self.assertTrue(no_block(out), cmd)
 
     def test_strict_orchestrator_keeps_track_only_with_lean_agent(self):
         home = self.env["LEAN_AGENT_HOME"]
@@ -605,7 +610,7 @@ class BudgetTest(Base):
                     "lean-agent runs --wait all", "lean-agent runs --stop abc", "lean-agent logs --run abc",
                     "lean-agent handover", "lean-agent advise \"do x\"", "lean-agent learn proj",
                     "lean-agent todo list", "lean-agent todo done 3", "lean-agent remember \"x\""):
-            self.assertFalse(hook("Bash", command=cmd, run_in_background=True), cmd)
+            self.assertTrue(no_block(hook("Bash", command=cmd, run_in_background=True) or None), cmd)
         for out in (hook("Read", file_path="/srv/proj/src/app.py"), hook("Read", file_path="/srv/other/work/0101-000000-abcd/summary-1.txt"),
                     hook("Bash", command="cat /srv/proj/summary-1.txt", run_in_background=True),
                     hook("Bash", command="tail -n 5 /srv/work/0101-000000-abcd/result.json", run_in_background=True)):
@@ -1291,6 +1296,36 @@ class BudgetTest(Base):
         out = run_hook("budget_hook.py", ev, LEAN_AGENT_SESSION_ROLE="thread", LEAN_AGENT_THREAD="t1", **self.env)
         self.assertNotIn("front desk", json.dumps(out))
 
+    def hook_decision(self, command, role, background=True):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        ev = dict(self.ev, cwd=home, tool_name="Bash", tool_input={"command": command, "run_in_background": background})
+        out = run_hook("budget_hook.py", ev, LEAN_AGENT_SESSION_ROLE=role, LEAN_AGENT_THREAD="t1", **self.env)
+        return (out or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+
+    def test_a_plain_lean_agent_command_is_allowed_without_a_prompt_in_thread_and_main_sessions(self):
+        body = ("Look up (read-only) https://example.test/a?b=1; then run: svc show; svc invoke | grep x\n"
+                "second line with $(not run) and `ticks`")
+        cmd = ("lean-agent run proj -m haiku --why \"read-only lookup: a; b | c\" --read-only --cards auto "
+               "--allow-cmd \"svc invoke\" --allow-cmd \"svc show\" --thread t8 --todo 12 --max-usd 0.5 "
+               "--task-file - <<'EOF'\n" + body + "\nEOF")
+        self.assertEqual(self.hook_decision(cmd, "thread"), "allow")
+        desk = ("lean-agent thread send t8 --prompt-file - <<'EOF'\n" + body + "\nEOF")
+        self.assertEqual(self.hook_decision(desk, "main"), "allow")
+        self.assertEqual(self.hook_decision("lean-agent runs 2>&1", "thread"), "allow")
+
+    def test_only_a_single_lean_agent_invocation_is_allowed(self):
+        for cmd in ("lean-agent x; rm -rf y", "lean-agent x | sh", "echo hi", "lean-agent x && rm y", "lean-agent x &",
+                    "lean-agent x > out.txt", "lean-agent x $(id)", "lean-agent x <<'E'\nbody\nE\nrm -rf y",
+                    "lean-agent x <<'E'\nbody\nE; rm y", "cd /tmp && lean-agent x", "rm -rf y # lean-agent x"):
+            self.assertNotEqual(self.hook_decision(cmd, "thread"), "allow", cmd)
+
+    def test_a_denial_beats_the_lean_agent_allow(self):
+        self.assertEqual(self.hook_decision("lean-agent run p -- 'x'", "main"), "deny")
+
+    def test_a_worker_role_is_not_allowed(self):
+        self.assertNotEqual(self.hook_decision("lean-agent runs", "worker"), "allow")
+
     def test_orchestrator_surface_doc_lists_the_front_desk_commands(self):
         sys.path.insert(0, ROOT)
         import budget_hook
@@ -1356,11 +1391,11 @@ class BudgetTest(Base):
         home = self.env["LEAN_AGENT_HOME"]
         ev = dict(self.ev, cwd=home, tool_name="Bash", tool_input={"command": "lean-agent budget --cap off"})
         os.makedirs(home, exist_ok=True)
-        self.assertIsNone(run_hook("budget_hook.py", ev, LEAN_AGENT_BUDGET="5000", LEAN_AGENT_BUDGET_SET="1", **self.env))
+        self.assertTrue(no_block(run_hook("budget_hook.py", ev, LEAN_AGENT_BUDGET="5000", LEAN_AGENT_BUDGET_SET="1", **self.env)))
         with open(os.path.join(home, "session-cap.json"), "w") as fh:
             json.dump({"cap": 0}, fh)
         ev["tool_input"] = {"command": "npm test"}
-        self.assertIsNone(run_hook("budget_hook.py", ev, LEAN_AGENT_BUDGET="5000", LEAN_AGENT_BUDGET_SET="1", **self.env))
+        self.assertTrue(no_block(run_hook("budget_hook.py", ev, LEAN_AGENT_BUDGET="5000", LEAN_AGENT_BUDGET_SET="1", **self.env)))
         # outside the lean-agent home the saved setting doesn't apply (the user's own sessions)
         out = run_hook("budget_hook.py", dict(ev, cwd=self.tmp.name), LEAN_AGENT_BUDGET="5000",
                        LEAN_AGENT_BUDGET_SET="1", **self.env)
@@ -1396,15 +1431,15 @@ class BudgetTest(Base):
             out = run_hook("budget_hook.py", ev(cmd), **self.env)
             self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny", cmd)
             self.assertIn("run_in_background: true", out["hookSpecificOutput"]["permissionDecisionReason"])
-            self.assertIsNone(run_hook("budget_hook.py", ev(cmd, bg=True), LEAN_AGENT_TODO_REMINDER="0", **self.env))
+            self.assertTrue(no_block(run_hook("budget_hook.py", ev(cmd, bg=True), LEAN_AGENT_TODO_REMINDER="0", **self.env)))
         for cmd in ("lean-agent review shop --status", "lean-agent review --costs --days 3", "lean-agent review decline shop 1 --why x",
                     "lean-agent runs --show", "lean-agent tracker shop", "lean-agent stats",
                     "cat > /tmp/task.md <<'EOF'\nThen run lean-agent review shop --resume\nEOF",
                     'echo "next: lean-agent run -p shop"', "git commit -m 'lean-agent do shop x'"):
-            self.assertIsNone(run_hook("budget_hook.py", ev(cmd), **self.env), cmd)
+            self.assertTrue(no_block(run_hook("budget_hook.py", ev(cmd), **self.env)), cmd)
         self.assertIsNone(run_hook("budget_hook.py", ev("lean-agent run -p shop -m haiku x", cwd=self.tmp.name), **self.env))
-        self.assertIsNone(run_hook("budget_hook.py", ev("lean-agent run -p shop -m haiku x"),
-                                   LEAN_AGENT_BACKGROUND_RUNS="0", LEAN_AGENT_TODO_REMINDER="0", **self.env))
+        self.assertTrue(no_block(run_hook("budget_hook.py", ev("lean-agent run -p shop -m haiku x"),
+                                          LEAN_AGENT_BACKGROUND_RUNS="0", LEAN_AGENT_TODO_REMINDER="0", **self.env)))
 
     def test_workers_name_their_work_queue_item(self):
         home = self.env["LEAN_AGENT_HOME"]
@@ -1424,7 +1459,7 @@ class BudgetTest(Base):
                     "lean-agent run -p shop --todo none -m haiku --why x look", "lean-agent run --resume 0101-x more",
                     "lean-agent review shop --status", "lean-agent review shop --decide-gaps", "lean-agent review --costs",
                     "lean-agent todo add x"):
-            self.assertIsNone(run_hook("budget_hook.py", ev(cmd), **self.env), cmd)
+            self.assertTrue(no_block(run_hook("budget_hook.py", ev(cmd), **self.env)), cmd)
 
     def test_check_before_auto_compaction(self):
         home = self.env["LEAN_AGENT_HOME"]

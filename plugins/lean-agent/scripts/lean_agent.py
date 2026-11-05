@@ -9213,6 +9213,10 @@ def cmd_doctor(a):
     desk = front_desk_file(h)
     report(os.path.exists(desk) and read_text(desk).startswith(f"{GUIDE_MARK}{text_hash(render_guide(front_desk=True))}"),
            "main-session front-desk guide is current", "lean-agent home  (or doctor --fix)")
+    allowed = (load_json(os.path.join(h, ".claude", "settings.json"), {}).get("permissions") or {}).get("allow") or []
+    report("Bash(lean-agent:*)" in allowed,
+           "orchestrator home allows Bash(lean-agent:*) (main and thread sessions start in it, so they never prompt "
+           "for a lean-agent command)", "lean-agent home  (or doctor --fix)")
     report(True, "guide sizes: thread sessions ~" + f"{est_tokens(current):,}" + " tokens (CLAUDE.md), main session ~"
            + f"{est_tokens(read_text(desk)) if os.path.exists(desk) else 0:,}" + " tokens (front-desk.md)")
     loaded = [(f, t) for f, t in (home_instruction_files(h) if os.path.isdir(h) else [])
