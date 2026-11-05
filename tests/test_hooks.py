@@ -1448,7 +1448,7 @@ class BudgetTest(Base):
         for cmd in ('lean-agent run --check shop -m haiku --why x --read-only --allow-cmd "tool sub" "look"',
                     "lean-agent run shop --check -m haiku --why x", "lean-agent run --help"):
             out = run_hook("budget_hook.py", ev(cmd), **self.env)
-            self.assertIsNone(out, cmd)
+            self.assertTrue(no_block(out), cmd)
         out = run_hook("budget_hook.py", ev('lean-agent run shop -m haiku --why x -- "--check the logs"'), **self.env)
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
 

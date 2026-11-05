@@ -1401,11 +1401,15 @@ def _question(text):
     return qs[-1] if qs else ""
 
 
+UNVERIFIED_MARK = "UNVERIFIED against the user's claim"
+
+
 def scan_turn(path, offset):
     """What the transcript at `path` shows from byte `offset` on: {"runs": a lean-agent run/review/handover/push command
     was issued, "err": the last lean-agent tool result was an error, "result": its first line, "ask": the open
     AskUserQuestion's question (else None), "size": file size}."""
-    out = {"runs": False, "err": False, "result": "", "ask": None, "asked": False, "reported": False, "size": offset}
+    out = {"runs": False, "err": False, "result": "", "ask": None, "asked": False, "reported": False, "size": offset,
+           "unverified": False}
     try:
         with open(path, "rb") as fh:
             fh.seek(offset)
@@ -1439,10 +1443,12 @@ def scan_turn(path, offset):
                     ids.add(c.get("id"))
             elif c.get("type") == "tool_result":
                 out["ask"] = None
+                res = c.get("content")
+                if isinstance(res, list):
+                    res = " ".join(str(x.get("text") or "") for x in res if isinstance(x, dict))
+                if c.get("tool_use_id") in ids and UNVERIFIED_MARK in str(res or ""):
+                    out["unverified"] = True  # a run's claim check failed: the turn is not "done"
                 if c.get("tool_use_id") in ids:
-                    res = c.get("content")
-                    if isinstance(res, list):
-                        res = " ".join(str(x.get("text") or "") for x in res if isinstance(x, dict))
                     out["err"] = bool(c.get("is_error"))
                     out["result"] = next((l.strip() for l in str(res or "").splitlines() if l.strip()), "")
     return out
@@ -1629,6 +1635,13 @@ class Reporter(AutoClear):
         ask = _question(text)
         if scan["asked"]:
             note_turn(tid, True, "question")
+            return
+        if scan["unverified"]:  # wins over an explicit "done": a user claim the worker never checked is not settled
+            self.woken = False
+            note = "a user claim is UNVERIFIED by the worker: " + (text or scan["result"])
+            save_last_report(tid, "needs-you", note)
+            queue_report(tid, "needs-you", _short(note, tid=tid))
+            note_turn(tid, True, "needs-you")
             return
         if scan["reported"]:  # the explicit report is the channel; it also did the goal bookkeeping
             note_turn(tid, True, "done")

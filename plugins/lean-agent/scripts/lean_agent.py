@@ -1230,8 +1230,68 @@ def code_tools_note(project):
     return "\n".join(lines) + "\n"
 
 
+CLAIMS_HEAD = "User's claims (verify each one; open every PR, commit or work item a claim names before concluding):"
+CLAIM_RULE = ("The task has a section of the user's claims. In your reply write one line per claim, exactly:\n"
+              "`Claim: <short> — verified|refuted|unverified: <evidence: what you read (PR N, commit sha, file@ref)>`.\n"
+              "Open every PR, commit or work item a claim names before you judge it; a claim you did not check is `unverified`.\n")
+UNVERIFIED_MARK = "UNVERIFIED against the user's claim"
+CLAIM_LINE_RE = re.compile(r"^\W*Claim:\s*(.+)$", re.M | re.I)
+CLAIM_VERDICT_RE = re.compile(r"[—–-]\s*(verified|refuted|unverified)\b", re.I)
+CLAIM_PR_RE = re.compile(r"(?i)(?:\bPRs?\s*|pull request\s*|!|#)(\d+)")
+CLAIM_SHA_RE = re.compile(r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b")
+
+
+def claims_section(claims):
+    return ("\n\n" + CLAIMS_HEAD + "\n" + "\n".join(f"- {c}" for c in claims)) if claims else ""
+
+
+def claim_refs(claim):
+    """[(kind, value)] of the PRs/work items (numbers) and commit shas a claim names."""
+    return [("PR", n) for n in dict.fromkeys(CLAIM_PR_RE.findall(claim))] + \
+           [("commit", x) for x in dict.fromkeys(CLAIM_SHA_RE.findall(claim.lower()))]
+
+
+def tool_call_text(raw):
+    """Everything the worker's tool calls contained (commands, paths, patterns, MCP arguments), from the stream-json."""
+    out = []
+    for line in str(raw or "").splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        msg = ev.get("message") if isinstance(ev, dict) and ev.get("type") == "assistant" else None
+        for b in (msg.get("content") if isinstance(msg, dict) and isinstance(msg.get("content"), list) else []):
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                out.append(json.dumps(b.get("input"), ensure_ascii=False))
+    return "\n".join(out)
+
+
+def check_claims(claims, reply, calls):
+    """Problems with how a worker handled the user's claims: [(claim, why)]. (a) a matching `Claim:` line in the
+    reply, (b) every PR number / commit sha the claim names shows up in the worker's tool calls."""
+    lines = [m.strip() for m in CLAIM_LINE_RE.findall(str(reply or ""))]
+    low_calls = str(calls or "").lower()
+    bad = []
+    for i, claim in enumerate(claims):
+        refs = claim_refs(claim)
+        words = {w for w in re.findall(r"[a-z]{4,}", claim.lower())}
+        mine = [l for l in lines if any(v in l.lower() for _, v in refs)
+                or len(words & set(re.findall(r"[a-z]{4,}", l.lower()))) >= 2]
+        if not mine and len(lines) == len(claims):
+            mine = [lines[i]]
+        if not mine or not any(CLAIM_VERDICT_RE.search(l) for l in mine):
+            bad.append((claim, "no Claim line in the reply"))
+            continue
+        never = [f"{k} {v} never opened" for k, v in refs
+                 if not re.search(r"(?<![0-9a-z])" + re.escape(v.lower()) if k == "commit" else
+                                  r"(?<!\d)" + re.escape(v) + r"(?!\d)", low_calls)]
+        if never:
+            bad.append((claim, "; ".join(never)))
+    return bad
+
+
 def build_append(project, cards, read_only=False, allow_send=None, chrome=False, role_rule="", answer_lines=0,
-                 *, branch_rule):
+                 *, branch_rule, claims=None):
     """branch_rule: the worker may create a branch itself (it writes, and no branch was made for it)."""
     parts = [WORKER_PROTOCOL.format(
         answer_rule=ANSWER_RULE.format(n=answer_lines, mark=DETAILS_MARK) if answer_lines else "",
@@ -1242,6 +1302,8 @@ def build_append(project, cards, read_only=False, allow_send=None, chrome=False,
         role_rule=role_rule)]
     if branch_rule:
         parts.append(BRANCH_RULE)
+    if claims:
+        parts.append(CLAIM_RULE)
     tools = code_tools_note(project)
     if tools:
         parts.append(tools)
@@ -2290,6 +2352,7 @@ def _cmd_run(a):
         task = sys.stdin.read().strip()
     elif a.task_file:
         task = read_text(a.task_file).strip()
+    claims = [c.strip() for c in (getattr(a, "claim", None) or []) if c and c.strip()]
     early_register(a, task, prev)  # a resumed run is "running" again from here (runs --wait waits for it)
     if not task:
         die("no task given")
@@ -2330,7 +2393,7 @@ def _cmd_run(a):
         with open(os.path.join(workdir, "append.md"), "w") as fh:  # same context, current send/browser rules
             fh.write(build_append(project, [lib[c] for c in prev.get("cards", []) if c in lib], read_only,
                                   a.allow_send, bool(chrome_spec), role_rule, answer_lines,
-                                  branch_rule=not read_only and not auto_branch))
+                                  branch_rule=not read_only and not auto_branch, claims=claims))
     else:
         slug, project = resolve_project(a.project)
         sync_memory(slug)
@@ -2432,7 +2495,7 @@ def _cmd_run(a):
                 fh.write(role_rule)
         with open(os.path.join(workdir, "append.md"), "w") as fh:
             fh.write(build_append(project, cards, read_only, a.allow_send, bool(chrome_spec), role_rule, answer_lines,
-                                  branch_rule=not read_only and not auto_branch))
+                                  branch_rule=not read_only and not auto_branch, claims=claims))
         tools = a.tools or (READONLY_TOOLS + ",Bash" if read_only else WORKER_TOOLS)
 
     todo_id = (prev or {}).get("todo") or getattr(a, "todo", None)
@@ -2645,7 +2708,7 @@ def _cmd_run(a):
             os.remove(os.path.join(workdir, stale))
     try:
         with wt_lock:
-            raw, err, reads = stream_worker(cmd, today_line() + "\n\n" + (f"Note: {WATCHER_NOTE}.\n\n" if watchers else "") + task, workdir, env,
+            raw, err, reads = stream_worker(cmd, today_line() + "\n\n" + (f"Note: {WATCHER_NOTE}.\n\n" if watchers else "") + task + claims_section(claims), workdir, env,
                                             run_seconds, max_reads, note_session,
                                             cwd=project if native_rules else None, warn_turns=a.max_turns)
     except FileNotFoundError:
@@ -2685,6 +2748,7 @@ def _cmd_run(a):
     if tu and sum(tu.values()) > sum((out.get("usage") or {}).get(k, 0) or 0 for k in usage.FIELDS):
         out["usage"] = dict(out.get("usage") or {}, **tu)  # the result's usage can under-count; the transcript doesn't
     summary, fb = parse_feedback(out.get("result") or "")
+    summary_full = summary
     mcp_seq = (lean_mcp.mcp_call_sequence(workdir, out.get("session_id"), started_utc)
                if (mcp_specs or chrome_spec) else [])
     offered = offered_tools(mcp_specs)
@@ -2716,6 +2780,7 @@ def _cmd_run(a):
         if final_text:
             out["result"] = final_text
             summary, fb = parse_feedback(final_text)
+            summary_full = summary
     timeout_dirty = None
     if reads.get("timed_out") and not out.get("type"):  # killed by lean-agent's timer: keep what the stream showed
         prior = out.get("usage") or {}
@@ -2725,6 +2790,7 @@ def _cmd_run(a):
         fb = {}
         out = {"subtype": "timeout", "session_id": reads.get("session_id"), "num_turns": reads["turns"], "usage": keep,
                "is_error": True, "result": summary, "total_cost_usd": round(usage.estimate_usd(keep, model), 4)}
+    claim_bad = check_claims(claims, summary_full, tool_call_text(raw)) if claims and not out.get("is_error") and out.get("type") else []
     subtype = out.get("subtype") or "error"
     if subtype == "timeout":
         status = "timed out"
@@ -2795,6 +2861,7 @@ def _cmd_run(a):
         "mcp_calls": {t: mcp_seq.count(t) for t in dict.fromkeys(mcp_seq)},
         "mcp_seq": mcp_seq[:60], "mcp_offered": {k: len(v) for k, v in offered.items()},
         "result_head": (summary or "")[:600],
+        "claims": claims or None, "unverified_claims": [f"{c} ({w})" for c, w in claim_bad] or None,
         "details": details_path, "detached_warning": wt_warning,
     })
     if status == "timed out":
@@ -2890,6 +2957,8 @@ def _cmd_run(a):
     elif status in ("done", "partial") and turns_n >= 40 and ctx // max(1, turns_n) >= 60000:
         print(f"  heavy run: {turns_n} turns at ~{ctx // turns_n:,} context each. Next time split it into "
               "smaller parallel workers and one that combines their answers.")
+    for c, w in claim_bad:
+        print(f"{UNVERIFIED_MARK}: {c} ({w})")
     if status == "needs-input":
         print("ACTION NEEDED: the worker needs an answer (see above). Ask the user, then: "
               f"lean-agent run --resume {run_id} \"<answer>\"")
@@ -9112,6 +9181,8 @@ def cmd_runs(a):
         if needs and not a.details:
             print("blocked on permission: rerun with `lean-agent run ... --resume " + r["id"] + " "
                   + " ".join(needs) + "`")
+        for c in r.get("unverified_claims") or []:
+            print(f"{UNVERIFIED_MARK}: {c}")
         if r.get("status") == "timed out" and not a.details:
             dirty = (git(r["project_path"], "status", "--porcelain") or "").splitlines() if r.get("project_path") else []
             print(f"uncommitted now in {r.get('project_path')}: " + (f"{len(dirty)} file(s)" if dirty else "nothing"))
@@ -13118,9 +13189,19 @@ Answer with at most 15 lines, the first one exactly `ADVICE`, then one short lin
   "Known issues" listed in the task that apply (say what to do first, e.g. the fix it names) (or none)
 `ask the user first:` `yes: <the question>`, `user already asked: proceed`, or `no`; an ambiguous request is always `yes`
 `--allow-cmd` only goes with `--read-only`: never put it in a command for a worker that edits.
+When the request states something as fact about a PR, fix or merge ("I fixed it", "already merged", "that's done in PR 12"),
+the suggested command carries `--claim "<that sentence, verbatim>"` so the worker verifies it (opening the PR it names).
 Pick the cheapest model that fits (haiku for reading, sonnet for edits, opus only for hard design). No other text.
 """
 ADVICE_KEEP = 50
+USER_CLAIM_RE = re.compile(r"(?i)\b(i(?:'ve| have)? (?:already )?(?:fixed|merged|done|resolved|released|deployed)|(?:already|is|was|been|it's|that's|its) "
+                           r"(?:fixed|merged|resolved|released|deployed|done)|(?:fixed|done|merged|resolved) (?:in|by|with|to|into) )")
+
+
+def user_claims(request):
+    """Sentences of a request that state something as fact about a fix, merge or PR (what `run --claim` is for)."""
+    parts = re.split(r"(?<=[.!?;])\s+|\n+", str(request or ""))
+    return [p.strip()[:300] for p in parts if USER_CLAIM_RE.search(p)][:3]
 
 
 def advice_dir():
@@ -13272,6 +13353,11 @@ def vet_suggested(line, request=""):
     if i is None:
         return line, ""
     toks, notes = tokens[i + 1:], []
+    if "--claim" not in toks:  # the user's statements of fact travel with the task, to be verified
+        extra = [x for c in user_claims(request) for x in ("--claim", c)]
+        if extra:
+            at = toks.index("--") if "--" in toks else 0
+            toks = toks[:at] + extra + toks[at:]
     task = " ".join(toks[toks.index("--") + 1:]) if "--" in toks else " ".join(t for t in toks if not t.startswith("-"))
     if "--read-only" in toks and CHANGE_RE.search(task + " " + request):
         toks = drop_flag_tokens(toks, {"--read-only", "--allow-cmd"})
@@ -13940,6 +14026,9 @@ def build_parser():
                    "again on the next (e.g. haiku,sonnet). Replaces --model")
     s.add_argument("--todo", type=todo_arg, metavar="N", help="the work-queue item this run "
                    "works on (an open item becomes doing)")
+    s.add_argument("--claim", action="append", metavar="TEXT", help="something the user stated as fact (\"I fixed it in PR 12\", "
+                   "\"already merged\"), verbatim; the worker must verify it, opening every PR/commit/item it names, and answer "
+                   "with one `Claim:` line each; a claim it did not check is flagged UNVERIFIED (repeatable)")
     s.add_argument("--allow-cmd", action="append", metavar="PREFIX", help="--read-only: also allow this read-only "
                    "command prefix, e.g. \"az pipelines runs show\" (repeatable; commands that change things are refused)")
     s.add_argument("--allow-edit", action="append", metavar="PATH", help="let the worker edit this repo-owned path "

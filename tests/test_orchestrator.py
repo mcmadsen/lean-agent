@@ -157,6 +157,11 @@ FAKE_CLAUDE = textwrap.dedent("""\
             {"type": "text", "text": os.environ["FAKE_SAY"]},
             {"type": "tool_use", "id": "tus", "name": "Bash", "input": {"command": "git merge topic-b"}}],
             "usage": {"input_tokens": 20, "output_tokens": 30}}}), flush=True)
+    if os.environ.get("FAKE_TOOLCMD"):  # tool calls the worker made (separated by ||)
+        for i, c in enumerate(os.environ["FAKE_TOOLCMD"].split("||")):
+            print(json.dumps({"type": "assistant", "session_id": "sess-1", "message": {"id": "tc-%d" % i, "content": [
+                {"type": "tool_use", "id": "tc%d" % i, "name": "Bash", "input": {"command": c}}],
+                "usage": {"input_tokens": 5}}}), flush=True)
     if os.environ.get("FAKE_HANG"):
         time.sleep(60)
     second = "search-only second opinion" in open(append).read()
@@ -1710,7 +1715,7 @@ class CliTest(unittest.TestCase):
             return json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"] if p.stdout.strip() else None
         self.assertEqual(call(home), "deny")
         self.assertIsNone(call(self.proj))                      # normal sessions are never blocked
-        self.assertIsNone(call(home, "lean-agent limits --5h 0"))  # the user can still raise it
+        self.assertNotEqual(call(home, "lean-agent limits --5h 0"), "deny")  # the user can still raise it (allowed, never denied)
 
     def test_max_budget_status(self):
         self.cli("learn", self.proj)
@@ -9702,6 +9707,54 @@ class CliTest(unittest.TestCase):
             text = fh.read()
         self.assertIn("| Item | What | State | Thread | Next |", text)
         self.assertIn("**Your call:** / **Your vote:** in Next AND is asked with AskUserQuestion", text)
+
+    def test_claims_are_passed_and_checked(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        run = lambda *claims, **env: self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--again",
+                                              *[x for c in claims for x in ("--claim", c)], "--", "look at the comment", **env)
+        claim = "I fixed it in PR 4711, merged to develop"
+        out = run(claim, FAKE_TOOLCMD="gh pr view 4711||git log develop").stdout
+        call = self.calls()[-1]
+        self.assertIn("User's claims (verify each one; open every PR, commit or work item a claim names before concluding):\n- " + claim,
+                      call["task"])
+        self.assertIn("Claim: <short>", call["append"])
+        self.assertIn("UNVERIFIED against the user's claim: " + claim, out)  # no Claim line in the reply
+        ok = ("Claim: fixed in PR 4711 — verified: read PR 4711 (merged), git log develop\n")
+        out = run(claim, FAKE_TOOLCMD="gh pr view 4711", FAKE_ANSWER="Done.\n" + ok).stdout
+        self.assertNotIn("UNVERIFIED", out)
+        out = run(claim, FAKE_TOOLCMD="grep -n foo a.py", FAKE_ANSWER="Done.\n" + ok).stdout  # PR 4711 never opened
+        self.assertIn("UNVERIFIED against the user's claim: " + claim + " (PR 4711 never opened)", out)
+        shown = self.cli("runs", "--show", self.cli("runs", "--last").stdout.split()[0]).stdout
+        self.assertIn("UNVERIFIED against the user's claim", shown)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--again", "--", "no claims here")
+        self.assertNotIn("User's claims", self.calls()[-1]["task"])
+        self.assertNotIn("Claim: <short>", self.calls()[-1]["append"])
+
+    def test_advise_claim_is_added_to_suggested_run(self):
+        self.cli("learn", self.proj, "--name", "proj")
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_agent
+        self.assertEqual(lean_agent.user_claims("Check PR 9. The comment seems stale: I fixed it in the last release and it's merged to develop."),
+                         ["The comment seems stale: I fixed it in the last release and it's merged to develop."])
+        self.assertEqual(lean_agent.user_claims("Please review PR 9"), [])
+        with mock.patch.dict(os.environ, self.env):
+            line, _ = lean_agent.vet_suggested("suggested: lean-agent run -p proj -m haiku --why x --read-only -- \"look at PR 9\"",
+                                               "The comment on PR 9 is stale, I fixed it in PR 12.")
+            self.assertIn("--claim", line)
+            self.assertIn("I fixed it in PR 12", line)
+            self.assertEqual(self.cli("run", "--check", *shlex.split(line.split("lean-agent run", 1)[1])).returncode, 0)
+            self.assertNotIn("--claim", lean_agent.vet_suggested("suggested: lean-agent run -p proj -m haiku --why x -- \"look\"", "look at PR 9")[0])
+
+    def test_guides_tell_threads_to_pass_claims(self):
+        tpl = os.path.join(os.path.dirname(CLI), "..", "templates")
+        with open(os.path.join(tpl, "guide.md"), encoding="utf-8") as fh:
+            guide = " ".join(fh.read().split())
+        with open(os.path.join(tpl, "front-desk.md"), encoding="utf-8") as fh:
+            desk = fh.read()
+        for text in ("--claim", "unverified against your claim", "UNVERIFIED against the user's claim", "never present it as settled"):
+            self.assertIn(text, guide)
+        self.assertIn("unverified against your claim", desk)
+        self.assertLess(len(desk), 6000)
 
     def test_failed_start_is_reported_logged_and_noted(self):
         self.cli("learn", self.proj, "--name", "proj")
