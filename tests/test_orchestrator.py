@@ -8772,6 +8772,31 @@ class CliTest(unittest.TestCase):
         self.assertIn("no open known gaps", p.stdout)
         self.assertEqual(p.returncode, 0)
 
+    def test_chase_decide_is_a_hidden_haiku_helper_run(self):
+        ctx = [{"id": "g1", "thread": "t21", "ref": "PR 512", "kind": "quiet", "run": "", "quiet_min": 45,
+                "last_report": "x" * 900, "last_chase": "", "last_reply": "ignoring 0105-0900-aa11, superseded", "runs": []},
+               {"id": "g2", "thread": "t22", "ref": "PR 600", "kind": "lost", "run": "0105-0900-bb22", "quiet_min": 5,
+                "last_report": "", "last_chase": "", "last_reply": "", "runs": []}]
+        path = os.path.join(self.tmp.name, "chase-in.json")
+        with open(path, "w") as fh:
+            json.dump(ctx, fh)
+        decided = {"decisions": [{"goal": "g1", "action": "skip", "why": "thread said superseded"},
+                                 {"goal": "g2", "action": "chase", "message": "Resume 0105-0900-bb22 for PR 600.", "why": "lost"},
+                                 {"goal": "g3", "action": "bogus"}]}
+        fb = '{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-CHASE ' + json.dumps(decided)
+        p = self.cli("chase-decide", path, FAKE_FEEDBACK=fb)
+        out = json.loads(p.stdout.strip().splitlines()[-1])
+        self.assertEqual(out["decisions"]["g1"]["action"], "skip")
+        self.assertEqual(out["decisions"]["g2"]["message"], "Resume 0105-0900-bb22 for PR 600.")
+        self.assertNotIn("g3", out["decisions"])
+        call = self.calls()[-1]
+        self.assertIn("haiku", call["argv"][call["argv"].index("--model") + 1])
+        self.assertIn("ignoring 0105-0900-aa11", call["append"])
+        self.assertNotIn("x" * 500, call["append"])  # the report is capped
+        row = self.ledger()[-1]
+        self.assertEqual(row["role"], "chaser")
+        self.assertNotIn(row["id"], self.cli("runs").stdout)  # hidden from the runs list
+
     def test_review_decide_gaps_edge_cases(self):
         self.git_project()
         self.cli("learn", self.proj, "--name", "proj")

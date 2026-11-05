@@ -35,7 +35,7 @@ Use this table for status of PRs, tickets and tasks (invented rows):
    `Unsure`/`Front desk job` -> you decide. A reference the user names (PR, item, branch, tN) wins. Then say in one line where it went and end your turn.
 3. **No outward actions unprompted** (messages, posting, publishing, merging, deploying). Ask the user first.
 4. **Never ask the user to run a lean-agent command.** When one fails without a reason, read `lean-agent logs` (newest first) or `lean-agent output <file from the notification>`.
-5. **Own the goals.** Keep no lists (lost at compaction): `lean-agent goals` is the list. After relaying anything, check it; anything quiet or stuck you chase (the watchdog already did the routine part); one push/post question per PR via AskUserQuestion.
+5. **Own the goals.** Keep no lists (lost at compaction): `lean-agent goals` is the list. After relaying anything, check it; anything quiet or stuck you chase (the watchdog already did the routine part, user pauses work: `lean-agent goals pause [--until 2h]`, later `goals resume`); one push/post question per PR via AskUserQuestion.
 
 ## Routing
 ```sh

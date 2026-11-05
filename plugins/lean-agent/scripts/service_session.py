@@ -28,6 +28,7 @@ import signal
 import socket
 import stat
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -1068,6 +1069,26 @@ def goal_send(tid, text):
         return False, str(exc)
 
 
+def chase_decide(contexts):
+    """One haiku helper run (`lean-agent chase-decide`, role chaser, hidden from runs) for a batch of quiet or lost goals:
+    {goal id: {action, message, why}, "_cost": usd}."""
+    exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lean_agent.py")
+    fd, p = tempfile.mkstemp(suffix=".json", dir=lean_home())
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(contexts, fh)
+        r = subprocess.run([sys.executable, exe, "chase-decide", p], capture_output=True, text=True, timeout=90)
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+    finally:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    got = dict(out.get("decisions") or {})
+    got["_cost"] = out.get("_cost") or 0
+    return got
+
+
 def reports_path():
     return lean_home("thread-reports.json")
 
@@ -1092,6 +1113,7 @@ def queue_report(tid, kind, text, tag="", force=False):
     if kind != "chase":
         try:  # a report is activity on the thread's goals (and answers a chase)
             lean_goals.touch(tid, reset=kind in ("done", "needs-you", "question"))
+            lean_goals.acknowledge(tid, text)  # superseded/ignored/abandoned/merged: remembered, never chased again
         except Exception:
             pass
     with lean_common.file_lock(reports_path()):
@@ -1726,7 +1748,7 @@ class Reporter(AutoClear):
         if now - getattr(self, "goals_at", 0) < _knob("LEAN_AGENT_GOAL_TICK", GOAL_TICK):
             return
         self.goals_at = now
-        lines = lean_goals.watchdog(now, goal_send, lambda tid: alive_thread(tid), log=self.log)
+        lines = lean_goals.watchdog(now, goal_send, lambda tid: alive_thread(tid), log=self.log, decide=chase_decide)
         for line in lines:
             queue_report(re.search(r"\b(t\d+)\b", line).group(1) if re.search(r"\b(t\d+)\b", line) else "main", "chase", line)
 

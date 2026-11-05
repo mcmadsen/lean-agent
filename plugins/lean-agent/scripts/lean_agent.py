@@ -1755,10 +1755,10 @@ def duplicate_launch_guard(a, model, task):
     return key
 
 
-INTERNAL_ROLES = ("librarian", "advisor", "composer", "gap-decider", "tracker-discover", "review-learn", "reuse-check")
+INTERNAL_ROLES = ("librarian", "advisor", "composer", "gap-decider", "chaser", "tracker-discover", "review-learn", "reuse-check")
 # helper runs behind another command: not shown as workers (runs list, thread lists, --wait all, week counts, "started" line)
 
-NO_RESUME_ROLES = ("librarian", "advisor", "composer", "gap-decider")  # one-shot helpers with their own grants
+NO_RESUME_ROLES = ("librarian", "advisor", "composer", "gap-decider", "chaser")  # one-shot helpers with their own grants
 
 
 def latest_run_id(runs=None, ordinary=False):
@@ -2885,6 +2885,9 @@ def _cmd_run(a):
     elif role == "gap-decider":
         summary, decided = parse_marker(summary, "LEAN-GAPS")
         save_json(os.path.join(workdir, "gaps.json"), decided or {})
+    elif role == "chaser":
+        summary, decided = parse_marker(summary, "LEAN-CHASE")
+        save_json(os.path.join(workdir, "chase.json"), decided or {})
     elif role == "tracker-discover":
         summary, found = parse_marker(summary, "LEAN-TRACKER")
         save_json(os.path.join(workdir, "tracker.json"), found or {})
@@ -13152,8 +13155,71 @@ def cmd_waiting(a):
     return 0
 
 
+CHASE_RULE = """You decide, for each goal below, whether a thread that went quiet needs a wake-up message. Waking a thread
+costs a full context read, so only choose "chase" when the thread must act and has not said otherwise. Facts only come
+from the text given; do not run commands or read files.
+- "skip": the thread already answered or ignored this notice, the run was superseded, or nothing is actually pending.
+- "drop-goal": the thread or the records say the PR/work item was abandoned, closed or is no longer needed.
+- "done-goal": it was merged, pushed and posted, or finished.
+- "chase": the thread must act. Give a message of ONE short sentence: what, the run id if any, one action.
+Goals (JSON):
+{goals}
+Answer with one line exactly like this (valid JSON, one line) before the LEAN-FEEDBACK line:
+LEAN-CHASE {{"decisions": [{{"goal": "g1", "action": "chase|skip|drop-goal|done-goal", "message": "one sentence for a chase", "why": "short reason"}}]}}
+"""
+
+
+def chase_decide(a):
+    """internal: one haiku helper run decides a batch of quiet/lost goals (JSON file in); prints
+    {"decisions": {goal: {...}}, "_cost": usd} for the goals watchdog."""
+    goals = load_json(a.file, [])
+    if not goals:
+        print(json.dumps({"decisions": {}, "_cost": 0}))
+        return 0
+    for g in goals:  # tiny context: every field capped
+        for k in ("last_report", "last_chase", "last_reply"):
+            g[k] = str(g.get(k) or "")[:400]
+        g["runs"] = [str(r)[:120] for r in (g.get("runs") or [])[-4:]]
+    work = home("chaser")  # an empty project dir of its own: the helper reads no repository
+    os.makedirs(work, exist_ok=True)
+    ns = argparse.Namespace(resume=None, task=["Decide the quiet goals: chase, skip, drop-goal or done-goal."], task_file=None,
+                            model="haiku", todo=None, why="cheap goal chase check", cards="none", card_list=None,
+                            project=work, read_only=True, chrome=None, mcp=None, tools=None, allow_send=None,
+                            max_turns=3, max_usd=0.1, max_context=1500, max_cards=0, ttype="read", role="chaser",
+                            effort="low", role_rule=CHASE_RULE.format(goals=json.dumps(goals, indent=0)))
+    LAST_RUN[:] = []
+    with contextlib.redirect_stdout(io.StringIO()):
+        cmd_run(ns)
+    run = LAST_RUN[0] if LAST_RUN else None
+    got = load_json(os.path.join(run["workdir"], "chase.json"), {}) if run and run.get("workdir") else {}
+    out = {}
+    for d in got.get("decisions") or []:
+        if isinstance(d, dict) and d.get("goal") and d.get("action") in ("chase", "skip", "drop-goal", "done-goal"):
+            out[str(d["goal"])] = {"action": d["action"], "message": str(d.get("message") or "")[:240], "why": str(d.get("why") or "")[:160]}
+    out["_cost"] = float((run or {}).get("cost_usd") or 0)
+    print(json.dumps({"decisions": {k: v for k, v in out.items() if k != "_cost"}, "_cost": out["_cost"]}))
+    return 0
+
+
 def cmd_goals(a):
-    print(lean_goals.table() or "No open goals.")
+    args = list(a.args or [])
+    if args[:1] == ["pause"]:
+        try:
+            until = lean_goals.parse_until(a.until) if a.until else None
+        except ValueError as exc:
+            die(str(exc))
+        lean_goals.pause(until)
+        print("goal chases paused" + (f" until {lean_goals._iso(until)}" if until else " until `lean-agent goals resume`"))
+        return 0
+    if args[:1] == ["resume"]:
+        print("goal chases resumed" if lean_goals.resume() else "goal chases were not paused")
+        return 0
+    if a.chase_log:
+        print(lean_goals.log_text())
+        return 0
+    if lean_goals.paused():
+        print("(chases paused" + (f" until {lean_goals._iso(lean_goals.read_pause_until())}" if lean_goals.read_pause_until() else "; `lean-agent goals resume`") + ")")
+    print(lean_goals.table(detail=True) or "No open goals.")
     return 0
 
 
@@ -14982,8 +15048,16 @@ def build_parser():
     s.add_argument("--answer", help="done: what the user answered")
     s.set_defaults(fn=cmd_waiting)
 
-    s = sub.add_parser("goals", help="the open goals (one per PR, work item or branch the front desk owns): Goal | Ref | Thread | State | Quiet | Next")
+    s = sub.add_parser("goals", help="the open goals (one per PR, work item or branch the front desk owns): Goal | Ref | Thread | State | Quiet | Next; "
+                       "`goals pause [--until 2h|18:00]` / `goals resume` stops/restarts all chases; --chase-log: recent chase decisions with cost")
+    s.add_argument("args", nargs="*")
+    s.add_argument("--until", help="with pause: how long (2h, 30m, 18:00 or an ISO time)")
+    s.add_argument("--chase-log", action="store_true", help="recent chase decisions (skip/chase/drop) with cost")
     s.set_defaults(fn=cmd_goals)
+
+    s = sub.add_parser("chase-decide", help="internal: one haiku run deciding a batch of quiet goals")
+    s.add_argument("file")
+    s.set_defaults(fn=chase_decide)
 
     s = sub.add_parser("goal", help="`add \"<ref>\" [tN]`, `done <id>`, `drop <id>`, `next <id> \"<text>\"`")
     s.add_argument("args", nargs="*")
