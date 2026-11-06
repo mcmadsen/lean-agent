@@ -161,7 +161,7 @@ lean-agent saves that part to a file and shows only its path. The LEAN-* lines s
 """
 
 BRANCH_RULE = ("New branches follow the project's branch rules: if you must create one yourself, get its name with\n"
-               "`lean-agent branch-name -p <project> [--type feature|bugfix|release] [--task ID] \"<title>\"`.\n")
+               "`lean-agent branch-name -p <project> [--type feature|bugfix|release] [--task ID] \"<title>\"` (never a lean/ prefix).\n")
 SHELL_RULE = "Run shell commands as `cd {project} && <command>`."
 MUTATING_WORDS = {"delete", "create", "update", "set", "apply", "push", "rm", "merge", "deploy", "remove", "add", "put",
                   "post", "patch", "install", "exec", "write", "reset", "approve", "complete", "abandon", "queue"}
@@ -2432,6 +2432,15 @@ def preflight_run_args(a, slug, project, read_only):
             die_try(f"unknown card(s): {', '.join(missing)} (see: lean-agent cards {slug})", card=set(missing))
     check_allow_cmd([c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()], read_only)
     clean_allow_edit(getattr(a, "allow_edit", None), read_only)
+    wt_ref = getattr(a, "worktree", None)
+    if wt_ref and wt_ref != "auto" and not branch_conforms(slug, wt_ref):
+        # a new branch with a name that breaks the rules is refused now; an existing one (local or on the remote) is fine
+        known = any(git(project, "rev-parse", "--verify", "--quiet", r + "^{commit}") for r in (wt_ref, "origin/" + wt_ref))
+        if not known and git(project, "remote"):
+            known = bool(subprocess.run(["git", "-C", project, "ls-remote", "--heads", "origin", wt_ref],
+                                        capture_output=True, text=True).stdout.strip())
+        if not known:
+            check_new_branch(slug, project, wt_ref, getattr(a, "why", None), getattr(a, "todo", None))
     base = getattr(a, "worktree_base", None)
     if base and getattr(a, "worktree", None):
         if base.startswith("origin/"):
@@ -2540,7 +2549,8 @@ def _cmd_run(a):
                         print(note, flush=True)
                 wt_repo = project
                 wt = ensure_worktree(slug, project, a.worktree, reset=getattr(a, "reset_worktree", False),
-                                     base=getattr(a, "worktree_base", None), typed=not auto_branch)
+                                     base=getattr(a, "worktree_base", None), typed=not auto_branch,
+                                     hint=(getattr(a, "why", None), getattr(a, "todo", None)))
             project = wt["path"]
             print(f"worktree: {wt['ref']} at {wt['path']} ({'reused' if wt['reused'] else 'created'}"
                   f"{', on branch ' + wt['branch'] if wt['branch'] else ', detached'}, HEAD {wt['head'][:10]})", flush=True)
@@ -7100,6 +7110,55 @@ def new_branch_name(slug, repo, kind, task_id, title, version=None):
     return branch_name(slug, kind, task_id, title, version, taken=set(branch_names(repo)))
 
 
+_LEAN_PREFIX = re.compile(r"^lean([-/]|$)", re.I)
+
+
+def branch_conforms(slug, name):
+    """True when `name` is acceptable for a NEW branch/remote branch: not a lean/ or lean- prefix and, for a project
+    with saved branch rules, matching one of them. Projects without saved rules only get the prefix check."""
+    if _LEAN_PREFIX.match(name or ""):
+        return False
+    saved = (projects().get(slug) or {}).get("branch_rules") or {}
+    if not saved:
+        return True
+    for pat in branch_rules(slug).values():
+        rx = re.escape(pat)
+        rx = rx.replace(re.escape("{task-id}-"), r"(?:[A-Za-z0-9][A-Za-z0-9._-]*-)?").replace(re.escape("{task-id}"), r"[A-Za-z0-9][A-Za-z0-9._-]*")
+        rx = rx.replace(re.escape("{name}"), r".+").replace(re.escape("{version}"), r".+")
+        if re.fullmatch(rx, name):
+            return True
+    return False
+
+
+def suggest_branch(slug, repo, name, why=None, todo=None):
+    """A conforming name for a refused one: kind guessed from the words, item id from the todo's ref or a number in --why,
+    title from --why else the refused name without its prefix."""
+    stem = re.sub(r"^(lean[-/]+|[A-Za-z]+/)", "", name or "")
+    title = (why or "").strip() or stem.replace("-", " ").replace("_", " ") or "work"
+    tid = todo_task_id(todo)
+    if not tid:
+        m = re.search(r"(?<![\w.])#?(\d{1,7})(?![\w.])", why or "")
+        tid = m.group(1) if m else None
+    kind = infer_branch_kind(title if why else name.replace("-", " "))
+    if kind == "release" and not title_version(title):
+        kind = "feature"
+    return new_branch_name(slug, repo, kind, tid, title)
+
+
+def check_new_branch(slug, repo, name, why=None, todo=None, cmd="--worktree"):
+    """Dies for a new branch name that breaks the project's branch rules (or has a lean prefix)."""
+    if branch_conforms(slug, name):
+        return
+    try:
+        better = suggest_branch(slug, repo, name, why, todo)
+    except SystemExit:
+        better = f"feature/{branch_slug(name) or 'work'}"
+    reason = ("a lean/ or lean- prefix is not a branch name for the remote" if _LEAN_PREFIX.match(name)
+              else "it doesn't match the project's branch rules (lean-agent config branch-rules)")
+    die(f"new branch {name!r} refused: {reason}. Existing branches are used as they are; for a new one "
+        f"try: {cmd} {better}   (or --worktree auto)")
+
+
 def release_note(slug, name):
     """Said when a new branch matches the push guard (release/* by default): local is fine, pushing stays blocked."""
     if not push_guard.guarded(name, push_guard.project_patterns(slug)):
@@ -7207,7 +7266,7 @@ def worktree_attach(a):
     print(f"{a.ref} moved to {head[:10]}; {path} is on the branch")
 
 
-def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True):
+def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True, hint=None):
     """A shared worktree of `ref` for this project: reuse it (moved to the ref's tip when clean) or create it.
     A branch that exists neither locally nor on the remote is created from the base. `typed` is False for a generated
     name, which skips the "did you mean" check (that is only for names the user typed)."""
@@ -7230,6 +7289,8 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True):
             near = next((b for b in branch_names(repo) if b != ref and edit_distance(b, ref) <= 2), None)
             if near:
                 die(f"no branch {ref!r} in {repo}; did you mean {near}? add --worktree-base <ref> to create {ref}")
+        if typed:
+            check_new_branch(slug, repo, ref, *(hint or (None, None)))
         if new_from and new_from.startswith("origin/"):
             git(repo, "fetch", "-q", "origin")
         sha = new_from and git(repo, "rev-parse", "--verify", "--quiet", new_from + "^{commit}")
@@ -7444,13 +7505,21 @@ def worktree_create(a):
     slug, repo = resolve_project(a.project)
     if not a.ref or not a.from_ref:
         die("lean-agent worktree create <project> <new-branch> --from <ref>   (ref: a local branch, tag, origin/<x> or commit)")
+    if a.ref == "auto":
+        a.ref = new_branch_name(slug, repo, getattr(a, "branch_type", None), todo_task_id(getattr(a, "todo", None)),
+                                branch_title(getattr(a, "todo", None), "", getattr(a, "branch_name", None) or getattr(a, "why", None)),
+                                getattr(a, "branch_version", None))
+        auto = True
+    else:
+        auto = False
     if git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + a.ref):
         die(f"branch {a.ref} already exists in {repo}; use `run --worktree {a.ref}` to work on it")
     if a.from_ref.startswith("origin/"):
         git(repo, "fetch", "-q", "origin")
     if not git(repo, "rev-parse", "--verify", "--quiet", a.from_ref + "^{commit}"):
         die(f"--from {a.from_ref!r} is unknown in {repo} (a local branch, tag, origin/<branch> or commit)")
-    wt = ensure_worktree(slug, repo, a.ref, base=a.from_ref, typed=False)
+    wt = ensure_worktree(slug, repo, a.ref, base=a.from_ref, typed=not auto,
+                         hint=(getattr(a, "why", None), getattr(a, "todo", None)))
     print(f"{wt['path']}")
     return 0
 
@@ -7654,6 +7723,14 @@ def worktree_push(a):
         print(f"push guard {hit!r} overridden: {a.override_guard}")
     on_remote = bool(subprocess.run(["git", "-C", path, "ls-remote", "--heads", "origin", target],
                                     capture_output=True, text=True).stdout.strip())
+    if not on_remote and not branch_conforms(slug, target):
+        try:
+            better = suggest_branch(slug, repo, target)
+        except SystemExit:
+            better = f"feature/{branch_slug(target) or 'work'}"
+        die(f"refused: origin/{target} would be a NEW remote branch whose name breaks the project's branch rules "
+            f"(or has a lean prefix). Pushing to an existing remote branch is fine. try: lean-agent worktree push {slug} "
+            f"{a.ref} --remote-branch {better} --new-branch ... (or rename the branch)", 3)
     if not on_remote and not a.new_branch:
         die(f"refused: {branch} would create a NEW remote branch origin/{target}, which isn't on the remote yet. "
             f"To push to an existing branch (e.g. the PR's source branch): lean-agent worktree push {slug} {a.ref} "
@@ -14247,12 +14324,14 @@ whole server).
 When the task mentions merging into, or starting from, a branch (possibly an unpushed local one, a tag or a commit), the
 suggested command carries `--worktree <new-branch> --worktree-base <that ref>`; without it a new branch starts from the
 project's default base.
+For a task that changes files on a NEW branch the suggested command carries `--worktree auto` (it follows the project's branch
+rules), never an invented name or a lean/ prefix.
 Answer with at most 15 lines, the first one exactly `ADVICE`, then one short line each:
 `understood:` the request in one line, in your own words
 `ambiguous:` only when the request has two plausible readings: `<reading A> | <reading B>` (leave the line out otherwise)
 `known:` facts and earlier decisions that apply (or none)
 `project:` the project slug and the card ids (--cards) that fit
-`suggested:` ONE exact command: `{lean} run <project> --cards auto|<ids> -m <model> --effort <low|medium|high> [--mcp <server>[:<preset>]] [--todo N|new] [--worktree <name>] --why "..." -- "<task>"`,
+`suggested:` ONE exact command: `{lean} run <project> --cards auto|<ids> -m <model> --effort <low|medium|high> [--mcp <server>[:<preset>]] [--todo N|new] [--worktree auto|<existing-branch>] --why "..." -- "<task>"`,
   or `{lean} remember "<text>"`, or `answer from state` when nothing needs doing
 `risks:` open review gaps on that branch, a decision that contradicts the request, a run still working on it, and any
   "Known issues" listed in the task that apply (say what to do first, e.g. the fix it names) (or none)
@@ -15314,6 +15393,8 @@ def build_parser():
     s.add_argument("action", choices=["rm", "setup", "push", "base", "attach", "create", "adopt"])
     s.add_argument("--from", dest="from_ref", metavar="REF", help="create: where the new branch starts (a local branch, tag, origin/<x> or commit)")
     s.add_argument("--show", action="store_true", help="setup: print the stored command (or none)")
+    s.add_argument("--why", help="create: with `auto`, the title the branch is named after (and the source of a suggested name)")
+    s.add_argument("--todo", type=todo_arg, metavar="N", help="create: the work-queue item (its ref gives the work item id)")
     s.add_argument("project")
     s.add_argument("ref", nargs="?", help="the worktree's branch (setup: also run the command there now)")
     s.add_argument("--run", dest="command", metavar="COMMAND", help="setup: the command for new worktrees")
