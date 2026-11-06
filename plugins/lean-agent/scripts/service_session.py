@@ -882,6 +882,75 @@ AUTO_REPORT_MIN = 120  # characters: a turn-ending text this long with no report
 PROMPT_RE = re.compile(r"Esc to cancel|Do you want to (?:proceed|make|create|allow)|❯\s*1\.\s*Yes")
 
 
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]")
+OPTION_RE = re.compile(r"^\s*[❯>]?\s*(\d)\.\s+(\S.*?)\s*$")
+PERMISSION_CMD_CHARS = 200
+PERMISSION_OPTIONS = ["Approve once", "Approve always (this command prefix)", "Deny"]
+
+
+def parse_permission_prompt(screen):
+    """The permission prompt on a session's terminal screen, or None: {"tool": header ("Bash command", "Edit file"),
+    "command": the command or file path (capped), "options": [(number, label)]}. Only the last prompt counts."""
+    text = ANSI_RE.sub("", str(screen or "")).replace("\r\n", "\n").replace("\r", "\n")
+    at = max(text.rfind("Do you want to"), text.rfind("Would you like to"))
+    if at < 0:
+        return None
+    lines = [l for l in text[at:].splitlines()[1:] if l.strip()]
+    options = [m.groups() for m in map(OPTION_RE.match, lines[:10]) if m]
+    if not options:
+        return None
+    after = [l for l in lines[len(options):] if l.strip() and not re.search(r"Esc to cancel|Tab to|ctrl\+", l, re.I)]
+    if after:  # output after the options: the prompt was answered, the session moved on
+        return None
+    body = [l.strip(" │╭╮╰╯─") for l in text[:at].splitlines()[-14:]]
+    body = [l for l in body if l]
+    # the header is the line ending in command/file/tool use/request; what follows it is the command
+    head = next((i for i in range(len(body) - 1, -1, -1) if re.search(r"(command|file|tool use|request|search|fetch)\s*$", body[i], re.I) and len(body[i]) < 60), None)
+    tool = body[head] if head is not None else "tool"
+    command = (body[head + 1] if head is not None and head + 1 < len(body) else body[-1]) if body else ""
+    return {"tool": tool, "command": _short(command, PERMISSION_CMD_CHARS), "options": options}
+
+
+PERMISSION_CHOICES = {"approve": ("approve", "yes", "y", "once", "approve once", "allow"),
+                      "always": ("always", "approve always", "yes always", "allow always"),
+                      "deny": ("deny", "no", "n", "reject")}
+
+
+def permission_choice(text):
+    t = " ".join(str(text or "").lower().replace("(", " ").split())
+    for name, words in PERMISSION_CHOICES.items():
+        if t in words or t.split(" ")[0] == name:
+            return name
+    return None
+
+
+def permission_key(prompt, choice):
+    """The number key of the option for `choice`: approve = the first, always = the option offering not to ask again (else
+    the first), deny = the last (No)."""
+    opts = prompt["options"]
+    if choice == "deny":
+        return opts[-1][0]
+    if choice == "always":
+        for num, label in opts:
+            if re.search(r"don'?t ask again|always allow|allow all", label, re.I):
+                return num
+    return opts[0][0]
+
+
+def answer_permission(key, choice):
+    """Press the option for `choice` (approve | always | deny) in session `key`'s open permission prompt.
+    Returns (pressed label or None, message)."""
+    prompt = parse_permission_prompt(tail(key))
+    if not prompt:
+        return None, "the prompt is no longer open"
+    num = permission_key(prompt, choice)
+    ok, err = keys(num, key)
+    if not ok:
+        return None, "could not press the option: " + (err or "no session")
+    label = next((l for n, l in prompt["options"] if n == num), num)
+    return label, f"pressed {num}. {label}"
+
+
 def reports_mode():
     """on (default), questions-only or off: LEAN_AGENT_THREAD_REPORTS, else `lean-agent config thread-reports`."""
     raw = (os.environ.get("LEAN_AGENT_THREAD_REPORTS") or _load(lean_home("config.json")).get("thread_reports") or "on")
@@ -1150,7 +1219,7 @@ def report_auth_failure(source, is_structured=False):
     return False
 
 
-def queue_report(tid, kind, text, tag="", force=False):
+def queue_report(tid, kind, text, tag="", force=False, waiting=True):
     """Queue one thread report (kind: done | blocked | needs-you | question) for the main session; the mode filters it,
     except an explicit question (`thread ask`) or an explicit report (`thread report`, force), which always go through.
     `tag` marks where it came from (explicit | auto)."""
@@ -1169,7 +1238,7 @@ def queue_report(tid, kind, text, tag="", force=False):
         items = data.get("items") if isinstance(data.get("items"), list) else []
         items.append(dict({"thread": tid, "kind": kind, "text": text, "ts": time.time()}, **({"tag": tag} if tag else {})))
         lean_common.write_json_atomic(reports_path(), {"items": items[-50:]})
-    if kind in ("question", "needs-you"):
+    if waiting and kind in ("question", "needs-you"):
         try:  # waiting on the user is recorded by lean-agent, not left to the front desk's memory
             m = re.match(r"QUESTION (q\d+): (.*?)(?: \[options: (.*)\])?$", str(text))
             opts = [o.strip() for o in m.group(3).split("|")] if m and m.group(3) else None
@@ -1683,6 +1752,35 @@ class Reporter(AutoClear):
     def prompting(self):
         return bool(PROMPT_RE.search(self.host.tail_text()[-1500:]))
 
+    def permission_text(self):
+        """The report line for the permission prompt on screen; the prompt is recorded as an open question (kind
+        permission) with a waiting item, so `thread answer tN qN approve|always|deny` can press its option."""
+        prompt = parse_permission_prompt(self.host.tail_text())
+        if not prompt:
+            return "waits for your permission: " + _short(_question(self.host.tail_text()[-600:]) or "a tool needs approval", 110)
+        tid = self.key
+        what = f"{prompt['tool']}: {prompt['command']}" if prompt["command"] else prompt["tool"]
+        try:
+            import lean_threads
+            qid = lean_threads.ask(tid, "permission: " + what, "|".join(PERMISSION_OPTIONS), kind="permission")
+            lean_waiting.add("permission: " + what, "permission", PERMISSION_OPTIONS, tid, qid=qid)
+        except Exception as exc:  # noqa: BLE001 - the report must still go out
+            qid = ""
+            self.log(f"{tid}: could not record the permission question: {exc}", "error")
+        return f"{qid} waits for your permission: {what} " + (f"-> thread answer {tid} {qid} approve|always|deny" if qid else "")
+
+    def close_permission(self):
+        """The prompt is gone (answered in the terminal, or the turn moved on): close its question and waiting item."""
+        try:
+            import lean_threads
+            t = lean_threads.load()["threads"].get(self.key) or {}
+            for q in lean_threads.open_questions(t):
+                if q.get("kind") == "permission":
+                    lean_threads.answer(self.key, q["id"], "the prompt is no longer open")
+                    lean_waiting.close_for(self.key, {q["id"]}, "the prompt is no longer open")
+        except Exception:  # noqa: BLE001
+            pass
+
     def thread_tick(self):
         path = self.transcript()
         if not path or reports_mode() == "off":
@@ -1699,14 +1797,15 @@ class Reporter(AutoClear):
         if not st["ended"]:
             ask = scan["ask"]
             if ask or (self.prompting() and self.host.alive()):
-                what = "asks: " + _short(ask) if ask else "waits for your permission: " + _short(
-                    _question(self.host.tail_text()[-600:]) or "a tool needs approval", 110)
+                what = "asks: " + _short(ask) if ask else self.permission_text()
                 if self.alerted != what:
                     self.alerted = what
-                    queue_report(tid, "needs-you", what)
+                    queue_report(tid, "needs-you", what, waiting=bool(ask) or " waits for your permission: " not in what)
             else:
                 self.alerted = None
+                self.close_permission()
             return
+        self.close_permission()
         self.alerted = None
         if scan["size"] <= self.seen:
             return

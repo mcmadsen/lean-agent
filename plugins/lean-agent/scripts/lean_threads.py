@@ -831,7 +831,7 @@ def _qnorm(text):
     return " ".join("".join(c if c.isalnum() else " " for c in str(text or "").lower()).split())
 
 
-def ask(tid, text, options=None, info=None):
+def ask(tid, text, options=None, info=None, kind=""):
     """Record an open question on thread `tid` (status "waiting on main"); returns its id qN. The same question
     (normalised text) asked again while open is merged into the open one (count + 1; `info["merged"]` is set)."""
     text = " ".join(str(text or "").split())
@@ -850,8 +850,20 @@ def ask(tid, text, options=None, info=None):
                 info["merged"] = True
             return same["id"]
         qid = "q%d" % (1 + max([int(q["id"][1:]) for q in qs if str(q.get("id", "")).startswith("q") and q["id"][1:].isdigit()] + [0]))
-        qs.append({"id": qid, "text": text[:QUESTION_CHARS], "options": opts, "ts": now_iso()})
+        qs.append({"id": qid, "text": text[:QUESTION_CHARS], "options": opts, "ts": now_iso(), **({"kind": kind} if kind else {})})
     return qid
+
+
+def open_permission(tid, qid=None):
+    """The open permission question `qid` of thread `tid` (default: the only open question, if it is one), else None."""
+    try:
+        data = load()
+        t = data["threads"].get(resolve(norm(tid), data["aliases"])) or {}
+    except ValueError:
+        return None
+    opened = open_questions(t)
+    q = next((x for x in opened if x["id"] == qid), None) if qid else opened[0] if len(opened) == 1 else None
+    return q if q and q.get("kind") == "permission" else None
 
 
 def answer(tid, qid, text):
