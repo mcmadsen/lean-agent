@@ -4513,6 +4513,26 @@ class CliTest(unittest.TestCase):
         for k in ("| ? |", "| more |", "| s21 |", "| a21 <question> |", "| f21 |", "| f21 2 |", "| goals |", "| waiting |"):
             self.assertIn(k, out)
 
+    def test_goals_done_drop_next_block_are_aliases_of_goal_and_shown_in_help_and_shortcuts(self):
+        lg = self.threads_home() and __import__("lean_goals")
+        ids = [lg.ensure(f"PR 90{i}", "t1") for i in range(4)]
+        self.assertIn("goals done gN", self.cli("shortcuts").stdout)
+        for w in ("goals drop gN", "goals next gN", "goals block gN"):
+            self.assertIn(w, self.cli("shortcuts").stdout)
+        helptext = " ".join(self.cli("goals", "--help").stdout.split())
+        for w in ("goals done gN", "goals drop gN", "goals next gN", "goals block gN"):
+            self.assertIn(w, helptext)
+        self.cli("goals", "done", ids[0])
+        self.cli("goals", "drop", ids[1], "--why", "obsolete")
+        self.cli("goals", "next", ids[2], "wait for CI")
+        self.cli("goals", "block", ids[3], "the vendor")
+        st = {g["id"]: g for g in lg._load()}
+        self.assertEqual(st[ids[0]]["state"], "done")
+        self.assertEqual((st[ids[1]]["state"], st[ids[1]]["next"]), ("dropped", "obsolete"))
+        self.assertEqual(st[ids[2]]["next"], "wait for CI")
+        self.assertEqual((st[ids[3]]["state"], st[ids[3]]["blocked_on"]), ("blocked", "the vendor"))
+        self.assertIn("blocked", self.cli("goals").stdout)
+
     def test_now_short_show_cell_lists_files_only_with_files(self):
         lt = self.threads_home()
         t1, t2 = lt.new("One"), lt.new("Two")

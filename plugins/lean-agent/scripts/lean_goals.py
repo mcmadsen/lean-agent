@@ -17,7 +17,7 @@ import lean_common
 import lean_find
 import lean_waiting
 
-OPEN = ("active", "waiting-user", "stuck")
+OPEN = ("active", "waiting-user", "stuck", "blocked")
 STATES = OPEN + ("done", "dropped")
 DEFAULT_TARGET = "pushed+posted"
 QUIET_MIN = 30        # minutes without activity before a thread is nudged (config goal-quiet)
@@ -156,8 +156,22 @@ def done(gid):
     return _set(gid, state="done")
 
 
-def drop(gid):
-    return _set(gid, state="dropped")
+def drop(gid, why=""):
+    f = {"state": "dropped"}
+    if why:
+        f["next"] = " ".join(str(why).split())[:200]
+    return _set(gid, **f)
+
+
+def block(gid, on):
+    """Marked blocked: listed, never chased, until unblocked or its blocker (a goal id) is done."""
+    on = " ".join(str(on or "").split())[:200]
+    return _set(gid, state="blocked", blocked_on=on, next="blocked on: " + on)
+
+
+def unblock(gid):
+    g = next((x for x in _load() if x.get("id") == gid and x.get("state") == "blocked"), None)
+    return bool(g) and _set(gid, state="active", blocked_on="", next="")
 
 
 def set_next(gid, text):
@@ -597,10 +611,14 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
     if is_paused(now):
         return []
     quiet = quiet_minutes() * 60
-    digest, cands = [], []
+    digest, cands, freed = [], [], False
     with lean_common.file_lock(path()):
         items = _load()
+        finished = {x.get("id") for x in items if x.get("state") in ("done", "dropped")}
         for g in items:
+            if g.get("state") == "blocked" and g.get("blocked_on") in finished:
+                g["state"], g["blocked_on"], g["next"] = "active", "", ""
+                freed = True
             if g.get("state") != "active" or not g.get("thread"):
                 continue
             tid, ref = g["thread"], g.get("ref", "")
@@ -706,7 +724,7 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
                 remember("runs", rid, "chased")
             log_decision(now, goal=g["id"], thread=tid, ref=ref, decision="chase", why=why or why_s, how="wake", cost=0)
             digest.append(f"chased {tid} ({ref}): {why_s} → {how}")
-        if cands or digest:
+        if cands or digest or freed:
             _save(items)
     if log:
         for d in digest:

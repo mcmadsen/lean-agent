@@ -13030,6 +13030,10 @@ SHORTCUTS = (
     ("f21", "files t21 made for you, numbered"),
     ("f21 2", "show file 2 of t21 (text only, capped)"),
     ("goals", "open goals"),
+    ("goals done gN", "close goal gN as done (alias of `goal done`)"),
+    ("goals drop gN [--why ...]", "drop goal gN (alias of `goal drop`)"),
+    ("goals next gN \"...\"", "set the next step of goal gN (alias of `goal next`)"),
+    ("goals block gN \"<on what>\"", "mark gN blocked: never chased until `goals unblock gN` or the blocker goal is done"),
     ("waiting", "what waits on you"),
     ("pr21", "PR status of t21 (open comments, votes, CI; known state first, live state cached 10 min)"),
     ("pr21 c", "all active comments on t21's PRs in full"),
@@ -13642,6 +13646,11 @@ def cmd_pr(a):
     return 0 if ok else 1
 
 
+GOALS_HELP = ("The open goals. Close or steer a goal (aliases of `goal`): `goals done gN`, `goals drop gN [--why \"...\"]`, "
+              "`goals next gN \"...\"`, `goals block gN \"<on what>\"` / `goals unblock gN` (blocked goals are never chased). "
+              "`goals pause [--until 2h|18:00]` / `goals resume` stops/restarts all chases.")
+
+
 def cmd_goals(a):
     args = list(a.args or [])
     if args[:1] == ["pause"]:
@@ -13652,6 +13661,8 @@ def cmd_goals(a):
         lean_goals.pause(until)
         print("goal chases paused" + (f" until {lean_goals._iso(until)}" if until else " until `lean-agent goals resume`"))
         return 0
+    if args[:1] in (["done"], ["drop"], ["next"], ["block"], ["unblock"]):
+        return cmd_goal(a)
     if args[:1] == ["resume"]:
         print("goal chases resumed" if lean_goals.resume() else "goal chases were not paused")
         return 0
@@ -13670,15 +13681,24 @@ def cmd_goal(a):
     if act == "add" and 1 <= len(args) <= 2:
         print(lean_goals.add(args[0], args[1] if len(args) > 1 else (lean_threads.resolve_tag() or "")))
     elif act in ("done", "drop") and len(args) == 1:
-        if not (lean_goals.done if act == "done" else lean_goals.drop)(args[0]):
+        why = getattr(a, "why", None) or ""
+        if not (lean_goals.done(args[0]) if act == "done" else lean_goals.drop(args[0], why)):
             die(f"no goal {args[0]} (lean-agent goals)")
         print(f"{args[0]} {act}")
+    elif act == "block" and len(args) == 2:
+        if not lean_goals.block(args[0], args[1]):
+            die(f"no goal {args[0]} (lean-agent goals)")
+        print(f"{args[0]} blocked on: {args[1]}")
+    elif act == "unblock" and len(args) == 1:
+        if not lean_goals.unblock(args[0]):
+            die(f"no blocked goal {args[0]} (lean-agent goals)")
+        print(f"{args[0]} active")
     elif act == "next" and len(args) == 2:
         if not lean_goals.set_next(args[0], args[1]):
             die(f"no goal {args[0]} (lean-agent goals)")
         print(f"{args[0]} next: {args[1]}")
     else:
-        die('usage: lean-agent goal add "<ref>" [tN] | done <id> | drop <id> | next <id> "<text>"')
+        die('usage: lean-agent goal add "<ref>" [tN] | done <id> | drop <id> [--why "<text>"] | next <id> "<text>" | block <id> "<on what>" | unblock <id>')
     return 0
 
 
@@ -15500,9 +15520,12 @@ def build_parser():
     s.add_argument("--answer", help="done: what the user answered")
     s.set_defaults(fn=cmd_waiting)
 
-    s = sub.add_parser("goals", help="the open goals (one per PR, work item or branch the front desk owns): Goal | Ref | Thread | State | Quiet | Next; "
-                       "`goals pause [--until 2h|18:00]` / `goals resume` stops/restarts all chases; --chase-log: recent chase decisions with cost")
+    s = sub.add_parser("goals", description=GOALS_HELP, help="the open goals (one per PR, work item or branch the front desk owns): Goal | Ref | Thread | State | Quiet | Next; "
+                       "`goals pause [--until 2h|18:00]` / `goals resume` stops/restarts all chases; --chase-log: recent chase decisions with cost. "
+                       "Close or steer a goal (aliases of `goal`): `goals done gN`, `goals drop gN [--why \"...\"]`, `goals next gN \"...\"`, "
+                       "`goals block gN \"<on what>\"` / `goals unblock gN` (blocked goals are never chased)")
     s.add_argument("args", nargs="*")
+    s.add_argument("--why", help="with drop: the reason")
     s.add_argument("--until", help="with pause: how long (2h, 30m, 18:00 or an ISO time)")
     s.add_argument("--chase-log", action="store_true", help="recent chase decisions (skip/chase/drop) with cost")
     s.set_defaults(fn=cmd_goals)
@@ -15531,8 +15554,10 @@ def build_parser():
     s.add_argument("file")
     s.set_defaults(fn=chase_decide)
 
-    s = sub.add_parser("goal", help="`add \"<ref>\" [tN]`, `done <id>`, `drop <id>`, `next <id> \"<text>\"`")
+    s = sub.add_parser("goal", help="`add \"<ref>\" [tN]`, `done <id>`, `drop <id> [--why ...]`, `next <id> \"<text>\"`, "
+                       "`block <id> \"<on what>\"` (never chased until `unblock <id>` or its blocker goal is done)")
     s.add_argument("args", nargs="*")
+    s.add_argument("--why", help="with drop: the reason")
     s.set_defaults(fn=cmd_goal)
 
     s = sub.add_parser("now", help="what we are working on: the open threads by last activity, with state and last action")
