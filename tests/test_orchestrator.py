@@ -5878,7 +5878,7 @@ class CliTest(unittest.TestCase):
         out = self.cli("brief").stdout
         self.assertNotIn("  next todo #", out)  # the short form: one line per thread
         self.assertNotIn("Open threads (8)", out)
-        self.assertRegex(out, r"(?m)^t8 .* · idle \d+m$")
+        self.assertRegex(out, r"(?m)^\| t8 \|.*\| idle \d+m \|")  # the summary table, one row per thread
         self.assertNotIn("zebra", out)
         self.assertLessEqual(len(out.split("Full list")[0].splitlines()), 12)
         self.assertIn("lean-agent thread show tN", out)
