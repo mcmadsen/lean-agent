@@ -745,7 +745,7 @@ def turn_of(path):
 def silent_ending(path):
     """True when the turn at the end of the transcript at `path` ended with an assistant message without any text (after
     tool calls, or only thinking): the user, e.g. in Remote Control, sees nothing of the answer."""
-    last, seen = "", False
+    last, seen, last_id = "", False, None
     try:
         with open(path, "rb") as fh:
             raw = fh.read()
@@ -760,16 +760,20 @@ def silent_ending(path):
         body = msg.get("content")
         if rec.get("type") == "user":
             if isinstance(body, str) or any(isinstance(c, dict) and c.get("type") == "text" for c in body or []):
-                last, seen = "", False
+                last, seen, last_id = "", False, None
         elif rec.get("type") == "assistant":
             seen = True
-            last = "".join(str(c.get("text") or "") for c in body if isinstance(c, dict) and c.get("type") == "text") \
+            mid = msg.get("id")
+            part = "".join(str(c.get("text") or "") for c in body if isinstance(c, dict) and c.get("type") == "text") \
                 if isinstance(body, list) else str(body or "")
+            # one message can be written as several records (thinking, text, tool_use): they share the message id
+            last = (last + part) if (mid and mid == last_id) else part
+            last_id = mid
     return seen and not last.strip()
 
 
-SILENT_REASON = ("Your turn ended without visible text, so the user sees nothing. Reply now in one or two sentences: answer "
-                 "the user's last message or relay the pending thread reports as a table row.")
+SILENT_REASON = ("Your turn ended without visible text, so the user sees nothing. Do not repeat your previous message. "
+                 "Only add one short sentence answering the user.")
 
 
 def ask_answers(path):
@@ -807,13 +811,33 @@ def ask_answers(path):
 
 
 def asks_user(text):
-    paras = [p.strip() for p in re.split(r"\n\s*\n", str(text or "")) if p.strip()]
+    paras = [p.strip() for p in re.split(r"\n\s*\n", plain_text(text)) if p.strip()]
     if not paras:
         return False
     return paras[-1].endswith("?") or bool(ASKING_RE.search(paras[-1]))
 
 
-WAITING_RE = re.compile(r"your call|your vote|waiting on you|needs you|no vote|approve\?|your decision|pending your|awaiting your", re.I)
+WAITING_RE = re.compile(r"\byour call\b|\byour vote\b|\bwaiting on you\b|\bapprove\?|\bpending your (?:decision|approval|answer)\b|\bawaiting your (?:decision|approval|answer|reply)\b", re.I)
+DECISION_KINDS = ("question", "permission", "push", "review", "auth")
+
+
+def plain_text(text):
+    """The text without code, quoted lines, quoted strings and paths."""
+    t = re.sub(r"```.*?```", " ", str(text or ""), flags=re.S)
+    t = re.sub(r"`[^`\n]*`", " ", t)
+    t = "\n".join(l for l in t.split("\n") if not l.lstrip().startswith(">"))
+    t = re.sub(r"\"[^\"\n]*\"|\u201c[^\u201d\n]*\u201d", " ", t)
+    return re.sub(r"\S*/\S*", " ", t)
+
+
+def waiting_marker(text):
+    """True when the text clearly hands a decision to the user."""
+    return bool(WAITING_RE.search(plain_text(text)))
+
+
+def decision_items(items):
+    """Items that need a user decision and were never asked; info-only items ('other', no options) never block."""
+    return [i for i in items if i.get("kind") in DECISION_KINDS and i.get("options") and not i.get("asked_at")]
 
 
 def waiting_reason(items):
@@ -821,9 +845,9 @@ def waiting_reason(items):
     for i in items:
         opts = " | ".join(i.get("options") or []) or "concrete options"
         lines.append(f"{i.get('id')}: {i.get('summary')} [{opts}]")
-    base = "Something waits on the user and a table row is not asking. Ask it now with AskUserQuestion, with "
-    base += ("options (at most 4 questions): " + "; ".join(lines)) if lines else "concrete options."
-    return base + " Also write the question as visible text: never answer with only a tool call."
+    base = "Do not repeat your previous message. Only call AskUserQuestion for: "
+    base += ("; ".join(lines) + " (at most 4 questions).") if lines else "the decision your message hands to the user, with concrete options."
+    return base
 
 
 def stop_hook(event):
@@ -845,8 +869,8 @@ def stop_hook(event):
                 else:
                     lean_waiting.mark_asked()
             else:
-                unasked = lean_waiting.unasked()
-                if unasked or (WAITING_RE.search(text) and not lean_waiting.recent()):
+                unasked = decision_items(lean_waiting.unasked())
+                if unasked or (waiting_marker(text) and not lean_waiting.recent()):
                     print(json.dumps({"decision": "block", "reason": waiting_reason(unasked)}))
                     return
                 if silent_ending(event.get("transcript_path") or ""):
