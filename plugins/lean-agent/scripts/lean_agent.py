@@ -12859,6 +12859,16 @@ def close_for_send(tid, text):
     return f"closed {q['id']}" + (f", waiting {', '.join(waits)}" if waits else "")
 
 
+def answer_permission_question(tid, q, text):
+    """`thread answer` / `waiting done` on a permission question: press the matching option in the session's prompt
+    (approve | always | deny; yes/no too), close the question and its waiting items. Returns the report line."""
+    choice = service_session.permission_choice(text)
+    _, msg = service_session.answer_permission(tid, choice)
+    waits = close_waiting(tid, [q["id"]], text)
+    print(f"{tid} {q['id']}: {msg}; closed" + (f", waiting {', '.join(waits)}" if waits else ""))
+    return 0
+
+
 def cmd_thread(a):
     if a.action != "send" or getattr(a, "answered", False):
         return thread_action(a)
@@ -12977,6 +12987,12 @@ def thread_action(a):
         qid = args[1] if len(args) == 3 else None
         if not text:
             die("thread answer needs the answer text")
+        perm = lean_threads.open_permission(args[0], qid)
+        if perm:
+            if not service_session.permission_choice(text):
+                die(f"{perm['id']} is a permission prompt: answer approve, always or deny")
+            tid, q = lean_threads.answer(args[0], perm["id"], text)
+            return answer_permission_question(tid, q, text)
         try:
             tid, q = lean_threads.answer(args[0], qid, text)
         except ValueError as exc:
@@ -13147,6 +13163,11 @@ def cmd_waiting(a):
     elif act == "done":
         if len(args) != 1:
             die("usage: lean-agent waiting done <id> [--answer TEXT]")
+        item = next((i for i in lean_waiting._load() if i.get("id") == args[0] and not i.get("answered_at")), None)
+        perm = item and item.get("qid") and lean_threads.open_permission(item.get("thread"), item["qid"])
+        if perm and service_session.permission_choice(a.answer):
+            tid, q = lean_threads.answer(item["thread"], perm["id"], a.answer)
+            return answer_permission_question(tid, q, a.answer)
         if not lean_waiting.done(args[0], a.answer):
             die(f"no open waiting item {args[0]}")
         print(f"{args[0]} done")

@@ -103,6 +103,33 @@ while True:
             add({"type": "user", "isMeta": True, "message": {"role": "user", "content": "<command-name>/clear</command-name>"}})
             continue
         add({"type": "user", "message": {"role": "user", "content": text}})
+        if "permission tool" in text:  # a tool permission prompt: waits for a number key, then runs the tool (3 = No: it does not)
+            cmd = re.sub(r"^.*permission tool\s*", "", text.strip()) or "az group list"
+            opts = ["Yes"] + ([] if os.environ.get("FAKE_NO_ALWAYS") else ["Yes, and don't ask again for %s commands in /work" % cmd.split()[0]]) + ["No, and tell Claude what to do differently (esc)"]
+            sys.stdout.write("\x1b[2J\r\n Bash command\r\n\r\n   %s\r\n   Run it\r\n\r\n Do you want to proceed?\r\n" % cmd)
+            sys.stdout.write("".join("%s %d. %s\r\n" % ("\u276f" if i == 0 else " ", i + 1, o) for i, o in enumerate(opts)) + " Esc to cancel\r\n")
+            sys.stdout.flush()
+            pressed = b""
+            while not re.match(rb"[1-9]", pressed):
+                pressed = os.read(0, 16)
+                if not pressed:
+                    sys.exit(0)
+            with open(os.environ["FAKE_SESSION_LOG"], "a") as fh:
+                fh.write(json.dumps({"key": pressed.decode(), "option": opts[int(pressed[:1]) - 1]}) + "\n")
+            sys.stdout.write("\x1b[2J\r\n running: %s\r\n" % cmd)
+            sys.stdout.flush()
+            if int(pressed[:1]) == len(opts):
+                add({"type": "assistant", "message": {"role": "assistant", "id": "msg_" + os.urandom(4).hex(),
+                     "content": [{"type": "text", "text": "denied"}], "stop_reason": "end_turn"}})
+                continue
+            tid = "toolu_" + os.urandom(4).hex()
+            add({"type": "assistant", "message": {"role": "assistant", "id": "msg_" + os.urandom(4).hex(),
+                 "content": [{"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": cmd}}], "stop_reason": "tool_use"}})
+            add({"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tid, "content": "ok", "is_error": False}]}})
+            add({"type": "assistant", "message": {"role": "assistant", "id": "msg_" + os.urandom(4).hex(),
+                 "content": [{"type": "text", "text": "tool done"}], "stop_reason": "end_turn"}})
+            continue
         if "use a tool" in text:
             tid = "toolu_" + os.urandom(4).hex()
             add({"type": "assistant", "message": {"role": "assistant", "id": "msg_" + os.urandom(4).hex(),

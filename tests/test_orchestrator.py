@@ -6619,7 +6619,65 @@ class CliTest(unittest.TestCase):
         write("t1", result("q1", "pg"), assistant("", {"id": "q2", "name": "Bash", "input": {"command": "ls"}}))
         hosts["t1"].tail = "Do you want to proceed?\n 1. Yes\n Esc to cancel"
         reps["t1"].tick()
-        self.assertTrue(ss.queued_reports()[-1]["text"].startswith("waits for your permission"))
+        self.assertIn("waits for your permission", ss.queued_reports()[-1]["text"])
+
+    def test_permission_prompt_becomes_a_question_with_tool_command_and_waiting_item(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        import lean_threads as lt  # in the reporter's home
+        tid = lt.new("topic")
+        self.assertEqual(tid, "t1")
+        reps["t1"].tick()
+        write("t1", user(), assistant("", {"id": "q9", "name": "Bash", "input": {"command": "az group list"}}))
+        hosts["t1"].tail = ("\x1b[2J Bash command\r\n\r\n   az group list\r\n   Run it\r\n\r\n Do you want to proceed?\r\n"
+                            " \u276f 1. Yes\r\n   2. Yes, and don't ask again for az commands in /work\r\n   3. No, and tell Claude what to do differently (esc)\r\n Esc to cancel")
+        reps["t1"].tick()
+        reps["t1"].tick()  # reported once
+        self.assertEqual(len(ss.queued_reports()), 1)
+        text = ss.queued_reports()[0]["text"]
+        self.assertIn("q1 waits for your permission: Bash command: az group list", text)
+        self.assertIn(f"thread answer {tid} q1 approve|always|deny", text)
+        q = lt.open_questions(lt.load()["threads"][tid])[0]
+        self.assertEqual((q["id"], q["kind"], q["options"]), ("q1", "permission", ["Approve once", "Approve always (this command prefix)", "Deny"]))
+        self.assertIn("permission: Bash command: az group list", q["text"])
+        waits = [i for i in ss.lean_waiting._load() if not i.get("answered_at")]
+        self.assertEqual([(i["kind"], i["thread"], i["qid"], i["options"]) for i in waits],
+                         [("permission", tid, "q1", ["Approve once", "Approve always (this command prefix)", "Deny"])])
+        hosts["t1"].tail = "ready"  # answered in the terminal: the question closes
+        reps["t1"].tick()
+        self.assertEqual(lt.open_questions(lt.load()["threads"][tid]), [])
+        self.assertEqual([i for i in ss.lean_waiting._load() if not i.get("answered_at")], [])
+
+    def test_permission_answer_presses_the_matching_option_of_the_prompt(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        p, log, ss = self.start_up()
+        for word, num, option in (("approve", "1", "Yes"), ("always", "2", "Yes, and don't ask again for az commands in /work"), ("deny", "3", None)):
+            ss.send("permission tool az group list")
+            self.wait_for(lambda: ss.parse_permission_prompt(ss.tail()), "the permission prompt on the screen")
+            prompt = ss.parse_permission_prompt(ss.tail())
+            self.assertEqual((prompt["tool"], prompt["command"], [n for n, _ in prompt["options"]]), ("Bash command", "az group list", ["1", "2", "3"]))
+            label, msg = ss.answer_permission("main", word)
+            self.assertEqual(msg, f"pressed {num}. {label}")
+            self.wait_for(lambda: any(r.get("key") == num for r in self.read_jsonl(log)), f"key {num} to reach the session")
+            if option:
+                self.assertIn(option, [r.get("option") for r in self.read_jsonl(log)])
+            self.wait_for(lambda: not ss.parse_permission_prompt(ss.tail()) or "Do you want" not in ss.tail()[-80:], "the prompt to go")
+        self.assertEqual(ss.answer_permission("main", "approve"), (None, "the prompt is no longer open"))
+
+    def test_permission_answer_without_an_always_option_uses_the_first_and_cli_reports_a_stale_prompt(self):
+        ss = self.with_home(self.tmp.name)
+        prompt = ss.parse_permission_prompt("Do you want to proceed?\n 1. Yes\n 2. No\n")
+        self.assertEqual((ss.permission_key(prompt, "always"), ss.permission_key(prompt, "approve"), ss.permission_key(prompt, "deny")), ("1", "1", "2"))
+        self.assertEqual([ss.permission_choice(x) for x in ("Approve once", "yes", "always", "no", "Deny", "maybe")], ["approve", "approve", "always", "deny", "deny", None])
+        lt = self.threads_home()
+        tid = lt.new("topic")
+        qid = lt.ask(tid, "permission: Bash command: git status", "Approve once|Approve always (this command prefix)|Deny", kind="permission")
+        wid = self.cli("waiting", "add", "permission: Bash command: git status", "--thread", tid, "--kind", "permission").stdout.strip()
+        bad = self.cli("thread", "answer", tid, qid, "perhaps", check=False)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("approve, always or deny", bad.stderr)
+        out = self.cli("thread", "answer", tid, qid, "approve").stdout  # no session is up: the prompt is gone
+        self.assertIn("the prompt is no longer open", out)
+        self.assertEqual(lt.open_questions(lt.load()["threads"][tid]), [])
 
     def test_waiting_store_and_commands(self):
         self.assertIn("Nothing is waiting", self.cli("waiting").stdout)
