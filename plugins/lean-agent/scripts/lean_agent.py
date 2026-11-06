@@ -13304,7 +13304,7 @@ def cmd_feedback(a):
         fid, added = lean_feedback.add(text, a.kind or "friction", a.severity, a.repro)
         print(f"feedback {fid} added" if added else f"feedback {fid}: +1")
     elif a.action == "list":
-        items = lean_feedback.list_items(a.open, a.kind, a.since)
+        items = lean_feedback.list_items(a.all, a.kind, a.since)
         print(lean_feedback.table(items) if items else "No feedback.")
     elif a.action in ("rm", "done"):
         if not lean_feedback.mark(text, None if a.action == "rm" else "done"):
@@ -15362,9 +15362,9 @@ def build_parser():
     s.add_argument("--kind", choices=lean_feedback.KINDS, help="add (default friction); list: only this kind")
     s.add_argument("--severity", choices=lean_feedback.SEVERITIES, default="normal")
     s.add_argument("--repro", default="", help="add: the command or steps that show it")
-    s.add_argument("--open", action="store_true", help="list: only open items")
+    s.add_argument("--open", action="store_true", help="list: only open items (the default; kept for old scripts)")
     s.add_argument("--since", metavar="DATE", help="list: from this date (YYYY-MM-DD)")
-    s.add_argument("--all", action="store_true", help="export: also items already exported or done")
+    s.add_argument("--all", action="store_true", help="list|export: include done items too (marked as done); the default is open items only")
     s.add_argument("--out", metavar="PATH", help="export: write here instead of <home>/feedback/feedback-DATE.md")
     s.set_defaults(fn=cmd_feedback)
 
