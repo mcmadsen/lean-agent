@@ -9780,6 +9780,62 @@ def service_root_problem(uid=None):
     return None
 
 
+DOCTOR_LOCK_MIN_AGE = 60  # seconds a held lock must have been held before doctor lists it
+
+
+def held_locks_found(root=None):
+    """[(lock file, holder pid, command, age s, holder_dead)] of lean-agent lock files that are held right now
+    and record their holder's pid (flock on a file whose holder died stays held only through an inheriting child)."""
+    import fcntl
+    root = root or service_session.lean_home()
+    out = []
+    for base, dirs, files in os.walk(root):
+        if base[len(root):].count(os.sep) >= 3:
+            dirs[:] = []
+        for f in files:
+            if not f.endswith(".lock"):
+                continue
+            path = os.path.join(base, f)
+            pid = lean_common.lock_holder(path)
+            if not pid.isdigit():
+                continue
+            try:
+                with open(path) as fh:
+                    try:
+                        fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                        continue  # not held
+                    except OSError:
+                        pass
+            except OSError:
+                continue
+            dead = not lean_common.pid_running(pid)
+            age = lean_common.lock_age(path)
+            if dead or age >= DOCTOR_LOCK_MIN_AGE:
+                out.append((path, pid, lean_common.pid_command(pid) if not dead else "", age, dead))
+    return out
+
+
+def doctor_locks(report, fix, root=None):
+    """doctor: a lock held longer than a minute (holder, command, age); --fix clears the ones whose holder is gone."""
+    found = held_locks_found(root)
+    for path, pid, cmd, age, dead in found:
+        name = os.path.basename(path)[:-5]
+        held = f"{age // 60}m" if age >= 60 else f"{age}s"
+        if dead and fix:
+            try:
+                os.unlink(path)
+                report(True, f"lock {name}: holder pid {pid} is gone; cleared")
+                continue
+            except OSError:
+                pass
+        if dead:
+            report(False, f"lock {name} is held by pid {pid}, which is gone ({held})", "lean-agent doctor --fix")
+        else:
+            report(None, f"lock {name} held {held} by pid {pid} ({cmd or 'unknown command'})",
+                   f"wait for it, or stop that process (kill {pid})")
+    return found
+
+
 def cmd_doctor(a):
     path = os.path.realpath(os.path.expanduser(a.path or os.getcwd()))
     bad = []
@@ -9942,6 +9998,7 @@ def cmd_doctor(a):
         else:
             report(False, f"{f} contradicts lean-agent ({where})", "lean-agent doctor --fix  (adds a one-line precedence note)")
 
+    doctor_locks(report, a.fix)
     stale = forward_old_hooks(dry=not a.fix)
     if stale and not a.fix:
         report(False, f"{len(stale)} hook script(s) in older cached plugin copies run outdated code (sessions "
