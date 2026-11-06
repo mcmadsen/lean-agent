@@ -197,3 +197,37 @@ class SpoolTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpoolSurvivesReplacementTest(SpoolTest):
+    def test_queued_while_replacing_is_delivered_once_to_the_new_session(self):
+        sent = []
+        ss.mark_replacing(self.tid)
+        with mock.patch.object(ss, "alive", return_value=True), \
+                mock.patch.object(ss, "send", side_effect=lambda text, key="main": (sent.append(text) or (True, ""))):
+            ss.spool_add(self.tid, "first")
+            ss.spool_add(self.tid, "second")
+            self.assertEqual(lean_agent.deliver_spool(self.tid)[0], "deferred")
+            self.assertEqual(sent, [])
+            self.assertEqual(ss.spool_count(self.tid), 2)
+            self.assertIn("2 messages queued for delivery", lean_threads.show_text(self.tid))
+            ss.clear_replacing(self.tid)  # the new session has its brief
+            self.assertEqual(lean_agent.deliver_spool(self.tid)[0], "ok")
+            self.assertEqual(lean_agent.deliver_spool(self.tid)[0], "ok")
+        self.assertEqual(sent, ["first", "second"])
+        self.assertEqual(ss.spool_count(self.tid), 0)
+        self.assertNotIn("queued for delivery", lean_threads.show_text(self.tid))
+
+    def test_send_during_replacement_stays_queued_not_failed(self):
+        ss.mark_replacing(self.tid)
+        with mock.patch.object(ss, "alive", return_value=True):
+            rc, out, _ = self.send("hello")
+        self.assertEqual(rc, 0)
+        self.assertIn("queued", out)
+        self.assertEqual(ss.spool_count(self.tid), 1)
+
+    def test_stale_marker_does_not_block_for_good(self):
+        ss.mark_replacing(self.tid)
+        old = time.time() - ss.REPLACING_TTL - 5
+        os.utime(ss._replacing_path(self.tid), (old, old))
+        self.assertFalse(ss.is_replacing(self.tid))

@@ -726,6 +726,8 @@ class AutoClear:
         why = f" ({self.reason})" if self.reason else ""
         self.waiting = self.verify = self.started = None
         self.manual, self.reason = False, None
+        if self.key == "main" or how.startswith("cleared"):
+            clear_replacing(self.key)  # a replaced thread session keeps the hold until its brief is in (brief_new_session)
         self.hold(None)
         self.update(clear_requested=None, clear_pending_since=None, cleared_at=now, clear_hold=None,
                     clear_status=f"{self.key} was {ctx // 1000}k, {how} as session {str(new_sid)[:8]} at "
@@ -734,6 +736,12 @@ class AutoClear:
 
     def brief_new_session(self, old_proc):
         """A replaced thread session starts from its brief: sent once the new process is up and quiet."""
+        try:
+            self._brief_new_session(old_proc)
+        finally:
+            clear_replacing(self.key)  # queued messages now go to the new session, after its brief
+
+    def _brief_new_session(self, old_proc):
         end = time.time() + 30
         while time.time() < end and (self.host.proc is old_proc or not self.host.alive()):
             time.sleep(0.2)
@@ -806,6 +814,7 @@ class AutoClear:
                 # end; an automatic one gives up and asks again at a turn end
                 if not self.manual:
                     self.waiting = self.started = None
+                    clear_replacing(self.key)
                     self.log("no reply in time and a turn is running: giving up this round")
                 return
             if answered or timed_out:
@@ -832,6 +841,7 @@ class AutoClear:
             self.started = now
             self.waiting = (st["size"], now)
             self.log("clear requested with `lean-agent clear`: asking for a checkpoint")
+            mark_replacing(self.key)
             self.host.paste(checkpoint_prompt())
             return
         self.manual = False
@@ -857,6 +867,7 @@ class AutoClear:
         self.waiting = (st["size"], now)
         self.update(clear_pending_since=now)
         self.log(f"context {st['ctx']:,} tokens is above {limit:,}: asking for a checkpoint")
+        mark_replacing(self.key)
         self.host.paste(checkpoint_prompt())
 
     def run(self):
@@ -999,6 +1010,47 @@ def spool_add(tid, text=None, new=False):
         json.dump({"text": text, "ts": time.time(), "new": new}, fh)
     os.replace(tmp, os.path.join(d, name))
     return name
+
+
+REPLACING_TTL = 600  # seconds a replacement marker holds delivery at most (a crashed replacement never blocks for good)
+
+
+def _replacing_path(tid):
+    return os.path.join(spool_dir(tid), ".replacing")
+
+
+def mark_replacing(tid):
+    """The thread session is being checkpointed/replaced: the spool holds its messages until the new session has its brief."""
+    if tid == "main":
+        return
+    try:
+        os.makedirs(spool_dir(tid), exist_ok=True)
+        with open(_replacing_path(tid), "w") as fh:
+            fh.write(str(time.time()))
+    except OSError:
+        pass
+
+
+def clear_replacing(tid):
+    try:
+        os.remove(_replacing_path(tid))
+    except OSError:
+        pass
+
+
+def is_replacing(tid):
+    try:
+        return time.time() - os.path.getmtime(_replacing_path(tid)) < REPLACING_TTL
+    except OSError:
+        return False
+
+
+def spool_count(tid):
+    """Messages of thread `tid` queued for delivery (waiting or being delivered)."""
+    try:
+        return sum(1 for n in os.listdir(spool_dir(tid)) if n.endswith((".json", ".sending")))
+    except OSError:
+        return 0
 
 
 def spool_pending(tid):

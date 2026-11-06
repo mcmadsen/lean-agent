@@ -12336,6 +12336,8 @@ def deliver_one(tid, prompt, resume_old=False, new=False):
     May wait for the session; only the service and the capped caller below run it. Returns the one-line result;
     raises RuntimeError when it could not be delivered."""
     tid, t = thread_session_tid(tid)
+    if prompt and service_session.is_replacing(tid):  # the session is being replaced: the message waits for the new one
+        raise Deferred(f"{tid}: session being replaced")
     running = service_session.alive(tid)
     force, why = False, ""
     if running and prompt and not resume_old:
@@ -12395,6 +12397,9 @@ def deliver_spool(tid, lock_wait=0, resume_old=False):
                 continue
             try:
                 line = deliver_one(tid, msg.get("text"), resume_old, bool(msg.get("new")))
+            except Deferred as exc:  # the session is being replaced: the message stays spooled, in order
+                service_session.spool_release(tid, name)
+                return "deferred", str(exc)
             except NoSlot as exc:  # the message stays spooled; the service retries on its tick
                 service_session.spool_release(tid, name)
                 try:
@@ -12454,7 +12459,7 @@ def deliver_with_cap(tid, own=None, new=False, resume_old=False):
         return line
     if kind == "slot":
         return slot_line(tid, line, new)
-    if kind == "busy":
+    if kind in ("busy", "deferred"):
         return f"{tid}: queued (service busy), will deliver"
     # a definite failure inside the cap: withdraw the message (unless the service took it meanwhile) and report it
     if own and service_session.spool_withdraw(tid, own):
@@ -12713,6 +12718,10 @@ def caller_thread():
     (the role `up` gives it), never by the thread tag of the request being worked on."""
     kept = os.environ.get("LEAN_AGENT_CALLER_THREAD") if os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread" else ""
     return kept or lean_threads.pinned_thread()  # `--thread` re-tags LEAN_AGENT_THREAD; main() kept the session's own id
+
+
+class Deferred(Exception):
+    """The message cannot go to a session right now (it is being replaced); it stays queued."""
 
 
 class NoSlot(Exception):
@@ -13072,6 +13081,7 @@ def thread_action(a):
             qs = lean_threads.open_questions(lean_threads.load()["threads"].get(x["thread"]) or {})
             extra = ("".join(f'  waiting on main: {q["id"]} "{lean_threads.one_line(q["text"], 60)}" {lean_threads.age(q.get("ts"))}' for q in qs)
                      + (f"  {len(runs)} running (first {runs[0][0]})" if runs else "") + ("  mid-turn" if service_session.mid_turn(x["thread"]) else "")
+                     + (f"  {lean_threads.queued_note(x['thread'])}" if lean_threads.queued_messages(x["thread"]) else "")
                      + (f'  {x["thread"]}: {st}' if (st := service_session.session_rec(x["thread"]).get("stuck")) else ""))
             print(f"{x['thread']:<6}{x['name'] or '-':<42}pid {x['pid'] or '-':<8}idle {x['idle']}s  context {context_cell(ctxs[x['thread']])}"
                   + ("  fresh on next send" if ctxs[x["thread"]]["fresh"] else "") + extra)
