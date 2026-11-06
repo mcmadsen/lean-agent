@@ -8854,6 +8854,96 @@ class CliTest(unittest.TestCase):
         self.assertEqual(row["role"], "chaser")
         self.assertNotIn(row["id"], self.cli("runs").stdout)  # hidden from the runs list
 
+    def pr_setup(self, remote="https://dev.azure.com/acme/shop/_git/shop", prs=("512",)):
+        self.git_project()
+        subprocess.run(["git", "-C", self.proj, "remote", "add", "origin", remote], check=True, capture_output=True)
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("thread", "new", "Export timeout")
+        for pr in prs:
+            self.cli("todo", "add", f"Fix thing {pr}", "-p", "proj", "--ref", f"PR {pr}", "--thread", "t1")
+
+    def pr_fb(self, *rows):
+        return ('{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-PR '
+                + json.dumps({"prs": [dict({"status": "active", "isDraft": False, "title": "Fix export", "author": "dev", "target": "main",
+                                            "merge": "succeeded", "reviewers": [{"name": "rev", "vote": "waiting"}], "ci": "passed",
+                                            "threads": []}, **r) for r in rows]}))
+
+    def test_pr_known_state_without_network(self):
+        self.pr_setup(prs=("512", "513"))
+        p = self.cli("pr", "t1", "--no-live")
+        self.assertIn("PR", p.stdout.splitlines()[0])
+        self.assertIn("Known state", p.stdout)
+        self.assertIn("512", p.stdout)
+        self.assertIn("513", p.stdout)
+        self.assertIn("review it", p.stdout)
+        self.assertFalse(os.path.exists(self.log))  # no worker started
+        self.assertIn("512", self.cli("pr", "512", "--no-live").stdout)
+        self.assertNotIn("513", self.cli("pr", "512", "--no-live").stdout)
+
+    def test_pr_live_az_cache_refresh_and_hidden_helper(self):
+        self.pr_setup()
+        fb = self.pr_fb({"pr": "512", "threads": [
+            {"id": "7", "author": "rev", "file": "api/totals.py", "line": 2, "gist": "rounding is wrong", "kind": "human"},
+            {"id": "8", "author": "build", "file": "", "line": 0, "gist": "policy note", "kind": "bot"}]})
+        p = self.cli("pr", "t1", FAKE_FEEDBACK=fb)
+        self.assertIn("fetching live state (haiku", p.stdout)
+        self.assertIn("2 open comments", p.stdout)
+        self.assertIn("Open comments, PR 512:", p.stdout)
+        self.assertIn("api/totals.py:2 - rounding is wrong", p.stdout)
+        self.assertIn("answer or fix 1 open comment", p.stdout)
+        call = self.calls()[-1]
+        self.assertIn("haiku", call["argv"][call["argv"].index("--model") + 1])
+        self.assertIn("az repos pr show", call["append"])
+        self.assertIn("az devops invoke --http-method get", call["append"])
+        self.assertNotIn("gh pr", call["append"])
+        row = self.ledger()[-1]
+        self.assertEqual(row["role"], "pr-status")
+        self.assertNotIn(row["id"], self.cli("runs").stdout)  # hidden from the runs list
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "pr-cache.json")) as fh:
+            self.assertIn("fetched", list(json.load(fh).values())[0])
+        n = len(self.calls())
+        p = self.cli("pr", "t1")  # within 10 minutes: the cache, no worker
+        self.assertEqual(len(self.calls()), n)
+        self.assertIn("(cached, ", p.stdout)
+        self.assertIn("2 open comments", p.stdout)
+        p = self.cli("pr", "t1", "--refresh", FAKE_FEEDBACK=self.pr_fb({"pr": "512", "status": "completed"}))
+        self.assertEqual(len(self.calls()), n + 1)
+        self.assertIn("merged: close the goal", p.stdout)
+        self.assertIn("completed", p.stdout)
+
+    def test_pr_live_gh_flavour(self):
+        self.pr_setup(remote="git@github.com:acme/shop.git")
+        p = self.cli("pr", "t1", FAKE_FEEDBACK=self.pr_fb({"pr": "512", "isDraft": True}))
+        call = self.calls()[-1]
+        self.assertIn("gh pr view", call["append"])
+        self.assertNotIn("az repos", call["append"])
+        self.assertIn("draft", p.stdout)
+        self.assertIn("publish when ready", p.stdout)
+
+    def test_pr_list_batches_one_worker_and_async(self):
+        self.pr_setup(prs=("512", "513"))
+        p = self.cli("pr", "list", FAKE_FEEDBACK=self.pr_fb({"pr": "512"}, {"pr": "513", "ci": "failed"}))
+        self.assertEqual(len([r for r in self.ledger() if r.get("role") == "pr-status"]), 1)
+        self.assertIn("Thread", p.stdout)
+        self.assertIn("fix the failing checks", p.stdout)
+        self.assertIn("t1", p.stdout)
+        n = len(self.ledger())
+        self.cli("pr", "list")  # cached: no helper
+        self.assertEqual(len(self.ledger()), n)
+        self.cli("pr", "list", "--refresh", FAKE_FEEDBACK=self.pr_fb({"pr": "512"}, {"pr": "513"}))
+        self.assertEqual(len(self.ledger()), n + 1)
+        a = self.cli("pr", "t1", "--async", "--refresh", FAKE_FEEDBACK=self.pr_fb({"pr": "512"}, {"pr": "513"}))
+        self.assertIn("in the background", a.stdout)
+
+    def test_pr_front_desk_may_run_it(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import budget_hook
+        event = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}}
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_SESSION_ROLE": "main"}):
+            for cmd in ("lean-agent pr t21", "lean-agent pr list --refresh", "lean-agent pr 512 --async"):
+                self.assertEqual(budget_hook.front_desk_denial(event(cmd)), "", cmd)
+                self.assertEqual(budget_hook.strict_denial(event(cmd), "/home", "/home"), "", cmd)
+
     def test_review_decide_gaps_edge_cases(self):
         self.git_project()
         self.cli("learn", self.proj, "--name", "proj")

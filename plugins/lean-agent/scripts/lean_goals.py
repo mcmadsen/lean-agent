@@ -460,7 +460,7 @@ def _runs_of(tid, data):
     return list(out.values())
 
 
-HELPER_ROLES = ("chaser", "advisor", "librarian", "composer", "gap-decider", "tracker-discover", "review-learn", "reuse-check", "reviewer")
+HELPER_ROLES = ("chaser", "advisor", "librarian", "composer", "gap-decider", "tracker-discover", "review-learn", "reuse-check", "reviewer", "pr-status")
 
 
 def thread_info(tid, data=None):
