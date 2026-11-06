@@ -6460,6 +6460,48 @@ class CliTest(unittest.TestCase):
         ss.note_restart("t1", "restarted after a 20m stall")
         self.assertRegex(ss.restart_line("t1"), r"^Restarted \d\d:\d\d: restarted after a 20m stall$")
 
+    def run_finished_during_replacement_unit(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import service_session as ss
+        home = tempfile.mkdtemp()
+        env = mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": home, "LEAN_AGENT_LOG_DIR": os.path.join(home, "logs")})
+        env.start()
+        self.addCleanup(env.stop)
+        now = time.time()
+
+        def row(rid, ago):
+            ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now - ago))
+            with open(os.path.join(home, "ledger.jsonl"), "a") as fh:
+                fh.write(json.dumps({"id": rid, "thread": "t1", "status": "done", "ts": ts, "task": "check things"}) + "\n")
+        return ss, home, now, row
+
+    def test_a_run_that_finishes_during_a_fresh_continuation_wakes_the_new_session(self):
+        ss, home, now, row = self.run_finished_during_replacement_unit()
+        row("r1old001", 600)                         # finished before the replacement: not this session's
+        ss.note_restart("t1", "context 168k reached the thread-fresh-after limit (checkpoint kept)", ts=now - 120)
+        row("r2new002", 60)                          # finished while the session was being replaced
+        host = self.FakeHost()
+        host.key = "t1"
+        rep = ss.Reporter(host, now=lambda: now)     # the new session's watcher, born after the replacement
+        st = {"ended": True}
+        rep.wake_for_runs(st)
+        self.assertEqual(len(host.pasted), 1)
+        self.assertIn("r2new002", host.pasted[0])
+        self.assertNotIn("r1old001", host.pasted[0])
+
+    def test_a_run_nobody_reported_gets_an_automatic_report_after_the_wait(self):
+        ss, home, now, row = self.run_finished_during_replacement_unit()
+        row("r3auto003", 30)
+        ss.run_state_update("_init", seen=now - 3600)
+        ss.run_fallback(now)
+        self.assertEqual(ss.queued_reports(), [])    # inside the wait: the thread may still report
+        ss.run_fallback(now + ss.RUN_REPORT_FALLBACK + 5)
+        items = ss.queued_reports()
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0]["text"].startswith("run r3auto003: done"))
+        ss.run_fallback(now + 2 * ss.RUN_REPORT_FALLBACK + 10)
+        self.assertEqual(len(ss.queued_reports()), 1)  # once per run
+
     def test_the_main_and_thread_briefs_open_with_the_restart_line(self):
         sys.path.insert(0, os.path.dirname(CLI))
         import compact_hook

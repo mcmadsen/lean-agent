@@ -169,6 +169,7 @@ def last_clear(rec):
     return max(times) if times else None
 
 
+REPLACE_WINDOW = 900  # seconds between a replacement and the new session's start in which finished runs still get reported
 RESTART_MAX_AGE = 6 * 3600  # seconds: an older restart note is not told to a session
 
 
@@ -185,6 +186,10 @@ def note_restart(key, why, ts=None):
             data[key] = {"ts": ts, "why": why}
             lean_common.write_json_atomic(_restarts_path(), data)
     except OSError:
+        pass
+    try:
+        update_session(key, replaced_at=ts)  # runs that finish from here on are the new session's to report
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -1955,8 +1960,12 @@ class Reporter(AutoClear):
     def wake_for_runs(self, st):
         """A run tagged to this thread finished: type a short turn into the idle session so it reports to main."""
         mine = [r for r in finished_thread_runs(self.now()) if r["thread"] == self.key]
-        if self.waked is None:  # runs that ended before this session started are not its to report
-            self.waked = {r["id"] for r in mine if r["fin"] < self.born}
+        if self.waked is None:  # runs that ended before this session started are not its to report ...
+            cut = self.born
+            replaced = session_rec(self.key).get("replaced_at")
+            if isinstance(replaced, (int, float)) and 0 <= self.born - replaced <= REPLACE_WINDOW:
+                cut = replaced  # ... except those that finished while the session was being replaced
+            self.waked = {r["id"] for r in mine if r["fin"] < cut}
         todo = [r for r in mine if r["id"] not in self.waked and not (_load(runs_state_path()).get(r["id"]) or {}).get("reported")]
         if not todo or not self.host.alive() or self.now() - self.host.last_input < _knob("LEAN_AGENT_REPORT_IDLE", 3):
             return
