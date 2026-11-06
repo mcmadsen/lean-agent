@@ -7,6 +7,7 @@ answer; the user has a question), done or dropped. Goals are created when a thre
 fresh by thread reports and runs, and watched by `watchdog`, which the service runs every few minutes: it only sends
 messages to threads (the thread does the work) and tells the front desk what it did."""
 import datetime
+import glob
 import json
 import os
 import re
@@ -468,6 +469,7 @@ def thread_info(tid, data=None):
     import lean_threads
     data = data or lean_threads.load()
     t = data["threads"].get(tid) or {}
+    settle_orphan_markers(data)
     lost = [(rid, m) for rid, m in lean_common.lost_runs(lean_common.lean_home())
             if m.get("pid") and lean_threads.thread_of_run(dict(m, id=rid), data) == tid and m.get("role") not in HELPER_ROLES]
     last = lean_threads._epoch(t.get("last_message") or t.get("created"))
@@ -489,7 +491,65 @@ def thread_info(tid, data=None):
             "closed": bool(t.get("closed")), "last": last, "runs": runs}
 
 
-def lost_message(run, ref):
+def settle_orphan_markers(data=None):
+    """Running markers whose process is gone and that have no ledger row (so `runs --show` / `run --resume` know no such
+    run): when the thread has a newer run, or sent a final report after the marker started, the marker is dropped
+    silently; otherwise a ledger row "lost (no record)" with the task head is recorded and the marker kept (flagged
+    no_record) so `runs --show`, `runs --lost` and the chase can name it. Returns the number of markers dropped."""
+    import lean_threads
+    home_ = lean_common.lean_home()
+    data = data or lean_threads.load()
+    dropped = 0
+    try:
+        lost = lean_common.lost_runs(home_)
+    except Exception:
+        return 0
+    reports = lean_common.read_json(os.path.join(home_, "last-reports.json"), {})
+    for rid, m in lost:
+        if m.get("no_record") or not isinstance(m, dict):
+            continue
+        tid = lean_threads.thread_of_run(dict(m, id=rid), data)
+        started = str(m.get("started") or "")
+        newer = bool(tid) and any(r.get("id") != rid and str(r.get("started") or "") > started
+                                  for r in _runs_of(tid, data) + _markers_of(tid, data))
+        rep = reports.get(tid) if tid else None
+        final = bool(rep) and rep.get("kind") in ("done", "final") and float(rep.get("ts") or 0) > _epoch(started)
+        marker = os.path.join(home_, "running", f"{os.path.basename(str(m.get('run') or rid))}.json")
+        if newer or final:
+            try:
+                os.remove(marker)
+                dropped += 1
+            except OSError:
+                pass
+            continue
+        row = {"id": rid, "ts": lean_common.now_iso(), "started": started, "project": m.get("project"),
+               "model": m.get("model") or "?", "task": str(m.get("task") or "")[:300], "thread": m.get("thread"),
+               "role": m.get("role"), "status": lean_common.LOST_NO_RECORD, "why": "lost", "turns": None, "seconds": None,
+               "usage": {}, "units": 0, "cost_usd": None}
+        try:
+            with open(os.path.join(home_, "ledger.jsonl"), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+            m["no_record"] = True
+            lean_common.write_json_atomic(marker, m)
+        except OSError:
+            pass
+    return dropped
+
+
+def _markers_of(tid, data):
+    import lean_threads
+    out = []
+    for f in glob.glob(os.path.join(lean_common.lean_home(), "running", "*.json")):
+        m = lean_common.read_json(f, {})
+        if isinstance(m, dict) and m.get("role") not in HELPER_ROLES and lean_threads.thread_of_run(dict(m, id=m.get("run") or ""), data) == tid:
+            out.append({"id": m.get("run") or "", "started": m.get("started") or ""})
+    return out
+
+
+def lost_message(run, ref, record_only=False):
+    if record_only:
+        return (f"Worker {run} ({ref}) left only a marker, no record; nothing to resume (`lean-agent runs --stop {run}` "
+                "clears it). Check whether the work is done, then send ONE consolidated final report.")
     return (f"Worker {run} ({ref}) was lost. Resume it (`lean-agent run --resume {run} ...`) or restart it, "
             "then send ONE consolidated final report.")
 
@@ -612,7 +672,7 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
                 continue
             msg = str(d.get("message") or "").strip()
             if kind == "lost":
-                msg = lost_message(rid, ref)
+                msg = lost_message(rid, ref, bool(next((m for r_, m in (i.get("lost") or []) if r_ == rid), {}).get("no_record")))
                 how = "asked to resume"
             else:
                 msg = (msg[:240] if msg and action == "chase" else nudge_message(ref))

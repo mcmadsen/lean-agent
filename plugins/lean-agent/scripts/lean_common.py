@@ -394,6 +394,9 @@ def running_runs(lean_home):
     return sorted(out, key=lambda x: (x[1].get("started") or "", x[0]))
 
 
+LOST_NO_RECORD = "lost (no record)"  # ledger status of a run whose marker outlived its process with no result recorded
+
+
 def lost_runs(lean_home, acknowledged=False):
     """[(run id, marker)] of runs whose supervisor died without recording a result: a running/*.json whose process is
     gone and whose run is not in the ledger (and that `runs --lost --clear` has not acknowledged, unless acknowledged=True)."""
@@ -402,7 +405,9 @@ def lost_runs(lean_home, acknowledged=False):
         with open(os.path.join(lean_home, "ledger.jsonl")) as fh:
             for line in fh:
                 try:
-                    done.add(json.loads(line).get("id"))
+                    row = json.loads(line)
+                    if row.get("status") != LOST_NO_RECORD:  # that row only gives a marker its record; it stays listed as lost
+                        done.add(row.get("id"))
                 except (ValueError, AttributeError):
                     continue
     except OSError:

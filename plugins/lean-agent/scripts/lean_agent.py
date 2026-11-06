@@ -9541,9 +9541,20 @@ def run_summary_line(r):
     return run_line_from_ledger(r)
 
 
+def settle_markers():
+    """Give markers of dead runs without a ledger row their record (or drop them): see lean_goals.settle_orphan_markers."""
+    try:
+        import lean_goals
+        lean_goals.settle_orphan_markers()
+    except Exception:
+        pass
+
+
 def cmd_runs(a):
     if getattr(a, "wait", None):
         return wait_for_runs(a.wait, a.timeout)
+    if getattr(a, "lost", False) or getattr(a, "show", None):
+        settle_markers()
     runs = ledger()
     if a.project:
         slug, _ = resolve_project(a.project)
@@ -9559,12 +9570,18 @@ def cmd_runs(a):
         lost = lost_runs(home())
         if a.clear:
             for rid, m in lost:
+                if m.get("no_record"):  # nothing to acknowledge: only a marker; remove it
+                    try:
+                        os.remove(home("running", (m.get("run") or rid) + ".json"))
+                    except OSError:
+                        pass
+                    continue
                 m["lost_ack"] = now_iso()
                 save_json(home("running", (m.get("run") or rid) + ".json"), m)
             print(f"{len(lost)} lost runs marked lost and acknowledged")
             return
         for rid, m in lost:
-            print(f"{rid}  lost  ({m.get('lost_reason') or lost_reason(m)}; close it: lean-agent runs --stop {rid})  {m.get('model', '?'):<7} "
+            print(f"{rid}  lost  ({(m.get('lost_reason') or lost_reason(m)) + ('; record only, nothing to resume' if m.get('no_record') else '')}; close it: lean-agent runs --stop {rid})  {m.get('model', '?'):<7} "
                   f"{m.get('project', '?'):<16} {m.get('task', '')[:50]}")
         if not lost:
             print("No lost runs.")
