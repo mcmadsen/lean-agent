@@ -1196,6 +1196,14 @@ class CliTest(unittest.TestCase):
             L.cmd_remember(a)
         self.assertEqual(out.getvalue().strip(), "REMEMBERED memory mine")
 
+    def test_guide_says_ops_work_runs_as_small_steps_and_stays_small(self):
+        with open(os.path.join(os.path.dirname(CLI), "..", "templates", "guide.md")) as fh:
+            guide = fh.read()
+        flat = " ".join(guide.split())
+        for phrase in ("one action per worker", "report after each", "never one long chained run"):
+            self.assertIn(phrase, flat)
+        self.assertLess(len(guide), 32000)
+
     def test_guide_has_the_strict_orchestrator_rules(self):
         with open(os.path.join(os.path.dirname(CLI), "..", "templates", "guide.md")) as fh:
             guide = fh.read()
