@@ -13386,14 +13386,18 @@ def cmd_goal(a):
 
 
 def cmd_now(a):
+    if getattr(a, "show", None):
+        print(lean_threads.show_text(a.show))
+        return 0
     waiting = lean_waiting.text()
     if waiting:
         print(waiting)
     goals = lean_goals.now_text()
     if goals:
         print(goals)
-    short = a.short or (os.environ.get("LEAN_AGENT_SESSION_ROLE") == "main" and not FULL)  # the front desk gets the short view unless it asks --full
-    print(lean_threads.short_text() if short else lean_threads.now_text())
+    all_ = bool(getattr(a, "all", False))
+    short = a.short or all_ or (os.environ.get("LEAN_AGENT_SESSION_ROLE") == "main" and not FULL)  # the front desk gets the short view unless it asks --full
+    print(lean_threads.short_text(all_=all_) if short else lean_threads.now_text())
     line = feedback_line()
     if line:
         print(line)
@@ -15210,6 +15214,8 @@ def build_parser():
 
     s = sub.add_parser("now", help="what we are working on: the open threads by last activity, with state and last action")
     s.add_argument("--short", action="store_true", help="one line per open thread: needs you, running, done, idle (the front desk's view)")
+    s.add_argument("--all", action="store_true", help="the short table with every thread (no 10-row cap)")
+    s.add_argument("--show", metavar="tN", help="the short summary of one thread (same as `thread show tN`)")
     s.set_defaults(fn=cmd_now)
 
     s = sub.add_parser("week", help="the last 7 days: pace, runs, reviews, pushes, todos, scheduled jobs")

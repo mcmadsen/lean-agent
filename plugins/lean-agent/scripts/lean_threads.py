@@ -285,6 +285,7 @@ being do does did done have has had it its this that these those there here we y
 can could would should will shall may might must not no yes ok okay please just also so very more most some any all
 what which who whom how why when where than too lets let get got make made use using new need want like again still
 now thanks thank hello hey hi""".split())
+SHORTCUT_RE = re.compile(r"^(?:please\s+)?(?:((?:show\s+)?more)|(?:s|summary|show)\s*t?(\d+))\s*[.!?]?$", re.I)
 EXPLICIT_RE = re.compile(r"(?<![\w/&])(?:#(\d+)|[tT](\d+))\b")
 
 
@@ -582,6 +583,13 @@ def decide(text, data, session=None, now=None, idx=None):
     with a clear margin. Returns (thread id or None, line, kind), kind in thread|new|unsure|job|status."""
     import lean_find
     text = " ".join(str(text or "").split())
+    sc = SHORTCUT_RE.match(text)
+    if sc and not sc.group(1):
+        tid = resolve(f"t{int(sc.group(2))}", data["aliases"])
+        if tid in data["threads"]:
+            return None, f"Front desk job (summary shortcut) \u2014 no thread: lean-agent thread show {tid}", "job"
+    elif sc:
+        return None, "Front desk job (show more shortcut) \u2014 no thread: lean-agent now --all", "job"
     ids = list(EXPLICIT_RE.finditer(text))
     for m in ids:  # a thread id: tN, or a small #N
         cand = resolve(f"#{int(m.group(1))}" if m.group(1) else f"t{int(m.group(2))}", data["aliases"])
@@ -1238,12 +1246,32 @@ SHORT_LINES = 12
 SHORT_DONE_HOURS = 24  # a done report counts as recent this long; older, the thread is idle
 
 
-def short_text(now=None, max_lines=SHORT_LINES):
-    """One line per open thread for the front desk, `now --short`: needs you (or blocked) first, then running, done
-    (recent), idle; at most `max_lines` lines, the rest counted in a last line. Read-only: never closes idle threads."""
+SHORT_ROWS = 10
+WAIT_NEEDS = {"review": "vote", "question": "answer", "permission": "approve", "push": "push/post?", "auth": "sign in", "other": "your call"}
+
+
+def show_code(tid):
+    """The reply shortcut that shows a thread's summary: t21 -> s21."""
+    return "s" + str(tid).lstrip("t#")
+
+
+def _cell(text, n):
+    return one_line(text, n).replace("|", "/")
+
+
+def short_text(now=None, max_lines=SHORT_ROWS, all_=False):
+    """`now --short`, the front desk's status: ONE table (Thread | What | State | Needs | Next | Show). Every thread that
+    needs something (open question or permission, waiting item, report awaiting the user, blocked) comes first, most
+    urgent (oldest) first; then every thread with a running worker; then recent done and idle ones. At most `max_lines`
+    rows (all with all_), the rest counted in a last line. Read-only: never closes idle threads."""
+    import lean_waiting
     now = time.time() if now is None else now
     todos = _todo_map()
     started = {rid: m.get("started") for rid, m in lean_common.running_runs(lean_home())}
+    try:
+        waits = [i for i in lean_waiting._load() if not i.get("answered_at") and i.get("thread")]
+    except Exception:
+        waits = []
     with _locked() as data:
         evs = events(data, todos)
         running = running_by_thread(data)
@@ -1254,26 +1282,37 @@ def short_text(now=None, max_lines=SHORT_LINES):
             last = max([_epoch(t.get("last_message") or t.get("created"))] + [e[0] for e in evs.get(tid, [])])
             rep = t.get("report") if isinstance(t.get("report"), dict) and t["report"].get("text") else None
             rep_ts = _epoch(rep.get("ts")) if rep else 0
-            title = one_line(t.get("title"), 28)
             oq = open_questions(t)
+            wi = [i for i in waits if resolve(i.get("thread"), data["aliases"]) == tid]
+            run = f"running {age(_iso_of(started.get(sorted(running[tid])[0]), last), now)}" if running.get(tid) else ""
             if oq:
-                rows.append((0, -_epoch(oq[0].get("ts")), tid, f'{tid} {title} · waiting on main {age(oq[0]["ts"], now)} · {oq[0]["id"]} "{one_line(oq[0]["text"], 60)}"'))
+                ts = oq[0].get("ts")
+                row = (0, _epoch(ts), tid, "waiting on main " + age(ts, now), _cell(oq[0]["text"], 40), f"answer {oq[0]['id']}")
+            elif wi:
+                w = min(wi, key=lambda i: _epoch(i.get("created") or i.get("ts")))
+                row = (0, _epoch(w.get("created") or w.get("ts")), tid, "waiting " + age(w.get("created") or w.get("ts"), now),
+                       _cell(w.get("summary"), 40), WAIT_NEEDS.get(w.get("kind"), "your call"))
             elif rep and rep.get("kind") in ("needs-you", "blocked") and rep_ts >= last - 5:
                 label = "needs you" if rep["kind"] == "needs-you" else "blocked"
-                rows.append((0, -rep_ts, tid, f'{tid} {title} · {label} {age(rep["ts"], now)} · "{one_line(rep["text"], 60)}"'))
+                row = (0, rep_ts, tid, f"{label} {age(rep['ts'], now)}", _cell(rep["text"], 40), "your call" if label == "needs you" else "unblock it")
             elif running.get(tid):
-                rid = sorted(running[tid])[0]
-                rows.append((1, -last, tid, f"{tid} {title} · running run {rid} {age(_iso_of(started.get(rid), last), now)}"))
+                row = (1, -last, tid, run, "", "wait for the run")
             elif rep and rep.get("kind") == "done" and now - rep_ts < SHORT_DONE_HOURS * 3600:
-                rows.append((2, -rep_ts, tid, f'{tid} {title} · done {age(rep["ts"], now)} · "{one_line(rep["text"], 60)}"'))
+                row = (2, -rep_ts, tid, f"done {age(rep['ts'], now)}", _cell(rep["text"], 40), "nothing")
             else:
-                rows.append((3, -last, tid, f"{tid} {title} · idle {age(_iso_of(None, last), now)}"))
+                row = (3, -last, tid, f"idle {age(_iso_of(None, last), now)}", "", "nothing")
+            if row[0] == 0 and run:
+                row = row[:3] + (row[3] + ", " + run,) + row[4:]
+            rows.append(row + (_cell(t.get("title"), 28),))
     if not rows:
         return "No open threads."
-    rows.sort()
-    lines = [r[3] for r in rows[:max_lines]]
-    if len(rows) > max_lines:
-        lines.append(f"+{len(rows) - max_lines} more (lean-agent now)")
+    rows.sort(key=lambda r: (r[0], r[1], r[2]))
+    shown = rows if all_ else rows[:max_lines]
+    lines = ["| Thread | What | State | Needs | Next | Show |", "|---|---|---|---|---|---|"]
+    for pr, _, tid, state, needs, nxt, title in shown:
+        lines.append(f"| {tid} | {title} | {state} | {needs} | {nxt} | **{show_code(tid)}** |")
+    if len(rows) > len(shown):
+        lines.append(f"\n+{len(rows) - len(shown)} more threads \u2014 reply **more**")
     return "\n".join(lines)
 
 
