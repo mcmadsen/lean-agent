@@ -16,6 +16,7 @@ import json
 import math
 import os
 import re
+import shlex
 import time
 
 import lean_common
@@ -285,6 +286,17 @@ being do does did done have has had it its this that these those there here we y
 can could would should will shall may might must not no yes ok okay please just also so very more most some any all
 what which who whom how why when where than too lets let get got make made use using new need want like again still
 now thanks thank hello hey hi""".split())
+ASK_RE = re.compile(r"^(?:ask\s+t?|a)(\d+)(?:\s+(.*))?$", re.I | re.S)
+FILES_RE = re.compile(r"^(?:files?\s+t?|f)(\d+)(?:\s+(\d+))?$", re.I)
+SHORTCUT_RE = re.compile(r"^(?:please\s+)?(?:((?:show\s+)?more)|(?:s|summary|show)\s*t?(\d+))\s*[.!?]?$", re.I)
+PR_RE = re.compile(r"^pr\s*t?(\d+)(?:\s+(c|comments|ci|diff|fix|reply|review))?$", re.I)
+PR_LIST_RE = re.compile(r"^pr\s+(list|mine|stale|find)(?:\s+(.+))?$", re.I)
+PR_FLAGS = {"c": " --comments", "comments": " --comments", "ci": " --ci", "diff": " --diff", "": ""}
+PR_WORK = {
+    "fix": "Fix the open review comments on your PR(s) with a worker; then send one consolidated final report with the proposed push",
+    "reply": "Draft replies to the open comments on your PR(s); report the drafts; post nothing until the user approves",
+    "review": "Run a review of your PR's latest head; report the verdict with the vote question",
+}
 EXPLICIT_RE = re.compile(r"(?<![\w/&])(?:#(\d+)|[tT](\d+))\b")
 
 
@@ -582,6 +594,52 @@ def decide(text, data, session=None, now=None, idx=None):
     with a clear margin. Returns (thread id or None, line, kind), kind in thread|new|unsure|job|status."""
     import lean_find
     text = " ".join(str(text or "").split())
+    low = text.lower().rstrip("?!. ") if text != "?" else "?"
+    if text == "?" or low in ("shortcuts", "help"):
+        return None, "Front desk job (shortcuts) \u2014 no thread: lean-agent shortcuts", "job"
+    if low in ("goals", "waiting"):
+        return None, f"Front desk job ({low}) \u2014 no thread: lean-agent {low}", "job"
+    am = ASK_RE.match(text)
+    if am:
+        tid = resolve(f"t{int(am.group(1))}", data["aliases"])
+        if tid in data["threads"]:
+            q = (am.group(2) or "").strip()
+            if not q:
+                return None, f"Front desk job (ask shortcut) \u2014 no thread: no question given; ask the user what to ask {tid}", "job"
+            return None, f"Front desk job (ask shortcut) \u2014 no thread: send the question to {tid} unchanged: lean-agent thread send {tid} {_dq(q)}", "job"
+    fm = FILES_RE.match(text)
+    if fm:
+        tid = resolve(f"t{int(fm.group(1))}", data["aliases"])
+        if tid in data["threads"]:
+            if fm.group(2):
+                return None, f"Front desk job (files shortcut) \u2014 no thread: lean-agent thread files {tid} --show {fm.group(2)}", "job"
+            return None, f"Front desk job (files shortcut) \u2014 no thread: lean-agent thread files {tid}", "job"
+    sc = SHORTCUT_RE.match(text)
+    if sc and not sc.group(1):
+        tid = resolve(f"t{int(sc.group(2))}", data["aliases"])
+        if tid in data["threads"]:
+            return None, f"Front desk job (summary shortcut) \u2014 no thread: lean-agent thread show {tid}", "job"
+    elif sc:
+        return None, "Front desk job (show more shortcut) \u2014 no thread: lean-agent now --all", "job"
+    pm = PR_RE.match(low)
+    if pm:
+        tid = resolve(f"t{int(pm.group(1))}", data["aliases"])
+        if tid in data["threads"]:
+            act = (pm.group(2) or "").lower()
+            if act in PR_WORK:
+                return None, (f"Front desk job (pr {act} shortcut) \u2014 no thread: send the task to {tid} unchanged: "
+                              f"lean-agent thread send {tid} {_dq(PR_WORK[act])}"), "job"
+            return None, f"Front desk job (pr shortcut) \u2014 no thread: lean-agent pr {tid}{PR_FLAGS[act]}", "job"
+    pl = PR_LIST_RE.match(low)
+    if pl:
+        what, rest = pl.group(1), (pl.group(2) or "").strip()
+        orig = text.split(None, 2)[2] if what == "find" and len(text.split(None, 2)) > 2 else rest
+        if what in ("list", "mine") and not rest:
+            return None, f"Front desk job (pr {what} shortcut) \u2014 no thread: lean-agent pr {what}", "job"
+        if what == "stale" and (not rest or re.fullmatch(r"\d+(\.\d+)?", rest)):
+            return None, f"Front desk job (pr stale shortcut) \u2014 no thread: lean-agent pr stale" + (f" --days {rest}" if rest else ""), "job"
+        if what == "find" and rest:
+            return None, f"Front desk job (pr find shortcut) \u2014 no thread: lean-agent pr find {_dq(orig)}", "job"
     ids = list(EXPLICIT_RE.finditer(text))
     for m in ids:  # a thread id: tN, or a small #N
         cand = resolve(f"#{int(m.group(1))}" if m.group(1) else f"t{int(m.group(2))}", data["aliases"])
@@ -1238,12 +1296,127 @@ SHORT_LINES = 12
 SHORT_DONE_HOURS = 24  # a done report counts as recent this long; older, the thread is idle
 
 
-def short_text(now=None, max_lines=SHORT_LINES):
-    """One line per open thread for the front desk, `now --short`: needs you (or blocked) first, then running, done
-    (recent), idle; at most `max_lines` lines, the rest counted in a last line. Read-only: never closes idle threads."""
+SHORT_ROWS = 10
+WAIT_NEEDS = {"review": "vote", "question": "answer", "permission": "approve", "push": "push/post?", "auth": "sign in", "other": "your call"}
+
+
+def _dq(text):
+    """`text` as one double-quoted shell word."""
+    return '"' + re.sub(r'(["\\$`])', r"\\\1", text) + '"'
+
+
+def show_code(tid):
+    """The reply shortcut that shows a thread's summary: t21 -> s21."""
+    return "s" + str(tid).lstrip("t#")
+
+
+def _files_path():
+    return lean_home("files.json")
+
+
+def record_file(path, kind, thread=None):
+    """Remember a file lean-agent wrote for the user: path, size, time, thread (resolve_tag; the front desk is "main"), kind."""
+    try:
+        path = os.path.abspath(os.path.expanduser(str(path)))
+        tid = resolve_tag(thread) if thread is not None else resolve_tag()
+        rec = {"path": path, "kind": kind, "thread": tid or "main", "ts": now_iso(),
+               "size": os.path.getsize(path) if os.path.exists(path) else 0}
+        reg = _files_path()
+        with lean_common.file_lock(reg):
+            recs = lean_common.read_json(reg, [])
+            recs = [r for r in recs if isinstance(r, dict) and not (r.get("path") == path and r.get("thread") == rec["thread"])] if isinstance(recs, list) else []
+            recs.append(rec)
+            lean_common.write_json_atomic(reg, recs[-500:])
+    except Exception:  # a bookkeeping failure never fails the command that wrote the file
+        pass
+
+
+def thread_files(tid):
+    """The files made for thread `tid`, oldest first: recorded ones plus (older) handovers of the thread. Each:
+    {path, kind, ts, size, gone}."""
+    tid = resolve(norm(tid)) if tid != "main" else "main"
+    recs = lean_common.read_json(_files_path(), [])
+    out = {r["path"]: dict(r) for r in recs if isinstance(r, dict) and r.get("thread") == tid and r.get("path")}
+    hs = lean_common.read_json(lean_home("handovers.json"), [])
+    for h in hs if isinstance(hs, list) else []:
+        if isinstance(h, dict) and h.get("thread") == tid and h.get("path") and h["path"] not in out:
+            out[h["path"]] = {"path": h["path"], "kind": "handover", "ts": h.get("ts") or ""}
+    rows = []
+    for r in out.values():
+        r["gone"] = not os.path.exists(r["path"])
+        if not r["gone"]:
+            r["size"] = os.path.getsize(r["path"])
+        rows.append(r)
+    rows.sort(key=lambda r: r.get("ts") or "")
+    return rows
+
+
+def _size(n):
+    return f"{n} B" if n < 1024 else f"{max(1, round(n / 1024))} KB" if n < 1024 * 1024 else f"{n / 1048576:.1f} MB"
+
+
+def files_text(tid):
+    rows = thread_files(tid)
+    if not rows:
+        return f"No files recorded for {tid}."
+    home = os.path.expanduser("~")
+    lines = []
+    for i, r in enumerate(rows, 1):
+        path = r["path"]
+        shown = "~" + path[len(home):] if path.startswith(home + os.sep) else path
+        ts = str(r.get("ts") or "")[:16].replace("T", " ")
+        lines.append(f"{i}. {shown} \u00b7 " + ("(gone)" if r["gone"] else _size(r.get("size", 0))) + f" \u00b7 {ts} \u00b7 {r.get('kind', 'file')}")
+    return "\n".join(lines)
+
+
+SHOW_LINES, SHOW_CHARS = 200, 12000
+
+
+def file_show(tid, n):
+    """(text, ok) for file number n of the thread: Markdown/text only, capped; a missing or binary file is refused with its path."""
+    rows = thread_files(tid)
+    if not str(n).isdigit() or not 1 <= int(n) <= len(rows):
+        return f"no file {n} for {tid} (lean-agent thread files {tid})", False
+    r = rows[int(n) - 1]
+    path = r["path"]
+    if r["gone"]:
+        return f"{path} is gone", False
+    try:
+        raw = open(path, "rb").read(SHOW_CHARS * 4 + 1)
+        if b"\0" in raw[:4096]:
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "binary")
+        text = raw.decode("utf-8", "ignore")
+    except (OSError, UnicodeDecodeError):
+        return f"not a text file, open it: {path}", False
+    full = open(path, encoding="utf-8", errors="ignore").read()
+    lines = full.splitlines()
+    cut = "\n".join(lines[:SHOW_LINES])
+    if len(cut) > SHOW_CHARS:
+        cut = cut[:SHOW_CHARS]
+        cut = cut[:cut.rfind("\n")] if "\n" in cut else cut
+    kept = len(cut.splitlines())
+    if kept < len(lines):
+        cut += f"\n\u2026 ({len(lines) - kept} more lines; open {path})"
+    return cut, True
+
+
+def _cell(text, n):
+    return one_line(text, n).replace("|", "/")
+
+
+def short_text(now=None, max_lines=SHORT_ROWS, all_=False):
+    """`now --short`, the front desk's status: ONE table (Thread | What | State | Needs | Next | Show). Every thread that
+    needs something (open question or permission, waiting item, report awaiting the user, blocked) comes first, most
+    urgent (oldest) first; then every thread with a running worker; then recent done and idle ones. At most `max_lines`
+    rows (all with all_), the rest counted in a last line. Read-only: never closes idle threads."""
+    import lean_waiting
     now = time.time() if now is None else now
     todos = _todo_map()
     started = {rid: m.get("started") for rid, m in lean_common.running_runs(lean_home())}
+    try:
+        waits = [i for i in lean_waiting._load() if not i.get("answered_at") and i.get("thread")]
+    except Exception:
+        waits = []
     with _locked() as data:
         evs = events(data, todos)
         running = running_by_thread(data)
@@ -1254,26 +1427,39 @@ def short_text(now=None, max_lines=SHORT_LINES):
             last = max([_epoch(t.get("last_message") or t.get("created"))] + [e[0] for e in evs.get(tid, [])])
             rep = t.get("report") if isinstance(t.get("report"), dict) and t["report"].get("text") else None
             rep_ts = _epoch(rep.get("ts")) if rep else 0
-            title = one_line(t.get("title"), 28)
             oq = open_questions(t)
+            wi = [i for i in waits if resolve(i.get("thread"), data["aliases"]) == tid]
+            run = f"running {age(_iso_of(started.get(sorted(running[tid])[0]), last), now)}" if running.get(tid) else ""
             if oq:
-                rows.append((0, -_epoch(oq[0].get("ts")), tid, f'{tid} {title} · waiting on main {age(oq[0]["ts"], now)} · {oq[0]["id"]} "{one_line(oq[0]["text"], 60)}"'))
+                ts = oq[0].get("ts")
+                row = (0, _epoch(ts), tid, "waiting on main " + age(ts, now), _cell(oq[0]["text"], 40), f"answer {oq[0]['id']}")
+            elif wi:
+                w = min(wi, key=lambda i: _epoch(i.get("created") or i.get("ts")))
+                row = (0, _epoch(w.get("created") or w.get("ts")), tid, "waiting " + age(w.get("created") or w.get("ts"), now),
+                       _cell(w.get("summary"), 40), WAIT_NEEDS.get(w.get("kind"), "your call"))
             elif rep and rep.get("kind") in ("needs-you", "blocked") and rep_ts >= last - 5:
                 label = "needs you" if rep["kind"] == "needs-you" else "blocked"
-                rows.append((0, -rep_ts, tid, f'{tid} {title} · {label} {age(rep["ts"], now)} · "{one_line(rep["text"], 60)}"'))
+                row = (0, rep_ts, tid, f"{label} {age(rep['ts'], now)}", _cell(rep["text"], 40), "your call" if label == "needs you" else "unblock it")
             elif running.get(tid):
-                rid = sorted(running[tid])[0]
-                rows.append((1, -last, tid, f"{tid} {title} · running run {rid} {age(_iso_of(started.get(rid), last), now)}"))
+                row = (1, -last, tid, run, "", "wait for the run")
             elif rep and rep.get("kind") == "done" and now - rep_ts < SHORT_DONE_HOURS * 3600:
-                rows.append((2, -rep_ts, tid, f'{tid} {title} · done {age(rep["ts"], now)} · "{one_line(rep["text"], 60)}"'))
+                row = (2, -rep_ts, tid, f"done {age(rep['ts'], now)}", _cell(rep["text"], 40), "nothing")
             else:
-                rows.append((3, -last, tid, f"{tid} {title} · idle {age(_iso_of(None, last), now)}"))
+                row = (3, -last, tid, f"idle {age(_iso_of(None, last), now)}", "", "nothing")
+            if row[0] == 0 and run:
+                row = row[:3] + (row[3] + ", " + run,) + row[4:]
+            rows.append(row + (_cell(t.get("title"), 28),))
     if not rows:
         return "No open threads."
-    rows.sort()
-    lines = [r[3] for r in rows[:max_lines]]
-    if len(rows) > max_lines:
-        lines.append(f"+{len(rows) - max_lines} more (lean-agent now)")
+    rows.sort(key=lambda r: (r[0], r[1], r[2]))
+    shown = rows if all_ else rows[:max_lines]
+    lines = ["| Thread | What | State | Needs | Next | Show |", "|---|---|---|---|---|---|"]
+    for pr, _, tid, state, needs, nxt, title in shown:
+        c = show_code(tid)
+        cell = f"**{c}** \u00b7 a{c[1:]}" + (f" \u00b7 f{c[1:]}" if thread_files(tid) else "")
+        lines.append(f"| {tid} | {title} | {state} | {needs} | {nxt} | {cell} |")
+    if len(rows) > len(shown):
+        lines.append(f"\n+{len(rows) - len(shown)} more threads \u2014 reply **more**")
     return "\n".join(lines)
 
 

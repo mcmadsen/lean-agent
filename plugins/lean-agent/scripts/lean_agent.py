@@ -44,6 +44,7 @@ import lean_threads  # noqa: E402
 import lean_find  # noqa: E402
 import lean_feedback  # noqa: E402
 import lean_goals  # noqa: E402
+import lean_pr  # noqa: E402
 import lean_waiting  # noqa: E402
 import lean_auth  # noqa: E402
 import service_session  # noqa: E402
@@ -1755,10 +1756,10 @@ def duplicate_launch_guard(a, model, task):
     return key
 
 
-INTERNAL_ROLES = ("librarian", "advisor", "composer", "gap-decider", "chaser", "tracker-discover", "review-learn", "reuse-check")
+INTERNAL_ROLES = ("librarian", "advisor", "composer", "gap-decider", "chaser", "tracker-discover", "review-learn", "reuse-check", "pr-status")
 # helper runs behind another command: not shown as workers (runs list, thread lists, --wait all, week counts, "started" line)
 
-NO_RESUME_ROLES = ("librarian", "advisor", "composer", "gap-decider", "chaser")  # one-shot helpers with their own grants
+NO_RESUME_ROLES = ("librarian", "advisor", "composer", "gap-decider", "chaser", "pr-status")  # one-shot helpers with their own grants
 
 
 def latest_run_id(runs=None, ordinary=False):
@@ -2888,6 +2889,9 @@ def _cmd_run(a):
     elif role == "chaser":
         summary, decided = parse_marker(summary, "LEAN-CHASE")
         save_json(os.path.join(workdir, "chase.json"), decided or {})
+    elif role == "pr-status":
+        summary, got_pr = parse_marker(summary, "LEAN-PR")
+        save_json(os.path.join(workdir, "pr.json"), got_pr or {})
     elif role == "tracker-discover":
         summary, found = parse_marker(summary, "LEAN-TRACKER")
         save_json(os.path.join(workdir, "tracker.json"), found or {})
@@ -12213,6 +12217,7 @@ def cmd_doc(a):
     os.makedirs(os.path.dirname(target), exist_ok=True)
     with open(target, "a" if a.append else "w") as fh:
         fh.write(text if text.endswith("\n") or not text else text + "\n")
+    lean_threads.record_file(target, "doc")
     print(f"{'appended' if a.append else 'wrote'} {text.count(chr(10)) + (0 if text.endswith(chr(10)) else 1)} lines "
           f"({len(text.encode())} bytes) to {target}")
     return 0
@@ -13006,8 +13011,51 @@ def cmd_thread(a):
     return rc
 
 
+def thread_files_cmd(a):
+    tid = a.args[0] if a.args else lean_threads.resolve_tag() or "main"
+    if a.show is not None:
+        text, ok = lean_threads.file_show(tid, a.show)
+        print(text, file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
+    print(lean_threads.files_text(tid))
+    return 0
+
+
+SHORTCUTS = (
+    ("?", "this list"),
+    ("status / now", "the status table"),
+    ("more", "all threads (when the table says +N more)"),
+    ("s21", "summary of t21: last report, open questions, running work, next step"),
+    ("a21 <question>", "send the question to t21 unchanged"),
+    ("f21", "files t21 made for you, numbered"),
+    ("f21 2", "show file 2 of t21 (text only, capped)"),
+    ("goals", "open goals"),
+    ("waiting", "what waits on you"),
+    ("pr21", "PR status of t21 (open comments, votes, CI; known state first, live state cached 10 min)"),
+    ("pr21 c", "all active comments on t21's PRs in full"),
+    ("pr21 ci", "CI/policy checks of t21's PRs, failing first, with the build link"),
+    ("pr21 diff", "changed files with +/- lines of t21's PRs"),
+    ("pr list", "all PRs of every open thread"),
+    ("pr mine", "open PRs waiting for your vote"),
+    ("pr stale [days]", "your own open PRs without activity (default 3 days)"),
+    ("pr find <text>", "open PRs by author, reviewer, title, branch or work item"),
+    ("pr21 fix", "send t21 the task: fix the open review comments, then one final report with the proposed push"),
+    ("pr21 reply", "send t21 the task: draft replies to the open comments, post nothing until you approve"),
+    ("pr21 review", "send t21 the task: review the PR's latest head, report the verdict with the vote question"),
+)
+
+
+def cmd_shortcuts(a):
+    print("| Reply | Meaning |\n|---|---|")
+    for k, v in SHORTCUTS:
+        print(f"| {k} | {v} |")
+    return 0
+
+
 def thread_action(a):
     act = a.action
+    if act == "files":
+        return thread_files_cmd(a)
     resume_old = getattr(a, "resume_old", False)
     if act == "sessions":
         if not service_session.alive():
@@ -13260,6 +13308,7 @@ def cmd_feedback(a):
         print(f"feedback {text} {'removed' if a.action == 'rm' else 'done'}")
     else:
         path, n = lean_feedback.export(a.all, a.out)
+        lean_threads.record_file(path, "feedback")
         print(f"feedback: {path} ({n} items)")
     return 0
 
@@ -13345,6 +13394,254 @@ def chase_decide(a):
     return 0
 
 
+# ---------------------------------------------------------------- pr: PR status per thread (known state + one read-only haiku helper)
+
+def pr_entry(tid, slug, pr, head, goals, reviews_cache, pushes):
+    """One PR of a thread from lean-agent's own records: goal, last review, last push, last report line."""
+    tid_n = norm_thread_tag(tid)
+    goal = next((g for g in goals if lean_goals.key_of(g.get("ref")) == "n" + str(pr) and norm_thread_tag(g.get("thread")) in ("", tid_n)), None)
+    if slug not in reviews_cache:
+        reviews_cache[slug] = [r for r in read_jsonl(reviews_path(slug)) if is_real_review(r)]
+    review = next((r for r in reversed(reviews_cache[slug])
+                   if pr_of_ref(r.get("ref")) == str(pr) or (head and (bare_ref(r.get("ref")) == bare_ref(head) or r.get("branch") == head))), None)
+    push = next((p for p in reversed(pushes) if p.get("project") == slug
+                 and ((head and p.get("branch") == head) or (not head and norm_thread_tag(p.get("thread")) == tid_n))), None)
+    report = ""
+    if goal and goal.get("last_report"):
+        report = goal["last_report"].splitlines()[0]
+    else:
+        t = lean_threads.load()["threads"].get(tid) or {}
+        report = str((t.get("report") or {}).get("text") or "").splitlines()[0] if isinstance(t.get("report"), dict) and t["report"].get("text") else ""
+    path = (projects().get(slug) or {}).get("path") or ""
+    remote = git(path, "remote", "get-url", "origin") if path and os.path.isdir(path) else ""
+    return {"thread": tid, "project": slug, "path": path, "remote": remote or "", "flavour": lean_pr.flavour_of(remote), "pr": str(pr),
+            "head": head, "goal": goal, "review": review, "push": push, "report": report}
+
+
+def pr_entries(tids=None, only_pr=None):
+    """Entries for the threads `tids` (None: every open thread, and closed ones that still have an open PR goal)."""
+    data = lean_threads.load()
+    goals = [g for g in lean_goals._load() if isinstance(g, dict)]
+    open_goal_threads = {norm_thread_tag(g.get("thread")) for g in goals if g.get("state") in lean_goals.OPEN}
+    if tids is None:
+        tids = [t["id"] for t in lean_threads.threads(include_expired=True) if re.fullmatch(r"t\d+", t["id"])
+                and (not t.get("closed") or norm_thread_tag(t["id"]) in open_goal_threads)]
+    reviews_cache, pushes, out = {}, [p for p in read_jsonl(home("pushes.jsonl")) if p.get("ok")], []
+    for tid in tids:
+        refs = thread_pr_refs(tid)
+        slug0 = next((s for s, _, _ in refs), "")
+        if not slug0:
+            slug0 = next((r.get("project") for r in reversed(ledger()) if norm_thread_tag(r.get("thread")) == norm_thread_tag(tid) and r.get("project")), "")
+        closed = bool((data["threads"].get(tid) or {}).get("closed"))
+        for g in goals:  # PR goals of the thread that no todo/run/review names
+            n = lean_goals.key_of(g.get("ref"))
+            if n.startswith("n") and norm_thread_tag(g.get("thread")) == norm_thread_tag(tid) and slug0 and n[1:] not in [p for _, p, _ in refs]:
+                if not closed or g.get("state") in lean_goals.OPEN:
+                    refs.append((slug0, n[1:], None))
+        for slug, pr, head in refs:
+            e = pr_entry(tid, slug, pr, head, goals, reviews_cache, pushes)
+            if closed and not (e["goal"] and e["goal"].get("state") in lean_goals.OPEN):
+                continue
+            if only_pr is None or e["pr"] == str(only_pr):
+                out.append(e)
+    return out
+
+
+def pr_fetch(a):
+    """internal (`pr-fetch FILE [--report TID]`): ONE read-only haiku helper (role pr-status) reads the live state of the PRs
+    (or, for mode mine/stale/find, the project's open-PR list) in FILE ({"entries": [...], "mode": ...}); the rows go into the
+    cache; prints {"prs": n, "_cost": usd}. With --report the table is queued as a report line for that thread (main: the front desk)."""
+    spec = load_json(a.file, {})
+    entries, mode = spec.get("entries") or [], spec.get("mode") or "status"
+    if not entries:
+        print(json.dumps({"prs": 0, "_cost": 0}))
+        return 0
+    flavours = [e["flavour"] for e in entries if e.get("flavour")]
+    work = entries[0]["path"] if os.path.isdir(entries[0].get("path") or "") else home("pr-status")
+    os.makedirs(work, exist_ok=True)
+    ns = argparse.Namespace(resume=None, task=["Report the live state of the listed pull requests (read-only)."], task_file=None,
+                            model="haiku", todo=None, why="cheap PR status", cards="none", card_list=None,
+                            project=work, read_only=True, chrome=None, mcp=None, tools=None, allow_send=None,
+                            allow_cmd=lean_pr.allow_cmds(flavours), max_turns=12, max_usd=0.3, max_context=3000, max_cards=0, ttype="read",
+                            role=lean_pr.ROLE, effort="low",
+                            role_rule=lean_pr.prompt([e for e in entries if e.get("flavour")] or entries, mode))
+    LAST_RUN[:] = []
+    with contextlib.redirect_stdout(io.StringIO()):
+        cmd_run(ns)
+    run = LAST_RUN[0] if LAST_RUN else None
+    got = load_json(os.path.join(run["workdir"], "pr.json"), {}) if run and run.get("workdir") else {}
+    rows = lean_pr.parse_rows(got)
+    cost = float((run or {}).get("cost_usd") or 0)
+    if mode in lean_pr.QUERIES:
+        slug = entries[0]["project"]
+        if rows:
+            lean_pr.save_query("open" if mode == "find" else mode, slug, rows, me=str((got or {}).get("me") or "") if isinstance(got, dict) else "")
+        print(json.dumps({"prs": len(rows), "_cost": cost}))
+        return 0 if rows else 1
+    by_pr = {e["pr"]: e["project"] for e in entries}
+    for r in rows:
+        r["project"] = by_pr.get(r["pr"], r.get("project") or "")
+    rows = [r for r in rows if r["project"] or r["pr"] in by_pr]
+    if rows:
+        lean_pr.save_live(rows, section=mode)
+    if a.report and rows:
+        cache = lean_pr.load_cache()
+        try:
+            service_session.queue_report(a.report, "done", lean_pr.report_line(a.report, entries, cache), tag="pr-status", force=True)
+        except Exception as exc:
+            print(f"pr: report not queued ({exc})", file=sys.stderr)
+    print(json.dumps({"prs": len(rows), "_cost": cost}))
+    return 0 if rows else 1
+
+
+def pr_start_fetch(entries, report=None, wait=True, mode="status"):
+    """Start the helper process (detached when not waiting). Returns (ok, cost, note)."""
+    fd = home("pr-fetch-%d.json" % os.getpid())
+    save_json(fd, {"mode": mode, "entries": [{k: v for k, v in e.items() if k in ("project", "path", "remote", "flavour", "pr", "thread")} for e in entries]})
+    cmd = [sys.executable, os.path.abspath(__file__), "pr-fetch", fd] + (["--report", report] if report else [])
+    if not wait:
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+                         env=dict(os.environ, LEAN_AGENT_THREAD="none"))
+        return True, 0.0, "started"
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=lean_pr.FETCH_CAP_SECONDS, env=dict(os.environ, LEAN_AGENT_THREAD="none"))
+    except subprocess.TimeoutExpired:
+        return False, 0.0, f"timed out after {lean_pr.FETCH_CAP_SECONDS}s"
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(fd)
+    try:
+        out = json.loads(p.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        return False, 0.0, "the helper returned nothing"
+    return p.returncode == 0, float(out.get("_cost") or 0), "" if p.returncode == 0 else "the helper returned no usable rows"
+
+
+def pr_project(a):
+    """(slug, path) for a PR command without a thread: -p, else the registered project of the current directory, else the one
+    learned project; asks for -p when there are several."""
+    projs = projects()
+    if getattr(a, "project", None):
+        slug, path = resolve_project(a.project, register=False)
+        return slug, path
+    for s, v in projs.items():
+        if same_path(v["path"], os.getcwd()):
+            return s, v["path"]
+    if len(projs) == 1:
+        s = next(iter(projs))
+        return s, projs[s]["path"]
+    die("several projects are learned and the current directory is none of them: pass -p <project>" if projs else "no project is learned (lean-agent learn <path>)")
+
+
+def pr_pseudo_entry(slug, path, pr="*"):
+    remote = git(path, "remote", "get-url", "origin") if os.path.isdir(path) else ""
+    return {"thread": "", "project": slug, "path": path, "remote": remote or "", "flavour": lean_pr.flavour_of(remote), "pr": pr,
+            "head": None, "goal": None, "review": None, "push": None, "report": ""}
+
+
+def pr_query(a, kind):
+    """`pr mine | stale | find <text>`: the project's open PRs from one cached helper list, filtered here."""
+    slug, path = pr_project(a)
+    pe = pr_pseudo_entry(slug, path)
+    qk = "open" if kind == "find" else kind
+    cache = lean_pr.load_cache()
+    q = lean_pr.query_of(qk, slug, cache)
+    text = " ".join(a.words or []).strip()
+    if kind == "find" and not text:
+        die("usage: lean-agent pr find <text> (author, reviewer, title, branch or work item id)")
+    note = ""
+    if a.no_live or not pe["flavour"]:
+        if kind == "find":
+            known = lean_pr.find_known(text, pr_entries(None), cache)
+            q = {"rows": known, "fetched": 0, "me": ""}
+            note = "known PRs only (no live data)"
+        elif not q:
+            print("(no live state" + (": the git remote is neither Azure DevOps nor GitHub)" if not pe["flavour"] else "; drop --no-live)"))
+            return 0
+    elif a.refresh or not lean_pr.fresh(q):
+        print("fetching live state (haiku, ~$0.01)…", flush=True)
+        ok, cost, why = pr_start_fetch([pe], mode=kind)
+        print(f"live state: {'fetched' if ok else 'not fetched (' + why + ')'}" + (f" · ${cost:.3f}" if cost else ""))
+        q = lean_pr.query_of(qk, slug)
+        if not q and kind == "find":
+            q = {"rows": lean_pr.find_known(text, pr_entries(None), cache), "fetched": 0, "me": ""}
+            note = "known PRs only (the helper returned nothing)"
+        elif not q:
+            return 1
+    else:
+        note = f"cached, {lean_pr.age_text(q['fetched'])} old; --refresh for the current state"
+    rows = q["rows"] if kind == "find" and note.startswith("known") else lean_pr.filter_query(kind, q["rows"], q.get("me"), a.days, text)
+    owners = {e["pr"]: e["thread"] for e in pr_entries(None) if e["project"] == slug and e.get("thread")}
+    head = {"mine": f"Open PRs waiting for your vote ({len(rows)}):", "stale": f"Your open PRs with no activity for {a.days:g}+ days ({len(rows)}):",
+            "find": f"Open PRs matching {text!r} ({len(rows)}):"}[kind]
+    print(head)
+    print(lean_pr.query_table(rows, pe["remote"], owners, note))
+    return 0
+
+
+def cmd_pr(a):
+    """`pr tN | pr <PR> | pr list | mine | stale | find <text>`: known state at once, then the live state (cached 10 min;
+    --refresh, --no-live, --async; --comments, --ci, --diff for one section)."""
+    arg = (a.target or "list").strip()
+    words = list(a.words or [])
+    if arg in lean_pr.QUERIES:
+        return pr_query(a, arg)
+    if arg not in ("list",) and not re.fullmatch(r"[tT#]\d+|!?\d+", arg):  # `pr find`-style words: a free-text search
+        a.words, arg = [arg] + words, "find"
+        return pr_query(a, "find")
+    is_list = arg == "list"
+    mode = "comments" if a.comments else "ci" if a.ci else "diff" if a.diff else "status"
+    if is_list:
+        entries = pr_entries()
+    elif re.fullmatch(r"[tT#]\d+", arg):
+        entries = pr_entries([norm_thread_tag(arg)])
+    else:
+        n = arg.lstrip("!")
+        entries = pr_entries(None, only_pr=n)
+        if not entries:  # not known to a thread: the PR of the project (-p, cwd, or the single learned one)
+            slug, path = pr_project(a)
+            entries = [pr_pseudo_entry(slug, path, n)]
+    if not entries:
+        print("No PRs known for " + ("any open thread." if is_list else f"{arg}."))
+        return 0
+    cache = lean_pr.load_cache()
+    if (not is_list and mode == "status") or a.no_live:
+        print(lean_pr.known_table(entries) if not is_list else lean_pr.list_table(entries, cache))
+    if a.no_live:
+        return 0
+    sect = None if mode == "status" else mode
+    todo = [e for e in entries if e.get("flavour") and (a.refresh or not lean_pr.fresh(lean_pr.live_of(e["project"], e["pr"], cache), section=sect))]
+    if not any(e.get("flavour") for e in entries) and not any(lean_pr.live_of(e["project"], e["pr"], cache) for e in entries):
+        print("(no live state: the git remote is neither Azure DevOps nor GitHub)")
+    ok = True
+    if todo and a.async_:
+        pr_start_fetch(todo, report="main" if is_list else (entries[0].get("thread") or caller_thread()), wait=False, mode=mode)
+        print("fetching live state in the background (haiku, ~$0.01); the table follows as a report line")
+        return 0
+    if todo:
+        print("fetching live state (haiku, ~$0.01)…", flush=True)
+        ok, cost, note = pr_start_fetch(todo, mode=mode)
+        print(f"live state: {'fetched' if ok else 'not fetched (' + note + ')'}" + (f" · ${cost:.3f}" if cost else ""))
+        cache = lean_pr.load_cache()
+    have = [lean_pr.live_of(e["project"], e["pr"], cache) for e in entries]
+    have = [h for h in have if h]
+    if have:
+        if not todo:
+            print(f"(cached, {lean_pr.age_text(min(h['fetched'] for h in have))} old; --refresh for the current state)")
+        if mode == "comments":
+            print(lean_pr.comments_full(entries, cache))
+        elif mode == "ci":
+            print(lean_pr.ci_text(entries, cache))
+        elif mode == "diff":
+            print(lean_pr.diff_text(entries, cache))
+        else:
+            print(lean_pr.list_table(entries, cache) if is_list else lean_pr.live_table(entries, cache))
+            comments = lean_pr.comments_text(entries, cache)
+            if comments:
+                print(comments)
+    return 0 if ok else 1
+
+
 def cmd_goals(a):
     args = list(a.args or [])
     if args[:1] == ["pause"]:
@@ -13386,14 +13683,18 @@ def cmd_goal(a):
 
 
 def cmd_now(a):
+    if getattr(a, "show", None):
+        print(lean_threads.show_text(a.show))
+        return 0
     waiting = lean_waiting.text()
     if waiting:
         print(waiting)
     goals = lean_goals.now_text()
     if goals:
         print(goals)
-    short = a.short or (os.environ.get("LEAN_AGENT_SESSION_ROLE") == "main" and not FULL)  # the front desk gets the short view unless it asks --full
-    print(lean_threads.short_text() if short else lean_threads.now_text())
+    all_ = bool(getattr(a, "all", False))
+    short = a.short or all_ or (os.environ.get("LEAN_AGENT_SESSION_ROLE") == "main" and not FULL)  # the front desk gets the short view unless it asks --full
+    print(lean_threads.short_text(all_=all_) if short else lean_threads.now_text())
     line = feedback_line()
     if line:
         print(line)
@@ -14251,6 +14552,7 @@ def handover_out_path(out, name, force):
 def handover_copy(src, out):
     import shutil
     shutil.copyfile(src, out)
+    lean_threads.record_file(out, "handover")
     print(f"copy: {out}")
 
 
@@ -14321,6 +14623,7 @@ def cmd_handover(a):
         else:
             recs[i] = rec  # the same file again: one record, with the new title, date and thread
         save_json(reg, recs)
+    lean_threads.record_file(path, "handover")
     print(f"handover: {path}")
     if copy_to:
         handover_copy(path, copy_to)
@@ -15165,9 +15468,10 @@ def build_parser():
     s.set_defaults(fn=cmd_schedule)
 
     s = sub.add_parser("thread", help="threads: new \"title\" [\"<text>\"|--prompt-file F|-] (its own Remote Control session) | send tN \"<text>\"|--prompt-file F|- | ask \"question\" [--options \"a|b|c\"] (from inside a thread session: the question goes to main; end the turn, the answer arrives as your next turn) | answer tN [qN] \"answer\" (main: pass an answer into the thread session) | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
-    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "report", "answer", "reports", "park", "wake", "deliver"],
+    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "files", "ask", "report", "answer", "reports", "park", "wake", "deliver"],
                    metavar="{new,list,show,close,reopen,merge,unmerge,move,send,open,sessions,ask,report,answer,reports,park,wake}")  # deliver is internal: not shown
     s.add_argument("args", nargs="*", help='new "title" ["<text>"]; send tN "<text>"; answer tN [qN] "<answer>"; other actions: ids')
+    s.add_argument("--show", metavar="N", help="files: print file number N (Markdown/text, capped)")
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin); or give it as a positional argument, not both")
     s.add_argument("--json", action="store_true", help="list: as JSON")
@@ -15183,6 +15487,9 @@ def build_parser():
     s.add_argument("--resume-old", action="store_true", help="reopen|send|open: continue the thread's previous Claude session "
                    "instead of starting a new one from a short brief")
     s.set_defaults(fn=cmd_thread)
+
+    s = sub.add_parser("shortcuts", help="the front desk's reply shortcuts (? s21 a21 f21 more goals waiting) as a table")
+    s.set_defaults(fn=cmd_shortcuts)
 
     s = sub.add_parser("waiting", help="what waits on the user (list), `add \"<summary>\"`, `done <id> [--answer TEXT]`; the front desk asks each with AskUserQuestion")
     s.add_argument("args", nargs="*", help="[list] | add <summary> | done <id>")
@@ -15200,6 +15507,26 @@ def build_parser():
     s.add_argument("--chase-log", action="store_true", help="recent chase decisions (skip/chase/drop) with cost")
     s.set_defaults(fn=cmd_goals)
 
+    s = sub.add_parser("pr", help="PR status per thread: `pr tN` | `pr <PR number>` | `pr list`. The known state (goal, last review, last push) "
+                       "at once, then the live state (open comments, votes, CI) from one read-only haiku helper, cached 10 min "
+                       "(config pr-cache-minutes). --refresh, --no-live, --async")
+    s.add_argument("target", nargs="?", help="tN, a PR number, list (default), mine, stale, or find <text>")
+    s.add_argument("words", nargs="*", help="the search text of find")
+    s.add_argument("--refresh", action="store_true", help="ignore the cache")
+    s.add_argument("--no-live", action="store_true", help="the known state only (no helper, no network)")
+    s.add_argument("--async", dest="async_", action="store_true", help="start the helper and return; the table arrives as a report line")
+    s.add_argument("--comments", "-c", action="store_true", help="all active comment threads in full (text, file:line, author, human/bot, age)")
+    s.add_argument("--ci", action="store_true", help="CI/policy checks, failing first, with the latest build's link")
+    s.add_argument("--diff", action="store_true", help="changed files with +/- lines against the target branch")
+    s.add_argument("--days", type=float, default=3, help="with stale: days without activity (default 3)")
+    s.add_argument("--project", "-p", help="the project for a PR number no thread knows, mine, stale, find")
+    s.set_defaults(fn=cmd_pr)
+
+    s = sub.add_parser("pr-fetch", help="internal: one read-only haiku helper reading the live state of PRs")
+    s.add_argument("file")
+    s.add_argument("--report", help="queue the table as a report line for this thread")
+    s.set_defaults(fn=pr_fetch)
+
     s = sub.add_parser("chase-decide", help="internal: one haiku run deciding a batch of quiet goals")
     s.add_argument("file")
     s.set_defaults(fn=chase_decide)
@@ -15210,6 +15537,8 @@ def build_parser():
 
     s = sub.add_parser("now", help="what we are working on: the open threads by last activity, with state and last action")
     s.add_argument("--short", action="store_true", help="one line per open thread: needs you, running, done, idle (the front desk's view)")
+    s.add_argument("--all", action="store_true", help="the short table with every thread (no 10-row cap)")
+    s.add_argument("--show", metavar="tN", help="the short summary of one thread (same as `thread show tN`)")
     s.set_defaults(fn=cmd_now)
 
     s = sub.add_parser("week", help="the last 7 days: pace, runs, reviews, pushes, todos, scheduled jobs")
