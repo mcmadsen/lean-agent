@@ -13031,6 +13031,17 @@ SHORTCUTS = (
     ("f21 2", "show file 2 of t21 (text only, capped)"),
     ("goals", "open goals"),
     ("waiting", "what waits on you"),
+    ("pr21", "PR status of t21 (open comments, votes, CI; known state first, live state cached 10 min)"),
+    ("pr21 c", "all active comments on t21's PRs in full"),
+    ("pr21 ci", "CI/policy checks of t21's PRs, failing first, with the build link"),
+    ("pr21 diff", "changed files with +/- lines of t21's PRs"),
+    ("pr list", "all PRs of every open thread"),
+    ("pr mine", "open PRs waiting for your vote"),
+    ("pr stale [days]", "your own open PRs without activity (default 3 days)"),
+    ("pr find <text>", "open PRs by author, reviewer, title, branch or work item"),
+    ("pr21 fix", "send t21 the task: fix the open review comments, then one final report with the proposed push"),
+    ("pr21 reply", "send t21 the task: draft replies to the open comments, post nothing until you approve"),
+    ("pr21 review", "send t21 the task: review the PR's latest head, report the verdict with the vote question"),
 )
 
 
@@ -13438,9 +13449,10 @@ def pr_entries(tids=None, only_pr=None):
 
 def pr_fetch(a):
     """internal (`pr-fetch FILE [--report TID]`): ONE read-only haiku helper (role pr-status) reads the live state of the PRs
-    in FILE ({"entries": [...]}); the rows go into the cache; prints {"prs": n, "_cost": usd}. With --report the table is
-    queued as a report line for that thread."""
-    entries = load_json(a.file, {}).get("entries") or []
+    (or, for mode mine/stale/find, the project's open-PR list) in FILE ({"entries": [...], "mode": ...}); the rows go into the
+    cache; prints {"prs": n, "_cost": usd}. With --report the table is queued as a report line for that thread (main: the front desk)."""
+    spec = load_json(a.file, {})
+    entries, mode = spec.get("entries") or [], spec.get("mode") or "status"
     if not entries:
         print(json.dumps({"prs": 0, "_cost": 0}))
         return 0
@@ -13451,20 +13463,27 @@ def pr_fetch(a):
                             model="haiku", todo=None, why="cheap PR status", cards="none", card_list=None,
                             project=work, read_only=True, chrome=None, mcp=None, tools=None, allow_send=None,
                             allow_cmd=lean_pr.allow_cmds(flavours), max_turns=12, max_usd=0.3, max_context=3000, max_cards=0, ttype="read",
-                            role=lean_pr.ROLE, effort="low", role_rule=lean_pr.prompt([e for e in entries if e.get("flavour")] or entries))
+                            role=lean_pr.ROLE, effort="low",
+                            role_rule=lean_pr.prompt([e for e in entries if e.get("flavour")] or entries, mode))
     LAST_RUN[:] = []
     with contextlib.redirect_stdout(io.StringIO()):
         cmd_run(ns)
     run = LAST_RUN[0] if LAST_RUN else None
     got = load_json(os.path.join(run["workdir"], "pr.json"), {}) if run and run.get("workdir") else {}
     rows = lean_pr.parse_rows(got)
+    cost = float((run or {}).get("cost_usd") or 0)
+    if mode in lean_pr.QUERIES:
+        slug = entries[0]["project"]
+        if rows:
+            lean_pr.save_query("open" if mode == "find" else mode, slug, rows, me=str((got or {}).get("me") or "") if isinstance(got, dict) else "")
+        print(json.dumps({"prs": len(rows), "_cost": cost}))
+        return 0 if rows else 1
     by_pr = {e["pr"]: e["project"] for e in entries}
     for r in rows:
         r["project"] = by_pr.get(r["pr"], r.get("project") or "")
     rows = [r for r in rows if r["project"] or r["pr"] in by_pr]
     if rows:
-        lean_pr.save_live(rows)
-    cost = float((run or {}).get("cost_usd") or 0)
+        lean_pr.save_live(rows, section=mode)
     if a.report and rows:
         cache = lean_pr.load_cache()
         try:
@@ -13475,10 +13494,10 @@ def pr_fetch(a):
     return 0 if rows else 1
 
 
-def pr_start_fetch(entries, report=None, wait=True):
+def pr_start_fetch(entries, report=None, wait=True, mode="status"):
     """Start the helper process (detached when not waiting). Returns (ok, cost, note)."""
     fd = home("pr-fetch-%d.json" % os.getpid())
-    save_json(fd, {"entries": [{k: v for k, v in e.items() if k in ("project", "path", "remote", "flavour", "pr", "thread")} for e in entries]})
+    save_json(fd, {"mode": mode, "entries": [{k: v for k, v in e.items() if k in ("project", "path", "remote", "flavour", "pr", "thread")} for e in entries]})
     cmd = [sys.executable, os.path.abspath(__file__), "pr-fetch", fd] + (["--report", report] if report else [])
     if not wait:
         subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
@@ -13498,43 +13517,110 @@ def pr_start_fetch(entries, report=None, wait=True):
     return p.returncode == 0, float(out.get("_cost") or 0), "" if p.returncode == 0 else "the helper returned no usable rows"
 
 
+def pr_project(a):
+    """(slug, path) for a PR command without a thread: -p, else the registered project of the current directory, else the one
+    learned project; asks for -p when there are several."""
+    projs = projects()
+    if getattr(a, "project", None):
+        slug, path = resolve_project(a.project, register=False)
+        return slug, path
+    for s, v in projs.items():
+        if same_path(v["path"], os.getcwd()):
+            return s, v["path"]
+    if len(projs) == 1:
+        s = next(iter(projs))
+        return s, projs[s]["path"]
+    die("several projects are learned and the current directory is none of them: pass -p <project>" if projs else "no project is learned (lean-agent learn <path>)")
+
+
+def pr_pseudo_entry(slug, path, pr="*"):
+    remote = git(path, "remote", "get-url", "origin") if os.path.isdir(path) else ""
+    return {"thread": "", "project": slug, "path": path, "remote": remote or "", "flavour": lean_pr.flavour_of(remote), "pr": pr,
+            "head": None, "goal": None, "review": None, "push": None, "report": ""}
+
+
+def pr_query(a, kind):
+    """`pr mine | stale | find <text>`: the project's open PRs from one cached helper list, filtered here."""
+    slug, path = pr_project(a)
+    pe = pr_pseudo_entry(slug, path)
+    qk = "open" if kind == "find" else kind
+    cache = lean_pr.load_cache()
+    q = lean_pr.query_of(qk, slug, cache)
+    text = " ".join(a.words or []).strip()
+    if kind == "find" and not text:
+        die("usage: lean-agent pr find <text> (author, reviewer, title, branch or work item id)")
+    note = ""
+    if a.no_live or not pe["flavour"]:
+        if kind == "find":
+            known = lean_pr.find_known(text, pr_entries(None), cache)
+            q = {"rows": known, "fetched": 0, "me": ""}
+            note = "known PRs only (no live data)"
+        elif not q:
+            print("(no live state" + (": the git remote is neither Azure DevOps nor GitHub)" if not pe["flavour"] else "; drop --no-live)"))
+            return 0
+    elif a.refresh or not lean_pr.fresh(q):
+        print("fetching live state (haiku, ~$0.01)…", flush=True)
+        ok, cost, why = pr_start_fetch([pe], mode=kind)
+        print(f"live state: {'fetched' if ok else 'not fetched (' + why + ')'}" + (f" · ${cost:.3f}" if cost else ""))
+        q = lean_pr.query_of(qk, slug)
+        if not q and kind == "find":
+            q = {"rows": lean_pr.find_known(text, pr_entries(None), cache), "fetched": 0, "me": ""}
+            note = "known PRs only (the helper returned nothing)"
+        elif not q:
+            return 1
+    else:
+        note = f"cached, {lean_pr.age_text(q['fetched'])} old; --refresh for the current state"
+    rows = q["rows"] if kind == "find" and note.startswith("known") else lean_pr.filter_query(kind, q["rows"], q.get("me"), a.days, text)
+    owners = {e["pr"]: e["thread"] for e in pr_entries(None) if e["project"] == slug and e.get("thread")}
+    head = {"mine": f"Open PRs waiting for your vote ({len(rows)}):", "stale": f"Your open PRs with no activity for {a.days:g}+ days ({len(rows)}):",
+            "find": f"Open PRs matching {text!r} ({len(rows)}):"}[kind]
+    print(head)
+    print(lean_pr.query_table(rows, pe["remote"], owners, note))
+    return 0
+
+
 def cmd_pr(a):
-    """`pr tN | pr <PR> | pr list`: known state at once, then the live state (cached 10 min; --refresh, --no-live, --async)."""
+    """`pr tN | pr <PR> | pr list | mine | stale | find <text>`: known state at once, then the live state (cached 10 min;
+    --refresh, --no-live, --async; --comments, --ci, --diff for one section)."""
     arg = (a.target or "list").strip()
+    words = list(a.words or [])
+    if arg in lean_pr.QUERIES:
+        return pr_query(a, arg)
+    if arg not in ("list",) and not re.fullmatch(r"[tT#]\d+|!?\d+", arg):  # `pr find`-style words: a free-text search
+        a.words, arg = [arg] + words, "find"
+        return pr_query(a, "find")
     is_list = arg == "list"
+    mode = "comments" if a.comments else "ci" if a.ci else "diff" if a.diff else "status"
     if is_list:
         entries = pr_entries()
     elif re.fullmatch(r"[tT#]\d+", arg):
         entries = pr_entries([norm_thread_tag(arg)])
-    elif re.fullmatch(r"[!]?\d+", arg):
+    else:
         n = arg.lstrip("!")
         entries = pr_entries(None, only_pr=n)
-        if not entries:  # not known to a thread: the PR of the project in the current directory
-            slug = next((s for s, v in projects().items() if same_path(v["path"], os.getcwd())), "")
-            if not slug:
-                die(f"PR {n} is not named by any thread, goal or review, and the current directory is not a registered project")
-            entries = [pr_entry("", slug, n, None, [], {}, [])]
-    else:
-        die("usage: lean-agent pr tN | pr <PR number> | pr list [--refresh] [--no-live] [--async]")
+        if not entries:  # not known to a thread: the PR of the project (-p, cwd, or the single learned one)
+            slug, path = pr_project(a)
+            entries = [pr_pseudo_entry(slug, path, n)]
     if not entries:
         print("No PRs known for " + ("any open thread." if is_list else f"{arg}."))
         return 0
     cache = lean_pr.load_cache()
-    if not is_list or a.no_live:
+    if (not is_list and mode == "status") or a.no_live:
         print(lean_pr.known_table(entries) if not is_list else lean_pr.list_table(entries, cache))
     if a.no_live:
         return 0
-    todo = [e for e in entries if e.get("flavour") and (a.refresh or not lean_pr.fresh(lean_pr.live_of(e["project"], e["pr"], cache)))]
+    sect = None if mode == "status" else mode
+    todo = [e for e in entries if e.get("flavour") and (a.refresh or not lean_pr.fresh(lean_pr.live_of(e["project"], e["pr"], cache), section=sect))]
     if not any(e.get("flavour") for e in entries) and not any(lean_pr.live_of(e["project"], e["pr"], cache) for e in entries):
         print("(no live state: the git remote is neither Azure DevOps nor GitHub)")
     ok = True
     if todo and a.async_:
-        pr_start_fetch(todo, report=None if is_list else (entries[0].get("thread") or caller_thread()), wait=False)
+        pr_start_fetch(todo, report="main" if is_list else (entries[0].get("thread") or caller_thread()), wait=False, mode=mode)
         print("fetching live state in the background (haiku, ~$0.01); the table follows as a report line")
         return 0
     if todo:
         print("fetching live state (haiku, ~$0.01)…", flush=True)
-        ok, cost, note = pr_start_fetch(todo)
+        ok, cost, note = pr_start_fetch(todo, mode=mode)
         print(f"live state: {'fetched' if ok else 'not fetched (' + note + ')'}" + (f" · ${cost:.3f}" if cost else ""))
         cache = lean_pr.load_cache()
     have = [lean_pr.live_of(e["project"], e["pr"], cache) for e in entries]
@@ -13542,10 +13628,17 @@ def cmd_pr(a):
     if have:
         if not todo:
             print(f"(cached, {lean_pr.age_text(min(h['fetched'] for h in have))} old; --refresh for the current state)")
-        print(lean_pr.list_table(entries, cache) if is_list else lean_pr.live_table(entries, cache))
-        comments = lean_pr.comments_text(entries, cache)
-        if comments:
-            print(comments)
+        if mode == "comments":
+            print(lean_pr.comments_full(entries, cache))
+        elif mode == "ci":
+            print(lean_pr.ci_text(entries, cache))
+        elif mode == "diff":
+            print(lean_pr.diff_text(entries, cache))
+        else:
+            print(lean_pr.list_table(entries, cache) if is_list else lean_pr.live_table(entries, cache))
+            comments = lean_pr.comments_text(entries, cache)
+            if comments:
+                print(comments)
     return 0 if ok else 1
 
 
@@ -15417,10 +15510,16 @@ def build_parser():
     s = sub.add_parser("pr", help="PR status per thread: `pr tN` | `pr <PR number>` | `pr list`. The known state (goal, last review, last push) "
                        "at once, then the live state (open comments, votes, CI) from one read-only haiku helper, cached 10 min "
                        "(config pr-cache-minutes). --refresh, --no-live, --async")
-    s.add_argument("target", nargs="?", help="tN, a PR number, or list (default)")
+    s.add_argument("target", nargs="?", help="tN, a PR number, list (default), mine, stale, or find <text>")
+    s.add_argument("words", nargs="*", help="the search text of find")
     s.add_argument("--refresh", action="store_true", help="ignore the cache")
     s.add_argument("--no-live", action="store_true", help="the known state only (no helper, no network)")
     s.add_argument("--async", dest="async_", action="store_true", help="start the helper and return; the table arrives as a report line")
+    s.add_argument("--comments", "-c", action="store_true", help="all active comment threads in full (text, file:line, author, human/bot, age)")
+    s.add_argument("--ci", action="store_true", help="CI/policy checks, failing first, with the latest build's link")
+    s.add_argument("--diff", action="store_true", help="changed files with +/- lines against the target branch")
+    s.add_argument("--days", type=float, default=3, help="with stale: days without activity (default 3)")
+    s.add_argument("--project", "-p", help="the project for a PR number no thread knows, mine, stale, find")
     s.set_defaults(fn=cmd_pr)
 
     s = sub.add_parser("pr-fetch", help="internal: one read-only haiku helper reading the live state of PRs")

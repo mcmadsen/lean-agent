@@ -289,6 +289,14 @@ now thanks thank hello hey hi""".split())
 ASK_RE = re.compile(r"^(?:ask\s+t?|a)(\d+)(?:\s+(.*))?$", re.I | re.S)
 FILES_RE = re.compile(r"^(?:files?\s+t?|f)(\d+)(?:\s+(\d+))?$", re.I)
 SHORTCUT_RE = re.compile(r"^(?:please\s+)?(?:((?:show\s+)?more)|(?:s|summary|show)\s*t?(\d+))\s*[.!?]?$", re.I)
+PR_RE = re.compile(r"^pr\s*t?(\d+)(?:\s+(c|comments|ci|diff|fix|reply|review))?$", re.I)
+PR_LIST_RE = re.compile(r"^pr\s+(list|mine|stale|find)(?:\s+(.+))?$", re.I)
+PR_FLAGS = {"c": " --comments", "comments": " --comments", "ci": " --ci", "diff": " --diff", "": ""}
+PR_WORK = {
+    "fix": "Fix the open review comments on your PR(s) with a worker; then send one consolidated final report with the proposed push",
+    "reply": "Draft replies to the open comments on your PR(s); report the drafts; post nothing until the user approves",
+    "review": "Run a review of your PR's latest head; report the verdict with the vote question",
+}
 EXPLICIT_RE = re.compile(r"(?<![\w/&])(?:#(\d+)|[tT](\d+))\b")
 
 
@@ -613,6 +621,25 @@ def decide(text, data, session=None, now=None, idx=None):
             return None, f"Front desk job (summary shortcut) \u2014 no thread: lean-agent thread show {tid}", "job"
     elif sc:
         return None, "Front desk job (show more shortcut) \u2014 no thread: lean-agent now --all", "job"
+    pm = PR_RE.match(low)
+    if pm:
+        tid = resolve(f"t{int(pm.group(1))}", data["aliases"])
+        if tid in data["threads"]:
+            act = (pm.group(2) or "").lower()
+            if act in PR_WORK:
+                return None, (f"Front desk job (pr {act} shortcut) \u2014 no thread: send the task to {tid} unchanged: "
+                              f"lean-agent thread send {tid} {_dq(PR_WORK[act])}"), "job"
+            return None, f"Front desk job (pr shortcut) \u2014 no thread: lean-agent pr {tid}{PR_FLAGS[act]}", "job"
+    pl = PR_LIST_RE.match(low)
+    if pl:
+        what, rest = pl.group(1), (pl.group(2) or "").strip()
+        orig = text.split(None, 2)[2] if what == "find" and len(text.split(None, 2)) > 2 else rest
+        if what in ("list", "mine") and not rest:
+            return None, f"Front desk job (pr {what} shortcut) \u2014 no thread: lean-agent pr {what}", "job"
+        if what == "stale" and (not rest or re.fullmatch(r"\d+(\.\d+)?", rest)):
+            return None, f"Front desk job (pr stale shortcut) \u2014 no thread: lean-agent pr stale" + (f" --days {rest}" if rest else ""), "job"
+        if what == "find" and rest:
+            return None, f"Front desk job (pr find shortcut) \u2014 no thread: lean-agent pr find {_dq(orig)}", "job"
     ids = list(EXPLICIT_RE.finditer(text))
     for m in ids:  # a thread id: tN, or a small #N
         cand = resolve(f"#{int(m.group(1))}" if m.group(1) else f"t{int(m.group(2))}", data["aliases"])

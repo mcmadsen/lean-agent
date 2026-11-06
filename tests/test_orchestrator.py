@@ -9017,7 +9017,7 @@ class CliTest(unittest.TestCase):
         p = self.cli("pr", "t1", FAKE_FEEDBACK=fb)
         self.assertIn("fetching live state (haiku", p.stdout)
         self.assertIn("2 open comments", p.stdout)
-        self.assertIn("Open comments, PR 512:", p.stdout)
+        self.assertIn("Open comments, PR [512](", p.stdout)
         self.assertIn("api/totals.py:2 - rounding is wrong", p.stdout)
         self.assertIn("answer or fix 1 open comment", p.stdout)
         call = self.calls()[-1]
@@ -9072,6 +9072,155 @@ class CliTest(unittest.TestCase):
             for cmd in ("lean-agent pr t21", "lean-agent pr list --refresh", "lean-agent pr 512 --async"):
                 self.assertEqual(budget_hook.front_desk_denial(event(cmd)), "", cmd)
                 self.assertEqual(budget_hook.strict_denial(event(cmd), "/home", "/home"), "", cmd)
+
+    def pr_q(self, rows, me="Ann Dev"):
+        return ('{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-PR '
+                + json.dumps({"me": me, "prs": rows}))
+
+    def test_pr_numbers_are_links(self):
+        self.pr_setup()
+        out = self.cli("pr", "t1", "--no-live").stdout
+        self.assertIn("[512](https://dev.azure.com/acme/shop/_git/shop/pullrequest/512)", out)
+        out = self.cli("pr", "t1", FAKE_FEEDBACK=self.pr_fb({"pr": "512", "url": "https://dev.azure.com/acme/shop/_git/shop/pullrequest/512?live=1"})).stdout
+        self.assertIn("[512](https://dev.azure.com/acme/shop/_git/shop/pullrequest/512?live=1)", out)
+        self.assertIn("[512](https://dev.azure.com/acme/shop/_git/shop/pullrequest/512?live=1)", self.cli("pr", "list").stdout)
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_pr
+        self.assertEqual(lean_pr.web_url("git@github.com:acme/shop.git", "7"), "https://github.com/acme/shop/pull/7")
+        self.assertEqual(lean_pr.web_url("https://github.com/acme/shop", "7"), "https://github.com/acme/shop/pull/7")
+        self.assertEqual(lean_pr.web_url("https://acme.visualstudio.com/DefaultCollection/Shop%20X/_git/shop", "7"),
+                         "https://acme.visualstudio.com/Shop%20X/_git/shop/pullrequest/7")
+        self.assertEqual(lean_pr.web_url("git@ssh.dev.azure.com:v3/acme/shop/shop", "7"), "https://dev.azure.com/acme/shop/_git/shop/pullrequest/7")
+        self.assertEqual(lean_pr.web_url("https://example.invalid/x.git", "7"), "")
+
+    def test_pr_comments_ci_diff_options(self):
+        self.pr_setup()
+        ths = [{"id": "7", "author": "rev", "file": "api/totals.py", "line": 2, "gist": "rounding", "text": "Rounding is wrong here; use Decimal for the totals.",
+                "kind": "human", "created": "2020-01-01T00:00:00Z"},
+               {"id": "8", "author": "build", "file": "", "line": 0, "gist": "policy", "text": "Policy note", "kind": "bot", "created": "2020-01-02T00:00:00Z"}]
+        p = self.cli("pr", "t1", "--comments", FAKE_FEEDBACK=self.pr_fb({"pr": "512", "threads": ths}))
+        self.assertIn("2 active comments", p.stdout)
+        self.assertIn("use Decimal for the totals", p.stdout)
+        self.assertIn("api/totals.py:2", p.stdout)
+        self.assertIn("[bot]", p.stdout)
+        self.assertIn("ago", p.stdout)
+        call = self.calls()[-1]
+        self.assertIn("ACTIVE comment thread in full", call["append"])
+        n = len(self.calls())
+        self.cli("pr", "t1", "--comments")  # cached section
+        self.assertEqual(len(self.calls()), n)
+        checks = [{"name": "unit", "state": "passed", "kind": "build"}, {"name": "lint", "state": "failed", "kind": "build", "link": "https://ci.example/lint/1"},
+                  {"name": "approvers", "state": "queued", "kind": "policy"}]
+        p = self.cli("pr", "t1", "--ci", FAKE_FEEDBACK=self.pr_fb({"pr": "512", "ci": "failed", "checks": checks,
+                                                                      "build": {"result": "failed", "link": "https://ci.example/run/9"}}))
+        self.assertLess(p.stdout.index("lint"), p.stdout.index("approvers"))
+        self.assertLess(p.stdout.index("approvers"), p.stdout.index("unit"))
+        self.assertIn("latest build: failed  https://ci.example/run/9", p.stdout)
+        self.assertIn("az pipelines runs", self.calls()[-1]["append"])
+        files = [{"path": "api/totals.py", "added": 10, "deleted": 2}, {"path": "web/app.js", "added": 5, "deleted": 0}]
+        p = self.cli("pr", "t1", "--diff", FAKE_FEEDBACK=self.pr_fb({"pr": "512", "files": files}))
+        self.assertIn("2 files, +15 -2 vs main", p.stdout)
+        self.assertIn("api/totals.py", p.stdout)
+        self.assertIn("numstat", self.calls()[-1]["append"])
+
+    def test_pr_options_gh_flavour(self):
+        self.pr_setup(remote="https://github.com/acme/shop.git")
+        p = self.cli("pr", "t1", "--ci", FAKE_FEEDBACK=self.pr_fb({"pr": "512", "checks": [{"name": "build", "state": "failed"}]}))
+        self.assertIn("build", p.stdout)
+        ap = self.calls()[-1]["append"]
+        self.assertIn("gh pr checks", ap)
+        self.assertNotIn("az repos", ap)
+        self.assertIn("[512](https://github.com/acme/shop/pull/512)", p.stdout)
+
+    def test_pr_mine_stale_find(self):
+        self.pr_setup()
+        import datetime
+        old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=9)).isoformat()
+        new = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        rows = [{"pr": "512", "title": "Fix export", "author": "Bob Dev", "branch": "feature/export", "status": "active", "myVote": "none",
+                 "reviewers": [{"name": "Ann Dev", "vote": "none"}], "updated": new, "workItems": ["4100"]},
+                {"pr": "600", "title": "Tidy docs", "author": "Cy Dev", "branch": "docs", "status": "active", "myVote": "approved",
+                 "reviewers": [{"name": "Ann Dev", "vote": "approved"}], "updated": old, "workItems": []},
+                {"pr": "700", "title": "My own change", "author": "Ann Dev", "branch": "mine", "status": "active", "myVote": None,
+                 "reviewers": [{"name": "Bob Dev", "vote": "waiting"}], "updated": old, "workItems": ["4200"]}]
+        p = self.cli("pr", "mine", FAKE_FEEDBACK=self.pr_q(rows))
+        self.assertIn("(1)", p.stdout)
+        self.assertIn("Fix export", p.stdout)
+        self.assertNotIn("Tidy docs", p.stdout)
+        self.assertNotIn("My own change", p.stdout)
+        self.assertIn("Thread", p.stdout)
+        self.assertIn("t1", p.stdout)  # PR 512 is owned by thread t1
+        ap = self.calls()[-1]["append"]
+        self.assertIn("--reviewer", ap)
+        self.assertIn("az account show", ap)
+        p = self.cli("pr", "stale", FAKE_FEEDBACK=self.pr_q([rows[2], rows[0]]))
+        self.assertIn("My own change", p.stdout)
+        self.assertNotIn("Fix export", p.stdout)
+        self.assertIn("--creator", self.calls()[-1]["append"])
+        n = len(self.calls())
+        self.assertIn("(0)", self.cli("pr", "stale", "--days", "30").stdout)  # cached list, filtered again
+        self.assertEqual(len(self.calls()), n)
+        p = self.cli("pr", "find", "bob", FAKE_FEEDBACK=self.pr_q(rows))
+        self.assertIn("Fix export", p.stdout)
+        self.assertIn("My own change", p.stdout)  # Bob reviews it
+        self.assertNotIn("Tidy docs", p.stdout)
+        self.assertIn("Reviewers/votes", p.stdout)
+        n = len(self.calls())
+        self.assertIn("My own change", self.cli("pr", "find", "4200").stdout)  # linked work item, from the cached list
+        self.assertEqual(len(self.calls()), n)
+        self.assertIn("Fix export", self.cli("pr", "find", "feature/export").stdout)
+        known = self.cli("pr", "find", "512", "--no-live").stdout  # known refs only
+        self.assertIn("known PRs only", known)
+        self.assertIn("t1", known)
+
+    def test_pr_number_falls_back_to_the_single_project_or_asks_for_p(self):
+        self.pr_setup(prs=("512",))
+        p = self.cli("pr", "999", "--no-live")
+        self.assertIn("999", p.stdout)
+        other = os.path.join(self.tmp.name, "other")
+        os.makedirs(other)
+        subprocess.run(["git", "-C", other, "init", "-q"], check=True, capture_output=True)
+        self.cli("learn", other, "--name", "other")
+        p = self.cli("pr", "998", "--no-live", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("-p", p.stdout + p.stderr)
+        self.assertIn("998", self.cli("pr", "998", "--no-live", "-p", "proj").stdout)
+
+    def test_pr_list_async_queues_a_report_for_the_front_desk(self):
+        self.pr_setup()
+        p = self.cli("pr", "list", "--async", FAKE_FEEDBACK=self.pr_fb({"pr": "512"}))
+        self.assertIn("in the background", p.stdout)
+        rp = os.path.join(self.env["LEAN_AGENT_HOME"], "thread-reports.json")
+        end = time.time() + scaled(30)
+        text = ""
+        while time.time() < end and "PR status" not in text:
+            time.sleep(0.2)
+            text = open(rp).read() if os.path.exists(rp) else ""
+        self.assertIn("PR status", text)
+        self.assertIn('"thread": "main"', text)
+
+    def test_pr_shortcuts_route_to_front_desk_jobs(self):
+        lt = self.threads_home()
+        lt.new("Parser fixes")
+        data = lt.load()
+        for text, cmd in (("pr1", "lean-agent pr t1"), ("PR1", "lean-agent pr t1"), ("pr1 c", "lean-agent pr t1 --comments"),
+                          ("pr1 ci", "lean-agent pr t1 --ci"), ("pr1 diff", "lean-agent pr t1 --diff"), ("pr list", "lean-agent pr list"),
+                          ("pr mine", "lean-agent pr mine"), ("pr stale", "lean-agent pr stale"), ("pr stale 5", "lean-agent pr stale --days 5"),
+                          ("pr find Bob Dev", 'lean-agent pr find "Bob Dev"')):
+            tid, line, kind = lt.decide(text, data)
+            self.assertEqual((tid, kind), (None, "job"), text)
+            self.assertTrue(line.endswith(cmd), (text, line))
+        for word, task in (("fix", "Fix the open review comments on your PR(s) with a worker; then send one consolidated final report with the proposed push"),
+                           ("reply", "Draft replies to the open comments on your PR(s); report the drafts; post nothing until the user approves"),
+                           ("review", "Run a review of your PR's latest head; report the verdict with the vote question")):
+            tid, line, kind = lt.decide(f"pr1 {word}", data)
+            self.assertEqual((tid, kind), (None, "job"), word)
+            self.assertTrue(line.endswith(f'lean-agent thread send t1 "{task}"'), line)
+        self.assertNotIn("pr shortcut", lt.decide("pr99", data)[1])  # no such thread: not a shortcut
+        out = self.cli("shortcuts").stdout
+        for k in ("| pr21 |", "| pr21 c |", "| pr21 ci |", "| pr21 diff |", "| pr list |", "| pr mine |", "| pr stale [days] |",
+                  "| pr find <text> |", "| pr21 fix |", "| pr21 reply |", "| pr21 review |"):
+            self.assertIn(k, out)
 
     def test_review_decide_gaps_edge_cases(self):
         self.git_project()
