@@ -137,7 +137,9 @@ def _ensure(data, tid, title=None, ts=None, create=False):
     return t
 
 
-def new(title):
+def new(title, text=None):
+    """Create a thread. `text` (its first message) is stored at once as the thread's first request, marked undelivered
+    until the thread's session has received it (pin), so `thread show` has it whatever happens to the delivery."""
     title = " ".join(str(title or "").replace('"', "'").split())[:80]
     if not title:
         raise ValueError("a thread needs a title")
@@ -145,7 +147,51 @@ def new(title):
         nums = [int(k[1:]) for k in data["threads"] if re.fullmatch(r"t\d+", k)]
         tid = f"t{max(nums, default=0) + 1}"
         data["threads"][tid] = {"id": tid, "title": title, "created": now_iso(), "last_message": now_iso(), "kind": "free"}
+        body = _request_text(text)
+        if body:
+            data["next_request"] = int(data.get("next_request") or 0) + 1
+            data["threads"][tid]["requests"] = [{"id": f"r{data['next_request']}", "ts": now_iso(), "text": body, "undelivered": True}]
     return tid
+
+
+GOAL_START_MIN = 10  # minutes a request may stay unstarted before it is redelivered / nudged (config goal-start-minutes)
+
+
+def start_minutes():
+    for v in (os.environ.get("LEAN_AGENT_GOAL_START"), (lean_common.read_json(lean_common.lean_home("config.json"), {}) or {}).get("goal_start_minutes")):
+        try:
+            if v is not None and float(v) > 0:
+                return float(v)
+        except (TypeError, ValueError):
+            pass
+    return GOAL_START_MIN
+
+
+def unstarted_request(t, evs, now, min_secs=0):
+    """The thread's request that was never started, or None: the oldest one never delivered to the session (undelivered
+    True), else the newest delivered one when nothing but requests happened after it (no run, note, todo, push or report).
+    {id, text, since, undelivered}. Only requests that are at least `min_secs` old count."""
+    reqs = [r for r in t.get("requests") or [] if isinstance(r, dict)]
+    rep = t.get("report") if isinstance(t.get("report"), dict) else {}
+    rep_ts = _epoch(rep.get("ts")) if rep.get("text") else 0
+    pick = next((r for r in reqs if r.get("undelivered")), None)
+    if pick is None and reqs and reqs[-1].get("delivered_ts") and not is_status_question(reqs[-1].get("text")):
+        pick = reqs[-1]
+    if pick is None:
+        return None
+    since = _epoch(pick.get("ts"))
+    if not pick.get("undelivered") and (rep_ts >= since or any(e[2] != "request" and e[0] >= since for e in evs or [])):
+        return None
+    if now - since < min_secs:
+        return None
+    return {"id": pick.get("id"), "text": pick.get("text") or "", "since": since, "undelivered": bool(pick.get("undelivered"))}
+
+
+def _request_text(prompt):
+    prompt = str(prompt or "")
+    if BRIEF_END in prompt:
+        prompt = prompt.split(BRIEF_END, 1)[1]
+    return " ".join(prompt.split())[:REQUEST_CHARS]
 
 
 def discard(tid):
@@ -436,20 +482,23 @@ def pinned_thread():
 
 def pin(tid, prompt, session=None, now=None):
     """A prompt in a thread session belongs to that thread, whatever it says: stores the request, makes the thread current."""
-    prompt = str(prompt or "")
-    if BRIEF_END in prompt:  # the first message of a started thread: brief, then the user's prompt; only that is a request
-        prompt = prompt.split(BRIEF_END, 1)[1]
-    text = " ".join(prompt.split())[:REQUEST_CHARS]
+    text = _request_text(prompt)  # the first message of a started thread: brief, then the user's prompt; only that is a request
     now_s = now_iso() if now is None else datetime.datetime.fromtimestamp(now).isoformat(timespec="seconds")
     with _locked() as data:
         t = data["threads"].get(tid)
         if t is None:
             return False
         t["last_message"] = now_s
-        if text and not any(r.get("text") == text for r in t.get("requests") or []):
-            # not when the front desk already stored it as the request it handed over
+        have = [r for r in t.get("requests") or [] if _request_text(r.get("text")) == text]
+        if text and have:
+            # stored already (the front desk handed it over, or `thread new` at creation): the session has it now
+            r = next((r for r in have if r.get("undelivered")), None)
+            if r is not None:
+                r.pop("undelivered", None)
+                r["delivered_ts"] = now_s
+        elif text:
             data["next_request"] = int(data.get("next_request") or 0) + 1
-            t.setdefault("requests", []).append({"id": f"r{data['next_request']}", "ts": now_s, "text": text})
+            t.setdefault("requests", []).append({"id": f"r{data['next_request']}", "ts": now_s, "text": text, "delivered_ts": now_s})
             del t["requests"][:-REQUESTS_KEPT]
     set_current(tid, session)
     return True
@@ -826,7 +875,7 @@ def route(prompt, session=None, now=None, create=True):
         t["last_message"] = now_s
         data["next_request"] = int(data.get("next_request") or 0) + 1
         rid = f"r{data['next_request']}"
-        t.setdefault("requests", []).append({"id": rid, "ts": now_s, "text": text[:REQUEST_CHARS]})
+        t.setdefault("requests", []).append({"id": rid, "ts": now_s, "text": text[:REQUEST_CHARS], "undelivered": True})
         del t["requests"][:-REQUESTS_KEPT]
         title = t["title"]
     set_current(tid, session)
@@ -1404,6 +1453,9 @@ def _cell(text, n):
     return one_line(text, n).replace("|", "/")
 
 
+SHORT_UNSTARTED_HOURS = 12  # an unstarted request older than this is no longer shown as "not started"
+
+
 def short_text(now=None, max_lines=SHORT_ROWS, all_=False):
     """`now --short`, the front desk's status: ONE table (Thread | What | State | Needs | Next | Show). Every thread that
     needs something (open question or permission, waiting item, report awaiting the user, blocked) comes first, most
@@ -1442,6 +1494,9 @@ def short_text(now=None, max_lines=SHORT_ROWS, all_=False):
                 row = (0, rep_ts, tid, f"{label} {age(rep['ts'], now)}", _cell(rep["text"], 40), "your call" if label == "needs you" else "unblock it")
             elif running.get(tid):
                 row = (1, -last, tid, run, "", "wait for the run")
+            elif (un := unstarted_request(t, evs.get(tid), now, start_minutes() * 60)) and now - un["since"] < SHORT_UNSTARTED_HOURS * 3600:
+                row = (0, un["since"], tid, f"idle {age(_iso_of(None, last), now)}", f"not started ({int((now - un['since']) // 60)}m)",
+                       "redeliver it" if un["undelivered"] else "start it")
             elif rep and rep.get("kind") == "done" and now - rep_ts < SHORT_DONE_HOURS * 3600:
                 row = (2, -rep_ts, tid, f"done {age(rep['ts'], now)}", _cell(rep["text"], 40), "nothing")
             else:

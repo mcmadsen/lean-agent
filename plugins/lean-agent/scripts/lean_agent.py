@@ -13209,7 +13209,7 @@ def thread_action(a):
             if not thread_start_lock_try(send_wait_secs()):
                 return
             try:
-                tid = lean_threads.new(a.args[0])
+                tid = lean_threads.new(a.args[0], prompt)
                 lean_threads.set_session(tid, session_id=str(uuid.uuid4()), session_on=True)
                 made["tid"] = tid
             finally:
