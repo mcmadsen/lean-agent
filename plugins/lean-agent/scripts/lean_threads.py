@@ -1472,6 +1472,19 @@ SHOW_TAIL = 5          # `thread show` default: the latest entries
 SHOW_REPORT_CHARS = 800  # `thread show` default: the latest report, cut here (--full for all of it)
 
 
+def queued_messages(tid):
+    """How many messages for thread `tid` wait in the delivery spool."""
+    try:
+        return sum(1 for n in os.listdir(os.path.join(lean_home("thread-inbox"), tid)) if n.endswith((".json", ".sending")))
+    except OSError:
+        return 0
+
+
+def queued_note(tid):
+    n = queued_messages(tid)
+    return f"{n} message{'s' if n != 1 else ''} queued for delivery" if n else ""
+
+
 def show_text(tid, all_=False, limit=40, report_chars=None):
     tid = resolve(norm(tid))
     data = load()
@@ -1483,7 +1496,7 @@ def show_text(tid, all_=False, limit=40, report_chars=None):
     merged = sorted(s for s, d in data["aliases"].items() if resolve(d, data["aliases"]) == tid)
     if merged:
         head += f" (includes {', '.join(merged)})"
-    lines = [head] + [l.strip() for l in question_lines(t)]
+    lines = [head] + ([queued_note(tid)] if queued_note(tid) else []) + [l.strip() for l in question_lines(t)]
     shown = ev if all_ or len(ev) <= limit else ev[-limit:]
     if len(shown) < len(ev):
         lines.append(f"... {len(ev) - len(shown)} earlier (lean-agent thread show {tid} --all)")

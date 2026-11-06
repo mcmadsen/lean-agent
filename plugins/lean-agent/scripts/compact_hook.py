@@ -308,7 +308,19 @@ def brief(cap=None):
         shown = cut_lines(rest, room)
         more = more or shown != rest
         rest = shown
-    return head + rest + (("\n" + BRIEF_MORE) if more else "")
+    return restart_prefix("main") + head + rest + (("\n" + BRIEF_MORE) if more else "")
+
+
+def restart_prefix(key):
+    """The one line saying why and when this session was restarted (told to the user in the first reply), or ''."""
+    try:
+        import service_session
+        line = service_session.restart_line(key)
+    except Exception:  # noqa: BLE001 - the brief works without it
+        return ""
+    if not line:
+        return ""
+    return line + (" \u2014 tell the user this line in your first reply." if key == "main" else "") + "\n\n"
 
 
 def inflight_lines(tid):
@@ -370,7 +382,9 @@ def fresh_brief(tid, max_tokens=FRESH_BRIEF_TOKENS):
     import lean_threads
     data = lean_threads.load()
     t = data["threads"].get(tid) or {}
-    head = [f'Thread {tid} "{t.get("title") or tid}" (a new session: the old conversation is not carried over). '
+    rline = restart_prefix(tid).strip()
+    head = [rline] if rline else []
+    head += [f'Thread {tid} "{t.get("title") or tid}" (a new session: the old conversation is not carried over). '
             "You are the session of this thread, not the front desk."]
     cps = [n for n in load_notes() if n.get("kind") == "checkpoint" and checkpoint_owner(n) == tid]
     if cps:

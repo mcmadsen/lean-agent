@@ -169,6 +169,46 @@ def last_clear(rec):
     return max(times) if times else None
 
 
+REPLACE_WINDOW = 900  # seconds between a replacement and the new session's start in which finished runs still get reported
+RESTART_MAX_AGE = 6 * 3600  # seconds: an older restart note is not told to a session
+
+
+def _restarts_path():
+    return lean_home("restarts.json")
+
+
+def note_restart(key, why, ts=None):
+    """Record why session `key` is being replaced (or restarted): the next brief for it opens with one line saying so."""
+    ts = time.time() if ts is None else ts
+    try:
+        with lean_common.file_lock(_restarts_path()):
+            data = _load(_restarts_path())
+            data[key] = {"ts": ts, "why": why}
+            lean_common.write_json_atomic(_restarts_path(), data)
+    except OSError:
+        pass
+    try:
+        update_session(key, replaced_at=ts)  # runs that finish from here on are the new session's to report
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def restart_line(key, take=True):
+    """`Restarted 12:12: <why>` for the last replacement of session `key` (and forgets it when `take`), else ''."""
+    try:
+        with lean_common.file_lock(_restarts_path()):
+            data = _load(_restarts_path())
+            e = data.get(key)
+            if take and e:
+                data.pop(key, None)
+                lean_common.write_json_atomic(_restarts_path(), data)
+    except OSError:
+        return ""
+    if not e or time.time() - float(e.get("ts") or 0) > RESTART_MAX_AGE:
+        return ""
+    return f"Restarted {time.strftime('%H:%M', time.localtime(float(e['ts'])))}: {e.get('why')}"
+
+
 def go_fresh(restart_host=False, wait=None, now=time.time, sleep=time.sleep):
     """Restart with a clean context: ask a live session to checkpoint (waiting up to `wait` seconds, default
     CLEAR_WAIT, for 'checkpointed'), then point up.json at a new session id; `up` starts that one next, and the
@@ -188,6 +228,7 @@ def go_fresh(restart_host=False, wait=None, now=time.time, sleep=time.sleep):
                 sleep(0.5)
     sid = str(uuid.uuid4())
     update_up(session_id=sid, transcript=transcript_path(lean_home("home"), sid), fresh_sid=sid)
+    note_restart("main", "cleared on request (checkpoint kept)" if checkpointed else "cleared on request (no checkpoint reply in time)")
     if restart_host and alive():
         request({"restart": True})
     return sid, checkpointed
@@ -657,6 +698,7 @@ class AutoClear:
         self.manual = False   # the clear in progress was asked for with `lean-agent clear`
         self.verify = None    # (session id, transcript, when, context) of a typed /clear that must show a new session
         self.reason = None    # why the clear in progress was started, when not the user
+        self.limit = None     # the context limit the automatic clear in progress passed
 
     def record(self):
         """The hook's record of the transcript this session writes now (chat/service.json, thread: service-tN.json)."""
@@ -724,16 +766,34 @@ class AutoClear:
     def finish(self, old_sid, new_sid, ctx, how):
         now = self.now()
         why = f" ({self.reason})" if self.reason else ""
+        manual, reason = self.manual, self.reason
         self.waiting = self.verify = self.started = None
         self.manual, self.reason = False, None
+        if self.key == "main" or how.startswith("cleared"):
+            clear_replacing(self.key)  # a replaced thread session keeps the hold until its brief is in (brief_new_session)
         self.hold(None)
         self.update(clear_requested=None, clear_pending_since=None, cleared_at=now, clear_hold=None,
                     clear_status=f"{self.key} was {ctx // 1000}k, {how} as session {str(new_sid)[:8]} at "
                                  f"{time.strftime('%H:%M', time.localtime(now))}{why}")
+        if reason:
+            cause = reason
+        elif manual:
+            cause = "cleared on request"
+        else:
+            cause = f"context {ctx // 1000}k passed the {(self.limit or 0) // 1000}k clear point" if self.limit else f"context {ctx // 1000}k, clear point passed"
+        if how.startswith("cleared"):
+            cause += " (typed /clear)"
+        note_restart(self.key, cause + " (checkpoint kept)")
         self.log(f"{self.key} cleared: {old_sid} ({ctx:,} tokens) -> {new_sid}, {how}{why}", "info")
 
     def brief_new_session(self, old_proc):
         """A replaced thread session starts from its brief: sent once the new process is up and quiet."""
+        try:
+            self._brief_new_session(old_proc)
+        finally:
+            clear_replacing(self.key)  # queued messages now go to the new session, after its brief
+
+    def _brief_new_session(self, old_proc):
         end = time.time() + 30
         while time.time() < end and (self.host.proc is old_proc or not self.host.alive()):
             time.sleep(0.2)
@@ -806,6 +866,7 @@ class AutoClear:
                 # end; an automatic one gives up and asks again at a turn end
                 if not self.manual:
                     self.waiting = self.started = None
+                    clear_replacing(self.key)
                     self.log("no reply in time and a turn is running: giving up this round")
                 return
             if answered or timed_out:
@@ -832,6 +893,7 @@ class AutoClear:
             self.started = now
             self.waiting = (st["size"], now)
             self.log("clear requested with `lean-agent clear`: asking for a checkpoint")
+            mark_replacing(self.key)
             self.host.paste(checkpoint_prompt())
             return
         self.manual = False
@@ -856,7 +918,9 @@ class AutoClear:
         self.started = now
         self.waiting = (st["size"], now)
         self.update(clear_pending_since=now)
+        self.limit = limit
         self.log(f"context {st['ctx']:,} tokens is above {limit:,}: asking for a checkpoint")
+        mark_replacing(self.key)
         self.host.paste(checkpoint_prompt())
 
     def run(self):
@@ -999,6 +1063,47 @@ def spool_add(tid, text=None, new=False):
         json.dump({"text": text, "ts": time.time(), "new": new}, fh)
     os.replace(tmp, os.path.join(d, name))
     return name
+
+
+REPLACING_TTL = 600  # seconds a replacement marker holds delivery at most (a crashed replacement never blocks for good)
+
+
+def _replacing_path(tid):
+    return os.path.join(spool_dir(tid), ".replacing")
+
+
+def mark_replacing(tid):
+    """The thread session is being checkpointed/replaced: the spool holds its messages until the new session has its brief."""
+    if tid == "main":
+        return
+    try:
+        os.makedirs(spool_dir(tid), exist_ok=True)
+        with open(_replacing_path(tid), "w") as fh:
+            fh.write(str(time.time()))
+    except OSError:
+        pass
+
+
+def clear_replacing(tid):
+    try:
+        os.remove(_replacing_path(tid))
+    except OSError:
+        pass
+
+
+def is_replacing(tid):
+    try:
+        return time.time() - os.path.getmtime(_replacing_path(tid)) < REPLACING_TTL
+    except OSError:
+        return False
+
+
+def spool_count(tid):
+    """Messages of thread `tid` queued for delivery (waiting or being delivered)."""
+    try:
+        return sum(1 for n in os.listdir(spool_dir(tid)) if n.endswith((".json", ".sending")))
+    except OSError:
+        return 0
 
 
 def spool_pending(tid):
@@ -1722,6 +1827,7 @@ class StuckWatch:
             self.stage, self.since, self.mark = 1, now, st["size"]
             self.note(f"nudged after {mins}m stall")
             return "nudge"
+        note_restart(key, f"restarted after a {round((now - self.since + limit) / 60)}m stall")
         self.host.terminate_for("stalled")
         self.stage, self.mark = 0, None
         text = f"restarted after {round((now - self.since + limit) / 60)}m stall"
@@ -1854,8 +1960,12 @@ class Reporter(AutoClear):
     def wake_for_runs(self, st):
         """A run tagged to this thread finished: type a short turn into the idle session so it reports to main."""
         mine = [r for r in finished_thread_runs(self.now()) if r["thread"] == self.key]
-        if self.waked is None:  # runs that ended before this session started are not its to report
-            self.waked = {r["id"] for r in mine if r["fin"] < self.born}
+        if self.waked is None:  # runs that ended before this session started are not its to report ...
+            cut = self.born
+            replaced = session_rec(self.key).get("replaced_at")
+            if isinstance(replaced, (int, float)) and 0 <= self.born - replaced <= REPLACE_WINDOW:
+                cut = replaced  # ... except those that finished while the session was being replaced
+            self.waked = {r["id"] for r in mine if r["fin"] < cut}
         todo = [r for r in mine if r["id"] not in self.waked and not (_load(runs_state_path()).get(r["id"]) or {}).get("reported")]
         if not todo or not self.host.alive() or self.now() - self.host.last_input < _knob("LEAN_AGENT_REPORT_IDLE", 3):
             return
