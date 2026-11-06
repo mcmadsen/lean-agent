@@ -4384,7 +4384,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(lines[0], "| Thread | What | State | Needs | Next | Show |")
         rows = [[c.strip() for c in l.strip("|").split("|")] for l in lines[2:]]
         self.assertEqual([r[0] for r in rows], ["t2", "t1", "t3", "t4", "t5"])
-        self.assertEqual([r[5] for r in rows], ["**s2**", "**s1**", "**s3**", "**s4**", "**s5**"])
+        self.assertEqual([r[5] for r in rows], ["**s2** \u00b7 a2", "**s1** \u00b7 a1", "**s3** \u00b7 a3", "**s4** \u00b7 a4", "**s5** \u00b7 a5"])
         self.assertRegex(rows[0][2], r"^needs you 2m$")
         self.assertRegex(rows[0][3], r"^Which plan should we use\? x+…$")
         self.assertRegex(rows[1][2], r"^running 14m$")
@@ -4444,6 +4444,84 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("summary shortcut", lt.decide("s99", data)[1])
         self.assertNotIn("thread show", lt.decide("more tests for t1 please", data)[1])
         self.assertEqual(t21, "t2")
+
+    def test_shortcuts_ask_files_help_goals_waiting_are_front_desk_jobs(self):
+        lt = self.threads_home()
+        lt.new("Parser fixes")
+        data = lt.load()
+        tid, line, kind = lt.decide("a1 what's the status of the 'parser'?", data)
+        self.assertEqual((tid, kind), (None, "job"))
+        self.assertIn("lean-agent thread send t1 ", line)
+        self.assertIn("thread send t1 \"what's the status of the 'parser'?\"", line)
+        self.assertIn("unchanged", line)
+        self.assertEqual(lt.decide("ask t1 why?", data)[2], "job")
+        self.assertIn("ask the user what to ask", lt.decide("a1", data)[1])
+        self.assertIn("lean-agent thread files t1 --show 2", lt.decide("f1 2", data)[1])
+        self.assertTrue(lt.decide("f1", data)[1].endswith("lean-agent thread files t1"))
+        for text, cmd in (("?", "lean-agent shortcuts"), ("help", "lean-agent shortcuts"), ("Shortcuts", "lean-agent shortcuts"),
+                          ("goals", "lean-agent goals"), ("waiting", "lean-agent waiting")):
+            tid, line, kind = lt.decide(text, data)
+            self.assertEqual((tid, kind), (None, "job"), text)
+            self.assertTrue(line.endswith(cmd), (text, line))
+
+    def test_thread_files_are_recorded_listed_shown_and_capped(self):
+        lt = self.threads_home()
+        tid = lt.new("Docs")
+        d = os.path.join(os.environ["LEAN_AGENT_HOME"], "out")
+        os.makedirs(d)
+        a, b, c = (os.path.join(d, n) for n in ("a.md", "big.md", "pic.bin"))
+        open(a, "w").write("# Hello\nworld\n")
+        open(b, "w").write("".join(f"line {i}\n" for i in range(500)))
+        open(c, "wb").write(b"\0\1\2" * 100)
+        lt.record_file(a, "handover", tid)
+        lt.record_file(b, "doc", tid)
+        lt.record_file(c, "feedback", tid)
+        lt.record_file(os.path.join(d, "gone.md"), "doc", tid)
+        lt.record_file(a, "doc", "main")
+        out = self.cli("thread", "files", tid).stdout.splitlines()
+        self.assertEqual(len(out), 4)
+        self.assertRegex(out[0], r"^1\. .*a\.md \u00b7 \d+ B \u00b7 \d{4}-\d\d-\d\d \d\d:\d\d \u00b7 handover$")
+        self.assertIn("(gone)", out[3])
+        self.assertIn("# Hello", self.cli("thread", "files", tid, "--show", "1").stdout)
+        big = self.cli("thread", "files", tid, "--show", "2").stdout
+        self.assertIn("line 199", big)
+        self.assertNotIn("line 200\n", big)
+        self.assertRegex(big, r"\u2026 \(300 more lines; open .*big\.md\)")
+        r = self.cli("thread", "files", tid, "--show", "3", check=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("pic.bin", r.stderr)
+        self.assertEqual(self.cli("thread", "files", tid, "--show", "4", check=False).returncode, 1)
+        self.assertIn("a.md", self.cli("thread", "files", "main").stdout)
+
+    def test_thread_files_find_older_handovers_and_handover_records_its_file(self):
+        lt = self.threads_home()
+        tid = lt.new("Docs")
+        h = os.path.join(os.environ["LEAN_AGENT_HOME"], "old.md")
+        open(h, "w").write("# Old\n")
+        with open(os.path.join(os.environ["LEAN_AGENT_HOME"], "handovers.json"), "w") as fh:
+            json.dump([{"ts": "2026-11-01T09:12:00", "thread": tid, "title": "Old", "path": h}], fh)
+        out = self.cli("thread", "files", tid).stdout
+        self.assertIn("old.md", out)
+        self.assertIn("2026-11-01 09:12 \u00b7 handover", out)
+        r = self.cli("handover", "Fresh one", "--as-is", "--task-file", "-", input="Some text\n", LEAN_AGENT_THREAD=tid, check=False)
+        if r.returncode == 0:
+            self.assertIn("fresh-one.md", self.cli("thread", "files", tid).stdout)
+
+    def test_shortcuts_command_prints_the_table(self):
+        out = self.cli("shortcuts").stdout
+        self.assertTrue(out.startswith("| Reply | Meaning |"))
+        for k in ("| ? |", "| more |", "| s21 |", "| a21 <question> |", "| f21 |", "| f21 2 |", "| goals |", "| waiting |"):
+            self.assertIn(k, out)
+
+    def test_now_short_show_cell_lists_files_only_with_files(self):
+        lt = self.threads_home()
+        t1, t2 = lt.new("One"), lt.new("Two")
+        f = os.path.join(os.environ["LEAN_AGENT_HOME"], "x.md")
+        open(f, "w").write("x\n")
+        lt.record_file(f, "doc", t2)
+        out = self.cli("now", "--short").stdout
+        self.assertIn("| **s1** \u00b7 a1 |", out)
+        self.assertIn("| **s2** \u00b7 a2 \u00b7 f2 |", out)
 
     def test_an_explicit_thread_id_reopens_a_closed_thread(self):
         lt = self.threads_home()
@@ -10004,7 +10082,7 @@ class CliTest(unittest.TestCase):
         with open(tpl, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("| Item | What | State | Thread | Next |", text)
-        for phrase in ("lean-agent now --short", "lean-agent now --all", "lean-agent thread show t21", "Needs, Show cols"):
+        for phrase in ("lean-agent now --short", "Shortcuts (`?` lists them)", "run exactly that", "Needs, Show cols"):
             self.assertIn(phrase, text)
         self.assertLess(len(text.encode()) + 100, 6000)  # the installed copy is a bit larger
         self.assertIn("**Your call:** / **Your vote:** in Next AND is asked with AskUserQuestion", text)

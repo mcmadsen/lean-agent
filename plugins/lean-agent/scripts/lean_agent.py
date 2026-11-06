@@ -12213,6 +12213,7 @@ def cmd_doc(a):
     os.makedirs(os.path.dirname(target), exist_ok=True)
     with open(target, "a" if a.append else "w") as fh:
         fh.write(text if text.endswith("\n") or not text else text + "\n")
+    lean_threads.record_file(target, "doc")
     print(f"{'appended' if a.append else 'wrote'} {text.count(chr(10)) + (0 if text.endswith(chr(10)) else 1)} lines "
           f"({len(text.encode())} bytes) to {target}")
     return 0
@@ -13006,8 +13007,40 @@ def cmd_thread(a):
     return rc
 
 
+def thread_files_cmd(a):
+    tid = a.args[0] if a.args else lean_threads.resolve_tag() or "main"
+    if a.show is not None:
+        text, ok = lean_threads.file_show(tid, a.show)
+        print(text, file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
+    print(lean_threads.files_text(tid))
+    return 0
+
+
+SHORTCUTS = (
+    ("?", "this list"),
+    ("status / now", "the status table"),
+    ("more", "all threads (when the table says +N more)"),
+    ("s21", "summary of t21: last report, open questions, running work, next step"),
+    ("a21 <question>", "send the question to t21 unchanged"),
+    ("f21", "files t21 made for you, numbered"),
+    ("f21 2", "show file 2 of t21 (text only, capped)"),
+    ("goals", "open goals"),
+    ("waiting", "what waits on you"),
+)
+
+
+def cmd_shortcuts(a):
+    print("| Reply | Meaning |\n|---|---|")
+    for k, v in SHORTCUTS:
+        print(f"| {k} | {v} |")
+    return 0
+
+
 def thread_action(a):
     act = a.action
+    if act == "files":
+        return thread_files_cmd(a)
     resume_old = getattr(a, "resume_old", False)
     if act == "sessions":
         if not service_session.alive():
@@ -13260,6 +13293,7 @@ def cmd_feedback(a):
         print(f"feedback {text} {'removed' if a.action == 'rm' else 'done'}")
     else:
         path, n = lean_feedback.export(a.all, a.out)
+        lean_threads.record_file(path, "feedback")
         print(f"feedback: {path} ({n} items)")
     return 0
 
@@ -14255,6 +14289,7 @@ def handover_out_path(out, name, force):
 def handover_copy(src, out):
     import shutil
     shutil.copyfile(src, out)
+    lean_threads.record_file(out, "handover")
     print(f"copy: {out}")
 
 
@@ -14325,6 +14360,7 @@ def cmd_handover(a):
         else:
             recs[i] = rec  # the same file again: one record, with the new title, date and thread
         save_json(reg, recs)
+    lean_threads.record_file(path, "handover")
     print(f"handover: {path}")
     if copy_to:
         handover_copy(path, copy_to)
@@ -15169,9 +15205,10 @@ def build_parser():
     s.set_defaults(fn=cmd_schedule)
 
     s = sub.add_parser("thread", help="threads: new \"title\" [\"<text>\"|--prompt-file F|-] (its own Remote Control session) | send tN \"<text>\"|--prompt-file F|- | ask \"question\" [--options \"a|b|c\"] (from inside a thread session: the question goes to main; end the turn, the answer arrives as your next turn) | answer tN [qN] \"answer\" (main: pass an answer into the thread session) | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
-    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "report", "answer", "reports", "park", "wake", "deliver"],
+    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "files", "ask", "report", "answer", "reports", "park", "wake", "deliver"],
                    metavar="{new,list,show,close,reopen,merge,unmerge,move,send,open,sessions,ask,report,answer,reports,park,wake}")  # deliver is internal: not shown
     s.add_argument("args", nargs="*", help='new "title" ["<text>"]; send tN "<text>"; answer tN [qN] "<answer>"; other actions: ids')
+    s.add_argument("--show", metavar="N", help="files: print file number N (Markdown/text, capped)")
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin); or give it as a positional argument, not both")
     s.add_argument("--json", action="store_true", help="list: as JSON")
@@ -15187,6 +15224,9 @@ def build_parser():
     s.add_argument("--resume-old", action="store_true", help="reopen|send|open: continue the thread's previous Claude session "
                    "instead of starting a new one from a short brief")
     s.set_defaults(fn=cmd_thread)
+
+    s = sub.add_parser("shortcuts", help="the front desk's reply shortcuts (? s21 a21 f21 more goals waiting) as a table")
+    s.set_defaults(fn=cmd_shortcuts)
 
     s = sub.add_parser("waiting", help="what waits on the user (list), `add \"<summary>\"`, `done <id> [--answer TEXT]`; the front desk asks each with AskUserQuestion")
     s.add_argument("args", nargs="*", help="[list] | add <summary> | done <id>")

@@ -16,6 +16,7 @@ import json
 import math
 import os
 import re
+import shlex
 import time
 
 import lean_common
@@ -285,6 +286,8 @@ being do does did done have has had it its this that these those there here we y
 can could would should will shall may might must not no yes ok okay please just also so very more most some any all
 what which who whom how why when where than too lets let get got make made use using new need want like again still
 now thanks thank hello hey hi""".split())
+ASK_RE = re.compile(r"^(?:ask\s+t?|a)(\d+)(?:\s+(.*))?$", re.I | re.S)
+FILES_RE = re.compile(r"^(?:files?\s+t?|f)(\d+)(?:\s+(\d+))?$", re.I)
 SHORTCUT_RE = re.compile(r"^(?:please\s+)?(?:((?:show\s+)?more)|(?:s|summary|show)\s*t?(\d+))\s*[.!?]?$", re.I)
 EXPLICIT_RE = re.compile(r"(?<![\w/&])(?:#(\d+)|[tT](\d+))\b")
 
@@ -583,6 +586,26 @@ def decide(text, data, session=None, now=None, idx=None):
     with a clear margin. Returns (thread id or None, line, kind), kind in thread|new|unsure|job|status."""
     import lean_find
     text = " ".join(str(text or "").split())
+    low = text.lower().rstrip("?!. ") if text != "?" else "?"
+    if text == "?" or low in ("shortcuts", "help"):
+        return None, "Front desk job (shortcuts) \u2014 no thread: lean-agent shortcuts", "job"
+    if low in ("goals", "waiting"):
+        return None, f"Front desk job ({low}) \u2014 no thread: lean-agent {low}", "job"
+    am = ASK_RE.match(text)
+    if am:
+        tid = resolve(f"t{int(am.group(1))}", data["aliases"])
+        if tid in data["threads"]:
+            q = (am.group(2) or "").strip()
+            if not q:
+                return None, f"Front desk job (ask shortcut) \u2014 no thread: no question given; ask the user what to ask {tid}", "job"
+            return None, f"Front desk job (ask shortcut) \u2014 no thread: send the question to {tid} unchanged: lean-agent thread send {tid} {_dq(q)}", "job"
+    fm = FILES_RE.match(text)
+    if fm:
+        tid = resolve(f"t{int(fm.group(1))}", data["aliases"])
+        if tid in data["threads"]:
+            if fm.group(2):
+                return None, f"Front desk job (files shortcut) \u2014 no thread: lean-agent thread files {tid} --show {fm.group(2)}", "job"
+            return None, f"Front desk job (files shortcut) \u2014 no thread: lean-agent thread files {tid}", "job"
     sc = SHORTCUT_RE.match(text)
     if sc and not sc.group(1):
         tid = resolve(f"t{int(sc.group(2))}", data["aliases"])
@@ -1250,9 +1273,104 @@ SHORT_ROWS = 10
 WAIT_NEEDS = {"review": "vote", "question": "answer", "permission": "approve", "push": "push/post?", "auth": "sign in", "other": "your call"}
 
 
+def _dq(text):
+    """`text` as one double-quoted shell word."""
+    return '"' + re.sub(r'(["\\$`])', r"\\\1", text) + '"'
+
+
 def show_code(tid):
     """The reply shortcut that shows a thread's summary: t21 -> s21."""
     return "s" + str(tid).lstrip("t#")
+
+
+def _files_path():
+    return lean_home("files.json")
+
+
+def record_file(path, kind, thread=None):
+    """Remember a file lean-agent wrote for the user: path, size, time, thread (resolve_tag; the front desk is "main"), kind."""
+    try:
+        path = os.path.abspath(os.path.expanduser(str(path)))
+        tid = resolve_tag(thread) if thread is not None else resolve_tag()
+        rec = {"path": path, "kind": kind, "thread": tid or "main", "ts": now_iso(),
+               "size": os.path.getsize(path) if os.path.exists(path) else 0}
+        reg = _files_path()
+        with lean_common.file_lock(reg):
+            recs = lean_common.read_json(reg, [])
+            recs = [r for r in recs if isinstance(r, dict) and not (r.get("path") == path and r.get("thread") == rec["thread"])] if isinstance(recs, list) else []
+            recs.append(rec)
+            lean_common.write_json_atomic(reg, recs[-500:])
+    except Exception:  # a bookkeeping failure never fails the command that wrote the file
+        pass
+
+
+def thread_files(tid):
+    """The files made for thread `tid`, oldest first: recorded ones plus (older) handovers of the thread. Each:
+    {path, kind, ts, size, gone}."""
+    tid = resolve(norm(tid)) if tid != "main" else "main"
+    recs = lean_common.read_json(_files_path(), [])
+    out = {r["path"]: dict(r) for r in recs if isinstance(r, dict) and r.get("thread") == tid and r.get("path")}
+    hs = lean_common.read_json(lean_home("handovers.json"), [])
+    for h in hs if isinstance(hs, list) else []:
+        if isinstance(h, dict) and h.get("thread") == tid and h.get("path") and h["path"] not in out:
+            out[h["path"]] = {"path": h["path"], "kind": "handover", "ts": h.get("ts") or ""}
+    rows = []
+    for r in out.values():
+        r["gone"] = not os.path.exists(r["path"])
+        if not r["gone"]:
+            r["size"] = os.path.getsize(r["path"])
+        rows.append(r)
+    rows.sort(key=lambda r: r.get("ts") or "")
+    return rows
+
+
+def _size(n):
+    return f"{n} B" if n < 1024 else f"{max(1, round(n / 1024))} KB" if n < 1024 * 1024 else f"{n / 1048576:.1f} MB"
+
+
+def files_text(tid):
+    rows = thread_files(tid)
+    if not rows:
+        return f"No files recorded for {tid}."
+    home = os.path.expanduser("~")
+    lines = []
+    for i, r in enumerate(rows, 1):
+        path = r["path"]
+        shown = "~" + path[len(home):] if path.startswith(home + os.sep) else path
+        ts = str(r.get("ts") or "")[:16].replace("T", " ")
+        lines.append(f"{i}. {shown} \u00b7 " + ("(gone)" if r["gone"] else _size(r.get("size", 0))) + f" \u00b7 {ts} \u00b7 {r.get('kind', 'file')}")
+    return "\n".join(lines)
+
+
+SHOW_LINES, SHOW_CHARS = 200, 12000
+
+
+def file_show(tid, n):
+    """(text, ok) for file number n of the thread: Markdown/text only, capped; a missing or binary file is refused with its path."""
+    rows = thread_files(tid)
+    if not str(n).isdigit() or not 1 <= int(n) <= len(rows):
+        return f"no file {n} for {tid} (lean-agent thread files {tid})", False
+    r = rows[int(n) - 1]
+    path = r["path"]
+    if r["gone"]:
+        return f"{path} is gone", False
+    try:
+        raw = open(path, "rb").read(SHOW_CHARS * 4 + 1)
+        if b"\0" in raw[:4096]:
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "binary")
+        text = raw.decode("utf-8", "ignore")
+    except (OSError, UnicodeDecodeError):
+        return f"not a text file, open it: {path}", False
+    full = open(path, encoding="utf-8", errors="ignore").read()
+    lines = full.splitlines()
+    cut = "\n".join(lines[:SHOW_LINES])
+    if len(cut) > SHOW_CHARS:
+        cut = cut[:SHOW_CHARS]
+        cut = cut[:cut.rfind("\n")] if "\n" in cut else cut
+    kept = len(cut.splitlines())
+    if kept < len(lines):
+        cut += f"\n\u2026 ({len(lines) - kept} more lines; open {path})"
+    return cut, True
 
 
 def _cell(text, n):
@@ -1310,7 +1428,9 @@ def short_text(now=None, max_lines=SHORT_ROWS, all_=False):
     shown = rows if all_ else rows[:max_lines]
     lines = ["| Thread | What | State | Needs | Next | Show |", "|---|---|---|---|---|---|"]
     for pr, _, tid, state, needs, nxt, title in shown:
-        lines.append(f"| {tid} | {title} | {state} | {needs} | {nxt} | **{show_code(tid)}** |")
+        c = show_code(tid)
+        cell = f"**{c}** \u00b7 a{c[1:]}" + (f" \u00b7 f{c[1:]}" if thread_files(tid) else "")
+        lines.append(f"| {tid} | {title} | {state} | {needs} | {nxt} | {cell} |")
     if len(rows) > len(shown):
         lines.append(f"\n+{len(rows) - len(shown)} more threads \u2014 reply **more**")
     return "\n".join(lines)

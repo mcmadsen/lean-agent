@@ -454,6 +454,23 @@ Say it in the chat; main runs the command and shows the result as a table.
 
 Anything that needs you (a finished review to vote on, a thread question, an approval) is asked with a prompt in the same turn, with options; the table row is only the record. lean-agent keeps these in `<home>/waiting.json` (`lean-agent waiting`, `waiting add`, `waiting done <id>`), and a Stop hook sends the front desk back once if a turn ended without asking.
 
+## Front desk shortcuts
+Reply to the front desk with one of these on its own; its prompt hook turns it into the exact command to run, and never sends it to a thread. `lean-agent shortcuts` prints the same table. The Show column of the status table lists the codes that fit a row (`s21 · a21 · f21`; `f21` only when the thread has files).
+
+| Reply | Meaning |
+|---|---|
+| `?` / `shortcuts` / `help` | this list |
+| `status` / `now` | the status table (needs-you and running threads first, max 10 rows) |
+| `more` | all threads, when the table ends with `+N more threads` |
+| `s21` | summary of t21: last report, open questions, running work, next step (also `s t21`, `summary t21`, `show t21`) |
+| `a21 <question>` | send the question to t21 unchanged (`ask t21 <question>`); `a21` alone asks what to ask |
+| `f21` | the files t21 made for you, numbered, with size, time and kind; missing ones are marked `(gone)` |
+| `f21 2` | file 2's content (Markdown/text only, about 200 lines / 12k chars; a binary file is refused with its path) |
+| `goals` | `lean-agent goals` |
+| `waiting` | `lean-agent waiting` |
+
+Files are recorded when lean-agent writes them for you (handovers and their `--out` copies, `doc write`, `feedback export`) in `<home>/files.json`; older handovers of a thread are found from `handovers.json`.
+
 ## Goals and follow-up
 The front desk owns every deliverable until it is done. `lean-agent goals` lists the open goals (Goal | Ref | Thread | State | Quiet | Next);
 `lean-agent goal add "<ref>" [tN]`, `goal done <id>`, `goal drop <id>`, `goal next <id> "<text>"` edit them, and `lean-agent now` shows them after
