@@ -387,5 +387,61 @@ class GoalsTest(unittest.TestCase):
         self.assertEqual(lean_goals.quiet_minutes(), 10)
 
 
+class NeverStartedTest(GoalsTest):
+    """A request that never got going (no run, report or activity) is chased at goal-start-minutes without asking the model."""
+
+    def unstarted(self, undelivered=True):
+        return {"unstarted": {"id": "r1", "text": "review the change", "since": T0, "undelivered": undelivered}}
+
+    def test_undelivered_first_request_is_redelivered_at_ten_minutes_not_before(self):
+        self.goal()
+        self.info_by["t21"] = self.unstarted()
+        self.assertEqual(self.watch(9), [])
+        self.assertEqual(self.sent, [])
+        self.watch(11)
+        self.assertEqual(self.sent, [("t21", "review the change")])
+
+    def test_delivered_but_unstarted_request_gets_the_start_nudge(self):
+        self.goal()
+        self.info_by["t21"] = self.unstarted(False)
+        self.watch(11)
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("unstarted request r1: start it", self.sent[0][1])
+
+    def test_still_spooled_message_is_not_sent_twice(self):
+        self.goal()
+        self.info_by["t21"] = dict(self.unstarted(), spooled=True)
+        self.watch(30)
+        self.assertEqual(self.sent, [])
+
+    def test_the_chaser_cannot_skip_it_and_is_not_asked_about_it(self):
+        gid = self.goal()
+        self.info_by["t21"] = self.unstarted()
+        seen = []
+
+        def decide(contexts):
+            seen.extend(contexts)
+            return {c["id"]: {"action": "skip", "why": "no pending action recorded"} for c in contexts}
+
+        lean_goals.watchdog(T0 + 11 * MIN, self.send, lambda t: True, self.info, lambda: False, decide=decide, is_paused=lambda n: False)
+        self.assertEqual(seen, [])
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.get(gid)["last_decision"], "chase")
+
+    def test_quiet_context_carries_the_never_started_fact(self):
+        g = self.get(self.goal())
+        ctx = lean_goals._context(g, {"unstarted": {"id": "r1"}}, "quiet", "", T0 + 40 * MIN)
+        self.assertTrue(ctx["never_started"])
+        self.assertFalse(lean_goals._context(g, {}, "quiet", "", T0 + 40 * MIN)["never_started"])
+
+    def test_start_minutes_config(self):
+        with open(os.path.join(self.tmp, "config.json"), "w") as fh:
+            json.dump({"goal_start_minutes": 3}, fh)
+        self.goal()
+        self.info_by["t21"] = self.unstarted()
+        self.watch(4)
+        self.assertEqual(len(self.sent), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

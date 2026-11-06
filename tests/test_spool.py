@@ -199,6 +199,44 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class FirstMessageTest(SpoolTest):
+    def test_first_message_is_the_request_at_creation_and_marked_delivered_by_the_session(self):
+        tid = lean_threads.new("review", "Please review the change")
+        t = lean_threads.load()["threads"][tid]
+        self.assertEqual([r["text"] for r in t["requests"]], ["Please review the change"])
+        self.assertTrue(t["requests"][0]["undelivered"])
+        self.assertIn("Please review the change", lean_threads.show_text(tid, all_=True))
+        brief = "brief\n" + lean_threads.BRIEF_END + "\n\nPlease  review the change"
+        lean_threads.pin(tid, brief)  # the session received it: no second request, flag cleared
+        t = lean_threads.load()["threads"][tid]
+        self.assertEqual(len(t["requests"]), 1)
+        self.assertNotIn("undelivered", t["requests"][0])
+        self.assertTrue(t["requests"][0]["delivered_ts"])
+
+    def test_lost_first_paste_leaves_a_recorded_request_that_the_goal_check_redelivers_and_the_table_flags(self):
+        # the host's first paste fails (logged only) and the spool entry is already done: before the fix thread show had
+        # no request at all and nothing knew the message was missing
+        tid = lean_threads.new("review", "Please review the change")
+        t = lean_threads.load()["threads"][tid]
+        created = lean_threads._epoch(t["created"])
+        now = created + 12 * 60
+        info = lean_goals.thread_info(tid)
+        self.assertTrue(info["unstarted"]["undelivered"])
+        self.assertIn("not started (12m)", lean_threads.short_text(now=now))
+        lean_goals.ensure("PR 1", tid)
+        sent = []
+        lean_goals.watchdog(now, lambda t_, x: (sent.append(x) or (True, "")), lambda x: True,
+                            lambda x: dict(lean_goals.thread_info(x), last=created), lambda: False)
+        self.assertEqual(sent, ["Please review the change"])
+
+    def test_started_thread_is_not_flagged(self):
+        tid = lean_threads.new("review", "Please review the change")
+        t = lean_threads.load()["threads"][tid]
+        now = lean_threads._epoch(t["created"]) + 12 * 60
+        lean_threads.pin(tid, "Please review the change")
+        self.assertNotIn("not started", lean_threads.short_text(now=lean_threads._epoch(t["created"]) + 5))
+
+
 class SpoolSurvivesReplacementTest(SpoolTest):
     def test_queued_while_replacing_is_delivered_once_to_the_new_session(self):
         sent = []

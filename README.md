@@ -488,6 +488,10 @@ A watchdog in the service looks at the active goals every few minutes (it only m
 worker is asked to resume or restart it and send ONE consolidated final report; a quiet thread (no worker, no open question, longer than `LEAN_AGENT_GOAL_QUIET`
 or config `goal_quiet`, default 30m) or a parked session is woken with a status nudge. At most one chase per goal per quiet period; after 3 chases the goal is
 "stuck" and the user gets one question. No chase while the plan limit is near. Every chase reaches the front desk as a one-line `CHASED:` digest.
+A thread's first message is stored as its request at `thread new` (undelivered until its session receives it). A request that never started
+(never delivered, or no run, report or other activity after it) for `LEAN_AGENT_GOAL_START` or config `goal_start_minutes` (default 10) is chased at once,
+without the model check: an undelivered one is redelivered, else the thread is told "you have an unstarted request rN: start it". `now` marks such threads
+"not started (Nm)" in Needs.
 
 A thread's consolidated final report (Ref, Head sha, Review, Checks, Left, Proposed action) becomes exactly one waiting item of kind `push` per goal with the
 options Push / Push and post / Post only / Hold; a newer report of the same PR replaces it instead of adding a second question.

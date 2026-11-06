@@ -501,8 +501,14 @@ def thread_info(tid, data=None):
         waiting = [i for i in lean_waiting.open_items() if i.get("thread") == tid]
     except Exception:
         waiting = []
+    try:
+        evs = lean_threads.events(data, lean_threads._todo_map()).get(tid, [])
+        unstarted = lean_threads.unstarted_request(t, evs, time.time())
+    except Exception:
+        unstarted = None
     return {"lost": lost, "running": running, "question": bool(lean_threads.open_questions(t)), "waiting": bool(waiting),
-            "closed": bool(t.get("closed")), "last": last, "runs": runs}
+            "closed": bool(t.get("closed")), "last": last, "runs": runs, "unstarted": unstarted,
+            "spooled": bool(lean_threads.queued_messages(tid))}
 
 
 def settle_orphan_markers(data=None):
@@ -599,7 +605,7 @@ def _context(g, i, kind, rid, now):
     return {"id": g["id"], "thread": g["thread"], "ref": g.get("ref", ""), "kind": kind, "run": rid,
             "quiet_min": int(max(0, now - max(_epoch(g.get("last_activity")), _epoch(g.get("created")), i.get("last") or 0)) // 60),
             "last_report": g.get("last_report", ""), "last_chase": g.get("last_chase_text", ""), "last_reply": g.get("last_reply", ""),
-            "chases": int(g.get("chase_count") or 0),
+            "chases": int(g.get("chase_count") or 0), "never_started": bool(i.get("unstarted")),
             "runs": [f"{r.get('id')} {r.get('final') or 'running'}: {str(r.get('task'))[:80]}" for r in (i.get("runs") or [])[-4:]]}
 
 
@@ -625,10 +631,19 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
             if g["id"] in memory()["goals"]:
                 g["state"] = "dropped"
                 continue
+            import lean_threads
             i = info(tid)
             act = max(_epoch(g.get("last_activity")), _epoch(g.get("created")), i.get("last") or 0)
             since_chase = now - _epoch(g.get("chased_at")) if g.get("chased_at") else float("inf")
             lost = real_lost(i.get("lost") or [], ref, i.get("runs"))
+            un = i.get("unstarted")
+            if un and not i.get("running") and not lost and not i.get("question") and not i.get("waiting"):
+                # deterministic: a request that never got going is chased at once, no model asked
+                age_s = max(0, now - un["since"])
+                if i.get("spooled") or age_s < lean_threads.start_minutes() * 60 or since_chase < lean_threads.start_minutes() * 60:
+                    continue
+                cands.append((g, i, "unstarted", un["id"] or "", _context(g, i, "unstarted", un["id"] or "", now)))
+                continue
             if i.get("running") or i.get("question") or i.get("waiting") or i.get("closed"):
                 continue
             if lost:
@@ -644,7 +659,7 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
             cands.append((g, i, kind, rid, _context(g, i, kind, rid, now)))
         # the cheap check: one batched helper call for the goals without a pending nudge
         decisions, cost, called, waiting_on_helper = {}, 0.0, False, False
-        todo = [c for c in cands if not c[0].get("pending_chase")]
+        todo = [c for c in cands if not c[0].get("pending_chase") and c[2] != "unstarted"]
         if todo and decide is not None:
             if chaser_calls_last_hour(now) < chaser_per_hour():
                 try:
@@ -666,11 +681,13 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
                 continue
             d = decisions.get(g["id"]) or {}
             action = str(d.get("action") or ("chase" if decide is None or kind == "lost" else "skip")).lower()
+            if kind == "unstarted" or (ctx.get("never_started") and action in ("skip", "defer", "")):
+                action, d = "chase", {}  # a request that never started is never skipped
             if g.get("pending_chase"):
                 action, d = "chase", {"message": g["pending_chase"], "why": "deferred nudge"}
             why = str(d.get("why") or d.get("message") or "")[:160]
             share = cost / max(1, len(todo))
-            if called and not g.get("pending_chase"):
+            if called and not g.get("pending_chase") and kind != "unstarted":
                 log_decision(now, goal=g["id"], thread=tid, ref=ref, decision=action, why=why, cost=share, how="haiku",
                              call=(g is todo[0][0]))
             if action == "defer":  # the per-hour cap: no decision was made, ask again later
@@ -689,14 +706,19 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
                 remember("goals", g["id"], g["next"])
                 continue
             msg = str(d.get("message") or "").strip()
-            if kind == "lost":
+            if kind == "unstarted":
+                un = i["unstarted"]
+                msg = (un["text"] if un["undelivered"] and un["text"]
+                       else f"You have an unstarted request {un['id']}: start it. ({un['text'][:160]})")
+                how = "redelivered the first request" if un["undelivered"] else "asked to start the request"
+            elif kind == "lost":
                 msg = lost_message(rid, ref, bool(next((m for r_, m in (i.get("lost") or []) if r_ == rid), {}).get("no_record")))
                 how = "asked to resume"
             else:
                 msg = (msg[:240] if msg and action == "chase" else nudge_message(ref))
                 parked = not alive(tid)
                 how = "woken and asked for status" if parked else "asked for status"
-            why_s = "worker lost" if kind == "lost" else ("session parked" if not alive(tid) else "quiet")
+            why_s = "never started" if kind == "unstarted" else "worker lost" if kind == "lost" else ("session parked" if not alive(tid) else "quiet")
             if kind == "quiet" and near():
                 g["pending_chase"], g["last_decision"] = msg, "defer"
                 g["decision_why"] = "plan limit near: nudge waits"
