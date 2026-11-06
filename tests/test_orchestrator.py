@@ -10831,6 +10831,74 @@ class CliTest(unittest.TestCase):
                      "--", "t", check=False)
         self.assertIn("'nope' is unknown", p.stderr)
 
+    def _branch_rule_project(self, rules=True):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        g("branch", "-m", "feature", "feat-old")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        if rules:
+            self.cli("config", "-p", "proj", "branch-rules", "feature=feat/{task-id}-{name}", "bugfix=fix/{task-id}-{name}")
+        return g
+
+    def test_new_branch_name_must_follow_the_branch_rules(self):
+        g = self._branch_rule_project()
+        p = self.cli("run", "proj", "-m", "haiku", "--why", "Fix login timeout 512", "--worktree", "zz-scratch",
+                     "--worktree-base", "main", "--", "t", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("refused", p.stderr)
+        self.assertIn("try: --worktree fix/512-fix-login-timeout-512", p.stderr)
+        # an existing branch is used as it is, whatever its name
+        g("branch", "odd-name", "main")
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "odd-name", "--", "t").stdout
+        self.assertIn("on branch odd-name", out)
+        # a conforming new name is fine; --worktree auto builds one with the item id
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "feat/7-ok", "--worktree-base", "main",
+                       "--", "t").stdout
+        self.assertIn("worktree: created feat/7-ok from main", out)
+        self.cli("todo", "add", "Login timeout", "-p", "proj", "--ref", "PR 512")
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "auto", "--todo", "1",
+                       "--worktree-base", "main", "--", "t").stdout
+        self.assertIn("worktree: created feat/512-login-timeout from main", out)
+        # worktree create: same rule, and auto
+        p = self.cli("worktree", "create", "proj", "lean/t9-thing", "--from", "main", check=False)
+        self.assertIn("try: --worktree", p.stderr)
+        out = self.cli("worktree", "create", "proj", "auto", "--from", "main", "--todo", "1", "--why", "Second").stdout
+        self.assertIn("feat/512-", subprocess.run(["git", "-C", self.proj, "branch", "--list"], capture_output=True,
+                                                 text=True).stdout)
+
+    def test_no_rules_project_refuses_a_lean_prefix_for_a_new_branch(self):
+        self._branch_rule_project(rules=False)
+        for name in ("lean/t7-merge", "lean-t7-merge"):
+            p = self.cli("run", "proj", "-m", "haiku", "--why", "merge develop", "--worktree", name,
+                         "--worktree-base", "main", "--", "t", check=False)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("try: --worktree feature/", p.stderr)
+        out = self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "plain-name", "--worktree-base", "main",
+                       "--", "t").stdout
+        self.assertIn("worktree: created plain-name from main", out)
+
+    def test_worktree_push_refuses_a_nonconforming_new_remote_branch(self):
+        g = self._branch_rule_project()
+        origin = os.path.join(self.tmp.name, "origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+        g("remote", "add", "origin", origin)
+        g("push", "-q", "origin", "main")
+        self.cli("worktree", "create", "proj", "feat/5-ok", "--from", "main")
+        wt = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", "feat-5-ok")
+        subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
+                        "-m", "c"], check=True)
+        subprocess.run(["git", "-C", wt, "branch", "-m", "scratch-x"], check=True)
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        self.cli("review", "proj", "--head", "scratch-x", "--base", "main", FAKE_REVIEW=approve)
+        p = self.cli("worktree", "push", "proj", "scratch-x", "--new-branch", check=False)
+        self.assertEqual(p.returncode, 3)
+        self.assertIn("--remote-branch feat/", p.stderr)
+        p = self.cli("worktree", "push", "proj", "scratch-x", "--remote-branch", "feat/5-ok", "--new-branch", check=False)
+        self.assertNotIn("branch rules", p.stderr)
+        self.assertEqual(p.returncode, 2)  # past the guards: waits for --allow-send
+
     def test_worktree_refuses_a_branch_name_one_typo_from_an_existing_branch(self):
         g = self.git_project()
         g("add", "-A")

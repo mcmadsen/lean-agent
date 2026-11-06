@@ -112,8 +112,8 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      authenticated`) when the server answers anonymous, and `advise`/`run` show the known-issue card.
    - `--chrome=<tool>,<tool>`: the user's real Chrome (Teams, Gmail ...); a worker checks the connection once (worker:
      `lean-agent chrome check`; it is refused for you, `lean-agent chrome status` is not).
-   - New branches follow the project's branch rules: get a name with `lean-agent branch-name` or let lean-agent create
-     it (`--worktree auto [--branch-type feature|bugfix|release]`).
+   - new branch: `--worktree auto` (it follows the project's branch rules; `[--branch-type feature|bugfix|release]`) or a
+     name from `lean-agent branch-name`; never invent a prefix like lean/ (refused). Existing branches keep their names.
    - `--worktree <new-branch> --worktree-base <ref>`: a branch that doesn't exist yet starts from `<ref>` (a local, even
      unpushed branch, a tag, `origin/<x>` or a commit), else from the project's base; the start line says "created <branch>
      from <ref> (<sha>)". Use it when the task starts from, or merges into, a particular branch. A worker can also
