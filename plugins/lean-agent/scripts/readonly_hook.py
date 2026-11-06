@@ -110,19 +110,39 @@ def git_ok(args, cwd, project):
     return f"git {sub} is not read-only"
 
 
+def unquoted(seg):
+    """The segment with quoted text and escaped characters blanked out: <, >, |, ;, & inside quotes are data."""
+    out, quote, i = "", None, 0
+    while i < len(seg):
+        c = seg[i]
+        if quote:
+            if c == "\\" and quote == '"':
+                i += 1
+            elif c == quote:
+                quote = None
+            out += "x"
+        elif c in "'\"":
+            quote = c
+            out += "x"
+        elif c == "\\":
+            i += 1
+            out += "x"
+        else:
+            out += c
+        i += 1
+    return out
+
+
 def segment_ok(seg, cfg, state):
     """None when the segment may run, else the reason."""
     try:
         toks = shlex.split(seg)
     except ValueError:
         return "unbalanced quotes"
-    clean = []
-    for t in toks:
-        if re.search(r"[<>]", t) and t not in REDIRECT_OK:
-            return "redirects can write files"
-        if t not in REDIRECT_OK:
-            clean.append(t)
-    toks = clean
+    bare = unquoted(seg).split()
+    if any(re.search(r"[<>]", t) and t not in REDIRECT_OK for t in bare):
+        return "redirects can write files"
+    toks = [t for t in toks if t not in REDIRECT_OK]
     if not toks:
         return None
     if re.match(r"\w+=", toks[0]):
