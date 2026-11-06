@@ -12179,6 +12179,39 @@ def start_closed_thread(tid, t, prompt, resume_old, force=False):
     return name, line
 
 
+DELIVER_BY_HAND_WAIT = 10  # seconds `thread deliver` waits when a person ran it (the service gives it far longer)
+
+
+def lean_budget_refusal():
+    import budget_hook
+    return f"thread deliver: {budget_hook.DELIVER_REFUSED}"
+
+
+def deliver_by_hand(tid):
+    """The hand-run `thread deliver`: deliver what is spooled, but wait at most DELIVER_BY_HAND_WAIT seconds; what is
+    not done stays queued for the service."""
+    tid = thread_session_tid(tid)[0]
+    out = {}
+
+    def work():
+        try:
+            out["r"] = deliver_spool(tid, 0)
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            out["r"] = ("error", str(exc) or type(exc).__name__)
+
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    th.join(DELIVER_BY_HAND_WAIT)
+    kind, line = out.get("r", ("", ""))
+    if kind == "ok":
+        return line
+    if kind == "slot":
+        return slot_line(tid, line)
+    if kind == "error":
+        die(line)
+    return queued_line(tid)
+
+
 DELIVER_LOCK_WAIT = 120  # seconds the service's delivery waits for another delivery of the same thread
 
 
@@ -12198,6 +12231,12 @@ def thread_start_lock_try(wait):
     while True:
         try:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fh.truncate(0)
+                fh.write(f"{os.getpid()}\n")
+                fh.flush()
+            except OSError:
+                pass
             _START_LOCK.append(fh)
             return True
         except OSError:
@@ -12390,6 +12429,8 @@ def thread_session_tid(raw):
     return tid, t
 
 
+START_REQUEST_WAIT = 25  # seconds the start request may take while the thread-start lock is held
+STOP_REQUEST_WAIT = 15  # seconds a stop request may take (also under that lock, when a cap park runs)
 START_GRACE = 4  # seconds a host may take to come up after a failed or timed-out start request
 
 
@@ -12444,13 +12485,13 @@ def start_thread_session(tid, t, prompt=None, msg=None):
     if msg is None and prompt:
         import compact_hook
         msg = compact_hook.thread_brief(tid, THREAD_BRIEF_CAP) + "\n" + lean_threads.BRIEF_END + "\n\n" + prompt
-    r = service_session.sessions_request("start", thread=tid, prompt=msg)
+    r = service_session.sessions_request("start", timeout=START_REQUEST_WAIT, thread=tid, prompt=msg)
     if not r.get("ok"):  # a failed or timed-out request may still have a host coming up: give it a moment
         deadline = time.time() + START_GRACE
         while not service_session.alive(tid) and time.time() < deadline:
             time.sleep(0.5)
         if not service_session.alive(tid):
-            service_session.sessions_request("stop", thread=tid)  # nothing may start later unrecorded
+            service_session.sessions_request("stop", timeout=STOP_REQUEST_WAIT, thread=tid)  # nothing may start later unrecorded
             raise RuntimeError(f"could not start the session of {tid}: {r.get('error') or 'not started'}")
     lean_threads.set_session(tid, session_on=True)  # only a started session is one the service keeps
     return r.get("name") or service_session.thread_session_name(tid, t.get("title"))
@@ -12488,7 +12529,7 @@ def close_thread_session(tid):
     if hosted:
         if service_session.alive(tid):
             ok = service_session.checkpoint_session(tid)
-        res = service_session.sessions_request("stop", thread=tid)
+        res = service_session.sessions_request("stop", timeout=STOP_REQUEST_WAIT, thread=tid)
         if not res.get("ok") and rec.get("host_pid") and pid_alive(rec["host_pid"]):
             raise RuntimeError(f"{tid}: the session did not stop ({res.get('error') or 'stop request failed'}); "
                                f"host pid {rec['host_pid']} is still alive")
@@ -12537,9 +12578,12 @@ def _idle_age(sec):
     return lean_threads.age(datetime.datetime.fromtimestamp(time.time() - sec).isoformat(timespec="seconds"))
 
 
+THREAD_START_LOCK_WAIT = 150  # seconds a caller waits for the thread-start lock before it fails cleanly (holders keep it under ~1 min)
+
+
 def thread_start_lock():
     """Held from the cap check to the end of the start, so parallel callers see each other's sessions."""
-    return lean_common.file_lock(home("thread-start"))
+    return lean_common.file_lock(home("thread-start"), timeout=THREAD_START_LOCK_WAIT)
 
 
 CLOSE_MIN_IDLE = 120  # seconds a session must have been idle (since its last turn ended) before the cap may close it
@@ -13058,6 +13102,11 @@ def thread_action(a):
     if act == "deliver":  # internal: the service delivers the spooled messages of one thread (may wait for the session)
         if len(a.args) != 1:
             die("usage: lean-agent thread deliver tN")
+        if os.environ.get("LEAN_AGENT_SERVICE_DELIVER") != "1":  # run by hand: never wait more than a few seconds
+            if os.environ.get("LEAN_AGENT_SESSION_ROLE") in ("main", "thread"):
+                die(lean_budget_refusal())
+            print(deliver_by_hand(a.args[0]))
+            return 0
         res = deliver_spool(a.args[0], lock_wait=DELIVER_LOCK_WAIT)
         if res[0] == "error":
             die(res[1])
@@ -15021,7 +15070,8 @@ def build_parser():
     s.set_defaults(fn=cmd_schedule)
 
     s = sub.add_parser("thread", help="threads: new \"title\" [\"<text>\"|--prompt-file F|-] (its own Remote Control session) | send tN \"<text>\"|--prompt-file F|- | ask \"question\" [--options \"a|b|c\"] (from inside a thread session: the question goes to main; end the turn, the answer arrives as your next turn) | answer tN [qN] \"answer\" (main: pass an answer into the thread session) | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
-    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "report", "answer", "reports", "park", "wake", "deliver"])
+    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "report", "answer", "reports", "park", "wake", "deliver"],
+                   metavar="{new,list,show,close,reopen,merge,unmerge,move,send,open,sessions,ask,report,answer,reports,park,wake}")  # deliver is internal: not shown
     s.add_argument("args", nargs="*", help='new "title" ["<text>"]; send tN "<text>"; answer tN [qN] "<answer>"; other actions: ids')
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin); or give it as a positional argument, not both")
@@ -15250,6 +15300,9 @@ def _main(argv=None):
         return rc
     except BrokenPipeError:
         raise  # the reader went away: main() ends quietly, not a crash
+    except lean_common.LockBusy as e:  # a lock stayed held: one clean line, not a crash
+        print(f"lean-agent: {e}", file=sys.stderr)
+        return 1
     except SystemExit as e:
         if FAIL_CMD and isinstance(e.code, int) and e.code != 0:  # an exit that no die() explained
             report_failure(FAIL_CMD[0], FAIL_REASON[0] if FAIL_REASON else f"exited with code {e.code}")
