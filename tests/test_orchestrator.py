@@ -6419,6 +6419,62 @@ class CliTest(unittest.TestCase):
         self.assertEqual(host.terminated, [])
         self.assertRegex(ss.clear_state("main"), r"^cleared ")
 
+    def test_every_kind_of_replacement_leaves_one_restart_line_for_the_new_brief(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import service_session as ss
+        # automatic: context passed the clear point
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        clock[0] = time.time()
+        ss.update_session("main", session_id="s1")
+        turn("done", ctx=50000)
+        ac.tick()
+        turn("checkpointed", ctx=50000)
+        ac.tick()
+        line = ss.restart_line("main", take=False)
+        self.assertRegex(line, r"^Restarted \d\d:\d\d: context 50k passed the 40k clear point \(checkpoint kept\)$")
+        self.assertEqual(ss.restart_line("main"), line)
+        self.assertEqual(ss.restart_line("main"), "")  # told once
+        # user clear
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        clock[0] = time.time()
+        os.environ["LEAN_AGENT_CLEAR_AT"] = "off"
+        turn("done")
+        ss.update_session("main", session_id="s1", clear_requested=clock[0], clear_pending_since=clock[0])
+        ac.tick()
+        turn("checkpointed")
+        ac.tick()
+        self.assertRegex(ss.restart_line("main"), r"^Restarted \d\d:\d\d: cleared on request")
+        # main-fresh-at
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        clock[0] = time.time()
+        os.environ["LEAN_AGENT_CLEAR_AT"] = "off"
+        os.environ["LEAN_AGENT_MAIN_FRESH_AT"] = "60000"
+        self.addCleanup(os.environ.pop, "LEAN_AGENT_MAIN_FRESH_AT", None)
+        turn("done", ctx=90000)
+        ac.tick()  # the safety net asks for the clear
+        ac.tick()  # the checkpoint is requested
+        turn("checkpointed", ctx=90000)
+        ac.tick()
+        self.assertRegex(ss.restart_line("main"), r"passed main-fresh-at 60k")
+        # stuck restart, stale session, thread context limit
+        ss.note_restart("t1", "restarted after a 20m stall")
+        self.assertRegex(ss.restart_line("t1"), r"^Restarted \d\d:\d\d: restarted after a 20m stall$")
+
+    def test_the_main_and_thread_briefs_open_with_the_restart_line(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import compact_hook
+        import service_session as ss
+        home = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": home}):
+            ss.note_restart("main", "cleared on request (checkpoint kept)")
+            b = compact_hook.brief()
+            self.assertRegex(b, r"^Restarted \d\d:\d\d: cleared on request \(checkpoint kept\) .*first reply")
+            self.assertNotIn("Restarted", compact_hook.brief())
+            ss.note_restart("t1", "context 168k reached the thread-fresh-after limit (checkpoint kept)")
+            fb = compact_hook.fresh_brief("t1")
+            self.assertTrue(fb.startswith("Restarted "), fb[:80])
+            self.assertEqual(fb.count("Restarted "), 1)
+
     def test_main_safety_net_replaces_main_at_twice_the_compaction_point_and_not_below(self):
         ac, host, clock, turn, home = self.auto_clear_unit()
         clock[0] = time.time()  # compaction at 67,000

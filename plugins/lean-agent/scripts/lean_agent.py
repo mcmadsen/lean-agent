@@ -10332,6 +10332,7 @@ def host_session(cmd, extra, env, h, name):
         if not state["stale"] and STALE_SESSION_RE.search(seen):
             state["stale"] = True
             if not state.get("retried"):
+                service_session.note_restart(host.key, "the session was stale (Remote Control or sign-in changed), restarted")
                 host.terminate_for("stale")
             else:  # still the old session: say what still works
                 print("\nlean-agent: Remote Control still tries the old session. The session works; pick the new "
@@ -12354,6 +12355,7 @@ def deliver_one(tid, prompt, resume_old=False, new=False):
         if why:  # decided again under the lock: a concurrent send may have restarted it fresh already
             why = auto_fresh_reason(tid) if service_session.alive(tid) else ""
         if why:
+            service_session.note_restart(tid, f"context {why} reached the thread-fresh-after limit (checkpoint kept)")
             close_thread_session(tid)
             force = True
             prepare_thread_session(tid, False, True)  # new session id now: a failed start below still retries fresh
