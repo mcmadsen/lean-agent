@@ -192,6 +192,9 @@ def pid_command(pid):
                                   timeout=3).stdout.strip()
         except Exception:
             text = ""
+    head, _, rest = text.partition(" ")
+    if head.startswith("/"):  # the program's name, not its full path (macOS framework paths fill the line)
+        text = (os.path.basename(head) + (" " + rest if rest else "")).strip()
     return text if len(text) <= 100 else text[:97] + "..."
 
 
