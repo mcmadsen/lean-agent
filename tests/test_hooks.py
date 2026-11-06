@@ -1704,6 +1704,14 @@ class ReadOnlyHookTest(Base):
         self.assertEqual(self.decision("git reflog"), "deny")  # cwd is not the project
         self.assertEqual(self.decision("git -C /somewhere/else log"), "deny")
 
+    def test_quoted_redirect_characters_are_data_but_unquoted_redirects_are_refused(self):
+        for c in ("pkg why x --query \"value[?id>4711]\"", "pkg why x --query 'value[?id<5]'",
+                  "pkg why x --jq '.a | .b; x & y > 1'", "pkg why x --query \"a|b\" 2>&1"):
+            self.assertEqual(self.decision(c), "allow", c)
+        self.assertEqual(self.decision(f"echo 'a>b' | head -1"), "allow")
+        for c in ("pkg why x > out.txt", "pkg why x --query 'a' > out", "echo \"a\" >out", "cat < f > g"):
+            self.assertEqual(self.decision(c), "deny", c)
+
     def test_mutating_git_is_refused(self):
         for c in ("reset --hard", "branch -D x", "branch x", "tag v1", "checkout x", "commit -m x", "push", "reflog expire --all",
                   "remote add x y", "diff --output=f", "stash drop", "config user.name x"):

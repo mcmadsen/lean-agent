@@ -149,8 +149,13 @@ def _since(items, since):
     return [i for i in items if str(i.get("ts", ""))[:10] >= since] if since else items
 
 
-def list_items(open_only=False, kind=None, since=None):
-    items = [i for i in _load() if (not open_only or i.get("status") == "open") and (not kind or i.get("kind") == kind)]
+def _version_key(i):
+    return tuple(int(x) if x.isdigit() else 0 for x in re.split(r"[.\-+]", str(i.get("version", "")))[:4])
+
+
+def list_items(include_all=False, kind=None, since=None):
+    """Open items (not done) by default, all with include_all."""
+    items = [i for i in _load() if (include_all or i.get("status") != "done") and (not kind or i.get("kind") == kind)]
     return _since(items, since)
 
 
@@ -186,6 +191,7 @@ def export(include_all=False, out=None, today=None):
     """Writes the Markdown file; returns (path, n)."""
     items = _load()
     chosen = [i for i in items if include_all or i.get("status") == "open"]
+    n_done = sum(1 for i in items if i.get("status") == "done")
     today = today or datetime.date.today().isoformat()
     if not out:
         base = folder(f"feedback-{today}")
@@ -197,16 +203,18 @@ def export(include_all=False, out=None, today=None):
     lines = ["# Feedback for lean-agent", "",
              f"- Version: {', '.join(versions)}",
              f"- Dates: {dates[0]} to {dates[-1]}" if dates else f"- Dates: {today}",
-             f"- Items: {len(chosen)}", ""]
+             (f"- Items: {len(chosen) - sum(1 for i in chosen if i.get('status') == 'done')} open items, "
+              f"{sum(1 for i in chosen if i.get('status') == 'done')} done (marked as such)" if include_all else
+              f"- Items: {len(chosen)} open items ({n_done} done not included; --all to include)"), ""]
     titles = {"bug": "Bugs", "friction": "Friction", "idea": "Ideas", "praise": "Praise"}
     for kind in KINDS:
         group = sorted((i for i in chosen if i.get("kind") == kind),
-                       key=lambda i: (-SEVERITIES.index(i.get("severity", "normal")), i.get("ts", "")))
+                       key=lambda i: (tuple(-x for x in _version_key(i)), -SEVERITIES.index(i.get("severity", "normal")), i.get("ts", "")))
         if not group:
             continue
         lines += [f"## {titles[kind]}", ""]
         for i in group:
-            lines += [f"### {i['id']} [{i.get('severity', 'normal')}] {i['text']}", "",
+            lines += [f"### {i['id']} [{i.get('severity', 'normal')}]{' (done)' if i.get('status') == 'done' else ''} {i['text']}", "",
                       f"- Count: {i.get('count', 1)}", f"- Thread: {i.get('thread', 'main')}",
                       f"- Version: {i.get('version', '?')}"]
             if i.get("repro"):
@@ -220,7 +228,7 @@ def export(include_all=False, out=None, today=None):
     ids = {i["id"] for i in chosen}
     name = os.path.basename(out)
     for i in items:
-        if i["id"] in ids:
+        if i["id"] in ids and i.get("status") != "done":
             i["status"], i["exported"] = "exported", name
     _save(items)
     return out, len(chosen)

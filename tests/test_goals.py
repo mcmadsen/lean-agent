@@ -60,6 +60,30 @@ class GoalsTest(unittest.TestCase):
     def get(self, gid):
         return next(g for g in lean_goals._load() if g["id"] == gid)
 
+    def test_blocked_goal_is_listed_never_chased_and_frees_when_unblocked_or_blocker_done(self):
+        gid = self.goal()
+        self.assertTrue(lean_goals.block(gid, "the vendor answer"))
+        self.assertEqual(self.get(gid)["state"], "blocked")
+        self.assertIn("blocked on: the vendor answer", lean_goals.table())
+        self.watch(300)
+        self.assertEqual(self.sent, [])
+        self.assertTrue(lean_goals.unblock(gid))
+        self.assertEqual(self.get(gid)["state"], "active")
+        self.assertFalse(lean_goals.unblock(gid))
+        lean_goals.block(gid, "g99")
+        other = lean_goals.ensure("work item 7", "t22")
+        lean_goals._set(gid, blocked_on=other)
+        self.watch(1)
+        self.assertEqual(self.get(gid)["state"], "blocked")
+        lean_goals.done(other)
+        self.watch(1)
+        self.assertEqual(self.get(gid)["state"], "active")
+
+    def test_drop_keeps_the_reason(self):
+        gid = self.goal()
+        lean_goals.drop(gid, "not needed any more")
+        self.assertEqual((self.get(gid)["state"], self.get(gid)["next"]), ("dropped", "not needed any more"))
+
     # -- creation
     def test_thread_text_creates_one_goal_per_ref(self):
         a = lean_goals.note_text("please finish PR 512 and push it", "t21")

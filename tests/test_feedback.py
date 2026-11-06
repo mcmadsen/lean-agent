@@ -70,8 +70,10 @@ class FeedbackTest(unittest.TestCase):
         self.cli("feedback", "done", "f2")
         out = self.cli("feedback", "list").stdout
         self.assertTrue(out.splitlines()[0].startswith("id | kind"))
-        self.assertEqual(len(out.splitlines()), 4)
+        self.assertEqual(len(out.splitlines()), 3)  # open only: the done f2 is hidden
+        self.assertNotIn("beta", out)
         self.assertNotIn("beta", self.cli("feedback", "list", "--open").stdout)
+        self.assertIn("beta", self.cli("feedback", "list", "--all").stdout)
         only = self.cli("feedback", "list", "--kind", "idea").stdout
         self.assertIn("gamma", only)
         self.assertNotIn("alpha", only)
@@ -103,6 +105,27 @@ class FeedbackTest(unittest.TestCase):
         self.assertTrue(self.cli("feedback", "export", "--all").stdout.strip().endswith("-3.md (4 items)"))
         custom = os.path.join(self.tmp.name, "x.md")
         self.assertIn(custom, self.cli("feedback", "export", "--all", "--out", custom).stdout)
+
+    def test_export_is_open_only_newest_version_first_and_all_marks_done(self):
+        for text, ver in (("old thing", "0.40.1"), ("newer thing", "0.45.2"), ("newest thing", "0.45.10"), ("closed thing", "0.45.3")):
+            lean_feedback.add(text, "bug")
+            it = lean_feedback._load()
+            it[-1]["version"] = ver
+            lean_feedback._save(it)
+        self.cli("feedback", "done", "f4")
+        path = self.cli("feedback", "export").stdout.split("feedback: ")[1].split(" (")[0]
+        with open(path) as fh:
+            md = fh.read()
+        self.assertIn("3 open items (1 done not included; --all to include)", md)
+        self.assertNotIn("closed thing", md)
+        self.assertLess(md.index("newest thing"), md.index("newer thing"))
+        self.assertLess(md.index("newer thing"), md.index("old thing"))
+        self.assertEqual([i["status"] for i in self.items()], ["exported", "exported", "exported", "done"])
+        path = self.cli("feedback", "export", "--all").stdout.split("feedback: ")[1].split(" (")[0]
+        with open(path) as fh:
+            md = fh.read()
+        self.assertIn("(done) closed thing", md)
+        self.assertEqual(self.items()[3]["status"], "done")
 
     def test_now_line_and_offer_once_a_day(self):
         self.assertNotIn("feedback:", self.cli("now").stdout)
