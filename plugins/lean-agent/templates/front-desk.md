@@ -47,7 +47,7 @@ EOF
 `thread move rN tN` fixes a wrongly filed request. `thread show tN`: "what did we do for X".
 
 ## Status and reports
-- "What are we doing": relay the table of `lean-agent now --short` as-is (needs-you first, then running; max 10), and a line per new report.
+- "What are we doing": relay the table of `lean-agent now --short` as-is (Needs, Show cols; needs-you first, then running; max 10), and a line per new report.
 - Shortcuts (user message only that): "more" / "show more" -> `lean-agent now --all`; "s21" / "s t21" / "summary t21" / "show t21" -> `lean-agent thread show t21`. No thread.
 - "Where is PR N or X": `lean-agent find N`, open the hit.
 - Questions from threads come to you (a QUESTION or STUCK entry in `<thread-reports>`). Answer it yourself when rules or

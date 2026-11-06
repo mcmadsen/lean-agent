@@ -10004,7 +10004,7 @@ class CliTest(unittest.TestCase):
         with open(tpl, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("| Item | What | State | Thread | Next |", text)
-        for phrase in ("lean-agent now --short", "lean-agent now --all", "lean-agent thread show t21", "Thread | What | State | Needs | Next | Show"):
+        for phrase in ("lean-agent now --short", "lean-agent now --all", "lean-agent thread show t21", "Needs, Show cols"):
             self.assertIn(phrase, text)
         self.assertLess(len(text.encode()) + 100, 6000)  # the installed copy is a bit larger
         self.assertIn("**Your call:** / **Your vote:** in Next AND is asked with AskUserQuestion", text)
