@@ -1028,7 +1028,8 @@ class SpoolDeliverer:
     @staticmethod
     def _subprocess(tid):
         exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lean_agent.py")
-        r = subprocess.run([sys.executable, exe, "thread", "deliver", tid], capture_output=True, text=True, timeout=180)
+        r = subprocess.run([sys.executable, exe, "thread", "deliver", tid], capture_output=True, text=True, timeout=180,
+                           env={**os.environ, "LEAN_AGENT_SERVICE_DELIVER": "1"})
         if r.returncode == 0 and "session slot" in r.stdout:
             return True, "slot"
         return r.returncode == 0, (r.stderr or r.stdout).strip()[-200:]

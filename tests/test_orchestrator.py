@@ -7952,11 +7952,10 @@ class CliTest(unittest.TestCase):
         r = self.cli("runs", "--clear", check=False)
         self.assertEqual(r.returncode, 2)
         self.assertIn("--clear goes with --lost", r.stderr)
-        stopped = self.cli("runs", "--stop", "0101-000000-aaaa", check=False)  # acknowledged, still stoppable by id
-        self.assertNotIn("no running run", stopped.stderr)
-        self.assertIn("run 0101-000000-aaaa stopped", stopped.stdout)
+        # a marker with no ledger row was given a "lost (no record)" row and --clear removed the marker itself
         rows = [json.loads(l) for l in open(os.path.join(self.env["LEAN_AGENT_HOME"], "ledger.jsonl")) if l.strip()]
-        self.assertEqual([r["status"] for r in rows if r["id"] == "0101-000000-aaaa"], ["stopped"])  # recorded, once
+        self.assertEqual([r["status"] for r in rows if r["id"] == "0101-000000-aaaa"], ["lost (no record)"])
+        self.assertFalse(os.path.exists(os.path.join(self.env["LEAN_AGENT_HOME"], "running", "0101-000000-aaaa.json")))
 
     def test_routing_by_id_beats_topic_words(self):
         lt = self.threads_home()

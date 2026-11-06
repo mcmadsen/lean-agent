@@ -136,6 +136,14 @@ def lock_wait_timeout():
         return 600.0
 
 
+LOCK_MAX_HOLD = {"thread-start": 120}  # seconds a lock is sane to be held; longer is reported with the holder's command
+LOCK_MAX_HOLD_DEFAULT = 300
+
+
+class LockBusy(TimeoutError):
+    """A lock stayed held past the wait cap: one clean line, never a crash."""
+
+
 def lock_holder(path):
     """The pid that wrote itself into the lock file (best effort), else ''."""
     try:
@@ -145,12 +153,78 @@ def lock_holder(path):
         return ""
 
 
+def lock_age(path):
+    """Seconds since the lock file was written (when its holder took it), or 0."""
+    try:
+        return max(0, int(time.time() - os.path.getmtime(path)))
+    except OSError:
+        return 0
+
+
+def pid_running(pid):
+    try:
+        pid = int(pid)
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (ValueError, OSError):
+        return True
+    try:  # a zombie is gone for our purposes
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return True
+
+
+def pid_command(pid):
+    """The command line of `pid` (ps), shortened; '' when unknown."""
+    try:
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as fh:
+            text = fh.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+    except (OSError, ValueError):
+        text = ""
+    if not text:
+        try:
+            import subprocess
+            text = subprocess.run(["ps", "-o", "args=", "-p", str(int(pid))], capture_output=True, text=True,
+                                  timeout=3).stdout.strip()
+        except Exception:
+            text = ""
+    return text if len(text) <= 100 else text[:97] + "..."
+
+
+def lock_max_hold(path):
+    name = os.path.basename(path)
+    name = name[:-5] if name.endswith(".lock") else name
+    return LOCK_MAX_HOLD.get(name, LOCK_MAX_HOLD_DEFAULT)
+
+
+def lock_busy_text(what, path, holder, secs=None):
+    """One line: who holds the lock, what it runs, for how long."""
+    age = lock_age(path)
+    cmd = pid_command(holder) if holder else ""
+    who = f"pid {holder}" + (f" ({cmd})" if cmd else "") if holder else "another process"
+    held = f" has held it {age // 60}m" if age >= 60 else f" has held it {age}s" if age else " holds it"
+    return f"{what} busy: {who}{held}; try again or lean-agent doctor"
+
+
+def _log_takeover(what, holder):
+    try:
+        print(f"lean-agent: lock {what}: holder pid {holder} is gone; taking it over", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
 def flock_waiting(fh, mode, what, path, timeout=None, every=None):
     """flock(fh, mode) that says at once what it waits for ("waiting for lock X held by pid N"), repeats it every
-    `every` seconds, and gives up after `timeout` seconds (None: lock_wait_timeout(); 0: never) with TimeoutError."""
+    `every` seconds, and gives up after `timeout` seconds (None: lock_wait_timeout(); 0: never) with LockBusy.
+    A holder pid that is gone (its lock inherited by a stray child) is taken over at once by replacing the lock file;
+    returns the file object that holds the lock (a new one after a takeover)."""
     try:
         fcntl.flock(fh, mode | fcntl.LOCK_NB)
-        return
+        return fh
     except OSError:
         pass
     timeout = lock_wait_timeout() if timeout is None else timeout
@@ -158,7 +232,26 @@ def flock_waiting(fh, mode, what, path, timeout=None, every=None):
     holder = lock_holder(path)
     start = last = time.time()
     while True:
-        text = f"waiting for lock {what}" + (f" held by pid {holder}" if holder else "")
+        holder = lock_holder(path) or holder
+        if holder and holder != str(os.getpid()) and not pid_running(holder):
+            _log_takeover(what, holder)
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            fh2 = open(path, "a")
+            try:
+                fcntl.flock(fh2, mode | fcntl.LOCK_NB)
+                try:
+                    fh.close()
+                except OSError:
+                    pass
+                return fh2
+            except OSError:
+                fh2.close()
+        long_held = bool(holder) and lock_age(path) > lock_max_hold(path)
+        text = (lock_busy_text(what, path, holder).replace("; try again or lean-agent doctor", "")
+                if long_held else f"waiting for lock {what}" + (f" held by pid {holder}" if holder else ""))
         if WAIT_NOTICE and (last == start or time.time() - last >= every):
             WAIT_NOTICE[0](text + f" ({int(time.time() - start)}s)")
             last = time.time()
@@ -167,22 +260,22 @@ def flock_waiting(fh, mode, what, path, timeout=None, every=None):
             last = time.time() + 1e9
         try:
             fcntl.flock(fh, mode | fcntl.LOCK_NB)
-            return
+            return fh
         except OSError:
             pass
         if timeout and time.time() - start >= timeout:
-            raise TimeoutError(f"gave up waiting for lock {what}{' held by pid ' + holder if holder else ''} "
-                               f"after {int(time.time() - start)}s (LEAN_AGENT_LOCK_TIMEOUT sets the limit)")
+            raise LockBusy(lock_busy_text(what, path, holder))
         time.sleep(0.05)
 
 
 @contextlib.contextmanager
-def file_lock(path):
+def file_lock(path, timeout=None):
     """Exclusive advisory lock on `path` + '.lock' (read-modify-write of a shared json file)."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path + ".lock", "a") as lock:
+    lock = open(path + ".lock", "a")
+    try:
         if fcntl:
-            flock_waiting(lock, fcntl.LOCK_EX, os.path.basename(path), path + ".lock")
+            lock = flock_waiting(lock, fcntl.LOCK_EX, os.path.basename(path), path + ".lock", timeout=timeout)
             try:
                 lock.truncate(0)
                 lock.write(f"{os.getpid()}\n")
@@ -194,6 +287,8 @@ def file_lock(path):
         finally:
             if fcntl:
                 fcntl.flock(lock, fcntl.LOCK_UN)
+    finally:
+        lock.close()
 
 
 def write_json_atomic(path, data):
@@ -299,6 +394,9 @@ def running_runs(lean_home):
     return sorted(out, key=lambda x: (x[1].get("started") or "", x[0]))
 
 
+LOST_NO_RECORD = "lost (no record)"  # ledger status of a run whose marker outlived its process with no result recorded
+
+
 def lost_runs(lean_home, acknowledged=False):
     """[(run id, marker)] of runs whose supervisor died without recording a result: a running/*.json whose process is
     gone and whose run is not in the ledger (and that `runs --lost --clear` has not acknowledged, unless acknowledged=True)."""
@@ -307,7 +405,9 @@ def lost_runs(lean_home, acknowledged=False):
         with open(os.path.join(lean_home, "ledger.jsonl")) as fh:
             for line in fh:
                 try:
-                    done.add(json.loads(line).get("id"))
+                    row = json.loads(line)
+                    if row.get("status") != LOST_NO_RECORD:  # that row only gives a marker its record; it stays listed as lost
+                        done.add(row.get("id"))
                 except (ValueError, AttributeError):
                     continue
     except OSError:

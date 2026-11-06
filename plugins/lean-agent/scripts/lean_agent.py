@@ -9541,9 +9541,20 @@ def run_summary_line(r):
     return run_line_from_ledger(r)
 
 
+def settle_markers():
+    """Give markers of dead runs without a ledger row their record (or drop them): see lean_goals.settle_orphan_markers."""
+    try:
+        import lean_goals
+        lean_goals.settle_orphan_markers()
+    except Exception:
+        pass
+
+
 def cmd_runs(a):
     if getattr(a, "wait", None):
         return wait_for_runs(a.wait, a.timeout)
+    if getattr(a, "lost", False) or getattr(a, "show", None):
+        settle_markers()
     runs = ledger()
     if a.project:
         slug, _ = resolve_project(a.project)
@@ -9559,12 +9570,18 @@ def cmd_runs(a):
         lost = lost_runs(home())
         if a.clear:
             for rid, m in lost:
+                if m.get("no_record"):  # nothing to acknowledge: only a marker; remove it
+                    try:
+                        os.remove(home("running", (m.get("run") or rid) + ".json"))
+                    except OSError:
+                        pass
+                    continue
                 m["lost_ack"] = now_iso()
                 save_json(home("running", (m.get("run") or rid) + ".json"), m)
             print(f"{len(lost)} lost runs marked lost and acknowledged")
             return
         for rid, m in lost:
-            print(f"{rid}  lost  ({m.get('lost_reason') or lost_reason(m)}; close it: lean-agent runs --stop {rid})  {m.get('model', '?'):<7} "
+            print(f"{rid}  lost  ({(m.get('lost_reason') or lost_reason(m)) + ('; record only, nothing to resume' if m.get('no_record') else '')}; close it: lean-agent runs --stop {rid})  {m.get('model', '?'):<7} "
                   f"{m.get('project', '?'):<16} {m.get('task', '')[:50]}")
         if not lost:
             print("No lost runs.")
@@ -9780,6 +9797,62 @@ def service_root_problem(uid=None):
     return None
 
 
+DOCTOR_LOCK_MIN_AGE = 60  # seconds a held lock must have been held before doctor lists it
+
+
+def held_locks_found(root=None):
+    """[(lock file, holder pid, command, age s, holder_dead)] of lean-agent lock files that are held right now
+    and record their holder's pid (flock on a file whose holder died stays held only through an inheriting child)."""
+    import fcntl
+    root = root or service_session.lean_home()
+    out = []
+    for base, dirs, files in os.walk(root):
+        if base[len(root):].count(os.sep) >= 3:
+            dirs[:] = []
+        for f in files:
+            if not f.endswith(".lock"):
+                continue
+            path = os.path.join(base, f)
+            pid = lean_common.lock_holder(path)
+            if not pid.isdigit():
+                continue
+            try:
+                with open(path) as fh:
+                    try:
+                        fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                        continue  # not held
+                    except OSError:
+                        pass
+            except OSError:
+                continue
+            dead = not lean_common.pid_running(pid)
+            age = lean_common.lock_age(path)
+            if dead or age >= DOCTOR_LOCK_MIN_AGE:
+                out.append((path, pid, lean_common.pid_command(pid) if not dead else "", age, dead))
+    return out
+
+
+def doctor_locks(report, fix, root=None):
+    """doctor: a lock held longer than a minute (holder, command, age); --fix clears the ones whose holder is gone."""
+    found = held_locks_found(root)
+    for path, pid, cmd, age, dead in found:
+        name = os.path.basename(path)[:-5]
+        held = f"{age // 60}m" if age >= 60 else f"{age}s"
+        if dead and fix:
+            try:
+                os.unlink(path)
+                report(True, f"lock {name}: holder pid {pid} is gone; cleared")
+                continue
+            except OSError:
+                pass
+        if dead:
+            report(False, f"lock {name} is held by pid {pid}, which is gone ({held})", "lean-agent doctor --fix")
+        else:
+            report(None, f"lock {name} held {held} by pid {pid} ({cmd or 'unknown command'})",
+                   f"wait for it, or stop that process (kill {pid})")
+    return found
+
+
 def cmd_doctor(a):
     path = os.path.realpath(os.path.expanduser(a.path or os.getcwd()))
     bad = []
@@ -9942,6 +10015,7 @@ def cmd_doctor(a):
         else:
             report(False, f"{f} contradicts lean-agent ({where})", "lean-agent doctor --fix  (adds a one-line precedence note)")
 
+    doctor_locks(report, a.fix)
     stale = forward_old_hooks(dry=not a.fix)
     if stale and not a.fix:
         report(False, f"{len(stale)} hook script(s) in older cached plugin copies run outdated code (sessions "
@@ -12179,6 +12253,39 @@ def start_closed_thread(tid, t, prompt, resume_old, force=False):
     return name, line
 
 
+DELIVER_BY_HAND_WAIT = 10  # seconds `thread deliver` waits when a person ran it (the service gives it far longer)
+
+
+def lean_budget_refusal():
+    import budget_hook
+    return f"thread deliver: {budget_hook.DELIVER_REFUSED}"
+
+
+def deliver_by_hand(tid):
+    """The hand-run `thread deliver`: deliver what is spooled, but wait at most DELIVER_BY_HAND_WAIT seconds; what is
+    not done stays queued for the service."""
+    tid = thread_session_tid(tid)[0]
+    out = {}
+
+    def work():
+        try:
+            out["r"] = deliver_spool(tid, 0)
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            out["r"] = ("error", str(exc) or type(exc).__name__)
+
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    th.join(DELIVER_BY_HAND_WAIT)
+    kind, line = out.get("r", ("", ""))
+    if kind == "ok":
+        return line
+    if kind == "slot":
+        return slot_line(tid, line)
+    if kind == "error":
+        die(line)
+    return queued_line(tid)
+
+
 DELIVER_LOCK_WAIT = 120  # seconds the service's delivery waits for another delivery of the same thread
 
 
@@ -12198,6 +12305,12 @@ def thread_start_lock_try(wait):
     while True:
         try:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fh.truncate(0)
+                fh.write(f"{os.getpid()}\n")
+                fh.flush()
+            except OSError:
+                pass
             _START_LOCK.append(fh)
             return True
         except OSError:
@@ -12390,6 +12503,8 @@ def thread_session_tid(raw):
     return tid, t
 
 
+START_REQUEST_WAIT = 25  # seconds the start request may take while the thread-start lock is held
+STOP_REQUEST_WAIT = 15  # seconds a stop request may take (also under that lock, when a cap park runs)
 START_GRACE = 4  # seconds a host may take to come up after a failed or timed-out start request
 
 
@@ -12444,13 +12559,13 @@ def start_thread_session(tid, t, prompt=None, msg=None):
     if msg is None and prompt:
         import compact_hook
         msg = compact_hook.thread_brief(tid, THREAD_BRIEF_CAP) + "\n" + lean_threads.BRIEF_END + "\n\n" + prompt
-    r = service_session.sessions_request("start", thread=tid, prompt=msg)
+    r = service_session.sessions_request("start", timeout=START_REQUEST_WAIT, thread=tid, prompt=msg)
     if not r.get("ok"):  # a failed or timed-out request may still have a host coming up: give it a moment
         deadline = time.time() + START_GRACE
         while not service_session.alive(tid) and time.time() < deadline:
             time.sleep(0.5)
         if not service_session.alive(tid):
-            service_session.sessions_request("stop", thread=tid)  # nothing may start later unrecorded
+            service_session.sessions_request("stop", timeout=STOP_REQUEST_WAIT, thread=tid)  # nothing may start later unrecorded
             raise RuntimeError(f"could not start the session of {tid}: {r.get('error') or 'not started'}")
     lean_threads.set_session(tid, session_on=True)  # only a started session is one the service keeps
     return r.get("name") or service_session.thread_session_name(tid, t.get("title"))
@@ -12488,7 +12603,7 @@ def close_thread_session(tid):
     if hosted:
         if service_session.alive(tid):
             ok = service_session.checkpoint_session(tid)
-        res = service_session.sessions_request("stop", thread=tid)
+        res = service_session.sessions_request("stop", timeout=STOP_REQUEST_WAIT, thread=tid)
         if not res.get("ok") and rec.get("host_pid") and pid_alive(rec["host_pid"]):
             raise RuntimeError(f"{tid}: the session did not stop ({res.get('error') or 'stop request failed'}); "
                                f"host pid {rec['host_pid']} is still alive")
@@ -12537,9 +12652,12 @@ def _idle_age(sec):
     return lean_threads.age(datetime.datetime.fromtimestamp(time.time() - sec).isoformat(timespec="seconds"))
 
 
+THREAD_START_LOCK_WAIT = 150  # seconds a caller waits for the thread-start lock before it fails cleanly (holders keep it under ~1 min)
+
+
 def thread_start_lock():
     """Held from the cap check to the end of the start, so parallel callers see each other's sessions."""
-    return lean_common.file_lock(home("thread-start"))
+    return lean_common.file_lock(home("thread-start"), timeout=THREAD_START_LOCK_WAIT)
 
 
 CLOSE_MIN_IDLE = 120  # seconds a session must have been idle (since its last turn ended) before the cap may close it
@@ -13058,6 +13176,11 @@ def thread_action(a):
     if act == "deliver":  # internal: the service delivers the spooled messages of one thread (may wait for the session)
         if len(a.args) != 1:
             die("usage: lean-agent thread deliver tN")
+        if os.environ.get("LEAN_AGENT_SERVICE_DELIVER") != "1":  # run by hand: never wait more than a few seconds
+            if os.environ.get("LEAN_AGENT_SESSION_ROLE") in ("main", "thread"):
+                die(lean_budget_refusal())
+            print(deliver_by_hand(a.args[0]))
+            return 0
         res = deliver_spool(a.args[0], lock_wait=DELIVER_LOCK_WAIT)
         if res[0] == "error":
             die(res[1])
@@ -15021,7 +15144,8 @@ def build_parser():
     s.set_defaults(fn=cmd_schedule)
 
     s = sub.add_parser("thread", help="threads: new \"title\" [\"<text>\"|--prompt-file F|-] (its own Remote Control session) | send tN \"<text>\"|--prompt-file F|- | ask \"question\" [--options \"a|b|c\"] (from inside a thread session: the question goes to main; end the turn, the answer arrives as your next turn) | answer tN [qN] \"answer\" (main: pass an answer into the thread session) | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
-    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "report", "answer", "reports", "park", "wake", "deliver"])
+    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "ask", "report", "answer", "reports", "park", "wake", "deliver"],
+                   metavar="{new,list,show,close,reopen,merge,unmerge,move,send,open,sessions,ask,report,answer,reports,park,wake}")  # deliver is internal: not shown
     s.add_argument("args", nargs="*", help='new "title" ["<text>"]; send tN "<text>"; answer tN [qN] "<answer>"; other actions: ids')
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin); or give it as a positional argument, not both")
@@ -15250,6 +15374,9 @@ def _main(argv=None):
         return rc
     except BrokenPipeError:
         raise  # the reader went away: main() ends quietly, not a crash
+    except lean_common.LockBusy as e:  # a lock stayed held: one clean line, not a crash
+        print(f"lean-agent: {e}", file=sys.stderr)
+        return 1
     except SystemExit as e:
         if FAIL_CMD and isinstance(e.code, int) and e.code != 0:  # an exit that no die() explained
             report_failure(FAIL_CMD[0], FAIL_REASON[0] if FAIL_REASON else f"exited with code {e.code}")

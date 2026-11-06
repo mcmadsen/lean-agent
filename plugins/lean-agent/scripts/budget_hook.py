@@ -593,9 +593,19 @@ FRONT_DESK_HINT = ("main is the front desk: hand it to a thread — lean-agent t
                    "(or thread new \"title\")")
 
 
+DELIVER_REFUSED = "the service delivers; use thread send"
+
+
 def front_desk_denial(event):
-    """Why the main session (LEAN_AGENT_SESSION_ROLE=main) may not run this call, or ''. Only work commands are refused."""
-    if os.environ.get("LEAN_AGENT_SESSION_ROLE") != "main" or event.get("tool_name") != "Bash":
+    """Why the main session (LEAN_AGENT_SESSION_ROLE=main) may not run this call, or ''. Only work commands are refused.
+    `thread deliver` is the service's own command: refused in thread sessions too."""
+    role = os.environ.get("LEAN_AGENT_SESSION_ROLE")
+    if role in ("main", "thread") and event.get("tool_name") == "Bash":
+        for words in commands_run(str((event.get("tool_input") or {}).get("command") or "")):
+            args = [w for w in words[1:] if not w.startswith("-")]
+            if os.path.basename(words[0]) == "lean-agent" and args[:2] == ["thread", "deliver"]:
+                return f"`lean-agent thread deliver`: {DELIVER_REFUSED}"
+    if role != "main" or event.get("tool_name") != "Bash":
         return ""
     for words in commands_run(str((event.get("tool_input") or {}).get("command") or "")):
         if os.path.basename(words[0]) != "lean-agent":
