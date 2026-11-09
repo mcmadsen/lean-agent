@@ -1757,7 +1757,7 @@ def duplicate_launch_guard(a, model, task):
     return key
 
 
-INTERNAL_ROLES = ("librarian", "advisor", "composer", "gap-decider", "chaser", "tracker-discover", "review-learn", "reuse-check", "pr-status")
+INTERNAL_ROLES = lean_common.INTERNAL_ROLES
 # helper runs behind another command: not shown as workers (runs list, thread lists, --wait all, week counts, "started" line)
 
 NO_RESUME_ROLES = ("librarian", "advisor", "composer", "gap-decider", "chaser", "pr-status")  # one-shot helpers with their own grants
@@ -2759,7 +2759,9 @@ def _cmd_run(a):
     env.pop("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", None)  # never pull in the project's CLAUDE.md
     env.pop("LEAN_AGENT_SERVICE_SESSION", None)  # the service session's hooks (session, permission) must not act in a worker
     thread_tag = lean_threads.resolve_tag()
-    if prev and not os.environ.get("LEAN_AGENT_THREAD"):  # a resumed run stays with its deliverable, whatever thread is current now
+    if (getattr(a, "role", None) or (prev or {}).get("role")) in INTERNAL_ROLES:
+        thread_tag = None  # a helper run is never a thread's work, whatever LEAN_AGENT_THREAD the caller had
+    elif prev and not os.environ.get("LEAN_AGENT_THREAD"):  # a resumed run stays with its deliverable, whatever thread is current now
         thread_tag = lean_threads.thread_of_run(prev) or thread_tag
     env["LEAN_AGENT_THREAD"] = thread_tag or "none"  # nested lean-agent commands in the worker record the same thread
     env["BASH_MAX_OUTPUT_LENGTH"] = os.environ.get("LEAN_AGENT_WORKER_BASH_OUTPUT") or "8000"  # not the orchestrator's
@@ -5303,7 +5305,7 @@ def thread_pr_refs(tid):
         if norm_thread_tag(t.get("thread")) == norm_thread_tag(tid):
             add(t.get("project"), pr_of_ref(t.get("ref")), t.get("branch"))
     for r in ledger():
-        if norm_thread_tag(r.get("thread")) == norm_thread_tag(tid):
+        if r.get("role") not in INTERNAL_ROLES and norm_thread_tag(r.get("thread")) == norm_thread_tag(tid):
             m = PR_WORD_RE.search(str(r.get("task") or ""))
             add(r.get("project"), m and (m.group(1) or m.group(2)), r.get("branch"))
     for slug in projects():
@@ -9646,7 +9648,7 @@ def cmd_runs(a):
         runs = [r for r in runs if r["project"] == slug]
     if getattr(a, "thread_filter", None):
         want = norm_thread_tag(a.thread_filter)
-        runs = [r for r in runs if norm_thread_tag(r.get("thread")) == want]
+        runs = [r for r in runs if r.get("role") not in INTERNAL_ROLES and norm_thread_tag(r.get("thread")) == want]
     if getattr(a, "stop", None):
         return stop_run(a.stop)
     if getattr(a, "clear", False) and not getattr(a, "lost", False):
@@ -12809,7 +12811,7 @@ def launching_threads():
                 os.remove(f)
             except OSError:
                 pass
-        elif m.get("thread"):
+        elif m.get("thread") and m.get("role") not in INTERNAL_ROLES:
             out.add(m["thread"])
     return out
 
@@ -13582,7 +13584,7 @@ def pr_entries(tids=None, only_pr=None):
         refs = thread_pr_refs(tid)
         slug0 = next((s for s, _, _ in refs), "")
         if not slug0:
-            slug0 = next((r.get("project") for r in reversed(ledger()) if norm_thread_tag(r.get("thread")) == norm_thread_tag(tid) and r.get("project")), "")
+            slug0 = next((r.get("project") for r in reversed(ledger()) if r.get("role") not in INTERNAL_ROLES and norm_thread_tag(r.get("thread")) == norm_thread_tag(tid) and r.get("project")), "")
         closed = bool((data["threads"].get(tid) or {}).get("closed"))
         for g in goals:  # PR goals of the thread that no todo/run/review names
             n = lean_goals.key_of(g.get("ref"))

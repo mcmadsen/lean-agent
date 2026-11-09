@@ -825,7 +825,7 @@ class CliTest(unittest.TestCase):
         self.cli("handover", "Untagged", "-p", "proj", "--as-is", "--thread", "none", "--task-file", "-", input="x")
         self.assertNotIn("thread", open(os.path.join(self.handover_dir(), "untagged.md")).read().split("\n")[2])
         self.cli("handover", "Worker", "-p", "proj", "--thread", "t1", "--task-file", "-", input="x", FAKE_ANSWER="body")
-        self.assertEqual(self.ledger()[-1]["thread"], "t1")
+        self.assertIsNone(self.ledger()[-1]["thread"])  # a helper run is never a thread's work
 
     def registry(self):
         return _load_json(os.path.join(self.env["LEAN_AGENT_HOME"], "handovers.json"))
@@ -4155,7 +4155,7 @@ class CliTest(unittest.TestCase):
         self.cli("run", "-p", "proj", "and again", "--model", "haiku", "--why", "t", "--thread", "#9")
         self.assertEqual(self.ledger()[-1]["thread"], "#9")
         self.cli("remember", "Never merge on Fridays.", FAKE_ANSWER="REMEMBERED feedback x")
-        self.assertEqual(self.ledger()[-1]["thread"], "t1")
+        self.assertIsNone(self.ledger()[-1]["thread"])  # a helper run is never a thread's work
         self.cli("todo", "add", "Fix it", "--thread", "t1")
         self.cli("todo", "add", "Other", "--thread", "none")
         with open(os.path.join(self.env["LEAN_AGENT_HOME"], "todo.json")) as fh:
@@ -6565,6 +6565,24 @@ class CliTest(unittest.TestCase):
         self.assertTrue(items[0]["text"].startswith("run r3auto003: done"))
         ss.run_fallback(now + 2 * ss.RUN_REPORT_FALLBACK + 10)
         self.assertEqual(len(ss.queued_reports()), 1)  # once per run
+
+    def test_an_old_helper_row_with_a_thread_tag_is_not_woken_reported_or_counted(self):
+        ss, home, now, row = self.run_finished_during_replacement_unit()
+        with open(os.path.join(home, "ledger.jsonl"), "a") as fh:
+            ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now - 30))
+            fh.write(json.dumps({"id": "h1helper01", "thread": "t1", "role": "chaser", "status": "done", "ts": ts, "task": "check"}) + "\n")
+        self.assertEqual(ss.finished_thread_runs(now), [])
+        host = self.FakeHost()
+        host.key = "t1"
+        ss.Reporter(host, now=lambda: now).wake_for_runs({"ended": True})
+        self.assertEqual(host.pasted, [])
+        ss.run_state_update("_init", seen=now - 3600)
+        ss.run_fallback(now + ss.RUN_REPORT_FALLBACK + 5)
+        self.assertEqual(ss.queued_reports(), [])
+        import lean_threads
+        self.assertIsNone(lean_threads.thread_of_run({"id": "h1helper01", "thread": "t1", "role": "chaser"}))
+        self.assertEqual(lean_threads.thread_of_run({"id": "w1", "thread": "t1", "role": "worker"}), "t1")
+        self.assertNotIn("h1helper01", self.cli("runs", "--thread", "t1", "--all").stdout)
 
     def test_the_main_and_thread_briefs_open_with_the_restart_line(self):
         sys.path.insert(0, os.path.dirname(CLI))
@@ -9145,6 +9163,17 @@ class CliTest(unittest.TestCase):
         self.assertEqual(row["role"], "chaser")
         self.assertNotIn(row["id"], self.cli("runs").stdout)  # hidden from the runs list
 
+    def test_a_helper_run_gets_no_thread_tag_even_when_launched_with_one_set(self):
+        path = os.path.join(self.tmp.name, "chase-in.json")
+        with open(path, "w") as fh:
+            json.dump([{"id": "g1", "thread": "t21", "ref": "PR 512", "kind": "quiet", "run": "", "quiet_min": 45,
+                        "last_report": "", "last_chase": "", "last_reply": "", "runs": []}], fh)
+        fb = '{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-CHASE {"decisions": []}'
+        self.cli("chase-decide", path, FAKE_FEEDBACK=fb, LEAN_AGENT_THREAD="t21")
+        row = self.ledger()[-1]
+        self.assertEqual(row["role"], "chaser")
+        self.assertIn(row.get("thread"), (None, "none"))
+
     def pr_setup(self, remote="https://dev.azure.com/acme/shop/_git/shop", prs=("512",)):
         self.git_project()
         subprocess.run(["git", "-C", self.proj, "remote", "add", "origin", remote], check=True, capture_output=True)
@@ -9939,7 +9968,7 @@ class CliTest(unittest.TestCase):
         runs = self.wait_learn_runs(2)
         self.assertEqual(2, len(runs))
         self.assertEqual("sonnet", runs[-1]["model"])
-        self.assertEqual("t1", runs[-1]["thread"])
+        self.assertIsNone(runs[-1]["thread"])  # a helper run is never a thread's work
         self.assertIn("pull request 43", self.calls()[-1]["append"])
         # done again / reopened / thread closed: the PR is not learned a second time
         self.cli("todo", "reopen", "1")

@@ -252,6 +252,23 @@ class HookLockTest(unittest.TestCase):
         rows = lean_common.recent_long_holds()
         self.assertTrue(any(r["lock"] == "goals.json" and r["kind"] == "skipped" for r in rows))
 
+    def test_the_wait_notice_shows_the_real_age_of_the_hold(self):
+        path = os.path.join(self.tmp.name, "goals.json.lock")
+        with open(path, "w") as fh:
+            fh.write(f"{os.getpid()}\n")
+        old = time.time() - 130
+        os.utime(path, (old, old))
+        notes = []
+        holder = open(path, "a")
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        self.addCleanup(holder.close)
+        with mock.patch.object(lean_common, "WAIT_NOTICE", [notes.append]):
+            with open(path, "a") as fh:
+                with self.assertRaises(lean_common.LockBusy):
+                    lean_common.flock_waiting(fh, fcntl.LOCK_EX, "goals.json", path, timeout=0.2)
+        self.assertTrue(any("for 2m1" in n or "for 2m2" in n for n in notes), notes)
+        self.assertFalse(any("(0s)" in n for n in notes), notes)
+
     def test_a_long_hold_is_logged_with_the_lock_name_and_holder(self):
         path = os.path.join(self.tmp.name, "goals.json")
         with mock.patch.object(lean_common, "LONG_HOLD", 0.05):

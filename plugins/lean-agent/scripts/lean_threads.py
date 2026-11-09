@@ -1037,6 +1037,8 @@ def is_notification(prompt):
 
 def thread_of_run(rec, data=None):
     """The thread of a ledger/running record: a `thread move` override, else its tag (merges followed); None if untagged."""
+    if rec.get("role") in lean_common.INTERNAL_ROLES:
+        return None  # helper runs are never a thread's work, even when an old row carries a tag
     data = data or load()
     tid = data["overrides"].get(f"run:{rec.get('id') or rec.get('run')}") or rec.get("thread")
     if not tid or str(tid).lower() == "none":
@@ -1183,6 +1185,8 @@ def events(data=None, todos=None, full=False):
         for r in t.get("requests") or []:
             add(tid, r.get("ts"), "request", r.get("text"))
     for kind, key, r in _log_records():
+        if kind == "run" and r.get("role") in lean_common.INTERNAL_ROLES:
+            continue  # a helper run is never a thread's work
         if kind == "run":
             what = (r.get("result_head") or "").strip().splitlines()
             text = (f"{r.get('id')} {r.get('model') or '?'} {r.get('status') or '?'} {r.get('project') or ''}: "
@@ -1226,7 +1230,7 @@ def running_by_thread(data):
         m = lean_common.read_json(f, {})
         if not lean_common.pid_alive(m.get("pid")):
             continue
-        if m.get("thread"):
+        if m.get("thread") and m.get("role") not in lean_common.INTERNAL_ROLES:
             tid = resolve(m["thread"], data["aliases"])
             out.setdefault(tid, []).append(m.get("run") or os.path.basename(f)[:-5])
     return out
