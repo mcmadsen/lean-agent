@@ -126,6 +126,7 @@ Other ways to run the orchestrator:
 | `lean-agent do <project> <recipe> [key=value ...] [--apply [--allow-send "<approved>"]]` | Run a recipe in one command. `--apply` runs its apply step with the last check's answer as its plan (`--from <run-id>`, or `--fresh` to re-derive); outward changes stop with the list until the user approves them. A recipe saved with `--fields id,title,state` tells workers to fetch only those; with `--complete` every item must be listed (OK / change / unclear) or the run fails. |
 | `lean-agent text-len <file> [-p project]` | Characters, words, lines, checked against limits named in the project's tracker notes (e.g. a description limit). |
 | `lean-agent card shorten <project> <id> [--save]` | A shorter text for a card (one Haiku call); lists headings, `code`, paths, names and numbers that would be lost, and saves only if none are. |
+| `lean-agent reviews --branch X [--project P] [--json]` | Every review run of a branch: run id, time, head, base, model, cost, verdict, blocker/major/minor counts, open and declined findings, carry-overs, total cost ("verdict unknown" for old runs). |
 | `lean-agent runs --all` (alias `--internal`) | Helper runs (advisor, librarian, composer, review-learn, tracker-discover, gap-decider, reuse-check) are internal: they print no `run ... started` line and are left out of `runs`, thread run lists, `runs --wait all` and the `week` run counts (their cost still counts, shown as `helpers`). `--all` lists them too. |
 | `lean-agent runs --running` | Runs in progress. Every run prints `run <id> started` first, so a background launch is visible. A run's work happens in a detached process, so killing the command (or a clear) doesn't stop it; Ctrl-C does. |
 | `lean-agent runs --lost [--clear]` | Runs whose supervisor died without a result (hidden from `--running`). `--lost --clear` marks them acknowledged so they stop appearing; `runs --stop <id>` still closes one by id. `--clear` alone is a usage error. |
@@ -709,7 +710,7 @@ uncommitted changes and new untracked files.
   branch; the review is recorded for the branch's new tip (also when the reviewer is resumed with `run --resume`).
   A fresh review of a branch that was reviewed before gets the earlier findings, so it says which are resolved
   instead of starting blind. `review <project> --status` exits 0 only if the
-  *current* code (HEAD plus uncommitted changes) has an approve (no open gaps), 2 for changes requested, needs-checks, open gaps or no review of this code, and 1 only for errors. `review` on a head that was reviewed already says `no new commits since <sha> — verdict <X> stands` and exits 0. With `--head <branch>` it checks that branch's
+  *current* code (HEAD plus uncommitted changes) has an approve (gaps and minors are noted, never blocking: `approve, 1 gap noted (path:line)`; an approval carries over a rebase whose branch diff is unchanged, with no run; after a rebase that changed the branch only the changed files are re-reviewed), 2 for changes requested, needs-checks or no review of this code, and 1 only for errors. `review` on a head that was reviewed already says `no new commits since <sha> — verdict <X> stands` and exits 0. With `--head <branch>` it checks that branch's
   tip instead, whatever is checked out. The guide and repo block make that a hard rule
   before any PR.
 

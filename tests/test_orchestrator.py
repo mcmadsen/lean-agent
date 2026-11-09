@@ -9320,7 +9320,7 @@ class CliTest(unittest.TestCase):
                 {"what": "Which store listing name to use", "file": "docs/DISTRIBUTION.md", "line": 9,
                  "blocks_goal": False, "scoped_out": "ask the user"}]
         approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[], gaps=gaps))
-        self.assertEqual(self.cli("review", "proj", check=False, FAKE_REVIEW=approve).returncode, 2)
+        self.assertEqual(self.cli("review", "proj", check=False, FAKE_REVIEW=approve).returncode, 0)
         decisions = {"decisions": [
             {"gap": "g1", "action": "decline", "why": "out of scope: the other browser is a separate task"},
             {"gap": "g2", "action": "decline", "why": "the hosting card says the URL is set at release"},
@@ -9330,7 +9330,7 @@ class CliTest(unittest.TestCase):
         fb = '{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-GAPS ' + json.dumps(decisions)
         p = self.cli("review", "proj", "--decide-gaps", check=False, FAKE_FEEDBACK=fb)
         call = self.calls()[-1]
-        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)  # decide-gaps itself: fix tasks / questions remain
         self.assertIn("sonnet", call["argv"][call["argv"].index("--model") + 1])
         self.assertIn("g1 docs/DISTRIBUTION.md:5: Other browser: not done yet", call["append"])
         self.assertIn("g4 docs/DISTRIBUTION.md:9: Which store listing name", call["append"])
@@ -9341,7 +9341,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("3) Shop for Chrome", p.stdout)
         self.assertNotIn("g1:", p.stdout.split("needs you")[1])
         st = self.cli("review", "proj", "--status", check=False).stdout
-        self.assertIn("2 known gap(s) not acknowledged", st)  # g1 and g2 were recorded as declined
+        self.assertIn("2 gaps noted", st)  # g1 and g2 were recorded as declined
         self.assertNotIn("Other browser", st)
         with open(os.path.join(self.env["LEAN_AGENT_HOME"], "reviews", "proj.declined.jsonl")) as fh:
             why = [json.loads(l)["why"] for l in fh]
@@ -9642,7 +9642,7 @@ class CliTest(unittest.TestCase):
                 {"what": "B thing", "file": "b.py", "line": 2, "blocks_goal": False, "scoped_out": ""},
                 {"what": "C thing", "file": "c.py", "line": 3, "blocks_goal": False, "scoped_out": ""}]
         approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[], gaps=gaps))
-        self.assertEqual(self.cli("review", "proj", check=False, FAKE_REVIEW=approve).returncode, 2)
+        self.assertEqual(self.cli("review", "proj", check=False, FAKE_REVIEW=approve).returncode, 0)
         head = "\nLEAN-GAPS "
         ok = '{"status": "done", "used": [], "unneeded": [], "missing": ""}'
         # empty and invalid LEAN-GAPS: exit 1 with the run to look at, nothing applied
@@ -9681,62 +9681,40 @@ class CliTest(unittest.TestCase):
             del os.environ["LEAN_AGENT_HOME"]
 
     def test_review_catches_self_declared_gaps(self):
+        """Only explicit markers in non-test code are gaps; a gap alone keeps an approve open (exit 0)."""
         self.git_project()
         self.cli("learn", self.proj, "--name", "proj")
         os.makedirs(os.path.join(self.proj, "docs"), exist_ok=True)
         with open(os.path.join(self.proj, "docs", "DISTRIBUTION.md"), "w") as fh:
-            fh.write("# Passive install\n\nChrome: done.\n\nOther browser: not done yet, so it cannot be shipped today.\n"
-                     "Not yet wired: the package is not built or published by the release pipeline.\n"
-                     "Until one is, the policy above installs nothing. Policy URL: https://<your-host>/ext.xpi\n")
+            fh.write("# Passive install\n\nOther browser: not done yet, so it cannot be shipped today.\n")
+        os.makedirs(os.path.join(self.proj, "tests"), exist_ok=True)
+        with open(os.path.join(self.proj, "tests", "test_policy.py"), "w") as fh:
+            fh.write("# TODO: cover the other browser\ndef test_policy():\n    pass\n")
         with open(os.path.join(self.proj, "api", "totals.py"), "a") as fh:
-            fh.write("def passive_policy():\n    return {'mode': 'passive'}\n")
+            fh.write("def passive_policy():\n    # replaces the placeholder in the template, plain prose\n"
+                     "    # TODO: wire the other browser\n    return {'mode': 'passive'}\n")
         checked = dict(REUSE_CHECKED, reuse=REUSE_CHECKED["reuse"] + [
             {"symbol": s_, "candidates": [], "verdict": "justified-new", "why": "nothing like it in the repository yet"}
-            for s_ in ("docs/DISTRIBUTION.md", "passive_policy")])
+            for s_ in ("docs/DISTRIBUTION.md", "passive_policy", "tests/test_policy.py", "test_policy")])
         approve = json.dumps(dict(checked, verdict="approve", findings=[], checks=[]))
-        p = self.cli("review", "proj", "--goal", "Passive build for both browsers", check=False, FAKE_REVIEW=approve)
+        p = self.cli("review", "proj", "--goal", "Passive build", check=False, FAKE_REVIEW=approve)
         call = next(c for c in self.calls() if "0. Completeness" in c["append"])
-        self.assertIn("Self-declared gaps", call["append"])
-        self.assertIn("docs/DISTRIBUTION.md:5: Other browser: not done yet", call["append"])
-        self.assertIn("docs/DISTRIBUTION.md:7: Until one is, the policy above installs nothing.", call["append"])
-        self.assertIn("The change's stated goal (task, work item or PR title): Passive build for both browsers", call["task"])
-        self.assertEqual(p.returncode, 2, p.stdout)
-        self.assertIn("known gaps: ", p.stdout)
-        self.assertIn("[not checked by the reviewer]", p.stdout)
-        self.assertIn("Approved, but with", p.stdout)
-        self.assertRegex(p.stdout.rstrip().splitlines()[-1], r"^approved: \d+ known gap\(s\) wait for your decision \(exit 2 until")
+        self.assertIn("# TODO: wire the other browser", call["append"], call["append"][call["append"].find("Self-declared")-50:][:600])
+        self.assertNotIn("DISTRIBUTION.md:3", call["append"])  # prose in a doc is not a marker
+        self.assertNotIn("test_policy.py:1", call["append"])  # nothing in a test file is a gap
+        self.assertNotIn("api/totals.py:4:", call["append"])  # a comment without a marker is not one either
+        self.assertEqual(p.returncode, 0, p.stdout)
+        self.assertIn("approve, 1 gap noted (api/totals.py:5)", p.stdout)
         st = self.cli("review", "proj", "--status", check=False)
-        self.assertEqual(st.returncode, 2)
-        self.assertIn("known gap(s) not acknowledged", st.stdout)
-        self.cli("review", "decline", "proj", "--all-gaps", "--why", "out of scope: hosting is a separate task")
-        self.assertEqual(self.cli("review", "proj", "--status").returncode, 0)
-        # a new tip: a helper named after placeholders, a reworded gap and a nit don't bring the decided gaps back
-        with open(os.path.join(self.proj, "api", "totals.py"), "a") as fh:
-            fh.write("def fill_placeholders(t):\n    # replaces the placeholder in the template\n    return t\n")
-        checked["reuse"].append({"symbol": "fill_placeholders", "candidates": [], "verdict": "justified-new",
-                                 "why": "nothing fills templates in the repository yet"})
-        reworded = json.dumps(dict(checked, verdict="approve", checks=[],
-                                   findings=[{"severity": "nit", "category": "tests", "file": "api/totals.py", "line": 7,
-                                              "issue": "no spec covers the literal replacement"}],
-                                   gaps=[{"what": "the other browser: not done yet, it cannot be shipped today",
-                                          "file": "docs/DISTRIBUTION.md", "line": 5, "blocks_goal": False,
-                                          "scoped_out": "ask the user"},
-                                         {"what": "no spec covers the literal replacement", "file": "api/totals.py",
-                                          "line": 7, "blocks_goal": False, "scoped_out": ""}]))
-        p = self.cli("review", "proj", check=False, FAKE_REVIEW=reworded)
-        self.assertNotIn("known gaps:", p.stdout)
-        self.assertIn("1. [nit/tests]", p.stdout)  # still a finding, not a gap
-        self.assertEqual(self.cli("review", "proj", "--status").returncode, 0)
+        self.assertEqual(st.returncode, 0)
+        self.assertIn("approve, 1 gap noted", st.stdout)
         # a gap the reviewer says keeps the goal from working, not scoped out: a major finding
-        with open(os.path.join(self.proj, "docs", "DISTRIBUTION.md"), "a") as fh:
-            fh.write("The update URL is a placeholder for now.\n")
-        blocking = json.dumps(dict(checked, verdict="approve", findings=[], checks=[],
-                                   goal="passive build for both browsers",
+        blocking = json.dumps(dict(checked, verdict="approve", findings=[], checks=[], goal="passive build",
                                    gaps=[{"what": "the second browser's package is never hosted", "file": "docs/DISTRIBUTION.md",
                                           "line": 9, "blocks_goal": True, "scoped_out": ""}]))
-        p = self.cli("review", "proj", check=False, FAKE_REVIEW=blocking)
+        p = self.cli("review", "proj", "--force", check=False, FAKE_REVIEW=blocking)
         self.assertEqual(p.returncode, 2)
-        self.assertIn("[major/completeness] docs/DISTRIBUTION.md:9: the change doesn't deliver: the second browser's package", p.stdout)
+        self.assertIn("[major/completeness] docs/DISTRIBUTION.md:9: the change doesn't deliver", p.stdout)
         self.assertIn("NOT approved", p.stdout)
 
     def test_closed_output_pipe_ends_quietly_and_keeps_side_effects(self):
@@ -11975,16 +11953,130 @@ class CliTest(unittest.TestCase):
         self.assertEqual((p.returncode, len(self.reviewer_runs())), (0, 1))
         self.assertIn("verdict approve stands", p.stdout)
 
-    def test_a_force_pushed_head_is_reviewed_again(self):
+    def test_a_force_pushed_head_with_the_same_patches_is_carried_over(self):
         g = self.git_project()
         self.cli("learn", self.proj, "--name", "proj")
         self.review_feature()
         g("checkout", "-q", "feature")
         g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--amend", "-m", "feature, reworded")
         g("checkout", "-q", "main")
-        p = self.review_feature()
-        self.assertNotIn("no new commits", p.stdout)
+        p = self.review_feature()  # same patches, new head: the approval carries over, no run
+        self.assertIn("approval carried over: rebase only, branch diff unchanged", p.stdout)
+        self.assertEqual(len(self.reviewer_runs()), 1)
+
+    def rebase_branch(self, g, onto_files, branch_files=None):
+        """A branch `feat` with one edit of big.txt, reviewed and approved; then main moves on and feat is rebased."""
+        g = self.skip_project()
+        g("checkout", "-q", "main")
+        self.write_commit(g, {"big.txt": "".join(f"line {i}\n" for i in range(1, 21))}, "big file")
+        g("checkout", "-qb", "feat", "main")
+        self.write_commit(g, {"big.txt": "".join(f"line {i}{' edited' if i == 2 else ''}\n" for i in range(1, 21))}, "edit")
+        self.review_branch("feat")
+        self.assertEqual(len(self.reviewer_runs()), 1)
+        g("checkout", "-q", "main")
+        self.write_commit(g, onto_files, "infra")
+        g("checkout", "-q", "feat")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "rebase", "-q", "main")
+        if branch_files:
+            self.write_commit(g, branch_files, "more")
+        g("checkout", "-q", "main")
+        return g
+
+    def test_a_rebase_onto_unrelated_base_commits_carries_the_approval_over(self):
+        g = None
+        self.rebase_branch(g, {"infra/ci.yml": "a: 1\n"})
+        st = self.cli("review", "proj", "--head", "feat", "--status", check=False)
+        self.assertEqual(st.returncode, 0, st.stdout)
+        self.assertIn("approval carried over: rebase only, branch diff unchanged", st.stdout)
+        self.assertEqual(len(self.reviewer_runs()), 1)  # no model run
+        p = self.review_branch("feat", "--for-push")
+        self.assertEqual((p.returncode, len(self.reviewer_runs())), (0, 1))
+        led = self.cli("reviews", "--branch", "feat", "-p", "proj").stdout
+        self.assertIn("carried over: rebase only", led)
+
+    def test_a_rebase_with_base_changes_in_the_same_file_but_the_same_patch_is_carried_over(self):
+        self.rebase_branch(None, {"big.txt": "".join(f"line {i}{' base' if i == 19 else ''}\n" for i in range(1, 21))})
+        st = self.cli("review", "proj", "--head", "feat", "--status", check=False)
+        self.assertEqual(st.returncode, 0, st.stdout)
+        self.assertIn("carried over", st.stdout)
+        self.assertEqual(len(self.reviewer_runs()), 1)
+
+    def test_a_rebase_that_also_changed_the_branch_reviews_only_the_delta(self):
+        self.rebase_branch(None, {"big.txt": "".join(f"line {i}{' base' if i == 19 else ''}\n" for i in range(1, 21))},
+                           {"src/code.py": "x = 2\n"})
+        st = self.cli("review", "proj", "--head", "feat", "--status", check=False)
+        self.assertEqual(st.returncode, 2, st.stdout)
+        p = self.review_branch("feat")
+        self.assertIn("history was rewritten (rebase onto a moved base): reviewing only the 1 file(s)", p.stdout)
+        self.assertNotIn("a full review", p.stdout)
         self.assertEqual(len(self.reviewer_runs()), 2)
+        call = self.calls()[-1]
+        self.assertIn("src/code.py", call["task"] + call["append"])
+
+    def test_minors_do_not_close_the_gate_and_reviews_lists_the_runs(self):
+        g = self.skip_project()
+        g("checkout", "-qb", "feat", "main")
+        self.write_commit(g, {"src/code.py": "x = 2\n"}, "code")
+        minors = json.dumps(dict(REUSE_CHECKED, verdict="changes-requested", checks=[], findings=[
+            {"severity": "minor", "category": "style", "file": "src/code.py", "line": 1, "issue": "name is vague"},
+            {"severity": "nit", "category": "style", "file": "src/code.py", "line": 1, "issue": "spacing"}]))
+        p = self.review_branch("feat", FAKE_REVIEW=minors)
+        self.assertEqual(p.returncode, 0, p.stdout)
+        self.assertIn("approve, 2 minor/nit left (not blocking)", p.stdout)
+        st = self.cli("review", "proj", "--head", "feat", "--status", check=False)
+        self.assertEqual(st.returncode, 0)
+        self.assertIn("approve, 2 minor/nit left (not blocking)", st.stdout)
+        out = self.cli("reviews", "--branch", "feat", "-p", "proj").stdout
+        self.assertRegex(out, r"approve · 0 blocker / 0 major / 2 minor")
+        self.assertRegex(out, r"1 review events, verdict known for 1; total cost \$")
+        data = json.loads(self.cli("reviews", "--branch", "feat", "-p", "proj", "--json").stdout)
+        self.assertEqual((data["runs"][0]["verdict"], data["runs"][0]["counts"]["minor"]), ("approve", 2))
+        self.assertEqual(len(data["runs"][0]["head"]), 12)
+
+    def test_reviews_shows_unknown_for_a_run_without_a_stored_verdict(self):
+        g = self.skip_project()
+        g("checkout", "-qb", "feat", "main")
+        self.write_commit(g, {"src/code.py": "x = 2\n"}, "code")
+        self.review_branch("feat")
+        path = os.path.join(self.env["LEAN_AGENT_HOME"], "reviews", "proj.jsonl")
+        os.remove(path)  # the review record is gone, the ledger run remains
+        out = self.cli("reviews", "--branch", "feat", "-p", "proj").stdout
+        self.assertIn("review: unknown · counts unknown", out)
+
+    def test_gap_markers_versus_plain_comments_and_test_files(self):
+        gl = lean_agent_module().gap_line
+        self.assertTrue(gl("src/a.py", "x = 1  # TODO: wire the retry"))
+        self.assertTrue(gl("src/a.ts", "throw new Error('not implemented');"))
+        self.assertTrue(gl("src/a.py", "raise NotImplementedError"))
+        self.assertTrue(gl("src/a.py", "# temporary: remove with the migration"))
+        self.assertFalse(gl("src/a.py", "# the retry covers the placeholder in the template"))
+        self.assertFalse(gl("src/a.py", "# this is not yet used by callers"))  # prose, no marker
+        self.assertFalse(gl("tests/test_a.py", "# TODO: cover the retry"))
+        self.assertFalse(gl("web/a.spec.ts", "// FIXME: flaky"))
+        self.assertFalse(gl("docs/guide.md", "TODO: write this"))
+
+    def test_an_unrunnable_check_keeps_the_approve_and_names_the_command(self):
+        agent = lean_agent_module()
+        self.assertEqual(agent.test_run_command("web/a.spec.ts: 'adds up' (renamed)"), "npx jest web/a.spec.ts -t 'adds up'")
+        self.assertEqual(agent.test_run_command("tests/test_a.py: 'adds up' (skipped)"), "python -m pytest tests/test_a.py -k 'adds up'")
+        review = dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[], coverage=[])
+        meta = {"edited_tests": ["tests/test_a.py: 'adds up' (skipped)"], "new_symbols": [], "hunks": {}}
+        with mock.patch.dict(os.environ, self.env):
+            verdict, findings, checks, notes = agent.enforce_review_rules(review, meta, [])
+        self.assertEqual(verdict, "approve")
+        self.assertTrue(any(c["what"].startswith("to run: python -m pytest tests/test_a.py") for c in checks), checks)
+
+    def test_late_nits_on_unchanged_code_are_not_counted_on_a_re_review(self):
+        agent = lean_agent_module()
+        review = dict(REUSE_CHECKED, verdict="changes-requested", checks=[], coverage=[], findings=[
+            {"severity": "nit", "category": "style", "file": "src/old.py", "line": 5, "issue": "rename it"},
+            {"severity": "minor", "category": "style", "file": "src/new.py", "line": 2, "issue": "extract a helper"}])
+        meta = {"resume": True, "since_hunks": {"src/new.py": [(1, 3)]}, "earlier": [], "new_symbols": [], "hunks": {}}
+        with mock.patch.dict(os.environ, self.env):
+            verdict, findings, checks, notes = agent.enforce_review_rules(review, meta, [])
+        self.assertEqual([f["file"] for f in findings], ["src/new.py"])
+        self.assertTrue(any("late nit" in n for n in notes))
+        self.assertEqual(verdict, "approve")
 
     def test_review_of_the_working_tree_follows_uncommitted_changes(self):
         g = self.git_project()  # on feature, web/page.txt uncommitted
@@ -12217,8 +12309,8 @@ class CliTest(unittest.TestCase):
         self.assertIn("skipped (tests-only)", p.stdout)
         self.assertEqual(len(self.real_reviews()), 1)
         st = self.cli("review", "proj", "--head", "feat", "--status", check=False)
-        self.assertEqual(st.returncode, 2, st.stdout)
-        self.assertIn("known gap", st.stdout)
+        self.assertEqual(st.returncode, 0, st.stdout)  # a gap alone never closes the gate
+        self.assertIn("gap(s) (src/code.py:1), not blocking", st.stdout)
         lean_agent = lean_agent_module()
         with mock.patch.dict(os.environ, self.env):
             last = lean_agent.latest_review("proj", self.proj, "feat")
@@ -12253,7 +12345,7 @@ class CliTest(unittest.TestCase):
         with mock.patch.object(L, "cmd_run", lambda ns: None), mock.patch.object(L, "ledger", lambda: [old]):
             self.assertEqual(L.run_reuse_check(a, "proj", "haiku", "why", [], "feat", "rule"), {})
 
-    def test_a_skip_exits_2_with_open_gaps_and_a_second_run_on_the_same_head_exits_0_while_status_stays_2(self):
+    def test_a_skip_with_open_gaps_exits_0_and_status_stays_open(self):
         g = self.skip_project()
         gaps = [{"what": "Retry the upload once", "file": "src/code.py", "line": 1, "blocks_goal": False, "scoped_out": ""}]
         with_gaps = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[], gaps=gaps))
@@ -12264,10 +12356,10 @@ class CliTest(unittest.TestCase):
         first = self.review_branch("feat")
         self.assertIn("skipped (tests-only)", first.stdout)
         second = self.review_branch("feat")
-        self.assertEqual(first.returncode, 2, first.stdout)
+        self.assertEqual(first.returncode, 0, first.stdout)
         self.assertEqual(second.returncode, 0, second.stdout)  # nothing new to review is not a failure
         self.assertIn("verdict skipped (tests-only) stands", second.stdout)
-        self.assertEqual(self.review_branch("feat", "--status").returncode, 2)  # the gate still reflects the open gap
+        self.assertEqual(self.review_branch("feat", "--status").returncode, 0)  # the gap is noted, not blocking
 
     def test_release_branch_version_bump_only_and_merge_only_deltas_are_skipped(self):
         g = self.skip_project()
@@ -13025,7 +13117,7 @@ class ReviewUnitTest(unittest.TestCase):
             self.assertEqual((code, open_gaps), (0, []))
             own = {"what": "wire the retry", "file": "src/own.py", "line": 1}
             code, open_gaps = agent.stored_exit("proj", self.dir, dict(rec, gaps=rec["gaps"] + [own]), "feature", head)
-            self.assertEqual((code, open_gaps), (2, [own]))
+            self.assertEqual((code, open_gaps), (0, [own]))  # noted, never blocking
 
     def test_gap_listing_has_full_text_source_and_excerpt(self):
         agent = self.agent

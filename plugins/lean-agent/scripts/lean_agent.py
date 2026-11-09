@@ -3971,14 +3971,22 @@ def comment_part(body):
     return m.group(1) if m else ""
 
 
+# a self-declared gap is an explicit marker, in a comment or a "not implemented" error: never plain prose
+GAP_EXPLICIT_RE = re.compile(r"\b(?:TODO|FIXME|XXX|HACK)\b|(?i:\bnot implemented\b|\bnot done yet\b|\btemporary\b)")
+GAP_EXPLICIT_CASE_RE = re.compile(r"\b(?:TODO|FIXME|XXX|HACK)\b")
+GAP_RAISE_RE = re.compile(r"\bNotImplemented(?:Error|Exception)\b|\b(?:unimplemented|todo)!\s*\("
+                          r"|\b(?:raise|throw)\b.*not implemented|\bnew Error\(\s*['\"`][^'\"`]*not implemented", re.I)
+
+
 def gap_line(rel, body):
-    """Whether an added line says something isn't done: any line of a doc; the comments of code."""
-    if SKIP_GAP_FILE_RE.search(rel):
+    """Whether an added line is an explicit gap marker (TODO, FIXME, XXX, HACK, "not implemented", "not done yet",
+    "temporary" in a comment; a raised not-implemented error) in non-test, non-doc code."""
+    if SKIP_GAP_FILE_RE.search(rel) or TEST_PATH_RE.search(rel) or DOC_RE.search(rel):
         return False
-    if DOC_RE.search(rel):
-        return bool(GAP_RE.search(body) or GAP_MARK_RE.search(body) or DOC_PLACEHOLDER_RE.search(body))
     note = comment_part(body)
-    return bool((note and (CODE_GAP_RE.search(note) or GAP_MARK_RE.search(note))) or NOT_IMPLEMENTED_RE.search(body))
+    if note and GAP_EXPLICIT_RE.search(note):
+        return True
+    return bool(GAP_RAISE_RE.search(body))
 
 
 def pr_own(path, base, head="HEAD"):
@@ -4079,7 +4087,7 @@ def self_declared_gaps(path, rng_args, new_files=(), base=None):
     msgs = ((git(path, "log", "--no-merges", "--format=%s%n%b", rng_args[1] if len(rng_args) == 2 else "HEAD",
                  "--not", base) or "") if own is not None else (git(path, "log", "--format=%s%n%b", rng) or "" if rng else ""))
     for msg in msgs.splitlines():
-        if GAP_RE.search(msg) or GAP_MARK_RE.search(msg):
+        if GAP_EXPLICIT_CASE_RE.search(msg) or re.search(r"\bnot (?:implemented|done yet)\b", msg, re.I):
             out.append(f"commit message: {msg.strip()[:160]}")
     return list(dict.fromkeys(out))[:25]
 
@@ -5889,6 +5897,55 @@ def decide_gaps(a):
     return 2 if asks else 0
 
 
+def branch_patches(path, mb, head, files):
+    """{file: digest of the added/removed lines} of the branch-only diff mb..head (line numbers and context ignored,
+    like `git patch-id --stable`)."""
+    out = {}
+    for f in files:
+        d = git(path, "diff", "--no-color", "-U0", mb, head, "--", f) or ""
+        body = "\n".join(l for l in d.splitlines() if l[:1] in "+-" and not l.startswith(("+++", "---")))
+        out[f] = hashlib.sha1(body.encode("utf-8", "replace")).hexdigest() if body else ""
+    return out
+
+
+def rebase_delta(path, base, old, new):
+    """What a rebase/merge onto a moved base changed in the BRANCH's own diff: (files whose branch diff changed,
+    files the incoming base commits changed, files the branch changes), or None when it can't be told."""
+    if not base or not old or not new or git(path, "cat-file", "-e", old + "^{commit}") is None:
+        return None
+    mb_old, mb_new = git(path, "merge-base", base, old), git(path, "merge-base", base, new)
+    if not mb_old or not mb_new:
+        return None
+    fo = set((git(path, "diff", "--name-only", mb_old, old) or "").split())
+    fn = set((git(path, "diff", "--name-only", mb_new, new) or "").split())
+    po, pn = branch_patches(path, mb_old, old, fo), branch_patches(path, mb_new, new, fn)
+    changed = sorted(f for f in fo | fn if po.get(f, "") != pn.get(f, ""))
+    incoming = set((git(path, "diff", "--name-only", mb_old, mb_new) or "").split()) if mb_old != mb_new else set()
+    return changed, incoming, fo | fn
+
+
+def try_carry_over(slug, path, head, base, record=True):
+    """The branch's approval survives a rebase when its own diff is unchanged (same patches on a moved base): the
+    stored approve record is copied to the new head with no model run. Returns the new record or None."""
+    sha, dirty, label, mode = review_target(path, head)
+    if dirty or mode != "ref" or not base:
+        return None
+    prev = last_review(slug, path, label)
+    if not prev or prev.get("head") == sha or not approved(prev.get("verdict")) or prev.get("dirty"):
+        return None
+    d = rebase_delta(path, base, prev["head"], sha)
+    if d is None or d[0]:
+        return None
+    reason = "rebase only, branch diff unchanged" + (
+        f" ({len(d[1])} file(s) came in from {base}, none of them the branch's)" if d[1] and not d[1] & d[2] else "")
+    rec = dict(prev, head=sha, dirty="", carried={"from": prev["head"], "run": prev.get("run"), "reason": reason},
+               ts=now_iso(), base=base)
+    if record:
+        append_jsonl(reviews_path(slug), rec)
+    print(f"review: approval carried over: {reason}", flush=True)
+    return rec
+
+
 def review_gate(a, slug, path):
     """Reviews that need no run: the head was reviewed already and nothing changed since, or the range is empty.
     Returns the exit code to stop with, else None. --force reviews anyway."""
@@ -5901,8 +5958,7 @@ def review_gate(a, slug, path):
     if match and (match.get("verdict") in ("approve", "changes-requested") or is_skipped(match.get("verdict"))):
         print(f"review: no new commits since {sha[:12]} — verdict {match['verdict']} stands")
         _, open_gaps = stored_exit(slug, path, match, label, sha)
-        print(f"review {match['run']} of {label} @ {sha[:12]}: {match['verdict']}"
-              + (f", {len(open_gaps)} known gap(s) not acknowledged" if open_gaps else ""))
+        print(f"review {match['run']} of {label} @ {sha[:12]}: {status_text(match, open_gaps)}")
         return 0  # nothing to review is not a failure; `review --status` is the gate
     base = a.base or default_base(path)
     mb = git(path, "merge-base", base, sha) if base else None
@@ -5912,6 +5968,11 @@ def review_gate(a, slug, path):
         why = skip_reason(slug, path, label, mode, sha, mb, base)
         if why:
             return record_skip(slug, path, a, sha, label, mode, base, why)
+    carried = try_carry_over(slug, path, a.head, base) if not dirty else None
+    if carried:
+        _, open_gaps = stored_exit(slug, path, carried, label, sha)
+        print(f"review {carried['run']} of {label} @ {sha[:12]}: {status_text(carried, open_gaps)} (carried over)")
+        return 0
     return None
 
 
@@ -6164,6 +6225,85 @@ def review_saving(rows):
     return saving_line(review_scope_stats(rows, cost))
 
 
+def branch_review_rows(slug, path, branch):
+    """Every review event of one branch, oldest first: reviewer runs from the ledger (with their stored verdict and
+    findings when a review record exists, "unknown" when not), plus skips and carry-overs from the review records."""
+    br = branch_of(path, branch) or bare_ref(branch)
+    mine = lambda ref: bool(ref) and (bare_ref(ref) == bare_ref(branch) or (br and (branch_of(path, ref) or "") == br))
+    recs = list(read_jsonl(reviews_path(slug)))
+    by_run = {}
+    for r in recs:
+        if not r.get("carried") and not r.get("skip"):
+            by_run[r.get("run")] = r
+    rows, seen = [], set()
+    for r in ledger():
+        meta = r.get("review_meta") or {}
+        if r.get("project") != slug or r.get("role") not in ("reviewer", "reuse-check") or not mine(meta.get("ref")):
+            continue
+        rec = by_run.get(r.get("id"))
+        seen.add(r.get("id"))
+        rows.append({"run": r.get("id"), "ts": r.get("ts"), "head": (rec or {}).get("head") or meta.get("head") or "",
+                     "base": (rec or {}).get("base") or meta.get("base") or "", "model": r.get("model") or "?",
+                     "cost": r.get("cost_usd") or 0, "role": r.get("role"),
+                     "kind": "delta" if meta.get("resume") else "review",
+                     "verdict": (rec or {}).get("verdict") or "unknown", "record": rec})
+    for r in recs:
+        if not mine(r.get("ref")) and not mine(r.get("branch")):
+            continue
+        if r.get("carried") or r.get("skip"):
+            rows.append({"run": r.get("run"), "ts": r.get("ts"), "head": r.get("head") or "", "base": r.get("base") or "",
+                         "model": "-", "cost": 0, "role": "", "verdict": r.get("verdict") or "unknown", "record": r,
+                         "kind": "carried over" if r.get("carried") else "skipped",
+                         "carried": (r.get("carried") or {}).get("reason")})
+        elif r.get("run") not in seen:  # a review record whose run the ledger no longer has
+            rows.append({"run": r.get("run"), "ts": r.get("ts"), "head": r.get("head") or "", "base": r.get("base") or "",
+                         "model": "?", "cost": 0, "role": "", "kind": "review", "verdict": r.get("verdict") or "unknown",
+                         "record": r})
+    return sorted(rows, key=lambda x: x.get("ts") or "")
+
+
+def cmd_reviews(a):
+    """`reviews --branch X`: every review run of the branch with its verdict, counts, cost and what is left open."""
+    slug, path = resolve_project(a.project)
+    rows = branch_review_rows(slug, path, a.branch)
+    br = branch_of(path, a.branch) or bare_ref(a.branch)
+    declined = [d for d in read_jsonl(declined_path(slug))
+                if d.get("ref") in (a.branch, None) or d.get("branch") == br or bare_ref(d.get("ref")) == br]
+    out = []
+    for x in rows:
+        rec = x.pop("record") or {}
+        fs = rec.get("findings") or []
+        cnt = {k: sum(1 for f in fs if f.get("severity") == k) for k in ("blocker", "major", "minor")}
+        cnt["minor"] += sum(1 for f in fs if f.get("severity") == "nit")
+        x.update(head=x["head"][:12], counts=cnt if rec else None,
+                 open=[f"[{f.get('severity')}] {f.get('file')}:{f.get('line', '')} {str(f.get('issue', ''))[:120]}" for f in fs]
+                 + [f"[check] {str(c.get('what', ''))[:120]}" for c in rec.get("checks") or []])
+        out.append(x)
+    total = round(sum(x["cost"] for x in out), 4)
+    dec = [{"what": d.get("issue") or d.get("gap") or d.get("symbol") or "?", "file": d.get("file"), "why": d.get("why")}
+           for d in declined]
+    if a.json:
+        print(json.dumps({"branch": a.branch, "runs": out, "declined": dec, "total_cost_usd": total}, indent=1))
+        return 0
+    if not out:
+        print(f"no review recorded for {a.branch} in {slug}")
+        return 0
+    for x in out:
+        c = x["counts"]
+        cs = f"{c['blocker']} blocker / {c['major']} major / {c['minor']} minor" if c else "counts unknown"
+        print(f"{x['run']} · {(x['ts'] or '?')[:16]} · {x['head'] or '?'} · base {x['base'] or '?'} · {x['model']} · "
+              f"${x['cost']:.2f} · {x['kind']}: {x['verdict']} · {cs}")
+        if x.get("carried"):
+            print(f"    carried over: {x['carried']}")
+        for o in x["open"][:8]:
+            print(f"    open {o}")
+    for d in dec:
+        print(f"  declined: {d['file'] or '?'}: {str(d['what'])[:100]} (why: {str(d['why'] or '?')[:120]})")
+    known = sum(1 for x in out if x["verdict"] != "unknown")
+    print(f"{len(out)} review events, verdict known for {known}; total cost ${total:.2f}")
+    return 0
+
+
 def review_costs(a):
     """`review --costs`: what the reviews of the last N days cost, from the ledger: per branch and per model, runs,
     second turns (the reviewer resumed, or the cheap fill-in run), re-review rounds and skipped reviews by reason."""
@@ -6242,11 +6382,27 @@ def stored_exit(slug, path, match, label, sha):
     """(exit code, open gaps) of a stored review: 0 for an approve without open gaps, else 2 (changes requested,
     needs checks, open gaps); after a policy skip, what the last real review left. 1 is for errors only."""
     open_gaps = open_gaps_of(slug, path, match, sha)
-    if approved(match["verdict"]) and open_gaps:
-        return 2, open_gaps
     if is_skipped(match["verdict"]):
         return skipped_status(slug, path, label, sha), open_gaps
-    return (0 if approved(match["verdict"]) else 2), open_gaps
+    return (0 if approved(match["verdict"]) else 2), open_gaps  # a gap alone never closes an approve
+
+
+def gap_locs(open_gaps):
+    return ", ".join(f"{g.get('file', '?')}" + (f":{g['line']}" if g.get("line") else "") for g in open_gaps[:5])
+
+
+def status_text(match, open_gaps):
+    """`approve, 1 gap noted (path:line), 2 minor/nit left (not blocking)`; other verdicts as they are."""
+    v = match["verdict"]
+    if not approved(v):
+        return v + (f", {len(open_gaps)} known gap(s) not acknowledged" if open_gaps else "")
+    out = v
+    if open_gaps:
+        out += f", {len(open_gaps)} gap{'' if len(open_gaps) == 1 else 's'} noted ({gap_locs(open_gaps)})"
+    small = [f for f in match.get("findings") or [] if f.get("severity") in ("minor", "nit")]
+    if small and v == "approve":
+        out += f", {len(small)} minor/nit left (not blocking)"
+    return out
 
 
 def skipped_status(slug, path, label, sha):
@@ -6255,10 +6411,10 @@ def skipped_status(slug, path, label, sha):
     if not real:
         return 0
     open_gaps = open_gaps_of(slug, path, real, sha)
-    if not open_gaps:
-        return 0
-    print(f"  the last real review ({real['run']}, {real['verdict']}) left {len(open_gaps)} known gap(s) not acknowledged")
-    return 2
+    if open_gaps and approved(real.get("verdict")):
+        print(f"  the last real review ({real['run']}, {real['verdict']}) noted {len(open_gaps)} gap(s) "
+              f"({gap_locs(open_gaps)}), not blocking")
+    return 0
 
 
 def review_main(a):
@@ -6267,10 +6423,12 @@ def review_main(a):
         git(path, "fetch", "-q", "origin")  # updates remote refs only; the working tree isn't touched
     if a.status:
         match, (sha, label) = find_review(slug, path, a.head)
+        if not match and not getattr(a, "force", False):
+            match = try_carry_over(slug, path, a.head, a.base or default_base(path))
         if match:
             code, open_gaps = stored_exit(slug, path, match, label, sha)
-            print(f"review {match['run']} of {label} @ {sha[:12]}: {match['verdict']}"
-                  + (f", {len(open_gaps)} known gap(s) not acknowledged" if open_gaps else ""))
+            print(f"review {match['run']} of {label} @ {sha[:12]}: {status_text(match, open_gaps)}"
+                  + (f" (carried over: {match['carried']['reason']})" if match.get("carried") else ""))
             for i, g in enumerate(open_gaps, 1):
                 print(f"  g{i}. {g.get('file', '?')}: {str(g.get('what', ''))[:140]}")
             return code
@@ -6321,9 +6479,16 @@ def review_main(a):
         old = reviewed_baseline(slug, path, a.head, prev_)
         new = git(path, "rev-parse", "--verify", "--quiet", a.head + "^{commit}")
         if prev_ and old and new and old != new:
-            stat = git(path, "diff", "--numstat", old, new) or ""
-            size = sum(int(x) for l in stat.splitlines() for x in l.split("\t")[:2] if x.isdigit())
-            if size <= delta_max or getattr(a, "delta_only", False):
+            rewritten = not delta_is_descendant(path, old, new)
+            rd = rebase_delta(path, a.base or default_base(path), old, new) if rewritten else None
+            if rd is not None:  # a rebase: only the files whose branch diff changed, however big
+                mbn = git(path, "merge-base", a.base or default_base(path), new)
+                stat = (git(path, "diff", "--numstat", mbn, new, "--", *rd[0]) or "") if rd[0] and mbn else ""
+                size = sum(int(x) for l in stat.splitlines() for x in l.split("\t")[:2] if x.isdigit())
+            else:
+                stat = git(path, "diff", "--numstat", old, new) or ""
+                size = sum(int(x) for l in stat.splitlines() for x in l.split("\t")[:2] if x.isdigit())
+            if rd is not None or size <= delta_max or getattr(a, "delta_only", False):
                 print(f"review: {branch_of(path, a.head) or a.head} was reviewed at {old[:12]} (run {prev_['id']}); "
                       f"reviewing only what changed since ({size} lines) and whether the earlier findings are fixed. "
                       "--full-review reviews the whole change again.", flush=True)
@@ -6337,9 +6502,15 @@ def review_main(a):
         old = reviewed_baseline(slug, path, a.head, prev_) if prev_ else None
         new = git(path, "rev-parse", "--verify", "--quiet", a.head + "^{commit}")
         if old and new and old != new and not delta_is_descendant(path, old, new):
-            a._fallback = f"history was rewritten ({old[:12]} is not an ancestor of {new[:12]})"
-            print(f"review: {a._fallback}: a full review instead of a delta", flush=True)
-            a.resume = False
+            rd = rebase_delta(path, a.base or default_base(path), old, new)
+            if rd is not None:
+                a._delta_files = rd[0]
+                print(f"review: history was rewritten (rebase onto a moved base): reviewing only the {len(rd[0])} "
+                      "file(s) whose branch diff changed, not the whole branch", flush=True)
+            else:
+                a._fallback = f"history was rewritten ({old[:12]} is not an ancestor of {new[:12]})"
+                print(f"review: {a._fallback}: a full review instead of a delta", flush=True)
+                a.resume = False
     if not a.status and (not a.head or git(path, "rev-parse", "--verify", "--quiet", a.head + "^{commit}")):
         warn = review_cap_warning(slug, review_target(path, a.head)[2])
         if warn:
@@ -6361,6 +6532,8 @@ def review_main(a):
               flush=True)
         since = ([old_head, meta["head"]] if meta.get("mode") == "ref" else [old_head]) if old_head else []
         changed = (git(path, "diff", "--name-only", *since) or "").split() if since else []
+        if getattr(a, "_delta_files", None) is not None:  # rebased: the range also holds what the base brought in
+            changed = [f for f in changed if f in a._delta_files]
         ns_syms = new_symbols(path, since, untracked_files(path) if meta.get("mode") != "ref" else ()) \
             if since else {"files": [], "symbols": []}
         meta["new_symbols"] = ns_syms["files"] + ns_syms["symbols"]
@@ -6379,6 +6552,9 @@ def review_main(a):
             meta["hunks"] = changed_hunks(path, [mb, meta["head"]] if meta.get("mode") == "ref" else [mb])
         dt = decisions_text(slug, meta.get("ref"), path, meta.get("head"))
         where += (" " + dt.replace("\n", " ") if dt else "")
+        if getattr(a, "_delta_files", None) is not None:
+            where += (" The branch was rebased: the diff range also shows commits that came in from the base; "
+                      "ignore every file not listed below.")
         where += (f" Since your last review these files changed: {', '.join(changed[:30]) or 'none'}. Re-check only "
                   "(a) your earlier open findings against the new code (say for each: fixed / still open) and (b) "
                   "the changed files above, with the reuse, scope and platform passes limited to them. Don't "
@@ -6754,6 +6930,24 @@ def in_changed_lines(candidate, hunks):
     return False
 
 
+def test_run_command(entry):
+    """The command that runs one edited test, from its listing `path: 'title' (what changed)`."""
+    rel, _, rest = entry.partition(": ")
+    title = rest.split("' (")[0].lstrip("'")[:60]
+    ext = os.path.splitext(rel)[1].lower()
+    if ext == ".py":
+        return f"python -m pytest {rel}" + (f" -k {shlex.quote(title)}" if title else "")
+    if ext in (".js", ".jsx", ".ts", ".tsx", ".mjs"):
+        return f"npx jest {rel}" + (f" -t {shlex.quote(title)}" if title else "")
+    if ext == ".cs":
+        return "dotnet test" + (f" --filter {shlex.quote('FullyQualifiedName~' + title.replace(' ', ''))}" if title else "")
+    if ext == ".go":
+        return f"go test ./{os.path.dirname(rel) or '.'}"
+    if ext == ".rb":
+        return f"bundle exec rspec {rel}"
+    return f"run the tests in {rel}"
+
+
 def enforce_review_rules(review, meta, declined=()):
     """lean-agent's own rules on top of the reviewer's verdict.
 
@@ -6852,10 +7046,11 @@ def enforce_review_rules(review, meta, declined=()):
     edited = meta.get("edited_tests") or []
     cov_text = " ".join(str(c.get("test", "")) for c in cov)
     no_cov = [t for t in edited if t.split(": '", 1)[-1].split("' (")[0][:40] not in cov_text]
-    if no_cov:
-        checks.append({"what": "coverage not checked for edited tests: " + "; ".join(no_cov[:8]),
-                       "why": "for each: what it protected, and whether that's still tested"})
-        notes.append(f"coverage not checked for {len(no_cov)} of {len(edited)} edited tests")
+    if no_cov:  # the gate can't run these itself: approve stands, the exact commands are listed
+        for t in no_cov[:8]:
+            checks.append({"what": f"to run: {test_run_command(t)}",
+                           "why": f"edited test, coverage not checked ({t.split(': ', 1)[0]}): what it protected, still tested?"})
+        notes.append(f"coverage not checked for {len(no_cov)} of {len(edited)} edited tests: listed as 'to run'")
     lost = [c for c in cov if c.get("verdict") == "lost"]
     if lost and not any(f.get("category") == "tests" and f.get("severity") in ("blocker", "major", "minor")
                         for f in findings):  # one finding for all of them, unless the reviewer wrote its own
@@ -6910,6 +7105,21 @@ def enforce_review_rules(review, meta, declined=()):
     review["_goal"] = review.get("goal") or meta.get("goal")
 
     if meta.get("resume") and meta.get("since_hunks") is not None:
+        # round 2 on: a minor/nit about code unchanged since the last round is a late nit, not counted by the gate
+        late = []
+        for f in list(findings):
+            if f.get("severity") not in ("minor", "nit"):
+                continue
+            if any(_jaccard(_words(f.get("issue", "")), _words(e)) >= 0.3 for e in meta.get("earlier") or []):
+                continue
+            if not in_changed_lines(f"{f.get('file', '')}:{f.get('line') or 0}", meta["since_hunks"]):
+                late.append(f)
+                findings.remove(f)
+        if late:
+            review["_late_nits"] = late
+            notes.append(f"{len(late)} late nit(s) about code unchanged since the last round (not counted): "
+                         + "; ".join(f"{f.get('file', '?')}:{f.get('line', '')} {str(f.get('issue', ''))[:80]}" for f in late[:5]))
+    if meta.get("resume") and meta.get("since_hunks") is not None:
         # converge: on a re-review, a NEW major about code that didn't change since the last review is minor
         for f in findings:
             if f.get("severity") not in ("blocker", "major"):
@@ -6930,15 +7140,16 @@ def enforce_review_rules(review, meta, declined=()):
     review["_declined_shown"] = [d for d in declined][:10]
 
     blocking = [f for f in findings if f.get("severity") in ("blocker", "major")]
-    open_checks = [c for c in checks if not str(c.get("what", "")).startswith("unverified")] if meta.get("resume") else checks
-    if verdict == "approve" and (blocking or missing or disputed or no_cov or (wanted and not review.get("searches"))):
+    open_checks = [c for c in checks if not str(c.get("what", "")).startswith(("unverified", "to run:"))] \
+        if meta.get("resume") else [c for c in checks if not str(c.get("what", "")).startswith("to run:")]
+    if verdict == "approve" and (blocking or missing or disputed or (wanted and not review.get("searches"))):
         verdict = "changes-requested" if blocking else "needs-checks"
         notes.append(f"lean-agent changed the verdict from approve to {verdict}")
-    elif verdict == "changes-requested" and not blocking and not missing and not disputed and not no_cov:
+    elif verdict == "changes-requested" and not blocking and not missing and not disputed:
         # what made it request changes was declined, optional or unverified: nothing left to fix
         verdict = "needs-checks" if any(str(c.get("what", "")).startswith("unverified") for c in checks) else "approve"
         notes.append(f"only minor{', declined' if declined else ''} or unverified findings left: {verdict}")
-    elif verdict == "needs-checks" and meta.get("resume") and not blocking and not missing and not disputed and not no_cov \
+    elif verdict == "needs-checks" and meta.get("resume") and not blocking and not missing and not disputed \
             and not open_checks and not any(str(c.get("what", "")).startswith("unverified") for c in checks):
         verdict = "approve"
     return verdict, findings, checks, notes
@@ -7041,14 +7252,13 @@ def report_review(slug, project, entry, review, meta):
     if BRIEF:
         print(f"  full review (reuse table, coverage, fixes): lean-agent runs --show {entry['id']}")
     blocking = [f for f in findings if f.get("severity") in ("blocker", "major")]
-    if verdict == "approve" and not blocking and gaps:
-        print(f"Approved, but with {len(gaps)} known gap(s): tell the user about each in one line and get their word "
-              f"(out of scope: lean-agent review decline {slug} g<n> --why \"...\") before calling it ready or opening a PR.\n"
-              f"approved: {len(gaps)} known gap(s) wait for your decision (exit 2 until each is declined or fixed; "
-              "`review --status` exits 2 as well until then)")
-        return 2
+    small = [f for f in findings if f.get("severity") in ("minor", "nit")]
     if verdict == "approve" and not blocking:
-        print("Approved: OK to prepare the PR (still an outward action: ask the user before creating it).")
+        extra = (f", {len(gaps)} gap{'' if len(gaps) == 1 else 's'} noted ({gap_locs(gaps)})" if gaps else "") + (
+            f", {len(small)} minor/nit left (not blocking)" if small else "")
+        print(f"approve{extra}: OK to prepare the PR (still an outward action: ask the user before creating it)."
+              + (f" Mention the gap{'' if len(gaps) == 1 else 's'} to the user (decline one: lean-agent review "
+                 f"decline {slug} g<n> --why \"...\")." if gaps else ""))
         return 0
     print("NOT approved. Delegate fixes (blockers/majors) and the checks to workers, then re-review: "
           f"lean-agent review {slug} --resume")
@@ -15760,6 +15970,12 @@ def build_parser():
     s.add_argument("-n", type=int, default=10, help="newest N entries (default 10)")
     s.add_argument("--run", metavar="RUN_ID", help="only entries that mention this run")
     s.set_defaults(fn=cmd_logs)
+
+    s = sub.add_parser("reviews", help="every review run of a branch: verdict, counts, cost, open and declined findings")
+    s.add_argument("--branch", required=True)
+    s.add_argument("--project", "-p")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_reviews)
 
     s = sub.add_parser("runs", help="recent worker runs (id, status, model, task)")
     s.add_argument("--project", "-p")
