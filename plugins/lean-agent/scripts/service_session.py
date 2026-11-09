@@ -38,6 +38,7 @@ import lean_auth
 import lean_common
 import lean_goals
 import lean_log
+import lean_own
 import lean_waiting
 import usage
 
@@ -1210,6 +1211,10 @@ class SpoolDeliverer:
 
     def tick(self):
         started = []
+        try:
+            lean_own.sweep()  # review items about the user's own PRs need no vote
+        except Exception:
+            pass
         for tid in spool_threads():
             spool_reclaim_stale(tid)
             with self.lock:
