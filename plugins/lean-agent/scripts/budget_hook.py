@@ -771,6 +771,7 @@ def prompt_hook(event):
 
 ASKING_RE = re.compile(r"\b(should I|do you want|would you like|let me know|waiting (?:for|on) you|your call|which (?:one|option) )", re.I)
 STOP_REASON = "Ask this with AskUserQuestion so it can't be missed, and add one visible sentence stating the question."
+STOP_REASON_VISIBLE = "Ask this with AskUserQuestion so it can't be missed. Your reply's text is already visible: do not repeat it."
 
 
 def turn_of(path):
@@ -945,7 +946,7 @@ def stop_hook(event):
         except Exception:
             return
     if not asked and asks_user(text):
-        print(json.dumps({"decision": "block", "reason": STOP_REASON}))
+        print(json.dumps({"decision": "block", "reason": STOP_REASON_VISIBLE if str(text or "").strip() else STOP_REASON}))
 
 
 def main():
