@@ -669,6 +669,28 @@ MEMORY_REDIRECT = ("lean-agent: this is a request to keep something (a '#' memor
                    "about one project) and tell the user in one line what you started.")
 
 
+def capture_question(prompt, session=None):
+    """Record the user's own question (no model): `a21 <question>` to its thread, or a question to the front desk itself
+    (target main). Shortcuts, jobs and requests routed to a thread are not questions to the front desk."""
+    try:
+        import lean_myq
+        text = " ".join(str(prompt or "").split())
+        am = lean_threads.ASK_RE.match(text)
+        data = lean_threads.load()
+        if am:
+            tid = lean_threads.resolve(f"t{int(am.group(1))}", data["aliases"])
+            if tid in data["threads"] and (am.group(2) or "").strip():
+                lean_myq.add(am.group(2).strip(), tid)
+            return
+        if not lean_myq.is_question(text):
+            return
+        _, _, kind = lean_threads.decide(text, data, session)
+        if kind not in ("thread", "job"):
+            lean_myq.add(text, "main")
+    except Exception:
+        pass
+
+
 def prompt_hook(event):
     """UserPromptSubmit in the orchestrator. Main session: the prompt is matched against the open threads (no model call) and
     one context line says what to do (hand it to its thread session, start a new one, or answer a status question with `now`);
@@ -698,6 +720,7 @@ def prompt_hook(event):
             elif lean_threads.is_notification(prompt):  # a background-task notification: never a new request or thread; attaches to its run's thread silently
                 lean_threads.notification_line(prompt)
             else:  # the main session is the front desk: one line saying what to do with the request
+                capture_question(prompt, event.get("session_id"))
                 lines.append(lean_threads.advise(prompt, event.get("session_id"))[1])
         except Exception:  # never break the prompt
             pass
@@ -860,6 +883,11 @@ def stop_hook(event):
         return
     text, asked = turn_of(event.get("transcript_path") or "")
     if role == "main":
+        try:
+            import lean_myq
+            lean_myq.main_reply(text)
+        except Exception:
+            pass
         try:
             import lean_waiting
             if asked:

@@ -4521,6 +4521,42 @@ class CliTest(unittest.TestCase):
         for k in ("| ? |", "| more |", "| s21 |", "| a21 <question> |", "| f21 |", "| f21 2 |", "| goals |", "| waiting |"):
             self.assertIn(k, out)
 
+    def test_myq_shortcuts_route_and_print_the_questions(self):
+        lt = self.threads_home()
+        lt.new("Parser fixes")
+        data = lt.load()
+        for text, cmd in (("q", "lean-agent myq"), ("q open", "lean-agent myq --open"), ("q t1", "lean-agent myq --thread t1"),
+                          ("q12", "lean-agent myq 12")):
+            tid, line, kind = lt.decide(text, data)
+            self.assertEqual((tid, kind), (None, "job"), text)
+            self.assertTrue(line.endswith(cmd), (text, line))
+        import lean_myq
+        a = lean_myq.add("why is the parser slow?", "t1", now=time.time() - 3600)
+        lean_myq.add("what is open?", "main")
+        lean_myq.thread_report("t1", "done", "It re-reads the file twice.")
+        out = self.cli("myq").stdout
+        self.assertIn("| # | When | To | Status | Question | Answer |", out)
+        self.assertLess(out.index("what is open?"), out.index("why is the parser slow?"))  # open first
+        self.assertIn("It re-reads the file twice.", out)
+        self.assertNotIn("why is the parser slow?", self.cli("myq", "--open").stdout)
+        self.assertNotIn("what is open?", self.cli("myq", "--thread", "t1").stdout)
+        full = self.cli("myq", "1").stdout
+        self.assertIn("why is the parser slow?", full)
+        self.assertIn("It re-reads the file twice.", full)
+        self.assertIn("done report of t1", full)
+        self.assertEqual(lean_myq.qn(a), "q1")
+        self.assertIn("q open", self.cli("shortcuts").stdout)
+
+    def test_now_short_shows_a_stale_open_question_in_needs(self):
+        lt = self.threads_home()
+        lt.new("Parser fixes")
+        import lean_myq
+        lean_myq.add("why is the parser slow?", "t1", now=time.time() - 40 * 60)
+        out = lt.short_text()
+        self.assertRegex(out, r"your question q1 unanswered \(40m\)")
+        lean_myq.thread_report("t1", "done", "Fixed.")
+        self.assertNotIn("unanswered", lt.short_text())
+
     def test_goals_done_drop_next_block_are_aliases_of_goal_and_shown_in_help_and_shortcuts(self):
         lg = self.threads_home() and __import__("lean_goals")
         ids = [lg.ensure(f"PR 90{i}", "t1") for i in range(4)]

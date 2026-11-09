@@ -508,7 +508,16 @@ def thread_info(tid, data=None):
         unstarted = None
     return {"lost": lost, "running": running, "question": bool(lean_threads.open_questions(t)), "waiting": bool(waiting),
             "closed": bool(t.get("closed")), "last": last, "runs": runs, "unstarted": unstarted,
-            "spooled": bool(lean_threads.queued_messages(tid))}
+            "spooled": bool(lean_threads.queued_messages(tid)), "myq": _stale_question(tid)}
+
+
+def _stale_question(tid):
+    """The user's open question to this thread, older than the stale limit and not nudged within it, else None."""
+    try:
+        import lean_myq
+        return lean_myq.stale(tid, nudgeable=True)
+    except Exception:
+        return None
 
 
 def settle_orphan_markers(data=None):
@@ -637,6 +646,13 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
             since_chase = now - _epoch(g.get("chased_at")) if g.get("chased_at") else float("inf")
             lost = real_lost(i.get("lost") or [], ref, i.get("runs"))
             un = i.get("unstarted")
+            mq = i.get("myq")
+            if mq and not i.get("running") and not lost and not i.get("question") and not i.get("waiting") and not i.get("closed"):
+                # deterministic: the user's unanswered question is nudged like a request that never started, no model asked
+                if i.get("spooled"):
+                    continue
+                cands.append((g, i, "myq", mq["id"], _context(g, i, "myq", mq["id"], now)))
+                continue
             if un and not i.get("running") and not lost and not i.get("question") and not i.get("waiting"):
                 # deterministic: a request that never got going is chased at once, no model asked
                 age_s = max(0, now - un["since"])
@@ -659,7 +675,7 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
             cands.append((g, i, kind, rid, _context(g, i, kind, rid, now)))
         # the cheap check: one batched helper call for the goals without a pending nudge
         decisions, cost, called, waiting_on_helper = {}, 0.0, False, False
-        todo = [c for c in cands if not c[0].get("pending_chase") and c[2] != "unstarted"]
+        todo = [c for c in cands if not c[0].get("pending_chase") and c[2] not in ("unstarted", "myq")]
         if todo and decide is not None:
             if chaser_calls_last_hour(now) < chaser_per_hour():
                 try:
@@ -681,13 +697,13 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
                 continue
             d = decisions.get(g["id"]) or {}
             action = str(d.get("action") or ("chase" if decide is None or kind == "lost" else "skip")).lower()
-            if kind == "unstarted" or (ctx.get("never_started") and action in ("skip", "defer", "")):
+            if kind in ("unstarted", "myq") or (ctx.get("never_started") and action in ("skip", "defer", "")):
                 action, d = "chase", {}  # a request that never started is never skipped
             if g.get("pending_chase"):
                 action, d = "chase", {"message": g["pending_chase"], "why": "deferred nudge"}
             why = str(d.get("why") or d.get("message") or "")[:160]
             share = cost / max(1, len(todo))
-            if called and not g.get("pending_chase") and kind != "unstarted":
+            if called and not g.get("pending_chase") and kind not in ("unstarted", "myq"):
                 log_decision(now, goal=g["id"], thread=tid, ref=ref, decision=action, why=why, cost=share, how="haiku",
                              call=(g is todo[0][0]))
             if action == "defer":  # the per-hour cap: no decision was made, ask again later
@@ -706,7 +722,10 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
                 remember("goals", g["id"], g["next"])
                 continue
             msg = str(d.get("message") or "").strip()
-            if kind == "unstarted":
+            if kind == "myq":
+                msg = f"answer the user's question q{str(rid)[1:]}: {i['myq']['text'][:300]}"
+                how = "asked to answer the user's question"
+            elif kind == "unstarted":
                 un = i["unstarted"]
                 msg = (un["text"] if un["undelivered"] and un["text"]
                        else f"You have an unstarted request {un['id']}: start it. ({un['text'][:160]})")
@@ -718,7 +737,7 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
                 msg = (msg[:240] if msg and action == "chase" else nudge_message(ref))
                 parked = not alive(tid)
                 how = "woken and asked for status" if parked else "asked for status"
-            why_s = "never started" if kind == "unstarted" else "worker lost" if kind == "lost" else ("session parked" if not alive(tid) else "quiet")
+            why_s = "unanswered question" if kind == "myq" else "never started" if kind == "unstarted" else "worker lost" if kind == "lost" else ("session parked" if not alive(tid) else "quiet")
             if kind == "quiet" and near():
                 g["pending_chase"], g["last_decision"] = msg, "defer"
                 g["decision_why"] = "plan limit near: nudge waits"
@@ -739,6 +758,12 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
                 digest.append(f"chase of {tid} ({ref}) failed: {err}")
                 g["decided_at"] = ""
                 continue
+            if kind == "myq":
+                try:
+                    import lean_myq
+                    lean_myq.mark_nudged(i["myq"]["id"], now)
+                except Exception:
+                    pass
             g["chased_at"], g["chase_count"] = _iso(now), int(g.get("chase_count") or 0) + 1
             g["last_chase_text"], g["chased_run"], g["replied_at"] = msg, rid, ""
             g["last_decision"], g["decision_why"] = "chase", why or why_s

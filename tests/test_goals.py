@@ -408,6 +408,19 @@ class NeverStartedTest(GoalsTest):
         self.assertEqual(len(self.sent), 1)
         self.assertIn("unstarted request r1: start it", self.sent[0][1])
 
+    def test_stale_user_question_is_nudged_once_without_the_model(self):
+        import lean_myq
+        self.goal()
+        e = lean_myq.add("why is the export slow?", "t21", now=T0)
+        self.info_by["t21"] = {"myq": e}
+        calls = []
+        self.assertEqual(lean_goals.watchdog(T0 + 40 * MIN, self.send, lambda t: True, self.info, lambda: False,
+                                             decide=lambda c: calls.append(c) or {}, is_paused=lambda n: False)[0][:7], "chased ")
+        self.assertEqual(calls, [])
+        self.assertEqual(self.sent, [("t21", "answer the user's question q1: why is the export slow?")])
+        self.assertGreater(lean_myq._load()[0]["nudged"], 0)
+        self.assertIsNone(lean_myq.stale("t21", T0 + 50 * MIN, nudgeable=True, minutes=30))  # nudged: not due again in the period
+
     def test_still_spooled_message_is_not_sent_twice(self):
         self.goal()
         self.info_by["t21"] = dict(self.unstarted(), spooled=True)

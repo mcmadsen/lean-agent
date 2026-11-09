@@ -332,6 +332,7 @@ being do does did done have has had it its this that these those there here we y
 can could would should will shall may might must not no yes ok okay please just also so very more most some any all
 what which who whom how why when where than too lets let get got make made use using new need want like again still
 now thanks thank hello hey hi""".split())
+MYQ_RE = re.compile(r"^q(?:\s+(open)|\s+t(\d+)|\s*(\d+))?\s*[.!]?$", re.I)  # q | q open | q t21 | q12: the user's own questions
 ASK_RE = re.compile(r"^(?:ask\s+t?|a)(\d+)(?:\s+(.*))?$", re.I | re.S)
 FILES_RE = re.compile(r"^(?:files?\s+t?|f)(\d+)(?:\s+(\d+))?$", re.I)
 SHORTCUT_RE = re.compile(r"^(?:please\s+)?(?:((?:show\s+)?more)|(?:s|summary|show)\s*t?(\d+))\s*[.!?]?$", re.I)
@@ -648,6 +649,15 @@ def decide(text, data, session=None, now=None, idx=None):
         return None, "Front desk job (shortcuts) \u2014 no thread: lean-agent shortcuts", "job"
     if low in ("goals", "waiting"):
         return None, f"Front desk job ({low}) \u2014 no thread: lean-agent {low}", "job"
+    qm = MYQ_RE.match(text)
+    if qm:
+        if qm.group(1):
+            return None, "Front desk job (my questions shortcut) \u2014 no thread: lean-agent myq --open", "job"
+        if qm.group(2):
+            return None, f"Front desk job (my questions shortcut) \u2014 no thread: lean-agent myq --thread t{int(qm.group(2))}", "job"
+        if qm.group(3):
+            return None, f"Front desk job (my questions shortcut) \u2014 no thread: lean-agent myq {int(qm.group(3))}", "job"
+        return None, "Front desk job (my questions shortcut) \u2014 no thread: lean-agent myq", "job"
     am = ASK_RE.match(text)
     if am:
         tid = resolve(f"t{int(am.group(1))}", data["aliases"])
@@ -1456,6 +1466,19 @@ def _cell(text, n):
 SHORT_UNSTARTED_HOURS = 12  # an unstarted request older than this is no longer shown as "not started"
 
 
+def _stale_myq(tid, now):
+    try:
+        import lean_myq
+        return lean_myq.stale(tid, now)
+    except Exception:
+        return None
+
+
+def _myq_label(mq, now):
+    import lean_myq
+    return lean_myq.stale_label(mq, now)
+
+
 def short_text(now=None, max_lines=SHORT_ROWS, all_=False):
     """`now --short`, the front desk's status: ONE table (Thread | What | State | Needs | Next | Show). Every thread that
     needs something (open question or permission, waiting item, report awaiting the user, blocked) comes first, most
@@ -1489,6 +1512,8 @@ def short_text(now=None, max_lines=SHORT_ROWS, all_=False):
                 w = min(wi, key=lambda i: _epoch(i.get("created") or i.get("ts")))
                 row = (0, _epoch(w.get("created") or w.get("ts")), tid, "waiting " + age(w.get("created") or w.get("ts"), now),
                        _cell(w.get("summary"), 40), WAIT_NEEDS.get(w.get("kind"), "your call"))
+            elif (mq := _stale_myq(tid, now)):
+                row = (0, float(mq.get("ts") or 0), tid, _myq_label(mq, now), _cell(mq["text"], 40), "answer it")
             elif rep and rep.get("kind") in ("needs-you", "blocked") and rep_ts >= last - 5:
                 label = "needs you" if rep["kind"] == "needs-you" else "blocked"
                 row = (0, rep_ts, tid, f"{label} {age(rep['ts'], now)}", _cell(rep["text"], 40), "your call" if label == "needs you" else "unblock it")

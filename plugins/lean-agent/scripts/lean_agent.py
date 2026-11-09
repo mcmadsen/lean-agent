@@ -13132,6 +13132,10 @@ SHORTCUTS = (
     ("a21 <question>", "send the question to t21 unchanged"),
     ("f21", "files t21 made for you, numbered"),
     ("f21 2", "show file 2 of t21 (text only, capped)"),
+    ("q", "my questions: open first, newest first, with the answers (`lean-agent myq`)"),
+    ("q12", "question 12 in full with its answer and source (a thread's own question ids are answered with `thread answer tN qN`)"),
+    ("q open", "only my unanswered questions"),
+    ("q t21", "my questions to t21"),
     ("goals", "open goals"),
     ("goals done gN", "close goal gN as done (alias of `goal done`)"),
     ("goals drop gN [--why ...]", "drop goal gN (alias of `goal drop`)"),
@@ -13150,6 +13154,21 @@ SHORTCUTS = (
     ("pr21 reply", "send t21 the task: draft replies to the open comments, post nothing until you approve"),
     ("pr21 review", "send t21 the task: review the PR's latest head, report the verdict with the vote question"),
 )
+
+
+def cmd_myq(a):
+    import lean_myq
+    args = list(a.args or [])
+    if args:
+        if getattr(a, "drop", False):
+            x = lean_myq.drop(args[0])
+            print(f"dropped {lean_myq.qn(x)}" if x else f"no open question {args[0]}")
+            return 0 if x else 1
+        print(lean_myq.show(args[0]))
+        return 0
+    thread = lean_threads.resolve(a.thread, lean_threads.load()["aliases"]) if a.thread else None
+    print(lean_myq.table(open_only=a.open, thread=thread))
+    return 0
 
 
 def cmd_shortcuts(a):
@@ -13249,6 +13268,11 @@ def thread_action(a):
         except Exception:
             pass
         service_session.save_last_report(tid, "done", text)
+        try:  # the full report answers the user's open questions to this thread (queue_report then finds none open)
+            import lean_myq
+            lean_myq.thread_report(tid, "done", text)
+        except Exception:
+            pass
         service_session.queue_report(tid, "done", service_session._short(text, tid=tid), tag="explicit", force=True)
         service_session.note_turn(tid, True, "done")
         print(f"report for {tid} queued for the front desk. End your turn.")
@@ -15619,6 +15643,13 @@ def build_parser():
 
     s = sub.add_parser("shortcuts", help="the front desk's reply shortcuts (? s21 a21 f21 more goals waiting) as a table")
     s.set_defaults(fn=cmd_shortcuts)
+
+    s = sub.add_parser("myq", help="my questions and their answers: list (open first), `N` one in full, --open, --thread tN, `N --drop`")
+    s.add_argument("args", nargs="*", help="[N]: show question N in full")
+    s.add_argument("--open", action="store_true", help="only unanswered questions")
+    s.add_argument("--thread", help="only questions to this thread (tN or main)")
+    s.add_argument("--drop", action="store_true", help="N --drop: stop tracking an open question")
+    s.set_defaults(fn=cmd_myq)
 
     s = sub.add_parser("waiting", help="what waits on the user (list), `add \"<summary>\"`, `done <id> [--answer TEXT]`; the front desk asks each with AskUserQuestion")
     s.add_argument("args", nargs="*", help="[list] | add <summary> | done <id>")

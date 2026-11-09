@@ -804,6 +804,39 @@ class BudgetTest(Base):
             self.assertEqual(lean_threads.load()["threads"]["t2"]["report"]["text"], "Fixed the retry loop.")
             self.assertEqual(sorted(lean_threads.load()["threads"]), ["t1", "t2"])
 
+    def myq_items(self):
+        p = os.path.join(self.env["LEAN_AGENT_HOME"], "my-questions.json")
+        return json.load(open(p))["items"] if os.path.exists(p) else []
+
+    def test_a_shortcut_question_is_recorded_once_and_answered_by_the_threads_next_report(self):
+        self.make_threads("Publish quarterly report through docs worker")
+        self.prompt_ctx("a1 why is the export slow?")
+        self.prompt_ctx("a1 why is the export slow?")  # a repeated hook run: still one record
+        items = self.myq_items()
+        self.assertEqual([(x["text"], x["target"], x["status"]) for x in items], [("why is the export slow?", "t1", "open")])
+        sys.path.insert(0, ROOT)
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=self.env["LEAN_AGENT_HOME"]), clear=True):
+            import lean_myq
+            lean_myq.thread_report("t1", "question", "which export?")  # a counter-question keeps it open
+            self.assertEqual(self.myq_items()[0]["status"], "open")
+            self.assertIn("asked back", self.myq_items()[0]["note"])
+            lean_myq.thread_report("t1", "done", "The export runs a full scan.")
+        x = self.myq_items()[0]
+        self.assertEqual((x["status"], x["answer"]), ("answered", "The export runs a full scan."))
+        self.assertEqual(len(self.myq_items()), 1)
+
+    def test_front_desk_question_is_recorded_and_answered_by_the_reply_and_non_questions_are_not(self):
+        self.make_threads("Publish quarterly report through docs worker")
+        main = {"LEAN_AGENT_SESSION_ROLE": "main"}
+        for text in ("please publish the report", "thanks", "?", "s1", "goals", "q", "q open"):
+            self.prompt_ctx(text, **main)
+        self.assertEqual(self.myq_items(), [])
+        self.prompt_ctx("how many threads are open?", **main)
+        self.assertEqual([(x["text"], x["target"]) for x in self.myq_items()], [("how many threads are open?", "main")])
+        self.stop_event(["Two threads are open."], **main)
+        x = self.myq_items()[0]
+        self.assertEqual((x["status"], x["answer"]), ("answered", "Two threads are open."))
+
     def stop_event(self, texts, ask=False, active=False, answer=None, question="Which?", **env):
         tr = os.path.join(self.env["LEAN_AGENT_HOME"], "stop.jsonl")
         recs = [{"type": "user", "message": {"role": "user", "content": "go"}}]

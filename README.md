@@ -467,6 +467,9 @@ Reply to the front desk with one of these on its own; its prompt hook turns it i
 | `a21 <question>` | send the question to t21 unchanged (`ask t21 <question>`); `a21` alone asks what to ask |
 | `f21` | the files t21 made for you, numbered, with size, time and kind; missing ones are marked `(gone)` |
 | `f21 2` | file 2's content (Markdown/text only, about 200 lines / 12k chars; a binary file is refused with its path) |
+| `q` | `lean-agent myq`: your questions (`a21 ...` to a thread, or asked at the front desk), open first, newest first, with the answer in one line |
+| `q12` | `lean-agent myq 12`: question 12 in full with its answer and source (bare `q12` is your question; a thread's own question is answered with `thread answer tN qN`) |
+| `q open` / `q t21` | `lean-agent myq --open` (unanswered only) / `--thread t21` (questions to t21) |
 | `goals` | `lean-agent goals` |
 | `waiting` | `lean-agent waiting` |
 | `pr21` | `lean-agent pr t21`: PR status of t21 (known state, then live state; PR numbers are links) |
@@ -475,6 +478,8 @@ Reply to the front desk with one of these on its own; its prompt hook turns it i
 | `pr stale [days]` | your own open PRs with no activity for N days (default 3) |
 | `pr find <text>` | open PRs by author, reviewer, title, branch or work item id, with the owning thread |
 | `pr21 fix` / `pr21 reply` / `pr21 review` | sent to t21 as a request with a fixed text: fix the open comments with a worker and report once; draft replies and post nothing until you approve; review the latest head and report the verdict with the vote question |
+
+Your questions are recorded without a model in `<home>/my-questions.json`: an `a21 <question>` is stored once with target t21 and answered by t21's next report (`done`, `needs-you`; a counter-question via `thread ask` keeps it open); a short question to the front desk itself (ends with `?` or starts with how/why/what/...) is stored with target main and answered by its reply. A thread's open question older than `myq-stale-minutes` (config key, default 30) shows as `your question q12 unanswered (40m)` in the status table's Needs, and the goals watchdog nudges the thread once per period with `answer the user's question q12: ...` (no model).
 
 Files are recorded when lean-agent writes them for you (handovers and their `--out` copies, `doc write`, `feedback export`) in `<home>/files.json`; older handovers of a thread are found from `handovers.json`.
 
