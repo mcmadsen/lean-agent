@@ -883,6 +883,16 @@ class BudgetTest(Base):
         self.assertIsNone(self.stop_event(["Should I squash the branch first?"], LEAN_AGENT_SESSION_ROLE="thread"))
         self.assertIsNone(self.stop_event(["Routed to t3."]))
 
+    def test_stop_hook_table_only_reply_counts_as_visible_text_and_never_asks_for_a_sentence(self):
+        table = "| Thread | State |\n|---|---|\n| t3 | idle |\n\nShould I close t3?"
+        out = self.stop_event([table])
+        self.assertEqual(out["decision"], "block")
+        self.assertNotIn("visible sentence", out["reason"])
+        main = {"LEAN_AGENT_SESSION_ROLE": "main"}
+        self.assertIsNone(self.stop_event(["| Thread | State |\n|---|---|\n| t3 | idle |"], **main))  # not silent
+        out = self.stop_event([""])
+        self.assertIn("visible sentence", out["reason"]) if out else None
+
     def test_stop_hook_front_desk_turn_ending_without_text_is_sent_back_once_to_answer_visibly(self):
         main = {"LEAN_AGENT_SESSION_ROLE": "main"}
         out = self.stop_event(["Checking.", ""], **main)  # text earlier in the turn, an empty final message

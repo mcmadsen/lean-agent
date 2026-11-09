@@ -6114,10 +6114,65 @@ class CliTest(unittest.TestCase):
         self.assertLess(len(d), 2000)
         self.assertTrue(all(len(l) <= 700 for l in d.splitlines()))
         self.assertIn("[t5 done] Finished the work.", d)
-        self.assertIn("thread reports t5 rabc123", d)
+        self.assertIn("thread reports t6 rabc123", d)  # newest thread first
         many = [{"thread": "t%d" % n, "kind": "done", "text": "y" * 230} for n in range(1, 30)]
         self.assertLess(len(ss.reports_digest(many, 0, "abc123")), 2600)
-        self.assertIn("more report(s)", ss.reports_digest(many, 0, "abc123"))
+        self.assertIn("more:", ss.reports_digest(many, 0, "abc123"))
+
+    def test_replayed_report_is_not_resent_and_the_same_report_by_two_paths_is_queued_once(self):
+        self.threads_home()
+        import service_session as ss
+        self.assertTrue(ss.queue_report("t5", "done", "Fixed the parser. Tests pass.", tag="explicit", force=True))
+        self.assertFalse(ss.queue_report("t5", "done", "Fixed the parser.  Tests pass.", tag="auto"))  # second path, same content
+        items, _ = ss.take_reports()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(ss.take_reports()[0], items)  # taking does not mark it relayed
+        ss.mark_relayed(items)
+        ss.drop_reports(items)
+        self.assertFalse(ss.queue_report("t5", "done", "Fixed the parser. Tests pass.", force=True))  # redelivery
+        ss.queue_report("t5", "done", "Fixed the parser. Tests pass.", force=True)
+        old = dict(items[0], id=ss.report_seq(items[0]) - 5, text="Older result.")
+        ss.lean_common.write_json_atomic(ss.reports_path(), {"items": [old]})
+        self.assertEqual(ss.take_reports()[0], [])  # older than the last relayed id of the thread
+        self.assertEqual(ss.queued_reports(), [])
+        self.assertTrue(ss.queue_report("t5", "done", "A new result.", force=True))
+        self.assertEqual([i["text"] for i in ss.take_reports()[0]], ["A new result."])
+
+    def test_a_helper_run_report_never_reaches_the_digest_even_with_an_old_thread_tag(self):
+        self.threads_home()
+        import service_session as ss
+        os.makedirs(ss.lean_home(), exist_ok=True)
+        with open(ss.lean_home("ledger.jsonl"), "a") as fh:
+            fh.write(json.dumps({"id": "gw1helper0", "thread": "t1", "role": "chaser", "status": "done", "ts": "2026-11-09T10:00:00"}) + "\n")
+        ss.queue_report("t1", "done", "run gw1helper0: done \u00b7 Goals checked. (details: lean-agent runs --show gw1helper0)", force=True)
+        self.assertEqual(ss.take_reports()[0], [])
+
+    def test_digest_cuts_at_a_sentence_boundary_keeping_the_first_sentence(self):
+        import service_session as ss
+        text = "Merged the fix. " + "Second sentence with more words. " * 20
+        cut = ss.sentence_cut(text, 100)
+        self.assertTrue(cut.endswith("."), cut)
+        self.assertTrue(cut.startswith("Merged the fix."))
+        self.assertLessEqual(len(cut), 100)
+        long_first = "word " * 100 + "end."
+        cut = ss.sentence_cut(long_first, 60)
+        self.assertTrue(cut.endswith("\u2026"))
+        self.assertLessEqual(len(cut), 60)
+        self.assertEqual(ss.sentence_cut("Short one.", 60), "Short one.")
+
+    def test_digest_lists_newest_threads_first_and_names_the_threads_in_the_more_line(self):
+        import service_session as ss
+        items = [{"thread": "t%d" % n, "kind": "done", "text": "Result %d. " % n + "x" * 280} for n in range(1, 21)]
+        d = ss.reports_digest(items, 0, "abc123")
+        lines = d.splitlines()
+        self.assertTrue(lines[1].startswith("[t20 done]"))
+        more = next(l for l in lines if "more:" in l)
+        self.assertIn("t1 ", more + " ")
+        self.assertNotIn("t20", more)
+        self.assertIn("lean-agent thread reports", more)
+        shown = [l.split()[0][1:] for l in lines if l.startswith("[t")]
+        self.assertEqual(len(shown) + len(more.split("more:")[1].split("\u2192")[0].split()), 20)
+
 
     def test_staged_digest_is_hidden_context_and_full_text_is_kept_for_thread_reports(self):
         self.threads_home()
@@ -7205,7 +7260,9 @@ class CliTest(unittest.TestCase):
         clock[0] += 31
         reps["main"].tick()
         self.assertEqual(len(hosts["main"].pasted), 1)
-        self.assertEqual(ss.take_pending(hosts["main"].pasted[0]).count("[t1 done]"), 2)  # one message, one line each
+        digest = ss.take_pending(hosts["main"].pasted[0])
+        self.assertEqual(digest.count("[t1 done]"), 1)  # one message, one line per thread: the newest report
+        self.assertIn("Second done.", digest)
         os.environ["LEAN_AGENT_THREAD_REPORTS"] = "questions-only"
         run_turn("t1", "Third done.")
         reps["t1"].tick()

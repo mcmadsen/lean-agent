@@ -1329,6 +1329,53 @@ def report_auth_failure(source, is_structured=False):
     return False
 
 
+def report_key(tid, kind, text):
+    """Identity of a report's content: the same text of the same thread is the same report, whatever path it came by."""
+    return hashlib.sha1(f"{tid}|{kind}|{' '.join(str(text or '').split())}".encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def report_seq(item):
+    """A queued report's sequence number (its id; older items without one use their time)."""
+    try:
+        return int(item.get("id") or float(item.get("ts") or 0) * 1000)
+    except (TypeError, ValueError):
+        return 0
+
+
+def relayed_path():
+    return lean_home("reports-relayed.json")
+
+
+def relayed_seq(tid):
+    """The id of the last report of thread `tid` that was delivered to main (0 if none)."""
+    try:
+        return int((_load(relayed_path()).get(tid) or {}).get("id") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
+def relayed_keys(tid):
+    keys = (_load(relayed_path()).get(tid) or {}).get("keys")
+    return keys if isinstance(keys, list) else []
+
+
+def mark_relayed(items):
+    """Remember per thread the last report id (and recent contents) delivered to main; written when the digest is
+    delivered, so an older or already relayed report is never sent again."""
+    os.makedirs(lean_home(), exist_ok=True)
+    with lean_common.file_lock(relayed_path()):
+        data = _load(relayed_path())
+        for i in items:
+            t = i.get("thread")
+            if not t:
+                continue
+            rec = data.get(t) if isinstance(data.get(t), dict) else {}
+            keys = [k for k in rec.get("keys") or [] if isinstance(k, str)]
+            keys = (keys + [report_key(t, i.get("kind"), i.get("text"))])[-20:]
+            data[t] = {"id": max(int(rec.get("id") or 0), report_seq(i)), "keys": keys, "ts": time.time()}
+        lean_common.write_json_atomic(relayed_path(), data)
+
+
 def queue_report(tid, kind, text, tag="", force=False, waiting=True):
     """Queue one thread report (kind: done | blocked | needs-you | question) for the main session; the mode filters it,
     except an explicit question (`thread ask`) or an explicit report (`thread report`, force), which always go through.
@@ -1352,7 +1399,11 @@ def queue_report(tid, kind, text, tag="", force=False, waiting=True):
     with lean_common.file_lock(reports_path()):
         data = _load(reports_path())
         items = data.get("items") if isinstance(data.get("items"), list) else []
-        items.append(dict({"thread": tid, "kind": kind, "text": text, "ts": time.time()}, **({"tag": tag} if tag else {})))
+        key = report_key(tid, kind, text)
+        if any(report_key(i.get("thread"), i.get("kind"), i.get("text")) == key for i in items) or key in relayed_keys(tid):
+            return False  # the same report arriving by a second path (reporter, fallback, wake-up, redelivery): once
+        seq = max([report_seq(i) for i in items] + [relayed_seq(tid), int(time.time() * 1000) - 1]) + 1
+        items.append(dict({"thread": tid, "kind": kind, "text": text, "ts": time.time(), "id": seq}, **({"tag": tag} if tag else {})))
         lean_common.write_json_atomic(reports_path(), {"items": items[-50:]})
     if waiting and kind in ("question", "needs-you"):
         try:  # waiting on the user is recorded by lean-agent, not left to the front desk's memory
@@ -1515,16 +1566,47 @@ def queued_reports():
     return items if isinstance(items, list) else []
 
 
+def _internal_run_text(text):
+    """True when a report is the automatic line of a run that was a helper's (chaser, advisor, ...), whatever its tag."""
+    m = re.match(r"run (\S+?)(?::| )", str(text or ""))
+    if not m:
+        return False
+    try:
+        with open(lean_home("ledger.jsonl"), errors="replace") as fh:
+            lines = fh.readlines()[-400:]
+    except OSError:
+        return False
+    for line in reversed(lines):
+        if m.group(1) in line:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if r.get("id") == m.group(1):
+                return r.get("role") in lean_common.INTERNAL_ROLES
+    return False
+
+
 def take_reports(now=None):
     """(items, dropped): the queued reports to deliver, none removed yet (see drop_reports). Reports older than
-    REPORT_MAX_AGE are discarded here and counted in `dropped`."""
+    REPORT_MAX_AGE are discarded here and counted in `dropped`; helper-run reports, reports not newer than the
+    thread's last relayed one and duplicates are discarded silently."""
     now = time.time() if now is None else now
     with lean_common.file_lock(reports_path()):
         items = queued_reports()
-        fresh = [i for i in items if now - (i.get("ts") or now) <= REPORT_MAX_AGE]
+        aged = [i for i in items if now - (i.get("ts") or now) <= REPORT_MAX_AGE]
+        fresh, seen = [], set()
+        for i in aged:
+            t = i.get("thread")
+            k = report_key(t, i.get("kind"), i.get("text"))
+            if k in seen or k in relayed_keys(t) or (report_seq(i) <= relayed_seq(t) and i.get("kind") != "chase") \
+                    or (i.get("kind") in ("done", "blocked") and _internal_run_text(i.get("text"))):
+                continue
+            seen.add(k)
+            fresh.append(i)
         if len(fresh) != len(items):
             lean_common.write_json_atomic(reports_path(), {"items": fresh})
-    return fresh, len(items) - len(fresh)
+    return fresh, len(items) - len(aged)
 
 
 def drop_reports(taken):
@@ -1556,29 +1638,55 @@ def reports_message(items, dropped=0):
         f"details: lean-agent thread show {tids[0]}{more}", "</thread-reports>"])
 
 
-DIGEST_CHARS = 240      # a plain report's digest in the hidden context (a question keeps up to DIGEST_Q_CHARS)
+DIGEST_CHARS = 300      # a plain report's digest in the hidden context (a question keeps up to DIGEST_Q_CHARS)
 DIGEST_Q_CHARS = 600
 DIGEST_TURN_CHARS = 2000
 
 
+def sentence_cut(text, n):
+    """`text` on one line, at most `n` chars: cut after the last whole sentence that fits (the first sentence is kept);
+    if the first sentence alone is too long, cut at a word and add an ellipsis."""
+    text = " ".join(str(text or "").replace("`", "").replace("*", "").split())
+    if len(text) <= n:
+        return text
+    ends = [m.end() for m in re.finditer(r"[.!?](?=\s|$)", text[:n + 1])]
+    ends = [e for e in ends if e <= n]
+    if ends:
+        return text[:ends[-1]].rstrip()
+    cut = text[:n - 1]
+    if text[n - 1:n].strip():
+        cut = cut.rsplit(" ", 1)[0] if " " in cut else cut
+    return cut.rstrip(" ,;:") + "\u2026"
+
+
 def reports_digest(items, dropped=0, rid=""):
-    """The hidden context for a batch of reports: one short line per report with the batch id, questions whole up to
-    DIGEST_Q_CHARS, 2k in all. The full text stays in the log: `lean-agent thread reports tN [rId]`."""
-    lines, used = [], 0
-    for n, i in enumerate(items):
+    """The hidden context for a batch of reports: one line per thread (its newest report, a question if it has one),
+    newest thread first, each cut at a sentence end, 2k in all; threads that do not fit are named in a `+N more` line.
+    The full text stays in the log: `lean-agent thread reports tN [rId]`."""
+    latest = {}
+    for pos, i in enumerate(items):  # queue order is age: a later item is newer
+        t = i["thread"]
         ask = i["kind"] in ("question", "needs-you")
-        line = f"[{i['thread']} {i['kind']}] {REPORT_LABELS.get(i['kind'], '')}" + _short(i["text"], DIGEST_Q_CHARS if ask else DIGEST_CHARS)
+        cur = latest.get(t)
+        if cur is None or (ask and not cur[2]) or (ask == cur[2] and pos > cur[0]):
+            latest[t] = (pos, i, ask)
+    order = sorted(latest.items(), key=lambda kv: -max(pos for pos, i in enumerate(items) if i["thread"] == kv[0]))
+    lines, used, shown = [], 0, []
+    for n, (t, (_, i, ask)) in enumerate(order):
+        line = f"[{t} {i['kind']}] {REPORT_LABELS.get(i['kind'], '')}" + sentence_cut(i["text"], DIGEST_Q_CHARS if ask else DIGEST_CHARS)
         if used + len(line) > DIGEST_TURN_CHARS and lines:
-            lines.append(f"(+{len(items) - n} more report(s): `lean-agent thread reports`)")
+            rest = [x for x, _ in order[n:]]
+            lines.append(f"(+{len(rest)} more: {' '.join(rest)} \u2192 lean-agent thread reports)")
             break
         lines.append(line)
         used += len(line)
+        shown.append(t)
     if dropped:
         lines.append(f"({dropped} older report(s) dropped: over {REPORT_MAX_AGE // 3600} h old)")
     asking = sorted({i["thread"] for i in items if i["kind"] in ("question", "needs-you")})
     if asking:
         lines.append(ASK_LINE.format(cmd=f'lean-agent thread answer {asking[0]} qN "<answer>"', tids=", ".join(asking)))
-    tids = list(dict.fromkeys(i["thread"] for i in items if i["kind"] not in ("job-failed", "chase")))
+    tids = [t for t, _ in order if latest[t][1]["kind"] not in ("job-failed", "chase")]
     if tids:
         lines.append(f"Relay these digests, do not paste reports. Full text only when needed: lean-agent thread reports {tids[0]}"
                      + (f" r{rid}" if rid else ""))
@@ -2140,6 +2248,7 @@ class Reporter(AutoClear):
                 except OSError:
                     pass
                 return
+            mark_relayed(items)
             drop_reports(items)
             self.log(f"{len(items)} thread report(s) typed into the main session" + (f" ({dropped} stale dropped)" if dropped else ""))
         elif dropped:
