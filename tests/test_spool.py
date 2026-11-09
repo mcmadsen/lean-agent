@@ -195,6 +195,41 @@ class SpoolTest(unittest.TestCase):
         self.assertEqual(ss.spool_pending(self.tid), [])
 
 
+class QuestionPushTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.env = mock.patch.dict(os.environ, {**clean_environ(), "LEAN_AGENT_HOME": self.tmp}, clear=True)
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.tid = lean_threads.new("work")
+
+    def test_question_is_queued_at_once_with_the_ask_line_and_answer_command(self):
+        qid, merged = lean_agent.ask_main(self.tid, "Pick a or b?", "a|b")
+        self.assertEqual((qid, merged), ("q1", False))
+        items = ss.queued_reports()
+        self.assertEqual([(i["thread"], i["kind"]) for i in items], [(self.tid, "question")])
+        for text in (ss.reports_message(items), ss.reports_digest(items)):
+            self.assertIn("AskUserQuestion", text)
+            self.assertIn(f'lean-agent thread answer {self.tid} qN "<answer>"', text)
+
+    def test_repush_once_after_two_minutes_when_still_unanswered(self):
+        lean_agent.ask_main(self.tid, "Pick a or b?")
+        now = time.time()
+        self.assertEqual(ss.repush_questions(now + 60), [])
+        self.assertEqual(ss.repush_questions(now + 130), [self.tid])
+        self.assertEqual(ss.repush_questions(now + 400), [])
+        items = ss.queued_reports()
+        self.assertEqual(len(items), 2)
+        self.assertIn("pushed again", items[1]["text"])
+
+    def test_answered_question_is_not_repushed(self):
+        lean_agent.ask_main(self.tid, "Pick a or b?")
+        import lean_waiting
+        for i in lean_waiting.open_items():
+            lean_waiting.done(i["id"], "a")
+        self.assertEqual(ss.repush_questions(time.time() + 500), [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

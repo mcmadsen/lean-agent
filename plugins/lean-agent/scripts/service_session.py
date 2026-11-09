@@ -1370,6 +1370,33 @@ def queue_report(tid, kind, text, tag="", force=False, waiting=True):
     return True
 
 
+def repush_questions(now=None, after=None):
+    """Thread questions still open `after` seconds (REPUSH_AFTER) after they were recorded and never shown to the user
+    (waiting item not asked, not answered) go to main once more; each only once. Returns the thread ids re-pushed."""
+    import lean_threads
+    now = time.time() if now is None else now
+    after = REPUSH_AFTER if after is None else after
+    done = []
+    for w in lean_waiting.open_items():
+        tid, qid = w.get("thread"), w.get("qid")
+        if w.get("kind") != "question" or not tid or not qid or w.get("asked_at") or w.get("repushed"):
+            continue
+        try:
+            age_s = now - datetime.datetime.fromisoformat(str(w.get("created"))).timestamp()
+        except ValueError:
+            continue
+        if age_s < after:
+            continue
+        t = lean_threads.load()["threads"].get(tid) or {}
+        q = next((q for q in lean_threads.open_questions(t) if q.get("id") == qid), None)
+        if q is None:
+            continue
+        lean_waiting.mark_repushed(w["id"])
+        queue_report(tid, "question", f"QUESTION {qid} (still unanswered, pushed again): {q['text']}", tag="repush", waiting=False)
+        done.append(tid)
+    return done
+
+
 def reported_path():
     return lean_home("thread-reported.json")
 
@@ -1507,6 +1534,9 @@ def drop_reports(taken):
         lean_common.write_json_atomic(reports_path(), {"items": left})
 
 
+ASK_LINE = ("NEEDS THE USER ({tids}): ask each question NOW with AskUserQuestion (its options), then run the answer with "
+            "`{cmd}`. Do not answer for the user; never leave it waiting.")
+REPUSH_AFTER = 120  # seconds a thread question may stay unanswered before it is pushed to main once more
 REPORT_LABELS = {"needs-you": "QUESTION: ", "blocked": "STUCK: ", "job-failed": "FAILED: ", "chase": "CHASED: "}
 
 
@@ -1516,8 +1546,7 @@ def reports_message(items, dropped=0):
         lines.append(f"({dropped} older report(s) dropped: over {REPORT_MAX_AGE // 3600} h old)")
     asking = sorted({i["thread"] for i in items if i["kind"] in ("question", "needs-you")})
     if asking:
-        lines.append(f"questions from {', '.join(asking)}: answer them (or ask the user, naming the thread) with "
-                     f'lean-agent thread answer {asking[0]} [qN] "<answer>"')
+        lines.append(ASK_LINE.format(cmd=f'lean-agent thread answer {asking[0]} qN "<answer>"', tids=", ".join(asking)))
     tids = list(dict.fromkeys(i["thread"] for i in items if i["kind"] not in ("job-failed", "chase")))
     if not tids:
         return "\n".join(["<thread-reports>"] + lines + ["</thread-reports>"])
@@ -1548,7 +1577,7 @@ def reports_digest(items, dropped=0, rid=""):
         lines.append(f"({dropped} older report(s) dropped: over {REPORT_MAX_AGE // 3600} h old)")
     asking = sorted({i["thread"] for i in items if i["kind"] in ("question", "needs-you")})
     if asking:
-        lines.append(f'questions: answer them (or ask the user) with lean-agent thread answer {asking[0]} [qN] "<answer>"')
+        lines.append(ASK_LINE.format(cmd=f'lean-agent thread answer {asking[0]} qN "<answer>"', tids=", ".join(asking)))
     tids = list(dict.fromkeys(i["thread"] for i in items if i["kind"] not in ("job-failed", "chase")))
     if tids:
         lines.append(f"Relay these digests, do not paste reports. Full text only when needed: lean-agent thread reports {tids[0]}"
@@ -2067,6 +2096,11 @@ class Reporter(AutoClear):
                 pass
             self.log(f"{len(items)} queued report(s) undelivered for {round(limit / 60)}m: redelivering", "warn")
             lean_log.log("warn", "stuck", f"main: {len(items)} queued report(s) undelivered for {round(limit / 60)}m, redelivering")
+        try:
+            repush_questions(self.now())
+        except Exception as exc:  # noqa: BLE001 - the report queue must keep going
+            self.log(f"question re-push failed: {exc}", "error")
+        items = queued_reports()
         if os.path.exists(pending_path()):
             return self.fallback_pending()
         if not items or not self.host.alive():
@@ -2074,8 +2108,9 @@ class Reporter(AutoClear):
         if clear_pending("main") or main_fresh_pending(self):
             return  # a queued clear goes first: the reports reach the fresh session after it
         now = self.now()
-        if now - min(i.get("ts") or now for i in items) < _knob("LEAN_AGENT_REPORT_BATCH", REPORT_BATCH):
-            return
+        if not any(i["kind"] in ("question", "needs-you") for i in items) \
+                and now - min(i.get("ts") or now for i in items) < _knob("LEAN_AGENT_REPORT_BATCH", REPORT_BATCH):
+            return  # (a question that needs the user is never held for the batch window)
         quiet = now - getattr(self.host, "last_output", 0)
         if self.record().get("session_id") != info("main").get("session_id") and quiet < 10:
             return  # a replaced session whose start the hook has not recorded yet

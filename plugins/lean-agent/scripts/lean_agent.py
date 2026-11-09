@@ -6429,8 +6429,18 @@ def review_main(a):
     a._estimate = (cost, "scaled-review" if "price ratio" in how else "history-review")
     if (any(m in model for m in ("opus", "fable")) and not getattr(a, "yes", False)
             and why_model not in ("--reviewer-model", "LEAN_AGENT_REVIEW_MODEL", "config review-model")):
-        gate(f"this review would use {model} (~${cost:.2f}, {why_model}) — rerun with --yes to accept or "
-             "--reviewer-model sonnet", 2)
+        limit = approve_usd()
+        if cost <= limit:  # the user asked for the review; cost under the limit is decided by rule, not asked
+            print(f"review: {model}, est {cost:.1f} USD, auto-approved (limit {limit:g} USD)", flush=True)
+        else:
+            tid = caller_thread()
+            msg = (f"this review would use {model} (~${cost:.2f}, over the {limit:g} USD auto-approve limit; {why_model})")
+            if tid:
+                qid, _ = ask_main(tid, f"Run the review on {model}, est {cost:.1f} USD (over the {limit:g} USD limit)?",
+                                  f"Yes, run on {model}|No, use sonnet")
+                gate(f"{msg} - asked main ({qid}); end your turn, the answer arrives as your next turn: yes -> rerun with --yes, "
+                     "no -> --reviewer-model sonnet", 2)
+            gate(f"{msg} - rerun with --yes to accept or --reviewer-model sonnet (raise the limit: lean-agent config approve-usd N)", 2)
     risk = high_risk(path, [merge_base, sha] if mode == "ref" else [merge_base], names)
     if risk and usage.model_rate(model) <= 1:
         strong = os.environ.get("LEAN_AGENT_STRONG_REVIEW_MODEL") or "opus"
@@ -11618,6 +11628,22 @@ def cmd_config(a):
         print(f"review-model: {config_json().get('review_model') or 'auto'} · auto picks sonnet for re-reviews, docs/test-only "
               "and small diffs, opus for large or security-sensitive first reviews; --reviewer-model overrides")
         return 0
+    if a.name == "approve-usd":
+        if a.value is not None:
+            cfg = config_json()
+            if a.value.lower() == "default":
+                cfg.pop("approve_usd", None)
+            else:
+                try:
+                    if float(a.value) < 0:
+                        raise ValueError
+                except ValueError:
+                    die("approve-usd takes a number of USD (0 or more) or `default`")
+                cfg["approve_usd"] = float(a.value)
+            save_json(home("config.json"), cfg)
+        print(f"approve-usd: {approve_usd():g} USD per run \u00b7 a review or run the user asked for is approved without asking up to this "
+              "estimate; above it a question reaches the user (default 5)")
+        return 0
     if a.name == "run-timeout":
         if a.value is not None:
             if a.value.lower() != "default":
@@ -12841,6 +12867,35 @@ def launching_threads():
     return out
 
 
+APPROVE_USD_DEFAULT = 5.0
+
+
+def approve_usd():
+    """The per-run cost lean-agent approves by itself (config approve-usd, default 5 USD); above it the user is asked."""
+    try:
+        v = float(config_json().get("approve_usd"))
+        return v if v >= 0 else APPROVE_USD_DEFAULT
+    except (TypeError, ValueError):
+        return APPROVE_USD_DEFAULT
+
+
+def ask_main(tid, text, options=None):
+    """A thread's question for the user: recorded as open, pushed to main at once (the report carries the exact answer
+    command and tells the front desk to ask it with AskUserQuestion). Returns (qid, merged)."""
+    info = {}
+    qid = lean_threads.ask(tid, text, options, info)
+    text = " ".join(str(text).split())[:lean_threads.QUESTION_CHARS]
+    if info.get("merged"):
+        try:
+            lean_waiting.add(text, "question", None, tid, qid=qid)
+        except Exception:
+            pass
+        return qid, True
+    opts = [o.strip() for o in str(options or "").split("|") if o.strip()]
+    service_session.queue_report(tid, "question", f"QUESTION {qid}: {text}" + (f" [options: {' | '.join(opts)}]" if opts else ""))
+    return qid, False
+
+
 def caller_thread():
     """The thread session this command runs inside, else None (the main session). Decided by the session's identity
     (the role `up` gives it), never by the thread tag of the request being worked on."""
@@ -13270,7 +13325,7 @@ def thread_action(a):
         for x in sessions:
             runs = thread_live_runs(x["thread"])
             qs = lean_threads.open_questions(lean_threads.load()["threads"].get(x["thread"]) or {})
-            extra = ("".join(f'  waiting on main: {q["id"]} "{lean_threads.one_line(q["text"], 60)}" {lean_threads.age(q.get("ts"))}' for q in qs)
+            extra = ("".join(f'  waiting on you: {q["id"]} "{lean_threads.one_line(q["text"], 60)}" {lean_threads.age(q.get("ts"))}' for q in qs)
                      + (f"  {len(runs)} running (first {runs[0][0]})" if runs else "") + ("  mid-turn" if service_session.mid_turn(x["thread"]) else "")
                      + (f"  {lean_threads.queued_note(x['thread'])}" if lean_threads.queued_messages(x["thread"]) else "")
                      + (f'  {x["thread"]}: {st}' if (st := service_session.session_rec(x["thread"]).get("stuck")) else ""))
@@ -13311,22 +13366,14 @@ def thread_action(a):
             die("thread ask works only inside a thread session (main asks the user directly)")
         if len(a.args) != 1:
             die('usage: lean-agent thread ask "<question>" [--options "a|b|c"]')
-        merged = {}
         try:
-            qid = lean_threads.ask(tid, a.args[0], getattr(a, "options", None), merged)
+            qid, merged = ask_main(tid, a.args[0], getattr(a, "options", None))
         except ValueError as exc:
             die(str(exc))
-        if merged.get("merged"):  # the same question is already open: counted, not reported again
-            try:
-                lean_waiting.add(" ".join(a.args[0].split())[:lean_threads.QUESTION_CHARS], "question", None, tid, qid=qid)
-            except Exception:
-                pass
-            print(f"{tid} is already waiting on main with this question ({qid}); not reported again. End your turn now.")
+        if merged:  # the same question is already open: counted, not reported again
+            print(f"{tid} is already waiting on you with this question ({qid}); not reported again. End your turn now.")
             return 0
-        opts = [o.strip() for o in str(getattr(a, "options", None) or "").split("|") if o.strip()]
-        text = " ".join(a.args[0].split())[:lean_threads.QUESTION_CHARS]
-        service_session.queue_report(tid, "question", f"QUESTION {qid}: {text}" + (f" [options: {' | '.join(opts)}]" if opts else ""))
-        print(f"{tid} is waiting on main ({qid}). End your turn now and do not ask the user: main's answer arrives as your next turn.")
+        print(f"{tid} is waiting on you ({qid}), pushed to main now. End your turn now and do not ask the user: the answer arrives as your next turn.")
         return 0
     if act == "report":
         tid = caller_thread()
@@ -15183,9 +15230,9 @@ def build_parser():
 
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "allow-edit-outside <dir>|clear (extra dirs, besides ~/Downloads, where --allow-edit may name an explicit file outside the worktree), allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
-                       "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), max-thread-sessions N (thread sessions the service runs; default 20), session-idle-stop DUR|off|default (the service stops a thread session idle that long; the thread stays open; default 3h), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-vote-own on|off (ask vote or post for reviews of your own PRs too; default off), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
+                       "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), max-thread-sessions N (thread sessions the service runs; default 20), session-idle-stop DUR|off|default (the service stops a thread session idle that long; the thread stays open; default 3h), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-vote-own on|off (ask vote or post for reviews of your own PRs too; default off), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model>|default (default auto: by risk), approve-usd N|default (cost approved by itself per run; default 5 USD, above it the user is asked), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
     s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions", "session-idle-stop", "session-stuck",
-                                           "review-max-rerounds", "review-vote-own", "review-skip", "review-model", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
+                                           "review-max-rerounds", "review-vote-own", "review-skip", "review-model", "approve-usd", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)
