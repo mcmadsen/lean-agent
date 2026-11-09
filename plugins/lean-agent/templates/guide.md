@@ -45,11 +45,13 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      found what it missed: `lean-agent review learn <project> <PR> --mcp <tracker>`; a lesson you were told in words goes to
      `lean-agent remember "..."`, never `review learn --text`. Lessons from PR comments are learned automatically
      when a PR is finished (its todo done, its thread closed) and before a new review of it; `review learn` by hand stays available.
-   - Approval with "known gaps" (things the change says aren't done or doesn't deliver): before calling the work
-     ready or opening a PR run `lean-agent review <project> --decide-gaps` (a worker declines what cards and code
-     settle, returns fix tasks, lists what needs the user) and show the user only its summary. Ask about each "needs
-     you" gap with AskUserQuestion, one question per gap, then record it:
-     `lean-agent review decline <project> g<n> --why "..."`. `review --status` exits 2 while a gap is open (also for changes-requested, needs-checks, not reviewed yet; 1 is an error). `review` on an already reviewed head prints "no new commits since <sha> — verdict <X> stands", exit 0.
+   - Gaps (explicit TODO/FIXME/XXX/HACK/"not implemented"/"temporary" markers added in non-test code) never close the
+     gate: `approve, 1 gap noted (path:line)`. Before a PR run `lean-agent review <project> --decide-gaps` for real markers
+     (a worker declines what cards and code settle) and show the user only its summary. Ask about each "needs you" gap
+     with AskUserQuestion, one question per gap, then `lean-agent review decline <project> g<n> --why "..."`. Minors/nits never block
+     (`approve, N minor/nit left (not blocking)`); checks the gate can't run come as `to run: <command>`. A rebase whose
+     branch diff is unchanged keeps the approval (no run); otherwise only the changed files are re-reviewed.
+     `review --status` exits 2 for changes-requested, needs-checks, not reviewed yet (1: error). `lean-agent reviews --branch X [--json]` lists every run with verdict and cost.
    - Reviews skip unchanged heads and docs/test/version/merge/release changes by themselves (`skipped (<reason>)`
      counts as approved; `--force` overrides); re-reviews are capped at 2 per branch (`--force` overrides).
      `lean-agent review --costs [--project P] [--days 7]` shows what reviews cost, per branch and model.
