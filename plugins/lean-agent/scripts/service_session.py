@@ -1408,6 +1408,8 @@ def finished_thread_runs(now=None):
             continue
         tag = str(r.get("thread") or "").strip().lstrip("#").lower()
         tag = "t" + tag if tag.isdigit() else tag
+        if r.get("role") in lean_common.INTERNAL_ROLES:
+            continue
         if not tag or r.get("status") not in FINISHED or not r.get("id"):
             continue
         try:

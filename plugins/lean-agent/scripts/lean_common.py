@@ -221,6 +221,9 @@ def lock_holder(path):
         return ""
 
 
+INTERNAL_ROLES = ("librarian", "advisor", "composer", "gap-decider", "chaser", "tracker-discover", "review-learn", "reuse-check", "pr-status")  # helper runs: never a thread's work
+
+
 def lock_age(path):
     """Seconds since the lock file was written (when its holder took it), or 0."""
     try:
@@ -327,10 +330,13 @@ def flock_waiting(fh, mode, what, path, timeout=None, every=None):
             except OSError:
                 fh2.close()
         long_held = bool(holder) and lock_age(path) > lock_max_hold(path)
+        age = lock_age(path)
+        cmd = pid_command(holder) if holder else ""
+        held_for = f" for {age // 60}m{age % 60:02d}s" if age >= 60 else f" for {age}s" if age else ""
         text = (lock_busy_text(what, path, holder).replace("; try again or lean-agent doctor", "")
-                if long_held else f"waiting for lock {what}" + (f" held by pid {holder}" if holder else ""))
+                if long_held else f"waiting for lock {what}" + (f" held by pid {holder}" + (f" ({cmd})" if cmd else "") + held_for if holder else ""))
         if WAIT_NOTICE and (last == start or time.time() - last >= every):
-            WAIT_NOTICE[0](text + f" ({int(time.time() - start)}s)")
+            WAIT_NOTICE[0](text if held_for else text + f" ({int(time.time() - start)}s)")
             last = time.time()
         elif not WAIT_NOTICE and last == start:
             print(f"lean-agent: {text}", file=sys.stderr, flush=True)
