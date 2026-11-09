@@ -10169,6 +10169,11 @@ def cmd_doctor(a):
           + ("; plan reset times set" if cfg.get("plan") else "; windows roll (lean-agent limits plan)")
           + ("; calibrated" if cfg.get("caps") else ""))
     try:
+        lim = service_session.idle_stop_limit()
+        print("  session-idle-stop: " + (f"{lim / 60:g} min" if lim else "off") + f" · max-thread-sessions {service_session.max_thread_sessions()}")
+    except Exception:
+        pass
+    try:
         for tid, t in lean_threads.load()["threads"].items():
             if t.get("session_on") or (t.get("session_id") and not t.get("closed")):
                 state, name = lean_threads.session_state(tid, t)
@@ -11523,6 +11528,26 @@ def cmd_config(a):
         print("session-stuck: " + (f"{lim / 60:g} minutes" if lim else "off") + " · a turn with no transcript progress that long "
               "(no worker of its own running) is interrupted and nudged; still stuck after as long again, the session restarts")
         return 0
+    if a.name == "session-idle-stop":
+        if a.value is not None:
+            v = a.value.lower()
+            if v not in ("off", "default"):
+                try:
+                    if lean_common.parse_duration(v) <= 0:
+                        raise ValueError
+                except ValueError:
+                    die("session-idle-stop takes a duration (3h, 90m), off or default")
+            cfg = config_json()
+            if v == "default":
+                cfg.pop("session_idle_stop", None)
+            else:
+                cfg["session_idle_stop"] = v
+            save_json(home("config.json"), cfg)
+        lim = service_session.idle_stop_limit()
+        print("session-idle-stop: " + (f"{lim / 60:g} minutes" if lim else "off")
+              + " · the service stops a thread session idle that long (checkpointed); the thread stays open and its next message "
+              "starts a session again")
+        return 0
     if a.name == "max-thread-sessions":
         if a.value is not None:
             if not (a.value.isdigit() and int(a.value) > 0) and a.value.lower() != "default":
@@ -12353,7 +12378,7 @@ def start_closed_thread(tid, t, prompt, resume_old, force=False):
     elif parked:
         line = f"{tid} woken: resumed its parked session"
     if parked:
-        lean_threads.set_session(tid, parked=None, parked_summary=None)
+        lean_threads.set_session(tid, parked=None, parked_summary=None, parked_by=None)
     if t.get("closed"):
         lean_threads.set_closed(tid, False)
     name = start_thread_session(tid, t, prompt, msg)
@@ -12533,7 +12558,7 @@ def queued_line(tid):
     t = lean_threads.load()["threads"].get(tid) or {}
     if service_session.alive(tid):
         return f"{tid}: queued (service busy), will deliver"
-    state = "parked" if t.get("parked") else "ended" if t.get("closed") else "idle"
+    state = "idle, session stopped" if t.get("parked_by") == "idle" else "parked" if t.get("parked") else "ended" if t.get("closed") else "idle"
     return f"{tid}: queued, waking ({state})"
 
 
@@ -12773,7 +12798,7 @@ def thread_start_lock():
     return lean_common.file_lock(home("thread-start"), timeout=THREAD_START_LOCK_WAIT)
 
 
-CLOSE_MIN_IDLE = 120  # seconds a session must have been idle (since its last turn ended) before the cap may close it
+CLOSE_MIN_IDLE = 3600  # seconds a session must have been idle (since its last turn ended) before the cap may close it: past the prompt-cache lifetime
 LAUNCH_GRACE = 60  # seconds a run counts as live from the moment `run` starts, before its running marker exists
 
 
@@ -12883,13 +12908,14 @@ def parked_summary(tid):
     return "\n\n".join(parts)
 
 
-def park_thread_session(tid):
-    """Stop a thread's live session but keep it: summary stored, session id kept (resumable). Not closed."""
+def park_thread_session(tid, by=None):
+    """Stop a thread's live session but keep it: summary stored, session id kept (resumable). Not closed.
+    `by` records who parked it ("idle": the service's idle-stop)."""
 
     close_thread_session(tid)
     summary = parked_summary(tid)
     try:
-        lean_threads.set_session(tid, parked=now_iso(), parked_summary=summary)
+        lean_threads.set_session(tid, parked=now_iso(), parked_summary=summary, parked_by=by)
     except ValueError:  # the thread no longer exists
         pass
 
@@ -12937,6 +12963,37 @@ def make_room_for_thread_session(tid=None):
             pass
         print(f'parked {v["thread"]} "{v["title"]}" \u2014 wake with lean-agent thread wake {v["thread"]} (or thread send)')
         sessions.remove(v)
+
+
+def idle_stop_threads():
+    """The service's idle-stop pass (`thread idle-stop`): checkpoint and stop every thread session idle at least
+    session-idle-stop. The SESSION only: the thread stays open (parked, session_on cleared, so a service restart does not
+    resume it) and the next message wakes it. Never the main session, a mid-turn session, one with a live or starting run,
+    an open question to main, or a queued message. One service-log line per stop. Returns the stopped thread ids."""
+    limit = service_session.idle_stop_limit()
+    if not limit:
+        return []
+    busy = lean_threads.running_by_thread(lean_threads.load())
+    launching = launching_threads()
+    stopped = []
+    for s in open_thread_sessions():
+        tid = s["thread"]
+        if tid == "main" or s["idle"] < limit or lean_threads.queued_messages(tid) or service_session.spool_pending(tid):
+            continue
+        if close_blockers(s, busy, launching, None, True):
+            continue
+        try:
+            park_thread_session(tid, by="idle")
+        except RuntimeError:
+            continue
+        stopped.append(tid)
+        try:
+            os.makedirs(home("logs"), exist_ok=True)
+            with open(home("logs", "service.log"), "a", encoding="utf-8") as fh:
+                fh.write(f'{now_iso()} idle-stop: {tid} "{s["title"]}" session stopped after {_idle_age(s["idle"])} idle; thread stays open\n')
+        except OSError:
+            pass
+    return stopped
 
 
 def parse_idle(text):
@@ -13224,7 +13281,8 @@ def thread_action(a):
             if k in live or k in lean_threads.load()["aliases"] or k in lean_threads.RESERVED:
                 continue
             if t.get("parked"):
-                print(f"parked  {k:<5}{t.get('title') or '-':<42}{lean_threads.age(t['parked'])}  (wake: lean-agent thread wake {k})")
+                print(f"{'stopped' if t.get('parked_by') == 'idle' else 'parked '} {k:<5}{t.get('title') or '-':<42}{lean_threads.age(t['parked'])}  "
+                      + ("(idle, session stopped; the next message restarts it)" if t.get("parked_by") == "idle" else f"(wake: lean-agent thread wake {k})"))
             elif t.get("closed") and t.get("session_id"):
                 print(f"closed  {k:<5}{t.get('title') or '-':<42}(reopen: lean-agent thread reopen {k})")
         if not sessions:
@@ -13388,6 +13446,10 @@ def thread_action(a):
                     rcs.append(exc.code if isinstance(exc.code, int) else 1)
             return max(rcs)
         act, a.action, a._wake = "open", "open", True
+    if act == "idle-stop":  # internal: the service stops thread sessions idle for session-idle-stop
+        for tid in idle_stop_threads():
+            print(f"idle-stop: {tid}")
+        return 0
     if act == "deliver":  # internal: the service delivers the spooled messages of one thread (may wait for the session)
         if len(a.args) != 1:
             die("usage: lean-agent thread deliver tN")
@@ -15121,8 +15183,8 @@ def build_parser():
 
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "allow-edit-outside <dir>|clear (extra dirs, besides ~/Downloads, where --allow-edit may name an explicit file outside the worktree), allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
-                       "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), max-thread-sessions N (thread sessions the service runs; default 8), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-vote-own on|off (ask vote or post for reviews of your own PRs too; default off), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
-    s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions", "session-stuck",
+                       "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), max-thread-sessions N (thread sessions the service runs; default 20), session-idle-stop DUR|off|default (the service stops a thread session idle that long; the thread stays open; default 3h), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-vote-own on|off (ask vote or post for reviews of your own PRs too; default off), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
+    s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions", "session-idle-stop", "session-stuck",
                                            "review-max-rerounds", "review-vote-own", "review-skip", "review-model", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
@@ -15641,7 +15703,7 @@ def build_parser():
     s.set_defaults(fn=cmd_schedule)
 
     s = sub.add_parser("thread", help="threads: new \"title\" [\"<text>\"|--prompt-file F|-] (its own Remote Control session) | send tN \"<text>\"|--prompt-file F|- | ask \"question\" [--options \"a|b|c\"] (from inside a thread session: the question goes to main; end the turn, the answer arrives as your next turn) | answer tN [qN] \"answer\" (main: pass an answer into the thread session) | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
-    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "files", "ask", "report", "answer", "reports", "park", "wake", "deliver"],
+    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "files", "ask", "report", "answer", "reports", "park", "wake", "deliver", "idle-stop"],
                    metavar="{new,list,show,close,reopen,merge,unmerge,move,send,open,sessions,ask,report,answer,reports,park,wake}")  # deliver is internal: not shown
     s.add_argument("args", nargs="*", help='new "title" ["<text>"]; send tN "<text>"; answer tN [qN] "<answer>"; other actions: ids')
     s.add_argument("--show", metavar="N", help="files: print file number N (Markdown/text, capped)")

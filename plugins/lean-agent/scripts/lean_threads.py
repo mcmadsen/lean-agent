@@ -243,6 +243,8 @@ def session_lines(tid, t):
     state, name = session_state(tid, t)
     if state == "closed" and not t.get("session_id"):
         return []
+    if state == "closed" and t.get("parked_by") == "idle":
+        return ["  session: idle, session stopped (thread open; the next message starts it again)"]
     return [f'  session: {state}' + (f' \u2014 Remote Control "{name}"' if name else "")]
 
 

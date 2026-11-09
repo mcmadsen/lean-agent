@@ -2024,6 +2024,17 @@ class Reporter(AutoClear):
         for line in lines:
             queue_report(re.search(r"\b(t\d+)\b", line).group(1) if re.search(r"\b(t\d+)\b", line) else "main", "chase", line)
 
+    def idle_stop_tick(self):
+        """Every IDLE_STOP_TICK seconds: stop the thread sessions idle for session-idle-stop (checkpointed, thread stays open)."""
+        now = self.now()
+        if not idle_stop_limit() or now - getattr(self, "idle_stop_at", 0) < _knob("LEAN_AGENT_IDLE_STOP_TICK", IDLE_STOP_TICK):
+            return
+        self.idle_stop_at = now
+        exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lean_agent.py")
+        r = subprocess.run([sys.executable, exe, "thread", "idle-stop"], capture_output=True, text=True, timeout=300)
+        if r.returncode:
+            self.log(f"idle-stop failed: {(r.stderr or r.stdout).strip()[-200:]}", "error")
+
     def main_tick(self):
         try:
             if lean_auth.recheck(self.now()):
@@ -2036,6 +2047,10 @@ class Reporter(AutoClear):
                 self.goals_tick()
             except Exception as exc:  # noqa: BLE001 - the report queue must keep going
                 self.log(f"goals watchdog failed: {exc}", "error")
+            try:
+                self.idle_stop_tick()
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"idle-stop failed: {exc}", "error")
             try:
                 run_fallback(self.now())
             except Exception as exc:  # noqa: BLE001 - the report queue must keep going
@@ -2455,7 +2470,9 @@ class Host:
 
 # ---------------------------------------------------------------- thread sessions (inside `up`)
 
-MAX_THREAD_SESSIONS = 8
+MAX_THREAD_SESSIONS = 20
+SESSION_IDLE_STOP = 3 * 3600  # seconds a thread session may sit idle before the service stops it (the thread stays open)
+IDLE_STOP_TICK = 300  # seconds between idle-stop passes
 READY_QUIET = 1.5   # seconds without output from a new session before its first message is typed
 READY_WAIT = 40     # ... and the longest wait for that
 NAME_MAX = 40
@@ -2473,6 +2490,22 @@ def max_thread_sessions():
         return n if n > 0 else MAX_THREAD_SESSIONS
     except (TypeError, ValueError):
         return MAX_THREAD_SESSIONS
+
+
+def idle_stop_limit():
+    """Seconds of idleness after which the service stops a thread session (0: off): LEAN_AGENT_SESSION_IDLE_STOP, else
+    `lean-agent config session-idle-stop`, else 3h."""
+    raw = os.environ.get("LEAN_AGENT_SESSION_IDLE_STOP") or _load(lean_home("config.json")).get("session_idle_stop")
+    raw = str(raw if raw is not None else "").strip().lower()
+    if raw in ("off", "0", "none"):
+        return 0
+    if raw in ("", "default"):
+        return SESSION_IDLE_STOP
+    try:
+        v = lean_common.parse_duration(raw)
+    except ValueError:
+        return SESSION_IDLE_STOP
+    return v if v > 0 else SESSION_IDLE_STOP
 
 
 def wait_ready(host, quiet=None, limit=READY_WAIT):
