@@ -37,6 +37,7 @@ import uuid
 import lean_auth
 import lean_common
 import lean_goals
+import lean_threads
 import lean_log
 import lean_own
 import lean_waiting
@@ -1039,7 +1040,15 @@ def alive_thread(tid):
 # idle, parked or ended). A deliverer claims a message by renaming its file, so a message is delivered once.
 
 SEND_WAIT = 10  # seconds a caller waits for a delivery before leaving the message to the service; LEAN_AGENT_SEND_WAIT overrides
-SPOOL_RETRY = 5  # seconds before the service retries a delivery that failed
+UNSTARTED_AFTER = 180  # seconds a request may sit without a started turn before the service redelivers it by itself
+UNSTARTED_TICK = 20  # seconds between those checks
+SPOOL_RETRY = 20  # seconds before the service retries a delivery that failed (then backs off)
+SPOOL_RETRY_MAX = 120  # ... up to this many seconds between tries
+
+
+def spool_backoff(fails):
+    """Seconds to wait after the `fails`-th failed or pending delivery in a row: SPOOL_RETRY, growing 1.5x, at most SPOOL_RETRY_MAX."""
+    return min(SPOOL_RETRY_MAX, SPOOL_RETRY * 1.5 ** max(0, fails - 1))
 
 
 def send_wait():
@@ -1054,14 +1063,15 @@ def spool_dir(tid):
     return lean_home("thread-inbox", tid)
 
 
-def spool_add(tid, text=None, new=False):
-    """Queue `text` for thread `tid` (None: only wake it). Returns the spool file name."""
+def spool_add(tid, text=None, new=False, rid=None):
+    """Queue `text` for thread `tid` (None: only wake it). `rid`: the thread request it carries (never delivered once that
+    request has started). Returns the spool file name."""
     d = spool_dir(tid)
     os.makedirs(d, exist_ok=True)
     name = f"{time.time_ns():020d}-{uuid.uuid4().hex[:8]}.json"
     tmp = os.path.join(d, name + ".tmp")
     with open(tmp, "w") as fh:
-        json.dump({"text": text, "ts": time.time(), "new": new}, fh)
+        json.dump({"text": text, "ts": time.time(), "new": new, **({"rid": rid} if rid else {})}, fh)
     os.replace(tmp, os.path.join(d, name))
     return name
 
@@ -1198,6 +1208,7 @@ class SpoolDeliverer:
         self.now = now
         self.busy = {}
         self.failed = {}
+        self.fails = {}
         self.lock = threading.Lock()
 
     @staticmethod
@@ -1218,7 +1229,7 @@ class SpoolDeliverer:
         for tid in spool_threads():
             spool_reclaim_stale(tid)
             with self.lock:
-                if self.busy.get(tid) or self.now() - self.failed.get(tid, 0) < SPOOL_RETRY:
+                if self.busy.get(tid) or self.now() - self.failed.get(tid, 0) < spool_backoff(self.fails.get(tid, 1)):
                     continue
                 self.busy[tid] = True
             t = threading.Thread(target=self._deliver, args=(tid,), daemon=True)
@@ -1233,12 +1244,15 @@ class SpoolDeliverer:
             ok, err = False, str(exc)
         with self.lock:
             self.busy[tid] = False
-            if ok and err == "slot":  # waiting for a session slot: look again after SPOOL_RETRY seconds
+            if ok and err == "slot":  # waiting for a session slot: look again after the backoff
                 self.failed[tid] = self.now()
+                self.fails[tid] = self.fails.get(tid, 0) + 1
             elif ok:
                 self.failed.pop(tid, None)
+                self.fails.pop(tid, None)
             else:
                 self.failed[tid] = self.now()
+                self.fails[tid] = self.fails.get(tid, 0) + 1
         if not ok:
             lean_log.log("warn", "spool", f"{tid}: delivery failed, will retry: {err}")
 
@@ -2161,6 +2175,26 @@ class Reporter(AutoClear):
         for line in lines:
             queue_report(re.search(r"\b(t\d+)\b", line).group(1) if re.search(r"\b(t\d+)\b", line) else "main", "chase", line)
 
+    def unstarted_tick(self):
+        """Every UNSTARTED_TICK seconds: a request whose first message never started a turn for UNSTARTED_AFTER seconds is
+        redelivered once by the service (the spool wakes or restarts the session), with one line to main."""
+        now = self.now()
+        if now - getattr(self, "unstarted_at", 0) < _knob("LEAN_AGENT_UNSTARTED_TICK", UNSTARTED_TICK):
+            return
+        self.unstarted_at = now
+        data = lean_threads.load()
+        for tid, t in data["threads"].items():
+            if t.get("closed") and not t.get("parked"):
+                continue
+            un = lean_threads.unstarted_request(t, [], now, _knob("LEAN_AGENT_UNSTARTED_AFTER", UNSTARTED_AFTER))
+            if not un or not un["undelivered"] or not un["id"] or not un["text"] or spool_pending(tid):
+                continue
+            if not lean_threads.mark_redelivered(tid, un["id"]):
+                continue  # redelivered before: once per request
+            spool_add(tid, un["text"], rid=un["id"])
+            self.log(f"{tid}: request {un['id']} was not started, redelivered", "warn")
+            queue_report(tid, "chase", f"{tid}: request was not started, redelivered")
+
     def idle_stop_tick(self):
         """Every IDLE_STOP_TICK seconds: stop the thread sessions idle for session-idle-stop (checkpointed, thread stays open)."""
         now = self.now()
@@ -2184,6 +2218,10 @@ class Reporter(AutoClear):
                 self.goals_tick()
             except Exception as exc:  # noqa: BLE001 - the report queue must keep going
                 self.log(f"goals watchdog failed: {exc}", "error")
+            try:
+                self.unstarted_tick()
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"unstarted check failed: {exc}", "error")
             try:
                 self.idle_stop_tick()
             except Exception as exc:  # noqa: BLE001
@@ -2652,6 +2690,19 @@ def idle_stop_limit():
     return v if v > 0 else SESSION_IDLE_STOP
 
 
+FIRST_READY_ROUNDS = 3  # ready-waits (READY_WAIT each) before a first message is given back to the spool
+FIRST_CONFIRM_WAIT = 45  # seconds after pasting a first message until its turn must show; LEAN_AGENT_SESSION_FIRST_CONFIRM overrides
+
+
+def _turn_started(host, since):
+    """True when the session's transcript has grown since `since` (a turn started even if the prompt hook did not record it)."""
+    try:
+        path = info(host.key).get("transcript") or ""
+        return bool(path) and os.path.exists(path) and os.path.getmtime(path) >= since
+    except Exception:
+        return False
+
+
 def wait_ready(host, quiet=None, limit=READY_WAIT):
     """Until the new session has printed something and then been quiet for `quiet` seconds (its input box is up)."""
     quiet = _knob("LEAN_AGENT_READY_QUIET", READY_QUIET) if quiet is None else quiet
@@ -2699,13 +2750,48 @@ class Sessions:
         return host
 
     def _first(self, host, prompt, fresh):
-        if fresh:
-            wait_ready(host)
+        """The thread's first message: typed in only once the input box is up (a ready-wait that runs out is not success);
+        recorded as pasted when the bridge took it, else put back in the spool for the service to deliver."""
+        tid = host.key
+        start = time.time()
+        ready = not fresh
+        for _ in range(FIRST_READY_ROUNDS if fresh else 0):
+            if host.stopping.is_set() or (getattr(host, "thread", None) is not None and not host.thread.is_alive()):
+                break  # the host is gone (its process may simply not have started yet: wait_ready waits for it)
+            ready = wait_ready(host)
+            if ready:
+                break
+        if not ready and host.alive() and not host.stopping.is_set() and getattr(host, "tail_len", 0):
+            ready = True  # it has drawn its screen but never went quiet (a busy banner): the box is up, type the message in
+        if not ready:
+            self._requeue(tid, prompt, "session input not ready" if host.alive() else "session ended before its first message")
+            return
         try:
             host.last_input = time.time()
             host.paste(prompt)
         except OSError as exc:
-            lean_log.log("error", "sessions", f"first message to {host.key} not delivered: {exc}")
+            lean_log.log("error", "sessions", f"first message to {tid} not delivered: {exc}")
+            self._requeue(tid, prompt, f"paste failed: {exc}")
+            return
+        update_session(tid, first_pasted=time.time(), first_pending=None)
+        end = time.time() + _knob("LEAN_AGENT_SESSION_FIRST_CONFIRM", FIRST_CONFIRM_WAIT)  # the prompt hook storing the request is the confirmation
+        while time.time() < end and not host.stopping.is_set():
+            if lean_threads.request_seen(tid, prompt, start):
+                return
+            time.sleep(0.5)
+        if not host.stopping.is_set() and not lean_threads.request_seen(tid, prompt, start) and not _turn_started(host, start):
+            self._requeue(tid, prompt, "no turn started after the paste")
+
+    def _requeue(self, tid, prompt, why):
+        """Put a first message that did not reach the session back in the spool (its request id kept) for redelivery."""
+        text = lean_threads._request_text(prompt)
+        t = lean_threads.load()["threads"].get(tid) or {}
+        rid = next((r.get("id") for r in t.get("requests") or [] if isinstance(r, dict) and r.get("undelivered")
+                    and lean_threads._request_text(r.get("text")) == text), None)
+        update_session(tid, first_pending=why, first_pasted=None)
+        lean_log.log("warn", "sessions", f"{tid}: first message not delivered ({why}); queued again")
+        if text and not (rid and lean_threads.request_started(tid, rid)) and not spool_pending(tid):
+            spool_add(tid, text, rid=rid)
 
     def _run(self, tid, host):
         try:

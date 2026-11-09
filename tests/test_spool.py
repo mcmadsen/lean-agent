@@ -7,6 +7,7 @@ import socket
 import sys
 import tempfile
 import threading
+import types
 import time
 import unittest
 from unittest import mock
@@ -64,7 +65,7 @@ class SpoolTest(unittest.TestCase):
         rc, line, took = self.send()
         self.assertEqual(rc, 0)
         self.assertLess(took, scaled(8))
-        self.assertIn(f"{self.tid}: queued, waking", line)
+        self.assertIn(f"{self.tid}: queued: delivery pending (waking", line)
         files = os.listdir(ss.spool_dir(self.tid))  # queued, or claimed by the delivery still waiting in this process
         self.assertEqual(len([f for f in files if f.endswith((".json", ".sending"))]), 1)
 
@@ -229,6 +230,128 @@ class QuestionPushTest(unittest.TestCase):
             lean_waiting.done(i["id"], "a")
         self.assertEqual(ss.repush_questions(time.time() + 500), [])
 
+
+class FirstDeliveryTest(unittest.TestCase):
+    """The first message of a thread is confirmed or retried: never lost, never delivered twice, never reported as started early."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.env = mock.patch.dict(os.environ, {**clean_environ(), "LEAN_AGENT_HOME": self.tmp, "LEAN_AGENT_SEND_WAIT": "1.5"}, clear=True)
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.tid = lean_threads.new("work", "do the job")
+        lean_threads.set_session(self.tid, session_id="11111111-1111-1111-1111-111111111111", session_on=True)
+        self.rid = lean_threads.load()["threads"][self.tid]["requests"][0]["id"]
+        self.got = []
+        self.send = mock.patch.object(ss, "send", side_effect=lambda text, key="main": self.got.append(text) or (True, ""))
+        self.alive = mock.patch.object(ss, "alive", return_value=True)
+        self.fresh = mock.patch.object(lean_agent, "auto_fresh_reason", return_value="")
+        for p in (self.send, self.alive, self.fresh):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def host(self, alive=True):
+        h = mock.Mock(key=self.tid, stopping=threading.Event(), tail_len=0)
+        h.alive.return_value = alive
+        return h
+
+    def test_first_message_sent_before_ready_is_retried_and_delivered_once(self):
+        h = self.host()
+        sessions = ss.Sessions(lambda tid: h)
+        with mock.patch.object(ss, "wait_ready", return_value=False):
+            sessions._first(h, "brief\n" + lean_threads.BRIEF_END + "\n\ndo the job", True)
+        h.paste.assert_not_called()  # not typed into a box that is not up
+        self.assertEqual(len(ss.spool_pending(self.tid)), 1)
+        self.assertEqual(lean_agent.deliver_spool(self.tid, 0)[0], "ok")
+        self.assertEqual(lean_agent.deliver_spool(self.tid, 0)[0], "ok")
+        self.assertEqual(self.got, ["do the job"])
+
+    def test_start_lock_busy_is_retried_not_dropped(self):
+        ss.spool_add(self.tid, "later", rid=None)
+        with mock.patch.object(lean_agent, "deliver_one", side_effect=lean_agent.lean_common.LockBusy("busy")):
+            kind, _ = lean_agent.deliver_spool(self.tid, 0)
+        self.assertEqual(kind, "deferred")
+        self.assertEqual(len(ss.spool_pending(self.tid)), 1)
+        self.assertEqual(lean_agent.deliver_spool(self.tid, 0)[0], "ok")
+        self.assertEqual(self.got, ["later"])
+
+    def test_parking_to_make_room_then_start_delivers_without_the_lock_held(self):
+        lean_threads.set_session(self.tid, session_on=None)
+        victim = {"thread": "t9", "title": "old", "idle": 7200}
+        calls = {"room": 0, "park": 0, "start": 0}
+        held = []
+
+        def room(tid, defer_park=False):
+            calls["room"] += 1
+            if calls["room"] == 1:
+                raise lean_agent.NeedPark(victim, "parking t9", 1, tid)
+
+        def park(*a):
+            calls["park"] += 1
+            held.append(not lean_agent.thread_start_lock_try(0))  # the lock is free while a session is parked
+            lean_agent.release_start_lock()
+
+        def start(tid, t, prompt=None, msg=None):
+            calls["start"] += 1
+            return "name"
+        with mock.patch.object(ss, "alive", return_value=False), mock.patch.object(lean_agent, "make_room_for_thread_session", room), \
+                mock.patch.object(lean_agent, "park_to_make_room", park), mock.patch.object(lean_agent, "start_thread_session", start), \
+                mock.patch.object(lean_agent, "prepare_thread_session", return_value=(True, "", {})), \
+                mock.patch.object(lean_agent, "fresh_message", return_value=("m", 1)), \
+                mock.patch.object(lean_agent, "confirm_first_message", return_value=True):
+            line = lean_agent.deliver_one(self.tid, "do the job", new=True)
+        self.assertEqual(calls, {"room": 2, "park": 1, "start": 1})
+        self.assertEqual(held, [False])
+        self.assertIn("started", line)
+
+    def test_caller_says_queued_when_the_first_message_is_not_confirmed(self):
+        ss.spool_add(self.tid, "do the job", new=True, rid=self.rid)
+        with mock.patch.object(ss, "alive", return_value=False), mock.patch.object(lean_agent, "make_room_for_thread_session"), \
+                mock.patch.object(lean_agent, "start_thread_session", return_value="name"), \
+                mock.patch.object(lean_agent, "confirm_first_message", return_value=False):
+            kind, line = lean_agent.deliver_spool(self.tid, 0)
+        self.assertEqual(kind, "ok")
+        self.assertIn("queued: delivery pending (first message not yet in the session)", line)
+        self.assertNotIn("started", line)
+
+    def reporter(self, now):
+        return types.SimpleNamespace(now=lambda: now[0], log=lambda *a, **k: None)
+
+    def test_no_turn_after_three_minutes_redelivers_once_with_one_main_line(self):
+        t0 = time.time()
+        now = [t0]
+        rep = self.reporter(now)
+        ss.Reporter.unstarted_tick(rep)
+        self.assertEqual(ss.spool_pending(self.tid), [])
+        now[0] = t0 + 200
+        ss.Reporter.unstarted_tick(rep)
+        self.assertEqual(len(ss.spool_pending(self.tid)), 1)
+        now[0] = t0 + 500
+        ss.Reporter.unstarted_tick(rep)  # once per request
+        self.assertEqual(len(ss.spool_pending(self.tid)), 1)
+        lines = [i["text"] for i in ss.queued_reports()]
+        self.assertEqual(lines, [f"{self.tid}: request was not started, redelivered"])
+
+    def test_no_double_delivery_once_the_request_started(self):
+        ss.spool_add(self.tid, "do the job", rid=self.rid)
+        lean_threads.pin(self.tid, "brief\n" + lean_threads.BRIEF_END + "\n\ndo the job")  # the session's turn started
+        self.assertEqual(lean_agent.deliver_spool(self.tid, 0)[0], "ok")
+        self.assertEqual(self.got, [])
+        self.assertEqual(ss.spool_pending(self.tid), [])
+        now = [time.time() + 600]
+        ss.Reporter.unstarted_tick(self.reporter(now))
+        self.assertEqual(ss.spool_pending(self.tid), [])
+        self.assertEqual(ss.queued_reports(), [])
+
+    def test_deliverer_backs_off_from_twenty_seconds_to_two_minutes(self):
+        self.assertEqual(ss.spool_backoff(1), 20)
+        self.assertGreater(ss.spool_backoff(3), ss.spool_backoff(2))
+        self.assertEqual(ss.spool_backoff(30), 120)
+
+    def test_status_shows_not_started_and_retrying(self):
+        t = lean_threads.load()["threads"][self.tid]
+        t["requests"][0]["ts"] = lean_threads.datetime.datetime.fromtimestamp(time.time() - 300).isoformat(timespec="seconds")
+        self.assertIn("not started (5m), retrying", "\n".join(lean_threads.session_lines(self.tid, t)))
 
 if __name__ == "__main__":
     unittest.main()

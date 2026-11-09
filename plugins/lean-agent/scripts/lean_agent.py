@@ -12503,26 +12503,40 @@ def deliver_one(tid, prompt, resume_old=False, new=False):
             if not ok:
                 raise RuntimeError(f"{tid}: {err}")
         return f"thread {tid} started" if new else f"{tid}: " + ("sent (session live)" if prompt else "session live")
-    with thread_start_lock():
-        if why:  # decided again under the lock: a concurrent send may have restarted it fresh already
-            why = auto_fresh_reason(tid) if service_session.alive(tid) else ""
-        if why:
-            service_session.note_restart(tid, f"context {why} reached the thread-fresh-after limit (checkpoint kept)")
-            close_thread_session(tid)
-            force = True
-            prepare_thread_session(tid, False, True)  # new session id now: a failed start below still retries fresh
-        if service_session.alive(tid):  # another call started it while this one waited
-            if prompt:
-                ok, err = service_session.send(prompt, tid)
-                if not ok:
-                    raise RuntimeError(f"{tid}: {err}")
-            return f"thread {tid} started" if new else f"{tid}: " + ("sent (session live)" if prompt else "session live")
-        make_room_for_thread_session(tid)
-        if new:
-            name, line = start_thread_session(tid, t, prompt), ""
-            lean_threads.set_closed(tid, False) if t.get("closed") else None
-        else:
-            name, line = start_closed_thread(tid, t, prompt, resume_old, force)
+    for _attempt in range(12):
+        victim = None
+        with thread_start_lock():  # bookkeeping only: no waiting for a session to park or to become ready in here
+            if why:  # decided again under the lock: a concurrent send may have restarted it fresh already
+                why = auto_fresh_reason(tid) if service_session.alive(tid) else ""
+            if why:
+                service_session.note_restart(tid, f"context {why} reached the thread-fresh-after limit (checkpoint kept)")
+                close_thread_session(tid)
+                force = True
+                prepare_thread_session(tid, False, True)  # new session id now: a failed start below still retries fresh
+            if service_session.alive(tid):  # another call started it while this one waited
+                if prompt:
+                    ok, err = service_session.send(prompt, tid)
+                    if not ok:
+                        raise RuntimeError(f"{tid}: {err}")
+                return f"thread {tid} started" if new else f"{tid}: " + ("sent (session live)" if prompt else "session live")
+            try:
+                make_room_for_thread_session(tid, defer_park=True)
+            except NeedPark as np_:
+                victim = np_
+            else:
+                since = time.time()
+                if new:
+                    name, line = start_thread_session(tid, t, prompt), ""
+                    lean_threads.set_closed(tid, False) if t.get("closed") else None
+                else:
+                    name, line = start_closed_thread(tid, t, prompt, resume_old, force)
+                break
+        # parked outside the lock, then the cap is checked again under it: the new thread's start is delayed, never dropped
+        park_to_make_room(victim.victim, victim.line, victim.cap, victim.tid)
+    else:
+        raise Deferred(f"{tid}: could not make room for its session")
+    if prompt and not confirm_first_message(tid, prompt, since):
+        raise PendingFirst(f"{tid}: queued: delivery pending (first message not yet in the session)")
     if new:
         return f'thread {tid} started: Remote Control "{name}"'
     return ((f"{tid} was {why} \u2014 continued in a fresh session" if why else line or f"thread {tid} started")
@@ -12549,11 +12563,17 @@ def deliver_spool(tid, lock_wait=0, resume_old=False):
             msg = service_session.spool_claim(tid, name)
             if msg is None:
                 continue
+            if msg.get("rid") and lean_threads.request_started(tid, msg["rid"]):
+                service_session.spool_done(tid, name)  # its request has started a turn already: never delivered twice
+                continue
             try:
                 line = deliver_one(tid, msg.get("text"), resume_old, bool(msg.get("new")))
-            except Deferred as exc:  # the session is being replaced: the message stays spooled, in order
+            except (Deferred, lean_common.LockBusy) as exc:  # the session is being replaced: the message stays spooled, in order
                 service_session.spool_release(tid, name)
-                return "deferred", str(exc)
+                return "deferred", str(exc) or "thread-start lock busy"
+            except PendingFirst as exc:  # handed to the session host, which pastes it (or queues it again) and the service redelivers
+                service_session.spool_done(tid, name)
+                return "ok", str(exc)
             except NoSlot as exc:  # the message stays spooled; the service retries on its tick
                 service_session.spool_release(tid, name)
                 try:
@@ -12583,9 +12603,9 @@ def slot_line(tid, why, new=False):
 def queued_line(tid):
     t = lean_threads.load()["threads"].get(tid) or {}
     if service_session.alive(tid):
-        return f"{tid}: queued (service busy), will deliver"
+        return f"{tid}: queued: delivery pending (service busy), will deliver"
     state = "idle, session stopped" if t.get("parked_by") == "idle" else "parked" if t.get("parked") else "ended" if t.get("closed") else "idle"
-    return f"{tid}: queued, waking ({state})"
+    return f"{tid}: queued: delivery pending (waking, {state})"
 
 
 def deliver_with_cap(tid, own=None, new=False, resume_old=False):
@@ -12614,7 +12634,7 @@ def deliver_with_cap(tid, own=None, new=False, resume_old=False):
     if kind == "slot":
         return slot_line(tid, line, new)
     if kind in ("busy", "deferred"):
-        return f"{tid}: queued (service busy), will deliver"
+        return f"{tid}: queued: delivery pending ({line or 'service busy'}), will retry"
     # a definite failure inside the cap: withdraw the message (unless the service took it meanwhile) and report it
     if own and service_session.spool_withdraw(tid, own):
         if new:
@@ -12903,6 +12923,28 @@ def caller_thread():
     return kept or lean_threads.pinned_thread()  # `--thread` re-tags LEAN_AGENT_THREAD; main() kept the session's own id
 
 
+class PendingFirst(Exception):
+    """The session started but its first message is not confirmed in it yet; the host and the service keep delivering it."""
+
+
+def confirm_first_message(tid, prompt, since):
+    """Wait (outside every lock) until the session shows the message as taken: its prompt hook stored the request, or the
+    host pasted it and the bridge took it. False when neither happened within FIRST_CONFIRM_CALLER seconds."""
+    end = time.time() + service_session._knob("LEAN_AGENT_FIRST_CONFIRM_CALLER", FIRST_CONFIRM_CALLER)
+    while True:
+        if lean_threads.request_seen(tid, prompt, since):
+            return True
+        rec = service_session.session_rec(tid)
+        if (rec.get("first_pasted") or 0) >= since and not rec.get("first_pending"):
+            return True
+        if time.time() >= end:
+            return False
+        time.sleep(0.3)
+
+
+FIRST_CONFIRM_CALLER = 45  # seconds a start waits for its first message to show in the session before it says "queued"
+
+
 class Deferred(Exception):
     """The message cannot go to a session right now (it is being replaced); it stays queued."""
 
@@ -12982,10 +13024,35 @@ def close_min_idle():
         return CLOSE_MIN_IDLE
 
 
-def make_room_for_thread_session(tid=None):
+class NeedPark(Exception):
+    """make_room_for_thread_session(defer_park=True): this session has to be parked first (outside the start lock)."""
+
+    def __init__(self, victim, line, cap, tid):
+        super().__init__(line)
+        self.victim, self.line, self.cap, self.tid = victim, line, cap, tid
+
+
+def park_to_make_room(v, line, cap, tid):
+    print(line, flush=True)
+    try:
+        park_thread_session(v["thread"])
+    except RuntimeError as exc:
+        die(str(exc))
+    try:
+        os.makedirs(home("logs"), exist_ok=True)
+        with open(home("logs", "service.log"), "a", encoding="utf-8") as fh:
+            fh.write(f'{now_iso()} cap auto-park: {line}; reason: max-thread-sessions {cap} reached starting '
+                     f'{tid or "a new thread"}; idle {v["idle"]}s; caller {caller_thread() or "none"}\n')
+    except OSError:
+        pass
+    print(f'parked {v["thread"]} "{v["title"]}" \u2014 wake with lean-agent thread wake {v["thread"]} (or thread send)')
+
+
+def make_room_for_thread_session(tid=None, defer_park=False):
     """Before a thread session starts: at max-thread-sessions, close the longest-idle open session that is eligible
     (see close_blockers: not the caller, not mid-turn, no live or starting run, idle at least CLOSE_MIN_IDLE),
-    checkpointed like `thread close`; when none is, refuse and list them with the reason."""
+    checkpointed like `thread close`; when none is, refuse and list them with the reason. With `defer_park` the victim
+    is not parked here: NeedPark(victim, ...) is raised so the caller parks it without holding the thread-start lock."""
     cap = service_session.max_thread_sessions()
     caller = caller_thread()
     sessions = [s for s in open_thread_sessions() if s["thread"] != tid]
@@ -13004,19 +13071,9 @@ def make_room_for_thread_session(tid=None):
             raise exc
         v = max(done_ or free, key=lambda s: s["idle"])  # a finished thread first, else the least recently used idle one
         line = f'parking {v["thread"]} ({"finished, " if done_ else ""}idle {_idle_age(v["idle"])}) to make room'
-        print(line, flush=True)
-        try:
-            park_thread_session(v["thread"])
-        except RuntimeError as exc:
-            die(str(exc))
-        try:
-            os.makedirs(home("logs"), exist_ok=True)
-            with open(home("logs", "service.log"), "a", encoding="utf-8") as fh:
-                fh.write(f'{now_iso()} cap auto-park: {line}; reason: max-thread-sessions {cap} reached starting '
-                         f'{tid or "a new thread"}; idle {v["idle"]}s; caller {caller or "none"}\n')
-        except OSError:
-            pass
-        print(f'parked {v["thread"]} "{v["title"]}" \u2014 wake with lean-agent thread wake {v["thread"]} (or thread send)')
+        if defer_park:
+            raise NeedPark(v, line, cap, tid)
+        park_to_make_room(v, line, cap, tid)
         sessions.remove(v)
 
 
@@ -13453,7 +13510,8 @@ def thread_action(a):
                 made["tid"] = tid
             finally:
                 release_start_lock()
-            made["own"] = service_session.spool_add(made["tid"], prompt, new=True)
+            rq = (lean_threads.load()["threads"].get(made["tid"]) or {}).get("requests") or [{}]
+            made["own"] = service_session.spool_add(made["tid"], prompt, new=True, rid=rq[0].get("id"))
             lean_goals.note_text(f"{a.args[0]} {prompt or ''}", made["tid"])
             _myq_retarget(made["tid"], f"{a.args[0]} {prompt or ''}")
 
