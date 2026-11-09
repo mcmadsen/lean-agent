@@ -46,6 +46,7 @@ import lean_feedback  # noqa: E402
 import lean_goals  # noqa: E402
 import lean_pr  # noqa: E402
 import lean_waiting  # noqa: E402
+import lean_own  # noqa: E402
 import lean_auth  # noqa: E402
 import service_session  # noqa: E402
 import lean_common
@@ -6465,7 +6466,7 @@ def review_main(a):
             "hunks": changed_hunks(path, [merge_base, sha] if mode == "ref" else [merge_base]),
             "edited_tests": focus["tests"], "independent": bool(a.independent), "gaps": focus.get("gaps") or [],
             "goal": getattr(a, "goal", None), "ci_parity": focus.get("ci_parity") or [],
-            "scope": "full", "fallback": getattr(a, "_fallback", "")}
+            "scope": "full", "fallback": getattr(a, "_fallback", ""), "for_push": bool(getattr(a, "for_push", False))}
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=model, estimate=getattr(a, "_estimate", None),
                             todo=getattr(a, "todo", None),
                             why=f"pre-PR review ({effort} effort)", cards=None, card_list=cards, project=slug,
@@ -6877,12 +6878,22 @@ def report_review(slug, project, entry, review, meta):
                                       "branch": branch_of(root, meta.get("ref")) if meta.get("mode") == "ref" else "",
                                       "after": meta.get("after"), "delta": bool(meta.get("resume")),
                                       "scope": meta.get("scope") or ("delta" if meta.get("resume") else "full"),
-                                      "delta_base": meta.get("delta_base"), "fallback": meta.get("fallback") or ""})
+                                      "delta_base": meta.get("delta_base"), "fallback": meta.get("fallback") or "",
+                                      "for_push": bool(meta.get("for_push"))})
     order = {"blocker": 0, "major": 1, "minor": 2, "nit": 3}
     label = meta.get("ref") or "the working tree"
     if meta.get("mode") == "ref" and entry.get("thread") and entry.get("thread") != "none" and verdict in ("approve", "changes-requested"):
+        own = False
+        try:
+            own = not lean_own.vote_own_on() and lean_own.is_own(root, meta.get("ref") or "", meta.get("head") or "", meta.get("base") or "",
+                                                                 bool(meta.get("for_push")), branch_of(root, meta.get("ref")), meta.get("author") or "")
+        except Exception:
+            pass
+        if own:  # your own work: no vote; the thread fixes the findings and reports once
+            print(f"review of your branch {label} ({entry['thread']}): {verdict}, {len(findings)} findings (own work: no vote)")
         try:  # a review a thread asked for ends in a vote or posting findings: that is the user's call
-            lean_waiting.add(f"review of {label} finished: {verdict}, {len(findings)} findings; vote or post?", "review",
+            if not own:
+                lean_waiting.add(f"review of {label} finished: {verdict}, {len(findings)} findings; vote or post?", "review",
                              thread=entry["thread"], ref=str(meta.get("ref") or ""))
         except Exception:
             pass
@@ -9209,15 +9220,8 @@ CLAUDE_CREDIT_RE = re.compile(r"(?im)^\s*co-authored-by:.*\b(claude|anthropic)\b
 
 
 def my_emails(path):
-    """Lower-cased emails that count as the user's: the worktree's and the global git user.email, plus
-    `config attribution-emails`."""
-    out = set()
-    for e in (git(path, "config", "user.email"),
-              subprocess.run(["git", "config", "--global", "user.email"], capture_output=True, text=True).stdout.strip()):
-        if e:
-            out.add(e.lower())
-    out |= {str(e).lower() for e in config_json().get("attribution_emails") or []}
-    return out
+    """Lower-cased emails that count as the user's (lean_own.my_emails)."""
+    return lean_own.my_emails(path)
 
 
 def attribution():
@@ -11609,6 +11613,17 @@ def cmd_config(a):
         print(f"review-max-rerounds: {review_max_rerounds()} · re-reviews of one branch's lineage before `review "
               "--resume` refuses (--force overrides)")
         return 0
+    if a.name == "review-vote-own":
+        if a.value is not None:
+            if a.value not in ("on", "off"):
+                die("review-vote-own takes on or off")
+            cfg = config_json()
+            cfg["review_vote_own"] = a.value
+            save_json(home("config.json"), cfg)
+        print(f"review-vote-own: {'on' if lean_own.vote_own_on() else 'off'} \u00b7 "
+              + ("a finished review of your own PR or branch also asks vote or post" if lean_own.vote_own_on()
+                 else "a finished review of your own PR or branch is a one-line report, no vote question (others' PRs: vote or post)"))
+        return 0
     if a.name == "review-learn-auto":
         if a.value is not None:
             if a.value.lower() not in ("on", "off", "default"):
@@ -13437,6 +13452,7 @@ def cmd_waiting(a):
             die(f"no open waiting item {args[0]}")
         print(f"{args[0]} done")
     else:
+        lean_own.sweep()
         print(lean_waiting.text() or "Nothing is waiting on the user.")
     return 0
 
@@ -15061,9 +15077,9 @@ def build_parser():
 
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "allow-edit-outside <dir>|clear (extra dirs, besides ~/Downloads, where --allow-edit may name an explicit file outside the worktree), allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
-                       "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), max-thread-sessions N (thread sessions the service runs; default 8), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
+                       "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), max-thread-sessions N (thread sessions the service runs; default 8), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-vote-own on|off (ask vote or post for reviews of your own PRs too; default off), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model> (default auto: by risk), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
     s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions", "session-stuck",
-                                           "review-max-rerounds", "review-skip", "review-model", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
+                                           "review-max-rerounds", "review-vote-own", "review-skip", "review-model", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)
