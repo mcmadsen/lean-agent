@@ -200,8 +200,8 @@ Remember something: `lean-agent remember "..."`. A todo: `lean-agent todo list|n
 ## Feedback about lean-agent
 When lean-agent gets in the way (a command fails or misbehaves, a flag is missing, output is confusing, a rule blocks
 wrongly, a workaround was needed), record it once: `lean-agent feedback add "<what happened>" --kind bug|friction|idea|praise
-[--severity low|normal|high] --repro "<command or steps>"` with a concrete repro, then carry on; don't stop for it
-or record problems of the project.
+[--severity low|normal|high] --repro "<command or steps>"` with a concrete repro, then carry on; don't stop for it;
+don't record problems of the project.
 
 ## Listing files
 List files as clickable references: absolute path or path:line, one per bullet, never in code blocks or table cells, never ~/ or a bare name.
