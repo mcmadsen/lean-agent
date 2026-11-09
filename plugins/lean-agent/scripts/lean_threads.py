@@ -1430,11 +1430,10 @@ def files_text(tid):
     rows = thread_files(tid)
     if not rows:
         return f"No files recorded for {tid}."
-    home = os.path.expanduser("~")
     lines = []
     for i, r in enumerate(rows, 1):
         path = r["path"]
-        shown = "~" + path[len(home):] if path.startswith(home + os.sep) else path
+        shown = lean_common.display_path(path)
         ts = str(r.get("ts") or "")[:16].replace("T", " ")
         lines.append(f"{i}. {shown} \u00b7 " + ("(gone)" if r["gone"] else _size(r.get("size", 0))) + f" \u00b7 {ts} \u00b7 {r.get('kind', 'file')}")
     return "\n".join(lines)

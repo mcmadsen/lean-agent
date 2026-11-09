@@ -350,12 +350,15 @@ def inflight_lines(tid):
     return ["In flight (when these finish, report to main in your reply; do not wait to be asked):"] + lines
 
 
+FILE_RULE = "List files as clickable references: absolute path or path:line, one per bullet, never in code blocks or table cells, never ~/ or a bare name."
+
+
 def thread_brief(tid, cap=None):
     """What a cleared thread session starts from: its thread line, its own latest checkpoint and notes, and its own work
     (`thread show`): nothing of the other threads."""
     import lean_threads
     t = lean_threads.load()["threads"].get(tid) or {}
-    lines = [f'Thread {tid} "{t.get("title") or tid}". You are the session of this thread, not the front desk.']
+    lines = [f'Thread {tid} "{t.get("title") or tid}". You are the session of this thread, not the front desk. ' + FILE_RULE]
     mine = [n for n in load_notes() if n.get("thread") == tid and checkpoint_owner(n) == tid]
     cps = [n for n in mine if n.get("kind") == "checkpoint"]
     if cps:
@@ -385,7 +388,7 @@ def fresh_brief(tid, max_tokens=FRESH_BRIEF_TOKENS):
     rline = restart_prefix(tid).strip()
     head = [rline] if rline else []
     head += [f'Thread {tid} "{t.get("title") or tid}" (a new session: the old conversation is not carried over). '
-            "You are the session of this thread, not the front desk."]
+            "You are the session of this thread, not the front desk. " + FILE_RULE]
     cps = [n for n in load_notes() if n.get("kind") == "checkpoint" and checkpoint_owner(n) == tid]
     if cps:
         head.append(f"Latest checkpoint ({str(cps[-1].get('ts', ''))[:16].replace('T', ' ')}; continue from it):")

@@ -10609,6 +10609,17 @@ class CliTest(unittest.TestCase):
             self.assertIn("Never ask the user to run a lean-agent command", text)
             self.assertIn("lean-agent output <file from the notification>", text)
 
+    def test_clickable_file_rule_is_in_the_front_desk_and_guide_and_paths_are_absolute(self):
+        tpl = os.path.join(os.path.dirname(CLI), "..", "templates")
+        for name in ("guide.md", "front-desk.md"):
+            with open(os.path.join(tpl, name), encoding="utf-8") as fh:
+                self.assertIn("absolute path or path:line", fh.read(), name)
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_common
+        shown = lean_common.display_path("~/x/y.txt")
+        self.assertTrue(os.path.isabs(shown) and "~" not in shown, shown)
+        self.assertEqual(lean_common.display_path("/a/b.py"), "/a/b.py")
+
     def test_front_desk_guide_has_the_table_template(self):
         tpl = os.path.join(os.path.dirname(CLI), "..", "templates", "front-desk.md")
         with open(tpl, encoding="utf-8") as fh:

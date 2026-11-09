@@ -111,6 +111,12 @@ def compaction_label(window=None, pct=None, model=None, source=True):
             f"pct {pct or 'default'}{'; set by config' if source else ''})")
 
 
+def display_path(path):
+    """A path as shown to the user: absolute, never `~`-shortened (so the app and terminal make it clickable)."""
+    path = str(path or "")
+    return os.path.abspath(os.path.expanduser(path)) if path.startswith("~") else path
+
+
 def lean_home(*parts):
     """~/.lean-agent (or $LEAN_AGENT_HOME), absolute, with `parts` joined on."""
     return os.path.join(os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent")), *parts)

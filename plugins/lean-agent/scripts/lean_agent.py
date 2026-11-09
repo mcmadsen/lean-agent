@@ -112,7 +112,8 @@ user correction, a decision, or where external info lives:
 WORKER_RULE = (
     "You are the worker, not an advisor or planner: EXECUTE the task with your tools (run the commands, make the edits,\n"
     "call the services it names) and report what you did. Never answer with a plan, an \"Understood as:\" line or an\n"
-    "ADVICE block instead of doing the work; if you can't do a step, say which and why (status partial or failed).\n\n")
+    "ADVICE block instead of doing the work; if you can't do a step, say which and why (status partial or failed).\n"
+    "List files as clickable references: absolute path or path:line, one per bullet, never in code blocks or table cells, never ~/ or a bare name.\n\n")
 ADVICE_REPLY_RE = re.compile(r"(?im)^\s*(understood as:|advice\s*$)|outcome:\s*the advisor made no changes")
 ADVICE_NOTE = "worker returned advice, nothing executed"
 

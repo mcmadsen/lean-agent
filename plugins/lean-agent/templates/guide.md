@@ -198,6 +198,9 @@ wrongly, a workaround was needed), record it once: `lean-agent feedback add "<wh
 [--severity low|normal|high] --repro "<command or steps>"` with a concrete repro, then carry on. Don't stop the work for it and
 don't record problems of the project.
 
+## Listing files
+List files as clickable references: absolute path or path:line, one per bullet, never in code blocks or table cells, never ~/ or a bare name.
+
 ## Memory and cards
 lean-agent owns shared memory (Claude's auto memory is off). You never write it: anything to keep goes through
 `lean-agent remember`, or a worker task when the content is bigger.
