@@ -12564,6 +12564,27 @@ class CliTest(unittest.TestCase):
         self.assertEqual(len(rec["user_facing"]), 2)
         self.assertEqual(rec["regression_risks"][0]["who"], "billing users")
 
+    def test_declined_findings_with_reasons_reach_a_full_review_after_a_rebase_and_later_rounds_cap_minors(self):
+        g = self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        first = json.dumps(dict(REUSE_CHECKED, verdict="changes-requested", checks=[], findings=[
+            {"severity": "minor", "category": "correctness", "file": "api/totals.py", "line": 2, "issue": "magic number 1.1 in total"}]))
+        self.review_feature(FAKE_REVIEW=first)
+        self.cli("review", "decline", "proj", "1", "--why", "the 10 percent markup is the product rule")
+        with open(os.path.join(self.proj, "api", "totals.py"), "w") as fh:  # history rewritten, the line moved down
+            fh.write("# header\n# more\ndef total(xs):\n    return sum(xs) * 1.1\n")
+        g("checkout", "-q", "feature")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qa", "--amend", "-m", "feature")
+        g("checkout", "-q", "main")
+        self.review_feature(FAKE_REVIEW=self.APPROVE)
+        call = [c for c in self.calls() if "0. Completeness" in c["append"]][-1]
+        text = call["task"] if "task" in call else call["append"]
+        self.assertIn("magic number 1.1 in total", text)
+        self.assertIn("the 10 percent markup is the product rule", text)
+        self.assertIn("Do not report these again or variants of them", text)
+        self.assertNotIn("the code it points at changed since", text)  # same snippet, new line number
+        self.assertIn("at most 5 minor or nit items", text)  # round 2: capped
+
     # ---- sign-in (lean_auth)
     FAKE_TOKEN = "sk-ant-oat01-FAKEFAKEFAKEFAKEFAKEFAKE_fake-1234567890"
 
@@ -13044,6 +13065,69 @@ class ReviewUnitTest(unittest.TestCase):
         self.dir = d
         self._repo({"src/small.py": "def _private(x):\n    return x\n"})
         self.assertEqual(agent.classify_risk(d, ["HEAD~1", "HEAD"], ["src/small.py"]), [])
+
+    def test_snippet_survives_a_line_shift_and_a_changed_line_is_moved(self):
+        agent = self.agent
+        self._repo({"src/a.py": "def f(x):\n    return risky_call(x) + 1\n"})
+        old = agent.git(self.dir, "rev-parse", "HEAD")
+        snip = agent.line_snippet(self.dir, old, "src/a.py", 2)
+        self.assertEqual(snip, "return risky_call(x) + 1")
+        with open(os.path.join(self.dir, "src", "a.py"), "w") as fh:
+            fh.write("# a\n# b\n# c\ndef f(x):\n    return risky_call(x) + 1\n")
+        subprocess.run(["git", "-C", self.dir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qa", "--amend", "-m", "x"], check=True)
+        new = agent.git(self.dir, "rev-parse", "HEAD")
+        self.assertFalse(agent.code_moved(self.dir, old, new, "src/a.py", 2, snippet=snip))
+        self.assertFalse(agent.code_moved(self.dir, old, new, "src/a.py", 2))  # rebased, no snippet: nothing claimed
+        with open(os.path.join(self.dir, "src", "a.py"), "w") as fh:
+            fh.write("def f(x):\n    return safe_call(x)\n")
+        subprocess.run(["git", "-C", self.dir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qa", "-m", "y"], check=True)
+        self.assertTrue(agent.code_moved(self.dir, old, agent.git(self.dir, "rev-parse", "HEAD"), "src/a.py", 2, snippet=snip))
+
+    def test_round_limit_text_caps_minors_not_majors(self):
+        t = self.agent.round_limit_text("abc..def")
+        self.assertIn("at most 5 minor or nit items", t)
+        self.assertIn("only on lines changed since the previous round (abc..def)", t)
+        self.assertIn("blockers and majors are unlimited", t)
+
+    def test_risk_comes_only_from_files_the_branch_changed_not_from_base_commits(self):
+        agent = self.agent
+        self._repo({"src/plain.py": "x = 1\n"})
+        g = lambda *a: subprocess.run(["git", "-C", self.dir, "-c", "user.name=t", "-c", "user.email=t@t", *a], check=True, capture_output=True)
+        g("checkout", "-q", "-b", "feature", "HEAD~1")
+        os.makedirs(os.path.join(self.dir, "src"), exist_ok=True)
+        with open(os.path.join(self.dir, "src", "plain2.py"), "w") as fh:
+            fh.write("y = 2\n")
+        g("add", "-A")
+        g("commit", "-qm", "branch")
+        g("checkout", "-q", "main")
+        with open(os.path.join(self.dir, "signin.py"), "w") as fh:  # a sign-in helper that only the base gained
+            fh.write("def refresh_token(user):\n    return user.password\n")
+        g("add", "-A")
+        g("commit", "-qm", "base signin")
+        g("checkout", "-q", "feature")
+        g("merge", "-q", "--no-edit", "main")  # the branch now contains the base's commit
+        mb = agent.git(self.dir, "merge-base", "main", "feature")
+        names = (agent.git(self.dir, "diff", "--name-only", mb, "feature") or "").split()
+        self.assertEqual(names, ["src/plain2.py"])
+        with mock.patch.object(agent, "config_json", return_value={}):
+            model, why = agent.choose_review_model(self.dir, [mb, "feature"], names)
+        self.assertEqual(model, "sonnet", why)
+        # a delta range old_head..head that spans the merge: only the branch's own files may raise the risk
+        spans = ["HEAD~1", "HEAD"]
+        self.assertEqual(agent.classify_risk(self.dir, spans, names), [])
+        self.assertTrue(agent.classify_risk(self.dir, spans, ["signin.py"]))  # the same range does flag it when asked for
+
+    def test_the_review_question_is_only_for_an_automatic_pick_over_the_limit(self):
+        agent = self.agent
+        with mock.patch.object(agent, "config_json", return_value={"approve_usd": 5}):
+            q = agent.review_question_limit
+            self.assertIsNone(q("opus", "risk: migration", 0.5))
+            self.assertIsNone(q("opus", "risk: migration", 5.0))
+            self.assertEqual(q("opus", "risk: migration", 5.01), 5.0)
+            self.assertIsNone(q("opus", "risk: migration", 50, yes=True))
+            self.assertIsNone(q("opus", "--reviewer-model", 50))
+            self.assertIsNone(q("sonnet", "100 lines", 50))
+            self.assertEqual(q("fable", "risk: x", 9), 5.0)
 
     def test_review_cards_are_only_the_ones_that_match_the_change(self):
         agent = self.agent

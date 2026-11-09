@@ -4319,8 +4319,25 @@ def same_line(path, old, new, branch=""):
     return False
 
 
-def code_moved(path, old, new, file, line, around=3):
-    """Whether the lines around `file:line` (at commit `old`) changed by commit `new`."""
+def line_snippet(path, head, file, line):
+    """The stripped source line `file:line` at commit `head` ('' when unknown): a finding's anchor that survives a rebase."""
+    try:
+        text = git(path, "show", f"{head}:{file}") or ""
+        return text.splitlines()[int(line) - 1].strip()[:200]
+    except (TypeError, ValueError, IndexError):
+        return ""
+
+
+def code_moved(path, old, new, file, line, around=3, snippet=""):
+    """Whether the code a finding points at changed by commit `new`. With a recorded snippet it is found by text, wherever
+    its line went (rebases move lines); else the lines around `file:line` at `old` are compared, and when `old` isn't an
+    ancestor of `new` (rebased) nothing is claimed to have moved."""
+    if snippet and len(snippet) >= 6 and new:
+        cur = git(path, "show", f"{new}:{file}")
+        if cur is not None:
+            return snippet not in {l.strip() for l in cur.splitlines()}
+    if old and new and old != new and git(path, "merge-base", "--is-ancestor", old, new) is None:
+        return False
     try:
         line = int(line)
     except (TypeError, ValueError):
@@ -4343,12 +4360,22 @@ def declined_for(slug, ref, path=None, head=None, include_moved=False):
     for d in read_jsonl(declined_path(slug)):
         if not (d.get("ref") in (ref, None) or (br and (d.get("branch") == br or bare_ref(d.get("ref")) == br))):
             continue
-        if path and head and d.get("head") and d.get("file") and code_moved(path, d["head"], head, d["file"], d.get("line")):
+        if path and head and d.get("head") and d.get("file") and code_moved(path, d["head"], head, d["file"], d.get("line"), snippet=d.get("snippet") or ""):
             if include_moved:
                 out.append(dict(d, moved=True))
             continue  # the code it was about changed: it may come up again
         out.append(d)
     return out
+
+
+MAX_LATER_MINORS = 5
+
+
+def round_limit_text(since_desc):
+    """Round 2 and later: few minors, only on what changed since the previous round; blockers and majors unlimited."""
+    return (f"\nThis is not the first round on this branch. Report at most {MAX_LATER_MINORS} minor or nit items in total, "
+            f"and only on lines changed since the previous round ({since_desc}); blockers and majors are unlimited and "
+            "may be anywhere in the change.\n")
 
 
 def decisions_text(slug, ref, path=None, head=None):
@@ -4358,11 +4385,12 @@ def decisions_text(slug, ref, path=None, head=None):
               f"- declined: [{d.get('category') or '?'}] {d.get('file', '?')}: {d.get('issue', '')[:160]} "
               f"(why: {d.get('why', '')[:160]})") + (" [the code it points at changed since: raise it only if it "
                                                      "still applies]" if d.get("moved") else "")
-             for d in declined_for(slug, ref, path, head, include_moved=True)][:15]
+             for d in declined_for(slug, ref, path, head, include_moved=True)][:25]
     if not lines:
         return ""
-    return ("Decided with the author earlier (don't raise these again unless the change makes them newly "
-            "relevant, and then say what changed):\n" + "\n".join(lines) + "\n")
+    return ("Declined or accepted with the author earlier, with their reasons. Do not report these again or variants of "
+            "them; only report them if the code they refer to changed and the reason no longer holds (then say what "
+            "changed). They are matched by file and symbol, not line number:\n" + "\n".join(lines) + "\n")
 
 
 def _words(t):
@@ -5026,6 +5054,7 @@ def cmd_review_decline(a):
             append_jsonl(declined_path(slug), {"ts": now_iso(), "ref": None if a.all_branches else last.get("ref"),
                                                "branch": last.get("branch") or branch_of(path, last.get("ref")),
                                                "head": last.get("head"), "line": g.get("line"),
+                                               "snippet": line_snippet(path, last.get("head"), g.get("file"), g.get("line")),
                                                "file": g.get("file"), "gap": g.get("what", ""), "why": a.why,
                                                "review": last["run"]})
             print(f"acknowledged {n}: {g.get('file', '?')}: {str(g.get('what', ''))[:100]} ({a.why})")
@@ -5040,6 +5069,7 @@ def cmd_review_decline(a):
         append_jsonl(declined_path(slug), {"ts": now_iso(), "ref": None if a.all_branches else last.get("ref"),
                                            "branch": last.get("branch") or branch_of(path, last.get("ref")),
                                            "head": last.get("head"), "line": f.get("line"),
+                                           "snippet": line_snippet(path, last.get("head"), f.get("file"), f.get("line")),
                                            "file": f.get("file"), "category": f.get("category"),
                                            "symbol": finding_symbol(f),
                                            "issue": f.get("issue", ""), "why": a.why, "review": last["run"]})
@@ -5709,8 +5739,9 @@ def classify_risk(path, rng_args, names, diff=None, size=None):
     security words, concurrency/sync words, size, UI or strings, migrations/storage, public API/routes/protocols,
     config formats, removed public symbols. Empty list = ordinary change."""
     names = [n for n in names if n]
+    spec = ["--", *names] if 0 < len(names) <= 300 else []  # only the files given: never context or base-only files
     if diff is None:
-        diff = git(path, "diff", "-U0", "--no-color", *rng_args) or ""
+        diff = git(path, "diff", "-U0", "--no-color", *rng_args, *spec) or ""
     lines = [l for l in diff.splitlines() if l[:1] in "+-" and not l.startswith(("+++", "---"))]
     tokens = {t.lower() for t in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])", " ".join(names) + "\n" + "\n".join(lines))}
     why = []
@@ -5728,7 +5759,7 @@ def classify_risk(path, rng_args, names, diff=None, size=None):
     if gone:
         why.append("removes public symbols: " + ", ".join(gone[:3]))
     if size is None:
-        stat = git(path, "diff", "--numstat", *rng_args) or ""
+        stat = git(path, "diff", "--numstat", *rng_args, *spec) or ""
         size = sum(int(x) for l in stat.splitlines() for x in l.split("\t")[:2] if x.isdigit())
     if size >= LARGE_REVIEW_LINES:
         why.append(f"large diff, {size} lines")
@@ -5751,7 +5782,8 @@ def choose_review_model(path, rng_args, names, explicit=None, rereview=False):
     names = [n for n in names if n]
     if names and all(is_docs_file(n) or TEST_FILE.search(n) for n in names):
         return "sonnet", "docs/tests only"
-    stat = git(path, "diff", "--numstat", *rng_args) or ""
+    spec = ["--", *names] if 0 < len(names) <= 300 else []
+    stat = git(path, "diff", "--numstat", *rng_args, *spec) or ""
     size = sum(int(x) for l in stat.splitlines() for x in l.split("\t")[:2] if x.isdigit())
     why = classify_risk(path, rng_args, names, size=size)
     if why:
@@ -6508,7 +6540,7 @@ def review_main(a):
         if mb:
             meta["hunks"] = changed_hunks(path, [mb, meta["head"]] if meta.get("mode") == "ref" else [mb])
         dt = decisions_text(slug, meta.get("ref"), path, meta.get("head"))
-        where += (" " + dt.replace("\n", " ") if dt else "")
+        where += (" " + dt.replace("\n", " ") if dt else "") + round_limit_text(f"{old_head[:12]}..{meta['head'][:12]}").replace("\n", " ")
         where += (f" Since your last review these files changed: {', '.join(changed[:30]) or 'none'}. Re-check only "
                   "(a) your earlier open findings against the new code (say for each: fixed / still open) and (b) "
                   "the changed files above, with the reuse, scope and platform passes limited to them. Don't "
@@ -6543,11 +6575,13 @@ def review_main(a):
         task = (summary + "Re-review after fixes. The earlier review's open items (say for each: fixed / still open, with "
                 "file:line):\n" + ("\n".join(open_items[:25]) or "- none") + "\n\nGive the changes since then the full "
                 "passes; don't re-review code that didn't change. " + decisions_text(slug, meta.get("ref"), path, meta["head"])
+                + round_limit_text(f"{old_head[:12]}..{meta['head'][:12]}")
                 + (a.focus or "") + answer_template(ns_syms, focus))
         cards = review_cards(slug, path, since, changed, getattr(a, "goal", None), a.focus, a.max_context)
         meta["since_hunks"] = changed_hunks(path, since)
         meta["earlier"] = [str(f.get("issue", "")) for f in last.get("findings") or []]
-        risk = classify_risk(path, since, changed) if since else []
+        own = set((git(path, "diff", "--name-only", *([mb, meta["head"]] if meta.get("mode") == "ref" else [mb])) or "").split()) if mb else set()
+        risk = classify_risk(path, since, [n for n in changed if n in own]) if since and own else []
         delta_model, why_model = choose_review_model(path, since, changed, getattr(a, "reviewer_model", None)
                                                      or os.environ.get("LEAN_AGENT_DELTA_REVIEW_MODEL") or explicit,
                                                      rereview=True)
@@ -6637,10 +6671,10 @@ def review_main(a):
     cost, how = expected_review_cost(model)
     print(f"reviewer: {model} ({why_model}), effort {effort} (expected ~${cost:.2f}, {how})", flush=True)
     a._estimate = (cost, "scaled-review" if "price ratio" in how else "history-review")
-    if (any(m in model for m in ("opus", "fable")) and not getattr(a, "yes", False)
-            and why_model not in ("--reviewer-model", "LEAN_AGENT_REVIEW_MODEL", "config review-model")):
+    if any(m in model for m in ("opus", "fable")) and not getattr(a, "yes", False) \
+            and why_model not in ("--reviewer-model", "LEAN_AGENT_REVIEW_MODEL", "config review-model"):
         limit = approve_usd()
-        if cost <= limit:  # the user asked for the review; cost under the limit is decided by rule, not asked
+        if review_question_limit(model, why_model, cost) is None:  # under the limit: decided by rule, never asked
             print(f"review: {model}, est {cost:.1f} USD, auto-approved (limit {limit:g} USD)", flush=True)
         else:
             tid = caller_thread()
@@ -6673,6 +6707,8 @@ def review_main(a):
         lines = [f"- [{f.get('severity', '?')}] {f.get('file', '?')}:{f.get('line', '')} {f.get('issue', '')}"[:240]
                  for f in earlier.get("findings", [])[:15]]
         lines += [f"- [check] {c.get('what', '')}"[:240] for c in earlier.get("checks", [])[:5]]
+        task += round_limit_text(f"git diff {earlier['head'][:12]}..{sha[:12]} where that commit still exists, else only code "
+                                 "the earlier findings below don't already cover")
         task += (f"\nAn earlier review of {label} (at {earlier['head'][:12]}, verdict {earlier['verdict']}) found:\n"
                  + "\n".join(lines) + "\nSay for each whether it is resolved now; don't repeat resolved ones as "
                  "findings. Still look at the whole change.\n")
@@ -13170,6 +13206,18 @@ def launching_threads():
 
 
 APPROVE_USD_DEFAULT = 5.0
+
+
+def review_question_limit(model, why_model, cost, yes=False):
+    """The approve-usd limit when a review on `model` must be put to the user, else None. The one rule for every path:
+    only an automatic opus/fable pick costing MORE than approve-usd is asked; --yes, an explicit/configured model and
+    anything at or under the limit never is."""
+    if yes or not any(m in model for m in ("opus", "fable")):
+        return None
+    if why_model in ("--reviewer-model", "LEAN_AGENT_REVIEW_MODEL", "config review-model"):
+        return None
+    limit = approve_usd()
+    return limit if cost > limit else None
 
 
 def approve_usd():
