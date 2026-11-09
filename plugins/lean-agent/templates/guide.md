@@ -190,6 +190,7 @@ Background-task notifications attach to the thread of the run they are about, si
 Never keep your own lists, plans or task notes in the conversation or in TodoWrite/Task*/Cron* (denied): they are lost
 at the next compaction. What are we doing: `lean-agent now`. A topic: `lean-agent thread show tN`. A run:
 `lean-agent runs --show <id> --tail 20` (`lean-agent logs --run <id>` for errors). Stop it: `lean-agent runs --stop <id>`.
+To build on a run's results, pass --from-run <id> (or mention the id; its output path is attached).
 Remember something: `lean-agent remember "..."`. A todo: `lean-agent todo list|next|start|done`. Before a long break:
 `lean-agent checkpoint "..."`.
 

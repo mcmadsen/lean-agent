@@ -1867,6 +1867,14 @@ class ReadOnlyHookTest(Base):
         for c in ("pkg why x > out.txt", "pkg why x --query 'a' > out", "echo \"a\" >out", "cat < f > g"):
             self.assertEqual(self.decision(c), "deny", c)
 
+    def test_lean_agent_runs_show_and_output_are_allowed_other_subcommands_not(self):
+        for c in ("lean-agent runs --show 1101-120000-abcd", "/x/bin/lean-agent runs --show 1101-120000-abcd --details",
+                  "lean-agent output /tmp/f.txt"):
+            self.assertEqual(self.decision(c), "allow", c)
+        for c in ("lean-agent runs --stop 1101-120000-abcd", "lean-agent runs --show last", "lean-agent run x",
+                  "lean-agent runs --show 1101-120000-abcd --out f", "lean-agent output", "lean-agent output a b"):
+            self.assertEqual(self.decision(c), "deny", c)
+
     def test_mutating_git_is_refused(self):
         for c in ("reset --hard", "branch -D x", "branch x", "tag v1", "checkout x", "commit -m x", "push", "reflog expire --all",
                   "remote add x y", "diff --output=f", "stash drop", "config user.name x"):
