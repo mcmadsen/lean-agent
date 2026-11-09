@@ -1337,6 +1337,12 @@ def queue_report(tid, kind, text, tag="", force=False, waiting=True):
     if not force and kind not in ("question", "job-failed", "chase") and (mode == "off" or (mode == "questions-only" and kind != "needs-you")):
         return False
     os.makedirs(lean_home(), exist_ok=True)
+    if kind in ("done", "needs-you", "blocked", "question"):
+        try:  # the user's open questions to this thread: answered by its report (a counter-question keeps them open)
+            import lean_myq
+            lean_myq.thread_report(tid, kind, text)
+        except Exception:
+            pass
     if kind != "chase":
         try:  # a report is activity on the thread's goals (and answers a chase)
             lean_goals.touch(tid, reset=kind in ("done", "needs-you", "question"))
