@@ -7840,6 +7840,9 @@ class CliTest(unittest.TestCase):
         g("add", "-A")
         g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
         p = self.start_run(turns="3", sleep="30")
+        # stop only once the fake worker has recorded its session id (else there is no resume hint)
+        self.wait_for(lambda: [m for m in self.running_markers() if not m.get("early") and m.get("session_id")],
+                      "the session id in the run's marker")
         [m] = [m for m in self.running_markers() if not m.get("early")]
         self.assertTrue(m["start_head"])
         self.assertTrue(os.path.isdir(m["path"]))
@@ -12508,8 +12511,8 @@ class CliTest(unittest.TestCase):
         self.cli("config", "approve-usd", "0")
         p = self.cli("review", "proj", "--head", "feature", "--base", "main", check=False)
         self.assertEqual(p.returncode, 2)
-        self.assertRegex(p.stdout, r"reviewer: opus \(security-sensitive: .*\), effort high \(expected ~\$[\d.]+")
-        self.assertRegex(p.stderr, r"this review would use opus \(~\$[\d.]+, over the 0 USD auto-approve limit; security-sensitive.*\) "
+        self.assertRegex(p.stdout, r"reviewer: opus \(risk: security-sensitive: .*\), effort high \(expected ~\$[\d.]+")
+        self.assertRegex(p.stderr, r"this review would use opus \(~\$[\d.]+, over the 0 USD auto-approve limit; risk: security-sensitive.*\) "
                                    r"- rerun with --yes to accept or --reviewer-model sonnet")
         self.assertEqual(self.reviewer_runs(), [])
         p = self.cli("review", "proj", "--head", "feature", "--base", "main", "--reviewer-model", "sonnet",
@@ -12517,7 +12520,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("reviewer: sonnet (--reviewer-model)", p.stdout)
         p = self.cli("review", "proj", "--head", "feature", "--base", "main", "--yes", "--force", FAKE_REVIEW=self.APPROVE,
                      check=False)
-        self.assertIn("reviewer: opus (security-sensitive", p.stdout)
+        self.assertIn("reviewer: opus (risk: security-sensitive", p.stdout)
 
     # ---- sign-in (lean_auth)
     FAKE_TOKEN = "sk-ant-oat01-FAKEFAKEFAKEFAKEFAKEFAKE_fake-1234567890"

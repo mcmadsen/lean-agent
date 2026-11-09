@@ -462,3 +462,74 @@ def query_table(rows, remote, owners, age=""):
          ("draft" if r.get("isDraft") else r.get("status") or "-") + (f" · updated {ago(r['updated'])}" if r.get("updated") else ""), owners.get(r["pr"]) or "-")
         for r in rows]
     return render(body) + (f"\n({age})" if age else "")
+
+
+# ---- review context: the PR's title, description and linked work items, read-only, no model (cap ~3k chars)
+CONTEXT_CAP = 3000
+CONTEXT_SECONDS = 20
+
+
+def _run(cmd, cwd, seconds=CONTEXT_SECONDS):
+    """stdout of one read-only CLI call ('' on any failure); only commands from the allow lists are run."""
+    import subprocess
+    allowed = AZ_CMDS + GH_CMDS + ["az boards work-item show", "az repos pr work-item list"]
+    if not any(" ".join(cmd).startswith(a) for a in allowed):
+        return ""
+    try:
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=seconds)
+        return p.stdout if p.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _json(text):
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _clean(text, n):
+    t = re.sub(r"<[^>]+>", " ", str(text or ""))  # Azure DevOps descriptions are often HTML
+    return re.sub(r"\s+", " ", t).strip()[:n]
+
+
+def format_context(title, description, items, cap=CONTEXT_CAP):
+    """Compact text: 'PR title: ... | Description: ... | Work items: #1 title: description'."""
+    parts = []
+    if title:
+        parts.append("PR title: " + _clean(title, 300))
+    if description:
+        parts.append("PR description: " + _clean(description, 1500))
+    for i in (items or [])[:5]:
+        parts.append(f"Work item {i.get('id', '?')}: {_clean(i.get('title'), 200)}"
+                     + (f" - {_clean(i.get('description'), 600)}" if i.get("description") else ""))
+    return "\n".join(parts)[:cap]
+
+
+def fetch_context(flavour, pr, cwd, cached=None):
+    """Title, description and linked work items/issues of a PR, via read-only `az`/`gh` calls; '' when unavailable.
+    `cached` is the pr-cache row (its title is the fallback). Never raises."""
+    try:
+        pr = str(pr).strip().lstrip("#!")
+        if not pr.isdigit():
+            return ""
+        title, desc, items = (cached or {}).get("title") or "", "", []
+        if flavour == "gh":
+            d = _json(_run(["gh", "pr", "view", pr, "--json", "title,body,closingIssuesReferences"], cwd)) or {}
+            title, desc = d.get("title") or title, d.get("body") or ""
+            for r in (d.get("closingIssuesReferences") or [])[:5]:
+                n = r.get("number")
+                i = _json(_run(["gh", "api", "--method", "GET", f"repos/{{owner}}/{{repo}}/issues/{n}"], cwd)) or {}
+                items.append({"id": f"#{n}", "title": i.get("title") or "", "description": i.get("body") or ""})
+        elif flavour == "az":
+            d = _json(_run(["az", "repos", "pr", "show", "--id", pr, "--output", "json"], cwd)) or {}
+            title, desc = d.get("title") or title, d.get("description") or ""
+            wl = _json(_run(["az", "repos", "pr", "work-item", "list", "--id", pr, "--output", "json"], cwd)) or []
+            for w in wl[:5]:
+                wid = w.get("id")
+                f = (_json(_run(["az", "boards", "work-item", "show", "--id", str(wid), "--output", "json"], cwd)) or {}).get("fields") or {}
+                items.append({"id": f"#{wid}", "title": f.get("System.Title") or "", "description": f.get("System.Description") or ""})
+        return format_context(title, desc, items)
+    except Exception:
+        return ""
