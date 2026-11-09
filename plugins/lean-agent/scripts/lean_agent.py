@@ -46,6 +46,7 @@ import lean_feedback  # noqa: E402
 import lean_goals  # noqa: E402
 import lean_pr  # noqa: E402
 import lean_waiting  # noqa: E402
+import lean_poll  # noqa: E402
 import lean_own  # noqa: E402
 import lean_auth  # noqa: E402
 import service_session  # noqa: E402
@@ -172,7 +173,9 @@ READONLY_SHELL_RULE = ("You are read-only. The only shell commands you can run a
                        "`git -C {project} <show|log|log -g|reflog|grep|diff|blame|status|ls-files|ls-tree|cat-file -p|rev-parse|rev-list|\n"
                        "show-ref|for-each-ref|branch --list/-a/-r/-v|fetch|describe|merge-base|tag --list|remote -v> ...`,\n"
                        "plus find (never -exec/-delete), ls, stat, wc, head, tail, grep, rg, cat, du, file, realpath, readlink, which.\n"
-                       "`cd <dir> && ...` and pipes between these are fine. Everything else is refused.")
+                       "`cd <dir> && ...` and pipes between these are fine. Everything else is refused.\n"
+                       "To wait for something (a build, a deploy), do not loop or sleep: run\n"
+                       "`lean-agent poll --every 2m --until '<done regex>' -- <command>` and finish; you are told when it is done.")
 SEND_RULE = ("Outward actions: do NOT do anything that leaves this machine and can't be undone, such as\n"
              "sending or posting a message, submitting a form, publishing, merging, deploying, or deleting\n"
              "remote data. Do the work up to that point (e.g. type the draft), then stop with status\n"
@@ -2761,6 +2764,7 @@ def _cmd_run(a):
         lean_cli = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
         allowed += [f"Bash({lean_cli} runs --show:*)", f"Bash({lean_cli} output:*)"]  # readonly_hook.py checks the shape
         allowed += [f"Bash({c}:*)" for c in allow_cmd + internal_cmd]  # read-only commands the orchestrator named, and the role's own
+        allowed += [f"Bash({lean_cli} poll:*)"]  # readonly_hook.py: lean-agent poll checks the command itself
         permission_mode = "default"
     else:
         allowed = [tools]
@@ -2830,6 +2834,9 @@ def _cmd_run(a):
         thread_tag = None  # a helper run is never a thread's work, whatever LEAN_AGENT_THREAD the caller had
     elif prev and not os.environ.get("LEAN_AGENT_THREAD"):  # a resumed run stays with its deliverable, whatever thread is current now
         thread_tag = lean_threads.thread_of_run(prev) or thread_tag
+    env.pop("LEAN_AGENT_RO_CFG", None)
+    if read_only:
+        env["LEAN_AGENT_RO_CFG"] = ro_cfg  # `lean-agent poll` applies the same read-only checks to its command
     env["LEAN_AGENT_THREAD"] = thread_tag or "none"  # nested lean-agent commands in the worker record the same thread
     env["BASH_MAX_OUTPUT_LENGTH"] = os.environ.get("LEAN_AGENT_WORKER_BASH_OUTPUT") or "8000"  # not the orchestrator's
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"  # memory comes from lean-agent cards instead
@@ -11534,6 +11541,24 @@ def cmd_config(a):
               "user.email, these author/committer emails count as yours when attribution is off; credited commits "
               "by anyone else only warn. set: lean-agent config attribution-emails <email>...  clear: ... clear")
         return 0
+    if a.name == "poll-allow":
+        vals = [v.strip() for v in [a.value] + list(a.more or []) if v and v.strip()]
+        key = "*"
+        if a.project:
+            key = os.path.realpath(resolve_project(a.project)[1])
+        cfg = config_json()
+        table = cfg.get("poll_allow") if isinstance(cfg.get("poll_allow"), dict) else {}
+        if vals == ["clear"]:
+            table.pop(key, None)
+        elif vals:
+            table[key] = sorted(set(table.get(key) or []) | set(vals))
+        if vals:
+            cfg["poll_allow"] = table
+            save_json(home("config.json"), cfg)
+        print("poll-allow: " + ("; ".join(f"{'all projects' if k == '*' else k}: {', '.join(v)}" for k, v in table.items() if v) or "none")
+              + " \u00b7 commands (besides read-only ones) a thread's `lean-agent poll` may run. "
+              "set: lean-agent config poll-allow [--project P] <prefix>...  clear: ... clear")
+        return 0
     if a.name == "allow-edit":
         vals = [v for v in [a.value] + list(a.more or []) if v]
         proj = a.project
@@ -15374,8 +15399,8 @@ def build_parser():
 
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "allow-edit-outside <dir>|clear (extra dirs, besides ~/Downloads, where --allow-edit may name an explicit file outside the worktree), allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
-                       "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), max-thread-sessions N (thread sessions the service runs; default 20), session-idle-stop DUR|off|default (the service stops a thread session idle that long; the thread stays open; default 3h), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-vote-own on|off (ask vote or post for reviews of your own PRs too; default off), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model>|default (default auto: by risk), approve-usd N|default (cost approved by itself per run; default 5 USD, above it the user is asked), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
-    s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions", "session-idle-stop", "session-stuck",
+                       "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), poll-allow <prefix>...|clear (commands a thread's `lean-agent poll` may run besides read-only ones; --project limits it), max-thread-sessions N (thread sessions the service runs; default 20), session-idle-stop DUR|off|default (the service stops a thread session idle that long; the thread stays open; default 3h), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-vote-own on|off (ask vote or post for reviews of your own PRs too; default off), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model>|default (default auto: by risk), approve-usd N|default (cost approved by itself per run; default 5 USD, above it the user is asked), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
+    s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "poll-allow", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions", "session-idle-stop", "session-stuck",
                                            "review-max-rerounds", "review-vote-own", "review-skip", "review-model", "approve-usd", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
@@ -15927,6 +15952,11 @@ def build_parser():
     s.add_argument("--drop", action="store_true", help="N --drop: stop tracking an open question")
     s.set_defaults(fn=cmd_myq)
 
+    s = sub.add_parser("poll", help="wait without a model: `poll [--every 2m] [--timeout 2h] [--until REGEX] [--fail REGEX] [--thread tN] [--name T] -- <command...>` "
+                       "runs the command detached until it matches, then reports once; `poll --list|--show ID|--stop ID`")
+    s.add_argument("args", nargs=argparse.REMAINDER)
+    s.set_defaults(fn=lambda a: lean_poll.main(a.args))
+
     s = sub.add_parser("waiting", help="what waits on the user (list), `add \"<summary>\"`, `done <id> [--answer TEXT]`; the front desk asks each with AskUserQuestion")
     s.add_argument("args", nargs="*", help="[list] | add <summary> | done <id>")
     s.add_argument("--options", help="add: the answers to offer, a|b|c")
@@ -16118,6 +16148,8 @@ def _main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:2] in (["review", "learn"], ["review", "decline"]):
         argv = ["review-" + argv[1]] + argv[2:]
+    if argv[:1] == ["poll"]:
+        return lean_poll.main(argv[1:])  # own parser: the command after `--` is passed through untouched
     argv = normalise_run_argv(argv)  # `lean-agent run <project> ...` like `cards <project>`
     global BRIEF
     global VERBOSE, FULL

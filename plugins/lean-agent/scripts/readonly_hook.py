@@ -110,6 +110,28 @@ def git_ok(args, cwd, project):
     return f"git {sub} is not read-only"
 
 
+CLOUD_READS = {
+    "az": [("pipelines", "build", "show"), ("pipelines", "build", "list"), ("pipelines", "runs", "show"),
+           ("pipelines", "runs", "list"), ("pipelines", "show"), ("pipelines", "list")],
+    "gh": [(a, b) for a in ("run", "pr", "issue", "workflow", "release") for b in ("view", "list")]
+          + [("pr", "checks"), ("pr", "status"), ("pr", "diff")],
+}
+
+
+def cloud_ok(head, args):
+    """True for a read subcommand (show/list/view) of az pipelines or gh: the positional words must start with one of them."""
+    words = []
+    for t in args:
+        if t.startswith("-"):
+            if head == "gh" and t in ("--web", "-w"):
+                return False  # opens a browser
+            if head == "az" and not words:
+                continue
+            break
+        words.append(t)
+    return any(tuple(words[:len(sub)]) == sub for sub in CLOUD_READS[head])
+
+
 def unquoted(seg):
     """The segment with quoted text and escaped characters blanked out: <, >, |, ;, & inside quotes are data."""
     out, quote, i = "", None, 0
@@ -141,6 +163,8 @@ def lean_agent_ok(args):
     if len(args) in (3, 4) and args[:2] == ["runs", "--show"] and RUN_ID.fullmatch(args[2]) \
             and (len(args) == 3 or args[3] == "--details"):
         return None
+    if args[:1] == ["poll"]:
+        return None  # lean-agent poll runs only commands that pass this hook's checks (LEAN_AGENT_RO_CFG)
     if len(args) == 2 and args[0] == "output" and not args[1].startswith("-"):
         return None
     return "only `lean-agent runs --show <id> [--details]` and `lean-agent output <file>` are read-only"
@@ -178,6 +202,8 @@ def segment_ok(seg, cfg, state):
         return None
     if os.path.basename(head) == "lean-agent":
         return lean_agent_ok(toks[1:])
+    if head in CLOUD_READS:
+        return None if cloud_ok(head, toks[1:]) else f"only read subcommands (show, list, view) of {head}"
     if head in SIMPLE:
         if head == "sort" and any(t in SORT_BAD or t.startswith("--output=") for t in toks):
             return "sort -o writes a file"
