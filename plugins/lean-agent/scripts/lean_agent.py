@@ -3651,9 +3651,8 @@ def budget_line():
 
 REVIEWER_RULE = """\
 Role: you are the reviewer and tech lead for this change, the last quality gate before a pull request.
-Workers wrote it cheaply; your job is to make sure the quality is still right. You can only read code
-and git history. You can't run tests, build, or change anything, and you mustn't try. Spend your turns on
-reading and searching the code, not on style.
+Workers wrote it cheaply; make sure the quality is still right. You can only read code and git history; you
+can't run tests, build or change anything. Spend your turns on reading and searching, not on style.
 
 The change: {scope}
 Start with `git -C {project} diff --stat {diff_range}`, then read each file's diff with
@@ -3674,28 +3673,37 @@ Do these passes in order. Report what you searched and found fine, and what you 
 1. Correctness, tracing each changed path end to end: from its entry points (callers, events, timers) through
    the changed code to its effects (state, requests, callbacks, consumers). Concurrency, ordering, cleanup on
    logout/teardown, error paths, edge cases. Does the change do what it says?
-2. Reuse and duplication. For every new file, hook, store, util, component, class or exported function above:
+2. Behaviour and regressions. For every changed path compare base and head (old code: `git show {base_ref}:<file>`)
+   and write what the user or caller observed BEFORE -> AFTER. Mark each difference intended (named in the goal, PR
+   description or work item) or unintended. Look at: UI text, flows, screens; messages and errors; defaults; removed or
+   renamed options, flags, commands, endpoints, events; settings, storage and wire formats; migrations and old data;
+   older clients or versions talking to the new code; permissions; performance on hot paths. List them in
+   "user_facing". An unintended user-visible change or a broken old client or old data path is at least "major"
+   (category "compatibility"). For what could still go wrong, fill "risks": who is affected, likelihood, impact,
+   whether a rollback is possible, and ONE concrete check a worker can run (a test on base and head, a command, a
+   manual step). Those checks also go in "checks". Callers and tests found by lean-agent may be listed below.
+3. Reuse and duplication. For every new file, hook, store, util, component, class or exported function above:
    search the repository (Grep/Glob, `git -C {project} grep -n <pattern> {grep_ref}`) for existing code with the
    same job, by name, key identifiers and behaviour words (counter, register, subscribe, store, cache, overlay,
    defer, retry, debounce, poll, map). At least one search per new symbol. A thin wrapper or hook that calls
    existing code is "wraps-existing" (reuse done right); read the new symbol's body before calling it a copy.
-3. Scope and platform. Does it fix one instance of a class of problem (one dialog, field, site, endpoint) while
+4. Scope and platform. Does it fix one instance of a class of problem (one dialog, field, site, endpoint) while
    siblings share the cause? List the siblings you checked. For new state handling (dismiss, hide, defer,
    cleanup, retries, caching), is there an existing hook or lifecycle that already does it reversibly?
-4. Tests. For every test the change edits so that its assertions change (renamed, expectation flipped,
+5. Tests. For every test the change edits so that its assertions change (renamed, expectation flipped,
    deleted, skipped; the list above): what behaviour did it protect before? Is that still protected by another
    test (search), lost, or removed on purpose (say why)? For each new or changed behaviour, is the complement
    tested (the case that must NOT change), and the scoped vs unscoped / empty / boundary variants? Read each new
    test against the code before the change: would it fail without the fix? Lost coverage of behaviour the
    change says must stay is major; a missing test for a boundary or complement case of new behaviour is minor
    (list the cases), unless the code for that case is wrong.
-5. Defaults and state. For each new or changed parameter with a default (list above): do production callers
+6. Defaults and state. For each new or changed parameter with a default (list above): do production callers
    always pass it? If so, the default only hides mistakes ("make it required", minor); if the default
    recomputes something the fix says must be captured earlier, it's a correctness finding. When the change
    merges, widens or substitutes a value (scope, filter, version, token), list the consumers of the old value
    (flags, timestamps, caches, metrics) and check they see the right one. For new module-level state (list
    above): do the specs reset it, or does the module export a reset? Accidental isolation is a nit (tests).
-6. Then style and comments: import cycles, misleading names or comments, dead code. Skip what a linter catches.
+7. Then style and comments: import cycles, misleading names or comments, dead code. Skip what a linter catches.
 
 Severity: blocker (must fix before the PR), major (should fix), minor, nit. Duplication is major only when the
 change copies logic that exists elsewhere (about 10+ lines, or a multi-branch algorithm) or adds a second copy
@@ -3705,14 +3713,13 @@ with obvious siblings is major. If you'd call it optional, it is minor. A findin
 didn't verify goes under "checks" ("unverified: ..."), not as a major. Style never outranks the passes above.
 Reuse verdicts: "duplicate" (copies existing code outside this change: reuse it instead), "extends-existing" or
 "wraps-existing" (builds on existing code: good, no finding), "justified-new" (nothing existing fits; say why).
-Categories: completeness, correctness, duplication, scope, platform, tests, security, compatibility, performance,
-style.
-Verdict: "approve" (no blockers or majors, every new symbol has a reuse entry, every edited test has a
-coverage entry), "changes-requested", or "needs-checks" (you can't judge without something being run).
+Categories: completeness, correctness, duplication, scope, platform, tests, security, compatibility, performance, style.
+Verdict: "approve" (no blockers or majors, no unintended user-facing change, every new symbol has a reuse entry,
+every edited test has a coverage entry), "changes-requested", or "needs-checks" (you can't judge without something being run).
 Be specific (file:line, what, why, a concrete suggestion). Don't pad: if the change is good, approve it.
 
 Before the LEAN-FEEDBACK line, add one line exactly like this (valid JSON, one line):
-LEAN-REVIEW {{"verdict": "approve|changes-requested|needs-checks", "searches": [{{"for": "what you searched", "found": "file:line, ... or nothing"}}], "reuse": [{{"symbol": "new symbol", "candidates": ["file:line existing symbol"], "verdict": "duplicate|extends-existing|wraps-existing|justified-new", "why": "..."}}], "siblings": [{{"checked": "sibling", "needs_fix": true}}], "coverage": [{{"test": "edited test", "protected": "behaviour it protected", "verdict": "still-covered|lost|intentional", "by": "other test or why"}}], "findings": [{{"severity": "blocker|major|minor|nit", "category": "completeness|correctness|duplication|scope|platform|tests|security|compatibility|performance|style", "file": "path", "line": 0, "issue": "...", "why": "...", "suggestion": "..."}}], "checks": [{{"what": "what to run or verify", "why": "..."}}], "fine": ["what you checked and found fine"], "unverified": ["what you could not verify"], "goal": "what the change promises, in one line", "gaps": [{{"what": "what isn't delivered", "file": "path or commit", "line": 0, "blocks_goal": true, "scoped_out": "where it says it's out of scope, or ask the user, or empty"}}]}}
+LEAN-REVIEW {{"verdict": "approve|changes-requested|needs-checks", "searches": [{{"for": "what you searched", "found": "file:line, ... or nothing"}}], "reuse": [{{"symbol": "new symbol", "candidates": ["file:line existing symbol"], "verdict": "duplicate|extends-existing|wraps-existing|justified-new", "why": "..."}}], "siblings": [{{"checked": "sibling", "needs_fix": true}}], "coverage": [{{"test": "edited test", "protected": "behaviour it protected", "verdict": "still-covered|lost|intentional", "by": "other test or why"}}], "findings": [{{"severity": "blocker|major|minor|nit", "category": "completeness|correctness|duplication|scope|platform|tests|security|compatibility|performance|style", "file": "path", "line": 0, "issue": "...", "why": "...", "suggestion": "..."}}], "checks": [{{"what": "what to run or verify", "why": "..."}}], "user_facing": [{{"what": "UI/message/default/option/format/...", "where": "file:line", "before": "...", "after": "...", "intended": true}}], "risks": [{{"risk": "...", "who": "users/clients affected", "likelihood": "low|medium|high", "impact": "low|medium|high", "rollback": true, "check": "one concrete check"}}], "fine": ["what you checked and found fine"], "unverified": ["what you could not verify"], "goal": "what the change promises, in one line", "gaps": [{{"what": "what isn't delivered", "file": "path or commit", "line": 0, "blocks_goal": true, "scoped_out": "where it says it's out of scope, or ask the user, or empty"}}]}}
 """
 
 REUSE_RULE = """\
@@ -4138,15 +4145,15 @@ def focus_text(fc):
         parts.append("Tests only renamed (same body; no coverage entry needed):\n" +
                      "\n".join(f"- {t}" for t in fc["renamed"]))
     if fc["tests"]:
-        parts.append("Tests whose assertions this change edits (pass 4: what did each protect, is that still "
+        parts.append("Tests whose assertions this change edits (pass 5: what did each protect, is that still "
                      "protected elsewhere, or was it removed on purpose?):\n" + "\n".join(f"- {t}" for t in fc["tests"]))
     if fc["params"]:
-        parts.append("New or changed parameters with defaults (pass 5):\n" + "\n".join(f"- {p}" for p in fc["params"]))
+        parts.append("New or changed parameters with defaults (pass 6):\n" + "\n".join(f"- {p}" for p in fc["params"]))
     if fc["state"]:
-        parts.append("New module-level state (pass 5: do the specs reset it?):\n" + "\n".join(f"- {x}" for x in fc["state"]))
+        parts.append("New module-level state (pass 6: do the specs reset it?):\n" + "\n".join(f"- {x}" for x in fc["state"]))
     if fc.get("ci_parity"):
         parts.append("CI parity: tests that read folders the CI pipeline's sparse checkout leaves out (they pass in a "
-                     "full worktree and fail in CI; pass 4):\n" + "\n".join(f"- {x}" for x in fc["ci_parity"]))
+                     "full worktree and fail in CI; pass 5):\n" + "\n".join(f"- {x}" for x in fc["ci_parity"]))
     if fc.get("gaps"):
         parts.append("Self-declared gaps: added lines and commit messages that say something isn't done (pass 0: "
                      "does each keep the change from doing what it promises? Put every one in \"gaps\"):\n"
@@ -4312,8 +4319,25 @@ def same_line(path, old, new, branch=""):
     return False
 
 
-def code_moved(path, old, new, file, line, around=3):
-    """Whether the lines around `file:line` (at commit `old`) changed by commit `new`."""
+def line_snippet(path, head, file, line):
+    """The stripped source line `file:line` at commit `head` ('' when unknown): a finding's anchor that survives a rebase."""
+    try:
+        text = git(path, "show", f"{head}:{file}") or ""
+        return text.splitlines()[int(line) - 1].strip()[:200]
+    except (TypeError, ValueError, IndexError):
+        return ""
+
+
+def code_moved(path, old, new, file, line, around=3, snippet=""):
+    """Whether the code a finding points at changed by commit `new`. With a recorded snippet it is found by text, wherever
+    its line went (rebases move lines); else the lines around `file:line` at `old` are compared, and when `old` isn't an
+    ancestor of `new` (rebased) nothing is claimed to have moved."""
+    if snippet and len(snippet) >= 6 and new:
+        cur = git(path, "show", f"{new}:{file}")
+        if cur is not None:
+            return snippet not in {l.strip() for l in cur.splitlines()}
+    if old and new and old != new and git(path, "merge-base", "--is-ancestor", old, new) is None:
+        return False
     try:
         line = int(line)
     except (TypeError, ValueError):
@@ -4336,12 +4360,22 @@ def declined_for(slug, ref, path=None, head=None, include_moved=False):
     for d in read_jsonl(declined_path(slug)):
         if not (d.get("ref") in (ref, None) or (br and (d.get("branch") == br or bare_ref(d.get("ref")) == br))):
             continue
-        if path and head and d.get("head") and d.get("file") and code_moved(path, d["head"], head, d["file"], d.get("line")):
+        if path and head and d.get("head") and d.get("file") and code_moved(path, d["head"], head, d["file"], d.get("line"), snippet=d.get("snippet") or ""):
             if include_moved:
                 out.append(dict(d, moved=True))
             continue  # the code it was about changed: it may come up again
         out.append(d)
     return out
+
+
+MAX_LATER_MINORS = 5
+
+
+def round_limit_text(since_desc):
+    """Round 2 and later: few minors, only on what changed since the previous round; blockers and majors unlimited."""
+    return (f"\nThis is not the first round on this branch. Report at most {MAX_LATER_MINORS} minor or nit items in total, "
+            f"and only on lines changed since the previous round ({since_desc}); blockers and majors are unlimited and "
+            "may be anywhere in the change.\n")
 
 
 def decisions_text(slug, ref, path=None, head=None):
@@ -4351,11 +4385,12 @@ def decisions_text(slug, ref, path=None, head=None):
               f"- declined: [{d.get('category') or '?'}] {d.get('file', '?')}: {d.get('issue', '')[:160]} "
               f"(why: {d.get('why', '')[:160]})") + (" [the code it points at changed since: raise it only if it "
                                                      "still applies]" if d.get("moved") else "")
-             for d in declined_for(slug, ref, path, head, include_moved=True)][:15]
+             for d in declined_for(slug, ref, path, head, include_moved=True)][:25]
     if not lines:
         return ""
-    return ("Decided with the author earlier (don't raise these again unless the change makes them newly "
-            "relevant, and then say what changed):\n" + "\n".join(lines) + "\n")
+    return ("Declined or accepted with the author earlier, with their reasons. Do not report these again or variants of "
+            "them; only report them if the code they refer to changed and the reason no longer holds (then say what "
+            "changed). They are matched by file and symbol, not line number:\n" + "\n".join(lines) + "\n")
 
 
 def _words(t):
@@ -5019,6 +5054,7 @@ def cmd_review_decline(a):
             append_jsonl(declined_path(slug), {"ts": now_iso(), "ref": None if a.all_branches else last.get("ref"),
                                                "branch": last.get("branch") or branch_of(path, last.get("ref")),
                                                "head": last.get("head"), "line": g.get("line"),
+                                               "snippet": line_snippet(path, last.get("head"), g.get("file"), g.get("line")),
                                                "file": g.get("file"), "gap": g.get("what", ""), "why": a.why,
                                                "review": last["run"]})
             print(f"acknowledged {n}: {g.get('file', '?')}: {str(g.get('what', ''))[:100]} ({a.why})")
@@ -5033,6 +5069,7 @@ def cmd_review_decline(a):
         append_jsonl(declined_path(slug), {"ts": now_iso(), "ref": None if a.all_branches else last.get("ref"),
                                            "branch": last.get("branch") or branch_of(path, last.get("ref")),
                                            "head": last.get("head"), "line": f.get("line"),
+                                           "snippet": line_snippet(path, last.get("head"), f.get("file"), f.get("line")),
                                            "file": f.get("file"), "category": f.get("category"),
                                            "symbol": finding_symbol(f),
                                            "issue": f.get("issue", ""), "why": a.why, "review": last["run"]})
@@ -5669,31 +5706,72 @@ def expected_review_cost(model):
     return base * usage.model_rate(model) * fix, how
 
 
-def high_risk(path, rng_args, names):
-    """Reasons a change deserves a stronger reviewer: concurrency, timers, auth/logout, sync, migrations, size."""
-    diff = git(path, "diff", "-U0", "--no-color", *rng_args) or ""
-    added = "\n".join(l for l in diff.splitlines() if l.startswith(("+", "-")) and not l.startswith(("+++", "---")))
-    tokens = {t.lower() for t in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])", added)}  # splits camelCase too
-    hits = sorted(tokens & HIGH_RISK_WORDS)
-    why = []
-    if len(hits) >= 3:
-        why.append("touches " + ", ".join(hits[:5]))
-    if len(names) >= 15 or len(added.splitlines()) >= 600:
-        why.append(f"large ({len(names)} files)")
-    return why
-
-
 SECURITY_WORDS = {"auth", "authn", "authz", "authenticate", "authentication", "authorize", "authorization", "token",
                   "tokens", "crypto", "cryptography", "secret", "secrets", "password", "passwords", "permission",
                   "permissions", "cert", "certs", "certificate", "sign", "signed", "signing", "signature", "encrypt",
                   "encrypted", "encryption", "sanitize", "sanitise", "sanitizer", "csp", "cors"}
 LARGE_REVIEW_LINES = 800
 SMALL_REVIEW_LINES = 150
+# path signals of a change users or other code can observe: (reason, regex over the file path)
+RISK_PATHS = (
+    ("UI strings", re.compile(r"(^|/)(locales?|i18n|l10n|translations?|lang|strings)(/|\.|$)|\.(resx|po|xlf|arb)$", re.I)),
+    ("UI", re.compile(r"\.(xaml|axaml|storyboard|tsx|jsx|vue|svelte|html|cshtml|razor)$|(^|/)(ui|views?|screens?|pages)/", re.I)),
+    ("migration", re.compile(r"migrat|(^|/)schema|\.sql$|(^|/)(models?|entities)\.|(^|/)storage|\.prisma$", re.I)),
+    ("public API", re.compile(r"openapi|swagger|\.proto$|\.graphql$|(^|/)(routes?|routing|controllers?|endpoints?|protocol)(/|\.)", re.I)),
+    ("config format", re.compile(r"(^|/)(appsettings[^/]*|settings|config)\.[a-z]+$|\.(toml|ini|env)$|\.config\.[a-z]+$", re.I)),
+)
+RISK_DEF = re.compile(r"^\s*(?:export\s+)?(?:public\s+|async\s+)*(?:def|class|function|func|fn|interface|struct|enum)\s+([A-Za-z][A-Za-z0-9_]*)")
+
+
+def removed_public_symbols(diff):
+    """Names of public functions/classes the diff removes and doesn't add back (a rename counts as removed)."""
+    gone, back = set(), set()
+    for l in diff.splitlines():
+        if l[:1] in "+-" and not l.startswith(("+++", "---")):
+            m = RISK_DEF.match(l[1:])
+            if m and not m.group(1).startswith("_"):
+                (gone if l[0] == "-" else back).add(m.group(1))
+    return sorted(gone - back)
+
+
+def classify_risk(path, rng_args, names, diff=None, size=None):
+    """Reasons a change deserves the stronger reviewer (one classifier for model choice and the printed hint):
+    security words, concurrency/sync words, size, UI or strings, migrations/storage, public API/routes/protocols,
+    config formats, removed public symbols. Empty list = ordinary change."""
+    names = [n for n in names if n]
+    spec = ["--", *names] if 0 < len(names) <= 300 else []  # only the files given: never context or base-only files
+    if diff is None:
+        diff = git(path, "diff", "-U0", "--no-color", *rng_args, *spec) or ""
+    lines = [l for l in diff.splitlines() if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+    tokens = {t.lower() for t in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])", " ".join(names) + "\n" + "\n".join(lines))}
+    why = []
+    sec = sorted(tokens & SECURITY_WORDS)
+    if sec:
+        why.append("security-sensitive: " + ", ".join(sec[:3]))
+    hits = sorted(tokens & HIGH_RISK_WORDS - SECURITY_WORDS)
+    if len(hits) >= 3:
+        why.append("touches " + ", ".join(hits[:5]))
+    code = [n for n in names if not (is_docs_file(n) or TEST_FILE.search(n))]
+    for reason, rx in RISK_PATHS:
+        if any(rx.search(n) for n in code):
+            why.append(reason)
+    gone = removed_public_symbols(diff)
+    if gone:
+        why.append("removes public symbols: " + ", ".join(gone[:3]))
+    if size is None:
+        stat = git(path, "diff", "--numstat", *rng_args, *spec) or ""
+        size = sum(int(x) for l in stat.splitlines() for x in l.split("\t")[:2] if x.isdigit())
+    if size >= LARGE_REVIEW_LINES:
+        why.append(f"large diff, {size} lines")
+    elif len(names) >= 15 or len(lines) >= 600:
+        why.append(f"large ({len(names)} files)")
+    return why
 
 
 def choose_review_model(path, rng_args, names, explicit=None, rereview=False):
-    """(model, reason) for a review: an explicit choice wins; else by risk. Re-reviews, docs/test-only and small
-    diffs run on sonnet; security-sensitive or large (>= 800 lines) first reviews on opus; fable never by default."""
+    """(model, reason) for a review: an explicit choice wins; else by risk. Re-reviews and docs/test-only diffs run on
+    sonnet; any risk reason from classify_risk (security, UI strings, migrations, public API, config formats, removed
+    public symbols, concurrency, size) on opus; small ordinary diffs on sonnet; fable never by default."""
     if explicit:
         return explicit, "--reviewer-model" if explicit != os.environ.get("LEAN_AGENT_REVIEW_MODEL") else "LEAN_AGENT_REVIEW_MODEL"
     cfg = config_json().get("review_model")
@@ -5704,18 +5782,102 @@ def choose_review_model(path, rng_args, names, explicit=None, rereview=False):
     names = [n for n in names if n]
     if names and all(is_docs_file(n) or TEST_FILE.search(n) for n in names):
         return "sonnet", "docs/tests only"
-    stat = git(path, "diff", "--numstat", *rng_args) or ""
+    spec = ["--", *names] if 0 < len(names) <= 300 else []
+    stat = git(path, "diff", "--numstat", *rng_args, *spec) or ""
     size = sum(int(x) for l in stat.splitlines() for x in l.split("\t")[:2] if x.isdigit())
-    diff = git(path, "diff", "-U0", "--no-color", *rng_args) or ""
-    text = " ".join(names) + "\n" + "\n".join(l for l in diff.splitlines()
-                                              if l[:1] in "+-" and not l.startswith(("+++", "---")))
-    tokens = {t.lower() for t in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])", text)}
-    hits = sorted(tokens & SECURITY_WORDS)
-    if hits:
-        return "opus", "security-sensitive: " + ", ".join(hits[:3])
-    if size >= LARGE_REVIEW_LINES:
-        return "opus", f"large diff, {size} lines"
+    why = classify_risk(path, rng_args, names, size=size)
+    if why:
+        return "opus", "risk: " + ", ".join(why[:4])
     return "sonnet", f"{size} lines" if size < SMALL_REVIEW_LINES else f"{size} lines, no sensitive paths"
+
+
+def review_pr_context(slug, path, label):
+    """The goal text of a PR review: the PR's title, description and linked work items (read-only, no model, ~3k chars).
+    '' when the ref isn't a PR or nothing can be fetched; never fails the review."""
+    try:
+        pr = pr_of_ref(label)
+        if not pr:
+            return ""
+        remote = git(path, "remote", "get-url", "origin") or ""
+        return lean_pr.fetch_context(lean_pr.flavour_of(remote), pr, path, cached=lean_pr.live_of(slug, pr)) or ""
+    except Exception:
+        return ""
+
+
+SYMBOL_DEF = re.compile(r"\b(?:def|class|function|func|fn|interface|struct|enum|type)\s+([A-Za-z_][A-Za-z0-9_]*)"
+                        r"|\b(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=")
+PLAIN_NAMES = {"main", "self", "test", "init", "setup", "run", "get", "set", "new", "name", "data", "value", "type"}
+
+
+def changed_symbol_names(diff, limit=30):
+    """Names of functions/classes/consts defined on added or removed lines of a -U0 diff (callers are searched for these)."""
+    out = []
+    for l in diff.splitlines():
+        if l[:1] in "+-" and not l.startswith(("+++", "---")):
+            for m in SYMBOL_DEF.finditer(l[1:]):
+                n = m.group(1) or m.group(2)
+                if len(n) >= 4 and not n.startswith("__") and n.lower() not in PLAIN_NAMES and n not in out:
+                    out.append(n)
+    return out[:limit]
+
+
+def caller_sites(path, symbols, ref="", limit=20):
+    """Top call sites ('path:line') of changed symbols from `git grep -w`, definitions left out; [] on any failure."""
+    sites = []
+    try:
+        for sym in symbols:
+            args = ["grep", "-n", "-I", "-w", "-e", sym] + ([ref] if ref else [])
+            for l in (git(path, *args) or "").splitlines():
+                loc = l[len(ref) + 1:] if ref and l.startswith(ref + ":") else l
+                f, _, rest = loc.partition(":")
+                ln, _, text = rest.partition(":")
+                if not ln.isdigit() or SYMBOL_DEF.search(text) and sym in (SYMBOL_DEF.search(text).groups() or ()):
+                    continue
+                if f"{f}:{ln}" not in sites:
+                    sites.append(f"{f}:{ln}")
+            if len(sites) >= limit:
+                break
+    except Exception:
+        return []
+    return sites[:limit]
+
+
+def touching_tests(path, names, symbols, ref="", limit=15):
+    """Test files that mention a changed symbol or are named after a changed file (git grep in test paths), as paths."""
+    found = []
+    try:
+        spec = ["--", ":(glob)**/test*/**", ":(glob)**/*test*", ":(glob)**/*spec*", ":(glob)**/__tests__/**"]
+        for sym in symbols:
+            out = git(path, "grep", "-l", "-I", "-w", "-e", sym, *([ref] if ref else []), *spec) or ""
+            for l in out.splitlines():
+                f = l[len(ref) + 1:] if ref and l.startswith(ref + ":") else l
+                if f and f not in found and f not in names:
+                    found.append(f)
+        stems = {os.path.splitext(os.path.basename(n))[0].lower() for n in names if n and not TEST_FILE.search(n)}
+        for l in (git(path, "ls-tree", "-r", "--name-only", ref or "HEAD") or "").splitlines():
+            b = os.path.splitext(os.path.basename(l))[0].lower()
+            if TEST_FILE.search(l) and l not in found and l not in names and any(len(t) >= 4 and t in b for t in stems):
+                found.append(l)
+    except Exception:
+        return []
+    return found[:limit]
+
+
+def review_inputs_text(path, rng_args, names, ref=""):
+    """Prompt lines: callers of changed symbols and tests that touch the change (cheap git greps; '' when nothing)."""
+    try:
+        diff = git(path, "diff", "-U0", "--no-color", *rng_args) or ""
+        syms = changed_symbol_names(diff)
+        sites = caller_sites(path, syms, ref)
+        tests = touching_tests(path, names, syms, ref)
+    except Exception:
+        return ""
+    out = ""
+    if sites:
+        out += "\nCallers of changed or removed symbols (git grep, top 20; check each still works): " + ", ".join(sites) + "\n"
+    if tests:
+        out += "\nTests that touch the changed files or symbols (read them against the change): " + ", ".join(tests) + "\n"
+    return out
 
 
 MAX_REVIEW_CARDS = 4
@@ -6378,7 +6540,7 @@ def review_main(a):
         if mb:
             meta["hunks"] = changed_hunks(path, [mb, meta["head"]] if meta.get("mode") == "ref" else [mb])
         dt = decisions_text(slug, meta.get("ref"), path, meta.get("head"))
-        where += (" " + dt.replace("\n", " ") if dt else "")
+        where += (" " + dt.replace("\n", " ") if dt else "") + round_limit_text(f"{old_head[:12]}..{meta['head'][:12]}").replace("\n", " ")
         where += (f" Since your last review these files changed: {', '.join(changed[:30]) or 'none'}. Re-check only "
                   "(a) your earlier open findings against the new code (say for each: fixed / still open) and (b) "
                   "the changed files above, with the reuse, scope and platform passes limited to them. Don't "
@@ -6413,11 +6575,13 @@ def review_main(a):
         task = (summary + "Re-review after fixes. The earlier review's open items (say for each: fixed / still open, with "
                 "file:line):\n" + ("\n".join(open_items[:25]) or "- none") + "\n\nGive the changes since then the full "
                 "passes; don't re-review code that didn't change. " + decisions_text(slug, meta.get("ref"), path, meta["head"])
+                + round_limit_text(f"{old_head[:12]}..{meta['head'][:12]}")
                 + (a.focus or "") + answer_template(ns_syms, focus))
         cards = review_cards(slug, path, since, changed, getattr(a, "goal", None), a.focus, a.max_context)
         meta["since_hunks"] = changed_hunks(path, since)
         meta["earlier"] = [str(f.get("issue", "")) for f in last.get("findings") or []]
-        risk = high_risk(path, since, changed) if since else []
+        own = set((git(path, "diff", "--name-only", *([mb, meta["head"]] if meta.get("mode") == "ref" else [mb])) or "").split()) if mb else set()
+        risk = classify_risk(path, since, [n for n in changed if n in own]) if since and own else []
         delta_model, why_model = choose_review_model(path, since, changed, getattr(a, "reviewer_model", None)
                                                      or os.environ.get("LEAN_AGENT_DELTA_REVIEW_MODEL") or explicit,
                                                      rereview=True)
@@ -6483,6 +6647,12 @@ def review_main(a):
         read_rule = ""
     if not names:
         die(f"nothing to review: no changes on {label} since {base}")
+    a._goal_from_pr = False
+    if not getattr(a, "goal", None) and mode == "ref":  # no --goal: the PR title, description and work items are the goal
+        a.goal = review_pr_context(slug, path, label) or None
+        a._goal_from_pr = bool(a.goal)
+        if a.goal:
+            print(f"review: goal from the PR ({len(a.goal)} chars of title, description, work items)", flush=True)
     cards = review_cards(slug, path, [merge_base, sha] if mode == "ref" else [merge_base], names,
                          getattr(a, "goal", None), a.focus, a.max_context)
     ns_syms = new_symbols(path, [merge_base, sha] if mode == "ref" else [merge_base], new)
@@ -6501,10 +6671,10 @@ def review_main(a):
     cost, how = expected_review_cost(model)
     print(f"reviewer: {model} ({why_model}), effort {effort} (expected ~${cost:.2f}, {how})", flush=True)
     a._estimate = (cost, "scaled-review" if "price ratio" in how else "history-review")
-    if (any(m in model for m in ("opus", "fable")) and not getattr(a, "yes", False)
-            and why_model not in ("--reviewer-model", "LEAN_AGENT_REVIEW_MODEL", "config review-model")):
+    if any(m in model for m in ("opus", "fable")) and not getattr(a, "yes", False) \
+            and why_model not in ("--reviewer-model", "LEAN_AGENT_REVIEW_MODEL", "config review-model"):
         limit = approve_usd()
-        if cost <= limit:  # the user asked for the review; cost under the limit is decided by rule, not asked
+        if review_question_limit(model, why_model, cost) is None:  # under the limit: decided by rule, never asked
             print(f"review: {model}, est {cost:.1f} USD, auto-approved (limit {limit:g} USD)", flush=True)
         else:
             tid = caller_thread()
@@ -6515,7 +6685,7 @@ def review_main(a):
                 gate(f"{msg} - asked main ({qid}); end your turn, the answer arrives as your next turn: yes -> rerun with --yes, "
                      "no -> --reviewer-model sonnet", 2)
             gate(f"{msg} - rerun with --yes to accept or --reviewer-model sonnet (raise the limit: lean-agent config approve-usd N)", 2)
-    risk = high_risk(path, [merge_base, sha] if mode == "ref" else [merge_base], names)
+    risk = classify_risk(path, [merge_base, sha] if mode == "ref" else [merge_base], names)
     if risk and usage.model_rate(model) <= 1:
         strong = os.environ.get("LEAN_AGENT_STRONG_REVIEW_MODEL") or "opus"
         print(f"review: high-risk change ({'; '.join(risk)}). A stronger reviewer may find more: "
@@ -6537,6 +6707,8 @@ def review_main(a):
         lines = [f"- [{f.get('severity', '?')}] {f.get('file', '?')}:{f.get('line', '')} {f.get('issue', '')}"[:240]
                  for f in earlier.get("findings", [])[:15]]
         lines += [f"- [check] {c.get('what', '')}"[:240] for c in earlier.get("checks", [])[:5]]
+        task += round_limit_text(f"git diff {earlier['head'][:12]}..{sha[:12]} where that commit still exists, else only code "
+                                 "the earlier findings below don't already cover")
         task += (f"\nAn earlier review of {label} (at {earlier['head'][:12]}, verdict {earlier['verdict']}) found:\n"
                  + "\n".join(lines) + "\nSay for each whether it is resolved now; don't repeat resolved ones as "
                  "findings. Still look at the whole change.\n")
@@ -6545,13 +6717,15 @@ def review_main(a):
         task += f"\nThe author asks you to look closely at: {a.focus}\n"
     if getattr(a, "goal", None):
         task += f"\nThe change's stated goal (task, work item or PR title): {a.goal}\n"
+    task += review_inputs_text(path, [merge_base, sha] if mode == "ref" else [merge_base], names, grep_ref)
     task += answer_template(ns_syms, focus)
     meta = {"base": base, "merge_base": merge_base, "head": sha, "dirty": dirty, "ref": label, "mode": mode,
             "files": len(names), "new_symbols": ns_syms["files"] + ns_syms["symbols"],
             "second_opinion": getattr(a, "_second", []),
             "hunks": changed_hunks(path, [merge_base, sha] if mode == "ref" else [merge_base]),
             "edited_tests": focus["tests"], "independent": bool(a.independent), "gaps": focus.get("gaps") or [],
-            "goal": getattr(a, "goal", None), "ci_parity": focus.get("ci_parity") or [],
+            "goal": (a.goal.splitlines()[0][:200] if getattr(a, "_goal_from_pr", False) else getattr(a, "goal", None)),
+            "ci_parity": focus.get("ci_parity") or [],
             "scope": "full", "fallback": getattr(a, "_fallback", ""), "for_push": bool(getattr(a, "for_push", False))}
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=model, estimate=getattr(a, "_estimate", None),
                             todo=getattr(a, "todo", None),
@@ -6609,7 +6783,8 @@ def merge_reviews(reviews):
     return {"verdict": verdict, "findings": findings,
             "reuse": union("reuse", "symbol", lambda x, y: x.get("verdict") == "duplicate"),
             "coverage": union("coverage", "test", lambda x, y: x.get("verdict") == "lost"),
-            "checks": union("checks", "what"), "siblings": union("siblings", "checked", lambda x, y: x.get("needs_fix")),
+            "checks": union("checks", "what"), "user_facing": union("user_facing", "what", lambda x, y: x.get("intended") is False),
+            "risks": union("risks", "risk"), "siblings": union("siblings", "checked", lambda x, y: x.get("needs_fix")),
             "searches": [s_ for rv in reviews for s_ in rv.get("searches") or []],
             "fine": lists("fine"), "unverified": lists("unverified")}
 
@@ -6909,6 +7084,27 @@ def enforce_review_rules(review, meta, declined=()):
                            "why": "it passes in a full worktree and fails in CI"})
     review["_goal"] = review.get("goal") or meta.get("goal")
 
+    uf = [dict(u) for u in review.get("user_facing") or [] if isinstance(u, dict) and (u.get("what") or u.get("after"))]
+    for u in uf:  # intended unless the reviewer says it isn't
+        u["intended"] = str(u.get("intended")).strip().lower() not in ("false", "no", "unintended", "0")
+        if not u["intended"] and not any(str(u.get("what", ""))[:40] in str(f.get("issue", "")) for f in findings):
+            where = str(u.get("where") or "")
+            file_, _, line = where.partition(":")
+            findings.append({"severity": "major", "category": "compatibility", "file": file_ or "?",
+                             "line": int(line) if line.isdigit() else 0,
+                             "issue": f"unintended user-facing change: {str(u.get('what', ''))[:100]}: "
+                                      f"{str(u.get('before', '?'))[:80]} -> {str(u.get('after', '?'))[:80]}",
+                             "why": "not named in the goal, PR description or work item",
+                             "suggestion": "revert it, or confirm it is intended (lean-agent review decline)"})
+    review["_user_facing"] = uf
+    rk = [dict(r) for r in review.get("risks") or [] if isinstance(r, dict) and r.get("risk")]
+    for r in rk:
+        c = str(r.get("check") or "").strip()
+        if c and not any(c[:60] in str(x.get("what", "")) for x in checks):
+            checks.append({"what": c, "why": f"risk: {str(r['risk'])[:80]} (who: {str(r.get('who', '?'))[:60]}, "
+                                              f"likelihood {r.get('likelihood', '?')}, impact {r.get('impact', '?')})"})
+    review["_risks"] = rk
+
     if meta.get("resume") and meta.get("since_hunks") is not None:
         # converge: on a re-review, a NEW major about code that didn't change since the last review is minor
         for f in findings:
@@ -6961,6 +7157,7 @@ def report_review(slug, project, entry, review, meta):
                                       "unchecked": review.get("_missing") or [], "disputed": review.get("_disputed") or [],
                                       "coverage_unchecked": review.get("_no_cov") or [],
                                       "gaps": review.get("_gaps") or [], "goal": review.get("_goal"),
+                                      "user_facing": review.get("_user_facing") or [], "regression_risks": review.get("_risks") or [],
                                       "branch": branch_of(root, meta.get("ref")) if meta.get("mode") == "ref" else "",
                                       "after": meta.get("after"), "delta": bool(meta.get("resume")),
                                       "scope": meta.get("scope") or ("delta" if meta.get("resume") else "full"),
@@ -7016,6 +7213,21 @@ def report_review(slug, project, entry, review, meta):
             f"  {i}. [{f.get('severity', '?')}{cat}] {loc}: {issue if len(issue) <= 140 else issue[:137] + '...'}")
         if f.get("suggestion"):
             detail(f"      fix: {f['suggestion']}")
+    uf = review.get("_user_facing") or []
+    if uf:
+        print("  User-facing changes (intended / unintended):")
+        for u in uf:
+            tag = "intended" if u.get("intended") else "UNINTENDED" + (" (declined)" if is_declined(
+                {"file": str(u.get("where", "")).partition(":")[0], "category": "compatibility",
+                 "issue": f"unintended user-facing change: {u.get('what', '')}"}, declined) else "")
+            print(f"    [{tag}] {str(u.get('what', ''))[:70]}: {str(u.get('before', '?'))[:70]} -> {str(u.get('after', '?'))[:70]}")
+    rks = review.get("_risks") or []
+    if rks:
+        print("  Regression risks:")
+        for r in rks:
+            print(f"    {str(r.get('risk', ''))[:80]} · who: {str(r.get('who', '?'))[:50]} · {r.get('likelihood', '?')} likelihood, "
+                  f"{r.get('impact', '?')} impact · rollback: {'yes' if r.get('rollback') is not False else 'no'} · check: "
+                  f"{str(r.get('check', '?'))[:100]}")
     for c in checks:
         print(f"  [check] {c.get('what', '')}" + (f" ({c['why']})" if c.get("why") else ""))
     gaps = review.get("_gaps") or []
@@ -12994,6 +13206,18 @@ def launching_threads():
 
 
 APPROVE_USD_DEFAULT = 5.0
+
+
+def review_question_limit(model, why_model, cost, yes=False):
+    """The approve-usd limit when a review on `model` must be put to the user, else None. The one rule for every path:
+    only an automatic opus/fable pick costing MORE than approve-usd is asked; --yes, an explicit/configured model and
+    anything at or under the limit never is."""
+    if yes or not any(m in model for m in ("opus", "fable")):
+        return None
+    if why_model in ("--reviewer-model", "LEAN_AGENT_REVIEW_MODEL", "config review-model"):
+        return None
+    limit = approve_usd()
+    return limit if cost > limit else None
 
 
 def approve_usd():
