@@ -416,7 +416,7 @@ push that follows; `--thread tN|none` overrides it, workers inherit it through `
 | `lean-agent thread new "<title>" [--prompt-file F\|-]` / `list` | Start a thread with its own Remote Control session (with a first message) / list threads |
 | `lean-agent thread send tN --prompt-file F\|-` / `open tN` / `sessions [--context]` | Hand a message to the thread's session (starting or resuming it) / bring its session back / list main and the running thread sessions: pid, idle time, context, `waiting on main` questions, running runs (`N running`), `mid-turn`, `fresh on next send`. `--context` prints only the table Session \| Title \| Context \| % of compact \| Idle \| State, largest first. Needs `up` running |
 | `lean-agent thread reports` | The thread reports delivered to main, in full |
-| `lean-agent thread ask "<question>" [--options "a\|b\|c"]` / `answer tN [qN] "<answer>"` | A thread session asks main instead of the user (the thread waits, status "waiting on main"); main answers it or asks the user, and `answer` sends the reply into the thread session as its next turn |
+| `lean-agent thread ask "<question>" [--options "a\|b\|c"]` / `answer tN [qN] "<answer>"` | A thread session asks main instead of the user (the thread waits, status "needs you / waiting on you: qN"; it is pushed to main at once with the AskUserQuestion hint and the exact answer command, re-pushed once after 2 minutes, and never counts as running or done); main answers it or asks the user, and `answer` sends the reply into the thread session as its next turn |
 | `lean-agent thread merge tB tA` / `unmerge tB` | Fold thread B into A / give B its own tag back |
 | `lean-agent thread move tN` | Wrong thread: move the latest request, the current thread and the work recorded since to tN |
 
@@ -694,7 +694,7 @@ uncommitted changes and new untracked files.
   is recorded as "not checked") instead of resuming the main reviewer. The model is chosen by risk unless
   `--reviewer-model` is given: re-reviews, docs/test-only and small diffs (under about 150 lines) sonnet, first reviews of
   large diffs (about 800 lines or more) or of security-sensitive paths and keywords (auth, token, crypto, secret,
-  password, permission, cert, sign, encrypt, sanitize, csp, cors) opus, fable never by default; `config review-model
+  password, permission, cert, sign, encrypt, sanitize, csp, cors) opus, fable never by default; `config approve-usd N|default` (cost per run approved without asking, default 5 USD; above it a question reaches the user), `config review-model
   auto|<model>` fixes it. A gap declined earlier on the branch (matched by location and similar wording) is not shown
   again, and a gap whose own text says it is documented, out of scope or already handled is declined with that reason
   (one summary line). Review prompts carry at most 4 cards: rules whose globs match the changed files, or cards whose
