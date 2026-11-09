@@ -160,7 +160,7 @@ def new(title, text=None):
     return tid
 
 
-GOAL_START_MIN = 10  # minutes a request may stay unstarted before it is redelivered / nudged (config goal-start-minutes)
+GOAL_START_MIN = 3  # minutes a request may stay unstarted before it is redelivered / nudged (config goal-start-minutes)
 
 
 def start_minutes():
@@ -191,6 +191,32 @@ def unstarted_request(t, evs, now, min_secs=0):
     if now - since < min_secs:
         return None
     return {"id": pick.get("id"), "text": pick.get("text") or "", "since": since, "undelivered": bool(pick.get("undelivered"))}
+
+
+def request_seen(tid, text, since=0):
+    """True when the thread's session has taken the message `text` (its prompt hook stored it as delivered at or after
+    `since`, an epoch), i.e. the user turn started."""
+    want = _request_text(text)
+    t = load()["threads"].get(tid) or {}
+    return any(_request_text(r.get("text")) == want and not r.get("undelivered") and r.get("delivered_ts")
+               and _epoch(r.get("delivered_ts")) >= since - 1 for r in t.get("requests") or [] if isinstance(r, dict))
+
+
+def request_started(tid, rid):
+    """True when request `rid` of the thread is no longer undelivered (or is gone): never deliver it again."""
+    t = load()["threads"].get(tid) or {}
+    r = next((r for r in t.get("requests") or [] if isinstance(r, dict) and r.get("id") == rid), None)
+    return r is None or not r.get("undelivered")
+
+
+def mark_redelivered(tid, rid):
+    """Record that the service redelivered request `rid` by itself; False when it already did (or the request is gone)."""
+    with _locked() as data:
+        r = next((r for r in (data["threads"].get(tid) or {}).get("requests") or [] if isinstance(r, dict) and r.get("id") == rid), None)
+        if r is None or r.get("redelivered_ts") or not r.get("undelivered"):
+            return False
+        r["redelivered_ts"] = now_iso()
+        return True
 
 
 def _request_text(prompt):
@@ -241,6 +267,9 @@ def session_state(tid, t=None):
 def session_lines(tid, t):
     """The `now` line for a thread's own session: running or closed, with its Remote Control name ([] for a thread that never had one)."""
     state, name = session_state(tid, t)
+    un = next((r for r in t.get("requests") or [] if isinstance(r, dict) and r.get("undelivered")), None)
+    if un and time.time() - _epoch(un.get("ts")) >= 60:
+        return [f"  request {un.get('id')}: not started ({int((time.time() - _epoch(un.get('ts'))) // 60)}m), retrying"]
     if state == "closed" and not t.get("session_id"):
         return []
     if state == "closed" and t.get("parked_by") == "idle":
@@ -1532,7 +1561,7 @@ def short_text(now=None, max_lines=SHORT_ROWS, all_=False):
             elif running.get(tid):
                 row = (1, -last, tid, run, "", "wait for the run")
             elif (un := unstarted_request(t, evs.get(tid), now, start_minutes() * 60)) and now - un["since"] < SHORT_UNSTARTED_HOURS * 3600:
-                row = (0, un["since"], tid, f"idle {age(_iso_of(None, last), now)}", f"not started ({int((now - un['since']) // 60)}m)",
+                row = (0, un["since"], tid, f"idle {age(_iso_of(None, last), now)}", f"not started ({int((now - un['since']) // 60)}m), retrying",
                        "redeliver it" if un["undelivered"] else "start it")
             elif rep and rep.get("kind") == "done" and now - rep_ts < SHORT_DONE_HOURS * 3600:
                 row = (2, -rep_ts, tid, f"done {age(rep['ts'], now)}", _cell(rep["text"], 40), "nothing")

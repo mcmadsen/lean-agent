@@ -430,18 +430,18 @@ class NeverStartedTest(GoalsTest):
     def unstarted(self, undelivered=True):
         return {"unstarted": {"id": "r1", "text": "review the change", "since": T0, "undelivered": undelivered}}
 
-    def test_undelivered_first_request_is_redelivered_at_ten_minutes_not_before(self):
+    def test_undelivered_first_request_is_redelivered_at_three_minutes_not_before(self):
         self.goal()
         self.info_by["t21"] = self.unstarted()
-        self.assertEqual(self.watch(9), [])
+        self.assertEqual(self.watch(2), [])
         self.assertEqual(self.sent, [])
-        self.watch(11)
+        self.watch(4)
         self.assertEqual(self.sent, [("t21", "review the change")])
 
     def test_delivered_but_unstarted_request_gets_the_start_nudge(self):
         self.goal()
         self.info_by["t21"] = self.unstarted(False)
-        self.watch(11)
+        self.watch(4)
         self.assertEqual(len(self.sent), 1)
         self.assertIn("unstarted request r1: start it", self.sent[0][1])
 
