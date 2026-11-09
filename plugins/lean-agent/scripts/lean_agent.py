@@ -7227,9 +7227,9 @@ def enforce_review_rules(review, meta, declined=()):
                            "why": f"edited test, coverage not checked ({t.split(': ', 1)[0]}): what it protected, still tested?"})
         notes.append(f"coverage not checked for {len(no_cov)} of {len(edited)} edited tests: listed as 'to run'")
     lost = [c for c in cov if c.get("verdict") == "lost"]
-    if lost and not any(f.get("category") == "tests" and f.get("severity") in ("blocker", "major", "minor")
+    if lost and not any(f.get("category") == "tests" and f.get("severity") in ("blocker", "major")
                         for f in findings):  # one finding for all of them, unless the reviewer wrote its own
-        findings.append({"severity": "minor", "category": "tests", "file": "tests", "line": 0,
+        findings.append({"severity": "major", "category": "tests", "file": "tests", "line": 0,
                          "issue": "coverage lost: " + "; ".join(f"'{c.get('test')}' protected {c.get('protected', '?')}"
                                                                 for c in lost[:6]),
                          "suggestion": "add tests for these back, or say why they no longer apply"})

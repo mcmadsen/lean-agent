@@ -1271,19 +1271,21 @@ class CliTest(unittest.TestCase):
                                                             "reuse": [{"symbol": n, "verdict": "justified-new"}
                                                                       for n in ("merge", "shareable", "isSent", "takePending")]})).stdout
         self.assertIn("4 edited tests, 1 defaults, 2 module state", out)
-        self.assertIn("coverage not checked for 4 of 4 edited tests", out)
-        self.assertNotIn("REVIEW: APPROVE", out)
-        self.assertRegex(out, r"reviewer: sonnet( \(\d+ lines\))?, effort high \(expected ~\$")
-        self.assertIn("high-risk change (touches", out)
+        # the reviewer answered no coverage entries: the gate can't run them itself, so the approve stands and the
+        # exact commands are listed (an un-runnable check alone never blocks; a "lost" answer is a major, below)
+        self.assertIn("coverage not checked for 4 of 4 edited tests: listed as 'to run'", out)
+        self.assertIn("REVIEW: APPROVE", out)
+        self.assertIn("[check] to run: npx jest test/runner.spec.js -t 'shares a running check for the same scope'", out)
+        self.assertRegex(out, r"reviewer: opus \(risk: touches [^)]*\), effort high \(expected ~\$")  # risk picks opus
         append = self.calls()[-1]["append"]
         self.assertIn("capturedAtMs = Date.now()", append)
-        self.assertIn("4. Tests. For every test the change edits", append)
+        self.assertIn("5. Tests. For every test the change edits", append)
         # an independent comparison run sees no earlier findings or decisions
         prev = json.dumps({"verdict": "changes-requested", "checks": [], "findings": [
             {"severity": "major", "category": "correctness", "file": "src/checks/runner.js", "line": 25,
              "issue": "uses the request scope"}], "searches": [{"for": "x", "found": "y"}],
             "reuse": [{"symbol": n, "verdict": "justified-new"} for n in ("merge", "shareable", "isSent", "takePending")]})
-        self.cli("review", "case", "--head", "fix-races", "--base", "main", "--second-opinion", "off", check=False,
+        self.cli("review", "case", "--head", "fix-races", "--base", "main", "--second-opinion", "off", "--force", check=False,
                  FAKE_REVIEW=prev)
         self.cli("review", "decline", "case", "1", "--head", "fix-races", "--why", "not a bug")
         out = self.cli("review", "case", "--head", "fix-races", "--base", "main", "--independent", check=False,
@@ -1301,7 +1303,6 @@ class CliTest(unittest.TestCase):
         self.assertIn("review pass 1: 1 findings", out)
         self.assertIn("uses the request scope [2/2 passes]", out)
         self.assertIn("cost: this review $0.10", out)
-        self.assertIn("or --runs 2 (two independent passes", out)
         # estimates learn from their misses: opus was estimated from Sonnet, then fable gets the correction
         self.cli("review", "case", "--head", "fix-races", "--base", "main", "--independent", "--reviewer-model", "opus",
                  check=False, FAKE_REVIEW=prev)
@@ -12068,6 +12069,16 @@ class CliTest(unittest.TestCase):
             verdict, findings, checks, notes = agent.enforce_review_rules(review, meta, [])
         self.assertEqual(verdict, "approve")
         self.assertTrue(any(c["what"].startswith("to run: python -m pytest tests/test_a.py") for c in checks), checks)
+
+    def test_lost_test_coverage_is_a_major_and_blocks(self):
+        agent = lean_agent_module()
+        review = dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[], coverage=[
+            {"test": "adds up", "protected": "rounding", "verdict": "lost", "by": ""}])
+        meta = {"edited_tests": ["tests/test_a.py: 'adds up' (skipped)"], "new_symbols": [], "hunks": {}}
+        with mock.patch.dict(os.environ, self.env):
+            verdict, findings, checks, notes = agent.enforce_review_rules(review, meta, [])
+        self.assertEqual(verdict, "changes-requested")
+        self.assertEqual([f["severity"] for f in findings], ["major"])
 
     def test_late_nits_on_unchanged_code_are_not_counted_on_a_re_review(self):
         agent = lean_agent_module()
