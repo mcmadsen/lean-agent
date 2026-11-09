@@ -430,9 +430,22 @@ def scan_windows():
     os.makedirs(home, exist_ok=True)
     path = os.path.join(home, "windows.json")
     prefixes = tuple({_munge(home), _munge(os.path.realpath(home))})
-    with open(path + ".lock", "w") as lock:
-        if fcntl:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+    lock = open(path + ".lock", "a")
+    if fcntl:
+        try:
+            import lean_common
+            if lean_common.HOOK["on"]:  # a hook never waits for a scan another process runs: it uses the last result
+                lock = lean_common.flock_waiting(lock, fcntl.LOCK_EX, "windows.json", path + ".lock")
+            else:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+        except Exception as exc:  # LockBusy (hook) or no lean_common: the cached buckets, read without the lock
+            lock.close()
+            try:
+                with open(path) as fh:
+                    return (json.load(fh) or {}).get("buckets", {})
+            except (OSError, ValueError):
+                return {}
+    with lock:
         try:
             with open(path) as fh:
                 st = json.load(fh)

@@ -29,6 +29,7 @@ import json
 import os
 import re
 import sys
+import threading
 
 MEMORY_MESSAGE_RE = r"^#[ \t]+\S"  # '# keep this', not '#12 is failing' or '#tag'
 COMMAND_PROMPT_RE = r"^/(memory|init)(\s|$)"
@@ -86,7 +87,44 @@ def compaction_point():
 ALLOW_REASON = ""  # set once the deny checks have passed for a plain lean-agent command
 
 
+DONE = []  # set once a decision was printed: the deadline timer then has nothing left to do
+_PRINT = threading.Lock()
+
+
+def hook_deadline(stage_default):
+    try:
+        return float(os.environ.get("LEAN_AGENT_HOOK_DEADLINE") or stage_default)
+    except ValueError:
+        return stage_default
+
+
+def arm_deadline(seconds, answer):
+    """A slow check never costs the user a permission prompt (Claude Code ignores a hook that outruns its timeout):
+    at the deadline `answer()` (the decision reached so far, or nothing) is printed and the hook exits, failing open."""
+    def fire():
+        with _PRINT:
+            if DONE:
+                return
+            DONE.append(1)
+            try:
+                answer()
+                sys.stdout.flush()
+                print("lean-agent hook: deadline reached; failing open", file=sys.stderr, flush=True)
+            finally:
+                os._exit(0)
+    timer = threading.Timer(seconds, fire)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 def emit(**fields):
+    with _PRINT:
+        _emit(**fields)
+
+
+def _emit(**fields):
+    DONE.append(1)
     if ALLOW_REASON and "permissionDecision" not in fields:
         fields.update(permissionDecision="allow", permissionDecisionReason=ALLOW_REASON)
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", **fields}}))
@@ -911,10 +949,15 @@ def stop_hook(event):
 
 
 def main():
+    lean_common.hook_mode()
     try:
         event = json.loads(STDIN) if STDIN is not None else json.load(sys.stdin)
     except ValueError:
         return 0
+    if event.get("hook_event_name") in ("UserPromptSubmit", "Stop"):
+        arm_deadline(hook_deadline(5.0), lambda: None)  # fail open: no block, no note
+    else:
+        arm_deadline(hook_deadline(3.0), lambda: _emit() if ALLOW_REASON else None)
     if event.get("hook_event_name") == "UserPromptSubmit":
         cwd = os.path.realpath(event.get("cwd") or os.getcwd())
         home = os.path.realpath(usage.lean_home())
@@ -941,14 +984,6 @@ def main():
     checking = event.get("tool_name") == "Bash" and command.startswith(tuple(
         "lean-agent " + c for c in ("limits", "stats", "budget", "runs", "logs", "doctor")))
     in_home = cwd == home or cwd.startswith(home + os.sep)
-    if in_home and not checking:
-        hit = usage.exhausted_window()
-        if hit:
-            emit(permissionDecision="deny",
-                 permissionDecisionReason=usage.describe_exhausted(hit) + " Do not call more tools: tell the user "
-                 "briefly what is done and what remains, then end your turn.")
-            return 0
-
     if event.get("tool_name") == "AskUserQuestion" and os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread":
         emit(permissionDecision="deny", permissionDecisionReason=(
             "lean-agent: a thread session never asks the user directly. Use `lean-agent thread ask \"<question>\" "
@@ -1004,6 +1039,14 @@ def main():
     if (event.get("tool_name") == "Bash" and not worker_dir and role in (None, "", "main", "thread")
             and (in_home or role in ("main", "thread")) and single_lean_agent(command)):
         ALLOW_REASON = "lean-agent command"  # the deny checks above passed; no permission prompt for a plain lean-agent call
+
+    if in_home and not checking:  # the slow check (a transcript scan) comes after the cheap ones; the deadline skips it
+        hit = usage.exhausted_window()
+        if hit:
+            emit(permissionDecision="deny",
+                 permissionDecisionReason=usage.describe_exhausted(hit) + " Do not call more tools: tell the user "
+                 "briefly what is done and what remains, then end your turn.")
+            return 0
 
     state = usage.load_state(session_id)
     usage.update(state, transcript)
@@ -1101,4 +1144,6 @@ if __name__ == "__main__":
         sys.exit(main())
     except Exception as exc:  # never break the user's session over accounting
         print(f"lean-agent budget hook error: {exc}", file=sys.stderr)
+        if ALLOW_REASON and not DONE:
+            emit()
         sys.exit(0)

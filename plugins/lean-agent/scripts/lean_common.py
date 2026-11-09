@@ -144,6 +144,74 @@ class LockBusy(TimeoutError):
     """A lock stayed held past the wait cap: one clean line, never a crash."""
 
 
+HOOK = {"on": False}  # a hook process: never waits long for a lock (set by hook_mode())
+HOOK_LOCK_WAIT = 0.5   # seconds a hook waits for a lock before skipping its write
+LONG_HOLD = 2.0        # seconds a lock wait or hold is logged from (lock-holds.log, listed by doctor)
+_SKIPPED = set()
+
+
+def hook_mode():
+    """Called by hook entry points: locks are tried for HOOK_LOCK_WAIT seconds, then LockBusy (the write is skipped)."""
+    HOOK["on"] = True
+
+
+def hook_skipped(what):
+    """Log once per process that a hook skipped a write or a check because `what` was busy."""
+    if what in _SKIPPED:
+        return
+    _SKIPPED.add(what)
+    log_long_lock("skipped", what, 0, "", "hook skipped: lock busy")
+
+
+def lock_log_path():
+    return lean_home("lock-holds.log")
+
+
+def log_long_lock(kind, what, secs, holder, note=""):
+    """One line in <home>/lock-holds.log (and stderr): which lock, waited/held for how long, by which pid + command."""
+    cmd = pid_command(holder) if holder else ""
+    row = {"ts": now_iso(), "kind": kind, "lock": what, "secs": round(secs, 1), "pid": str(holder or ""),
+           "cmd": cmd[:160], "by": os.getpid(), "note": note}
+    try:
+        print(f"lean-agent: lock {what}: {note or kind} {secs:.1f}s" + (f", holder pid {holder} ({cmd})" if holder else ""),
+              file=sys.stderr, flush=True)
+    except Exception:
+        pass
+    try:
+        path = lock_log_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a") as fh:
+            fh.write(json.dumps(row) + "\n")
+        if os.path.getsize(path) > 200000:
+            with open(path) as fh:
+                keep = fh.readlines()[-300:]
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with open(tmp, "w") as fh:
+                fh.writelines(keep)
+            os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def recent_long_holds(n=10, since_hours=24):
+    """The last `n` logged long lock waits/holds/skips from the last `since_hours` hours (dicts)."""
+    out = []
+    try:
+        with open(lock_log_path()) as fh:
+            lines = fh.readlines()[-500:]
+    except OSError:
+        return out
+    cutoff = time.time() - since_hours * 3600
+    for line in lines:
+        try:
+            row = json.loads(line)
+            if datetime.datetime.fromisoformat(row["ts"]).timestamp() >= cutoff:
+                out.append(row)
+        except (ValueError, KeyError, TypeError):
+            continue
+    return out[-n:]
+
+
 def lock_holder(path):
     """The pid that wrote itself into the lock file (best effort), else ''."""
     try:
@@ -231,10 +299,16 @@ def flock_waiting(fh, mode, what, path, timeout=None, every=None):
     except OSError:
         pass
     timeout = lock_wait_timeout() if timeout is None else timeout
+    if HOOK["on"]:
+        timeout = HOOK_LOCK_WAIT if not timeout else min(timeout, HOOK_LOCK_WAIT)
     every = LOCK_NOTICE_EVERY if every is None else every
     holder = lock_holder(path)
+    logged_wait = []
     start = last = time.time()
     while True:
+        if time.time() - start >= LONG_HOLD and not logged_wait:
+            logged_wait.append(1)
+            log_long_lock("waiting", what, time.time() - start, holder, "waiting for lock")
         holder = lock_holder(path) or holder
         if holder and holder != str(os.getpid()) and not pid_running(holder):
             _log_takeover(what, holder)
@@ -267,6 +341,8 @@ def flock_waiting(fh, mode, what, path, timeout=None, every=None):
         except OSError:
             pass
         if timeout and time.time() - start >= timeout:
+            if HOOK["on"]:
+                hook_skipped(what)
             raise LockBusy(lock_busy_text(what, path, holder))
         time.sleep(0.05)
 
@@ -285,11 +361,15 @@ def file_lock(path, timeout=None):
                 lock.flush()
             except OSError:
                 pass
+        taken = time.time()
         try:
             yield
         finally:
+            held = time.time() - taken
             if fcntl:
                 fcntl.flock(lock, fcntl.LOCK_UN)
+            if held >= LONG_HOLD:
+                log_long_lock("held", os.path.basename(path), held, os.getpid(), "held")
     finally:
         lock.close()
 

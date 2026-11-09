@@ -463,6 +463,7 @@ def main():
 
 
 if __name__ == "__main__":
+    lean_common.hook_mode()  # a hook never waits long for a lock
     try:
         sys.exit(main())
     except Exception as exc:  # never break compaction
