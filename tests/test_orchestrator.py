@@ -8037,13 +8037,17 @@ class CliTest(unittest.TestCase):
                       and not ss.spool_pending("t4"), "the queued thread to start when a slot frees", secs=60)
         self.stop_up(p, 30)
 
-    def room_for(self, sessions, caller=None, busy=None, launching=(), mid_turn=(), cap=3, tid=None):
+    def room_for(self, sessions, caller=None, busy=None, launching=(), mid_turn=(), cap=3, tid=None, min_idle=None):
         """Run make_room_for_thread_session on faked sessions; returns (closed ids, output, error text or None)."""
         L = lean_agent_module()
         import service_session
         self.threads_home()
         closed, out, home = [], io.StringIO(), self.env["LEAN_AGENT_HOME"]
         os.makedirs(home, exist_ok=True)
+        if min_idle is not None:
+            self.env["LEAN_AGENT_CLOSE_MIN_IDLE"] = str(min_idle)
+        elif "LEAN_AGENT_CLOSE_MIN_IDLE" not in self.env:
+            self.env["LEAN_AGENT_CLOSE_MIN_IDLE"] = "600"  # the older tests use ten-minute-scale idle times
         with mock.patch.dict(os.environ, self.env):
             for t in launching:
                 L.mark_launching(t)
@@ -8115,15 +8119,32 @@ class CliTest(unittest.TestCase):
         self.assertFalse(os.path.exists(old))
         self.assertTrue(os.path.exists(fresh))
 
-    def test_cap_idle_of_exactly_ten_minutes_is_eligible(self):
-        closed, out, err = self.room_for(self.fake_sessions(("t1", 600), ("t2", 599), ("t3", 598)))
+    def test_cap_will_not_close_a_session_idle_30_minutes_but_closes_one_idle_61(self):
+        closed, out, err = self.room_for(self.fake_sessions(("t1", 1800), ("t2", 1700), ("t3", 1600)), min_idle="")
+        self.assertEqual(closed, [])
+        self.assertIn("idle under 60 min", err)
+        closed, out, err = self.room_for(self.fake_sessions(("t1", 1800), ("t2", 3660), ("t3", 1600)), min_idle="")
+        self.assertEqual(closed, ["t2"])
+
+    def test_cap_default_is_twenty(self):
+        import service_session
+        self.threads_home()
+        with mock.patch.dict(os.environ, self.env):
+            self.assertEqual(service_session.MAX_THREAD_SESSIONS, 20)
+            self.assertEqual(service_session.max_thread_sessions(), 20)
+            self.cli("config", "max-thread-sessions", "5")
+            self.assertEqual(service_session.max_thread_sessions(), 5)
+            self.cli("config", "max-thread-sessions", "default")
+            self.assertEqual(service_session.max_thread_sessions(), 20)
+
+    def test_cap_idle_of_exactly_sixty_minutes_is_eligible(self):
+        closed, out, err = self.room_for(self.fake_sessions(("t1", 3600), ("t2", 3599), ("t3", 3598)), min_idle="")
         self.assertEqual(closed, ["t1"])
 
-    def test_cap_invalid_min_idle_falls_back_to_ten_minutes(self):
-        ss = self.fake_sessions(("t1", 599), ("t2", 601), ("t3", 100))
+    def test_cap_invalid_min_idle_falls_back_to_sixty_minutes(self):
+        ss = self.fake_sessions(("t1", 3599), ("t2", 3601), ("t3", 100))
         for bad in ("abc", ""):
-            self.env["LEAN_AGENT_CLOSE_MIN_IDLE"] = bad
-            closed, out, err = self.room_for(ss)
+            closed, out, err = self.room_for(ss, min_idle=bad)
             self.assertEqual(closed, ["t2"])
 
     def test_cap_min_idle_override_lowers_the_threshold(self):
@@ -8233,6 +8254,87 @@ class CliTest(unittest.TestCase):
         self.assertRegex(self.cli("thread", "sessions").stdout, r"(?m)^t1\b")
         self.stop_up(p, 30)
 
+    def idle_stop(self, sessions, limit="3h", caller=None, busy=None, launching=(), mid_turn=(), spooled=(), open_q=()):
+        """Run idle_stop_threads on faked sessions; returns (parked ids with their `by`, stopped ids)."""
+        L = lean_agent_module()
+        import service_session
+        self.threads_home()
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        env = dict(self.env, LEAN_AGENT_SESSION_IDLE_STOP=limit)
+        parked = []
+        with mock.patch.dict(os.environ, env):
+            for t in launching:
+                L.mark_launching(t)
+        for k in {x["thread"] for x in sessions}:
+            open(os.path.join(home, k), "w").write("x")
+
+        def state(path):
+            return {"ended": os.path.basename(path) not in mid_turn}
+        with mock.patch.dict(os.environ, env), mock.patch.object(L, "open_thread_sessions", return_value=sessions), \
+                mock.patch.object(L.lean_threads, "running_by_thread", return_value=busy or {}), \
+                mock.patch.object(L.lean_threads, "queued_messages", side_effect=lambda t: 1 if t in spooled else 0), \
+                mock.patch.object(L.lean_threads, "open_questions", side_effect=lambda t: [1] if t.get("title") in open_q else []), \
+                mock.patch.object(service_session, "info", side_effect=lambda k: {"transcript": os.path.join(home, k)}), \
+                mock.patch.object(service_session, "transcript_state", side_effect=state), \
+                mock.patch.object(L, "park_thread_session", side_effect=lambda t, by=None: parked.append((t, by))):
+            stopped = L.idle_stop_threads()
+        return parked, stopped
+
+    def test_idle_stop_default_is_three_hours_and_config_parses(self):
+        import service_session
+        self.threads_home()
+        with mock.patch.dict(os.environ, self.env):
+            os.environ.pop("LEAN_AGENT_SESSION_IDLE_STOP", None)
+            self.assertEqual(service_session.idle_stop_limit(), 10800)
+            self.assertIn("180 minutes", self.cli("config", "session-idle-stop").stdout)
+            self.cli("config", "session-idle-stop", "90m")
+            self.assertEqual(service_session.idle_stop_limit(), 5400)
+            self.cli("config", "session-idle-stop", "off")
+            self.assertEqual(service_session.idle_stop_limit(), 0)
+            self.assertIn("off", self.cli("config", "session-idle-stop").stdout)
+            self.cli("config", "session-idle-stop", "default")
+            self.assertEqual(service_session.idle_stop_limit(), 10800)
+            self.assertNotEqual(self.cli("config", "session-idle-stop", "banana", check=False).returncode, 0)
+
+    def test_idle_stop_stops_a_three_hour_idle_session_only(self):
+        ss = self.fake_sessions(("t1", 3 * 3600), ("t2", 3 * 3600 - 60), ("t3", 100))
+        parked, stopped = self.idle_stop(ss)
+        self.assertEqual(parked, [("t1", "idle")])
+        self.assertEqual(stopped, ["t1"])
+
+    def test_idle_stop_skips_mid_turn_running_launching_spooled_and_main(self):
+        h = 4 * 3600
+        ss = self.fake_sessions(("t1", h), ("t2", h), ("t3", h), ("t4", h), ("main", h), ("t6", h))
+        parked, stopped = self.idle_stop(ss, mid_turn=("t1",), busy={"t2": ["r1"]}, launching=("t3",), spooled=("t4",))
+        self.assertEqual(stopped, ["t6"])
+
+    def test_idle_stop_off_disables_it(self):
+        parked, stopped = self.idle_stop(self.fake_sessions(("t1", 9 * 3600)), limit="off")
+        self.assertEqual((parked, stopped), ([], []))
+
+    def test_idle_stopped_thread_stays_open_shows_stopped_and_send_restarts_it(self):
+        p, log, ss = self.start_up()
+        lt = self.threads_home()
+        self.cli("thread", "new", "alpha topic")
+        time.sleep(2)
+        self.env["LEAN_AGENT_SESSION_IDLE_STOP"] = "1s"
+        out = self.cli("thread", "idle-stop").stdout
+        self.assertIn("idle-stop: t1", out)
+        t = lt.load()["threads"]["t1"]
+        self.assertTrue(t.get("parked") and t.get("parked_by") == "idle" and not t.get("closed") and not t.get("session_on"))
+        self.assertRegex(self.cli("thread", "sessions").stdout, r"(?m)^stopped t1\b.*idle, session stopped")
+        self.assertIn("idle, session stopped", self.cli("now").stdout)
+        self.assertIn("idle-stop: t1", open(os.path.join(self.env["LEAN_AGENT_HOME"], "logs", "service.log")).read())
+        # a service restart resumes only session_on threads: none now
+        self.assertNotIn("t1", lt.session_threads())
+        self.cli("thread", "send", "t1", "--prompt-file", "-", input="hello again")
+        t = lt.load()["threads"]["t1"]
+        self.assertFalse(t.get("parked") or t.get("parked_by"))
+        self.assertTrue(t.get("session_on"))
+        self.assertRegex(self.cli("thread", "sessions").stdout, r"(?m)^t1\b")
+        self.stop_up(p, 30)
+
     def test_cap_skips_a_session_idle_under_two_minutes(self):
         ss = self.fake_sessions(("t1", 119), ("t2", 700), ("t3", 650))
         closed, out, err = self.room_for(ss)
@@ -8275,7 +8377,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(closed, [])
         self.assertIn("none can be parked", err)
         self.assertRegex(err, r't1 "title t1" idle \d+[mh], not eligible: the calling session')
-        self.assertRegex(err, r't2 .*not eligible: idle under 2 min')
+        self.assertRegex(err, r't2 .*not eligible: idle under 10 min')
         self.assertRegex(err, r't3 .*mid-turn')
         self.assertIn("lean-agent thread close tN", err)
         self.assertIn("max-thread-sessions", err)
