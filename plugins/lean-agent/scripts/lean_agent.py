@@ -13114,6 +13114,14 @@ def cmd_thread(a):
     return rc
 
 
+def _myq_retarget(tid, text):
+    try:
+        import lean_myq
+        lean_myq.retarget(tid, text)
+    except Exception:
+        pass
+
+
 def thread_files_cmd(a):
     tid = a.args[0] if a.args else lean_threads.resolve_tag() or "main"
     if a.show is not None:
@@ -13295,6 +13303,7 @@ def thread_action(a):
             tid, q = lean_threads.answer(args[0], qid, text)
         except ValueError as exc:
             die(str(exc))
+        _myq_retarget(tid, text)
         waits = close_waiting(tid, [q["id"]], text)
         print(f"closed {q['id']}" + (f", waiting {', '.join(waits)}" if waits else ""))
         a.answered = True
@@ -13332,6 +13341,7 @@ def thread_action(a):
                 release_start_lock()
             made["own"] = service_session.spool_add(made["tid"], prompt, new=True)
             lean_goals.note_text(f"{a.args[0]} {prompt or ''}", made["tid"])
+            _myq_retarget(made["tid"], f"{a.args[0]} {prompt or ''}")
 
         th = threading.Thread(target=create, daemon=True)
         th.start()
@@ -13394,6 +13404,7 @@ def thread_action(a):
             die('thread send needs the message: "<text>" or --prompt-file F|-')
         if act == "send" and prompt:
             lean_goals.note_text(prompt, tid)
+            _myq_retarget(tid, prompt)
         if not service_session._socket_listening(service_session.client_sock_path()) and not service_session.alive():
             die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
         print(queue_and_deliver(tid, prompt, resume_old))

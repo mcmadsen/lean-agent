@@ -511,6 +511,32 @@ def thread_info(tid, data=None):
             "spooled": bool(lean_threads.queued_messages(tid)), "myq": _stale_question(tid)}
 
 
+def _myq_pass(now, send, info, done):
+    """The user's stale open questions to threads without a goal chase (those with one are handled above): one cheap nudge
+    per thread per stale period, no model."""
+    out = []
+    try:
+        import lean_myq
+        due = lean_myq.due(now)
+    except Exception:
+        return out
+    for x in due:
+        tid = x["target"]
+        if tid in done:
+            continue
+        try:
+            i = info(tid)
+            if i.get("running") or i.get("question") or i.get("waiting") or i.get("closed") or i.get("spooled"):
+                continue
+            ok, err = send(tid, f"answer the user's question {lean_myq.qn(x)}: {x['text'][:300]}")
+        except Exception as exc:  # noqa: BLE001 - retried on a later pass
+            ok, err = False, str(exc)
+        if ok:
+            lean_myq.mark_nudged(x["id"], now)
+            out.append(f"nudged {tid}: unanswered question {lean_myq.qn(x)}")
+    return out
+
+
 def _stale_question(tid):
     """The user's open question to this thread, older than the stale limit and not nudged within it, else None."""
     try:
@@ -773,6 +799,7 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
             digest.append(f"chased {tid} ({ref}): {why_s} → {how}")
         if cands or digest or freed:
             _save(items)
+    digest += _myq_pass(now, send, info, {c[0]["thread"] for c in cands if c[2] == "myq"})
     if log:
         for d in digest:
             log(d)

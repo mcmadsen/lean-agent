@@ -421,6 +421,21 @@ class NeverStartedTest(GoalsTest):
         self.assertGreater(lean_myq._load()[0]["nudged"], 0)
         self.assertIsNone(lean_myq.stale("t21", T0 + 50 * MIN, nudgeable=True, minutes=30))  # nudged: not due again in the period
 
+    def test_stale_user_question_is_nudged_once_even_without_a_goal(self):
+        import lean_myq
+        e = lean_myq.add("why is the export slow?", "t9", now=T0)
+        lean_myq.add("not yet stale", "t8", now=T0 + 35 * MIN)
+        run = lambda m: lean_goals.watchdog(T0 + m * MIN, self.send, lambda t: True, self.info, lambda: False, is_paused=lambda n: False)
+        self.assertEqual(run(20), [])
+        self.assertEqual(run(40), ["nudged t9: unanswered question q1"])
+        self.assertEqual(self.sent, [("t9", "answer the user's question q1: why is the export slow?")])
+        self.assertEqual(run(50), [])  # once per stale period
+        self.assertEqual(len(self.sent), 1)
+        self.info_by["t9"] = self.info_by["t8"] = {"running": ["r1"]}
+        self.assertEqual(run(75), [])  # a thread that is busy is left alone
+        lean_myq.thread_report("t9", "done", "Index missing.")
+        self.assertEqual(run(120), [])
+
     def test_still_spooled_message_is_not_sent_twice(self):
         self.goal()
         self.info_by["t21"] = dict(self.unstarted(), spooled=True)

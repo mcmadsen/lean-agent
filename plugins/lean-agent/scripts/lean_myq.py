@@ -112,6 +112,51 @@ def main_reply(text, now=None):
     return None
 
 
+def _words(text):
+    return {w for w in re.findall(r"\w+", str(text or "").lower()) if len(w) > 2}
+
+
+def retarget(tid, text, now=None):
+    """The front desk handed a thread (`thread send|new|answer`) a message in the turn of its own latest open `main`
+    question: that question now belongs to the thread (status stays open) and the front desk's reply no longer answers
+    it. Matches when the message carries the question (containment, or most of its words); else a single fresh open
+    question (under 5 minutes) is taken to be the turn's routed message. Only in the front desk's session."""
+    if os.environ.get("LEAN_AGENT_SESSION_ROLE") != "main":
+        return None
+    now = time.time() if now is None else now
+    msg = " ".join(str(text or "").lower().split())
+    with lean_common.file_lock(path()):
+        items = _load()
+        opens = [x for x in items if x.get("target") == "main" and x.get("status") == "open" and now - float(x.get("ts") or 0) < 1800]
+        hit = None
+        for x in reversed(opens):
+            q = " ".join(str(x.get("text") or "").lower().split())
+            qw = _words(q)
+            if q and (q in msg or (msg and msg in q) or (qw and len(qw & _words(msg)) / len(qw) >= 0.6)):
+                hit = x
+                break
+        if not hit and len(opens) == 1 and now - float(opens[0].get("ts") or 0) < 300:
+            hit = opens[0]
+        if hit:
+            hit["target"] = tid
+            hit["note"] = f"sent to {tid} by the front desk"
+            _save(items)
+        return hit
+
+
+def due(now=None):
+    """One stale, not recently nudged open question per thread (any thread, goal or not)."""
+    now = time.time() if now is None else now
+    lim = stale_minutes() * 60
+    out = {}
+    for x in _load():
+        t = x.get("target")
+        if x.get("status") == "open" and t and t != "main" and t not in out and now - float(x.get("ts") or 0) >= lim \
+                and now - float(x.get("nudged") or 0) >= lim:
+            out[t] = x
+    return list(out.values())
+
+
 def drop(num, now=None):
     i = parse_id(num)
     with lean_common.file_lock(path()):

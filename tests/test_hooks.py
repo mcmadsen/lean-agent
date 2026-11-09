@@ -837,6 +837,26 @@ class BudgetTest(Base):
         x = self.myq_items()[0]
         self.assertEqual((x["status"], x["answer"]), ("answered", "Two threads are open."))
 
+    def test_question_sent_to_a_thread_in_the_same_turn_moves_there_and_the_routing_reply_is_not_its_answer(self):
+        self.make_threads("Publish quarterly report through docs worker")
+        main = {"LEAN_AGENT_SESSION_ROLE": "main"}
+        self.prompt_ctx("how many rows does the quarterly export have?", **main)
+        sys.path.insert(0, ROOT)
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=self.env["LEAN_AGENT_HOME"], **main), clear=True):
+            import lean_myq
+            x = lean_myq.retarget("t1", "How many rows does the quarterly export have? Report back.")
+            self.assertEqual((x["target"], x["status"]), ("t1", "open"))
+        self.stop_event(["Sent to t1."], **main)
+        x = self.myq_items()[0]
+        self.assertEqual((x["target"], x["status"], x["answer"]), ("t1", "open", ""))
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=self.env["LEAN_AGENT_HOME"]), clear=True):
+            import lean_myq
+            lean_myq.thread_report("t1", "done", "About 4000 rows.")
+        self.assertEqual(self.myq_items()[0]["answer"], "About 4000 rows.")
+        # outside the front desk, or with an unrelated message and several questions, nothing moves
+        with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=self.env["LEAN_AGENT_HOME"]), clear=True):
+            self.assertIsNone(lean_myq.retarget("t1", "how many rows does the quarterly export have?"))
+
     def stop_event(self, texts, ask=False, active=False, answer=None, question="Which?", **env):
         tr = os.path.join(self.env["LEAN_AGENT_HOME"], "stop.jsonl")
         recs = [{"type": "user", "message": {"role": "user", "content": "go"}}]
