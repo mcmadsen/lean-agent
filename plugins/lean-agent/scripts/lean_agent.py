@@ -46,6 +46,7 @@ import lean_feedback  # noqa: E402
 import lean_goals  # noqa: E402
 import lean_pr  # noqa: E402
 import lean_waiting  # noqa: E402
+import lean_poll  # noqa: E402
 import lean_own  # noqa: E402
 import lean_auth  # noqa: E402
 import service_session  # noqa: E402
@@ -172,7 +173,9 @@ READONLY_SHELL_RULE = ("You are read-only. The only shell commands you can run a
                        "`git -C {project} <show|log|log -g|reflog|grep|diff|blame|status|ls-files|ls-tree|cat-file -p|rev-parse|rev-list|\n"
                        "show-ref|for-each-ref|branch --list/-a/-r/-v|fetch|describe|merge-base|tag --list|remote -v> ...`,\n"
                        "plus find (never -exec/-delete), ls, stat, wc, head, tail, grep, rg, cat, du, file, realpath, readlink, which.\n"
-                       "`cd <dir> && ...` and pipes between these are fine. Everything else is refused.")
+                       "`cd <dir> && ...` and pipes between these are fine. Everything else is refused.\n"
+                       "To wait for something (a build, a deploy), do not loop or sleep: run\n"
+                       "`lean-agent poll --every 2m --until '<done regex>' -- <command>` and finish; you are told when it is done.")
 SEND_RULE = ("Outward actions: do NOT do anything that leaves this machine and can't be undone, such as\n"
              "sending or posting a message, submitting a form, publishing, merging, deploying, or deleting\n"
              "remote data. Do the work up to that point (e.g. type the draft), then stop with status\n"
@@ -2761,6 +2764,7 @@ def _cmd_run(a):
         lean_cli = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
         allowed += [f"Bash({lean_cli} runs --show:*)", f"Bash({lean_cli} output:*)"]  # readonly_hook.py checks the shape
         allowed += [f"Bash({c}:*)" for c in allow_cmd + internal_cmd]  # read-only commands the orchestrator named, and the role's own
+        allowed += [f"Bash({lean_cli} poll:*)"]  # readonly_hook.py: lean-agent poll checks the command itself
         permission_mode = "default"
     else:
         allowed = [tools]
@@ -2830,6 +2834,9 @@ def _cmd_run(a):
         thread_tag = None  # a helper run is never a thread's work, whatever LEAN_AGENT_THREAD the caller had
     elif prev and not os.environ.get("LEAN_AGENT_THREAD"):  # a resumed run stays with its deliverable, whatever thread is current now
         thread_tag = lean_threads.thread_of_run(prev) or thread_tag
+    env.pop("LEAN_AGENT_RO_CFG", None)
+    if read_only:
+        env["LEAN_AGENT_RO_CFG"] = ro_cfg  # `lean-agent poll` applies the same read-only checks to its command
     env["LEAN_AGENT_THREAD"] = thread_tag or "none"  # nested lean-agent commands in the worker record the same thread
     env["BASH_MAX_OUTPUT_LENGTH"] = os.environ.get("LEAN_AGENT_WORKER_BASH_OUTPUT") or "8000"  # not the orchestrator's
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"  # memory comes from lean-agent cards instead
@@ -15913,6 +15920,11 @@ def build_parser():
     s.add_argument("--drop", action="store_true", help="N --drop: stop tracking an open question")
     s.set_defaults(fn=cmd_myq)
 
+    s = sub.add_parser("poll", help="wait without a model: `poll [--every 2m] [--timeout 2h] [--until REGEX] [--fail REGEX] [--thread tN] [--name T] -- <command...>` "
+                       "runs the command detached until it matches, then reports once; `poll --list|--show ID|--stop ID`")
+    s.add_argument("args", nargs=argparse.REMAINDER)
+    s.set_defaults(fn=lambda a: lean_poll.main(a.args))
+
     s = sub.add_parser("waiting", help="what waits on the user (list), `add \"<summary>\"`, `done <id> [--answer TEXT]`; the front desk asks each with AskUserQuestion")
     s.add_argument("args", nargs="*", help="[list] | add <summary> | done <id>")
     s.add_argument("--options", help="add: the answers to offer, a|b|c")
@@ -16104,6 +16116,8 @@ def _main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:2] in (["review", "learn"], ["review", "decline"]):
         argv = ["review-" + argv[1]] + argv[2:]
+    if argv[:1] == ["poll"]:
+        return lean_poll.main(argv[1:])  # own parser: the command after `--` is passed through untouched
     argv = normalise_run_argv(argv)  # `lean-agent run <project> ...` like `cards <project>`
     global BRIEF
     global VERBOSE, FULL

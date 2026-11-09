@@ -141,6 +141,8 @@ def lean_agent_ok(args):
     if len(args) in (3, 4) and args[:2] == ["runs", "--show"] and RUN_ID.fullmatch(args[2]) \
             and (len(args) == 3 or args[3] == "--details"):
         return None
+    if args[:1] == ["poll"]:
+        return None  # lean-agent poll runs only commands that pass this hook's checks (LEAN_AGENT_RO_CFG)
     if len(args) == 2 and args[0] == "output" and not args[1].startswith("-"):
         return None
     return "only `lean-agent runs --show <id> [--details]` and `lean-agent output <file>` are read-only"

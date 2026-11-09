@@ -255,6 +255,8 @@ lean-agent optimize {{P}} --apply --skip checkout-notes
   "start fresh"): run `lean-agent clear`. After a clear, collect earlier runs with `lean-agent runs --wait all`.
   On "Checkpoint now" (the clear asks for it): run `lean-agent checkpoint` with your soft state (promises, decisions,
   next steps, open threads with their tags) in 15 lines or fewer, then reply `checkpointed`; keep the thread tags after.
+- Waiting on a build/deploy: no model loops. `lean-agent poll --every 2m --until RE [--fail RE] [--thread tN] --
+  <read-only cmd>` runs detached, no tokens, reports once; `poll --list|--show ID|--stop ID`.
 - Big JS/TS front-end refactor or migration: look first with `lean-agent map <project>` (`--who-uses`, `--deps`,
   `--route all`, `--unused`), not a worker. Safety net on the code as it is: `lean-agent check <project> add types
   "npx tsc --noEmit"` (and lint, tests), `lean-agent check <project> baseline`, a counter per legacy pattern (worker:
