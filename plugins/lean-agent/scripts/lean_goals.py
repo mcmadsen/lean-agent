@@ -6,6 +6,7 @@ waiting-user (a final report proposes a push/post and the user has the question)
 answer; the user has a question), done or dropped. Goals are created when a thread starts work on a reference, kept
 fresh by thread reports and runs, and watched by `watchdog`, which the service runs every few minutes: it only sends
 messages to threads (the thread does the work) and tells the front desk what it did."""
+import copy
 import datetime
 import glob
 import json
@@ -644,6 +645,35 @@ def _context(g, i, kind, rid, now):
             "runs": [f"{r.get('id')} {r.get('final') or 'running'}: {str(r.get('task'))[:80]}" for r in (i.get("runs") or [])[-4:]]}
 
 
+def _merge_changes(items, orig):
+    """Write the fields a pass changed on its snapshot `items` (against `orig`) into the current file, under the lock
+    held only for this read-modify-write (sends and helper calls happen before it)."""
+    before = {g.get("id"): g for g in orig}
+    changes = []
+    for g in items:
+        o = before.get(g.get("id"))
+        if o is None or o == g:
+            continue
+        changes.append((g["id"], {k: v for k, v in g.items() if o.get(k, _MISSING) != v},
+                        [k for k in o if k not in g]))
+    if not changes:
+        return
+    with lean_common.file_lock(path()):
+        cur = _load()
+        byid = {g.get("id"): g for g in cur}
+        for gid, sets, dels in changes:
+            g = byid.get(gid)
+            if g is None:
+                continue
+            g.update(sets)
+            for k in dels:
+                g.pop(k, None)
+        _save(cur)
+
+
+_MISSING = object()
+
+
 def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, decide=None, is_paused=paused):
     """One pass over the active goals. `send(tid, text) -> (ok, err)` messages a thread (starting a parked one),
     `alive(tid)` says whether its session runs. `decide(contexts) -> {goal id: {action, message}, "_cost": usd}` (None: not ready yet, asked again next pass; {}: no decision) is the cheap
@@ -653,152 +683,152 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
         return []
     quiet = quiet_minutes() * 60
     digest, cands, freed = [], [], False
-    with lean_common.file_lock(path()):
-        items = _load()
-        finished = {x.get("id") for x in items if x.get("state") in ("done", "dropped")}
-        for g in items:
-            if g.get("state") == "blocked" and g.get("blocked_on") in finished:
-                g["state"], g["blocked_on"], g["next"] = "active", "", ""
-                freed = True
-            if g.get("state") != "active" or not g.get("thread"):
+    items = _load()
+    orig = copy.deepcopy(items)  # decisions are made on this snapshot, outside the lock; only the changes are merged back
+    finished = {x.get("id") for x in items if x.get("state") in ("done", "dropped")}
+    for g in items:
+        if g.get("state") == "blocked" and g.get("blocked_on") in finished:
+            g["state"], g["blocked_on"], g["next"] = "active", "", ""
+            freed = True
+        if g.get("state") != "active" or not g.get("thread"):
+            continue
+        tid, ref = g["thread"], g.get("ref", "")
+        if g["id"] in memory()["goals"]:
+            g["state"] = "dropped"
+            continue
+        import lean_threads
+        i = info(tid)
+        act = max(_epoch(g.get("last_activity")), _epoch(g.get("created")), i.get("last") or 0)
+        since_chase = now - _epoch(g.get("chased_at")) if g.get("chased_at") else float("inf")
+        lost = real_lost(i.get("lost") or [], ref, i.get("runs"))
+        un = i.get("unstarted")
+        mq = i.get("myq")
+        if mq and not i.get("running") and not lost and not i.get("question") and not i.get("waiting") and not i.get("closed"):
+            # deterministic: the user's unanswered question is nudged like a request that never started, no model asked
+            if i.get("spooled"):
                 continue
-            tid, ref = g["thread"], g.get("ref", "")
-            if g["id"] in memory()["goals"]:
-                g["state"] = "dropped"
+            cands.append((g, i, "myq", mq["id"], _context(g, i, "myq", mq["id"], now)))
+            continue
+        if un and not i.get("running") and not lost and not i.get("question") and not i.get("waiting"):
+            # deterministic: a request that never got going is chased at once, no model asked
+            age_s = max(0, now - un["since"])
+            if i.get("spooled") or age_s < lean_threads.start_minutes() * 60 or since_chase < lean_threads.start_minutes() * 60:
                 continue
-            import lean_threads
-            i = info(tid)
-            act = max(_epoch(g.get("last_activity")), _epoch(g.get("created")), i.get("last") or 0)
-            since_chase = now - _epoch(g.get("chased_at")) if g.get("chased_at") else float("inf")
-            lost = real_lost(i.get("lost") or [], ref, i.get("runs"))
-            un = i.get("unstarted")
-            mq = i.get("myq")
-            if mq and not i.get("running") and not lost and not i.get("question") and not i.get("waiting") and not i.get("closed"):
-                # deterministic: the user's unanswered question is nudged like a request that never started, no model asked
-                if i.get("spooled"):
-                    continue
-                cands.append((g, i, "myq", mq["id"], _context(g, i, "myq", mq["id"], now)))
-                continue
-            if un and not i.get("running") and not lost and not i.get("question") and not i.get("waiting"):
-                # deterministic: a request that never got going is chased at once, no model asked
-                age_s = max(0, now - un["since"])
-                if i.get("spooled") or age_s < lean_threads.start_minutes() * 60 or since_chase < lean_threads.start_minutes() * 60:
-                    continue
-                cands.append((g, i, "unstarted", un["id"] or "", _context(g, i, "unstarted", un["id"] or "", now)))
-                continue
-            if i.get("running") or i.get("question") or i.get("waiting") or i.get("closed"):
-                continue
-            if lost:
-                kind, rid = "lost", lost[0][0]
-            elif now - act >= quiet and since_chase >= quiet:
-                kind, rid = "quiet", ""
-            else:
-                continue
-            if kind == "lost" and since_chase < quiet:
-                continue
-            if now - _epoch(g.get("decided_at")) < quiet and _epoch(g.get("decided_at")) >= act and not g.get("pending_chase"):
-                continue  # one decision per quiet period
-            cands.append((g, i, kind, rid, _context(g, i, kind, rid, now)))
-        # the cheap check: one batched helper call for the goals without a pending nudge
-        decisions, cost, called, waiting_on_helper = {}, 0.0, False, False
-        todo = [c for c in cands if not c[0].get("pending_chase") and c[2] not in ("unstarted", "myq")]
-        if todo and decide is not None:
-            if chaser_calls_last_hour(now) < chaser_per_hour():
-                try:
-                    got = decide([c[4] for c in todo])
-                except Exception as exc:  # noqa: BLE001 - fall back to the plain rules
-                    got = {}
-                    if log:
-                        log(f"chaser check failed: {exc}")
-                if got is None:  # the helper is still running in the background: decide on a later tick
-                    waiting_on_helper = True
-                    got = {}
-                cost = float(got.pop("_cost", 0) or 0) if isinstance(got, dict) else 0.0
-                decisions, called = got if isinstance(got, dict) else {}, not waiting_on_helper
-            else:
-                decisions = {c[0]["id"]: {"action": "chase" if c[2] == "lost" else "defer", "message": "", "why": "chaser cap per hour"} for c in todo}
-        for g, i, kind, rid, ctx in cands:
-            tid, ref = g["thread"], g.get("ref", "")
-            if waiting_on_helper and not g.get("pending_chase"):
-                continue
-            d = decisions.get(g["id"]) or {}
-            action = str(d.get("action") or ("chase" if decide is None or kind == "lost" else "skip")).lower()
-            if kind in ("unstarted", "myq") or (ctx.get("never_started") and action in ("skip", "defer", "")):
-                action, d = "chase", {}  # a request that never started is never skipped
-            if g.get("pending_chase"):
-                action, d = "chase", {"message": g["pending_chase"], "why": "deferred nudge"}
-            why = str(d.get("why") or d.get("message") or "")[:160]
-            share = cost / max(1, len(todo))
-            if called and not g.get("pending_chase") and kind not in ("unstarted", "myq"):
-                log_decision(now, goal=g["id"], thread=tid, ref=ref, decision=action, why=why, cost=share, how="haiku",
-                             call=(g is todo[0][0]))
-            if action == "defer":  # the per-hour cap: no decision was made, ask again later
-                g["last_decision"], g["decision_why"] = "defer", why
-                continue
-            g["last_decision"], g["decision_why"], g["decided_at"] = action, why or kind, _iso(now)
-            if action == "skip":
-                continue
-            if action == "drop-goal":
-                g["state"], g["next"] = "dropped", why or "dropped by the chase check"
-                remember("goals", g["id"], g["next"])
-                digest.append(f"dropped goal {g['id']} ({tid} / {ref}): {why or 'no longer needed'}")
-                continue
-            if action == "done-goal":
-                g["state"], g["next"] = "done", why or "done"
-                remember("goals", g["id"], g["next"])
-                continue
-            msg = str(d.get("message") or "").strip()
-            if kind == "myq":
-                msg = f"answer the user's question q{str(rid)[1:]}: {i['myq']['text'][:300]}"
-                how = "asked to answer the user's question"
-            elif kind == "unstarted":
-                un = i["unstarted"]
-                msg = (un["text"] if un["undelivered"] and un["text"]
-                       else f"You have an unstarted request {un['id']}: start it. ({un['text'][:160]})")
-                how = "redelivered the first request" if un["undelivered"] else "asked to start the request"
-            elif kind == "lost":
-                msg = lost_message(rid, ref, bool(next((m for r_, m in (i.get("lost") or []) if r_ == rid), {}).get("no_record")))
-                how = "asked to resume"
-            else:
-                msg = (msg[:240] if msg and action == "chase" else nudge_message(ref))
-                parked = not alive(tid)
-                how = "woken and asked for status" if parked else "asked for status"
-            why_s = "unanswered question" if kind == "myq" else "never started" if kind == "unstarted" else "worker lost" if kind == "lost" else ("session parked" if not alive(tid) else "quiet")
-            if kind == "quiet" and near():
-                g["pending_chase"], g["last_decision"] = msg, "defer"
-                g["decision_why"] = "plan limit near: nudge waits"
-                if now - _epoch(g.get("limit_noted")) >= quiet:
-                    g["limit_noted"] = _iso(now)
-                continue
-            g.pop("pending_chase", None)
-            if int(g.get("chase_count") or 0) >= MAX_CHASES:
-                g["state"], g["next"] = "stuck", f"stuck after {MAX_CHASES} chases"
-                wid = lean_waiting.add(f"{tid} / {ref} is stuck after {MAX_CHASES} chases: what next?", "question", STUCK_OPTIONS, tid, ref)
-                digest.append(f"{tid} ({ref}) is stuck after {MAX_CHASES} chases: asked the user ({wid})")
-                continue
+            cands.append((g, i, "unstarted", un["id"] or "", _context(g, i, "unstarted", un["id"] or "", now)))
+            continue
+        if i.get("running") or i.get("question") or i.get("waiting") or i.get("closed"):
+            continue
+        if lost:
+            kind, rid = "lost", lost[0][0]
+        elif now - act >= quiet and since_chase >= quiet:
+            kind, rid = "quiet", ""
+        else:
+            continue
+        if kind == "lost" and since_chase < quiet:
+            continue
+        if now - _epoch(g.get("decided_at")) < quiet and _epoch(g.get("decided_at")) >= act and not g.get("pending_chase"):
+            continue  # one decision per quiet period
+        cands.append((g, i, kind, rid, _context(g, i, kind, rid, now)))
+    # the cheap check: one batched helper call for the goals without a pending nudge
+    decisions, cost, called, waiting_on_helper = {}, 0.0, False, False
+    todo = [c for c in cands if not c[0].get("pending_chase") and c[2] not in ("unstarted", "myq")]
+    if todo and decide is not None:
+        if chaser_calls_last_hour(now) < chaser_per_hour():
             try:
-                ok, err = send(tid, msg)
-            except Exception as exc:  # noqa: BLE001 - retried on a later pass
-                ok, err = False, str(exc)
-            if not ok:
-                digest.append(f"chase of {tid} ({ref}) failed: {err}")
-                g["decided_at"] = ""
-                continue
-            if kind == "myq":
-                try:
-                    import lean_myq
-                    lean_myq.mark_nudged(i["myq"]["id"], now)
-                except Exception:
-                    pass
-            g["chased_at"], g["chase_count"] = _iso(now), int(g.get("chase_count") or 0) + 1
-            g["last_chase_text"], g["chased_run"], g["replied_at"] = msg, rid, ""
-            g["last_decision"], g["decision_why"] = "chase", why or why_s
-            if rid:
-                remember("runs", rid, "chased")
-            log_decision(now, goal=g["id"], thread=tid, ref=ref, decision="chase", why=why or why_s, how="wake", cost=0)
-            digest.append(f"chased {tid} ({ref}): {why_s} → {how}")
-        if cands or digest or freed:
-            _save(items)
+                got = decide([c[4] for c in todo])
+            except Exception as exc:  # noqa: BLE001 - fall back to the plain rules
+                got = {}
+                if log:
+                    log(f"chaser check failed: {exc}")
+            if got is None:  # the helper is still running in the background: decide on a later tick
+                waiting_on_helper = True
+                got = {}
+            cost = float(got.pop("_cost", 0) or 0) if isinstance(got, dict) else 0.0
+            decisions, called = got if isinstance(got, dict) else {}, not waiting_on_helper
+        else:
+            decisions = {c[0]["id"]: {"action": "chase" if c[2] == "lost" else "defer", "message": "", "why": "chaser cap per hour"} for c in todo}
+    for g, i, kind, rid, ctx in cands:
+        tid, ref = g["thread"], g.get("ref", "")
+        if waiting_on_helper and not g.get("pending_chase"):
+            continue
+        d = decisions.get(g["id"]) or {}
+        action = str(d.get("action") or ("chase" if decide is None or kind == "lost" else "skip")).lower()
+        if kind in ("unstarted", "myq") or (ctx.get("never_started") and action in ("skip", "defer", "")):
+            action, d = "chase", {}  # a request that never started is never skipped
+        if g.get("pending_chase"):
+            action, d = "chase", {"message": g["pending_chase"], "why": "deferred nudge"}
+        why = str(d.get("why") or d.get("message") or "")[:160]
+        share = cost / max(1, len(todo))
+        if called and not g.get("pending_chase") and kind not in ("unstarted", "myq"):
+            log_decision(now, goal=g["id"], thread=tid, ref=ref, decision=action, why=why, cost=share, how="haiku",
+                         call=(g is todo[0][0]))
+        if action == "defer":  # the per-hour cap: no decision was made, ask again later
+            g["last_decision"], g["decision_why"] = "defer", why
+            continue
+        g["last_decision"], g["decision_why"], g["decided_at"] = action, why or kind, _iso(now)
+        if action == "skip":
+            continue
+        if action == "drop-goal":
+            g["state"], g["next"] = "dropped", why or "dropped by the chase check"
+            remember("goals", g["id"], g["next"])
+            digest.append(f"dropped goal {g['id']} ({tid} / {ref}): {why or 'no longer needed'}")
+            continue
+        if action == "done-goal":
+            g["state"], g["next"] = "done", why or "done"
+            remember("goals", g["id"], g["next"])
+            continue
+        msg = str(d.get("message") or "").strip()
+        if kind == "myq":
+            msg = f"answer the user's question q{str(rid)[1:]}: {i['myq']['text'][:300]}"
+            how = "asked to answer the user's question"
+        elif kind == "unstarted":
+            un = i["unstarted"]
+            msg = (un["text"] if un["undelivered"] and un["text"]
+                   else f"You have an unstarted request {un['id']}: start it. ({un['text'][:160]})")
+            how = "redelivered the first request" if un["undelivered"] else "asked to start the request"
+        elif kind == "lost":
+            msg = lost_message(rid, ref, bool(next((m for r_, m in (i.get("lost") or []) if r_ == rid), {}).get("no_record")))
+            how = "asked to resume"
+        else:
+            msg = (msg[:240] if msg and action == "chase" else nudge_message(ref))
+            parked = not alive(tid)
+            how = "woken and asked for status" if parked else "asked for status"
+        why_s = "unanswered question" if kind == "myq" else "never started" if kind == "unstarted" else "worker lost" if kind == "lost" else ("session parked" if not alive(tid) else "quiet")
+        if kind == "quiet" and near():
+            g["pending_chase"], g["last_decision"] = msg, "defer"
+            g["decision_why"] = "plan limit near: nudge waits"
+            if now - _epoch(g.get("limit_noted")) >= quiet:
+                g["limit_noted"] = _iso(now)
+            continue
+        g.pop("pending_chase", None)
+        if int(g.get("chase_count") or 0) >= MAX_CHASES:
+            g["state"], g["next"] = "stuck", f"stuck after {MAX_CHASES} chases"
+            wid = lean_waiting.add(f"{tid} / {ref} is stuck after {MAX_CHASES} chases: what next?", "question", STUCK_OPTIONS, tid, ref)
+            digest.append(f"{tid} ({ref}) is stuck after {MAX_CHASES} chases: asked the user ({wid})")
+            continue
+        try:
+            ok, err = send(tid, msg)
+        except Exception as exc:  # noqa: BLE001 - retried on a later pass
+            ok, err = False, str(exc)
+        if not ok:
+            digest.append(f"chase of {tid} ({ref}) failed: {err}")
+            g["decided_at"] = ""
+            continue
+        if kind == "myq":
+            try:
+                import lean_myq
+                lean_myq.mark_nudged(i["myq"]["id"], now)
+            except Exception:
+                pass
+        g["chased_at"], g["chase_count"] = _iso(now), int(g.get("chase_count") or 0) + 1
+        g["last_chase_text"], g["chased_run"], g["replied_at"] = msg, rid, ""
+        g["last_decision"], g["decision_why"] = "chase", why or why_s
+        if rid:
+            remember("runs", rid, "chased")
+        log_decision(now, goal=g["id"], thread=tid, ref=ref, decision="chase", why=why or why_s, how="wake", cost=0)
+        digest.append(f"chased {tid} ({ref}): {why_s} → {how}")
+    if items != orig:
+        _merge_changes(items, orig)
     digest += _myq_pass(now, send, info, {c[0]["thread"] for c in cands if c[2] == "myq"})
     if log:
         for d in digest:

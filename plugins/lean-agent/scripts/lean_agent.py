@@ -9935,6 +9935,13 @@ def doctor_locks(report, fix, root=None):
         else:
             report(None, f"lock {name} held {held} by pid {pid} ({cmd or 'unknown command'})",
                    f"wait for it, or stop that process (kill {pid})")
+    try:
+        for r in lean_common.recent_long_holds(5):
+            who = f" by pid {r['pid']} ({r['cmd']})" if r.get("pid") else ""
+            report(None, f"{r['ts']} lock {r['lock']}: {r.get('note') or r['kind']} {r['secs']}s{who}",
+                   "a long hold slows hooks and commands; see ~/.lean-agent/lock-holds.log")
+    except Exception:
+        pass
     return found
 
 

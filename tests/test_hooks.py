@@ -8,10 +8,11 @@ import subprocess
 import threading
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
-from _env import clean_environ
+from _env import clean_environ, scaled
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins", "lean-agent", "scripts")
 
@@ -1408,6 +1409,55 @@ class BudgetTest(Base):
         desk = ("lean-agent thread send t8 --prompt-file - <<'EOF'\n" + body + "\nEOF")
         self.assertEqual(self.hook_decision(desk, "main"), "allow")
         self.assertEqual(self.hook_decision("lean-agent runs 2>&1", "thread"), "allow")
+
+    def hold_locks(self, names):
+        """Another process that holds the given lock files in the lean-agent home until it is killed."""
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        code = ("import fcntl, sys, time\nfhs = [open(p, 'a') for p in sys.argv[1:]]\n"
+                "[fcntl.flock(f, fcntl.LOCK_EX) for f in fhs]\nprint('held', flush=True)\ntime.sleep(120)")
+        p = subprocess.Popen([sys.executable, "-c", code] + [os.path.join(home, n + ".lock") for n in names],
+                             stdout=subprocess.PIPE, text=True)
+        self.addCleanup(p.kill)
+        self.assertEqual(p.stdout.readline().strip(), "held")
+        return p
+
+    def test_a_busy_goals_lock_never_delays_the_allow_of_a_plain_lean_agent_command(self):
+        self.hold_locks(["goals.json", "waiting.json", "threads.json", "myquestions.json", "windows.json"])
+        cmd = "lean-agent run proj -m haiku --why \"read-only lookup\" --read-only --todo none -- \"a long quoted task\""
+        start = time.time()
+        self.assertEqual(self.hook_decision(cmd, "thread"), "allow")
+        self.assertLess(time.time() - start, scaled(3.0))
+
+    def test_the_deadline_fails_open_and_still_allows_a_plain_lean_agent_command(self):
+        # a slow check (here: the transcript scan, via a usage budget) outruns the deadline: the decision so far is printed
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        slow = os.path.join(self.tmp.name, "slow")
+        os.makedirs(slow)
+        with open(os.path.join(slow, "sitecustomize.py"), "w") as fh:
+            fh.write("import sys, time\nsys.path.insert(0, %r)\nimport usage\n"
+                     "usage.exhausted_window = lambda *a, **k: time.sleep(30)\n" % ROOT)
+        ev = dict(self.ev, cwd=home, tool_name="Bash", tool_input={"command": "lean-agent runs", "run_in_background": True})
+        env = base_env(LEAN_AGENT_SESSION_ROLE="thread", LEAN_AGENT_HOOK_DEADLINE="0.5", PYTHONPATH=slow, **self.env)
+        start = time.time()
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "budget_hook.py")], input=json.dumps(ev),
+                           capture_output=True, text=True, env=env, timeout=scaled(20))
+        self.assertLess(time.time() - start, scaled(10))
+        self.assertEqual(json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"], "allow")
+
+    def test_the_stop_hook_answers_fast_with_every_lock_held(self):
+        self.hold_locks(["goals.json", "waiting.json", "threads.json", "myquestions.json"])
+        home = self.env["LEAN_AGENT_HOME"]
+        tr = os.path.join(self.tmp.name, "t.jsonl")
+        with open(tr, "w") as fh:
+            fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}) + "\n"
+                     + json.dumps({"type": "assistant", "message": {"role": "assistant",
+                                   "content": [{"type": "text", "text": "Done."}]}}) + "\n")
+        ev = {"hook_event_name": "Stop", "cwd": home, "session_id": "s", "transcript_path": tr}
+        start = time.time()
+        run_hook("budget_hook.py", ev, LEAN_AGENT_SESSION_ROLE="main", **self.env)
+        self.assertLess(time.time() - start, scaled(5.0))
 
     def test_only_a_single_lean_agent_invocation_is_allowed(self):
         for cmd in ("lean-agent x; rm -rf y", "lean-agent x | sh", "echo hi", "lean-agent x && rm y", "lean-agent x &",

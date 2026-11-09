@@ -225,3 +225,56 @@ class OrphanMarkerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HookLockTest(unittest.TestCase):
+    """Hooks never wait long for a lock, and long waits/holds are logged with the lock's name."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        p = mock.patch.dict(os.environ, {**clean_environ(), "LEAN_AGENT_HOME": self.tmp.name}, clear=True)
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(lambda: lean_common.HOOK.update(on=False))
+        lean_common._SKIPPED.clear()
+
+    def test_a_hook_gives_up_on_a_busy_lock_within_the_hook_wait(self):
+        path = os.path.join(self.tmp.name, "goals.json")
+        with lean_common.file_lock(path):
+            code = ("import sys; sys.path.insert(0, %r)\nimport lean_common, time\nlean_common.hook_mode()\n"
+                    "t = time.time()\ntry:\n    with lean_common.file_lock(%r): pass\n"
+                    "except lean_common.LockBusy: print('busy %%.2f' %% (time.time() - t))\n" % (SCRIPTS, path))
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=scaled(15),
+                                 env=dict(clean_environ(), LEAN_AGENT_HOME=self.tmp.name))
+        self.assertTrue(out.stdout.startswith("busy"), out.stdout + out.stderr)
+        self.assertLess(float(out.stdout.split()[1]), scaled(2.0))
+        rows = lean_common.recent_long_holds()
+        self.assertTrue(any(r["lock"] == "goals.json" and r["kind"] == "skipped" for r in rows))
+
+    def test_a_long_hold_is_logged_with_the_lock_name_and_holder(self):
+        path = os.path.join(self.tmp.name, "goals.json")
+        with mock.patch.object(lean_common, "LONG_HOLD", 0.05):
+            with lean_common.file_lock(path):
+                time.sleep(0.2)
+        rows = lean_common.recent_long_holds()
+        self.assertEqual(rows[-1]["lock"], "goals.json")
+        self.assertEqual(rows[-1]["kind"], "held")
+        self.assertEqual(rows[-1]["pid"], str(os.getpid()))
+        self.assertTrue(rows[-1]["cmd"])
+
+    def test_a_long_wait_is_logged_with_the_holder(self):
+        path = os.path.join(self.tmp.name, "waiting.json")
+        holder = sleeper()
+        self.addCleanup(holder.kill)
+        fh = open(path + ".lock", "w")
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        fh.write(f"{holder.pid}\n")
+        fh.flush()
+        self.addCleanup(fh.close)
+        with mock.patch.object(lean_common, "LONG_HOLD", 0.1):
+            with self.assertRaises(lean_common.LockBusy):
+                with lean_common.file_lock(path, timeout=0.4):
+                    pass
+        row = [r for r in lean_common.recent_long_holds() if r["kind"] == "waiting"][-1]
+        self.assertEqual((row["lock"], row["pid"]), ("waiting.json", str(holder.pid)))

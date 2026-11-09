@@ -5,14 +5,17 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
-from _env import clean_environ
+from _env import clean_environ, scaled
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins", "lean-agent", "scripts")
 sys.path.insert(0, ROOT)
 
+import lean_common  # noqa: E402
 import lean_goals  # noqa: E402
 import lean_waiting  # noqa: E402
 
@@ -59,6 +62,40 @@ class GoalsTest(unittest.TestCase):
 
     def get(self, gid):
         return next(g for g in lean_goals._load() if g["id"] == gid)
+
+    def test_the_watchdog_does_not_hold_the_goals_lock_while_it_sends(self):
+        gid = self.goal()
+        taken = []
+
+        def slow_send(tid, text):
+            def other():  # another process' view: the lock is free during the send
+                t0 = time.time()
+                with lean_common.file_lock(lean_goals.path(), timeout=scaled(5)):
+                    taken.append(time.time() - t0)
+            th = threading.Thread(target=other)
+            th.start()
+            th.join(scaled(10))
+            self.sent.append((tid, text))
+            return True, ""
+
+        out = lean_goals.watchdog(T0 + 300 * MIN, slow_send, lambda t: True, self.info, lambda: False)
+        self.assertEqual(len(self.sent), 1)
+        self.assertTrue(taken and taken[0] < scaled(1.0))
+        self.assertTrue(any("chased" in d for d in out))
+        self.assertEqual(self.get(gid)["chase_count"], 1)  # the result was recorded after the send
+
+    def test_a_goal_changed_during_the_send_keeps_both_changes(self):
+        gid = self.goal()
+        other = lean_goals.ensure("PR 900", "t22")
+
+        def send(tid, text):
+            lean_goals.touch("t22", reset=True)
+            lean_goals.drop(other, "meanwhile")
+            return True, ""
+
+        lean_goals.watchdog(T0 + 300 * MIN, send, lambda t: True, self.info, lambda: False)
+        self.assertEqual(self.get(gid)["chase_count"], 1)
+        self.assertEqual(next(g for g in lean_goals._load() if g["id"] == other)["state"], "dropped")
 
     def test_blocked_goal_is_listed_never_chased_and_frees_when_unblocked_or_blocker_done(self):
         gid = self.goal()

@@ -103,7 +103,13 @@ def _locked():
     _migrate()
     with open(path() + ".lock", "a") as lock:
         if fcntl:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            lock = lean_common.flock_waiting(lock, fcntl.LOCK_EX, "threads.json", path() + ".lock")
+            try:
+                lock.truncate(0)
+                lock.write(f"{os.getpid()}\n")
+                lock.flush()
+            except OSError:
+                pass
         data = load()
         before = json.dumps(data, sort_keys=True)
         yield data

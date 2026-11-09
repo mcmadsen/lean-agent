@@ -209,6 +209,9 @@ def main(ppid=parent_pid, cmd=argv_of, wait=3.0):
 
 if __name__ == "__main__":
     try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import lean_common
+        lean_common.hook_mode()  # a hook never waits long for a lock
         main()
     except BaseException:
         pass
