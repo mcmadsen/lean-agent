@@ -1200,6 +1200,66 @@ def ledger():
     return list(read_jsonl(home("ledger.jsonl")))
 
 
+RUN_ID_RE = re.compile(r"(?<![\w-])(\d{4}-\d{6}-[0-9a-f]{4})(?![\w-])")
+RUN_OUTPUT_MAX = 5
+FROM_RUN_CAP = 12000  # characters of a run's summary that --from-run inlines
+
+
+def newest_summary(run_id):
+    """Absolute path of the run's newest summary-N.txt, or None."""
+    files = glob.glob(os.path.join(home("work", run_id), "summary-*.txt"))
+    nums = [(int(m.group(1)), f) for f in files for m in [re.search(r"summary-(\d+)\.txt$", f)] if m]
+    return max(nums)[1] if nums else None
+
+
+def mentioned_runs(text, extra=()):
+    """Ids (max RUN_OUTPUT_MAX, in order) that the text mentions (or `extra` names) and the ledger knows."""
+    cand = list(dict.fromkeys(list(extra) + RUN_ID_RE.findall(text or "")))
+    if not cand:
+        return []
+    known = {r.get("id") for r in ledger()}
+    return [c for c in cand if c in known][:RUN_OUTPUT_MAX]
+
+
+def run_outputs_footer(text):
+    """A short footer naming the summary file of each ledger run the text mentions, or ''."""
+    lines = []
+    for rid in mentioned_runs(text):
+        path = newest_summary(rid)
+        if path:
+            lines.append(f"- {rid}: {path}")
+    if not lines:
+        return ""
+    return ("\n\nRun outputs:\n" + "\n".join(lines) +
+            "\nRead these files directly; do not search ~/.lean-agent.")
+
+
+def from_run_text(ids):
+    """The final summary of each --from-run run, capped at FROM_RUN_CAP characters (head inline, path for the rest)."""
+    parts = []
+    for rid in ids or []:
+        if rid not in {r.get("id") for r in ledger()}:
+            die(f"--from-run {rid}: no such run in the ledger")
+        path = newest_summary(rid)
+        if not path:
+            die(f"--from-run {rid}: the run has no summary file")
+        body = read_text(path).strip()
+        if len(body) > FROM_RUN_CAP:
+            body = body[:FROM_RUN_CAP] + f"\n[... cut; the rest is in {path}]"
+        parts.append(f"Output of run {rid} ({path}):\n{body}")
+    return ("\n\n" + "\n\n".join(parts)) if parts else ""
+
+
+def attach_run_outputs(text, from_run=None):
+    """text plus the --from-run summaries and the footer for mentioned runs."""
+    return text + from_run_text(from_run) + run_outputs_footer(text)
+
+
+def run_dirs_for(text, from_run=None):
+    """<home>/work/<id> of the runs attached to a task."""
+    return [home("work", r) for r in mentioned_runs(text, from_run or ())]
+
+
 def parse_marker(text, marker):
     """(text without the `MARKER {json}` line, parsed dict) for the last such line."""
     lines = text.rstrip().splitlines()
@@ -2483,6 +2543,9 @@ def _cmd_run(a):
         task = sys.stdin.read().strip()
     elif a.task_file:
         task = read_text(a.task_file).strip()
+    run_dirs = run_dirs_for(task, getattr(a, "from_run", None)) if task else []
+    if task:
+        task = attach_run_outputs(task, getattr(a, "from_run", None))
     claims = [c.strip() for c in (getattr(a, "claim", None) or []) if c and c.strip()]
     early_register(a, task, prev)  # a resumed run is "running" again from here (runs --wait waits for it)
     if not task:
@@ -2694,6 +2757,8 @@ def _cmd_run(a):
         allowed += [f"Bash(git {sub}:*)" for sub in READONLY_GIT]  # cwd = project (readonly_hook.py checks)
         allowed += [f"Bash({b}:*)" for b in READONLY_BUILTINS]
         allowed.append(f"Bash({lean_json}:*)")  # reads a file, prints a compact view
+        lean_cli = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
+        allowed += [f"Bash({lean_cli} runs --show:*)", f"Bash({lean_cli} output:*)"]  # readonly_hook.py checks the shape
         allowed += [f"Bash({c}:*)" for c in allow_cmd + internal_cmd]  # read-only commands the orchestrator named, and the role's own
         permission_mode = "default"
     else:
@@ -2708,6 +2773,7 @@ def _cmd_run(a):
            "--permission-mode", permission_mode,
            "--add-dir", project,
            *[x for g in allow_edit if os.path.isabs(g) for x in ("--add-dir", os.path.dirname(g))],
+           *[x for d in (run_dirs if read_only else []) if os.path.isdir(d) for x in ("--add-dir", d)],
            "--append-system-prompt-file", os.path.join(workdir, "append.md"),
            "--max-turns", str(a.max_turns)]
     role = getattr(a, "role", None) or (prev or {}).get("role")
@@ -12621,10 +12687,15 @@ def thread_positional_message(a, act):
 
 def thread_prompt(a):
     if getattr(a, "prompt_text", None):
-        return a.prompt_text
-    if not a.prompt_file:
+        text = a.prompt_text
+    elif not a.prompt_file:
         return None
-    return (sys.stdin.read() if a.prompt_file == "-" else read_text(a.prompt_file)).strip() or None
+    else:
+        text = (sys.stdin.read() if a.prompt_file == "-" else read_text(a.prompt_file)).strip() or None
+    if not text or getattr(a, "_run_attached", False):
+        return text
+    a._run_attached = True
+    return attach_run_outputs(text, getattr(a, "from_run", None))
 
 
 THREAD_BRIEF_CAP = 2000  # characters of brief a thread session starts with
@@ -15267,6 +15338,8 @@ def build_parser():
     s = sub.add_parser("run", help="run an isolated worker on a project")
     s.add_argument("task", nargs="*", help="task text, or - to read stdin")
     s.add_argument("--project", "-p")
+    s.add_argument("--from-run", action="append", metavar="RUN_ID", help="inline that run's final summary into the task "
+                   "(capped; repeatable)")
     s.add_argument("--model", "-m", help="haiku | sonnet | opus | full model id (required)")
     s.add_argument("--why", help="one line: why this model and context (required)")
     s.add_argument("--cards", help="comma-separated card ids, or 'auto'")
@@ -15708,6 +15781,7 @@ def build_parser():
     s.add_argument("args", nargs="*", help='new "title" ["<text>"]; send tN "<text>"; answer tN [qN] "<answer>"; other actions: ids')
     s.add_argument("--show", metavar="N", help="files: print file number N (Markdown/text, capped)")
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
+    s.add_argument("--from-run", action="append", metavar="RUN_ID", help="send|new: inline that run's final summary into the message (capped; repeatable)")
     s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin); or give it as a positional argument, not both")
     s.add_argument("--json", action="store_true", help="list: as JSON")
     s.add_argument("--grep", metavar="TEXT", help="list: only threads whose title, requests, reports or notes contain TEXT")

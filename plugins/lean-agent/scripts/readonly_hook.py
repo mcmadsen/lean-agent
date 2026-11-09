@@ -133,6 +133,19 @@ def unquoted(seg):
     return out
 
 
+RUN_ID = re.compile(r"\d{4}-\d{6}-[0-9a-f]{4}")
+
+
+def lean_agent_ok(args):
+    """`lean-agent runs --show <id> [--details]` and `lean-agent output <file>` only: both print, nothing else."""
+    if len(args) in (3, 4) and args[:2] == ["runs", "--show"] and RUN_ID.fullmatch(args[2]) \
+            and (len(args) == 3 or args[3] == "--details"):
+        return None
+    if len(args) == 2 and args[0] == "output" and not args[1].startswith("-"):
+        return None
+    return "only `lean-agent runs --show <id> [--details]` and `lean-agent output <file>` are read-only"
+
+
 def segment_ok(seg, cfg, state):
     """None when the segment may run, else the reason."""
     try:
@@ -163,6 +176,8 @@ def segment_ok(seg, cfg, state):
         return f"find {bad[0]} can change files" if bad else None
     if head.endswith("/lean-json") or head == "lean-json":
         return None
+    if os.path.basename(head) == "lean-agent":
+        return lean_agent_ok(toks[1:])
     if head in SIMPLE:
         if head == "sort" and any(t in SORT_BAD or t.startswith("--output=") for t in toks):
             return "sort -o writes a file"

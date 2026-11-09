@@ -3248,6 +3248,50 @@ class CliTest(unittest.TestCase):
             self.assertEqual(mod.run_timeout("90m"), 5400)
         self.assertIn("run-timeout: 30m", self.cli("config", "run-timeout", "default").stdout)
 
+    def _first_run_with_summary(self, text):
+        self.cli("learn", self.proj, "--name", "proj")
+        out = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "first job").stdout
+        run_id = out.split()[1]
+        workdir = next(r for r in self.ledger() if r["id"] == run_id)["workdir"]
+        path = os.path.join(workdir, "summary-9.txt")
+        with open(path, "w") as fh:
+            fh.write(text)
+        return run_id, workdir, path
+
+    def test_task_mentioning_a_ledger_run_id_gets_its_summary_path_and_unknown_ids_none(self):
+        run_id, workdir, path = self._first_run_with_summary("the findings")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", f"build on run {run_id} and 0101-000000-abcd")
+        task = self.calls()[-1]["task"]
+        self.assertIn("Run outputs:", task)
+        self.assertIn(f"- {run_id}: {path}", task)
+        self.assertIn("do not search ~/.lean-agent", task)
+        self.assertNotIn("0101-000000-abcd:", task)
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "mention 0101-000000-abcd only")
+        self.assertNotIn("Run outputs:", self.calls()[-1]["task"])
+        argv = self.calls()[-1]["argv"]
+        self.assertNotIn(workdir, argv)  # unknown id: no extra readable dir
+
+    def test_read_only_worker_gets_the_attached_run_dir_readable_and_only_that(self):
+        run_id, workdir, path = self._first_run_with_summary("x")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", f"see {run_id}")
+        argv = self.calls()[-1]["argv"]
+        dirs = [argv[i + 1] for i, v in enumerate(argv) if v == "--add-dir"]
+        self.assertIn(workdir, dirs)
+        self.assertNotIn(os.path.dirname(workdir), dirs)
+
+    def test_from_run_inlines_the_summary_and_caps_it(self):
+        run_id, workdir, path = self._first_run_with_summary("short result line")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "--from-run", run_id, "continue")
+        self.assertIn("short result line", self.calls()[-1]["task"])
+        with open(path, "w") as fh:
+            fh.write("A" * 13000 + "ENDMARK")
+        self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--read-only", "--from-run", run_id, "continue")
+        task = self.calls()[-1]["task"]
+        self.assertNotIn("ENDMARK", task)
+        self.assertIn(f"the rest is in {path}", task)
+        self.assertEqual(self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--from-run", "0101-000000-abcd",
+                                  "x", check=False).returncode, 1)
+
     def test_allow_cmd_without_read_only_is_noted_and_the_run_starts(self):
         self.cli("learn", self.proj, "--name", "proj")
         p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "--allow-cmd", "az pipelines runs show", "look")
