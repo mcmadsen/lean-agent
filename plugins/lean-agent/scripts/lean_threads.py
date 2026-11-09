@@ -1545,7 +1545,9 @@ def short_text(now=None, max_lines=SHORT_ROWS, all_=False):
             oq = open_questions(t)
             wi = [i for i in waits if resolve(i.get("thread"), data["aliases"]) == tid]
             run = f"running {age(_iso_of(started.get(sorted(running[tid])[0]), last), now)}" if running.get(tid) else ""
-            if oq:
+            if (ud := undelivered_label(tid, now)):
+                row = (-1, now - undelivered_age(tid, now), tid, ud, "message not delivered yet", f"wake {tid}")
+            elif oq:
                 ts = oq[0].get("ts")
                 row = (-1, _epoch(ts), tid, "needs you " + age(ts, now),
                        f"waiting on you: {oq[0]['id']} " + _cell(oq[0]["text"], 40), f"answer {oq[0]['id']}")
@@ -1601,9 +1603,43 @@ def queued_messages(tid):
         return 0
 
 
+UNDELIVERED_AFTER = 60  # seconds a queued message may wait before it counts as undelivered (a needs-attention state)
+
+
+def undelivered_age(tid, now=None):
+    """Seconds the oldest message queued for thread `tid` has waited (0 when none). The spool file name starts with the queue time."""
+    now = time.time() if now is None else now
+    oldest = None
+    try:
+        for n in os.listdir(os.path.join(lean_home("thread-inbox"), tid)):
+            if n.endswith((".json", ".sending")) and n[:20].isdigit():
+                ts = int(n[:20]) / 1e9
+                oldest = ts if oldest is None else min(oldest, ts)
+    except OSError:
+        return 0
+    return max(0, now - oldest) if oldest is not None else 0
+
+
+def undelivered_label(tid, now=None):
+    """"undelivered message (Nm)" when thread `tid` has had a message queued for over a minute, else ''."""
+    age_s = undelivered_age(tid, now)
+    return f"undelivered message ({max(1, int(age_s // 60))}m)" if age_s >= UNDELIVERED_AFTER else ""
+
+
+def undelivered_threads(now=None, min_secs=UNDELIVERED_AFTER):
+    """[(thread id, age seconds)] of the open threads with a message queued for at least `min_secs`, oldest first."""
+    try:
+        names = os.listdir(lean_home("thread-inbox"))
+    except OSError:
+        return []
+    out = [(t, a) for t in names if not t.endswith(".lock") and (a := undelivered_age(t, now)) and a >= min_secs]
+    return sorted(out, key=lambda x: -x[1])
+
+
 def queued_note(tid):
     n = queued_messages(tid)
-    return f"{n} message{'s' if n != 1 else ''} queued for delivery" if n else ""
+    label = undelivered_label(tid)
+    return (f"{n} message{'s' if n != 1 else ''} queued for delivery" + (f" - {label}" if label else "")) if n else ""
 
 
 def show_text(tid, all_=False, limit=40, report_chars=None):

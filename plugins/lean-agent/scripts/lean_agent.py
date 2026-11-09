@@ -12560,6 +12560,8 @@ def deliver_one(tid, prompt, resume_old=False, new=False):
         raise Deferred(f"{tid}: session being replaced")
     running = service_session.alive(tid)
     force, why = False, ""
+    if running and prompt and not resume_old and service_session.mid_turn(tid):  # delivered at its next turn end, in the session it has then
+        raise Deferred(BUSY_NOTE)
     if running and prompt and not resume_old:
         why = auto_fresh_reason(tid)
     if running and not why:
@@ -12667,10 +12669,15 @@ def slot_line(tid, why, new=False):
     return f"{tid} created, queued for a session slot ({why})" if new else f"{tid}: queued for a session slot ({why})"
 
 
+BUSY_NOTE = "thread busy, delivers at its next turn end"
+
+
 def queued_line(tid):
     t = lean_threads.load()["threads"].get(tid) or {}
     if service_session.alive(tid):
-        return f"{tid}: queued: delivery pending (service busy), will deliver"
+        if service_session.mid_turn(tid):
+            return f"{tid}: queued: {BUSY_NOTE}"
+        return f"{tid}: queued: delivery pending (service busy), will deliver within 20 s"
     state = "idle, session stopped" if t.get("parked_by") == "idle" else "parked" if t.get("parked") else "ended" if t.get("closed") else "idle"
     return f"{tid}: queued: delivery pending (waking, {state})"
 
@@ -12701,6 +12708,8 @@ def deliver_with_cap(tid, own=None, new=False, resume_old=False):
     if kind == "slot":
         return slot_line(tid, line, new)
     if kind in ("busy", "deferred"):
+        if line == BUSY_NOTE:
+            return f"{tid}: queued: {BUSY_NOTE}"
         return f"{tid}: queued: delivery pending ({line or 'service busy'}), will retry"
     # a definite failure inside the cap: withdraw the message (unless the service took it meanwhile) and report it
     if own and service_session.spool_withdraw(tid, own):
@@ -13059,6 +13068,8 @@ def close_blockers(s, busy, launching, caller, ignore_idle=False):
         why.append("mid-turn (tool call, answer or prompt pending)")
     if lean_threads.open_questions(lean_threads.load()["threads"].get(tid) or {}):
         why.append("an open question waits on main")
+    if service_session.spool_count(tid):
+        why.append("a message is queued for delivery")
     return why
 
 
@@ -13079,8 +13090,9 @@ def parked_summary(tid):
 
 def park_thread_session(tid, by=None):
     """Stop a thread's live session but keep it: summary stored, session id kept (resumable). Not closed.
-    `by` records who parked it ("idle": the service's idle-stop)."""
-
+    `by` records who parked it ("idle": the service's idle-stop). Refused while a message waits in the spool: it is delivered first."""
+    if service_session.spool_pending(tid) or service_session.spool_count(tid):
+        raise RuntimeError(f"{tid}: a message is queued for delivery; it is delivered before the session stops")
     close_thread_session(tid)
     summary = parked_summary(tid)
     try:
@@ -14097,6 +14109,8 @@ def cmd_now(a):
     waiting = lean_waiting.text()
     if waiting:
         print(waiting)
+    for tid_, age_s in lean_threads.undelivered_threads():
+        print(f"{tid_}: undelivered message ({max(1, int(age_s // 60))}m) - fix: lean-agent thread wake {tid_}")
     goals = lean_goals.now_text()
     if goals:
         print(goals)
