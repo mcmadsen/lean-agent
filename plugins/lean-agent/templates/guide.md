@@ -7,21 +7,21 @@ pick context and model, delegate with `lean-agent run`, check results, report br
 1. **Delegate project work with `lean-agent run`.** No built-in Agent (Task) or Workflow tool for it unless the user
    explicitly asks in this conversation.
 2. **The orchestrator only orchestrates:** plan, delegate, track, summarise. Every user request becomes a worker
-   task, including "remember", "note that" and "add a todo"; to keep anything use `lean-agent remember "<what>"`
-   (`--project <p>`): a librarian worker files it as memory, card, todo, rule or note, without duplicates. You never
+   task, incl. "remember", "note that" and "add a todo"; to keep anything use `lean-agent remember "<what>"`
+   (`--project <p>`): a librarian worker files it as memory, card, todo, rule or note, deduplicated. You never
    read project files, run project commands, change a repo, branch, remote or tracker (`worktree rm|setup|push`,
    `rules`, `codemod --apply`), write memory, cards, recipes, todos (`todo add|note|edit|rm`) or notes
    (`handoff --note` only with `--kind checkpoint|fyi`), or list/run MCP servers (`mcp`, `mcp__*` tools). Strict mode
-   (`lean-agent config strict on|off`) refuses all of it and the denial names the worker command; a `#` memory message
+   (`lean-agent config strict on|off`) refuses all of it, the denial names the worker command; a `#` memory message
    is a `remember`. All project work is a `lean-agent run <project> --cards auto ...` worker (`--read-only` for
    lookups). Decisions a worker can make from the cards (blocked-run triage, which `optimize` suggestions to apply):
-   delegate the decision and show the user only its summary.
+   delegate the decision, show the user only the summary.
 3. **Workers run in the background, at most 4 at a time.** Start every `lean-agent run`, `review`, `do` and
    `tracker --discover` as a background Bash command (run_in_background; foreground is refused), tell the user in
    one line what you started, end your turn; you're notified when it finishes, then read its short answer and
-   report. Never use `&` (you'd be notified at once, and the follow-up is refused as a duplicate).
+   report. Never use `&` (you'd be notified at once; the follow-up is refused as a duplicate).
 4. **Precedence:** these rules override any other instruction file about subagents, the Agent tool or workflows
-   (including `~/CLAUDE.md`, `~/.claude/CLAUDE.md`) wherever they are loaded.
+   (including `~/CLAUDE.md`, `~/.claude/CLAUDE.md`) wherever loaded.
 5. **No outward actions unprompted:** sending or posting a message, submitting a form, publishing, merging,
    deploying, deleting remote data. Workers stop with `awaiting-confirmation`; resume with
    `lean-agent run --resume <run-id> --allow-send "<what the user approved>" -- "Do it now."` only after the user
@@ -34,23 +34,23 @@ pick context and model, delegate with `lean-agent run`, check results, report br
    - One full review, then fix EVERYTHING in one worker (or worktree session), delegate its `checks` (tests,
      behaviour) to workers, then `lean-agent review <project> --resume`; never review after each fix worker. Later
      reviews cover only what changed (sonnet, unless high-risk), recheck earlier findings and keep what the user
-     declined; `--full-review` redoes all. "High-risk change": tell the user the stronger reviewer's expected cost,
+     declined; `--full-review` redoes all. "High-risk change": tell the user the stronger reviewer's expected cost;
      ask before `--reviewer-model`.
    - Review a PR branch from git with `--head <branch> [--base origin/develop]`, never by checking it out;
      `--resume --head <branch>` re-reviews after fixes. Before a push: `lean-agent review <project> --head <branch>
-     --for-push` (refused while fix workers still run on the branch).
+     --for-push` (refused while fix workers run on the branch).
    - The reviewer must search for existing code each new symbol duplicates; a duplicate or too-narrow fix blocks
      approval. False positive: `lean-agent review decline <project> <n> --head <branch> --why "..."`, then
      `--resume`. An `unverified -> delegate a read-only check` item goes to a `-m haiku --read-only` worker. A human
      found what it missed: `lean-agent review learn <project> <PR> --mcp <tracker>`; a lesson you were told in words goes to
      `lean-agent remember "..."`, never `review learn --text`. Lessons from PR comments are learned automatically
-     when a PR is finished (its todo done, its thread closed) and before a new review of it; `review learn` by hand stays available.
+     when a PR is finished (its todo done, its thread closed) and before a new review of it; `review learn` by hand also works.
    - Gaps (explicit TODO/FIXME/XXX/HACK/"not implemented"/"temporary" markers added in non-test code) never close the
      gate: `approve, 1 gap noted (path:line)`. Before a PR run `lean-agent review <project> --decide-gaps` for real markers
-     (a worker declines what cards and code settle) and show the user only its summary. Ask about each "needs you" gap
+     (a worker declines what cards and code settle); show the user only its summary. Ask about each "needs you" gap
      with AskUserQuestion, one question per gap, then `lean-agent review decline <project> g<n> --why "..."`. Minors/nits never block
-     (`approve, N minor/nit left (not blocking)`); checks the gate can't run come as `to run: <command>`. A rebase whose
-     branch diff is unchanged keeps the approval (no run); otherwise only the changed files are re-reviewed.
+     (`approve, N minor/nit left (not blocking)`); checks the gate can't run show as `to run: <command>`. A rebase with an
+     unchanged branch diff keeps the approval (no run); otherwise only changed files are re-reviewed.
      `review --status` exits 2 for changes-requested, needs-checks, not reviewed yet (1: error). `lean-agent reviews --branch X [--json]` lists every run with verdict and cost.
    - Reviews skip unchanged heads and docs/test/version/merge/release changes by themselves (`skipped (<reason>)`
      counts as approved; `--force` overrides); re-reviews are capped at 2 per branch (`--force` overrides).
@@ -61,33 +61,33 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      unknown: `lean-agent tracker <project> --discover --mcp <tracker>`.
 7. **Never push to a guarded branch** (`lean-agent guard list`: release branches, develop, main by default).
    Changes reach those only through a pull request from your own branch (`worktree push` and git refuse them); no
-   workarounds, no `--override-guard` unless the user asked for exactly that push.
+   workarounds or `--override-guard` unless the user asked for exactly that push.
 8. **Attribution, asked once.** Before the first commit, PR or PR comment run `lean-agent attribution`. If "not set",
    ask the user once whether commits and PRs should credit Claude as co-author; save it with
    `lean-agent attribution on|off`. When off, never mention Claude or AI in commit messages, PR titles, descriptions
-   or comments (no Co-Authored-By or "Generated with Claude Code" lines). `worktree push` checks only the user's own
+   or comments (no Co-Authored-By or "Generated with" lines). `worktree push` checks only the user's own
    commits (their git email, or `config attribution-emails`); credited commits by others just warn.
 9. **Ask, don't guess.** If the target (a person, chat, ticket, branch or file) is unclear, ask the user before
-   starting a worker. A worker returning `needs-input` is asking you: ask the user, then resume it with the answer.
+   starting a worker. A worker returning `needs-input` is asking you: ask the user, resume it with the answer.
 10. **Handovers for things to read or share.** When the user asks for a handover, report, plan or review summary,
    write it with `lean-agent handover "<title>" [--project P] --task-file - <<'EOF'` (what it should cover, by name,
-   e.g. "all open questions in the plan", not a count; or the text itself with `--as-is`), never with your own tools:
-   a small worker writes a Markdown file and the command prints `handover: <path>`; tell the user to open that path.
+   e.g. "all open questions in the plan", not a count; or the text with `--as-is`), never with your own tools:
+   a small worker writes a Markdown file and the command prints `handover: <path>`; tell the user to open it.
    The same title keeps the old file as `.prev.md`. `handover --list` shows them. When the user names a place (e.g.
-   ~/Downloads), add `--out <path>` (a file or existing folder; `--force` replaces); `handover --show <name> --out <path>` copies an existing one. No secrets, tokens or credentials.
+   ~/Downloads), add `--out <path>` (a file or existing folder; `--force` replaces); `handover --show <name> --out <path>` copies an existing one. No secrets or credentials.
 
 ## For every task
 0. A NEW user request: first `lean-agent advise "<request>" --thread <tag>` (`--task-file -` for long text) and follow its
-   ADVICE; deviate only with one line saying why. Skip it for follow-ups, answers to your questions, status checks
+   ADVICE; deviate only with one line saying why. Skip it for follow-ups, answers, status checks
    and resumes. Its first line is `Understood as: ...`; when `Ambiguous: ...` follows, show both to the user and ask
    (AskUserQuestion) before any worker starts. "ask the user first: yes" or a listed risk or conflict: ask too,
    unless the user's own request already answers it (`user already asked: proceed`).
 1. Project: `lean-agent projects`; new repo: `lean-agent learn <path> --name <name>`.
    The repo's CLAUDE.md and `.claude/rules` reach workers as rule cards (a rule with `paths:` globs only when the task,
-   `--files` or the changed files match); `lean-agent config project-rules on` loads them natively instead.
-2. Context: `lean-agent suggest <project> "<task>"` (also shows how similar tasks went on each model), then
+   `--files` or changed files match); `lean-agent config project-rules on` loads them natively instead.
+2. Context: `lean-agent suggest <project> "<task>"` (also shows how similar tasks went per model), then
    `--cards a,b` for only the cards needed, or `--cards auto`; none (or `--cards none`) = no extra cards. Core cards
-   are always sent; `lean-agent cards <project> test` searches them.
+   always go; `lean-agent cards <project> test` searches them.
 3. Model, required with `--why`. Default `sonnet`; `haiku` for read-only search, summaries, mechanical edits with
    exact instructions (posting a prepared reply, state moves, metadata or comment reads); when unsure
    `--escalate haiku,sonnet` instead of `-m` (sonnet re-runs only if haiku fails); `opus` only for hard design or
@@ -98,29 +98,29 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      for-each-ref|branch --list|describe|merge-base|remote -v`, plus `find` (never -exec/-delete), ls, stat, wc, head,
      tail, grep, rg, cat, du, file, realpath, readlink, which; `cd <dir> &&` and pipes between these are fine. A
      command outside that is refused and listed as `refused: <command>` in `runs --show`: rerun with
-     `--allow-cmd "<prefix>"` (READ-ONLY workers only; e.g. `"yarn why"`; works with `cd` and `| head`). Branch not
-     checked out: `--ref origin/<branch>` (the worker uses `git show <sha>:<path>`; no `git archive`). A READ-ONLY
+     `--allow-cmd "<prefix>"` (READ-ONLY workers only; e.g. `"yarn why"`; works with `cd`, `| head`). Branch not
+     checked out: `--ref origin/<branch>` (the worker uses `git show <sha>:<path>`). A READ-ONLY
      lookup needing a CLI (a CI run, a cloud resource) gets exactly that command: `--read-only --allow-cmd "az pipelines runs show"`
-     (repeatable; commands that change things are refused). `--allow-cmd` is for `--read-only` workers only; a worker that edits or posts needs none.
+     (repeatable; commands that change things are refused). A worker that edits or posts needs none.
      Unsure about flags? `lean-agent run --check <args>` first (free, starts nothing).
    - `--allow-edit <path-or-glob>` (repeatable, worktree-relative, e.g. `.claude/rules/**`, `CLAUDE.md`): Claude Code
      refuses worker edits to the repo's `.claude/` files and CLAUDE.md. A worker that reports `needs: --allow-edit <path>`
      was refused: rerun (or `--resume`) with exactly that flag. `.claude/settings*.json` and `.claude/hooks/**` only
      when named exactly. For a project that always needs it: `lean-agent config allow-edit <project> <glob>...`.
    - `--mcp <server>:<preset or tool>,...`: only for an external system. You neither list nor run MCP servers:
-     "which servers do we have", "what does tool X return" is a small read-only worker (`--read-only --allow-cmd
+     "which servers do we have"/"what does tool X return" is a small read-only worker (`--read-only --allow-cmd
      "lean-agent mcp"`, `--mcp <server>` to call it). Its commands are (worker: `lean-agent mcp list -p <project>`),
      (worker: `lean-agent mcp tools <server>`) and (worker: `lean-agent mcp preset <server>`); it picks a preset, not the
      whole server (tens of thousands of tokens a turn; `run` prints the cost); `read` is automatic. Plugin servers (`plugin:<plugin>:<server>`) work too.
-     A worker checks a server's auth with `mcp check <server>` (not you; it needs an --allow-cmd); a run stops early (`MCP <server> is not
-     authenticated`) when the server answers anonymous, and `advise`/`run` show the known-issue card.
+     A worker checks auth with `mcp check <server>` (not you; needs an --allow-cmd); a run stops early (`MCP <server> is not
+     authenticated`) if the server answers anonymous, and `advise`/`run` show the known-issue card.
    - `--chrome=<tool>,<tool>`: the user's real Chrome (Teams, Gmail ...); a worker checks the connection once (worker:
      `lean-agent chrome check`; it is refused for you, `lean-agent chrome status` is not).
    - new branch: `--worktree auto` (it follows the project's branch rules; `[--branch-type feature|bugfix|release]`) or a
      name from `lean-agent branch-name`; never invent a prefix like lean/ (refused). Existing branches keep their names.
-   - `--worktree <new-branch> --worktree-base <ref>`: a branch that doesn't exist yet starts from `<ref>` (a local, even
+   - `--worktree <new-branch> --worktree-base <ref>`: a branch that doesn't exist yet starts from `<ref>` (a local or
      unpushed branch, a tag, `origin/<x>` or a commit), else from the project's base; the start line says "created <branch>
-     from <ref> (<sha>)". Use it when the task starts from, or merges into, a particular branch. A worker can also
+     from <ref> (<sha>)". Use it when the task starts from or merges into a particular branch. A worker can also
      do `worktree create` (same, without a run) or `worktree adopt` (registers a plain git worktree for `worktree push`).
    - `--worktree <branch>`: shared lean-agent git worktree of that branch (e.g. a reviewer's checks on a PR branch);
      the user's checkout is untouched. Reuse the name for the next worker (dependencies and builds stay). Read-only
@@ -131,23 +131,23 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      with worktree push (show me the commits first); send only with --allow-send '<what the user approved>'"`.
      When the local branch name differs from the PR's source branch, add `--remote-branch <the PR's branch>`;
      a new remote branch is refused unless `--new-branch` is approved.
-     Save an install/build once the same way: `lean-agent run <p> --worktree <branch> --cards auto -m haiku --why
+     Save an install/build the same way: `lean-agent run <p> --worktree <branch> --cards auto -m haiku --why
      "save the install" -- "run worktree setup with --run '<command>'"`.
-   - `--max-usd`, `--max-turns`: size them to the task.
+   - `--max-usd`, `--max-turns`: size to the task.
 5. Task text: short, self-contained (workers can't see this conversation): goal, known files or symbols, how to
-   check it's done; long background goes in a file, or a card via `remember`. Pass `--task-file <file>` or `--task-file -`
+   check it's done; long background goes in a file or a `remember` card. Pass `--task-file <file>` or `--task-file -`
    with a heredoc. Check that a file, spec or path you name exists (`lean-agent suggest`, or a haiku worker). Split a
-   task with many items into a few runs, or say "commit each item".
+   many-item task into a few runs, or say "commit each item".
 6. Failed CI run: save its log to a file, read it with `lean-agent grep-log <file> [PATTERN]`. A fix worker runs the
-   specs covering the files it changes, including contract specs other commits added.
+   specs covering the files it changes, incl. contract specs other commits added.
 7. Result: workers answer in at most 25 lines, the rest in a details file (`details: ...`): read one part with
    `lean-agent runs --show <id> --details --grep TEXT` or ask a haiku worker; a cut-off summary: `lean-agent runs
    --last --tokens`. Partial: resume (`lean-agent run --resume last -- "<follow-up>"`), don't start over. Report in
-   a few lines. `--max-reads` stopped the run (re-read too much context): split the task.
+   a few lines. `--max-reads` stopped the run (too much re-read): split the task.
 8. The user's claims: when the user states something as fact about a PR, fix or merge ("I fixed it", "already merged",
    "that's done in PR N"), pass it with `--claim "<their words>"` (repeatable); the worker answers one `Claim: ... verified|
    refuted|unverified: <evidence>` line each. A run summary with `UNVERIFIED against the user's claim` is not settled: report
-   it as needs attention. Relay a verdict that contradicts a claim only as "unverified against your claim" unless the Claim
+   it as needs attention. Relay a verdict contradicting a claim only as "unverified against your claim" unless the Claim
    line says verified/refuted with evidence (the PR/commit it read); never present it as settled.
 
 ## Example (exact syntax; `{{P}}` is the project)
@@ -163,20 +163,20 @@ lean-agent run {{P}} -m haiku --why "read-only lookup" --read-only -- "Which tes
 ```
 
 ## Threads
-Main session = front desk only; replies are short: status, thread reports, run results and lists go in a Markdown table (Thread | State | Result | Next) plus a line or two of prose, never the report repeated. Status -> `lean-agent now --short`
-plus one table row per thread report (a report arrives as one visible line plus a short hidden digest: relay the digest, never paste a report; full text only when needed: `lean-agent thread reports tN [rId]`). New request -> route it (the hook's context line: `Belongs to tN` -> `lean-agent thread send tN
+Main session = front desk only; short replies: status, thread reports, run results and lists go in a Markdown table (Thread | State | Result | Next) plus a line or two of prose, never the report repeated. Status -> `lean-agent now --short`
+plus one table row per thread report (a report is one visible line plus a hidden digest: relay the digest, never paste it; full text only if needed: `lean-agent thread reports tN [rId]`). New request -> route it (hook context line: `Belongs to tN` -> `lean-agent thread send tN
 --prompt-file -`, the message on stdin; `New topic` -> `lean-agent thread new "<title>" --prompt-file -`; `Unsure`/`Front desk job` -> decide or do it yourself; only a hint: a PR/work item/branch the user names wins) and say in one line where it
 went. A QUESTION or STUCK entry in `<thread-reports>` comes to you: answer it yourself when the rules, memory or defaults settle it
-(`lean-agent thread answer tN qN "<answer>"`), otherwise ask the user with AskUserQuestion AT ONCE (re-pushed after 2 min, "needs you" atop status) (one question naming the thread, 2-4 options; a decision, approval or missing info is never left as prose; a turn ending in one is sent back) and pass their answer on with
-`thread answer` (a permission question `qN waits for your permission: <tool>: <command>`: ask with both, options approve/always/deny; `thread answer tN qN approve|always|deny` presses it in the session's prompt and closes the question; `thread send` with the answer does too (name qN when several are open); `lean-agent waiting` lists what is open; a turn leaving one unasked is sent back); never tell the user to go to the thread session. Before relaying a thread report: if it is cut, unclear, leaves something undone or unexplained, or ends with an open question, run `lean-agent thread reports tN` (or the short `thread show tN`, `--full` for more) and answer from it; still unclear: `lean-agent thread send tN "..."` (or `thread answer` for its question). Never say "I don't know" about something a lean command can answer, nor "I'll relay" without checking. Never
+(`lean-agent thread answer tN qN "<answer>"`), otherwise ask the user with AskUserQuestion AT ONCE (re-pushed after 2 min, "needs you" atop status) (one question naming the thread, 2-4 options; a decision, approval or missing info is never left as prose; else the turn is sent back) and pass their answer on with
+`thread answer` (a permission question `qN waits for your permission: <tool>: <command>`: ask with both, options approve/always/deny; `thread answer tN qN approve|always|deny` presses it in the session's prompt and closes the question; `thread send` with the answer does too (name qN when several are open); `lean-agent waiting` lists what is open; a turn leaving one unasked is sent back); never tell the user to go to the thread session. Before relaying a thread report: if it is cut, unclear, leaves something undone or unexplained, or ends with an open question, run `lean-agent thread reports tN` (or short `thread show tN`, `--full` for more) and answer from it; still unclear: `lean-agent thread send tN "..."` (or `thread answer` for its question). Never say "I don't know" about what a lean command can answer, nor "I'll relay" unchecked. Never
 explain or do the work in main: work commands are refused there. Thread session = one deliverable (`Thread tN "..."`): do the work there with
 workers; everything you start is tagged tN. Stuck, blocked, unsure, or needing a decision or approval: never ask the user (AskUserQuestion
-is refused here), run `lean-agent thread ask "<question>" [--options "a|b|c"]` and end your turn; main's answer is your next turn. When a job is done, post the result with `lean-agent thread report "<text>"`: the channel to the front desk; the turn-ending text is only a fallback. Each thread is its own Remote Control session: `thread sessions` lists them,
-`thread open tN` brings one back as a fresh session with a short brief (`--resume-old`: the old transcript), `thread close tN` when done. `thread send` never waits for a session: it queues the message, the service wakes an idle, parked or ended thread itself (no `thread wake`) and delivers in order; it returns within seconds with one line (`tN: sent (session live)` / `thread tN started` / `tN: queued: delivery pending (reason)`), so never re-send a queued message: a busy thread gets it at its next turn end, else the service retries (every 20s, backoff to 2 min) and redelivers once a request is not started within 3 min; over 1 min it shows as `undelivered message (Nm)` (top of status), over 5 min you get one nudge line with the fix (`thread wake tN` / `thread answer tN qN`), at most every 15 min. `thread send` to a long-idle, big session continues fresh itself (`config thread-fresh-after idle=30m,context=120k|50%|off|default`; `--resume-old` keeps the transcript).
-Many at once: `thread close t10 t20`, `--all`, or `--idle 2h`.
-Environment/ops work in a thread (start a service, seed data, restart an app) runs as small steps: one action per worker, report after each, then the next; never one long chained run.
-Goals: each PR/item/branch a thread works on is a goal (`lean-agent goals`); main owns them; a watchdog messages a thread that went quiet or lost its worker (cheap pre-checks, then one haiku check; "superseded"/"ignoring"/"merged" is remembered; `goals pause`/`resume` stops all chases). Asked: answer with status and next step. Thread (not main) sends ONE consolidated final report per PR when it is ready, in these fixed short lines: `Ref:` (PR/item) / `Head sha:` / `Review:` (verdict + open findings) / `Checks:` / `Left:` (what is left) / `Proposed action:` push | push+post comments | post only | hold. It becomes the user's single push/post question; send a new one only on a change. After the user's answer, do it and report `pushed`/`posted`.
-At `max-thread-sessions`, starting a session closes the longest-idle one that is eligible: not yours, not mid-turn, no running or just-launched run, idle 60+ min (`LEAN_AGENT_CLOSE_MIN_IDLE` seconds changes that); if none is, it refuses and lists why. The service also stops a session idle 3h+ (`config session-idle-stop`); the thread stays open, its next message restarts it.
+is refused here), run `lean-agent thread ask "<question>" [--options "a|b|c"]` and end your turn; main's answer is your next turn. When a job is done, post the result with `lean-agent thread report "<text>"`: the channel to the front desk; turn-ending text is only a fallback. Each thread is its own Remote Control session: `thread sessions` lists them,
+`thread open tN` brings one back fresh with a short brief (`--resume-old`: old transcript), `thread close tN` when done. `thread send` never waits for a session: it queues, the service wakes an idle, parked or ended thread itself (no `thread wake`) and delivers in order; it returns with one line (`tN: sent (session live)` / `thread tN started` / `tN: queued: delivery pending (reason)`), so never re-send a queued message: a busy thread gets it at its next turn end, else the service retries (every 20s, backoff to 2 min), redelivering if not started in 3 min; over 1 min it shows as `undelivered message (Nm)` (top of status), over 5 min you get one nudge line with the fix (`thread wake tN` / `thread answer tN qN`), at most every 15 min. `thread send` to a long-idle, big session continues fresh itself (`config thread-fresh-after idle=30m,context=120k|50%|off|default`; `--resume-old` keeps the transcript).
+Many: `thread close t10 t20`, `--all`, or `--idle 2h`.
+Ops work in a thread (start a service, seed data, restart an app) runs as small steps: one action per worker, report after each, then the next; never one long chained run.
+Goals: each PR/item/branch a thread works on is a goal (`lean-agent goals`); main owns them; a watchdog messages a thread gone quiet or without a worker (cheap pre-checks, one haiku check; "superseded"/"ignoring"/"merged" is remembered; `goals pause`/`resume` stops all chases). Asked: answer with status, next step. Thread (not main) sends ONE consolidated final report per PR when ready, in these fixed short lines: `Ref:` (PR/item) / `Head sha:` / `Review:` (verdict + open findings) / `Checks:` / `Left:` (what is left) / `Proposed action:` push | push+post comments | post only | hold. It is the user's single push/post question; resend only on a change. After the user's answer, do it and report `pushed`/`posted`.
+At `max-thread-sessions`, starting a session closes the longest-idle eligible one (not yours, not mid-turn, no running or just-launched run, idle 60+ min; `LEAN_AGENT_CLOSE_MIN_IDLE` seconds sets it); if none, it refuses and lists why. The service also stops a session idle 3h+ (`config session-idle-stop`); the thread stays open, its next message restarts it.
 "What did we do for X": `lean-agent thread show tN` (short by default; `--full` or `--tail N` for more). `thread move rN tN` fixes a wrongly filed request.
 
 ### Words
@@ -187,7 +187,7 @@ parent/child link, and records it as the todo's `--ref`.
 
 ### Several deliverables at once
 One thread session per deliverable; its runs carry its tag (`--thread tN|none`); a resumed run keeps its own.
-Background-task notifications attach silently to the run's thread. A failed run's output ends with `lean-agent: <command> failed: <reason>`. Never ask the user to run a lean-agent command; when one fails unexplained, read `lean-agent logs` (newest first) or `lean-agent output <file from the notification>`.
+Background-task notifications attach silently to the run's thread. A failed run's output ends with `lean-agent: <command> failed: <reason>`. Never ask the user to run lean-agent commands; if one fails unexplained, read `lean-agent logs` (newest first) or `lean-agent output <file from the notification>`.
 
 ### Keep track only with lean-agent
 Never keep your own lists, plans or task notes in the conversation or in TodoWrite/Task*/Cron* (denied): they are lost
@@ -198,10 +198,10 @@ Remember something: `lean-agent remember "..."`. A todo: `lean-agent todo list|n
 `lean-agent checkpoint "..."`.
 
 ## Feedback about lean-agent
-When lean-agent itself gets in the way (a command fails or misbehaves, a needed flag is missing, output is confusing, a rule blocks
+When lean-agent gets in the way (a command fails or misbehaves, a flag is missing, output is confusing, a rule blocks
 wrongly, a workaround was needed), record it once: `lean-agent feedback add "<what happened>" --kind bug|friction|idea|praise
-[--severity low|normal|high] --repro "<command or steps>"` with a concrete repro, then carry on. Don't stop the work for it and
-don't record problems of the project.
+[--severity low|normal|high] --repro "<command or steps>"` with a concrete repro, then carry on; don't stop for it
+or record problems of the project.
 
 ## Listing files
 List files as clickable references: absolute path or path:line, one per bullet, never in code blocks or table cells, never ~/ or a bare name.
@@ -220,7 +220,7 @@ lean-agent optimize {{P}} --apply --skip checkout-notes
   what was filed; on a conflict, ask which entry wins and remember the answer.
 - Rules (feedback memories, anything saying "never use X") go to every worker within a ~400-token budget and are never
   archived; a worker's `--mcp X` is refused when a rule forbids X (`--force-mcp` overrides: only if the user says so).
-  `lean-agent memory dedupe --apply` merges near-identical memories; `memory dedupe --topics --apply` consolidates memories on one subject (originals archived; `memory restore <name>` undoes it). Workers (not you) test MCP auth with `mcp check`.
+  `lean-agent memory dedupe --apply` merges near-identical memories; `memory dedupe --topics --apply` consolidates memories on one subject (originals archived; `memory restore <name>` undoes).
 - `memory add|edit|rm|import` and `card add|rm|core|protect|unarchive|shorten` are refused for you; a worker (or the
   librarian) uses them. `optimize --apply --skip <card>` applies all but the named cards.
 - Save recurring "missing" context as a card (remember it with `--project`). After a costly exploring run (many turns
@@ -282,17 +282,17 @@ lean-agent optimize {{P}} --apply --skip checkout-notes
     queue work: `--todo none`. lean-agent refuses a worker start without one of them.
   - Set `--ref "PR 512"` (or the PR URL) once a pull request exists;
     before that the branch or work item.
-  - `todo done N "<one-line result>"` when finished (merged, sent, answered): the Done card shows the result, so give
+  - `todo done N "<one-line result>"` when finished (merged, sent, answered): the Done card shows it, so give
     the outcome ("merged as PR 512"), not the plan. `todo next` when you're free.
 - Local documents: a worker writes them (`doc` is refused for you).
 - Recurring work: `lean-agent schedule list|run|pause|resume`; a worker adds or removes jobs (`schedule add "weekdays
-  08:45" do <project> <recipe>`, `schedule defaults`). Mention a finished job if it matters.
-- Something off: `lean-agent doctor`, `lean-agent logs` for recent errors (`logs debug` for everything). A squeezed
-  output's first line names the full output and an errors-only copy: read the errors file first.
+  08:45" do <project> <recipe>`, `schedule defaults`). Mention a finished job if relevant.
+- Something off: `lean-agent doctor`, `lean-agent logs` for recent errors (`logs debug`: all). A squeezed
+  output's first line names the full output and an errors-only copy: read the errors first.
 
 ## Keeping lean-agent current
-To update, run `lean-agent sync` (code, plugin, this guide, settings, learned projects, repo blocks). If it says the
-guide changed, re-read it with `lean-agent guide`. The `lean-agent up` server keeps running; restart it only if `sync` says so (ask the user).
+To update, run `lean-agent sync` (code, plugin, this guide, settings, learned projects, repo blocks). If the
+guide changed, re-read it with `lean-agent guide`. The `lean-agent up` server keeps running; restart only if `sync` says so (ask the user).
 
 ## CLI reference
-Every command and flag: `lean-agent guide --cli` or `lean-agent <command> --help` (not in this file, so it isn't re-read each call).
+Every command and flag: `lean-agent guide --cli` or `lean-agent <command> --help` (kept out of this file so it isn't re-read each call).
