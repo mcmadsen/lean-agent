@@ -616,6 +616,17 @@ uncommitted changes and new untracked files.
 - **Reuse before style:** lean-agent lists the change's new files and newly defined symbols itself (exports,
   functions, classes, hooks, stores; test files left out) and gives them to the reviewer, whose first three
   passes are mandatory and come before any correctness, test or style finding:
+  0. **Behaviour and regressions** (after correctness): for every changed path the reviewer reads the old code
+     (`git show <base>:<file>`) and writes what the user or caller saw BEFORE -> AFTER (UI text, flows, messages,
+     defaults, removed or renamed options/flags/commands/endpoints/events, settings and storage formats,
+     migrations and old data, older clients, permissions, hot-path performance), each marked intended (named in
+     the goal, PR description or work item) or unintended. The result has **User-facing changes (intended /
+     unintended)** and **Regression risks** (who, likelihood, impact, rollback possible, one concrete check; the
+     check joins `checks`). An unintended change is a major compatibility finding, so `approve` needs none unless
+     you decline it; earlier ones carry into re-reviews like other findings. lean-agent also gives the reviewer,
+     without a model call: for a PR review the PR title, description and linked work items (Azure DevOps and
+     GitHub, read-only, about 3k chars, used as the goal when `--goal` is absent), the top 20 call sites of
+     changed or removed symbols, and the tests that touch them. All optional; the review never fails without them.
   1. **Reuse and duplication:** at least one search per new symbol (by name, key identifiers and behaviour
      words like counter, subscribe, overlay, defer, retry) for existing code with the same job.
   2. **Scope and generality:** does it fix one dialog/field/endpoint while siblings share the cause?
@@ -659,8 +670,7 @@ uncommitted changes and new untracked files.
 - **Model and cost:** `--reviewer-model opus` (or `fable`) for one review; the expected cost is printed first
   (from your earlier reviews on that model, else scaled from Sonnet's and corrected by how far such scaled
   estimates were off before; every estimate is stored with its run, so they improve). `--independent` gives a
-  clean comparison run: no earlier findings, declined decisions, second opinion or decline filtering. For high-risk changes (concurrency, timers, auth and
-  logout, sync, migrations, or large diffs) the review suggests a stronger reviewer with its expected cost.
+  clean comparison run: no earlier findings, declined decisions, second opinion or decline filtering. For high-risk changes (below) the review runs on opus and prints why.
 - **Replay case:** `python3 tests/fixtures/review_case.py <dir>` builds a small repo whose change has a lost
   test case, a hiding default, a merged value with a stale consumer, unreset module state, a logout bug and an
   import cycle; `--fixed` adds the author's fixes, to replay `review --resume` until it approves.
@@ -692,9 +702,11 @@ uncommitted changes and new untracked files.
 - **Cheaper reviews:** the reviewer prompt carries a fill-in template listing every new symbol (reuse) and edited or
   removed test (coverage) with the answer format; entries still missing are filled by the cheap haiku reuse run (coverage
   is recorded as "not checked") instead of resuming the main reviewer. The model is chosen by risk unless
-  `--reviewer-model` is given: re-reviews, docs/test-only and small diffs (under about 150 lines) sonnet, first reviews of
-  large diffs (about 800 lines or more) or of security-sensitive paths and keywords (auth, token, crypto, secret,
-  password, permission, cert, sign, encrypt, sanitize, csp, cors) opus, fable never by default; `config approve-usd N|default` (cost per run approved without asking, default 5 USD; above it a question reaches the user), `config review-model
+  `--reviewer-model` is given: re-reviews, docs/test-only and small ordinary diffs sonnet; first reviews that one shared risk classifier flags
+  opus, with the reason printed (`reviewer: opus (risk: migration, UI strings)`): security words (auth, token, crypto,
+  secret, password, permission, cert, sign, encrypt, sanitize, csp, cors), concurrency/sync words, UI files, strings
+  or locales, migrations/schema/storage, public API/route/protocol definitions, config formats, removed public
+  symbols, or large diffs (about 800 lines), fable never by default; `config approve-usd N|default` (cost per run approved without asking, default 5 USD; above it a question reaches the user), `config review-model
   auto|<model>` fixes it. A gap declined earlier on the branch (matched by location and similar wording) is not shown
   again, and a gap whose own text says it is documented, out of scope or already handled is declined with that reason
   (one summary line). Review prompts carry at most 4 cards: rules whose globs match the changed files, or cards whose

@@ -27,9 +27,10 @@ pick context and model, delegate with `lean-agent run`, check results, report br
    `lean-agent run --resume <run-id> --allow-send "<what the user approved>" -- "Do it now."` only after the user
    approves that exact action.
 6. **No pull request without a review.** Before creating a PR or saying work is ready to merge, run
-   `lean-agent review <project>` (read-only Sonnet reviewer, high effort: the one place to spend on quality; exit 0
-   approve, 2 changes requested or checks needed). `--goal "<task or PR title>"` makes it check the change delivers
-   that end to end; `--focus "the new retry logic"` narrows it.
+   `lean-agent review <project>` (read-only reviewer, high effort: Sonnet, Opus when risky; exit 0 approve, 2 changes
+   requested or checks needed). It also compares behaviour before/after: an unintended user-facing change blocks
+   approve; regression risks come with one check each. `--goal "<task or PR title>"` makes it check the change
+   delivers that end to end (a PR review reads the PR text itself); `--focus "the new retry logic"` narrows it.
    - One full review, then fix EVERYTHING in one worker (or worktree session), delegate its `checks` (tests,
      behaviour) to workers, then `lean-agent review <project> --resume`; never review after each fix worker. Later
      reviews cover only what changed (sonnet, unless high-risk), recheck earlier findings and keep what the user

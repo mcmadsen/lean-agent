@@ -10540,7 +10540,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("turned an unverified major into a check", out)
         self.assertIn("[check] unverified -> delegate a read-only check: src/sync/index.ts: queuedScope", out)
         self.assertIn("1. [major/duplication] resetScheduler", out)  # copies code outside the change
-        self.assertIn("cost: this review $0.05 (3,100 sonnet-eq) · fix so far $0.05 over 1 review run(s)", out)
+        self.assertIn("cost: this review $0.05 (6,200 sonnet-eq) · fix so far $0.05 over 1 review run(s)", out)
         # decline the auto-raised one; it must not come back on --resume, and can't flip the verdict
         self.cli("review", "decline", "proj", "1", "--head", "fix", "--why", "false positive: it calls clearTimer")
         resumed = dict(rv, verdict="changes-requested", findings=[])
@@ -12522,6 +12522,48 @@ class CliTest(unittest.TestCase):
                      check=False)
         self.assertIn("reviewer: opus (risk: security-sensitive", p.stdout)
 
+    def test_a_risky_change_names_its_reason_and_asks_when_over_the_cost_limit(self):
+        g = self.git_project()
+        g("checkout", "-q", "feature")
+        os.makedirs(os.path.join(self.proj, "locales"), exist_ok=True)
+        with open(os.path.join(self.proj, "locales", "en.json"), "w") as fh:
+            fh.write('{"save": "Save"}\n')
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "strings")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("config", "approve-usd", "0")
+        p = self.cli("review", "proj", "--head", "feature", "--base", "main", check=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertRegex(p.stdout, r"reviewer: opus \(risk: .*UI strings.*\)")
+        self.assertIn("over the 0 USD auto-approve limit", p.stderr)
+        self.assertEqual(self.reviewer_runs(), [])
+        self.cli("config", "approve-usd", "100")
+        p = self.cli("review", "proj", "--head", "feature", "--base", "main", FAKE_REVIEW=self.APPROVE, check=False)
+        self.assertIn("auto-approved", p.stdout)
+
+    def test_review_prints_user_facing_changes_and_risks_and_refuses_approve_with_an_unintended_one(self):
+        self.git_project()
+        self.cli("learn", self.proj, "--name", "proj")
+        rv = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[],
+                             user_facing=[{"what": "total rounding", "where": "api/totals.py:2", "before": "exact", "after": "x1.1", "intended": False},
+                                          {"what": "new page", "where": "web/page.txt:1", "before": "none", "after": "added", "intended": True}],
+                             risks=[{"risk": "totals differ for old data", "who": "billing users", "likelihood": "medium",
+                                     "impact": "high", "rollback": True, "check": "run total() on base and head with the same input"}]))
+        p = self.review_feature(FAKE_REVIEW=rv)
+        self.assertEqual(p.returncode, 2, p.stdout)
+        self.assertIn("REVIEW: CHANGES-REQUESTED", p.stdout)
+        self.assertIn("User-facing changes (intended / unintended):", p.stdout)
+        self.assertIn("[UNINTENDED] total rounding: exact -> x1.1", p.stdout)
+        self.assertIn("[intended] new page", p.stdout)
+        self.assertIn("Regression risks:", p.stdout)
+        self.assertIn("totals differ for old data", p.stdout)
+        self.assertIn("[check] run total() on base and head", p.stdout)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "reviews", "proj.jsonl")) as fh:
+            rec = [json.loads(l) for l in fh if l.strip()][-1]
+        self.assertEqual(len(rec["user_facing"]), 2)
+        self.assertEqual(rec["regression_risks"][0]["who"], "billing users")
+
     # ---- sign-in (lean_auth)
     FAKE_TOKEN = "sk-ant-oat01-FAKEFAKEFAKEFAKEFAKEFAKE_fake-1234567890"
 
@@ -12884,6 +12926,124 @@ class ReviewUnitTest(unittest.TestCase):
         self.assertEqual(shown, ["src/c.py", "src/up.py"])
         self.assertTrue(any("2 gap(s) auto-declined" in n for n in notes), notes)
         self.assertTrue(any("gap(s) declined earlier" in n for n in notes), notes)
+
+    def test_prompt_has_the_behaviour_pass_and_the_risk_output(self):
+        rule = self.agent.REVIEWER_RULE
+        self.assertIn("Behaviour and regressions", rule)
+        self.assertIn("BEFORE -> AFTER", rule)
+        self.assertIn("git show {base_ref}:<file>", rule)
+        self.assertLess(rule.index("Correctness"), rule.index("Behaviour and regressions"))
+        self.assertLess(rule.index("Behaviour and regressions"), rule.index("Reuse and duplication"))
+        self.assertIn('"user_facing"', rule)
+        self.assertIn('"risks"', rule)
+        self.assertIn("no unintended user-facing change", rule)
+
+    def _enforce(self, review, declined=()):
+        return self.agent.enforce_review_rules(review, {"head": "abc"}, declined)
+
+    def test_user_facing_changes_and_risks_are_kept_and_risk_checks_join_checks(self):
+        review = {"verdict": "approve",
+                  "user_facing": [{"what": "button label", "where": "ui/a.tsx:3", "before": "Save", "after": "Store", "intended": True}],
+                  "risks": [{"risk": "old clients send v1", "who": "mobile 1.x", "likelihood": "low", "impact": "high",
+                             "rollback": True, "check": "run tests/test_wire.py on base and head"}]}
+        verdict, findings, checks, _ = self._enforce(review)
+        self.assertEqual(verdict, "approve")
+        self.assertEqual(findings, [])
+        self.assertEqual(review["_user_facing"][0]["intended"], True)
+        self.assertEqual(review["_risks"][0]["risk"], "old clients send v1")
+        self.assertTrue(any("tests/test_wire.py" in c["what"] and "old clients send v1" in c["why"] for c in checks), checks)
+
+    def test_approve_is_refused_with_an_unintended_change_unless_declined(self):
+        mk = lambda: {"verdict": "approve", "user_facing": [
+            {"what": "default page size", "where": "api/list.py:9", "before": "20", "after": "50", "intended": False}]}
+        verdict, findings, _, notes = self._enforce(mk())
+        self.assertEqual(verdict, "changes-requested")
+        self.assertEqual((findings[0]["severity"], findings[0]["category"]), ("major", "compatibility"))
+        self.assertIn("unintended user-facing change", findings[0]["issue"])
+        declined = [{"category": "compatibility", "file": "api/list.py", "issue": findings[0]["issue"]}]
+        verdict, findings, _, _ = self._enforce(mk(), declined)
+        self.assertEqual((verdict, findings), ("approve", []))
+
+    def test_unintended_change_is_a_finding_so_a_re_review_carries_it(self):
+        review = {"verdict": "approve", "user_facing": [{"what": "error text", "where": "x.py:1", "before": "a", "after": "b", "intended": "false"}]}
+        _, findings, _, _ = self._enforce(review)
+        self.assertEqual(len(findings), 1)  # recorded like any finding: previous_findings/open_items pass it on
+        self.assertEqual(review["_user_facing"][0]["intended"], False)
+
+    def test_multi_pass_merge_keeps_user_facing_and_risks(self):
+        a, b = {"what": "x", "intended": True}, {"what": "x", "intended": False}
+        merged = self.agent.merge_reviews([{"verdict": "approve", "user_facing": [a], "risks": [{"risk": "r1"}]},
+                                           {"verdict": "approve", "user_facing": [b], "risks": [{"risk": "r1"}]}])
+        self.assertEqual(merged["user_facing"], [b])
+        self.assertEqual(len(merged["risks"]), 1)
+
+    def test_pr_context_becomes_the_goal_source_and_never_fails(self):
+        agent = self.agent
+        self.assertEqual(agent.pr_of_ref("PR 42"), "42")
+        with mock.patch.object(agent, "git", return_value="https://dev.azure.com/o/p/_git/r"), \
+                mock.patch.object(agent.lean_pr, "fetch_context", return_value="PR title: Add retry") as fc:
+            self.assertEqual(agent.review_pr_context("proj", self.dir, "PR 42"), "PR title: Add retry")
+            self.assertEqual(fc.call_args[0][:2], ("az", "42"))
+            self.assertEqual(agent.review_pr_context("proj", self.dir, "feature"), "")  # not a PR
+        with mock.patch.object(agent.lean_pr, "fetch_context", side_effect=RuntimeError("offline")):
+            self.assertEqual(agent.review_pr_context("proj", self.dir, "PR 42"), "")
+
+    def test_pr_context_text_is_capped_and_html_is_stripped(self):
+        import lean_pr
+        text = lean_pr.format_context("T" * 500, "<p>" + "d " * 3000 + "</p>", [{"id": "#7", "title": "Item", "description": "<b>why</b>"}])
+        self.assertLessEqual(len(text), 3000)
+        self.assertNotIn("<p>", text)
+        self.assertIn("PR title: ", text)
+        self.assertEqual(lean_pr.fetch_context("az", "notanumber", self.dir), "")
+
+    def test_callers_and_tests_lists_come_from_git(self):
+        agent = self.agent
+        self._repo({"src/billing.py": "def compute_total(xs):\n    return sum(xs)\n",
+                    "src/use.py": "from billing import compute_total\n\nx = compute_total([1])\n",
+                    "tests/test_billing.py": "from billing import compute_total\n"})
+        diff = agent.git(self.dir, "diff", "-U0", "--no-color", "HEAD~1", "HEAD")
+        self.assertEqual(agent.changed_symbol_names(diff), ["compute_total"])
+        sites = agent.caller_sites(self.dir, ["compute_total"])
+        self.assertIn("src/use.py:3", sites)
+        self.assertNotIn("src/billing.py:1", sites)  # the definition itself is left out
+        self.assertLessEqual(len(agent.caller_sites(self.dir, ["compute_total"], limit=1)), 1)
+        self.assertEqual(agent.touching_tests(self.dir, ["src/billing.py"], ["compute_total"]), ["tests/test_billing.py"])
+        text = agent.review_inputs_text(self.dir, ["HEAD~1", "HEAD"], ["src/billing.py"])
+        self.assertIn("src/use.py:3", text)
+        self.assertIn("tests/test_billing.py", text)
+        self.assertEqual(agent.review_inputs_text(self.dir + "/missing", ["HEAD~1", "HEAD"], []), "")
+
+    def test_risk_classifier_flags_ui_migration_and_removed_symbols_and_picks_opus(self):
+        agent = self.agent
+        base = {"src/a.py": "def keep_me(x):\n    return x\n", "src/old_api.py": "def public_call(x):\n    return x\n"}
+        for files, expect in (({"locales/en.json": "{}\n"}, "UI strings"),
+                              ({"db/migrations/001_init.sql": "select 1;\n"}, "migration"),
+                              ({"api/routes.py": "x = 1\n"}, "public API"),
+                              ({"appsettings.toml": "a = 1\n"}, "config format"),
+                              ({"web/views/home.tsx": "export const A = 1\n"}, "UI")):
+            d = tempfile.mkdtemp()
+            self.addCleanup(shutil.rmtree, d, True)
+            self.dir = d
+            self._repo(files)
+            names = list(files)
+            self.assertIn(expect, agent.classify_risk(d, ["HEAD~1", "HEAD"], names), files)
+            with mock.patch.object(agent, "config_json", return_value={}):
+                model, why = agent.choose_review_model(d, ["HEAD~1", "HEAD"], names)
+            self.assertEqual(model, "opus")
+            self.assertTrue(why.startswith("risk: ") and expect in why, why)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        self.dir = d
+        self._repo(base)
+        subprocess.run(["git", "-C", d, "rm", "-q", "src/old_api.py"], check=True)
+        subprocess.run(["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "rm"], check=True)
+        why = agent.classify_risk(d, ["HEAD~1", "HEAD"], ["src/old_api.py"])
+        self.assertTrue(any(w.startswith("removes public symbols: public_call") for w in why), why)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        self.dir = d
+        self._repo({"src/small.py": "def _private(x):\n    return x\n"})
+        self.assertEqual(agent.classify_risk(d, ["HEAD~1", "HEAD"], ["src/small.py"]), [])
 
     def test_review_cards_are_only_the_ones_that_match_the_change(self):
         agent = self.agent

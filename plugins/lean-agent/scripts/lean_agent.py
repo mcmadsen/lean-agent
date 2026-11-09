@@ -5687,7 +5687,7 @@ RISK_PATHS = (
     ("UI strings", re.compile(r"(^|/)(locales?|i18n|l10n|translations?|lang|strings)(/|\.|$)|\.(resx|po|xlf|arb)$", re.I)),
     ("UI", re.compile(r"\.(xaml|axaml|storyboard|tsx|jsx|vue|svelte|html|cshtml|razor)$|(^|/)(ui|views?|screens?|pages)/", re.I)),
     ("migration", re.compile(r"migrat|(^|/)schema|\.sql$|(^|/)(models?|entities)\.|(^|/)storage|\.prisma$", re.I)),
-    ("public API", re.compile(r"openapi|swagger|\.proto$|\.graphql$|(^|/)(routes?|routing|controllers?|endpoints?|api|protocol)(/|\.)", re.I)),
+    ("public API", re.compile(r"openapi|swagger|\.proto$|\.graphql$|(^|/)(routes?|routing|controllers?|endpoints?|protocol)(/|\.)", re.I)),
     ("config format", re.compile(r"(^|/)(appsettings[^/]*|settings|config)\.[a-z]+$|\.(toml|ini|env)$|\.config\.[a-z]+$", re.I)),
 )
 RISK_DEF = re.compile(r"^\s*(?:export\s+)?(?:public\s+|async\s+)*(?:def|class|function|func|fn|interface|struct|enum)\s+([A-Za-z][A-Za-z0-9_]*)")
@@ -6680,7 +6680,7 @@ def review_main(a):
     if a.focus:
         task += f"\nThe author asks you to look closely at: {a.focus}\n"
     if getattr(a, "goal", None):
-        task += f"\nThe change's stated goal (task, work item or PR title and description): {a.goal}\n"
+        task += f"\nThe change's stated goal (task, work item or PR title): {a.goal}\n"
     task += review_inputs_text(path, [merge_base, sha] if mode == "ref" else [merge_base], names, grep_ref)
     task += answer_template(ns_syms, focus)
     meta = {"base": base, "merge_base": merge_base, "head": sha, "dirty": dirty, "ref": label, "mode": mode,
