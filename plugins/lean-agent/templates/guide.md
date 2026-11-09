@@ -187,7 +187,7 @@ parent/child link, and records it as the todo's `--ref`.
 
 ### Several deliverables at once
 One thread session per deliverable; its runs carry its tag (`--thread tN|none`); a resumed run keeps its own.
-Background-task notifications attach silently to the run's thread. A failed run's output ends with `lean-agent: <command> failed: <reason>`. Never ask the user to run lean-agent commands; if one fails unexplained, read `lean-agent logs` (newest first) or `lean-agent output <file from the notification>`.
+Background-task notifications attach silently to the run's thread. A failed run's output ends with `lean-agent: <command> failed: <reason>`. Never ask the user to run a lean-agent command; if one fails unexplained, read `lean-agent logs` (newest first) or `lean-agent output <file from the notification>`.
 
 ### Keep track only with lean-agent
 Never keep your own lists, plans or task notes in the conversation or in TodoWrite/Task*/Cron* (denied): they are lost
