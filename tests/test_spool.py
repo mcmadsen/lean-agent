@@ -345,8 +345,8 @@ class FirstDeliveryTest(unittest.TestCase):
 
     def test_deliverer_backs_off_from_twenty_seconds_to_two_minutes(self):
         self.assertEqual(ss.spool_backoff(1), 20)
-        self.assertGreater(ss.spool_backoff(3), ss.spool_backoff(2))
-        self.assertEqual(ss.spool_backoff(30), 120)
+        self.assertLessEqual(ss.spool_backoff(3), 20)
+        self.assertEqual(ss.spool_backoff(30), ss.SPOOL_RETRY_MAX)  # never past 20 s: a queued message is looked at every 20 s
 
     def test_status_shows_not_started_and_retrying(self):
         t = lean_threads.load()["threads"][self.tid]

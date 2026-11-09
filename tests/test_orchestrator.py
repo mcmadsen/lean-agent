@@ -5440,6 +5440,7 @@ class CliTest(unittest.TestCase):
         ss.update_session("t9", host_pid=None)  # the host stopped: the slot is free, the service starts t1 by itself
         self.wait_for(lambda: ss.alive("t1") or not self.threads_home().load()["threads"]["t1"].get("waiting_slot"),
                       "the queued thread to start", secs=60)
+        self.wait_for(lambda: not ss.spool_count("t1"), "its first message to be delivered (a queued message blocks the cap)", secs=60)
         r = self.cli("thread", "new", "third")  # at the cap the idle t1 makes room
         self.assertIn("t2 started", r.stdout)
         self.stop_up(p, 30)

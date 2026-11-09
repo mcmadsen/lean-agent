@@ -1043,7 +1043,7 @@ SEND_WAIT = 10  # seconds a caller waits for a delivery before leaving the messa
 UNSTARTED_AFTER = 180  # seconds a request may sit without a started turn before the service redelivers it by itself
 UNSTARTED_TICK = 20  # seconds between those checks
 SPOOL_RETRY = 20  # seconds before the service retries a delivery that failed (then backs off)
-SPOOL_RETRY_MAX = 120  # ... up to this many seconds between tries
+SPOOL_RETRY_MAX = 20  # ... never longer than this between tries: a queued message is looked at least every 20 s
 
 
 def spool_backoff(fails):
@@ -1076,7 +1076,7 @@ def spool_add(tid, text=None, new=False, rid=None):
     return name
 
 
-REPLACING_TTL = 600  # seconds a replacement marker holds delivery at most (a crashed replacement never blocks for good)
+REPLACING_TTL = 180  # seconds a replacement marker holds delivery at most (a crashed replacement never blocks for good)
 
 
 def _replacing_path(tid):
@@ -1227,7 +1227,12 @@ class SpoolDeliverer:
         except Exception:
             pass
         for tid in spool_threads():
-            spool_reclaim_stale(tid)
+            spool_reclaim_stale(tid, age=200)
+            try:
+                if mid_turn(tid) and alive_thread(tid):
+                    continue  # busy: delivered at its next turn end (checked again every tick)
+            except Exception:
+                pass
             with self.lock:
                 if self.busy.get(tid) or self.now() - self.failed.get(tid, 0) < spool_backoff(self.fails.get(tid, 1)):
                     continue
@@ -1460,6 +1465,60 @@ def repush_questions(now=None, after=None):
         queue_report(tid, "question", f"QUESTION {qid} (still unanswered, pushed again): {q['text']}", tag="repush", waiting=False)
         done.append(tid)
     return done
+
+
+NUDGE_AFTER = 300    # seconds an undelivered message, an unanswered thread question or an unstarted request may wait before main is nudged
+NUDGE_REPEAT = 900   # seconds before the same item is nudged again
+
+
+def attention_items(now, after=NUDGE_AFTER, skip=()):
+    """[(key, one line with the exact fix command)] for what has waited over `after` seconds and is still stuck: queued
+    messages not delivered, thread questions nobody answered, requests that never started. `skip`: thread ids whose
+    question was pushed to main this very tick."""
+    import lean_threads
+    out = []
+    for tid, age_s in lean_threads.undelivered_threads(now, after):
+        out.append((f"undelivered:{tid}", f"{tid}: message undelivered ({int(age_s // 60)}m) -> lean-agent thread wake {tid}"))
+    data = lean_threads.load()
+    for tid, t in data["threads"].items():
+        if tid in data["aliases"] or tid == "main":
+            continue
+        for q in lean_threads.open_questions(t):
+            try:
+                age_q = now - datetime.datetime.fromisoformat(str(q.get("ts"))).timestamp()
+            except ValueError:
+                continue
+            if age_q >= after and tid not in skip and q.get("kind") != "permission":
+                out.append((f"question:{tid}:{q['id']}", f'{tid} {q["id"]}: question unanswered ({int(age_q // 60)}m) -> '
+                            f'lean-agent thread answer {tid} {q["id"]} "<answer>"'))
+        if t.get("closed") and not t.get("parked"):
+            continue
+        un = lean_threads.unstarted_request(t, [], now, after)
+        if un and un["undelivered"] and not spool_pending(tid):
+            out.append((f"unstarted:{tid}:{un.get('id')}", f"{tid}: request not started ({int((now - un['since']) // 60)}m) -> lean-agent thread wake {tid}"))
+    return out
+
+
+def nudge_main(now=None, skip=(), after=None, repeat=None):
+    """The one compact nudge to main: a line per stuck item older than `after` (5 min), each item at most once per `repeat`
+    (15 min). Returns the lines queued."""
+    now = time.time() if now is None else now
+    after = _knob("LEAN_AGENT_NUDGE_AFTER", NUDGE_AFTER) if after is None else after
+    repeat = _knob("LEAN_AGENT_NUDGE_REPEAT", NUDGE_REPEAT) if repeat is None else repeat
+    items = attention_items(now, after, skip)
+    path = lean_home("nudged.json")
+    with lean_common.file_lock(path):
+        seen = _load(path)
+        seen = {k: v for k, v in seen.items() if k in {i[0] for i in items}}  # an item that is resolved is forgotten
+        lines = []
+        for key, line in items:
+            if now - float(seen.get(key) or 0) >= repeat:
+                seen[key] = now
+                lines.append(line)
+        lean_common.write_json_atomic(path, seen)
+    if lines:
+        queue_report("main", "chase", "NEEDS ATTENTION (waiting over 5 min):\n" + "\n".join(lines), tag="nudge")
+    return lines
 
 
 def reported_path():
@@ -2242,10 +2301,17 @@ class Reporter(AutoClear):
                 pass
             self.log(f"{len(items)} queued report(s) undelivered for {round(limit / 60)}m: redelivering", "warn")
             lean_log.log("warn", "stuck", f"main: {len(items)} queued report(s) undelivered for {round(limit / 60)}m, redelivering")
+        pushed = []
         try:
-            repush_questions(self.now())
+            pushed = repush_questions(self.now())
         except Exception as exc:  # noqa: BLE001 - the report queue must keep going
             self.log(f"question re-push failed: {exc}", "error")
+        if self.now() - getattr(self, "nudge_at", 0) >= 10:
+            self.nudge_at = self.now()
+            try:
+                nudge_main(self.now(), skip=set(pushed))
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"attention nudge failed: {exc}", "error")
         items = queued_reports()
         if os.path.exists(pending_path()):
             return self.fallback_pending()
