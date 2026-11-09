@@ -12685,14 +12685,14 @@ def thread_positional_message(a, act):
     return a
 
 
-def thread_prompt(a):
+def thread_prompt(a, attach=True):
     if getattr(a, "prompt_text", None):
         text = a.prompt_text
     elif not a.prompt_file:
         return None
     else:
         text = (sys.stdin.read() if a.prompt_file == "-" else read_text(a.prompt_file)).strip() or None
-    if not text or getattr(a, "_run_attached", False):
+    if not text or not attach or getattr(a, "_run_attached", False):
         return text
     a._run_attached = True
     return attach_run_outputs(text, getattr(a, "from_run", None))
@@ -13405,7 +13405,7 @@ def thread_action(a):
             die("thread report works only inside a thread session")
         if len(a.args) > 1 or (a.args and a.prompt_file):
             die('usage: lean-agent thread report ("<text>" | --prompt-file F|-)')
-        text = (a.args[0].strip() if a.args else thread_prompt(a)) or ""
+        text = (a.args[0].strip() if a.args else thread_prompt(a, attach=False)) or ""
         if not text:
             die('thread report needs the report text: "<text>" or --prompt-file -')
         try:  # the consolidated final report (Ref/Head/Review/Checks/Left/Proposed action): the push question for the user

@@ -6802,6 +6802,24 @@ class CliTest(unittest.TestCase):
         self.assertEqual([(i["kind"], i.get("tag")) for i in items], [("done", "explicit")])
         self.assertRegex(ss.turn_status("t1"), r"report queued \(done\)")
 
+    def test_thread_report_mentioning_a_ledger_run_gets_no_run_outputs_footer(self):
+        ss, reps, hosts, clock, write, run_turn, assistant, user, result = self.reporter_unit()
+        reps["t1"].tick()
+        h = os.environ["LEAN_AGENT_HOME"]
+        rid = "0202-101010-abcd"
+        os.makedirs(os.path.join(h, "work", rid))
+        with open(os.path.join(h, "work", rid, "summary-1.txt"), "w") as fh:
+            fh.write("result")
+        with open(os.path.join(h, "ledger.jsonl"), "a") as fh:
+            fh.write(json.dumps({"id": rid}) + "\n")
+        env = {"LEAN_AGENT_SESSION_ROLE": "thread", "LEAN_AGENT_THREAD": "t1", "LEAN_AGENT_HOME": h}
+        r = subprocess.run([sys.executable, CLI, "thread", "report", "--prompt-file", "-"], env=dict(os.environ, **env),
+                           input=f"Built on run {rid}. Done.", capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        texts = json.dumps(ss.queued_reports()) + json.dumps(ss._load(ss.last_reports_path()))
+        self.assertIn(rid, texts)
+        self.assertNotIn("Run outputs", texts)
+
     def test_explicit_thread_report_refused_outside_a_thread_session(self):
         self.threads_home()
         env = dict(os.environ, **self.env)
