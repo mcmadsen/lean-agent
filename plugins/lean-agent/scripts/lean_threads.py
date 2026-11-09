@@ -1019,7 +1019,7 @@ def reopen_question(tid, qid):
 
 
 def question_lines(t, now=None):
-    return [f'  waiting on main: {q["id"]} "{one_line(q["text"], 100)}" {age(q.get("ts"), now)}' for q in open_questions(t)]
+    return [f'  waiting on you: {q["id"]} "{one_line(q["text"], 100)}" {age(q.get("ts"), now)}' for q in open_questions(t)]
 
 
 def report_lines(t, now=None):
@@ -1517,7 +1517,8 @@ def short_text(now=None, max_lines=SHORT_ROWS, all_=False):
             run = f"running {age(_iso_of(started.get(sorted(running[tid])[0]), last), now)}" if running.get(tid) else ""
             if oq:
                 ts = oq[0].get("ts")
-                row = (0, _epoch(ts), tid, "waiting on main " + age(ts, now), _cell(oq[0]["text"], 40), f"answer {oq[0]['id']}")
+                row = (-1, _epoch(ts), tid, "needs you " + age(ts, now),
+                       f"waiting on you: {oq[0]['id']} " + _cell(oq[0]["text"], 40), f"answer {oq[0]['id']}")
             elif wi:
                 w = min(wi, key=lambda i: _epoch(i.get("created") or i.get("ts")))
                 row = (0, _epoch(w.get("created") or w.get("ts")), tid, "waiting " + age(w.get("created") or w.get("ts"), now),
@@ -1536,7 +1537,7 @@ def short_text(now=None, max_lines=SHORT_ROWS, all_=False):
                 row = (2, -rep_ts, tid, f"done {age(rep['ts'], now)}", _cell(rep["text"], 40), "nothing")
             else:
                 row = (3, -last, tid, f"idle {age(_iso_of(None, last), now)}", "", "nothing")
-            if row[0] == 0 and run:
+            if row[0] == 0 and run:  # (a thread waiting on an answer never shows as running: row[0] is -1)
                 row = row[:3] + (row[3] + ", " + run,) + row[4:]
             rows.append(row + (_cell(t.get("title"), 28),))
     if not rows:

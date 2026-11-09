@@ -140,6 +140,11 @@ def mark_asked(ids=None):
     return _mark("asked_at", ids)
 
 
+def mark_repushed(wid):
+    """Remember that open item `wid` was pushed to main a second time (done once per item)."""
+    return _mark("repushed", {wid})
+
+
 def done(wid, answer=None):
     return bool(_mark("answered_at", {wid}, answer))
 

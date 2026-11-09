@@ -6139,7 +6139,7 @@ class CliTest(unittest.TestCase):
         lt.ask(tid, "Which API?")
         short = self.cli("thread", "show", tid).stdout
         full = self.cli("thread", "show", tid, "--full").stdout
-        self.assertIn("waiting on main: q1", short)
+        self.assertIn("waiting on you: q1", short)
         self.assertIn("Last report", short)
         self.assertIn("--full", short)
         self.assertLess(len(short), len(full))
@@ -7026,10 +7026,10 @@ class CliTest(unittest.TestCase):
         self.assertIn("old | new", items[0]["text"])
         msg = service_session.reports_message(items)
         self.assertIn(f"[{tid} question] QUESTION q1", msg)
-        self.assertIn(f"thread answer {tid} [qN]", msg)
-        self.assertIn("waiting on main: q1", lt.show_text(tid))
-        self.assertIn("waiting on main", lt.short_text())
-        self.assertIn("waiting on main: q1", lt.now_text(close_idle=False))
+        self.assertIn(f"thread answer {tid} qN", msg)
+        self.assertIn("waiting on you: q1", lt.show_text(tid))
+        self.assertIn("waiting on you: q1", lt.short_text())
+        self.assertIn("waiting on you: q1", lt.now_text(close_idle=False))
 
     def test_report_hint_names_the_thread_and_long_text_is_cut_at_a_sentence(self):
         sys.path.insert(0, os.path.dirname(CLI))
@@ -12220,6 +12220,49 @@ class CliTest(unittest.TestCase):
         self.assertIn("review-model: auto", self.cli("config", "review-model").stdout)
 
 
+    def _auth_branch(self):
+        g = self.git_project()
+        g("checkout", "-q", "feature")
+        with open(os.path.join(self.proj, "auth.py"), "w") as fh:
+            fh.write("def f(user):\n    return refresh_token(user)\n")
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "auth")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+
+    def test_review_cost_under_the_limit_is_auto_approved_without_a_question(self):
+        self._auth_branch()
+        self.assertIn("approve-usd: 5 USD", self.cli("config", "approve-usd").stdout)
+        p = self.cli("review", "proj", "--head", "feature", "--base", "main", FAKE_REVIEW=self.APPROVE, check=False)
+        self.assertRegex(p.stdout, r"review: opus, est [\d.]+ USD, auto-approved \(limit 5 USD\)")
+        self.assertNotIn("would use", p.stderr)
+
+    def test_review_cost_over_the_limit_asks_main_from_a_thread(self):
+        self._auth_branch()
+        lt = self.threads_home()
+        tid = lt.new("topic")
+        self.cli("config", "approve-usd", "0")
+        p = self.cli("review", "proj", "--head", "feature", "--base", "main", check=False,
+                     LEAN_AGENT_THREAD=tid, LEAN_AGENT_SESSION_ROLE="thread")
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("asked main (q1)", p.stderr)
+        import service_session
+        items = service_session.queued_reports()
+        self.assertEqual([(i["thread"], i["kind"]) for i in items], [(tid, "question")])
+        self.assertIn("over the 0 USD limit", items[0]["text"])
+        self.cli("config", "approve-usd", "default")
+        self.assertIn("approve-usd: 5 USD", self.cli("config", "approve-usd").stdout)
+
+    def test_a_waiting_thread_is_needs_you_at_the_top_and_not_running(self):
+        lt = self.threads_home()
+        a, b = lt.new("quiet"), lt.new("asker")
+        self.cli("thread", "ask", "Which one?", LEAN_AGENT_THREAD=b, LEAN_AGENT_SESSION_ROLE="thread")
+        rows = [l for l in lt.short_text().splitlines() if l.startswith("| t")]
+        self.assertTrue(rows[0].startswith(f"| {b} "), rows)
+        self.assertIn("needs you", rows[0])
+        self.assertIn("waiting on you: q1", rows[0])
+        self.assertNotIn("running", rows[0])
+
     def test_a_review_that_picks_opus_by_risk_needs_the_users_go(self):
         g = self.git_project()
         g("checkout", "-q", "feature")
@@ -12229,11 +12272,12 @@ class CliTest(unittest.TestCase):
         g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "auth")
         g("checkout", "-q", "main")
         self.cli("learn", self.proj, "--name", "proj")
+        self.cli("config", "approve-usd", "0")
         p = self.cli("review", "proj", "--head", "feature", "--base", "main", check=False)
         self.assertEqual(p.returncode, 2)
         self.assertRegex(p.stdout, r"reviewer: opus \(security-sensitive: .*\), effort high \(expected ~\$[\d.]+")
-        self.assertRegex(p.stderr, r"this review would use opus \(~\$[\d.]+, security-sensitive.*\) — rerun with --yes to accept "
-                                   r"or --reviewer-model sonnet")
+        self.assertRegex(p.stderr, r"this review would use opus \(~\$[\d.]+, over the 0 USD auto-approve limit; security-sensitive.*\) "
+                                   r"- rerun with --yes to accept or --reviewer-model sonnet")
         self.assertEqual(self.reviewer_runs(), [])
         p = self.cli("review", "proj", "--head", "feature", "--base", "main", "--reviewer-model", "sonnet",
                      FAKE_REVIEW=self.APPROVE, check=False)
