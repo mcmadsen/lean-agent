@@ -1168,6 +1168,7 @@ class BudgetTest(Base):
             text = compact_hook.thread_brief("t2", 3000)
         self.assertTrue(text.startswith('Thread t2 "Fix export retry loop in billing service"'), text)
         self.assertIn("billing soft state", text)
+        self.assertIn("absolute path or path:line", text)  # the clickable-files rule
         for other in ("main soft state", "docs note", "Publish quarterly"):
             self.assertNotIn(other, text)
 
