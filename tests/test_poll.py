@@ -105,6 +105,38 @@ class PollTest(unittest.TestCase):
         rc, out = self.cli("poll", "--", "ls", "|", "wc")  # main: metacharacters need --shell too
         self.assertEqual(rc, 2)
 
+    def test_thread_allow_cmd_refused_and_config_poll_allow(self):
+        env = dict(self.env, LEAN_AGENT_THREAD="t1")
+        rc, out = self.cli("poll", "--allow-cmd", "echo", "--", "echo", "hi", env=env)
+        self.assertEqual(rc, 2)
+        self.assertIn("config poll-allow", out)
+        rc, out = self.cli("poll", "--", "mytool", "status", env=env)
+        self.assertEqual(rc, 2)
+        rc, out = self.cli("config", "poll-allow", "mytool status")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("mytool status", out)
+        rc, out = self.cli("poll", "--every", "0.2s", "--", "mytool", "status", env=env)
+        self.assertEqual(rc, 0, out)
+        self.cli("poll", "--stop", out.split()[1], env=env)
+        rc, out = self.cli("poll", "--", "mytool", "other", env=env)
+        self.assertEqual(rc, 2)
+        self.cli("config", "poll-allow", "clear")
+        rc, out = self.cli("poll", "--", "mytool", "status", env=env)
+        self.assertEqual(rc, 2)
+
+    def test_cloud_cli_reads_are_read_only(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(CLI)))
+        import readonly_hook
+        cfg = {"project": self.tmp.name, "allow_cmd": []}
+        def ok(cmd):
+            return readonly_hook.decide({"tool_name": "Bash", "tool_input": {"command": cmd}}, cfg)[0] == "allow"
+        for cmd in ("az pipelines build show --id 12 --output json", "az pipelines runs show --id 3", "az pipelines build list --top 5",
+                    "az pipelines runs list", "gh run view 123", "gh run view 123 --log", "gh pr checks 4", "gh pr view 4", "gh run list"):
+            self.assertTrue(ok(cmd), cmd)
+        for cmd in ("az pipelines run --name x", "az pipelines build queue --definition-id 1", "gh run rerun 123", "gh run cancel 1",
+                    "gh pr merge 4", "gh run view 1 --web", "az pipelines variable-group delete --id 1", "gh api -X POST /x"):
+            self.assertFalse(ok(cmd), cmd)
+
     def test_list_show_stop_and_detached_record(self):
         pid = self.start("--every", "0.2s", "--until", "NEVER", "--name", "slow", "--", *self.counter_cmd("print('wait')"))
         rc, out = self.cli("poll", "--list")

@@ -11541,6 +11541,24 @@ def cmd_config(a):
               "user.email, these author/committer emails count as yours when attribution is off; credited commits "
               "by anyone else only warn. set: lean-agent config attribution-emails <email>...  clear: ... clear")
         return 0
+    if a.name == "poll-allow":
+        vals = [v.strip() for v in [a.value] + list(a.more or []) if v and v.strip()]
+        key = "*"
+        if a.project:
+            key = os.path.realpath(resolve_project(a.project)[1])
+        cfg = config_json()
+        table = cfg.get("poll_allow") if isinstance(cfg.get("poll_allow"), dict) else {}
+        if vals == ["clear"]:
+            table.pop(key, None)
+        elif vals:
+            table[key] = sorted(set(table.get(key) or []) | set(vals))
+        if vals:
+            cfg["poll_allow"] = table
+            save_json(home("config.json"), cfg)
+        print("poll-allow: " + ("; ".join(f"{'all projects' if k == '*' else k}: {', '.join(v)}" for k, v in table.items() if v) or "none")
+              + " \u00b7 commands (besides read-only ones) a thread's `lean-agent poll` may run. "
+              "set: lean-agent config poll-allow [--project P] <prefix>...  clear: ... clear")
+        return 0
     if a.name == "allow-edit":
         vals = [v for v in [a.value] + list(a.more or []) if v]
         proj = a.project
@@ -15367,8 +15385,8 @@ def build_parser():
 
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "allow-edit-outside <dir>|clear (extra dirs, besides ~/Downloads, where --allow-edit may name an explicit file outside the worktree), allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
-                       "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), max-thread-sessions N (thread sessions the service runs; default 20), session-idle-stop DUR|off|default (the service stops a thread session idle that long; the thread stays open; default 3h), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-vote-own on|off (ask vote or post for reviews of your own PRs too; default off), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model>|default (default auto: by risk), approve-usd N|default (cost approved by itself per run; default 5 USD, above it the user is asked), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
-    s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions", "session-idle-stop", "session-stuck",
+                       "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), poll-allow <prefix>...|clear (commands a thread's `lean-agent poll` may run besides read-only ones; --project limits it), max-thread-sessions N (thread sessions the service runs; default 20), session-idle-stop DUR|off|default (the service stops a thread session idle that long; the thread stays open; default 3h), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-vote-own on|off (ask vote or post for reviews of your own PRs too; default off), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model>|default (default auto: by risk), approve-usd N|default (cost approved by itself per run; default 5 USD, above it the user is asked), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
+    s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "poll-allow", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions", "session-idle-stop", "session-stuck",
                                            "review-max-rerounds", "review-vote-own", "review-skip", "review-model", "approve-usd", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")

@@ -62,7 +62,7 @@ def context():
     return "main", None
 
 
-def refuse(cmd, shell, allow=()):
+def refuse(cmd, shell):
     """None when this context may poll the command, else the reason."""
     kind, cfg = context()
     if shell:
@@ -72,7 +72,8 @@ def refuse(cmd, shell, allow=()):
         return "shell metacharacters (| & ; < > $ ` ...) need --shell (main session only)"
     if kind == "main":
         return None
-    cfg = dict(cfg, allow_cmd=list(cfg.get("allow_cmd") or []) + (list(allow) if kind == "thread" else []))
+    if kind == "thread":  # only what main/the user configured widens it, never the thread itself
+        cfg = dict(cfg, allow_cmd=config_allow(os.getcwd()))
     try:
         if cmd and os.path.basename(cmd[0]) == "lean-agent" and cmd[1:2] == ["poll"]:
             return "a poll cannot start a poll"
@@ -80,6 +81,17 @@ def refuse(cmd, shell, allow=()):
     except Exception as e:  # noqa: BLE001
         return f"cannot check the command: {e}"
     return None if decision == "allow" else f"not allowed here: {seg} ({why})"
+
+
+def config_allow(cwd):
+    """The prefixes main granted threads with `lean-agent config poll-allow`: global ("*") and for the project holding cwd."""
+    cfg = lean_common.read_json(lean_common.lean_home("config.json"), {})
+    table = cfg.get("poll_allow") if isinstance(cfg, dict) else None
+    out = []
+    for key, vals in (table.items() if isinstance(table, dict) else []):
+        if key == "*" or readonly_hook.inside(cwd, key):
+            out += [v for v in vals if isinstance(v, str)]
+    return out
 
 
 def fmt_age(secs):
@@ -240,7 +252,11 @@ def main(argv):
     except (ValueError, re.error) as e:
         print(f"poll: {e}")
         return 2
-    why = refuse(cmd, a.shell, a.allow_cmd)
+    if a.allow_cmd and context()[0] != "main":
+        print("refused: --allow-cmd cannot widen a poll from a worker or thread; the user grants prefixes with "
+              "`lean-agent config poll-allow <prefix>...`")
+        return 2
+    why = refuse(cmd, a.shell)
     if why:
         print(f"refused: {why}")
         return 2
