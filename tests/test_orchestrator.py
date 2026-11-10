@@ -7573,7 +7573,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual((last["id"], last["status"]), (m["run"], "done"))
 
     def test_a_resume_killed_at_its_caller_still_finishes_and_records(self):
-        p = self.start_run(turns="1", sleep="0")
+        p = self.start_run(turns="2", sleep="0.7")  # slow enough that its marker is seen before it ends
         p.communicate(timeout=scaled(60))
         self.wait_for(lambda: not self.running_markers(), "the first turn to finish", 60)
         rid = self.ledger()[-1]["id"]
