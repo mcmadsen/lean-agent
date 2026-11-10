@@ -13211,7 +13211,7 @@ def queued_line(tid):
         if service_session.mid_turn(tid):
             return f"{tid}: queued: {BUSY_NOTE}"
         return f"{tid}: queued: delivery pending (service busy), will deliver within 20 s"
-    state = "idle, session stopped" if t.get("parked_by") == "idle" else "parked" if t.get("parked") else "ended" if t.get("closed") else "idle"
+    state = "idle, session stopped" if t.get("parked_by") in ("idle", "user-stop") else "parked" if t.get("parked") else "ended" if t.get("closed") else "idle"
     return f"{tid}: queued: delivery pending (waking, {state})"
 
 
@@ -13602,8 +13602,9 @@ def thread_finished(tid, t=None):
     return not turn or float(rep_.get("ts") or 0) >= float(turn.get("ts") or 0) - 30
 
 
-def close_blockers(s, busy, launching, caller, ignore_idle=False):
-    """Why the cap may not close session `s` (a list; empty = eligible)."""
+def close_blockers(s, busy, launching, caller, ignore_idle=False, keep_spool=False):
+    """Why the cap may not close session `s` (a list; empty = eligible). `keep_spool`: a queued message is no blocker
+    (`thread stop`: it stays and is delivered when the session restarts)."""
     tid, why = s["thread"], []
     if tid == caller:
         why.append("the calling session")
@@ -13617,7 +13618,7 @@ def close_blockers(s, busy, launching, caller, ignore_idle=False):
         why.append("mid-turn (tool call, answer or prompt pending)")
     if lean_threads.open_questions(lean_threads.load()["threads"].get(tid) or {}):
         why.append("an open question waits on main")
-    if service_session.spool_count(tid):
+    if service_session.spool_count(tid) and not keep_spool:
         why.append("a message is queued for delivery")
     return why
 
@@ -13637,10 +13638,10 @@ def parked_summary(tid):
     return "\n\n".join(parts)
 
 
-def park_thread_session(tid, by=None):
+def park_thread_session(tid, by=None, keep_spool=False):
     """Stop a thread's live session but keep it: summary stored, session id kept (resumable). Not closed.
     `by` records who parked it ("idle": the service's idle-stop). Refused while a message waits in the spool: it is delivered first."""
-    if service_session.spool_pending(tid) or service_session.spool_count(tid):
+    if not keep_spool and (service_session.spool_pending(tid) or service_session.spool_count(tid)):
         raise RuntimeError(f"{tid}: a message is queued for delivery; it is delivered before the session stops")
     close_thread_session(tid)
     summary = parked_summary(tid)
@@ -13788,8 +13789,12 @@ def close_threads(a):
     """`thread close tN...|--all|--idle DUR`: one checkpoint-and-stop per thread, then a summary line. An explicit id or
     --all refuses a thread with a live run or a mid-turn session unless --force (the runs are detached and keep going)."""
     idle, all_ = getattr(a, "idle", None), getattr(a, "all", False)
-    if sum(map(bool, (a.args, all_, idle))) != 1:
-        die("usage: lean-agent thread close tN [tM ...] | --all | --idle DUR")
+    if idle is True:
+        die("usage: lean-agent thread close --idle DUR (e.g. 2h)")
+    except_ = getattr(a, "except_", None) or []
+    if sum(map(bool, (a.args, all_, idle))) != 1 or (except_ and not all_):
+        die("usage: lean-agent thread close tN [tM ...] | --all [--except tA tB ...] | --idle DUR")
+    skip = {thread_session_tid(f"t{r}" if str(r).isdigit() else r)[0] for r in except_}  # a bare number is a thread here
     if idle:
         try:
             limit = parse_idle(idle)
@@ -13805,9 +13810,15 @@ def close_threads(a):
             tid = thread_session_tid(ref)[0]
             if tid not in tids:
                 tids.append(tid)
+    me = caller_thread()
+    tids = [t for t in tids if t not in skip]
     done, failed, held = [], [], []
     force = getattr(a, "force", False)
     for tid in tids:
+        if tid == "main" or tid == me:
+            print(f"{tid}: not closed \u2014 " + ("the main session is never closed" if tid == "main" else "the calling session is never closed"))
+            held.append(tid)
+            continue
         if not idle:
             why, rids = close_hold(tid)
             if why and not force:
@@ -13834,6 +13845,61 @@ def close_threads(a):
               + (f"; not closed (running): {', '.join(held)}" if held else "")
               + (f"; failed: {', '.join(failed)}" if failed else ""))
     return 1 if failed or held else 0
+
+
+def stop_threads(a):
+    """`thread stop tN...|--idle [DUR]`: checkpoint and stop the SESSION only; the thread stays open (parked_by "user-stop":
+    nudges skip it) and its next message restarts it. Queued messages are kept and delivered then. Never main or the
+    calling session; a live run or mid-turn session is skipped unless --force."""
+    idle = getattr(a, "idle", None)
+    if bool(a.args) == bool(idle):
+        die("usage: lean-agent thread stop tN [tM ...] [--force] | --idle [DUR]")
+    sessions = {s["thread"]: s for s in open_thread_sessions()}
+    if idle:
+        try:
+            limit = service_session.idle_stop_limit() if idle is True else parse_idle(idle)
+        except ValueError as exc:
+            die(str(exc))
+        if not limit:
+            die("no idle limit: give a duration (thread stop --idle 2h) or set session-idle-stop")
+        tids = [t for t, s in sessions.items() if s["idle"] >= limit]
+    else:
+        tids = []
+        for ref in a.args:
+            tid = thread_session_tid(ref)[0]
+            if tid not in tids:
+                tids.append(tid)
+    me, force = caller_thread(), getattr(a, "force", False)
+    done, held = [], []
+    for tid in tids:
+        if tid == "main" or tid == me:
+            print(f"{tid}: not stopped \u2014 " + ("the main session is never stopped" if tid == "main" else "the calling session is never stopped"))
+            held.append(tid)
+            continue
+        s = sessions.get(tid)
+        if not s:
+            print(f"{tid}: no live session to stop")
+            continue
+        why, rids = close_hold(tid)
+        if why and not force:
+            print(f"{tid}: not stopped \u2014 running: {why}; use --force to stop anyway (the run keeps going detached)")
+            held.append(tid)
+            continue
+        if why:
+            print(f"{tid}: stopping anyway \u2014 running: {why}")
+        try:
+            park_thread_session(tid, by="user-stop", keep_spool=True)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            held.append(tid)
+            continue
+        q = service_session.spool_count(tid)
+        print(f"{tid}: session stopped (checkpointed); thread stays open" + (f"; {q} queued message{'s' * (q != 1)} kept for the restart" if q else ""))
+        done.append(tid)
+    if len(tids) != 1 or idle:
+        print(f"stopped {len(done)} session{'s' * (len(done) != 1)}" + (f": {', '.join(done)}" if done else "")
+              + (f"; not stopped: {', '.join(held)}" if held else ""))
+    return 1 if held else 0
 
 
 def session_contexts():
@@ -13956,6 +14022,13 @@ SHORTCUTS = (
     ("a21 <question>", "send the question to t21 unchanged"),
     ("f21", "files t21 made for you, numbered"),
     ("f21 2", "show file 2 of t21 (text only, capped)"),
+    ("x21 / x21 x22 / x 21 22", "close t21 (t22 ...): `thread close`; mid-turn or running threads are skipped and named; a trailing `force` closes them anyway; queued messages are discarded"),
+    ("x all", "close every thread session (not main, not the calling session)"),
+    ("x all but 152 153", "close all except t152 t153 (`except` works too)"),
+    ("x idle 2h", "close the sessions idle at least 2h with no running run"),
+    ("stop21 / stop 21 22", "stop the SESSION of t21 (t22 ...) only: checkpointed, the thread stays open, queued messages are kept, the next message restarts it"),
+    ("stop idle [2h]", "stop every session idle that long (default: the session-idle-stop limit)"),
+    ("o21", "reopen t21 and continue its previous transcript (`thread reopen t21 --resume-old`)"),
     ("q", "my questions: open first, newest first, with the answers (`lean-agent myq`)"),
     ("q12", "question 12 in full with its answer and source (a thread's own question ids are answered with `thread answer tN qN`)"),
     ("q open", "only my unanswered questions"),
@@ -14031,8 +14104,8 @@ def thread_action(a):
             if k in live or k in lean_threads.load()["aliases"] or k in lean_threads.RESERVED:
                 continue
             if t.get("parked"):
-                print(f"{'stopped' if t.get('parked_by') == 'idle' else 'parked '} {k:<5}{t.get('title') or '-':<42}{lean_threads.age(t['parked'])}  "
-                      + ("(idle, session stopped; the next message restarts it)" if t.get("parked_by") == "idle" else f"(wake: lean-agent thread wake {k})"))
+                print(f"{'stopped' if t.get('parked_by') in ('idle', 'user-stop') else 'parked '} {k:<5}{t.get('title') or '-':<42}{lean_threads.age(t['parked'])}  "
+                      + ("(" + ("idle, " if t.get("parked_by") == "idle" else "") + "session stopped; the next message restarts it)" if t.get("parked_by") in ("idle", "user-stop") else f"(wake: lean-agent thread wake {k})"))
             elif t.get("closed") and t.get("session_id"):
                 print(f"closed  {k:<5}{t.get('title') or '-':<42}(reopen: lean-agent thread reopen {k})")
         if not sessions:
@@ -14244,6 +14317,8 @@ def thread_action(a):
         return 0
     if act == "close":
         return close_threads(a)
+    if act == "stop":
+        return stop_threads(a)
     if act == "reopen" and len(a.args) == 1:
         tid, t = thread_session_tid(a.args[0])
         if t.get("closed") and t.get("session_id"):
@@ -16572,7 +16647,7 @@ def build_parser():
     s.set_defaults(fn=cmd_schedule)
 
     s = sub.add_parser("thread", help="threads: new \"title\" [\"<text>\"|--prompt-file F|-] (its own Remote Control session) | send tN \"<text>\"|--prompt-file F|- | ask \"question\" [--options \"a|b|c\"] (from inside a thread session: the question goes to main; end the turn, the answer arrives as your next turn) | answer tN [qN] \"answer\" (main: pass an answer into the thread session) | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
-    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "files", "ask", "report", "answer", "reports", "park", "wake", "discard", "deliver", "idle-stop"],
+    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "files", "ask", "report", "answer", "reports", "park", "wake", "discard", "deliver", "idle-stop", "stop"],
                    metavar="{new,list,show,close,reopen,merge,unmerge,move,send,open,sessions,ask,report,answer,reports,park,wake,discard}")  # deliver is internal: not shown
     s.add_argument("args", nargs="*", help='new "title" ["<text>"]; send tN "<text>"; answer tN [qN] "<answer>"; other actions: ids')
     s.add_argument("--show", metavar="N", help="files: print file number N (Markdown/text, capped)")
@@ -16589,12 +16664,13 @@ def build_parser():
     s.add_argument("--mine", action="store_true", help="reports: the calling thread's own reports with their delivery state (queued / delivered / dropped)")
     s.add_argument("--tail", type=int, metavar="N", help="show: the latest N entries (default 5)")
     s.add_argument("--force", action="store_true", help="close: close even with a live run or mid-turn (runs keep going detached)")
-    s.add_argument("--idle", help="close: every session idle at least this long (e.g. 2h, 90m) without a running run")
+    s.add_argument("--idle", nargs="?", const=True, help="close: every session idle at least this long (e.g. 2h, 90m) without a running run; stop: idle at least this long (default: session-idle-stop)")
+    s.add_argument("--except", dest="except_", nargs="+", metavar="tN", help="close --all: keep these threads")
     s.add_argument("--resume-old", action="store_true", help="reopen|send|open: continue the thread's previous Claude session "
                    "instead of starting a new one from a short brief")
     s.set_defaults(fn=cmd_thread)
 
-    s = sub.add_parser("shortcuts", help="the front desk's reply shortcuts (? s21 a21 f21 more goals waiting) as a table")
+    s = sub.add_parser("shortcuts", help="the front desk's reply shortcuts (? s21 a21 f21 x21 stop21 o21 more goals waiting) as a table")
     s.set_defaults(fn=cmd_shortcuts)
 
     s = sub.add_parser("myq", help="my questions and their answers: list (open first), `N` one in full, --open, --thread tN, `N --drop`")
