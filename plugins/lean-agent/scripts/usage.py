@@ -355,6 +355,7 @@ def report(arg=None, workers=None):
 # Input price per 1M tokens, used to weigh models against each other. Plan limits
 # are not published per model; API price ratios are the best available proxy.
 PRICE_PER_MTOK = (
+    ("claude-fable-5-2", 8.0), ("claude-mythos-5-2", 8.0),
     ("claude-fable", 10.0), ("claude-mythos", 10.0),
     ("claude-opus-5-5", 4.0), ("claude-opus", 5.0),
     ("claude-sonnet-4", 3.0), ("claude-sonnet", 2.0),
@@ -366,7 +367,7 @@ KEEP_HOURS = 8 * 24
 BUCKET_MINUTES = 10
 
 
-ALIASES = {"fable": "claude-fable-5-1", "opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5",
+ALIASES = {"fable": "claude-fable-5-2", "opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5",
            "haiku": "claude-haiku-5-5"}
 
 
@@ -524,7 +525,7 @@ def _scan_into(path, fstate, buckets, is_lean):
     fstate["seen"] = seen[-SEEN_KEEP:]
 
 
-FAMILIES = {"fable": "claude-fable-5-1", "opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5",
+FAMILIES = {"fable": "claude-fable-5-2", "opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5",
             "haiku": "claude-haiku-5-5"}
 DEFAULT_WEIGHTS = {"cache_read": 0.1, "output": 5.0}
 

@@ -1752,7 +1752,7 @@ def resolve_mcp(project, specs):
     return servers, allowed, disallowed
 
 
-PRICE_SONNET_EQ_USD = 3.0 / 1_000_000  # one sonnet-eq token at Sonnet's input price, for comparing estimates
+PRICE_SONNET_EQ_USD = 2.0 / 1_000_000  # one sonnet-eq token at Sonnet's input price, for comparing estimates
 
 
 def expected_run_units(model, ttype=None):
@@ -8959,7 +8959,7 @@ def print_limits():
                     part += f" (≈ {x['family_pct'][f]:.0f}% of its own limit)"
                 fams.append(part)
             print("  by model: " + ", ".join(fams))
-    print("Units: Sonnet-equivalent tokens (Haiku 5.5 counts 0.05x, Opus 5.5 2x, Fable 5.1 5x).")
+    print("Units: Sonnet-equivalent tokens (Haiku 5.5 counts 0.05x, Opus 5.5 2x, Fable 5.2 4x, Fable 5.1 5x).")
     real, age = usage.plan_usage()
     if real and age is not None and age <= usage.PLAN_FRESH_MINUTES:
         print("Plan % and reset times come from Claude itself (includes claude.ai and other machines).")

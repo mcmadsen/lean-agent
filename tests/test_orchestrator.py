@@ -1711,6 +1711,18 @@ class CliTest(unittest.TestCase):
             json.dump(d, fh)
         self.assertIn("no session since the last reset", self.cli("limits").stdout)
 
+    def test_fable_model_rates_and_family(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import usage
+        self.assertEqual(usage.model_rate("fable"), 4.0)
+        self.assertEqual(usage.model_rate("claude-fable-5-2"), 4.0)
+        self.assertEqual(usage.model_rate("claude-fable-5-1"), 5.0)
+        self.assertEqual(usage.model_rate("claude-mythos-5-2"), 4.0)
+        self.assertEqual(usage.family("claude-fable-5-2"), "fable")
+        u = {"input_tokens": 1_000_000}
+        self.assertAlmostEqual(usage.estimate_usd(u, "fable"), 8.0)
+        self.assertAlmostEqual(usage.estimate_usd(u, "claude-fable-5-1"), 10.0)
+
     def test_calibration_fits_weights(self):
         sys.path.insert(0, os.path.dirname(CLI))
         import usage

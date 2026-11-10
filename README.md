@@ -932,8 +932,8 @@ Your project files are never modified by learning. Everything lives in `~/.lean-
 
 `claude remote-control` silently drops a `--model` flag, so remote sessions would start on your default model,
 which may be the most expensive one. `up` therefore writes the model into `~/.lean-agent/home/.claude/settings.json`,
-which those sessions do read. Token counts are similar across models, but price per token is not: Fable 5.1 costs
-5× Sonnet 5.5 for input and output. The orchestrator only plans, picks cards and models, and reads short summaries,
+which those sessions do read. Token counts are similar across models, but price per token is not: Fable 5.2 costs
+4× Sonnet 5.5 for input and output (Fable 5.1: 5×). The orchestrator only plans, picks cards and models, and reads short summaries,
 and Sonnet handled that well in every test. Use `up --model default` to run it on your own default model instead.
 You can also switch the model of a running session in the app.
 
@@ -965,7 +965,7 @@ session=N week=N` (percentages from `/usage`) make that estimate closer, and are
   first message after it and lasts 5 hours. The week runs from the weekly reset. Without a plan the windows roll
   (the last 5 hours, the last 7 days), which is a bit stricter.
 - **Units:** **Sonnet-equivalent tokens**, which are weighted tokens scaled by the model's price relative to
-  Sonnet 5.5. Haiku 5.5 counts 0.05×, Opus 5.5 2× and Fable 5.1 5×. The weekly line also splits usage by model
+  Sonnet 5.5. Haiku 5.5 counts 0.05×, Opus 5.5 2×, Fable 5.2 4× and Fable 5.1 5×. The weekly line also splits usage by model
   family, because a model with its own weekly bar fills that bar separately.
 - **Calibration:** `calibrate` divides the usage seen in each window by the percentage you give, so `limits`
   can show "plan ≈ N%". A model family (`fable=8`) calibrates that family's own weekly limit. After three or more
