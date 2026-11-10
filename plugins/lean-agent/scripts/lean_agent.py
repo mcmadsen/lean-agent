@@ -10897,6 +10897,18 @@ def cmd_up(a):
     refresh_blocks()
     if getattr(a, "clear", False) and not a.fresh:
         fresh_start()
+    starts, loop = service_session.record_start()
+    if loop and not a.fresh:
+        a.fresh = True  # a restart loop: main starts from its checkpoint, never resumes the conversation that keeps restarting us
+        held = service_session.hold_back_main()
+        line = (f"restart loop detected: {starts} starts in {service_session.LOOP_WINDOW // 60} min; started fresh; held back: "
+                + (", ".join(held) or "nothing"))
+        print("lean-agent: " + line, flush=True)
+        lean_log.log("warn", "startup", line)
+        try:
+            service_session.queue_report("main", "chase", line, force=True)
+        except Exception:  # noqa: BLE001
+            pass
     prev = load_json(home("up.json"), {})
     save_json(home("up.json"), {"started": now_iso(), "server_env": orchestrator_env(), "name": a.name,
                                 "local": a.local, "pid": os.getpid(), "uid": os.getuid(),
@@ -16810,6 +16822,10 @@ def _main(argv=None):
         if a.cmd == "guard" and leftover:
             a.patterns = list(a.patterns or []) + leftover
             leftover = []
+    harm = lean_common.service_self_harm(argv) if a.cmd in ("service", "up", "sync", "clear") else ""
+    if harm and lean_common.inside_service():
+        print("lean-agent: " + lean_common.self_harm_message(harm), file=sys.stderr)
+        return 2
     if a.cmd == "run":
         if getattr(a, "check", False):
             return run_check_cli(argv)

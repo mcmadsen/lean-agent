@@ -2124,6 +2124,46 @@ def session_workers(key):
         return []
 
 
+LOOP_WINDOW = 600  # seconds
+LOOP_STARTS = 3    # more starts than this within LOOP_WINDOW is a restart loop
+
+
+def record_start(now=None):
+    """Record this `up` start; (starts within the window including this one, True when that is a restart loop)."""
+    now = time.time() if now is None else now
+    path = lean_home("up-starts.json")
+    with lean_common.file_lock(path):
+        data = lean_common.read_json(path, {})
+        starts = [t for t in (data.get("starts") if isinstance(data, dict) else []) or []
+                  if isinstance(t, (int, float)) and now - t < LOOP_WINDOW] + [now]
+        lean_common.write_json_atomic(path, {"starts": starts[-20:]})
+    return len(starts), len(starts) > LOOP_STARTS
+
+
+def hold_back_main():
+    """Keep (not redeliver) main's pending message and spooled messages after a restart loop: moved aside, listed.
+    Returns short descriptions of what was held."""
+    held = []
+    pend = pending_path()
+    if os.path.exists(pend):
+        try:
+            os.replace(pend, pend + ".held")
+            held.append("pending request")
+        except OSError:
+            pass
+    names = spool_pending("main")
+    if names:
+        dst = spool_dir("main") + ".held"
+        os.makedirs(dst, exist_ok=True)
+        for n in names:
+            try:
+                os.replace(os.path.join(spool_dir("main"), n), os.path.join(dst, n))
+            except OSError:
+                pass
+        held.append(f"{len(names)} spooled message(s) in {dst}")
+    return held
+
+
 CLEANUP_LIMIT = 20  # seconds the startup cleanup may run before it gives up
 
 

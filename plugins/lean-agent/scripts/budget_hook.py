@@ -643,6 +643,10 @@ def front_desk_denial(event):
             args = [w for w in words[1:] if not w.startswith("-")]
             if os.path.basename(words[0]) == "lean-agent" and args[:2] == ["thread", "deliver"]:
                 return f"`lean-agent thread deliver`: {DELIVER_REFUSED}"
+            if os.path.basename(words[0]) == "lean-agent":
+                harm = lean_common.service_self_harm(words[1:])
+                if harm:
+                    return lean_common.self_harm_message(harm)
     if role != "main" or event.get("tool_name") != "Bash":
         return ""
     for words in commands_run(str((event.get("tool_input") or {}).get("command") or "")):

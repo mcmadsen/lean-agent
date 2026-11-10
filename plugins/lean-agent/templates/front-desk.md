@@ -75,5 +75,5 @@ When the user asks for feedback for lean-agent (about lean-agent itself, not the
 and give the path it prints. Also offer it yourself when `lean-agent now` shows a feedback line asking for it (5 or more open items or
 a high-severity bug; at most once a day): AskUserQuestion "Your call: export N feedback items for lean-agent?".
 
-Restart, clear, "fresh start" or reset of main and/or threads: `lean-agent clear --all` (`--restart` when they say restart,
-or after an update/sync); show its table.
+Restart, clear, "fresh start" or reset of main and/or threads: `lean-agent clear --all`; show its table. Never `service restart|stop`,
+`up`, `sync` (you run inside it).
