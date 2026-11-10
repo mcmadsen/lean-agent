@@ -301,7 +301,7 @@ def session_lines(tid, t):
         return [f"  request {un.get('id')}: not started ({int((time.time() - _epoch(un.get('ts'))) // 60)}m), retrying"]
     if state == "closed" and not t.get("session_id"):
         return []
-    if state == "closed" and t.get("parked_by") == "idle":
+    if state == "closed" and t.get("parked_by") in ("idle", "user-stop"):
         return ["  session: idle, session stopped (thread open; the next message starts it again)"]
     return [f'  session: {state}' + (f' \u2014 Remote Control "{name}"' if name else "")]
 
@@ -402,6 +402,10 @@ MYQ_RE = re.compile(r"^q(?:\s+(open)|\s+t(\d+)|\s*(\d+))?\s*[.!]?$", re.I)  # q 
 ASK_RE = re.compile(r"^(?:ask\s+t?|a)(\d+)(?:\s+(.*))?$", re.I | re.S)
 FILES_RE = re.compile(r"^(?:files?\s+t?|f)(\d+)(?:\s+(\d+))?$", re.I)
 SHORTCUT_RE = re.compile(r"^(?:please\s+)?(?:((?:show\s+)?more)|(?:s|summary|show)\s*t?(\d+))\s*[.!?]?$", re.I)
+_NUMS = r"t?\d+(?:[\s,]+(?:x\s*)?t?\d+)*"
+CLOSE_RE = re.compile(rf"^(?:please\s+)?x\s*(?:(all)(?:\s+(?:but|except)\s+({_NUMS}))?|idle\s+(\d+(?:\.\d+)?\s*[smhd]?)|({_NUMS}))(\s+force)?\s*[.!]?$", re.I)
+STOP_RE = re.compile(rf"^(?:please\s+)?stop\s*(?:(idle)(?:\s+(\d+(?:\.\d+)?\s*[smhd]?))?|({_NUMS}))(\s+force)?\s*[.!]?$", re.I)
+REOPEN_RE = re.compile(r"^(?:please\s+)?o\s*t?(\d+)\s*[.!]?$", re.I)
 PR_RE = re.compile(r"^pr\s*t?(\d+)(?:\s+(c|comments|ci|diff|fix|reply|review))?$", re.I)
 PR_LIST_RE = re.compile(r"^pr\s+(list|mine|stale|find)(?:\s+(.+))?$", re.I)
 PR_FLAGS = {"c": " --comments", "comments": " --comments", "ci": " --ci", "diff": " --diff", "": ""}
@@ -698,6 +702,16 @@ def _closed(data, tid):
     return bool((data["threads"].get(tid) or {}).get("closed"))
 
 
+def _tids(text, data):
+    """The existing thread ids in a shortcut's number list ("21 x22, t30"), in order, without repeats."""
+    out = []
+    for n in re.findall(r"\d+", text or ""):
+        tid = resolve(f"t{int(n)}", data["aliases"])
+        if tid in data["threads"] and tid not in out:
+            out.append(tid)
+    return out
+
+
 def _send(tid, data):
     if (data["threads"].get(tid) or {}).get("session_on"):
         return f"hand it over: {SEND_TAIL.format(t=tid)}"
@@ -746,6 +760,33 @@ def decide(text, data, session=None, now=None, idx=None):
             return None, f"Front desk job (summary shortcut) \u2014 no thread: lean-agent thread show {tid}", "job"
     elif sc:
         return None, "Front desk job (show more shortcut) \u2014 no thread: lean-agent now --all", "job"
+    cm = CLOSE_RE.match(text)
+    if cm:
+        force = " --force" if cm.group(5) else ""
+        if cm.group(1):
+            ex = _tids(cm.group(2), data)
+            cmd = "--all" + (" --except " + " ".join(ex) if ex else "")
+        elif cm.group(3):
+            cmd = "--idle " + cm.group(3).replace(" ", "").lower()
+        else:
+            ids = _tids(cm.group(4), data)
+            cmd = " ".join(ids)
+        if cmd:
+            return None, f"Front desk job (close shortcut) \u2014 no thread: lean-agent thread close {cmd}{force}", "job"
+    sm = STOP_RE.match(text)
+    if sm:
+        force = " --force" if sm.group(4) else ""
+        if sm.group(1):
+            cmd = "--idle" + (" " + sm.group(2).replace(" ", "").lower() if sm.group(2) else "")
+        else:
+            cmd = " ".join(_tids(sm.group(3), data))
+        if cmd:
+            return None, f"Front desk job (stop shortcut: stops the session only, the thread stays open) \u2014 no thread: lean-agent thread stop {cmd}{force}", "job"
+    om = REOPEN_RE.match(text)
+    if om:
+        tid = resolve(f"t{int(om.group(1))}", data["aliases"])
+        if tid in data["threads"]:
+            return None, f"Front desk job (reopen shortcut) \u2014 no thread: lean-agent thread reopen {tid} --resume-old", "job"
     pm = PR_RE.match(low)
     if pm:
         tid = resolve(f"t{int(pm.group(1))}", data["aliases"])

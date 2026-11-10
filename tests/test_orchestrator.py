@@ -8057,6 +8057,94 @@ class CliTest(unittest.TestCase):
         rc, closed, out = self.close_unit({"all": True, "force": True}, {}, mid=("t2",))
         self.assertEqual((rc, closed), (0, ["t1", "t2", "t3"]))
 
+    def test_close_all_except_keeps_the_named_threads_and_never_main_or_the_caller(self):
+        rc, closed, out = self.close_unit({"all": True, "except_": ["t152", "t2"]}, {}, sessions=("t1", "t2", "t152", "t153", "main"))
+        self.assertEqual(closed, ["t1", "t153"])
+        self.assertNotIn("t2", closed)
+        self.assertNotIn("t152", closed)
+        self.assertNotIn("main", closed)
+        self.assertIn("main: not closed", out)
+        L = lean_agent_module()
+        seen = []
+        with mock.patch.object(L, "thread_session_tid", side_effect=lambda r: seen.append(r) or (r, {})), \
+                mock.patch.object(L, "open_thread_sessions", return_value=[]), contextlib.redirect_stdout(io.StringIO()):
+            L.close_threads(argparse.Namespace(args=[], all=True, idle=None, json=False, force=False, except_=["152", "153"]))
+        self.assertEqual(seen, ["t152", "t153"])
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_SESSION_ROLE": "thread", "LEAN_AGENT_CALLER_THREAD": "t1"}):
+            rc, closed, out = self.close_unit({"args": ["t1", "t2"]}, {})
+        self.assertEqual(closed, ["t2"])
+        self.assertIn("t1: not closed \u2014 the calling session is never closed", out)
+
+    def stop_unit(self, args, runs=None, mid=(), sessions=("t1", "t2", "t3"), spooled=()):
+        L = lean_agent_module()
+        parked = []
+        with mock.patch.object(L, "open_thread_sessions", return_value=[{"thread": t, "idle": 9000} for t in sessions]), \
+                mock.patch.object(L, "thread_live_runs", side_effect=lambda t, d=None: (runs or {}).get(t, [])), \
+                mock.patch.object(L, "launching_threads", return_value=set()), \
+                mock.patch.object(L.service_session, "mid_turn", side_effect=lambda t: t in mid), \
+                mock.patch.object(L.service_session, "spool_count", side_effect=lambda t: 1 if t in spooled else 0), \
+                mock.patch.object(L, "thread_session_tid", side_effect=lambda r: (r, {})), \
+                mock.patch.object(L, "park_thread_session", side_effect=lambda t, by=None, keep_spool=False: parked.append((t, by, keep_spool))), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = L.stop_threads(argparse.Namespace(**dict({"args": [], "idle": None, "force": False}, **args)))
+        return rc, parked, out.getvalue()
+
+    def test_stop_parks_as_user_stop_keeps_spool_skips_mid_turn_and_main_unless_forced(self):
+        rc, parked, out = self.stop_unit({"args": ["t1", "t2", "main"]}, mid=("t2",), spooled=("t1",))
+        self.assertEqual(parked, [("t1", "user-stop", True)])
+        self.assertIn("1 queued message kept", out)
+        self.assertIn("t2: not stopped \u2014 running: session mid-turn", out)
+        self.assertIn("main: not stopped", out)
+        self.assertEqual(rc, 1)
+        rc, parked, out = self.stop_unit({"args": ["t2", "main"], "force": True}, mid=("t2",))
+        self.assertEqual([p[0] for p in parked], ["t2"])
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_SESSION_IDLE_STOP": "2h"}):
+            rc, parked, out = self.stop_unit({"idle": True}, mid=("t3",))
+        self.assertEqual([p[0] for p in parked], ["t1", "t2"])
+
+    def test_stop_keeps_the_thread_open_and_its_queued_message_and_next_send_restarts_it(self):
+        p, log, ss = self.start_up()
+        lt = self.threads_home()
+        self.cli("thread", "new", "alpha topic")
+        self.wait_for(lambda: ss.alive("t1"), "t1")
+        out = self.cli("thread", "stop", "t1").stdout
+        self.assertIn("t1: session stopped", out)
+        t = lt.load()["threads"]["t1"]
+        self.assertTrue(t.get("parked") and t.get("parked_by") == "user-stop" and not t.get("closed") and not t.get("session_on"))
+        self.assertTrue(lt.no_nudge(t))
+        self.assertRegex(self.cli("thread", "sessions").stdout, r"(?m)^stopped t1\b.*session stopped")
+        self.assertIn("session stopped", self.cli("now").stdout)
+        self.cli("thread", "send", "t1", "--prompt-file", "-", input="hello again")
+        t = lt.load()["threads"]["t1"]
+        self.assertFalse(t.get("parked") or t.get("parked_by"))
+        self.assertTrue(t.get("session_on"))
+        self.stop_up(p, 30)
+
+    def test_close_stop_and_reopen_shortcuts_map_to_commands(self):
+        lt = self.threads_home()
+        for i in range(3):
+            lt.new(f"Topic {i}")
+        data = lt.load()
+        for n in (21, 22, 30, 152, 153):
+            data["threads"][f"t{n}"] = {"title": f"T{n}"}
+        P = "lean-agent thread "
+        cases = (("x21", P + "close t21"), ("X 21", P + "close t21"), ("please x t21", P + "close t21"),
+                 ("x21 x22 x30", P + "close t21 t22 t30"), ("x 21 22 30", P + "close t21 t22 t30"),
+                 ("x21 force", P + "close t21 --force"), ("x all", P + "close --all"),
+                 ("x all but 152 153", P + "close --all --except t152 t153"), ("X ALL except t152 t153", P + "close --all --except t152 t153"),
+                 ("x all force", P + "close --all --force"), ("x idle 2h", P + "close --idle 2h"),
+                 ("stop21", P + "stop t21"), ("stop 21 22", P + "stop t21 t22"), ("Stop idle", P + "stop --idle"),
+                 ("stop idle 90m", P + "stop --idle 90m"), ("stop 21 force", P + "stop t21 --force"),
+                 ("o21", P + "reopen t21 --resume-old"), ("please O t21", P + "reopen t21 --resume-old"))
+        for text, cmd in cases:
+            tid, line, kind = lt.decide(text, data)
+            self.assertEqual((tid, kind), (None, "job"), text)
+            self.assertTrue(line.endswith(cmd), (text, line))
+        self.assertNotIn("close shortcut", lt.decide("x999", lt.load())[1])
+        out = self.cli("shortcuts").stdout
+        for k in ("x21", "x all", "x all but", "x idle 2h", "stop21", "stop idle", "o21"):
+            self.assertIn(k, out)
+
     def test_thread_sessions_lists_running_runs_and_mid_turn(self):
         p, log, ss = self.start_up()
         self.cli("thread", "new", "one")
