@@ -12059,6 +12059,58 @@ class CliTest(unittest.TestCase):
         out = self.cli("reviews", "--branch", "feat", "-p", "proj").stdout
         self.assertIn("review: unknown · counts unknown", out)
 
+    def _reviews_home(self, projects):
+        """A bare home: {slug: [review rows]} as projects with partial/old review records, no ledger."""
+        h = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(os.path.join(h, "reviews"), exist_ok=True)
+        with open(os.path.join(h, "projects.json"), "w") as fh:
+            json.dump({s: {"path": os.path.join(h, "nowhere", s)} for s in projects}, fh)
+        for slug, rows in projects.items():
+            with open(os.path.join(h, "reviews", slug + ".jsonl"), "w") as fh:
+                fh.writelines(json.dumps(r) + "\n" for r in rows)
+
+    def _reviews_away(self, *args):
+        away = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, away, True)
+        return subprocess.run([sys.executable, CLI, "reviews", *args], capture_output=True, text=True, cwd=away,
+                              env=self.env, stdin=subprocess.DEVNULL)
+
+    def test_reviews_prints_question_marks_for_old_partial_rows(self):
+        old = [{"run": "r1", "ref": "origin/feat"}, {"run": "r2", "ref": "refs/heads/feat", "skip": True, "verdict": None},
+               {"run": "r3", "branch": "feat", "carried": {"reason": None}, "head": None, "base": None, "ts": None}]
+        self._reviews_home({"alpha": old})
+        for br in ("feat", "origin/feat", "refs/heads/feat"):
+            p = self.cli("reviews", "--branch", br, "-p", "alpha")
+            self.assertIn("3 review events", p.stdout)
+            self.assertIn("base ?", p.stdout)
+        self.assertEqual(len(json.loads(self.cli("reviews", "--branch", "feat", "-p", "alpha", "--json").stdout)["runs"]), 3)
+
+    def test_reviews_takes_the_project_as_a_positional(self):
+        self._reviews_home({"alpha": [{"run": "r1", "ref": "feat", "verdict": "approve"}]})
+        p = self.cli("reviews", "alpha", "--branch", "origin/feat")
+        self.assertIn("approve", p.stdout)
+
+    def test_reviews_without_a_project_searches_every_ledger(self):
+        row = {"run": "r1", "ref": "feat", "verdict": "approve"}
+        self._reviews_home({"alpha": [row], "beta": [{"run": "r2", "ref": "other"}], "gamma": [dict(row, run="r3")]})
+        one = self._reviews_away("--branch", "other")
+        self.assertEqual(one.returncode, 0, one.stderr)
+        self.assertIn("r2", one.stdout)
+        many = self._reviews_away("--branch", "feat")
+        self.assertNotEqual(many.returncode, 0)
+        self.assertNotIn("Traceback", many.stderr)
+        self.assertIn("alpha", many.stderr)
+        self.assertIn("gamma", many.stderr)
+        self.assertIn("-p", many.stderr)
+        none = self._reviews_away("--branch", "nothing")
+        self.assertNotEqual(none.returncode, 0)
+        self.assertNotIn("Traceback", none.stderr)
+        self.assertIn("usage", none.stderr)
+
+    def test_resolve_project_refuses_none_without_crashing(self):
+        with self.assertRaises(SystemExit):
+            lean_agent_module().resolve_project(None)
+
     def test_gap_markers_versus_plain_comments_and_test_files(self):
         gl = lean_agent_module().gap_line
         self.assertTrue(gl("src/a.py", "x = 1  # TODO: wire the retry"))
