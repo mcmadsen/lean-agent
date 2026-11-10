@@ -28,7 +28,7 @@ except ImportError:  # not on Windows: no lock, the write is still atomic
     fcntl = None
 
 RESERVED = {"optimize": "Optimize"}
-ID_RE = re.compile(r"^(#\d+|t\d+|optimize)$")
+ID_RE = re.compile(r"^(#[1-9]\d*|t[1-9]\d*|optimize)$")  # never #0 / t0
 
 
 lean_home = lean_common.lean_home
@@ -64,6 +64,29 @@ def norm(tid):
     if not ID_RE.match(t):
         raise ValueError(f"bad thread id {tid!r} (use #N for a task, tN for another topic)")
     return t
+
+
+def is_zero_id(tid):
+    """True for an id that is empty, 0, #0 or t0 (a misparse; never a real thread)."""
+    return not re.sub(r"[#tT0\s.]", "", str(tid or "")) and not re.fullmatch(r"optimize|main", str(tid or "").strip().lower())
+
+
+def close_zero_threads():
+    """Close threads with an empty/zero id (#0, t0, 0): kept as closed, their text attached to main as a note, spool dropped.
+    One threads write. Returns the closed ids."""
+    done = []
+    with _locked() as data:
+        for tid in [k for k in data["threads"] if is_zero_id(k)]:
+            t = data["threads"][tid]
+            if t.get("closed") and t.get("zero_closed"):
+                continue
+            texts = [str(r.get("text") or "") for r in t.get("requests") or [] if isinstance(r, dict)]
+            main = data["threads"].setdefault("main", {"id": "main", "title": "main", "created": now_iso(), "last_message": None, "kind": "free"})
+            main.setdefault("notes", []).append(f"closed misparsed thread {tid!r} ({t.get('title')}): " + " | ".join(texts)[:2000])
+            t["closed"] = now_iso()
+            t["zero_closed"] = True
+            done.append(tid)
+    return done
 
 
 def kind_of(tid):
@@ -132,6 +155,8 @@ def resolve(tid, aliases=None):
 
 
 def _ensure(data, tid, title=None, ts=None, create=False):
+    if is_zero_id(tid):
+        raise ValueError(f"bad thread id {tid!r}")
     t = data["threads"].get(tid)
     if t is None:
         if kind_of(tid) == "free" and tid not in RESERVED and not create:
@@ -435,7 +460,7 @@ PR_WORK = {
     "reply": "Draft replies to the open comments on your PR(s); report the drafts; post nothing until the user approves",
     "review": "Run a review of your PR's latest head; report the verdict with the vote question",
 }
-EXPLICIT_RE = re.compile(r"(?<![\w/&])(?:#(\d+)|[tT](\d+))\b")
+EXPLICIT_RE = re.compile(r"(?<![\w/&])(?:#(?!0+\b)(\d+)|[tT](?!0+\b)(\d+))\b")  # #0 / t0 are never thread ids
 
 
 def words(text):

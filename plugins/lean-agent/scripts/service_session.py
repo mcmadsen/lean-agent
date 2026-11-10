@@ -2182,6 +2182,8 @@ def startup_cleanup(log=None, limit=None, deadline=None):
     try:
         if lean_common.read_json(cleanup_marker_path(), {}).get("version") == lean_common.plugin_version():
             return out
+        for zid in lean_threads.close_zero_threads():
+            out.append(f"{zid!r}: misparsed zero-id thread closed, its text kept as a note on main")
         data = lean_threads.load()
         turns = lean_threads.turns_map()
         closed, handled = [], {}
@@ -2498,7 +2500,7 @@ class Reporter(AutoClear):
             lean_threads.mark_handled_many(done)
             data = lean_threads.load()
         for tid, t in data["threads"].items():
-            if lean_threads.no_nudge(t):
+            if lean_threads.no_nudge(t) or lean_threads.is_zero_id(tid):
                 continue
             un = lean_threads.unstarted_request(t, [], now, _knob("LEAN_AGENT_UNSTARTED_AFTER", UNSTARTED_AFTER), turns=turns)
             if not un or not un["undelivered"] or not un["id"] or not un["text"] or spool_pending(tid):
