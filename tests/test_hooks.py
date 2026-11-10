@@ -1341,10 +1341,11 @@ class BudgetTest(Base):
         with open(os.path.join(ROOT, "..", "templates", "front-desk.md"), encoding="utf-8") as fh:
             desk = fh.read()
         self.assertIn("lean-agent clear --all", desk)
-        self.assertIn("--restart", desk)
+        self.assertIn("you run inside it", desk)
         event = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}}
         with mock.patch.dict(os.environ, {"LEAN_AGENT_SESSION_ROLE": "main"}):
-            for cmd in ("lean-agent clear --all", "lean-agent clear --all --restart", "lean-agent clear --all --force"):
+            self.assertIn("ask the user to run", budget_hook.front_desk_denial(event("lean-agent clear --all --restart")))
+            for cmd in ("lean-agent clear --all", "lean-agent clear --all --force"):
                 self.assertEqual(budget_hook.front_desk_denial(event(cmd)), "", cmd)
                 self.assertEqual(budget_hook.strict_denial(event(cmd), "/home", "/home"), "", cmd)
 

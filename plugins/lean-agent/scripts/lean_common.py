@@ -5,6 +5,7 @@ import glob
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import uuid
@@ -589,3 +590,57 @@ def glob_match(pattern, path):
         else:
             out, i = out + re.escape(pattern[i]), i + 1
     return re.fullmatch(out, path) is not None
+
+
+SERVICE_ACTIONS_REFUSED = ("restart", "stop", "start", "uninstall", "install")
+
+
+def service_self_harm(words):
+    """`words`: the arguments after `lean-agent`. The command line (str) when it would stop or restart the lean-agent
+    service (and so the session that runs it), else ''. `service status|logs` and `sync --check` are fine."""
+    args = [w for w in words if not str(w).startswith("-")]
+    name, sub = (args[0] if args else ""), (args[1] if len(args) > 1 else "")
+    if {"-h", "--help"} & set(words):
+        return ""
+    if name == "service" and sub in SERVICE_ACTIONS_REFUSED:
+        return f"lean-agent service {sub}"
+    if name == "up":
+        return "lean-agent up"
+    if name == "sync" and "--check" not in words:
+        return "lean-agent sync"
+    if name == "clear" and "--restart" in words:
+        return "lean-agent clear --restart"
+    return ""
+
+
+def self_harm_message(cmd):
+    return f"this session runs inside the lean-agent service; ask the user to run `{cmd}` in a terminal"
+
+
+def inside_service(env=None, pid=None, home_dir=None):
+    """True for a session the service hosts: LEAN_AGENT_SESSION_ROLE main|thread, or a process below the running `up`."""
+    env = os.environ if env is None else env
+    if env.get("LEAN_AGENT_SESSION_ROLE") in ("main", "thread"):
+        return True
+    try:
+        up = int((read_json(os.path.join(home_dir or lean_home(), "up.json"), {}) or {}).get("pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if up <= 1 or not pid_alive(up):
+        return False
+    cur = os.getppid() if pid is None else pid
+    for _ in range(40):
+        if cur == up:
+            return True
+        if cur <= 1:
+            return False
+        try:
+            with open(f"/proc/{cur}/stat") as fh:
+                cur = int(fh.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            try:
+                out = subprocess.run(["ps", "-o", "ppid=", "-p", str(cur)], capture_output=True, text=True, timeout=5).stdout
+                cur = int(out.strip() or 0)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                return False
+    return False
