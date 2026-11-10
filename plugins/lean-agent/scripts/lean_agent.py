@@ -10451,6 +10451,45 @@ def held_locks_found(root=None):
     return out
 
 
+def service_start_durations(text):
+    """[(start ts, seconds until sessions up or None)] from debug.log text ("startup: service start" / "startup: sessions up")."""
+    out = []
+    for line in text.splitlines():
+        m = re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d) \w+\s+startup: (service start|sessions up)", line)
+        if not m:
+            continue
+        try:
+            ts = datetime.datetime.fromisoformat(m.group(1)).timestamp()
+        except ValueError:
+            continue
+        if m.group(2) == "service start":
+            out.append([ts, None])
+        elif out and out[-1][1] is None:
+            out[-1][1] = ts - out[-1][0]
+    return [tuple(x) for x in out]
+
+
+def doctor_service_start(report, text=None, now=None):
+    if text is None:
+        try:
+            import lean_log
+            text = read_text(os.path.join(lean_log.log_dir(), "debug.log"))
+        except Exception:  # noqa: BLE001
+            return
+    runs = service_start_durations(text)
+    if not runs:
+        return
+    ts, secs = runs[-1]
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+    if secs is None:
+        waited = (now or time.time()) - ts
+        report(None if waited > 60 else True, f"service started {when}: sessions not up yet ({int(waited)}s)" + (
+            "; slow start" if waited > 60 else ""), "lean-agent service logs; lean-agent service restart" if waited > 60 else None)
+    else:
+        report(None if secs > 60 else True, f"service start took {int(secs)}s to bring the sessions up ({when})" + (
+            " (over 60s)" if secs > 60 else ""), "lean-agent service logs" if secs > 60 else None)
+
+
 def doctor_locks(report, fix, root=None):
     """doctor: a lock held longer than a minute (holder, command, age); --fix clears the ones whose holder is gone."""
     found = held_locks_found(root)
@@ -10529,6 +10568,7 @@ def cmd_doctor(a):
                "shorten the checkpoint or the hand-off")
     except Exception:  # noqa: BLE001 - a courtesy line
         pass
+    doctor_service_start(report)
     report(True, f"strict orchestrator: {'on' if strict_on() else 'off'} (lean-agent config strict on|off)")
     rules_cache = {}
 
@@ -14835,6 +14875,47 @@ def service_file():
     return os.path.expanduser("~/.config/systemd/user/lean-agent.service")
 
 
+SERVICE_STOP_WAIT = 90   # seconds `service stop|restart` waits for the old service to exit before it kills it
+SERVICE_TERM_WAIT = 10   # seconds between SIGTERM and SIGKILL of the old service's process group
+
+
+def wait_or_kill(pid, wait=SERVICE_STOP_WAIT, grace=SERVICE_TERM_WAIT, say=print, alive=None, sleep=time.sleep,
+                 clock=time.time, killpg=None):
+    """Wait for the old service process `pid` to exit, saying what it waits for; after `wait` seconds kill its process
+    group (SIGTERM, SIGKILL after `grace`). Returns "stopped" | "killed" | "gone"."""
+    alive = alive or pid_alive
+    def _kill(p, sig):
+        pg = os.getpgid(p)
+        if pg <= 1 or pg == os.getpgrp():
+            os.kill(p, sig)  # never the caller's own group
+        else:
+            os.killpg(pg, sig)
+    killpg = killpg or _kill
+    if not pid or not alive(pid):
+        return "gone"
+    start = clock()
+    last = -10
+    while alive(pid) and clock() - start < wait:
+        if clock() - start - last >= 10:
+            last = clock() - start
+            say(f"waiting for the service to stop (pid {pid}, {int(last)}s)...")
+        sleep(1)
+    if not alive(pid):
+        return "stopped"
+    say(f"the service (pid {pid}) did not stop within {int(wait)}s: killing its process group (SIGTERM, then SIGKILL after {int(grace)}s)")
+    for sig, limit in ((signal.SIGTERM, grace), (signal.SIGKILL, 5)):
+        try:
+            killpg(pid, sig)
+        except (OSError, ProcessLookupError):
+            pass
+        t0 = clock()
+        while alive(pid) and clock() - t0 < limit:
+            sleep(0.5)
+        if not alive(pid):
+            break
+    return "killed"
+
+
 def cmd_service(a):
     """Optional: keep `lean-agent up` running across logins, restarts and closed terminals."""
     plat = service_platform()
@@ -14854,6 +14935,25 @@ def cmd_service(a):
         except subprocess.TimeoutExpired:
             return 124, f"{' '.join(cmd)} didn't finish within {timeout}s"
         return p.returncode, (p.stdout + p.stderr).strip()
+
+    service_wait = env_num("LEAN_AGENT_SERVICE_TIMEOUT", SERVICE_STOP_WAIT)
+
+    def ctl_nowait(*args):
+        """Start a launchctl/systemctl command without waiting for it (it can block as long as the service takes to stop)."""
+        cmd = [tool, *args] if plat == "mac" else [tool, "--user", *args]
+        try:
+            return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+        except OSError:
+            return None
+
+    def mac_pid():
+        rc, out = ctl("print", f"gui/{uid}/{SERVICE_LABEL}", timeout=15)
+        m = re.search(r"\bpid = (\d+)", out) if rc == 0 else None
+        return int(m.group(1)) if m else 0
+
+    def linux_pid():
+        rc, out = ctl("show", "-p", "MainPID", "--value", "lean-agent.service", timeout=15)
+        return int(out.strip()) if rc == 0 and out.strip().isdigit() else 0
 
     def mac_running():
         rc, out = ctl("print", f"gui/{uid}/{SERVICE_LABEL}", timeout=15)
@@ -14930,8 +15030,17 @@ def cmd_service(a):
             return 0
         if a.action == "stop":
             print("stopping (the orchestrator session shuts down; this can take up to a minute)...", flush=True)
-            rc, out = ctl("bootout", target, timeout=90)
-            print("stopped" if rc == 0 or not mac_running()[1] else f"stop: {out[:200]}")
+            old = mac_pid()
+            proc = ctl_nowait("bootout", target)
+            res = wait_or_kill(old, service_wait)
+            if proc is not None and res != "killed":
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+            if res == "killed":
+                ctl("bootout", target, timeout=15)
+            print("stopped" if not mac_running()[1] or res != "gone" else f"stop: nothing to stop")
             return 0
         if not loaded:
             rc, out = ctl("bootstrap", f"gui/{uid}", path)
@@ -14944,15 +15053,28 @@ def cmd_service(a):
             print("started" if mac_running()[0] else "starting... (lean-agent service status / logs)")
             return 0
         print("restarting (the orchestrator session shuts down first; this can take up to a minute)...", flush=True)
-        rc, out = ctl("kickstart", "-k", target, timeout=env_num("LEAN_AGENT_SERVICE_TIMEOUT", 90))
-        if rc == 124:  # launchd is still waiting for the old one: unload and load it again
-            ctl("bootout", target, timeout=60)
-            ctl("bootstrap", f"gui/{uid}", path)
+        old = mac_pid()
+        ctl_nowait("kickstart", "-k", target)
+        if wait_or_kill(old, service_wait) == "killed":
+            print("old service killed; starting the new one", flush=True)
+            ctl("kickstart", target, timeout=30)
         time.sleep(1)
         print("restarted" if mac_running()[0] else "restarting... (lean-agent service status / logs)")
         return 0
     cmd = {"start": ["start", "lean-agent.service"], "restart": ["restart", "lean-agent.service"],
            "stop": ["stop", "lean-agent.service"], "status": ["status", "lean-agent.service"]}[a.action]
+    if a.action in ("stop", "restart"):
+        old = linux_pid()
+        proc = ctl_nowait(a.action, "lean-agent.service")
+        res = wait_or_kill(old, service_wait)
+        if res == "killed":
+            print("old service killed; starting the new one" if a.action == "restart" else "old service killed", flush=True)
+            ctl("kill", "--signal=SIGKILL", "lean-agent.service", timeout=15)
+            if a.action == "restart":
+                ctl("start", "lean-agent.service", timeout=30)
+        rc = proc.wait(timeout=30) if proc is not None and res != "killed" else 0
+        print(f"{a.action}: " + ("ok" if rc == 0 else "failed"))
+        return rc
     rc, out = ctl(*cmd)
     if a.action == "status":
         state = re.search(r"state = (\w+)|Active: (\S+ \S+)", out)

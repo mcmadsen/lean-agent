@@ -2177,9 +2177,12 @@ def startup_cleanup_background(log=None, host=None, wait=30, limit=None):
     """Run startup_cleanup in a daemon thread once the main session is up (or `wait` seconds passed)."""
     def run():
         try:
-            end = time.time() + wait
+            t0 = time.time()
+            end = t0 + wait
             while host is not None and not host.alive() and time.time() < end:
                 time.sleep(0.5)
+            if host is not None and host.alive():
+                lean_log.log("debug", "startup", f"sessions up ({round(time.time() - t0, 1)}s after the reporter started)")
             startup_cleanup(log, limit=limit)
         except Exception:  # noqa: BLE001
             pass
@@ -2772,6 +2775,8 @@ class Host:
         except OSError as exc:
             raise RuntimeError(f"cannot make {sdir} private (mode 0700) for the session socket: {exc}") from exc
         self.claim_socket(path)
+        if self.key == "main":
+            lean_log.log("debug", "startup", "service start")
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.bind(path)
         os.chmod(path, 0o600)
