@@ -71,6 +71,37 @@ def is_zero_id(tid):
     return not re.sub(r"[#tT0\s.]", "", str(tid or "")) and not re.fullmatch(r"optimize|main", str(tid or "").strip().lower())
 
 
+def add_main_note(text):
+    """One line for main (shown with its notes)."""
+    with _locked() as data:
+        main = data["threads"].setdefault("main", {"id": "main", "title": "main", "created": now_iso(), "last_message": None, "kind": "free"})
+        main.setdefault("notes", []).append(str(text)[:500])
+
+
+def session_refusal(tid, data=None):
+    """"" when a session may run for this thread id; else why not: invalid/zero id, no record, or closed."""
+    try:
+        if is_zero_id(tid):
+            raise ValueError("zero id")
+        key = norm(tid)
+    except ValueError:
+        return f"invalid thread id {str(tid)!r}"
+    data = data if data is not None else load()
+    key = data.get("aliases", {}).get(key, key)
+    t = data["threads"].get(key)
+    if t is None:
+        return f"no thread record for {key}"
+    if t.get("closed"):
+        return f"thread {key} is closed"
+    return ""
+
+
+def orphan_reason(tid):
+    """Why a thread session has no thread (invalid id, no record); "" for a real thread (open or closed)."""
+    why = session_refusal(tid)
+    return "" if not why or why.endswith("is closed") else why
+
+
 def close_zero_threads():
     """Close threads with an empty/zero id (#0, t0, 0): kept as closed, their text attached to main as a note, spool dropped.
     One threads write. Returns the closed ids."""
@@ -84,6 +115,7 @@ def close_zero_threads():
             main = data["threads"].setdefault("main", {"id": "main", "title": "main", "created": now_iso(), "last_message": None, "kind": "free"})
             main.setdefault("notes", []).append(f"closed misparsed thread {tid!r} ({t.get('title')}): " + " | ".join(texts)[:2000])
             t["closed"] = now_iso()
+            t.pop("session_on", None)
             t["zero_closed"] = True
             done.append(tid)
     return done
@@ -363,8 +395,9 @@ def session_threads_by_activity():
 
 def session_threads():
     """Ids of the threads whose session the service keeps running, oldest first."""
-    ts = load()["threads"]
-    return sorted((k for k, t in ts.items() if t.get("session_on")), key=lambda k: int(k[1:]) if k[1:].isdigit() else 0)
+    data = load()
+    ts = data["threads"]
+    return sorted((k for k, t in ts.items() if t.get("session_on") and not session_refusal(k, data)), key=lambda k: int(k[1:]) if k[1:].isdigit() else 0)
 
 
 def merge(src, dst):
@@ -1417,6 +1450,7 @@ def autoclose(data, evs, running, todos, days, now):
         last = max([_epoch(t.get("last_message") or t.get("created"))] + [e[0] for e in evs.get(tid, [])])
         if idle(tid, t, last, todos, days, now):
             t["closed"], t["auto_closed"] = now_iso(), True
+            t.pop("session_on", None)
             gone.append(tid)
     return gone
 
@@ -1923,6 +1957,7 @@ def set_closed(tid, closed):
             raise ValueError(f"no such thread {tid}")
         if closed:
             t["closed"] = now_iso()
+            t.pop("session_on", None)
         else:
             t.pop("closed", None)
             t.pop("auto_closed", None)

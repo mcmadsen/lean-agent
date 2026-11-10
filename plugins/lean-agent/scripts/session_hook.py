@@ -18,6 +18,11 @@ BRIEF_CAP = 3000  # characters of brief added to a cleared session
 CHAIN_KEEP = 20   # transcripts kept in the record's chain
 
 
+ORPHAN_TEXT = ("You are NOT the front desk and NOT the orchestrator. You are an orphan session: your thread does not exist "
+               "(invalid id or no record), so you have no brief and no work. Say so in one line and stop. Do nothing else: "
+               "no lean-agent run/advise/thread commands, no project work.")
+
+
 def session_key():
     """"main", or the thread id of a thread session (`lean-agent thread new` starts those)."""
     tid = os.environ.get("LEAN_AGENT_THREAD") or ""
@@ -166,6 +171,12 @@ def main(ppid=parent_pid, cmd=argv_of, wait=3.0):
         return
     home = os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent"))
     key = session_key()
+    if os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread":
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import lean_threads
+        if lean_threads.orphan_reason(os.environ.get("LEAN_AGENT_THREAD") or ""):
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ORPHAN_TEXT}}), flush=True)
+            return
     if not owned(home, ppid, cmd, wait, key):
         return
     path = os.path.join(home, "chat", "service.json" if key == "main" else f"service-{key}.json")
