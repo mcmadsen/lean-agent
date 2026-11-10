@@ -120,7 +120,7 @@ class DeliverTest(unittest.TestCase):
     def test_hidden_from_help(self):
         out = subprocess.run([sys.executable, AGENT, "thread", "-h"], capture_output=True, text=True,
                              env=clean_environ()).stdout
-        self.assertNotIn("deliver", out)
+        self.assertNotRegex(out, r"\bdeliver\b")  # the hidden subcommand; "delivered"/"delivery" in other help is fine
 
     def test_by_hand_never_waits_long(self):
         import lean_agent
