@@ -2600,11 +2600,13 @@ class Reporter(AutoClear):
         if self.prompting():
             return
         idle_ok = bool(st["ended"])
-        force = not idle_ok and busy_for >= _knob("LEAN_AGENT_REPORT_FORCE", REPORT_FORCE) \
+        force_after = _knob("LEAN_AGENT_REPORT_FORCE", REPORT_FORCE)
+        # a busy main gets a second message only when the staged line has gone untaken for the whole busy limit (lost)
+        force = not idle_ok and busy_for >= force_after and now - (data.get("ts") or 0) >= force_after \
             and now - self.host.last_input >= _knob("LEAN_AGENT_REPORT_IDLE", 3)
         if not (idle_ok or force):
             return
-        text = data["block"] if idle_ok else one_line_digest(data["block"], data.get("id"))
+        text = (data.get("full") or data["block"]) if idle_ok else one_line_digest(data["block"], data.get("id"))
         try:
             self.host.paste(text)
         except Exception as exc:  # noqa: BLE001 - stays staged, retried on a later tick
