@@ -287,7 +287,10 @@ def threads_summary(lines=12):
     return "" if text.startswith("No open") else text + "\nFull list: lean-agent now; one topic: lean-agent thread show tN"
 
 
-def brief(cap=None):
+PAYLOAD_MAX = 8000  # characters: a start payload above this is trimmed (it is part of every fresh session's context)
+
+
+def brief(cap=None, peek=False):
     """What a fresh orchestrator session starts from: the latest checkpoint (its soft state), then the hand-off.
     With `cap`, the checkpoint gets up to CHECKPOINT_CAP characters and the hand-off the rest."""
     cps = [n for n in load_notes() if n.get("kind") == "checkpoint" and checkpoint_owner(n) == "main"]
@@ -302,20 +305,25 @@ def brief(cap=None):
     rest = handoff()
     topics = threads_summary()
     if topics:
-        head += topics + "\n\n"
+        head += (cut_lines(topics, max(500, PAYLOAD_MAX - len(head) - cap)) if cap else topics) + "\n\n"
     if cap:
         room = max(0, cap - len(head) - len(BRIEF_MORE) - 1)
         shown = cut_lines(rest, room)
         more = more or shown != rest
         rest = shown
-    return restart_prefix("main") + head + rest + (("\n" + BRIEF_MORE) if more else "")
+    return restart_prefix("main", peek) + head + rest + (("\n" + BRIEF_MORE) if more else "")
 
 
-def restart_prefix(key):
+def start_payload_size(cap=3000):
+    """Characters of the brief a fresh main session gets at start (what doctor and `thread sessions --context` report)."""
+    return len(brief(cap, peek=True))
+
+
+def restart_prefix(key, peek=False):
     """The one line saying why and when this session was restarted (told to the user in the first reply), or ''."""
     try:
         import service_session
-        line = service_session.restart_line(key)
+        line = service_session.restart_line(key, take=not peek)
     except Exception:  # noqa: BLE001 - the brief works without it
         return ""
     if not line:

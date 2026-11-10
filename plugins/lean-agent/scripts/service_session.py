@@ -421,6 +421,8 @@ CLEAR_PROMPT = "Checkpoint now: run lean-agent checkpoint with your soft state, 
 CLEAR_PENDING = "clear requested: waiting for the turn to end"
 CLEAR_WAIT = 120       # seconds to wait for the checkpoint before clearing anyway
 CLEAR_GAP = 600        # seconds between two clears
+REGROW = 0.3           # after a clear the session must grow by this share of the clear point before the next one
+REGROW_TURNS = 5       # ... and have had this many user turns
 CLEAR_IDLE = 30        # seconds since the user last typed
 CLEAR_HOLD_MAX = 900   # seconds a queued clear keeps thread reports back
 CLEAR_VERIFY = 30      # seconds a typed /clear has to show a new session before the session is replaced instead
@@ -633,7 +635,7 @@ def transcript_state(path, offset=0):
     """What the transcript at `path` (read from byte `offset`, else its last 512 KB) shows now:
     {"ended": the last message is the assistant's final one (no tool running), "ctx": tokens in the last usage
     record, "text": that final message's text, "user_ts": epoch of the last user record, "size": file size}."""
-    state = {"ended": False, "ctx": 0, "text": "", "user_ts": 0.0, "size": 0}
+    state = {"ended": False, "ctx": 0, "text": "", "user_ts": 0.0, "size": 0, "turns": 0}
     try:
         with open(path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
@@ -667,6 +669,7 @@ def transcript_state(path, offset=0):
             body = msg.get("content")
             if not isinstance(body, str) and not any(isinstance(c, dict) and c.get("type") == "text" for c in body or []):
                 continue  # a tool result is not someone typing
+            state["turns"] += 1
             try:
                 import datetime
                 state["user_ts"] = datetime.datetime.fromisoformat(
@@ -775,6 +778,7 @@ class AutoClear:
             clear_replacing(self.key)  # a replaced thread session keeps the hold until its brief is in (brief_new_session)
         self.hold(None)
         self.update(clear_requested=None, clear_pending_since=None, cleared_at=now, clear_hold=None,
+                    post_clear_sid=str(new_sid) if new_sid else None, post_clear_ctx=None,
                     clear_status=f"{self.key} was {ctx // 1000}k, {how} as session {str(new_sid)[:8]} at "
                                  f"{time.strftime('%H:%M', time.localtime(now))}{why}")
         if reason:
@@ -823,11 +827,25 @@ class AutoClear:
             self.replace("replaced, /clear did not take")
         return True
 
+    def regrown(self, st, limit):
+        """False while a session started by a clear has not yet grown by a real amount: its context at the first measure
+        (the hand-off, checkpoint and start hooks) is the baseline, and it needs REGROW of the limit on top of it and
+        REGROW_TURNS turns. Sessions not started by a clear are unaffected."""
+        rec = self.up()
+        if not rec.get("post_clear_sid") or rec.get("post_clear_sid") != str(self.session_id()):
+            return True
+        base = rec.get("post_clear_ctx")
+        if base is None:
+            if st["ctx"]:
+                self.update(post_clear_ctx=st["ctx"])
+            return False
+        return st["ctx"] >= base + REGROW * limit and st["turns"] >= REGROW_TURNS
+
     def safety_net(self, st):
         """A session whose context passed main-fresh-at (default 2x the compaction point) is replaced at this turn end:
         the checkpoint, then a fresh session; reports wait meanwhile. True when it started one."""
         mark = main_fresh_at(compact_at(getattr(self.host, "env", None)) if getattr(self.host, "env", None) else None)
-        if not mark or not st["ended"] or st["ctx"] <= mark:
+        if not mark or not st["ended"] or st["ctx"] <= mark or not self.regrown(st, mark):
             return False
         self.reason = f"context {st['ctx'] // 1000}k passed main-fresh-at {mark // 1000}k"
         now = self.now()
@@ -908,7 +926,7 @@ class AutoClear:
             self.hold(None)
             return
         st = transcript_state(path)
-        if not st["ended"] or st["ctx"] <= limit or self.blocked(st):
+        if not st["ended"] or st["ctx"] <= limit or self.blocked(st) or not self.regrown(st, limit):
             self.hold(None)
             return
         runs = running_runs()
