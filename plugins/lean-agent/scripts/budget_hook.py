@@ -953,6 +953,17 @@ def stop_hook(event):
         print(json.dumps({"decision": "block", "reason": STOP_REASON_VISIBLE if str(text or "").strip() else STOP_REASON}))
 
 
+def orphan_denial(command):
+    """True for a lean-agent run/advise/thread command typed by a thread session whose thread does not exist."""
+    try:
+        import lean_threads
+        if not lean_threads.orphan_reason(os.environ.get("LEAN_AGENT_THREAD") or ""):
+            return False
+    except Exception:
+        return False
+    return bool(re.search(r"(^|[;&|\s])lean-agent\s+(run|advise|thread)\b", command))
+
+
 def main():
     lean_common.hook_mode()
     try:
@@ -989,6 +1000,11 @@ def main():
     checking = event.get("tool_name") == "Bash" and command.startswith(tuple(
         "lean-agent " + c for c in ("limits", "stats", "budget", "runs", "logs", "doctor")))
     in_home = cwd == home or cwd.startswith(home + os.sep)
+    if os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread" and event.get("tool_name") == "Bash" and orphan_denial(command):
+        emit(permissionDecision="deny", permissionDecisionReason=(
+            "lean-agent: you are an orphan session (your thread does not exist). lean-agent run/advise/thread commands are "
+            "not allowed here; say so and stop."))
+        return 0
     if event.get("tool_name") == "AskUserQuestion" and os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread":
         emit(permissionDecision="deny", permissionDecisionReason=(
             "lean-agent: a thread session never asks the user directly. Use `lean-agent thread ask \"<question>\" "

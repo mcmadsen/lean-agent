@@ -1407,6 +1407,11 @@ class BudgetTest(Base):
     def hook_decision(self, command, role, background=True):
         home = self.env["LEAN_AGENT_HOME"]
         os.makedirs(home, exist_ok=True)
+        if not os.path.exists(os.path.join(home, "threads.json")):  # t1 must exist: a session of an unknown thread is an orphan
+            import json
+            with open(os.path.join(home, "threads.json"), "w") as fh:
+                json.dump({"threads": {"t1": {"id": "t1", "title": "work", "created": "2026-11-10T10:00:00", "last_message": None, "kind": "free"}},
+                           "aliases": {}, "overrides": {}}, fh)
         ev = dict(self.ev, cwd=home, tool_name="Bash", tool_input={"command": command, "run_in_background": background})
         out = run_hook("budget_hook.py", ev, LEAN_AGENT_SESSION_ROLE=role, LEAN_AGENT_THREAD="t1", **self.env)
         return (out or {}).get("hookSpecificOutput", {}).get("permissionDecision")

@@ -11033,6 +11033,9 @@ def host_session(cmd, extra, env, h, name):
 
     def thread_host(tid):
         t = lean_threads.load()["threads"].get(tid) or {}
+        why = lean_threads.session_refusal(tid)
+        if why:
+            raise RuntimeError(f"no session for {tid!r}: {why}")
         name = service_session.thread_session_name(tid, t.get("title"))
 
         def build_thread():  # the registry names the session (the hook moves it on a /clear): read it at every spawn
@@ -11052,6 +11055,12 @@ def host_session(cmd, extra, env, h, name):
     host = service_session.Host(build, env, h, remote_control=True, on_text=on_text, on_stale=on_stale,
                                 on_message=sessions.dispatch)
     threading.Thread(target=schedule_timer, daemon=True).start()
+    orphan_stop = threading.Event()
+    try:
+        sessions.sweep()  # sessions of closed, invalid or unknown threads (also from an older version) never come back
+    except Exception as exc:
+        print(f"lean-agent: orphan sweep failed: {exc}", file=sys.stderr)
+    threading.Thread(target=sessions.sweep_loop, args=(orphan_stop,), daemon=True).start()
     # open thread sessions come back with the service, the most recently active first, up to max-thread-sessions
     for tid in lean_threads.session_threads_by_activity()[:service_session.max_thread_sessions()]:
         try:
@@ -11065,6 +11074,7 @@ def host_session(cmd, extra, env, h, name):
 
     def stop_all(*_):
         spool_stop.set()
+        orphan_stop.set()
         sessions.stop_all()
         host.stop()
 
@@ -13088,6 +13098,10 @@ def deliver_one(tid, prompt, resume_old=False, new=False):
     """Deliver one message to thread `tid` (None: only wake it), starting or resuming its session when it is not running.
     May wait for the session; only the service and the capped caller below run it. Returns the one-line result;
     raises RuntimeError when it could not be delivered."""
+    why = lean_threads.orphan_reason(tid)
+    if why:
+        lean_log.log("warn", "sessions", f"refused to deliver to {tid!r}: {why}")
+        raise RuntimeError(f"no session for {tid!r}: {why}")
     tid, t = thread_session_tid(tid)
     if prompt and service_session.is_replacing(tid):  # the session is being replaced: the message waits for the new one
         raise Deferred(f"{tid}: session being replaced")
@@ -13352,6 +13366,10 @@ def fresh_message(tid, prompt=None):
 def start_thread_session(tid, t, prompt=None, msg=None):
     """Ask `up` to host the thread's session (resuming it when its transcript exists). Returns the Remote Control name;
     raises RuntimeError when it did not start."""
+    why = lean_threads.session_refusal(tid)
+    if why:
+        lean_log.log("warn", "sessions", f"refused to start a session for {tid!r}: {why}")
+        raise RuntimeError(f"no session for {tid!r}: {why}")
     if not t.get("session_id"):
         lean_threads.set_session(tid, session_id=str(uuid.uuid4()))
     if msg is None and prompt:
@@ -13399,7 +13417,7 @@ def close_thread_session(tid):
     else:  # the service did not answer: a live host process still gets stopped
         hosted = bool(rec.get("host_pid")) and pid_alive(rec["host_pid"])
     if hosted:
-        if service_session.alive(tid):
+        if service_session.alive(tid) and not lean_threads.orphan_reason(tid):
             ok = service_session.checkpoint_session(tid)
         res = service_session.sessions_request("stop", timeout=STOP_REQUEST_WAIT, thread=tid)
         if not res.get("ok") and rec.get("host_pid") and pid_alive(rec["host_pid"]):

@@ -1227,6 +1227,7 @@ class SpoolDeliverer:
         self.busy = {}
         self.failed = {}
         self.fails = {}
+        self.refused = set()
         self.lock = threading.Lock()
 
     @staticmethod
@@ -1245,6 +1246,12 @@ class SpoolDeliverer:
         except Exception:
             pass
         for tid in spool_threads():
+            why = lean_threads.session_refusal(tid)
+            if why:
+                if tid not in self.refused:
+                    self.refused.add(tid)
+                    lean_log.log("warn", "spool", f"not delivering to {tid!r}: {why}")
+                continue
             spool_reclaim_stale(tid, age=200)
             try:
                 if mid_turn(tid) and alive_thread(tid):
@@ -2183,6 +2190,10 @@ def startup_cleanup(log=None, limit=None, deadline=None):
         if lean_common.read_json(cleanup_marker_path(), {}).get("version") == lean_common.plugin_version():
             return out
         for zid in lean_threads.close_zero_threads():
+            try:
+                sessions_request("stop", timeout=5, thread=zid)
+            except Exception:
+                pass
             out.append(f"{zid!r}: misparsed zero-id thread closed, its text kept as a note on main")
         data = lean_threads.load()
         turns = lean_threads.turns_map()
@@ -3065,13 +3076,27 @@ class Sessions:
         h = self.hosts.get(tid)
         return bool(h and h.thread.is_alive() and not h.stopping.is_set())
 
+    def refuse(self, tid, why):
+        lean_log.log("warn", "sessions", f"refused to start a session for {tid!r}: {why}")
+        try:
+            lean_threads.add_main_note(f"lean-agent: no session started for {tid!r} ({why})")
+        except Exception:
+            pass
+        raise RuntimeError(f"no session for {tid!r}: {why}")
+
     def start(self, tid, prompt=None):
+        why = lean_threads.session_refusal(tid)
+        if why:
+            self.refuse(tid, why)
         with self.lock:
             if self.running(tid):
                 host = self.hosts[tid]
                 fresh = False
             else:
-                host = self.hosts[tid] = self.make_host(tid)
+                host = self.make_host(tid)
+                if not str(getattr(host, "name", "") or "").startswith("lean-agent \u00b7 "):
+                    self.refuse(tid, "no lean-agent session name could be built")
+                self.hosts[tid] = host
                 update_session(tid, host_pid=os.getpid(), host_started=time.time())
                 host.thread = threading.Thread(target=self._run, args=(tid, host), daemon=True)
                 host.thread.start()
@@ -3142,6 +3167,44 @@ class Sessions:
         host.thread.join(timeout=_session_wait("STOP_WAIT", wait, STOP_WAIT))
         update_session(tid, pid=None, host_pid=None)
         return True
+
+    def sweep(self, known=None):
+        """Stop every session this service hosts whose thread is closed, invalid or unknown, including host records an
+        older lean-agent version left in up.json (a live host process that is not this one). Returns the keys stopped."""
+        out = []
+        data = lean_threads.load()
+        for tid in list(self.hosts):
+            if self.running(tid) and lean_threads.session_refusal(tid, data):
+                self.stop(tid)
+                out.append(tid)
+        recs = session_rec("main").get("sessions")
+        for tid, rec in (recs.items() if isinstance(recs, dict) else []):
+            if tid == "main" or tid in out or not isinstance(rec, dict) or not lean_threads.session_refusal(tid, data):
+                continue
+            pid = rec.get("host_pid")
+            if pid and pid != os.getpid() and not self.running(tid):
+                try:
+                    os.kill(int(pid), signal.SIGTERM)
+                except (OSError, ValueError):
+                    pass
+            if pid or rec.get("pid"):
+                out.append(tid)
+            drop_session(tid)
+        for tid in out:
+            try:
+                lean_threads.set_session(tid, session_on=None)
+            except ValueError:
+                pass
+            lean_log.log("warn", "sessions", f"stopped orphan session {tid}")
+        return out
+
+    def sweep_loop(self, stop, interval=300):
+        while not stop.is_set():
+            try:
+                self.sweep()
+            except Exception as exc:
+                lean_log.log("error", "sessions", f"orphan sweep: {exc}")
+            stop.wait(interval)
 
     def stop_all(self, wait=0):
         """Ask every thread session to end; with `wait`, until each has (its socket is removed by then)."""
