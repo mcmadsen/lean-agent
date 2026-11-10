@@ -1861,7 +1861,28 @@ def show_text(tid, all_=False, limit=40, report_chars=None):
 ON_CLOSE = []  # callbacks(list of thread ids), called after threads were closed (set by lean_agent)
 
 
+def _drop_goals(tids):
+    """Closed threads drop their open goals (reason "thread closed"); a reopen does not revive them."""
+    import lean_goals
+    _closed_hooks.goals = {}
+    try:
+        _closed_hooks.goals = lean_goals.drop_for_threads(tids)
+    except Exception:
+        pass
+
+
+def goal_line(tid):
+    n = (getattr(_closed_hooks, "goals", None) or {}).get(lean_goals_tid(tid), 0)
+    return f"{tid} closed: {n} goal{'s' * (n != 1)} dropped" if n else ""
+
+
+def lean_goals_tid(tid):
+    import lean_goals
+    return lean_goals._tid(tid)
+
+
 def _closed_hooks(tids):
+    _drop_goals(tids)
     for fn in ON_CLOSE:
         try:
             fn(list(tids))
@@ -2009,6 +2030,8 @@ def cli(action, args, as_json=False, out=print):
             out(f"{set_closed(args[0], action == 'close')} {'closed' if action == 'close' else 'open again'}")
             if action == "close" and getattr(set_closed, "discarded", 0):
                 out(discard_line(resolve(norm(args[0])), set_closed.discarded))
+            if action == "close" and goal_line(resolve(norm(args[0]))):
+                out(goal_line(resolve(norm(args[0]))))
         elif action == "discard":
             ids = [a for a in args[1:] if not a.startswith("--")]
             if not args or args[0].startswith("--") or (not ids and "--all" not in args):

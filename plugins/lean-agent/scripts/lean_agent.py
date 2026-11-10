@@ -14723,7 +14723,7 @@ def cmd_goals(a):
         return 0
     if lean_goals.paused():
         print("(chases paused" + (f" until {lean_goals._iso(lean_goals.read_pause_until())}" if lean_goals.read_pause_until() else "; `lean-agent goals resume`") + ")")
-    print(lean_goals.table(detail=True) or "No open goals.")
+    print(lean_goals.table(detail=True, show_all=getattr(a, "all", False)) or ("No goals." if getattr(a, "all", False) else "No open goals."))
     return 0
 
 
@@ -16702,6 +16702,7 @@ def build_parser():
     s.add_argument("--why", help="with drop: the reason")
     s.add_argument("--until", help="with pause: how long (2h, 30m, 18:00 or an ISO time)")
     s.add_argument("--chase-log", action="store_true", help="recent chase decisions (skip/chase/drop) with cost")
+    s.add_argument("--all", action="store_true", help="every goal, also done/dropped ones (with their reason) and those of closed threads")
     s.set_defaults(fn=cmd_goals)
 
     s = sub.add_parser("pr", help="PR status per thread: `pr tN` | `pr <PR number>` | `pr list`. The known state (goal, last review, last push) "
