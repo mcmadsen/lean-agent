@@ -508,5 +508,104 @@ class NeverStartedTest(GoalsTest):
         self.assertEqual(len(self.sent), 1)
 
 
+class ClosedThreadGoalsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.env = mock.patch.dict(os.environ, {**clean_environ(), "LEAN_AGENT_HOME": self.tmp}, clear=True)
+        self.env.start()
+        import lean_threads
+        import service_session
+        self.lt, self.ss = lean_threads, service_session
+        self.t1 = lean_threads.new("alpha", "do alpha")
+        self.t2 = lean_threads.new("beta", "do beta")
+
+    def tearDown(self):
+        self.env.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def states(self):
+        return {g["id"]: (g["state"], g.get("next")) for g in lean_goals._load()}
+
+    def test_close_drops_goals_with_reason_and_reopen_does_not_revive(self):
+        a = lean_goals.ensure("PR 9101", self.t1)
+        lean_goals.ensure("work item 9102", self.t1)
+        b = lean_goals.ensure("PR 9103", self.t2)
+        self.lt.set_closed(self.t1, True)
+        self.assertEqual(self.lt.goal_line(self.t1), f"{self.t1} closed: 2 goals dropped")
+        self.assertEqual(self.states()[a], ("dropped", "thread closed"))
+        self.assertEqual(self.states()[b][0], "active")
+        self.lt.set_closed(self.t1, False)
+        self.assertEqual(self.states()[a][0], "dropped")
+
+    def test_goals_default_hides_closed_thread_goals_all_shows(self):
+        a = lean_goals.ensure("PR 9101", self.t1)
+        lean_goals.ensure("PR 9103", self.t2)
+        self.lt.set_closed(self.t1, True)
+        self.assertNotIn("9101", lean_goals.table())
+        self.assertIn("9103", lean_goals.table())
+        full = lean_goals.table(show_all=True)
+        self.assertIn("9101", full)
+        self.assertIn("thread closed", full)
+        self.assertIn(a, full)
+        # even an open goal left on a closed thread is hidden by default
+        lean_goals._set(a, state="active")
+        self.assertNotIn("9101", lean_goals.table())
+
+    def test_parked_thread_keeps_goals(self):
+        a = lean_goals.ensure("PR 9101", self.t1)
+        with self.lt._locked() as data:
+            data["threads"][self.t1]["parked_by"] = "user-stop"
+        self.assertEqual(self.states()[a][0], "active")
+        self.assertIn("9101", lean_goals.table())
+
+    def test_cleanup_drops_closed_and_misparsed_keeps_user_goals_one_write(self):
+        closed = lean_goals.ensure("PR 9101", self.t1)
+        bad = lean_goals.ensure("work item 4711", self.t2)
+        good = lean_goals.ensure("work item 4712", self.t2)
+        user = lean_goals.add("work item 4713", self.t2)
+        with self.lt._locked() as data:
+            data["threads"][self.t1]["closed"] = self.lt.now_iso()
+            data["threads"][self.t2]["requests"] = [{"id": "r1", "text": "line 4711 failed, see AB#4712", "ts": self.lt.now_iso()}]
+        writes = []
+        orig = os.replace
+        with mock.patch("os.replace", side_effect=lambda x, y: (writes.append(y), orig(x, y))[1]):
+            lines = self.ss.startup_cleanup()
+        self.assertEqual(sum(1 for w in writes if w == lean_goals.path()), 1)
+        st = self.states()
+        self.assertEqual(st[closed], ("dropped", "thread closed"))
+        self.assertEqual(st[bad], ("dropped", "misparsed ref"))
+        self.assertEqual(st[good][0], "active")
+        self.assertEqual(st[user][0], "active")
+        self.assertTrue(any("misparsed" in l for l in lines))
+
+
+class ExtractionTest(unittest.TestCase):
+    def refs(self, text):
+        return lean_goals.refs_in(text)
+
+    def test_explicit_forms(self):
+        self.assertEqual(self.refs("fix #4821 now"), [("hash", "4821")])
+        self.assertEqual(self.refs("AB#4822"), [("item", "4822")])
+        for w in ("work item", "workitem", "WI", "bug", "task", "story"):
+            self.assertEqual(self.refs(f"see {w} 4823"), [("item", "4823")], w)
+        self.assertEqual(self.refs("https://dev.azure.com/org/proj/_workitems/edit/4824"), [("item", "4824")])
+        self.assertEqual(self.refs("https://org.visualstudio.com/proj/_workitems/edit/4825"), [("item", "4825")])
+        self.assertEqual(self.refs("https://github.com/o/r/pull/77"), [("pr", "77")])
+        self.assertEqual(self.refs("https://github.com/o/r/issues/78"), [("issue", "78")])
+
+    def test_rejected(self):
+        for text in ("line 4821 of the log", "took 4821 ms", "error id 48213 in log", "version 1.2.3 and 4.8.21", "see foo.py:4821:12",
+                     "count is 4821", "on 2026-11-04 at 10:42", "commit 4821abc", "`work item 4821`", "```\nbug 4821\n```",
+                     "  File \"x.py\", line 4821, in run", "bug 4821.5", "a 4821 kb file", "bug 4821 times"):
+            self.assertEqual(self.refs(text), [], text)
+
+    def test_pr_wording_is_a_pr_ref_and_dedupe(self):
+        self.assertEqual(self.refs("PR 4821"), [("pr", "4821")])
+        self.assertEqual(self.refs("pull request #4821"), [("pr", "4821")])
+        self.assertEqual(self.refs("PR #4821 and #4821, bug 4830 / bug 4830"), [("pr", "4821"), ("item", "4830")])
+        self.assertEqual(lean_goals.ref_in("pull request 4821"), "PR 4821")
+        self.assertEqual(lean_goals.ref_in("nothing 4821"), "")
+
+
 if __name__ == "__main__":
     unittest.main()

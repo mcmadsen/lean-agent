@@ -76,12 +76,124 @@ def key_of(ref):
     return "t" + " ".join(str(ref or "").lower().split())
 
 
+_UNIT = r"(?!\s*(?:[kmgt]i?b|ms|sec|secs|seconds?|minutes?|mins?|hours?|%|px|times|lines?|rows?|files?|errors?|x)\b)"
+_NUM = r"(\d{1,9})(?!\d|[.:,/-]\d)" + _UNIT
+_PRS = (re.compile(r"\b(?:PR|pull\s*requests?|pull|merge\s*requests?|MR)s?[\s#:/_-]{0,2}" + _NUM, re.I),
+        re.compile(r"(?<![\w])!" + _NUM))
+_HASH = re.compile(r"(?<![\w&/])#(\d{3,9})(?!\d|[.:,/-]\d)")  # #1234: a PR or a work item, one key
+_ITEMS = (re.compile(r"\b[A-Za-z]{1,10}#" + _NUM),
+          re.compile(r"\b(?:work\s*items?|workitem|bug|task|story|(?-i:WI))\s{0,2}#?\s{0,1}" + _NUM, re.I))
+_URLS = (("item", re.compile(r"https?://(?:dev\.azure\.com|[\w.-]+\.visualstudio\.com)/[^\s)>\]]*?/edit/(\d{1,9})", re.I)),
+         ("pr", re.compile(r"https?://github\.com/[^\s/]+/[^\s/]+/pull/(\d{1,9})", re.I)),
+         ("issue", re.compile(r"https?://github\.com/[^\s/]+/[^\s/]+/issues/(\d{1,9})", re.I)))
+_TRACE = re.compile(r"^\s*(?:Traceback\b|File \"|at\s+\S+.*\(?[^\s()]+:\d+(?::\d+)?\)?\s*$|\S+\.\w+:\d+(?::\d+)?\b.*$|\s*\^+\s*$)")
+
+
+def _prune(text):
+    """The prose of a text: no fenced or inline code, no stack-trace or file:line lines."""
+    t = re.sub(r"```.*?(?:```|\Z)", " ", str(text or ""), flags=re.S)
+    t = re.sub(r"`[^`\n]*`", " ", t)
+    return "\n".join(ln for ln in t.splitlines() if not _TRACE.match(ln))
+
+
+def refs_in(text):
+    """[(kind, number)] the explicit references of a text, deduped: kind pr, hash (#1234), item (AB#1, work item/WI/bug/task/story N,
+    a tracker URL) or issue (github). Bare numbers, code, traces, versions, line numbers and sizes never count."""
+    t = _prune(text)
+    out = []
+
+    def add(kind, n):
+        if (kind, n) not in out and not (kind == "item" and ("pr", n) in out):
+            out.append((kind, n))
+    for kind, rx in _URLS:
+        for m in rx.finditer(t):
+            add(kind, m.group(1))
+    t = re.sub(r"https?://\S+", " ", t)
+    for rx in _PRS:
+        for m in rx.finditer(t):
+            add("pr", m.group(1))
+    prs = {n for k, n in out if k == "pr"}
+    for rx in _ITEMS:
+        for m in rx.finditer(t):
+            if m.group(1) not in prs:
+                add("item", m.group(1))
+    for m in _HASH.finditer(t):
+        if m.group(1) not in prs and ("item", m.group(1)) not in out:
+            add("hash", m.group(1))
+    return out
+
+
+def ref_label(kind, n):
+    return {"hash": f"#{n}", "pr": f"PR {n}", "item": f"work item {n}", "issue": f"issue {n}"}[kind]
+
+
 def ref_in(text, branches=False):
-    """The first deliverable a text names (PR, work item, #number; a branch when asked), as a label, or ''."""
-    for kind, v in lean_find.prompt_references(text):
-        if kind in ("pr", "item", "hash") or (branches and kind == "branch"):
-            return lean_find.reference_label(kind, v)
+    """The first deliverable a text names (PR, work item, issue; a branch when asked), as a label, or ''."""
+    refs = refs_in(text)
+    for want in ("pr", "item", "hash", "issue"):
+        for kind, n in refs:
+            if kind == want:
+                return ref_label(kind, n)
+    if branches:
+        for kind, v in lean_find.prompt_references(_prune(text)):
+            if kind == "branch":
+                return lean_find.reference_label(kind, v)
     return ""
+
+
+def _tid(tag):
+    t = str(tag or "").strip().lstrip("#").lower()
+    return "t" + t if t.isdigit() else t
+
+
+def drop_for_threads(tids, why="thread closed"):
+    """Closed threads: their open goals are dropped (one write). Returns {thread: dropped count}."""
+    want = {_tid(t) for t in tids}
+    out = {}
+    with lean_common.file_lock(path()):
+        items = _load()
+        for g in items:
+            k = _tid(g.get("thread"))
+            if g.get("state") in OPEN and k in want:
+                g["state"], g["next"] = "dropped", why
+                out[k] = out.get(k, 0) + 1
+        if out:
+            _save(items)
+    return out
+
+
+def misparsed(g, texts):
+    """An open auto-created work-item goal whose number no explicit reference in its thread's text names."""
+    m = re.fullmatch(r"work item (\d+)", str(g.get("ref") or ""))
+    if not m or g.get("state") not in OPEN or g.get("origin") == "user" or not g.get("thread"):
+        return False
+    return ("item", m.group(1)) not in refs_in("\n".join(texts))
+
+
+def cleanup(closed_tids, texts_of):
+    """One-time: drop open goals of closed threads, and misparsed auto work-item goals (texts_of(tid) -> list of strings).
+    One read, one write. Returns the log lines."""
+    out = []
+    closed = {_tid(t) for t in closed_tids}
+    with lean_common.file_lock(path()):
+        items = _load()
+        n_closed = n_bad = 0
+        for g in items:
+            if g.get("state") not in OPEN:
+                continue
+            if _tid(g.get("thread")) in closed:
+                g["state"], g["next"] = "dropped", "thread closed"
+                n_closed += 1
+            elif misparsed(g, texts_of(g.get("thread"))):
+                g["state"], g["next"] = "dropped", "misparsed ref"
+                n_bad += 1
+        if n_closed or n_bad:
+            _save(items)
+    if n_closed:
+        out.append(f"goals: {n_closed} open goal(s) of closed threads dropped")
+    if n_bad:
+        out.append(f"goals: {n_bad} misparsed work-item goal(s) dropped")
+    return out
 
 
 # -- the store
@@ -94,7 +206,7 @@ def _new_id(items):
     return "g%d" % (max([int(str(g.get("id", "g0"))[1:] or 0) for g in items if re.fullmatch(r"g\d+", str(g.get("id", "")))] + [0]) + 1)
 
 
-def ensure(ref, thread, target=DEFAULT_TARGET, nxt=""):
+def ensure(ref, thread, target=DEFAULT_TARGET, nxt="", origin="auto"):
     """The open goal for `ref` (created when none), owned by `thread`; its activity is now. Returns its id ('' without a ref)."""
     ref = " ".join(str(ref or "").split())[:120]
     if not ref:
@@ -105,7 +217,7 @@ def ensure(ref, thread, target=DEFAULT_TARGET, nxt=""):
         g = _find(items, ref)
         if g is None:
             g = {"id": _new_id(items), "ref": ref, "thread": thread or "", "target": target, "state": "active", "next": nxt,
-                 "last_activity": now, "chased_at": "", "chase_count": 0, "created": now}
+                 "last_activity": now, "chased_at": "", "chase_count": 0, "created": now, "origin": origin}
             items.append(g)
         else:
             if thread and g.get("thread") != thread:
@@ -150,7 +262,7 @@ def _set(gid, **fields):
 
 
 def add(ref, thread="", target=DEFAULT_TARGET):
-    return ensure(ref, thread, target)
+    return ensure(ref, thread, target, origin="user")
 
 
 def done(gid):
@@ -260,8 +372,21 @@ def last_text(g, now=None):
     return ", ".join(parts)
 
 
-def table(now=None, detail=False):
-    goals = open_goals()
+def _closed_threads():
+    try:
+        import lean_threads
+        return {_tid(k) for k, t in lean_threads.load()["threads"].items() if t.get("closed")}
+    except Exception:
+        return set()
+
+
+def table(now=None, detail=False, show_all=False):
+    """Open goals of open threads; show_all lists every goal (done/dropped with their reason)."""
+    if show_all:
+        goals = _load()
+    else:
+        closed = _closed_threads()
+        goals = [g for g in open_goals() if _tid(g.get("thread")) not in closed]
     if not goals:
         return ""
     rows = [("Goal", "Ref", "Thread", "State", "Quiet", "Next")] + [

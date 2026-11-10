@@ -2197,6 +2197,16 @@ def startup_cleanup(log=None, limit=None, deadline=None):
             out.append("startup cleanup timed out before applying anything; will retry next start")
         else:
             discarded = lean_threads.discard_spool_many(closed, handled)  # one threads write for both
+            try:  # open goals of closed threads, and misparsed auto work-item goals: one goals write
+                import lean_goals
+
+                def texts_of(tid):
+                    t = data["threads"].get(lean_goals._tid(tid)) or data["threads"].get(tid) or {}
+                    return [str(t.get("title") or "")] + [str(r.get("text") or "") for r in t.get("requests") or [] if isinstance(r, dict)] \
+                        + [str(v) for v in (t.get("report") if isinstance(t.get("report"), dict) else {}).values() if isinstance(v, str)]
+                out.extend(lean_goals.cleanup([k for k, t in data["threads"].items() if t.get("closed") and k not in data["aliases"]], texts_of))
+            except Exception as exc:  # noqa: BLE001
+                out.append(f"startup cleanup: goals skipped ({exc})")
             for tid, mid, _text in discarded:
                 out.append(f"{tid}: closed thread, discarded queued message {mid}")
             for tid, ids in handled.items():
