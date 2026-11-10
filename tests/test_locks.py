@@ -152,7 +152,8 @@ class StartLockTest(unittest.TestCase):
         with mock.patch.object(service_session, "sessions_request", slow_request), \
                 mock.patch.object(service_session, "alive", lambda *a, **k: False), \
                 mock.patch.object(lean_agent, "START_GRACE", 0), \
-                mock.patch.object(lean_threads_mod(), "set_session", lambda *a, **k: None):
+                mock.patch.object(lean_threads_mod(), "set_session", lambda *a, **k: None), \
+                mock.patch.object(lean_threads_mod(), "session_refusal", lambda *a, **k: ""):  # t1 is not in a registry here
             with self.assertRaises(RuntimeError):
                 lean_agent.start_thread_session("t1", {"session_id": "s"}, None, "m")
         self.assertEqual(calls[0], ("start", lean_agent.START_REQUEST_WAIT))
