@@ -1395,6 +1395,79 @@ def mark_relayed(items):
         lean_common.write_json_atomic(relayed_path(), data)
 
 
+def states_path():
+    return lean_home("report-states.json")
+
+
+STATES_KEPT = 40  # per thread
+
+
+def report_state(tid, rid, kind=None, text=None, state=None, how="", why="", block=""):
+    """Per-report delivery state of thread `tid`'s report `rid`: queued | delivered (time, how) | dropped (why).
+    Creates the record when `kind` is given."""
+    os.makedirs(lean_home(), exist_ok=True)
+    with lean_common.file_lock(states_path()):
+        data = _load(states_path())
+        recs = data.get(tid) if isinstance(data.get(tid), list) else []
+        rec = next((r for r in recs if r.get("id") == rid), None)
+        if rec is None:
+            rec = {"id": rid, "kind": kind or "", "text": text or "", "queued": time.time(), "state": "queued"}
+            recs.append(rec)
+        if state:
+            rec.update(state=state, how=how, why=why, **({"at": time.time()} if state != "queued" else {}))
+        if block:
+            rec["block"] = block
+        data[tid] = recs[-STATES_KEPT:]
+        lean_common.write_json_atomic(states_path(), data)
+
+
+def report_states(tid=None):
+    """[(tid, record)] oldest first, for one thread or all."""
+    data = _load(states_path())
+    out = [(t, r) for t, recs in data.items() if isinstance(recs, list) and (tid is None or t == tid) for r in recs if isinstance(r, dict)]
+    return sorted(out, key=lambda x: x[1].get("queued") or 0)
+
+
+def set_block_how(block, how):
+    """The staged block `block` was taken by the prompt hook: its reports were delivered as hidden context."""
+    with lean_common.file_lock(states_path()):
+        data = _load(states_path())
+        for recs in data.values():
+            for r in recs if isinstance(recs, list) else []:
+                if r.get("block") == block and r.get("state") == "delivered":
+                    r["how"] = "hook context"
+        lean_common.write_json_atomic(states_path(), data)
+
+
+def counter_path():
+    return lean_home("report-counter.json")
+
+
+def next_report_id(floor=0):
+    """A report id above every earlier one; the counter is on disk so a restart or reset never takes it back."""
+    with lean_common.file_lock(counter_path()):
+        n = max(int(_load(counter_path()).get("n") or 0), int(floor), int(time.time() * 1000)) + 1
+        lean_common.write_json_atomic(counter_path(), {"n": n})
+    return n
+
+
+def ensure_question_items():
+    """Every open thread question has an open waiting item (created when queueing missed it)."""
+    import lean_threads
+    have = {(w.get("thread"), w.get("qid")) for w in lean_waiting.open_items()}
+    data = lean_threads.load()
+    for tid, t in data["threads"].items():
+        if tid in data["aliases"]:
+            continue
+        for q in lean_threads.open_questions(t):
+            if q.get("kind") == "permission" or (tid, q.get("id")) in have:
+                continue
+            try:
+                lean_waiting.add(q["text"], "question", None, tid, qid=q["id"])
+            except Exception:
+                pass
+
+
 def queue_report(tid, kind, text, tag="", force=False, waiting=True):
     """Queue one thread report (kind: done | blocked | needs-you | question) for the main session; the mode filters it,
     except an explicit question (`thread ask`) or an explicit report (`thread report`, force), which always go through.
@@ -1415,15 +1488,22 @@ def queue_report(tid, kind, text, tag="", force=False, waiting=True):
             lean_goals.acknowledge(tid, text)  # superseded/ignored/abandoned/merged: remembered, never chased again
         except Exception:
             pass
+    queued_ok = False
     with lean_common.file_lock(reports_path()):
         data = _load(reports_path())
         items = data.get("items") if isinstance(data.get("items"), list) else []
         key = report_key(tid, kind, text)
-        if any(report_key(i.get("thread"), i.get("kind"), i.get("text")) == key for i in items) or key in relayed_keys(tid):
-            return False  # the same report arriving by a second path (reporter, fallback, wake-up, redelivery): once
-        seq = max([report_seq(i) for i in items] + [relayed_seq(tid), int(time.time() * 1000) - 1]) + 1
-        items.append(dict({"thread": tid, "kind": kind, "text": text, "ts": time.time(), "id": seq}, **({"tag": tag} if tag else {})))
-        lean_common.write_json_atomic(reports_path(), {"items": items[-50:]})
+        # only an exact copy of a report already DELIVERED is dropped; one that is merely queued is kept
+        if key not in relayed_keys(tid):
+            seq = next_report_id(max([report_seq(i) for i in items] + [relayed_seq(tid)]))
+            items.append(dict({"thread": tid, "kind": kind, "text": text, "ts": time.time(), "id": seq}, **({"tag": tag} if tag else {})))
+            lean_common.write_json_atomic(reports_path(), {"items": items[-50:]})
+            queued_ok = True
+    if queued_ok:
+        try:
+            report_state(tid, seq, kind, text)
+        except Exception:
+            pass
     if waiting and kind in ("question", "needs-you"):
         try:  # waiting on the user is recorded by lean-agent, not left to the front desk's memory
             m = re.match(r"QUESTION (q\d+): (.*?)(?: \[options: (.*)\])?$", str(text))
@@ -1432,6 +1512,8 @@ def queue_report(tid, kind, text, tag="", force=False, waiting=True):
                             qid=m.group(1) if m else "")
         except Exception:
             pass
+    if not queued_ok:
+        return False
     if kind != RUN_AUTO_KIND:
         with lean_common.file_lock(reported_path()):
             seen = _load(reported_path())
@@ -1447,6 +1529,10 @@ def repush_questions(now=None, after=None):
     now = time.time() if now is None else now
     after = REPUSH_AFTER if after is None else after
     done = []
+    try:
+        ensure_question_items()
+    except Exception:
+        pass
     for w in lean_waiting.open_items():
         tid, qid = w.get("thread"), w.get("qid")
         if w.get("kind") != "question" or not tid or not qid or w.get("asked_at") or w.get("repushed"):
@@ -1668,15 +1754,31 @@ def take_reports(now=None):
     with lean_common.file_lock(reports_path()):
         items = queued_reports()
         aged = [i for i in items if now - (i.get("ts") or now) <= REPORT_MAX_AGE]
-        fresh, seen = [], set()
+        fresh, seen = [], {}
         for i in aged:
             t = i.get("thread")
             k = report_key(t, i.get("kind"), i.get("text"))
-            if k in seen or k in relayed_keys(t) or (report_seq(i) <= relayed_seq(t) and i.get("kind") != "chase") \
-                    or (i.get("kind") in ("done", "blocked") and _internal_run_text(i.get("text"))):
+            why = ""
+            if k in relayed_keys(t):
+                why = "already delivered earlier"
+            elif k in seen:
+                why = f"same text as r{seen[k]}, delivered in the same message"
+            elif i.get("kind") in ("done", "blocked") and _internal_run_text(i.get("text")):
+                why = "helper run"
+            if why:
+                try:
+                    report_state(t, report_seq(i), state="dropped", why=why)
+                except Exception:
+                    pass
                 continue
-            seen.add(k)
+            seen[k] = report_seq(i)
             fresh.append(i)
+        for i in items:
+            if i not in aged:
+                try:
+                    report_state(i.get("thread"), report_seq(i), state="dropped", why=f"older than {REPORT_MAX_AGE // 3600} h")
+                except Exception:
+                    pass
         if len(fresh) != len(items):
             lean_common.write_json_atomic(reports_path(), {"items": fresh})
     return fresh, len(items) - len(aged)
@@ -1820,6 +1922,10 @@ def take_pending(line, with_full=False):
             os.remove(pending_path())
         except OSError:
             return None
+    try:
+        set_block_how(data.get("id"), "hook context")
+    except Exception:
+        pass
     return (data["block"], data.get("full") or data["block"]) if with_full else data["block"]
 
 
@@ -2245,6 +2351,11 @@ class Reporter(AutoClear):
         for tid, t in data["threads"].items():
             if t.get("closed") and not t.get("parked"):
                 continue
+            for r in t.get("requests") or []:  # a request the thread already replied to is handled, never redelivered
+                if isinstance(r, dict) and r.get("undelivered") and not r.get("handled_ts") \
+                        and lean_threads.answered_after(t, [], lean_threads._epoch(r.get("ts"))):
+                    lean_threads.mark_handled(tid, r.get("id"))
+                    t = lean_threads.load()["threads"].get(tid) or t
             un = lean_threads.unstarted_request(t, [], now, _knob("LEAN_AGENT_UNSTARTED_AFTER", UNSTARTED_AFTER))
             if not un or not un["undelivered"] or not un["id"] or not un["text"] or spool_pending(tid):
                 continue
@@ -2354,6 +2465,11 @@ class Reporter(AutoClear):
                 return
             mark_relayed(items)
             drop_reports(items)
+            for i in items:
+                try:
+                    report_state(i.get("thread"), report_seq(i), state="delivered", how="typed", block=rid)
+                except Exception:
+                    pass
             self.log(f"{len(items)} thread report(s) typed into the main session" + (f" ({dropped} stale dropped)" if dropped else ""))
         elif dropped:
             self.log(f"{dropped} stale thread report(s) dropped")
