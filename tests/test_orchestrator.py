@@ -6181,9 +6181,9 @@ class CliTest(unittest.TestCase):
         self.threads_home()
         import service_session as ss
         self.assertTrue(ss.queue_report("t5", "done", "Fixed the parser. Tests pass.", tag="explicit", force=True))
-        self.assertFalse(ss.queue_report("t5", "done", "Fixed the parser.  Tests pass.", tag="auto"))  # second path, same content
+        self.assertTrue(ss.queue_report("t5", "done", "Fixed the parser.  Tests pass.", tag="auto"))  # queued copy is kept, not dropped
         items, _ = ss.take_reports()
-        self.assertEqual(len(items), 1)
+        self.assertEqual(len(items), 1)  # but delivered once
         self.assertEqual(ss.take_reports()[0], items)  # taking does not mark it relayed
         ss.mark_relayed(items)
         ss.drop_reports(items)
@@ -6191,8 +6191,8 @@ class CliTest(unittest.TestCase):
         ss.queue_report("t5", "done", "Fixed the parser. Tests pass.", force=True)
         old = dict(items[0], id=ss.report_seq(items[0]) - 5, text="Older result.")
         ss.lean_common.write_json_atomic(ss.reports_path(), {"items": [old]})
-        self.assertEqual(ss.take_reports()[0], [])  # older than the last relayed id of the thread
-        self.assertEqual(ss.queued_reports(), [])
+        self.assertEqual([i["text"] for i in ss.take_reports()[0]], ["Older result."])  # the id never drops a report
+        ss.drop_reports(ss.take_reports()[0])
         self.assertTrue(ss.queue_report("t5", "done", "A new result.", force=True))
         self.assertEqual([i["text"] for i in ss.take_reports()[0]], ["A new result."])
 

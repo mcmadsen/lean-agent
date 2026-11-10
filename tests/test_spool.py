@@ -231,6 +231,71 @@ class QuestionPushTest(unittest.TestCase):
         self.assertEqual(ss.repush_questions(time.time() + 500), [])
 
 
+class QuestionDeliveryTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.env = mock.patch.dict(os.environ, {**clean_environ(), "LEAN_AGENT_HOME": self.tmp}, clear=True)
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.tid = lean_threads.new("work")
+
+    def test_question_while_main_busy_has_waiting_item_push_and_is_delivered_once(self):
+        import lean_waiting
+        for text in ("Pick a or b?", "Pick a or b?"):  # the same question twice: merged, still one waiting item
+            lean_agent.ask_main(self.tid, text)
+        self.assertEqual([(w["thread"], w["qid"]) for w in lean_waiting.open_items()], [(self.tid, "q1")])
+        items, _ = ss.take_reports()
+        self.assertEqual(len(items), 1)
+        self.assertIn("NEEDS THE USER", ss.reports_message(items))
+        ss.mark_relayed(items)
+        ss.drop_reports(items)
+        lean_agent.ask_main(self.tid, "Pick a or b?")  # merged again after delivery: not delivered a second time
+        self.assertEqual(ss.take_reports()[0], [])
+
+    def test_missing_waiting_item_is_recreated(self):
+        import lean_waiting
+        lean_threads.ask(self.tid, "Orphan question?")
+        self.assertEqual(lean_waiting.open_items(), [])
+        ss.ensure_question_items()
+        self.assertEqual([w["qid"] for w in lean_waiting.open_items()], ["q1"])
+        self.assertTrue(any(k.startswith("question:") for k, _ in ss.attention_items(time.time() + 400)))
+
+    def test_ids_monotonic_across_restart_and_duplicate_of_queued_not_dropped(self):
+        ss.queue_report(self.tid, "done", "Same text.", force=True)
+        first = ss.queued_reports()[0]["id"]
+        os.remove(ss.reports_path())  # restart: the queue is gone, the counter stays
+        ss.queue_report(self.tid, "done", "Other.", force=True)
+        self.assertGreater(ss.queued_reports()[0]["id"], first)
+        ss.queue_report(self.tid, "done", "Other.", force=True)
+        self.assertEqual(len(ss.queued_reports()), 2)
+        items, _ = ss.take_reports()
+        self.assertEqual(len(items), 1)
+        ss.mark_relayed(items)
+        ss.report_state(self.tid, ss.report_seq(items[0]), state="delivered", how="typed")
+        states = {r["id"]: r for _, r in ss.report_states(self.tid)}
+        self.assertEqual(states[ss.report_seq(items[0])]["state"], "delivered")
+        self.assertTrue(any(r["state"] == "dropped" and r["why"] for r in states.values()))
+
+    def test_reports_all_shows_state_and_text(self):
+        ss.queue_report(self.tid, "done", "Result text here.", force=True)
+        a = argparse.Namespace(action="reports", args=[self.tid], all=True, mine=False, json=False)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            lean_agent.cmd_thread(a)
+        self.assertIn("QUEUED", out.getvalue())
+        self.assertIn("Result text here.", out.getvalue())
+
+    def test_answered_informational_request_is_never_redelivered(self):
+        with lean_threads._locked() as data:
+            data["threads"][self.tid]["requests"] = [{"id": "r1", "ts": lean_threads.now_iso(), "text": "FYI only", "undelivered": True}]
+        ss.queue_report(self.tid, "done", "No action needed.", force=True)
+        ss.note_turn(self.tid, True, "done")
+        t = lean_threads.load()["threads"][self.tid]
+        self.assertIsNone(lean_threads.unstarted_request(t, [], time.time() + 3600, 60))
+        self.assertEqual(lean_threads.mark_handled(self.tid, "r1"), ["r1"])
+        self.assertFalse([k for k, _ in ss.attention_items(time.time() + 3600) if k.startswith("unstarted")])
+
+
 class FirstDeliveryTest(unittest.TestCase):
     """The first message of a thread is confirmed or retried: never lost, never delivered twice, never reported as started early."""
 

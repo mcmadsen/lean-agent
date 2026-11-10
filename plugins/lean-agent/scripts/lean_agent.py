@@ -13476,6 +13476,10 @@ def ask_main(tid, text, options=None):
             lean_waiting.add(text, "question", None, tid, qid=qid)
         except Exception:
             pass
+        qtext = f"QUESTION {qid}: {text}"
+        if not any(r.get("kind") == "question" and str(r.get("text")).startswith(f"QUESTION {qid}:") and r.get("state") != "dropped"
+                   for _, r in service_session.report_states(tid)):
+            service_session.queue_report(tid, "question", qtext, tag="merged", waiting=False)  # the first push was lost: push it again
         return qid, True
     opts = [o.strip() for o in str(options or "").split("|") if o.strip()]
     service_session.queue_report(tid, "question", f"QUESTION {qid}: {text}" + (f" [options: {' | '.join(opts)}]" if opts else ""))
@@ -13970,8 +13974,26 @@ def thread_action(a):
             print("no thread sessions running (start one with `lean-agent thread new \"title\"`)")
         return 0
     if act == "reports":
-        blocks = service_session.logged_blocks()
         want = [x for x in a.args if re.fullmatch(r"t\d+", x)]
+        if getattr(a, "mine", False):
+            mine = caller_thread()
+            if not mine:
+                die("thread reports --mine works only inside a thread session")
+            want = [mine]
+        if getattr(a, "all", False) or getattr(a, "mine", False):
+            tids = [lean_threads.resolve(w, lean_threads.load()["aliases"]) for w in want] or [None]
+            n = 0
+            for tid in tids:
+                for t, r in service_session.report_states(tid):
+                    n += 1
+                    st = r.get("state") or "queued"
+                    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r.get("at") or r.get("queued") or 0))
+                    extra = f" ({when}, {r.get('how')})" if st == "delivered" else f" ({when}: {r.get('why')})" if st == "dropped" else ""
+                    print(f"{t} r{r.get('id')} {r.get('kind')}: {st.upper()}{extra}\n  {r.get('text')}")
+            if not n:
+                print("no reports recorded")
+            return 0
+        blocks = service_session.logged_blocks()
         rid = next((x[1:] for x in a.args if re.fullmatch(r"r[0-9a-f]{6}", x)), "")
         if rid:
             blocks = [b for b in blocks if b.get("id") == rid]
@@ -14023,7 +14045,8 @@ def thread_action(a):
             pass
         service_session.queue_report(tid, "done", service_session._short(text, tid=tid), tag="explicit", force=True)
         service_session.note_turn(tid, True, "done")
-        print(f"report for {tid} queued for the front desk. End your turn.")
+        print(f"report for {tid} queued, NOT yet delivered to the front desk. End your turn. Say it was sent only after "
+              f"`lean-agent thread reports {tid} --mine` shows it as delivered.")
         return 0
     if act == "answer":
         args = list(a.args)
@@ -14233,6 +14256,10 @@ def cmd_waiting(a):
         print(f"{args[0]} done")
     else:
         lean_own.sweep()
+        try:
+            service_session.ensure_question_items()
+        except Exception:
+            pass
         print(lean_waiting.text() or "Nothing is waiting on the user.")
     return 0
 
@@ -16402,6 +16429,7 @@ def build_parser():
     s.add_argument("--open", action="store_true", help="list: hide closed threads")
     s.add_argument("--context", action="store_true", help="sessions: just the context table (Session | Title | Context | %% of compact | Idle | State), largest first")
     s.add_argument("--all", action="store_true", help="show: every entry and the whole last report (same as --full); close: every open session")
+    s.add_argument("--mine", action="store_true", help="reports: the calling thread's own reports with their delivery state (queued / delivered / dropped)")
     s.add_argument("--tail", type=int, metavar="N", help="show: the latest N entries (default 5)")
     s.add_argument("--force", action="store_true", help="close: close even with a live run or mid-turn (runs keep going detached)")
     s.add_argument("--idle", help="close: every session idle at least this long (e.g. 2h, 90m) without a running run")

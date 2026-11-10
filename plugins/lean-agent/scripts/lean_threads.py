@@ -186,11 +186,39 @@ def unstarted_request(t, evs, now, min_secs=0):
     if pick is None:
         return None
     since = _epoch(pick.get("ts"))
+    if pick.get("handled_ts") or answered_after(t, evs, since, rep_ts):
+        return None  # the thread already produced a turn after it (any reply, "no action needed" included)
     if not pick.get("undelivered") and (rep_ts >= since or any(e[2] != "request" and e[0] >= since for e in evs or [])):
         return None
     if now - since < min_secs:
         return None
     return {"id": pick.get("id"), "text": pick.get("text") or "", "since": since, "undelivered": bool(pick.get("undelivered"))}
+
+
+def answered_after(t, evs, since, rep_ts=None):
+    """True when the thread replied after a request made at `since` (epoch): its report, or a turn end recorded by the
+    service that produced a report."""
+    if rep_ts is None:
+        rep = t.get("report") if isinstance(t.get("report"), dict) else {}
+        rep_ts = _epoch(rep.get("ts")) if rep.get("text") else 0
+    if rep_ts and rep_ts >= since:
+        return True
+    tid = t.get("id")
+    rec = (lean_common.read_json(lean_home("thread-turns.json"), {}) or {}).get(tid) if tid else None
+    return bool(rec and rec.get("reported") and float(rec.get("ts") or 0) >= since)
+
+
+def mark_handled(tid, rid=None):
+    """Record that the thread handled its request `rid` (default: every request it answered): never redelivered."""
+    changed = []
+    with _locked() as data:
+        t = data["threads"].get(tid) or {}
+        for r in t.get("requests") or []:
+            if isinstance(r, dict) and not r.get("handled_ts") and (rid is None or r.get("id") == rid):
+                r["handled_ts"] = now_iso()
+                r.pop("undelivered", None)
+                changed.append(r.get("id"))
+    return changed
 
 
 def request_seen(tid, text, since=0):
