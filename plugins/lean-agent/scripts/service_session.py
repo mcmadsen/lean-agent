@@ -1586,6 +1586,12 @@ def attention_items(now, after=NUDGE_AFTER, skip=()):
     out = []
     for tid, age_s in lean_threads.undelivered_threads(now, after):
         out.append((f"undelivered:{tid}", f"{tid}: message undelivered ({int(age_s // 60)}m) -> lean-agent thread wake {tid} (or: thread discard {tid} <id>)"))
+    held = bool(_load(wait_path()).get("why"))  # the reporter saw main and could not deliver yet
+    for i in queued_reports() if held else []:  # a thread report that main has not been given for over `after` seconds
+        age_r = now - float(i.get("ts") or now)
+        if after <= age_r < REPORT_MAX_AGE and i.get("thread") and i.get("kind") not in ("chase", "job-failed"):
+            out.append((f"report:{i['thread']}:{report_seq(i)}", f"{i['thread']} r{report_seq(i)} {i.get('kind')}: report queued "
+                        f"{int(age_r // 60)}m, not delivered -> lean-agent thread reports {i['thread']} --mine"))
     data = lean_threads.load()
     turns = lean_threads.turns_map()
     for tid, t in data["threads"].items():
@@ -1907,19 +1913,28 @@ def summary_line(items, rid):
     return f"lean-agent: {len(items)} thread report{'s' if len(items) != 1 else ''} ({', '.join(tags)}) [r{rid}]"
 
 
-def stage_block(rid, line, block, now=None, full=None):
+def one_line_digest(block, rid=None):
+    """The staged digest on one line (at most ~400 chars), for typing into a busy main as queued input."""
+    lines = [l for l in str(block).splitlines() if l.startswith("[")]
+    text = " | ".join(sentence_cut(l, 110) for l in lines)
+    return f"lean-agent thread reports{f' [r{rid}]' if rid else ''}: " + sentence_cut(text, 400) + " (details: lean-agent thread reports)"
+
+
+def stage_block(rid, line, block, now=None, full=None, items=None):
     """Queue the block (the digest) on disk for the main session's prompt hook; the full text (default: the block)
     goes to the log for `thread reports` and to the threads' stored reports."""
     os.makedirs(lean_home(), exist_ok=True)
     full = block if full is None else full
-    lean_common.write_json_atomic(pending_path(), {"id": rid, "line": line, "block": block, "full": full, "ts": time.time() if now is None else now})
+    lean_common.write_json_atomic(pending_path(), {"id": rid, "line": line, "block": block, "full": full, "ts": time.time() if now is None else now,
+                                                 "items": list(items or [])})
     log_block(full, rid)
 
 
 def log_block(block, rid=""):
     with lean_common.file_lock(reports_log_path()):
         items = _load(reports_log_path()).get("items")
-        items = (items if isinstance(items, list) else []) + [{"ts": time.time(), "block": block, "id": rid}]
+        items = [x for x in (items if isinstance(items, list) else []) if not (rid and x.get("id") == rid)]
+        items = items + [{"ts": time.time(), "block": block, "id": rid}]
         lean_common.write_json_atomic(reports_log_path(), {"items": items[-REPORT_LOG_KEPT:]})
 
 
@@ -2304,6 +2319,107 @@ class StuckWatch:
         return "restart"
 
 
+REPORT_FORCE = 180      # seconds main may stay busy before queued reports are typed anyway (queued input, between turns)
+REPORTER_STALL = 60     # seconds without a Reporter tick before the supervisor restarts it
+
+
+def _mins(sec):
+    sec = int(max(0, sec))
+    return f"{sec // 60}m" if sec >= 60 else f"{sec}s"
+
+
+def wait_path():
+    return lean_home("report-wait.json")
+
+
+def report_wait(why, now=None, eta=None):
+    """Record why the queued reports wait (shown by `thread reports --mine/--all`); None clears it."""
+    try:
+        if why is None:
+            if os.path.exists(wait_path()):
+                os.remove(wait_path())
+            return
+        old = _load(wait_path())
+        since = old.get("since") if str(old.get("why", "")).split(" ")[:2] == why.split(" ")[:2] else None
+        lean_common.write_json_atomic(wait_path(), {"why": why, "since": since or now or time.time(), "eta": eta, "ts": now or time.time()})
+    except Exception:  # noqa: BLE001 - visibility only
+        pass
+
+
+def wait_reason(rec, now=None):
+    """One line: why report record `rec` (state queued, or typed into main but its staged block still untaken) waits, else ''."""
+    now = time.time() if now is None else now
+    hh = lambda t: time.strftime("%H:%M", time.localtime(t))
+    pend = _load(pending_path())
+    if rec.get("state") == "delivered":
+        if pend.get("block") and rec.get("block") and rec.get("block") == pend.get("id"):
+            ts = pend.get("ts") or now
+            return (f"staged for hook since {hh(ts)}; typed in full by {hh(ts + PENDING_FALLBACK)} if main idles, "
+                    f"else as a one-line digest after main is busy {_mins(REPORT_FORCE)}")
+        return ""
+    if (rec.get("state") or "queued") != "queued":
+        return ""
+    w = _load(wait_path())
+    if not w.get("why"):
+        return "queued, the service picks it up within a minute"
+    eta = f"; typed anyway at ~{hh(w['eta'])}" if w.get("eta") else "; typed at main's next idle moment"
+    return f"{w['why']}" + (f" since {hh(w['since'])}" if w.get("since") else "") + eta
+
+
+class ReporterSupervisor:
+    """Runs the Reporter and restarts it (logging why) when its thread died or it made no tick for `stall` seconds."""
+
+    CARRY = ("cleaned", "goals_at", "chaser", "unstarted_at", "idle_stop_at", "nudge_at", "delivered", "idle_at", "redelivered")
+
+    def __init__(self, host, make=None, now=time.time, stall=REPORTER_STALL):
+        self.host, self.now, self.stall = host, now, stall
+        self.make = make or (lambda h: Reporter(h, now))
+        self.rep = self.thread = None
+        self.restarts = 0
+
+    def spawn(self, old=None):
+        rep = self.make(self.host)
+        for k in self.CARRY:
+            if old is not None and hasattr(old, k):
+                setattr(rep, k, getattr(old, k))
+        self.rep = rep
+        self.thread = threading.Thread(target=rep.run, daemon=True)
+        self.thread.start()
+
+    def check(self):
+        """Restart a dead or stalled Reporter; the reason, else None."""
+        rep = self.rep
+        if rep is None or self.host.stopping.is_set():
+            return None
+        if not self.thread.is_alive():
+            why = "its thread died"
+        elif self.now() - getattr(rep, "tick_at", self.now()) > self.stall:
+            why = f"no tick for {round(self.now() - rep.tick_at)}s"
+        else:
+            return None
+        rep.retired = True
+        self.restarts += 1
+        lean_log.log("warn", "reports", f"{getattr(self.host, 'key', 'main')}: reporter restarted ({why})")
+        self.spawn(rep)
+        return why
+
+    def watch(self):
+        while not self.host.stopping.wait(_knob("LEAN_AGENT_REPORTER_WATCH", 10)):
+            try:
+                self.check()
+            except Exception as exc:  # noqa: BLE001
+                lean_log.log("error", "reports", f"reporter supervisor failed: {exc}")
+
+    def start(self):
+        self.spawn()
+        threading.Thread(target=self.watch, daemon=True).start()
+        return self
+
+
+def start_reporter(host):
+    return ReporterSupervisor(host).start()
+
+
 class Reporter(AutoClear):
     """A thread session's Host: at each turn end builds a report (done | blocked | needs-you) when the turn ran lean-agent
     work or asks the user something, and queues it; also reports a pending question or permission prompt. The main
@@ -2322,6 +2438,20 @@ class Reporter(AutoClear):
         self.waked = None      # run ids already woken for (None: not yet read at start)
         self.stuck = StuckWatch(host, now)
         self.redelivered = 0.0
+        self.idle_at = now()   # when main was last seen idle (turn ended)
+        self.tick_at = now()   # heartbeat for the supervisor
+        self.retired = False   # replaced by the supervisor: the loop ends
+
+    def run(self):
+        poll = _knob("LEAN_AGENT_CLEAR_POLL", 2)
+        while not self.host.stopping.is_set() and not self.retired:
+            self.tick_at = self.now()
+            try:
+                self.tick()
+            except Exception as exc:  # never take the session down
+                self.log(f"error: {exc}", "error")
+            self.tick_at = self.now()
+            self.host.stopping.wait(poll)
 
     def prompting(self):
         return bool(PROMPT_RE.search(self.host.tail_text()[-1500:]))
@@ -2448,16 +2578,24 @@ class Reporter(AutoClear):
         self.woken = True
         self.log(f"run {r['id']} finished: woke the thread session")
 
-    def fallback_pending(self):
-        """A staged block the prompt hook never took (hook not active): type it in full, as before."""
+    def fallback_pending(self, st=None, busy_for=0):
+        """A staged block the prompt hook never took: after PENDING_FALLBACK seconds it is typed in full when main is idle,
+        and as a one-line digest between turns (queued input) when main has been busy for REPORT_FORCE seconds."""
         data = _load(pending_path())
-        if not data.get("block") or self.now() - (data.get("ts") or 0) < PENDING_FALLBACK:
+        now = self.now()
+        if not data.get("block") or now - (data.get("ts") or 0) < PENDING_FALLBACK:
             return
-        st = transcript_state(self.transcript())
-        if not st["ended"] or self.prompting():
+        st = st or transcript_state(self.transcript())
+        if self.prompting():
             return
+        idle_ok = bool(st["ended"])
+        force = not idle_ok and busy_for >= _knob("LEAN_AGENT_REPORT_FORCE", REPORT_FORCE) \
+            and now - self.host.last_input >= _knob("LEAN_AGENT_REPORT_IDLE", 3)
+        if not (idle_ok or force):
+            return
+        text = data["block"] if idle_ok else one_line_digest(data["block"], data.get("id"))
         try:
-            self.host.paste(data["block"])
+            self.host.paste(text)
         except Exception as exc:  # noqa: BLE001 - stays staged, retried on a later tick
             self.log(f"typing the staged thread reports failed, kept: {exc}")
             return
@@ -2465,7 +2603,34 @@ class Reporter(AutoClear):
             os.remove(pending_path())
         except OSError:
             pass
-        self.log("staged thread reports not taken by the prompt hook: typed in full")
+        if force:
+            set_block_how(data.get("id"), "typed (one-line digest, main busy)")
+        self.log("staged thread reports not taken by the prompt hook: " + ("typed in full" if idle_ok else f"typed as a one-line digest (main busy {round(busy_for / 60)}m)"))
+
+    def merge_staged(self, now):
+        """Reports queued while an earlier block is still staged (not yet taken by the hook) join that block: they are never
+        held behind it."""
+        items, dropped = take_reports(now)
+        if not items:
+            return
+        with lean_common.file_lock(pending_path()):
+            data = _load(pending_path())
+            if not data.get("block"):  # taken by the hook meanwhile: these go out on the next tick
+                return
+            rid = data.get("id")
+            allitems = [i for i in data.get("items") or [] if isinstance(i, dict)] + items
+            data.update(items=allitems, block=reports_digest(allitems, dropped, rid), full=reports_message(allitems, dropped),
+                        line=summary_line(allitems, rid))
+            lean_common.write_json_atomic(pending_path(), data)
+        log_block(data["full"], rid)
+        mark_relayed(items)
+        drop_reports(items)
+        for i in items:
+            try:
+                report_state(i.get("thread"), report_seq(i), state="delivered", how="typed", block=rid)
+            except Exception:
+                pass
+        self.log(f"{len(items)} thread report(s) joined the staged block r{rid}")
 
     def goals_tick(self):
         """The goals watchdog, every GOAL_TICK seconds: chase quiet or lost threads, tell the front desk."""
@@ -2573,25 +2738,50 @@ class Reporter(AutoClear):
             except Exception as exc:  # noqa: BLE001
                 self.log(f"attention nudge failed: {exc}", "error")
         items = queued_reports()
-        if os.path.exists(pending_path()):
-            return self.fallback_pending()
-        if not items or not self.host.alive():
-            return
-        if clear_pending("main") or main_fresh_pending(self):
-            return  # a queued clear goes first: the reports reach the fresh session after it
         now = self.now()
-        if not any(i["kind"] in ("question", "needs-you") for i in items) \
-                and now - min(i.get("ts") or now for i in items) < _knob("LEAN_AGENT_REPORT_BATCH", REPORT_BATCH):
-            return  # (a question that needs the user is never held for the batch window)
-        quiet = now - getattr(self.host, "last_output", 0)
-        if self.record().get("session_id") != info("main").get("session_id") and quiet < 10:
-            return  # a replaced session whose start the hook has not recorded yet
+        if not self.host.alive() and not os.path.exists(pending_path()):
+            if items:
+                report_wait("main session is not running", now)
+            return
         path = self.transcript()
         st = transcript_state(path)
+        quiet = now - getattr(self.host, "last_output", 0)
         new_session = not (path and os.path.exists(path) and os.path.getsize(path))  # a fresh session has no turn yet
         if new_session:
             st["ended"] = quiet > _knob("LEAN_AGENT_READY_QUIET", READY_QUIET)
-        if not st["ended"] or self.prompting() or now - self.host.last_input < _knob("LEAN_AGENT_REPORT_IDLE", 3):
+        if st["ended"] and now - self.host.last_input >= _knob("LEAN_AGENT_REPORT_IDLE", 3):
+            self.idle_at = now  # main is idle and nobody is typing: reports can be delivered now
+        busy_for = now - self.idle_at
+        if os.path.exists(pending_path()):
+            self.fallback_pending(st, busy_for)
+            if os.path.exists(pending_path()):  # still staged: later reports join it instead of waiting behind it
+                if items and self.host.alive():
+                    self.merge_staged(now)
+                return
+            items = queued_reports()
+        if not items:
+            report_wait(None)
+            return
+        if not self.host.alive():
+            report_wait("main session is not running", now)
+            return
+        if clear_pending("main") or main_fresh_pending(self):
+            report_wait("a clear of main goes first", now)
+            return  # a queued clear goes first: the reports reach the fresh session after it
+        urgent = any(i["kind"] in ("question", "needs-you", "done", "blocked") for i in items)
+        oldest = min(i.get("ts") or now for i in items)
+        if not urgent and now - oldest < _knob("LEAN_AGENT_REPORT_BATCH", REPORT_BATCH):
+            report_wait("batch window (up to 60s)", now)
+            return  # (a question or a final report is never held for the batch window)
+        if self.record().get("session_id") != info("main").get("session_id") and quiet < 10:
+            return  # a replaced session whose start the hook has not recorded yet
+        force_after = _knob("LEAN_AGENT_REPORT_FORCE", REPORT_FORCE)
+        typing = now - self.host.last_input < _knob("LEAN_AGENT_REPORT_IDLE", 3)
+        if self.prompting() or typing:
+            report_wait("a prompt is open on main" if self.prompting() else "you are typing in main", now)
+            return
+        if not st["ended"] and busy_for < force_after:
+            report_wait(f"main busy {_mins(busy_for)}", now, eta=now + force_after - busy_for)
             return
         if self.delivered and self.delivered[0] == st["size"] and now - self.delivered[1] < PENDING_FALLBACK:
             return  # the last message has not started a turn yet
@@ -2602,7 +2792,7 @@ class Reporter(AutoClear):
             rid = f"{int(now * 1000) & 0xffffff:06x}"
             line = summary_line(items, rid)
             try:
-                stage_block(rid, line, reports_digest(items, dropped, rid), now, full)
+                stage_block(rid, line, reports_digest(items, dropped, rid), now, full, items)
                 self.host.paste(line)
             except Exception as exc:  # noqa: BLE001 - the reports stay queued and go out on a later tick
                 self.log(f"typing {len(items)} thread report(s) failed, kept queued: {exc}")
@@ -3076,7 +3266,7 @@ class Sessions:
                 host.thread = threading.Thread(target=self._run, args=(tid, host), daemon=True)
                 host.thread.start()
                 threading.Thread(target=AutoClear(host).run, daemon=True).start()
-                threading.Thread(target=Reporter(host).run, daemon=True).start()
+                start_reporter(host)
                 fresh = True
         if prompt:
             threading.Thread(target=self._first, args=(host, prompt, fresh), daemon=True).start()

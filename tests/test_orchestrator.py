@@ -7408,10 +7408,7 @@ class CliTest(unittest.TestCase):
         clock[0] += 30
         run_turn("t1", "Second done.")
         reps["t1"].tick()
-        reps["main"].tick()
-        self.assertEqual(hosts["main"].pasted, [])  # the window is still open
-        clock[0] += 31
-        reps["main"].tick()
+        reps["main"].tick()  # a done report is never held for the batch window
         self.assertEqual(len(hosts["main"].pasted), 1)
         digest = ss.take_pending(hosts["main"].pasted[0])
         self.assertEqual(digest.count("[t1 done]"), 1)  # one message, one line per thread: the newest report
