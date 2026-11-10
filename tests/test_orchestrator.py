@@ -11564,18 +11564,17 @@ class CliTest(unittest.TestCase):
             self.cli("review", "proj", "--head", branch, "--base", "main", FAKE_REVIEW=approve)
             return wt
 
-        # a differently named local branch: refused as a new remote branch, allowed onto an existing one
+        # a new local branch: the plain push goes to the same-named remote branch and creates it, never to the base
         wt = commit_in("local-work", "main", "change one")
-        p = self.cli("worktree", "push", "proj", "local-work", "--allow-send", "push it", check=False)
-        self.assertEqual(p.returncode, 3)
-        for part in ("local-work", "origin/local-work", "--remote-branch <existing>", "--new-branch"):
-            self.assertIn(part, p.stderr)
-        self.assertEqual(remote("local-work"), "")
         head = subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        out = self.cli("worktree", "push", "proj", "local-work", "--allow-send", "push it").stdout
+        self.assertIn("pushed local-work -> origin/local-work", out)
+        self.assertEqual(remote("local-work"), head)
+        self.assertNotEqual(remote("main"), head)
+        subprocess.run(["git", "-C", origin, "update-ref", "-d", "refs/heads/local-work"], check=True)
         out = self.cli("worktree", "push", "proj", "local-work", "--remote-branch", "topic-a", "--allow-send", "push it").stdout
         self.assertIn("pushed local-work -> origin/topic-a", out)
         self.assertEqual(remote("topic-a"), head)
-        self.assertEqual(remote("local-work"), "")
         # --to is the alias; the guard applies to the remote name
         p = self.cli("worktree", "push", "proj", "local-work", "--to", "main", "--allow-send", "x", check=False)
         self.assertEqual(p.returncode, 3)
@@ -11585,13 +11584,48 @@ class CliTest(unittest.TestCase):
                        "--allow-send", "push it").stdout
         self.assertIn("pushed local-work -> origin/topic-new", out)
         self.assertEqual(remote("topic-new"), head)
-        # a worktree made from origin/<x> remembers it
+        # a new branch made from origin/<x> never pushes to <x>: it goes to its own name, created on the remote
         wt2 = commit_in("local-fix", "origin/topic-b", "change two")
         head2 = subprocess.run(["git", "-C", wt2, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        topic_b = remote("topic-b")
         out = self.cli("worktree", "push", "proj", "local-fix", "--allow-send", "push it").stdout
+        self.assertIn("pushed local-fix -> origin/local-fix", out)
+        self.assertEqual(remote("local-fix"), head2)
+        self.assertEqual(remote("topic-b"), topic_b)
+        # an explicit --remote-branch is still honoured
+        out = self.cli("worktree", "push", "proj", "local-fix", "--remote-branch", "topic-b", "--allow-send", "again").stdout
         self.assertIn("pushed local-fix -> origin/topic-b", out)
         self.assertEqual(remote("topic-b"), head2)
-        self.assertEqual(remote("local-fix"), "")
+
+    def test_push_new_branch_from_base_goes_to_its_own_name(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        origin = os.path.join(self.tmp.name, "origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+        g("remote", "add", "origin", origin)
+        g("branch", "-q", "base-x", "main")
+        g("push", "-q", "origin", "main", "base-x")
+        g("checkout", "-q", "main")
+        self.cli("learn", self.proj, "--name", "proj")
+        remote = lambda b: subprocess.run(["git", "-C", origin, "rev-parse", "--verify", "-q", b], capture_output=True,
+                                          text=True).stdout.strip()
+        base_sha = remote("base-x")
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "work/new-one", "--worktree-base", "origin/base-x", "--", "go")
+        wt = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", "work-new-one")
+        up = subprocess.run(["git", "-C", wt, "rev-parse", "--abbrev-ref", "@{u}"], capture_output=True, text=True)
+        self.assertNotIn("base-x", up.stdout)
+        subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
+                        "-m", "change"], check=True)
+        head = subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        self.cli("review", "proj", "--head", "work/new-one", "--base", "main", FAKE_REVIEW=approve)
+        p = self.cli("worktree", "push", "proj", "work/new-one", check=False)
+        self.assertIn("origin/work/new-one (a new remote branch)", p.stdout)
+        out = self.cli("worktree", "push", "proj", "work/new-one", "--allow-send", "push it").stdout
+        self.assertIn("pushed work/new-one -> origin/work/new-one", out)
+        self.assertEqual(remote("work/new-one"), head)
+        self.assertEqual(remote("base-x"), base_sha)
 
     def test_push_guards(self):
         g = self.git_project()
@@ -11614,7 +11648,8 @@ class CliTest(unittest.TestCase):
                         "-m", "fix"], check=True)
         approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
         self.cli("review", "proj", "--head", "bugfix/b-1", "--base", "main", FAKE_REVIEW=approve)
-        p = self.cli("worktree", "push", "proj", "origin/release/r-1", "--allow-send", "push it", check=False)
+        # without --remote-branch the push goes to its own name (the tracked release branch is never the target)
+        p = self.cli("worktree", "push", "proj", "origin/release/r-1", "--remote-branch", "release/r-1", "--allow-send", "push it", check=False)
         self.assertEqual(p.returncode, 3)
         self.assertIn("would be pushed to origin/release/r-1, which matches the push guard 'release/*'", p.stderr)
         remote = lambda b: subprocess.run(["git", "-C", origin, "rev-parse", b], capture_output=True, text=True).stdout
@@ -11661,7 +11696,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("hotfix/*", self.cli("guard", "list", "proj").stdout)
             self.cli("learn", self.proj, "--name", "proj")  # re-learning (sync) keeps them
             self.assertIn("hotfix/*", self.cli("guard", "list", "proj").stdout)
-            out = self.cli("worktree", "push", "proj", "origin/release/r-1", "--allow-send", "push it", "--only-commits",
+            out = self.cli("worktree", "push", "proj", "origin/release/r-1", "--remote-branch", "release/r-1", "--allow-send", "push it", "--only-commits",
                            "--override-guard", "user asked for exactly this").stdout
             self.assertIn("uncommitted change(s) stay in the worktree", out)
             self.assertIn("overridden: user asked for exactly this", out)

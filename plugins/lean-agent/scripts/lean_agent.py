@@ -7821,8 +7821,7 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True, hint=No
         if r.returncode != 0:
             die(f"could not create branch {ref!r} from {new_from}: {(r.stderr or r.stdout).strip()[:300]}")
         print(f"worktree: created {ref} from {new_from} ({sha[:10]})", flush=True)
-        if base and base.startswith("origin/"):
-            rec_upstream = base[len("origin/"):]
+        # the base is only where the branch starts: it is never recorded as the upstream
     sync_worktree_registry(slug, repo)
     remote_branch = ref[len("origin/"):] if ref.startswith("origin/") else None
     rec_upstream = rec_upstream or remote_branch
@@ -8168,6 +8167,10 @@ def worktree_push(a):
     else:
         upstream = (f"origin/{w['upstream']}" if w.get("upstream") else None) or own_upstream or (
             w["ref"] if w.get("ref", "").startswith("origin/") else None)
+        if upstream and upstream.split("/", 1)[-1] != branch:
+            # an upstream with another name than the local branch is the base it was made from (origin/develop,
+            # ...): never push there. Push to the same-named remote branch, created when missing.
+            upstream, own_upstream = None, None
         remote_ref = upstream or f"origin/{branch}"
     if not a.no_fetch:
         git(path, "fetch", "-q", "origin")
@@ -8250,7 +8253,7 @@ def worktree_push(a):
         die(f"refused: origin/{target} would be a NEW remote branch whose name breaks the project's branch rules "
             f"(or has a lean prefix). Pushing to an existing remote branch is fine. try: lean-agent worktree push {slug} "
             f"{a.ref} --remote-branch {better} --new-branch ... (or rename the branch)", 3)
-    if not on_remote and not a.new_branch:
+    if not on_remote and not a.new_branch and not (not explicit and target == branch):
         die(f"refused: {branch} would create a NEW remote branch origin/{target}, which isn't on the remote yet. "
             f"To push to an existing branch (e.g. the PR's source branch): lean-agent worktree push {slug} {a.ref} "
             f"--remote-branch <existing> --allow-send ...; to really create origin/{target}: add --new-branch", 3)
