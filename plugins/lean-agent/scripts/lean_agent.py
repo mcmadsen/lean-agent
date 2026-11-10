@@ -363,6 +363,8 @@ def project_slug(path):
 
 
 def resolve_project(ref, register=True):
+    if not ref or not isinstance(ref, str):
+        die("no project given; pass -p <project> (see: lean-agent projects)")
     projs = projects()
     if ref in projs:
         return ref, projs[ref]["path"]
@@ -6406,7 +6408,7 @@ def branch_review_rows(slug, path, branch):
         seen.add(r.get("id"))
         rows.append({"run": r.get("id"), "ts": r.get("ts"), "head": (rec or {}).get("head") or meta.get("head") or "",
                      "base": (rec or {}).get("base") or meta.get("base") or "", "model": r.get("model") or "?",
-                     "cost": r.get("cost_usd") or 0, "role": r.get("role"),
+                     "cost": r.get("cost_usd") if isinstance(r.get("cost_usd"), (int, float)) else 0, "role": r.get("role"),
                      "kind": "delta" if meta.get("resume") else "review",
                      "verdict": (rec or {}).get("verdict") or "unknown", "record": rec})
     for r in recs:
@@ -6424,9 +6426,29 @@ def branch_review_rows(slug, path, branch):
     return sorted(rows, key=lambda x: x.get("ts") or "")
 
 
+def reviews_project(a):
+    """(slug, path) for `reviews`: -p, the positional project, the project holding the cwd, else the one project whose
+    ledger has the branch; several -> list them, none -> a usage line."""
+    ref = a.project or getattr(a, "project_pos", None)
+    if ref:
+        return resolve_project(ref)
+    cwd = os.getcwd()
+    for s_, v in projects().items():
+        if same_path(v.get("path"), cwd) or (v.get("path") and os.path.realpath(cwd).startswith(os.path.realpath(v["path"]) + os.sep)):
+            return s_, v["path"]
+    want = bare_ref(a.branch)
+    hits = [s_ for s_ in projects() if any(bare_ref(r.get("ref")) == want or bare_ref(r.get("branch")) == want
+                                          for r in read_jsonl(reviews_path(s_)))]
+    if len(hits) == 1:
+        return hits[0], projects()[hits[0]].get("path") or ""
+    if hits:
+        die(f"branch {a.branch} has reviews in several projects: {', '.join(hits)}; pass -p <project>")
+    die(f"no review of {a.branch} found; usage: lean-agent reviews [PROJECT] --branch X [-p PROJECT]")
+
+
 def cmd_reviews(a):
     """`reviews --branch X`: every review run of the branch with its verdict, counts, cost and what is left open."""
-    slug, path = resolve_project(a.project)
+    slug, path = reviews_project(a)
     rows = branch_review_rows(slug, path, a.branch)
     br = branch_of(path, a.branch) or bare_ref(a.branch)
     declined = [d for d in read_jsonl(declined_path(slug))
@@ -6437,11 +6459,11 @@ def cmd_reviews(a):
         fs = rec.get("findings") or []
         cnt = {k: sum(1 for f in fs if f.get("severity") == k) for k in ("blocker", "major", "minor")}
         cnt["minor"] += sum(1 for f in fs if f.get("severity") == "nit")
-        x.update(head=x["head"][:12], counts=cnt if rec else None,
+        x.update(head=str(x.get("head") or "")[:12], counts=cnt if rec else None,
                  open=[f"[{f.get('severity')}] {f.get('file')}:{f.get('line', '')} {str(f.get('issue', ''))[:120]}" for f in fs]
                  + [f"[check] {str(c.get('what', ''))[:120]}" for c in rec.get("checks") or []])
         out.append(x)
-    total = round(sum(x["cost"] for x in out), 4)
+    total = round(sum(x["cost"] for x in out if isinstance(x["cost"], (int, float))), 4)
     dec = [{"what": d.get("issue") or d.get("gap") or d.get("symbol") or "?", "file": d.get("file"), "why": d.get("why")}
            for d in declined]
     if a.json:
@@ -6452,9 +6474,10 @@ def cmd_reviews(a):
         return 0
     for x in out:
         c = x["counts"]
+        x["cost"] = x["cost"] if isinstance(x["cost"], (int, float)) else 0
         cs = f"{c['blocker']} blocker / {c['major']} major / {c['minor']} minor" if c else "counts unknown"
-        print(f"{x['run']} · {(x['ts'] or '?')[:16]} · {x['head'] or '?'} · base {x['base'] or '?'} · {x['model']} · "
-              f"${x['cost']:.2f} · {x['kind']}: {x['verdict']} · {cs}")
+        print(f"{x['run']} · {(x['ts'] or '?')[:16]} · {x['head'] or '?'} · base {x['base'] or '?'} · {x['model'] or '?'} · "
+              f"${x['cost']:.2f} · {x['kind'] or '?'}: {x['verdict'] or '?'} · {cs}")
         if x.get("carried"):
             print(f"    carried over: {x['carried']}")
         for o in x["open"][:8]:
@@ -16196,6 +16219,7 @@ def build_parser():
     s.set_defaults(fn=cmd_logs)
 
     s = sub.add_parser("reviews", help="every review run of a branch: verdict, counts, cost, open and declined findings")
+    s.add_argument("project_pos", nargs="?", metavar="PROJECT")
     s.add_argument("--branch", required=True)
     s.add_argument("--project", "-p")
     s.add_argument("--json", action="store_true")
