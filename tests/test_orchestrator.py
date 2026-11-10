@@ -6535,7 +6535,84 @@ class CliTest(unittest.TestCase):
             self.assertEqual(len(host.pasted), 2, step)
         clock[0] += 2
         ac.tick()
+        self.assertEqual(len(host.pasted), 2)  # the new session has not grown since its start: no second clear
+        for i in range(5):  # it grows by a real amount over enough turns: one more clear
+            with open(os.path.join(home, "s1.jsonl"), "a") as fh:
+                fh.write(json.dumps({"type": "user", "timestamp": "1970-01-02T00:00:00Z",
+                                     "message": {"role": "user", "content": "go"}}) + "\n")
+            turn("work", 52000 + 3000 * i)
+        ac.tick()
         self.assertEqual(len(host.pasted), 3)
+
+    def replaced_unit(self):
+        """An AutoClear whose session was just replaced by a clear: the new session s2 writes its own transcript."""
+        ac, host, clock, turn, home = self.auto_clear_unit()
+        import service_session
+        turn("done")
+        ac.finish("s1", "s2", 50000, "replaced")
+        tr2 = os.path.join(home, "s2.jsonl")
+        with open(os.path.join(home, "chat", "service.json"), "w") as fh:
+            json.dump({"session_id": "s2", "transcript_path": tr2, "source": "startup", "ts": clock[0]}, fh)
+        service_session.update_session("main", session_id="s2")
+
+        def turn2(text, ctx, user=True):
+            with open(tr2, "a") as fh:
+                if user:
+                    fh.write(json.dumps({"type": "user", "timestamp": "1970-01-02T00:00:00Z",
+                                         "message": {"role": "user", "content": "go"}}) + "\n")
+                fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}],
+                         "stop_reason": "end_turn", "usage": {"input_tokens": 1, "cache_read_input_tokens": ctx}}}) + "\n")
+        clock[0] += 700  # past the clear gap
+        return ac, host, clock, turn2
+
+    def test_start_payload_near_the_threshold_does_not_clear_again(self):
+        ac, host, clock, turn2 = self.replaced_unit()
+        turn2("hello", 45000)  # the start payload alone is above the 40,000 clear point
+        for _ in range(8):
+            ac.tick()
+            turn2("more", 45500)
+            ac.tick()
+        self.assertEqual(host.pasted, [])
+
+    def test_growth_over_the_threshold_clears_once(self):
+        ac, host, clock, turn2 = self.replaced_unit()
+        turn2("hello", 45000)
+        ac.tick()  # baseline taken
+        for i in range(5):
+            turn2("work", 45000 + 3000 * (i + 1))
+        ac.tick()
+        self.assertEqual(len(host.pasted), 1)
+        self.assertIn("Checkpoint now", host.pasted[0])
+        ac.tick()  # waiting for the reply: no second prompt
+        self.assertEqual(len(host.pasted), 1)
+
+    def test_few_turns_do_not_clear_even_after_growth(self):
+        ac, host, clock, turn2 = self.replaced_unit()
+        turn2("hello", 45000)
+        ac.tick()
+        turn2("big", 70000)
+        ac.tick()
+        self.assertEqual(host.pasted, [])
+
+    def test_one_restart_notice_per_restart(self):
+        ac, host, clock, turn2 = self.replaced_unit()
+        import service_session
+        self.assertTrue(service_session.restart_line("main"))
+        self.assertEqual(service_session.restart_line("main"), "")
+
+    def test_start_payload_size_is_reported_and_trimmed(self):
+        sys.path.insert(0, os.path.dirname(CLI))
+        import compact_hook
+        home = tempfile.mkdtemp()
+        old = os.environ.get("LEAN_AGENT_HOME")
+        os.environ["LEAN_AGENT_HOME"] = home
+        self.addCleanup(lambda: os.environ.pop("LEAN_AGENT_HOME", None) if old is None else os.environ.__setitem__("LEAN_AGENT_HOME", old))
+        size = compact_hook.start_payload_size()
+        self.assertIsInstance(size, int)
+        self.assertLessEqual(size, compact_hook.PAYLOAD_MAX + 1000)
+        out = subprocess.run([sys.executable, CLI, "doctor"], capture_output=True, text=True,
+                             env=dict(os.environ, LEAN_AGENT_HOME=home)).stdout
+        self.assertIn("start payload", out)
 
     def test_a_queued_clear_replaces_the_session_and_records_when(self):
         ac, host, clock, turn, home = self.auto_clear_unit()

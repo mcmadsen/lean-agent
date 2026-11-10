@@ -10495,6 +10495,14 @@ def cmd_doctor(a):
                + ", ".join(f"{os.path.basename(f)} ~{t:,}" for f, t in loaded),
                "keep files other than lean-agent's guide out: lean-agent doctor --fix (refreshes the excludes)")
     report(is_trusted(h), "orchestrator home is trusted", "lean-agent trust")
+    try:
+        import compact_hook
+        size = compact_hook.start_payload_size()
+        report(True if size <= compact_hook.PAYLOAD_MAX else None,
+               f"main-session start payload ~{size:,} chars (trimmed above {compact_hook.PAYLOAD_MAX:,})",
+               "shorten the checkpoint or the hand-off")
+    except Exception:  # noqa: BLE001 - a courtesy line
+        pass
     report(True, f"strict orchestrator: {'on' if strict_on() else 'off'} (lean-agent config strict on|off)")
     rules_cache = {}
 
@@ -13778,6 +13786,11 @@ def context_table():
                      + ("  fresh on next send" if r["fresh"] and r["state"] == "idle" else "")
                      + (f"  {r['clear']}" if r["clear"] else ""))
     lines.append(f"Total: {kt(sum(r['ctx'] for r in rows))} across {len(rows)} sessions (compaction point {kt(service_session.up_compact_at())})")
+    try:
+        import compact_hook
+        lines.append(f"Start payload (main): ~{compact_hook.start_payload_size():,} chars")
+    except Exception:  # noqa: BLE001
+        pass
     return "\n".join(lines)
 
 
