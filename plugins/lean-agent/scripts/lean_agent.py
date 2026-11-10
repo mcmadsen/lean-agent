@@ -11068,7 +11068,7 @@ def host_session(cmd, extra, env, h, name):
         except Exception as exc:
             print(f"lean-agent: could not start the session of {tid}: {exc}", file=sys.stderr)
     threading.Thread(target=service_session.AutoClear(host).run, daemon=True).start()
-    threading.Thread(target=service_session.Reporter(host).run, daemon=True).start()
+    service_session.start_reporter(host)
     spool_stop = threading.Event()
     threading.Thread(target=service_session.SpoolDeliverer().loop, args=(spool_stop,), daemon=True).start()
 
@@ -14145,6 +14145,9 @@ def thread_action(a):
                     st = r.get("state") or "queued"
                     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r.get("at") or r.get("queued") or 0))
                     extra = f" ({when}, {r.get('how')})" if st == "delivered" else f" ({when}: {r.get('why')})" if st == "dropped" else ""
+                    why = service_session.wait_reason(r)
+                    if why:
+                        st, extra = "queued", f" (since {when}: {why})"
                     print(f"{t} r{r.get('id')} {r.get('kind')}: {st.upper()}{extra}\n  {r.get('text')}")
             if not n:
                 print("no reports recorded")
