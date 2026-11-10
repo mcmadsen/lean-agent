@@ -13616,7 +13616,7 @@ class NeedPark(Exception):
 def park_to_make_room(v, line, cap, tid):
     print(line, flush=True)
     try:
-        park_thread_session(v["thread"])
+        park_thread_session(v["thread"], by="cap")
     except RuntimeError as exc:
         die(str(exc))
     try:
@@ -14635,7 +14635,7 @@ def cmd_now(a):
     if waiting:
         print(waiting)
     for tid_, age_s in lean_threads.undelivered_threads():
-        print(f"{tid_}: undelivered message ({max(1, int(age_s // 60))}m) - fix: lean-agent thread wake {tid_}")
+        print(f"{tid_}: undelivered message ({max(1, int(age_s // 60))}m) - fix: lean-agent thread wake {tid_} (or: thread discard {tid_} <id>)")
     goals = lean_goals.now_text()
     if goals:
         print(goals)
@@ -16428,8 +16428,8 @@ def build_parser():
     s.set_defaults(fn=cmd_schedule)
 
     s = sub.add_parser("thread", help="threads: new \"title\" [\"<text>\"|--prompt-file F|-] (its own Remote Control session) | send tN \"<text>\"|--prompt-file F|- | ask \"question\" [--options \"a|b|c\"] (from inside a thread session: the question goes to main; end the turn, the answer arrives as your next turn) | answer tN [qN] \"answer\" (main: pass an answer into the thread session) | open tN (resume its session) | sessions | list | show tN [--all] | close tN [tM ...]|--all|--idle DUR (checkpoint, stop their sessions) | reopen tN | merge tB tA | unmerge tB | move [rN|tM] tN (a request by its id, or the latest request of thread tM, or without either the latest request of this session, if under 24 h old: LEAN_AGENT_SESSION or the hook's session, else the latest one)")
-    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "files", "ask", "report", "answer", "reports", "park", "wake", "deliver", "idle-stop"],
-                   metavar="{new,list,show,close,reopen,merge,unmerge,move,send,open,sessions,ask,report,answer,reports,park,wake}")  # deliver is internal: not shown
+    s.add_argument("action", choices=["new", "list", "show", "close", "reopen", "merge", "unmerge", "move", "send", "open", "sessions", "files", "ask", "report", "answer", "reports", "park", "wake", "discard", "deliver", "idle-stop"],
+                   metavar="{new,list,show,close,reopen,merge,unmerge,move,send,open,sessions,ask,report,answer,reports,park,wake,discard}")  # deliver is internal: not shown
     s.add_argument("args", nargs="*", help='new "title" ["<text>"]; send tN "<text>"; answer tN [qN] "<answer>"; other actions: ids')
     s.add_argument("--show", metavar="N", help="files: print file number N (Markdown/text, capped)")
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")

@@ -192,7 +192,8 @@ def unstarted_request(t, evs, now, min_secs=0):
         return None
     if now - since < min_secs:
         return None
-    return {"id": pick.get("id"), "text": pick.get("text") or "", "since": since, "undelivered": bool(pick.get("undelivered"))}
+    return {"id": pick.get("id"), "text": pick.get("text") or "", "since": since, "undelivered": bool(pick.get("undelivered")),
+            "redelivered": bool(pick.get("redelivered_ts"))}
 
 
 def answered_after(t, evs, since, rep_ts=None):
@@ -998,6 +999,10 @@ def store_reports(prompt):
                 old = t.get("reports") if isinstance(t.get("reports"), list) else []
                 t["reports"] = (old + reps)[-REPORTS_KEPT:]
                 t["report"] = t["reports"][-1]  # `now` shows the latest
+                for r in t.get("requests") or []:  # the thread reported: its earlier requests are handled (hook hand-over included)
+                    if isinstance(r, dict) and not r.get("handled_ts") and _epoch(r.get("ts")) <= _epoch(reps[-1]["ts"]):
+                        r["handled_ts"] = now_iso()
+                        r.pop("undelivered", None)
     return sorted(got)
 
 
@@ -1654,14 +1659,69 @@ def undelivered_label(tid, now=None):
     return f"undelivered message ({max(1, int(age_s // 60))}m)" if age_s >= UNDELIVERED_AFTER else ""
 
 
+def no_nudge(t):
+    """True for a thread nobody wants chased or nudged: closed by the user, or parked by the user. A thread parked by
+    idle-stop or the session cap still gets its spooled message (it wakes and delivers it)."""
+    if not isinstance(t, dict):
+        return False
+    if t.get("parked"):
+        return t.get("parked_by") not in ("idle", "cap")
+    return bool(t.get("closed"))
+
+
 def undelivered_threads(now=None, min_secs=UNDELIVERED_AFTER):
-    """[(thread id, age seconds)] of the open threads with a message queued for at least `min_secs`, oldest first."""
+    """[(thread id, age seconds)] of the threads with a message queued for at least `min_secs`, oldest first. Closed and
+    user-parked threads are skipped."""
     try:
         names = os.listdir(lean_home("thread-inbox"))
     except OSError:
         return []
-    out = [(t, a) for t in names if not t.endswith(".lock") and (a := undelivered_age(t, now)) and a >= min_secs]
+    threads_ = load()["threads"]
+    out = [(t, a) for t in names if not t.endswith(".lock") and not no_nudge(threads_.get(t)) and (a := undelivered_age(t, now)) and a >= min_secs]
     return sorted(out, key=lambda x: -x[1])
+
+
+def spool_messages(tid):
+    """[(id, file name, {text, rid, ts})] of the messages queued for `tid` and not being sent right now. The id is the
+    short hex part of the file name."""
+    d = os.path.join(lean_home("thread-inbox"), tid)
+    out = []
+    try:
+        names = sorted(n for n in os.listdir(d) if n.endswith(".json"))
+    except OSError:
+        return out
+    for n in names:
+        rec = lean_common.read_json(os.path.join(d, n), {}) or {}
+        out.append((n[:-5].split("-", 1)[-1], n, rec if isinstance(rec, dict) else {}))
+    return out
+
+
+def discard_spool(tid, ids=None):
+    """Drop the undelivered spooled messages of `tid` (`ids`: only those; None: all) and mark the requests they carry
+    handled. Returns [(id, text)] of what was discarded."""
+    tid = resolve(norm(tid))
+    got = []
+    for mid, name, rec in spool_messages(tid):
+        if ids is not None and not any(mid.startswith(i) or name.startswith(i) for i in ids):
+            continue
+        try:
+            os.remove(os.path.join(lean_home("thread-inbox"), tid, name))
+        except OSError:
+            continue
+        got.append((mid, str(rec.get("text") or ""), rec.get("rid")))
+    with _locked() as data:
+        t = data["threads"].get(tid) or {}
+        rids = {g[2] for g in got if g[2]}
+        for r in t.get("requests") or []:
+            if isinstance(r, dict) and not r.get("handled_ts") and (r.get("id") in rids or (ids is None and r.get("undelivered"))):
+                r["handled_ts"] = now_iso()
+                r["discarded"] = True
+                r.pop("undelivered", None)
+    return [(m, x) for m, x, _ in got]
+
+
+def discard_line(tid, n):
+    return f"{tid} closed: {n} queued message{'s' if n != 1 else ''} discarded"
 
 
 def queued_note(tid):
@@ -1681,7 +1741,8 @@ def show_text(tid, all_=False, limit=40, report_chars=None):
     merged = sorted(s for s, d in data["aliases"].items() if resolve(d, data["aliases"]) == tid)
     if merged:
         head += f" (includes {', '.join(merged)})"
-    lines = [head] + ([queued_note(tid)] if queued_note(tid) else []) + [l.strip() for l in question_lines(t)]
+    lines = [head] + ([queued_note(tid)] if queued_note(tid) else []) + [
+        f"  queued {m}: {str(rec.get('text') or '')[:60]!r} (lean-agent thread discard {tid} {m})" for m, _, rec in spool_messages(tid)] + [l.strip() for l in question_lines(t)]
     shown = ev if all_ or len(ev) <= limit else ev[-limit:]
     if len(shown) < len(ev):
         lines.append(f"... {len(ev) - len(shown)} earlier (lean-agent thread show {tid} --all)")
@@ -1729,6 +1790,7 @@ def set_closed(tid, closed):
             t["last_message"] = now_iso()  # reopened: counts as activity, or the next `now` would close it again
     if closed:
         _closed_hooks([tid])
+        set_closed.discarded = len(discard_spool(tid))
     return tid
 
 
@@ -1852,6 +1914,20 @@ def cli(action, args, as_json=False, out=print):
             if len(args) != 1:
                 raise ValueError(f"usage: lean-agent thread {action} tN")
             out(f"{set_closed(args[0], action == 'close')} {'closed' if action == 'close' else 'open again'}")
+            if action == "close" and getattr(set_closed, "discarded", 0):
+                out(discard_line(resolve(norm(args[0])), set_closed.discarded))
+        elif action == "discard":
+            ids = [a for a in args[1:] if not a.startswith("--")]
+            if not args or args[0].startswith("--") or (not ids and "--all" not in args):
+                raise ValueError("usage: lean-agent thread discard tN [msg-id ...|--all]")
+            tid = resolve(norm(args[0]))
+            if tid not in load()["threads"]:
+                raise ValueError(f"no such thread {tid}")
+            gone = discard_spool(tid, None if "--all" in args else ids)
+            for mid, text in gone:
+                out(f"{tid}: discarded {mid} {text[:60]!r}")
+            if not gone:
+                out(f"{tid}: no queued message to discard")
         elif action == "merge" and len(args) != 2 or action == "unmerge" and len(args) != 1 or action == "move" and len(args) not in (1, 2):
             raise ValueError({"merge": "usage: lean-agent thread merge tB tA", "move": "usage: lean-agent thread move [rN|tM] tN",
                               "unmerge": "usage: lean-agent thread unmerge tB"}[action])
@@ -1865,7 +1941,7 @@ def cli(action, args, as_json=False, out=print):
             old, new_ = move_latest(args[-1], cli_session(), args[0] if len(args) == 2 else None)
             out(f"{'the latest request' if len(args) == 1 else args[0]} moved from {old} to {new_}")
         else:
-            raise ValueError("usage: lean-agent thread new|list|show|close|reopen|merge|unmerge|move")
+            raise ValueError("usage: lean-agent thread new|list|show|close|reopen|discard|merge|unmerge|move")
     except ValueError as e:
         out(f"lean-agent: {e}")
         return 1

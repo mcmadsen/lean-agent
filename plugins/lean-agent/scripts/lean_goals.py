@@ -503,12 +503,17 @@ def thread_info(tid, data=None):
     except Exception:
         waiting = []
     try:
+        for r in t.get("requests") or []:  # a request the thread already answered is handled, never redelivered
+            if isinstance(r, dict) and r.get("undelivered") and not r.get("handled_ts") \
+                    and lean_threads.answered_after(t, [], lean_threads._epoch(r.get("ts"))):
+                lean_threads.mark_handled(tid, r.get("id"))
+                t = lean_threads.load()["threads"].get(tid) or t
         evs = lean_threads.events(data, lean_threads._todo_map()).get(tid, [])
         unstarted = lean_threads.unstarted_request(t, evs, time.time())
     except Exception:
         unstarted = None
     return {"lost": lost, "running": running, "question": bool(lean_threads.open_questions(t)), "waiting": bool(waiting),
-            "closed": bool(t.get("closed")), "last": last, "runs": runs, "unstarted": unstarted,
+            "closed": bool(t.get("closed")), "nonudge": lean_threads.no_nudge(t), "last": last, "runs": runs, "unstarted": unstarted,
             "spooled": bool(lean_threads.queued_messages(tid)), "myq": _stale_question(tid)}
 
 
@@ -698,6 +703,8 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
             continue
         import lean_threads
         i = info(tid)
+        if i.get("nonudge") or i.get("closed"):
+            continue  # closed or parked by the user: never chased
         act = max(_epoch(g.get("last_activity")), _epoch(g.get("created")), i.get("last") or 0)
         since_chase = now - _epoch(g.get("chased_at")) if g.get("chased_at") else float("inf")
         lost = real_lost(i.get("lost") or [], ref, i.get("runs"))
@@ -714,6 +721,8 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
             age_s = max(0, now - un["since"])
             if i.get("spooled") or age_s < lean_threads.start_minutes() * 60 or since_chase < lean_threads.start_minutes() * 60:
                 continue
+            if un.get("undelivered") and un.get("redelivered"):
+                continue  # a request is redelivered once, ever
             cands.append((g, i, "unstarted", un["id"] or "", _context(g, i, "unstarted", un["id"] or "", now)))
             continue
         if i.get("running") or i.get("question") or i.get("waiting") or i.get("closed"):
@@ -807,6 +816,8 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
             digest.append(f"{tid} ({ref}) is stuck after {MAX_CHASES} chases: asked the user ({wid})")
             continue
         try:
+            if kind == "unstarted" and i["unstarted"].get("undelivered") and i["unstarted"].get("id"):
+                lean_threads.mark_redelivered(tid, i["unstarted"]["id"])  # once per request, ever
             ok, err = send(tid, msg)
         except Exception as exc:  # noqa: BLE001 - retried on a later pass
             ok, err = False, str(exc)
