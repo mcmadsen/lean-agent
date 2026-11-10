@@ -1582,10 +1582,10 @@ def attention_items(now, after=NUDGE_AFTER, skip=()):
     import lean_threads
     out = []
     for tid, age_s in lean_threads.undelivered_threads(now, after):
-        out.append((f"undelivered:{tid}", f"{tid}: message undelivered ({int(age_s // 60)}m) -> lean-agent thread wake {tid}"))
+        out.append((f"undelivered:{tid}", f"{tid}: message undelivered ({int(age_s // 60)}m) -> lean-agent thread wake {tid} (or: thread discard {tid} <id>)"))
     data = lean_threads.load()
     for tid, t in data["threads"].items():
-        if tid in data["aliases"] or tid == "main":
+        if tid in data["aliases"] or tid == "main" or lean_threads.no_nudge(t):
             continue
         for q in lean_threads.open_questions(t):
             try:
@@ -1595,8 +1595,6 @@ def attention_items(now, after=NUDGE_AFTER, skip=()):
             if age_q >= after and tid not in skip and q.get("kind") != "permission":
                 out.append((f"question:{tid}:{q['id']}", f'{tid} {q["id"]}: question unanswered ({int(age_q // 60)}m) -> '
                             f'lean-agent thread answer {tid} {q["id"]} "<answer>"'))
-        if t.get("closed") and not t.get("parked"):
-            continue
         un = lean_threads.unstarted_request(t, [], now, after)
         if un and un["undelivered"] and not spool_pending(tid):
             out.append((f"unstarted:{tid}:{un.get('id')}", f"{tid}: request not started ({int((now - un['since']) // 60)}m) -> lean-agent thread wake {tid}"))
@@ -2122,6 +2120,31 @@ def session_workers(key):
         return []
 
 
+def startup_cleanup(log=None):
+    """Once per service start: queued messages of closed threads are discarded (logged), and requests the thread already
+    replied to are marked handled, so neither is nudged or redelivered again."""
+    import lean_threads
+    out = []
+    try:
+        data = lean_threads.load()
+        for tid, t in data["threads"].items():
+            if tid in data["aliases"] or tid == "main":
+                continue
+            if t.get("closed") and not t.get("parked") and spool_count(tid):
+                for mid, text in lean_threads.discard_spool(tid):
+                    out.append(f"{tid}: closed thread, discarded queued message {mid}")
+            for r in t.get("requests") or []:
+                if isinstance(r, dict) and not r.get("handled_ts") and lean_threads.answered_after(t, [], lean_threads._epoch(r.get("ts"))):
+                    if lean_threads.mark_handled(tid, r.get("id")):
+                        out.append(f"{tid}: request {r.get('id')} was already answered, marked handled")
+    except Exception as exc:  # noqa: BLE001 - never stops the service
+        out.append(f"startup cleanup failed: {exc}")
+    for line in out:
+        if log:
+            log(line, "info")
+    return out
+
+
 class StuckWatch:
     """Per session: a turn with no transcript progress for `stuck_limit()` (no worker of its own running, no legitimately
     long tool call, no permission prompt) is interrupted and nudged; still stuck one limit later, the session is
@@ -2367,7 +2390,7 @@ class Reporter(AutoClear):
         self.unstarted_at = now
         data = lean_threads.load()
         for tid, t in data["threads"].items():
-            if t.get("closed") and not t.get("parked"):
+            if lean_threads.no_nudge(t):
                 continue
             for r in t.get("requests") or []:  # a request the thread already replied to is handled, never redelivered
                 if isinstance(r, dict) and r.get("undelivered") and not r.get("handled_ts") \
@@ -2395,6 +2418,9 @@ class Reporter(AutoClear):
             self.log(f"idle-stop failed: {(r.stderr or r.stdout).strip()[-200:]}", "error")
 
     def main_tick(self):
+        if not getattr(self, "cleaned", False):
+            self.cleaned = True
+            startup_cleanup(self.log)
         try:
             if lean_auth.recheck(self.now()):
                 self.log("sign-in works again: chases and restarts resumed")

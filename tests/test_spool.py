@@ -492,3 +492,114 @@ class SpoolSurvivesReplacementTest(SpoolTest):
         old = time.time() - ss.REPLACING_TTL - 5
         os.utime(ss._replacing_path(self.tid), (old, old))
         self.assertFalse(ss.is_replacing(self.tid))
+
+
+class ChaseCleanupTest(unittest.TestCase):
+    """Answered requests are never redelivered; closed and user-parked threads are not nudged; closing and `thread discard` drop the queue."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.env = mock.patch.dict(os.environ, {**clean_environ(), "LEAN_AGENT_HOME": self.tmp}, clear=True)
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.tid = lean_threads.new("work", "review the change")
+        self.sent = []
+
+    def old_request(self):
+        ts = lean_threads.datetime.datetime.fromtimestamp(time.time() - 3600).isoformat(timespec="seconds")
+        with lean_threads._locked() as data:
+            data["threads"][self.tid]["requests"][0]["ts"] = ts
+
+    def chase(self):
+        gid = lean_goals.ensure("PR 512", self.tid)
+        old = lean_goals._iso(time.time() - 7200)
+        lean_goals._set(gid, last_activity=old, created=old)
+        return lean_goals.watchdog(time.time(), lambda t, x: self.sent.append((t, x)) or (True, ""), lambda t: True,
+                                   lean_goals.thread_info, lambda: False, is_paused=lambda n: False)
+
+    def cli(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = lean_threads.cli(args[0], list(args[1:]))
+        return rc, out.getvalue()
+
+    def test_goal_chase_does_not_redeliver_an_answered_request(self):
+        self.old_request()
+        ss.queue_report(self.tid, "done", "Looks fine.", force=True)
+        ss.note_turn(self.tid, True, "done")
+        self.assertEqual(self.chase(), [])
+        self.assertEqual(self.sent, [])
+        self.assertTrue(lean_threads.load()["threads"][self.tid]["requests"][0].get("handled_ts"))
+
+    def test_unanswered_request_is_redelivered_once(self):
+        self.old_request()
+        self.assertEqual(len(self.chase()), 1)
+        self.assertEqual(self.chase(), [])
+        self.assertEqual(len(self.sent), 1)
+
+    def test_first_report_of_a_hook_routed_thread_marks_the_request_handled(self):
+        self.old_request()  # the session's prompt text differs from the stored request: pin cannot match it
+        lean_threads.pin(self.tid, "brief + review the change please")
+        lean_threads.store_reports(f"<thread-reports>[{self.tid} done] All reviewed.</thread-reports>")
+        r = lean_threads.load()["threads"][self.tid]["requests"][0]
+        self.assertTrue(r.get("handled_ts"))
+        self.assertFalse(r.get("undelivered"))
+        self.assertEqual(self.chase(), [])
+
+    def test_nudge_skips_closed_and_user_parked_but_not_idle_parked(self):
+        ss.spool_add(self.tid, "hello")
+        later = time.time() + 3600
+        keys = lambda: [k for k, _ in ss.attention_items(later) if k.startswith("undelivered")]
+        self.assertEqual(keys(), [f"undelivered:{self.tid}"])
+        self.assertIn(f"thread discard {self.tid}", ss.attention_items(later)[0][1])
+        lean_threads.set_session(self.tid, parked="2026-01-01T00:00:00", parked_by="idle")
+        self.assertEqual(keys(), [f"undelivered:{self.tid}"])
+        lean_threads.set_session(self.tid, parked="2026-01-01T00:00:00", parked_by="cap")
+        self.assertEqual(keys(), [f"undelivered:{self.tid}"])
+        lean_threads.set_session(self.tid, parked="2026-01-01T00:00:00", parked_by=None)
+        self.assertEqual(keys(), [])
+        lean_threads.set_session(self.tid, parked=None)
+        with lean_threads._locked() as data:
+            data["threads"][self.tid]["closed"] = lean_threads.now_iso()
+        self.assertEqual(keys(), [])
+
+    def test_close_discards_the_queue_with_a_summary_line_and_reopen_keeps_it_gone(self):
+        ss.spool_add(self.tid, "hello", rid="r1")
+        rc, out = self.cli("close", self.tid)
+        self.assertIn(f"{self.tid} closed: 1 queued message discarded", out)
+        self.assertEqual(ss.spool_count(self.tid), 0)
+        self.assertTrue(lean_threads.load()["threads"][self.tid]["requests"][0].get("handled_ts"))
+        self.cli("reopen", self.tid)
+        self.assertEqual(ss.spool_count(self.tid), 0)
+        self.assertIsNone(lean_threads.unstarted_request(lean_threads.load()["threads"][self.tid], [], time.time() + 3600, 60))
+
+    def test_discard_by_id_and_all(self):
+        a = ss.spool_add(self.tid, "first", rid="r1")
+        ss.spool_add(self.tid, "second")
+        ss.spool_add(self.tid, "third")
+        _, shown = self.cli("show", self.tid)
+        mid = a[:-5].split("-", 1)[1]
+        self.assertIn(f"thread discard {self.tid} {mid}", shown)
+        rc, out = self.cli("discard", self.tid, mid)
+        self.assertEqual(rc, 0)
+        self.assertIn("first", out)
+        self.assertEqual(ss.spool_count(self.tid), 2)
+        self.assertTrue(lean_threads.load()["threads"][self.tid]["requests"][0].get("handled_ts"))
+        rc, out = self.cli("discard", self.tid, "--all")
+        self.assertEqual(len([l for l in out.splitlines() if "discarded" in l]), 2)
+        self.assertEqual(ss.spool_count(self.tid), 0)
+
+    def test_startup_cleanup_discards_closed_spool_and_marks_answered_requests(self):
+        ss.spool_add(self.tid, "hello")
+        other = lean_threads.new("other", "do it")
+        with lean_threads._locked() as data:
+            data["threads"][self.tid]["closed"] = lean_threads.now_iso()
+        ts = lean_threads.datetime.datetime.fromtimestamp(time.time() - 3600).isoformat(timespec="seconds")
+        with lean_threads._locked() as data:
+            data["threads"][other]["requests"][0]["ts"] = ts
+            data["threads"][other]["report"] = {"kind": "done", "text": "ok", "ts": lean_threads.now_iso()}
+        lines = ss.startup_cleanup()
+        self.assertEqual(ss.spool_count(self.tid), 0)
+        self.assertTrue(any("discarded queued message" in l for l in lines))
+        self.assertTrue(any("marked handled" in l for l in lines))
+        self.assertTrue(lean_threads.load()["threads"][other]["requests"][0].get("handled_ts"))
