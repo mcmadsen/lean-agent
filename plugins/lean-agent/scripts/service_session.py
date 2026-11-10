@@ -1551,6 +1551,7 @@ def repush_questions(now=None, after=None):
         ensure_question_items()
     except Exception:
         pass
+    threads_ = None
     for w in lean_waiting.open_items():
         tid, qid = w.get("thread"), w.get("qid")
         if w.get("kind") != "question" or not tid or not qid or w.get("asked_at") or w.get("repushed"):
@@ -1561,7 +1562,9 @@ def repush_questions(now=None, after=None):
             continue
         if age_s < after:
             continue
-        t = lean_threads.load()["threads"].get(tid) or {}
+        if threads_ is None:
+            threads_ = lean_threads.load()["threads"]
+        t = threads_.get(tid) or {}
         q = next((q for q in lean_threads.open_questions(t) if q.get("id") == qid), None)
         if q is None:
             continue
@@ -1584,6 +1587,7 @@ def attention_items(now, after=NUDGE_AFTER, skip=()):
     for tid, age_s in lean_threads.undelivered_threads(now, after):
         out.append((f"undelivered:{tid}", f"{tid}: message undelivered ({int(age_s // 60)}m) -> lean-agent thread wake {tid} (or: thread discard {tid} <id>)"))
     data = lean_threads.load()
+    turns = lean_threads.turns_map()
     for tid, t in data["threads"].items():
         if tid in data["aliases"] or tid == "main" or lean_threads.no_nudge(t):
             continue
@@ -1595,7 +1599,7 @@ def attention_items(now, after=NUDGE_AFTER, skip=()):
             if age_q >= after and tid not in skip and q.get("kind") != "permission":
                 out.append((f"question:{tid}:{q['id']}", f'{tid} {q["id"]}: question unanswered ({int(age_q // 60)}m) -> '
                             f'lean-agent thread answer {tid} {q["id"]} "<answer>"'))
-        un = lean_threads.unstarted_request(t, [], now, after)
+        un = lean_threads.unstarted_request(t, [], now, after, turns=turns)
         if un and un["undelivered"] and not spool_pending(tid):
             out.append((f"unstarted:{tid}:{un.get('id')}", f"{tid}: request not started ({int((now - un['since']) // 60)}m) -> lean-agent thread wake {tid}"))
     return out
@@ -2120,29 +2124,68 @@ def session_workers(key):
         return []
 
 
-def startup_cleanup(log=None):
-    """Once per service start: queued messages of closed threads are discarded (logged), and requests the thread already
-    replied to are marked handled, so neither is nudged or redelivered again."""
+CLEANUP_LIMIT = 20  # seconds the startup cleanup may run before it gives up
+
+
+def cleanup_marker_path():
+    return lean_home("startup-cleanup.json")
+
+
+def startup_cleanup(log=None, limit=None, deadline=None):
+    """Once per lean-agent version (marker): queued messages of closed threads are discarded (logged), and requests the
+    thread already replied to are marked handled, so neither is nudged or redelivered again. Everything is computed from
+    one load and applied in one threads write; never raises."""
     import lean_threads
     out = []
+    started = time.time()
+    deadline = deadline or started + (CLEANUP_LIMIT if limit is None else limit)
     try:
+        if lean_common.read_json(cleanup_marker_path(), {}).get("version") == lean_common.plugin_version():
+            return out
         data = lean_threads.load()
+        turns = lean_threads.turns_map()
+        closed, handled = [], {}
         for tid, t in data["threads"].items():
             if tid in data["aliases"] or tid == "main":
                 continue
             if t.get("closed") and not t.get("parked") and spool_count(tid):
-                for mid, text in lean_threads.discard_spool(tid):
-                    out.append(f"{tid}: closed thread, discarded queued message {mid}")
+                closed.append(tid)
             for r in t.get("requests") or []:
-                if isinstance(r, dict) and not r.get("handled_ts") and lean_threads.answered_after(t, [], lean_threads._epoch(r.get("ts"))):
-                    if lean_threads.mark_handled(tid, r.get("id")):
-                        out.append(f"{tid}: request {r.get('id')} was already answered, marked handled")
+                if isinstance(r, dict) and not r.get("handled_ts") and lean_threads.answered_after(t, [], lean_threads._epoch(r.get("ts")), turns=turns):
+                    handled.setdefault(tid, set()).add(r.get("id"))
+        if time.time() > deadline:
+            out.append("startup cleanup timed out before applying anything; will retry next start")
+        else:
+            discarded = lean_threads.discard_spool_many(closed, handled)  # one threads write for both
+            for tid, mid, _text in discarded:
+                out.append(f"{tid}: closed thread, discarded queued message {mid}")
+            for tid, ids in handled.items():
+                for rid in sorted(map(str, ids)):
+                    out.append(f"{tid}: request {rid} was already answered, marked handled")
+            lean_common.write_json_atomic(cleanup_marker_path(), {"version": lean_common.plugin_version(), "ts": time.time()})
+        out.append(f"startup cleanup: {len(closed)} closed thread(s) with queued messages, "
+                   f"{sum(len(v) for v in handled.values())} answered request(s), {round(time.time() - started, 2)}s")
     except Exception as exc:  # noqa: BLE001 - never stops the service
         out.append(f"startup cleanup failed: {exc}")
     for line in out:
         if log:
             log(line, "info")
     return out
+
+
+def startup_cleanup_background(log=None, host=None, wait=30, limit=None):
+    """Run startup_cleanup in a daemon thread once the main session is up (or `wait` seconds passed)."""
+    def run():
+        try:
+            end = time.time() + wait
+            while host is not None and not host.alive() and time.time() < end:
+                time.sleep(0.5)
+            startup_cleanup(log, limit=limit)
+        except Exception:  # noqa: BLE001
+            pass
+    th = threading.Thread(target=run, daemon=True, name="startup-cleanup")
+    th.start()
+    return th
 
 
 class StuckWatch:
@@ -2389,15 +2432,22 @@ class Reporter(AutoClear):
             return
         self.unstarted_at = now
         data = lean_threads.load()
+        turns = lean_threads.turns_map()
+        done = {}
         for tid, t in data["threads"].items():
             if lean_threads.no_nudge(t):
                 continue
             for r in t.get("requests") or []:  # a request the thread already replied to is handled, never redelivered
                 if isinstance(r, dict) and r.get("undelivered") and not r.get("handled_ts") \
-                        and lean_threads.answered_after(t, [], lean_threads._epoch(r.get("ts"))):
-                    lean_threads.mark_handled(tid, r.get("id"))
-                    t = lean_threads.load()["threads"].get(tid) or t
-            un = lean_threads.unstarted_request(t, [], now, _knob("LEAN_AGENT_UNSTARTED_AFTER", UNSTARTED_AFTER))
+                        and lean_threads.answered_after(t, [], lean_threads._epoch(r.get("ts")), turns=turns):
+                    done.setdefault(tid, set()).add(r.get("id"))
+        if done:
+            lean_threads.mark_handled_many(done)
+            data = lean_threads.load()
+        for tid, t in data["threads"].items():
+            if lean_threads.no_nudge(t):
+                continue
+            un = lean_threads.unstarted_request(t, [], now, _knob("LEAN_AGENT_UNSTARTED_AFTER", UNSTARTED_AFTER), turns=turns)
             if not un or not un["undelivered"] or not un["id"] or not un["text"] or spool_pending(tid):
                 continue
             if not lean_threads.mark_redelivered(tid, un["id"]):
@@ -2420,7 +2470,7 @@ class Reporter(AutoClear):
     def main_tick(self):
         if not getattr(self, "cleaned", False):
             self.cleaned = True
-            startup_cleanup(self.log)
+            startup_cleanup_background(self.log, self.host)
         try:
             if lean_auth.recheck(self.now()):
                 self.log("sign-in works again: chases and restarts resumed")

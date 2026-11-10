@@ -173,7 +173,7 @@ def start_minutes():
     return GOAL_START_MIN
 
 
-def unstarted_request(t, evs, now, min_secs=0):
+def unstarted_request(t, evs, now, min_secs=0, turns=None):
     """The thread's request that was never started, or None: the oldest one never delivered to the session (undelivered
     True), else the newest delivered one when nothing but requests happened after it (no run, note, todo, push or report).
     {id, text, since, undelivered}. Only requests that are at least `min_secs` old count."""
@@ -186,7 +186,7 @@ def unstarted_request(t, evs, now, min_secs=0):
     if pick is None:
         return None
     since = _epoch(pick.get("ts"))
-    if pick.get("handled_ts") or answered_after(t, evs, since, rep_ts):
+    if pick.get("handled_ts") or answered_after(t, evs, since, rep_ts, turns):
         return None  # the thread already produced a turn after it (any reply, "no action needed" included)
     if not pick.get("undelivered") and (rep_ts >= since or any(e[2] != "request" and e[0] >= since for e in evs or [])):
         return None
@@ -196,7 +196,13 @@ def unstarted_request(t, evs, now, min_secs=0):
             "redelivered": bool(pick.get("redelivered_ts"))}
 
 
-def answered_after(t, evs, since, rep_ts=None):
+def turns_map():
+    """thread-turns.json read once (pass it as `turns` to answered_after / unstarted_request when looping over threads)."""
+    data = lean_common.read_json(lean_home("thread-turns.json"), {})
+    return data if isinstance(data, dict) else {}
+
+
+def answered_after(t, evs, since, rep_ts=None, turns=None):
     """True when the thread replied after a request made at `since` (epoch): its report, or a turn end recorded by the
     service that produced a report."""
     if rep_ts is None:
@@ -205,7 +211,7 @@ def answered_after(t, evs, since, rep_ts=None):
     if rep_ts and rep_ts >= since:
         return True
     tid = t.get("id")
-    rec = (lean_common.read_json(lean_home("thread-turns.json"), {}) or {}).get(tid) if tid else None
+    rec = (turns_map() if turns is None else turns).get(tid) if tid else None
     return bool(rec and rec.get("reported") and float(rec.get("ts") or 0) >= since)
 
 
@@ -219,6 +225,21 @@ def mark_handled(tid, rid=None):
                 r["handled_ts"] = now_iso()
                 r.pop("undelivered", None)
                 changed.append(r.get("id"))
+    return changed
+
+
+def mark_handled_many(by_thread):
+    """{tid: set(request ids)} marked handled in ONE locked write. Returns [(tid, rid)] that changed."""
+    changed = []
+    if not by_thread:
+        return changed
+    with _locked() as data:
+        for tid, rids in by_thread.items():
+            for r in (data["threads"].get(tid) or {}).get("requests") or []:
+                if isinstance(r, dict) and not r.get("handled_ts") and r.get("id") in rids:
+                    r["handled_ts"] = now_iso()
+                    r.pop("undelivered", None)
+                    changed.append((tid, r.get("id")))
     return changed
 
 
@@ -1694,6 +1715,37 @@ def spool_messages(tid):
         rec = lean_common.read_json(os.path.join(d, n), {}) or {}
         out.append((n[:-5].split("-", 1)[-1], n, rec if isinstance(rec, dict) else {}))
     return out
+
+
+def discard_spool_many(tids, handled=None):
+    """Drop every queued message of the threads `tids` and mark their requests handled in ONE locked write.
+    `handled` ({tid: request ids}) are marked handled in the same write. Returns [(tid, id, text)]."""
+    got = []
+    rids = {}
+    for tid in tids:
+        tid = resolve(norm(tid))
+        for mid, name, rec in spool_messages(tid):
+            try:
+                os.remove(os.path.join(lean_home("thread-inbox"), tid, name))
+            except OSError:
+                continue
+            got.append((tid, mid, str(rec.get("text") or "")))
+            if rec.get("rid"):
+                rids.setdefault(tid, set()).add(rec.get("rid"))
+        rids.setdefault(tid, set())
+    with _locked() as data:
+        for tid, ids in rids.items():
+            for r in (data["threads"].get(tid) or {}).get("requests") or []:
+                if isinstance(r, dict) and not r.get("handled_ts") and (r.get("id") in ids or r.get("undelivered")):
+                    r["handled_ts"] = now_iso()
+                    r["discarded"] = True
+                    r.pop("undelivered", None)
+        for tid, ids in (handled or {}).items():
+            for r in (data["threads"].get(tid) or {}).get("requests") or []:
+                if isinstance(r, dict) and not r.get("handled_ts") and r.get("id") in ids:
+                    r["handled_ts"] = now_iso()
+                    r.pop("undelivered", None)
+    return got
 
 
 def discard_spool(tid, ids=None):
