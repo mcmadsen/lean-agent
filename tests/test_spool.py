@@ -603,3 +603,33 @@ class ChaseCleanupTest(unittest.TestCase):
         self.assertTrue(any("discarded queued message" in l for l in lines))
         self.assertTrue(any("marked handled" in l for l in lines))
         self.assertTrue(lean_threads.load()["threads"][other]["requests"][0].get("handled_ts"))
+
+    def test_no_zero_thread_ids_and_unstarted_text_with_hash0_is_not_routed(self):
+        for bad in ("#0", "0", "t0", "T0", "#00"):
+            with self.assertRaises(ValueError):
+                lean_threads.norm(bad)
+        text = "Warning 10 console messages (#0 of 10) after restart"
+        tid, how, _ = lean_threads.route(text)
+        self.assertFalse(lean_threads.is_zero_id(tid))
+        self.assertFalse(any(lean_threads.is_zero_id(k) for k in lean_threads.load()["threads"]))
+        self.assertIsNone(lean_threads.EXPLICIT_RE.search("see #0 and t0"))
+
+    def test_restart_with_typed_main_message_creates_no_thread_or_spool(self):
+        lean_threads.route("Warning 10 console messages #0 look at it", session="main")
+        before = set(lean_threads.load()["threads"])
+        ss.hold_back_main()
+        ss.startup_cleanup()
+        self.assertEqual(set(lean_threads.load()["threads"]), before)
+        self.assertEqual(ss.spool_pending("main"), [])
+        self.assertFalse(any(ss.spool_pending(t) for t in before if lean_threads.is_zero_id(t)))
+
+    def test_cleanup_closes_zero_thread_and_notes_it_on_main(self):
+        with lean_threads._locked() as data:
+            data["threads"]["#0"] = {"id": "#0", "title": "#0 Warning 10 console mess", "created": lean_threads.now_iso(),
+                                     "last_message": None, "kind": "task",
+                                     "requests": [{"id": "r9", "ts": lean_threads.now_iso(), "text": "typed text", "undelivered": True}]}
+        lines = ss.startup_cleanup()
+        data = lean_threads.load()
+        self.assertTrue(data["threads"]["#0"].get("closed"))
+        self.assertTrue(any("typed text" in n for n in data["threads"]["main"]["notes"]))
+        self.assertTrue(any("zero-id" in l for l in lines))
