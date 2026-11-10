@@ -15054,9 +15054,19 @@ def cmd_service(a):
             return 0
         print("restarting (the orchestrator session shuts down first; this can take up to a minute)...", flush=True)
         old = mac_pid()
-        ctl_nowait("kickstart", "-k", target)
-        if wait_or_kill(old, service_wait) == "killed":
+        proc = ctl_nowait("kickstart", "-k", target)
+        res = wait_or_kill(old, service_wait)
+        if res == "killed":
             print("old service killed; starting the new one", flush=True)
+        if proc is not None:
+            try:
+                proc.wait(timeout=15 if old else service_wait)
+            except subprocess.TimeoutExpired:  # launchd is still waiting for the old one: unload and load it again
+                print(f"launchctl kickstart did not finish: unloading and loading the service again", flush=True)
+                proc.kill()
+                ctl("bootout", target, timeout=60)
+                ctl("bootstrap", f"gui/{uid}", path)
+        if res == "killed":
             ctl("kickstart", target, timeout=30)
         time.sleep(1)
         print("restarted" if mac_running()[0] else "restarting... (lean-agent service status / logs)")
