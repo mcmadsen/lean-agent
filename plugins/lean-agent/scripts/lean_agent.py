@@ -1852,8 +1852,8 @@ def newest_run(runs, ordinary=False, thread=None, live=()):
         rows = own or rows
     if not rows:
         return None
-    key, rid, _ = max(rows, key=lambda x: (x[0], x[1]))
-    return rid, key
+    best = max(range(len(rows)), key=lambda i: (rows[i][0], i))  # equal start (same second): the later ledger row wins
+    return rows[best][1], rows[best][0]
 
 
 def latest_run_id(runs=None, ordinary=False, thread=None):
