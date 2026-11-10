@@ -13737,7 +13737,7 @@ class TopicCardsTest(unittest.TestCase):
         self.assertIn(f"trimmed when loaded ({agent.CARD_LOAD_CAP:,} of {self.big['tokens']:,} tokens)", out)
         text, kept, total = agent.trim_for_load(self.big)
         self.assertLessEqual(kept, agent.CARD_LOAD_CAP)
-        self.assertIn("[trimmed:", text)
+        self.assertIn("(cut: ", text)
         self.assertEqual(total, self.big["tokens"])
 
     def test_split_dry_run_writes_nothing_and_apply_covers_every_learning_once(self):
