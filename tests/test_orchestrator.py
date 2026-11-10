@@ -7575,6 +7575,67 @@ class CliTest(unittest.TestCase):
         last = self.ledger()[-1]
         self.assertEqual((last["id"], last["status"]), (m["run"], "done"))
 
+    def test_a_resume_killed_at_its_caller_still_finishes_and_records(self):
+        p = self.start_run(turns="1", sleep="0")
+        p.communicate(timeout=scaled(60))
+        self.wait_for(lambda: not self.running_markers(), "the first turn to finish", 60)
+        rid = self.ledger()[-1]["id"]
+        before = len(self.ledger())
+        q = subprocess.Popen([sys.executable, CLI, "run", "--resume", rid, "go on"],
+                             env=dict(self.env, FAKE_TURNS="2", FAKE_TURN_SLEEP="0.7"), stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        self.addCleanup(lambda: q.poll() is None and q.kill())
+        self.addCleanup(lambda: [os.kill(m["pid"], signal.SIGKILL) for m in self.running_markers()
+                                 if m.get("pid") and service_alive(m["pid"])])
+        self.wait_for(lambda: [m for m in self.running_markers() if m.get("run") == rid and m.get("detached")],
+                      "the resume's detached marker")
+        os.killpg(q.pid, signal.SIGKILL)
+        q.wait(timeout=scaled(20))
+        self.wait_for(lambda: not self.running_markers(), "the resumed run to finish", 60)
+        self.assertGreater(len(self.ledger()), before)
+        self.assertEqual((self.ledger()[-1]["id"], self.ledger()[-1]["status"]), (rid, "done"))
+
+    def test_runs_last_is_the_newest_by_start_not_an_old_lost_run(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        os.makedirs(home, exist_ok=True)
+        rows = [{"id": "1001-000000-aaaa", "ts": "2026-01-01T10:00:00", "started": "2026-01-01T10:00:00", "status": "lost (no record)",
+                 "model": "haiku", "project": "proj", "task": "old lost", "why": "lost"},
+                {"id": "1001-120000-bbbb", "ts": "2026-01-02T12:05:00", "seconds": 300, "status": "done", "model": "haiku",
+                 "project": "proj", "task": "newer", "why": "x"},
+                # the lost row is written long after the run started: its ts must not make it the newest
+                {"id": "1001-110000-cccc", "ts": "2026-01-03T09:00:00", "started": "2026-01-02T11:00:00",
+                 "status": "lost (no record)", "model": "haiku", "project": "proj", "task": "lost later", "why": "lost"}]
+        with open(os.path.join(home, "ledger.jsonl"), "w") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in rows))
+        out = self.cli("runs", "--last").stdout
+        self.assertTrue(out.startswith("1001-120000-bbbb"), out)
+
+    def test_runs_show_names_the_running_turn_above_the_previous_summary(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        wd = os.path.join(home, "work", "r-show")
+        os.makedirs(wd)
+        with open(os.path.join(wd, "summary-1.txt"), "w") as fh:
+            fh.write("run r-show done: previous answer\n")
+        os.utime(os.path.join(wd, "summary-1.txt"), (1000, 1000))
+        with open(os.path.join(home, "ledger.jsonl"), "w") as fh:
+            fh.write(json.dumps({"id": "r-show", "ts": "2026-01-01T10:00:00", "status": "done", "model": "haiku", "project": "proj",
+                                 "task": "t", "why": "x", "workdir": wd}) + "\n")
+        os.makedirs(os.path.join(home, "running"), exist_ok=True)
+        live = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(live.kill)
+        marker = os.path.join(home, "running", "r-show.json")
+        with open(marker, "w") as fh:
+            json.dump({"pid": live.pid, "run": "r-show", "started": "2026-01-01T10:30:00", "task": "t", "model": "haiku",
+                       "project": "proj"}, fh)
+        out = self.cli("runs", "--show", "r-show").stdout
+        self.assertTrue(out.startswith("turn 2 running since 10:30 (previous summary below)\n"), out)
+        self.assertIn("previous answer", out)
+        with open(os.path.join(wd, "summary-2.txt"), "w") as fh:  # the new turn wrote its summary
+            fh.write("run r-show done: new answer\n")
+        out = self.cli("runs", "--show", "r-show").stdout
+        self.assertNotIn("running since", out)
+        self.assertIn("new answer", out)
+
     def test_run_prints_what_it_printed_before_with_a_detached_worker(self):
         self.cli("learn", self.proj, "--name", "proj")
         p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "look around")

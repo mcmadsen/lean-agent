@@ -700,8 +700,15 @@ uncommitted changes and new untracked files.
   the reason; `--apply` removes them. It checks `--head`, HEAD, the default branch and every base branch your
   reviews used, matches partial paths (relative to a package folder, in backticks, with `:line`), and keeps a
   line whose symbol is found even when its path is wrong.
+- **`--cards` names:** `--cards a, b,` works (spaces, quotes and a trailing comma are ignored); a name is an exact id,
+  else a title/slug, else a unique partial. An unknown or ambiguous name refuses the run before it starts, naming it;
+  the start line prints `cards: a, b`.
+- **Runs:** `runs --last` is the newest run by start time (any status; a lost run never beats a newer one), the calling
+  thread's own runs first. `runs --show <id>` of a resumed run whose new turn is still going starts with
+  `turn N running since HH:MM (previous summary below)`. A `run --resume` detaches from its caller right after it is
+  registered, so a session restart does not kill it; a lost run's record carries the reason.
 - **Card size:** a card above ~1,500 tokens is cut to that when loaded into a worker (the cut is marked in the
-  text); `lean-agent cards <project>` flags such cards ("trimmed when loaded (1,500 of N tokens)") and `doctor` warns.
+  text, ending `(cut: N more lines; full card: <absolute path>)`; table-shaped cards get twice that); `lean-agent cards <project>` flags such cards ("trimmed when loaded (1,500 of N tokens)") and `doctor` warns.
   `review learn` keeps its cards at ~800 tokens by grouping lessons by topic into `review-checklist-<topic>` cards
   (tests, docs, frontend, cache-sync, api, security, build-ci, other); a review loads the topic cards that match the
   changed paths, and `suggest` lists them with sizes. Split an existing big card once with

@@ -1829,11 +1829,39 @@ INTERNAL_ROLES = lean_common.INTERNAL_ROLES
 NO_RESUME_ROLES = ("librarian", "advisor", "composer", "gap-decider", "chaser", "pr-status")  # one-shot helpers with their own grants
 
 
-def latest_run_id(runs=None, ordinary=False):
-    """The id of the latest run in `runs` (default: the whole ledger); dies when there is none. `ordinary` skips
-    role runs (reviewers, librarian, advisor ...): `run --resume last` is for the orchestrator's own work."""
-    runs = [r for r in (ledger() if runs is None else runs) if not (ordinary and r.get("role"))]
-    return runs[-1]["id"] if runs else die("no ordinary runs yet (only reviewer/helper runs)" if ordinary and ledger() else "no runs yet")
+def run_start_key(r):
+    """Sortable start time of a ledger row or running marker: its own `started`, else its end time minus its seconds,
+    else its end time."""
+    if r.get("started"):
+        return str(r["started"])[:19]
+    ts = str(r.get("ts") or "")[:19]
+    try:
+        end = datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S")
+        return (end - datetime.timedelta(seconds=float(r.get("seconds") or 0))).strftime("%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return ts
+
+
+def newest_run(runs, ordinary=False, thread=None, live=()):
+    """(id, start key) of the newest run by start time, any status (a lost run is a run: it only loses to newer ones).
+    From a thread session (`thread`) that thread's runs win when it has any. `live`: [(id, marker)] of runs in progress."""
+    rows = [(run_start_key(r), r["id"], r.get("thread")) for r in runs if r.get("id") and not (ordinary and r.get("role"))]
+    rows += [(run_start_key(m), rid, m.get("thread")) for rid, m in live if not (ordinary and m.get("role"))]
+    if thread:
+        own = [x for x in rows if x[2] == thread]
+        rows = own or rows
+    if not rows:
+        return None
+    key, rid, _ = max(rows, key=lambda x: (x[0], x[1]))
+    return rid, key
+
+
+def latest_run_id(runs=None, ordinary=False, thread=None):
+    """The id of the newest run by start time in `runs` (default: the whole ledger plus runs in progress); dies when
+    there is none. `ordinary` skips role runs (reviewers, librarian, advisor ...): `run --resume last` is for the
+    orchestrator's own work."""
+    got = newest_run(ledger() if runs is None else runs, ordinary, thread, live_runs() if runs is None else ())
+    return got[0] if got else die("no ordinary runs yet (only reviewer/helper runs)" if ordinary and ledger() else "no runs yet")
 
 
 def new_todo(slug, title):
@@ -2593,6 +2621,11 @@ def _cmd_run(a):
     early_register(a, task, prev)  # a resumed run is "running" again from here (runs --wait waits for it)
     if not task:
         die("no task given")
+    if prev:  # a resume is detached now, not after the slot wait and the checks: a session restart in between must not kill it
+        rc = detach_run((prev.get("workdir") or home("work", prev["id"])), prev["id"])
+        if rc is not None:  # the caller's copy: the supervisor owns the marker from here
+            EARLY_RUN.clear()
+            return rc
 
     model = check_model_why(a, prev)
     wait_for_slot(a)
@@ -10048,6 +10081,21 @@ def uncollected_runs(live_ids=()):
     return uncollected_ids(home(), live_ids)
 
 
+def running_turn_note(run_id, files):
+    """For a run whose newest turn (a `run --resume`) is still going: 'turn N running since HH:MM (previous summary
+    below)', else ''. Once the turn wrote its summary, that summary is the newest one and there is no note."""
+    m = dict(live_runs()).get(run_id)
+    if not m or not files or not m.get("started"):
+        return ""
+    try:
+        began = datetime.datetime.strptime(str(m["started"])[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
+        if os.path.getmtime(files[-1]) >= began:
+            return ""
+    except (ValueError, OSError):
+        return ""
+    return f"turn {len(files) + 1} running since {str(m['started'])[11:16]} (previous summary below)"
+
+
 def run_summary_files(r, prefix="summary", ext="txt"):
     """The saved summary (or details) files of a run, oldest turn first (the latest is last)."""
     files = sorted(glob.glob(os.path.join(r.get("workdir") or "", f"{prefix}-*.{ext}")),
@@ -10285,7 +10333,7 @@ def cmd_runs(a):
             print("No runs in progress.")
         return
     if a.show or a.tokens:
-        rid = a.show if a.show and a.show != "last" else latest_run_id(runs)
+        rid = a.show if a.show and a.show != "last" else latest_run_id(runs, thread=caller_thread())
         r = next((x for x in reversed(runs) if x["id"] == rid), None)
         if not r:
             die(f"no run {rid!r}" if rid else "no runs yet")
@@ -10300,6 +10348,9 @@ def cmd_runs(a):
                 die(f"run {r['id']} has no report saved (its whole answer is in `lean-agent runs --show {r['id']}`)")
         else:
             text = read_text(files[-1])
+            note = running_turn_note(r["id"], files)
+            if note:
+                text = note + "\n" + text
         mark_collected(r["id"])
         if a.tail:
             text = "".join(text.splitlines(True)[-a.tail:])
@@ -10340,9 +10391,15 @@ def cmd_runs(a):
             print(f"({len(files)} turns of this run; this is the latest: {files[-1]})")
         return
     if a.last:
-        rid = latest_run_id(runs)
+        live = live_runs()
+        rid = newest_run(runs, thread=caller_thread(), live=live)
+        rid = rid[0] if rid else latest_run_id(runs)
         r = next((x for x in reversed(runs) if x["id"] == rid), None)
-        print(f"{rid}  {run_summary_line(r)}" if r else rid)
+        m = dict(live).get(rid)
+        if m and not r:
+            print(f"{rid}  running since {str(m.get('started') or '?')[11:16]}  {str(m.get('task') or '')[:70]}")
+        else:
+            print(f"{rid}  {run_summary_line(r)}" if r else rid)
         return
     if a.pr or a.item or a.grep:
         q = a.pr or a.item or a.grep
