@@ -1664,7 +1664,7 @@ class CliTest(unittest.TestCase):
         out = self.cli("limits").stdout
         self.assertIn("Last 5 hours: lean-agent 50,000 | all Claude Code here 70,000", out)
         self.assertIn("Last 7 days : lean-agent 75,000 | all Claude Code here 95,000", out)
-        self.assertIn("by model: fable 50,000, sonnet 20,000, opus 20,000, haiku 5,000", out)
+        self.assertIn("by model: fable 40,000, sonnet 20,000, opus 20,000, haiku 5,000", out)
         self.cli("limits", "--5h", "40000", "--week", "1000000")
         self.assertIn("50,000 of 40,000 (125%), frees up from", self.cli("limits").stdout)
         p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False)
@@ -1691,7 +1691,7 @@ class CliTest(unittest.TestCase):
         out = self.cli("limits", "calibrate", "session=20", "week=10", "fable=4").stdout
         self.assertIn("default weights", out)
         self.assertIn("plan ≈ 20%", out)
-        self.assertIn("fable 10,000 (≈ 4% of its own limit)", out)
+        self.assertIn("fable 8,000 (≈ 4% of its own limit)", out)
         self.cli("limits", "--session-pct", "15")
         p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "t", check=False)
         self.assertEqual(p.returncode, 3)
