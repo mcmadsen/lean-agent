@@ -1428,7 +1428,7 @@ def check_claims(claims, reply, calls):
 
 
 def build_append(project, cards, read_only=False, allow_send=None, chrome=False, role_rule="", answer_lines=0,
-                 *, branch_rule, claims=None, internal=False):
+                 *, branch_rule, claims=None, internal=False, card_dir=None):
     """internal: a helper role (advisor, reviewer ...) with its own rules, not a worker that executes a task.
     branch_rule: the worker may create a branch itself (it writes, and no branch was made for it)."""
     parts = [WORKER_PROTOCOL.format(
@@ -1449,7 +1449,7 @@ def build_append(project, cards, read_only=False, allow_send=None, chrome=False,
     if cards:
         parts.append("# Project context (selected for this task)\n")
         for c in cards:
-            parts.append(f"## [{c['id']}] {c['title']}\n{trim_for_load(c)[0]}\n")
+            parts.append(f"## [{c['id']}] {c['title']}\n{trim_for_load(c, card_dir)[0]}\n")
     return "\n".join(parts)
 
 
@@ -1829,11 +1829,39 @@ INTERNAL_ROLES = lean_common.INTERNAL_ROLES
 NO_RESUME_ROLES = ("librarian", "advisor", "composer", "gap-decider", "chaser", "pr-status")  # one-shot helpers with their own grants
 
 
-def latest_run_id(runs=None, ordinary=False):
-    """The id of the latest run in `runs` (default: the whole ledger); dies when there is none. `ordinary` skips
-    role runs (reviewers, librarian, advisor ...): `run --resume last` is for the orchestrator's own work."""
-    runs = [r for r in (ledger() if runs is None else runs) if not (ordinary and r.get("role"))]
-    return runs[-1]["id"] if runs else die("no ordinary runs yet (only reviewer/helper runs)" if ordinary and ledger() else "no runs yet")
+def run_start_key(r):
+    """Sortable start time of a ledger row or running marker: its own `started`, else its end time minus its seconds,
+    else its end time."""
+    if r.get("started"):
+        return str(r["started"])[:19]
+    ts = str(r.get("ts") or "")[:19]
+    try:
+        end = datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S")
+        return (end - datetime.timedelta(seconds=float(r.get("seconds") or 0))).strftime("%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return ts
+
+
+def newest_run(runs, ordinary=False, thread=None, live=()):
+    """(id, start key) of the newest run by start time, any status (a lost run is a run: it only loses to newer ones).
+    From a thread session (`thread`) that thread's runs win when it has any. `live`: [(id, marker)] of runs in progress."""
+    rows = [(run_start_key(r), r["id"], r.get("thread")) for r in runs if r.get("id") and not (ordinary and r.get("role"))]
+    rows += [(run_start_key(m), rid, m.get("thread")) for rid, m in live if not (ordinary and m.get("role"))]
+    if thread:
+        own = [x for x in rows if x[2] == thread]
+        rows = own or rows
+    if not rows:
+        return None
+    key, rid, _ = max(rows, key=lambda x: (x[0], x[1]))
+    return rid, key
+
+
+def latest_run_id(runs=None, ordinary=False, thread=None):
+    """The id of the newest run by start time in `runs` (default: the whole ledger plus runs in progress); dies when
+    there is none. `ordinary` skips role runs (reviewers, librarian, advisor ...): `run --resume last` is for the
+    orchestrator's own work."""
+    got = newest_run(ledger() if runs is None else runs, ordinary, thread, live_runs() if runs is None else ())
+    return got[0] if got else die("no ordinary runs yet (only reviewer/helper runs)" if ordinary and ledger() else "no runs yet")
 
 
 def new_todo(slug, title):
@@ -2489,14 +2517,51 @@ def run_check_cli(argv):
     return 1
 
 
+def parse_card_names(spec, lib):
+    """(ids, missing, ambiguous) for a --cards value: comma list, spaces and quotes around names and a trailing comma
+    are fine; a name is an exact id, then (case-insensitive) an id, a title or a slug-form of the title, then a unique
+    partial match. 'none' and 'auto' pass through."""
+    ids, missing = [], []
+    for raw in re.split(r"[,\n]", spec or ""):
+        n = raw.strip().strip("'\"`").strip()
+        if not n:
+            continue
+        if n in ("none", "auto"):
+            ids.append(n)
+            continue
+        low = n.lower()
+        slug = re.sub(r"[^a-z0-9]+", "-", low).strip("-")
+        found = n if n in lib else None
+        for test in (lambda c: c["id"].lower() == low or c["id"].lower() == slug,
+                     lambda c: c.get("title", "").lower() == low or re.sub(r"[^a-z0-9]+", "-", c.get("title", "").lower()).strip("-") == slug,
+                     lambda c: slug in c["id"].lower() or low in c.get("title", "").lower()):
+            if found:
+                break
+            hit = [c["id"] for c in lib.values() if test(c) and not c.get("archived")]
+            if len(hit) == 1:
+                found = hit[0]
+            elif hit:
+                missing.append(f"{n} (ambiguous: {', '.join(hit[:4])})")
+                found = ""
+                break
+        if found:
+            if found not in ids:
+                ids.append(found)
+        elif found is None:
+            missing.append(n)
+    return ids, missing
+
+
 def preflight_run_args(a, slug, project, read_only):
     """Every cheap argument check of a new run, before a worktree or its setup command exists: a refused start leaves
     nothing behind."""
     lib = {c["id"]: c for c in load_cards(slug)}
     if getattr(a, "card_list", None) is None:
-        missing = [x for x in (a.cards or "").split(",") if x and x not in ("none", "auto") and x not in lib]
+        ids, missing = parse_card_names(a.cards, lib)
         if missing:
             die_try(f"unknown card(s): {', '.join(missing)} (see: lean-agent cards {slug})", card=set(missing))
+        if a.cards:
+            a.cards = ",".join(ids)  # the normalized list: later code splits on commas only
     check_allow_cmd([c.strip() for c in getattr(a, "allow_cmd", None) or [] if c.strip()], read_only)
     clean_allow_edit(getattr(a, "allow_edit", None), read_only)
     wt_ref = getattr(a, "worktree", None)
@@ -2556,6 +2621,11 @@ def _cmd_run(a):
     early_register(a, task, prev)  # a resumed run is "running" again from here (runs --wait waits for it)
     if not task:
         die("no task given")
+    if prev:  # a resume is detached now, not after the slot wait and the checks: a session restart in between must not kill it
+        rc = detach_run((prev.get("workdir") or home("work", prev["id"])), prev["id"])
+        if rc is not None:  # the caller's copy: the supervisor owns the marker from here
+            EARLY_RUN.clear()
+            return rc
 
     model = check_model_why(a, prev)
     wait_for_slot(a)
@@ -2594,7 +2664,7 @@ def _cmd_run(a):
             fh.write(build_append(project, [lib[c] for c in prev.get("cards", []) if c in lib], read_only,
                                   a.allow_send, bool(chrome_spec), role_rule, answer_lines,
                                   branch_rule=not read_only and not auto_branch, claims=claims,
-                                  internal=role_rule_internal(a, prev)))
+                                  internal=role_rule_internal(a, prev), card_dir=workdir))
     else:
         slug, project = resolve_project(a.project)
         sync_memory(slug)
@@ -2631,7 +2701,10 @@ def _cmd_run(a):
                 task += ("\n\n(You work in a lean-agent worktree. If the task has several items, commit each one when "
                          "it's done, before the next, so a turn limit never leaves all of the work uncommitted.)")
         lib = {c["id"]: c for c in load_cards(slug)}
-        wanted = [x for x in (a.cards or "").split(",") if x and x != "none"]
+        wanted, _missing = parse_card_names(a.cards, lib)
+        if _missing:
+            die_try(f"unknown card(s): {', '.join(_missing)} (see: lean-agent cards {slug})", card=set(_missing))
+        wanted = [x for x in wanted if x != "none"]
         if getattr(a, "card_list", None) is not None:  # chosen by the caller (e.g. `review`)
             cards = a.card_list
         elif "auto" in wanted:
@@ -2866,6 +2939,7 @@ def _cmd_run(a):
         return rc
     if (getattr(a, "role", None) or (prev or {}).get("role")) not in INTERNAL_ROLES:
         print(f"run {run_id} started · {model} · {slug}" + (" (resumed)" if prev else "") +
+              (f" · cards: {', '.join(sorted(c['id'] for c in cards if not c.get('is_rule')))}" if cards else "") +
               f" · see it later with `lean-agent runs --show {run_id}`", file=sys.stderr, flush=True)
     seed_collected(home())  # runs recorded from here on can be told apart from a ledger older than collected.json
     running_key = launch_key or run_id  # every run is listed while it runs (the status line)
@@ -4525,6 +4599,7 @@ REVIEW_CARDS = {
 # ---- topic cards: a learnings card stays small by splitting into <base>-<topic> cards
 
 CARD_SPLIT_TOKENS = 800    # learn/--split keep each learnings card at or under this
+CARD_TABLE_FACTOR = 2      # table-shaped cards load up to this times CARD_LOAD_CAP
 CARD_LOAD_CAP = 1500       # a card above this is cut to it when loaded into a worker (see trim_for_load)
 TOPICS = {  # topic: (keywords in a learning, regex on a changed file path, trigger words for the card title)
     "security": (r"\b(security|auth\w*|token|secrets?|password|credential\w*|permission\w*|sanitiz\w*|escap\w*|injection|csrf|xss|encrypt\w*)\b",
@@ -4612,23 +4687,42 @@ def split_plan(card):
             for t in TOPICS for n, chunk in enumerate(pack_lines(by.get(t, [])), 1)]
 
 
-def trim_for_load(c):
-    """(text, kept tokens, total tokens): a card above CARD_LOAD_CAP is cut at a line to fit it when loaded."""
-    total = est_tokens(c["text"])
-    if total <= CARD_LOAD_CAP or c.get("is_rule"):
+def table_shaped(c):
+    lines = [l for l in c["text"].splitlines() if l.strip()]
+    return bool(lines) and sum(l.lstrip().startswith("|") for l in lines) * 2 >= len(lines)
+
+
+def card_load_cap(c):
+    """Table cards cost many tokens per row but are useless half cut: they get a bigger cap (the total card budget
+    still applies)."""
+    return CARD_LOAD_CAP * CARD_TABLE_FACTOR if table_shaped(c) else CARD_LOAD_CAP
+
+
+def trim_for_load(c, full_dir=None):
+    """(text, kept tokens, total tokens): a card above its load cap is cut at a line to fit it when loaded. The cut
+    ends with the number of lines left out and the absolute path of the full card."""
+    total, cap = est_tokens(c["text"]), card_load_cap(c)
+    if total <= cap or c.get("is_rule"):
         return c["text"], total, total
-    kept, tok = [], 0
-    for l in c["text"].splitlines():
-        if tok + est_tokens(l) + 1 > CARD_LOAD_CAP:
+    kept, tok, all_lines = [], 0, c["text"].splitlines()
+    for l in all_lines:
+        if tok + est_tokens(l) + 1 > cap:
             break
         kept.append(l)
         tok += est_tokens(l) + 1
-    kept.append(f"[trimmed: {tok} of {total} tokens loaded; split it: lean-agent cards <project> --split {c['id']}]")
+    path = os.path.join(full_dir or home("work", "cards"), re.sub(r"[^\w.-]", "_", c["id"]) + ".md")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(c["text"].rstrip() + "\n")
+    except OSError:
+        path = library_path(c.get("project") or "") if c.get("project") else path
+    kept.append(f"(cut: {len(all_lines) - len(kept)} more lines; full card: {os.path.abspath(path)})")
     return "\n".join(kept), tok, total
 
 
 def load_tokens(c):
-    return c["tokens"] if c.get("is_rule") else min(c["tokens"], CARD_LOAD_CAP)
+    return c["tokens"] if c.get("is_rule") else min(c["tokens"], card_load_cap(c))
 
 
 def cmd_cards_split(slug, cards, a):
@@ -9987,6 +10081,21 @@ def uncollected_runs(live_ids=()):
     return uncollected_ids(home(), live_ids)
 
 
+def running_turn_note(run_id, files):
+    """For a run whose newest turn (a `run --resume`) is still going: 'turn N running since HH:MM (previous summary
+    below)', else ''. Once the turn wrote its summary, that summary is the newest one and there is no note."""
+    m = dict(live_runs()).get(run_id)
+    if not m or not files or not m.get("started"):
+        return ""
+    try:
+        began = datetime.datetime.strptime(str(m["started"])[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
+        if os.path.getmtime(files[-1]) >= began:
+            return ""
+    except (ValueError, OSError):
+        return ""
+    return f"turn {len(files) + 1} running since {str(m['started'])[11:16]} (previous summary below)"
+
+
 def run_summary_files(r, prefix="summary", ext="txt"):
     """The saved summary (or details) files of a run, oldest turn first (the latest is last)."""
     files = sorted(glob.glob(os.path.join(r.get("workdir") or "", f"{prefix}-*.{ext}")),
@@ -10224,7 +10333,7 @@ def cmd_runs(a):
             print("No runs in progress.")
         return
     if a.show or a.tokens:
-        rid = a.show if a.show and a.show != "last" else latest_run_id(runs)
+        rid = a.show if a.show and a.show != "last" else latest_run_id(runs, thread=caller_thread())
         r = next((x for x in reversed(runs) if x["id"] == rid), None)
         if not r:
             die(f"no run {rid!r}" if rid else "no runs yet")
@@ -10239,6 +10348,9 @@ def cmd_runs(a):
                 die(f"run {r['id']} has no report saved (its whole answer is in `lean-agent runs --show {r['id']}`)")
         else:
             text = read_text(files[-1])
+            note = running_turn_note(r["id"], files)
+            if note:
+                text = note + "\n" + text
         mark_collected(r["id"])
         if a.tail:
             text = "".join(text.splitlines(True)[-a.tail:])
@@ -10279,9 +10391,15 @@ def cmd_runs(a):
             print(f"({len(files)} turns of this run; this is the latest: {files[-1]})")
         return
     if a.last:
-        rid = latest_run_id(runs)
+        live = live_runs()
+        rid = newest_run(runs, thread=caller_thread(), live=live)
+        rid = rid[0] if rid else latest_run_id(runs)
         r = next((x for x in reversed(runs) if x["id"] == rid), None)
-        print(f"{rid}  {run_summary_line(r)}" if r else rid)
+        m = dict(live).get(rid)
+        if m and not r:
+            print(f"{rid}  running since {str(m.get('started') or '?')[11:16]}  {str(m.get('task') or '')[:70]}")
+        else:
+            print(f"{rid}  {run_summary_line(r)}" if r else rid)
         return
     if a.pr or a.item or a.grep:
         q = a.pr or a.item or a.grep

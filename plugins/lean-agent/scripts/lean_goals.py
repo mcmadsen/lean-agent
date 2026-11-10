@@ -710,7 +710,8 @@ def settle_orphan_markers(data=None):
             continue
         row = {"id": rid, "ts": lean_common.now_iso(), "started": started, "project": m.get("project"),
                "model": m.get("model") or "?", "task": str(m.get("task") or "")[:300], "thread": m.get("thread"),
-               "role": m.get("role"), "status": lean_common.LOST_NO_RECORD, "why": "lost", "turns": None, "seconds": None,
+               "role": m.get("role"), "status": lean_common.LOST_NO_RECORD, "why": "lost",
+               "reason": m.get("lost_reason") or "its process ended before a result was recorded", "turns": None, "seconds": None,
                "usage": {}, "units": 0, "cost_usd": None}
         try:
             with open(os.path.join(home_, "ledger.jsonl"), "a", encoding="utf-8") as fh:
