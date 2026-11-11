@@ -42,6 +42,7 @@ import lean_rules  # noqa: E402
 import push_guard  # noqa: E402
 import lean_schedule  # noqa: E402
 import lean_threads  # noqa: E402
+import lean_private  # noqa: E402
 import lean_find  # noqa: E402
 import lean_feedback  # noqa: E402
 import lean_goals  # noqa: E402
@@ -835,7 +836,11 @@ def cmd_projects(a):
     projs = projects()
     if not projs:
         print("No projects yet. Add one: lean-agent learn <path>")
+    if lean_private.hidden():
+        print("(private projects hidden: lean-agent private on)")
     for slug, v in sorted(projs.items()):
+        if lean_private.hides(project=slug):
+            continue
         cards = [c for c in load_cards(slug) if not c.get("archived")]
         print(f"{slug:<32} {len(cards):>3} cards  {v['path']}" + ("  [private]" if v.get("private") else ""))
 
@@ -1175,6 +1180,8 @@ def recommend_model(ttype, task=None):
 
 def cmd_suggest(a):
     slug, _ = resolve_project(a.project)
+    if lean_private.hides(project=slug):
+        die(lean_private.HELD_MSG)
     sync_memory(slug)
     ttype = task_type(a.task)
     picked, reasons, closest = suggest(slug, a.task, a.max_tokens, ttype, explain=True, strict=True,
@@ -2608,6 +2615,8 @@ def preflight_run_args(a, slug, project, read_only):
 
 def _cmd_run(a):
     lean_common.WAIT_NOTICE[:] = [run_wait_notice]
+    if lean_private.hidden() and (push_guard.private_slug_of(a.project or os.getcwd())):
+        die(lean_private.HELD_MSG)
     tag = lean_threads.resolve_tag()
     print(f"lean-agent run: starting" + (f" (thread {tag})" if tag else "") + (f" · {a.project}" if a.project else "")
           + " · checking the arguments", file=sys.stderr, flush=True)
@@ -6563,6 +6572,8 @@ def reviews_project(a):
 def cmd_reviews(a):
     """`reviews --branch X`: every review run of the branch with its verdict, counts, cost and what is left open."""
     slug, path = reviews_project(a)
+    if lean_private.hides(project=slug):
+        die(lean_private.HELD_MSG)
     rows = branch_review_rows(slug, path, a.branch)
     br = branch_of(path, a.branch) or bare_ref(a.branch)
     declined = [d for d in read_jsonl(declined_path(slug))
@@ -8114,6 +8125,8 @@ def cmd_worktrees(a):
     slugs = [resolve_project(a.project)[0]] if a.project else sorted(idx)
     found = False
     for slug in slugs:
+        if lean_private.hides(project=slug):
+            continue
         if idx.get(slug) and (projects().get(slug) or {}).get("path"):
             idx = sync_worktree_registry(slug, projects()[slug]["path"], write=False)
         for name, w in sorted((idx.get(slug) or {}).items()):
@@ -10374,7 +10387,7 @@ def cmd_runs(a):
         return wait_for_runs(a.wait, a.timeout)
     if getattr(a, "lost", False) or getattr(a, "show", None):
         settle_markers()
-    runs = ledger()
+    runs = [r for r in ledger() if not lean_private.hides(r)]
     if a.project:
         slug, _ = resolve_project(a.project)
         runs = [r for r in runs if r["project"] == slug]
@@ -10784,6 +10797,7 @@ def cmd_doctor(a):
 
     import shutil
     report(bool(shutil.which("lean-agent")), "lean-agent is on PATH", "run ./install in your lean-agent clone")
+    report(None if lean_private.hidden() else True, private_status_line())
     h = home("home")
     if a.fix:
         prepare_home()
@@ -12293,6 +12307,85 @@ def cmd_branch_name(a):
     return 0
 
 
+def private_status_line():
+    names = sorted(lean_private.private_slugs())
+    if lean_private.hidden():
+        return (f"private mode: off \u00b7 private projects hidden ({', '.join(names) or 'none marked'}); "
+                "show them again: lean-agent private on")
+    return (f"private mode: on \u00b7 private projects shown ({', '.join(names) or 'none marked'}); "
+            "hide them and stop their sessions: lean-agent private off")
+
+
+def private_off():
+    data = lean_threads.load()
+    ps = lean_private.private_slugs()
+    stopped = lean_private.read_stopped()
+    live = []
+    try:
+        live = [x["thread"] for x in open_thread_sessions()]
+    except Exception:  # noqa: BLE001
+        live = [k for k, t in data["threads"].items() if t.get("session_on")]
+    for tid in live:
+        if not lean_private.thread_is_private(tid, data, ps):
+            continue
+        try:
+            park_thread_session(tid, by="private", keep_spool=True)
+            lean_threads.set_session(tid, parked_note=lean_private.STOPPED_BY)
+            stopped.append(tid)
+            print(f"{tid}: {lean_private.STOPPED_BY} (checkpointed)")
+        except (RuntimeError, ValueError) as exc:
+            print(f"{tid}: could not stop: {exc}")
+    lean_private.write_stopped(stopped)
+    lean_private.set_hidden(True)
+    snap = service_session.read_snapshot()
+    if snap is not None:
+        hid = lean_threads.hidden_threads(lean_threads.load())
+        service_session.write_snapshot([t for t in snap["threads"] if t not in hid], snap["ts"])
+
+
+def private_on():
+    lean_private.set_hidden(False)
+    data = lean_threads.load()
+    for tid in lean_private.read_stopped():
+        t = data["threads"].get(tid)
+        if not t or lean_threads.session_refusal(tid, data) or t.get("parked_by") != "private":
+            continue
+        try:
+            lean_threads.set_session(tid, parked=None, parked_summary=None, parked_by=None, parked_note=None)
+            if service_session.alive():
+                start_thread_session(tid, t, prompt="Your session was stopped by `private off` and is back (`private on`). Continue where you left off.")
+                print(f"{tid}: restarted")
+            else:
+                print(f"{tid}: will restart with the next message (no service session is up)")
+        except (RuntimeError, ValueError) as exc:
+            print(f"{tid}: could not restart: {exc}")
+    lean_private.write_stopped([])
+    ps = lean_private.private_slugs()
+    path = service_session.reports_path()
+    held = {}
+    with lean_common.file_lock(path):
+        d = lean_common.read_json(path, {})
+        items = d.get("items") if isinstance(d.get("items"), list) else []
+        for i in items:
+            if lean_private.thread_is_private(i.get("thread"), data, ps):
+                i["ts"] = time.time()  # held reports must not age out
+                held[i["thread"]] = held.get(i["thread"], 0) + 1
+        if held:
+            lean_common.write_json_atomic(path, {"items": items})
+    for tid, n in sorted(held.items()):
+        print(f"{tid}: {n} held report(s) delivered to the front desk")
+
+
+def cmd_private(a):
+    state = a.state or "status"
+    if state == "off":
+        private_off()
+    elif state == "on":
+        private_on()
+    print(private_status_line())
+    return 0
+
+
 def cmd_config(a):
     if a.name == "private":
         vals = [v for v in [a.value] + list(a.more or []) if v]
@@ -12306,6 +12399,7 @@ def cmd_config(a):
               "disabled (git push, remote add/set-url, gh/az create, worktree push); no override. "
               f"off: lean-agent config private {slug} off" if on else
               f" \u00b7 set: lean-agent config private {slug} on"))
+        print(private_status_line())
         return 0
     if a.name == "branch-rules":
         slug, _ = resolve_project(a.project or os.getcwd())
@@ -13599,6 +13693,8 @@ def thread_session_tid(raw):
     t = lean_threads.load()["threads"].get(tid)
     if not t:
         die(f"no such thread {tid}")
+    if tid in lean_threads.hidden_threads(lean_threads.load()):
+        die(f"{tid} is private: {lean_private.HELD_MSG}")
     return tid, t
 
 
@@ -14335,6 +14431,7 @@ SHORTCUTS = (
     ("stop21 / stop 21 22", "stop the SESSION of t21 (t22 ...) only: checkpointed, the thread stays open, queued messages are kept, the next message restarts it"),
     ("stop idle [2h]", "stop every session idle that long (default: the session-idle-stop limit)"),
     ("o21", "reopen t21 and continue its previous transcript (`thread reopen t21 --resume-old`)"),
+    ("private on / private off", "show / hide all private projects and their items (off stops their sessions, on restarts them): `lean-agent private on|off`"),
     ("q", "my questions: open first, newest first, with the answers (`lean-agent myq`)"),
     ("q12", "question 12 in full with its answer and source (a thread's own question ids are answered with `thread answer tN qN`)"),
     ("q open", "only my unanswered questions"),
@@ -14393,6 +14490,8 @@ def thread_action(a):
             print(context_table())
             return 0
         sessions = open_thread_sessions()
+        hid = lean_threads.hidden_threads(lean_threads.load())
+        sessions = [x for x in sessions if x["thread"] not in hid]
         ctxs = {r["session"]: r for r in session_contexts()}
         print(f"{'main':<6}{'main session':<42}{'':<12}context {context_cell(ctxs['main'])}"
               + (f"  main: {st}" if (st := service_session.session_rec("main").get("stuck")) else ""))
@@ -14408,7 +14507,7 @@ def thread_action(a):
                   + ("  fresh on next send" if ctxs[x["thread"]]["fresh"] else "") + extra)
         live = {x["thread"] for x in sessions}
         for k, t in sorted(lean_threads.load()["threads"].items(), key=lambda kv: int(kv[0][1:]) if kv[0][1:].isdigit() else 0):
-            if k in live or k in lean_threads.load()["aliases"] or k in lean_threads.RESERVED:
+            if k in live or k in hid or k in lean_threads.load()["aliases"] or k in lean_threads.RESERVED:
                 continue
             if t.get("parked"):
                 print(f"{'stopped' if t.get('parked_by') in ('idle', 'user-stop') else 'parked '} {k:<5}{t.get('title') or '-':<42}{lean_threads.age(t['parked'])}  "
@@ -15967,7 +16066,9 @@ def cmd_advise(a):
     if not what:
         die('what? lean-agent advise "<the user\'s request>" [--project <p>] [--thread <tag>]   (or --task-file -)')
     slug, path = role_project(a, "advisor")
-    projs = projects()
+    if lean_private.hides(project=slug):
+        die(lean_private.HELD_MSG)
+    projs = {k: v for k, v in projects().items() if not lean_private.hides(project=k)}
     thread = thread_key(a.thread) or "main"
     lean = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
     rule_lines = advise_rules(slug, path)
@@ -17015,6 +17116,9 @@ def build_parser():
     s.add_argument("args", nargs=argparse.REMAINDER)
     s.set_defaults(fn=lambda a: lean_poll.main(a.args))
 
+    s = sub.add_parser("private", help="show or hide ALL private projects: `private off` hides them and their items and stops their sessions, `private on` shows them and restarts what off stopped (default on)")
+    s.add_argument("state", nargs="?", choices=["on", "off", "status"])
+    s.set_defaults(fn=cmd_private)
     s = sub.add_parser("waiting", help="what waits on the user (list), `add \"<summary>\"`, `done <id> [--answer TEXT]`; the front desk asks each with AskUserQuestion")
     s.add_argument("args", nargs="*", help="[list] | add <summary> | done <id>")
     s.add_argument("--options", help="add: the answers to offer, a|b|c")

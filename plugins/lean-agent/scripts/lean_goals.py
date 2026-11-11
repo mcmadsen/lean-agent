@@ -15,6 +15,7 @@ import re
 import time
 
 import lean_common
+import lean_private
 import lean_find
 import lean_waiting
 
@@ -292,7 +293,7 @@ def set_next(gid, text):
 
 
 def open_goals():
-    return [g for g in _load() if g.get("state") in OPEN]
+    return [g for g in _load() if g.get("state") in OPEN and not lean_private.hides(g)]
 
 
 def answered(thread):
@@ -383,7 +384,7 @@ def _closed_threads():
 def table(now=None, detail=False, show_all=False):
     """Open goals of open threads; show_all lists every goal (done/dropped with their reason)."""
     if show_all:
-        goals = _load()
+        goals = [g for g in _load() if not lean_private.hides(g)]
     else:
         closed = _closed_threads()
         goals = [g for g in open_goals() if _tid(g.get("thread")) not in closed]

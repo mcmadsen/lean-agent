@@ -10,6 +10,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lean_common
+import lean_private
 
 ANSWER_CHARS = 4000
 STALE_MIN = 30
@@ -219,7 +220,7 @@ def stale_label(x, now=None):
 
 
 def select(open_only=False, thread=None):
-    items = _load()
+    items = [x for x in _load() if not lean_private.hides(thread=x.get("target"))]
     if open_only:
         items = [x for x in items if x.get("status") == "open"]
     if thread:

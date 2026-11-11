@@ -20,6 +20,7 @@ import shlex
 import time
 
 import lean_common
+import lean_private
 from lean_common import now_iso, stem
 
 try:
@@ -93,6 +94,8 @@ def session_refusal(tid, data=None):
         return f"no thread record for {key}"
     if t.get("closed"):
         return f"thread {key} is closed"
+    if lean_private.hidden() and lean_private.thread_is_private(key, data):
+        return f"thread {key} is private: {lean_private.HELD_MSG}"
     return ""
 
 
@@ -448,6 +451,14 @@ def idle(tid, t, last, todos, days, now):
     return bool(last) and now - last > days * 86400
 
 
+def hidden_threads(data):
+    """Ids of the threads hidden by `private off` (empty while private mode is on)."""
+    if not lean_private.hidden():
+        return set()
+    ps = lean_private.private_slugs()
+    return {k for k in data["threads"] if lean_private.thread_is_private(k, data, ps)}
+
+
 def threads(now=None, include_expired=False):
     """The threads to show: merged ones are left out (they show under their target), expired ones filtered."""
     data, todos, days = load(), _todo_map(), idle_days()
@@ -455,7 +466,8 @@ def threads(now=None, include_expired=False):
     if "optimize" not in data["threads"]:
         data["threads"]["optimize"] = {"id": "optimize", "title": RESERVED["optimize"], "created": None,
                                        "last_message": None, "kind": "free"}
-    tops = {k: dict(t) for k, t in data["threads"].items() if k not in data["aliases"]}
+    hid = hidden_threads(data)
+    tops = {k: dict(t) for k, t in data["threads"].items() if k not in data["aliases"] and k not in hid}
     for src, dst in data["aliases"].items():  # the target's last message counts its merged threads' too (before expiry)
         tgt = tops.get(resolve(dst, data["aliases"]))
         s = data["threads"].get(src) or {}
@@ -486,6 +498,7 @@ SHORTCUT_RE = re.compile(r"^(?:please\s+)?(?:((?:show\s+)?more)|(?:s|summary|sho
 _NUMS = r"t?\d+(?:[\s,]+(?:x\s*)?t?\d+)*"
 CLOSE_RE = re.compile(rf"^(?:please\s+)?x\s*(?:(all)(?:\s+(?:but|except)\s+({_NUMS}))?|idle\s+(\d+(?:\.\d+)?\s*[smhd]?)|({_NUMS}))(\s+force)?\s*[.!]?$", re.I)
 STOP_RE = re.compile(rf"^(?:please\s+)?stop\s*(?:(idle)(?:\s+(\d+(?:\.\d+)?\s*[smhd]?))?|({_NUMS}))(\s+force)?\s*[.!]?$", re.I)
+PRIVATE_RE = re.compile(r"^(?:please\s+)?private\s+(on|off|status)\s*[.!]?$", re.I)
 REOPEN_RE = re.compile(r"^(?:please\s+)?o\s*t?(\d+)\s*[.!]?$", re.I)
 PR_RE = re.compile(r"^pr\s*t?(\d+)(?:\s+(c|comments|ci|diff|fix|reply|review))?$", re.I)
 PR_LIST_RE = re.compile(r"^pr\s+(list|mine|stale|find)(?:\s+(.+))?$", re.I)
@@ -810,6 +823,18 @@ def decide(text, data, session=None, now=None, idx=None):
         return None, "Front desk job (shortcuts) \u2014 no thread: lean-agent shortcuts", "job"
     if low in ("goals", "waiting"):
         return None, f"Front desk job ({low}) \u2014 no thread: lean-agent {low}", "job"
+    pv = PRIVATE_RE.match(low)
+    if pv:
+        return None, f"Front desk job (private shortcut) \u2014 no thread: lean-agent private {pv.group(1)}", "job"
+    if lean_private.hidden():  # private projects are hidden: never route to one
+        ps = lean_private.private_slugs()
+        hid = {k for k in data["threads"] if lean_private.thread_is_private(k, data, ps)}
+        if any(resolve(f"#{int(m.group(1))}" if m.group(1) else f"t{int(m.group(2))}", data["aliases"]) in hid
+               for m in EXPLICIT_RE.finditer(text)) or lean_private.mentions_private(text):
+            return None, lean_private.HELD_MSG, "unsure"
+        data = {**data, "threads": {k: v for k, v in data["threads"].items() if k not in hid},
+                "aliases": {k: v for k, v in data["aliases"].items() if v not in hid}}
+        idx = None
     qm = MYQ_RE.match(text)
     if qm:
         if qm.group(1):
@@ -1513,8 +1538,9 @@ def now_text(now=None, close_idle=True, max_lines=NOW_LINES):
         running = running_by_thread(data)
         closed = autoclose(data, evs, running, todos, days, now) if close_idle else []
         rows = []
+        hid = hidden_threads(data)
         for tid, t in data["threads"].items():
-            if t.get("closed") or tid in data["aliases"] or tid in RESERVED:
+            if t.get("closed") or tid in data["aliases"] or tid in RESERVED or tid in hid:
                 continue
             ev = evs.get(tid, [])
             last_ts = max([t.get("last_message") or t.get("created") or ""] + [e[1] for e in ev])
@@ -1523,6 +1549,8 @@ def now_text(now=None, close_idle=True, max_lines=NOW_LINES):
                          session_lines(tid, t) + question_lines(t, now) + report_lines(t, now) + _details(tid, ev, data, todos, live, waiting, now)))
     rows.sort(key=lambda r: (r[0], r[2]), reverse=True)
     lines = [f"Open threads ({len(rows)}), latest first:"] if rows else ["No open threads."]
+    if lean_private.hidden():
+        lines.insert(0, "(private projects hidden)")
     budget = max_lines - 2  # header and the footer line
     shown = 0
     for _, last_ts, tid, t, act, state, det in rows:
@@ -1692,8 +1720,9 @@ def short_text(now=None, max_lines=SHORT_ROWS, all_=False):
         evs = events(data, todos)
         running = running_by_thread(data)
         rows = []
+        hid = hidden_threads(data)
         for tid, t in data["threads"].items():
-            if t.get("closed") or tid in data["aliases"] or tid in RESERVED:
+            if t.get("closed") or tid in data["aliases"] or tid in RESERVED or tid in hid:
                 continue
             last = max([_epoch(t.get("last_message") or t.get("created"))] + [e[0] for e in evs.get(tid, [])])
             rep = t.get("report") if isinstance(t.get("report"), dict) and t["report"].get("text") else None
@@ -1728,11 +1757,12 @@ def short_text(now=None, max_lines=SHORT_ROWS, all_=False):
             if row[0] == 0 and run:  # (a thread waiting on an answer never shows as running: row[0] is -1)
                 row = row[:3] + (row[3] + ", " + run,) + row[4:]
             rows.append(row + (_cell(t.get("title"), 28),))
+    note = ["(private projects hidden)", ""] if lean_private.hidden() else []
     if not rows:
-        return "No open threads."
+        return "\n".join(note + ["No open threads."])
     rows.sort(key=lambda r: (r[0], r[1], r[2]))
     shown = rows if all_ else rows[:max_lines]
-    lines = ["| Thread | What | State | Needs | Next | Show |", "|---|---|---|---|---|---|"]
+    lines = note + ["| Thread | What | State | Needs | Next | Show |", "|---|---|---|---|---|---|"]
     for pr, _, tid, state, needs, nxt, title in shown:
         c = show_code(tid)
         cell = f"**{c}** \u00b7 a{c[1:]}" + (f" \u00b7 f{c[1:]}" if thread_files(tid) else "")
@@ -1799,8 +1829,10 @@ def undelivered_threads(now=None, min_secs=UNDELIVERED_AFTER):
         names = os.listdir(lean_home("thread-inbox"))
     except OSError:
         return []
-    threads_ = load()["threads"]
-    out = [(t, a) for t in names if not t.endswith(".lock") and not no_nudge(threads_.get(t)) and (a := undelivered_age(t, now)) and a >= min_secs]
+    data_ = load()
+    threads_ = data_["threads"]
+    hid = hidden_threads(data_)
+    out = [(t, a) for t in names if t not in hid and not t.endswith(".lock") and not no_nudge(threads_.get(t)) and (a := undelivered_age(t, now)) and a >= min_secs]
     return sorted(out, key=lambda x: -x[1])
 
 
@@ -1890,6 +1922,8 @@ def show_text(tid, all_=False, limit=40, report_chars=None):
     t = data["threads"].get(tid)
     if t is None:
         raise ValueError(f"no such thread {tid}")
+    if tid in hidden_threads(data):
+        return f"{tid}: hidden: private ({lean_private.HELD_MSG})"
     ev = events(data).get(tid, [])
     head = f'{tid} "{t.get("title")}"' + (" [closed]" if t.get("closed") else "")
     merged = sorted(s for s, d in data["aliases"].items() if resolve(d, data["aliases"]) == tid)

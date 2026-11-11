@@ -8,6 +8,7 @@ import datetime
 import time
 
 import lean_common
+import lean_private
 
 KINDS = ("review", "question", "permission", "push", "auth", "other")
 DEFAULT_OPTIONS = {
@@ -76,7 +77,7 @@ def add(summary, kind="other", options=None, thread="", ref="", qid=""):
 
 
 def open_items():
-    return [i for i in _load() if not i.get("answered_at")]
+    return [i for i in _load() if not i.get("answered_at") and not lean_private.hides(i)]
 
 
 def unasked():
