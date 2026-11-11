@@ -52,7 +52,7 @@ import lean_own  # noqa: E402
 import lean_auth  # noqa: E402
 import service_session  # noqa: E402
 import lean_common
-from lean_common import glob_match, compact_overrides, compaction_label, compaction_point, pid_alive, signal_group, lost_runs, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
+from lean_common import LOST_NO_RECORD, glob_match, compact_overrides, compaction_label, compaction_point, pid_alive, signal_group, lost_runs, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(HERE)
 REPO = "mcmadsen/lean-agent"
@@ -2456,8 +2456,12 @@ def check_launch(a):
     early_arg_checks(a)
     check_timeout(a)
     if a.resume:
-        if not any(r["id"] == a.resume for r in ledger()) and a.resume != "last":
-            die(f"no resumable run {a.resume!r}")
+        if a.resume != "last":
+            got = find_run(a.resume)
+            if not got:
+                die(f"no resumable run {a.resume!r}")
+            if got.get("lost") and not got.get("session_id"):
+                die(lost_no_session(got))
         return
     if not a.task and not a.task_file:
         die("no task given")
@@ -2622,9 +2626,12 @@ def _cmd_run(a):
     prev = None
     run_seconds = check_timeout(a)
     if a.resume:
-        prev = next((r for r in reversed(ledger()) if r["id"] == a.resume), None)
+        prev = find_run(a.resume)
+        if prev and prev.get("lost") and not prev.get("session_id"):
+            die(lost_no_session(prev))
         if not prev or not prev.get("session_id"):
             die(f"no resumable run {a.resume!r}")
+        a.resume = prev["id"]
         if prev.get("role") in NO_RESUME_ROLES and not getattr(a, "role", None):
             die(f"run {a.resume} is a {prev['role']} run (its own commands, no task of yours): it can't be resumed. "
                 "Start a new run, or use the command that made it again")
@@ -10369,6 +10376,85 @@ def settle_markers():
         pass
 
 
+def lost_no_session(r):
+    return (f"run {r['id']} is lost and no session id was recorded, so it can't be resumed. "
+            f"Start a new run with --from-run {r['id']} (its work dir and summary are carried over)")
+
+
+def one_line(text, n=70):
+    """A table cell: the text on one line, cut to n characters with an ellipsis."""
+    t = " ".join(str(text or "").split())
+    return t if len(t) <= n else t[:max(n - 1, 0)].rstrip() + "\u2026"
+
+
+def lost_row(rid, m, row=None):
+    """A ledger-shaped record of a lost run, from its marker (and the thin 'lost (no record)' ledger row, if any)."""
+    out = dict(m.get("fixed") or {})
+    out.update({k: v for k, v in m.items() if k != "fixed" and v not in (None, "")})
+    out.update({k: v for k, v in (row or {}).items() if v not in (None, "") and k not in ("status", "usage", "units")})
+    out.update(id=rid, status="lost", lost=True, lost_reason=m.get("lost_reason") or (row or {}).get("reason") or lost_reason(m))
+    out.setdefault("project_path", m.get("path"))
+    out["workdir"] = out.get("workdir") or home("work", rid)
+    out["model"] = out.get("model") or "?"
+    out["task"] = str(out.get("task") or "")
+    return out
+
+
+def find_run(target, runs=None):
+    """The newest record of a run by full id or unique id prefix: its ledger row, or a lost run's marker (+ work dir)
+    shaped like one (`lost`: True). None when nothing matches; dies on an ambiguous prefix."""
+    rows = {}
+    for r in (ledger() if runs is None else runs):
+        rows[r["id"]] = r
+    markers = {rid: m for rid, m in lost_runs(home(), acknowledged=True)}
+    ids = list(dict.fromkeys(list(rows) + list(markers)))
+    rid = target if target in ids else None
+    if rid is None and target:
+        hits = [i for i in ids if i.startswith(target)]
+        if len(hits) > 1:
+            die(f"run id prefix {target!r} is ambiguous: {', '.join(hits[:6])}")
+        rid = hits[0] if hits else None
+    if rid is None:
+        return None
+    row = rows.get(rid)
+    if rid in markers and (row is None or row.get("status") == LOST_NO_RECORD):
+        return lost_row(rid, markers[rid], row)
+    return row
+
+
+def lost_report(r):
+    """What `runs --show` prints for a lost run: reason, partial summary, progress tail, commits, how to go on."""
+    wd = r.get("workdir") or ""
+    out = [f"run {r['id']} \u00b7 {r.get('model', '?')} \u00b7 lost \u00b7 {r.get('lost_reason') or 'supervisor gone'}",
+           f"task: {one_line(r.get('task'), 300)}"]
+    files = run_summary_files(r)
+    if files:
+        out += ["partial summary:", read_text(files[-1]).rstrip()]
+    else:
+        out.append("partial summary: none saved")
+    try:
+        lines = [l for l in read_text(os.path.join(wd, "progress.jsonl")).splitlines() if l.strip()][-5:]
+    except OSError:
+        lines = []
+    if lines:
+        out.append("progress (last turns):")
+        for l in lines:
+            try:
+                e = json.loads(l)
+                out.append(f"  {str(e.get('ts', ''))[11:19]} turn {e.get('turn')} ctx {e.get('ctx')}: {one_line(e.get('steps'), 160)}")
+            except (ValueError, AttributeError):
+                out.append("  " + one_line(l, 160))
+    path, head = r.get("project_path") or r.get("path"), r.get("start_head")
+    if path and head and os.path.isdir(path):
+        log = (git(path, "log", "--oneline", f"{head}..HEAD") or "").strip()
+        out.append("commits in its worktree:" + ("\n" + log if log else " none"))
+    if r.get("session_id"):
+        out.append(f"resume: lean-agent run --resume {r['id']} --why '<why>' -- '<task>'")
+    else:
+        out.append(f"no session id was recorded, so it can't be resumed; start a new run with --from-run {r['id']} to carry its work over")
+    return "\n".join(out) + "\n"
+
+
 def cmd_runs(a):
     if getattr(a, "wait", None):
         return wait_for_runs(a.wait, a.timeout)
@@ -10401,7 +10487,7 @@ def cmd_runs(a):
             return
         for rid, m in lost:
             print(f"{rid}  lost  ({(m.get('lost_reason') or lost_reason(m)) + ('; record only, nothing to resume' if m.get('no_record') else '')}; close it: lean-agent runs --stop {rid})  {m.get('model', '?'):<7} "
-                  f"{m.get('project', '?'):<16} {m.get('task', '')[:50]}")
+                  f"{m.get('project', '?'):<16} {one_line(m.get('task', ''), 50)}")
         if not lost:
             print("No lost runs.")
         return
@@ -10413,7 +10499,7 @@ def cmd_runs(a):
             found = True
             state = m.get("state") or ("starting" if m.get("early") else "running")
             print(f"{m.get('run', '?')}  {state} since {m.get('started', '?')[11:19]}  {(m.get('thread') or '-'):<4} "
-                  f"{m.get('model', '?'):<7} {m.get('project', '?'):<16} {m.get('task', '')[:70]}"
+                  f"{m.get('model', '?'):<7} {m.get('project', '?'):<16} {one_line(m.get('task', ''), 70)}"
                   + (f"  [{m['reason']}]" if m.get("reason") else "")
                   + (f"  (lean-agent {m['version']})" if m.get("version") else ""))
         lost = lost_runs(home())
@@ -10425,9 +10511,12 @@ def cmd_runs(a):
         return
     if a.show or a.tokens:
         rid = a.show if a.show and a.show != "last" else latest_run_id(runs, thread=caller_thread())
-        r = next((x for x in reversed(runs) if x["id"] == rid), None)
+        r = find_run(rid, runs)
         if not r:
             die(f"no run {rid!r}" if rid else "no runs yet")
+        if r.get("lost"):
+            sys.stdout.write(lost_report(r))
+            return
         files = run_summary_files(r)
         if not files and not a.details:  # runs from before summaries were saved: rebuild the run line from the ledger
             print(run_line_from_ledger(r))
@@ -10502,11 +10591,20 @@ def cmd_runs(a):
             print("No run matches.")
     if not getattr(a, "all", False):
         runs = [r for r in runs if r.get("role") not in INTERNAL_ROLES]
-    for r in runs[-(a.limit or a.n):]:
-        print(f"{r['id']}  {r['status']:<22} {r['model']:<7} {r['project']:<16} {r['task'][:70]}")
+    rows = {}  # one row per run id: the newest state wins (a lost marker beats its thin 'lost (no record)' ledger row)
+    for r in runs:
+        rows.pop(r["id"], None)
+        rows[r["id"]] = r
+    lost_by_id = {}
     for rid, m in lost_runs(home()):
         if not a.project or m.get("project") == a.project:
-            print(f"{rid}  {'lost':<22} {m.get('model', '?'):<7} {m.get('project', '?'):<16} {m.get('task', '')[:70]}")
+            lost_by_id[rid] = m
+            if rid in rows and rows[rid].get("status") == LOST_NO_RECORD:
+                rows.pop(rid)
+    table = [(r["id"], r["status"], r["model"], r["project"], r["task"]) for r in list(rows.values())[-(a.limit or a.n):]]
+    table += [(rid, "lost", m.get("model", "?"), m.get("project", "?"), m.get("task", "")) for rid, m in lost_by_id.items()]
+    for rid, status, model, project, task in table:
+        print(f"{rid}  {status:<22} {model:<7} {project:<16} {one_line(task, 70)}")
 
 
 def instruction_files(path):
