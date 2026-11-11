@@ -153,6 +153,39 @@ class Feedback(PrivateCase):
         self.assertNotIn("secretrepo", raw)
 
 
+    def test_goals_private_and_dropped(self):
+        import lean_goals
+        led = os.path.join(self.home, "ledger.jsonl")
+        with open(led, "w") as fh:
+            fh.write(json.dumps({"id": "r1", "project": "vault", "thread": "t1", "task": "PR 700"}) + "\n")
+            fh.write(json.dumps({"id": "r2", "project": "open", "thread": "t2", "task": "PR 701"}) + "\n")
+        old = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, old)
+        gid = lean_goals.ensure("work on vault PR 700", "t9")
+        g = next(x for x in lean_goals._load() if x["id"] == gid)
+        self.assertEqual(g["target"], lean_goals.LOCAL_TARGET)
+        gid = lean_goals.ensure("PR 702", "t2")
+        self.assertEqual(next(x for x in lean_goals._load() if x["id"] == gid)["target"], lean_goals.DEFAULT_TARGET)
+        # dropped goals are not re-created automatically; an explicit add brings them back
+        lean_goals.drop(gid, "not needed")
+        self.assertEqual(lean_goals.ensure("PR 702", "t2"), "")
+        self.assertTrue(lean_goals.add("PR 702", "t2"))
+        # startup cleanup drops open outward goals of private threads once
+        a = lean_goals.ensure("PR 703", "t1")
+        b = lean_goals.ensure("PR 704", "t2")
+        items = lean_goals._load()
+        for x in items:
+            if x["id"] in (a, b):
+                x["target"] = lean_goals.DEFAULT_TARGET
+        lean_goals._save(items)
+        out = lean_goals.cleanup([], lambda tid: [])
+        self.assertTrue(any("private" in line for line in out))
+        st = {x["id"]: x for x in lean_goals._load()}
+        self.assertEqual((st[a]["state"], st[a]["next"]), ("dropped", "private project"))
+        self.assertNotEqual(st[b]["state"], "dropped")
+
+
 class StartLine(unittest.TestCase):
     def test_empty_cards_part_is_omitted(self):
         with open(AGENT, encoding="utf-8") as fh:

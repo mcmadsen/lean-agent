@@ -21,6 +21,7 @@ import lean_waiting
 OPEN = ("active", "waiting-user", "stuck", "blocked")
 STATES = OPEN + ("done", "dropped")
 DEFAULT_TARGET = "pushed+posted"
+LOCAL_TARGET = "done locally / reported"
 QUIET_MIN = 30        # minutes without activity before a thread is nudged (config goal-quiet)
 MAX_CHASES = 3
 CHASER_PER_HOUR = 6   # haiku decisions (batches) per hour (config chaser_per_hour)
@@ -170,6 +171,73 @@ def misparsed(g, texts):
     return ("item", m.group(1)) not in refs_in("\n".join(texts))
 
 
+def _private_slugs():
+    try:
+        import push_guard
+        return {k for k, v in push_guard._projects().items() if (v or {}).get("private")}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _private_threads(slugs, data=None):
+    """Threads with at least one ledger run in a private project (one ledger pass)."""
+    out = set()
+    if not slugs:
+        return out
+    try:
+        import lean_threads
+        data = data or lean_threads.load()
+        with open(os.path.join(lean_common.lean_home(), "ledger.jsonl")) as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get("project") in slugs:
+                    tid = lean_threads.thread_of_run(r, data)
+                    if tid:
+                        out.add(_tid(tid))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def thread_private(thread, text=""):
+    """True when the work of `thread` is in a private project: the current directory, a private project named as a
+    whole word in `text`, or a run of the thread in one."""
+    slugs = _private_slugs()
+    if not slugs:
+        return False
+    try:
+        import push_guard
+        if push_guard.private_slug_of(os.getcwd()):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    if any(re.search(r"(?<![\w-])" + re.escape(s) + r"(?![\w-])", str(text or ""), re.I) for s in slugs):
+        return True
+    return bool(thread) and _tid(thread) in _private_threads(slugs)
+
+
+def _outward(target):
+    return bool(re.search(r"push|post|pr\b|publish", str(target or ""), re.I))
+
+
+def cleanup_private(items):
+    """Open auto goals with a push/post target in a private project: dropped (in `items`, no write). Returns the count."""
+    slugs = _private_slugs()
+    cand = [g for g in items if g.get("state") in OPEN and g.get("origin") != "user" and _outward(g.get("target"))]
+    if not slugs or not cand:
+        return 0
+    priv = _private_threads(slugs)
+    n = 0
+    for g in cand:
+        if _tid(g.get("thread")) in priv:
+            g["state"], g["next"] = "dropped", "private project"
+            n += 1
+    return n
+
+
 def cleanup(closed_tids, texts_of):
     """One-time: drop open goals of closed threads, and misparsed auto work-item goals (texts_of(tid) -> list of strings).
     One read, one write. Returns the log lines."""
@@ -187,12 +255,15 @@ def cleanup(closed_tids, texts_of):
             elif misparsed(g, texts_of(g.get("thread"))):
                 g["state"], g["next"] = "dropped", "misparsed ref"
                 n_bad += 1
-        if n_closed or n_bad:
+        n_priv = cleanup_private(items)
+        if n_closed or n_bad or n_priv:
             _save(items)
     if n_closed:
         out.append(f"goals: {n_closed} open goal(s) of closed threads dropped")
     if n_bad:
         out.append(f"goals: {n_bad} misparsed work-item goal(s) dropped")
+    if n_priv:
+        out.append(f"goals: {n_priv} open goal(s) of private projects dropped")
     return out
 
 
@@ -206,7 +277,7 @@ def _new_id(items):
     return "g%d" % (max([int(str(g.get("id", "g0"))[1:] or 0) for g in items if re.fullmatch(r"g\d+", str(g.get("id", "")))] + [0]) + 1)
 
 
-def ensure(ref, thread, target=DEFAULT_TARGET, nxt="", origin="auto"):
+def ensure(ref, thread, target=DEFAULT_TARGET, nxt="", origin="auto", text=""):
     """The open goal for `ref` (created when none), owned by `thread`; its activity is now. Returns its id ('' without a ref)."""
     ref = " ".join(str(ref or "").split())[:120]
     if not ref:
@@ -215,6 +286,12 @@ def ensure(ref, thread, target=DEFAULT_TARGET, nxt="", origin="auto"):
     with lean_common.file_lock(path()):
         items = _load()
         g = _find(items, ref)
+        if g is None and origin != "user":
+            k = key_of(ref)  # a goal the user dropped is never auto-created again for this ref and thread
+            if any(x.get("state") == "dropped" and key_of(x.get("ref")) == k and x.get("thread") in ("", thread or "") for x in items):
+                return ""
+            if _outward(target) and thread_private(thread, text or ref):
+                target = LOCAL_TARGET
         if g is None:
             g = {"id": _new_id(items), "ref": ref, "thread": thread or "", "target": target, "state": "active", "next": nxt,
                  "last_activity": now, "chased_at": "", "chase_count": 0, "created": now, "origin": origin}
@@ -230,7 +307,7 @@ def ensure(ref, thread, target=DEFAULT_TARGET, nxt="", origin="auto"):
 def note_text(text, thread):
     """A thread was given work naming a PR/work item: that is a goal. Returns the goal id or ''."""
     ref = ref_in(text)
-    return ensure(ref, thread) if ref and thread else ""
+    return ensure(ref, thread, text=text) if ref and thread else ""
 
 
 def touch(thread, reset=False):
