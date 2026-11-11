@@ -63,6 +63,89 @@ def guarded(branch, patterns):
     return next((p for p in patterns if fnmatch.fnmatchcase(b, p)), None)
 
 
+PRIVATE_MSG = ("project {p} is private (local only): pushing/publishing is disabled; the user can turn it off "
+               "with lean-agent config private {p} off")
+
+
+def private_slug_of(ref):
+    """The private project that `ref` (a project name, or a path inside its repo or one of its lean-agent
+    worktrees) belongs to, else None."""
+    projs = _projects()
+    if ref in projs:
+        return ref if (projs[ref] or {}).get("private") else None
+    if not ref:
+        return None
+    real = os.path.realpath(ref)
+    for slug, v in projs.items():
+        if not (v or {}).get("private"):
+            continue
+        p = os.path.realpath(v.get("path") or "")
+        wt = os.path.join(os.path.realpath(lean_home()), "worktrees", slug)
+        if p and (real == p or real.startswith(p + os.sep) or real == wt or real.startswith(wt + os.sep)):
+            return slug
+    return None
+
+
+private_project_slug = private_slug_of
+
+
+def private_message(slug):
+    return PRIVATE_MSG.format(p=slug)
+
+
+def _publishing(words):
+    """Does this command (words, after env assignments) publish to a remote? Returns the git/gh/az/lean-agent kind."""
+    name = os.path.basename(words[0]) if words else ""
+    rest = words[1:]
+    if name == "git":
+        i = 0
+        while i < len(rest) and rest[i].startswith("-"):
+            i += 2 if rest[i] in ("-C", "-c", "--git-dir", "--work-tree") else 1
+        sub = rest[i:i + 2]
+        return bool(sub) and (sub[0] == "push" or (sub[0] == "remote" and len(sub) > 1 and sub[1] in ("add", "set-url")))
+    if name == "gh":
+        pos = [w for w in rest if not w.startswith("-")]
+        return pos[:2] in (["pr", "create"], ["repo", "create"], ["release", "create"])
+    if name == "az":
+        pos = [w for w in rest if not w.startswith("-")]
+        return pos[:3] == ["repos", "pr", "create"] or pos[:2] == ["repos", "create"]
+    if name in ("lean-agent", "lean_agent.py"):
+        pos = [w for w in rest if not w.startswith("-")]
+        if pos[:2] == ["worktree", "push"] or pos[:2] == ["pr", "create"]:
+            return True
+        return bool(pos) and pos[0] == "review" and any(w in ("--comment", "--post") for w in rest)
+    return False
+
+
+def private_denial(command, cwd):
+    """Why `command` (a shell line run in `cwd`) is refused for a private project: any push or other publishing to a
+    remote there; '' if fine. No override: only `lean-agent config private <p> off` lifts it."""
+    cwd = cwd or os.getcwd()
+    for segment in re.split(r"&&|\|\||;|\||\n", command):
+        try:
+            words = shlex.split(segment)
+        except ValueError:
+            words = segment.split()
+        while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+            words = words[1:]
+        if len(words) >= 2 and words[0] == "cd":
+            cwd = os.path.join(cwd, os.path.expanduser(words[1]))
+            continue
+        if not _publishing(words):
+            continue
+        here, i = cwd, 1
+        while os.path.basename(words[0]) == "git" and i + 1 < len(words) and words[i].startswith("-"):
+            if words[i] == "-C":
+                here = os.path.join(here, os.path.expanduser(words[i + 1]))
+            i += 2 if words[i] in ("-C", "-c", "--git-dir", "--work-tree") else 1
+            i = min(i, len(words) - 1) if i >= len(words) else i
+        slug = private_slug_of(here) or next((private_slug_of(w) for w in words[1:] if not w.startswith("-")
+                                              and private_slug_of(w)), None)
+        if slug:
+            return private_message(slug)
+    return ""
+
+
 def _git(cwd, *args):
     try:
         p = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, timeout=10)
@@ -194,7 +277,7 @@ def ensure_git_wrapper(path_value):
     if not real:
         return None
     body = (f"#!/bin/sh\n# {HOOK_MARK}: checks pushes, then runs {real}\n"
-            f'case " $* " in *" push "*) exec {shlex.quote(sys.executable)} {shlex.quote(os.path.abspath(__file__))} '
+            f'case " $* " in *" push "*|*" remote "*) exec {shlex.quote(sys.executable)} {shlex.quote(os.path.abspath(__file__))} '
             f'git-wrapper {shlex.quote(real)} "$@" ;; esac\nexec {shlex.quote(real)} "$@"\n')
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, "git")
@@ -256,6 +339,10 @@ def wrapper_push_is_local(args):
 def git_wrapper(real, args):
     """`git <args>` through the guard: a push to a guarded branch is refused, --no-verify or not.
     A push to a local path or file:// URL runs unguarded."""
+    why = private_denial(" ".join(shlex.quote(a) for a in ["git", *args]), os.getcwd())
+    if why:  # no override, and a push to a local path is not exempt either
+        sys.stderr.write("lean-agent push guard: " + why + "\n")
+        return 1
     if os.environ.get("LEAN_AGENT_PUSH_GUARD_OVERRIDE") != "1" and wrapper_push_is_local(args):
         os.environ["LEAN_AGENT_PUSH_GUARD_OVERRIDE"] = "1"  # the pre-push hook too
     if os.environ.get("LEAN_AGENT_PUSH_GUARD_OVERRIDE") != "1":
@@ -381,6 +468,15 @@ def _git_hook(name, args):
     refs = read_refs()  # "<local ref> <local sha> <remote ref> <remote sha>" per ref git would update
     # args = [remote name, remote URL]; a push to a local path or file:// URL is not checked
     local = len(args) > 1 and skips_guard(args[1])
+    try:
+        top0 = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=HOOK_WAIT).stdout.strip()
+    except subprocess.TimeoutExpired:
+        raise HookTimeout(f"`git rev-parse` did not answer within {HOOK_WAIT} s")
+    slug = private_slug_of(top0 or os.getcwd())
+    if slug:
+        sys.stderr.write("lean-agent push guard: " + private_message(slug) + "\n")
+        return 1
     if os.environ.get("LEAN_AGENT_PUSH_GUARD_OVERRIDE") != "1" and not local:
         try:
             top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True,
@@ -423,9 +519,10 @@ def main():
     if event.get("tool_name") != "Bash":
         return 0
     command = str((event.get("tool_input") or {}).get("command") or "")
-    if "push" not in command:
+    if not any(k in command for k in ("push", "remote", "create", "review")):
         return 0
-    why = override_without_approval(command) or check(command, event.get("cwd") or os.getcwd())
+    why = (private_denial(command, event.get("cwd") or os.getcwd()) or override_without_approval(command)
+           or check(command, event.get("cwd") or os.getcwd()))
     if why:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                  "permissionDecisionReason": "lean-agent push guard: " + why}}))

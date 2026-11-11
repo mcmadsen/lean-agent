@@ -236,6 +236,17 @@ def main():
     decision, why, seg = decide(event, cfg)
     if not decision:
         return 0
+    if decision == "deny":
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import push_guard
+            private = push_guard.private_denial(seg, event.get("cwd") or cfg["project"])
+        except Exception:
+            private = ""
+        if private:
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                     "permissionDecisionReason": "lean-agent push guard: " + private}}))
+            return 0
     if decision == "allow":
         out = {"hookEventName": "PreToolUse", "permissionDecision": "allow",
                "permissionDecisionReason": "read-only command (lean-agent)"}

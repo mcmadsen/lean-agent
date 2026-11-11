@@ -10,6 +10,7 @@ import re
 import sys
 
 import lean_common
+import push_guard
 
 KINDS = ("bug", "friction", "idea", "praise")
 SEVERITIES = ("low", "normal", "high")
@@ -25,10 +26,67 @@ def folder(*parts):
     return lean_common.lean_home("feedback", *parts)
 
 
+URL = re.compile(r"\b(?:https?|ssh|git)://\S+|\bgit@\S+:\S+")
+NUMBERS = re.compile(r"(?i)(?:\b(?:pr|pull request|pull|work item|workitem|issue|ticket|task)\s*[#!]?\s*\d+|[#!]\d+)")
+BRANCHISH = re.compile(r"\b(?:feature|bugfix|hotfix|release|fix|chore|users?)/[\w./-]+")
+
+
+def _private_terms():
+    """[(slug, [paths], [branch names])] of the private projects."""
+    out = []
+    for slug, v in push_guard._projects().items():
+        if not (v or {}).get("private"):
+            continue
+        path = v.get("path") or ""
+        paths = [x for x in {path, os.path.realpath(path) if path else "",
+                             os.path.join(push_guard.lean_home(), "worktrees", slug)} if x]
+        branches = []
+        if path:
+            try:
+                import subprocess
+                r = subprocess.run(["git", "-C", path, "for-each-ref", "--format=%(refname:short)", "refs/heads"],
+                                   capture_output=True, text=True, timeout=5)
+                branches = [b for b in r.stdout.split() if b not in ("main", "master", "develop") and len(b) > 3]
+            except Exception:
+                pass
+        out.append((slug, sorted(paths, key=len, reverse=True), branches))
+    return out
+
+
+def redact(text, terms=None):
+    """`text` with private projects taken out: the name becomes "<private project>"; paths, and (when it mentions the
+    project) URLs, branch names and PR/work-item numbers, become "<redacted>"."""
+    text = str(text or "")
+    for slug, paths, branches in _private_terms() if terms is None else terms:
+        if slug.lower() not in text.lower() and not any(p in text for p in paths):
+            continue
+        for p in paths:
+            text = text.replace(p, "<redacted>")
+        for b in sorted(branches, key=len, reverse=True):
+            text = text.replace(b, "<redacted>")
+        text = URL.sub("<redacted>", text)
+        text = BRANCHISH.sub("<redacted>", text)
+        text = NUMBERS.sub("<redacted>", text)
+        text = re.sub(re.escape(slug), "<private project>", text, flags=re.I)
+    return text
+
+
+def redact_item(item, terms=None):
+    """(the item with private content redacted, whether anything changed)."""
+    terms = _private_terms() if terms is None else terms
+    if not terms:
+        return item, False
+    out = dict(item)
+    for k in ("text", "repro"):
+        out[k] = redact(item.get(k), terms)
+    out["recent"] = [redact(c, terms) for c in item.get("recent") or []]
+    return out, out != item
+
+
 def scrub(text):
-    """`text` without environment values (NAME=value -> NAME=) and anything token-like."""
+    """`text` without environment values (NAME=value -> NAME=), anything token-like and private projects."""
     text = ENV_ASSIGN.sub(lambda m: m.group(1) + "=", str(text or ""))
-    return SECRET.sub("<redacted>", text)
+    return redact(SECRET.sub("<redacted>", text))
 
 
 def thread():
@@ -156,7 +214,7 @@ def _version_key(i):
 def list_items(include_all=False, kind=None, since=None):
     """Open items (not done) by default, all with include_all."""
     items = [i for i in _load() if (include_all or i.get("status") != "done") and (not kind or i.get("kind") == kind)]
-    return _since(items, since)
+    return [redact_item(i)[0] for i in _since(items, since)]
 
 
 def table(items):
@@ -191,6 +249,13 @@ def export(include_all=False, out=None, today=None):
     """Writes the Markdown file; returns (path, n)."""
     items = _load()
     chosen = [i for i in items if include_all or i.get("status") == "open"]
+    terms, n_red, shown = _private_terms(), 0, []
+    for i in chosen:
+        r, changed = redact_item(i, terms)
+        shown.append(r)
+        marked = "<private project>" in json.dumps([r.get("text"), r.get("repro"), r.get("recent")])
+        n_red += 1 if changed or marked else 0
+    chosen = shown
     n_done = sum(1 for i in items if i.get("status") == "done")
     today = today or datetime.date.today().isoformat()
     if not out:
@@ -206,6 +271,8 @@ def export(include_all=False, out=None, today=None):
              (f"- Items: {len(chosen) - sum(1 for i in chosen if i.get('status') == 'done')} open items, "
               f"{sum(1 for i in chosen if i.get('status') == 'done')} done (marked as such)" if include_all else
               f"- Items: {len(chosen)} open items ({n_done} done not included; --all to include)"), ""]
+    if n_red:
+        lines.insert(-1, f"- {n_red} items redacted (private projects)")
     titles = {"bug": "Bugs", "friction": "Friction", "idea": "Ideas", "praise": "Praise"}
     for kind in KINDS:
         group = sorted((i for i in chosen if i.get("kind") == kind),

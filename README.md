@@ -534,6 +534,15 @@ A slice then runs cheap: the worker gets its context from `map`, makes mechanica
 done when `check` shows no new errors, `count` went down and `parity` is unchanged; then `review --goal` and a PR.
 The orchestrator's guide has the full sequence.
 
+## Private projects
+
+`lean-agent config private <project> on|off` (or `lean-agent learn <repo> --name N --private`) makes a project local only: its work never reaches a public repo. It shows in `lean-agent projects`, in `doctor` and as "private" on the run start line.
+
+- **Blocked** for that project's repo and all its worktrees, for workers, thread sessions and the front desk alike: `git push` in any form, `git remote add|set-url`, `gh pr|repo|release create`, `az repos create`, `az repos pr create`, `worktree push`, and `review --comment|--post`. The command itself refuses, and so do the PreToolUse hooks and the git wrapper, so the session gets the reason first: "project <p> is private (local only): pushing/publishing is disabled; the user can turn it off with lean-agent config private <p> off".
+- **No per-push override**: `--allow-send` and `--override-guard` do not lift it; only `config private <p> off` does. Read-only remote commands (fetch, pull, ls-remote, gh/az view and list) still work.
+- **`doctor`** checks each remote's visibility (GitHub through `gh api`, Azure DevOps through `az devops project show`; other hosts are unknown) and warns when one is public or unknown.
+- **Nothing leaks through lean-agent**: `feedback add|list|export` and crash records replace a private project's name with `<private project>` and its paths, branch names, PR/work-item numbers, URLs and commands with `<redacted>`; the export header says "N items redacted (private projects)".
+
 ## Attribution (asked once)
 
 Whether commits and PRs credit Claude is your call, asked once: by `lean-agent up` in a terminal, or by the

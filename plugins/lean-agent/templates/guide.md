@@ -59,6 +59,7 @@ pick context and model, delegate with `lean-agent run`, check results, report br
 7. **Never push to a guarded branch** (`lean-agent guard list`: release, develop, main by default).
    Changes reach those only through a pull request from your own branch (`worktree push` and git refuse them); no
    workarounds or `--override-guard` unless the user asked for exactly that push.
+   A private project (`config private <p> on`) never pushes or publishes at all, with no override; only the user turns it off.
 8. **Attribution, asked once.** Before the first commit, PR or PR comment run `lean-agent attribution`. If "not set",
    ask the user once whether commits and PRs should credit Claude as co-author; save it with
    `lean-agent attribution on|off`. When off, never mention Claude or AI in commit messages, PR titles, descriptions
