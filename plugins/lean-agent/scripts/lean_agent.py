@@ -8405,7 +8405,7 @@ def worktree_push(a):
     if not match or not approved(match["verdict"]):
         if a.override_guard and a.allow_send:  # the user's recorded approval: this exact head goes without a review
             unreviewed_override = a.override_guard
-            match = {"run": "none", "verdict": f"pushed without approving review: {a.override_guard}"}
+            match = {"run": "none", "verdict": f"skipped (pushed without approving review: {a.override_guard})"}
             print(f"pushed without approving review: {a.override_guard}")
         elif a.override_guard:
             die("--override-guard skips the approving review only with the user's recorded approval: add "

@@ -26,19 +26,23 @@ pick context and model, delegate with `lean-agent run`, check results, report br
    deploying, deleting remote data. Workers stop with `awaiting-confirmation`; resume with
    `lean-agent run --resume <run-id> --allow-send "<what the user approved>" -- "Do it now."` only after the user
    approves that exact action.
-6. **No pull request without a review.** Before creating a PR or saying work is ready to merge, run
+6. **Review only right before a push (the gate runs it on the final tip).** Only `worktree push` needs an approving
+   review of the exact commit pushed; it starts ONE review of the tip itself when none covers it (a cheap delta
+   re-review when an ancestor was approved and only fixes came after). Nothing else (run end, commit, PR create,
+   wrap-up) asks for or starts a review. Run an earlier review only when the change is risky or the user asks:
    `lean-agent review <project>` (read-only reviewer, high effort: Sonnet, Opus when risky; exit 0 approve, 2 changes
    requested or checks needed). It also compares behaviour before/after: an unintended user-facing change blocks
    approve; regression risks come with one check each. `--goal "<task or PR title>"` makes it check the change
    delivers that end to end (a PR review reads the PR text itself); `--focus "the new retry logic"` narrows it.
+   A push without an approving review goes through only on the user's explicit override:
+   `worktree push ... --override-guard "<why>" --allow-send "<what the user approved>"` (logged; never on your own).
    - One full review, then fix EVERYTHING in one worker (or worktree session), delegate its `checks` (tests,
      behaviour) to workers, then `lean-agent review <project> --resume`; never review after each fix worker. Later
      reviews cover only what changed (sonnet, unless high-risk), recheck earlier findings and keep what the user
      declined; `--full-review` redoes all. "High-risk change": tell the user the stronger reviewer's expected cost;
      ask before `--reviewer-model`.
    - Review a PR branch from git with `--head <branch> [--base origin/develop]`, never by checking it out;
-     `--resume --head <branch>` re-reviews after fixes. Before a push: `lean-agent review <project> --head <branch>
-     --for-push` (refused while fix workers run on the branch).
+     `--resume --head <branch>` re-reviews after fixes. The push gate runs `review --head <branch> --for-push` itself (refused while fix workers run on the branch).
    - The reviewer must search for existing code each new symbol duplicates; a duplicate or too-narrow fix blocks
      approval. False positive: `lean-agent review decline <project> <n> --head <branch> --why "..."`, then
      `--resume`. An `unverified -> delegate a read-only check` item goes to a `-m haiku --read-only` worker. A human
