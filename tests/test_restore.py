@@ -86,6 +86,20 @@ class RestoreTest(unittest.TestCase):
             d.tick()
         self.assertEqual(ran, [])
 
+    def test_restore_decision_without_proc_restores_once(self):
+        real = os.path.exists
+        lean_threads.set_session(self.t[0], session_on=None)
+        ss.write_snapshot([])  # the service stopped before t1 was in a tick
+        lean_threads.set_session(self.t[0], session_on=True)  # its session started after that
+        with mock.patch("os.path.exists", side_effect=lambda p: False if str(p).startswith("/proc") else real(p)), \
+                mock.patch("builtins.open", side_effect=lambda f, *a, **k: (_ for _ in ()).throw(OSError())
+                           if str(f).startswith("/proc") else open_real(f, *a, **k)):
+            ids, _ = ss.plan_restore()
+        self.assertEqual(ids.count(self.t[0]), 1)
+        self.assertNotIn(self.t[1], ids)
+
+
+open_real = open
 
 if __name__ == "__main__":
     unittest.main()

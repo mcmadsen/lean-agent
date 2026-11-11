@@ -1290,6 +1290,9 @@ def plan_restore(now=None, cap=None, data=None, activity=None):
                     for k, th in data["threads"].items()}
     if snap is not None:
         ids = [t for t in snap["threads"] if restorable(t, data)]
+        # a session started after the last snapshot (a crash between ticks, a start still queued at stop) was live too
+        ids += [t for t, th in data["threads"].items() if th.get("session_on") and restorable(t, data)
+                and float(th.get("session_on_at") or 0) > snap["ts"]]
     else:
         ids = [t for t, th in data["threads"].items() if th.get("session_on") and restorable(t, data)
                and now - activity.get(t, 0) <= RECENT_LIVE]
@@ -2980,7 +2983,7 @@ class Reporter(AutoClear):
         cur = getattr(Sessions, "current", None)
         if cur is not None:
             try:
-                snapshot_tick([x["thread"] for x in cur.listing() if x.get("state") == "running"], self.now())
+                snapshot_tick([t for t in list(cur.hosts) if cur.running(t)], self.now())
             except Exception as exc:  # noqa: BLE001
                 self.log(f"snapshot failed: {exc}", "error")
         if not getattr(self, "cleaned", False):
@@ -3684,7 +3687,7 @@ class Sessions:
     def stop_all(self, wait=0):
         """Ask every thread session to end; with `wait`, until each has (its socket is removed by then)."""
         if not _SNAP["frozen"]:  # the live set as the service stops, before any host is gone
-            snapshot_tick([x["thread"] for x in self.listing() if x.get("state") == "running"])
+            snapshot_tick([t for t in list(self.hosts) if self.running(t)])
         freeze_snapshot()
         hosts = list(self.hosts.values())
         for host in hosts:
