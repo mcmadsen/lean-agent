@@ -358,6 +358,36 @@ def pipe_stage_ok(words):
     return False
 
 
+PARSE_ERROR = []  # [UNPARSABLE] when the last split_stages gave up on the quoting or a substitution, not on a redirect
+UNPARSABLE = ("could not parse the quoting of this command; pass long text with --task-file - and a heredoc "
+              "(no backticks or $( ) inside double quotes)")
+QUOTED_PUNCT = re.compile("'[;&|<>()\\n]+'|\"[;&|<>()\\n]+\"")
+
+
+def mask_quoted_punctuation(command):
+    """Quoted text made only of shell punctuation (`"("`, `'<<'`) is an argument, not an operator: shlex's punctuation
+    mode would return it as an operator token, so such a span is replaced by a plain word before lexing. Spans are
+    found with the same quote rules as the lexer (a quote opened inside the other kind of quote is text)."""
+    out, i, n = [], 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\" and i + 1 < n:
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if c in "'\"":
+            end = i + 1
+            while end < n and command[end] != c:
+                end += 2 if (c == '"' and command[end] == "\\") else 1
+            span = command[i:end + 1]
+            out.append("Q" if QUOTED_PUNCT.fullmatch(span) else span)
+            i = end + 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def split_stages(command):
     """(stages, glued) of a shell command, or None when it can't be parsed or redirects/substitutes in a way strict
     mode refuses: stages are word lists, None marks a break between commands (see lean_agent_only)."""
@@ -365,14 +395,18 @@ def split_stages(command):
     # side of denying unusual shell; it is not a sandbox against a hostile model. That is also why it denies comments,
     # command substitution and unknown pipe stages outright rather than parsing them.
     import shlex
+    PARSE_ERROR.clear()
     command = split_heredocs(command)
     if command is None:
+        PARSE_ERROR.append(UNPARSABLE)
         return None
+    command = mask_quoted_punctuation(command)
     lex = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()\n")
     lex.whitespace_split, lex.whitespace, lex.commenters = True, " \t\r", ""
     try:
         tokens = list(lex)
     except ValueError:
+        PARSE_ERROR.append(UNPARSABLE)
         return None
     glued = []
     stages, words, i = [], [], 0  # stages: word lists; None marks a break between commands
@@ -684,6 +718,8 @@ def strict_denial(event, cwd, lean_root):
     if tool == "Bash":
         command = str(tool_input.get("command") or "")
         if not lean_agent_only(command):
+            if PARSE_ERROR and re.match(r"\s*(cd\s+\S+\s*&&\s*)?\S*lean-agent\b", command):
+                return f"strict mode: {PARSE_ERROR[0]}"
             return f"strict mode: the orchestrator runs only lean-agent commands, not `{command.strip()[:60]}`. " + hint(DELEGATE)
         kind, what = restricted_command(command)
         if kind == "change":
