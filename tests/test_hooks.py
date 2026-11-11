@@ -895,13 +895,14 @@ class BudgetTest(Base):
 
     def test_stop_hook_front_desk_turn_ending_without_text_is_sent_back_once_to_answer_visibly(self):
         main = {"LEAN_AGENT_SESSION_ROLE": "main"}
-        out = self.stop_event(["Checking.", ""], **main)  # text earlier in the turn, an empty final message
+        out = self.stop_event([""], **main)  # no text anywhere in the turn
         self.assertEqual(out["decision"], "block")
         self.assertIn("visible text", out["reason"])
         self.assertIn("Do not repeat your previous message", out["reason"])
         self.assertIn("one short sentence", out["reason"])
-        self.assertIsNone(self.stop_event(["Checking.", ""], active=True, **main))
-        self.assertIsNone(self.stop_event(["Checking.", ""], LEAN_AGENT_SESSION_ROLE="thread"))
+        self.assertIsNone(self.stop_event([""], active=True, **main))
+        self.assertIsNone(self.stop_event([""], LEAN_AGENT_SESSION_ROLE="thread"))
+        self.assertIsNone(self.stop_event(["Checking.", ""], **main))  # earlier text in the turn is visible
         self.assertIsNone(self.stop_event(["Checking.", "Done: t3 is idle."], **main))
 
     def test_stop_hook_waiting_block_reason_asks_for_visible_text_too(self):
@@ -955,10 +956,36 @@ class BudgetTest(Base):
             fh.write("".join(json.dumps(r) + "\n" for r in recs))
         ev = {"hook_event_name": "Stop", "cwd": self.env["LEAN_AGENT_HOME"], "session_id": "s1", "transcript_path": tr}
         self.assertIsNone(run_hook("budget_hook.py", ev, **dict(self.env, **main)))
-        recs[-1]["message"]["id"] = "m2"  # a separate final message without text is silent
+        recs[-1]["message"]["id"] = "m2"  # text earlier in the same turn still counts as visible
         with open(tr, "w") as fh:
             fh.write("".join(json.dumps(r) + "\n" for r in recs))
-        self.assertEqual(run_hook("budget_hook.py", ev, **dict(self.env, **main))["decision"], "block")
+        self.assertIsNone(run_hook("budget_hook.py", ev, **dict(self.env, **main)))
+
+    def test_stop_hook_statements_about_asking_never_block_and_a_real_question_blocks_once(self):
+        main = {"LEAN_AGENT_SESSION_ROLE": "main"}
+        reply = ("Understood. I won't ask you anything until the review verdict is in. I told t12 to decide anything that "
+                 "comes up itself. It also won't push before the verdict reaches me.")
+        self.assertIsNone(self.stop_event([reply], **main))
+        self.assertIsNone(self.stop_event(["No questions from me until the review verdict is in."], **main))
+        self.assertEqual(self.stop_event(["Review is in.\n\nShould I push it now?"], **main)["decision"], "block")
+        self.assertIsNone(self.stop_event(["Should I push it now?"], active=True, **main))  # a turn from a block is never blocked
+
+    def test_stop_hook_last_assistant_message_from_the_event_counts_as_visible_text(self):
+        main = {"LEAN_AGENT_SESSION_ROLE": "main"}
+        tr = os.path.join(self.env["LEAN_AGENT_HOME"], "late.jsonl")  # final text not flushed yet: transcript ends in a tool_result
+        recs = [{"type": "user", "message": {"role": "user", "content": "go"}},
+                {"type": "assistant", "message": {"id": "m1", "role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "Bash", "input": {}}]}},
+                {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "ok"}]}}]
+        with open(tr, "w") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in recs))
+        ev = {"hook_event_name": "Stop", "cwd": self.env["LEAN_AGENT_HOME"], "session_id": "s1", "transcript_path": tr,
+              "last_assistant_message": "Done, nothing for you to decide."}
+        self.assertIsNone(run_hook("budget_hook.py", ev, **dict(self.env, **main)))
+
+    def test_stop_hook_queued_reports_never_block_a_visible_turn(self):
+        main = {"LEAN_AGENT_SESSION_ROLE": "main"}
+        self._waiting("lean_waiting.add('FYI: report staged', 'other', thread='t1')")
+        self.assertIsNone(self.stop_event(["Noted."], **main))
 
     def test_stop_hook_front_desk_blocks_on_open_waiting_items_until_asked(self):
         sys.path.insert(0, ROOT)

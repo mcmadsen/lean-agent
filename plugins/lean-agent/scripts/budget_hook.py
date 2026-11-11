@@ -773,7 +773,7 @@ def prompt_hook(event):
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "\n".join(lines)}}))
 
 
-ASKING_RE = re.compile(r"\b(should I|do you want|would you like|let me know|waiting (?:for|on) you|your call|which (?:one|option) )", re.I)
+ASKING_RE = re.compile(r"(?:^|[.!:]\s+)(?:should I|do you want|would you like|which)\b", re.I)
 STOP_REASON = "Ask this with AskUserQuestion so it can't be missed, and add one visible sentence stating the question."
 STOP_REASON_VISIBLE = "Ask this with AskUserQuestion so it can't be missed. Your reply's text is already visible: do not repeat it."
 
@@ -811,7 +811,7 @@ def turn_of(path):
 def silent_ending(path):
     """True when the turn at the end of the transcript at `path` ended with an assistant message without any text (after
     tool calls, or only thinking): the user, e.g. in Remote Control, sees nothing of the answer."""
-    last, seen, last_id = "", False, None
+    seen, anytext = False, False
     try:
         with open(path, "rb") as fh:
             raw = fh.read()
@@ -826,16 +826,25 @@ def silent_ending(path):
         body = msg.get("content")
         if rec.get("type") == "user":
             if isinstance(body, str) or any(isinstance(c, dict) and c.get("type") == "text" for c in body or []):
-                last, seen, last_id = "", False, None
+                seen, anytext = False, False
         elif rec.get("type") == "assistant":
             seen = True
-            mid = msg.get("id")
             part = "".join(str(c.get("text") or "") for c in body if isinstance(c, dict) and c.get("type") == "text") \
                 if isinstance(body, list) else str(body or "")
-            # one message can be written as several records (thinking, text, tool_use): they share the message id
-            last = (last + part) if (mid and mid == last_id) else part
-            last_id = mid
-    return seen and not last.strip()
+            if part.strip():  # text anywhere in the turn counts as visible
+                anytext = True
+    return seen and not anytext
+
+
+def silent_after_retry(path, wait=1.5):
+    """silent_ending, re-read for up to `wait` seconds: the transcript may not have the final text flushed yet."""
+    import time
+    end = time.time() + wait
+    while silent_ending(path):
+        if time.time() >= end:
+            return True
+        time.sleep(0.15)
+    return False
 
 
 SILENT_REASON = ("Your turn ended without visible text, so the user sees nothing. Do not repeat your previous message. "
@@ -925,6 +934,8 @@ def stop_hook(event):
     if event.get("stop_hook_active") or role == "thread":
         return
     text, asked = turn_of(event.get("transcript_path") or "")
+    if not str(text or "").strip():
+        text = str(event.get("last_assistant_message") or "")
     if role == "main":
         try:
             import lean_myq
@@ -944,7 +955,7 @@ def stop_hook(event):
                 if unasked or (waiting_marker(text) and not lean_waiting.recent()):
                     print(json.dumps({"decision": "block", "reason": waiting_reason(unasked)}))
                     return
-                if silent_ending(event.get("transcript_path") or ""):
+                if not str(event.get("last_assistant_message") or "").strip() and silent_after_retry(event.get("transcript_path") or ""):
                     print(json.dumps({"decision": "block", "reason": SILENT_REASON}))
                     return
         except Exception:
