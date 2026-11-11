@@ -186,6 +186,33 @@ class Feedback(PrivateCase):
         self.assertNotEqual(st[b]["state"], "dropped")
 
 
+    def test_fresh_project_has_no_foreign_cards(self):
+        import lean_memory
+        store = os.path.join(self.home, "memory")
+        lean_memory.add(store, "Never use ado for tickets, the user's rule.", "feedback", scope="open", name="ado rule")
+        lean_memory.add(store, "Be brief.", "user", scope="global", name="brief")
+        os.makedirs(os.path.join(self.tmp, "x", "proj"))
+        with open(os.path.join(self.tmp, "x", "proj", "README.md"), "w") as fh:
+            fh.write("hi\n")
+        r = self.cli("learn", os.path.join(self.tmp, "x", "proj"), "--name", "fresh", "--no-rules")
+        self.assertIn("0 cards", r.stdout)
+        out = self.cli("cards", "fresh").stdout
+        self.assertIn("0 own cards", out)
+        self.assertIn("shared global", out)
+        self.assertNotIn("ado-rule", out)
+
+
+    def test_rule_warning_ignores_common_words(self):
+        import io
+        import contextlib
+        import lean_agent
+        card = {"id": "r1", "is_rule": True, "targets": ["user's"], "alternative": "", "text": "x", "title": "t"}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            lean_agent.task_rule_warnings([card], "update the user's profile page")
+        self.assertEqual(err.getvalue(), "")
+
+
 class StartLine(unittest.TestCase):
     def test_empty_cards_part_is_omitted(self):
         with open(AGENT, encoding="utf-8") as fh:

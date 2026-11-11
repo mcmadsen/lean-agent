@@ -722,6 +722,7 @@ def learn(path, include_user_skills=False, quiet=False, name=None, rules=None, a
         save_json(home("projects.json"), projs)
         cards = sync_memory(slug)
         if not quiet:
+            cards = [c for c in cards if not c.get("shared")]
             print(f"Refreshed '{slug}' from {path}: {len(cards)} cards, ~{sum(c['tokens'] for c in cards):,} tokens. "
                   f"The project stays registered at {kept['path']}; no rules block was written here.")
         return slug
@@ -744,6 +745,7 @@ def learn(path, include_user_skills=False, quiet=False, name=None, rules=None, a
         print("note: kept your edited text for cards whose CLAUDE.md source changed since: " + ", ".join(source_changed))
 
     if not quiet:
+        cards = [c for c in cards if not c.get("shared")]
         total = sum(c["tokens"] for c in cards)
         print(f"Learned {path} as '{slug}': {len(cards)} cards, ~{total:,} tokens if loaded in full.")
         print(f"Workers get only the cards you pick. List them: lean-agent cards {slug}")
@@ -773,7 +775,7 @@ def sync_memory(slug):
     fresh = {}
     for m in mems:
         cid = "mem-" + slugify(m["stem"], 40)
-        fresh[cid] = {**rule_fields(m["body"], m["type"]), "id": cid, "kind": "memory", "title": f"memory {m['type']}: {m['description'] or m['name']}"[:120],
+        fresh[cid] = {**rule_fields(m["body"], m["type"]), "shared": m["scope"] == lean_memory.GLOBAL, "id": cid, "kind": "memory", "title": f"memory {m['type']}: {m['description'] or m['name']}"[:120],
                       "source": m["file"], "text": m["body"], "tokens": est_tokens(m["body"])}
     with library_lock(slug):
         cards = load_cards(slug)
@@ -854,14 +856,21 @@ def cmd_cards(a):
         return
     w = max(len(c["id"]) for c in cards) + 2
     print(f" {'id':<{w}}{'kind':<10}{'~tok':>6}  {'used':>6}  title")
-    for c in cards:
+    cards = [c for c in cards if not c.get("shared")] + [c for c in cards if c.get("shared")]
+    for i, c in enumerate(cards):
+        if c.get("shared") and (i == 0 or not cards[i - 1].get("shared")):
+            print("-- shared global cards --")
         flag = "*" if c.get("core") else ("x" if c.get("archived") else " ")
         print(f"{flag}{c['id']:<{w}}{c['kind']:<10}{c['tokens']:>6}  {card_rate(c):>6}  {c['title'][:70]}")
         note = card_size_note(c)
         if note:
             print(f"{'':>{w + 11 + 6}}  ! {note}")
-    print(f"{len(cards)} cards, ~{sum(c['tokens'] for c in cards):,} tokens.  * = core (always sent)   "
+    own = [c for c in cards if not c.get("shared")]
+    print(f"{len(own)} own cards, ~{sum(c['tokens'] for c in own):,} tokens.  * = core (always sent)   "
           "used = times a worker used it / times it was sent")
+    if len(own) != len(cards):
+        sh = [c for c in cards if c.get("shared")]
+        print(f"plus {len(sh)} shared global cards (explicit scope: global, not this project's own), ~{sum(c['tokens'] for c in sh):,} tokens")
 
 
 def card_size_note(c):
@@ -1705,7 +1714,7 @@ COMMON_TARGETS = set(lean_rules.STOP) | {
     "thing", "things", "git", "shell", "script", "scripts", "api", "web", "local", "remote", "main", "default",
     "old", "existing", "real", "separate", "different", "extra", "full", "long", "short", "wait", "waiting", "retry",
     "loop", "loops", "sleep", "time", "now", "before", "after", "so", "not", "no", "is", "are", "was", "has", "have",
-    "can", "will", "should", "would", "you", "your", "we", "i", "he", "she", "they", "what", "which", "how", "why"}
+    "user", "users", "user's", "users'", "can", "will", "should", "would", "you", "your", "we", "i", "he", "she", "they", "what", "which", "how", "why"}
 
 
 def _target_strength(c, t):

@@ -135,7 +135,7 @@ def read_all(d):
             "name": meta.get("name") or stem.replace("_", " "),
             "description": meta.get("description") or titles.get(os.path.basename(f), ""),
             "type": meta.get("type") if meta.get("type") in TYPES else "project",
-            "scope": meta.get("scope") or GLOBAL,
+            "scope": meta.get("scope") or "",  # unscoped: reaches no project (global must be explicit)
             "modified": meta.get("modified", ""), "source": meta.get("source", ""),
             "created": meta.get("created") or meta.get("modified", ""),  # backfilled from `modified` when missing
         })
