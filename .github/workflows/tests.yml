@@ -25,7 +25,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python tests/test_hooks.py
       - run: python tests/test_orchestrator.py
-      - run: for t in feedback goals spool stuck locks own_review deliver_guard poll startup_perf service_wait restart_loop orphan report_delivery runs_cli worktree_nopath tool_boundary restore fresh_delivery; do python tests/test_$t.py || exit 1; done
+      - run: for t in feedback goals spool stuck locks own_review deliver_guard poll startup_perf service_wait restart_loop orphan report_delivery runs_cli worktree_nopath tool_boundary restore fresh_delivery push_gate; do python tests/test_$t.py || exit 1; done
       - run: sh -n bin/lean-agent && sh -n plugins/lean-agent/bin/lean-agent && sh -n plugins/lean-agent/bin/lean-budget
       - name: ./install in a scratch home
         run: |

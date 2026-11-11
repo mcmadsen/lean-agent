@@ -399,6 +399,17 @@ def _git_hook(name, args):
     return run_own_hook(name, args, refs)
 
 
+def override_without_approval(command):
+    """`worktree push --override-guard` skips the push guard and the approving-review requirement: only with the
+    user's recorded approval (--allow-send "<what they approved>"), never on an agent's own."""
+    if "--override-guard" not in command or "worktree" not in command:
+        return ""
+    if re.search(r"--allow-send(\s|=)\s*\S", command):
+        return ""
+    return ("--override-guard needs the user's recorded approval in the same command "
+            "(--allow-send \"<what the user approved>\"); never use it on your own")
+
+
 def main():
     """PreToolUse hook for workers: refuse a Bash `git push` to a guarded branch."""
     if len(sys.argv) > 2 and sys.argv[1] == "git-hook":
@@ -414,7 +425,7 @@ def main():
     command = str((event.get("tool_input") or {}).get("command") or "")
     if "push" not in command:
         return 0
-    why = check(command, event.get("cwd") or os.getcwd())
+    why = override_without_approval(command) or check(command, event.get("cwd") or os.getcwd())
     if why:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                  "permissionDecisionReason": "lean-agent push guard: " + why}}))

@@ -6696,8 +6696,28 @@ def skipped_status(slug, path, label, sha):
     return 0
 
 
+def worktree_head_target(slug, path, head):
+    """A review of a lean-agent worktree's branch covers the worktree's actual HEAD commit (git -C <worktree>
+    rev-parse HEAD), also when that HEAD is detached or the branch ref lags behind it: then the sha is the target."""
+    if not head or head.startswith("origin/") or re.fullmatch(r"[0-9a-f]{7,40}", head):
+        return head
+    try:
+        _, w = resolve_worktree(slug, head)
+    except SystemExit:
+        return head
+    wpath = (w or {}).get("path")
+    if not wpath or not os.path.isdir(wpath):
+        return head
+    wsha = git(wpath, "rev-parse", "HEAD")
+    if wsha and wsha != git(path, "rev-parse", "--verify", "--quiet", head + "^{commit}"):
+        print(f"review: the worktree's HEAD ({wsha[:12]}) is not what {head} points to: reviewing the HEAD commit", flush=True)
+        return wsha
+    return head
+
+
 def review_main(a):
     slug, path = resolve_project(a.project)
+    a.head = worktree_head_target(slug, path, a.head)
     if a.head and a.head.startswith("origin/") and not a.no_fetch:
         git(path, "fetch", "-q", "origin")  # updates remote refs only; the working tree isn't touched
     if a.status:
@@ -8272,6 +8292,21 @@ def clean_merge_approval(slug, path):
     return dict(review, _merged=label)
 
 
+def push_gate_review(slug, path, branch, sha):
+    """The push gate: no approval covers `sha` (the worktree's actual HEAD, also when detached or the branch ref
+    lags), so run ONE review of it now (a delta re-review when an earlier head of the branch was approved: review
+    picks that itself). Returns the approving review record of `sha` or None."""
+    head = branch if git(path, "rev-parse", "--verify", "--quiet", branch + "^{commit}") == sha else sha
+    print(f"push gate: no approving review of {branch} @ {sha[:12]}: reviewing it now (once)", flush=True)
+    subprocess.run([sys.executable, os.path.abspath(__file__), "review", slug, "--head", head, "--for-push"],
+                   stdin=subprocess.DEVNULL)
+    sha_now = git(path, "rev-parse", "HEAD")
+    if sha_now != sha:
+        die(f"{branch} moved to {(sha_now or '?')[:12]} during the review: run the push again")
+    match, _ = find_review(slug, path, "HEAD")
+    return match
+
+
 def worktree_push(a):
     """Push a worktree's branch to origin: an outward action, so it needs a review and the user's approval."""
     slug, repo = resolve_project(a.project)
@@ -8366,9 +8401,20 @@ def worktree_push(a):
             match = inherited
             print(f"approval carried over from {match['run']}: HEAD is a clean merge of {match['_merged']} into the "
                   f"reviewed {match['head'][:10]} and changes none of the PR's own files")
+    unreviewed_override = None
     if not match or not approved(match["verdict"]):
-        die(f"{branch} @ {sha[:12]} has no approving review. Run: lean-agent review {slug} --head {branch}"
-            + (f" --base <base>" if not has_remote else ""), 2)
+        if a.override_guard and a.allow_send:  # the user's recorded approval: this exact head goes without a review
+            unreviewed_override = a.override_guard
+            match = {"run": "none", "verdict": f"skipped (pushed without approving review: {a.override_guard})"}
+            print(f"pushed without approving review: {a.override_guard}")
+        elif a.override_guard:
+            die("--override-guard skips the approving review only with the user's recorded approval: add "
+                "--allow-send \"<what the user approved>\" (never on your own)", 3)
+        else:
+            match = push_gate_review(slug, path, branch, sha)
+    if not match or not approved(match["verdict"]):
+        die(f"{branch} @ {sha[:12]} has no approving review (the push gate's review of it did not approve). "
+            f"See: lean-agent review {slug} --head {branch} --status", 2)
     target = remote_ref.split("/", 1)[1] if "/" in remote_ref else branch
     hit = push_guard.guarded(target, push_guard.project_patterns(slug))
     if hit and not a.override_guard:
@@ -8403,8 +8449,14 @@ def worktree_push(a):
         push_env["LEAN_AGENT_PUSH_GUARD_OVERRIDE"] = "1"
     p = subprocess.run(["git", "-C", path, "push", "origin", f"HEAD:refs/heads/{target}"],
                        capture_output=True, text=True, env=push_env)
+    if unreviewed_override and p.returncode == 0:
+        append_jsonl(reviews_path(slug), {"ts": now_iso(), "run": "override", "project": slug, "head": sha, "ref": branch,
+                                          "mode": "ref", "dirty": "", "skip": True, "for_push": True,
+                                          "verdict": f"skipped (pushed without approving review: {unreviewed_override})",
+                                          "findings": []})
     append_jsonl(home("pushes.jsonl"), {"ts": now_iso(), "thread": lean_threads.resolve_tag(), "project": slug, "branch": branch, "to": f"origin/{target}",
                                         "sha": sha, "review": match["run"], "approved": a.allow_send,
+                                        "review_override": unreviewed_override,
                                         "guard_override": a.override_guard if hit else None,
                                         "ok": p.returncode == 0})
     if p.returncode != 0:
@@ -16662,8 +16714,9 @@ def build_parser():
     s.add_argument("--no-fetch", action="store_true", help="push: don't fetch origin first")
     s.add_argument("--only-commits", action="store_true", help="push: push the commits even when the shared "
                    "worktree has uncommitted changes (they aren't pushed)")
-    s.add_argument("--override-guard", metavar="WHY", help="push: push to a guarded branch anyway (logged; only "
-                   "when the user explicitly asked for exactly this)")
+    s.add_argument("--override-guard", metavar="WHY", help="push: push to a guarded branch, or without an approving "
+                   "review of this head, anyway (logged; needs --allow-send with the user's approval; never on an "
+                   "agent's own)")
     s.add_argument("--thread", dest="thread_tag", metavar="tN|none", help=THREAD_HELP)
     s.set_defaults(fn=cmd_worktree)
 

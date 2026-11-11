@@ -743,7 +743,7 @@ def lost_message(run, ref, record_only=False):
 
 def nudge_message(ref):
     return (f"Status check for {ref}: state and next step in one line? If done, send ONE consolidated final report "
-            "(Ref, head sha, review verdict, checks, what's left, proposed action).")
+            "(Ref, head sha, checks, what's left, proposed action; the review verdict only if one ran).")
 
 
 def real_lost(lost, ref, runs):

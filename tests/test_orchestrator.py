@@ -6336,10 +6336,11 @@ class CliTest(unittest.TestCase):
         """`up` with the fake session, after one auto clear; returns (process, log, bridge, new session id)."""
         p, log, ss = self.auto_clear_up(50000, **env)
         ss.send("hello")
-        self.wait_for(lambda: self.clears(log), "the clear")
+        self.wait_for(lambda: self.clears(log), "the clear", secs=30)
         sid = self.clears(log)[0]["sid"]
-        self.wait_for(lambda: ss.info().get("session_id") == sid, "up.json to follow the clear")
-        self.assertTrue(ss.info()["transcript"].endswith(sid + ".jsonl"))
+        # slow (macOS CI) runners: up.json follows the clear a poll or two after it; wait on both fields it changes
+        self.wait_for(lambda: ss.info().get("session_id") == sid and str(ss.info().get("transcript", "")).endswith(sid + ".jsonl"),
+                      "up.json to follow the clear", secs=45)
         return p, log, ss, sid
 
     def service_record(self):
@@ -11166,6 +11167,92 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(before, local)
         self.assertEqual(remote(), local)
         self.assertIn("nothing to push", self.cli("worktree", "push", "proj", "origin/feature").stdout)
+
+    def push_gate_setup(self):
+        """A project with origin and a PR-branch worktree holding one unreviewed fix commit: (worktree, origin, commit)."""
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        origin = os.path.join(self.tmp.name, "origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+        g("remote", "add", "origin", origin)
+        g("push", "-q", "origin", "main", "feature")
+        g("checkout", "-q", "main")
+        g("branch", "-qD", "feature")
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "origin/feature", "--", "fix")
+        wt = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", "origin-feature")
+
+        def commit(msg, text="# fixed\n"):
+            with open(os.path.join(wt, "api", "totals.py"), "a") as fh:
+                fh.write(text)
+            subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", msg], check=True)
+            return subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        return wt, origin, commit
+
+    def review_records(self):
+        path = os.path.join(self.env["LEAN_AGENT_HOME"], "reviews", "proj.jsonl")
+        if not os.path.exists(path):
+            return []
+        with open(path) as fh:
+            return [json.loads(l) for l in fh]
+
+    def test_push_gate_reviews_the_tip_once_and_nothing_else_does(self):
+        wt, origin, commit = self.push_gate_setup()
+        tip = commit("fix")
+        self.assertEqual(self.review_records(), [])  # a run end and a commit start/demand no review
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        p = self.cli("worktree", "push", "proj", "feature", check=False, FAKE_REVIEW=approve)
+        self.assertIn("push gate: no approving review", p.stdout)
+        self.assertIn("ACTION NEEDED", p.stdout)
+        recs = [r for r in self.review_records() if r.get("verdict") == "approve"]
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["head"], tip)
+        p = self.cli("worktree", "push", "proj", "feature", check=False, FAKE_REVIEW=approve)  # approved now: no second review
+        self.assertNotIn("push gate:", p.stdout)
+        self.assertEqual(len(self.review_records()), 1)
+
+    def test_push_gate_delta_reviews_fix_commits_after_an_approval(self):
+        wt, origin, commit = self.push_gate_setup()
+        commit("fix")
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        self.cli("review", "proj", "--head", "feature", "--base", "main", FAKE_REVIEW=approve)
+        tip = commit("fix 2", "# more\n")
+        p = self.cli("worktree", "push", "proj", "feature", check=False, FAKE_REVIEW=approve)
+        self.assertIn("reviewing only what changed", p.stdout)
+        self.assertIn("ACTION NEEDED", p.stdout)
+        recs = self.review_records()
+        self.assertEqual(len(recs), 2)
+        self.assertEqual(recs[-1]["head"], tip)
+        self.assertEqual(recs[-1]["verdict"], "approve")
+
+    def test_override_guard_skips_the_review_only_with_the_users_approval(self):
+        wt, origin, commit = self.push_gate_setup()
+        tip = commit("fix")
+        p = self.cli("worktree", "push", "proj", "feature", "--override-guard", "urgent", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("recorded approval", p.stderr)
+        self.assertEqual(self.review_records(), [])
+        p = self.cli("worktree", "push", "proj", "feature", "--override-guard", "urgent",
+                     "--allow-send", "the user said push it without review")
+        self.assertIn("pushed without approving review: urgent", p.stdout)
+        self.assertEqual(subprocess.run(["git", "-C", origin, "rev-parse", "feature"], capture_output=True,
+                                        text=True).stdout.strip(), tip)
+        recs = self.review_records()
+        self.assertEqual(len(recs), 1)
+        self.assertIn("pushed without approving review: urgent", recs[0]["verdict"])
+        self.assertEqual(recs[0]["head"], tip)
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "pushes.jsonl")) as fh:
+            self.assertEqual(json.loads(fh.readlines()[-1])["review_override"], "urgent")
+
+    def test_review_of_a_detached_worktree_targets_its_head(self):
+        wt, origin, commit = self.push_gate_setup()
+        subprocess.run(["git", "-C", wt, "checkout", "-q", "--detach"], check=True)
+        tip = commit("fix on a detached head")  # the branch ref lags behind
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        p = self.cli("review", "proj", "--head", "feature", "--base", "main", FAKE_REVIEW=approve)
+        self.assertIn("reviewing the HEAD commit", p.stdout)
+        self.assertEqual(self.review_records()[-1]["head"], tip)
 
     def test_branch_names_follow_the_project_rules(self):
         g = self.git_project()
