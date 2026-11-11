@@ -1081,7 +1081,7 @@ def spool_dir(tid):
     return lean_home("thread-inbox", tid)
 
 
-def spool_add(tid, text=None, new=False, rid=None):
+def spool_add(tid, text=None, new=False, rid=None, auto=False):
     """Queue `text` for thread `tid` (None: only wake it). `rid`: the thread request it carries (never delivered once that
     request has started). Returns the spool file name."""
     d = spool_dir(tid)
@@ -1089,7 +1089,7 @@ def spool_add(tid, text=None, new=False, rid=None):
     name = f"{time.time_ns():020d}-{uuid.uuid4().hex[:8]}.json"
     tmp = os.path.join(d, name + ".tmp")
     with open(tmp, "w") as fh:
-        json.dump({"text": text, "ts": time.time(), "new": new, **({"rid": rid} if rid else {})}, fh)
+        json.dump({"text": text, "ts": time.time(), "new": new, **({"rid": rid} if rid else {}), **({"auto": True} if auto else {})}, fh)
     os.replace(tmp, os.path.join(d, name))
     return name
 
@@ -1140,6 +1140,20 @@ def spool_pending(tid):
         return sorted(n for n in os.listdir(spool_dir(tid)) if n.endswith(".json"))
     except OSError:
         return []
+
+
+def spool_only_auto(tid):
+    """True when every queued message of the thread came from an automatic path (goal chase, redelivery), none from the
+    user or front desk."""
+    names = spool_pending(tid)
+    for n in names:
+        try:
+            with open(os.path.join(spool_dir(tid), n)) as fh:
+                if not json.load(fh).get("auto"):
+                    return False
+        except (OSError, ValueError):
+            return False
+    return bool(names)
 
 
 def spool_threads():
@@ -1272,7 +1286,8 @@ def plan_restore(now=None, cap=None, data=None, activity=None):
     snap = read_snapshot()
     if activity is None:
         evs = lean_threads.events(data)
-        activity = {k: max((e[0] for e in v), default=0) for k, v in evs.items()}
+        activity = {k: max([e[0] for e in evs.get(k, [])] + [lean_threads._epoch(th.get("last_message") or th.get("created"))])
+                    for k, th in data["threads"].items()}
     if snap is not None:
         ids = [t for t in snap["threads"] if restorable(t, data)]
     else:
@@ -1357,9 +1372,9 @@ class SpoolDeliverer:
                     self.refused.add(tid)
                     lean_log.log("warn", "spool", f"not delivering to {tid!r}: {why}")
                 continue
-            if not may_auto_start(tid, self.now()):
+            if spool_only_auto(tid) and not may_auto_start(tid, self.now()):
                 continue  # restore grace: queued, delivered after it (or when the thread is up)
-            if in_grace(self.now()) and lean_threads.no_nudge(lean_threads.load()["threads"].get(tid)):
+            if in_grace(self.now()) and spool_only_auto(tid) and lean_threads.no_nudge(lean_threads.load()["threads"].get(tid)):
                 continue  # user-stopped / user-parked: waits until the user opens it
             spool_reclaim_stale(tid, age=200)
             try:
@@ -1414,7 +1429,7 @@ def goal_send(tid, text):
         if not alive_thread(tid):
             return False, f"{tid} is parked or stopped: not woken (open it to continue)"
     try:
-        spool_add(tid, text)
+        spool_add(tid, text, auto=True)
         return True, "queued"
     except OSError as exc:
         return False, str(exc)
@@ -2946,7 +2961,7 @@ class Reporter(AutoClear):
                 continue  # closed: never reopened here; grace: looked at again after it
             if not lean_threads.mark_redelivered(tid, un["id"]):
                 continue  # redelivered before: once per request
-            spool_add(tid, un["text"], rid=un["id"])
+            spool_add(tid, un["text"], rid=un["id"], auto=True)
             self.log(f"{tid}: request {un['id']} was not started, redelivered", "warn")
             queue_report(tid, "chase", f"{tid}: request was not started, redelivered")
 
