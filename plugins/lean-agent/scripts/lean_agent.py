@@ -771,7 +771,8 @@ def rule_fields(text, mtype):
 def sync_memory(slug):
     """Mirror the shared memory store into a project's cards (global memories + this project's). Read-only for
     the store; write paths call heal_and_sync() so duplicates are merged first."""
-    mems = [m for m in lean_memory.read_all(memory_store()) if m["scope"] in (lean_memory.GLOBAL, slug)]
+    owner = lean_memory.owner_of_dir(memory_store(), projects())
+    mems = [m for m in lean_memory.read_all(memory_store(), owner) if m["scope"] in (lean_memory.GLOBAL, slug)]
     fresh = {}
     for m in mems:
         cid = "mem-" + slugify(m["stem"], 40)
@@ -5543,6 +5544,8 @@ def thread_pr_refs(tid):
     out = []
 
     def add(slug, pr, head=None):
+        if slug and push_guard.private_slug_of(slug):
+            return  # a private project has no PRs
         if slug and pr and (slug, str(pr)) not in [(s, p) for s, p, _ in out]:
             out.append((slug, str(pr), head))
     for t in todos()["items"]:
@@ -14745,6 +14748,7 @@ from the text given; do not run commands or read files.
 - "drop-goal": the thread or the records say the PR/work item was abandoned, closed or is no longer needed.
 - "done-goal": it was merged, pushed and posted, or finished.
 - "chase": the thread must act. Give a message of ONE short sentence: what, the run id if any, one action.
+A goal marked "private" is local work: never mention push, post, PR or review status for it.
 Goals (JSON):
 {goals}
 Answer with one line exactly like this (valid JSON, one line) before the LEAN-FEEDBACK line:
@@ -14825,7 +14829,7 @@ def pr_entries(tids=None, only_pr=None):
         closed = bool((data["threads"].get(tid) or {}).get("closed"))
         for g in goals:  # PR goals of the thread that no todo/run/review names
             n = lean_goals.key_of(g.get("ref"))
-            if n.startswith("n") and norm_thread_tag(g.get("thread")) == norm_thread_tag(tid) and slug0 and n[1:] not in [p for _, p, _ in refs]:
+            if n.startswith("n") and norm_thread_tag(g.get("thread")) == norm_thread_tag(tid) and slug0 and not push_guard.private_slug_of(slug0) and n[1:] not in [p for _, p, _ in refs]:
                 if not closed or g.get("state") in lean_goals.OPEN:
                     refs.append((slug0, n[1:], None))
         for slug, pr, head in refs:

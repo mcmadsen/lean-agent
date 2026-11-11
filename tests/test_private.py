@@ -213,6 +213,46 @@ class Feedback(PrivateCase):
         self.assertEqual(err.getvalue(), "")
 
 
+    def test_private_has_no_pr_refs(self):
+        import lean_goals
+        with open(os.path.join(self.home, "ledger.jsonl"), "w") as fh:
+            fh.write(json.dumps({"id": "r1", "project": "vault", "thread": "t1", "task": "x"}) + "\n")
+        old = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, old)
+        self.assertEqual(lean_goals.ref_in("fix PR 2 and #7", private=True), "")
+        self.assertEqual(lean_goals.ref_in("fix PR 2", private=False), "PR 2")
+        self.assertEqual(lean_goals.note_text("review PR 2 please", "t1"), "")
+        self.assertEqual(lean_goals.note_text("review PR 3 please", "t2"), lean_goals.note_text("review PR 3 please", "t2"))
+        import lean_agent
+        self.assertEqual([r for r in lean_agent.thread_pr_refs("t1")], [])
+        lost = lean_goals.lost_message("r9", "task", private=True)
+        self.assertNotIn("final report", lost)
+        self.assertIn("locally", lost)
+        self.assertIn("locally", lean_goals.nudge_message("task", private=True))
+        g = {"id": "g1", "thread": "t1", "ref": "task", "state": "active"}
+        self.assertTrue(lean_goals._context(g, {}, "lost", "r9", 0, True)["private"])
+
+    def test_unscoped_memory_belongs_to_its_project(self):
+        import lean_agent
+        import lean_memory
+        enc = "".join(c if c.isalnum() else "-" for c in lean_memory.git_root(self.repo))
+        d = os.path.join(self.tmp, ".claude", "projects", enc, "memory")
+        os.makedirs(d)
+        with open(os.path.join(d, "note.md"), "w") as fh:
+            fh.write("---\nname: n\ndescription: d\ntype: project\n---\nOnly for the vault.\n")
+        os.environ["LEAN_AGENT_MEMORY_DIR"] = d
+        self.addCleanup(os.environ.pop, "LEAN_AGENT_MEMORY_DIR", None)
+        has = lambda slug: any("Only for the vault" in c["text"] for c in lean_agent.sync_memory(slug))
+        self.assertTrue(has("vault"))
+        self.assertFalse(has("open"))
+        os.makedirs(os.path.join(self.tmp, "x", "p2"))
+        with open(os.path.join(self.tmp, "x", "p2", "README.md"), "w") as fh:
+            fh.write("hi\n")
+        self.cli("learn", os.path.join(self.tmp, "x", "p2"), "--name", "newp", "--no-rules")
+        self.assertFalse(has("newp"))
+
+
 class StartLine(unittest.TestCase):
     def test_empty_cards_part_is_omitted(self):
         with open(AGENT, encoding="utf-8") as fh:
