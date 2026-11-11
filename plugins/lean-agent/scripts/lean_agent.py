@@ -7879,7 +7879,7 @@ def worktree_attach(a):
         die("which branch? lean-agent worktree attach <project> <branch>")
     sync_worktree_registry(slug, repo)
     w = next((w for w in (worktree_index().get(slug) or {}).values() if w.get("branch") == a.ref or w.get("ref") == a.ref), None)
-    path = w["path"] if w else None
+    path = w.get("path") if w else None
     if not path or not os.path.isdir(path):
         die(f"no lean-agent worktree for {a.ref} in {slug} (see: lean-agent worktrees {slug})")
     if git(path, "symbolic-ref", "--quiet", "HEAD"):
@@ -8031,7 +8031,9 @@ def run_worktree_setup(slug, name, path, command):
 
     def mark(state):
         idx = worktree_index()
-        idx.setdefault(slug, {}).setdefault(name, {"created": now_iso()})["setup"] = state
+        e = idx.setdefault(slug, {}).setdefault(name, {"created": now_iso()})
+        e["setup"] = state
+        e.setdefault("path", worktree_path(path))  # never an entry without a path (setup runs before the entry is complete)
         save_json(home("worktrees.json"), idx)
     mark("running")
     t0 = time.time()
@@ -8075,6 +8077,17 @@ def cmd_worktrees(a):
         if idx.get(slug) and (projects().get(slug) or {}).get("path"):
             idx = sync_worktree_registry(slug, projects()[slug]["path"], write=False)
         for name, w in sorted((idx.get(slug) or {}).items()):
+            if not w.get("path"):
+                if getattr(a, "prune", False):
+                    idx = worktree_index()
+                    (idx.get(slug) or {}).pop(name, None)
+                    save_json(home("worktrees.json"), idx)
+                    print(f"{slug:<16} {name}: dropped entry with no path recorded")
+                else:
+                    found = True
+                    print(f"{slug:<16} {w.get('ref') or name:<36} {'branch ' + w['branch'] if w.get('branch') else 'detached':<24} "
+                          f"(no path recorded; worktrees --prune drops it)")
+                continue
             if not os.path.isdir(w["path"]):
                 continue
             found = True
@@ -8095,7 +8108,7 @@ def resolve_worktree(slug, ref):
     bare = re.sub(r"^(refs/heads/|origin/)", "", ref)
     hits = []
     for n, w in sorted(entries.items()):
-        cur = git(w["path"], "symbolic-ref", "--quiet", "--short", "HEAD") if os.path.isdir(w["path"]) else None
+        cur = git(w["path"], "symbolic-ref", "--quiet", "--short", "HEAD") if w.get("path") and os.path.isdir(w["path"]) else None
         wref = re.sub(r"^(refs/heads/|origin/)", "", w.get("ref") or "")
         if ref in (w.get("branch"), w.get("ref"), cur) or bare in (w.get("branch"), cur, wref):
             hits.append(n)
@@ -8124,6 +8137,11 @@ def cmd_worktree(a):
     name, w = resolve_worktree(slug, a.ref)
     if not w:
         die(f"no lean-agent worktree for {a.ref} in {slug} (see: lean-agent worktrees {slug})")
+    if not w.get("path"):
+        del idx[slug][name]
+        save_json(home("worktrees.json"), idx)
+        print(f"dropped {name}: no path recorded")
+        return
     if os.path.isdir(w["path"]) and git(w["path"], "status", "--porcelain") and not a.force:
         die(f"{w['path']} has uncommitted changes; pass --force to remove it anyway")
     p = subprocess.run(["git", "-C", repo, "worktree", "remove"] + (["--force"] if a.force else []) + [w["path"]],
@@ -8224,8 +8242,8 @@ def worktree_setup_cmd(a):
           f"{slug}: no setup command. Set one: lean-agent worktree setup {slug} --run \"npm ci && npm run build\"")
     if command and a.ref:
         name, w = resolve_worktree(slug, a.ref)
-        if not w:
-            die(f"no lean-agent worktree for {a.ref} in {slug}")
+        if not w or not w.get("path"):
+            die(f"no lean-agent worktree for {a.ref} in {slug}" + (" (no path recorded; lean-agent worktrees --prune)" if w else ""))
         run_worktree_setup(slug, name, w["path"], command)
     return 0
 
@@ -8260,7 +8278,7 @@ def worktree_push(a):
     if not a.ref:
         die("which branch? lean-agent worktree push <project> <ref>")
     _, w = resolve_worktree(slug, a.ref)
-    if not w or not os.path.isdir(w["path"]):
+    if not w or not os.path.isdir(w.get("path") or ""):
         die(f"no lean-agent worktree for {a.ref} in {slug} (see: lean-agent worktrees {slug})")
     path, branch = w["path"], git(w["path"], "symbolic-ref", "--quiet", "--short", "HEAD")
     if not branch and w.get("ref", "").startswith("origin/"):
@@ -16586,6 +16604,7 @@ def build_parser():
 
     s = sub.add_parser("worktrees", help="list lean-agent's shared worktrees")
     s.add_argument("project", nargs="?")
+    s.add_argument("--prune", action="store_true", help="drop registry entries that have no path recorded")
     s.set_defaults(fn=cmd_worktrees)
     s = sub.add_parser("worktree", help="shared worktrees: rm, create <new> --from <ref>, adopt <path>, setup (run on new ones; --show), push (after review + approval), attach (branch to a detached HEAD)")
     s.add_argument("action", choices=["rm", "setup", "push", "base", "attach", "create", "adopt"])
