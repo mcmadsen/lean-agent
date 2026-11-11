@@ -1754,7 +1754,7 @@ SHOW_REPORT_CHARS = 800  # `thread show` default: the latest report, cut here (-
 def queued_messages(tid):
     """How many messages for thread `tid` wait in the delivery spool."""
     try:
-        return sum(1 for n in os.listdir(os.path.join(lean_home("thread-inbox"), tid)) if n.endswith((".json", ".sending")))
+        return sum(1 for n in os.listdir(os.path.join(lean_home("thread-inbox"), tid)) if n.endswith((".json", ".sending", ".injected")))
     except OSError:
         return 0
 
@@ -1768,7 +1768,7 @@ def undelivered_age(tid, now=None):
     oldest = None
     try:
         for n in os.listdir(os.path.join(lean_home("thread-inbox"), tid)):
-            if n.endswith((".json", ".sending")) and n[:20].isdigit():
+            if n.endswith((".json", ".sending", ".injected")) and n[:20].isdigit():
                 ts = int(n[:20]) / 1e9
                 oldest = ts if oldest is None else min(oldest, ts)
     except OSError:

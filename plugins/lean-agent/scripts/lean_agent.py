@@ -14356,10 +14356,12 @@ def thread_action(a):
         if not tid:
             die("thread report works only inside a thread session")
         if len(a.args) > 1 or (a.args and a.prompt_file):
-            die('usage: lean-agent thread report ("<text>" | --prompt-file F|-)')
+            die('usage: lean-agent thread report ("<text>" | - | --prompt-file F|-)')
+        if a.args and a.args[0].strip() == "-":  # a bare "-" reads stdin, like --prompt-file -
+            a.args, a.prompt_file = [], "-"
         text = (a.args[0].strip() if a.args else thread_prompt(a, attach=False)) or ""
-        if not text:
-            die('thread report needs the report text: "<text>" or --prompt-file -')
+        if not text or text == "-":
+            die('usage: lean-agent thread report ("<text>" | - | --prompt-file F|-): the report text is empty')
         try:  # the consolidated final report (Ref/Head/Review/Checks/Left/Proposed action): the push question for the user
             lean_goals.final_report(tid, text)
             lean_goals.finished(tid, text)

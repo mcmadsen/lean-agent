@@ -800,6 +800,12 @@ class AutoClear:
             clear_replacing(self.key)  # queued messages now go to the new session, after its brief
 
     def _brief_new_session(self, old_proc):
+        try:
+            released = spool_release_injected(self.key)  # given to the old session, never confirmed: the new one gets it
+            if released:
+                self.log(f"{released} message(s) the old session never confirmed are queued for the fresh one")
+        except Exception:
+            pass
         end = time.time() + 30
         while time.time() < end and (self.host.proc is old_proc or not self.host.alive()):
             time.sleep(0.2)
@@ -1187,6 +1193,57 @@ def spool_done(tid, name):
         pass
 
 
+def spool_hold_injected(tid, name, key):
+    """A message handed to the session as tool-boundary context stays on disk (`.injected`) until the session is seen to
+    have finished a turn with it; a swap or death before that releases it (see spool_release_injected)."""
+    d = spool_dir(tid)
+    src = os.path.join(d, name[:-5] + ".sending")
+    dst = os.path.join(d, name[:-5] + ".injected")
+    try:
+        msg = _load(src)
+        with open(src, "w") as fh:
+            json.dump(dict(msg, ledger_key=key), fh)
+        os.rename(src, dst)
+    except OSError:
+        pass
+
+
+def _injected(tid):
+    try:
+        return sorted(n for n in os.listdir(spool_dir(tid)) if n.endswith(".injected"))
+    except OSError:
+        return []
+
+
+def spool_confirm_injected(tid):
+    """The session finished a turn after the injection: it had the text. Drops the held records."""
+    for n in _injected(tid):
+        try:
+            os.remove(os.path.join(spool_dir(tid), n))
+        except OSError:
+            pass
+
+
+def spool_release_injected(tid):
+    """The session that was given these as context is gone (or replaced) without confirming: queue them again, in order,
+    and forget their ledger ids so the next session receives them. Returns how many."""
+    n_ = 0
+    for n in _injected(tid):
+        path = os.path.join(spool_dir(tid), n)
+        try:
+            key = _load(path).get("ledger_key")
+            os.rename(path, os.path.join(spool_dir(tid), n[:-9] + ".json"))
+            n_ += 1
+            if key:
+                try:
+                    ledger_forget(key)
+                except Exception:
+                    pass
+        except OSError:
+            pass
+    return n_
+
+
 def spool_withdraw(tid, name):
     """Remove an unclaimed message from the spool; False when a deliverer has it (or it was delivered)."""
     try:
@@ -1368,6 +1425,10 @@ class SpoolDeliverer:
             lean_own.sweep()  # review items about the user's own PRs need no vote
         except Exception:
             pass
+        try:
+            self.settle_injected()
+        except Exception:
+            pass
         for tid in spool_threads():
             why = lean_threads.session_refusal(tid)
             if why:
@@ -1393,6 +1454,20 @@ class SpoolDeliverer:
             t.start()
             started.append(t)
         return started
+
+    def settle_injected(self):
+        """Held tool-boundary messages: the session idle again = consumed (dropped); the session gone = queued again."""
+        try:
+            tids = [t for t in os.listdir(lean_home("thread-inbox")) if _injected(t)]
+        except OSError:
+            return
+        for tid in tids:
+            if is_replacing(tid):
+                continue
+            if not alive_thread(tid):
+                spool_release_injected(tid)
+            elif not mid_turn(tid):
+                spool_confirm_injected(tid)
 
     def _deliver(self, tid):
         try:
@@ -2196,6 +2271,7 @@ def inject_thread(tid):
     if is_replacing(tid):
         return None
     texts = []
+    spool_confirm_injected(tid)  # a later tool boundary of the same session: the earlier text was consumed
     for name in spool_pending(tid):
         msg = spool_claim(tid, name)
         if msg is None:
@@ -2208,7 +2284,7 @@ def inject_thread(tid):
         except lean_common.LockBusy:
             spool_release(tid, name)
             break
-        spool_done(tid, name)
+        spool_hold_injected(tid, name, key)  # confirmed (dropped) at the session's next turn end, released if it dies first
         texts.append(str(msg["text"]))
     return HOOK_HEADER_THREAD + "\n" + "\n\n".join(texts) if texts else None
 
