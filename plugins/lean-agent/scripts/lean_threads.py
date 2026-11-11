@@ -354,6 +354,8 @@ def set_session(tid, **fields):
                 t.pop(k, None)
             else:
                 t[k] = v
+        if fields.get("session_on"):
+            t["session_on_at"] = time.time()  # when its session was started: a session newer than the live snapshot is restored too
     return tid
 
 
