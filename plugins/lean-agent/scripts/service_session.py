@@ -1453,14 +1453,14 @@ def report_states(tid=None):
     return sorted(out, key=lambda x: x[1].get("queued") or 0)
 
 
-def set_block_how(block, how):
+def set_block_how(block, how="hook context"):
     """The staged block `block` was taken by the prompt hook: its reports were delivered as hidden context."""
     with lean_common.file_lock(states_path()):
         data = _load(states_path())
         for recs in data.values():
             for r in recs if isinstance(recs, list) else []:
                 if r.get("block") == block and r.get("state") == "delivered":
-                    r["how"] = "hook context"
+                    r["how"] = how
         lean_common.write_json_atomic(states_path(), data)
 
 
@@ -1476,16 +1476,34 @@ def next_report_id(floor=0):
     return n
 
 
+def answered_question_keys():
+    """{(thread, qid)} of the questions whose waiting item is done (answered or dismissed)."""
+    try:
+        return {(w.get("thread"), w.get("qid")) for w in lean_waiting._load()
+                if w.get("qid") and (w.get("answered_at") or w.get("done"))}
+    except Exception:
+        return set()
+
+
+def question_answered(t, qid, answered=None):
+    """True when question `qid` of thread record `t` has an answer (recorded on the thread, or its waiting item is done)."""
+    q = next((x for x in (t.get("questions") or []) if isinstance(x, dict) and x.get("id") == qid), None)
+    if q is None or q.get("answered") or q.get("answer"):
+        return True
+    return (t.get("id") or t.get("thread"), qid) in (answered if answered is not None else set())
+
+
 def ensure_question_items():
     """Every open thread question has an open waiting item (created when queueing missed it)."""
     import lean_threads
     have = {(w.get("thread"), w.get("qid")) for w in lean_waiting.open_items()}
+    have |= answered_question_keys()  # a waiting item that is done (answered, dismissed) is never created again
     data = lean_threads.load()
     for tid, t in data["threads"].items():
         if tid in data["aliases"]:
             continue
         for q in lean_threads.open_questions(t):
-            if q.get("kind") == "permission" or (tid, q.get("id")) in have:
+            if q.get("kind") == "permission" or q.get("answer") or (tid, q.get("id")) in have:
                 continue
             try:
                 lean_waiting.add(q["text"], "question", None, tid, qid=q["id"])
@@ -1559,8 +1577,11 @@ def repush_questions(now=None, after=None):
     except Exception:
         pass
     threads_ = None
+    answered = answered_question_keys()
     for w in lean_waiting.open_items():
         tid, qid = w.get("thread"), w.get("qid")
+        if (tid, qid) in answered:
+            continue
         if w.get("kind") != "question" or not tid or not qid or w.get("asked_at") or w.get("repushed"):
             continue
         try:
@@ -1573,7 +1594,7 @@ def repush_questions(now=None, after=None):
             threads_ = lean_threads.load()["threads"]
         t = threads_.get(tid) or {}
         q = next((q for q in lean_threads.open_questions(t) if q.get("id") == qid), None)
-        if q is None:
+        if q is None or q.get("answer"):
             continue
         lean_waiting.mark_repushed(w["id"])
         queue_report(tid, "question", f"QUESTION {qid} (still unanswered, pushed again): {q['text']}", tag="repush", waiting=False)
@@ -1601,6 +1622,7 @@ def attention_items(now, after=NUDGE_AFTER, skip=()):
                         f"{int(age_r // 60)}m, not delivered -> lean-agent thread reports {i['thread']} --mine"))
     data = lean_threads.load()
     turns = lean_threads.turns_map()
+    answered_q = answered_question_keys()
     for tid, t in data["threads"].items():
         if tid in data["aliases"] or tid == "main" or lean_threads.no_nudge(t):
             continue
@@ -1609,7 +1631,8 @@ def attention_items(now, after=NUDGE_AFTER, skip=()):
                 age_q = now - datetime.datetime.fromisoformat(str(q.get("ts"))).timestamp()
             except ValueError:
                 continue
-            if age_q >= after and tid not in skip and q.get("kind") != "permission":
+            if age_q >= after and tid not in skip and q.get("kind") != "permission" and not q.get("answer") \
+                    and (tid, q.get("id")) not in answered_q:
                 out.append((f"question:{tid}:{q['id']}", f'{tid} {q["id"]}: question unanswered ({int(age_q // 60)}m) -> '
                             f'lean-agent thread answer {tid} {q["id"]} "<answer>"'))
         un = lean_threads.unstarted_request(t, [], now, after, turns=turns)
@@ -1792,7 +1815,7 @@ def take_reports(now=None):
             t = i.get("thread")
             k = report_key(t, i.get("kind"), i.get("text"))
             why = ""
-            if k in relayed_keys(t):
+            if k in relayed_keys(t) or ledger_has(item_key(i)):
                 why = "already delivered earlier"
             elif k in seen:
                 why = f"same text as r{seen[k]}, delivered in the same message"
@@ -1950,6 +1973,112 @@ def logged_blocks():
     return items if isinstance(items, list) else []
 
 
+LEDGER_KEPT = 600
+HOOK_HEADER_MAIN = "[lean-agent: thread reports]"
+HOOK_HEADER_THREAD = "[lean-agent: new message from main]"
+TOOL_BOUNDARY = "delivered (tool boundary)"
+
+
+def ledger_path():
+    return lean_home("delivered-items.json")
+
+
+def item_key(i):
+    return f"{i.get('thread')}:{report_seq(i)}"
+
+
+def ledger_has(key):
+    return key in _load(ledger_path())
+
+
+def ledger_claim(keys, timeout=None):
+    """The subset of `keys` not delivered before, now recorded as delivered (one id is delivered once, whichever path:
+    tool-boundary context, typed, fallback, a replay after a restart). Raises LockBusy when the lock stays held."""
+    os.makedirs(lean_home(), exist_ok=True)
+    with lean_common.file_lock(ledger_path(), timeout=timeout):
+        data = _load(ledger_path())
+        fresh = [k for k in dict.fromkeys(keys) if k not in data]
+        if fresh:
+            now = time.time()
+            data.update({k: now for k in fresh})
+            if len(data) > LEDGER_KEPT:
+                data = dict(sorted(data.items(), key=lambda kv: kv[1])[-LEDGER_KEPT:])
+            lean_common.write_json_atomic(ledger_path(), data)
+    return fresh
+
+
+def ledger_forget(key):
+    with lean_common.file_lock(ledger_path()):
+        data = _load(ledger_path())
+        if data.pop(key, None) is not None:
+            lean_common.write_json_atomic(ledger_path(), data)
+
+
+def inject_main(now=None):
+    """Main's pending items at a tool boundary: the staged block (not yet taken by the prompt hook) or, else, the queued
+    thread reports. Returns the additionalContext text or None. Claims by rename / under the queue lock and the ledger."""
+    now = time.time() if now is None else now
+    claimed = pending_path() + ".hook"
+    try:
+        os.rename(pending_path(), claimed)
+    except OSError:
+        claimed = None
+    if claimed:
+        data = _load(claimed)
+        try:
+            os.remove(claimed)
+        except OSError:
+            pass
+        keys = ["block:" + str(data.get("id"))] + [item_key(i) for i in data.get("items") or [] if isinstance(i, dict)]
+        if data.get("block") and ledger_claim(keys[:1]):
+            ledger_claim(keys[1:])
+            set_block_how(data.get("id"), TOOL_BOUNDARY)
+            return HOOK_HEADER_MAIN + "\n" + data["block"]
+        return None
+    if not queued_reports():
+        return None
+    items, dropped = take_reports(now)
+    if not items:
+        return None
+    won = set(ledger_claim([item_key(i) for i in items]))
+    items = [i for i in items if item_key(i) in won]
+    if not items:
+        return None
+    rid = f"{int(now * 1000) & 0xffffff:06x}"
+    log_block(reports_message(items, dropped), rid)
+    mark_relayed(items)
+    drop_reports(items)
+    for i in items:
+        try:
+            report_state(i.get("thread"), report_seq(i), state="delivered", how=TOOL_BOUNDARY, block=rid)
+        except Exception:
+            pass
+    return HOOK_HEADER_MAIN + "\n" + reports_digest(items, dropped, rid)
+
+
+def inject_thread(tid):
+    """Thread `tid`'s spooled messages/answers at a tool boundary, oldest first (claimed by rename: the spool deliverer
+    never also types them). Returns the additionalContext text or None."""
+    if is_replacing(tid):
+        return None
+    texts = []
+    for name in spool_pending(tid):
+        msg = spool_claim(tid, name)
+        if msg is None:
+            continue
+        key = "spool:" + tid + ":" + name
+        try:
+            if not msg.get("text") or msg.get("new") or not ledger_claim([key]):
+                spool_release(tid, name) if (msg.get("new") or not msg.get("text")) else spool_done(tid, name)
+                continue
+        except lean_common.LockBusy:
+            spool_release(tid, name)
+            break
+        spool_done(tid, name)
+        texts.append(str(msg["text"]))
+    return HOOK_HEADER_THREAD + "\n" + "\n\n".join(texts) if texts else None
+
+
 def take_pending(line, with_full=False):
     """The staged block (digest) for a summary `line` typed into main (once: the file is removed), else None;
     with `with_full` a (digest, full text) pair."""
@@ -1964,6 +2093,8 @@ def take_pending(line, with_full=False):
             os.remove(pending_path())
         except OSError:
             return None
+    if not ledger_claim(["block:" + str(data.get("id"))]):
+        return None  # already given to main at a tool boundary
     try:
         set_block_how(data.get("id"), "hook context")
     except Exception:
@@ -2372,7 +2503,7 @@ def wait_reason(rec, now=None):
         return ""
     w = _load(wait_path())
     if not w.get("why"):
-        return "queued, the service picks it up within a minute"
+        return "queued; delivered at main's next tool call, else the service types it within a minute"
     eta = f"; typed anyway at ~{hh(w['eta'])}" if w.get("eta") else "; typed at main's next idle moment"
     return f"{w['why']}" + (f" since {hh(w['since'])}" if w.get("since") else "") + eta
 
@@ -2596,6 +2727,12 @@ class Reporter(AutoClear):
         now = self.now()
         if not data.get("block") or now - (data.get("ts") or 0) < PENDING_FALLBACK:
             return
+        if ledger_has("block:" + str(data.get("id"))):  # given to main already (tool boundary): never typed as well
+            try:
+                os.remove(pending_path())
+            except OSError:
+                pass
+            return
         st = st or transcript_state(self.transcript())
         if self.prompting():
             return
@@ -2607,10 +2744,16 @@ class Reporter(AutoClear):
         if not (idle_ok or force):
             return
         text = (data.get("full") or data["block"]) if idle_ok else one_line_digest(data["block"], data.get("id"))
+        if not ledger_claim(["block:" + str(data.get("id"))]):
+            return
         try:
             self.host.paste(text)
         except Exception as exc:  # noqa: BLE001 - stays staged, retried on a later tick
             self.log(f"typing the staged thread reports failed, kept: {exc}")
+            try:
+                ledger_forget("block:" + str(data.get("id")))
+            except Exception:
+                pass
             return
         try:
             os.remove(pending_path())

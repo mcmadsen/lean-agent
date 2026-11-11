@@ -10826,6 +10826,14 @@ def cmd_doctor(a):
             report(False, f"{f} contradicts lean-agent ({where})", "lean-agent doctor --fix  (adds a one-line precedence note)")
 
     doctor_locks(report, a.fix)
+    try:
+        with open(os.path.join(HERE, "..", "hooks", "hooks.json")) as fh:
+            post = json.dumps((json.load(fh).get("hooks") or {}).get("PostToolUse") or [])
+    except (OSError, ValueError):
+        post = ""
+    report("inject_hook.py" in post and os.path.isfile(os.path.join(HERE, "inject_hook.py")) or (False if post else None),
+           "tool-boundary delivery hook (inject_hook.py, PostToolUse) is registered" if "inject_hook.py" in post else
+           "tool-boundary delivery hook (inject_hook.py) is not registered in hooks/hooks.json: thread messages and reports wait for a turn end")
     stale = forward_old_hooks(dry=not a.fix)
     if stale and not a.fix:
         report(False, f"{len(stale)} hook script(s) in older cached plugin copies run outdated code (sessions "
@@ -13254,7 +13262,7 @@ def deliver_one(tid, prompt, resume_old=False, new=False):
             ok, err = service_session.send(prompt, tid)
             if not ok:
                 raise RuntimeError(f"{tid}: {err}")
-        return f"thread {tid} started" if new else f"{tid}: " + ("sent (session live)" if prompt else "session live")
+        return f"thread {tid} started" if new else f"{tid}: " + ("delivered (session live)" if prompt else "session live")
     for _attempt in range(12):
         victim = None
         with thread_start_lock():  # bookkeeping only: no waiting for a session to park or to become ready in here
@@ -13270,7 +13278,7 @@ def deliver_one(tid, prompt, resume_old=False, new=False):
                     ok, err = service_session.send(prompt, tid)
                     if not ok:
                         raise RuntimeError(f"{tid}: {err}")
-                return f"thread {tid} started" if new else f"{tid}: " + ("sent (session live)" if prompt else "session live")
+                return f"thread {tid} started" if new else f"{tid}: " + ("delivered (session live)" if prompt else "session live")
             try:
                 make_room_for_thread_session(tid, defer_park=True)
             except NeedPark as np_:
@@ -13352,15 +13360,15 @@ def slot_line(tid, why, new=False):
     return f"{tid} created, queued for a session slot ({why})" if new else f"{tid}: queued for a session slot ({why})"
 
 
-BUSY_NOTE = "thread busy, delivers at its next turn end"
+BUSY_NOTE = "delivers at its next tool call or turn end"
 
 
 def queued_line(tid):
     t = lean_threads.load()["threads"].get(tid) or {}
     if service_session.alive(tid):
         if service_session.mid_turn(tid):
-            return f"{tid}: queued: {BUSY_NOTE}"
-        return f"{tid}: queued: delivery pending (service busy), will deliver within 20 s"
+            return f"{tid}: sent: {BUSY_NOTE.replace('its', tid + chr(39) + 's')}"
+        return f"{tid}: queued: service busy, retrying automatically"
     state = "idle, session stopped" if t.get("parked_by") in ("idle", "user-stop") else "parked" if t.get("parked") else "ended" if t.get("closed") else "idle"
     return f"{tid}: queued: delivery pending (waking, {state})"
 
@@ -13392,8 +13400,8 @@ def deliver_with_cap(tid, own=None, new=False, resume_old=False):
         return slot_line(tid, line, new)
     if kind in ("busy", "deferred"):
         if line == BUSY_NOTE:
-            return f"{tid}: queued: {BUSY_NOTE}"
-        return f"{tid}: queued: delivery pending ({line or 'service busy'}), will retry"
+            return f"{tid}: sent: {BUSY_NOTE.replace('its', tid + chr(39) + 's')}"
+        return f"{tid}: queued: {line or 'service busy'}, retrying automatically"
     # a definite failure inside the cap: withdraw the message (unless the service took it meanwhile) and report it
     if own and service_session.spool_withdraw(tid, own):
         if new:
@@ -14272,19 +14280,32 @@ def thread_action(a):
             if not mine:
                 die("thread reports --mine works only inside a thread session")
             want = [mine]
-        if getattr(a, "all", False) or getattr(a, "mine", False):
+        if getattr(a, "all", False) or getattr(a, "mine", False) or getattr(a, "undelivered", False):
             tids = [lean_threads.resolve(w, lean_threads.load()["aliases"]) for w in want] or [None]
+            rows = [x for tid in tids for x in service_session.report_states(tid)]
+            queued_all = [(i.get("thread"), service_session.report_seq(i)) for i in service_session.queued_reports()]
+            undone = lambda r: (r.get("state") or "queued") == "queued"
+            tail = getattr(a, "tail", None)
+            if getattr(a, "undelivered", False):
+                rows = [x for x in rows if undone(x[1])]
+            elif tail is not None or getattr(a, "mine", False):  # --mine: the last 5 and everything still undelivered
+                keep = max(0, tail if tail is not None else 5)
+                last = rows[-keep:] if keep else []
+                rows = [x for x in rows if x in last or (tail is None and undone(x[1]))]
+            if tail is not None and getattr(a, "undelivered", False):
+                rows = rows[-max(0, tail):]
             n = 0
-            for tid in tids:
-                for t, r in service_session.report_states(tid):
-                    n += 1
-                    st = r.get("state") or "queued"
-                    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r.get("at") or r.get("queued") or 0))
-                    extra = f" ({when}, {r.get('how')})" if st == "delivered" else f" ({when}: {r.get('why')})" if st == "dropped" else ""
-                    why = service_session.wait_reason(r)
-                    if why:
-                        st, extra = "queued", f" (since {when}: {why})"
-                    print(f"{t} r{r.get('id')} {r.get('kind')}: {st.upper()}{extra}\n  {r.get('text')}")
+            for t, r in rows:
+                n += 1
+                st = r.get("state") or "queued"
+                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r.get("at") or r.get("queued") or 0))
+                extra = f" ({when}, {r.get('how')})" if st == "delivered" else f" ({when}: {r.get('why')})" if st == "dropped" else ""
+                why = service_session.wait_reason(r)
+                if why:
+                    st, extra = "queued", f" (since {when}: {why})"
+                if st == "queued" and (t, r.get("id")) in queued_all:
+                    extra += f" [position {queued_all.index((t, r.get('id'))) + 1} of {len(queued_all)}]"
+                print(f"{t} r{r.get('id')} {r.get('kind')}: {st.upper()}{extra}\n  {r.get('text')}")
             if not n:
                 print("no reports recorded")
             return 0
@@ -16811,7 +16832,7 @@ def build_parser():
     s.add_argument("--show", metavar="N", help="files: print file number N (Markdown/text, capped)")
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
     s.add_argument("--from-run", action="append", metavar="RUN_ID", help="send|new: inline that run's final summary into the message (capped; repeatable)")
-    s.add_argument("--prompt-file", help="new|send: the first message / the message for the thread's session (- = stdin); or give it as a positional argument, not both")
+    s.add_argument("--prompt-file", "-F", help="new|send|report: the first message / the message for the thread's session (- = stdin); or give it as a positional argument, not both")
     s.add_argument("--json", action="store_true", help="list: as JSON")
     s.add_argument("--grep", metavar="TEXT", help="list: only threads whose title, requests, reports or notes contain TEXT")
     s.add_argument("--pr", metavar="N", help="list: only threads that mention this pull request (PR N, !N, #N, pullrequest/N)")
@@ -16820,7 +16841,8 @@ def build_parser():
     s.add_argument("--context", action="store_true", help="sessions: just the context table (Session | Title | Context | %% of compact | Idle | State), largest first")
     s.add_argument("--all", action="store_true", help="show: every entry and the whole last report (same as --full); close: every open session")
     s.add_argument("--mine", action="store_true", help="reports: the calling thread's own reports with their delivery state (queued / delivered / dropped)")
-    s.add_argument("--tail", type=int, metavar="N", help="show: the latest N entries (default 5)")
+    s.add_argument("--tail", type=int, metavar="N", help="show: the latest N entries (default 5); reports --mine|--all: the last N (--mine default 5, plus every undelivered one)")
+    s.add_argument("--undelivered", action="store_true", help="reports --mine|--all: only the reports still queued")
     s.add_argument("--force", action="store_true", help="close: close even with a live run or mid-turn (runs keep going detached)")
     s.add_argument("--idle", nargs="?", const=True, help="close: every session idle at least this long (e.g. 2h, 90m) without a running run; stop: idle at least this long (default: session-idle-stop)")
     s.add_argument("--except", dest="except_", nargs="+", metavar="tN", help="close --all: keep these threads")
