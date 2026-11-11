@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import uuid
 
 try:
@@ -807,9 +808,27 @@ def card_rate(c):
 
 # ---------------------------------------------------------------- commands: library
 
+def set_private(slug, on):
+    projs = projects()
+    saved = {k: v for k, v in projs[slug].items() if k != "private"}
+    if on:
+        saved["private"] = True
+    projs[slug] = saved
+    save_json(home("projects.json"), projs)
+
+
+def die_if_private(slug):
+    """Refuse an outward action (push, publish) for a private project; nothing lifts it but `config private off`."""
+    if push_guard.private_slug_of(slug):
+        die(push_guard.private_message(slug))
+
+
 def cmd_learn(a):
-    learn(a.path, include_user_skills=a.user_skills, name=a.name, rules=False if a.no_rules else None,
-          as_worktree=a.as_worktree)
+    slug = learn(a.path, include_user_skills=a.user_skills, name=a.name, rules=False if a.no_rules else None,
+                 as_worktree=a.as_worktree)
+    if getattr(a, "private", False) and slug:
+        set_private(slug, True)
+        print(f"'{slug}' is private (local only): pushing and publishing are disabled for it.")
 
 
 def cmd_projects(a):
@@ -818,7 +837,7 @@ def cmd_projects(a):
         print("No projects yet. Add one: lean-agent learn <path>")
     for slug, v in sorted(projs.items()):
         cards = [c for c in load_cards(slug) if not c.get("archived")]
-        print(f"{slug:<32} {len(cards):>3} cards  {v['path']}")
+        print(f"{slug:<32} {len(cards):>3} cards  {v['path']}" + ("  [private]" if v.get("private") else ""))
 
 
 def cmd_cards(a):
@@ -2939,7 +2958,8 @@ def _cmd_run(a):
         return rc
     if (getattr(a, "role", None) or (prev or {}).get("role")) not in INTERNAL_ROLES:
         print(f"run {run_id} started · {model} · {slug}" + (" (resumed)" if prev else "") +
-              (f" · cards: {', '.join(sorted(c['id'] for c in cards if not c.get('is_rule')))}" if cards else "") +
+              (" · private" if push_guard.private_project_slug(slug) else "") +
+              (f" · cards: {', '.join(ids_)}" if (ids_ := sorted(c['id'] for c in cards if not c.get('is_rule'))) else "") +
               f" · see it later with `lean-agent runs --show {run_id}`", file=sys.stderr, flush=True)
     seed_collected(home())  # runs recorded from here on can be told apart from a ledger older than collected.json
     running_key = launch_key or run_id  # every run is listed while it runs (the status line)
@@ -8310,6 +8330,7 @@ def push_gate_review(slug, path, branch, sha):
 def worktree_push(a):
     """Push a worktree's branch to origin: an outward action, so it needs a review and the user's approval."""
     slug, repo = resolve_project(a.project)
+    die_if_private(slug)
     if not a.ref:
         die("which branch? lean-agent worktree push <project> <ref>")
     _, w = resolve_worktree(slug, a.ref)
@@ -10706,6 +10727,51 @@ def doctor_locks(report, fix, root=None):
     return found
 
 
+def remote_visibility(url, timeout=20):
+    """"public", "private" or "unknown" for a git remote URL: GitHub through `gh api`, Azure DevOps through
+    `az devops project show` when az is available; any other host is unknown."""
+    import shutil
+    m = re.search(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", url)
+    try:
+        if m and shutil.which("gh"):
+            p = subprocess.run(["gh", "api", f"repos/{m.group(1)}/{m.group(2)}"], capture_output=True, text=True, timeout=timeout)
+            d = json.loads(p.stdout) if p.returncode == 0 else {}
+            if d.get("visibility"):
+                return "private" if d["visibility"] in ("private", "internal") else "public"
+            if "private" in d:
+                return "private" if d["private"] else "public"
+            return "unknown"
+        z = (re.search(r"dev\.azure\.com/([^/]+)/([^/]+)/_git/", url) or re.search(r"ssh\.dev\.azure\.com:v3/([^/]+)/([^/]+)/", url)
+             or re.search(r"([^/@.]+)\.visualstudio\.com/(?:DefaultCollection/)?([^/]+)/_git/", url))
+        if z and shutil.which("az"):
+            org, proj = z.group(1), urllib.parse.unquote(z.group(2))
+            p = subprocess.run(["az", "devops", "project", "show", "--project", proj, "--org", f"https://dev.azure.com/{org}",
+                                "--query", "visibility", "-o", "tsv"], capture_output=True, text=True, timeout=timeout)
+            v = p.stdout.strip().lower() if p.returncode == 0 else ""
+            return v if v in ("public", "private") else "unknown"
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return "unknown"
+
+
+def doctor_private(report, slug, path, visibility=remote_visibility):
+    """The private-project checks: it is on, and which remotes are public or of unknown visibility."""
+    report(True, f"{slug} is private (local only): pushing and publishing are disabled")
+    seen = set()
+    for line in (git(path, "remote", "-v") or "").splitlines():
+        parts = line.split()
+        if len(parts) < 2 or parts[1] in seen:
+            continue
+        seen.add(parts[1])
+        vis = visibility(parts[1])
+        if vis == "private":
+            report(True, f"remote {parts[0]} is private")
+        else:
+            report(None, f"remote {parts[0]} is {vis}: this project is private (nothing is pushed), but its remote "
+                   + ("is public" if vis == "public" else "has unknown visibility"),
+                   f"check the remote's visibility, or remove it: git remote remove {parts[0]}")
+
+
 def cmd_doctor(a):
     path = os.path.realpath(os.path.expanduser(a.path or os.getcwd()))
     bad = []
@@ -10835,6 +10901,8 @@ def cmd_doctor(a):
                 print(f"  {s_}: +{extra} more")
     if is_in_project and a.fix and projs[slug].get("rules") != "off":
         install_block(slug)
+    if is_in_project and projs[slug].get("private"):
+        doctor_private(report, slug, root)
 
     files = instruction_files(path)
     print("  instruction files loaded here: " + (", ".join(files) or "none"))
@@ -12226,6 +12294,19 @@ def cmd_branch_name(a):
 
 
 def cmd_config(a):
+    if a.name == "private":
+        vals = [v for v in [a.value] + list(a.more or []) if v]
+        state = next((v for v in vals if v in ("on", "off")), None)
+        refs = [v for v in vals if v not in ("on", "off")]
+        slug, _ = resolve_project(a.project or (refs[0] if refs else None) or os.getcwd())
+        if state:
+            set_private(slug, state == "on")
+        on = bool(projects()[slug].get("private"))
+        print(f"private for {slug}: {'on' if on else 'off'}" + (" \u00b7 local only: pushing and publishing are "
+              "disabled (git push, remote add/set-url, gh/az create, worktree push); no override. "
+              f"off: lean-agent config private {slug} off" if on else
+              f" \u00b7 set: lean-agent config private {slug} on"))
+        return 0
     if a.name == "branch-rules":
         slug, _ = resolve_project(a.project or os.getcwd())
         projs = projects()
@@ -16363,7 +16444,7 @@ def build_parser():
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "allow-edit-outside <dir>|clear (extra dirs, besides ~/Downloads, where --allow-edit may name an explicit file outside the worktree), allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
                        "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), poll-allow <prefix>...|clear (commands a thread's `lean-agent poll` may run besides read-only ones; --project limits it), max-thread-sessions N (thread sessions the service runs; default 20), session-idle-stop DUR|off|default (the service stops a thread session idle that long; the thread stays open; default 3h), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-vote-own on|off (ask vote or post for reviews of your own PRs too; default off), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model>|default (default auto: by risk), approve-usd N|default (cost approved by itself per run; default 5 USD, above it the user is asked), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
-    s.add_argument("name", choices=["strict", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "poll-allow", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions", "session-idle-stop", "session-stuck",
+    s.add_argument("name", choices=["strict", "private", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "poll-allow", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions", "session-idle-stop", "session-stuck",
                                            "review-max-rerounds", "review-vote-own", "review-skip", "review-model", "approve-usd", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
@@ -16407,6 +16488,8 @@ def build_parser():
                                    "It does not read pull request comments: lessons from those are `review learn`.")
     s.add_argument("path")
     s.add_argument("--no-rules", action="store_true", help="don't write the lean-agent block into the repo")
+    s.add_argument("--private", action="store_true", help="local only: the project never pushes or publishes to a remote "
+                   "(lean-agent config private <project> off lifts it)")
     s.add_argument("--name", help="short project name to use instead of <folder>-<hash>")
     s.add_argument("--user-skills", action="store_true", help="also index ~/.claude/skills")
     s.add_argument("--as-worktree", action="store_true",

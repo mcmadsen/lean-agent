@@ -119,6 +119,8 @@ folder's entry in `~/.claude.json`, `enabledMcpjsonServers` is empty). `lean-age
 A lean-agent command with the same name as a denied one but another first word, a quoted text that merely contains the
 word, or `lean-agent run … -- 'memory add …'` is not affected: the hook reads the command, not the task text.
 
+Private projects (`lean-agent config private <p> on`): for that project's repo and worktrees the PreToolUse hooks (`budget_hook.py`, `push_guard.py`, `readonly_hook.py`) and the git wrapper deny every publishing command (`git push`, `git remote add|set-url`, `gh pr|repo|release create`, `az repos create|pr create`, `lean-agent worktree push`, `review --comment|--post`) in every session, with no override (`--allow-send` and the guard override do not lift it); read-only remote commands stay allowed.
+
 ## 3. Hooks (`plugins/lean-agent/hooks/hooks.json`)
 
 | Hook | Class | What it does |

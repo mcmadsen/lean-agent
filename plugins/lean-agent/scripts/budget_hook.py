@@ -1034,6 +1034,11 @@ def main():
         if why:
             emit(permissionDecision="deny", permissionDecisionReason="lean-agent: " + why)
             return 0
+    if event.get("tool_name") == "Bash" and any(k in command for k in ("push", "remote", "create", "review")):
+        why = push_guard.private_denial(command, cwd)  # a private project never publishes; no override
+        if why:
+            emit(permissionDecision="deny", permissionDecisionReason="lean-agent push guard: " + why)
+            return 0
     if in_home and event.get("tool_name") == "Bash" and "push" in command:
         why = push_guard.check(command, cwd)
         if why:
