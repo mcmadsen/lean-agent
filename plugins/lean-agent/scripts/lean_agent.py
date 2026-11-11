@@ -11198,11 +11198,19 @@ def host_session(cmd, extra, env, h, name):
         print(f"lean-agent: orphan sweep failed: {exc}", file=sys.stderr)
     threading.Thread(target=sessions.sweep_loop, args=(orphan_stop,), daemon=True).start()
     # open thread sessions come back with the service, the most recently active first, up to max-thread-sessions
-    for tid in lean_threads.session_threads_by_activity()[:service_session.max_thread_sessions()]:
+    # (only the sessions that were live when the service stopped; see service_session.plan_restore)
+    restore_ids, snap_ts = service_session.plan_restore()
+    service_session.begin_grace(restore_ids)
+    started_ids = []
+    for tid in restore_ids:
         try:
             sessions.start(tid)
+            lean_threads.set_session(tid, session_why="restored")
+            started_ids.append(tid)
         except Exception as exc:
             print(f"lean-agent: could not start the session of {tid}: {exc}", file=sys.stderr)
+    print("lean-agent: " + service_session.restore_log(started_ids, snap_ts), flush=True)
+    lean_log.log("info", "sessions", service_session.restore_log(started_ids, snap_ts))
     threading.Thread(target=service_session.AutoClear(host).run, daemon=True).start()
     service_session.start_reporter(host)
     spool_stop = threading.Event()
@@ -13239,6 +13247,8 @@ def deliver_one(tid, prompt, resume_old=False, new=False):
         lean_log.log("warn", "sessions", f"refused to deliver to {tid!r}: {why}")
         raise RuntimeError(f"no session for {tid!r}: {why}")
     tid, t = thread_session_tid(tid)
+    if t.get("closed") and os.environ.get("LEAN_AGENT_SERVICE_DELIVER"):  # only an explicit user/front-desk command reopens
+        raise RuntimeError(f"no session for {tid!r}: thread {tid} is closed")
     if prompt and service_session.is_replacing(tid):  # the session is being replaced: the message waits for the new one
         raise Deferred(f"{tid}: session being replaced")
     running = service_session.alive(tid)
@@ -13519,7 +13529,8 @@ def start_thread_session(tid, t, prompt=None, msg=None):
         if not service_session.alive(tid):
             service_session.sessions_request("stop", timeout=STOP_REQUEST_WAIT, thread=tid)  # nothing may start later unrecorded
             raise RuntimeError(f"could not start the session of {tid}: {r.get('error') or 'not started'}")
-    lean_threads.set_session(tid, session_on=True)  # only a started session is one the service keeps
+    lean_threads.set_session(tid, session_on=True,  # only a started session is one the service keeps
+                             session_why="message" if os.environ.get("LEAN_AGENT_SERVICE_DELIVER") else "user")
     return r.get("name") or service_session.thread_session_name(tid, t.get("title"))
 
 
@@ -13592,7 +13603,7 @@ def open_thread_sessions():
         coming_up = bool(listing) and (listing.get(tid) or {}).get("state") == "starting"  # the service is (re)starting it
         if alive and (listing is None or tid in listing) or pending or coming_up:
             x = listing.get(tid) if listing else None
-            out.append({"thread": tid, "title": t.get("title") or "", "pid": x and x.get("pid") or rec.get("pid"),
+            out.append({"thread": tid, "why": t.get("session_why") or "", "title": t.get("title") or "", "pid": x and x.get("pid") or rec.get("pid"),
                         "name": (x and x.get("name")) or rec.get("name") or service_session.thread_session_name(tid, t.get("title")),
                         "idle": x["idle"] if x else round(now - started) if started else 0, "started": started})
         elif rec and (alive or listing is None or not rec.get("host_pid") or now - started > THREAD_START_PENDING):
@@ -14249,6 +14260,7 @@ def thread_action(a):
             qs = lean_threads.open_questions(lean_threads.load()["threads"].get(x["thread"]) or {})
             extra = ("".join(f'  waiting on you: {q["id"]} "{lean_threads.one_line(q["text"], 60)}" {lean_threads.age(q.get("ts"))}' for q in qs)
                      + (f"  {len(runs)} running (first {runs[0][0]})" if runs else "") + ("  mid-turn" if service_session.mid_turn(x["thread"]) else "")
+                     + (f'  open: {x["why"]}' if x.get("why") else "")
                      + (f"  {lean_threads.queued_note(x['thread'])}" if lean_threads.queued_messages(x["thread"]) else "")
                      + (f'  {x["thread"]}: {st}' if (st := service_session.session_rec(x["thread"]).get("stuck")) else ""))
             print(f"{x['thread']:<6}{x['name'] or '-':<42}pid {x['pid'] or '-':<8}idle {x['idle']}s  context {context_cell(ctxs[x['thread']])}"

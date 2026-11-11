@@ -1217,6 +1217,111 @@ def spool_reclaim_stale(tid, dead_age=5, age=300):
             pass
 
 
+# ---------------------------------------------------------------- restore after a service start
+# The set of thread sessions that were live is recorded (every tick and when the service stops); a start brings back exactly
+# that set. For GRACE seconds after a start nothing automatic starts a session for a thread outside the restored set.
+SNAPSHOT_FILE = "live-sessions.json"
+RESTORE_GRACE = 600  # seconds after a start in which only restored threads may be started automatically
+RECENT_LIVE = 1800  # no snapshot: only sessions with activity this recent come back
+_RESTORE = {"ids": set(), "at": None}
+_SNAP = {"frozen": False, "keep_until": 0, "keep": set()}
+
+
+def snapshot_path():
+    return lean_home(SNAPSHOT_FILE)
+
+
+def write_snapshot(ids, now=None):
+    now = time.time() if now is None else now
+    path = snapshot_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as fh:
+            json.dump({"ts": now, "threads": sorted(ids)}, fh)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def read_snapshot():
+    """{"ts", "threads"} or None when there is none (first start after an update) or it is unreadable."""
+    try:
+        with open(snapshot_path()) as fh:
+            d = json.load(fh)
+        if isinstance(d, dict) and isinstance(d.get("threads"), list):
+            return {"ts": float(d.get("ts") or 0), "threads": [str(x) for x in d["threads"]]}
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def restorable(tid, data):
+    """An open thread whose session was not parked or stopped (idle, cap, user-stop)."""
+    if lean_threads.session_refusal(tid, data):
+        return False
+    t = data["threads"].get(data.get("aliases", {}).get(tid, tid)) or {}
+    return not t.get("parked") and t.get("parked_by") not in ("idle", "cap", "user-stop")
+
+
+def plan_restore(now=None, cap=None, data=None, activity=None):
+    """(thread ids to bring back, most recently active first, snapshot time or None)."""
+    now = time.time() if now is None else now
+    data = data if data is not None else lean_threads.load()
+    cap = cap if cap is not None else max_thread_sessions()
+    snap = read_snapshot()
+    if activity is None:
+        evs = lean_threads.events(data)
+        activity = {k: max((e[0] for e in v), default=0) for k, v in evs.items()}
+    if snap is not None:
+        ids = [t for t in snap["threads"] if restorable(t, data)]
+    else:
+        ids = [t for t, th in data["threads"].items() if th.get("session_on") and restorable(t, data)
+               and now - activity.get(t, 0) <= RECENT_LIVE]
+    num = lambda k: int(k[1:]) if k[1:].isdigit() else 0
+    ids = sorted(set(ids), key=lambda k: (activity.get(k, 0), num(k)), reverse=True)[:cap]
+    return ids, (snap["ts"] if snap else None)
+
+
+def begin_grace(ids, now=None):
+    _RESTORE["ids"] = set(ids)
+    _RESTORE["at"] = time.time() if now is None else now
+    _SNAP["frozen"] = False
+    _SNAP["keep"], _SNAP["keep_until"] = set(ids), _RESTORE["at"] + 90
+
+
+def in_grace(now=None):
+    now = time.time() if now is None else now
+    return _RESTORE["at"] is not None and now - _RESTORE["at"] < RESTORE_GRACE
+
+
+def may_auto_start(tid, now=None):
+    """False in the grace period for a thread whose session is not up and was not restored: the message waits."""
+    if not in_grace(now) or tid in _RESTORE["ids"]:
+        return True
+    return alive_thread(tid)
+
+
+def freeze_snapshot():
+    _SNAP["frozen"] = True
+
+
+def snapshot_tick(live, now=None):
+    """Record the live thread sessions (the ones just restored count until they are up)."""
+    now = time.time() if now is None else now
+    if _SNAP["frozen"]:
+        return
+    ids = set(live)
+    if now < _SNAP["keep_until"]:
+        ids |= _SNAP["keep"]
+    write_snapshot(ids, now)
+
+
+def restore_log(ids, snap_ts):
+    hh = time.strftime("%H:%M", time.localtime(snap_ts)) if snap_ts else "none"
+    return f"restored {len(ids)} sessions: {' '.join(ids)} (snapshot {hh})"
+
+
 class SpoolDeliverer:
     """Service side: delivers spooled messages by running `lean-agent thread deliver tN` (the blocking start/resume path)
     in a background thread per thread, so a slow session never stalls a tick."""
@@ -1252,6 +1357,10 @@ class SpoolDeliverer:
                     self.refused.add(tid)
                     lean_log.log("warn", "spool", f"not delivering to {tid!r}: {why}")
                 continue
+            if not may_auto_start(tid, self.now()):
+                continue  # restore grace: queued, delivered after it (or when the thread is up)
+            if in_grace(self.now()) and lean_threads.no_nudge(lean_threads.load()["threads"].get(tid)):
+                continue  # user-stopped / user-parked: waits until the user opens it
             spool_reclaim_stale(tid, age=200)
             try:
                 if mid_turn(tid) and alive_thread(tid):
@@ -1296,7 +1405,14 @@ class SpoolDeliverer:
 
 
 def goal_send(tid, text):
-    """Message a thread like `lean-agent thread send`, without waiting: queued for the service to deliver."""
+    """Message a thread like `lean-agent thread send`, without waiting: queued for the service to deliver. The goal chase
+    never touches a closed thread and never wakes a parked, idle-stopped or user-stopped one (one line to main instead)."""
+    t = lean_threads.load()["threads"].get(lean_threads.resolve(lean_threads.norm(tid))) or {}
+    if t.get("closed"):
+        return False, f"{tid} is closed: not chased"
+    if t.get("parked") or t.get("parked_by") in ("idle", "cap", "user-stop"):
+        if not alive_thread(tid):
+            return False, f"{tid} is parked or stopped: not woken (open it to continue)"
     try:
         spool_add(tid, text)
         return True, "queued"
@@ -2683,6 +2799,8 @@ class Reporter(AutoClear):
             un = lean_threads.unstarted_request(t, [], now, _knob("LEAN_AGENT_UNSTARTED_AFTER", UNSTARTED_AFTER), turns=turns)
             if not un or not un["undelivered"] or not un["id"] or not un["text"] or spool_pending(tid):
                 continue
+            if t.get("closed") or not may_auto_start(tid, now):
+                continue  # closed: never reopened here; grace: looked at again after it
             if not lean_threads.mark_redelivered(tid, un["id"]):
                 continue  # redelivered before: once per request
             spool_add(tid, un["text"], rid=un["id"])
@@ -2701,6 +2819,12 @@ class Reporter(AutoClear):
             self.log(f"idle-stop failed: {(r.stderr or r.stdout).strip()[-200:]}", "error")
 
     def main_tick(self):
+        cur = getattr(Sessions, "current", None)
+        if cur is not None:
+            try:
+                snapshot_tick([x["thread"] for x in cur.listing() if x.get("state") == "running"], self.now())
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"snapshot failed: {exc}", "error")
         if not getattr(self, "cleaned", False):
             self.cleaned = True
             startup_cleanup_background(self.log, self.host)
@@ -3263,6 +3387,7 @@ class Sessions:
         self.make_host = make_host  # (tid) -> Host for that thread's session
         self.hosts = {}
         self.lock = threading.RLock()
+        Sessions.current = self
 
     def running(self, tid):
         h = self.hosts.get(tid)
@@ -3400,6 +3525,9 @@ class Sessions:
 
     def stop_all(self, wait=0):
         """Ask every thread session to end; with `wait`, until each has (its socket is removed by then)."""
+        if not _SNAP["frozen"]:  # the live set as the service stops, before any host is gone
+            snapshot_tick([x["thread"] for x in self.listing() if x.get("state") == "running"])
+        freeze_snapshot()
         hosts = list(self.hosts.values())
         for host in hosts:
             host.stop()
