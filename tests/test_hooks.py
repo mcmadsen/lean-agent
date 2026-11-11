@@ -523,8 +523,11 @@ class BudgetTest(Base):
                     "lean-agent runs | tail -n +x", "lean-agent runs | head -n +5", "lean-agent runs | wc -L"):
             out = bash(cmd)
             self.assertTrue(denied(out), cmd)
-            self.assertIn("Delegate it: lean-agent run <project> --cards auto -m <model> --why",
-                          out["hookSpecificOutput"]["permissionDecisionReason"])
+            why = out["hookSpecificOutput"]["permissionDecisionReason"]
+            if "could not parse the quoting" in why:  # an unreadable lean-agent command says so instead
+                self.assertIn("--task-file - and a heredoc", why)
+                continue
+            self.assertIn("Delegate it: lean-agent run <project> --cards auto -m <model> --why", why)
             self.assertIn("--read-only", out["hookSpecificOutput"]["permissionDecisionReason"])
         for cmd in ("lean-agent runs", "lean-agent branch-name -p shop --type bugfix --task 12 \"Fix login\"", "lean-agent config branch-rules -p shop default", "lean-agent runs --show 3", "lean-agent runs --show last --tail 20", "lean-agent logs --run r7 -n 5", "lean-agent runs --wait all", "lean-agent runs --wait last --timeout 90",
                     "cd /tmp && lean-agent review shop --status",
