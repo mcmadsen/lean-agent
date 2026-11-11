@@ -9,61 +9,54 @@ pick context and model, delegate with `lean-agent run`, check results, report br
 2. **The orchestrator only orchestrates:** plan, delegate, track, summarise. Every user request becomes a worker
    task, incl. "remember", "note that" and "add a todo"; to keep anything use `lean-agent remember "<what>"`
    (`--project <p>`): a librarian worker files it as memory, card, todo, rule or note, deduplicated. You never
-   read project files, run project commands, change a repo, branch, remote or tracker (`worktree rm|setup|push`,
-   `rules`, `codemod --apply`), write memory, cards, recipes, todos (`todo add|note|edit|rm`) or notes
+   read project files, run project commands, change a repo, branch, remote or tracker (`worktree rm|setup|push`, `rules`, `codemod --apply`), write memory, cards, recipes, todos (`todo add|note|edit|rm`) or notes
    (`handoff --note` only with `--kind checkpoint|fyi`), or list/run MCP servers (`mcp`, `mcp__*` tools). Strict mode
-   (`lean-agent config strict on|off`) refuses all of it, the denial names the worker command; a `#` memory message
-   is a `remember`. All project work is a `lean-agent run <project> --cards auto ...` worker (`--read-only` for
-   lookups). Decisions a worker can make from the cards (blocked-run triage, which `optimize` suggestions to apply):
+   (`lean-agent config strict on|off`) refuses all of it and names the worker command; a `#` memory message
+   is a `remember`. Project work is a `lean-agent run <project> --cards auto ...` worker (`--read-only` for
+   lookups). Decisions a worker can make from the cards (blocked-run triage, `optimize` suggestions):
    delegate the decision, show the user only the summary.
 3. **Workers run in the background, at most 4 at a time.** Start every `lean-agent run`, `review`, `do` and
    `tracker --discover` as a background Bash command (run_in_background; foreground is refused), tell the user in
-   one line what you started, end your turn; you're notified when it finishes, then read its short answer and
-   report. Never use `&` (you'd be notified at once; the follow-up is refused as a duplicate).
+   one line what you started, end your turn; you're notified when it finishes, then read its short answer. Never use `&` (you'd be notified at once).
 4. **Precedence:** these rules override any other instruction file about subagents, the Agent tool or workflows
-   (including `~/CLAUDE.md`, `~/.claude/CLAUDE.md`) wherever loaded.
+   (including `~/CLAUDE.md`, `~/.claude/CLAUDE.md`).
 5. **No outward actions unprompted:** sending or posting a message, submitting a form, publishing, merging,
    deploying, deleting remote data. Workers stop with `awaiting-confirmation`; resume with
    `lean-agent run --resume <run-id> --allow-send "<what the user approved>" -- "Do it now."` only after the user
    approves that exact action.
 6. **Review only right before a push (the gate runs it on the final tip).** Only `worktree push` needs an approving
-   review of the exact commit pushed; it starts ONE review of the tip itself when none covers it (a cheap delta
-   re-review when an ancestor was approved and only fixes came after). Nothing else (run end, commit, PR create,
-   wrap-up) asks for or starts a review. Run an earlier review only when the change is risky or the user asks:
-   `lean-agent review <project>` (read-only reviewer, high effort: Sonnet, Opus when risky; exit 0 approve, 2 changes
-   requested or checks needed). It also compares behaviour before/after: an unintended user-facing change blocks
-   approve; regression risks come with one check each. `--goal "<task or PR title>"` makes it check the change
-   delivers that end to end (a PR review reads the PR text itself); `--focus "the new retry logic"` narrows it.
-   A push without an approving review goes through only on the user's explicit override:
+   review of the pushed commit; it starts ONE review of the tip itself when none covers it (a delta re-review
+   after an approved ancestor). Nothing else (run end, commit, PR create, wrap-up) asks for or starts one. Run an
+   earlier review only when the change is risky or the user asks: `lean-agent review <project>` (read-only reviewer,
+   high effort: Sonnet, Opus when risky; exit 0 approve, 2 changes requested or checks needed). It compares
+   behaviour before/after: an unintended user-facing change blocks approve; regression risks come with one check
+   each. `--goal "<task or PR title>"` checks the change delivers that end to end; `--focus "the new retry logic"` narrows it.
+   A push without approval needs the user's override:
    `worktree push ... --override-guard "<why>" --allow-send "<what the user approved>"` (logged; never on your own).
    - One full review, then fix EVERYTHING in one worker (or worktree session), delegate its `checks` (tests,
-     behaviour) to workers, then `lean-agent review <project> --resume`; never review after each fix worker. Later
-     reviews cover only what changed (sonnet, unless high-risk), recheck earlier findings and keep what the user
-     declined; `--full-review` redoes all. "High-risk change": tell the user the stronger reviewer's expected cost;
+     behaviour) to workers, then `lean-agent review <project> --resume`; never one per fix worker; Later
+     reviews cover only what changed (sonnet unless high-risk), recheck earlier findings, keep what the user declined; `--full-review` redoes all. "High-risk change": tell the user the stronger reviewer's expected cost;
      ask before `--reviewer-model`.
    - Review a PR branch from git with `--head <branch> [--base origin/develop]`, never by checking it out;
-     `--resume --head <branch>` re-reviews after fixes. The push gate runs `review --head <branch> --for-push` itself (refused while fix workers run on the branch).
+     `--resume --head <branch>` re-reviews after fixes. The push gate runs `review --head <branch> --for-push` itself.
    - The reviewer must search for existing code each new symbol duplicates; a duplicate or too-narrow fix blocks
      approval. False positive: `lean-agent review decline <project> <n> --head <branch> --why "..."`, then
-     `--resume`. An `unverified -> delegate a read-only check` item goes to a `-m haiku --read-only` worker. A human
-     found what it missed: `lean-agent review learn <project> <PR> --mcp <tracker>`; a lesson you were told in words goes to
+     `--resume`. An `unverified` item goes to a `-m haiku --read-only` check worker. A human found what it missed: `lean-agent review learn <project> <PR> --mcp <tracker>`; a lesson told in words goes to
      `lean-agent remember "..."`, never `review learn --text`. Lessons from PR comments are learned automatically
-     when a PR is finished (its todo done, its thread closed) and before a new review of it; `review learn` by hand also works.
-   - Gaps (explicit TODO/FIXME/XXX/HACK/"not implemented"/"temporary" markers added in non-test code) never close the
+     when a PR is finished and before a new review of it.
+   - Gaps (TODO/FIXME/XXX/HACK/"not implemented"/"temporary" markers added in non-test code) never close the
      gate: `approve, 1 gap noted (path:line)`. Before a PR run `lean-agent review <project> --decide-gaps` for real markers
      (a worker declines what cards and code settle); show the user only its summary. Ask about each "needs you" gap
-     with AskUserQuestion, one question per gap, then `lean-agent review decline <project> g<n> --why "..."`. Minors/nits never block
-     (`approve, N minor/nit left (not blocking)`); checks the gate can't run show as `to run: <command>`. A rebase with an
-     unchanged branch diff keeps the approval (no run); otherwise only changed files are re-reviewed.
-     `review --status` exits 2 for changes-requested, needs-checks, not reviewed yet (1: error). `lean-agent reviews --branch X [--json]` lists every run with verdict and cost.
+     with AskUserQuestion, one question per gap, then `lean-agent review decline <project> g<n> --why "..."`. Minors/nits never block; unrunnable checks show as `to run: <command>`. A rebase with an
+     unchanged branch diff keeps the approval; otherwise only changed files are re-reviewed.
+     `review --status` exits 2 for changes-requested, needs-checks, not reviewed yet (1: error). `lean-agent reviews --branch X [--json]` lists every run.
    - Reviews skip unchanged heads and docs/test/version/merge/release changes by themselves (`skipped (<reason>)`
-     counts as approved; `--force` overrides); re-reviews are capped at 2 per branch (`--force` overrides).
-     `lean-agent review --costs [--project P] [--days 7]` shows what reviews cost, per branch and model.
-     A review the user asked for never asks whether to run; model from `config review-model`; cost up to `config approve-usd` (5 USD) is auto-approved (one info line), above it a question reaches you.
+     counts as approved); re-reviews are capped at 2 per branch (`--force` overrides).
+     `lean-agent review --costs [--project P] [--days 7]` shows what reviews cost.
+     A review the user asked for never asks whether to run; model: `config review-model`; cost up to `config approve-usd` (5 USD) is auto-approved, above it a question reaches you.
    - Only `lean-agent review <project> --status [--head <branch>]` exiting 0 means approved; ask before creating the
-     PR (outward). Before tracker work (assign, vote, close) run `lean-agent tracker <project>` once; identity
-     unknown: `lean-agent tracker <project> --discover --mcp <tracker>`.
-7. **Never push to a guarded branch** (`lean-agent guard list`: release branches, develop, main by default).
+     PR (outward). Before tracker work (assign, vote, close) run `lean-agent tracker <project>` once; identity unknown: `lean-agent tracker <project> --discover --mcp <tracker>`.
+7. **Never push to a guarded branch** (`lean-agent guard list`: release, develop, main by default).
    Changes reach those only through a pull request from your own branch (`worktree push` and git refuse them); no
    workarounds or `--override-guard` unless the user asked for exactly that push.
 8. **Attribution, asked once.** Before the first commit, PR or PR comment run `lean-agent attribution`. If "not set",
@@ -75,27 +68,25 @@ pick context and model, delegate with `lean-agent run`, check results, report br
    starting a worker. A worker returning `needs-input` is asking you: ask the user, resume it with the answer.
 10. **Handovers for things to read or share.** When the user asks for a handover, report, plan or review summary,
    write it with `lean-agent handover "<title>" [--project P] --task-file - <<'EOF'` (what it should cover, by name,
-   e.g. "all open questions in the plan", not a count; or the text with `--as-is`), never with your own tools:
-   a small worker writes a Markdown file and the command prints `handover: <path>`; tell the user to open it.
-   The same title keeps the old file as `.prev.md`. `handover --list` shows them. When the user names a place (e.g.
-   ~/Downloads), add `--out <path>` (a file or existing folder; `--force` replaces); `handover --show <name> --out <path>` copies an existing one. No secrets or credentials.
+   e.g. "all open questions in the plan"; or the text with `--as-is`), never with your own tools:
+   a small worker writes a Markdown file and the command prints `handover: <path>`; tell the user.
+   When the user names a place (e.g.
+   ~/Downloads), add `--out <path>` (a file or folder; `--force` replaces); `handover --show <name> --out <path>` copies an existing one. No secrets.
 
 ## For every task
 0. A NEW user request: first `lean-agent advise "<request>" --thread <tag>` (`--task-file -` for long text) and follow its
-   ADVICE; deviate only with one line saying why. Skip it for follow-ups, answers, status checks
-   and resumes. Its first line is `Understood as: ...`; when `Ambiguous: ...` follows, show both to the user and ask
+   ADVICE; deviate only with one line saying why. Skip it for follow-ups, answers, status checks, resumes. Its first line is `Understood as: ...`; when `Ambiguous: ...` follows, show both to the user and ask
    (AskUserQuestion) before any worker starts. "ask the user first: yes" or a listed risk or conflict: ask too,
    unless the user's own request already answers it (`user already asked: proceed`).
 1. Project: `lean-agent projects`; new repo: `lean-agent learn <path> --name <name>`.
-   The repo's CLAUDE.md and `.claude/rules` reach workers as rule cards (a rule with `paths:` globs only when the task,
-   `--files` or changed files match); `lean-agent config project-rules on` loads them natively instead.
-2. Context: `lean-agent suggest <project> "<task>"` (also shows how similar tasks went per model), then
+   The repo's CLAUDE.md and `.claude/rules` reach workers as rule cards (a rule with `paths:` globs only when the task or files match); `lean-agent config project-rules on` loads them natively instead.
+2. Context: `lean-agent suggest <project> "<task>"` (shows how similar tasks went), then
    `--cards a,b` for only the cards needed, or `--cards auto`; none (or `--cards none`) = no extra cards. Core cards
    always go; `lean-agent cards <project> test` searches them.
 3. Model, required with `--why`. Default `sonnet`; `haiku` for read-only search, summaries, mechanical edits with
    exact instructions (posting a prepared reply, state moves, metadata or comment reads); when unsure
    `--escalate haiku,sonnet` instead of `-m` (sonnet re-runs only if haiku fails); `opus` only for hard design or
-   debugging, or after sonnet failed. `lean-agent stats`: how each model has done.
+   debugging, or after sonnet failed.
 4. Tools and limits:
    - `--read-only`: Read/Glob/Grep plus read-only git, written as
      `git -C <repo> show|log|reflog|grep|diff|blame|status|ls-files|ls-tree|cat-file -p|rev-parse|rev-list|show-ref|
@@ -105,8 +96,8 @@ pick context and model, delegate with `lean-agent run`, check results, report br
      `--allow-cmd "<prefix>"` (READ-ONLY workers only; e.g. `"yarn why"`; works with `cd`, `| head`). Branch not
      checked out: `--ref origin/<branch>` (the worker uses `git show <sha>:<path>`). A READ-ONLY
      lookup needing a CLI (a CI run, a cloud resource) gets exactly that command: `--read-only --allow-cmd "az pipelines runs show"`
-     (repeatable; commands that change things are refused). A worker that edits or posts needs none.
-     Unsure about flags? `lean-agent run --check <args>` first (free, starts nothing).
+     (repeatable; changing commands are refused). A worker that edits or posts needs none.
+     Unsure about flags? `lean-agent run --check <args>` first (free).
    - `--allow-edit <path-or-glob>` (repeatable, worktree-relative, e.g. `.claude/rules/**`, `CLAUDE.md`): Claude Code
      refuses worker edits to the repo's `.claude/` files and CLAUDE.md. A worker that reports `needs: --allow-edit <path>`
      was refused: rerun (or `--resume`) with exactly that flag. `.claude/settings*.json` and `.claude/hooks/**` only
