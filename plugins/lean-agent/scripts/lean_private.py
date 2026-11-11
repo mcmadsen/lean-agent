@@ -101,10 +101,22 @@ def hides(item=None, **kw):
 
 
 def mentions_private(text):
-    """The private project a message clearly mentions (its name as a whole word), else None."""
+    """The private project a message clearly mentions (its name as a whole word, or a path inside its repo), else None."""
     import re
     low = str(text or "").lower()
-    return next((p for p in sorted(private_slugs()) if re.search(r"(?<![\w-])" + re.escape(p.lower()) + r"(?![\w-])", low)), None)
+    hit = next((p for p in sorted(private_slugs()) if re.search(r"(?<![\w-])" + re.escape(p.lower()) + r"(?![\w-])", low)), None)
+    if hit:
+        return hit
+    projs = lean_common.read_json(lean_common.lean_home("projects.json"), {})
+    for slug in sorted(private_slugs()):
+        base = os.path.realpath((projs.get(slug) or {}).get("path") or "")
+        if not base:
+            continue
+        for w in re.findall(r"[~/][^\s\"'`,;()]+", str(text or "")):
+            real = os.path.realpath(os.path.expanduser(w))
+            if real == base or real.startswith(base + os.sep):
+                return slug
+    return None
 
 
 def stopped_path():

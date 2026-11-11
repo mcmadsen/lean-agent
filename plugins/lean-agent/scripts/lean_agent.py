@@ -14643,6 +14643,8 @@ def thread_action(a):
         if len(a.args) != 1:
             die('usage: lean-agent thread new "title" ["<text>" | --prompt-file F|-]')
         prompt = thread_prompt(a)
+        if lean_private.hidden() and lean_private.mentions_private(f"{a.args[0]}\n{prompt or ''}"):
+            die(lean_private.HELD_MSG)
         if not wait_for_host(service_session._session_wait("NEW_WAIT", NEW_HOST_WAIT, NEW_HOST_WAIT)):
             if prompt:
                 die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")

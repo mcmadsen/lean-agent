@@ -3569,10 +3569,22 @@ READY_WAIT = 40     # ... and the longest wait for that
 NAME_MAX = 40
 
 
+NAME_BASE = "lean-agent \u00b7 "
+NAME_PRIVATE = "[private] " + NAME_BASE
+
+
+def is_session_name(name):
+    """True for a name this service gives a thread session (also the private form)."""
+    return str(name or "").startswith((NAME_BASE, NAME_PRIVATE))
+
+
 def thread_session_name(tid, title):
-    """The Remote Control name of a thread session: `lean-agent · tN <title>`, cut to NAME_MAX characters."""
-    name = f"lean-agent \u00b7 {tid} {' '.join(str(title or '').split())}".strip()
-    return name if len(name) <= NAME_MAX else name[:NAME_MAX - 1].rstrip() + "\u2026"
+    """The Remote Control name of a thread session: `lean-agent \u00b7 tN <title>` (`[private] lean-agent \u00b7 tN <title>` for a
+    thread of a private project), cut to NAME_MAX characters."""
+    prefix = NAME_PRIVATE if lean_private.is_private_item(thread=tid) else NAME_BASE
+    name = f"{prefix}{tid} {' '.join(str(title or '').split())}".strip()
+    cap = NAME_MAX + len(prefix) - len(NAME_BASE)  # the `[private] ` prefix does not eat the title's room
+    return name if len(name) <= cap else name[:cap - 1].rstrip() + "\u2026"
 
 
 def max_thread_sessions():
@@ -3660,7 +3672,7 @@ class Sessions:
                 fresh = False
             else:
                 host = self.make_host(tid)
-                if not str(getattr(host, "name", "") or "").startswith("lean-agent \u00b7 "):
+                if not is_session_name(getattr(host, "name", "")):
                     self.refuse(tid, "no lean-agent session name could be built")
                 self.hosts[tid] = host
                 update_session(tid, host_pid=os.getpid(), host_started=time.time())

@@ -119,6 +119,26 @@ class Sessions(SwitchCase):
         self.assertEqual(self.ss.read_snapshot()["threads"], [self.pub])
 
 
+class Naming(SwitchCase):
+    def test_private_thread_name_has_the_prefix_and_the_guard_accepts_it(self):
+        n = self.ss.thread_session_name(self.sec, "vault audit work")
+        self.assertEqual(n, "[private] lean-agent \u00b7 " + self.sec + " vault audit work")
+        self.assertTrue(self.ss.is_session_name(n))
+        self.assertTrue(self.ss.is_session_name(self.ss.thread_session_name(self.pub, "x")))
+        self.assertFalse(self.ss.is_session_name("something else"))
+
+    def test_non_private_unchanged(self):
+        self.assertEqual(self.ss.thread_session_name(self.pub, "open feature work"), f"lean-agent \u00b7 {self.pub} open feature work")
+        long = self.ss.thread_session_name(self.pub, "x" * 80)
+        self.assertEqual(len(long), self.ss.NAME_MAX)
+
+    def test_thread_switched_to_private_gets_the_prefix_on_next_start(self):
+        self.assertFalse(self.ss.thread_session_name(self.pub, "t").startswith("[private]"))
+        with self.lt._locked() as data:
+            data["threads"][self.pub]["project"] = "vault"
+        self.assertTrue(self.ss.thread_session_name(self.pub, "t").startswith("[private] lean-agent \u00b7 "))
+
+
 class Refusals(SwitchCase):
     MSG = "private projects are hidden: lean-agent private on"
 
@@ -130,6 +150,13 @@ class Refusals(SwitchCase):
         for act in ("send", "open"):
             p = self.cli("thread", act, self.sec, "hello") if act == "send" else self.cli("thread", act, self.sec)
             self.assertNotEqual(p.returncode, 0)
+            self.assertIn(self.MSG, p.stdout + p.stderr)
+
+    def test_thread_new_naming_a_private_project_is_refused(self):
+        self.cli("private", "off")
+        for args in (("vault audit",), ("audit", f"look at {self.repo}/src please"), ("audit", "check vault now")):
+            p = self.cli("thread", "new", *args)
+            self.assertNotEqual(p.returncode, 0, args)
             self.assertIn(self.MSG, p.stdout + p.stderr)
 
     def test_routing_never_picks_a_private_thread(self):
