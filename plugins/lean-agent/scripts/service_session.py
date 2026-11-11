@@ -39,6 +39,7 @@ import lean_common
 import lean_goals
 import lean_threads
 import lean_log
+import lean_private
 import lean_own
 import lean_waiting
 import usage
@@ -1389,6 +1390,9 @@ def snapshot_tick(live, now=None):
     ids = set(live)
     if now < _SNAP["keep_until"]:
         ids |= _SNAP["keep"]
+    if lean_private.hidden():  # private sessions are not restored while private mode is off
+        data = lean_threads.load()
+        ids -= lean_threads.hidden_threads(data)
     write_snapshot(ids, now)
 
 
@@ -1824,7 +1828,7 @@ def attention_items(now, after=NUDGE_AFTER, skip=()):
     for tid, age_s in lean_threads.undelivered_threads(now, after):
         out.append((f"undelivered:{tid}", f"{tid}: message undelivered ({int(age_s // 60)}m) -> lean-agent thread wake {tid} (or: thread discard {tid} <id>)"))
     held = bool(_load(wait_path()).get("why"))  # the reporter saw main and could not deliver yet
-    for i in queued_reports() if held else []:  # a thread report that main has not been given for over `after` seconds
+    for i in [i for i in queued_reports() if not (lean_private.hidden() and lean_private.is_private_item(thread=i.get("thread")))] if held else []:  # a thread report that main has not been given for over `after` seconds
         age_r = now - float(i.get("ts") or now)
         if after <= age_r < REPORT_MAX_AGE and i.get("thread") and i.get("kind") not in ("chase", "job-failed"):
             out.append((f"report:{i['thread']}:{report_seq(i)}", f"{i['thread']} r{report_seq(i)} {i.get('kind')}: report queued "
@@ -1832,8 +1836,10 @@ def attention_items(now, after=NUDGE_AFTER, skip=()):
     data = lean_threads.load()
     turns = lean_threads.turns_map()
     answered_q = answered_question_keys()
+    hid = lean_threads.hidden_threads(data)
+    out = [o for o in out if not any(o[0].split(":")[1:2] == [h] for h in hid)]
     for tid, t in data["threads"].items():
-        if tid in data["aliases"] or tid == "main" or lean_threads.no_nudge(t):
+        if tid in data["aliases"] or tid == "main" or tid in hid or lean_threads.no_nudge(t):
             continue
         for q in lean_threads.open_questions(t):
             try:
@@ -2018,6 +2024,12 @@ def take_reports(now=None):
     now = time.time() if now is None else now
     with lean_common.file_lock(reports_path()):
         items = queued_reports()
+        if lean_private.hidden():  # held, not dropped: they stay in the file until `private on`
+            ps = lean_private.private_slugs()
+            hold = [i for i in items if lean_private.thread_is_private(i.get("thread"), None, ps)]
+            items = [i for i in items if i not in hold]
+        else:
+            hold = []
         aged = [i for i in items if now - (i.get("ts") or now) <= REPORT_MAX_AGE]
         fresh, seen = [], {}
         for i in aged:
@@ -2045,7 +2057,7 @@ def take_reports(now=None):
                 except Exception:
                     pass
         if len(fresh) != len(items):
-            lean_common.write_json_atomic(reports_path(), {"items": fresh})
+            lean_common.write_json_atomic(reports_path(), {"items": fresh + hold})
     return fresh, len(items) - len(aged)
 
 
@@ -3557,10 +3569,22 @@ READY_WAIT = 40     # ... and the longest wait for that
 NAME_MAX = 40
 
 
+NAME_BASE = "lean-agent \u00b7 "
+NAME_PRIVATE = "[private] " + NAME_BASE
+
+
+def is_session_name(name):
+    """True for a name this service gives a thread session (also the private form)."""
+    return str(name or "").startswith((NAME_BASE, NAME_PRIVATE))
+
+
 def thread_session_name(tid, title):
-    """The Remote Control name of a thread session: `lean-agent · tN <title>`, cut to NAME_MAX characters."""
-    name = f"lean-agent \u00b7 {tid} {' '.join(str(title or '').split())}".strip()
-    return name if len(name) <= NAME_MAX else name[:NAME_MAX - 1].rstrip() + "\u2026"
+    """The Remote Control name of a thread session: `lean-agent \u00b7 tN <title>` (`[private] lean-agent \u00b7 tN <title>` for a
+    thread of a private project), cut to NAME_MAX characters."""
+    prefix = NAME_PRIVATE if lean_private.is_private_item(thread=tid) else NAME_BASE
+    name = f"{prefix}{tid} {' '.join(str(title or '').split())}".strip()
+    cap = NAME_MAX + len(prefix) - len(NAME_BASE)  # the `[private] ` prefix does not eat the title's room
+    return name if len(name) <= cap else name[:cap - 1].rstrip() + "\u2026"
 
 
 def max_thread_sessions():
@@ -3648,7 +3672,7 @@ class Sessions:
                 fresh = False
             else:
                 host = self.make_host(tid)
-                if not str(getattr(host, "name", "") or "").startswith("lean-agent \u00b7 "):
+                if not is_session_name(getattr(host, "name", "")):
                     self.refuse(tid, "no lean-agent session name could be built")
                 self.hosts[tid] = host
                 update_session(tid, host_pid=os.getpid(), host_started=time.time())
