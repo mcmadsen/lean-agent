@@ -55,13 +55,14 @@ class RestoreTest(unittest.TestCase):
     def test_grace_blocks_spool_and_delivers_later(self):
         ran = []
         d = ss.SpoolDeliverer(run=lambda tid: (ran.append(tid) or (True, "")))
-        ss.spool_add(self.t[0], "hi")
-        ss.spool_add(self.t[1], "hi")
+        ss.spool_add(self.t[0], "hi", auto=True)
+        ss.spool_add(self.t[1], "hi", auto=True)
+        ss.spool_add(self.t[2], "explicit")  # a user/front-desk message starts even in the grace period
         ss.begin_grace([self.t[0]])
         with mock.patch.object(ss, "alive_thread", return_value=False), mock.patch.object(ss, "mid_turn", return_value=False):
             for th in d.tick():
                 th.join()
-            self.assertEqual(ran, [self.t[0]])
+            self.assertEqual(sorted(ran), sorted([self.t[0], self.t[2]]))
             ss._RESTORE["at"] = time.time() - ss.RESTORE_GRACE - 1
             for th in d.tick():
                 th.join()
