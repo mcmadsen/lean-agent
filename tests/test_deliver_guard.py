@@ -51,7 +51,7 @@ class DeliverGuardTest(unittest.TestCase):
         ss.spool_add(self.tid, "answer")
         self.assertEqual(lean_agent.deliver_spool(self.tid)[0], "deferred")
         self.assertEqual(self.sent, [])
-        self.assertIn("thread busy, delivers at its next turn end", lean_agent.queued_line(self.tid))
+        self.assertIn("sent: delivers at " + self.tid + "'s next tool call or turn end", lean_agent.queued_line(self.tid))
         self.assertEqual(ss.SpoolDeliverer(run=lambda t: (_ for _ in ()).throw(AssertionError("busy"))).tick(), [])
         self.mid[0] = False  # turn ended
         ran = []
