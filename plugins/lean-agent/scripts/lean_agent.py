@@ -723,6 +723,7 @@ def learn(path, include_user_skills=False, quiet=False, name=None, rules=None, a
         save_json(home("projects.json"), projs)
         cards = sync_memory(slug)
         if not quiet:
+            cards = [c for c in cards if not c.get("shared")]
             print(f"Refreshed '{slug}' from {path}: {len(cards)} cards, ~{sum(c['tokens'] for c in cards):,} tokens. "
                   f"The project stays registered at {kept['path']}; no rules block was written here.")
         return slug
@@ -745,6 +746,7 @@ def learn(path, include_user_skills=False, quiet=False, name=None, rules=None, a
         print("note: kept your edited text for cards whose CLAUDE.md source changed since: " + ", ".join(source_changed))
 
     if not quiet:
+        cards = [c for c in cards if not c.get("shared")]
         total = sum(c["tokens"] for c in cards)
         print(f"Learned {path} as '{slug}': {len(cards)} cards, ~{total:,} tokens if loaded in full.")
         print(f"Workers get only the cards you pick. List them: lean-agent cards {slug}")
@@ -770,11 +772,12 @@ def rule_fields(text, mtype):
 def sync_memory(slug):
     """Mirror the shared memory store into a project's cards (global memories + this project's). Read-only for
     the store; write paths call heal_and_sync() so duplicates are merged first."""
-    mems = [m for m in lean_memory.read_all(memory_store()) if m["scope"] in (lean_memory.GLOBAL, slug)]
+    owner = lean_memory.owner_of_dir(memory_store(), projects())
+    mems = [m for m in lean_memory.read_all(memory_store(), owner) if m["scope"] in (lean_memory.GLOBAL, slug)]
     fresh = {}
     for m in mems:
         cid = "mem-" + slugify(m["stem"], 40)
-        fresh[cid] = {**rule_fields(m["body"], m["type"]), "id": cid, "kind": "memory", "title": f"memory {m['type']}: {m['description'] or m['name']}"[:120],
+        fresh[cid] = {**rule_fields(m["body"], m["type"]), "shared": m["scope"] == lean_memory.GLOBAL, "id": cid, "kind": "memory", "title": f"memory {m['type']}: {m['description'] or m['name']}"[:120],
                       "source": m["file"], "text": m["body"], "tokens": est_tokens(m["body"])}
     with library_lock(slug):
         cards = load_cards(slug)
@@ -859,14 +862,21 @@ def cmd_cards(a):
         return
     w = max(len(c["id"]) for c in cards) + 2
     print(f" {'id':<{w}}{'kind':<10}{'~tok':>6}  {'used':>6}  title")
-    for c in cards:
+    cards = [c for c in cards if not c.get("shared")] + [c for c in cards if c.get("shared")]
+    for i, c in enumerate(cards):
+        if c.get("shared") and (i == 0 or not cards[i - 1].get("shared")):
+            print("-- shared global cards --")
         flag = "*" if c.get("core") else ("x" if c.get("archived") else " ")
         print(f"{flag}{c['id']:<{w}}{c['kind']:<10}{c['tokens']:>6}  {card_rate(c):>6}  {c['title'][:70]}")
         note = card_size_note(c)
         if note:
             print(f"{'':>{w + 11 + 6}}  ! {note}")
-    print(f"{len(cards)} cards, ~{sum(c['tokens'] for c in cards):,} tokens.  * = core (always sent)   "
+    own = [c for c in cards if not c.get("shared")]
+    print(f"{len(own)} own cards, ~{sum(c['tokens'] for c in own):,} tokens.  * = core (always sent)   "
           "used = times a worker used it / times it was sent")
+    if len(own) != len(cards):
+        sh = [c for c in cards if c.get("shared")]
+        print(f"plus {len(sh)} shared global cards (explicit scope: global, not this project's own), ~{sum(c['tokens'] for c in sh):,} tokens")
 
 
 def card_size_note(c):
@@ -1712,7 +1722,7 @@ COMMON_TARGETS = set(lean_rules.STOP) | {
     "thing", "things", "git", "shell", "script", "scripts", "api", "web", "local", "remote", "main", "default",
     "old", "existing", "real", "separate", "different", "extra", "full", "long", "short", "wait", "waiting", "retry",
     "loop", "loops", "sleep", "time", "now", "before", "after", "so", "not", "no", "is", "are", "was", "has", "have",
-    "can", "will", "should", "would", "you", "your", "we", "i", "he", "she", "they", "what", "which", "how", "why"}
+    "user", "users", "user's", "users'", "can", "will", "should", "would", "you", "your", "we", "i", "he", "she", "they", "what", "which", "how", "why"}
 
 
 def _target_strength(c, t):
@@ -5550,6 +5560,8 @@ def thread_pr_refs(tid):
     out = []
 
     def add(slug, pr, head=None):
+        if slug and push_guard.private_slug_of(slug):
+            return  # a private project has no PRs
         if slug and pr and (slug, str(pr)) not in [(s, p) for s, p, _ in out]:
             out.append((slug, str(pr), head))
     for t in todos()["items"]:
@@ -14935,6 +14947,7 @@ from the text given; do not run commands or read files.
 - "drop-goal": the thread or the records say the PR/work item was abandoned, closed or is no longer needed.
 - "done-goal": it was merged, pushed and posted, or finished.
 - "chase": the thread must act. Give a message of ONE short sentence: what, the run id if any, one action.
+A goal marked "private" is local work: never mention push, post, PR or review status for it.
 Goals (JSON):
 {goals}
 Answer with one line exactly like this (valid JSON, one line) before the LEAN-FEEDBACK line:
@@ -15015,7 +15028,7 @@ def pr_entries(tids=None, only_pr=None):
         closed = bool((data["threads"].get(tid) or {}).get("closed"))
         for g in goals:  # PR goals of the thread that no todo/run/review names
             n = lean_goals.key_of(g.get("ref"))
-            if n.startswith("n") and norm_thread_tag(g.get("thread")) == norm_thread_tag(tid) and slug0 and n[1:] not in [p for _, p, _ in refs]:
+            if n.startswith("n") and norm_thread_tag(g.get("thread")) == norm_thread_tag(tid) and slug0 and not push_guard.private_slug_of(slug0) and n[1:] not in [p for _, p, _ in refs]:
                 if not closed or g.get("state") in lean_goals.OPEN:
                     refs.append((slug0, n[1:], None))
         for slug, pr, head in refs:

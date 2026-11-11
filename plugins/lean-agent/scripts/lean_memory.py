@@ -116,7 +116,24 @@ def index_titles(d):
     return out
 
 
-def read_all(d):
+def owner_of_dir(d, projects):
+    """The learned project a memory folder belongs to: the one whose repo holds it, or whose Claude memory folder
+    (~/.claude/projects/<encoded repo path>/memory) it is. None when no project matches."""
+    d = _expand(d)
+    enc = os.path.basename(os.path.dirname(d)) if os.path.basename(d) == "memory" else ""
+    for slug, v in (projects or {}).items():
+        root = (v or {}).get("path")
+        if not root:
+            continue
+        root = git_root(root)
+        if enc and enc == re.sub(r"[^A-Za-z0-9]", "-", root):
+            return slug
+        if d == root or d.startswith(root.rstrip(os.sep) + os.sep):
+            return slug
+    return None
+
+
+def read_all(d, owner=None):
     titles = index_titles(d)
     out = []
     for f in sorted(glob.glob(os.path.join(d, "*.md"))):
@@ -135,7 +152,7 @@ def read_all(d):
             "name": meta.get("name") or stem.replace("_", " "),
             "description": meta.get("description") or titles.get(os.path.basename(f), ""),
             "type": meta.get("type") if meta.get("type") in TYPES else "project",
-            "scope": meta.get("scope") or GLOBAL,
+            "scope": meta.get("scope") or owner or "",  # unscoped: the project whose folder it is in, else none (global must be explicit)
             "modified": meta.get("modified", ""), "source": meta.get("source", ""),
             "created": meta.get("created") or meta.get("modified", ""),  # backfilled from `modified` when missing
         })

@@ -22,6 +22,7 @@ import lean_waiting
 OPEN = ("active", "waiting-user", "stuck", "blocked")
 STATES = OPEN + ("done", "dropped")
 DEFAULT_TARGET = "pushed+posted"
+LOCAL_TARGET = "done locally / reported"
 QUIET_MIN = 30        # minutes without activity before a thread is nudged (config goal-quiet)
 MAX_CHASES = 3
 CHASER_PER_HOUR = 6   # haiku decisions (batches) per hour (config chaser_per_hour)
@@ -97,7 +98,7 @@ def _prune(text):
     return "\n".join(ln for ln in t.splitlines() if not _TRACE.match(ln))
 
 
-def refs_in(text):
+def refs_in(text, private=False):
     """[(kind, number)] the explicit references of a text, deduped: kind pr, hash (#1234), item (AB#1, work item/WI/bug/task/story N,
     a tracker URL) or issue (github). Bare numbers, code, traces, versions, line numbers and sizes never count."""
     t = _prune(text)
@@ -121,6 +122,8 @@ def refs_in(text):
     for m in _HASH.finditer(t):
         if m.group(1) not in prs and ("item", m.group(1)) not in out:
             add("hash", m.group(1))
+    if private:  # PRs come only from Azure DevOps/GitHub, which a private project never uses
+        out = [(k, n) for k, n in out if k not in ("pr", "hash")]
     return out
 
 
@@ -128,9 +131,9 @@ def ref_label(kind, n):
     return {"hash": f"#{n}", "pr": f"PR {n}", "item": f"work item {n}", "issue": f"issue {n}"}[kind]
 
 
-def ref_in(text, branches=False):
+def ref_in(text, branches=False, private=False):
     """The first deliverable a text names (PR, work item, issue; a branch when asked), as a label, or ''."""
-    refs = refs_in(text)
+    refs = refs_in(text, private)
     for want in ("pr", "item", "hash", "issue"):
         for kind, n in refs:
             if kind == want:
@@ -171,6 +174,73 @@ def misparsed(g, texts):
     return ("item", m.group(1)) not in refs_in("\n".join(texts))
 
 
+def _private_slugs():
+    try:
+        import push_guard
+        return {k for k, v in push_guard._projects().items() if (v or {}).get("private")}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _private_threads(slugs, data=None):
+    """Threads with at least one ledger run in a private project (one ledger pass)."""
+    out = set()
+    if not slugs:
+        return out
+    try:
+        import lean_threads
+        data = data or lean_threads.load()
+        with open(os.path.join(lean_common.lean_home(), "ledger.jsonl")) as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get("project") in slugs:
+                    tid = lean_threads.thread_of_run(r, data)
+                    if tid:
+                        out.add(_tid(tid))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def thread_private(thread, text=""):
+    """True when the work of `thread` is in a private project: the current directory, a private project named as a
+    whole word in `text`, or a run of the thread in one."""
+    slugs = _private_slugs()
+    if not slugs:
+        return False
+    try:
+        import push_guard
+        if push_guard.private_slug_of(os.getcwd()):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    if any(re.search(r"(?<![\w-])" + re.escape(s) + r"(?![\w-])", str(text or ""), re.I) for s in slugs):
+        return True
+    return bool(thread) and _tid(thread) in _private_threads(slugs)
+
+
+def _outward(target):
+    return bool(re.search(r"push|post|pr\b|publish", str(target or ""), re.I))
+
+
+def cleanup_private(items):
+    """Open auto goals with a push/post target in a private project: dropped (in `items`, no write). Returns the count."""
+    slugs = _private_slugs()
+    cand = [g for g in items if g.get("state") in OPEN and g.get("origin") != "user" and _outward(g.get("target"))]
+    if not slugs or not cand:
+        return 0
+    priv = _private_threads(slugs)
+    n = 0
+    for g in cand:
+        if _tid(g.get("thread")) in priv:
+            g["state"], g["next"] = "dropped", "private project"
+            n += 1
+    return n
+
+
 def cleanup(closed_tids, texts_of):
     """One-time: drop open goals of closed threads, and misparsed auto work-item goals (texts_of(tid) -> list of strings).
     One read, one write. Returns the log lines."""
@@ -188,12 +258,15 @@ def cleanup(closed_tids, texts_of):
             elif misparsed(g, texts_of(g.get("thread"))):
                 g["state"], g["next"] = "dropped", "misparsed ref"
                 n_bad += 1
-        if n_closed or n_bad:
+        n_priv = cleanup_private(items)
+        if n_closed or n_bad or n_priv:
             _save(items)
     if n_closed:
         out.append(f"goals: {n_closed} open goal(s) of closed threads dropped")
     if n_bad:
         out.append(f"goals: {n_bad} misparsed work-item goal(s) dropped")
+    if n_priv:
+        out.append(f"goals: {n_priv} open goal(s) of private projects dropped")
     return out
 
 
@@ -207,7 +280,7 @@ def _new_id(items):
     return "g%d" % (max([int(str(g.get("id", "g0"))[1:] or 0) for g in items if re.fullmatch(r"g\d+", str(g.get("id", "")))] + [0]) + 1)
 
 
-def ensure(ref, thread, target=DEFAULT_TARGET, nxt="", origin="auto"):
+def ensure(ref, thread, target=DEFAULT_TARGET, nxt="", origin="auto", text=""):
     """The open goal for `ref` (created when none), owned by `thread`; its activity is now. Returns its id ('' without a ref)."""
     ref = " ".join(str(ref or "").split())[:120]
     if not ref:
@@ -216,6 +289,12 @@ def ensure(ref, thread, target=DEFAULT_TARGET, nxt="", origin="auto"):
     with lean_common.file_lock(path()):
         items = _load()
         g = _find(items, ref)
+        if g is None and origin != "user":
+            k = key_of(ref)  # a goal the user dropped is never auto-created again for this ref and thread
+            if any(x.get("state") == "dropped" and key_of(x.get("ref")) == k and x.get("thread") in ("", thread or "") for x in items):
+                return ""
+            if _outward(target) and thread_private(thread, text or ref):
+                target = LOCAL_TARGET
         if g is None:
             g = {"id": _new_id(items), "ref": ref, "thread": thread or "", "target": target, "state": "active", "next": nxt,
                  "last_activity": now, "chased_at": "", "chase_count": 0, "created": now, "origin": origin}
@@ -230,8 +309,8 @@ def ensure(ref, thread, target=DEFAULT_TARGET, nxt="", origin="auto"):
 
 def note_text(text, thread):
     """A thread was given work naming a PR/work item: that is a goal. Returns the goal id or ''."""
-    ref = ref_in(text)
-    return ensure(ref, thread) if ref and thread else ""
+    ref = ref_in(text, private=bool(thread) and thread_private(thread, text))
+    return ensure(ref, thread, text=text) if ref and thread else ""
 
 
 def touch(thread, reset=False):
@@ -734,7 +813,10 @@ def _markers_of(tid, data):
     return out
 
 
-def lost_message(run, ref, record_only=False):
+def lost_message(run, ref, record_only=False, private=False):
+    if private:
+        return (f"Worker {run} ({ref}) was lost. This is local work (private project): resume it (`lean-agent run --resume {run} ...`) "
+                "or restart it, then report what is done locally. Nothing is pushed, posted or reviewed as a PR.")
     if record_only:
         return (f"Worker {run} ({ref}) left only a marker, no record; nothing to resume (`lean-agent runs --stop {run}` "
                 "clears it). Check whether the work is done, then send ONE consolidated final report.")
@@ -742,7 +824,9 @@ def lost_message(run, ref, record_only=False):
             "then send ONE consolidated final report.")
 
 
-def nudge_message(ref):
+def nudge_message(ref, private=False):
+    if private:
+        return f"Status check for {ref} (local work, private project): state and next step in one line? If done, report what is done locally."
     return (f"Status check for {ref}: state and next step in one line? If done, send ONE consolidated final report "
             "(Ref, head sha, checks, what's left, proposed action; the review verdict only if one ran).")
 
@@ -769,12 +853,13 @@ def real_lost(lost, ref, runs):
     return out
 
 
-def _context(g, i, kind, rid, now):
+def _context(g, i, kind, rid, now, private=False):
     return {"id": g["id"], "thread": g["thread"], "ref": g.get("ref", ""), "kind": kind, "run": rid,
             "quiet_min": int(max(0, now - max(_epoch(g.get("last_activity")), _epoch(g.get("created")), i.get("last") or 0)) // 60),
             "last_report": g.get("last_report", ""), "last_chase": g.get("last_chase_text", ""), "last_reply": g.get("last_reply", ""),
             "chases": int(g.get("chase_count") or 0), "never_started": bool(i.get("unstarted")),
-            "runs": [f"{r.get('id')} {r.get('final') or 'running'}: {str(r.get('task'))[:80]}" for r in (i.get("runs") or [])[-4:]]}
+            "runs": [f"{r.get('id')} {r.get('final') or 'running'}: {str(r.get('task'))[:80]}" for r in (i.get("runs") or [])[-4:]],
+            **({"private": True, "note": "local work in a private project: never push, post or PR"} if private else {})}
 
 
 def _merge_changes(items, orig):
@@ -815,6 +900,10 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
         return []
     quiet = quiet_minutes() * 60
     digest, cands, freed = [], [], False
+    _pt = _private_threads(_private_slugs())
+
+    def _priv(g):
+        return _tid(g.get("thread")) in _pt
     items = _load()
     orig = copy.deepcopy(items)  # decisions are made on this snapshot, outside the lock; only the changes are merged back
     finished = {x.get("id") for x in items if x.get("state") in ("done", "dropped")}
@@ -841,7 +930,7 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
             # deterministic: the user's unanswered question is nudged like a request that never started, no model asked
             if i.get("spooled"):
                 continue
-            cands.append((g, i, "myq", mq["id"], _context(g, i, "myq", mq["id"], now)))
+            cands.append((g, i, "myq", mq["id"], _context(g, i, "myq", mq["id"], now, _priv(g))))
             continue
         if un and not i.get("running") and not lost and not i.get("question") and not i.get("waiting"):
             # deterministic: a request that never got going is chased at once, no model asked
@@ -850,7 +939,7 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
                 continue
             if un.get("undelivered") and un.get("redelivered"):
                 continue  # a request is redelivered once, ever
-            cands.append((g, i, "unstarted", un["id"] or "", _context(g, i, "unstarted", un["id"] or "", now)))
+            cands.append((g, i, "unstarted", un["id"] or "", _context(g, i, "unstarted", un["id"] or "", now, _priv(g))))
             continue
         if i.get("running") or i.get("question") or i.get("waiting") or i.get("closed"):
             continue
@@ -864,7 +953,7 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
             continue
         if now - _epoch(g.get("decided_at")) < quiet and _epoch(g.get("decided_at")) >= act and not g.get("pending_chase"):
             continue  # one decision per quiet period
-        cands.append((g, i, kind, rid, _context(g, i, kind, rid, now)))
+        cands.append((g, i, kind, rid, _context(g, i, kind, rid, now, _priv(g))))
     # the cheap check: one batched helper call for the goals without a pending nudge
     decisions, cost, called, waiting_on_helper = {}, 0.0, False, False
     todo = [c for c in cands if not c[0].get("pending_chase") and c[2] not in ("unstarted", "myq")]
@@ -923,10 +1012,10 @@ def watchdog(now, send, alive, info=thread_info, near=limit_near, log=None, deci
                    else f"You have an unstarted request {un['id']}: start it. ({un['text'][:160]})")
             how = "redelivered the first request" if un["undelivered"] else "asked to start the request"
         elif kind == "lost":
-            msg = lost_message(rid, ref, bool(next((m for r_, m in (i.get("lost") or []) if r_ == rid), {}).get("no_record")))
+            msg = lost_message(rid, ref, bool(next((m for r_, m in (i.get("lost") or []) if r_ == rid), {}).get("no_record")), _priv(g))
             how = "asked to resume"
         else:
-            msg = (msg[:240] if msg and action == "chase" else nudge_message(ref))
+            msg = (msg[:240] if msg and action == "chase" else nudge_message(ref, _priv(g)))
             parked = not alive(tid)
             how = "woken and asked for status" if parked else "asked for status"
         why_s = "unanswered question" if kind == "myq" else "never started" if kind == "unstarted" else "worker lost" if kind == "lost" else ("session parked" if not alive(tid) else "quiet")
