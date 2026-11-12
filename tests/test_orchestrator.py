@@ -4593,7 +4593,9 @@ class CliTest(unittest.TestCase):
         lean_myq.thread_report("t1", "done", "It re-reads the file twice.")
         out = self.cli("myq").stdout
         self.assertIn("| # | When | To | Status | Question | Answer |", out)
-        self.assertLess(out.index("what is open?"), out.index("why is the parser slow?"))  # open first
+        tbl = out[out.index("| # |"):]
+        self.assertLess(tbl.index("what is open?"), tbl.index("why is the parser slow?"))  # open first
+        self.assertLess(out.index("1 unread answer"), out.index("| # |"))  # unread answers come first, in full
         self.assertIn("It re-reads the file twice.", out)
         self.assertNotIn("why is the parser slow?", self.cli("myq", "--open").stdout)
         self.assertNotIn("what is open?", self.cli("myq", "--thread", "t1").stdout)

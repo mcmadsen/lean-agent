@@ -86,6 +86,35 @@ class MyqAck(unittest.TestCase):
         self.assertFalse(lean_threads.ACK_RE.match("ack the PR please"))
         self.assertTrue(lean_threads.MYQ_RE.match("q unread"))
 
+    def test_question_linked_to_new_thread_then_answered_unread(self):
+        import budget_hook
+        os.environ["LEAN_AGENT_SESSION_ROLE"] = "main"
+        self.addCleanup(os.environ.pop, "LEAN_AGENT_SESSION_ROLE", None)
+        budget_hook.capture_question("Should we migrate the billing tables to postgres?", "s1")
+        q = self.m.select()
+        self.assertEqual([(x["target"], x["status"]) for x in q], [("main", "open")])
+        self.m.retarget("t9", "Investigate: should we migrate the billing tables to postgres?")
+        x = self.m.select()[0]
+        self.assertEqual((x["target"], x["thread"]), ("t9", "t9"))
+        self.m.thread_report("t9", "done", "Yes, migrate.", now=x["ts"] + 5)
+        self.assertEqual([self.m.qn(y) for y in self.m.unread()], ["q1"])
+        self.assertIn("Yes, migrate.", self.m.block())
+
+    def test_question_answered_by_main_is_read(self):
+        import budget_hook
+        budget_hook.capture_question("What does the cache do? And why is it slow?", "s1")
+        self.assertEqual(len(self.m.select()), 2)
+        self.m.main_reply("It caches; slow due to disk.")
+        self.assertEqual({x["status"] for x in self.m.select()}, {"answered"})
+        self.assertEqual(self.m.unread(), [])
+        self.assertEqual(self.m.block(), "")
+
+    def test_statement_is_not_recorded(self):
+        import budget_hook
+        budget_hook.capture_question("Please fix the login bug and push it.", "s1")
+        budget_hook.capture_question("/status", "s1")
+        self.assertEqual(self.m.select(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

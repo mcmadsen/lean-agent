@@ -14,7 +14,7 @@ import lean_private
 
 ANSWER_CHARS = 4000
 STALE_MIN = 30
-QUESTION_WORDS = ("how", "why", "what", "where", "when", "which", "who", "can", "could", "is", "are", "do", "does")
+QUESTION_WORDS = ("how", "why", "what", "where", "when", "which", "who", "can", "could", "is", "are", "do", "does", "should", "would", "will")
 QUESTION_MAX = 400
 _WORD_RE = re.compile(r"^(?:" + "|".join(QUESTION_WORDS) + r")\b", re.I)
 
@@ -49,6 +49,19 @@ def is_question(text):
     if not t or len(t) > QUESTION_MAX or t == "?" or t.startswith("/"):
         return False
     return t.endswith("?") or bool(_WORD_RE.match(t))
+
+
+def split_questions(text):
+    """The questions of one prompt: each sentence that ends with "?" or starts with a question word (a single question
+    stays whole); nothing for a statement or command."""
+    t = " ".join(str(text or "").split())
+    if not t or t.startswith("/"):
+        return []
+    if len(t) <= QUESTION_MAX and t.count("?") <= 1 and is_question(t):
+        return [t]
+    parts = [x.strip() for x in re.findall(r"[^?.!]*\?|[^?.!]+[.!]?", t) if x.strip()]
+    out = [x for x in parts if len(x) <= QUESTION_MAX and (x.endswith("?") or _WORD_RE.match(x)) and x != "?"]
+    return out if len(parts) > 1 else []
 
 
 def add(text, target="main", now=None):
@@ -107,12 +120,15 @@ def main_reply(text, now=None):
         return None
     with lean_common.file_lock(path()):
         items = _load()
+        hit = None
         for x in reversed(items):
-            if x.get("target") == "main" and x.get("status") == "open":
+            if x.get("target") == "main" and x.get("status") == "open" and (hit is None or now - float(x.get("ts") or 0) < 1800):
                 _answer(items, x, text, "front desk reply", now)
-                _save(items)
-                return x
-    return None
+                x["answer_read"] = True  # the user sees it in the reply: nothing to acknowledge
+                hit = hit or x
+        if hit:
+            _save(items)
+        return hit
 
 
 def _words(text):
@@ -131,20 +147,21 @@ def retarget(tid, text, now=None):
     with lean_common.file_lock(path()):
         items = _load()
         opens = [x for x in items if x.get("target") == "main" and x.get("status") == "open" and now - float(x.get("ts") or 0) < 1800]
-        hit = None
+        hits = []
         for x in reversed(opens):
             q = " ".join(str(x.get("text") or "").lower().split())
             qw = _words(q)
             if q and (q in msg or (msg and msg in q) or (qw and len(qw & _words(msg)) / len(qw) >= 0.6)):
-                hit = x
-                break
-        if not hit and len(opens) == 1 and now - float(opens[0].get("ts") or 0) < 300:
-            hit = opens[0]
-        if hit:
+                hits.append(x)
+        if not hits and len(opens) == 1 and now - float(opens[0].get("ts") or 0) < 300:
+            hits = [opens[0]]
+        for hit in hits:
             hit["target"] = tid
+            hit["thread"] = tid
             hit["note"] = f"sent to {tid} by the front desk"
+        if hits:
             _save(items)
-        return hit
+        return hits[0] if hits else None
 
 
 def due(now=None):
