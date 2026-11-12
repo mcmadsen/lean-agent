@@ -23,9 +23,11 @@ jobs:
         os: [ubuntu-24.04, macos-latest]
         python: ["3.9", "3.13", "3.14"]
         shard: [1, 2, 3, 4]
-        exclude:
+        exclude:  # macOS: only its system Python (3.9); 5 macOS jobs run at a time, so 4 shards fit one wave
           - os: macos-latest
             python: "3.13"
+          - os: macos-latest
+            python: "3.14"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
