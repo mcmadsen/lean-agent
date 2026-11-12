@@ -2869,7 +2869,7 @@ def _cmd_run(a):
                                      base=getattr(a, "worktree_base", None), typed=not auto_branch,
                                      hint=(getattr(a, "why", None), getattr(a, "todo", None)))
             project = wt["path"]
-            print(f"worktree: {'reusing worktree ' + wt['path'] + ' for ' if wt['reused'] else ''}{wt['ref']} at {wt['path']} ({'reused' if wt['reused'] else 'created'}"
+            print(f"worktree: {wt['ref']} at {wt['path']} ({'reused' if wt['reused'] else 'created'}"
                   f"{', on branch ' + wt['branch'] if wt['branch'] else ', detached'}, HEAD {wt['head'][:10]})", flush=True)
             if wt.get("moved"):
                 print(f"worktree: HEAD moved from {wt['moved'][0][:10]} to {wt['moved'][1][:10]} ({wt['ref']}'s tip)",
@@ -3186,8 +3186,6 @@ def _cmd_run(a):
     if wt and not read_only:
         try:
             wt_warning = worktree_after_run(slug, wt_repo, wt, wt["head"])
-            if not wt_warning:
-                remove_unused_worktree(slug, wt_repo, wt, run_id)
         except Exception as e:  # a failed check never costs the run's result
             lean_log.log("error", "cli", f"worktree check after run {run_id}: {e}")
 
@@ -8116,22 +8114,6 @@ def sync_worktree_registry(slug, repo, write=True):
     return idx
 
 
-def remove_unused_worktree(slug, repo, wt, run_id=None):
-    """A worktree this run created and left untouched (clean, HEAD where it started) goes away at once. True when removed."""
-    path = wt["path"]
-    if wt.get("reused") or not os.path.isdir(path) or git(path, "status", "--porcelain") != "":
-        return False
-    if (git(path, "rev-parse", "HEAD") or "") != wt.get("head") or worktree_busy(path, run_id):
-        return False
-    if git(repo, "worktree", "remove", path) is None:
-        return False
-    drop_worktree_entry(slug, wt["name"])
-    msg = f"removed unused worktree {path}"
-    lean_log.log("info", "cli", msg)
-    print(f"worktree: {msg}", flush=True)
-    return True
-
-
 def drop_worktree_entry(slug, name):
     idx = worktree_index()
     if (idx.get(slug) or {}).pop(name, None) is not None:
@@ -8250,10 +8232,6 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True, hint=No
     ensure_never_index(slug)
     reused = os.path.isdir(path) and git(path, "rev-parse", "--git-dir") is not None
     moved = None
-    if not reused and new_from:
-        donor = idle_worktree(slug, repo)
-        if donor and git(donor["path"], "checkout", "-q", ref) is not None:
-            path, name, reused = donor["path"], donor["name"], True  # a clean idle worktree takes the new branch
     if reused:
         branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
         head = git(path, "rev-parse", "HEAD") or ""
@@ -8322,7 +8300,7 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True, hint=No
             "head": git(path, "rev-parse", "HEAD") or "", "moved": moved}
 
 
-MANIFESTS = ("package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
+SETUP_MANIFESTS = ("package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
              "requirements.txt", "poetry.lock", "uv.lock", "Pipfile.lock", "Cargo.lock", "go.sum", "Gemfile.lock",
              "composer.lock", "packages.lock.json")
 
@@ -8330,7 +8308,7 @@ MANIFESTS = ("package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.l
 def manifest_hash(path):
     """A hash of the dependency manifests/lockfiles at the worktree root: a change means its setup should run again."""
     h = hashlib.sha1()
-    for f in MANIFESTS:
+    for f in SETUP_MANIFESTS:
         try:
             with open(os.path.join(path, f), "rb") as fh:
                 h.update(f.encode() + fh.read())
@@ -8390,21 +8368,6 @@ def lean_worktrees(slug=None):
             if isinstance(e, dict) and e.get("path") and os.path.isdir(e["path"]):
                 out.append((sl, name, e))
     return out
-
-
-def idle_worktree(slug, repo):
-    """A clean, idle, fully pushed lean-agent worktree of this project to reuse for a new branch, else None."""
-    mine = worktree_path(home("worktrees", slug)) + os.sep
-    for sl, name, e in lean_worktrees(slug):
-        path = e["path"]
-        if not path.startswith(mine) or git(path, "rev-parse", "--git-dir") is None:
-            continue
-        if git(path, "status", "--porcelain") or worktree_busy(path):
-            continue
-        if not worktree_pushed(repo, path, git(path, "symbolic-ref", "--quiet", "--short", "HEAD"), slug):
-            continue
-        return {"path": path, "name": name}
-    return None
 
 
 def dir_size(path):
