@@ -2190,6 +2190,7 @@ def detach_run(workdir, run_id):
                 os.write(wfd, str(gpid).encode())
                 os._exit(0)
             os.close(wfd)
+            os.setpgid(0, 0)  # its own process group (pgid == pid): runs --stop signals the group of the pid in the marker
             SUPERVISOR_RC[:] = [rc_file]
             signal.signal(signal.SIGINT, signal.default_int_handler)
             signal.signal(signal.SIGTERM, supervisor_term)
