@@ -8359,6 +8359,28 @@ def push_gate_review(slug, path, branch, sha):
     return match
 
 
+def is_release_branch(slug, name):
+    """True for release/* and for names matching the project's release branch pattern."""
+    if fnmatch.fnmatch(name or "", "release/*"):
+        return True
+    rx = re.escape(branch_rules(slug)["release"])
+    rx = rx.replace(re.escape("{task-id}-"), r"(?:[A-Za-z0-9][A-Za-z0-9._-]*-)?").replace(re.escape("{task-id}"), r"[A-Za-z0-9][A-Za-z0-9._-]*")
+    rx = rx.replace(re.escape("{name}"), r".+").replace(re.escape("{version}"), r".+")
+    return bool(re.fullmatch(rx, name or ""))
+
+
+def running_review_of(slug, sha, *refs):
+    """(run id, head) of a live review run of project `slug` whose head is `sha` or whose ref is one of `refs`, else None."""
+    for f in glob.glob(home("running", "*.json")):
+        m = load_json(f, {})
+        meta = (m.get("fixed") or {}).get("review_meta") or {}
+        if m.get("project") != slug or not meta or not pid_alive(m.get("pid")):
+            continue
+        if meta.get("head") == sha or (meta.get("ref") and meta.get("ref") in refs):
+            return m.get("run") or os.path.basename(f)[:-5], meta.get("head") or sha
+    return None
+
+
 def worktree_push(a):
     """Push a worktree's branch to origin: an outward action, so it needs a review and the user's approval."""
     slug, repo = resolve_project(a.project)
@@ -8401,12 +8423,12 @@ def worktree_push(a):
     if has_remote and git(path, "merge-base", "--is-ancestor", remote_ref, "HEAD") is None:
         die(f"{remote_ref} has commits that {branch} doesn't have: someone else pushed. Let a worker merge or "
             f"rebase onto {remote_ref} in the worktree, review again, then push. (lean-agent never force-pushes.)")
-    commits = (git(path, "log", "--oneline", f"{remote_ref}..HEAD") if has_remote
-               else git(path, "log", "--oneline", "-20", "HEAD")) or ""
-    if has_remote and not commits:
+    sha = git(path, "rev-parse", "HEAD")  # the worktree's own HEAD (also detached): never the local branch ref
+    commits = (git(path, "log", "--oneline", f"{remote_ref}..{sha}") if has_remote
+               else git(path, "log", "--oneline", "-20", sha)) or ""
+    if has_remote and sha == git(path, "rev-parse", remote_ref + "^{commit}"):
         print(f"nothing to push: {branch} is the same as {remote_ref}")
         return 0
-    sha = git(path, "rev-parse", "HEAD")
     if attribution() == "off":
         # only the commits being pushed: those the remote branch lacks, else those since the base branch
         if has_remote:
@@ -8446,6 +8468,12 @@ def worktree_push(a):
                           + ("are already on the remote (e.g. origin/develop) and can't be reworded" if why != "not yours" else
                              "aren't yours") + "; pushing anyway (attribution only applies to your unpublished commits)",
                           file=sys.stderr)
+    rel_target = (re.sub(r"^(refs/heads/|origin/)", "", (a.remote_branch or "").strip()) if a.remote_branch
+                  else remote_ref.split("/", 1)[-1])
+    if is_release_branch(slug, rel_target) and not (a.override_guard and a.allow_send):
+        busy = running_review_of(slug, sha, branch, rel_target)
+        if busy:
+            die(f"a review of {busy[1][:12]} is still running (run {busy[0]}); wait for its verdict", 2)
     match, _ = find_review(slug, path, "HEAD")
     inherited = None
     if not match or not approved(match["verdict"]):
