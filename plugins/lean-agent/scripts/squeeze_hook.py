@@ -22,7 +22,17 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import lean_log  # noqa: E402
+
+
+class _LazyLog:
+    """lean_log, imported when the first squeeze or log line needs it (most calls print nothing)."""
+
+    def __getattr__(self, name):
+        import lean_log as mod
+        return getattr(mod, name)
+
+
+lean_log = _LazyLog()
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 ERROR = re.compile(

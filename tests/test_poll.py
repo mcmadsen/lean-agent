@@ -17,7 +17,7 @@ class PollTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = os.path.join(self.tmp.name, "home")
-        self.env = dict(clean_environ(), LEAN_AGENT_HOME=self.home)
+        self.env = dict(clean_environ(), LEAN_AGENT_HOME=self.home, LEAN_AGENT_POLL_MIN="0.1")
 
     def cli(self, *args, env=None):
         p = subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True, env=env or self.env, cwd=self.tmp.name)
