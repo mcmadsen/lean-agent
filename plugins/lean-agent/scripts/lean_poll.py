@@ -150,6 +150,13 @@ def worker(pid):
         cur = load(pid)
         if not cur or cur.get("status") != "running":
             return 0  # stopped
+        try:
+            import lean_load
+            if time.time() - rec["started"] < rec["timeout"] and lean_load.overloaded():  # an overloaded machine is not asked more often
+                time.sleep(max(30, rec["every"] * 4))
+                continue
+        except ImportError:
+            pass
         rc, out = run_once(rec)
         with open(pdir(pid + ".out"), "w") as fh:
             fh.write(out)

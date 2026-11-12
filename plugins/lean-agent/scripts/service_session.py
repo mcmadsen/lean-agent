@@ -35,6 +35,7 @@ import time
 import uuid
 
 import lean_auth
+import lean_load
 import lean_common
 import lean_goals
 import lean_threads
@@ -3135,7 +3136,11 @@ class Reporter(AutoClear):
                 queue_report("main", "chase", "Claude Code sign-in works again; chases resumed.")
         except Exception as exc:  # noqa: BLE001
             self.log(f"auth check failed: {exc}", "error")
-        if not lean_auth.is_broken():  # signed out: chasing and starting follow-ups would all fail
+        loaded = lean_load.overloaded()
+        if loaded and self.now() - getattr(self, "load_noted", 0) > 600:
+            self.load_noted = self.now()
+            self.log(f"machine overloaded ({loaded}): chases, redelivery and follow-ups wait", "warn")
+        if not lean_auth.is_broken() and not loaded:  # signed out: chasing and starting follow-ups would all fail
             try:
                 self.goals_tick()
             except Exception as exc:  # noqa: BLE001 - the report queue must keep going
@@ -3154,7 +3159,7 @@ class Reporter(AutoClear):
                 self.log(f"run follow-up failed: {exc}", "error")
         items = queued_reports()
         limit = stuck_limit()
-        if items and limit and self.now() - min(i.get("ts") or self.now() for i in items) > limit \
+        if items and limit and not loaded and self.now() - min(i.get("ts") or self.now() for i in items) > limit \
                 and self.now() - self.redelivered > limit:
             self.redelivered = self.now()  # queued for a whole limit and still not typed in: try again from scratch
             self.delivered = None

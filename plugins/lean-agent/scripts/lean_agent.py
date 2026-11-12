@@ -37,6 +37,7 @@ sys.path.insert(0, HERE)
 import usage  # noqa: E402
 import lean_mcp  # noqa: E402
 import lean_log  # noqa: E402
+import lean_load  # noqa: E402
 import lean_memory  # noqa: E402
 import lean_rules  # noqa: E402
 import push_guard  # noqa: E402
@@ -2024,6 +2025,35 @@ def pin_code(workdir):
         return HERE
 
 
+SUPERVISOR_LINGER = 120  # seconds a supervisor may stay alive after its run has a ledger row
+
+
+def run_recorded(rid):
+    """True when the ledger has a row for run `rid` (reads the file's tail only)."""
+    try:
+        with open(home("ledger.jsonl"), "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 262144))
+            return rid.encode() in fh.read()
+    except OSError:
+        return False
+
+
+def supervisor_linger_guard(poll=15, linger=None, exit=os._exit):
+    """A finished run's supervisor never lingers: its result is in the ledger, so when it is still alive `linger` seconds
+    later (a child holding its pipes, a hung post-run step) it ends itself."""
+    seen = None
+    while True:
+        time.sleep(poll)
+        rid = RUN_CTX.get("id")
+        if not rid:
+            continue
+        if run_recorded(rid):
+            seen = seen or time.time()
+            if time.time() - seen >= (SUPERVISOR_LINGER if linger is None else linger):
+                exit(0)
+
+
 def ensure_final_row(rc):
     """The supervisor is about to exit: a run that still has its marker but no ledger row (its bookkeeping raised, or it
     died past the handlers) gets a failed row with a summary instead of turning up as lost. Never raises."""
@@ -2106,6 +2136,7 @@ def detach_run(workdir, run_id):
                 signal.signal(sig, handler)  # when this copy is not a real fork (a test) the caller must not stay deaf to them
             os._exit(1)  # never back into the caller: this is a copy of it
         SUPERVISOR.append(True)  # cmd_run's finally ends this process with os._exit
+        threading.Thread(target=supervisor_linger_guard, daemon=True, name="linger-guard").start()
         return None
     pos, status, interrupted = [0, 0], None, None
 
@@ -2203,20 +2234,23 @@ def max_workers():
 def wait_for_slot(a, every=None):
     """With a worker limit, a new run waits here (marker state `queued`) until fewer than the limit are running."""
     limit = max_workers()
-    if limit <= 0 or getattr(a, "role", None) in INTERNAL_ROLES:
+    if getattr(a, "role", None) in INTERNAL_ROLES or (limit <= 0 and not lean_load.overloaded()):
         return
     me = EARLY_RUN.get("id") or RUN_CTX.get("id")
+    load_cap = time.time() + float(os.environ.get("LEAN_AGENT_LOAD_MAX_WAIT") or 1800)  # never queued by load for ever
     every = LOCK_NOTICE_EVERY_RUN if every is None else every
     start = last = None
     while True:
         with file_lock(home("slots")):
             others = [(rid, m) for rid, m in live_runs() if rid != me and m.get("state") != "queued"
                       and m.get("role") not in INTERNAL_ROLES]
-            if len(others) < limit:
+            busy = lean_load.overloaded() if time.time() < load_cap else None
+            if (limit <= 0 or len(others) < limit) and not busy:
                 set_run_state(None)
                 break
             names = ", ".join(f"{m.get('thread') or '-'} {rid}" for rid, m in others[:6])
-            text = f"queued: {len(others)}/{limit} workers running ({names}); waiting for a slot"
+            text = f"queued: machine overloaded ({busy}); the run starts when it eases" if busy and (limit <= 0 or len(others) < limit) \
+                else f"queued: {len(others)}/{limit} workers running ({names}); waiting for a slot"
             if start is None:
                 start = last = time.time()
                 set_run_state("queued", text)
@@ -2225,7 +2259,7 @@ def wait_for_slot(a, every=None):
                 last = time.time()
                 set_run_state("queued", text)
                 print(f"lean-agent: {text} ({int(time.time() - start)}s)", file=sys.stderr, flush=True)
-        time.sleep(0.2)
+        time.sleep(2 if busy else 0.2)
     if start is not None:
         print(f"lean-agent: slot free after {int(time.time() - start)}s; starting", file=sys.stderr, flush=True)
 
@@ -5479,6 +5513,8 @@ LEARN_SYNC_TIMEOUT = 300
 def review_learn_auto_on():
     """Automatic learning from PR comments: LEAN_AGENT_REVIEW_LEARN_AUTO=0|1 wins, else `config review-learn-auto` (default on)."""
     env = (os.environ.get("LEAN_AGENT_REVIEW_LEARN_AUTO") or "").strip().lower()
+    if lean_load.overloaded():
+        return False  # automatic learning backs off while the machine is overloaded
     if env:
         return env not in ("0", "off", "false", "no")
     return config_json().get("review_learn_auto", True) is not False
@@ -10822,6 +10858,43 @@ def doctor_service_start(report, text=None, now=None):
             " (over 60s)" if secs > 60 else ""), "lean-agent service logs" if secs > 60 else None)
 
 
+def owned_pids():
+    """{"up": the service's pid, "pids": pids of running-run markers and running polls} (what is not here may be a stray)."""
+    pids = set()
+    for f in glob.glob(home("running", "*.json")) + glob.glob(home("polls", "*.json")):
+        m = load_json(f, {})
+        if m.get("status", "running") == "running" and m.get("pid"):
+            pids.add(int(m["pid"]))
+    up = None
+    try:
+        rec = service_session.session_rec("main")
+        up = int(rec.get("host_pid") or 0) or None
+    except Exception:  # noqa: BLE001
+        pass
+    return {"up": up, "pids": pids}
+
+
+def doctor_processes(report, fix, procs=None, owned=None, kill=None):
+    """doctor: the load line, the lean-agent processes with CPU and memory, and the strays among them; --fix stops the strays."""
+    ld = lean_load.overloaded()
+    report(None if ld else True, lean_load.status_line(), "stop work or close sessions until the load drops" if ld else None)
+    procs = lean_load.processes() if procs is None else procs
+    if not procs:
+        return
+    cpu, rss = sum(p["cpu"] for p in procs), sum(p["rss_mb"] for p in procs)
+    report(None if cpu > 150 or len(procs) > 25 else True,
+           f"{len(procs)} lean-agent processes, {cpu:.0f}% CPU, {rss} MB (top: " + ", ".join(
+               f"{p['pid']} {lean_load.kind(p['cmd'])} {p['cpu']:.0f}%/{p['rss_mb']}MB"
+               for p in sorted(procs, key=lambda p: -p["cpu"])[:4]) + ")")
+    stray = lean_load.strays(procs, owned_pids() if owned is None else owned)
+    for p, why in stray:
+        if fix and (kill or lean_load.kill_stray)(p):
+            report(True, f"stray process {p['pid']} ({lean_load.kind(p['cmd'])}): {why}; stopped")
+        else:
+            report(None, f"stray process {p['pid']} ({lean_load.kind(p['cmd'])}, {p['cpu']:.0f}% CPU, {p['rss_mb']} MB): {why}",
+                   "lean-agent doctor --fix")
+
+
 def doctor_locks(report, fix, root=None):
     """doctor: a lock held longer than a minute (holder, command, age); --fix clears the ones whose holder is gone."""
     found = held_locks_found(root)
@@ -11070,6 +11143,7 @@ def cmd_doctor(a):
             report(False, f"{f} contradicts lean-agent ({where})", "lean-agent doctor --fix  (adds a one-line precedence note)")
 
     doctor_locks(report, a.fix)
+    doctor_processes(report, a.fix)
     try:
         with open(os.path.join(HERE, "..", "hooks", "hooks.json")) as fh:
             post = json.dumps((json.load(fh).get("hooks") or {}).get("PostToolUse") or [])
