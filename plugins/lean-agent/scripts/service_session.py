@@ -2646,6 +2646,8 @@ def startup_cleanup(log=None, limit=None, deadline=None):
             for tid, ids in handled.items():
                 for rid in sorted(map(str, ids)):
                     out.append(f"{tid}: request {rid} was already answered, marked handled")
+            for tid_, rid_ in lean_threads.clear_stale_undelivered():
+                out.append(f"{tid_}: request {rid_} was flagged undelivered with nothing queued for over 1 h, flag cleared")
             lean_common.write_json_atomic(cleanup_marker_path(), {"version": lean_common.plugin_version(), "ts": time.time()})
         out.append(f"startup cleanup: {len(closed)} closed thread(s) with queued messages, "
                    f"{sum(len(v) for v in handled.values())} answered request(s), {round(time.time() - started, 2)}s")

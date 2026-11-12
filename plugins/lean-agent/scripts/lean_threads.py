@@ -1823,12 +1823,21 @@ SHOW_TAIL = 5          # `thread show` default: the latest entries
 SHOW_REPORT_CHARS = 800  # `thread show` default: the latest report, cut here (--full for all of it)
 
 
+SPOOL_SUFFIXES = (".json", ".sending", ".injected")  # queued, being sent, handed over and held: all of them count as queued AND are cleared by discard
+
+
+def spool_files(tid):
+    """Names of every spool file of thread `tid` (queued .json, .sending, held .injected): the one list the nudge counts
+    and `thread discard` clears."""
+    try:
+        return sorted(n for n in os.listdir(os.path.join(lean_home("thread-inbox"), tid)) if n.endswith(SPOOL_SUFFIXES))
+    except OSError:
+        return []
+
+
 def queued_messages(tid):
     """How many messages for thread `tid` wait in the delivery spool."""
-    try:
-        return sum(1 for n in os.listdir(os.path.join(lean_home("thread-inbox"), tid)) if n.endswith((".json", ".sending", ".injected")))
-    except OSError:
-        return 0
+    return len(spool_files(tid))
 
 
 UNDELIVERED_AFTER = 60  # seconds a queued message may wait before it counts as undelivered (a needs-attention state)
@@ -1838,13 +1847,10 @@ def undelivered_age(tid, now=None):
     """Seconds the oldest message queued for thread `tid` has waited (0 when none). The spool file name starts with the queue time."""
     now = time.time() if now is None else now
     oldest = None
-    try:
-        for n in os.listdir(os.path.join(lean_home("thread-inbox"), tid)):
-            if n.endswith((".json", ".sending", ".injected")) and n[:20].isdigit():
-                ts = int(n[:20]) / 1e9
-                oldest = ts if oldest is None else min(oldest, ts)
-    except OSError:
-        return 0
+    for n in spool_files(tid):
+        if n[:20].isdigit():
+            ts = int(n[:20]) / 1e9
+            oldest = ts if oldest is None else min(oldest, ts)
     return max(0, now - oldest) if oldest is not None else 0
 
 
@@ -1924,28 +1930,73 @@ def discard_spool_many(tids, handled=None):
     return got
 
 
-def discard_spool(tid, ids=None):
-    """Drop the undelivered spooled messages of `tid` (`ids`: only those; None: all) and mark the requests they carry
-    handled. Returns [(id, text)] of what was discarded."""
+def discard_all(tid, ids=None):
+    """Clear everything that makes thread `tid` look undelivered: its spool files (queued, .sending, held .injected) and,
+    with ids None, the undelivered flags of its requests. `ids`: only the spool files with those ids. Marks the requests
+    handled. Returns {"files": [(id, text, kind)], "flags": [request ids]}."""
     tid = resolve(norm(tid))
-    got = []
-    for mid, name, rec in spool_messages(tid):
+    d = os.path.join(lean_home("thread-inbox"), tid)
+    files = []
+    rids = set()
+    for name in spool_files(tid):
+        mid = name.rsplit(".", 1)[0].split("-", 1)[-1]
         if ids is not None and not any(mid.startswith(i) or name.startswith(i) for i in ids):
             continue
+        rec = lean_common.read_json(os.path.join(d, name), {}) or {}
+        rec = rec if isinstance(rec, dict) else {}
         try:
-            os.remove(os.path.join(lean_home("thread-inbox"), tid, name))
+            os.remove(os.path.join(d, name))
         except OSError:
             continue
-        got.append((mid, str(rec.get("text") or ""), rec.get("rid")))
+        files.append((mid, str(rec.get("text") or ""), name.rsplit(".", 1)[1]))
+        if rec.get("rid"):
+            rids.add(rec.get("rid"))
+    flags = []
     with _locked() as data:
         t = data["threads"].get(tid) or {}
-        rids = {g[2] for g in got if g[2]}
         for r in t.get("requests") or []:
             if isinstance(r, dict) and not r.get("handled_ts") and (r.get("id") in rids or (ids is None and r.get("undelivered"))):
                 r["handled_ts"] = now_iso()
                 r["discarded"] = True
-                r.pop("undelivered", None)
-    return [(m, x) for m, x, _ in got]
+                if r.pop("undelivered", None):
+                    flags.append(r.get("id"))
+    return {"files": files, "flags": flags}
+
+
+def discard_spool(tid, ids=None):
+    """Drop the spooled messages of `tid` (`ids`: only those; None: all) and mark the requests they carry handled.
+    Returns [(id, text)] of what was discarded."""
+    return [(m, x) for m, x, _ in discard_all(tid, ids)["files"]]
+
+
+CLEANUP_AFTER = 3600  # an undelivered flag with no spool file behind it is stale after this many seconds
+
+
+def clear_stale_undelivered(now=None, min_age=CLEANUP_AFTER):
+    """One-time startup pass: clear the undelivered flag of requests older than `min_age` that no spool file backs
+    (nothing is queued for the thread, or no queued file carries the request id) and mark them handled. Returns
+    [(thread id, request id)] cleared."""
+    now = time.time() if now is None else now
+    cleared = []
+    with _locked() as data:
+        for tid, t in data["threads"].items():
+            backed = set()
+            anon = False
+            d = os.path.join(lean_home("thread-inbox"), tid)
+            for name in spool_files(tid):
+                rec = lean_common.read_json(os.path.join(d, name), {}) or {}
+                if isinstance(rec, dict) and rec.get("rid"):
+                    backed.add(rec["rid"])
+                else:
+                    anon = True
+            for r in t.get("requests") or []:
+                if isinstance(r, dict) and r.get("undelivered") and r.get("id") not in backed and not anon \
+                        and now - _epoch(r.get("ts")) >= min_age:
+                    r.pop("undelivered", None)
+                    r["handled_ts"] = now_iso()
+                    r["stale_cleared"] = True
+                    cleared.append((tid, r.get("id")))
+    return cleared
 
 
 def discard_line(tid, n):
@@ -2177,10 +2228,12 @@ def cli(action, args, as_json=False, out=print):
             tid = resolve(norm(args[0]))
             if tid not in load()["threads"]:
                 raise ValueError(f"no such thread {tid}")
-            gone = discard_spool(tid, None if "--all" in args else ids)
-            for mid, text in gone:
-                out(f"{tid}: discarded {mid} {text[:60]!r}")
-            if not gone:
+            res = discard_all(tid, None if "--all" in args else ids)
+            for mid, text, kind in res["files"]:
+                out(f"{tid}: discarded {mid} {text[:60]!r}" + (f" ({'held after hand-over' if kind == 'injected' else 'being sent'})" if kind != "json" else ""))
+            for rid in res["flags"]:
+                out(f"{tid}: cleared undelivered flag of {rid}")
+            if not res["files"] and not res["flags"]:
                 out(f"{tid}: no queued message to discard")
         elif action == "merge" and len(args) != 2 or action == "unmerge" and len(args) != 1 or action == "move" and len(args) not in (1, 2):
             raise ValueError({"merge": "usage: lean-agent thread merge tB tA", "move": "usage: lean-agent thread move [rN|tM] tN",
