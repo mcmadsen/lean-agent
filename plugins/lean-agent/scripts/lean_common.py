@@ -477,8 +477,8 @@ def uncollected_ids(lean_home, live_ids=()):
     return [i for i, r in latest.items() if i not in done and i not in live_ids and (r.get("ts") or "") >= cutoff]
 
 
-def running_runs(lean_home):
-    """[(run id, marker)] of the runs in progress, oldest first: running/*.json whose process is alive."""
+def _marker_files(lean_home):
+    """[(path, marker)] of every readable running/*.json that is a dict (the archive folder is not looked into)."""
     out = []
     for f in glob.glob(os.path.join(lean_home, "running", "*.json")):
         try:
@@ -486,40 +486,121 @@ def running_runs(lean_home):
                 m = json.load(fh)
         except (OSError, ValueError):
             continue
-        if isinstance(m, dict) and m.get("pid") and pid_alive(m["pid"]):
-            out.append((m.get("run") or os.path.basename(f)[:-5], m))
-    return sorted(out, key=lambda x: (x[1].get("started") or "", x[0]))
+        if isinstance(m, dict):
+            out.append((f, m))
+    return out
+
+
+def has_task(m):
+    """True when a marker names its task (its own or the fixed copy). A marker without one is a placeholder (the
+    duplicate-launch guard's bare pid/started file), never a run to list."""
+    return bool(str(m.get("task") or (m.get("fixed") or {}).get("task") or "").strip())
+
+
+def _drop_placeholder(f, m):
+    """A task-less marker whose process is gone is settled: removed. Returns True when it is a placeholder."""
+    if has_task(m):
+        return False
+    if not (m.get("pid") and pid_alive(m["pid"])):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+    return True
+
+
+def running_runs(lean_home):
+    """[(run id, marker)] of the runs in progress, oldest first: running/*.json whose process is alive. A marker
+    without a task is never listed; two markers of one run (early + launch key) list once."""
+    out = {}
+    for f, m in _marker_files(lean_home):
+        if _drop_placeholder(f, m):
+            continue
+        if m.get("pid") and pid_alive(m["pid"]):
+            rid = m.get("run") or os.path.basename(f)[:-5]
+            if rid not in out or out[rid].get("early"):
+                out[rid] = m
+    return sorted(out.items(), key=lambda x: (x[1].get("started") or "", x[0]))
 
 
 LOST_NO_RECORD = "lost (no record)"  # ledger status of a run whose marker outlived its process with no result recorded
+LOST_LISTED_DAYS = 7  # `runs --lost` shows these days unless --all
+LOST_ARCHIVE_HOURS = 24  # a lost marker older than this, with its ledger row, moves to running/archive/
 
 
-def lost_runs(lean_home, acknowledged=False):
-    """[(run id, marker)] of runs whose supervisor died without recording a result: a running/*.json whose process is
-    gone and whose run is not in the ledger (and that `runs --lost --clear` has not acknowledged, unless acknowledged=True)."""
-    done = set()
+def _ledger_ids(lean_home):
+    """(ids with a real ledger row, ids with only the thin 'lost (no record)' row): one read of the ledger."""
+    done, thin = set(), set()
     try:
         with open(os.path.join(lean_home, "ledger.jsonl")) as fh:
             for line in fh:
+                if '"id"' not in line:
+                    continue
                 try:
                     row = json.loads(line)
-                    if row.get("status") != LOST_NO_RECORD:  # that row only gives a marker its record; it stays listed as lost
-                        done.add(row.get("id"))
+                    (thin if row.get("status") == LOST_NO_RECORD else done).add(row.get("id"))
                 except (ValueError, AttributeError):
                     continue
     except OSError:
         pass
-    out = []
-    for f in glob.glob(os.path.join(lean_home, "running", "*.json")):
+    return done, thin
+
+
+def started_epoch(m, path=None):
+    """When a marker's run started (epoch); the file's age when the field is missing or unreadable."""
+    try:
+        return datetime.datetime.fromisoformat(str(m.get("started"))).timestamp()
+    except (ValueError, TypeError):
         try:
-            with open(f) as fh:
-                m = json.load(fh)
-        except (OSError, ValueError):
+            return os.path.getmtime(path)
+        except (OSError, TypeError):
+            return time.time()
+
+
+def lost_runs(lean_home, acknowledged=False, days=None, archived=False):
+    """[(run id, marker)] of runs whose supervisor died without recording a result: a running/*.json whose process is
+    gone and whose run is not in the ledger (and that `runs --lost --clear` has not acknowledged, unless acknowledged=True).
+    days: only those that started within that many days. archived: also the ones moved to running/archive/."""
+    done, _ = _ledger_ids(lean_home)
+    out = {}
+    files = _marker_files(lean_home)
+    if archived:
+        for f in glob.glob(os.path.join(lean_home, "running", "archive", "*.json")):
+            try:
+                with open(f) as fh:
+                    m = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if isinstance(m, dict):
+                files.append((f, m))
+    cutoff = time.time() - days * 86400 if days else None
+    for f, m in files:
+        if _drop_placeholder(f, m):
             continue
-        rid = isinstance(m, dict) and (m.get("run") or os.path.basename(f)[:-5])
+        rid = m.get("run") or os.path.basename(f)[:-5]
         if rid and not (m.get("pid") and pid_alive(m["pid"])) and rid not in done and (acknowledged or not m.get("lost_ack")):
-            out.append((rid, m))
-    return sorted(out, key=lambda x: (x[1].get("started") or "", x[0]))
+            if cutoff is None or started_epoch(m, f) >= cutoff:
+                out.setdefault(rid, m)
+    return sorted(out.items(), key=lambda x: (x[1].get("started") or "", x[0]))
+
+
+def archive_old_lost(lean_home, hours=LOST_ARCHIVE_HOURS):
+    """Moves lost markers older than `hours` that already have their ledger row to running/archive/ (a single pass:
+    one ledger read, one directory read). Returns how many moved."""
+    _, thin = _ledger_ids(lean_home)
+    if not thin:
+        return 0
+    cutoff, moved = time.time() - hours * 3600, 0
+    for rid, m in lost_runs(lean_home, acknowledged=True):
+        f = os.path.join(lean_home, "running", f"{os.path.basename(str(m.get('run') or rid))}.json")
+        if rid in thin and started_epoch(m, f) < cutoff and os.path.isfile(f):
+            try:
+                os.makedirs(os.path.join(lean_home, "running", "archive"), exist_ok=True)
+                os.replace(f, os.path.join(lean_home, "running", "archive", os.path.basename(f)))
+                moved += 1
+            except OSError:
+                pass
+    return moved
 
 
 def signal_group(pid, sig, wait=0):

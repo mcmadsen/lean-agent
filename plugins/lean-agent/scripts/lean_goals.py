@@ -771,13 +771,13 @@ def settle_orphan_markers(data=None):
     except Exception:
         return 0
     reports = lean_common.read_json(os.path.join(home_, "last-reports.json"), {})
+    by_thread = _thread_runs_index(data)  # one ledger read and one marker read for all the markers
     for rid, m in lost:
         if m.get("no_record") or not isinstance(m, dict):
             continue
         tid = lean_threads.thread_of_run(dict(m, id=rid), data)
         started = str(m.get("started") or "")
-        newer = bool(tid) and any(r.get("id") != rid and str(r.get("started") or "") > started
-                                  for r in _runs_of(tid, data) + _markers_of(tid, data))
+        newer = bool(tid) and any(i != rid and st > started for i, st in by_thread.get(tid, ()))
         rep = reports.get(tid) if tid else None
         final = bool(rep) and rep.get("kind") in ("done", "final") and float(rep.get("ts") or 0) > _epoch(started)
         marker = os.path.join(home_, "running", f"{os.path.basename(str(m.get('run') or rid))}.json")
@@ -800,7 +800,38 @@ def settle_orphan_markers(data=None):
             lean_common.write_json_atomic(marker, m)
         except OSError:
             pass
+    try:
+        lean_common.archive_old_lost(home_)
+    except Exception:
+        pass
     return dropped
+
+
+def _thread_runs_index(data):
+    """{thread: [(run id, started)]} of the ordinary runs in the ledger and in the running markers: one pass over each."""
+    import lean_threads
+    out = {}
+    try:
+        with open(os.path.join(lean_common.lean_home(), "ledger.jsonl")) as fh:
+            for line in fh:
+                if '"id"' not in line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get("id") and r.get("role") not in HELPER_ROLES:
+                    tid = lean_threads.thread_of_run(r, data)
+                    if tid:
+                        out.setdefault(tid, []).append((r["id"], str(r.get("started") or r.get("ts") or "")))
+    except OSError:
+        pass
+    for _, m in lean_common._marker_files(lean_common.lean_home()):
+        if m.get("role") not in HELPER_ROLES and lean_common.has_task(m):
+            tid = lean_threads.thread_of_run(dict(m, id=m.get("run") or ""), data)
+            if tid:
+                out.setdefault(tid, []).append((m.get("run") or "", str(m.get("started") or "")))
+    return out
 
 
 def _markers_of(tid, data):
