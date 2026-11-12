@@ -152,7 +152,7 @@ class LockBusy(TimeoutError):
 
 
 HOOK = {"on": False}  # a hook process: never waits long for a lock (set by hook_mode())
-HOOK_LOCK_WAIT = 0.5   # seconds a hook waits for a lock before skipping its write
+HOOK_LOCK_WAIT = 0.1   # seconds a hook waits for a lock before skipping its write
 LONG_HOLD = 2.0        # seconds a lock wait or hold is logged from (lock-holds.log, listed by doctor)
 _SKIPPED = set()
 

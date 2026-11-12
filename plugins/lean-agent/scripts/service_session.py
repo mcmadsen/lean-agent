@@ -632,7 +632,35 @@ def mid_turn(key="main"):
     return bool(path and os.path.exists(path) and os.path.getsize(path) and not transcript_state(path)["ended"])
 
 
+_TS_CACHE = {}  # (kind, path, offset) -> (size, mtime_ns, result): an unchanged transcript is not parsed again
+_TS_CACHE_MAX = 256
+
+
+def _cached_scan(kind, path, offset, compute):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return compute(path, offset)
+    key = (kind, path, offset)
+    hit = _TS_CACHE.get(key)
+    if hit and hit[0] == st.st_size and hit[1] == st.st_mtime_ns:
+        return dict(hit[2])
+    res = compute(path, offset)
+    if len(_TS_CACHE) >= _TS_CACHE_MAX:
+        _TS_CACHE.clear()
+    _TS_CACHE[key] = (st.st_size, st.st_mtime_ns, dict(res))
+    return res
+
+
 def transcript_state(path, offset=0):
+    return _cached_scan("state", path, offset, _transcript_state)
+
+
+def scan_turn(path, offset):
+    return _cached_scan("scan", path, offset, _scan_turn)
+
+
+def _transcript_state(path, offset=0):
     """What the transcript at `path` (read from byte `offset`, else its last 512 KB) shows now:
     {"ended": the last message is the assistant's final one (no tool running), "ctx": tokens in the last usage
     record, "text": that final message's text, "user_ts": epoch of the last user record, "size": file size}."""
@@ -1296,7 +1324,9 @@ SNAPSHOT_FILE = "live-sessions.json"
 RESTORE_GRACE = 600  # seconds after a start in which only restored threads may be started automatically
 RECENT_LIVE = 1800  # no snapshot: only sessions with activity this recent come back
 _RESTORE = {"ids": set(), "at": None}
-_SNAP = {"frozen": False, "keep_until": 0, "keep": set()}
+_SNAP = {"frozen": False, "keep_until": 0, "keep": set(), "last_ids": None, "last_at": 0.0}
+SNAP_MIN_GAP = 30  # seconds between snapshot writes when the live set changed
+SNAP_REFRESH = 300  # seconds after which an unchanged snapshot is rewritten (its time stays current)
 
 
 def snapshot_path():
@@ -1382,7 +1412,7 @@ def freeze_snapshot():
     _SNAP["frozen"] = True
 
 
-def snapshot_tick(live, now=None):
+def snapshot_tick(live, now=None, force=False):
     """Record the live thread sessions (the ones just restored count until they are up)."""
     now = time.time() if now is None else now
     if _SNAP["frozen"]:
@@ -1393,6 +1423,13 @@ def snapshot_tick(live, now=None):
     if lean_private.hidden():  # private sessions are not restored while private mode is off
         data = lean_threads.load()
         ids -= lean_threads.hidden_threads(data)
+    if force:
+        pass
+    elif _SNAP["last_ids"] == ids and now - _SNAP["last_at"] < SNAP_REFRESH:
+        return  # unchanged: nothing to write
+    elif _SNAP["last_ids"] is not None and _SNAP["last_ids"] != ids and now - _SNAP["last_at"] < SNAP_MIN_GAP:
+        return  # changed: written at most every SNAP_MIN_GAP seconds (a start after the snapshot counts via session_on_at)
+    _SNAP["last_ids"], _SNAP["last_at"] = ids, now
     write_snapshot(ids, now)
 
 
@@ -1425,10 +1462,12 @@ class SpoolDeliverer:
 
     def tick(self):
         started = []
-        try:
-            lean_own.sweep()  # review items about the user's own PRs need no vote
-        except Exception:
-            pass
+        if self.now() - getattr(self, "own_at", 0) >= 30:  # not every second
+            self.own_at = self.now()
+            try:
+                lean_own.sweep()  # review items about the user's own PRs need no vote
+            except Exception:
+                pass
         try:
             self.settle_injected()
         except Exception:
@@ -2395,7 +2434,7 @@ def _question(text):
 UNVERIFIED_MARK = "UNVERIFIED against the user's claim"
 
 
-def scan_turn(path, offset):
+def _scan_turn(path, offset):
     """What the transcript at `path` shows from byte `offset` on: {"runs": a lean-agent run/review/handover/push command
     was issued, "err": the last lean-agent tool result was an error, "result": its first line, "ask": the open
     AskUserQuestion's question (else None), "size": file size}."""
@@ -2746,7 +2785,7 @@ def wait_reason(rec, now=None):
 class ReporterSupervisor:
     """Runs the Reporter and restarts it (logging why) when its thread died or it made no tick for `stall` seconds."""
 
-    CARRY = ("cleaned", "goals_at", "chaser", "unstarted_at", "idle_stop_at", "nudge_at", "delivered", "idle_at", "redelivered")
+    CARRY = ("cleaned", "goals_at", "chaser", "unstarted_at", "idle_stop_at", "nudge_at", "repush_at", "delivered", "idle_at", "redelivered")
 
     def __init__(self, host, make=None, now=time.time, stall=REPORTER_STALL):
         self.host, self.now, self.stall = host, now, stall
@@ -3126,11 +3165,13 @@ class Reporter(AutoClear):
             self.log(f"{len(items)} queued report(s) undelivered for {round(limit / 60)}m: redelivering", "warn")
             lean_log.log("warn", "stuck", f"main: {len(items)} queued report(s) undelivered for {round(limit / 60)}m, redelivering")
         pushed = []
-        try:
-            pushed = repush_questions(self.now())
-        except Exception as exc:  # noqa: BLE001 - the report queue must keep going
-            self.log(f"question re-push failed: {exc}", "error")
-        if self.now() - getattr(self, "nudge_at", 0) >= 10:
+        if self.now() - getattr(self, "repush_at", 0) >= _knob("LEAN_AGENT_REPUSH_TICK", 20):
+            self.repush_at = self.now()
+            try:
+                pushed = repush_questions(self.now())
+            except Exception as exc:  # noqa: BLE001 - the report queue must keep going
+                self.log(f"question re-push failed: {exc}", "error")
+        if self.now() - getattr(self, "nudge_at", 0) >= _knob("LEAN_AGENT_NUDGE_TICK", 30):
             self.nudge_at = self.now()
             try:
                 nudge_main(self.now(), skip=set(pushed))
@@ -3800,7 +3841,7 @@ class Sessions:
     def stop_all(self, wait=0):
         """Ask every thread session to end; with `wait`, until each has (its socket is removed by then)."""
         if not _SNAP["frozen"]:  # the live set as the service stops, before any host is gone
-            snapshot_tick([t for t in list(self.hosts) if self.running(t)])
+            snapshot_tick([t for t in list(self.hosts) if self.running(t)], force=True)
         freeze_snapshot()
         hosts = list(self.hosts.values())
         for host in hosts:
