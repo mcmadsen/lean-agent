@@ -11,6 +11,8 @@ def _timeout_scale():
         return 4.0 if os.environ.get("GITHUB_ACTIONS") or sys.platform == "darwin" else 1.0
 
 
+os.environ["LEAN_AGENT_TEST"] = "1"  # lean_load.kill_stray refuses to signal anything under the tests
+
 TIMEOUT_SCALE = _timeout_scale()
 
 
@@ -27,4 +29,4 @@ CLAUDE_COMPACT_KNOBS = ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "CLAUDE_CODE_AUTO_COM
 def clean_environ(environ=None):
     """The environment minus every LEAN_AGENT_* key and Claude Code compaction knob."""
     return {k: v for k, v in (os.environ if environ is None else environ).items()
-            if not k.startswith("LEAN_AGENT_") and k not in CLAUDE_COMPACT_KNOBS}
+            if (not k.startswith("LEAN_AGENT_") and k not in CLAUDE_COMPACT_KNOBS)} | {"LEAN_AGENT_TEST": "1"}

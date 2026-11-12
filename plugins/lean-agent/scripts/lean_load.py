@@ -137,14 +137,13 @@ def strays(procs, owned):
             out.append((p, f"hook running {p['age']}s (stuck, probably on a lock)"))
         elif k == "up" and p["pid"] != keep:
             out.append((p, f"second `up` process (the service is pid {keep})"))
-        elif k in ("run", "poll") and p["age"] > 300 and p["pid"] not in owned.get("pids", ()) \
-                and p["ppid"] not in owned.get("pids", ()):
-            out.append((p, f"{k} process with no running marker or poll record ({p['age'] // 60}m old)"))
     return out
 
 
 def kill_stray(p, sig=signal.SIGTERM):
     """Stops one stray by pid (never its group) after checking the pid still has the same command. True when signalled."""
+    if os.environ.get("LEAN_AGENT_TEST") == "1":
+        return False
     now = [q for q in processes() if q["pid"] == p["pid"]]
     if not now or now[0]["cmd"] != p["cmd"]:
         return False
