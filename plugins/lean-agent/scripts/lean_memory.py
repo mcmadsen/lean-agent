@@ -298,14 +298,17 @@ def add(d, text, mtype="project", scope=GLOBAL, name=None, source=None, rebuild=
 
 
 @_locked
-def import_dirs(d, sources, scope=GLOBAL):
+def import_dirs(d, sources, scope=GLOBAL, projects=None):
     """Copy memories from Claude auto-memory folders into the store. Returns (added, skipped)."""
     added = skipped = 0
     for src in sources:
         if _expand(src) == _expand(d):
             continue
-        for m in read_all(src):
-            ok = add(d, m["body"], m["type"], scope=m["scope"] if m["scope"] != GLOBAL else scope,
+        owner = owner_of_dir(src, projects)
+        if not owner and len(projects or {}) == 1:  # a user-wide memory folder with a single learned project: that project's
+            owner = next(iter(projects))
+        for m in read_all(src, owner):  # unscoped: the project whose memory folder it is
+            ok = add(d, m["body"], m["type"], scope=m["scope"] if m["scope"] not in (GLOBAL, "") else scope,
                      name=m["name"], source=f"imported from {m['file']}", rebuild=False,
                      description=m["description"] or None, stem=m["stem"], dedupe=False)
             added, skipped = (added + 1, skipped) if ok else (added, skipped + 1)
