@@ -1536,7 +1536,7 @@ def _details(tid, ev, data, todos, live, waiting, now):
     for rid, m in live:
         if thread_of_run(dict(m, id=rid), data) == tid:
             out.append(f"  running {rid} {m.get('model') or '?'} {elapsed(m.get('started'), now)}: {one_line(m.get('task'), 60)}")
-    for rid, m in lean_common.lost_runs(lean_home()):
+    for rid, m in lean_common.lost_runs(lean_home(), days=lean_common.LOST_LISTED_DAYS):
         if thread_of_run(dict(m, id=rid), data) == tid:
             out.append(f"  lost {rid} {m.get('model') or '?'} since {elapsed(m.get('started'), now)}: its supervisor died "
                        f"(lean-agent runs --stop {rid} closes it)")

@@ -2659,6 +2659,27 @@ def startup_cleanup(log=None, limit=None, deadline=None):
     return out
 
 
+def archive_lost_backlog(log=None):
+    """One time per home (marker): lost markers older than a day get their ledger row and move to running/archive/, in
+    a single pass, so the lost listings stay small. Never raises. Returns how many moved."""
+    path = lean_home("lost-archive.json")
+    try:
+        if os.path.exists(path):
+            return 0
+        import lean_goals
+        arch = os.path.join(lean_home(), "running", "archive")
+        before = len(glob.glob(os.path.join(arch, "*.json")))
+        lean_goals.settle_orphan_markers()  # gives each old marker its ledger row (and archives it)
+        lean_common.archive_old_lost(lean_home())
+        moved = len(glob.glob(os.path.join(arch, "*.json"))) - before
+        lean_common.write_json_atomic(path, {"ts": time.time(), "archived": moved})
+        if log and moved:
+            log(f"startup cleanup: {moved} old lost run marker(s) archived", "info")
+        return moved
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def startup_cleanup_background(log=None, host=None, wait=30, limit=None):
     """Run startup_cleanup in a daemon thread once the main session is up (or `wait` seconds passed)."""
     def run():
@@ -2670,6 +2691,7 @@ def startup_cleanup_background(log=None, host=None, wait=30, limit=None):
             if host is not None and host.alive():
                 lean_log.log("debug", "startup", f"sessions up ({round(time.time() - t0, 1)}s after the reporter started)")
             startup_cleanup(log, limit=limit)
+            archive_lost_backlog(log)
         except Exception:  # noqa: BLE001
             pass
     th = threading.Thread(target=run, daemon=True, name="startup-cleanup")
