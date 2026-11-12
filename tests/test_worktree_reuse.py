@@ -50,24 +50,13 @@ class Reuse(unittest.TestCase):
         self.ensure("feat-a")
         self.assertTrue(os.path.exists(os.path.join(self.h, "worktrees", ".metadata_never_index")))
 
-    def test_reuse_clean_idle_for_new_branch(self):
+    def test_new_branch_never_takes_over_another_branchs_worktree(self):
         a = self.ensure("feat-a")
         b = self.ensure("feat-b")
-        self.assertTrue(b["reused"])
-        self.assertEqual(a["path"], b["path"])
-        self.assertEqual(b["branch"], "feat-b")
-
-    def test_no_reuse_dirty_or_busy(self):
-        a = self.ensure("feat-a")
-        open(os.path.join(a["path"], "x"), "w").write("x")
-        self.assertFalse(self.ensure("feat-b")["reused"])
-        os.remove(os.path.join(a["path"], "x"))
-        c = self.ensure("feat-c")
-        self.assertTrue(c["reused"])  # clean again: feat-a's or feat-b's worktree
-        self.running = [("r1", {"path": a["path"]}), ("r2", {"path": c["path"]})]
-        busy_paths = {a["path"], c["path"]}
-        d = self.ensure("feat-d")
-        self.assertNotIn(d["path"], busy_paths)
+        self.assertFalse(b["reused"])
+        self.assertNotEqual(a["path"], b["path"])
+        self.assertEqual(a["branch"], "feat-a")
+        self.assertEqual(sh(a["path"], "symbolic-ref", "--short", "HEAD"), "feat-a")
 
     def test_setup_once_and_on_manifest_change(self):
         self.projs["proj"]["worktree_setup"] = "true"
@@ -83,8 +72,7 @@ class Reuse(unittest.TestCase):
     def test_cleanup_only_clean_finished(self):
         a = self.ensure("feat-a")  # merged into main (no new commits): cleanable
         self.running = []
-        b = self.ensure("feat-b")  # takes feat-a's worktree
-        self.assertEqual(a["path"], b["path"])
+        b = a
         open(os.path.join(b["path"], "x"), "w").write("x")  # dirty
         removed, dirty, _ = agent.worktrees_cleanup(3, now=self.later)
         self.assertEqual((len(removed), len(dirty)), (0, 1))
@@ -107,18 +95,11 @@ class Reuse(unittest.TestCase):
         self.assertTrue(any("1 lean-agent worktrees" in l and "1 cleanable" in l for l in lines), lines)
         self.assertTrue(any(".metadata_never_index" in l for l in lines))
 
-    def test_unused_worktree_removed_at_run_end(self):
+    def test_unused_worktree_is_not_removed_at_run_end(self):
+        self.assertFalse(hasattr(agent, "remove_unused_worktree"))
         wt = self.ensure("feat-a")
-        wt["reused"] = False
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertTrue(agent.remove_unused_worktree("proj", self.repo, wt))
-        self.assertFalse(os.path.isdir(wt["path"]))
-        self.assertNotIn("feat-a", agent.worktree_index().get("proj", {}))
-        wt = self.ensure("feat-b")
-        wt["reused"] = False
-        sh(wt["path"], "commit", "-q", "--allow-empty", "-m", "work")
-        self.assertFalse(agent.remove_unused_worktree("proj", self.repo, wt))  # HEAD moved: kept
         self.assertTrue(os.path.isdir(wt["path"]))
+        self.assertIn("feat-a", agent.worktree_index().get("proj", {}))
 
     def test_retry_reuses_no_numbered_duplicate(self):
         a = self.ensure("feat-a")
