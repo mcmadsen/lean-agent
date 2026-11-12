@@ -3132,6 +3132,8 @@ def _cmd_run(a):
     if wt and not read_only:
         try:
             wt_warning = worktree_after_run(slug, wt_repo, wt, wt["head"])
+            if not wt_warning:
+                remove_unused_worktree(slug, wt_repo, wt, run_id)
         except Exception as e:  # a failed check never costs the run's result
             lean_log.log("error", "cli", f"worktree check after run {run_id}: {e}")
 
@@ -7996,6 +7998,28 @@ def sync_worktree_registry(slug, repo, write=True):
     return idx
 
 
+def remove_unused_worktree(slug, repo, wt, run_id=None):
+    """A worktree this run created and left untouched (clean, HEAD where it started) goes away at once. True when removed."""
+    path = wt["path"]
+    if wt.get("reused") or not os.path.isdir(path) or git(path, "status", "--porcelain") != "":
+        return False
+    if (git(path, "rev-parse", "HEAD") or "") != wt.get("head") or worktree_busy(path, run_id):
+        return False
+    if git(repo, "worktree", "remove", path) is None:
+        return False
+    drop_worktree_entry(slug, wt["name"])
+    msg = f"removed unused worktree {path}"
+    lean_log.log("info", "cli", msg)
+    print(f"worktree: {msg}", flush=True)
+    return True
+
+
+def drop_worktree_entry(slug, name):
+    idx = worktree_index()
+    if (idx.get(slug) or {}).pop(name, None) is not None:
+        save_json(home("worktrees.json"), idx)
+
+
 def worktree_after_run(slug, repo, wt, start_head):
     """After a run in a worktree made for a branch: commits on a detached HEAD move the branch (fast-forward, safe) or
     are reported loudly. Returns the warning text, else None."""
@@ -8214,10 +8238,12 @@ def ensure_never_index(slug=None):
     return missing
 
 
-def worktree_busy(path):
-    """True when a running run works in (or below) this worktree."""
+def worktree_busy(path, ignore_run=None):
+    """True when a running run (other than `ignore_run`) works in (or below) this worktree."""
     root = worktree_path(path)
     for _rid, m in live_runs():
+        if ignore_run and (_rid == ignore_run or m.get("run") == ignore_run):
+            continue
         p = m.get("path")
         if p and (worktree_path(p) == root or worktree_path(p).startswith(root + os.sep)):
             return True
@@ -8278,7 +8304,7 @@ def human_size(n):
         n /= 1024
 
 
-def worktree_cleanup_state(slug, name, e, older_days=3, now=None):
+def worktree_cleanup_state(slug, name, e, older_days=3, now=None, pushed_days=2):
     """'cleanable', 'dirty', 'busy' or 'keep' for one registered worktree."""
     path = e["path"]
     repo = e.get("repo") or (projects().get(slug) or {}).get("path")
@@ -8288,14 +8314,44 @@ def worktree_cleanup_state(slug, name, e, older_days=3, now=None):
         return "dirty"
     if worktree_busy(path):
         return "busy"
-    old = False
+    age = 0
     try:
         used = datetime.datetime.fromisoformat(str(e.get("last_used") or e.get("created"))[:19])
-        old = ((now or datetime.datetime.now()) - used).total_seconds() > older_days * 86400
+        age = ((now or datetime.datetime.now()) - used).total_seconds() / 86400
     except ValueError:
         pass
     branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
-    return "cleanable" if old or worktree_pushed(repo, path, branch, slug) else "keep"
+    if age > older_days or (age > pushed_days and worktree_pushed(repo, path, branch, slug)):
+        return "cleanable"
+    return "keep"
+
+
+def worktree_dup_key(e):
+    return (e.get("repo"), re.sub(r"^origin/", "", str(e.get("ref") or "")))
+
+
+def stale_duplicates(entries):
+    """Names of clean older worktrees of a ref that has a newer one (a retry used to make `<name>-2` ... copies): the
+    newest of each ref stays, the older ones go when clean, idle and with nothing the newest lacks."""
+    groups = {}
+    for sl, name, e in entries:
+        if e.get("ref"):
+            groups.setdefault((sl,) + worktree_dup_key(e), []).append((sl, name, e))
+    out = set()
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda m: str(m[2].get("last_used") or m[2].get("created") or ""), reverse=True)
+        newest = members[0][2]
+        for sl, name, e in members[1:]:
+            repo = e.get("repo") or (projects().get(sl) or {}).get("path")
+            if not repo or git(e["path"], "status", "--porcelain") != "" or worktree_busy(e["path"]):
+                continue
+            head = git(e["path"], "rev-parse", "HEAD")
+            if head and (head == git(newest["path"], "rev-parse", "HEAD") or worktree_pushed(repo, e["path"], None, sl)
+                         or git(repo, "merge-base", "--is-ancestor", head, git(newest["path"], "rev-parse", "HEAD") or "x") is not None):
+                out.add((sl, name))
+    return out
 
 
 def parse_age_days(text):
@@ -8309,8 +8365,12 @@ def worktrees_cleanup(older_days=3, remove=True, slug=None, now=None):
     """Remove clean, idle worktrees whose branch is pushed/merged or that were last used over N days ago. Returns
     (removed, dirty, kept) lists of (slug, name, path)."""
     removed, dirty, kept = [], [], []
-    for sl, name, e in lean_worktrees(slug):
+    entries = lean_worktrees(slug)
+    dups = stale_duplicates(entries)
+    for sl, name, e in entries:
         st = worktree_cleanup_state(sl, name, e, older_days, now)
+        if st == "keep" and (sl, name) in dups:
+            st = "cleanable"
         item = (sl, name, e["path"])
         if st == "dirty":
             dirty.append(item)
@@ -8386,6 +8446,14 @@ def worktree_lock(slug, name, shared):
 
 
 def cmd_worktrees(a):
+    if getattr(a, "prune", False):
+        idx = worktree_index()
+        for sl, entries in idx.items():
+            for name, e in list(entries.items()):
+                if isinstance(e, dict) and e.get("path") and not os.path.isdir(e["path"]):
+                    entries.pop(name)
+                    print(f"{sl:<16} {name}: dropped entry, {e['path']} no longer exists")
+                    save_json(home("worktrees.json"), idx)
     if getattr(a, "cleanup", False):
         if os.environ.get("LEAN_AGENT_SCHEDULED") and machine_overloaded():
             print("worktrees cleanup: skipped, the machine is overloaded")
@@ -11094,8 +11162,8 @@ def doctor_worktrees(report, fix):
         return
     total = sum(dir_size(e["path"]) for _s, _n, e in wts)
     clean = sum(1 for sl, n, e in wts if worktree_cleanup_state(sl, n, e) == "cleanable")
-    report(True if clean < 5 else None, f"{len(wts)} lean-agent worktrees, {human_size(total)}, {clean} cleanable",
-           "lean-agent worktrees --cleanup")
+    report(True if len(wts) <= 30 else None, f"{len(wts)} lean-agent worktrees, {human_size(total)}, {clean} cleanable"
+           + (" (more than 30)" if len(wts) > 30 else ""), "lean-agent worktrees --cleanup")
 
 
 def doctor_locks(report, fix, root=None):
@@ -14574,6 +14642,28 @@ def close_hold(tid, data=None):
     return ", ".join(parts), [r for r, _, _ in runs]
 
 
+def cleanup_closed_thread_worktrees():
+    """Worktrees of runs in closed threads go when clean, pushed and idle (no age wait)."""
+    seen = set()
+    for r in ledger():
+        name, tag = r.get("worktree"), r.get("thread")
+        if not name or not tag or (r.get("project"), name) in seen:
+            continue
+        seen.add((r.get("project"), name))
+        try:
+            if not thread_session_tid(tag)[1].get("closed"):
+                continue
+        except BaseException:
+            continue
+        e = (worktree_index().get(r.get("project")) or {}).get(name)
+        if e and e.get("path") and os.path.isdir(e["path"]) and worktree_cleanup_state(r["project"], name, e, 3, pushed_days=-1) != "dirty" \
+                and worktree_cleanup_state(r["project"], name, e, 3, pushed_days=-1) == "cleanable":
+            repo = e.get("repo") or (projects().get(r["project"]) or {}).get("path")
+            if repo and git(repo, "worktree", "remove", e["path"]) is not None:
+                drop_worktree_entry(r["project"], name)
+                lean_log.log("info", "cli", f"removed worktree {e['path']} (thread {tag} closed)")
+
+
 def close_threads(a):
     """`thread close tN...|--all|--idle DUR`: one checkpoint-and-stop per thread, then a summary line. An explicit id or
     --all refuses a thread with a live run or a mid-turn session unless --force (the runs are detached and keep going)."""
@@ -15138,7 +15228,12 @@ def thread_action(a):
         print(queue_and_deliver(tid, prompt, resume_old))
         return 0
     if act == "close":
-        return close_threads(a)
+        rc = close_threads(a)
+        try:
+            cleanup_closed_thread_worktrees()
+        except Exception as exc:  # never costs the close
+            lean_log.log("error", "cli", f"worktree cleanup after thread close: {exc}")
+        return rc
     if act == "stop":
         return stop_threads(a)
     if act == "reopen" and len(a.args) == 1:
@@ -17274,7 +17369,7 @@ def build_parser():
 
     s = sub.add_parser("worktrees", help="list lean-agent's shared worktrees")
     s.add_argument("project", nargs="?")
-    s.add_argument("--prune", action="store_true", help="drop registry entries that have no path recorded")
+    s.add_argument("--prune", action="store_true", help="drop registry entries that have no path recorded or whose directory is gone")
     s.add_argument("--cleanup", action="store_true", help="remove worktrees that are clean, idle and pushed/merged or unused for --older (never dirty ones)")
     s.add_argument("--older", default="3d", help="cleanup: age of last use that makes an unpushed clean worktree removable (default 3d)")
     s.set_defaults(fn=cmd_worktrees)

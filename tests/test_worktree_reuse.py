@@ -30,6 +30,7 @@ class Reuse(unittest.TestCase):
         sh(self.repo, "commit", "-qm", "init")
         self.h = os.path.join(self.tmp, "home")
         self.running = []
+        self.later = __import__("datetime").datetime.now() + __import__("datetime").timedelta(days=2, hours=1)
         self.projs = {"proj": {"path": self.repo, "base": "main"}}
         for p in (mock.patch.object(agent, "home", lambda *parts: os.path.join(self.h, *parts)),
                   mock.patch.object(agent, "projects", lambda: self.projs),
@@ -81,23 +82,68 @@ class Reuse(unittest.TestCase):
         b = self.ensure("feat-b")  # takes feat-a's worktree
         self.assertEqual(a["path"], b["path"])
         open(os.path.join(b["path"], "x"), "w").write("x")  # dirty
-        removed, dirty, _ = agent.worktrees_cleanup(3)
+        removed, dirty, _ = agent.worktrees_cleanup(3, now=self.later)
         self.assertEqual((len(removed), len(dirty)), (0, 1))
         self.assertTrue(os.path.isdir(b["path"]))
         os.remove(os.path.join(b["path"], "x"))
         self.running = [("r", {"path": b["path"]})]
-        self.assertEqual(agent.worktrees_cleanup(3)[0], [])
+        self.assertEqual(agent.worktrees_cleanup(3, now=self.later)[0], [])
         self.running = []
-        removed, dirty, _ = agent.worktrees_cleanup(3)
+        self.assertEqual(agent.worktrees_cleanup(3)[0], [])  # pushed/merged but not idle for 2 days yet
+        removed, dirty, _ = agent.worktrees_cleanup(3, now=self.later)
         self.assertEqual(len(removed), 1)
         self.assertFalse(os.path.isdir(b["path"]))
 
     def test_doctor_numbers(self):
         self.ensure("feat-a")
         lines = []
-        agent.doctor_worktrees(lambda ok, msg, fix=None: lines.append(msg), False)
+        with mock.patch.object(agent.datetime, "datetime", wraps=agent.datetime.datetime) as dt:
+            dt.now.return_value = self.later
+            agent.doctor_worktrees(lambda ok, msg, fix=None: lines.append(msg), False)
         self.assertTrue(any("1 lean-agent worktrees" in l and "1 cleanable" in l for l in lines), lines)
         self.assertTrue(any(".metadata_never_index" in l for l in lines))
+
+    def test_unused_worktree_removed_at_run_end(self):
+        wt = self.ensure("feat-a")
+        wt["reused"] = False
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(agent.remove_unused_worktree("proj", self.repo, wt))
+        self.assertFalse(os.path.isdir(wt["path"]))
+        self.assertNotIn("feat-a", agent.worktree_index().get("proj", {}))
+        wt = self.ensure("feat-b")
+        wt["reused"] = False
+        sh(wt["path"], "commit", "-q", "--allow-empty", "-m", "work")
+        self.assertFalse(agent.remove_unused_worktree("proj", self.repo, wt))  # HEAD moved: kept
+        self.assertTrue(os.path.isdir(wt["path"]))
+
+    def test_retry_reuses_no_numbered_duplicate(self):
+        a = self.ensure("feat-a")
+        b = self.ensure("feat-a")
+        self.assertTrue(b["reused"])
+        self.assertEqual(a["path"], b["path"])
+        self.assertEqual(os.listdir(os.path.join(self.h, "worktrees", "proj")).count("feat-a-2"), 0)
+
+    def test_unpushed_never_removed_and_duplicates(self):
+        a = self.ensure("feat-a")
+        sh(a["path"], "commit", "-q", "--allow-empty", "-m", "work")  # unpushed, clean
+        self.assertEqual(agent.worktrees_cleanup(3, now=self.later)[0], [])
+        self.assertTrue(os.path.isdir(a["path"]))
+
+    def test_prune_drops_missing_paths(self):
+        a = self.ensure("feat-a")
+        import shutil
+        shutil.rmtree(a["path"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            agent.cmd_worktrees(__import__("argparse").Namespace(project=None, prune=True))
+        self.assertNotIn("feat-a", agent.worktree_index().get("proj", {}))
+
+    def test_doctor_warns_over_30(self):
+        fake = [("proj", f"w{i}", {"path": self.repo, "repo": self.repo}) for i in range(31)]
+        lines = []
+        with mock.patch.object(agent, "lean_worktrees", lambda *a: fake), mock.patch.object(agent, "dir_size", lambda p: 1), \
+                mock.patch.object(agent, "worktree_cleanup_state", lambda *a, **k: "keep"):
+            agent.doctor_worktrees(lambda ok, msg, fix=None: lines.append((ok, msg, fix)), False)
+        self.assertTrue(any(ok is None and "31" in m and "--cleanup" in f for ok, m, f in lines), lines)
 
 
 if __name__ == "__main__":
