@@ -1999,6 +1999,12 @@ def cmd_run(a):
                         f.flush()
                     except (OSError, ValueError):
                         pass
+                for rc_file in SUPERVISOR_RC:
+                    try:
+                        with open(rc_file, "w") as fh:
+                            fh.write(str(rc if isinstance(rc, int) else 0))
+                    except OSError:
+                        pass
                 os._exit(rc if isinstance(rc, int) else 0)
 
 
@@ -2065,6 +2071,33 @@ def supervisor_term(signum, frame):
         os.kill(os.getpid(), signum)
 
 
+def supervisor_alive(pid):
+    """A detached supervisor that is still running (a zombie nobody reaped counts as gone)."""
+    if not pid_alive(pid):
+        return False
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+        return bool(r.stdout.strip()) and not r.stdout.strip().startswith("Z")
+
+
+def signal_supervisor(pid, sig):
+    """Passes a signal to the supervisor's process group (it leads the session lean-agent made for it), else to it alone."""
+    try:
+        pg = os.getpgid(pid)
+        if pg != os.getpgrp() and pg > 1:
+            os.killpg(pg, sig)
+        else:
+            os.kill(pid, sig)
+    except OSError:
+        pass
+
+
+SUPERVISOR_RC = []  # the file a detached supervisor writes its exit code to (its parent CLI is not its parent process)
+
+
 def detach_run(workdir, run_id):
     """Moves the rest of a run into a detached process (own session, stdin /dev/null, output in the run's work dir),
     so it survives whatever kills this command: the orchestrator's /clear, its shell tool ending, a closed terminal.
@@ -2085,13 +2118,29 @@ def detach_run(workdir, run_id):
             held[sig] = signal.signal(sig, signal.SIG_IGN)
         except ValueError:  # not the main thread
             break
+    rc_file = os.path.join(workdir, "supervisor.rc")
+    try:
+        os.remove(rc_file)
+    except OSError:
+        pass
+    rfd, wfd = os.pipe()
     pid = os.fork()
     if pid:
+        os.close(wfd)
         for sig, handler in held.items():
             signal.signal(sig, handler)
     if pid == 0:
         try:
+            os.close(rfd)
             os.setsid()
+            # double fork: the supervisor is a grandchild, reparented to init/launchd, so killing the caller's
+            # process tree never reaches it. The intermediate tells the caller the pid and exits at once.
+            gpid = os.fork()
+            if gpid:
+                os.write(wfd, str(gpid).encode())
+                os._exit(0)
+            os.close(wfd)
+            SUPERVISOR_RC[:] = [rc_file]
             signal.signal(signal.SIGINT, signal.default_int_handler)
             signal.signal(signal.SIGTERM, supervisor_term)
             signal.signal(signal.SIGHUP, signal.SIG_IGN)  # the caller's session ending is not a reason to stop
@@ -2108,6 +2157,17 @@ def detach_run(workdir, run_id):
             os._exit(1)  # never back into the caller: this is a copy of it
         SUPERVISOR.append(True)  # cmd_run's finally ends this process with os._exit
         return None
+    gpid = None
+    try:
+        with os.fdopen(rfd, "rb") as fh:
+            gpid = int(fh.read().decode() or 0) or None
+    except (OSError, ValueError):
+        pass
+    if gpid:
+        try:
+            os.waitpid(pid, 0)  # the intermediate has exited
+        except (ChildProcessError, OSError):
+            pass
     pos, status, interrupted = [0, 0], None, None
 
     def relay():
@@ -2139,20 +2199,31 @@ def detach_run(workdir, run_id):
     try:
         while status is None:
             try:
-                done, st = os.waitpid(pid, os.WNOHANG)
-                if done:
-                    status = st
-                    break
+                if gpid:
+                    if not supervisor_alive(gpid):
+                        status = 0
+                        break
+                else:
+                    done, st = os.waitpid(pid, os.WNOHANG)
+                    if done:
+                        status = st
+                        break
                 if presses[0] > sent:
                     sent = presses[0]
                     interrupted = interrupted or time.time()
-                    signal_group(pid, signal.SIGINT, wait=2)
+                    if gpid:
+                        signal_supervisor(gpid, signal.SIGINT)
+                    else:
+                        signal_group(pid, signal.SIGINT, wait=2)
                 relay()
                 time.sleep(0.1)
             except ChildProcessError:
                 status = 0
             if interrupted and time.time() - interrupted > 60:
-                signal_group(pid, signal.SIGKILL, wait=2)
+                if gpid:
+                    signal_supervisor(gpid, signal.SIGKILL)
+                else:
+                    signal_group(pid, signal.SIGKILL, wait=2)
     finally:
         if previous is not None:
             signal.signal(signal.SIGINT, previous)
@@ -2163,6 +2234,12 @@ def detach_run(workdir, run_id):
         mark_collected(run_id)  # relayed above: the caller has seen the result
     if presses[0]:
         return 130
+    if gpid:
+        try:
+            with open(rc_file) as fh:
+                return int(fh.read().strip())
+        except (OSError, ValueError):
+            return 0 if entry and entry.get("status") in ("done", "ok") else 1
     rc = os.waitstatus_to_exitcode(status)
     return rc if rc >= 0 else 128 - rc
 
