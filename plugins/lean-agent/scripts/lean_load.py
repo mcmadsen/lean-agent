@@ -125,18 +125,43 @@ def kind(cmd):
     return m.group(1) if m else "other"
 
 
-def strays(procs, owned):
-    """[(process, why)]: a hook running over a minute (stuck), an `up` besides the owner, a run supervisor or poll worker
-    that no marker or poll record owns. `owned`: {"up": pid or None, "pids": set of pids owned by markers/polls}."""
+def proven_ours(p, markers):
+    """True only when the command line or working dir proves the process belongs to this home: one of `markers`
+    (home path, this plugin's scripts dir) appears in the command or the cwd."""
+    cwd = ""
+    try:
+        cwd = os.readlink(f"/proc/{p['pid']}/cwd")
+    except OSError:
+        pass
+    return any(m and (m in p["cmd"] or (cwd and cwd.startswith(m))) for m in markers)
+
+
+def strays(procs, owned, markers=()):
+    """[(process, why)] that doctor --fix may stop: a hook running over a minute (stuck) and a second `up` besides the
+    one recorded for this home, each only when proven to be this home's (`markers`). Never a run or poll process.
+    `owned`: {"up": pid or None, "pids": set of pids owned by markers/polls}."""
     out = []
-    ups = sorted((p for p in procs if kind(p["cmd"]) == "up"), key=lambda p: -p["age"])
-    keep = owned.get("up") or (ups[0]["pid"] if ups else None)
+    keep = owned.get("up")
     for p in procs:
         k = kind(p["cmd"])
+        if not proven_ours(p, markers):
+            continue
         if k == "hook" and p["age"] > 60:
             out.append((p, f"hook running {p['age']}s (stuck, probably on a lock)"))
-        elif k == "up" and p["pid"] != keep:
+        elif k == "up" and keep and p["pid"] != keep:
             out.append((p, f"second `up` process (the service is pid {keep})"))
+    return out
+
+
+def possible_strays(procs, owned):
+    """[(process, why)] run supervisors / poll workers older than 5 minutes that no marker or poll record owns.
+    Report only: doctor never stops them."""
+    out = []
+    for p in procs:
+        k = kind(p["cmd"])
+        if k in ("run", "poll") and p["age"] > 300 and p["pid"] not in owned.get("pids", ()) \
+                and p["ppid"] not in owned.get("pids", ()):
+            out.append((p, f"{k} process with no running marker or poll record ({p['age'] // 60}m old)"))
     return out
 
 

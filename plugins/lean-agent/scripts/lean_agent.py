@@ -11337,7 +11337,13 @@ def doctor_processes(report, fix, procs=None, owned=None, kill=None):
            f"{len(procs)} lean-agent processes, {cpu:.0f}% CPU, {rss} MB (top: " + ", ".join(
                f"{p['pid']} {lean_load.kind(p['cmd'])} {p['cpu']:.0f}%/{p['rss_mb']}MB"
                for p in sorted(procs, key=lambda p: -p["cpu"])[:4]) + ")")
-    stray = lean_load.strays(procs, owned_pids() if owned is None else owned)
+    owned = owned_pids() if owned is None else owned
+    markers = [m for m in (home(), os.path.dirname(os.path.abspath(__file__))) if m]
+    stray = lean_load.strays(procs, owned, markers)
+    for p, why in lean_load.possible_strays(procs, owned):
+        report(None, f"possible stray {p['pid']} ({lean_load.kind(p['cmd'])}, {p['age']}s old, {p['cpu']:.0f}% CPU): {why}; "
+                     f"command: {p['cmd'][:200]}",
+               "lean-agent runs --stop <id> or kill the pid yourself (doctor never stops run/poll processes)")
     for p, why in stray:
         if fix and (kill or lean_load.kill_stray)(p):
             report(True, f"stray process {p['pid']} ({lean_load.kind(p['cmd'])}): {why}; stopped")
@@ -11347,9 +11353,9 @@ def doctor_processes(report, fix, procs=None, owned=None, kill=None):
 
 
 def doctor_worktrees(report, fix):
-    missing = ensure_never_index() if fix else None
+    wroot = home("worktrees")
+    missing = ensure_never_index() if fix and os.path.isdir(wroot) else None
     if missing is None:
-        wroot = home("worktrees")
         missing = [] if os.path.exists(os.path.join(wroot, ".metadata_never_index")) or not os.path.isdir(wroot) else [wroot]
     report(not missing, "worktree folder has .metadata_never_index (Spotlight skips it)",
            "lean-agent doctor --fix")
