@@ -2670,7 +2670,7 @@ def archive_lost_backlog(log=None):
         arch = os.path.join(lean_home(), "running", "archive")
         before = len(glob.glob(os.path.join(arch, "*.json")))
         lean_goals.settle_orphan_markers()  # gives each old marker its ledger row (and archives it)
-        lean_common.archive_old_lost(lean_home())
+        lean_common.archive_old_lost(lean_home(), fresh_rows=True)  # the backlog: rows just written count
         moved = len(glob.glob(os.path.join(arch, "*.json"))) - before
         lean_common.write_json_atomic(path, {"ts": time.time(), "archived": moved})
         if log and moved:

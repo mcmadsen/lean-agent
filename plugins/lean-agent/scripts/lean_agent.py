@@ -10967,7 +10967,7 @@ def cmd_runs(a):
             print(f"{rid}  lost  ({(m.get('lost_reason') or lost_reason(m)) + ('; record only, nothing to resume' if m.get('no_record') else '')}; close it: lean-agent runs --stop {rid})  {m.get('model', '?'):<7} "
                   f"{m.get('project', '?'):<16} {one_line(m.get('task', ''), 50)}")
         if not lost:
-            print("No lost runs." if a.all else f"No lost runs in the last {lean_common.LOST_LISTED_DAYS} days (--all for older ones).")
+            print("No lost runs." if a.all else f"No lost runs. (last {lean_common.LOST_LISTED_DAYS} days; --all for older ones)")
         return
     if a.running or getattr(a, "queued", False):
         found = False
@@ -10980,7 +10980,7 @@ def cmd_runs(a):
                   f"{m.get('model', '?'):<7} {m.get('project', '?'):<16} {one_line(m.get('task', ''), 70)}"
                   + (f"  [{m['reason']}]" if m.get("reason") else "")
                   + (f"  (lean-agent {m['version']})" if m.get("version") else ""))
-        lost = lost_runs(home(), days=lean_common.LOST_LISTED_DAYS, archived=True)
+        lost = lost_runs(home())
         if lost:
             found = True
             print(f"{len(lost)} lost runs \u2014 lean-agent runs --lost")
@@ -11076,7 +11076,7 @@ def cmd_runs(a):
         rows.pop(r["id"], None)
         rows[r["id"]] = r
     lost_by_id = {}
-    for rid, m in lost_runs(home(), days=lean_common.LOST_LISTED_DAYS):
+    for rid, m in lost_runs(home()):
         if not a.project or m.get("project") == a.project:
             lost_by_id[rid] = m
             if rid in rows and rows[rid].get("status") == LOST_NO_RECORD:

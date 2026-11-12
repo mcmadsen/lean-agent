@@ -197,15 +197,14 @@ class OrphanMarkerTest(unittest.TestCase):
         rows = self.ledger_rows()
         self.assertEqual([r["status"] for r in rows], ["lost (no record)"])
         self.assertIn("check the widget", rows[0]["task"])
-        self.assertEqual(lean_common.lost_runs(self.tmp.name), [])  # long gone and recorded: archived, not listed
-        self.assertEqual([r for r, _ in lean_common.lost_runs(self.tmp.name, archived=True)], ["0101-0000-aa11"])
+        self.assertEqual([r for r, _ in lean_common.lost_runs(self.tmp.name)], ["0101-0000-aa11"])
         self.assertIn("nothing to resume", lean_goals.lost_message("r", "ref", True))
         lean_goals.settle_orphan_markers({"threads": {"t5": {}}, "aliases": {}, "overrides": {}})  # again: no second row
         self.assertEqual(len(self.ledger_rows()), 1)
-        for rid, m in lean_common.lost_runs(self.tmp.name, archived=True):
+        for rid, m in lean_common.lost_runs(self.tmp.name):
             self.assertTrue(m.get("no_record"))
-            os.remove(os.path.join(self.tmp.name, "running", "archive", rid + ".json"))
-        self.assertEqual(lean_common.lost_runs(self.tmp.name, archived=True), [])
+            os.remove(os.path.join(self.tmp.name, "running", rid + ".json"))
+        self.assertEqual(lean_common.lost_runs(self.tmp.name), [])
 
     def test_marker_with_newer_run_is_dropped_silently(self):
         import lean_goals

@@ -94,10 +94,17 @@ class Listing(unittest.TestCase):
     def test_old_lost_markers_are_archived_with_their_row(self):
         self.marker("1001-000001-beef", 3, thread="")
         self.marker("1001-000002-beef", 0.2, thread="")
-        self.cli("runs", "--lost")  # settles: rows for both
-        rows = [json.loads(x) for x in open(os.path.join(self.tmp, "ledger.jsonl"), encoding="utf-8")]
-        self.assertEqual({r["id"] for r in rows}, {"1001-000001-beef", "1001-000002-beef"})
+        self.cli("runs", "--lost")  # settles: rows for both; a row written just now archives nothing yet
         run = os.path.join(self.tmp, "running")
+        self.assertTrue(os.path.exists(os.path.join(run, "1001-000001-beef.json")))
+        with open(os.path.join(self.tmp, "ledger.jsonl"), encoding="utf-8") as fh:
+            rows = [json.loads(x) for x in fh]
+        self.assertEqual({r["id"] for r in rows}, {"1001-000001-beef", "1001-000002-beef"})
+        with open(os.path.join(self.tmp, "ledger.jsonl"), "w", encoding="utf-8") as fh:  # the rows are old now
+            for r in rows:
+                r["ts"] = iso(2)
+                fh.write(json.dumps(r) + "\n")
+        self.cli("runs", "--lost")
         self.assertFalse(os.path.exists(os.path.join(run, "1001-000001-beef.json")))
         self.assertTrue(os.path.exists(os.path.join(run, "archive", "1001-000001-beef.json")))
         self.assertTrue(os.path.exists(os.path.join(run, "1001-000002-beef.json")))  # younger than a day: stays
@@ -110,7 +117,15 @@ class Listing(unittest.TestCase):
         os.makedirs(os.path.join(self.tmp, "running", "archive"))
         out, _ = self.cli("runs", "--lost")
         self.assertIn("1001-000002-beef", out)
-        self.assertNotIn("1001-000001-beef", out)
+        self.assertIn("1001-000001-beef", out)  # not archived yet: listed whatever its age
+        for rid, d in (("1001-000003-beef", 10), ("1001-000004-beef", 2)):  # archived ones: only the last 7 days
+            self.marker(rid, d, thread="")
+            os.replace(os.path.join(self.tmp, "running", rid + ".json"), os.path.join(self.tmp, "running", "archive", rid + ".json"))
+        out, _ = self.cli("runs", "--lost")
+        self.assertIn("1001-000004-beef", out)
+        self.assertNotIn("1001-000003-beef", out)
+        out, _ = self.cli("runs", "--lost", "--all")
+        self.assertIn("1001-000003-beef", out)
         out, _ = self.cli("runs", "--lost", "--all")
         self.assertIn("1001-000001-beef", out)
         self.assertIn("1001-000002-beef", out)
@@ -128,17 +143,15 @@ class Listing(unittest.TestCase):
         finally:
             os.environ.pop("LEAN_AGENT_HOME", None)
 
-    def test_marker_without_task_is_never_listed_and_settled_when_dead(self):
+    def test_taskless_marker_alive_is_listed_dead_is_settled(self):
         with open(os.path.join(self.tmp, "running", "abcdef0123456789.json"), "w") as fh:
-            json.dump({"pid": os.getpid(), "started": iso()}, fh)  # a live bare marker (the old launch-guard file)
+            json.dump({"pid": os.getpid(), "started": iso()}, fh)  # alive, no task: still a live run
         with open(os.path.join(self.tmp, "running", "0123456789abcdef.json"), "w") as fh:
-            json.dump({"pid": self.pid, "started": iso()}, fh)  # a dead one
-        self.assertEqual(lean_common.running_runs(self.tmp), [])
+            json.dump({"pid": self.pid, "started": iso()}, fh)  # gone, no task: a leftover
+        self.assertEqual([r for r, _ in lean_common.running_runs(self.tmp)], ["abcdef0123456789"])
         self.assertEqual(lean_common.lost_runs(self.tmp), [])
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "running", "0123456789abcdef.json")))
-        out, _ = self.cli("runs", "--running")
-        self.assertNotIn("?", out)
-        self.assertIn("No runs in progress", out)
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, "running", "abcdef0123456789.json")))
 
     def test_early_marker_of_a_starting_run_shows_starting_with_its_id(self):
         self.marker("1001-000001-beef", 0, pid=os.getpid(), early=True)
