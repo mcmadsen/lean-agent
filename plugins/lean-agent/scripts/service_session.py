@@ -1751,7 +1751,7 @@ def ensure_question_items():
     import lean_threads
     have = {(w.get("thread"), w.get("qid")) for w in lean_waiting.open_items()}
     have |= answered_question_keys()  # a waiting item that is done (answered, dismissed) is never created again
-    data = lean_threads.load()
+    data = lean_threads.load_ro()
     for tid, t in data["threads"].items():
         if tid in data["aliases"]:
             continue
@@ -1844,7 +1844,7 @@ def repush_questions(now=None, after=None):
         if age_s < after:
             continue
         if threads_ is None:
-            threads_ = lean_threads.load()["threads"]
+            threads_ = lean_threads.load_ro()["threads"]
         t = threads_.get(tid) or {}
         q = next((q for q in lean_threads.open_questions(t) if q.get("id") == qid), None)
         if q is None or q.get("answer"):
@@ -1873,7 +1873,7 @@ def attention_items(now, after=NUDGE_AFTER, skip=()):
         if after <= age_r < REPORT_MAX_AGE and i.get("thread") and i.get("kind") not in ("chase", "job-failed"):
             out.append((f"report:{i['thread']}:{report_seq(i)}", f"{i['thread']} r{report_seq(i)} {i.get('kind')}: report queued "
                         f"{int(age_r // 60)}m, not delivered -> lean-agent thread reports {i['thread']} --mine"))
-    data = lean_threads.load()
+    data = lean_threads.load_ro()
     turns = lean_threads.turns_map()
     answered_q = answered_question_keys()
     hid = lean_threads.hidden_threads(data)
@@ -3082,7 +3082,7 @@ class Reporter(AutoClear):
         if now - getattr(self, "unstarted_at", 0) < _knob("LEAN_AGENT_UNSTARTED_TICK", UNSTARTED_TICK):
             return
         self.unstarted_at = now
-        data = lean_threads.load()
+        data = lean_threads.load_ro()
         turns = lean_threads.turns_map()
         done = {}
         for tid, t in data["threads"].items():
@@ -3094,7 +3094,7 @@ class Reporter(AutoClear):
                     done.setdefault(tid, set()).add(r.get("id"))
         if done:
             lean_threads.mark_handled_many(done)
-            data = lean_threads.load()
+            data = lean_threads.load_ro()
         for tid, t in data["threads"].items():
             if lean_threads.no_nudge(t) or lean_threads.is_zero_id(tid):
                 continue
@@ -3809,7 +3809,7 @@ class Sessions:
         """Stop every session this service hosts whose thread is closed, invalid or unknown, including host records an
         older lean-agent version left in up.json (a live host process that is not this one). Returns the keys stopped."""
         out = []
-        data = lean_threads.load()
+        data = lean_threads.load_ro()
         for tid in list(self.hosts):
             if self.running(tid) and lean_threads.session_refusal(tid, data):
                 self.stop(tid)

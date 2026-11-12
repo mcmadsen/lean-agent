@@ -24,51 +24,59 @@ context reaches 80% of the session's compaction point (or LEAN_AGENT_CTX_NUDGE t
 isn't known; again every 50,000 more) Claude gets a note: check what fills the context and save open items
 before Claude Code compacts.
 """
-import datetime
 import json
 import os
 import re
 import sys
-import threading
 
 MEMORY_MESSAGE_RE = r"^#[ \t]+\S"  # '# keep this', not '#12 is failing' or '#tag'
 COMMAND_PROMPT_RE = r"^/(memory|init)(\s|$)"
 
 
-def in_home_or_service(cwd, home):
-    """Is this the orchestrator (cwd in the lean-agent home) or the service session?"""
-    return cwd == home or cwd.startswith(home + os.sep) or os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1"
-
-
-def prompt_needs_hook(event):
-    """Could the UserPromptSubmit hook act on this prompt here? Only in the orchestrator home or the service session
-    (every prompt there is put in a thread), never in a worker's run folder."""
-    prompt = str(event.get("prompt") or "").strip()
-    if not prompt:
-        return False
-    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
-    # computed inline: the hook must stay cheap, and importing usage here would defeat that
-    home = os.path.realpath(os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent")))
-    return in_home_or_service(cwd, home) and not cwd.startswith(os.path.join(home, "work") + os.sep)
+from budget_gate import in_home_or_service, prompt_needs_hook, nothing_to_do, NOOP_BASH_WORDS  # noqa: E402,F401
 
 
 STDIN = None
-if __name__ == "__main__":  # a prompt in any other session leaves here, before the heavy imports below
-    STDIN = sys.stdin.read()
-    if '"UserPromptSubmit"' in STDIN:
-        try:
-            if not prompt_needs_hook(json.loads(STDIN)):
-                sys.exit(0)
-        except ValueError:
-            sys.exit(0)
 
+
+class _Lazy:
+    """A module imported on first use (the hook's no-op path imports none of the heavy ones)."""
+
+    def __init__(self, name):
+        object.__setattr__(self, "_name", name)
+
+    def _mod(self):
+        import importlib
+        return importlib.import_module(object.__getattribute__(self, "_name"))
+
+    def __getattr__(self, attr):
+        return getattr(self._mod(), attr)
+
+    def __setattr__(self, attr, value):
+        setattr(self._mod(), attr, value)
+
+    def __delattr__(self, attr):
+        delattr(self._mod(), attr)
+
+
+if __name__ == "__main__":  # a call in any other session leaves here, before the heavy imports below
+    STDIN = sys.stdin.read()
+    try:
+        if nothing_to_do(json.loads(STDIN)):
+            sys.exit(0)
+    except ValueError:
+        sys.exit(0)
+
+import datetime  # noqa: E402
+import threading  # noqa: E402
+_PRINT = threading.Lock()
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import usage  # noqa: E402
-import push_guard  # noqa: E402
 import lean_common  # noqa: E402
-import lean_schedule  # noqa: E402
-import lean_threads  # noqa: E402
-import service_session  # noqa: E402
+push_guard = _Lazy("push_guard")
+lean_schedule = _Lazy("lean_schedule")
+lean_threads = _Lazy("lean_threads")
+service_session = _Lazy("service_session")
 
 
 def compaction_point():
@@ -88,7 +96,6 @@ ALLOW_REASON = ""  # set once the deny checks have passed for a plain lean-agent
 
 
 DONE = []  # set once a decision was printed: the deadline timer then has nothing left to do
-_PRINT = threading.Lock()
 
 
 def hook_deadline(stage_default):

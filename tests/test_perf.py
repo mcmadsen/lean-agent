@@ -123,5 +123,82 @@ class InjectHookTest(unittest.TestCase):
             self.assertFalse(inject_hook.nothing_pending("t1"))
 
 
+HEAVY = ("usage", "lean_threads", "service_session", "lean_agent", "lean_common", "push_guard", "lean_schedule")
+
+
+class BudgetHookFastPathTest(unittest.TestCase):
+    EVENT = '{"hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": {"file_path": "/x"}, "session_id": "s", "cwd": "/tmp", "transcript_path": "/x"}'
+
+    def run_hook(self, event, **env):
+        code = ("import sys, runpy; sys.argv = ['trampoline.py', 'budget_hook.py']; sys.path.insert(0, %r); "
+                "sys.argv = ['x']; import json; from budget_gate import nothing_to_do; "
+                "e = json.loads(%r); print(nothing_to_do(e)); print(sorted(m for m in sys.modules if m in %r))"
+                % (ROOT, event, HEAVY))
+        e = {**clean_environ(), "LEAN_AGENT_HOME": tempfile.mkdtemp(), "PATH": os.environ.get("PATH", ""), **env}
+        return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=e).stdout.split("\n")
+
+    def test_noop_outside_lean_agent(self):
+        out = self.run_hook(self.EVENT)
+        self.assertEqual(out[0], "True")
+        self.assertEqual(out[1], "[]")  # no heavy module imported
+
+    def test_checks_still_apply_where_they_matter(self):
+        self.assertEqual(self.run_hook(self.EVENT, LEAN_AGENT_SESSION_ROLE="thread")[0], "False")
+        self.assertEqual(self.run_hook(self.EVENT, LEAN_AGENT_BUDGET="1000")[0], "False")
+        self.assertEqual(self.run_hook(self.EVENT, LEAN_AGENT_SERVICE_SESSION="1")[0], "False")
+        push = self.EVENT.replace('"Read"', '"Bash"').replace('{"file_path": "/x"}', '{"command": "git push"}')
+        self.assertEqual(self.run_hook(push)[0], "False")
+
+    def test_noop_through_the_trampoline_is_fast(self):
+        e = {**clean_environ(), "LEAN_AGENT_HOME": tempfile.mkdtemp(), "PATH": os.environ.get("PATH", "")}
+        args = [sys.executable, os.path.join(ROOT, "trampoline.py"), "budget_hook.py"]
+        subprocess.run(args, input=self.EVENT, text=True, env=e, capture_output=True)  # bytecode cached
+        t0 = time.time()
+        for _ in range(5):
+            r = subprocess.run(args, input=self.EVENT, text=True, env=e, capture_output=True)
+            self.assertEqual((r.returncode, r.stdout), (0, ""))
+        per = (time.time() - t0) / 5
+        self.assertLess(per, 0.03 * max(1.0, float(os.environ.get("LEAN_AGENT_TEST_TIMEOUT_SCALE", "1"))) + 0.03)
+
+
+class ThreadsCacheTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        env = mock.patch.dict(os.environ, {**clean_environ(), "LEAN_AGENT_HOME": self.tmp}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+        lean_threads.invalidate()
+        perf_fixture.build(self.tmp, live=0)
+
+    def test_unchanged_file_is_parsed_once(self):
+        with mock.patch.object(lean_threads.json, "load", wraps=lean_threads.json.load) as j:
+            for _ in range(5):
+                lean_threads.load()
+                lean_threads.load_ro()
+        self.assertEqual(j.call_count, 1)
+
+    def test_load_returns_a_private_copy(self):
+        a = lean_threads.load()
+        a["threads"]["t1"]["title"] = "changed"
+        self.assertNotEqual(lean_threads.load()["threads"]["t1"].get("title"), "changed")
+
+    def test_fresh_after_a_write(self):
+        lean_threads.load()
+        with lean_threads._locked() as data:
+            data["threads"]["t1"]["title"] = "after"
+        self.assertEqual(lean_threads.load()["threads"]["t1"]["title"], "after")
+        self.assertEqual(lean_threads.load_ro()["threads"]["t1"]["title"], "after")
+
+    def test_fresh_after_an_outside_write(self):
+        import json
+        lean_threads.load_ro()
+        with open(lean_threads.path()) as fh:
+            d = json.load(fh)
+        d["threads"]["t2"]["title"] = "outside"
+        with open(lean_threads.path(), "w") as fh:
+            json.dump(d, fh)
+        self.assertEqual(lean_threads.load()["threads"]["t2"]["title"], "outside")
+
+
 if __name__ == "__main__":
     unittest.main()

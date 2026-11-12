@@ -13,6 +13,7 @@ import contextlib
 import glob
 import datetime
 import json
+import pickle
 import math
 import os
 import re
@@ -139,10 +140,22 @@ def _empty():
     return {"threads": {}, "aliases": {}, "overrides": {}}
 
 
-def load():
+_CACHE = {"key": None, "data": None, "blob": None}  # threads.json parsed once per (path, inode, mtime, size)
+
+
+def _read():
+    """(data, key): the parsed file, from the cache while it is unchanged. The data is shared: never mutate it."""
     _migrate()
+    p = path()
     try:
-        with open(path()) as fh:
+        st = os.stat(p)
+        key = (p, st.st_ino, st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None
+    if key is not None and _CACHE["key"] == key:
+        return _CACHE["data"], key
+    try:
+        with open(p) as fh:
             data = json.load(fh)
     except (OSError, ValueError):
         data = None
@@ -151,7 +164,28 @@ def load():
     for k in ("threads", "aliases", "overrides"):
         if not isinstance(data.get(k), dict):
             data[k] = {}
-    return data
+    if key is not None:
+        _CACHE.update(key=key, data=data, blob=None)
+    return data, key
+
+
+def load():
+    """The registry as a fresh copy the caller may change (a cached parse is copied, not parsed again)."""
+    data, key = _read()
+    if key is None:
+        return data
+    if _CACHE["blob"] is None or _CACHE["key"] != key:
+        _CACHE["blob"] = pickle.dumps(data, 5)
+    return pickle.loads(_CACHE["blob"])
+
+
+def load_ro():
+    """The registry for reading only (shared with the cache, free while the file is unchanged): callers never mutate it."""
+    return _read()[0]
+
+
+def invalidate():
+    _CACHE.update(key=None, data=None, blob=None)
 
 
 @contextlib.contextmanager
@@ -177,6 +211,7 @@ def _locked():
         with open(tmp, "w") as fh:
             json.dump(data, fh, indent=1)
         os.replace(tmp, path())
+        invalidate()
 
 
 def resolve(tid, aliases=None):
@@ -1836,7 +1871,7 @@ def undelivered_threads(now=None, min_secs=UNDELIVERED_AFTER):
         names = os.listdir(lean_home("thread-inbox"))
     except OSError:
         return []
-    data_ = load()
+    data_ = load_ro()
     threads_ = data_["threads"]
     hid = hidden_threads(data_)
     out = [(t, a) for t in names if t not in hid and not t.endswith(".lock") and not no_nudge(threads_.get(t)) and (a := undelivered_age(t, now)) and a >= min_secs]

@@ -36,9 +36,20 @@ def main():
     target = os.path.join(target_dir, script)
     if not os.path.isfile(target):
         target = os.path.join(here, script)
-    if script == "inject_hook.py":  # runs in this interpreter: the hot hook pays for one process start, not two
+    if script.endswith("_hook.py"):  # runs in this interpreter: the hot hooks pay for one process start, not two
         sys.argv = [target] + sys.argv[2:]
         sys.path.insert(0, os.path.dirname(target))
+        if script == "budget_hook.py":  # the no-op gate first: most calls end here, before the hook is even compiled
+            import io
+            data = sys.stdin.read()
+            try:
+                import json
+                from budget_gate import nothing_to_do
+                if nothing_to_do(json.loads(data)):
+                    return
+            except Exception:  # noqa: BLE001 - doubtful: the hook decides
+                pass
+            sys.stdin = io.StringIO(data)
         with open(target, "rb") as fh:
             code = compile(fh.read(), target, "exec")
         exec(code, {"__name__": "__main__", "__file__": target})
