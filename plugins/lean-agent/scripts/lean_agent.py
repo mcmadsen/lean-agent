@@ -872,7 +872,7 @@ def cmd_cards(a):
         if note:
             print(f"{'':>{w + 11 + 6}}  ! {note}")
     own = [c for c in cards if not c.get("shared")]
-    print(f"{len(own)} own cards, ~{sum(c['tokens'] for c in own):,} tokens.  * = core (always sent)   "
+    print(f"{len(own)} {'own ' if len(own) != len(cards) else ''}cards, ~{sum(c['tokens'] for c in own):,} tokens.  * = core (always sent)   "
           "used = times a worker used it / times it was sent")
     if len(own) != len(cards):
         sh = [c for c in cards if c.get("shared")]
@@ -9013,7 +9013,7 @@ def cmd_memory(a):
         sources = [os.path.abspath(os.path.expanduser(a.source))] if a.source else lean_memory.claude_memory_dirs(project_path)
         if not sources:
             die("no Claude Code auto-memory folders found; pass one with --from DIR")
-        added, skipped = lean_memory.import_dirs(store, sources, scope=scope)
+        added, skipped = lean_memory.import_dirs(store, sources, scope=scope, projects=projects())
         print(f"Imported {added} memories ({skipped} duplicates skipped) from: {', '.join(sources)}")
         print(f"Store: {store}")
         if added:
