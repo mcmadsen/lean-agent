@@ -9,25 +9,40 @@ on:
       version:
         description: "Existing version to (re)create a missing release for, e.g. 0.45.8 (default: plugin.json)"
         required: false
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }}, shard ${{ matrix.shard }}/4)
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-latest]
         python: ["3.9", "3.13", "3.14"]
+        shard: [1, 2, 3, 4]
+        exclude:
+          - os: macos-latest
+            python: "3.13"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: python tests/test_hooks.py
+      - if: matrix.shard == 1
+        run: python tests/test_hooks.py
       - run: python tests/test_orchestrator.py
-      - run: for t in feedback goals spool stuck locks own_review deliver_guard poll startup_perf service_wait restart_loop orphan report_delivery runs_cli worktree_nopath tool_boundary restore fresh_delivery push_gate private private_switch runs_lost myq_ack runs_show_fast delta_effects perf load_guard worktree_reuse detach_tree runs_listing_fast undelivered_source; do python tests/test_$t.py || exit 1; done
-      - run: sh -n bin/lean-agent && sh -n plugins/lean-agent/bin/lean-agent && sh -n plugins/lean-agent/bin/lean-budget
+        env:
+          LEAN_TEST_SHARD: ${{ matrix.shard }}/4
+      - env:
+          SHARD: ${{ matrix.shard }}
+        run: i=0; for t in feedback goals spool stuck locks own_review deliver_guard poll startup_perf service_wait restart_loop orphan report_delivery runs_cli worktree_nopath tool_boundary restore fresh_delivery push_gate private private_switch runs_lost myq_ack runs_show_fast delta_effects perf load_guard worktree_reuse detach_tree runs_listing_fast undelivered_source; do if [ $((i % 4)) -eq $((SHARD - 1)) ]; then python tests/test_$t.py || exit 1; fi; i=$((i + 1)); done
+      - if: matrix.shard == 1
+        run: sh -n bin/lean-agent && sh -n plugins/lean-agent/bin/lean-agent && sh -n plugins/lean-agent/bin/lean-budget
       - name: ./install in a scratch home
+        if: matrix.shard == 1
         run: |
           export T="$RUNNER_TEMP/home"; mkdir -p "$T"
           env -i HOME="$T" SHELL=/bin/zsh PATH=/usr/bin:/bin:"$(dirname "$(command -v python3)")" ./install --no-plugin
