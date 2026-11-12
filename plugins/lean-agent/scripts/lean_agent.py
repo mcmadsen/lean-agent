@@ -13,6 +13,7 @@ import datetime
 import fnmatch
 import glob
 import hashlib
+import hashlib
 import io
 import json
 import os
@@ -2737,7 +2738,7 @@ def _cmd_run(a):
                                      base=getattr(a, "worktree_base", None), typed=not auto_branch,
                                      hint=(getattr(a, "why", None), getattr(a, "todo", None)))
             project = wt["path"]
-            print(f"worktree: {wt['ref']} at {wt['path']} ({'reused' if wt['reused'] else 'created'}"
+            print(f"worktree: {'reusing worktree ' + wt['path'] + ' for ' if wt['reused'] else ''}{wt['ref']} at {wt['path']} ({'reused' if wt['reused'] else 'created'}"
                   f"{', on branch ' + wt['branch'] if wt['branch'] else ', detached'}, HEAD {wt['head'][:10]})", flush=True)
             if wt.get("moved"):
                 print(f"worktree: HEAD moved from {wt['moved'][0][:10]} to {wt['moved'][1][:10]} ({wt['ref']}'s tip)",
@@ -8027,8 +8028,13 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True, hint=No
         elif holder:
             die(f"branch {target} is checked out in {holder['path']}; switch it there, or start a new branch with "
                 f"--worktree-base {target}")
+    ensure_never_index(slug)
     reused = os.path.isdir(path) and git(path, "rev-parse", "--git-dir") is not None
     moved = None
+    if not reused and new_from:
+        donor = idle_worktree(slug, repo)
+        if donor and git(donor["path"], "checkout", "-q", ref) is not None:
+            path, name, reused = donor["path"], donor["name"], True  # a clean idle worktree takes the new branch
     if reused:
         branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
         head = git(path, "rev-parse", "HEAD") or ""
@@ -8077,11 +8083,14 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True, hint=No
                 die(f"git worktree add failed: {(p.stderr or p.stdout).strip()[:300]}")
     setup = (projects().get(slug) or {}).get("worktree_setup")
     idx_entry = (worktree_index().get(slug) or {}).get(name) or {}
-    if setup and (not reused or idx_entry.get("setup") not in ("ok", "running")):
+    stale = reused and idx_entry.get("setup_hash") not in (None, manifest_hash(path))  # lockfile/manifest changed
+    if setup and (not reused or idx_entry.get("setup") not in ("ok", "running") or stale):
         run_worktree_setup(slug, name, path, setup)
     idx = worktree_index()
     entry = idx.setdefault(slug, {}).get(name, {"created": now_iso()})
     entry.update(path=path, ref=ref, sha=sha, branch=branch, repo=repo, last_used=now_iso())
+    if not reused:
+        entry.pop("setup_hash", None) if not setup else None
     if rec_upstream:
         entry["upstream"] = rec_upstream
     idx[slug][name] = entry
@@ -8092,6 +8101,163 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True, hint=No
                    "unless the task asks you to.")
     return {"path": path, "name": name, "ref": ref, "branch": branch, "target": target, "reused": reused, "commit_rule": commit_rule,
             "head": git(path, "rev-parse", "HEAD") or "", "moved": moved}
+
+
+MANIFESTS = ("package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
+             "requirements.txt", "poetry.lock", "uv.lock", "Pipfile.lock", "Cargo.lock", "go.sum", "Gemfile.lock",
+             "composer.lock", "packages.lock.json")
+
+
+def manifest_hash(path):
+    """A hash of the dependency manifests/lockfiles at the worktree root: a change means its setup should run again."""
+    h = hashlib.sha1()
+    for f in MANIFESTS:
+        try:
+            with open(os.path.join(path, f), "rb") as fh:
+                h.update(f.encode() + fh.read())
+        except OSError:
+            pass
+    return h.hexdigest()
+
+
+def ensure_never_index(slug=None):
+    """macOS Spotlight must not index worktrees (node_modules and all): a .metadata_never_index file in the worktree
+    root folders. Returns the folders that lack it before the call."""
+    missing = []
+    roots = [home("worktrees")] + ([home("worktrees", slug)] if slug else [])
+    for root in roots:
+        mark = os.path.join(root, ".metadata_never_index")
+        if not os.path.exists(mark):
+            missing.append(root)
+            try:
+                os.makedirs(root, exist_ok=True)
+                open(mark, "a").close()
+            except OSError:
+                pass
+    return missing
+
+
+def worktree_busy(path):
+    """True when a running run works in (or below) this worktree."""
+    root = worktree_path(path)
+    for _rid, m in live_runs():
+        p = m.get("path")
+        if p and (worktree_path(p) == root or worktree_path(p).startswith(root + os.sep)):
+            return True
+    return False
+
+
+def worktree_pushed(repo, path, branch, slug=None):
+    """True when the worktree's commits are on a remote branch or already in the base (nothing would be lost)."""
+    tip = branch or "HEAD"
+    if git(repo, "branch", "-r", "--contains", tip):
+        return True
+    try:
+        base = worktree_base(slug, repo)
+    except SystemExit:
+        return False
+    return bool(base) and git(repo, "merge-base", "--is-ancestor", tip, base) is not None
+
+
+def lean_worktrees(slug=None):
+    """[(slug, name, entry)] of registered worktrees whose directory exists."""
+    out = []
+    for sl, entries in sorted(worktree_index().items()):
+        if slug and sl != slug:
+            continue
+        for name, e in sorted(entries.items()):
+            if isinstance(e, dict) and e.get("path") and os.path.isdir(e["path"]):
+                out.append((sl, name, e))
+    return out
+
+
+def idle_worktree(slug, repo):
+    """A clean, idle, fully pushed lean-agent worktree of this project to reuse for a new branch, else None."""
+    mine = worktree_path(home("worktrees", slug)) + os.sep
+    for sl, name, e in lean_worktrees(slug):
+        path = e["path"]
+        if not path.startswith(mine) or git(path, "rev-parse", "--git-dir") is None:
+            continue
+        if git(path, "status", "--porcelain") or worktree_busy(path):
+            continue
+        if not worktree_pushed(repo, path, git(path, "symbolic-ref", "--quiet", "--short", "HEAD"), slug):
+            continue
+        return {"path": path, "name": name}
+    return None
+
+
+def dir_size(path):
+    try:
+        r = subprocess.run(["du", "-sk", path], capture_output=True, text=True, timeout=60)
+        return int(r.stdout.split()[0]) * 1024
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+        return 0
+
+
+def human_size(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+
+
+def worktree_cleanup_state(slug, name, e, older_days=3, now=None):
+    """'cleanable', 'dirty', 'busy' or 'keep' for one registered worktree."""
+    path = e["path"]
+    repo = e.get("repo") or (projects().get(slug) or {}).get("path")
+    if not repo or git(path, "rev-parse", "--git-dir") is None:
+        return "keep"
+    if git(path, "status", "--porcelain"):
+        return "dirty"
+    if worktree_busy(path):
+        return "busy"
+    old = False
+    try:
+        used = datetime.datetime.fromisoformat(str(e.get("last_used") or e.get("created"))[:19])
+        old = ((now or datetime.datetime.now()) - used).total_seconds() > older_days * 86400
+    except ValueError:
+        pass
+    branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
+    return "cleanable" if old or worktree_pushed(repo, path, branch, slug) else "keep"
+
+
+def parse_age_days(text):
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([dhw]?)", str(text or "3d").strip())
+    if not m:
+        die(f"--older takes a number of days like 3d (or 12h, 1w), not {text!r}")
+    return float(m.group(1)) * {"d": 1, "h": 1 / 24, "w": 7, "": 1}[m.group(2)]
+
+
+def worktrees_cleanup(older_days=3, remove=True, slug=None, now=None):
+    """Remove clean, idle worktrees whose branch is pushed/merged or that were last used over N days ago. Returns
+    (removed, dirty, kept) lists of (slug, name, path)."""
+    removed, dirty, kept = [], [], []
+    for sl, name, e in lean_worktrees(slug):
+        st = worktree_cleanup_state(sl, name, e, older_days, now)
+        item = (sl, name, e["path"])
+        if st == "dirty":
+            dirty.append(item)
+        elif st != "cleanable":
+            kept.append(item)
+        elif not remove:
+            removed.append(item)
+        else:
+            repo = e.get("repo") or (projects().get(sl) or {}).get("path")
+            if git(repo, "worktree", "remove", e["path"]) is not None:
+                idx = worktree_index()
+                (idx.get(sl) or {}).pop(name, None)
+                save_json(home("worktrees.json"), idx)
+                removed.append(item)
+            else:
+                kept.append(item)
+    return removed, dirty, kept
+
+
+def machine_overloaded():
+    try:
+        return os.getloadavg()[0] > 2 * (os.cpu_count() or 1)
+    except (OSError, AttributeError):
+        return False
 
 
 def run_worktree_setup(slug, name, path, command):
@@ -8115,6 +8281,9 @@ def run_worktree_setup(slug, name, path, command):
             rc = 124
     mark("ok" if rc == 0 else f"failed ({rc})")
     if rc == 0:
+        idx = worktree_index()
+        idx.setdefault(slug, {}).setdefault(name, {})["setup_hash"] = manifest_hash(path)
+        save_json(home("worktrees.json"), idx)
         print(f"worktree setup: done in {time.time() - t0:.0f}s (log {log})", flush=True)
     else:
         with open(log, errors="replace") as fh:
@@ -8140,6 +8309,20 @@ def worktree_lock(slug, name, shared):
 
 
 def cmd_worktrees(a):
+    if getattr(a, "cleanup", False):
+        if os.environ.get("LEAN_AGENT_SCHEDULED") and machine_overloaded():
+            print("worktrees cleanup: skipped, the machine is overloaded")
+            return 0
+        slug = resolve_project(a.project)[0] if a.project else None
+        removed, dirty, kept = worktrees_cleanup(parse_age_days(getattr(a, "older", None)), slug=slug)
+        for sl, name, path in removed:
+            print(f"removed {sl}/{name}: {path}")
+        for sl, name, path in dirty:
+            print(f"kept (uncommitted changes) {sl}/{name}: {path}")
+        msg = f"worktrees cleanup: {len(removed)} removed, {len(dirty)} dirty, {len(kept)} kept"
+        print(msg)
+        lean_log.log("info", "cli", msg)
+        return 0
     idx = worktree_index()
     slugs = [resolve_project(a.project)[0]] if a.project else sorted(idx)
     found = False
@@ -10822,6 +11005,22 @@ def doctor_service_start(report, text=None, now=None):
             " (over 60s)" if secs > 60 else ""), "lean-agent service logs" if secs > 60 else None)
 
 
+def doctor_worktrees(report, fix):
+    missing = ensure_never_index() if fix else None
+    if missing is None:
+        wroot = home("worktrees")
+        missing = [] if os.path.exists(os.path.join(wroot, ".metadata_never_index")) or not os.path.isdir(wroot) else [wroot]
+    report(not missing, "worktree folder has .metadata_never_index (Spotlight skips it)",
+           "lean-agent doctor --fix")
+    wts = lean_worktrees()
+    if not wts:
+        return
+    total = sum(dir_size(e["path"]) for _s, _n, e in wts)
+    clean = sum(1 for sl, n, e in wts if worktree_cleanup_state(sl, n, e) == "cleanable")
+    report(True if clean < 5 else None, f"{len(wts)} lean-agent worktrees, {human_size(total)}, {clean} cleanable",
+           "lean-agent worktrees --cleanup")
+
+
 def doctor_locks(report, fix, root=None):
     """doctor: a lock held longer than a minute (holder, command, age); --fix clears the ones whose holder is gone."""
     found = held_locks_found(root)
@@ -11070,6 +11269,7 @@ def cmd_doctor(a):
             report(False, f"{f} contradicts lean-agent ({where})", "lean-agent doctor --fix  (adds a one-line precedence note)")
 
     doctor_locks(report, a.fix)
+    doctor_worktrees(report, a.fix)
     try:
         with open(os.path.join(HERE, "..", "hooks", "hooks.json")) as fh:
             post = json.dumps((json.load(fh).get("hooks") or {}).get("PostToolUse") or [])
@@ -15351,7 +15551,7 @@ def cmd_schedule(a):
         lean_schedule.run_due()
         return 0
     if a.action == "defaults":
-        wanted = [("daily 07:30", ["sync", "--check"]), ("fri 16:00", ["week"])]
+        wanted = [("daily 07:30", ["sync", "--check"]), ("fri 16:00", ["week"]), ("daily 04:15", ["worktrees", "--cleanup"])]
         wanted += [("mon 07:45", ["optimize", slug]) for slug in sorted(projects())]
         have = {(j["when"], tuple(j["args"])) for j in items}
         for when, args in wanted:
@@ -16998,6 +17198,8 @@ def build_parser():
     s = sub.add_parser("worktrees", help="list lean-agent's shared worktrees")
     s.add_argument("project", nargs="?")
     s.add_argument("--prune", action="store_true", help="drop registry entries that have no path recorded")
+    s.add_argument("--cleanup", action="store_true", help="remove worktrees that are clean, idle and pushed/merged or unused for --older (never dirty ones)")
+    s.add_argument("--older", default="3d", help="cleanup: age of last use that makes an unpushed clean worktree removable (default 3d)")
     s.set_defaults(fn=cmd_worktrees)
     s = sub.add_parser("worktree", help="shared worktrees: rm, create <new> --from <ref>, adopt <path>, setup (run on new ones; --show), push (after review + approval), attach (branch to a detached HEAD)")
     s.add_argument("action", choices=["rm", "setup", "push", "base", "attach", "create", "adopt"])
