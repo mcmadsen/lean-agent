@@ -1877,7 +1877,9 @@ def duplicate_launch_guard(a, model, task):
             die(f"the same task finished moments ago as run {recent['id']} ({recent['status']}): see it with "
                 f"`lean-agent runs --show {recent['id']}`, or pass --again to run it again", 2)
     os.makedirs(os.path.dirname(marker), exist_ok=True)
-    save_json(marker, {"pid": os.getpid(), "started": now_iso()})
+    early = dict(EARLY_RUN.get("fixed") or {})  # the guard's marker names its run (state "starting"), never a bare pid
+    save_json(marker, {"fixed": early, "pid": os.getpid(), "started": now_iso(), "run": early.get("id"), "task": task[:2000],
+                       "model": model, "project": a.project, "thread": early.get("thread"), "role": early.get("role"), "early": True})
     return key
 
 
@@ -10880,7 +10882,7 @@ def find_run(target, runs=None):
     rows = {}
     for r in (ledger() if runs is None else runs):
         rows[r["id"]] = r
-    markers = {rid: m for rid, m in lost_runs(home(), acknowledged=True)}
+    markers = {rid: m for rid, m in lost_runs(home(), acknowledged=True, archived=True)}
     ids = list(dict.fromkeys(list(rows) + list(markers)))
     rid = target if target in ids else None
     if rid is None and target:
@@ -10946,7 +10948,7 @@ def cmd_runs(a):
     if getattr(a, "clear", False) and not getattr(a, "lost", False):
         die("--clear goes with --lost: lean-agent runs --lost --clear", 2)
     if getattr(a, "lost", False):
-        lost = lost_runs(home())
+        lost = lost_runs(home(), days=None if a.all else lean_common.LOST_LISTED_DAYS, archived=True)
         if a.clear:
             for rid, m in lost:
                 if m.get("no_record"):  # nothing to acknowledge: only a marker; remove it
@@ -10955,6 +10957,8 @@ def cmd_runs(a):
                     except OSError:
                         pass
                     continue
+                if not os.path.exists(home("running", (m.get("run") or rid) + ".json")):
+                    continue  # archived: not in the way of any listing
                 m["lost_ack"] = now_iso()
                 save_json(home("running", (m.get("run") or rid) + ".json"), m)
             print(f"{len(lost)} lost runs marked lost and acknowledged")
@@ -10963,7 +10967,7 @@ def cmd_runs(a):
             print(f"{rid}  lost  ({(m.get('lost_reason') or lost_reason(m)) + ('; record only, nothing to resume' if m.get('no_record') else '')}; close it: lean-agent runs --stop {rid})  {m.get('model', '?'):<7} "
                   f"{m.get('project', '?'):<16} {one_line(m.get('task', ''), 50)}")
         if not lost:
-            print("No lost runs.")
+            print("No lost runs." if a.all else f"No lost runs. (last {lean_common.LOST_LISTED_DAYS} days; --all for older ones)")
         return
     if a.running or getattr(a, "queued", False):
         found = False
