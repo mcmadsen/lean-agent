@@ -3804,6 +3804,13 @@ Do these passes in order. Report what you searched and found fine, and what you 
    (category "compatibility"). For what could still go wrong, fill "risks": who is affected, likelihood, impact,
    whether a rollback is possible, and ONE concrete check a worker can run (a test on base and head, a command, a
    manual step). Those checks also go in "checks". Callers and tests found by lean-agent may be listed below.
+   Deferred, gated or lazy actions: when the change defers, gates or makes lazy an existing action (moves it
+   behind a trigger, a flag, a condition, a timer or first use), ask explicitly: (a) who never triggers the
+   deferred action (users, restore/import/migration paths, background and error paths that never reach the new
+   trigger), and (b) who reads the state that is now stale until then (derived flags, caches, counters, UI,
+   other processes). Report each as a "risks" entry with one concrete check. List the side effects the old code
+   performed (writes, recomputes, events, cache updates) in "removed_effects" with "still_done" true or false
+   per path; a side effect that is no longer done on some path is at least "major" unless the goal says so.
 3. Reuse and duplication. For every new file, hook, store, util, component, class or exported function above:
    search the repository (Grep/Glob, `git -C {project} grep -n <pattern> {grep_ref}`) for existing code with the
    same job, by name, key identifiers and behaviour words (counter, register, subscribe, store, cache, overlay,
@@ -3841,7 +3848,7 @@ every edited test has a coverage entry), "changes-requested", or "needs-checks" 
 Be specific (file:line, what, why, a concrete suggestion). Don't pad: if the change is good, approve it.
 
 Before the LEAN-FEEDBACK line, add one line exactly like this (valid JSON, one line):
-LEAN-REVIEW {{"verdict": "approve|changes-requested|needs-checks", "searches": [{{"for": "what you searched", "found": "file:line, ... or nothing"}}], "reuse": [{{"symbol": "new symbol", "candidates": ["file:line existing symbol"], "verdict": "duplicate|extends-existing|wraps-existing|justified-new", "why": "..."}}], "siblings": [{{"checked": "sibling", "needs_fix": true}}], "coverage": [{{"test": "edited test", "protected": "behaviour it protected", "verdict": "still-covered|lost|intentional", "by": "other test or why"}}], "findings": [{{"severity": "blocker|major|minor|nit", "category": "completeness|correctness|duplication|scope|platform|tests|security|compatibility|performance|style", "file": "path", "line": 0, "issue": "...", "why": "...", "suggestion": "..."}}], "checks": [{{"what": "what to run or verify", "why": "..."}}], "user_facing": [{{"what": "UI/message/default/option/format/...", "where": "file:line", "before": "...", "after": "...", "intended": true}}], "risks": [{{"risk": "...", "who": "users/clients affected", "likelihood": "low|medium|high", "impact": "low|medium|high", "rollback": true, "check": "one concrete check"}}], "fine": ["what you checked and found fine"], "unverified": ["what you could not verify"], "goal": "what the change promises, in one line", "gaps": [{{"what": "what isn't delivered", "file": "path or commit", "line": 0, "blocks_goal": true, "scoped_out": "where it says it's out of scope, or ask the user, or empty"}}]}}
+LEAN-REVIEW {{"verdict": "approve|changes-requested|needs-checks", "searches": [{{"for": "what you searched", "found": "file:line, ... or nothing"}}], "reuse": [{{"symbol": "new symbol", "candidates": ["file:line existing symbol"], "verdict": "duplicate|extends-existing|wraps-existing|justified-new", "why": "..."}}], "siblings": [{{"checked": "sibling", "needs_fix": true}}], "coverage": [{{"test": "edited test", "protected": "behaviour it protected", "verdict": "still-covered|lost|intentional", "by": "other test or why"}}], "findings": [{{"severity": "blocker|major|minor|nit", "category": "completeness|correctness|duplication|scope|platform|tests|security|compatibility|performance|style", "file": "path", "line": 0, "issue": "...", "why": "...", "suggestion": "..."}}], "checks": [{{"what": "what to run or verify", "why": "..."}}], "user_facing": [{{"what": "UI/message/default/option/format/...", "where": "file:line", "before": "...", "after": "...", "intended": true}}], "risks": [{{"risk": "...", "who": "users/clients affected", "likelihood": "low|medium|high", "impact": "low|medium|high", "rollback": true, "check": "one concrete check"}}], "removed_effects": [{{"where": "file:line or function", "effect": "side effect of the old code", "still_done": false, "intended": false}}], "side_effect_doubt": false, "fine": ["what you checked and found fine"], "unverified": ["what you could not verify"], "goal": "what the change promises, in one line", "gaps": [{{"what": "what isn't delivered", "file": "path or commit", "line": 0, "blocks_goal": true, "scoped_out": "where it says it's out of scope, or ask the user, or empty"}}]}}
 """
 
 REUSE_RULE = """\
@@ -6446,6 +6453,31 @@ def light_max_lines():
     return v if isinstance(v, int) and v >= 0 else env_num("LEAN_AGENT_LIGHT_MAX_LINES", LIGHT_MAX_LINES)
 
 
+DELTA_EFFECTS_RULE = (
+    "Removed or deferred side effects: for every function or path the delta changes, compare it with the merge-base "
+    "with the real base branch (shown below, not only the previous round). List the side effects the old code had "
+    "(writes, recomputes, events, cache updates) that the new code no longer performs on every path, in "
+    "\"removed_effects\" (where, effect, still_done, intended); a missing one is at least major unless the goal says "
+    "it is intended. If the delta touches code whose old version had such side effects and you are not confident "
+    "they are all kept, set \"side_effect_doubt\": true (lean-agent then runs a full review against the base). "
+    "For a deferred, gated or lazy action ask who never triggers it and who reads state that is stale until then.")
+
+
+def merge_base_effects_diff(path, mb, head, files, limit=6000):
+    """The merge-base..head diff of the files a delta touched (bounded), so a delta reviewer sees what the old code
+    did, not only what the last round changed."""
+    if not mb or not files:
+        return ""
+    out = git(path, "diff", "-U2", "--no-color", mb, head, "--", *files[:20]) or ""
+    return out if len(out) <= limit else out[:limit] + "\n[... truncated; read the rest with git diff]"
+
+
+def delta_effects_text(path, mb, head, files, base_label="the base"):
+    diff = merge_base_effects_diff(path, mb, head, files)
+    return (" " + DELTA_EFFECTS_RULE + (f"\n\nDiff of the touched files against the merge-base with {base_label} "
+                                        f"({mb[:12]}..{head[:12]}):\n{diff}\n" if diff else " "))
+
+
 def delta_is_descendant(path, old, new):
     """True when `new` builds on `old` (so old..new is exactly what was added since the reviewed commit)."""
     return git(path, "merge-base", "--is-ancestor", old, new) is not None
@@ -6910,7 +6942,7 @@ def review_main(a):
                   "re-derive the design of code that didn't change, and don't raise declined findings again. New "
                   "symbols since then:" + symbols_text(ns_syms) + " " + focus_text(focus).replace("\n", " ") +
                   " Reply with a complete LEAN-REVIEW line again (open findings only, plus searches, reuse and "
-                  "coverage for what's new).")
+                  "coverage for what's new)." + delta_effects_text(path, meta.get("merge_base"), meta["head"], changed))
         if a.same_session or not since:  # the old way: continue the reviewer's whole session
             task = (f"The change was updated after your review. {where} Check whether each earlier finding is "
                     "resolved, and look for new problems. " + (a.focus or "") + answer_template(ns_syms, focus))
@@ -6939,6 +6971,7 @@ def review_main(a):
                 "file:line):\n" + ("\n".join(open_items[:25]) or "- none") + "\n\nGive the changes since then the full "
                 "passes; don't re-review code that didn't change. " + decisions_text(slug, meta.get("ref"), path, meta["head"])
                 + round_limit_text(f"{old_head[:12]}..{meta['head'][:12]}")
+                + delta_effects_text(path, meta.get("merge_base"), meta["head"], changed)
                 + (a.focus or "") + answer_template(ns_syms, focus))
         cards = review_cards(slug, path, since, changed, getattr(a, "goal", None), a.focus, a.max_context)
         meta["since_hunks"] = changed_hunks(path, since)
@@ -6978,6 +7011,11 @@ def review_main(a):
               f"{len(open_items)} open items, {delta_model}); --same-session continues the old reviewer instead",
               flush=True)
         rc = cmd_run(ns)
+        if escalate_to_full(slug, meta["head"], prev["id"]):
+            print("review: the delta reviewer is not sure removed or deferred side effects are all kept; running a "
+                  "full review of the branch against its base (auto-approved under approve-usd)", flush=True)
+            a.full_review, a.resume = True, False
+            return cmd_review(a)
         return reuse_follow_up(a, slug, meta, effort) if rc == 2 else rc
     base = a.base or default_base(path)
     if not base:
@@ -7170,6 +7208,12 @@ def multi_pass_review(a, slug, path, ns, meta, effort):
                  units=sum(r.get("units", 0) for r in passes))
     rc = report_review(slug, path, entry, merge_reviews(reviews), meta)
     return reuse_follow_up(a, slug, meta, effort) if rc == 2 else rc
+
+
+def escalate_to_full(slug, head, after_run):
+    """True when the newest review of `head` is a delta that asked for a full review (side_effect_doubt)."""
+    last = [r for r in read_jsonl(reviews_path(slug)) if r.get("head") == head and r.get("delta")]
+    return bool(last and last[-1].get("escalate_full") and (last[-1].get("after") or {}).get("run") == after_run)
 
 
 def answer_template(ns_syms, focus):
@@ -7486,6 +7530,19 @@ def enforce_review_rules(review, meta, declined=()):
             checks.append({"what": c, "why": f"risk: {str(r['risk'])[:80]} (who: {str(r.get('who', '?'))[:60]}, "
                                               f"likelihood {r.get('likelihood', '?')}, impact {r.get('impact', '?')})"})
     review["_risks"] = rk
+    re_ = [r for r in review.get("removed_effects") or [] if isinstance(r, dict) and r.get("effect")]
+    for r in re_:
+        gone = str(r.get("still_done")).strip().lower() in ("false", "no", "0")
+        ok = str(r.get("intended")).strip().lower() in ("true", "yes", "1")
+        if gone and not ok:
+            file_, _, line = str(r.get("where") or "").partition(":")
+            findings.append({"severity": "major", "category": "correctness", "file": file_ or "?",
+                             "line": int(line) if line.isdigit() else 0,
+                             "issue": f"removed side effect: {str(r['effect'])[:140]} is no longer done on every path",
+                             "why": "the old code did it (merge-base); the goal doesn't say it is intended",
+                             "suggestion": "do it on the new path too, or confirm it is intended"})
+    review["_escalate_full"] = bool(meta.get("resume")) and (
+        str(review.get("side_effect_doubt")).strip().lower() in ("true", "yes", "1"))
 
     if meta.get("resume") and meta.get("since_hunks") is not None:
         # round 2 on: a minor/nit about code unchanged since the last round is a late nit, not counted by the gate
@@ -7505,8 +7562,8 @@ def enforce_review_rules(review, meta, declined=()):
     if meta.get("resume") and meta.get("since_hunks") is not None:
         # converge: on a re-review, a NEW major about code that didn't change since the last review is minor
         for f in findings:
-            if f.get("severity") not in ("blocker", "major"):
-                continue
+            if f.get("severity") not in ("blocker", "major") or str(f.get("issue", "")).startswith("removed side effect"):
+                continue  # a removed side effect is seen against the merge-base, never in the round's hunks
             if any(_jaccard(_words(f.get("issue", "")), _words(e)) >= 0.3 for e in meta.get("earlier") or []):
                 continue  # an earlier open finding, still open: keeps its severity
             loc = f"{f.get('file', '')}:{f.get('line') or 0}"
@@ -7558,6 +7615,7 @@ def report_review(slug, project, entry, review, meta):
                                       "user_facing": review.get("_user_facing") or [], "regression_risks": review.get("_risks") or [],
                                       "branch": branch_of(root, meta.get("ref")) if meta.get("mode") == "ref" else "",
                                       "after": meta.get("after"), "delta": bool(meta.get("resume")),
+                                      "escalate_full": bool(review.get("_escalate_full")),
                                       "scope": meta.get("scope") or ("delta" if meta.get("resume") else "full"),
                                       "delta_base": meta.get("delta_base"), "fallback": meta.get("fallback") or "",
                                       "for_push": bool(meta.get("for_push"))})
