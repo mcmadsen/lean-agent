@@ -394,6 +394,7 @@ def write_json_atomic(path, data):
     os.replace(tmp, path)
 
 
+SHOW_LOCK_WAIT = 1  # seconds `runs --show/--last` wait for collected.json's lock before skipping the mark
 COLLECTED_CUTOFF = "_cutoff"  # collected.json key: runs recorded before it count as collected (legacy ledger)
 
 
@@ -427,7 +428,7 @@ def seed_collected(lean_home):
     done = read_json(path, None)
     if not isinstance(done, dict):
         try:
-            with file_lock(path):
+            with file_lock(path, timeout=SHOW_LOCK_WAIT):
                 done = read_json(path, None)
                 if not isinstance(done, dict):
                     done = {COLLECTED_CUTOFF: now_iso()}
@@ -445,7 +446,7 @@ def mark_collected_ids(lean_home, run_ids):
     seed_collected(lean_home)
     path = os.path.join(lean_home, "collected.json")
     try:
-        with file_lock(path):
+        with file_lock(path, timeout=SHOW_LOCK_WAIT):  # a reader never waits minutes for a stuck holder: skip the mark
             done = read_json(path, {})
             done.update({r: now_iso() for r in ids})
             write_json_atomic(path, done)

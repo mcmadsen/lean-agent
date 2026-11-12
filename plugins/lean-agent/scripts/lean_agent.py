@@ -101,7 +101,9 @@ return status "needs-input" with your question and the candidates you found.
 
 {send_rule}
 {browser_rule}
-{worker_rule}{role_rule}{answer_rule}Start your reply with a one or two sentence summary of the outcome. Then give the result
+{worker_rule}{role_rule}{answer_rule}The FINAL reply of every turn (also of a resumed turn) must be self-contained: restate the findings and
+results in it and never refer to an earlier message ("see my previous message" leaves the reader with nothing).
+Start your reply with a one or two sentence summary of the outcome. Then give the result
 (what you did, files changed, anything unresolved), then one final line exactly like this:
 "used" lists only cards whose content changed what you did, not cards you merely received.
 LEAN-FEEDBACK {{"status": "done|partial|failed|needs-input|awaiting-confirmation", "used": ["card-id"], "unneeded": ["card-id"], "missing": "context you had to discover that should have been given up front, or empty", "remember": []}}
@@ -303,6 +305,24 @@ def read_jsonl(path):
                     pass
     except OSError:
         return
+
+
+SHORT_SUMMARY = 200  # a turn summary shorter than this that points to an earlier message also shows the previous summary
+REFERS_BACK_RE = re.compile(r"\b(?:see|as (?:said|stated|described|noted|mentioned)|same as|per|refer to|as in)\b[^.\n]{0,30}\b(?:previous|prior|earlier|last|above|first)\b", re.I)
+GIT_SHOW_TIMEOUT = 5  # seconds a git call of `runs --show` may take
+
+
+def tail_lines(path, n, window=65536):
+    """The last n non-empty lines of a file, read from its end (never the whole file); OSError when unreadable."""
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        size = fh.tell()
+        fh.seek(max(0, size - window))
+        raw = fh.read().decode("utf-8", "replace")
+    lines = raw.splitlines()
+    if size > window:
+        lines = lines[1:]  # the first line may be cut
+    return [l for l in lines if l.strip()][-n:]
 
 
 def read_text(path):
@@ -4296,8 +4316,12 @@ def symbols_text(ns):
     return ("\n" + "\n".join(f"- {p}" for p in parts)) if parts else "none found automatically (still check new code)"
 
 
-def git(path, *args):
-    p = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True)
+def git(path, *args, timeout=None):
+    """Stripped stdout of `git -C path ...`, None on failure (or after `timeout` seconds, when given)."""
+    try:
+        p = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
     return p.stdout.strip() if p.returncode == 0 else None
 
 
@@ -10458,7 +10482,7 @@ def lost_report(r):
     else:
         out.append("partial summary: none saved")
     try:
-        lines = [l for l in read_text(os.path.join(wd, "progress.jsonl")).splitlines() if l.strip()][-5:]
+        lines = [l for l in tail_lines(os.path.join(wd, "progress.jsonl"), 5)]
     except OSError:
         lines = []
     if lines:
@@ -10471,7 +10495,7 @@ def lost_report(r):
                 out.append("  " + one_line(l, 160))
     path, head = r.get("project_path") or r.get("path"), r.get("start_head")
     if path and head and os.path.isdir(path):
-        log = (git(path, "log", "--oneline", f"{head}..HEAD") or "").strip()
+        log = (git(path, "log", "--oneline", "-n", "30", f"{head}..HEAD", timeout=GIT_SHOW_TIMEOUT) or "").strip()
         out.append("commits in its worktree:" + ("\n" + log if log else " none"))
     if r.get("session_id"):
         out.append(f"resume: lean-agent run --resume {r['id']} --why '<why>' -- '<task>'")
@@ -10556,6 +10580,8 @@ def cmd_runs(a):
             note = running_turn_note(r["id"], files)
             if note:
                 text = note + "\n" + text
+            elif len(files) > 1 and len(text.strip()) < SHORT_SUMMARY and REFERS_BACK_RE.search(text):
+                text = text.rstrip("\n") + f"\n(this summary refers to an earlier message; previous summary, turn {len(files) - 1}:)\n" + read_text(files[-2])
         mark_collected(r["id"])
         if a.tail:
             text = "".join(text.splitlines(True)[-a.tail:])
@@ -10588,7 +10614,7 @@ def cmd_runs(a):
         for c in r.get("unverified_claims") or []:
             print(f"{UNVERIFIED_MARK}: {c}")
         if r.get("status") == "timed out" and not a.details:
-            dirty = (git(r["project_path"], "status", "--porcelain") or "").splitlines() if r.get("project_path") else []
+            dirty = (git(r["project_path"], "status", "--porcelain", timeout=GIT_SHOW_TIMEOUT) or "").splitlines() if r.get("project_path") else []
             print(f"uncommitted now in {r.get('project_path')}: " + (f"{len(dirty)} file(s)" if dirty else "nothing"))
             for d in dirty[:20]:
                 print(f"  {d}")
