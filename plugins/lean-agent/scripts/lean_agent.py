@@ -14542,6 +14542,7 @@ SHORTCUTS = (
     ("stop idle [2h]", "stop every session idle that long (default: the session-idle-stop limit)"),
     ("o21", "reopen t21 and continue its previous transcript (`thread reopen t21 --resume-old`)"),
     ("private on / private off", "show / hide all private projects and their items (off stops their sessions, on restarts them): `lean-agent private on|off`"),
+    ("ack / ack 35 / q unread", "acknowledge answers to my questions (`lean-agent myq ack [qN]`) / list unread in full"),
     ("q", "my questions: open first, newest first, with the answers (`lean-agent myq`)"),
     ("q12", "question 12 in full with its answer and source (a thread's own question ids are answered with `thread answer tN qN`)"),
     ("q open", "only my unanswered questions"),
@@ -14569,6 +14570,14 @@ SHORTCUTS = (
 def cmd_myq(a):
     import lean_myq
     args = list(a.args or [])
+    if args and args[0] == "unread":
+        print(lean_myq.unread_text())
+        return 0
+    if args and args[0] == "ack":
+        rest = [x for x in args[1:] if x != "--all"]
+        done = lean_myq.ack(rest)
+        print("acknowledged " + ", ".join(lean_myq.qn(x) for x in done) if done else "no unread answers to acknowledge")
+        return 0
     if args:
         if getattr(a, "drop", False):
             x = lean_myq.drop(args[0])
@@ -17217,8 +17226,9 @@ def build_parser():
     s = sub.add_parser("shortcuts", help="the front desk's reply shortcuts (? s21 a21 f21 x21 stop21 o21 more goals waiting) as a table")
     s.set_defaults(fn=cmd_shortcuts)
 
-    s = sub.add_parser("myq", help="my questions and their answers: list (open first), `N` one in full, --open, --thread tN, `N --drop`")
-    s.add_argument("args", nargs="*", help="[N]: show question N in full")
+    s = sub.add_parser("myq", aliases=["q"], help="my questions and their answers: list (open first), `N` one in full, --open, --thread tN, `N --drop`, `unread`, `ack [qN ...|--all]`")
+    s.add_argument("args", nargs="*", help="[N]: show question N in full; `unread`; `ack [qN ...]`")
+    s.add_argument("--all", action="store_true", help="ack --all: acknowledge every unread answer")
     s.add_argument("--open", action="store_true", help="only unanswered questions")
     s.add_argument("--thread", help="only questions to this thread (tN or main)")
     s.add_argument("--drop", action="store_true", help="N --drop: stop tracking an open question")

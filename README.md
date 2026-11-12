@@ -471,6 +471,8 @@ Reply to the front desk with one of these on its own; its prompt hook turns it i
 | `f21 2` | file 2's content (Markdown/text only, about 200 lines / 12k chars; a binary file is refused with its path) |
 | `q` | `lean-agent myq`: your questions (`a21 ...` to a thread, or asked at the front desk), open first, newest first, with the answer in one line |
 | `q12` | `lean-agent myq 12`: question 12 in full with its answer and source (bare `q12` is your question; a thread's own question is answered with `thread answer tN qN`) |
+| `ack` / `ack 35` / `ack q35` / `ack 34 35` | `lean-agent myq ack [qN ...]`: acknowledge answers. While any answer is unread the front desk opens its reply with an `ANSWERS FOR YOU` block (before any table), the status table header says `N unread answers (q34, q35)`, and an answer unread for 10 min gets one reminder |
+| `q unread` | `lean-agent myq unread`: the unread answers in full; bare `q` lists them first |
 | `q open` / `q t21` | `lean-agent myq --open` (unanswered only) / `--thread t21` (questions to t21) |
 | `goals` | `lean-agent goals` |
 | `waiting` | `lean-agent waiting` |

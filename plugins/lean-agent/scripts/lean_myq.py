@@ -71,7 +71,9 @@ def add(text, target="main", now=None):
 
 
 def _answer(items, e, text, ref, now):
-    e.update(status="answered", answer=str(text or "").strip()[:ANSWER_CHARS], answer_ref=ref, answered_ts=now)
+    e.update(status="answered", answer=str(text or "").strip()[:ANSWER_CHARS], answer_ref=ref, answered_ts=now, answer_read=False)
+    e.pop("reminded", None)
+    e.pop("announced", None)
     e.pop("note", None)
 
 
@@ -204,6 +206,91 @@ def mark_nudged(num, now=None):
         _save(items)
 
 
+REMIND_MIN = 10
+BLOCK_MAX = 5
+
+
+def _unread(items):
+    """Answered and not yet acknowledged; an answer without the flag (from before 0.45.55) counts as read."""
+    return sorted((x for x in items if x.get("status") == "answered" and x.get("answer_read") is False
+                   and not lean_private.hides(thread=x.get("target"))), key=lambda x: float(x.get("answered_ts") or 0))
+
+
+def unread():
+    return _unread(_load())
+
+
+def header(now=None):
+    u = unread()
+    return f"{len(u)} unread answer{'s' if len(u) != 1 else ''} ({', '.join(qn(x) for x in u)})" if u else ""
+
+
+def block(now=None):
+    """The front desk's first lines while answers are unread: one line per answer (max 5), before any table."""
+    u = unread()
+    if not u:
+        return ""
+    lines = ["ANSWERS FOR YOU (start your reply with these lines, before any table, never inside one; "
+             "put the line '" + header() + "' above any summary/status table):"]
+    for x in u[-BLOCK_MAX:][::-1]:
+        t = x.get("target") if x.get("target") != "main" else "front desk"
+        a = _cell(x.get("answer"), 200)
+        lines.append(f"{qn(x)} ({t}): {a} \u00b7 ack {qn(x)} when read")
+    if len(u) > BLOCK_MAX:
+        lines.append(f"+{len(u) - BLOCK_MAX} more: q unread")
+    lines.append("When the user says ack / ack N, run `lean-agent myq ack` (all) or `lean-agent myq ack qN ...`.")
+    return "\n".join(lines)
+
+
+def fresh_unannounced():
+    return any(not x.get("announced") for x in unread())
+
+
+def mark_announced():
+    with lean_common.file_lock(path()):
+        items = _load()
+        for x in _unread(items):
+            x["announced"] = True
+        _save(items)
+
+
+def ack(nums=None, now=None):
+    """Mark answers read: the given numbers, or all unread when `nums` is empty/None. Returns the entries changed."""
+    ids = {parse_id(n) for n in (nums or [])}
+    ids.discard("")
+    out = []
+    with lean_common.file_lock(path()):
+        items = _load()
+        for x in items:
+            if x.get("status") == "answered" and x.get("answer_read") is False and (not nums or x.get("id") in ids):
+                x["answer_read"] = True
+                out.append(x)
+        if out:
+            _save(items)
+    return out
+
+
+def reminder(now=None):
+    """ONE reminder line for answers unread for 10 minutes; each question is reminded once, ever."""
+    now = time.time() if now is None else now
+    with lean_common.file_lock(path()):
+        items = _load()
+        due = [x for x in _unread(items) if not x.get("reminded") and now - float(x.get("answered_ts") or 0) >= REMIND_MIN * 60]
+        if not due:
+            return ""
+        for x in due:
+            x["reminded"] = now
+        _save(items)
+    return "Reminder: unread answers for the user: " + ", ".join(qn(x) for x in due) + " (ack when read)."
+
+
+def unread_text():
+    u = unread()
+    if not u:
+        return "No unread answers."
+    return "\n\n".join(f"{qn(x)} to {x.get('target')}: {x.get('text')}\nAnswer: {x.get('answer')}" for x in u)
+
+
 def _age(ts, now):
     s = max(0, int(now - float(ts or 0)))
     return f"{s // 86400}d" if s >= 172800 else f"{s // 3600}h" if s >= 3600 else f"{s // 60}m"
@@ -231,6 +318,9 @@ def select(open_only=False, thread=None):
 def table(open_only=False, thread=None, now=None):
     now = time.time() if now is None else now
     rows = select(open_only, thread)
+    pre = ""
+    if not open_only and not thread and unread():
+        pre = header() + "\n\n" + unread_text() + "\n\n"
     if not rows:
         return "No questions" + (" open" if open_only else "") + (f" for {thread}" if thread else "") + " recorded."
     out = ["| # | When | To | Status | Question | Answer |", "|---|---|---|---|---|---|"]
@@ -238,7 +328,7 @@ def table(open_only=False, thread=None, now=None):
         ans = _cell(x.get("answer"), 60) or (_cell(x.get("note"), 60) if x.get("note") else "")
         out.append(f"| {qn(x)} | {_age(x.get('ts'), now)} ago | {x.get('target')} | {x.get('status')} | "
                    f"{_cell(x.get('text'), 50).replace('|', '/')} | {ans.replace('|', '/')} |")
-    return "\n".join(out)
+    return pre + "\n".join(out)
 
 
 def show(num, now=None):

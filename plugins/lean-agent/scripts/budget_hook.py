@@ -803,6 +803,13 @@ def prompt_hook(event):
         except Exception:  # never break the prompt
             pass
         lines = [l for l in lines if l]
+        if not pinned and not lean_threads.is_notification(prompt):
+            try:
+                import lean_myq
+                if not lean_threads.ACK_RE.match(prompt):
+                    lines = [x for x in (lean_myq.block(), lean_myq.reminder()) if x] + lines
+            except Exception:
+                pass
     if strict and re.match(MEMORY_MESSAGE_RE, prompt) and "\n" not in prompt and len(prompt) < 500:
         lines.append(MEMORY_REDIRECT)
     if lines:

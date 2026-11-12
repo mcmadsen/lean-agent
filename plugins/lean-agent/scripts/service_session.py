@@ -2239,6 +2239,19 @@ def inject_main(now=None):
     """Main's pending items at a tool boundary: the staged block (not yet taken by the prompt hook) or, else, the queued
     thread reports. Returns the additionalContext text or None. Claims by rename / under the queue lock and the ledger."""
     now = time.time() if now is None else now
+    text = _inject_main(now)
+    try:
+        import lean_myq
+        extra = [x for x in (lean_myq.block() if text or lean_myq.fresh_unannounced() else "", lean_myq.reminder(now)) if x]
+        if extra:
+            lean_myq.mark_announced()
+            text = "\n".join(extra + ([text] if text else []))
+    except Exception:  # noqa: BLE001
+        pass
+    return text
+
+
+def _inject_main(now):
     claimed = pending_path() + ".hook"
     try:
         os.rename(pending_path(), claimed)
