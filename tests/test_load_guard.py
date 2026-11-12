@@ -106,22 +106,35 @@ class DoctorProcessesTest(unittest.TestCase):
         return {"pid": pid, "ppid": ppid, "cpu": cpu, "rss_mb": 50, "age": age, "cmd": cmd}
 
     def test_strays_listed_and_fixed(self):
-        procs = [self.proc(10, "python3 /x/lean_agent.py up", age=9000, cpu=80),
-                 self.proc(11, "python3 /x/lean_agent.py up", age=100),
-                 self.proc(12, "python3 /x/scripts/inject_hook.py", age=500),
-                 self.proc(13, "python3 /x/lean_agent.py run -m haiku x", age=900),
-                 self.proc(14, "python3 /x/lean_agent.py run -m haiku y", age=900)]
+        procs = [self.proc(10, "python3 /h/x/lean_agent.py up", age=9000, cpu=80),
+                 self.proc(11, "python3 /h/x/lean_agent.py up", age=100),
+                 self.proc(12, "python3 /h/x/scripts/inject_hook.py", age=500),
+                 self.proc(13, "python3 /h/x/lean_agent.py run -m haiku x", age=900),
+                 self.proc(14, "python3 /h/x/lean_agent.py run -m haiku y", age=900),
+                 self.proc(15, "python3 /other/lean_agent.py up", age=100),
+                 self.proc(16, "python3 /other/scripts/inject_hook.py", age=500)]
         owned = {"up": 10, "pids": {14}}
         lines, killed = [], []
         doctor = lambda ok, msg, fix=None: lines.append((ok, msg))  # noqa: E731
-        with mock.patch.dict(os.environ, {"LEAN_AGENT_FAKE_LOAD": "0.1,9000"}):
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_FAKE_LOAD": "0.1,9000"}), \
+                mock.patch.object(lean_agent, "home", return_value="/h"), \
+                mock.patch.object(lean_agent.lean_load, "kill_stray", side_effect=AssertionError("real kill")):
             lean_agent.doctor_processes(doctor, False, procs, owned)
-        self.assertTrue(any("5 lean-agent processes" in m for _, m in lines))
-        self.assertEqual(sorted(int(m.split()[2]) for ok, m in lines if m.startswith("stray")), [11, 12, 13])
-        lines.clear()
-        with mock.patch.dict(os.environ, {"LEAN_AGENT_FAKE_LOAD": "0.1,9000"}):
+            self.assertTrue(any("7 lean-agent processes" in m for _, m in lines))
+            self.assertEqual(sorted(int(m.split()[2]) for ok, m in lines if m.startswith("stray")), [11, 12])
+            self.assertEqual([int(m.split()[2]) for ok, m in lines if m.startswith("possible stray")], [13])
+            lines.clear()
             lean_agent.doctor_processes(doctor, True, procs, owned, kill=lambda p: killed.append(p["pid"]) or True)
-        self.assertEqual(sorted(killed), [11, 12, 13])
+        self.assertEqual(sorted(killed), [11, 12])  # never the run (13), never another home's up/hook (15, 16)
+        self.assertTrue(any(m.startswith("possible stray 13") for _, m in lines))
+
+    def test_kill_stray_refuses_under_test_guard(self):
+        p = self.proc(os.getpid() + 1, "python3 /h/x/lean_agent.py up")
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_TEST": "1"}), \
+                mock.patch.object(lean_load, "processes", return_value=[p]), mock.patch("os.kill") as k:
+            self.assertFalse(lean_load.kill_stray(p))
+        k.assert_not_called()
+        self.assertEqual(os.environ.get("LEAN_AGENT_TEST"), "1")
 
 
 if __name__ == "__main__":
