@@ -13,6 +13,7 @@ import datetime
 import fnmatch
 import glob
 import hashlib
+import hashlib
 import io
 import json
 import os
@@ -2019,6 +2020,12 @@ def cmd_run(a):
                         f.flush()
                     except (OSError, ValueError):
                         pass
+                for rc_file in SUPERVISOR_RC:
+                    try:
+                        with open(rc_file, "w") as fh:
+                            fh.write(str(rc if isinstance(rc, int) else 0))
+                    except OSError:
+                        pass
                 os._exit(rc if isinstance(rc, int) else 0)
 
 
@@ -2114,6 +2121,33 @@ def supervisor_term(signum, frame):
         os.kill(os.getpid(), signum)
 
 
+def supervisor_alive(pid):
+    """A detached supervisor that is still running (a zombie nobody reaped counts as gone)."""
+    if not pid_alive(pid):
+        return False
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+        return bool(r.stdout.strip()) and not r.stdout.strip().startswith("Z")
+
+
+def signal_supervisor(pid, sig):
+    """Passes a signal to the supervisor's process group (it leads the session lean-agent made for it), else to it alone."""
+    try:
+        pg = os.getpgid(pid)
+        if pg != os.getpgrp() and pg > 1:
+            os.killpg(pg, sig)
+        else:
+            os.kill(pid, sig)
+    except OSError:
+        pass
+
+
+SUPERVISOR_RC = []  # the file a detached supervisor writes its exit code to (its parent CLI is not its parent process)
+
+
 def detach_run(workdir, run_id):
     """Moves the rest of a run into a detached process (own session, stdin /dev/null, output in the run's work dir),
     so it survives whatever kills this command: the orchestrator's /clear, its shell tool ending, a closed terminal.
@@ -2134,13 +2168,29 @@ def detach_run(workdir, run_id):
             held[sig] = signal.signal(sig, signal.SIG_IGN)
         except ValueError:  # not the main thread
             break
+    rc_file = os.path.join(workdir, "supervisor.rc")
+    try:
+        os.remove(rc_file)
+    except OSError:
+        pass
+    rfd, wfd = os.pipe()
     pid = os.fork()
     if pid:
+        os.close(wfd)
         for sig, handler in held.items():
             signal.signal(sig, handler)
     if pid == 0:
         try:
+            os.close(rfd)
             os.setsid()
+            # double fork: the supervisor is a grandchild, reparented to init/launchd, so killing the caller's
+            # process tree never reaches it. The intermediate tells the caller the pid and exits at once.
+            gpid = os.fork()
+            if gpid:
+                os.write(wfd, str(gpid).encode())
+                os._exit(0)
+            os.close(wfd)
+            SUPERVISOR_RC[:] = [rc_file]
             signal.signal(signal.SIGINT, signal.default_int_handler)
             signal.signal(signal.SIGTERM, supervisor_term)
             signal.signal(signal.SIGHUP, signal.SIG_IGN)  # the caller's session ending is not a reason to stop
@@ -2158,6 +2208,17 @@ def detach_run(workdir, run_id):
         SUPERVISOR.append(True)  # cmd_run's finally ends this process with os._exit
         threading.Thread(target=supervisor_linger_guard, daemon=True, name="linger-guard").start()
         return None
+    gpid = None
+    try:
+        with os.fdopen(rfd, "rb") as fh:
+            gpid = int(fh.read().decode() or 0) or None
+    except (OSError, ValueError):
+        pass
+    if gpid:
+        try:
+            os.waitpid(pid, 0)  # the intermediate has exited
+        except (ChildProcessError, OSError):
+            pass
     pos, status, interrupted = [0, 0], None, None
 
     def relay():
@@ -2189,20 +2250,31 @@ def detach_run(workdir, run_id):
     try:
         while status is None:
             try:
-                done, st = os.waitpid(pid, os.WNOHANG)
-                if done:
-                    status = st
-                    break
+                if gpid:
+                    if not supervisor_alive(gpid):
+                        status = 0
+                        break
+                else:
+                    done, st = os.waitpid(pid, os.WNOHANG)
+                    if done:
+                        status = st
+                        break
                 if presses[0] > sent:
                     sent = presses[0]
                     interrupted = interrupted or time.time()
-                    signal_group(pid, signal.SIGINT, wait=2)
+                    if gpid:
+                        signal_supervisor(gpid, signal.SIGINT)
+                    else:
+                        signal_group(pid, signal.SIGINT, wait=2)
                 relay()
                 time.sleep(0.1)
             except ChildProcessError:
                 status = 0
             if interrupted and time.time() - interrupted > 60:
-                signal_group(pid, signal.SIGKILL, wait=2)
+                if gpid:
+                    signal_supervisor(gpid, signal.SIGKILL)
+                else:
+                    signal_group(pid, signal.SIGKILL, wait=2)
     finally:
         if previous is not None:
             signal.signal(signal.SIGINT, previous)
@@ -2213,6 +2285,12 @@ def detach_run(workdir, run_id):
         mark_collected(run_id)  # relayed above: the caller has seen the result
     if presses[0]:
         return 130
+    if gpid:
+        try:
+            with open(rc_file) as fh:
+                return int(fh.read().strip())
+        except (OSError, ValueError):
+            return 0 if entry and entry.get("status") in ("done", "ok") else 1
     rc = os.waitstatus_to_exitcode(status)
     return rc if rc >= 0 else 128 - rc
 
@@ -2791,7 +2869,7 @@ def _cmd_run(a):
                                      base=getattr(a, "worktree_base", None), typed=not auto_branch,
                                      hint=(getattr(a, "why", None), getattr(a, "todo", None)))
             project = wt["path"]
-            print(f"worktree: {wt['ref']} at {wt['path']} ({'reused' if wt['reused'] else 'created'}"
+            print(f"worktree: {'reusing worktree ' + wt['path'] + ' for ' if wt['reused'] else ''}{wt['ref']} at {wt['path']} ({'reused' if wt['reused'] else 'created'}"
                   f"{', on branch ' + wt['branch'] if wt['branch'] else ', detached'}, HEAD {wt['head'][:10]})", flush=True)
             if wt.get("moved"):
                 print(f"worktree: HEAD moved from {wt['moved'][0][:10]} to {wt['moved'][1][:10]} ({wt['ref']}'s tip)",
@@ -3108,6 +3186,8 @@ def _cmd_run(a):
     if wt and not read_only:
         try:
             wt_warning = worktree_after_run(slug, wt_repo, wt, wt["head"])
+            if not wt_warning:
+                remove_unused_worktree(slug, wt_repo, wt, run_id)
         except Exception as e:  # a failed check never costs the run's result
             lean_log.log("error", "cli", f"worktree check after run {run_id}: {e}")
 
@@ -8036,6 +8116,28 @@ def sync_worktree_registry(slug, repo, write=True):
     return idx
 
 
+def remove_unused_worktree(slug, repo, wt, run_id=None):
+    """A worktree this run created and left untouched (clean, HEAD where it started) goes away at once. True when removed."""
+    path = wt["path"]
+    if wt.get("reused") or not os.path.isdir(path) or git(path, "status", "--porcelain") != "":
+        return False
+    if (git(path, "rev-parse", "HEAD") or "") != wt.get("head") or worktree_busy(path, run_id):
+        return False
+    if git(repo, "worktree", "remove", path) is None:
+        return False
+    drop_worktree_entry(slug, wt["name"])
+    msg = f"removed unused worktree {path}"
+    lean_log.log("info", "cli", msg)
+    print(f"worktree: {msg}", flush=True)
+    return True
+
+
+def drop_worktree_entry(slug, name):
+    idx = worktree_index()
+    if (idx.get(slug) or {}).pop(name, None) is not None:
+        save_json(home("worktrees.json"), idx)
+
+
 def worktree_after_run(slug, repo, wt, start_head):
     """After a run in a worktree made for a branch: commits on a detached HEAD move the branch (fast-forward, safe) or
     are reported loudly. Returns the warning text, else None."""
@@ -8145,8 +8247,13 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True, hint=No
         elif holder:
             die(f"branch {target} is checked out in {holder['path']}; switch it there, or start a new branch with "
                 f"--worktree-base {target}")
+    ensure_never_index(slug)
     reused = os.path.isdir(path) and git(path, "rev-parse", "--git-dir") is not None
     moved = None
+    if not reused and new_from:
+        donor = idle_worktree(slug, repo)
+        if donor and git(donor["path"], "checkout", "-q", ref) is not None:
+            path, name, reused = donor["path"], donor["name"], True  # a clean idle worktree takes the new branch
     if reused:
         branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
         head = git(path, "rev-parse", "HEAD") or ""
@@ -8195,11 +8302,14 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True, hint=No
                 die(f"git worktree add failed: {(p.stderr or p.stdout).strip()[:300]}")
     setup = (projects().get(slug) or {}).get("worktree_setup")
     idx_entry = (worktree_index().get(slug) or {}).get(name) or {}
-    if setup and (not reused or idx_entry.get("setup") not in ("ok", "running")):
+    stale = reused and idx_entry.get("setup_hash") not in (None, manifest_hash(path))  # lockfile/manifest changed
+    if setup and (not reused or idx_entry.get("setup") not in ("ok", "running") or stale):
         run_worktree_setup(slug, name, path, setup)
     idx = worktree_index()
     entry = idx.setdefault(slug, {}).get(name, {"created": now_iso()})
     entry.update(path=path, ref=ref, sha=sha, branch=branch, repo=repo, last_used=now_iso())
+    if not reused:
+        entry.pop("setup_hash", None) if not setup else None
     if rec_upstream:
         entry["upstream"] = rec_upstream
     idx[slug][name] = entry
@@ -8210,6 +8320,207 @@ def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True, hint=No
                    "unless the task asks you to.")
     return {"path": path, "name": name, "ref": ref, "branch": branch, "target": target, "reused": reused, "commit_rule": commit_rule,
             "head": git(path, "rev-parse", "HEAD") or "", "moved": moved}
+
+
+MANIFESTS = ("package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
+             "requirements.txt", "poetry.lock", "uv.lock", "Pipfile.lock", "Cargo.lock", "go.sum", "Gemfile.lock",
+             "composer.lock", "packages.lock.json")
+
+
+def manifest_hash(path):
+    """A hash of the dependency manifests/lockfiles at the worktree root: a change means its setup should run again."""
+    h = hashlib.sha1()
+    for f in MANIFESTS:
+        try:
+            with open(os.path.join(path, f), "rb") as fh:
+                h.update(f.encode() + fh.read())
+        except OSError:
+            pass
+    return h.hexdigest()
+
+
+def ensure_never_index(slug=None):
+    """macOS Spotlight must not index worktrees (node_modules and all): a .metadata_never_index file in the worktree
+    root folders. Returns the folders that lack it before the call."""
+    missing = []
+    roots = [home("worktrees")] + ([home("worktrees", slug)] if slug else [])
+    for root in roots:
+        mark = os.path.join(root, ".metadata_never_index")
+        if not os.path.exists(mark):
+            missing.append(root)
+            try:
+                os.makedirs(root, exist_ok=True)
+                open(mark, "a").close()
+            except OSError:
+                pass
+    return missing
+
+
+def worktree_busy(path, ignore_run=None):
+    """True when a running run (other than `ignore_run`) works in (or below) this worktree."""
+    root = worktree_path(path)
+    for _rid, m in live_runs():
+        if ignore_run and (_rid == ignore_run or m.get("run") == ignore_run):
+            continue
+        p = m.get("path")
+        if p and (worktree_path(p) == root or worktree_path(p).startswith(root + os.sep)):
+            return True
+    return False
+
+
+def worktree_pushed(repo, path, branch, slug=None):
+    """True when the worktree's commits are on a remote branch or already in the base (nothing would be lost)."""
+    tip = branch or "HEAD"
+    if git(repo, "branch", "-r", "--contains", tip):
+        return True
+    try:
+        base = worktree_base(slug, repo)
+    except SystemExit:
+        return False
+    return bool(base) and git(repo, "merge-base", "--is-ancestor", tip, base) is not None
+
+
+def lean_worktrees(slug=None):
+    """[(slug, name, entry)] of registered worktrees whose directory exists."""
+    out = []
+    for sl, entries in sorted(worktree_index().items()):
+        if slug and sl != slug:
+            continue
+        for name, e in sorted(entries.items()):
+            if isinstance(e, dict) and e.get("path") and os.path.isdir(e["path"]):
+                out.append((sl, name, e))
+    return out
+
+
+def idle_worktree(slug, repo):
+    """A clean, idle, fully pushed lean-agent worktree of this project to reuse for a new branch, else None."""
+    mine = worktree_path(home("worktrees", slug)) + os.sep
+    for sl, name, e in lean_worktrees(slug):
+        path = e["path"]
+        if not path.startswith(mine) or git(path, "rev-parse", "--git-dir") is None:
+            continue
+        if git(path, "status", "--porcelain") or worktree_busy(path):
+            continue
+        if not worktree_pushed(repo, path, git(path, "symbolic-ref", "--quiet", "--short", "HEAD"), slug):
+            continue
+        return {"path": path, "name": name}
+    return None
+
+
+def dir_size(path):
+    try:
+        r = subprocess.run(["du", "-sk", path], capture_output=True, text=True, timeout=60)
+        return int(r.stdout.split()[0]) * 1024
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+        return 0
+
+
+def human_size(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+
+
+def has_unpushed(path):
+    """True when HEAD has commits that are on no remote (also when git cannot tell): such a worktree is never removed."""
+    out = git(path, "rev-list", "HEAD", "--not", "--remotes")
+    return out is None or out != ""
+
+
+def worktree_cleanup_state(slug, name, e, older_days=3, now=None, pushed_days=2):
+    """'cleanable', 'dirty', 'busy' or 'keep' for one registered worktree."""
+    path = e["path"]
+    repo = e.get("repo") or (projects().get(slug) or {}).get("path")
+    if not repo or git(path, "rev-parse", "--git-dir") is None:
+        return "keep"
+    if git(path, "status", "--porcelain"):
+        return "dirty"
+    if worktree_busy(path):
+        return "busy"
+    if has_unpushed(path):
+        return "unpushed"
+    age = 0
+    try:
+        used = datetime.datetime.fromisoformat(str(e.get("last_used") or e.get("created"))[:19])
+        age = ((now or datetime.datetime.now()) - used).total_seconds() / 86400
+    except ValueError:
+        pass
+    branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if age > older_days or (age > pushed_days and worktree_pushed(repo, path, branch, slug)):
+        return "cleanable"
+    return "keep"
+
+
+def worktree_dup_key(e):
+    return (e.get("repo"), re.sub(r"^origin/", "", str(e.get("ref") or "")))
+
+
+def stale_duplicates(entries):
+    """Names of clean older worktrees of a ref that has a newer one (a retry used to make `<name>-2` ... copies): the
+    newest of each ref stays, the older ones go when clean, idle and with nothing the newest lacks."""
+    groups = {}
+    for sl, name, e in entries:
+        if e.get("ref"):
+            groups.setdefault((sl,) + worktree_dup_key(e), []).append((sl, name, e))
+    out = set()
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda m: str(m[2].get("last_used") or m[2].get("created") or ""), reverse=True)
+        newest = members[0][2]
+        for sl, name, e in members[1:]:
+            repo = e.get("repo") or (projects().get(sl) or {}).get("path")
+            if not repo or git(e["path"], "status", "--porcelain") != "" or worktree_busy(e["path"]):
+                continue
+            if git(e["path"], "rev-parse", "HEAD") and not has_unpushed(e["path"]):
+                out.add((sl, name))
+    return out
+
+
+def parse_age_days(text):
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([dhw]?)", str(text or "3d").strip())
+    if not m:
+        die(f"--older takes a number of days like 3d (or 12h, 1w), not {text!r}")
+    return float(m.group(1)) * {"d": 1, "h": 1 / 24, "w": 7, "": 1}[m.group(2)]
+
+
+def worktrees_cleanup(older_days=3, remove=True, slug=None, now=None):
+    """Remove clean, idle worktrees whose branch is pushed/merged or that were last used over N days ago. Returns
+    (removed, dirty, kept) lists of (slug, name, path)."""
+    removed, dirty, kept, unpushed = [], [], [], []
+    entries = lean_worktrees(slug)
+    dups = stale_duplicates(entries)
+    for sl, name, e in entries:
+        st = worktree_cleanup_state(sl, name, e, older_days, now)
+        if st == "keep" and (sl, name) in dups:  # unpushed ones never get here: stale_duplicates skips them
+            st = "cleanable"
+        item = (sl, name, e["path"])
+        if st == "dirty":
+            dirty.append(item)
+        elif st == "unpushed":
+            unpushed.append(item)
+        elif st != "cleanable":
+            kept.append(item)
+        elif not remove:
+            removed.append(item)
+        else:
+            repo = e.get("repo") or (projects().get(sl) or {}).get("path")
+            if git(repo, "worktree", "remove", e["path"]) is not None:
+                idx = worktree_index()
+                (idx.get(sl) or {}).pop(name, None)
+                save_json(home("worktrees.json"), idx)
+                removed.append(item)
+            else:
+                kept.append(item)
+    return removed, dirty, kept + unpushed  # unpushed ones are told apart by has_unpushed()
+
+
+def machine_overloaded():
+    try:
+        return os.getloadavg()[0] > 2 * (os.cpu_count() or 1)
+    except (OSError, AttributeError):
+        return False
 
 
 def run_worktree_setup(slug, name, path, command):
@@ -8233,6 +8544,9 @@ def run_worktree_setup(slug, name, path, command):
             rc = 124
     mark("ok" if rc == 0 else f"failed ({rc})")
     if rc == 0:
+        idx = worktree_index()
+        idx.setdefault(slug, {}).setdefault(name, {})["setup_hash"] = manifest_hash(path)
+        save_json(home("worktrees.json"), idx)
         print(f"worktree setup: done in {time.time() - t0:.0f}s (log {log})", flush=True)
     else:
         with open(log, errors="replace") as fh:
@@ -8258,6 +8572,31 @@ def worktree_lock(slug, name, shared):
 
 
 def cmd_worktrees(a):
+    if getattr(a, "prune", False):
+        idx = worktree_index()
+        for sl, entries in idx.items():
+            for name, e in list(entries.items()):
+                if isinstance(e, dict) and e.get("path") and not os.path.isdir(e["path"]):
+                    entries.pop(name)
+                    print(f"{sl:<16} {name}: dropped entry, {e['path']} no longer exists")
+                    save_json(home("worktrees.json"), idx)
+    if getattr(a, "cleanup", False):
+        if os.environ.get("LEAN_AGENT_SCHEDULED") and machine_overloaded():
+            print("worktrees cleanup: skipped, the machine is overloaded")
+            return 0
+        slug = resolve_project(a.project)[0] if a.project else None
+        removed, dirty, kept = worktrees_cleanup(parse_age_days(getattr(a, "older", None)), slug=slug)
+        for sl, name, path in removed:
+            print(f"removed {sl}/{name}: {path}")
+        for sl, name, path in dirty:
+            print(f"kept (uncommitted changes) {sl}/{name}: {path}")
+        for sl, name, path in kept:
+            if os.path.isdir(path) and has_unpushed(path):
+                print(f"kept: unpushed commits {sl}/{name}: {path}")
+        msg = f"worktrees cleanup: {len(removed)} removed, {len(dirty)} dirty, {len(kept)} kept"
+        print(msg)
+        lean_log.log("info", "cli", msg)
+        return 0
     idx = worktree_index()
     slugs = [resolve_project(a.project)[0]] if a.project else sorted(idx)
     found = False
@@ -11007,6 +11346,22 @@ def doctor_processes(report, fix, procs=None, owned=None, kill=None):
                    "lean-agent doctor --fix")
 
 
+def doctor_worktrees(report, fix):
+    missing = ensure_never_index() if fix else None
+    if missing is None:
+        wroot = home("worktrees")
+        missing = [] if os.path.exists(os.path.join(wroot, ".metadata_never_index")) or not os.path.isdir(wroot) else [wroot]
+    report(not missing, "worktree folder has .metadata_never_index (Spotlight skips it)",
+           "lean-agent doctor --fix")
+    wts = lean_worktrees()
+    if not wts:
+        return
+    total = sum(dir_size(e["path"]) for _s, _n, e in wts)
+    clean = sum(1 for sl, n, e in wts if worktree_cleanup_state(sl, n, e) == "cleanable")
+    report(True if len(wts) <= 30 else None, f"{len(wts)} lean-agent worktrees, {human_size(total)}, {clean} cleanable"
+           + (" (more than 30)" if len(wts) > 30 else ""), "lean-agent worktrees --cleanup")
+
+
 def doctor_locks(report, fix, root=None):
     """doctor: a lock held longer than a minute (holder, command, age); --fix clears the ones whose holder is gone."""
     found = held_locks_found(root)
@@ -11256,6 +11611,7 @@ def cmd_doctor(a):
 
     doctor_locks(report, a.fix)
     doctor_processes(report, a.fix)
+    doctor_worktrees(report, a.fix)
     try:
         with open(os.path.join(HERE, "..", "hooks", "hooks.json")) as fh:
             post = json.dumps((json.load(fh).get("hooks") or {}).get("PostToolUse") or [])
@@ -14483,6 +14839,28 @@ def close_hold(tid, data=None):
     return ", ".join(parts), [r for r, _, _ in runs]
 
 
+def cleanup_closed_thread_worktrees():
+    """Worktrees of runs in closed threads go when clean, pushed and idle (no age wait)."""
+    seen = set()
+    for r in ledger():
+        name, tag = r.get("worktree"), r.get("thread")
+        if not name or not tag or (r.get("project"), name) in seen:
+            continue
+        seen.add((r.get("project"), name))
+        try:
+            if not thread_session_tid(tag)[1].get("closed"):
+                continue
+        except BaseException:
+            continue
+        e = (worktree_index().get(r.get("project")) or {}).get(name)
+        if e and e.get("path") and os.path.isdir(e["path"]) and worktree_cleanup_state(r["project"], name, e, 3, pushed_days=-1) != "dirty" \
+                and worktree_cleanup_state(r["project"], name, e, 3, pushed_days=-1) == "cleanable":
+            repo = e.get("repo") or (projects().get(r["project"]) or {}).get("path")
+            if repo and git(repo, "worktree", "remove", e["path"]) is not None:
+                drop_worktree_entry(r["project"], name)
+                lean_log.log("info", "cli", f"removed worktree {e['path']} (thread {tag} closed)")
+
+
 def close_threads(a):
     """`thread close tN...|--all|--idle DUR`: one checkpoint-and-stop per thread, then a summary line. An explicit id or
     --all refuses a thread with a live run or a mid-turn session unless --force (the runs are detached and keep going)."""
@@ -15047,7 +15425,12 @@ def thread_action(a):
         print(queue_and_deliver(tid, prompt, resume_old))
         return 0
     if act == "close":
-        return close_threads(a)
+        rc = close_threads(a)
+        try:
+            cleanup_closed_thread_worktrees()
+        except Exception as exc:  # never costs the close
+            lean_log.log("error", "cli", f"worktree cleanup after thread close: {exc}")
+        return rc
     if act == "stop":
         return stop_threads(a)
     if act == "reopen" and len(a.args) == 1:
@@ -15537,7 +15920,7 @@ def cmd_schedule(a):
         lean_schedule.run_due()
         return 0
     if a.action == "defaults":
-        wanted = [("daily 07:30", ["sync", "--check"]), ("fri 16:00", ["week"])]
+        wanted = [("daily 07:30", ["sync", "--check"]), ("fri 16:00", ["week"]), ("daily 04:15", ["worktrees", "--cleanup"])]
         wanted += [("mon 07:45", ["optimize", slug]) for slug in sorted(projects())]
         have = {(j["when"], tuple(j["args"])) for j in items}
         for when, args in wanted:
@@ -17183,7 +17566,9 @@ def build_parser():
 
     s = sub.add_parser("worktrees", help="list lean-agent's shared worktrees")
     s.add_argument("project", nargs="?")
-    s.add_argument("--prune", action="store_true", help="drop registry entries that have no path recorded")
+    s.add_argument("--prune", action="store_true", help="drop registry entries that have no path recorded or whose directory is gone")
+    s.add_argument("--cleanup", action="store_true", help="remove worktrees that are clean, idle and pushed/merged or unused for --older (never dirty ones)")
+    s.add_argument("--older", default="3d", help="cleanup: age of last use that makes an unpushed clean worktree removable (default 3d)")
     s.set_defaults(fn=cmd_worktrees)
     s = sub.add_parser("worktree", help="shared worktrees: rm, create <new> --from <ref>, adopt <path>, setup (run on new ones; --show), push (after review + approval), attach (branch to a detached HEAD)")
     s.add_argument("action", choices=["rm", "setup", "push", "base", "attach", "create", "adopt"])
