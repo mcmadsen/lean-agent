@@ -11192,6 +11192,64 @@ class CliTest(unittest.TestCase):
             return subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
         return wt, origin, commit
 
+    def test_push_from_a_detached_worktree_sends_its_head_not_the_local_branch(self):
+        g = self.git_project()
+        g("add", "-A")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "page")
+        origin = os.path.join(self.tmp.name, "origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+        g("remote", "add", "origin", origin)
+        g("push", "-q", "origin", "main", "feature")  # the local branch `feature` stays checked out in the main checkout
+        self.cli("learn", self.proj, "--name", "proj")
+        self.cli("run", "proj", "-m", "haiku", "--why", "x", "--worktree", "origin/feature", "--", "fix")
+        wt = os.path.join(self.env["LEAN_AGENT_HOME"], "worktrees", "proj", "origin-feature")
+        wg = lambda *a: subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                                       check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(wg("rev-parse", "--abbrev-ref", "HEAD"), "HEAD")  # detached
+        self.assertIn("nothing to push", self.cli("worktree", "push", "proj", "origin/feature").stdout)
+        g("checkout", "-q", "main")
+        with open(os.path.join(self.proj, "other.txt"), "w") as fh:
+            fh.write("x\n")
+        g("add", "other.txt")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "other")
+        g("push", "-q", "origin", "main")
+        wg("fetch", "-q", "origin")
+        wg("merge", "-q", "--no-edit", "origin/main")
+        head = wg("rev-parse", "HEAD")
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        self.cli("review", "proj", "--head", head, "--base", "main", FAKE_REVIEW=approve)
+        p = self.cli("worktree", "push", "proj", "origin/feature", check=False)
+        self.assertNotIn("nothing to push", p.stdout)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("ACTION NEEDED", p.stdout)
+        self.cli("worktree", "push", "proj", "origin/feature", "--allow-send", "push the merge")
+        self.assertEqual(subprocess.run(["git", "-C", origin, "rev-parse", "feature"], capture_output=True,
+                                        text=True).stdout.strip(), head)
+        self.assertIn("nothing to push", self.cli("worktree", "push", "proj", "origin/feature").stdout)
+
+    def test_push_to_a_release_branch_waits_for_a_running_review(self):
+        wt, origin, commit = self.push_gate_setup()
+        tip = commit("fix")
+        subprocess.run(["git", "-C", origin, "branch", "release/1.0", "main"], check=True)
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        self.cli("review", "proj", "--head", tip, "--base", "main", FAKE_REVIEW=approve)
+        run_dir = os.path.join(self.env["LEAN_AGENT_HOME"], "running")
+        os.makedirs(run_dir, exist_ok=True)
+        marker = os.path.join(run_dir, "rev1.json")
+        with open(marker, "w") as fh:
+            json.dump({"pid": os.getpid(), "run": "r-rev1", "project": "proj",
+                       "fixed": {"review_meta": {"head": tip, "ref": "feature"}}}, fh)
+        args = ("worktree", "push", "proj", "origin/feature", "--remote-branch", "release/1.0")
+        p = self.cli(*args, check=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn(f"a review of {tip[:12]} is still running (run r-rev1); wait for its verdict", p.stderr)
+        p = self.cli("worktree", "push", "proj", "origin/feature", "--remote-branch", "feature", check=False)
+        self.assertNotIn("still running", p.stderr)  # only release branches wait
+        os.remove(marker)
+        p = self.cli(*args, check=False)
+        self.assertNotIn("still running", p.stderr)
+        self.assertIn("push guard", p.stderr)  # past the wait, release/* is still the guard's business
+
     def review_records(self):
         path = os.path.join(self.env["LEAN_AGENT_HOME"], "reviews", "proj.jsonl")
         if not os.path.exists(path):
