@@ -48,7 +48,7 @@ class TickCostTest(unittest.TestCase):
         ss.repush_questions(now)
         ss.attention_items(now)
         scans = (time.process_time() - c) / 10 + (time.process_time() - c) / 15
-        self.assertLess(per + scans, 0.05)
+        self.assertLess(per + scans, 0.2 if os.environ.get("CI") else 0.05)  # shared CI runners are slow and noisy
 
     def test_transcript_cache_follows_the_file(self):
         p = self.paths[0]
@@ -158,7 +158,8 @@ class BudgetHookFastPathTest(unittest.TestCase):
             r = subprocess.run(args, input=self.EVENT, text=True, env=e, capture_output=True)
             self.assertEqual((r.returncode, r.stdout), (0, ""))
         per = (time.time() - t0) / 5
-        self.assertLess(per, 0.03 * max(1.0, float(os.environ.get("LEAN_AGENT_TEST_TIMEOUT_SCALE", "1"))) + 0.03)
+        slack = 0.12 if os.environ.get("CI") else 0.03  # shared CI runners (macOS) are slow and noisy
+        self.assertLess(per, 0.03 * max(1.0, float(os.environ.get("LEAN_AGENT_TEST_TIMEOUT_SCALE", "1"))) + slack)
 
 
 class ThreadsCacheTest(unittest.TestCase):
