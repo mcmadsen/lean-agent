@@ -491,7 +491,8 @@ being do does did done have has had it its this that these those there here we y
 can could would should will shall may might must not no yes ok okay please just also so very more most some any all
 what which who whom how why when where than too lets let get got make made use using new need want like again still
 now thanks thank hello hey hi""".split())
-MYQ_RE = re.compile(r"^q(?:\s+(open)|\s+t(\d+)|\s*(\d+))?\s*[.!]?$", re.I)  # q | q open | q t21 | q12: the user's own questions
+MYQ_RE = re.compile(r"^q(?:\s+(open|unread)|\s+t(\d+)|\s*(\d+))?\s*[.!]?$", re.I)  # q | q open | q t21 | q12: the user's own questions
+ACK_RE = re.compile(r"^ack(?:\s+(?:q?\d+(?:[\s,]+q?\d+)*))?\s*[.!]?$", re.I)  # ack | ack 35 | ack q35 | ack 34 35
 ASK_RE = re.compile(r"^(?:ask\s+t?|a)(\d+)(?:\s+(.*))?$", re.I | re.S)
 FILES_RE = re.compile(r"^(?:files?\s+t?|f)(\d+)(?:\s+(\d+))?$", re.I)
 SHORTCUT_RE = re.compile(r"^(?:please\s+)?(?:((?:show\s+)?more)|(?:s|summary|show)\s*t?(\d+))\s*[.!?]?$", re.I)
@@ -835,8 +836,14 @@ def decide(text, data, session=None, now=None, idx=None):
         data = {**data, "threads": {k: v for k, v in data["threads"].items() if k not in hid},
                 "aliases": {k: v for k, v in data["aliases"].items() if v not in hid}}
         idx = None
+    ak = ACK_RE.match(text)
+    if ak:
+        nums = " ".join("q" + n for n in re.findall(r"\d+", text))
+        return None, "Front desk job (acknowledge answers) \u2014 no thread: lean-agent myq ack" + (f" {nums}" if nums else ""), "job"
     qm = MYQ_RE.match(text)
     if qm:
+        if (qm.group(1) or "").lower() == "unread":
+            return None, "Front desk job (my questions shortcut) \u2014 no thread: lean-agent myq unread", "job"
         if qm.group(1):
             return None, "Front desk job (my questions shortcut) \u2014 no thread: lean-agent myq --open", "job"
         if qm.group(2):

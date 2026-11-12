@@ -14,7 +14,7 @@ import lean_private
 
 ANSWER_CHARS = 4000
 STALE_MIN = 30
-QUESTION_WORDS = ("how", "why", "what", "where", "when", "which", "who", "can", "could", "is", "are", "do", "does")
+QUESTION_WORDS = ("how", "why", "what", "where", "when", "which", "who", "can", "could", "is", "are", "do", "does", "should", "would", "will")
 QUESTION_MAX = 400
 _WORD_RE = re.compile(r"^(?:" + "|".join(QUESTION_WORDS) + r")\b", re.I)
 
@@ -51,6 +51,19 @@ def is_question(text):
     return t.endswith("?") or bool(_WORD_RE.match(t))
 
 
+def split_questions(text):
+    """The questions of one prompt: each sentence that ends with "?" or starts with a question word (a single question
+    stays whole); nothing for a statement or command."""
+    t = " ".join(str(text or "").split())
+    if not t or t.startswith("/"):
+        return []
+    if len(t) <= QUESTION_MAX and t.count("?") <= 1 and is_question(t):
+        return [t]
+    parts = [x.strip() for x in re.findall(r"[^?.!]*\?|[^?.!]+[.!]?", t) if x.strip()]
+    out = [x for x in parts if len(x) <= QUESTION_MAX and (x.endswith("?") or _WORD_RE.match(x)) and x != "?"]
+    return out if len(parts) > 1 else []
+
+
 def add(text, target="main", now=None):
     """Record a question once: the same text to the same target still open within 10 minutes is not recorded again.
     Returns the entry."""
@@ -71,7 +84,9 @@ def add(text, target="main", now=None):
 
 
 def _answer(items, e, text, ref, now):
-    e.update(status="answered", answer=str(text or "").strip()[:ANSWER_CHARS], answer_ref=ref, answered_ts=now)
+    e.update(status="answered", answer=str(text or "").strip()[:ANSWER_CHARS], answer_ref=ref, answered_ts=now, answer_read=False)
+    e.pop("reminded", None)
+    e.pop("announced", None)
     e.pop("note", None)
 
 
@@ -105,12 +120,15 @@ def main_reply(text, now=None):
         return None
     with lean_common.file_lock(path()):
         items = _load()
+        hit = None
         for x in reversed(items):
-            if x.get("target") == "main" and x.get("status") == "open":
+            if x.get("target") == "main" and x.get("status") == "open" and (hit is None or now - float(x.get("ts") or 0) < 1800):
                 _answer(items, x, text, "front desk reply", now)
-                _save(items)
-                return x
-    return None
+                x["answer_read"] = True  # the user sees it in the reply: nothing to acknowledge
+                hit = hit or x
+        if hit:
+            _save(items)
+        return hit
 
 
 def _words(text):
@@ -129,20 +147,21 @@ def retarget(tid, text, now=None):
     with lean_common.file_lock(path()):
         items = _load()
         opens = [x for x in items if x.get("target") == "main" and x.get("status") == "open" and now - float(x.get("ts") or 0) < 1800]
-        hit = None
+        hits = []
         for x in reversed(opens):
             q = " ".join(str(x.get("text") or "").lower().split())
             qw = _words(q)
             if q and (q in msg or (msg and msg in q) or (qw and len(qw & _words(msg)) / len(qw) >= 0.6)):
-                hit = x
-                break
-        if not hit and len(opens) == 1 and now - float(opens[0].get("ts") or 0) < 300:
-            hit = opens[0]
-        if hit:
+                hits.append(x)
+        if not hits and len(opens) == 1 and now - float(opens[0].get("ts") or 0) < 300:
+            hits = [opens[0]]
+        for hit in hits:
             hit["target"] = tid
+            hit["thread"] = tid
             hit["note"] = f"sent to {tid} by the front desk"
+        if hits:
             _save(items)
-        return hit
+        return hits[0] if hits else None
 
 
 def due(now=None):
@@ -204,6 +223,91 @@ def mark_nudged(num, now=None):
         _save(items)
 
 
+REMIND_MIN = 10
+BLOCK_MAX = 5
+
+
+def _unread(items):
+    """Answered and not yet acknowledged; an answer without the flag (from before 0.45.55) counts as read."""
+    return sorted((x for x in items if x.get("status") == "answered" and x.get("answer_read") is False
+                   and not lean_private.hides(thread=x.get("target"))), key=lambda x: float(x.get("answered_ts") or 0))
+
+
+def unread():
+    return _unread(_load())
+
+
+def header(now=None):
+    u = unread()
+    return f"{len(u)} unread answer{'s' if len(u) != 1 else ''} ({', '.join(qn(x) for x in u)})" if u else ""
+
+
+def block(now=None):
+    """The front desk's first lines while answers are unread: one line per answer (max 5), before any table."""
+    u = unread()
+    if not u:
+        return ""
+    lines = ["ANSWERS FOR YOU (start your reply with these lines, before any table, never inside one; "
+             "put the line '" + header() + "' above any summary/status table):"]
+    for x in u[-BLOCK_MAX:][::-1]:
+        t = x.get("target") if x.get("target") != "main" else "front desk"
+        a = _cell(x.get("answer"), 200)
+        lines.append(f"{qn(x)} ({t}): {a} \u00b7 ack {qn(x)} when read")
+    if len(u) > BLOCK_MAX:
+        lines.append(f"+{len(u) - BLOCK_MAX} more: q unread")
+    lines.append("When the user says ack / ack N, run `lean-agent myq ack` (all) or `lean-agent myq ack qN ...`.")
+    return "\n".join(lines)
+
+
+def fresh_unannounced():
+    return any(not x.get("announced") for x in unread())
+
+
+def mark_announced():
+    with lean_common.file_lock(path()):
+        items = _load()
+        for x in _unread(items):
+            x["announced"] = True
+        _save(items)
+
+
+def ack(nums=None, now=None):
+    """Mark answers read: the given numbers, or all unread when `nums` is empty/None. Returns the entries changed."""
+    ids = {parse_id(n) for n in (nums or [])}
+    ids.discard("")
+    out = []
+    with lean_common.file_lock(path()):
+        items = _load()
+        for x in items:
+            if x.get("status") == "answered" and x.get("answer_read") is False and (not nums or x.get("id") in ids):
+                x["answer_read"] = True
+                out.append(x)
+        if out:
+            _save(items)
+    return out
+
+
+def reminder(now=None):
+    """ONE reminder line for answers unread for 10 minutes; each question is reminded once, ever."""
+    now = time.time() if now is None else now
+    with lean_common.file_lock(path()):
+        items = _load()
+        due = [x for x in _unread(items) if not x.get("reminded") and now - float(x.get("answered_ts") or 0) >= REMIND_MIN * 60]
+        if not due:
+            return ""
+        for x in due:
+            x["reminded"] = now
+        _save(items)
+    return "Reminder: unread answers for the user: " + ", ".join(qn(x) for x in due) + " (ack when read)."
+
+
+def unread_text():
+    u = unread()
+    if not u:
+        return "No unread answers."
+    return "\n\n".join(f"{qn(x)} to {x.get('target')}: {x.get('text')}\nAnswer: {x.get('answer')}" for x in u)
+
+
 def _age(ts, now):
     s = max(0, int(now - float(ts or 0)))
     return f"{s // 86400}d" if s >= 172800 else f"{s // 3600}h" if s >= 3600 else f"{s // 60}m"
@@ -231,6 +335,9 @@ def select(open_only=False, thread=None):
 def table(open_only=False, thread=None, now=None):
     now = time.time() if now is None else now
     rows = select(open_only, thread)
+    pre = ""
+    if not open_only and not thread and unread():
+        pre = header() + "\n\n" + unread_text() + "\n\n"
     if not rows:
         return "No questions" + (" open" if open_only else "") + (f" for {thread}" if thread else "") + " recorded."
     out = ["| # | When | To | Status | Question | Answer |", "|---|---|---|---|---|---|"]
@@ -238,7 +345,7 @@ def table(open_only=False, thread=None, now=None):
         ans = _cell(x.get("answer"), 60) or (_cell(x.get("note"), 60) if x.get("note") else "")
         out.append(f"| {qn(x)} | {_age(x.get('ts'), now)} ago | {x.get('target')} | {x.get('status')} | "
                    f"{_cell(x.get('text'), 50).replace('|', '/')} | {ans.replace('|', '/')} |")
-    return "\n".join(out)
+    return pre + "\n".join(out)
 
 
 def show(num, now=None):

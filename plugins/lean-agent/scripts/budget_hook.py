@@ -760,11 +760,13 @@ def capture_question(prompt, session=None):
             if tid in data["threads"] and (am.group(2) or "").strip():
                 lean_myq.add(am.group(2).strip(), tid)
             return
-        if not lean_myq.is_question(text):
+        qs = lean_myq.split_questions(text)
+        if not qs:
             return
         _, _, kind = lean_threads.decide(text, data, session)
-        if kind not in ("thread", "job"):
-            lean_myq.add(text, "main")
+        if kind != "job":  # a request routed to a thread is still the user's question: the front desk's `thread new|send` links it
+            for q in qs:
+                lean_myq.add(q, "main")
     except Exception:
         pass
 
@@ -803,6 +805,13 @@ def prompt_hook(event):
         except Exception:  # never break the prompt
             pass
         lines = [l for l in lines if l]
+        if not pinned and not lean_threads.is_notification(prompt):
+            try:
+                import lean_myq
+                if not lean_threads.ACK_RE.match(prompt):
+                    lines = [x for x in (lean_myq.block(), lean_myq.reminder()) if x] + lines
+            except Exception:
+                pass
     if strict and re.match(MEMORY_MESSAGE_RE, prompt) and "\n" not in prompt and len(prompt) < 500:
         lines.append(MEMORY_REDIRECT)
     if lines:
