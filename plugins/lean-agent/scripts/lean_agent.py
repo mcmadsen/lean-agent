@@ -8304,6 +8304,12 @@ def human_size(n):
         n /= 1024
 
 
+def has_unpushed(path):
+    """True when HEAD has commits that are on no remote (also when git cannot tell): such a worktree is never removed."""
+    out = git(path, "rev-list", "HEAD", "--not", "--remotes")
+    return out is None or out != ""
+
+
 def worktree_cleanup_state(slug, name, e, older_days=3, now=None, pushed_days=2):
     """'cleanable', 'dirty', 'busy' or 'keep' for one registered worktree."""
     path = e["path"]
@@ -8314,6 +8320,8 @@ def worktree_cleanup_state(slug, name, e, older_days=3, now=None, pushed_days=2)
         return "dirty"
     if worktree_busy(path):
         return "busy"
+    if has_unpushed(path):
+        return "unpushed"
     age = 0
     try:
         used = datetime.datetime.fromisoformat(str(e.get("last_used") or e.get("created"))[:19])
@@ -8347,9 +8355,7 @@ def stale_duplicates(entries):
             repo = e.get("repo") or (projects().get(sl) or {}).get("path")
             if not repo or git(e["path"], "status", "--porcelain") != "" or worktree_busy(e["path"]):
                 continue
-            head = git(e["path"], "rev-parse", "HEAD")
-            if head and (head == git(newest["path"], "rev-parse", "HEAD") or worktree_pushed(repo, e["path"], None, sl)
-                         or git(repo, "merge-base", "--is-ancestor", head, git(newest["path"], "rev-parse", "HEAD") or "x") is not None):
+            if git(e["path"], "rev-parse", "HEAD") and not has_unpushed(e["path"]):
                 out.add((sl, name))
     return out
 
@@ -8364,16 +8370,18 @@ def parse_age_days(text):
 def worktrees_cleanup(older_days=3, remove=True, slug=None, now=None):
     """Remove clean, idle worktrees whose branch is pushed/merged or that were last used over N days ago. Returns
     (removed, dirty, kept) lists of (slug, name, path)."""
-    removed, dirty, kept = [], [], []
+    removed, dirty, kept, unpushed = [], [], [], []
     entries = lean_worktrees(slug)
     dups = stale_duplicates(entries)
     for sl, name, e in entries:
         st = worktree_cleanup_state(sl, name, e, older_days, now)
-        if st == "keep" and (sl, name) in dups:
+        if st == "keep" and (sl, name) in dups:  # unpushed ones never get here: stale_duplicates skips them
             st = "cleanable"
         item = (sl, name, e["path"])
         if st == "dirty":
             dirty.append(item)
+        elif st == "unpushed":
+            unpushed.append(item)
         elif st != "cleanable":
             kept.append(item)
         elif not remove:
@@ -8387,7 +8395,7 @@ def worktrees_cleanup(older_days=3, remove=True, slug=None, now=None):
                 removed.append(item)
             else:
                 kept.append(item)
-    return removed, dirty, kept
+    return removed, dirty, kept + unpushed  # unpushed ones are told apart by has_unpushed()
 
 
 def machine_overloaded():
@@ -8464,6 +8472,9 @@ def cmd_worktrees(a):
             print(f"removed {sl}/{name}: {path}")
         for sl, name, path in dirty:
             print(f"kept (uncommitted changes) {sl}/{name}: {path}")
+        for sl, name, path in kept:
+            if os.path.isdir(path) and has_unpushed(path):
+                print(f"kept: unpushed commits {sl}/{name}: {path}")
         msg = f"worktrees cleanup: {len(removed)} removed, {len(dirty)} dirty, {len(kept)} kept"
         print(msg)
         lean_log.log("info", "cli", msg)

@@ -28,6 +28,10 @@ class Reuse(unittest.TestCase):
         open(os.path.join(self.repo, "a.txt"), "w").write("a")
         sh(self.repo, "add", ".")
         sh(self.repo, "commit", "-qm", "init")
+        self.remote = os.path.join(self.tmp, "remote.git")
+        subprocess.run(["git", "init", "-q", "--bare", self.remote], check=True)
+        sh(self.repo, "remote", "add", "origin", self.remote)
+        sh(self.repo, "push", "-q", "origin", "main")
         self.h = os.path.join(self.tmp, "home")
         self.running = []
         self.later = __import__("datetime").datetime.now() + __import__("datetime").timedelta(days=2, hours=1)
@@ -144,6 +148,48 @@ class Reuse(unittest.TestCase):
                 mock.patch.object(agent, "worktree_cleanup_state", lambda *a, **k: "keep"):
             agent.doctor_worktrees(lambda ok, msg, fix=None: lines.append((ok, msg, fix)), False)
         self.assertTrue(any(ok is None and "31" in m and "--cleanup" in f for ok, m, f in lines), lines)
+
+    def test_unpushed_commits_are_kept_whatever_the_age(self):
+        a = self.ensure("feat-a")
+        sh(a["path"], "commit", "-q", "--allow-empty", "-m", "local")
+        far = self.later + __import__("datetime").timedelta(days=400)
+        removed, dirty, kept = agent.worktrees_cleanup(3, now=far)
+        self.assertEqual(removed, [])
+        self.assertTrue(os.path.isdir(a["path"]))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            agent.cmd_worktrees(__import__("argparse").Namespace(project=None, cleanup=True, older="1d"))
+        self.assertTrue(os.path.isdir(a["path"]))
+
+    def test_detached_with_local_commit_is_kept(self):
+        a = self.ensure("feat-a")
+        sh(a["path"], "checkout", "-q", "--detach")
+        sh(a["path"], "commit", "-q", "--allow-empty", "-m", "local")
+        self.assertEqual(agent.worktrees_cleanup(3, now=self.later)[0], [])
+        self.assertTrue(agent.has_unpushed(a["path"]))
+
+    def test_closed_thread_unpushed_is_kept(self):
+        a = self.ensure("feat-a")
+        sh(a["path"], "commit", "-q", "--allow-empty", "-m", "local")
+        row = {"project": "proj", "worktree": a["name"], "thread": "t1"}
+        with mock.patch.object(agent, "ledger", lambda: [row]), \
+                mock.patch.object(agent, "thread_session_tid", lambda tag: ("t1", {"closed": True})):
+            agent.cleanup_closed_thread_worktrees()
+        self.assertTrue(os.path.isdir(a["path"]))
+
+    def test_duplicates_with_unpushed_commits_are_kept(self):
+        a = self.ensure("feat-a")
+        sh(a["path"], "commit", "-q", "--allow-empty", "-m", "local")
+        idx = agent.worktree_index()
+        old = dict(idx["proj"][a["name"]])
+        dup = os.path.join(self.h, "worktrees", "proj", "feat-a-2")
+        sh(self.repo, "worktree", "add", "-q", "--detach", dup, "main")
+        sh(dup, "commit", "-q", "--allow-empty", "-m", "dup local")
+        old.update(path=dup, last_used="2020-01-01T00:00:00")
+        idx["proj"]["feat-a-2"] = old
+        agent.save_json(os.path.join(self.h, "worktrees.json"), idx)
+        self.assertEqual(agent.worktrees_cleanup(3, now=self.later)[0], [])
+        self.assertTrue(os.path.isdir(dup))
 
 
 if __name__ == "__main__":
