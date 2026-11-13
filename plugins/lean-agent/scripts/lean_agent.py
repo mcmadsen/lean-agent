@@ -12083,6 +12083,13 @@ def sock_handlers(deliverer, helper):
             deliverer.kick(tid)  # still queued after the cap: the service delivers now, not at its next tick
         return {"thread": tid, "line": line, "state": "queued" if queued else "delivered"}
 
+    def plain(tid, prompt):
+        """True when delivery is only a paste / a queue for the next tool call into a live session. Anything that needs a
+        session start, a fresh start or a restart takes seconds (the file path waits send_wait, 10 s): the socket leaves it to
+        the file path (ok false) so the behaviour and the printed line stay the same."""
+        return bool(service_session.alive(tid) and not service_session.is_replacing(tid)
+                    and not (prompt and auto_fresh_reason(tid)))
+
     def send(req):
         tid = tid_of(req)
         text = req.get("text")
@@ -12090,11 +12097,15 @@ def sock_handlers(deliverer, helper):
             text = read_text(req["file"]).strip()
         if not text:
             return {"ok": False, "error": "empty message"}
+        if not plain(tid, text):
+            return {"ok": False, "error": "needs a session start: use the files"}
         own = service_session.spool_add(tid, text)  # the same spool as `thread send`: nothing is lost if the service dies
         return finish(tid, deliver_with_cap(tid, own, False, False, wait=SOCK_SEND_WAIT))
 
     def wake(req):
         tid = tid_of(req)
+        if not plain(tid, None):
+            return {"ok": False, "error": "needs a session start: use the files"}
         line = deliver_with_cap(tid, service_session.spool_add(tid, None), False, False, wait=SOCK_SEND_WAIT)
         if service_session.spool_pending(tid):  # never silently left queued
             line += "; " + (service_session.delivery_reason(tid) or "still queued, the service retries every few seconds")

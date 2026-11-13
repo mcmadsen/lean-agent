@@ -86,7 +86,20 @@ class SocketTest(unittest.TestCase):
         self.assertFalse(json.loads(s.makefile().readline())["ok"])
         s.close()
 
+    def live(self):
+        p = mock.patch.object(ss, "alive", return_value=True)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_send_and_wake_leave_a_session_start_to_the_files(self):
+        self.start(loop=True)  # the thread's session is not running: starting it takes longer than the socket's cap
+        for op, extra in (("send", {"text": "hello"}), ("wake", {})):
+            r = lean_sock.call(op, thread=self.tid, **extra)
+            self.assertFalse(r["ok"], r)
+        self.assertEqual(ss.spool_pending(self.tid), [])  # nothing queued behind the caller's back
+
     def test_send_delivers_without_a_tick(self):
+        self.live()
         self.start(loop=True)
         t0 = time.monotonic()
         r = lean_sock.call("send", thread=self.tid, text="hello")
@@ -100,6 +113,7 @@ class SocketTest(unittest.TestCase):
         self.assertEqual(ss.spool_pending(self.tid), [])
 
     def test_wake_and_unknown_thread(self):
+        self.live()
         self.start(loop=True)
         r = lean_sock.call("wake", thread=self.tid)
         self.assertTrue(r["ok"] and r["line"], r)
