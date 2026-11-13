@@ -394,7 +394,7 @@ def write_json_atomic(path, data):
     os.replace(tmp, path)
 
 
-SHOW_LOCK_WAIT = 1  # seconds `runs --show/--last` wait for collected.json's lock before skipping the mark
+SHOW_LOCK_WAIT = 0.3  # seconds `runs --show/--last` wait for collected.json's lock before skipping the mark
 COLLECTED_CUTOFF = "_cutoff"  # collected.json key: runs recorded before it count as collected (legacy ledger)
 
 

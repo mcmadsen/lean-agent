@@ -10682,7 +10682,7 @@ def full_report(r):
     else its details file; None when neither was saved."""
     path = os.path.join(r.get("workdir") or "", "result.json")
     if os.path.exists(path):
-        for line in reversed(read_text(path).splitlines()):
+        for line in reversed(tail_lines(path, 5, window=4_000_000)):
             try:
                 ev = json.loads(line)
             except ValueError:
@@ -10882,8 +10882,11 @@ def find_run(target, runs=None):
     rows = {}
     for r in (ledger() if runs is None else runs):
         rows[r["id"]] = r
-    markers = {rid: m for rid, m in lost_runs(home(), acknowledged=True, archived=True)}
+    markers = {rid: m for rid, m in lost_runs(home(), acknowledged=True)}  # the archive folder only when nothing else matches
     ids = list(dict.fromkeys(list(rows) + list(markers)))
+    if target and not any(i.startswith(target) for i in ids):
+        markers = {rid: m for rid, m in lost_runs(home(), acknowledged=True, archived=True)}
+        ids = list(dict.fromkeys(list(rows) + list(markers)))
     rid = target if target in ids else None
     if rid is None and target:
         hits = [i for i in ids if i.startswith(target)]
@@ -10934,7 +10937,7 @@ def lost_report(r):
 def cmd_runs(a):
     if getattr(a, "wait", None):
         return wait_for_runs(a.wait, a.timeout)
-    if getattr(a, "lost", False) or getattr(a, "show", None):
+    if getattr(a, "lost", False):  # settling is maintenance: never in the read paths (--show, --tail, --last --tokens)
         settle_markers()
     runs = [r for r in ledger() if not lean_private.hides(r)]
     if a.project:
@@ -17973,7 +17976,8 @@ def main(argv=None):
 def _main(argv=None):
     # the CLI is never the service session; its claude spawns must not inherit the marker
     os.environ.pop("LEAN_AGENT_SERVICE_SESSION", None)
-    if sys.argv[1:2] != ["login"] and (argv is None or list(argv)[:1] != ["login"]):
+    first = (sys.argv[1:2] if argv is None else list(argv)[:1])
+    if first not in (["login"], ["runs"]):  # `runs` only reads files: never ask the keychain (`security` can block for long)
         lean_auth.apply_env(os.environ)  # every claude this command spawns signs in with the stored token (env only)
     ap = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
