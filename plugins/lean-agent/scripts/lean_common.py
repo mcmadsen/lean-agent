@@ -267,7 +267,7 @@ def pid_command(pid):
         try:
             import subprocess
             text = subprocess.run(["ps", "-o", "args=", "-p", str(int(pid))], capture_output=True, text=True,
-                                  timeout=3).stdout.strip()
+                                  timeout=1).stdout.strip()
         except Exception:
             text = ""
     head, _, rest = text.partition(" ")
@@ -336,18 +336,20 @@ def flock_waiting(fh, mode, what, path, timeout=None, every=None):
                 return fh2
             except OSError:
                 fh2.close()
-        long_held = bool(holder) and lock_age(path) > lock_max_hold(path)
-        age = lock_age(path)
-        cmd = pid_command(holder) if holder else ""
-        held_for = f" for {age // 60}m{age % 60:02d}s" if age >= 60 else f" for {age}s" if age else ""
-        text = (lock_busy_text(what, path, holder).replace("; try again or lean-agent doctor", "")
-                if long_held else f"waiting for lock {what}" + (f" held by pid {holder}" + (f" ({cmd})" if cmd else "") + held_for if holder else ""))
-        if WAIT_NOTICE and (last == start or time.time() - last >= every):
-            WAIT_NOTICE[0](text if held_for else text + f" ({int(time.time() - start)}s)")
-            last = time.time()
-        elif not WAIT_NOTICE and last == start:
-            print(f"lean-agent: {text}", file=sys.stderr, flush=True)
-            last = time.time() + 1e9
+        due = (last == start or time.time() - last >= every) if WAIT_NOTICE else last == start
+        if due:  # the text (and its `ps` on macOS) only when it is shown: never one process start per 50 ms poll
+            long_held = bool(holder) and lock_age(path) > lock_max_hold(path)
+            age = lock_age(path)
+            cmd = pid_command(holder) if holder else ""
+            held_for = f" for {age // 60}m{age % 60:02d}s" if age >= 60 else f" for {age}s" if age else ""
+            text = (lock_busy_text(what, path, holder).replace("; try again or lean-agent doctor", "")
+                    if long_held else f"waiting for lock {what}" + (f" held by pid {holder}" + (f" ({cmd})" if cmd else "") + held_for if holder else ""))
+            if WAIT_NOTICE:
+                WAIT_NOTICE[0](text if held_for else text + f" ({int(time.time() - start)}s)")
+                last = time.time()
+            else:
+                print(f"lean-agent: {text}", file=sys.stderr, flush=True)
+                last = time.time() + 1e9
         try:
             fcntl.flock(fh, mode | fcntl.LOCK_NB)
             return fh
