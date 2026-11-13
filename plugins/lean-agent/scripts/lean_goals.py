@@ -878,10 +878,11 @@ def lost_message(run, ref, record_only=False, private=False):
 
 
 def nudge_message(ref, private=False):
+    head = lean_common.agent_line("main", "you", "question", ref, "reply in one line")
     if private:
-        return f"Status check for {ref} (local work, private project): state and next step in one line? If done, report what is done locally."
-    return (f"Status check for {ref}: state and next step in one line? If done, send ONE consolidated final report "
-            "(Ref, head sha, checks, what's left, proposed action; the review verdict only if one ran).")
+        return head + "\nState + next step. Done: report what is done locally (private project)."
+    return head + ("\nState + next step. Done: ONE final report (Ref, head sha, checks, what's left, proposed action; "
+                  "review verdict only if one ran).")
 
 
 def real_lost(lost, ref, runs):

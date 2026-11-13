@@ -5177,7 +5177,7 @@ class CliTest(unittest.TestCase):
         L = lean_agent_module()
         real = L.open_thread_sessions
         args = argparse.Namespace(action="send", args=["t1"], prompt_file=None, json=False, all=False)
-        with mock.patch.dict(os.environ, self.env), mock.patch.object(L, "thread_prompt", return_value=prompt), \
+        with mock.patch.dict(os.environ, {**self.env, "LEAN_AGENT_NO_SOCKET": "1"}), mock.patch.object(L, "thread_prompt", return_value=prompt), \
                 mock.patch.object(L, "open_thread_sessions", side_effect=lambda: [dict(x, idle=ages) for x in real()]), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             L.cmd_thread(args)

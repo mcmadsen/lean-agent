@@ -7,6 +7,16 @@ work with `lean-agent run`, which starts an isolated headless worker that gets
 only the context cards and tools the orchestrator picked. Workers report back
 which context they used, and the context library improves from that.
 """
+import os
+import sys
+if os.path.basename(sys.argv[0]) == "lean_agent.py" and sys.argv[1:2] in (["now"], ["runs"]) \
+        and not os.environ.get("LEAN_AGENT_NO_SOCKET") and not os.environ.get("LEAN_AGENT_SERVICE_DELIVER"):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import lean_sock as _sock  # the service answers before the heavy imports below; None: carry on with the files
+    _rc = _sock.cli(sys.argv[1:])
+    if _rc is not None:
+        sys.stdout.flush()
+        os._exit(_rc)
 import argparse
 import contextlib
 import datetime
@@ -58,6 +68,7 @@ import lean_poll  # noqa: E402
 import lean_own  # noqa: E402
 import lean_auth  # noqa: E402
 import service_session  # noqa: E402
+import lean_sock  # noqa: E402
 import lean_common
 from lean_common import LOST_NO_RECORD, glob_match, compact_overrides, compaction_label, compaction_point, pid_alive, signal_group, lost_runs, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
 
@@ -11593,6 +11604,10 @@ def cmd_doctor(a):
 
     import shutil
     report(bool(shutil.which("lean-agent")), "lean-agent is on PATH", "run ./install in your lean-agent clone")
+    sock_state, sock_secs = lean_sock.state()
+    report(True if sock_state == "listening" else None if sock_state == "missing" else False,
+           f"service socket: {sock_state}" + (f" ({sock_secs * 1000:.0f} ms round trip)" if sock_state == "listening" else f" ({lean_sock.path()})"),
+           "start the service: lean-agent up (or lean-agent service restart); a stale socket is replaced at start")
     for line in lean_slow.report_lines(3):  # commands/hooks that ran past 8 s / 4 s: where they were stuck
         report(None, line, "send this file with `lean-agent feedback add`")
     report(None if lean_private.hidden() else True, private_status_line())
@@ -11980,6 +11995,125 @@ def clear_all_threads():
     lean_log.log("info", "startup", line)
 
 
+SOCK_ENV = lean_sock.CLI_ENV
+_SOCK_PARSER = []
+
+
+def sockcli_run(argv, env):
+    """HELPER PROCESS ONLY (`__sockcli__`): one `now`/`runs` command with the asker's env: (rc, stdout, stderr). Sets this
+    process's env and globals and captures its stdout: never call it in the service."""
+    global FULL, BRIEF, VERBOSE
+    argv = [str(x) for x in argv]
+    if not lean_sock.cli_ok(argv):
+        return 2, "", "lean-agent: not served\n"
+    flags = {"--brief", "--full", "--verbose"} & set(argv[1:])
+    argv = [x for i, x in enumerate(argv) if not (i and x in flags)]
+    for k in SOCK_ENV:
+        os.environ.pop(k, None)
+    os.environ.update({k: v for k, v in (env or {}).items() if k in SOCK_ENV and isinstance(v, str)})
+    out, err = io.StringIO(), io.StringIO()
+    rc = 0
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            if not _SOCK_PARSER:
+                _SOCK_PARSER.append(build_parser())
+            a = _SOCK_PARSER[0].parse_args(argv)
+            VERBOSE, FULL = "--verbose" in flags, "--full" in flags
+            BRIEF = "--brief" in flags or (os.environ.get("LEAN_AGENT_BRIEF") == "1" and "--full" not in flags)
+            os.environ["LEAN_AGENT_CALLER_THREAD"] = lean_threads.pinned_thread() or ""
+            try:
+                rc = a.fn(a) or 0
+            except lean_common.LockBusy as e:
+                print(f"lean-agent: {e}", file=sys.stderr)
+                rc = 1
+    except SystemExit as exc:
+        if exc.code is None:
+            rc = 0
+        elif isinstance(exc.code, int):
+            rc = exc.code
+        else:
+            err.write(str(exc.code) + "\n")
+            rc = 1
+    except BaseException as exc:  # noqa: BLE001 - this request only
+        err.write(f"lean-agent: {type(exc).__name__}: {exc}\n")
+        rc = 1
+    return rc, out.getvalue(), err.getvalue()
+
+
+def sockcli_main():
+    """`lean_agent.py __sockcli__`: the service's persistent CLI helper. One JSON request line in ({argv, env}), one reply line
+    out ({rc, out, err}); ends when the service closes its stdin."""
+    proto = os.fdopen(os.dup(1), "w")
+    os.dup2(2, 1)  # stray prints can never corrupt the reply stream
+    proto.write("ready\n")
+    proto.flush()
+    for line in sys.stdin:
+        try:
+            req = json.loads(line)
+            rc, out, err = sockcli_run(req.get("argv") or [], req.get("env") or {})
+        except Exception as exc:  # noqa: BLE001
+            rc, out, err = 1, "", f"lean-agent: {exc}\n"
+        proto.write(json.dumps({"rc": rc, "out": out, "err": err}) + "\n")
+        proto.flush()
+    return 0
+
+
+SOCK_SEND_WAIT = 1.5  # seconds the socket `send`/`wake` wait for the delivery (the request cap is 2 s)
+
+
+def sock_handlers(deliverer, helper):
+    def cli(req, argv=None):
+        env = {k: v for k, v in (req.get("env") or {}).items() if k in SOCK_ENV and isinstance(v, str)}
+        argv = argv or req.get("argv") or []
+        if not lean_sock.cli_ok([str(x) for x in argv]):
+            return {"ok": False, "error": "not served"}
+        rc, out, err = helper.request([str(x) for x in argv], env)
+        return {"rc": rc, "out": out, "err": err}
+
+    def tid_of(req):
+        tid = lean_threads.resolve(lean_threads.norm(str(req.get("thread") or "")))
+        why = lean_threads.session_refusal(tid)
+        if why:
+            raise ValueError(why)
+        return tid
+
+    def finish(tid, line):
+        queued = bool(service_session.spool_pending(tid))
+        if queued:
+            deliverer.kick(tid)  # still queued after the cap: the service delivers now, not at its next tick
+        return {"thread": tid, "line": line, "state": "queued" if queued else "delivered"}
+
+    def send(req):
+        tid = tid_of(req)
+        text = req.get("text")
+        if req.get("file"):
+            text = read_text(req["file"]).strip()
+        if not text:
+            return {"ok": False, "error": "empty message"}
+        own = service_session.spool_add(tid, text)  # the same spool as `thread send`: nothing is lost if the service dies
+        return finish(tid, deliver_with_cap(tid, own, False, False, wait=SOCK_SEND_WAIT))
+
+    def wake(req):
+        tid = tid_of(req)
+        line = deliver_with_cap(tid, service_session.spool_add(tid, None), False, False, wait=SOCK_SEND_WAIT)
+        if service_session.spool_pending(tid):  # never silently left queued
+            line += "; " + (service_session.delivery_reason(tid) or "still queued, the service retries every few seconds")
+        return finish(tid, line)
+
+    def pending(req):
+        tid = str(req.get("thread") or "")
+        text = service_session.inject_thread(tid) if tid else service_session.inject_main()
+        return {"text": text}
+
+    return {
+        "send": send, "wake": wake, "pending": pending,
+        "now": lambda r: cli(r, ["now"] + [str(x) for x in r.get("args") or []]),
+        "runs": lambda r: cli(r, ["runs"] + [str(x) for x in r.get("args") or []]),
+        "show": lambda r: cli(r, ["runs", "--show", str(r.get("id") or "last")] + (["--tail", str(int(r["tail"]))] if r.get("tail") else [])),
+        "stop": lambda r: cli(r, ["runs", "--stop", str(r.get("run") or "")]),
+    }
+
+
 def cmd_up(a):
     ask_attribution_once()
     h = prepare_home()
@@ -12177,9 +12311,19 @@ def host_session(cmd, extra, env, h, name):
     threading.Thread(target=service_session.AutoClear(host).run, daemon=True).start()
     service_session.start_reporter(host)
     spool_stop = threading.Event()
-    threading.Thread(target=service_session.SpoolDeliverer().loop, args=(spool_stop,), daemon=True).start()
+    deliverer = service_session.SpoolDeliverer()
+    threading.Thread(target=deliverer.loop, args=(spool_stop,), daemon=True).start()
+    sock_server = None
+    try:
+        sock_helper = lean_sock.Helper(os.path.abspath(__file__))
+        sock_server = lean_sock.Server(sock_handlers(deliverer, sock_helper), version=plugin_version(), on_stop=sock_helper.stop).start()
+        threading.Thread(target=sock_helper.warm, daemon=True).start()
+    except Exception as exc:  # noqa: BLE001 - the files keep working without the socket
+        lean_log.log("warn", "sock", f"service socket not started: {exc}")
 
     def stop_all(*_):
+        if sock_server:
+            sock_server.stop()
         spool_stop.set()
         orphan_stop.set()
         sessions.stop_all()
@@ -12197,6 +12341,8 @@ def host_session(cmd, extra, env, h, name):
         host.stop()
         rc = 0
     finally:
+        if sock_server:
+            sock_server.stop()
         sessions.stop_all(wait=20)
         print_still_running(file=sys.stderr)
     return rc
@@ -14431,7 +14577,7 @@ def queued_line(tid):
     return f"{tid}: queued: delivery pending (waking, {state})"
 
 
-def deliver_with_cap(tid, own=None, new=False, resume_old=False):
+def deliver_with_cap(tid, own=None, new=False, resume_old=False, wait=None):
     """Deliver the spooled messages of `tid` but wait at most the send cap; what is not done stays queued for the
     service. Returns the one line to print."""
     out = {}
@@ -14444,9 +14590,9 @@ def deliver_with_cap(tid, own=None, new=False, resume_old=False):
 
     th = threading.Thread(target=work, daemon=True)
     th.start()
-    th.join(send_wait_secs())
+    th.join(wait if wait else send_wait_secs())
     if th.is_alive():
-        if any(n.endswith(".sending") for n in os.listdir(service_session.spool_dir(tid))):
+        if not wait and any(n.endswith(".sending") for n in os.listdir(service_session.spool_dir(tid))):
             th.join(6)  # a message claimed right now is sent within the socket timeout
             if not th.is_alive() and out.get("r", ("",))[0] == "ok":
                 return out["r"][1]
@@ -14467,6 +14613,14 @@ def deliver_with_cap(tid, own=None, new=False, resume_old=False):
             die(f"{line} (thread {tid} was removed)")
         die(line)
     return queued_line(tid)
+
+
+def sock_thread_line(tid, prompt, resume_old, wake):
+    """`thread send` / `thread wake` through the service socket: the line to print, or None (use the files)."""
+    if resume_old:
+        return None  # a start decision of this process, not the service's
+    r = lean_sock.call("send", thread=tid, text=prompt) if prompt else lean_sock.call("wake", thread=tid)
+    return r["line"] if r and r.get("ok") and r.get("line") else None
 
 
 def queue_and_deliver(tid, prompt, resume_old=False):
@@ -15591,6 +15745,10 @@ def thread_action(a):
             _myq_retarget(tid, prompt)
         if not service_session._socket_listening(service_session.client_sock_path()) and not service_session.alive():
             die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
+        line = sock_thread_line(tid, prompt, resume_old, getattr(a, "_wake", False))
+        if line is not None:
+            print(line)
+            return 0
         line = queue_and_deliver(tid, prompt, resume_old)
         if getattr(a, "_wake", False) and service_session.spool_pending(tid):  # never silently left queued
             line += "; " + (service_session.delivery_reason(tid) or "still queued, the service retries every few seconds")
@@ -18194,6 +18352,10 @@ def _main(argv=None):
         lean_auth.apply_env(os.environ)  # every claude this command spawns signs in with the stored token (env only)
     ap = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] in (["now"], ["runs"]) and not os.environ.get("LEAN_AGENT_SERVICE_DELIVER"):
+        rc = lean_sock.cli(argv)  # the service answers from memory; None: the file-based code below
+        if rc is not None:
+            return rc
     if argv[:2] in (["review", "learn"], ["review", "decline"]):
         argv = ["review-" + argv[1]] + argv[2:]
     if argv[:1] == ["poll"]:
@@ -18508,6 +18670,8 @@ class Tee:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["__sockcli__"]:
+        sys.exit(sockcli_main())
     if sys.argv[1:2] == [SUPERVISE_ARG] and len(sys.argv) == 3:
         sys.exit(supervise_main(sys.argv[2]))
     CLI_ENTRY.append(True)
