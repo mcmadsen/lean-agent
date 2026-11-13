@@ -131,6 +131,38 @@ class ServiceClearTest(unittest.TestCase):
         self.assertIn("ask the user to run", r.stdout + r.stderr)
         self.assertFalse(os.path.exists(ss.clear_marker_path()))
 
+    def service_cli(self, *args):
+        fake = os.path.join(self.tmp, "systemctl")
+        with open(fake, "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(fake, 0o755)
+        env = {**os.environ, "HOME": self.tmp, "LEAN_AGENT_SERVICE_PLATFORM": "linux", "LEAN_AGENT_SYSTEMCTL": fake,
+               "LEAN_AGENT_CLEAR_WAIT": "0"}
+        return subprocess.run([sys.executable, os.path.join(ROOT, "lean_agent.py"), "service", *args],
+                              capture_output=True, text=True, env=env, timeout=120)
+
+    def test_clear_all_restart_keeps_threads_and_plain_clear_writes_the_marker(self):
+        calls = []
+        with mock.patch.object(lean_agent.service_session, "mid_turn", return_value=False), \
+                mock.patch.object(lean_agent, "service_file", return_value=__file__), \
+                mock.patch.object(lean_agent.subprocess, "run", side_effect=lambda argv, **kw: calls.append(argv)):
+            self.assertEqual(lean_agent.restart_when_idle(wait=10, sleep=lambda s: None), "service restart --keep-threads")
+        self.assertIn("--keep-threads", calls[0])
+        self.assertNotIn("--clear", calls[0])
+        self.assertFalse(os.path.exists(ss.clear_marker_path()))
+        self.service_cli("install")
+        r = self.service_cli("restart", "--keep-threads", "--yes")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(ss.clear_marker_path()))
+        self.assertNotIn("thread(s) are closed", r.stdout)
+        r = self.service_cli("restart", "--clear", "--yes")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(ss.clear_marker_path()))
+        self.assertIn(self.t1, r.stdout)
+
+    def test_keep_threads_is_hidden_from_help(self):
+        self.assertNotIn("keep-threads", self.service_cli("--help").stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
