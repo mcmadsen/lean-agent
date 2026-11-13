@@ -2204,9 +2204,14 @@ def detach_run(workdir, run_id):
             sys.stdout = open(1, "w", buffering=1, closefd=False)
             sys.stderr = open(2, "w", buffering=1, closefd=False)
             own_marker(run_id, supervisor=True, version=plugin_version())  # the caller's pid in the early marker is not this run's
-        except BaseException:
+        except BaseException as exc:
             for sig, handler in held.items():
                 signal.signal(sig, handler)  # when this copy is not a real fork (a test) the caller must not stay deaf to them
+            try:  # the caller relays this file: say why the detached copy could not start
+                with open(paths[1], "a") as fh:
+                    fh.write(f"run {run_id} failed: the detached worker could not start: {type(exc).__name__}: {exc}\n")
+            except BaseException:
+                pass
             os._exit(1)  # never back into the caller: this is a copy of it
         SUPERVISOR.append(True)  # cmd_run's finally ends this process with os._exit
         threading.Thread(target=supervisor_linger_guard, daemon=True, name="linger-guard").start()
@@ -2293,7 +2298,12 @@ def detach_run(workdir, run_id):
             with open(rc_file) as fh:
                 return int(fh.read().strip())
         except (OSError, ValueError):
-            return 0 if entry and entry.get("status") in ("done", "ok") else 1
+            if entry and entry.get("status") in ("done", "ok"):
+                return 0
+            if not FAIL_REASON:  # the detached worker left no result and no reason: say so, not "exited with code 1"
+                FAIL_REASON[:] = [f"the detached worker of run {run_id} ended without a result and said nothing "
+                                  f"(see {paths[1]} and `lean-agent logs`)"]
+            return 1
     rc = os.waitstatus_to_exitcode(status)
     return rc if rc >= 0 else 128 - rc
 
@@ -2791,7 +2801,10 @@ def _cmd_run(a):
                 "Start a new run, or use the command that made it again")
     task = " ".join(a.task).strip()
     if task == "-" or a.task_file == "-" or (not task and a.task_file is None and not sys.stdin.isatty()):
-        task = sys.stdin.read().strip()
+        task = sys.stdin.read().strip()  # always here, in the caller, before detach_run replaces stdin
+        if not task:
+            early_register(a, "", prev)
+            die("no task given: stdin was empty (--task-file - reads the task from stdin)")
     elif a.task_file:
         task = read_text(a.task_file).strip()
     run_dirs = run_dirs_for(task, getattr(a, "from_run", None)) if task else []
