@@ -103,6 +103,28 @@ class ResumeStdin(unittest.TestCase):
         self.assertIn("marker write refused", p.stderr)
         self.assertIn("REASON ['the detached worker could not start", p.stderr)
 
+    def test_resume_supervisor_is_a_fresh_interpreter_and_finishes(self):
+        rid = self.first_run()
+        p = self.cli("run", "--resume", rid, "--task-file", "-", input="go on\n")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        wd = os.path.join(self.env["LEAN_AGENT_HOME"], "work", rid)
+        self.assertTrue(os.path.exists(os.path.join(wd, "supervisor.rc")))
+        self.assertFalse(os.path.exists(os.path.join(wd, "supervisor-start.pkl")))  # the task file is removed once read
+
+    def test_supervisor_crashing_at_start_reports_its_stderr(self):
+        for hook in ("raise", "abort"):
+            rid = self.first_run() if hook == "raise" else rid
+            p = self.cli("run", "--resume", rid, "--task-file", "-", input="go on\n", LEAN_AGENT_SUPERVISOR_CRASH_HOOK=hook)
+            self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+            out = p.stdout + p.stderr
+            self.assertIn(f"crash hook: {hook}", out)
+            self.assertNotIn("said nothing", out)
+            if hook == "abort":
+                self.assertIn("SIGABRT", out)
+            # the next look at the runs says it too
+            r = self.cli("runs", "--show", rid)
+            self.assertNotIn("said nothing", r.stdout + r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

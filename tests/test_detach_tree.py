@@ -63,6 +63,19 @@ class Detach(unittest.TestCase):
             time.sleep(0.1)
         self.assertTrue(os.path.exists(os.path.join(tmp, "done")))
 
+    def test_spawned_supervisor_has_own_session_and_env(self):
+        """detach_run(spawn=...) starts a fresh interpreter in its own session, with the fork-safety variable set."""
+        tmp = tempfile.mkdtemp()
+        wd = os.path.join(tmp, "wd")
+        os.makedirs(wd)
+        paths = [os.path.join(wd, f"supervisor.{n}") for n in ("out", "err")]
+        os.environ.pop("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", None)
+        pid = L.spawn_supervisor(wd, "r1", paths, {"args": None, "task": "t", "workdir": wd})
+        self.assertTrue(pid)
+        self.addCleanup(lambda: os.kill(pid, signal.SIGKILL) if L.pid_alive(pid) else None)
+        self.assertEqual(os.getsid(pid), pid)  # a session of its own
+        self.assertNotEqual(os.getsid(pid), os.getsid(0))
+
 
 if __name__ == "__main__":
     unittest.main()

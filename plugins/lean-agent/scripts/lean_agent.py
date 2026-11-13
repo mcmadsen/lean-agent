@@ -2154,11 +2154,112 @@ def signal_supervisor(pid, sig):
 SUPERVISOR_RC = []  # the file a detached supervisor writes its exit code to (its parent CLI is not its parent process)
 
 
-def detach_run(workdir, run_id):
+def stderr_tail(path, n=3):
+    """The last `n` non-empty lines of a supervisor.err (joined with ' | '), or ''."""
+    try:
+        with open(path, errors="replace") as fh:
+            lines = [l.strip() for l in fh.read().splitlines() if l.strip()]
+    except OSError:
+        return ""
+    return " | ".join(l[:300] for l in lines[-n:])
+
+
+def exit_how(status):
+    """'killed by signal 6 (SIGABRT)' / 'exited with code 3' for a wait status."""
+    if os.WIFSIGNALED(status):
+        sig = os.WTERMSIG(status)
+        try:
+            return f"killed by signal {sig} ({signal.Signals(sig).name})"
+        except ValueError:
+            return f"killed by signal {sig}"
+    return f"exited with code {os.WEXITSTATUS(status)}"
+
+
+def death_reason(run_id, err_path, how=None):
+    """Why a detached worker ended without a result: the exit status or signal when known, and what it wrote to stderr."""
+    tail = stderr_tail(err_path)
+    head = f"the detached worker of run {run_id} " + (how or "ended without a result")
+    if tail:
+        return f"{head}; its stderr ends: {tail}"
+    return f"{head} and wrote nothing to stderr (see {err_path} and `lean-agent logs`)"
+
+
+SPAWN_STATE = {}  # set in a supervisor started by spawn_supervisor: {"task": text}
+SUPERVISE_ARG = "__supervise__"
+
+
+def spawn_supervisor(workdir, run_id, paths, state):
+    """Starts the supervisor as a fresh interpreter (no fork of a process that may have touched Objective-C/CoreFoundation:
+    on macOS such a copy can die at once from the fork-safety check, leaving nothing). Everything it needs goes in a file
+    in the run dir (the task text never in argv). Returns its pid, or None when it could not be started this way."""
+    import pickle
+    state_path = os.path.join(workdir, "supervisor-start.pkl")
+    try:
+        fd = os.open(state_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            pickle.dump(dict(state, run_id=run_id, cwd=os.getcwd()), fh)
+        env = dict(os.environ, OBJC_DISABLE_INITIALIZE_FORK_SAFETY="YES")
+        out, err = (open(p, "ab") for p in paths)
+        try:
+            proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), SUPERVISE_ARG, state_path], env=env,
+                                    start_new_session=True, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                    close_fds=True)
+        finally:
+            out.close()
+            err.close()
+        return proc.pid
+    except Exception as exc:  # noqa: BLE001 - not picklable, no interpreter: the fork path still works
+        lean_log.log("warning", "cli", f"spawning the supervisor of run {run_id} failed ({exc}); forking instead")
+        return None
+
+
+def supervise_main(state_path):
+    """The entry of a spawned supervisor: loads what detach_run saved and runs the command to its end here."""
+    import pickle
+    run_id = None
+    try:
+        with open(state_path, "rb") as fh:
+            state = pickle.load(fh)
+        run_id = state["run_id"]
+        os.remove(state_path)
+        os.chdir(state.get("cwd") or ".")
+        hook = os.environ.get("LEAN_AGENT_SUPERVISOR_CRASH_HOOK")  # tests: die at start, as a crashing interpreter would
+        if hook:
+            print(f"crash hook: {hook}", file=sys.stderr, flush=True)
+            if hook == "abort":
+                os.abort()
+            raise RuntimeError("crash hook")
+        CLI_ENTRY.append(True)
+        SPAWN_STATE.update(task=state["task"])
+        SUPERVISOR.append(True)  # cmd_run ends this process with os._exit
+        SUPERVISOR_RC[:] = [os.path.join(state["workdir"], "supervisor.rc")]
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGTERM, supervisor_term)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        sys.stdout = open(1, "w", buffering=1, closefd=False)
+        sys.stderr = open(2, "w", buffering=1, closefd=False)
+        own_marker(run_id, supervisor=True, version=plugin_version())
+        threading.Thread(target=supervisor_linger_guard, daemon=True, name="linger-guard").start()
+        try:
+            lean_feedback.install_excepthooks()
+        except Exception:  # noqa: BLE001
+            pass
+        return cmd_run(state["args"])
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001
+        import traceback
+        traceback.print_exc()
+        print(f"run {run_id} failed: the detached worker could not start: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        os._exit(1)
+
+
+def detach_run(workdir, run_id, spawn=None):
     """Moves the rest of a run into a detached process (own session, stdin /dev/null, output in the run's work dir),
     so it survives whatever kills this command: the orchestrator's /clear, its shell tool ending, a closed terminal.
     Returns None in that process (it carries on), else the exit code once it is done, after this process has relayed
-    its output. Ctrl-C here is passed on to it, which stops the run as before."""
+    its output. Ctrl-C here is passed on to it, which stops the run as before. With `spawn` ({"args", "task", "workdir"}:
+    what a fresh interpreter needs to redo the command up to this point) the supervisor is such an interpreter, not a fork."""
     if SUPERVISOR or not CLI_ENTRY or not hasattr(os, "fork") or os.environ.get("LEAN_AGENT_NO_DETACH") == "1":
         return None
     os.makedirs(workdir, exist_ok=True)
@@ -2179,10 +2280,15 @@ def detach_run(workdir, run_id):
         os.remove(rc_file)
     except OSError:
         pass
-    rfd, wfd = os.pipe()
-    pid = os.fork()
+    spawned = spawn_supervisor(workdir, run_id, paths, dict(spawn, workdir=workdir)) if spawn else None
+    if spawned:
+        pid, rfd, wfd = spawned, None, None
+    else:
+        rfd, wfd = os.pipe()
+        pid = os.fork()
     if pid:
-        os.close(wfd)
+        if wfd is not None:
+            os.close(wfd)
         for sig, handler in held.items():
             signal.signal(sig, handler)
     if pid == 0:
@@ -2222,8 +2328,9 @@ def detach_run(workdir, run_id):
         return None
     gpid = None
     try:
-        with os.fdopen(rfd, "rb") as fh:
-            gpid = int(fh.read().decode() or 0) or None
+        if rfd is not None:
+            with os.fdopen(rfd, "rb") as fh:
+                gpid = int(fh.read().decode() or 0) or None
     except (OSError, ValueError):
         pass
     if gpid:
@@ -2232,6 +2339,12 @@ def detach_run(workdir, run_id):
         except (ChildProcessError, OSError):
             pass
     pos, status, interrupted = [0, 0], None, None
+    if spawned:  # the files are appended to: what an earlier supervisor wrote is not this one's output
+        for i, path in enumerate(paths):
+            try:
+                pos[i] = os.path.getsize(path)
+            except OSError:
+                pass
 
     def relay():
         for i, out in enumerate((sys.stdout, sys.stderr)):
@@ -2305,10 +2418,11 @@ def detach_run(workdir, run_id):
             if entry and entry.get("status") in ("done", "ok"):
                 return 0
             if not FAIL_REASON:  # the detached worker left no result and no reason: say so, not "exited with code 1"
-                FAIL_REASON[:] = [f"the detached worker of run {run_id} ended without a result and said nothing "
-                                  f"(see {paths[1]} and `lean-agent logs`)"]
+                FAIL_REASON[:] = [death_reason(run_id, paths[1])]
             return 1
     rc = os.waitstatus_to_exitcode(status)
+    if spawned and rc != 0 and not FAIL_REASON:  # it died without saying why in a "run <id> failed:" line
+        FAIL_REASON[:] = [death_reason(run_id, paths[1][:], exit_how(status))]
     return rc if rc >= 0 else 128 - rc
 
 
@@ -2781,8 +2895,9 @@ def _cmd_run(a):
     if lean_private.hidden() and (push_guard.private_slug_of(a.project or os.getcwd())):
         die(lean_private.HELD_MSG)
     tag = lean_threads.resolve_tag()
-    print(f"lean-agent run: starting" + (f" (thread {tag})" if tag else "") + (f" · {a.project}" if a.project else "")
-          + " · checking the arguments", file=sys.stderr, flush=True)
+    if not SPAWN_STATE:
+        print(f"lean-agent run: starting" + (f" (thread {tag})" if tag else "") + (f" · {a.project}" if a.project else "")
+              + " · checking the arguments", file=sys.stderr, flush=True)
     if a.resume == "last":  # the latest run, so the command needs no `$(lean-agent runs --last)`
         a.resume = latest_run_id(ordinary=True)
     if not a.resume:  # refused before anything starts (no worktree, no escalation); a refusal is still a "start failed" row
@@ -2804,22 +2919,27 @@ def _cmd_run(a):
             die(f"run {a.resume} is a {prev['role']} run (its own commands, no task of yours): it can't be resumed. "
                 "Start a new run, or use the command that made it again")
     task = " ".join(a.task).strip()
-    if task == "-" or a.task_file == "-" or (not task and a.task_file is None and not sys.stdin.isatty()):
+    if SPAWN_STATE:  # a spawned supervisor: the caller already read the task (stdin is /dev/null here)
+        task = SPAWN_STATE["task"]
+    elif task == "-" or a.task_file == "-" or (not task and a.task_file is None and not sys.stdin.isatty()):
         task = sys.stdin.read().strip()  # always here, in the caller, before detach_run replaces stdin
         if not task:
             early_register(a, "", prev)
             die("no task given: stdin was empty (--task-file - reads the task from stdin)")
     elif a.task_file:
         task = read_text(a.task_file).strip()
+    task_raw = task
     run_dirs = run_dirs_for(task, getattr(a, "from_run", None)) if task else []
     if task:
         task = attach_run_outputs(task, getattr(a, "from_run", None))
     claims = [c.strip() for c in (getattr(a, "claim", None) or []) if c and c.strip()]
-    early_register(a, task, prev)  # a resumed run is "running" again from here (runs --wait waits for it)
+    if not SPAWN_STATE:  # (a spawned supervisor: the caller registered the run already)
+        early_register(a, task, prev)  # a resumed run is "running" again from here (runs --wait waits for it)
     if not task:
         die("no task given")
     if prev:  # a resume is detached now, not after the slot wait and the checks: a session restart in between must not kill it
-        rc = detach_run((prev.get("workdir") or home("work", prev["id"])), prev["id"])
+        rc = detach_run((prev.get("workdir") or home("work", prev["id"])), prev["id"],
+                        spawn={"args": a, "task": task_raw})
         if rc is not None:  # the caller's copy: the supervisor owns the marker from here
             EARLY_RUN.clear()
             return rc
@@ -10622,6 +10742,9 @@ def lost_reason(m):
         crash = supervisor_crash(m)
         if crash:
             return f"supervisor crashed with {crash}"
+        said = supervisor_stderr(m)
+        if said:
+            return f"process gone; the supervisor's stderr ends: {said}"
         boot = boot_time()
         if boot and (m.get("started") or "") < datetime.datetime.fromtimestamp(boot).strftime("%Y-%m-%dT%H:%M:%S"):
             return "host restarted"
@@ -10639,6 +10762,11 @@ def supervisor_crash(m):
     if any(l.startswith("Traceback (most recent call last)") for l in lines):
         return lines[-1][:200]
     return None
+
+
+def supervisor_stderr(m):
+    """The last stderr lines of a lost run's supervisor (any text, not only a traceback), or ''."""
+    return stderr_tail(os.path.join(m.get("workdir") or home("work", m.get("run") or "?"), "supervisor.err"))
 
 
 def boot_time():
@@ -18380,5 +18508,7 @@ class Tee:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == [SUPERVISE_ARG] and len(sys.argv) == 3:
+        sys.exit(supervise_main(sys.argv[2]))
     CLI_ENTRY.append(True)
     sys.exit(main())
