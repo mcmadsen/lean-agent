@@ -15097,7 +15097,7 @@ SHORTCUTS = (
     ("o21", "reopen t21 and continue its previous transcript (`thread reopen t21 --resume-old`)"),
     ("private on / private off", "show / hide all private projects and their items (off stops their sessions, on restarts them): `lean-agent private on|off`"),
     ("ack / ack 35 / q unread", "acknowledge answers to my questions (`lean-agent myq ack [qN]`) / list unread in full"),
-    ("q", "my questions: open first, newest first, with the answers (`lean-agent myq`)"),
+    ("q", "my questions to threads: open first, newest first, with the answers (`lean-agent myq`)"),
     ("q12", "question 12 in full with its answer and source (a thread's own question ids are answered with `thread answer tN qN`)"),
     ("q open", "only my unanswered questions"),
     ("q t21", "my questions to t21"),
@@ -15106,7 +15106,7 @@ SHORTCUTS = (
     ("goals drop gN [--why ...]", "drop goal gN (alias of `goal drop`)"),
     ("goals next gN \"...\"", "set the next step of goal gN (alias of `goal next`)"),
     ("goals block gN \"<on what>\"", "mark gN blocked: never chased until `goals unblock gN` or the blocker goal is done"),
-    ("waiting", "what waits on you"),
+    ("waiting / inbox / i", "what waits on you: threads' questions to you, needs-you reports, blocked threads"),
     ("pr21", "PR status of t21 (open comments, votes, CI; known state first, live state cached 10 min)"),
     ("pr21 c", "all active comments on t21's PRs in full"),
     ("pr21 ci", "CI/policy checks of t21's PRs, failing first, with the build link"),
@@ -17784,7 +17784,7 @@ def build_parser():
                    "instead of starting a new one from a short brief")
     s.set_defaults(fn=cmd_thread)
 
-    s = sub.add_parser("shortcuts", help="the front desk's reply shortcuts (? s21 a21 f21 x21 stop21 o21 more goals waiting) as a table")
+    s = sub.add_parser("shortcuts", help="the front desk's reply shortcuts (? s21 a21 f21 x21 stop21 o21 more goals waiting/inbox/i) as a table")
     s.set_defaults(fn=cmd_shortcuts)
 
     s = sub.add_parser("myq", aliases=["q"], help="my questions and their answers: list (open first), `N` one in full, --open, --thread tN, `N --drop`, `unread`, `ack [qN ...|--all]`")

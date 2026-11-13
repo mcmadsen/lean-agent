@@ -857,6 +857,8 @@ def decide(text, data, session=None, now=None, idx=None):
     low = text.lower().rstrip("?!. ") if text != "?" else "?"
     if text == "?" or low in ("shortcuts", "help"):
         return None, "Front desk job (shortcuts) \u2014 no thread: lean-agent shortcuts", "job"
+    if low in ("inbox", "i"):
+        low = "waiting"
     if low in ("goals", "waiting"):
         return None, f"Front desk job ({low}) \u2014 no thread: lean-agent {low}", "job"
     pv = PRIVATE_RE.match(low)

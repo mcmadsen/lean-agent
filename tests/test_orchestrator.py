@@ -4528,6 +4528,8 @@ class CliTest(unittest.TestCase):
             tid, line, kind = lt.decide(text, data)
             self.assertEqual((tid, kind), (None, "job"), text)
             self.assertTrue(line.endswith(cmd), (text, line))
+        for alias in ("inbox", "i", "Inbox?", "I"):
+            self.assertEqual(lt.decide(alias, data), lt.decide("waiting", data), alias)
 
     def test_thread_files_are_recorded_listed_shown_and_capped(self):
         lt = self.threads_home()
@@ -4575,7 +4577,7 @@ class CliTest(unittest.TestCase):
     def test_shortcuts_command_prints_the_table(self):
         out = self.cli("shortcuts").stdout
         self.assertTrue(out.startswith("| Reply | Meaning |"))
-        for k in ("| ? |", "| more |", "| s21 |", "| a21 <question> |", "| f21 |", "| f21 2 |", "| goals |", "| waiting |"):
+        for k in ("| ? |", "| more |", "| s21 |", "| a21 <question> |", "| f21 |", "| f21 2 |", "| goals |", "| waiting / inbox / i |"):
             self.assertIn(k, out)
 
     def test_myq_shortcuts_route_and_print_the_questions(self):
