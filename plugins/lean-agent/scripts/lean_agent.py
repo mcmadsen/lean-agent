@@ -35,6 +35,10 @@ except ImportError:  # Windows: no locking, parallel runs may lose a stats updat
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import lean_slow  # noqa: E402
+if os.path.basename(sys.argv[0]) == "lean_agent.py" and not (  # the CLI itself (not a test importing the module)
+        {"run", "up", "poll", "login", "service", "review", "sync", "update", "install", "--wait", "--follow"} & set(sys.argv[1:2] + sys.argv[2:6])):
+    lean_slow.arm("cli", (sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "help"))  # slow-command trace
 import usage  # noqa: E402
 import lean_mcp  # noqa: E402
 import lean_log  # noqa: E402
@@ -10792,25 +10796,44 @@ def stop_run(target):
         die(f"run {target} already ended: {done['status']}" if done else f"no running run {target!r} (lean-agent runs --running)")
     rid, m = hit
     pid = m.get("pid")
+    t0 = time.time()
+    how = "was not running any more"
     if pid_alive(pid):
-        signal_group(pid, signal.SIGTERM, wait=2)
-        deadline = time.time() + env_num("LEAN_AGENT_STOP_WAIT", 5, float)
+        how = "SIGTERM"
+        if not signal_group(pid, signal.SIGTERM, wait=0.5):  # not a group leader (a queued run, a foreign pid): the pid only
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+            except (OSError, ValueError, TypeError):
+                pass
+        deadline = t0 + env_num("LEAN_AGENT_STOP_WAIT", 5, float)
         while pid_alive(pid) and time.time() < deadline:
             time.sleep(0.05)
         if pid_alive(pid):
-            signal_group(pid, signal.SIGKILL, wait=2)
-            for _ in range(100):
+            how = "SIGKILL after SIGTERM was ignored"
+            if not signal_group(pid, signal.SIGKILL, wait=0.2):
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                except (OSError, ValueError, TypeError):
+                    pass
+            for _ in range(40):
                 if not pid_alive(pid):
                     break
                 time.sleep(0.05)
-    if not any(r["id"] == rid for r in ledger()):  # the supervisor was killed before it could record anything
-        row = {"project": m.get("project"), "project_path": m.get("path"), "workdir": m.get("workdir") or home("work", rid),
-               "model": m.get("model") or "?", "task": (m.get("task") or "")[:300], "todo": m.get("todo"),
-               "thread": m.get("thread"), "role": m.get("role"), "effort": m.get("effort"), "start_head": m.get("start_head")}
-        row.update(m.get("fixed") or {})
-        row.update(id=rid, ts=now_iso(), why="stopped", status="stopped", turns=None, seconds=None, usage={}, units=0,
-                   cost_usd=None, session_id=m.get("session_id") or row.get("session_id"))
-        append_jsonl(home("ledger.jsonl"), row)
+        if pid_alive(pid):
+            die(f"run {rid}: pid {pid} did not exit after SIGTERM and SIGKILL ({time.time() - t0:.1f}s); "
+                f"the run stays listed. Look at it with `ps -p {pid}`")
+    print(f"stopped {rid} (pid {pid}, {how})")
+    try:
+        if not any(r["id"] == rid for r in ledger()):  # the supervisor was killed before it could record anything
+            row = {"project": m.get("project"), "project_path": m.get("path"), "workdir": m.get("workdir") or home("work", rid),
+                   "model": m.get("model") or "?", "task": (m.get("task") or "")[:300], "todo": m.get("todo"),
+                   "thread": m.get("thread"), "role": m.get("role"), "effort": m.get("effort"), "start_head": m.get("start_head")}
+            row.update(m.get("fixed") or {})
+            row.update(id=rid, ts=now_iso(), why="stopped", status="stopped", turns=None, seconds=None, usage={}, units=0,
+                       cost_usd=None, session_id=m.get("session_id") or row.get("session_id"))
+            append_jsonl(home("ledger.jsonl"), row)
+    except lean_common.LockBusy as e:
+        print(f"note: the ledger row was not written ({e}); `lean-agent runs --lost` settles it later")
     for f in glob.glob(home("running", "*.json")):
         if load_json(f, {}).get("run") == rid:
             try:
@@ -10821,15 +10844,19 @@ def stop_run(target):
     print(f"run {rid} stopped" + (f" (was running since {m['started'][11:19]})" if m.get("started") else ""))
     path, start = m.get("path"), m.get("start_head")
     if path and os.path.isdir(path):
-        changed = git(path, "status", "--porcelain") or ""
-        print(f"changes in {path}:" if changed else f"no uncommitted changes in {path}")
-        if changed:
-            print(changed)
-        if start:
-            commits = git(path, "log", "--oneline", f"{start}..HEAD") or ""
+        tmo = 1.5  # a big worktree must not hold the stop: the details are best effort
+        changed = git(path, "status", "--porcelain", timeout=tmo) if time.time() - t0 < 3 else None
+        if changed is None:
+            print(f"(changes in {path} not listed: git was slow; look with `git -C {path} status`)")
+        else:
+            print(f"changes in {path}:" if changed else f"no uncommitted changes in {path}")
+            if changed:
+                print(changed)
+        if start and changed is not None and time.time() - t0 < 4:
+            commits = git(path, "log", "--oneline", f"{start}..HEAD", timeout=tmo) or ""
             if commits:
                 print("commits since the run started:\n" + commits)
-            stat = git(path, "diff", "--stat", start)
+            stat = git(path, "diff", "--stat", start, timeout=tmo)
             if stat:
                 print(f"changed since {start[:10]} (the run's start):\n{stat}")
         print(f"resume it: lean-agent run --resume {rid} \"<what to do next>\"" if m.get("session_id") else
@@ -10950,6 +10977,7 @@ def lost_report(r):
 def cmd_runs(a):
     if getattr(a, "wait", None):
         return wait_for_runs(a.wait, a.timeout)
+    os.environ.setdefault("LEAN_AGENT_LOCK_TIMEOUT", "4")  # listing/showing/stopping never queue behind a busy lock for minutes
     if getattr(a, "lost", False):  # settling is maintenance: never in the read paths (--show, --tail, --last --tokens)
         settle_markers()
     runs = [r for r in ledger() if not lean_private.hides(r)]
@@ -11437,6 +11465,8 @@ def cmd_doctor(a):
 
     import shutil
     report(bool(shutil.which("lean-agent")), "lean-agent is on PATH", "run ./install in your lean-agent clone")
+    for line in lean_slow.report_lines(3):  # commands/hooks that ran past 8 s / 4 s: where they were stuck
+        report(None, line, "send this file with `lean-agent feedback add`")
     report(None if lean_private.hidden() else True, private_status_line())
     h = home("home")
     if a.fix:
@@ -15478,6 +15508,8 @@ def cmd_feedback(a):
     elif a.action == "list":
         items = lean_feedback.list_items(a.all, a.kind, a.since)
         print(lean_feedback.table(items) if items else "No feedback.")
+        for line in lean_slow.report_lines(3):
+            print(line)
     elif a.action in ("rm", "done"):
         if not lean_feedback.mark(text, None if a.action == "rm" else "done"):
             die(f"no feedback {text or '(give fN)'}")
@@ -18005,10 +18037,13 @@ def main(argv=None):
     """The CLI. A closed pipe (the caller timed out, was interrupted or cut the output) ends quietly: whatever the
     command already did (message queued, file written) stays, nothing is printed or recorded as a crash. Every way
     out (a return, die()/SystemExit) flushes here, where a closed pipe can still be caught."""
+    lean_slow.phase("imports")
     try:
         lean_feedback.install_excepthooks()
     except Exception:  # noqa: BLE001 - the hooks are a safety net
         pass
+    import atexit
+    atexit.register(lean_slow.disarm)  # die()/SystemExit paths too
     try:
         rc = _main(argv)
     except SystemExit:
@@ -18075,6 +18110,9 @@ def _main(argv=None):
     if a.cmd in FAILURE_COMMANDS:
         FAIL_CMD[:] = [a.cmd]
     lean_feedback.remember_command(argv)
+    lean_slow.phase("home prep")
+    if os.environ.get("LEAN_AGENT_TEST") and os.environ.get("LEAN_AGENT_TEST_SLEEP"):  # tests: force a slow command
+        time.sleep(float(os.environ["LEAN_AGENT_TEST_SLEEP"]))
     try:
         rc = a.fn(a) or 0
         if rc != 0 and FAIL_CMD and isinstance(rc, int):  # failed without die(): still end on the one-line reason

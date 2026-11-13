@@ -39,6 +39,14 @@ def main():
     if script.endswith("_hook.py"):  # runs in this interpreter: the hot hooks pay for one process start, not two
         sys.argv = [target] + sys.argv[2:]
         sys.path.insert(0, os.path.dirname(target))
+        try:  # slow-hook trace (4 s): a stuck hook leaves its stacks in <home>/logs/slow
+            import lean_slow
+            lean_slow.arm("hook", script[:-3] + (("-" + sys.argv[1]) if len(sys.argv) > 1 else ""))
+            lean_slow.phase("startup")
+            import atexit
+            atexit.register(lean_slow.disarm)
+        except Exception:  # noqa: BLE001
+            pass
         if script == "budget_hook.py":  # the no-op gate first: most calls end here, before the hook is even compiled
             import io
             data = sys.stdin.read()
