@@ -81,6 +81,34 @@ def call(op, timeout=READ_TIMEOUT, sock=None, **fields):
                 pass
 
 
+CLI_OPS = ("now", "runs")
+CLI_NOT = ("--lost", "--wait", "--clear", "--project", "-p")
+CLI_ENV = ("LEAN_AGENT_SESSION_ROLE", "LEAN_AGENT_THREAD", "LEAN_AGENT_BRIEF", "LEAN_AGENT_CALLER_THREAD", "LEAN_AGENT_LOCK_TIMEOUT")
+
+
+def cli_ok(argv):
+    """True when `argv` (a `now` / `runs` command) may be answered by the service: read paths and --stop only."""
+    return bool(argv) and argv[0] in CLI_OPS and not any(x in CLI_NOT or x.startswith("--project=") for x in argv[1:])
+
+
+def cli(argv):
+    """`now` / `runs` through the service: the exit code after printing its output, or None (run the file-based code)."""
+    if not cli_ok(argv):
+        return None
+    env = {k: os.environ[k] for k in CLI_ENV if k in os.environ and k != "LEAN_AGENT_CALLER_THREAD"}
+    r = call(argv[0], args=argv[1:], env=env)
+    if not r or not r.get("ok") or "rc" not in r:
+        return None
+    sys.stdout.write(r.get("out") or "")
+    if r.get("err"):
+        sys.stderr.write(r["err"])
+    try:
+        sys.stdout.flush()
+    except OSError:
+        pass
+    return r["rc"]
+
+
 def state(timeout=1.0):
     """('listening', seconds) | ('stale', 0) | ('missing', 0): for `doctor`."""
     p = path()

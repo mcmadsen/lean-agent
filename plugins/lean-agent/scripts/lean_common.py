@@ -411,6 +411,15 @@ def parse_duration(text):
     return float(m.group(1)) * DURATION_UNITS[m.group(2)]
 
 
+AGENT_KINDS = ("done", "partial", "blocked", "question", "info")
+
+
+def agent_line(frm, to, kind, ref, nxt):
+    """The one header line of every agent-to-agent text lean-agent composes:
+    `<from> \u2192 <to> \u00b7 <kind> \u00b7 <ref> \u00b7 next: <step>` (kind: done|partial|blocked|question|info), then a short body."""
+    return f"{frm} \u2192 {to} \u00b7 {kind if kind in AGENT_KINDS else 'info'} \u00b7 {ref or '-'} \u00b7 next: {nxt or '-'}"
+
+
 def now_iso():
     return datetime.datetime.now().isoformat(timespec="seconds")
 

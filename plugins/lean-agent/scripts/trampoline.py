@@ -36,6 +36,16 @@ def main():
     target = os.path.join(target_dir, script)
     if not os.path.isfile(target):
         target = os.path.join(here, script)
+    if script == "lean_agent.py" and sys.argv[2:3] in (["now"], ["runs"]) and not os.environ.get("LEAN_AGENT_NO_SOCKET"):
+        try:  # the service answers from memory: lean_agent.py (18k lines) is not even compiled; None: the files, below
+            sys.path.insert(0, os.path.dirname(target))
+            import lean_sock
+            rc = lean_sock.cli(sys.argv[2:])
+            if rc is not None:
+                sys.stdout.flush()
+                os._exit(rc)
+        except (ImportError, OSError):
+            pass
     if script.endswith("_hook.py"):  # runs in this interpreter: the hot hooks pay for one process start, not two
         sys.argv = [target] + sys.argv[2:]
         sys.path.insert(0, os.path.dirname(target))

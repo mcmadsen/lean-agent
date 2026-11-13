@@ -33,6 +33,11 @@ class SocketTest(unittest.TestCase):
         lean_threads.set_session(self.tid, session_id="11111111-1111-1111-1111-111111111111", session_on=True)
         self.delivered = []
         self.dl = ss.SpoolDeliverer(run=self.fake_run)
+        # the in-process delivery (starts sessions) is not under test here: a stand-in that leaves it to the deliverer
+        p = mock.patch.object(lean_agent, "deliver_with_cap", side_effect=lambda tid, own=None, new=False, resume=False, wait=None:
+                              (time.sleep(0.05), f"{tid}: queued")[1])
+        p.start()
+        self.addCleanup(p.stop)
         self.stop = threading.Event()
         self.server = None
 
@@ -85,15 +90,18 @@ class SocketTest(unittest.TestCase):
         t0 = time.monotonic()
         r = lean_sock.call("send", thread=self.tid, text="hello")
         self.assertTrue(r["ok"], r)
-        self.assertEqual(r["state"], "delivered", r)
+        self.assertEqual(r["state"], "queued", r)  # queued after the stand-in's cap ...
         self.assertLess(time.monotonic() - t0, 1.5)
+        deadline = time.monotonic() + 3
+        while not self.delivered and time.monotonic() < deadline:  # ... and the kick delivers it, the loop's interval is 30 s
+            time.sleep(0.01)
         self.assertEqual(len(self.delivered), 1)
         self.assertEqual(ss.spool_pending(self.tid), [])
 
     def test_wake_and_unknown_thread(self):
         self.start(loop=True)
         r = lean_sock.call("wake", thread=self.tid)
-        self.assertTrue(r["ok"] and r["state"] in ("delivered", "queued"), r)
+        self.assertTrue(r["ok"] and r["line"], r)
         self.assertFalse(lean_sock.call("send", thread="t999", text="x")["ok"])
 
     def test_pending_takes_once_two_hooks(self):
@@ -155,6 +163,22 @@ class SocketTest(unittest.TestCase):
         r = self.run_cli(["runs", "--running"], sock=True)
         self.assertEqual(r[0], 0)
         self.assertNotIn("socket", r[2])
+
+    def test_trampoline_uses_the_socket_with_identical_output(self):
+        import subprocess
+        self.start()
+        tr = os.path.join(ROOT, "trampoline.py")
+
+        def run(extra):
+            t0 = time.monotonic()
+            r = subprocess.run([sys.executable, tr, "lean_agent.py", "runs", "--running"], capture_output=True, text=True,
+                               env={**os.environ, **extra})
+            return (r.returncode, r.stdout, r.stderr), time.monotonic() - t0
+
+        files, _ = run({"LEAN_AGENT_NO_SOCKET": "1"})
+        sock, secs = run({})
+        self.assertEqual(files, sock)
+        self.assertLess(secs, 0.3)  # lean_agent.py is not even compiled when the service answers
 
     def test_hook_round_trip_is_fast(self):
         self.start()

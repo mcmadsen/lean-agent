@@ -64,7 +64,7 @@ class ThreadInjection(Base):
         ss.spool_add("t3", "decision: go with plan B")
         env = {"LEAN_AGENT_SESSION_ROLE": "thread", "LEAN_AGENT_THREAD": "t3"}
         ctx = self.hook(**env)
-        self.assertTrue(ctx.startswith("[lean-agent: new message from main]"))
+        self.assertTrue(ctx.startswith(ss.HOOK_HEADER_THREAD))
         self.assertIn("decision: go with plan B", ctx)
         self.assertEqual(ss.spool_count("t3"), 0)  # nothing left for the spool deliverer to type
         self.assertIsNone(self.hook(**env))
@@ -91,7 +91,7 @@ class MainInjection(Base):
         self.busy()
         self.report("question", "QUESTION q1: which one?")
         ctx = self.hook()
-        self.assertTrue(ctx.startswith("[lean-agent: thread reports]"))
+        self.assertTrue(ctx.startswith(ss.HOOK_HEADER_MAIN))
         self.assertIn("t5", ctx)
         self.assertEqual([r["how"] for _, r in ss.report_states("t5")], ["delivered (tool boundary)"])
         self.assertIsNone(self.hook())

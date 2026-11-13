@@ -2312,8 +2312,7 @@ def reports_digest(items, dropped=0, rid=""):
         lines.append(ASK_LINE.format(cmd=f'lean-agent thread answer {asking[0]} qN "<answer>"', tids=", ".join(asking)))
     tids = [t for t, _ in order if latest[t][1]["kind"] not in ("job-failed", "chase")]
     if tids:
-        lines.append(f"Relay these digests, do not paste reports. Full text only when needed: lean-agent thread reports {tids[0]}"
-                     + (f" r{rid}" if rid else ""))
+        lines.append(f"next: relay digests, no pasting; full text: lean-agent thread reports {tids[0]}" + (f" r{rid}" if rid else ""))
     return "\n".join(["<thread-reports>"] + lines + ["</thread-reports>"])
 
 
@@ -2367,8 +2366,8 @@ def logged_blocks():
 
 
 LEDGER_KEPT = 600
-HOOK_HEADER_MAIN = "[lean-agent: thread reports]"
-HOOK_HEADER_THREAD = "[lean-agent: new message from main]"
+HOOK_HEADER_MAIN = lean_common.agent_line("threads", "main", "info", "reports", "relay to the user in plain English")
+HOOK_HEADER_THREAD = lean_common.agent_line("main", "you", "info", "message", "act on it, then continue")
 TOOL_BOUNDARY = "delivered (tool boundary)"
 
 
