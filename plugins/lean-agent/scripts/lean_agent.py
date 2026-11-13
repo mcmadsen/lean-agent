@@ -58,6 +58,7 @@ import lean_poll  # noqa: E402
 import lean_own  # noqa: E402
 import lean_auth  # noqa: E402
 import service_session  # noqa: E402
+import lean_sock  # noqa: E402
 import lean_common
 from lean_common import LOST_NO_RECORD, glob_match, compact_overrides, compaction_label, compaction_point, pid_alive, signal_group, lost_runs, plugin_version, thread_key, running_runs, uncollected_ids, mark_collected_ids, seed_collected, read_json, write_json_atomic, file_lock, now_iso, stem  # noqa: E402
 
@@ -11593,6 +11594,10 @@ def cmd_doctor(a):
 
     import shutil
     report(bool(shutil.which("lean-agent")), "lean-agent is on PATH", "run ./install in your lean-agent clone")
+    sock_state, sock_secs = lean_sock.state()
+    report(True if sock_state == "listening" else None if sock_state == "missing" else False,
+           f"service socket: {sock_state}" + (f" ({sock_secs * 1000:.0f} ms round trip)" if sock_state == "listening" else f" ({lean_sock.path()})"),
+           "start the service: lean-agent up (or lean-agent service restart); a stale socket is replaced at start")
     for line in lean_slow.report_lines(3):  # commands/hooks that ran past 8 s / 4 s: where they were stuck
         report(None, line, "send this file with `lean-agent feedback add`")
     report(None if lean_private.hidden() else True, private_status_line())
@@ -11980,6 +11985,125 @@ def clear_all_threads():
     lean_log.log("info", "startup", line)
 
 
+SOCK_ENV = ("LEAN_AGENT_SESSION_ROLE", "LEAN_AGENT_THREAD", "LEAN_AGENT_BRIEF", "LEAN_AGENT_CALLER_THREAD", "LEAN_AGENT_LOCK_TIMEOUT")
+SOCK_CLI_LOCK = threading.Lock()
+SOCK_CLI = ("now", "runs")
+SOCK_NOT = ("--lost", "--wait", "--clear", "--project", "-p")
+_SOCK_PARSER = []
+
+
+def sock_cli_ok(argv):
+    """True when `argv` (a `now` / `runs` command) may be answered by the service: read paths and --stop only."""
+    return argv[:1] and argv[0] in SOCK_CLI and not any(x in SOCK_NOT or x.startswith("--project=") for x in argv[1:])
+
+
+def sock_cli_text(argv, env=None):
+    """Serve one `now`/`runs` command in the service: run the real command function, return (rc, stdout, stderr)."""
+    global FULL, BRIEF, VERBOSE
+    argv = [str(x) for x in argv]
+    if not sock_cli_ok(argv):
+        raise ValueError("not served")
+    flags = {"--brief", "--full", "--verbose"} & set(argv[1:])
+    argv = [x for i, x in enumerate(argv) if not (i and x in flags)]
+
+    def run():
+        if not _SOCK_PARSER:
+            _SOCK_PARSER.append(build_parser())
+        a = _SOCK_PARSER[0].parse_args(argv)
+        VERBOSE, FULL = "--verbose" in flags, "--full" in flags
+        BRIEF = "--brief" in flags or (os.environ.get("LEAN_AGENT_BRIEF") == "1" and "--full" not in flags)
+        os.environ["LEAN_AGENT_CALLER_THREAD"] = lean_threads.pinned_thread() or ""
+        try:
+            return a.fn(a) or 0
+        except lean_common.LockBusy as e:
+            print(f"lean-agent: {e}", file=sys.stderr)
+            return 1
+
+    with SOCK_CLI_LOCK:
+        keep = {k: os.environ.get(k) for k in SOCK_ENV}
+        for k in SOCK_ENV:
+            os.environ.pop(k, None)
+        os.environ.update(env or {})
+        try:
+            return lean_sock.capture(run)
+        finally:
+            for k, v in keep.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
+def sock_handlers(deliverer):
+    def cli(req, argv=None):
+        env = {k: v for k, v in (req.get("env") or {}).items() if k in SOCK_ENV and isinstance(v, str)}
+        argv = argv or req.get("argv") or []
+        rc, out, err = sock_cli_text(argv, env)
+        return {"rc": rc, "out": out, "err": err}
+
+    def settle(tid, secs=1.5):
+        if service_session.alive_thread(tid) and service_session.mid_turn(tid):
+            return {"state": "queued", "reason": service_session.delivery_reason(tid)}
+        end = time.monotonic() + secs
+        while time.monotonic() < end:
+            if not service_session.spool_pending(tid) and deliverer.settled(tid):
+                return {"state": "delivered"}
+            time.sleep(0.02)
+        return {"state": "queued", "reason": service_session.delivery_reason(tid) or "still queued, the service retries every few seconds"}
+
+    def tid_of(req):
+        tid = lean_threads.resolve(lean_threads.norm(str(req.get("thread") or "")))
+        why = lean_threads.session_refusal(tid)
+        if why:
+            raise ValueError(why)
+        return tid
+
+    def send(req):
+        tid = tid_of(req)
+        text = req.get("text")
+        if req.get("file"):
+            text = read_text(req["file"]).strip()
+        if not text:
+            return {"ok": False, "error": "empty message"}
+        name = service_session.spool_add(tid, text)
+        deliverer.kick(tid)
+        return {"thread": tid, "name": name, **settle(tid)}
+
+    def wake(req):
+        tid = tid_of(req)
+        if not service_session.spool_pending(tid):
+            service_session.spool_add(tid, None)  # a bare wake marker, as `thread wake` writes it
+        deliverer.kick(tid)
+        return {"thread": tid, **settle(tid)}
+
+    def pending(req):
+        tid = str(req.get("thread") or "")
+        text = service_session.inject_thread(tid) if tid else service_session.inject_main()
+        return {"text": text}
+
+    return {
+        "send": send, "wake": wake, "pending": pending,
+        "now": lambda r: cli(r, ["now"] + [str(x) for x in r.get("args") or []]),
+        "runs": lambda r: cli(r, ["runs"] + [str(x) for x in r.get("args") or []]),
+        "show": lambda r: cli(r, ["runs", "--show", str(r.get("id") or "last")] + (["--tail", str(int(r["tail"]))] if r.get("tail") else [])),
+        "stop": lambda r: cli(r, ["runs", "--stop", str(r.get("run") or "")]),
+    }
+
+
+def sock_client_cli(argv):
+    """`now` / `runs` through the service socket: (rc) after printing, or None to run the file-based code."""
+    if not sock_cli_ok(argv):
+        return None
+    env = {k: os.environ[k] for k in SOCK_ENV if k in os.environ and k != "LEAN_AGENT_CALLER_THREAD"}
+    r = lean_sock.call(argv[0], args=argv[1:], env=env)
+    if not r or not r.get("ok") or "rc" not in r:
+        return None
+    sys.stdout.write(r.get("out") or "")
+    if r.get("err"):
+        sys.stderr.write(r["err"])
+    return r["rc"]
+
+
 def cmd_up(a):
     ask_attribution_once()
     h = prepare_home()
@@ -12177,9 +12301,17 @@ def host_session(cmd, extra, env, h, name):
     threading.Thread(target=service_session.AutoClear(host).run, daemon=True).start()
     service_session.start_reporter(host)
     spool_stop = threading.Event()
-    threading.Thread(target=service_session.SpoolDeliverer().loop, args=(spool_stop,), daemon=True).start()
+    deliverer = service_session.SpoolDeliverer()
+    threading.Thread(target=deliverer.loop, args=(spool_stop,), daemon=True).start()
+    sock_server = None
+    try:
+        sock_server = lean_sock.Server(sock_handlers(deliverer), version=plugin_version()).start()
+    except Exception as exc:  # noqa: BLE001 - the files keep working without the socket
+        lean_log.log("warn", "sock", f"service socket not started: {exc}")
 
     def stop_all(*_):
+        if sock_server:
+            sock_server.stop()
         spool_stop.set()
         orphan_stop.set()
         sessions.stop_all()
@@ -12197,6 +12329,8 @@ def host_session(cmd, extra, env, h, name):
         host.stop()
         rc = 0
     finally:
+        if sock_server:
+            sock_server.stop()
         sessions.stop_all(wait=20)
         print_still_running(file=sys.stderr)
     return rc
@@ -14469,6 +14603,19 @@ def deliver_with_cap(tid, own=None, new=False, resume_old=False):
     return queued_line(tid)
 
 
+def sock_thread_line(tid, prompt, resume_old, wake):
+    """`thread send` / `thread wake` through the service socket: the line to print, or None (use the files)."""
+    if resume_old:
+        return None  # a start decision of this process, not the service's
+    r = lean_sock.call("send", thread=tid, text=prompt) if prompt else lean_sock.call("wake", thread=tid)
+    if not r or not r.get("ok"):
+        return None
+    if r.get("state") == "delivered":
+        return f"{tid}: sent"
+    why = r.get("reason") or "still queued, the service retries every few seconds"
+    return f"{tid}: queued: {why}" if not wake else f"{tid}: queued; {why}"
+
+
 def queue_and_deliver(tid, prompt, resume_old=False):
     own = service_session.spool_add(tid, prompt)
     return deliver_with_cap(tid, own, False, resume_old)
@@ -15591,6 +15738,10 @@ def thread_action(a):
             _myq_retarget(tid, prompt)
         if not service_session._socket_listening(service_session.client_sock_path()) and not service_session.alive():
             die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
+        line = sock_thread_line(tid, prompt, resume_old, getattr(a, "_wake", False))
+        if line is not None:
+            print(line)
+            return 0
         line = queue_and_deliver(tid, prompt, resume_old)
         if getattr(a, "_wake", False) and service_session.spool_pending(tid):  # never silently left queued
             line += "; " + (service_session.delivery_reason(tid) or "still queued, the service retries every few seconds")
@@ -18194,6 +18345,10 @@ def _main(argv=None):
         lean_auth.apply_env(os.environ)  # every claude this command spawns signs in with the stored token (env only)
     ap = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] in (["now"], ["runs"]) and not os.environ.get("LEAN_AGENT_SERVICE_DELIVER"):
+        rc = sock_client_cli(argv)  # the service answers from memory; None: the file-based code below
+        if rc is not None:
+            return rc
     if argv[:2] in (["review", "learn"], ["review", "decline"]):
         argv = ["review-" + argv[1]] + argv[2:]
     if argv[:1] == ["poll"]:

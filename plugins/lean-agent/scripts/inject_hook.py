@@ -47,6 +47,14 @@ def main():
         return 0
     import json
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    event = "PreToolUse" if "pre" in sys.argv[1:] else "PostToolUse"
+    import lean_sock  # stdlib only: asks the service first (it holds the state); any problem falls through to the files
+    role_tid = os.environ.get("LEAN_AGENT_THREAD") or "" if os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread" else ""
+    r = lean_sock.call("pending", timeout=1.0, thread=role_tid, session_id=os.environ.get("LEAN_AGENT_SESSION_ID") or "")
+    if r and r.get("ok") and "text" in r:
+        if r["text"]:
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": r["text"]}}))
+        return 0
     import lean_common
     import service_session
     lean_common.hook_mode()
@@ -57,7 +65,6 @@ def main():
     except Exception:  # noqa: BLE001 - LockBusy included: the items stay queued for the next call or the typed path
         return 0
     if text:
-        event = "PreToolUse" if "pre" in sys.argv[1:] else "PostToolUse"
         print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}))
     return 0
 

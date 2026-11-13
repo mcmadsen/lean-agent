@@ -1554,6 +1554,19 @@ class SpoolDeliverer:
         self.fails = {}
         self.refused = set()
         self.lock = threading.Lock()
+        self.kicked = threading.Event()
+
+    def kick(self, tid=None):
+        """Deliver now (socket `send`/`wake`): forget the retry backoff of `tid` and run a tick at once, not at the next one."""
+        with self.lock:
+            if tid:
+                self.failed.pop(tid, None)
+                self.fails.pop(tid, None)
+        self.kicked.set()
+
+    def settled(self, tid):
+        with self.lock:
+            return not self.busy.get(tid)
 
     @staticmethod
     def _subprocess(tid):
@@ -1641,7 +1654,8 @@ class SpoolDeliverer:
                 self.tick()
             except Exception as exc:
                 lean_log.log("error", "spool", str(exc))
-            stop.wait(interval)
+            self.kicked.wait(interval)
+            self.kicked.clear()
 
 
 def goal_send(tid, text):
