@@ -49,7 +49,8 @@ class SocketTest(unittest.TestCase):
         return True, ""
 
     def start(self, loop=False):
-        self.server = lean_sock.Server(lean_agent.sock_handlers(self.dl), version="9.9").start()
+        self.helper = lean_sock.Helper(lean_agent.__file__)
+        self.server = lean_sock.Server(lean_agent.sock_handlers(self.dl, self.helper), version="9.9", on_stop=self.helper.stop).start()
         self.addCleanup(self.server.stop)
         if loop:
             threading.Thread(target=self.dl.loop, args=(self.stop, 30), daemon=True).start()
@@ -175,10 +176,89 @@ class SocketTest(unittest.TestCase):
                                env={**os.environ, **extra})
             return (r.returncode, r.stdout, r.stderr), time.monotonic() - t0
 
+        lean_sock.call("now", timeout=5)  # the helper has imported lean_agent
         files, _ = run({"LEAN_AGENT_NO_SOCKET": "1"})
         sock, secs = run({})
         self.assertEqual(files, sock)
         self.assertLess(secs, 0.3)  # lean_agent.py is not even compiled when the service answers
+
+    def fake_helper(self, body=""):
+        path = os.path.join(self.tmp, "fake_helper.py")
+        with open(path, "w") as fh:
+            fh.write("import sys, os, json, time\nprint('ready', flush=True)\nfor line in sys.stdin:\n    req = json.loads(line)\n"
+                     "    if 'hang' in req['argv']:\n        time.sleep(60)\n"
+                     "    print(json.dumps({'rc': 0, 'out': str(os.getpid()), 'err': ''}), flush=True)\n" + body)
+        h = lean_sock.Helper(path)
+        self.addCleanup(h.stop)
+        return path, h
+
+    def test_service_state_is_untouched_by_served_calls(self):
+        self.start()
+        env_before = dict(os.environ)
+        globals_before = (lean_agent.FULL, lean_agent.BRIEF, lean_agent.VERBOSE)
+        for argv in (["now"], ["runs", "--running"]):
+            r = lean_sock.call(argv[0], args=argv[1:], env={"LEAN_AGENT_SESSION_ROLE": "thread", "LEAN_AGENT_THREAD": "t1",
+                                                              "LEAN_AGENT_BRIEF": "1"})
+            self.assertTrue(r["ok"] and r["rc"] == 0, r)
+        r = lean_sock.call("now", args=["--full"])
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(dict(os.environ), env_before)
+        self.assertEqual((lean_agent.FULL, lean_agent.BRIEF, lean_agent.VERBOSE), globals_before)
+
+    def test_service_prints_never_reach_a_reply(self):
+        self.start()
+        stop = threading.Event()
+
+        def chatter():
+            while not stop.is_set():
+                print("SERVICE-LOG-LINE")
+                time.sleep(0.001)
+
+        th = threading.Thread(target=chatter, daemon=True)
+        sink = io.StringIO()
+        self.addCleanup(setattr, sys, "stdout", sys.stdout)
+        sys.stdout = sink
+        th.start()
+        try:
+            replies = [lean_sock.call("now") for _ in range(5)] + [lean_sock.call("runs", args=["--running"]) for _ in range(5)]
+        finally:
+            stop.set()
+            th.join()
+            sys.stdout = sys.__stdout__
+        self.assertIn("SERVICE-LOG-LINE", sink.getvalue())
+        for r in replies:
+            self.assertTrue(r["ok"], r)
+            self.assertNotIn("SERVICE-LOG-LINE", r["out"] + r["err"])
+
+    def test_hung_helper_is_killed_and_respawned(self):
+        _, h = self.fake_helper()
+        rc, pid1, _ = h.request(["now"], {})
+        first = h.proc
+        t0 = time.monotonic()
+        with self.assertRaises(RuntimeError):
+            h.request(["now", "hang"], {})
+        self.assertTrue(1.5 < time.monotonic() - t0 < 2.5)
+        self.assertIsNotNone(first.poll())  # killed
+        rc, pid2, _ = h.request(["now"], {})
+        self.assertNotEqual(pid1, pid2)
+
+    def test_helper_restarts_when_the_script_changes(self):
+        path, h = self.fake_helper()
+        _, pid1, _ = h.request(["now"], {})
+        _, again, _ = h.request(["now"], {})
+        self.assertEqual(pid1, again)  # one persistent process
+        st = os.stat(path)
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        _, pid2, _ = h.request(["now"], {})
+        self.assertNotEqual(pid1, pid2)
+
+    def test_warm_calls_are_fast(self):
+        self.start()
+        lean_sock.call("now")
+        t0 = time.monotonic()
+        for _ in range(10):
+            self.assertTrue(lean_sock.call("runs", args=["--running"])["ok"])
+        self.assertLess((time.monotonic() - t0) / 10, 0.1)
 
     def test_hook_round_trip_is_fast(self):
         self.start()

@@ -11996,58 +11996,78 @@ def clear_all_threads():
 
 
 SOCK_ENV = lean_sock.CLI_ENV
-SOCK_CLI_LOCK = threading.Lock()
 _SOCK_PARSER = []
 
 
-sock_cli_ok = lean_sock.cli_ok
-
-
-def sock_cli_text(argv, env=None):
-    """Serve one `now`/`runs` command in the service: run the real command function, return (rc, stdout, stderr)."""
+def sockcli_run(argv, env):
+    """HELPER PROCESS ONLY (`__sockcli__`): one `now`/`runs` command with the asker's env: (rc, stdout, stderr). Sets this
+    process's env and globals and captures its stdout: never call it in the service."""
     global FULL, BRIEF, VERBOSE
     argv = [str(x) for x in argv]
-    if not sock_cli_ok(argv):
-        raise ValueError("not served")
+    if not lean_sock.cli_ok(argv):
+        return 2, "", "lean-agent: not served\n"
     flags = {"--brief", "--full", "--verbose"} & set(argv[1:])
     argv = [x for i, x in enumerate(argv) if not (i and x in flags)]
+    for k in SOCK_ENV:
+        os.environ.pop(k, None)
+    os.environ.update({k: v for k, v in (env or {}).items() if k in SOCK_ENV and isinstance(v, str)})
+    out, err = io.StringIO(), io.StringIO()
+    rc = 0
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            if not _SOCK_PARSER:
+                _SOCK_PARSER.append(build_parser())
+            a = _SOCK_PARSER[0].parse_args(argv)
+            VERBOSE, FULL = "--verbose" in flags, "--full" in flags
+            BRIEF = "--brief" in flags or (os.environ.get("LEAN_AGENT_BRIEF") == "1" and "--full" not in flags)
+            os.environ["LEAN_AGENT_CALLER_THREAD"] = lean_threads.pinned_thread() or ""
+            try:
+                rc = a.fn(a) or 0
+            except lean_common.LockBusy as e:
+                print(f"lean-agent: {e}", file=sys.stderr)
+                rc = 1
+    except SystemExit as exc:
+        if exc.code is None:
+            rc = 0
+        elif isinstance(exc.code, int):
+            rc = exc.code
+        else:
+            err.write(str(exc.code) + "\n")
+            rc = 1
+    except BaseException as exc:  # noqa: BLE001 - this request only
+        err.write(f"lean-agent: {type(exc).__name__}: {exc}\n")
+        rc = 1
+    return rc, out.getvalue(), err.getvalue()
 
-    def run():
-        if not _SOCK_PARSER:
-            _SOCK_PARSER.append(build_parser())
-        a = _SOCK_PARSER[0].parse_args(argv)
-        VERBOSE, FULL = "--verbose" in flags, "--full" in flags
-        BRIEF = "--brief" in flags or (os.environ.get("LEAN_AGENT_BRIEF") == "1" and "--full" not in flags)
-        os.environ["LEAN_AGENT_CALLER_THREAD"] = lean_threads.pinned_thread() or ""
-        try:
-            return a.fn(a) or 0
-        except lean_common.LockBusy as e:
-            print(f"lean-agent: {e}", file=sys.stderr)
-            return 1
 
-    with SOCK_CLI_LOCK:
-        keep = {k: os.environ.get(k) for k in SOCK_ENV}
-        for k in SOCK_ENV:
-            os.environ.pop(k, None)
-        os.environ.update(env or {})
+def sockcli_main():
+    """`lean_agent.py __sockcli__`: the service's persistent CLI helper. One JSON request line in ({argv, env}), one reply line
+    out ({rc, out, err}); ends when the service closes its stdin."""
+    proto = os.fdopen(os.dup(1), "w")
+    os.dup2(2, 1)  # stray prints can never corrupt the reply stream
+    proto.write("ready\n")
+    proto.flush()
+    for line in sys.stdin:
         try:
-            return lean_sock.capture(run)
-        finally:
-            for k, v in keep.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
+            req = json.loads(line)
+            rc, out, err = sockcli_run(req.get("argv") or [], req.get("env") or {})
+        except Exception as exc:  # noqa: BLE001
+            rc, out, err = 1, "", f"lean-agent: {exc}\n"
+        proto.write(json.dumps({"rc": rc, "out": out, "err": err}) + "\n")
+        proto.flush()
+    return 0
 
 
 SOCK_SEND_WAIT = 1.5  # seconds the socket `send`/`wake` wait for the delivery (the request cap is 2 s)
 
 
-def sock_handlers(deliverer):
+def sock_handlers(deliverer, helper):
     def cli(req, argv=None):
         env = {k: v for k, v in (req.get("env") or {}).items() if k in SOCK_ENV and isinstance(v, str)}
         argv = argv or req.get("argv") or []
-        rc, out, err = sock_cli_text(argv, env)
+        if not lean_sock.cli_ok([str(x) for x in argv]):
+            return {"ok": False, "error": "not served"}
+        rc, out, err = helper.request([str(x) for x in argv], env)
         return {"rc": rc, "out": out, "err": err}
 
     def tid_of(req):
@@ -12295,7 +12315,9 @@ def host_session(cmd, extra, env, h, name):
     threading.Thread(target=deliverer.loop, args=(spool_stop,), daemon=True).start()
     sock_server = None
     try:
-        sock_server = lean_sock.Server(sock_handlers(deliverer), version=plugin_version()).start()
+        sock_helper = lean_sock.Helper(os.path.abspath(__file__))
+        sock_server = lean_sock.Server(sock_handlers(deliverer, sock_helper), version=plugin_version(), on_stop=sock_helper.stop).start()
+        threading.Thread(target=sock_helper.warm, daemon=True).start()
     except Exception as exc:  # noqa: BLE001 - the files keep working without the socket
         lean_log.log("warn", "sock", f"service socket not started: {exc}")
 
@@ -18648,6 +18670,8 @@ class Tee:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["__sockcli__"]:
+        sys.exit(sockcli_main())
     if sys.argv[1:2] == [SUPERVISE_ARG] and len(sys.argv) == 3:
         sys.exit(supervise_main(sys.argv[2]))
     CLI_ENTRY.append(True)

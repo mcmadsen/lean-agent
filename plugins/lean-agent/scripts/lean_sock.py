@@ -5,9 +5,9 @@ returns None so the caller falls back to the file-based path. Server side (`Serv
 every request is answered within 2 s and never blocks the service loop (a handler that is too slow gets an error reply).
 """
 import hashlib
-import io
 import json
 import os
+import signal
 import socket
 import socketserver
 import stat
@@ -123,59 +123,113 @@ def state(timeout=1.0):
 
 # ------------------------------------------------------------------ server
 
-class _Router:
-    """sys.stdout/sys.stderr stand-in: a thread that registered a buffer writes into it, everyone else to the real stream."""
+class Helper:
+    """ONE persistent child process that runs the CLI commands the socket serves (`lean_agent.py __sockcli__`): it imports
+    lean_agent once and handles one JSON request line at a time, so env/globals/stdout are its own and never the service's.
+    A hung or dead helper is killed (its process group) and started again by the next request."""
 
-    def __init__(self, real, tls, name):
-        self._real, self._tls, self._name = real, tls, name
+    START_GRACE = 15.0  # a helper still importing after this long is killed too
 
-    def _target(self):
-        return getattr(self._tls, self._name, None) or self._real
+    def __init__(self, script, timeout=REQUEST_TIMEOUT - 0.15):
+        self.script, self.timeout = script, timeout
+        self.lock = threading.Lock()
+        self.proc = None
+        self.ready = False
+        self.buf = b""
+        self.started = 0.0
+        self.mtime = None
 
-    def write(self, s):
-        return self._target().write(s)
-
-    def flush(self):
+    def _mtime(self):
         try:
-            self._target().flush()
+            return os.stat(self.script).st_mtime_ns
+        except OSError:
+            return None
+
+    def _kill(self):
+        p, self.proc, self.ready, self.buf = self.proc, None, False, b""
+        if p is None:
+            return
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            try:
+                p.kill()
+            except OSError:
+                pass
+        try:
+            p.stdin.close()
+            p.stdout.close()
+            p.wait(timeout=1)
         except Exception:
             pass
 
-    def __getattr__(self, name):
-        return getattr(self._target(), name)
+    def _spawn(self):
+        import subprocess
+        self.mtime = self._mtime()
+        self.proc = subprocess.Popen([sys.executable, self.script, "__sockcli__"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, start_new_session=True, cwd=home())
+        self.ready, self.buf, self.started = False, b"", time.monotonic()
 
+    def _line(self, deadline):
+        import select
+        while b"\n" not in self.buf:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None
+            if not select.select([self.proc.stdout], [], [], left)[0]:
+                return None
+            chunk = os.read(self.proc.stdout.fileno(), 1 << 20)
+            if not chunk:
+                raise EOFError("helper ended")
+            self.buf += chunk
+        line, self.buf = self.buf.split(b"\n", 1)
+        return line
 
-_tls = threading.local()
-_installed = []
+    def warm(self):
+        """Start the helper now (the service does, so the first request does not wait for the import)."""
+        if self.lock.acquire(timeout=0.5):
+            try:
+                if self.proc is None or self.proc.poll() is not None:
+                    self._kill()
+                    self._spawn()
+            finally:
+                self.lock.release()
 
+    def request(self, argv, env):
+        """(rc, out, err); raises RuntimeError when the helper does not answer in time (it is killed unless it is still starting)."""
+        deadline = time.monotonic() + self.timeout
+        if not self.lock.acquire(timeout=self.timeout):
+            raise RuntimeError("helper busy")
+        try:
+            if self.proc is not None and (self.proc.poll() is not None or self._mtime() != self.mtime):
+                self._kill()  # died, or the script changed (sync): a fresh one
+            if self.proc is None:
+                self._spawn()
+            try:
+                if not self.ready:
+                    line = self._line(deadline)
+                    if line is None:
+                        if time.monotonic() - self.started > self.START_GRACE:
+                            self._kill()
+                        raise RuntimeError("helper starting")
+                    self.ready = True
+                self.proc.stdin.write(json.dumps({"argv": argv, "env": env}).encode() + b"\n")
+                self.proc.stdin.flush()
+                line = self._line(deadline)
+                if line is None:
+                    self._kill()
+                    raise RuntimeError("helper timeout")
+                r = json.loads(line)
+                return r["rc"], r["out"], r["err"]
+            except (OSError, EOFError, ValueError, KeyError) as exc:
+                self._kill()
+                raise RuntimeError(f"helper failed: {exc}")
+        finally:
+            self.lock.release()
 
-def install_router():
-    if _installed:
-        return
-    _installed.append(1)
-    sys.stdout = _Router(sys.stdout, _tls, "out")
-    sys.stderr = _Router(sys.stderr, _tls, "err")
-
-
-def capture(fn):
-    """Run fn() with this thread's stdout/stderr captured: (rc, out, err). SystemExit becomes its code."""
-    out, err = io.StringIO(), io.StringIO()
-    _tls.out, _tls.err = out, err
-    rc = 0
-    try:
-        rc = fn() or 0
-    except SystemExit as exc:
-        code = exc.code
-        if code is None:
-            rc = 0
-        elif isinstance(code, int):
-            rc = code
-        else:
-            err.write(str(code) + "\n")
-            rc = 1
-    finally:
-        _tls.out = _tls.err = None
-    return rc, out.getvalue(), err.getvalue()
+    def stop(self):
+        with self.lock:
+            self._kill()
 
 
 def peer_uid(conn):
@@ -226,7 +280,8 @@ class _Srv(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 
 
 class Server:
-    def __init__(self, handlers, sock=None, version=""):
+    def __init__(self, handlers, sock=None, version="", on_stop=None):
+        self.on_stop = on_stop
         self.handlers = dict(handlers)
         self.path = sock or path()
         self.version = version
@@ -278,12 +333,16 @@ class Server:
             os.umask(old)
         os.chmod(self.path, 0o600)
         self.srv.owner = self
-        install_router()
         self.thread = threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
         self.thread.start()
         return self
 
     def stop(self):
+        if self.on_stop:
+            try:
+                self.on_stop()
+            except Exception:
+                pass
         if self.srv:
             try:
                 self.srv.shutdown()
