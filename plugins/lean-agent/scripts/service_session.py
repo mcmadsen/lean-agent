@@ -197,6 +197,53 @@ def note_restart(key, why, ts=None):
         pass
 
 
+def clear_marker_path():
+    return lean_home("clear-on-start.json")
+
+
+def write_clear_marker(fresh_done=False):
+    """`service start|restart --clear` and `up --clear`: the next `up` start closes every thread and starts main fresh (once)."""
+    os.makedirs(lean_home(), exist_ok=True)
+    lean_common.write_json_atomic(clear_marker_path(), {"ts": time.time(), "fresh_done": bool(fresh_done)})
+
+
+def drop_clear_marker():
+    try:
+        os.remove(clear_marker_path())
+    except OSError:
+        pass
+
+
+def consume_clear_marker():
+    """The marker's content ({} when the marker is empty/odd), or None when there is none; the marker is removed (one-shot)."""
+    path = clear_marker_path()
+    if not os.path.exists(path):
+        return None
+    data = _load(path)
+    drop_clear_marker()
+    return data if isinstance(data, dict) else {}
+
+
+def hold_queued_reports(tids):
+    """--clear: reports of `tids` still queued for main are taken out of the queue (kept as held in the report states)."""
+    tids = set(tids)
+    with lean_common.file_lock(reports_path()):
+        data = _load(reports_path())
+        items = data.get("items") if isinstance(data.get("items"), list) else []
+        mine = [i for i in items if i.get("thread") in tids]
+        if mine:
+            lean_common.write_json_atomic(reports_path(), {"items": [i for i in items if i.get("thread") not in tids]})
+    for i in mine:
+        try:
+            report_state(i["thread"], report_seq(i), i.get("kind"), i.get("text"), state="held", why="thread closed by --clear")
+        except Exception:
+            pass
+    return len(mine)
+
+
+CLEAR_LINE = "Restarted with --clear: all threads closed and not chased; reopen one with o<N> when the user asks."
+
+
 def restart_line(key, take=True):
     """`Restarted 12:12: <why>` for the last replacement of session `key` (and forgets it when `take`), else ''."""
     try:
@@ -210,6 +257,8 @@ def restart_line(key, take=True):
         return ""
     if not e or time.time() - float(e.get("ts") or 0) > RESTART_MAX_AGE:
         return ""
+    if e.get("why") == CLEAR_LINE:
+        return CLEAR_LINE
     return f"Restarted {time.strftime('%H:%M', time.localtime(float(e['ts'])))}: {e.get('why')}"
 
 
@@ -1768,6 +1817,12 @@ def queue_report(tid, kind, text, tag="", force=False, waiting=True):
     """Queue one thread report (kind: done | blocked | needs-you | question) for the main session; the mode filters it,
     except an explicit question (`thread ask`) or an explicit report (`thread report`, force), which always go through.
     `tag` marks where it came from (explicit | auto)."""
+    if tid != "main" and tid in lean_threads.cleared_ids():
+        try:  # closed by --clear: the report is stored for the thread, never pushed to main and never reopens it
+            report_state(tid, next_report_id(relayed_seq(tid)), kind, text, state="held", why="thread closed by --clear")
+        except Exception:
+            pass
+        return False
     mode = reports_mode()
     if not force and kind not in ("question", "job-failed", "chase") and (mode == "off" or (mode == "questions-only" and kind != "needs-you")):
         return False
@@ -1876,7 +1931,7 @@ def attention_items(now, after=NUDGE_AFTER, skip=()):
     data = lean_threads.load_ro()
     turns = lean_threads.turns_map()
     answered_q = answered_question_keys()
-    hid = lean_threads.hidden_threads(data)
+    hid = set(lean_threads.hidden_threads(data)) | lean_threads.cleared_ids(data)
     out = [o for o in out if not any(o[0].split(":")[1:2] == [h] for h in hid)]
     for tid, t in data["threads"].items():
         if tid in data["aliases"] or tid == "main" or tid in hid or lean_threads.no_nudge(t):
@@ -2998,6 +3053,8 @@ class Reporter(AutoClear):
 
     def wake_for_runs(self, st):
         """A run tagged to this thread finished: type a short turn into the idle session so it reports to main."""
+        if self.key in lean_threads.cleared_ids():
+            return  # closed by --clear: a finished run neither wakes nor reopens it
         mine = [r for r in finished_thread_runs(self.now()) if r["thread"] == self.key]
         if self.waked is None:  # runs that ended before this session started are not its to report ...
             cut = self.born

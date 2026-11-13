@@ -1114,6 +1114,7 @@ def route(prompt, session=None, now=None, create=True):
                 _ensure(data, tid, title_from(text), create=True)
                 data["threads"][tid].pop("closed", None)  # naming a closed thread reopens it
                 data["threads"][tid].pop("auto_closed", None)
+                _unclear(tid, data["threads"][tid])
         if tid is None:
             tid = id_thread(text, data)
             how = "guessed" if tid else None
@@ -2092,11 +2093,96 @@ def set_closed(tid, closed):
         else:
             t.pop("closed", None)
             t.pop("auto_closed", None)
+            _unclear(tid, t)
             t["last_message"] = now_iso()  # reopened: counts as activity, or the next `now` would close it again
     if closed:
         _closed_hooks([tid])
         set_closed.discarded = len(discard_spool(tid))
     return tid
+
+
+def cleared(t):
+    """True for a thread closed by `service restart|start --clear`: no chaser touches it until it is reopened."""
+    return isinstance(t, dict) and bool(t.get("closed")) and t.get("closed_by") == "clear"
+
+
+def cleared_ids(data=None):
+    data = data if data is not None else load_ro()
+    return {k for k, t in data["threads"].items() if cleared(t)}
+
+
+def _held_dir(tid):
+    return os.path.join(lean_home("thread-inbox"), tid, "held")
+
+
+def _hold_spool(tid):
+    """Move the queued/undelivered spool files of `tid` into thread-inbox/<tid>/held/ (kept, not delivered). Returns the count."""
+    n = 0
+    for name in spool_files(tid):
+        try:
+            os.makedirs(_held_dir(tid), exist_ok=True)
+            os.replace(os.path.join(lean_home("thread-inbox"), tid, name), os.path.join(_held_dir(tid), name))
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
+def _unclear(tid, t):
+    """Reopening a thread that --clear closed: forget closed_by, put its held messages back in the queue and lift the
+    goal-chase pause that --clear set. Call under the threads lock with the record `t`."""
+    if t.get("closed_by") is None:
+        return
+    t.pop("closed_by", None)
+    d = _held_dir(tid)
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        names = []
+    for name in names:
+        try:
+            os.replace(os.path.join(d, name), os.path.join(lean_home("thread-inbox"), tid, name))
+        except OSError:
+            pass
+    try:
+        os.rmdir(d)
+    except OSError:
+        pass
+    try:
+        import lean_goals
+        lean_goals.lift_clear_pause()
+    except Exception:
+        pass
+
+
+def clearable_ids(data=None):
+    """The open (or parked) threads `--clear` closes."""
+    data = data if data is not None else load_ro()
+    ids = [k for k, t in data["threads"].items()
+           if not (k in data["aliases"] or k in RESERVED or k == "main" or is_zero_id(k) or t.get("closed"))]
+    return sorted(ids, key=lambda k: int(k[1:]) if k[1:].isdigit() else 0)
+
+
+def clear_threads():
+    """`--clear` at startup: every open or parked thread is closed with closed_by="clear" (session id, transcript and
+    parked state stay, so reopen and --resume-old work); its queued spool messages are held aside. No goals are dropped.
+    Returns ([thread ids], held message count)."""
+    done = []
+    with _locked() as data:
+        ids = set(clearable_ids(data))
+        for tid, t in data["threads"].items():
+            if tid not in ids:
+                continue
+            t["closed"], t["closed_by"] = now_iso(), "clear"
+            t.pop("session_on", None)
+            done.append(tid)
+    held = sum(_hold_spool(tid) for tid in done)
+    try:  # no goal is chased until a goal command or a thread reopen lifts this
+        import lean_goals
+        lean_goals.pause_by_clear()
+    except Exception:
+        pass
+    return sorted(done, key=lambda k: int(k[1:]) if k[1:].isdigit() else 0), held
 
 
 def _tagged(tag, thread, aliases):

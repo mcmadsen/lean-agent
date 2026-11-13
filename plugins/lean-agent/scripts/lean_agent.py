@@ -11811,11 +11811,30 @@ def fresh_start():
           " (checkpointed)" if checkpointed else " (no checkpoint reply in time)"), flush=True)
 
 
+def clear_all_threads():
+    """`--clear` at startup: close every open/parked thread (closed_by="clear"), hold their queued messages, tell main in
+    its brief. No thread session is restored (they are closed) and no chaser touches them."""
+    ids, held = lean_threads.clear_threads()
+    service_session.hold_queued_reports(ids)
+    service_session.note_restart("main", service_session.CLEAR_LINE)
+    line = f"--clear: closed {len(ids)} thread(s)" + (f" ({' '.join(ids)})" if ids else "") + f", held {held} queued message(s)"
+    print("lean-agent: " + line, flush=True)
+    lean_log.log("info", "startup", line)
+
+
 def cmd_up(a):
     ask_attribution_once()
     h = prepare_home()
     refresh_blocks()
-    if getattr(a, "clear", False) and not a.fresh:
+    marker = service_session.consume_clear_marker()
+    keep = getattr(a, "keep_threads", False)  # internal (clear --all --restart): a clean main session only
+    if getattr(a, "clear", False) and not keep and marker is None:
+        marker = {}  # `up --clear`: set directly
+    if keep:
+        marker = None
+        if not a.fresh:
+            fresh_start()
+    elif marker is not None and not a.fresh and (getattr(a, "clear", False) or not marker.get("fresh_done")):
         fresh_start()
     starts, loop = service_session.record_start()
     if loop and not a.fresh:
@@ -11829,6 +11848,8 @@ def cmd_up(a):
             service_session.queue_report("main", "chase", line, force=True)
         except Exception:  # noqa: BLE001
             pass
+    if marker is not None:
+        clear_all_threads()
     prev = load_json(home("up.json"), {})
     save_json(home("up.json"), {"started": now_iso(), "server_env": orchestrator_env(), "name": a.name,
                                 "local": a.local, "pid": os.getpid(), "uid": os.getuid(),
@@ -15826,7 +15847,9 @@ def cmd_goals(a):
     if a.chase_log:
         print(lean_goals.log_text())
         return 0
-    if lean_goals.paused():
+    if lean_goals.clear_paused_since():
+        print(f"(chasing paused since --clear, {lean_goals.clear_paused_since()[:16].replace('T', ' ')}: a goal command or `thread reopen` lifts it)")
+    elif lean_goals.paused():
         print("(chases paused" + (f" until {lean_goals._iso(lean_goals.read_pause_until())}" if lean_goals.read_pause_until() else "; `lean-agent goals resume`") + ")")
     print(lean_goals.table(detail=True, show_all=getattr(a, "all", False)) or ("No goals." if getattr(a, "all", False) else "No open goals."))
     return 0
@@ -15835,6 +15858,8 @@ def cmd_goals(a):
 def cmd_goal(a):
     args = list(a.args or [])
     act = args.pop(0) if args else ""
+    if act in ("add", "done", "drop", "next", "block", "unblock"):
+        lean_goals.lift_clear_pause()  # a goal command ends the pause --clear set
     if act == "add" and 1 <= len(args) <= 2:
         print(lean_goals.add(args[0], args[1] if len(args) > 1 else (lean_threads.resolve_tag() or "")))
     elif act in ("done", "drop") and len(args) == 1:
@@ -16206,7 +16231,13 @@ def cmd_service(a):
             die(f"{len(running)} worker(s) still running (lean-agent runs --running) that are not detached; they'd be "
                 f"stopped with it. Wait for them, or: lean-agent service {a.action} --yes")
         print_still_running()
-    if a.action == "restart" and getattr(a, "clear", False):
+    keep = getattr(a, "keep_threads", False)
+    if a.action in ("start", "restart") and getattr(a, "clear", False) and not keep:
+        ids = lean_threads.clearable_ids()
+        service_session.write_clear_marker(fresh_done=a.action == "restart")  # `up` consumes it once, at its start
+        print(f"--clear: {len(ids)} open thread(s) are closed when the service starts" + (f": {' '.join(ids)}" if ids else "")
+              + ". Only main runs after the restart; reopen one with `lean-agent thread reopen tN` (or o<N> in the front desk).", flush=True)
+    if a.action == "restart" and (getattr(a, "clear", False) or keep):
         fresh_start()
     if plat == "mac":
         target = f"gui/{uid}/{SERVICE_LABEL}"
@@ -16218,6 +16249,7 @@ def cmd_service(a):
             print("auto clear: " + clear_at_text())
             return 0 if is_running else 1
         if a.action == "start" and is_running:
+            service_session.drop_clear_marker()
             print("already running (lean-agent service restart restarts it with the current settings)")
             return 0
         if a.action == "stop":
@@ -16935,7 +16967,7 @@ def clear_all_table(rows, main_line):
 
 def restart_when_idle(wait=None, now=time.time, sleep=time.sleep):
     """Detached helper of `clear --all --restart`: wait until main's turn has ended (never restart under it), then do
-    what `service restart --clear` does. Returns the command run, or None when the turn did not end in time."""
+    what `service restart --keep-threads` does (main checkpoints and restarts clean; threads stay open). Returns the command run, or None when the turn did not end in time."""
     limit = now() + (env_num("LEAN_AGENT_CLEAR_RESTART_WAIT", 900) if wait is None else wait)
     calm = 0
     while now() < limit:
@@ -16946,8 +16978,8 @@ def restart_when_idle(wait=None, now=time.time, sleep=time.sleep):
     else:
         return None
     if os.path.exists(service_file()):
-        subprocess.run([sys.executable, os.path.abspath(__file__), "service", "restart", "--clear", "--yes"], check=False)
-        return "service restart --clear"
+        subprocess.run([sys.executable, os.path.abspath(__file__), "service", "restart", "--keep-threads", "--yes"], check=False)
+        return "service restart --keep-threads"
     service_session.go_fresh(restart_host=True)
     return "up restart"
 
@@ -17100,8 +17132,9 @@ def build_parser():
     s.add_argument("--local", action="store_true", help="interactive terminal session instead of Remote Control")
     s.add_argument("--fresh", action="store_true",
                    help="don't resume the previous Remote Control session (done for you when it answers 404)")
-    s.add_argument("--clear", action="store_true", help="start a new session with a clean context (a running one "
-                   "checkpoints first, up to 120 s); it starts from the brief")
+    s.add_argument("--clear", action="store_true", help="reset: a new main session with a clean context and every thread closed "
+                   "and not chased (reopen with `thread reopen tN`)")
+    s.add_argument("--keep-threads", action="store_true", help=argparse.SUPPRESS)  # internal: --clear for main only
     s.add_argument("extra", nargs=argparse.REMAINDER,
                    help="after --: extra flags for claude / claude remote-control, e.g. -- --debug")
     s.set_defaults(fn=cmd_up)
@@ -17868,8 +17901,9 @@ def build_parser():
                        "(install | status | start | restart | stop | logs | uninstall)")
     s.add_argument("action", choices=["install", "status", "start", "restart", "stop", "logs", "uninstall"])
     s.add_argument("--yes", action="store_true", help="restart/stop even while workers are running")
-    s.add_argument("--clear", action="store_true", help="restart: the orchestrator checkpoints first (up to 120 s), "
-                   "then restarts with a clean context (a new session that starts from the brief)")
+    s.add_argument("--clear", action="store_true", help="start|restart: reset: main starts with a clean context and every thread is "
+                   "closed and not chased (`thread reopen tN` brings one back); a terminal command, not for the front desk")
+    s.add_argument("--keep-threads", action="store_true", help=argparse.SUPPRESS)  # internal: --clear for main only
     s.add_argument("--name", default="lean-agent", help="install: the session name in the Claude app")
     s.add_argument("-n", type=int, default=40, help="logs: last N lines")
     s.set_defaults(fn=cmd_service)
