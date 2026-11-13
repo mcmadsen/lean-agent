@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PostToolUse hook of the sessions `lean-agent up` hosts (LEAN_AGENT_SERVICE_SESSION=1); no effect anywhere else.
+"""PostToolUse hook (and, with the argument `pre`, PreToolUse hook) of the sessions `lean-agent up` hosts (LEAN_AGENT_SERVICE_SESSION=1); no effect anywhere else.
 
 At each tool boundary it hands the session what is waiting for it as additionalContext: a thread session gets its spooled
 messages and answers ("[lean-agent: new message from main]"), main gets the queued thread reports ("[lean-agent: thread
@@ -57,7 +57,8 @@ def main():
     except Exception:  # noqa: BLE001 - LockBusy included: the items stay queued for the next call or the typed path
         return 0
     if text:
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}}))
+        event = "PreToolUse" if "pre" in sys.argv[1:] else "PostToolUse"
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}))
     return 0
 
 

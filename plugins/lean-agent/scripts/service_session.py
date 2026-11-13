@@ -676,10 +676,58 @@ def session_transcript(key="main"):
     return info(key).get("transcript") or _load(service_record(key)).get("transcript_path")
 
 
+QUIET_TEXT_END = 20  # seconds a transcript ending in a tool-less assistant message may stay quiet before the turn counts as over
+BUSY_TOOL_AFTER = 120  # seconds in one tool call before `now` calls the session busy in it
+
+
+def _quiet_secs(path):
+    try:
+        return max(0.0, time.time() - os.stat(path).st_mtime)
+    except OSError:
+        return 0.0
+
+
 def mid_turn(key="main"):
-    """True when session `key` has a transcript whose last message is not the assistant's final one."""
+    """True when session `key` has a transcript whose last message is not the assistant's final one. A last message that is
+    assistant text with no tool call and no end marker (stop_reason / turn_duration missing) counts as final once the
+    transcript has been quiet QUIET_TEXT_END seconds: otherwise such an idle session looked mid-turn for ever and nothing
+    was pasted into it."""
     path = session_transcript(key)
-    return bool(path and os.path.exists(path) and os.path.getsize(path) and not transcript_state(path)["ended"])
+    if not (path and os.path.exists(path) and os.path.getsize(path)):
+        return False
+    st = transcript_state(path)
+    if st["ended"]:
+        return False
+    return not (st.get("text_only") and _quiet_secs(path) >= QUIET_TEXT_END)
+
+
+def tool_wait(key):
+    """(seconds, one-line description) of the tool call session `key` has been inside since its transcript went quiet, or
+    (0, "") when it is not waiting on one."""
+    path = session_transcript(key)
+    if not (path and os.path.exists(path)):
+        return 0, ""
+    st = transcript_state(path)
+    if st["ended"] or not st.get("pending"):
+        return 0, ""
+    return int(_quiet_secs(path)), st["pending"]
+
+
+def delivery_reason(tid, now=None):
+    """Why a message queued for thread `tid` is not in its session yet, in one line ('' when nothing is queued)."""
+    if not spool_pending(tid):
+        return ""
+    try:
+        if not alive_thread(tid):
+            return f"{tid} session not running, restart pending"
+        if not mid_turn(tid):
+            return f"{tid} idle, paste retrying (service delivers every few seconds)"
+        secs, what = tool_wait(tid)
+        if secs >= BUSY_TOOL_AFTER:
+            return f"{tid} busy in one tool call for {max(1, secs // 60)} min: {what} (arrives at its next tool call)"
+        return f"{tid} mid-turn, arrives at its next tool call"
+    except Exception:
+        return ""
 
 
 _TS_CACHE = {}  # (kind, path, offset) -> (size, mtime_ns, result): an unchanged transcript is not parsed again
@@ -714,7 +762,7 @@ def _transcript_state(path, offset=0):
     """What the transcript at `path` (read from byte `offset`, else its last 512 KB) shows now:
     {"ended": the last message is the assistant's final one (no tool running), "ctx": tokens in the last usage
     record, "text": that final message's text, "user_ts": epoch of the last user record, "size": file size}."""
-    state = {"ended": False, "ctx": 0, "text": "", "user_ts": 0.0, "size": 0, "turns": 0}
+    state = {"ended": False, "ctx": 0, "text": "", "user_ts": 0.0, "size": 0, "turns": 0, "pending": "", "text_only": False}
     try:
         with open(path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
@@ -762,6 +810,12 @@ def _transcript_state(path, offset=0):
         content = msg.get("content") if isinstance(msg.get("content"), list) else []
         tools = any(isinstance(c, dict) and c.get("type") == "tool_use" for c in content)
         state["ended"] = not tools and (msg.get("stop_reason") == "end_turn" or bool(last.get("_ended")))
+        state["text_only"] = not tools
+        if tools:
+            tu = next(c for c in content if isinstance(c, dict) and c.get("type") == "tool_use")
+            inp = tu.get("input") if isinstance(tu.get("input"), dict) else {}
+            what = str(inp.get("command") or inp.get("file_path") or inp.get("pattern") or "").split("\n")[0]
+            state["pending"] = " ".join((str(tu.get("name") or "tool") + " " + what).split())[:120]
         state["text"] = "\n".join(c.get("text") or "" for c in content if isinstance(c, dict) and c.get("type") == "text")
     return state
 
@@ -1921,7 +1975,7 @@ def attention_items(now, after=NUDGE_AFTER, skip=()):
     import lean_threads
     out = []
     for tid, age_s in lean_threads.undelivered_threads(now, after):
-        out.append((f"undelivered:{tid}", f"{tid}: message undelivered ({int(age_s // 60)}m) -> lean-agent thread wake {tid} (or: thread discard {tid} <id>)"))
+        out.append((f"undelivered:{tid}", f"{tid}: message undelivered ({int(age_s // 60)}m; {lean_threads.undelivered_reason(tid) or 'reason unknown'}) -> lean-agent thread wake {tid} (or: thread discard {tid} <id>)"))
     held = bool(_load(wait_path()).get("why"))  # the reporter saw main and could not deliver yet
     for i in [i for i in queued_reports() if not (lean_private.hidden() and lean_private.is_private_item(thread=i.get("thread")))] if held else []:  # a thread report that main has not been given for over `after` seconds
         age_r = now - float(i.get("ts") or now)
@@ -2126,7 +2180,7 @@ def take_reports(now=None):
         else:
             hold = []
         aged = [i for i in items if now - (i.get("ts") or now) <= REPORT_MAX_AGE]
-        fresh, seen = [], {}
+        fresh, seen, seen_runs = [], {}, set()
         for i in aged:
             t = i.get("thread")
             k = report_key(t, i.get("kind"), i.get("text"))
@@ -2137,6 +2191,15 @@ def take_reports(now=None):
                 why = f"same text as r{seen[k]}, delivered in the same message"
             elif i.get("kind") in ("done", "blocked") and _internal_run_text(i.get("text")):
                 why = "helper run"
+            elif i.get("kind") == RUN_AUTO_KIND:
+                m = re.match(r"run (\S+?)(?::| )", str(i.get("text") or ""))
+                rid_ = m.group(1) if m else ""
+                if rid_ and rid_ in seen_runs:
+                    why = f"run {rid_} already in this message"
+                elif reported_at(t) > float(i.get("ts") or now):
+                    why = "the thread reported after this run finished"
+                if rid_ and not why:
+                    seen_runs.add(rid_)
             if why:
                 try:
                     report_state(t, report_seq(i), state="dropped", why=why)
@@ -2398,8 +2461,11 @@ def inject_thread(tid):
             continue
         key = "spool:" + tid + ":" + name
         try:
-            if not msg.get("text") or msg.get("new") or not ledger_claim([key]):
-                spool_release(tid, name) if (msg.get("new") or not msg.get("text")) else spool_done(tid, name)
+            if not msg.get("text") and not msg.get("new"):
+                spool_done(tid, name)  # a bare wake marker: this call is the proof the session is live (it used to stay queued, counted as an undelivered message)
+                continue
+            if msg.get("new") or not ledger_claim([key]):
+                spool_release(tid, name) if msg.get("new") else spool_done(tid, name)
                 continue
         except lean_common.LockBusy:
             spool_release(tid, name)

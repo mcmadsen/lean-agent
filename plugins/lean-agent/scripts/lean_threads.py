@@ -1776,7 +1776,7 @@ def short_text(now=None, max_lines=SHORT_ROWS, all_=False):
             wi = [i for i in waits if resolve(i.get("thread"), data["aliases"]) == tid]
             run = f"running {age(_iso_of(started.get(sorted(running[tid])[0]), last), now)}" if running.get(tid) else ""
             if (ud := undelivered_label(tid, now)):
-                row = (-1, now - undelivered_age(tid, now), tid, ud, "message not delivered yet", f"wake {tid}")
+                row = (-1, now - undelivered_age(tid, now), tid, ud, undelivered_reason(tid) or "message not delivered yet", f"wake {tid}")
             elif oq:
                 ts = oq[0].get("ts")
                 row = (-1, _epoch(ts), tid, "needs you " + age(ts, now),
@@ -1855,6 +1855,15 @@ def undelivered_age(tid, now=None):
             ts = int(n[:20]) / 1e9
             oldest = ts if oldest is None else min(oldest, ts)
     return max(0, now - oldest) if oldest is not None else 0
+
+
+def undelivered_reason(tid):
+    """Why thread `tid`'s queued message is not in its session (one line), '' when unknown."""
+    try:
+        import service_session
+        return service_session.delivery_reason(tid)
+    except Exception:
+        return ""
 
 
 def undelivered_label(tid, now=None):

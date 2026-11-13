@@ -15463,7 +15463,10 @@ def thread_action(a):
             _myq_retarget(tid, prompt)
         if not service_session._socket_listening(service_session.client_sock_path()) and not service_session.alive():
             die("no service session is up: start it with `lean-agent up` or `lean-agent service start`")
-        print(queue_and_deliver(tid, prompt, resume_old))
+        line = queue_and_deliver(tid, prompt, resume_old)
+        if getattr(a, "_wake", False) and service_session.spool_pending(tid):  # never silently left queued
+            line += "; " + (service_session.delivery_reason(tid) or "still queued, the service retries every few seconds")
+        print(line)
         return 0
     if act == "close":
         rc = close_threads(a)
