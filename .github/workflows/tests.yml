@@ -40,7 +40,7 @@ jobs:
           LEAN_TEST_SHARD: ${{ matrix.shard }}/4
       - env:
           SHARD: ${{ matrix.shard }}
-        run: i=0; for t in feedback goals spool stuck locks own_review deliver_guard poll startup_perf service_wait restart_loop orphan report_delivery runs_cli worktree_nopath tool_boundary restore fresh_delivery push_gate private private_switch runs_lost myq_ack runs_show_fast delta_effects perf load_guard worktree_reuse detach_tree runs_listing_fast undelivered_source; do if [ $((i % 4)) -eq $((SHARD - 1)) ]; then python tests/test_$t.py || exit 1; fi; i=$((i + 1)); done
+        run: i=0; for t in feedback goals spool stuck locks own_review deliver_guard poll startup_perf service_wait restart_loop orphan report_delivery runs_cli worktree_nopath tool_boundary restore fresh_delivery push_gate private private_switch runs_lost myq_ack runs_show_fast delta_effects perf load_guard worktree_reuse detach_tree resume_stdin runs_listing_fast undelivered_source; do if [ $((i % 4)) -eq $((SHARD - 1)) ]; then python tests/test_$t.py || exit 1; fi; i=$((i + 1)); done
       - if: matrix.shard == 1
         run: sh -n bin/lean-agent && sh -n plugins/lean-agent/bin/lean-agent && sh -n plugins/lean-agent/bin/lean-budget
       - name: ./install in a scratch home
