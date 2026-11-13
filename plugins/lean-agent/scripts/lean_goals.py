@@ -500,6 +500,28 @@ def resume():
         return False
 
 
+def pause_by_clear():
+    """`--clear`: no goal chases for any goal until a goal command or a thread reopen lifts it (chase_paused_by="clear").
+    A pause the user set themselves stays as it is."""
+    p = lean_common.read_json(_pause_path(), None)
+    if isinstance(p, dict) and paused() and p.get("chase_paused_by") != "clear":
+        return
+    lean_common.write_json_atomic(_pause_path(), {"until": 0, "since": lean_common.now_iso(), "chase_paused_by": "clear"})
+
+
+def clear_paused_since():
+    """The time chasing was paused by --clear, else ''."""
+    p = lean_common.read_json(_pause_path(), None)
+    return str((p or {}).get("since") or "") if isinstance(p, dict) and p.get("chase_paused_by") == "clear" else ""
+
+
+def lift_clear_pause():
+    """A goal command or a thread reopen: lifts the --clear pause (never one the user set with `goals pause`)."""
+    if clear_paused_since():
+        return resume()
+    return False
+
+
 def read_pause_until():
     p = lean_common.read_json(_pause_path(), None)
     return (p or {}).get("until") or 0 if isinstance(p, dict) else 0
