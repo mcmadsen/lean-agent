@@ -257,8 +257,8 @@ def restart_line(key, take=True):
         return ""
     if not e or time.time() - float(e.get("ts") or 0) > RESTART_MAX_AGE:
         return ""
-    if e.get("why") == CLEAR_LINE:
-        return CLEAR_LINE
+    if e.get("why") == CLEAR_LINE or str(e.get("why")).startswith("Updated lean-agent "):
+        return e["why"]
     return f"Restarted {time.strftime('%H:%M', time.localtime(float(e['ts'])))}: {e.get('why')}"
 
 

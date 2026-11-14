@@ -12147,14 +12147,17 @@ def cmd_up(a):
                 + (", ".join(held) or "nothing"))
         print("lean-agent: " + line, flush=True)
         lean_log.log("warn", "startup", line)
+        self_update_block(line)
         try:
             service_session.queue_report("main", "chase", line, force=True)
         except Exception:  # noqa: BLE001
             pass
     if marker is not None:
         clear_all_threads()
+    self_update_started(loop)
     prev = load_json(home("up.json"), {})
-    save_json(home("up.json"), {"started": now_iso(), "server_env": orchestrator_env(), "name": a.name,
+    save_json(home("up.json"), {"started": now_iso(), "started_ts": time.time(), "version": plugin_version(),
+                                "server_env": orchestrator_env(), "name": a.name,
                                 "local": a.local, "pid": os.getpid(), "uid": os.getuid(),
                                 **({} if a.fresh else {k: prev[k] for k in ("session_id", "fresh_sid") if prev.get(k)})})
     set_home_model(h, a.model)
@@ -15428,6 +15431,7 @@ SHORTCUTS = (
     ("?", "this list"),
     ("status / now", "the status table"),
     ("more", "all threads (when the table says +N more)"),
+    ("update", "sync and restart when idle (`lean-agent update`)"),
     ("s21", "summary of t21: last report, open questions, running work, next step"),
     ("a21 <question>", "send the question to t21 unchanged"),
     ("f21", "files t21 made for you, numbered"),
@@ -16225,6 +16229,9 @@ def cmd_now(a):
         print(waiting)
     for tid_, age_s in lean_threads.undelivered_threads():
         print(f"{tid_}: undelivered message ({max(1, int(age_s // 60))}m) - fix: lean-agent thread wake {tid_} (or: thread discard {tid_} <id>)")
+    note = self_update_note()
+    if note:
+        print(note)
     goals = lean_goals.now_text()
     if goals:
         print(goals)
@@ -17297,7 +17304,7 @@ def clear_all_table(rows, main_line):
     return "\n".join([f"{'Thread':<{w}}  Result"] + [f"{t:<{w}}  {r}" for t, r in rows] + [main_line])
 
 
-def restart_when_idle(wait=None, now=time.time, sleep=time.sleep):
+def restart_when_idle(wait=None, now=time.time, sleep=time.sleep, before=None):
     """Detached helper of `clear --all --restart`: wait until main's turn has ended (never restart under it), then do
     what `service restart --keep-threads` does (main checkpoints and restarts clean; threads stay open). Returns the command run, or None when the turn did not end in time."""
     limit = now() + (env_num("LEAN_AGENT_CLEAR_RESTART_WAIT", 900) if wait is None else wait)
@@ -17309,11 +17316,149 @@ def restart_when_idle(wait=None, now=time.time, sleep=time.sleep):
         sleep(1)
     else:
         return None
+    if before:
+        before()
     if os.path.exists(service_file()):
         subprocess.run([sys.executable, os.path.abspath(__file__), "service", "restart", "--keep-threads", "--yes"], check=False)
         return "service restart --keep-threads"
     service_session.go_fresh(restart_host=True)
     return "up restart"
+
+
+SELF_UPDATE_MIN_AGE = 600  # seconds: no self-restart sooner after a service start or an earlier self-restart
+
+
+def self_update_path(name="self-update.json"):
+    return home(name)
+
+
+def self_update_block(why):
+    """A restart loop blocks self-updates until the service is started from a terminal."""
+    save_json(self_update_path("self-update-blocked.json"), {"ts": time.time(), "why": why})
+
+
+def self_update_started(loop):
+    """At `up` start: a start the helper asked for completes the marker and tells main once; any other start (terminal)
+    without a loop lifts the loop block."""
+    marker = load_json(self_update_path(), {})
+    mine = isinstance(marker, dict) and marker.get("status") == "restarting"
+    if not loop and not mine:
+        try:
+            os.remove(self_update_path("self-update-blocked.json"))
+        except OSError:
+            pass
+    if not mine:
+        return
+    marker["status"] = "done"
+    marker["done_ts"] = time.time()
+    save_json(self_update_path(), marker)
+    service_session.note_restart("main", f"Updated lean-agent {marker.get('from')} -> {marker.get('to')} and restarted at your request; "
+                                         "done, do not run update again.")
+
+
+def self_update_note():
+    """One line for `now` when the helper gave up (shown once), else ''."""
+    marker = load_json(self_update_path(), {})
+    if not isinstance(marker, dict) or marker.get("status") != "gave_up" or marker.get("told"):
+        return ""
+    marker["told"] = True
+    save_json(self_update_path(), marker)
+    return f"update to {marker.get('to')} not applied: {marker.get('why')}; run `lean-agent update` again when idle"
+
+
+def self_update_refusal(running, new, now=None):
+    """Why a self-restart to `new` must not happen now, '' when it may. Order: version, loop block, loop, age, history."""
+    now = time.time() if now is None else now
+    if not running:
+        return "the running service's version is not recorded (it started before this feature); restart it once from a terminal: lean-agent service restart"
+    if running == new:
+        return ""
+    if os.path.exists(self_update_path("self-update-blocked.json")):
+        return "a restart loop was detected; restart the service from a terminal: lean-agent service restart"
+    count, loop = 0, False
+    try:
+        data = load_json(home("up-starts.json"), {})
+        count = len([t for t in (data.get("starts") or []) if isinstance(t, (int, float)) and now - t < service_session.LOOP_WINDOW])
+        loop = count >= service_session.LOOP_STARTS
+    except AttributeError:
+        pass
+    if loop:
+        return f"{count} service starts in {service_session.LOOP_WINDOW // 60} min look like a restart loop; restart from a terminal: lean-agent service restart"
+    up = load_json(home("up.json"), {})
+    started = up.get("started_ts") or 0
+    if now - float(started) < SELF_UPDATE_MIN_AGE:
+        return f"the service started {int((now - float(started)) // 60)} min ago; try again after {SELF_UPDATE_MIN_AGE // 60} min"
+    hist = load_json(self_update_path("self-update-history.json"), [])
+    hist = hist if isinstance(hist, list) else []
+    if any(h.get("to") == new for h in hist):
+        return f"the service was already self-restarted for {new}; restart from a terminal: lean-agent service restart"
+    if hist and now - float(hist[-1].get("ts") or 0) < SELF_UPDATE_MIN_AGE:
+        return f"a self-restart happened {int((now - float(hist[-1].get('ts') or 0)) // 60)} min ago; try again after {SELF_UPDATE_MIN_AGE // 60} min"
+    return ""
+
+
+def self_update_helper():
+    """Detached helper of `update`: wait for main's idle turn (15 min at most), record, restart with --keep-threads."""
+    os.environ.pop("LEAN_AGENT_SESSION_ROLE", None)  # this process is the service's controller, not a session of it
+    os.environ.pop("LEAN_AGENT_THREAD", None)
+    marker = load_json(self_update_path(), {})
+
+    def before():
+        hist = load_json(self_update_path("self-update-history.json"), [])
+        hist = hist if isinstance(hist, list) else []
+        hist.append({"from": marker.get("from"), "to": marker.get("to"), "ts": time.time()})
+        save_json(self_update_path("self-update-history.json"), hist[-20:])
+        marker["status"] = "restarting"
+        save_json(self_update_path(), marker)
+
+    ran = restart_when_idle(before=before)
+    if ran is None:
+        marker["status"] = "gave_up"
+        marker["why"] = f"main's turn did not end within {env_num('LEAN_AGENT_CLEAR_RESTART_WAIT', 900) // 60} min"
+        save_json(self_update_path(), marker)
+    return 0
+
+
+def cmd_update(a):
+    """`update`: sync (file replacement), then restart the service once main is idle when the installed version is newer
+    than the running one. Allowed from the front desk; the restart is done by a detached helper, never by this command."""
+    if getattr(a, "helper", False):
+        return self_update_helper()
+    cur = load_json(self_update_path(), {})
+    if isinstance(cur, dict) and cur.get("status") == "waiting" and pid_alive(cur.get("helper_pid")):
+        print(f"update to {cur.get('to')} is already scheduled; the service restarts when main's turn ends. End your turn now.")
+        return 0
+    env = dict(os.environ, LEAN_AGENT_VIA_UPDATE="1")
+    argv = [sys.executable, os.path.abspath(__file__), "sync"] + (["--no-pull"] if a.no_pull else []) + (["--no-learn"] if a.no_learn else [])
+    rc = subprocess.run(argv, env=env).returncode
+    if rc != 0:
+        print("lean-agent: sync failed; not restarting")
+        return rc
+    new = plugin_version()
+    up = load_json(home("up.json"), {})
+    running_now = bool(up) and pid_alive(up.get("pid"))
+    if not running_now:
+        print(f"synced to {new}; the service is not running: start it with `lean-agent service start`")
+        return 0
+    old = up.get("version") or ""
+    if old and old == new:
+        print(f"lean-agent is up to date ({new})")
+        return 0
+    why = self_update_refusal(old, new)
+    if why:
+        print(f"lean-agent: files updated to {new}, but the service is not restarted: {why}")
+        return 1
+    save_json(self_update_path(), {"from": old, "to": new, "ts": time.time(), "requested_by": "main" if lean_common.inside_service() else "terminal",
+                                   "status": "waiting"})
+    log = open(home("self-update.log"), "ab")
+    proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "update", "--helper"], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=log, start_new_session=True)
+    log.close()
+    marker = load_json(self_update_path(), {})
+    marker["helper_pid"] = proc.pid
+    save_json(self_update_path(), marker)
+    print(f"updated files to {new}; the service restarts when this turn ends (about a minute). End your turn now.")
+    return 0
 
 
 def spawn_restart_helper():
@@ -17919,6 +18064,12 @@ def build_parser():
     s.add_argument("--pulled", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(fn=cmd_sync)
 
+    s = sub.add_parser("update", help="sync, then restart the service when main is idle if the version is newer (safe from the front desk)")
+    s.add_argument("--no-pull", action="store_true", help="don't git pull; just refresh everything")
+    s.add_argument("--no-learn", action="store_true", help="don't re-learn projects")
+    s.add_argument("--helper", action="store_true", help=argparse.SUPPRESS)
+    s.set_defaults(fn=cmd_update)
+
     s = sub.add_parser("worktrees", help="list lean-agent's shared worktrees")
     s.add_argument("project", nargs="?")
     s.add_argument("--prune", action="store_true", help="drop registry entries that have no path recorded or whose directory is gone")
@@ -18392,6 +18543,8 @@ def _main(argv=None):
             a.patterns = list(a.patterns or []) + leftover
             leftover = []
     harm = lean_common.service_self_harm(argv) if a.cmd in ("service", "up", "sync", "clear") else ""
+    if a.cmd == "sync" and os.environ.get("LEAN_AGENT_VIA_UPDATE") == "1":
+        harm = ""  # run by `update`, which only replaces files
     if harm and lean_common.inside_service():
         print("lean-agent: " + lean_common.self_harm_message(harm), file=sys.stderr)
         return 2
