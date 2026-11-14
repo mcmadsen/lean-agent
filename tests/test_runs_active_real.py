@@ -117,7 +117,9 @@ class ActiveRealRun(unittest.TestCase):
             self.assertLess(secs, LIMIT, f"{args}: {secs:.1f}s\n{p.stdout[:300]}{p.stderr[:300]}")
             _, hsecs = self.hook_call("lean-agent " + " ".join(args))
             self.assertLess(hsecs, LIMIT, f"hook {args}: {hsecs:.1f}s")
-        self.assertEqual(glob.glob(os.path.join(self.home, "logs", "slow", "*")), [], "a fast command left a slow trace")
+        # only the runs commands under test: hooks (4 s trace threshold, also fired by the busy fake worker) may trace
+        # on a loaded CI runner while still inside LIMIT
+        self.assertEqual(glob.glob(os.path.join(self.home, "logs", "slow", "*-runs-*")), [], "a fast command left a slow trace")
         p, secs = self.cli("runs", "--stop", rid)
         self.assertLess(secs, 6, f"--stop took {secs:.1f}s\n{p.stdout[:400]}{p.stderr[:300]}")
         self.assertIn(f"stopped {rid}", p.stdout)
