@@ -40,7 +40,7 @@ jobs:
           LEAN_TEST_SHARD: ${{ matrix.shard }}/4
       - env:
           SHARD: ${{ matrix.shard }}
-        run: i=0; for t in socket feedback service_clear goals spool stuck locks own_review deliver_guard poll startup_perf service_wait restart_loop orphan report_delivery runs_cli worktree_nopath tool_boundary restore fresh_delivery push_gate private private_switch runs_lost myq_ack runs_show_fast runs_show_active runs_active_real delta_effects perf load_guard worktree_reuse detach_tree runs_listing_fast undelivered_source resume_stdin delivery_instant; do if [ $((i % 4)) -eq $((SHARD - 1)) ]; then python tests/test_$t.py || exit 1; fi; i=$((i + 1)); done
+        run: i=0; for t in socket feedback service_clear goals spool stuck locks own_review deliver_guard poll startup_perf service_wait restart_loop orphan report_delivery runs_cli worktree_nopath tool_boundary restore fresh_delivery push_gate private private_switch runs_lost myq_ack runs_show_fast runs_show_active runs_active_real delta_effects perf load_guard worktree_reuse detach_tree runs_listing_fast undelivered_source resume_stdin delivery_instant self_update; do if [ $((i % 4)) -eq $((SHARD - 1)) ]; then python tests/test_$t.py || exit 1; fi; i=$((i + 1)); done
       - if: matrix.shard == 1
         run: sh -n bin/lean-agent && sh -n plugins/lean-agent/bin/lean-agent && sh -n plugins/lean-agent/bin/lean-budget
       - name: ./install in a scratch home
@@ -89,6 +89,6 @@ jobs:
           {
             git log --reverse --no-merges --format='- %s' "$range"
             echo
-            echo "Update: lean-agent sync, then lean-agent service restart"
+            echo "Update: lean-agent update (or in a terminal: lean-agent sync, then lean-agent service restart)"
           } > "$RUNNER_TEMP/notes.md"
           gh release create "$tag" --target "$commit" --title "lean-agent $tag" --notes-file "$RUNNER_TEMP/notes.md"
