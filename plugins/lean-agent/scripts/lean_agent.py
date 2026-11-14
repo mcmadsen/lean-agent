@@ -17304,6 +17304,16 @@ def clear_all_table(rows, main_line):
     return "\n".join([f"{'Thread':<{w}}  Result"] + [f"{t:<{w}}  {r}" for t, r in rows] + [main_line])
 
 
+SESSION_ENV_VARS = ("LEAN_AGENT_SESSION_ROLE", "LEAN_AGENT_THREAD", "LEAN_AGENT_CALLER_THREAD", "LEAN_AGENT_SERVICE_SESSION")
+
+
+def leave_session_env():
+    """A detached helper controls the service; it is not a session of it: drop the session-role variables it inherited,
+    or the guard refuses its `service restart`."""
+    for k in SESSION_ENV_VARS:
+        os.environ.pop(k, None)
+
+
 def restart_when_idle(wait=None, now=time.time, sleep=time.sleep, before=None):
     """Detached helper of `clear --all --restart`: wait until main's turn has ended (never restart under it), then do
     what `service restart --keep-threads` does (main checkpoints and restarts clean; threads stay open). Returns the command run, or None when the turn did not end in time."""
@@ -17399,8 +17409,7 @@ def self_update_refusal(running, new, now=None):
 
 def self_update_helper():
     """Detached helper of `update`: wait for main's idle turn (15 min at most), record, restart with --keep-threads."""
-    os.environ.pop("LEAN_AGENT_SESSION_ROLE", None)  # this process is the service's controller, not a session of it
-    os.environ.pop("LEAN_AGENT_THREAD", None)
+    leave_session_env()
     marker = load_json(self_update_path(), {})
 
     def before():
@@ -17534,6 +17543,7 @@ def clear_all(a):
 def cmd_clear(a):
     """Ask the service session to checkpoint and /clear at the end of its current turn (see service_session.AutoClear)."""
     if getattr(a, "restart_helper", False):
+        leave_session_env()
         restart_when_idle()
         return 0
     if getattr(a, "status", False):

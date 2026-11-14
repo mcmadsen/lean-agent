@@ -176,6 +176,25 @@ class HelperTest(Base):
         self.assertEqual(lean_agent.self_update_note(), "")  # shown once
 
 
+class ClearHelperTest(Base):
+    def test_clear_restart_helper_is_not_refused_from_a_main_environment(self):
+        import lean_common
+        self.assertTrue(lean_common.inside_service())  # the inherited main role: the guard would refuse
+        seen = {}
+
+        def fake_run(argv, **kw):
+            seen["inside"] = lean_common.inside_service()
+            seen["harm"] = lean_common.service_self_harm(argv[2:])
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(ss, "mid_turn", return_value=False), mock.patch.object(lean_agent.subprocess, "run", side_effect=fake_run), \
+                mock.patch.object(lean_agent, "service_file", return_value=__file__), mock.patch.object(lean_agent.time, "sleep"):
+            rc = lean_agent.cmd_clear(mock.Mock(restart_helper=True))
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["harm"], "lean-agent service restart")
+        self.assertFalse(seen["inside"])
+
+
 class BriefTest(Base):
     def test_line_shown_once_after_restart(self):
         self.jwrite("self-update.json", {"from": "1.0.0", "to": "1.1.0", "status": "restarting"})
