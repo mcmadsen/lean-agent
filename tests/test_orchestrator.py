@@ -4960,6 +4960,7 @@ class CliTest(unittest.TestCase):
         import signal as _sig
         self.env["LEAN_AGENT_SESSION_QUICK_EXIT"] = "0"  # every death counts as "ran for a while"
         p, log, ss = self.start_up()
+        self.wait_for(lambda: ss.info().get("pid"), "the session pid", secs=10)
         pid = ss.info()["pid"]
         os.kill(pid, _sig.SIGKILL)
         self.wait_for(lambda: len(self.read_jsonl(log)) == 2 and ss.alive(), "the restart", secs=20)
@@ -4969,6 +4970,7 @@ class CliTest(unittest.TestCase):
         # a start that dies at once ends `up` (the service manager decides what to do)
         self.env["LEAN_AGENT_SESSION_QUICK_EXIT"] = "20"
         p, log, ss = self.start_up()
+        self.wait_for(lambda: ss.info().get("pid"), "the session pid", secs=10)  # written just after the start
         os.kill(ss.info()["pid"], _sig.SIGKILL)
         p.wait(timeout=scaled(30))
         self.assertEqual(len(self.read_jsonl(log)), 3)
