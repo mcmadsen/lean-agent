@@ -70,9 +70,12 @@ class MenubarTest(unittest.TestCase):
                     "doShellScript", "NSAppleScript"):
             self.assertNotIn(bad, src)
         cmds = set(re.findall(r"(?:spawn|run)\(\[(BIN, '[a-z]+'|'open', '-a', 'Claude')", src))
-        self.assertTrue(cmds <= {"BIN, 'map'", "BIN, 'menubar'", "'open', '-a', 'Claude'"}, cmds)
-        self.assertIn("BIN, 'map'", cmds)
-        self.assertIn("'open', '-a', 'Claude'", cmds)
+        self.assertEqual(cmds, {"BIN, 'map'", "BIN, 'menubar'", "'open', '-a', 'Claude'"})
+        self.assertEqual(len(re.findall(r"(?:spawn|run)\(", src)), len(re.findall(r"(?:spawn|run)\(\[", src)) + 2)  # 2 defs
+        self.assertNotIn("pause'", src.replace("'Pause'", ""))
+        self.assertIn("'menubar', loginBox.state", src)
+        self.assertIn("'--install' : '--uninstall'", src)
+        self.assertIn("[BIN, 'map', '--open']", src)
         self.assertIn("'map', '--json'", src)
         self.assertIn("'--svg', '--mini'", src)
 

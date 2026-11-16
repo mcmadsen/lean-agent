@@ -2,7 +2,8 @@
 // lean-agent menu bar item (macOS, JXA). UNTESTED on a real Mac when written.
 // Polls `lean-agent map --json` every 2 s (10 s while the service is down) and shows a status item with a badge;
 // clicking opens a popover (WKWebView with a local HTML file + native buttons). No network, no third-party code.
-// Only commands run: `lean-agent map ...`, `lean-agent pause|resume|menubar ...`, `open -a Claude`.
+// Only commands run: `lean-agent map ...`, `lean-agent menubar --install|--uninstall`, `open -a Claude`.
+// Pause only stops this script's own polling (the view); it runs no command.
 ObjC.import('Cocoa');
 ObjC.import('WebKit');
 
@@ -12,7 +13,7 @@ var DIR = ObjC.unwrap($.NSTemporaryDirectory()) + 'lean-agent-menubar/';
 var PAGE = DIR + 'popover.html';
 var TEAL = '#2EC4B6', AMBER = '#F2A541', RED = '#F07167';
 var snap = {service: {up: false}, nodes: [], edges: [], moving: [], inbox: 0};
-var busy = false, svgMini = '', loginOn = false;
+var viewPaused = false, busy = false, svgMini = '', loginOn = false;
 
 // Run a command through NSTask (via /usr/bin/env so PATH is searched); returns stdout or ''.
 function run(args) {
@@ -80,7 +81,7 @@ function colored(text, hex) {
 function updateButton() {
   var b = badge(snap), btn = statusItem.button;
   btn.image = drawIcon(false, b.kind === 'down');
-  btn.alphaValue = snap.paused ? 0.45 : 1.0;  // dimmed when paused
+  btn.alphaValue = viewPaused ? 0.45 : 1.0;  // dimmed when the view is paused
   if (b.text) {
     btn.imagePosition = $.NSImageLeft;
     btn.attributedTitle = colored(' ' + b.text, {teal: TEAL, amber: AMBER, red: RED}[b.kind]);
@@ -120,12 +121,12 @@ function poll() {
     var out = run([BIN, 'map', '--json']);
     try { snap = JSON.parse(out); } catch (e) { snap = {service: {up: false}, nodes: [], edges: [], moving: [], inbox: 0}; }
     updateButton();
-    pauseBtn.title = snap.paused ? 'Resume' : 'Pause';
     if (popover.shown) {
       svgMini = run([BIN, 'map', '--svg', '--mini']);
       writePage();
     }
   } finally { busy = false; }
+  if (viewPaused) return;
   var up = snap.service && snap.service.up;
   timer.invalidate;
   timer = $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(up ? 2 : 10, target, 'tick:', $(), false);
@@ -143,7 +144,11 @@ ObjC.registerSubclass({
     }},
     'openMap:': {types: ['void', ['id']], implementation: function (s) { spawn([BIN, 'map', '--open']); }},
     'frontDesk:': {types: ['void', ['id']], implementation: function (s) { spawn(['open', '-a', 'Claude']); }},
-    'pause:': {types: ['void', ['id']], implementation: function (s) { spawn([BIN, snap.paused ? 'resume' : 'pause']); }},
+    'pause:': {types: ['void', ['id']], implementation: function (s) {
+      viewPaused = !viewPaused;
+      pauseBtn.title = viewPaused ? 'Resume' : 'Pause';
+      if (viewPaused) { timer.invalidate; updateButton(); } else { poll(); }
+    }},
     'login:': {types: ['void', ['id']], implementation: function (s) {
       spawn([BIN, 'menubar', loginBox.state == $.NSControlStateValueOn ? '--install' : '--uninstall']);
     }}
