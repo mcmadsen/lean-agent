@@ -14478,7 +14478,7 @@ def start_closed_thread(tid, t, prompt, resume_old, force=False):
     elif fresh:
         msg, tokens = fresh_message(tid, prompt)
         line = f"{tid} started fresh (brief ~{kt(tokens)} tokens)"
-    elif parked:
+    elif parked and not resume_old:  # --resume-old keeps its own line (which session, how much context)
         line = f"{tid} woken: resumed its parked session"
     if parked:
         lean_threads.set_session(tid, parked=None, parked_summary=None, parked_by=None)

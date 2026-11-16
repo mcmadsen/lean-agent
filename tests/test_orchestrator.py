@@ -3948,6 +3948,7 @@ class CliTest(unittest.TestCase):
         session answers on the bridge."""
         sys.path.insert(0, os.path.join(os.path.dirname(CLI)))
         import service_session
+        import lean_sock
         fake = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "fake_interactive_claude.py")
         log = os.path.join(self.tmp.name, "session-calls.jsonl")
         before = len(self.read_jsonl(log))
@@ -3967,6 +3968,11 @@ class CliTest(unittest.TestCase):
             self.fail(f"up exited with {p.returncode}\nstdout (last lines):\n" + "\n".join(out.splitlines()[-15:])
                       + "\nstderr (last lines):\n" + "\n".join(err.splitlines()[-40:]))
         self.assertTrue(service_session.alive())
+        # ready = the session record has its pid (written just after the start) and the service socket (if it runs) answers
+        self.wait_for(lambda: p.poll() is not None or service_session.info().get("pid"), "the session pid", secs=20)
+        end = time.time() + scaled(20)  # the socket is optional (a start that failed leaves the files): wait, never fail
+        while p.poll() is None and time.time() < end and lean_sock.state(1.0)[0] != "listening":
+            time.sleep(0.1)
         return p, log, service_session
 
     def stop_up(self, p, timeout=30):
