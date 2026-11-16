@@ -3095,21 +3095,12 @@ def _cmd_run(a):
             a.worktree = None
             auto_branch = False
         if getattr(a, "worktree", None):
-            # an auto name is chosen and its branch created under one lock, so parallel runs can't pick the same name
-            with file_lock(home("worktrees", slug, ".auto-branch")) if auto_branch else contextlib.nullcontext():
-                if auto_branch:
-                    title = branch_title(getattr(a, "todo", None), task, getattr(a, "branch_name", None))
-                    a.worktree = new_branch_name(slug, project, getattr(a, "branch_type", None),
-                                                 todo_task_id(getattr(a, "todo", None)), title,
-                                                 getattr(a, "branch_version", None))
-                    print(f"branch: {a.worktree}", flush=True)
-                    note = release_note(slug, a.worktree)
-                    if note:
-                        print(note, flush=True)
-                wt_repo = project
-                wt = ensure_worktree(slug, project, a.worktree, reset=getattr(a, "reset_worktree", False),
-                                     base=getattr(a, "worktree_base", None), typed=not auto_branch,
-                                     hint=(getattr(a, "why", None), getattr(a, "todo", None)))
+            if auto_branch:
+                reserve_auto_branch(a, slug, project, task)
+            wt_repo = project
+            wt = ensure_worktree(slug, project, a.worktree, reset=getattr(a, "reset_worktree", False),
+                                 base=getattr(a, "worktree_base", None), typed=not auto_branch,
+                                 hint=(getattr(a, "why", None), getattr(a, "todo", None)))
             project = wt["path"]
             print(f"worktree: {wt['ref']} at {wt['path']} ({'reused' if wt['reused'] else 'created'}"
                   f"{', on branch ' + wt['branch'] if wt['branch'] else ', detached'}, HEAD {wt['head'][:10]})", flush=True)
@@ -8592,6 +8583,28 @@ def worktree_attach(a):
         die(f"{a.ref} now points at {head[:10]}, but checking it out in {path} failed")
     sync_worktree_registry(slug, repo)
     print(f"{a.ref} moved to {head[:10]}; {path} is on the branch")
+
+
+def reserve_auto_branch(a, slug, project, task):
+    """--worktree auto: pick a free branch name and create the branch under the .auto-branch lock, so parallel runs
+    can't pick the same name. The lock covers only the local name pick + `git branch`; the fetch comes before it and
+    the worktree checkout and its setup (ensure_worktree) after it, so the lock is held for milliseconds."""
+    base = worktree_base(slug, project, getattr(a, "worktree_base", None))
+    if git(project, "remote"):
+        git(project, "fetch", "-q", "origin")  # network: before the lock, so new_branch_name sees the remote names
+    sha = base and git(project, "rev-parse", "--verify", "--quiet", base + "^{commit}")
+    with file_lock(home("worktrees", slug, ".auto-branch")):
+        title = branch_title(getattr(a, "todo", None), task, getattr(a, "branch_name", None))
+        a.worktree = new_branch_name(slug, project, getattr(a, "branch_type", None),
+                                     todo_task_id(getattr(a, "todo", None)), title,
+                                     getattr(a, "branch_version", None))
+        if sha:  # ensure_worktree would create it itself (and say why it can't); here it only reserves the name
+            subprocess.run(["git", "-C", project, "branch", "-q", "--no-track", a.worktree, sha],
+                           capture_output=True, text=True)
+    print(f"branch: {a.worktree}", flush=True)
+    note = release_note(slug, a.worktree)
+    if note:
+        print(note, flush=True)
 
 
 def ensure_worktree(slug, repo, ref, reset=False, base=None, typed=True, hint=None):
@@ -14920,31 +14933,44 @@ def deliver_one(tid, prompt, resume_old=False, new=False):
         return f"thread {tid} started" if new else f"{tid}: " + ("delivered (session live)" if prompt else "session live")
     for _attempt in range(12):
         victim = None
-        with thread_start_lock():  # bookkeeping only: no waiting for a session to park or to become ready in here
-            if why:  # decided again under the lock: a concurrent send may have restarted it fresh already
+        action = "start"
+        # one starter per thread; the global thread-start lock below covers only the cap bookkeeping (milliseconds):
+        # stopping a stale session, delivering to a live one and the start request itself all run outside it
+        with thread_own_start_lock(tid):
+            if why:  # decided again under the per-thread lock: a concurrent send may have restarted it fresh already
                 why = auto_fresh_reason(tid) if service_session.alive(tid) else ""
             if why:
                 service_session.note_restart(tid, f"context {why} reached the thread-fresh-after limit (checkpoint kept)")
                 close_thread_session(tid)
                 force = True
                 prepare_thread_session(tid, False, True)  # new session id now: a failed start below still retries fresh
-            if service_session.alive(tid):  # another call started it while this one waited
+            with thread_start_lock():  # bookkeeping only: no waiting for a session to park or to become ready in here
+                if service_session.alive(tid):  # another call started it while this one waited
+                    action = "send"
+                else:
+                    try:
+                        make_room_for_thread_session(tid, defer_park=True)
+                    except NeedPark as np_:
+                        victim = np_
+                        action = "park"
+                    else:
+                        mark_thread_starting(tid)  # counts toward the cap from here, until the start ends
+            if action == "send":
                 if prompt:
                     ok, err = service_session.send(prompt, tid)
                     if not ok:
                         raise RuntimeError(f"{tid}: {err}")
                 return f"thread {tid} started" if new else f"{tid}: " + ("delivered (session live)" if prompt else "session live")
-            try:
-                make_room_for_thread_session(tid, defer_park=True)
-            except NeedPark as np_:
-                victim = np_
-            else:
-                since = time.time()
-                if new:
-                    name, line = start_thread_session(tid, t, prompt), ""
-                    lean_threads.set_closed(tid, False) if t.get("closed") else None
-                else:
-                    name, line = start_closed_thread(tid, t, prompt, resume_old, force)
+            if action == "start":
+                try:
+                    since = time.time()
+                    if new:
+                        name, line = start_thread_session(tid, t, prompt), ""
+                        lean_threads.set_closed(tid, False) if t.get("closed") else None
+                    else:
+                        name, line = start_closed_thread(tid, t, prompt, resume_old, force)
+                finally:
+                    clear_thread_starting(tid)
                 break
         # parked outside the lock, then the cap is checked again under it: the new thread's start is delayed, never dropped
         park_to_make_room(victim.victim, victim.line, victim.cap, victim.tid)
@@ -15244,6 +15270,37 @@ def close_thread_session(tid):
     return stopped, ok, stale
 
 
+def _starting_marker(tid):
+    return home("thread-starting", tid + ".json")
+
+
+def mark_thread_starting(tid):
+    """Reserve a session slot for a start that runs outside the thread-start lock (open_thread_sessions counts it)."""
+    os.makedirs(os.path.dirname(_starting_marker(tid)), exist_ok=True)
+    save_json(_starting_marker(tid), {"ts": time.time()})
+
+
+def clear_thread_starting(tid):
+    try:
+        os.remove(_starting_marker(tid))
+    except OSError:
+        pass
+
+
+def starting_threads():
+    """Threads whose start request is in flight (marker younger than THREAD_START_PENDING)."""
+    out, now = set(), time.time()
+    for f in glob.glob(home("thread-starting", "*.json")):
+        if now - (load_json(f, {}).get("ts") or 0) < THREAD_START_PENDING:
+            out.add(os.path.basename(f)[:-5])
+    return out
+
+
+def thread_own_start_lock(tid):
+    """Serialises the starters of ONE thread (held across its start request); never held with other threads' work."""
+    return lean_common.file_lock(home("thread-start-" + tid), timeout=THREAD_START_LOCK_WAIT)
+
+
 def open_thread_sessions():
     """The thread sessions hosted now: [{thread, title, name, pid, idle, started}], oldest id first. A thread counts
     when its recorded host process is alive (and the service lists it), or the host started less than
@@ -15257,14 +15314,15 @@ def open_thread_sessions():
     listed = service_session.sessions_request("list", timeout=5)
     listing = {x["thread"]: x for x in listed.get("sessions") or []} if listed.get("ok") else None
     out = []
-    for tid in sorted(set(recs) | {k for k, t in threads.items() if t.get("session_on")},
+    starting = starting_threads()
+    for tid in sorted(set(recs) | starting | {k for k, t in threads.items() if t.get("session_on")},
                       key=lambda k: int(k[1:]) if k[1:].isdigit() else 0):
         rec, t = recs.get(tid) or {}, threads.get(tid) or {}
         started = rec.get("host_started") or 0
         alive = bool(rec.get("host_pid")) and pid_alive(rec["host_pid"])
         pending = alive and now - started < THREAD_START_PENDING
         coming_up = bool(listing) and (listing.get(tid) or {}).get("state") == "starting"  # the service is (re)starting it
-        if alive and (listing is None or tid in listing) or pending or coming_up:
+        if alive and (listing is None or tid in listing) or pending or coming_up or tid in starting:
             x = listing.get(tid) if listing else None
             out.append({"thread": tid, "why": t.get("session_why") or "", "title": t.get("title") or "", "pid": x and x.get("pid") or rec.get("pid"),
                         "name": (x and x.get("name")) or rec.get("name") or service_session.thread_session_name(tid, t.get("title")),
@@ -16246,15 +16304,19 @@ def thread_action(a):
             if not service_session.alive():
                 prepare_thread_session(tid, resume_old)  # the next `send` starts as decided here
                 return lean_threads.cli("reopen", [tid], a.json)
-            with thread_start_lock():
-                try:
-                    make_room_for_thread_session(tid)
-                except NoSlot as exc:
-                    die(exc.full or str(exc))
+            with thread_own_start_lock(tid):
+                with thread_start_lock():  # the cap bookkeeping only; the start itself runs outside it
+                    try:
+                        make_room_for_thread_session(tid)
+                    except NoSlot as exc:
+                        die(exc.full or str(exc))
+                    mark_thread_starting(tid)
                 try:
                     name, line = start_closed_thread(tid, t, None, resume_old)
                 except RuntimeError as exc:
                     die(str(exc))
+                finally:
+                    clear_thread_starting(tid)
             print(line + f': Remote Control "{name}"')
             return 0
     if act == "list":
