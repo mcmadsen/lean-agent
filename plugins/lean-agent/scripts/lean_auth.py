@@ -214,11 +214,11 @@ def run_setup_token(claude, out=None):
     return extract(buf.decode("utf-8", "replace")), proc.returncode
 
 
-def auth_status(claude=None):
+def auth_status(claude=None, timeout=30):
     """`claude auth status --json` as a dict ({} when it cannot be read)."""
     claude = claude or os.environ.get("LEAN_AGENT_CLAUDE") or "claude"
     try:
-        r = subprocess.run([claude, "auth", "status", "--json"], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        r = subprocess.run([claude, "auth", "status", "--json"], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         data = json.loads(r.stdout)
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError, subprocess.SubprocessError):

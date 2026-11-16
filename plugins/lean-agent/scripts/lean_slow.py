@@ -95,9 +95,11 @@ def prune(keep=KEEP):
             pass
 
 
-def newest(n=3):
-    """[(path, [first lines of the deepest frame])] of the newest traces, newest first."""
+def newest(n=3, hours=None, now=None):
+    """[(path, [first lines of the deepest frame], age seconds)] of the newest traces, newest first; with `hours`
+    only those written within that time. Reads at most the first 64 KB of each file (a trace is a few KB)."""
     out = []
+    now = now or time.time()
     try:
         files = sorted(f for f in os.listdir(folder()) if f.endswith(".txt"))[::-1]
     except OSError:
@@ -105,19 +107,56 @@ def newest(n=3):
     for f in files:
         p = os.path.join(folder(), f)
         try:
+            age = max(0, now - os.path.getmtime(p))
+            if hours is not None and age > hours * 3600:
+                continue
             with open(p, errors="replace") as fh:
-                lines = fh.read().splitlines()
+                lines = fh.read(65536).splitlines()
         except OSError:
             continue
         if not lines:
             continue
         deep = next((i for i, l in enumerate(lines) if l.startswith("Current thread") or l.startswith("Thread")), None)
         frame = lines[deep + 1:deep + 3] if deep is not None else lines[:2]
-        out.append((p, [l.strip() for l in frame]))
+        out.append((p, [l.strip() for l in frame], age))
         if len(out) >= n:
             break
     return out
 
 
-def report_lines(n=3):
-    return [f"slow trace {p}: " + " | ".join(frame) for p, frame in newest(n)]
+def count_older(hours=24, now=None):
+    """How many trace files are older than `hours` (names only plus one stat each, no reads)."""
+    now = now or time.time()
+    c = 0
+    try:
+        for f in os.listdir(folder()):
+            if f.endswith(".txt"):
+                try:
+                    c += now - os.path.getmtime(os.path.join(folder(), f)) > hours * 3600
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return c
+
+
+def short_path(p):
+    """The trace's path below the lean home, with the user's home folder written as ~ (never a mangled name)."""
+    home = os.path.abspath(os.path.expanduser("~"))
+    p = os.path.abspath(p)
+    return "~" + p[len(home):] if p.startswith(home + os.sep) else p
+
+
+def age_text(secs):
+    secs = int(secs)
+    return f"{secs // 3600}h {secs % 3600 // 60}m ago" if secs >= 3600 else f"{secs // 60}m ago" if secs >= 60 else f"{secs}s ago"
+
+
+def report_lines(n=3, hours=24, now=None):
+    """Lines for the traces of the last `hours` hours (newest n), plus one count line for older ones."""
+    lines = [f"slow trace {short_path(p)} ({age_text(age)}): " + " | ".join(frame)
+             for p, frame, age in newest(n, hours, now)]
+    old = count_older(hours, now)
+    if old:
+        lines.append(f"{old} older slow trace(s) (over {hours} h) in {short_path(folder())}")
+    return lines
