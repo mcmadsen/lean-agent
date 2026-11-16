@@ -167,15 +167,16 @@ class Live:
         text = f"{type(exc).__name__}: {exc}"[:200]
         now = time.monotonic()
         with self.lock:
-            self.err = text
             log_it = now - self.err_logged >= LOG_EVERY_S
             if log_it:
                 self.err_logged = now
-        if log_it:
+        if log_it:  # log first: nobody sees the error (broadcast, or a new client's frame) before it is logged
             try:
                 self.log("warn", "map", "live map snapshot failed: " + text)
             except Exception:
                 pass
+        with self.lock:
+            self.err = text
         self._broadcast(json.dumps({"type": "error", "text": text}))
 
     def _first(self, c):

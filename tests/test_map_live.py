@@ -303,6 +303,9 @@ class RobustTest(unittest.TestCase):
         while self.calls < n + 3 and time.time() < deadline:
             time.sleep(0.05)
         self.assertGreaterEqual(self.calls, n + 3)  # the loop thread is still going
+        deadline = time.time() + WAIT
+        while not self.logs and time.time() < deadline:
+            time.sleep(0.05)
         self.assertEqual(len(self.logs), 1)  # rate limited
         self.assertIn("kaboom", self.logs[0][2])
         self.mode = "ok"
