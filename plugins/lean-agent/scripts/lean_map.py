@@ -503,7 +503,7 @@ def _answers(rec):
         return False
 
 
-def open_detached(browser=True, out=None, wait=1.5):
+def open_detached(browser=True, out=None, wait=5.0):  # a fresh interpreter on a busy Mac or a slow CI runner can need seconds to come up
     """`map --open`: start the page server as a detached process (or reuse the running one), open the browser when there is
     one, print the URL and return at once. Returns the URL, or None when the server did not come up."""
     import subprocess
