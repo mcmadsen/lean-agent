@@ -16807,6 +16807,68 @@ def service_file():
     return os.path.expanduser("~/.config/systemd/user/lean-agent.service")
 
 
+MENUBAR_LABEL = SERVICE_LABEL.rsplit(".", 1)[0] + ".menubar"
+MENUBAR_UNSUPPORTED = ("the menu bar item is macOS-only; on Windows the tray item needs lean-agent's service on Windows "
+                       "first (not supported yet)")
+
+
+def menubar_script():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "menubar.js")
+
+
+def menubar_plist_path():
+    return os.path.expanduser(f"~/Library/LaunchAgents/{MENUBAR_LABEL}.plist")
+
+
+def menubar_plist(script, bin_, log=None):
+    """The LaunchAgent for the menu bar item (a pure function: a dict for plistlib)."""
+    d = {"Label": MENUBAR_LABEL, "ProgramArguments": ["osascript", "-l", "JavaScript", script],
+         "RunAtLoad": True, "KeepAlive": False,
+         "EnvironmentVariables": {"PATH": os.environ.get("PATH", ""), "LEAN_AGENT_BIN": bin_}}
+    if log:
+        d["StandardOutPath"] = d["StandardErrorPath"] = log
+    return d
+
+
+def cmd_menubar(a):
+    if service_platform() != "mac":
+        print(MENUBAR_UNSUPPORTED, file=sys.stderr)
+        return 2
+    tool = os.environ.get("LEAN_AGENT_LAUNCHCTL") or "launchctl"
+    uid = str(os.getuid()) if hasattr(os, "getuid") else "0"
+    path = menubar_plist_path()
+
+    def ctl(*args):
+        p = subprocess.run([tool, *args], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        return p.returncode, (p.stdout + p.stderr).strip()
+
+    if a.install:
+        import plistlib
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        log = home("logs", "menubar.log")
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        with open(path, "wb") as fh:
+            plistlib.dump(menubar_plist(menubar_script(), os.path.join(PLUGIN_ROOT, "bin", "lean-agent"), log), fh)
+        ctl("bootout", f"gui/{uid}/{MENUBAR_LABEL}")
+        rc, out = ctl("bootstrap", f"gui/{uid}", path)
+        if rc != 0:
+            die(f"launchctl bootstrap failed: {out[:300]}")
+        print(f"menu bar item installed ({path}); it starts at login")
+        return 0
+    if a.uninstall:
+        ctl("bootout", f"gui/{uid}/{MENUBAR_LABEL}")
+        if os.path.exists(path):
+            os.remove(path)
+        print("menu bar item removed")
+        return 0
+    if a.status:
+        rc, _ = ctl("print", f"gui/{uid}/{MENUBAR_LABEL}")
+        print(f"menu bar item: {'installed' if os.path.exists(path) else 'not installed'}, "
+              f"{'loaded' if rc == 0 else 'not loaded'}")
+        return 0
+    os.execvp("osascript", ["osascript", "-l", "JavaScript", menubar_script()])
+
+
 SERVICE_STOP_WAIT = 90   # seconds `service stop|restart` waits for the old service to exit before it kills it
 SERVICE_TERM_WAIT = 10   # seconds between SIGTERM and SIGKILL of the old service's process group
 
@@ -18623,6 +18685,12 @@ def build_parser():
     s.add_argument("--append", action="store_true")
     s.add_argument("--text", help="the content (default: stdin)")
     s.set_defaults(fn=cmd_doc)
+
+    s = sub.add_parser("menubar", help="macOS menu bar item showing the live map (--install: start at login)")
+    s.add_argument("--install", action="store_true", help="write a LaunchAgent and load it")
+    s.add_argument("--uninstall", action="store_true", help="unload and remove the LaunchAgent")
+    s.add_argument("--status", action="store_true")
+    s.set_defaults(fn=cmd_menubar)
 
     s = sub.add_parser("map", help="the code's import graph (no model): who uses what, deps, routes, unused files; "
                        "with no project (or --json/--svg/--mini/--watch/--open): the live map of the service")

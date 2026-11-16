@@ -181,6 +181,12 @@ Other ways to run the orchestrator:
 | `lean-agent output <command> [--grep TEXT]` | In brief mode (`LEAN_AGENT_BRIEF=1`, set for the orchestrator, or `--brief`), `optimize`, `tracker`, `stats`, `budget`, `cards`, `limits`, `projects`, `recipes` and `savings` print one line per item (at most 20); this prints what was left out. `--full` prints a command in full. `lean-agent output <path|task-id>` also reads a Claude Code background task's output file (only under a claude temp `tasks/` dir) and prints its first and last 20 lines. Reviews in brief mode print the verdict and one line per finding; `runs --show <id>` has the rest. |
 | `lean-agent savings [--days 7] [-p project] [--measure]` | Estimated tokens saved: worker context (vs a normal Claude Code turn in that project: measured with `--measure`, one tiny Haiku call, else assumed 30,000), model choice (vs Sonnet for every worker), and output the squeezer shortened. Each run's summary also has a `saved ~N` line. |
 
+## Live map
+
+`lean-agent map --open` shows the live map in the browser. On macOS, `lean-agent menubar --install` adds a menu bar
+item with the mini map, what is moving now and the inbox count (it starts at login; `--uninstall` removes it,
+`--status` shows it).
+
 ## Run it as a service
 
 Why: `lean-agent up` (the front desk and the thread sessions) keeps running across logins, restarts and closed
