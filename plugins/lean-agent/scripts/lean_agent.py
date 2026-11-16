@@ -12108,7 +12108,7 @@ def cmd_doctor(a):
     import lean_maplive
     ok, text = lean_maplive.doctor_line(lean_sock.home())
     report(ok, text)
-    report(True, "live map: the Claude Code desktop pane (lean-agent map --json|--svg) or the live page (lean-agent map --html)")
+    report(True, "live map: the Claude Code desktop pane (lean-agent map --json|--svg) or the live page (lean-agent map --url)")
     fa = service_session.fresh_after()
     report(True, "auto fresh: " + service_session.fresh_text(fa) + (
         f" (thread sessions continue fresh at ~{kt(int(service_session.fresh_context_threshold(fa[1], service_session.up_compact_at())))} context)"
@@ -14676,7 +14676,7 @@ def _fe(fn, a):
 
 
 def cmd_map(a):
-    if not a.project or a.svg or a.mini or a.watch or a.html or getattr(a, "probe", False):
+    if not a.project or a.svg or a.mini or a.watch or a.html or getattr(a, "probe", False) or getattr(a, "url", False):
         return cmd_live_map(a)
     def run(fe, slug, path, a):
         root = fe.work_dir(slug, path, a.dir)
@@ -15869,7 +15869,7 @@ SHORTCUTS = (
     ("status / now", "the status table"),
     ("compare <project>", "overhead of a clean session vs lean-agent's: `lean-agent compare <project>`"),
     ("more", "all threads (when the table says +N more)"),
-    ("map", "the live map: run `lean-agent map --html`, reply with the printed path (clickable)"),
+    ("map", "the live map: run `lean-agent map --url`, reply with the printed URL (clickable; `map --html` only if a file is asked for)"),
     ("update", "sync and restart when idle (`lean-agent update`)"),
     ("s21", "summary of t21: last report, open questions, running work, next step"),
     ("a21 <question>", "send the question to t21 unchanged"),
@@ -15941,6 +15941,14 @@ def cmd_live_map(a):
         except (KeyboardInterrupt, BrokenPipeError):
             pass
         return 0
+    if getattr(a, "url", False):
+        import lean_maplive
+        u = lean_maplive.page_url(lean_sock.home())
+        if not u:
+            print("live map endpoint not running: start the service (lean-agent up), then run lean-agent map --url again")
+            return 1
+        print(u)
+        return 0
     if getattr(a, "probe", False):
         import lean_maplive
         print(lean_maplive.write_probe(lean_sock.home()))
@@ -15949,6 +15957,9 @@ def cmd_live_map(a):
     if getattr(a, "html", False):
         import lean_maplive
         print(lean_maplive.write_html(lean_sock.home(), snap, getattr(a, "out", None)))
+        u = lean_maplive.page_url(lean_sock.home())
+        if u:
+            print(u)
         return 0
     if getattr(a, "svg", False) or getattr(a, "mini", False):
         mini = bool(getattr(a, "mini", False))
@@ -18779,6 +18790,7 @@ def build_parser():
     s.add_argument("--mini", action="store_true", help="live map: the small round-node SVG")
     s.add_argument("--html", action="store_true", help="live map: write one self-contained live page (open it in the preview), print its path")
     s.add_argument("--out", metavar="FILE", help="with --html: where to write the page")
+    s.add_argument("--url", action="store_true", help="live map: print the localhost URL of the live page (open it in a browser)")
     s.add_argument("--probe", action="store_true", help="live map: write a diagnostics page (what the preview allows: JS, WebSocket, fetch, img), print its path")
     s.add_argument("--watch", action="store_true", help="live map: one JSON line whenever it changes (twice a second at most)")
     s.add_argument("--width", type=int)

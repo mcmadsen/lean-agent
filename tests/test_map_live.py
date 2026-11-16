@@ -222,6 +222,14 @@ class HttpRoutesTest(unittest.TestCase):
         self.assertIn(b"lean-agent live map", body)
         self.assertIn(self.live.token.encode(), body)
 
+    def test_page_has_legend_and_footer(self):
+        _, _, body = http_get(self.live.port, f"/?t={self.live.token}")
+        text = body.decode()
+        for w in ("Live map", "Message to an agent", "Report or result back", "Socket request", "Idle link", "Undelivered or stuck",
+                  "Lines fade 30 s after the last message · click a node for details", "Pause", "updates as messages move"):
+            self.assertIn(w, text)
+        self.assertEqual([u for u in re.findall(r"https?://[^/'\" ]*", text) if "127.0.0.1" not in u], [])
+
     def test_cached_and_nothing_when_idle(self):
         time.sleep(0.5)
         self.assertEqual(self.calls, 0)
@@ -442,6 +450,25 @@ class SelectTest(unittest.TestCase):
         self.assertEqual(s["more"], 79 - 12)
 
 
+class UrlTest(unittest.TestCase):
+    def test_page_url(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.assertIsNone(lean_maplive.page_url(tmp))
+        live = lean_maplive.Live(snap, tmp).start()
+        self.addCleanup(live.stop)
+        self.assertEqual(lean_maplive.page_url(tmp), f"http://127.0.0.1:{live.port}/?t={live.token}")
+
+    def test_cli_url_without_service(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        env = clean_environ()
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "lean_agent.py"), "map", "--url"], capture_output=True, text=True,
+                           env=dict(env, HOME=tmp, LEAN_AGENT_TEST="1"), timeout=60)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not running", r.stdout)
+
+
 class ProbeTest(unittest.TestCase):
     def test_probe_written(self):
         tmp = tempfile.mkdtemp()
@@ -476,8 +503,8 @@ const { chromium } = require('playwright');
     await new Promise(r => setTimeout(r, 300));
   }
   await new Promise(r => setTimeout(r, 500));
-  const rects = await pg.locator('#map svg rect').count();
-  const imgs = await pg.locator('#map img').count();
+  const rects = await pg.locator('#wrap .nd').count();
+  const imgs = await pg.locator('#wrap img').count();
   const why = await pg.locator('#why').innerText().catch(() => '');
   if (shot) await pg.screenshot({ path: shot });
   console.log(JSON.stringify({ chip, rects, imgs, why }));
@@ -507,6 +534,61 @@ def have_playwright():
         return False
 
 
+UI_JS = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const { url, shots, steps } = JSON.parse(process.argv[2]);
+  const b = await chromium.launch();
+  const out = {};
+  const wait = async (pg, fn, arg, ms = 30000) => { try { await pg.waitForFunction(fn, arg, { timeout: ms }); return true; } catch (e) { return false; } };
+  const chipIs = (t) => () => document.getElementById('chip').innerText === t;
+  // desktop, dark
+  let pg = await b.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: 'dark' });
+  await pg.goto(url);
+  out.socket = await wait(pg, () => document.getElementById('chip').innerText === 'live (socket)');
+  await wait(pg, () => document.querySelectorAll('.nd').length > 3);
+  out.nodes = await pg.locator('.nd').count();
+  out.legend = await pg.locator('footer').innerText();
+  if (shots) await pg.screenshot({ path: shots + '/dark-1280.png', fullPage: true });
+  // click a node
+  const id = steps.node;
+  await pg.locator('.nd[data-id="' + id + '"]').click();
+  out.panelOpen = await pg.locator('#panel.open').count();
+  out.panelText = await pg.locator('#panel').innerText();
+  await pg.keyboard.press('Escape');
+  out.panelClosedByEsc = (await pg.locator('#panel.open').count()) === 0;
+  // keyboard: focus + Enter
+  await pg.locator('.nd[data-id="' + id + '"]').focus();
+  await pg.keyboard.press('Enter');
+  out.panelByKey = await pg.locator('#panel.open').count();
+  await pg.locator('#px').click();
+  out.panelClosedByButton = (await pg.locator('#panel.open').count()) === 0;
+  // pause
+  const inbox = () => document.getElementById('inbox').innerText;
+  await pg.waitForTimeout(1500);
+  await pg.locator('#pause').click();
+  out.pausedChip = await pg.locator('#chip').innerText();
+  const before = await pg.locator('#inbox').innerText();
+  await pg.waitForTimeout(3500);
+  out.heldWhilePaused = (await pg.locator('#inbox').innerText()) === before;
+  await pg.locator('#pause').click();
+  out.resumed = await wait(pg, (b4) => document.getElementById('inbox').innerText !== b4, before);
+  out.chipAfterResume = await pg.locator('#chip').innerText();
+  await pg.close();
+  // narrow, light
+  pg = await b.newPage({ viewport: { width: 400, height: 800 }, colorScheme: 'light' });
+  await pg.goto(url);
+  await wait(pg, () => document.getElementById('chip').innerText === 'live (socket)');
+  await wait(pg, () => document.querySelectorAll('.nd').length > 3);
+  out.narrow = await pg.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
+  out.narrowBg = await pg.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  if (shots) await pg.screenshot({ path: shots + '/light-400.png', fullPage: true });
+  await b.close();
+  console.log(JSON.stringify(out));
+})().catch(e => { console.log(JSON.stringify({ error: String(e).slice(0, 400) })); });
+"""
+
+
 class BrowserTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -519,6 +601,9 @@ class BrowserTest(unittest.TestCase):
         self.js = os.path.join(self.tmp, "b.js")
         with open(self.js, "w") as fh:
             fh.write(BROWSER_JS)
+        self.js_ui = os.path.join(self.tmp, "ui.js")
+        with open(self.js_ui, "w") as fh:
+            fh.write(UI_JS)
 
     def run_page(self, html, want, shot=""):
         f = os.path.join(self.tmp, "page.html")
@@ -557,6 +642,49 @@ class BrowserTest(unittest.TestCase):
         d = self.run_page(self.live_html(snap(), "connect-src 'none'; img-src 'none'"), "preview blocks live updates")
         self.assertEqual(d["chip"], "preview blocks live updates")
         self.assertIn("Open in browser", d["why"])
+
+    def test_window_ui(self):
+        n = [0]
+        now = time.time()
+        lean_map.reset()
+        lean_map.VERSION = "9.9.9"
+        lean_map.record("message", "main", "service", "send · t192", now=now)
+        lean_map.record("message", "service", "t192", "deliver", node="t192", dir="to", text="x", now=now)
+        lean_map.record_request("pending", 1.0, now=now)
+        self.addCleanup(lean_map.reset)
+
+        def fn():
+            n[0] += 1
+            ctx = {"service": {"pid": 1, "version": "9.9.9", "threads": 3, "up_s": 7200, "cpu_pct": 3.0, "socket_ms": 0.6}, "inbox": n[0],
+                   "threads": [{"id": "t182", "title": "Parser fix", "state": "parked", "detail": "parked", "idle_s": 9000},
+                               {"id": "t192", "title": "E2E checks", "state": "active", "detail": "mid-turn", "idle_s": 1, "mid": True},
+                               {"id": "t196", "title": "PR review", "state": "idle", "detail": "idle 10 s", "idle_s": 10}],
+                   "runs": [{"id": "r-8545", "thread": "t192", "model": "sonnet", "age_s": 700, "progress_s": 20, "alive": True}],
+                   "desk_idle_s": 40}
+            return lean_map.build(ctx)
+        live = lean_maplive.Live(fn, self.tmp, interval=0.5).start()
+        self.addCleanup(live.stop)
+        shots = os.environ.get("LEAN_SHOTS") or "/tmp/claude-0/-home-user-lean-agent/ecf7a38c-d764-5e31-b359-10cc63491292/scratchpad/shots"
+        arg = {"url": lean_maplive.page_url(self.tmp), "shots": shots if os.path.isdir(shots) else "", "steps": {"node": "t192"}}
+        r = subprocess.run([NODE, self.js_ui, json.dumps(arg)], capture_output=True, text=True, timeout=180, env=node_env())
+        self.assertTrue(r.stdout.strip(), r.stderr)
+        d = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertNotIn("error", d)
+        self.assertTrue(d["socket"])
+        self.assertGreaterEqual(d["nodes"], 6)
+        for w in ("Message to an agent", "Undelivered or stuck", "click a node for details"):
+            self.assertIn(w, d["legend"])
+        self.assertEqual(d["panelOpen"], 1)
+        self.assertIn("E2E checks", d["panelText"])
+        self.assertIn("mid-turn", d["panelText"])
+        self.assertTrue(d["panelClosedByEsc"])
+        self.assertEqual(d["panelByKey"], 1)
+        self.assertTrue(d["panelClosedByButton"])
+        self.assertEqual(d["pausedChip"], "paused")
+        self.assertTrue(d["heldWhilePaused"])
+        self.assertTrue(d["resumed"])
+        self.assertEqual(d["chipAfterResume"], "live (socket)")
+        self.assertLessEqual(d["narrow"][0], d["narrow"][1])  # no horizontal scroll at 400 px
 
     def test_no_data_when_snapshots_fail(self):
         def boom():
