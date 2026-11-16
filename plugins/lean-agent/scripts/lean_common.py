@@ -204,8 +204,10 @@ def recent_long_holds(n=10, since_hours=24):
     """The last `n` logged long lock waits/holds/skips from the last `since_hours` hours (dicts)."""
     out = []
     try:
-        with open(lock_log_path()) as fh:
-            lines = fh.readlines()[-500:]
+        with open(lock_log_path(), "rb") as fh:  # the tail only: the log grows for months
+            end = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, end - 131072))
+            lines = fh.read().decode("utf-8", errors="replace").splitlines()[-500:]
     except OSError:
         return out
     cutoff = time.time() - since_hours * 3600

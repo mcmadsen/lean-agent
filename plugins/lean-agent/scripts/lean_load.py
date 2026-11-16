@@ -101,7 +101,7 @@ def processes():
     """[{pid, ppid, cpu, rss_mb, age, cmd}] of the processes whose command line is lean-agent's (this one excluded)."""
     try:
         out = subprocess.run(["ps", "-axo", "pid=,ppid=,pcpu=,rss=,etime=,command="], capture_output=True, text=True,
-                             timeout=10).stdout
+                             timeout=3).stdout
     except (OSError, subprocess.SubprocessError):
         return []
     res = []

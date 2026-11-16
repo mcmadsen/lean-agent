@@ -81,5 +81,51 @@ class GuideCurrentTest(unittest.TestCase):
         self.assertEqual(run(repo, "print(L.guide_states(L.home('home')))"), "{'guide': 'current', 'desk': 'current'}")
 
 
+class DoctorSpeedTest(unittest.TestCase):
+    """doctor on a busy home (big logs, many traces/runs/threads, slow external tools) stays quick."""
+
+    def build(self, tmp):
+        import json
+        home = os.path.join(tmp, "lh")
+        for d in ("logs/slow", "running", "polls", "runs", "worktrees"):
+            os.makedirs(os.path.join(home, d))
+        line = "2026-01-01T00:00:00 INFO  startup: service start\n" + "2026-01-01T00:00:01 INFO  noise " + "x" * 200 + "\n"
+        for name in ("logs/debug.log", "lock-holds.log"):
+            with open(os.path.join(home, name), "w") as fh:
+                fh.write(line * 60000)  # ~13 MB each
+        for i in range(60):
+            with open(os.path.join(home, "logs", "slow", f"2026010{i % 9}T0000{i:02d}-cmd-{i}.txt"), "w") as fh:
+                fh.write("Thread 0x1 (most recent call first):\n  File \"x.py\", line 1 in wait\n" + "pad\n" * 20000)
+        for i in range(400):
+            with open(os.path.join(home, "runs", f"r{i}.json"), "w") as fh:
+                json.dump({"id": f"r{i}", "status": "done", "prompt": "p" * 500}, fh)
+        threads = {f"t{i}": {"title": f"thread {i}", "closed": True, "events": []} for i in range(80)}
+        with open(os.path.join(home, "threads.json"), "w") as fh:
+            json.dump({"threads": threads}, fh)
+        bindir = os.path.join(tmp, "bin")
+        os.makedirs(bindir)
+        for tool in ("claude", "ps", "launchctl", "du", "security", "gh"):  # each external call is slow (0.6 s)
+            with open(os.path.join(bindir, tool), "w") as fh:
+                fh.write("#!/bin/sh\nsleep 0.6\n")
+            os.chmod(os.path.join(bindir, tool), 0o755)
+        return home, bindir
+
+    def test_doctor_is_under_1_5_s_and_verbose_names_slow_checks(self):
+        import shutil
+        import subprocess
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        home, bindir = self.build(tmp)
+        env = dict(os.environ, LEAN_AGENT_HOME=home, HOME=tmp, PATH=bindir + ":/usr/bin:/bin", LEAN_AGENT_TEST="1")
+        agent = os.path.join(SCRIPTS, "lean_agent.py")
+        subprocess.run([sys.executable, agent, "doctor"], env=env, cwd=tmp, capture_output=True, text=True)  # warm .pyc
+        t0 = time.time()
+        r = subprocess.run([sys.executable, agent, "doctor", "--verbose"], env=env, cwd=tmp, capture_output=True, text=True)
+        took = time.time() - t0
+        self.assertIn("doctor:", r.stdout, r.stderr)
+        self.assertIn("timing: total", r.stdout)
+        self.assertLess(took, 1.5, r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
