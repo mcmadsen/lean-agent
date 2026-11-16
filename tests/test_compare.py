@@ -57,7 +57,7 @@ print(json.dumps({"type": "result", "subtype": "success", "result": text, "num_t
 '''
 
 
-class Compare(unittest.TestCase):
+class CompareBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.proj = os.path.join(self.tmp, "proj")
@@ -88,6 +88,9 @@ class Compare(unittest.TestCase):
         self.assertEqual(len(files), 1)
         return json.load(open(files[0])), files[0]
 
+
+
+class Compare(CompareBase):
     def test_overhead_table_and_attribution(self):
         r = self.cli("compare", "proj", "--max-usd", "1")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -188,6 +191,132 @@ class Compare(unittest.TestCase):
         tid, line, kind = lean_threads.decide("compare proj", lean_threads.load())
         self.assertEqual(kind, "job")
         self.assertIn("lean-agent compare proj", line)
+
+
+class MemoryBreakdown(CompareBase):
+    """Memory sources per session kind, usage evidence and suggestions, on a fixture with nested CLAUDE.md, an @import and cards."""
+
+    def setUp(self):
+        super().setUp()
+        with open(os.path.join(self.tmp, "CLAUDE.md"), "w") as fh:  # a CLAUDE.md in a parent folder
+            fh.write("# parent\n" + "p" * 400 + "\n")
+        os.makedirs(os.path.join(self.proj, "docs"))
+        with open(os.path.join(self.proj, "docs", "arch.md"), "w") as fh:
+            fh.write("# Architecture overview\n" + "a" * 6000 + "\nIMPORT-SECRET\n")
+        with open(os.path.join(self.proj, "CLAUDE.md"), "a") as fh:
+            fh.write("see @docs/arch.md\n")
+        sys.path.insert(0, SCRIPTS)
+        self.old_env = {k: os.environ.get(k) for k in ("LEAN_AGENT_HOME", "HOME", "LEAN_AGENT_TEST")}
+        os.environ.update(LEAN_AGENT_HOME=os.path.join(self.tmp, "home"), HOME=self.tmp, LEAN_AGENT_TEST="1")
+        import lean_agent
+        self.la = lean_agent
+        self.cards = [{"id": "card-a", "title": "A", "kind": "note", "text": "a" * 400, "tokens": 100, "core": True, "offered": 0, "used": 0, "unneeded": 0},
+                      {"id": "card-b", "title": "B", "kind": "note", "text": "b" * 400, "tokens": 100, "core": True, "offered": 0, "used": 0, "unneeded": 0}]
+        self.la.save_cards(self.slug(), self.cards)
+
+    def tearDown(self):
+        for k, v in self.old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def slug(self):
+        return next(iter(self.la.projects())) if hasattr(self, "la") else None
+
+    def breakdown(self, kinds=("clean", "worker", "thread session", "front desk")):
+        import lean_compare
+        self.la.prepare_home()
+        return lean_compare, lean_compare.memory_breakdown(self.la, self.slug(), self.proj, list(kinds))
+
+    def test_sources_per_kind(self):
+        _, by = self.breakdown()
+        clean = {s["name"]: s for s in by["clean"]}
+        self.assertIn("CLAUDE.md", clean)
+        self.assertIn("docs/arch.md", clean)  # the @import
+        self.assertGreater(clean["docs/arch.md"]["tokens"], 1400)
+        self.assertEqual(clean["docs/arch.md"]["kind"], "import")
+        self.assertTrue(any(n.endswith("CLAUDE.md") and n != "CLAUDE.md" for n in clean))  # the parent's, nested
+        self.assertTrue(any(s["name"].startswith("card:") for s in by["worker"]))
+        self.assertTrue(any(s["kind"] == "protocol" for s in by["worker"]))
+        thread = [s["name"] for s in by["thread session"]]
+        self.assertTrue(any("thread brief" in n for n in thread))
+        self.assertTrue(any("thread line" in n for n in thread))
+        self.assertFalse(any("front-desk.md" in n for n in thread))  # threads leave the front-desk guide out
+        desk = [s["name"] for s in by["front desk"]]
+        self.assertTrue(any("front-desk.md" in n for n in desk))
+        self.assertTrue(any("hand-off" in n for n in desk))
+        self.assertFalse(any(n == "CLAUDE.md" for n in desk))
+
+    def test_usage_counts_from_feedback(self):
+        lc, by = self.breakdown(("worker",))
+        ids = [s["name"][5:] for s in by["worker"] if s["kind"] == "card"]
+        self.assertTrue(ids)
+        cid = ids[0]
+        ledger = []
+        for i in range(4):
+            wd = os.path.join(self.tmp, f"run{i}")
+            os.makedirs(wd)
+            fb = {"used": [cid] if i < 3 else [], "unneeded": [] if i < 3 else [cid]}
+            with open(os.path.join(wd, "result.json"), "w") as fh:
+                fh.write(json.dumps({"result": "done\nLEAN-FEEDBACK " + json.dumps(fb)}) + "\n")
+            ledger.append({"id": f"r{i}", "project": self.slug(), "cards": ids, "workdir": wd})
+        with open(os.path.join(self.tmp, "home", "ledger.jsonl"), "w") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in ledger))
+        mem = lc.usage_evidence(self.la, self.slug(), self.proj, by)
+        card = next(e for e in mem["sources"] if e["name"] == "card:" + cid)
+        self.assertEqual((card["used"], card["of"], card["unneeded"]), (3, 4, 1))
+        self.assertEqual(mem["runs_examined"], 4)
+        self.assertEqual(card["loaded_by"], ["worker"])
+
+    def test_document_usage_from_transcript_tool_calls_and_unknown(self):
+        lc, by = self.breakdown(("clean",))
+        mem = lc.usage_evidence(self.la, self.slug(), self.proj, by)
+        self.assertTrue(all(e["used"] is None and e["evidence"] == "unknown" for e in mem["sources"]))
+        sid = "11111111-2222-3333-4444-555555555555"
+        tp = self.la.service_session.transcript_path(self.proj, sid)
+        os.makedirs(os.path.dirname(tp), exist_ok=True)
+        with open(tp, "w") as fh:
+            fh.write(json.dumps({"message": {"content": [{"type": "tool_use", "name": "Read",
+                                                          "input": {"file_path": self.proj + "/docs/arch.md"}}]}}) + "\n")
+            fh.write(json.dumps({"message": {"content": [{"type": "text", "text": "CLAUDE.md mentioned in text only"}]}}) + "\n")
+        with open(os.path.join(self.tmp, "home", "ledger.jsonl"), "w") as fh:
+            fh.write(json.dumps({"id": "r1", "project": self.slug(), "session_id": sid}) + "\n")
+        mem = lc.usage_evidence(self.la, self.slug(), self.proj, by)
+        src = {e["name"]: e for e in mem["sources"]}
+        self.assertEqual((src["docs/arch.md"]["used"], src["docs/arch.md"]["of"]), (1, 1))
+        self.assertEqual(src["CLAUDE.md"]["used"], 0)
+
+    def test_suggestions_keep_and_card_candidate(self):
+        import lean_compare
+        mem = {"sources": [
+            {"name": "CLAUDE.md", "kind": "claude-md", "tokens": 3000, "loaded_by": ["thread session"], "used": 2, "of": 5},
+            {"name": "docs/arch.md", "kind": "import", "tokens": 1600, "loaded_by": ["clean", "thread session"], "used": None, "of": None},
+            {"name": "small.md", "kind": "import", "tokens": 200, "loaded_by": ["thread session"], "used": None, "of": None},
+            {"name": "big-worker-only.md", "kind": "import", "tokens": 5000, "loaded_by": ["worker"], "used": None, "of": None}]}
+        lines = lean_compare.memory_suggestions(mem)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("keep (rules)", lines[0])
+        self.assertIn("candidate for a card", lines[1])
+        self.assertIn("saves ~1.6k tokens per thread start", lines[1])
+        self.assertIn("usage unknown", lines[1])
+
+    def test_report_json_table_and_optimize(self):
+        r = self.cli("compare", "proj", "--max-usd", "1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Memory sources at start", r.stdout)
+        rep, path = self.report()
+        mem = rep["memory"]
+        self.assertEqual(set(mem["by_kind"]), {"clean", "worker", "thread session", "front desk"})
+        self.assertIn("docs/arch.md", [s["name"] for s in mem["by_kind"]["clean"]])
+        text = open(path).read()
+        for secret in ("IMPORT-SECRET", "SECRET-CONTENT"):
+            self.assertNotIn(secret, text)
+        for e in mem["sources"]:
+            self.assertEqual(set(e) - {"unneeded"}, {"name", "kind", "tokens", "loaded_by", "own", "used", "of", "evidence"})
+            self.assertIsInstance(e["tokens"], int)
+        o = self.cli("optimize", "proj")
+        self.assertIn("From the latest compare", o.stdout)
 
 
 if __name__ == "__main__":
