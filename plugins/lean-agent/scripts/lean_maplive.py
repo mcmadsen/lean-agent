@@ -102,10 +102,10 @@ class Live:
         self.wake = threading.Event()
         self.cache = None  # (monotonic, snapshot)
         self.svg_cache = {}  # (w, h, mini) -> (monotonic, svg)
-        self.last_poll = 0.0
+        self.last_poll = float("-inf")
         self.good = None  # last snapshot that computed
         self.err = ""
-        self.err_logged = 0.0
+        self.err_logged = None  # monotonic() can be small right after boot (fresh CI VMs): no 0.0 sentinel
         self.log = _default_log
         self.stopped = threading.Event()
 
@@ -167,7 +167,7 @@ class Live:
         text = f"{type(exc).__name__}: {exc}"[:200]
         now = time.monotonic()
         with self.lock:
-            log_it = now - self.err_logged >= LOG_EVERY_S
+            log_it = self.err_logged is None or now - self.err_logged >= LOG_EVERY_S
             if log_it:
                 self.err_logged = now
         if log_it:  # log first: nobody sees the error (broadcast, or a new client's frame) before it is logged
