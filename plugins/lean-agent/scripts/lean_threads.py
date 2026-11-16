@@ -859,6 +859,8 @@ def decide(text, data, session=None, now=None, idx=None):
     low = text.lower().rstrip("?!. ") if text != "?" else "?"
     if text == "?" or low in ("shortcuts", "help"):
         return None, "Front desk job (shortcuts) \u2014 no thread: lean-agent shortcuts", "job"
+    if low == "map":
+        return None, "Front desk job (map) \u2014 no thread: lean-agent map --open", "job"
     if low == "update":
         return None, "Front desk job (update) \u2014 no thread: lean-agent update", "job"
     if low in ("inbox", "i"):

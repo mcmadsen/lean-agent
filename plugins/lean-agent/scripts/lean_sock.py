@@ -313,6 +313,7 @@ class Server:
         self.srv = None
         self.thread = None
         self.workers = threading.BoundedSemaphore(MAX_WORKERS)
+        self.observer = None  # (op, ms) -> None: the live map counts requests
 
     def dispatch(self, req):
         op = req.get("op")
@@ -338,8 +339,14 @@ class Server:
             finally:
                 self.workers.release()
         th = threading.Thread(target=guarded, daemon=True)
+        t0 = time.monotonic()
         th.start()
         th.join(REQUEST_TIMEOUT - 0.1)
+        if self.observer:
+            try:
+                self.observer(op, (time.monotonic() - t0) * 1000)
+            except Exception:
+                pass
         if th.is_alive():
             return {"ok": False, "error": "timeout"}
         r = box.get("r")
