@@ -88,6 +88,16 @@ never shows the trust dialog, so without it every `lean-agent` call the orchestr
 The plugin can also be added in **Claude Desktop**: **+** next to the prompt → **Plugins** → **Add plugin** →
 marketplace `mcmadsen/lean-agent`.
 
+### Live map pane (Claude Desktop)
+
+A second plugin, `lean-agent-map`, shows the front desk, threads and workers as a live map in a pane beside the chat:
+
+```sh
+/plugin install lean-agent-map --marketplace mcmadsen/lean-agent
+```
+
+(or add it from the same marketplace in **Plugins**). It does nothing outside a lean-agent front-desk session; there it opens the pane once, refreshes every 2 s (every 10 s while the service is down) and adds `/live-map` to show or hide it. The pane has buttons for **Show inbox**, **Open full map** and **Pause**/**Resume**. It runs only `lean-agent map ...` and `lean-agent waiting`, and never sends prompts or writes files.
+
 ## Use
 
 ```sh
