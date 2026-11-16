@@ -8312,21 +8312,23 @@ class CliTest(unittest.TestCase):
         drop.assert_not_called()  # a record this young may still be coming up
 
     def test_parallel_thread_new_cannot_exceed_the_cap(self):
-        """The cap check and the start are one locked step: two concurrent `thread new` never overlap in it."""
+        """The cap check and the slot reservation are one locked step; the start itself runs outside the lock, and a start
+        in flight is counted by the next cap check, so two concurrent `thread new` can never both see a free last slot."""
         L = lean_agent_module()
         import service_session
         self.threads_home()
-        inside, peak, guard = [0], [0], threading.Lock()
+        in_flight, checks, guard = [0], [], threading.Lock()
 
         def enter(*a, **k):
             with guard:
-                inside[0] += 1
-                peak[0] = max(peak[0], inside[0])
+                checks.append((in_flight[0], len(L.starting_threads())))
 
         def start(tid, t, prompt=None):
+            with guard:
+                in_flight[0] += 1
             time.sleep(0.5)  # the window in which a second caller would see the cap not yet reached
             with guard:
-                inside[0] -= 1
+                in_flight[0] -= 1
             return "name"
         args = argparse.Namespace(action="new", args=["parallel"], prompt_file=None, json=False, all=False)
         with mock.patch.dict(os.environ, self.env), mock.patch.object(L, "thread_prompt", return_value=None), \
@@ -8339,8 +8341,10 @@ class CliTest(unittest.TestCase):
                 t.start()
             for t in ts:
                 t.join(30)
-        self.assertEqual(inside[0], 0)
-        self.assertEqual(peak[0], 1)
+        self.assertEqual(in_flight[0], 0)
+        self.assertEqual(len(checks), 2)
+        self.assertTrue(all(marked >= started for started, marked in checks), checks)  # every start in flight is counted
+        self.assertEqual(L.starting_threads(), set())
 
     def test_restart_with_more_open_threads_than_the_cap_resumes_only_the_most_recent(self):
         lt = self.threads_home()
