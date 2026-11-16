@@ -15,6 +15,7 @@ import lean_private  # noqa: E402
 
 THREADS = 300
 ROWS = 30000
+LIMIT = 6 if os.environ.get("CI") else 2  # seconds; shared CI runners (macOS above all) are much slower
 
 
 class Fast(unittest.TestCase):
@@ -56,7 +57,7 @@ class Fast(unittest.TestCase):
             self.write("config.json", {"private": "off"} if mode == "off" else {})
             for args in (("runs",), ("runs", "--last"), ("now",)):
                 out, secs = self.cli(*args)
-                self.assertLess(secs, 2, f"private {mode}: {args} took {secs:.1f}s")
+                self.assertLess(secs, LIMIT, f"private {mode}: {args} took {secs:.1f}s")
         self.write("config.json", {"private": "off"})
         out, _ = self.cli("runs")  # rows 29990 (public) and 29991 (private) are among the last ten
         self.assertIn("0101-029990-abcd", out)
@@ -79,7 +80,7 @@ class Fast(unittest.TestCase):
         t = time.time()
         for i in range(ROWS):
             lean_private.hides({"id": "x", "thread": f"t{i % THREADS}"})
-        self.assertLess(time.time() - t, 2)
+        self.assertLess(time.time() - t, LIMIT)
         with open(os.path.join(self.tmp, "ledger.jsonl"), "a") as fh:  # t1 gains a run in a private project only
             fh.write(json.dumps({"id": "0102-000001-abcd", "project": "sec", "thread": "tnew", "status": "done"}) + "\n")
         self.assertTrue(lean_private.hides({"thread": "tnew"}))

@@ -2132,10 +2132,41 @@ def own_marker(run_id, **extra):
             save_json(f, m)
 
 
+def stop_worker_of_run(workdir, grace=2.0):
+    """A deliberate stop of the supervisor also stops its worker (claude -p) and everything below it, so the run is
+    over at once; an orphaned live worker is left only by a hard kill of the supervisor (SIGKILL, crash). The worker is
+    our child: it is reaped here, else a zombie would still count as a live worker of the run."""
+    pid = lean_common.claude_alive(workdir)
+    if not pid:
+        return
+    pids = [pid] + descendants(pid)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for p in pids:
+            try:
+                os.kill(p, sig)
+            except OSError:
+                pass
+        end = time.time() + (grace if sig == signal.SIGTERM else 1.0)
+        while time.time() < end:
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                    return
+            except ChildProcessError:  # not our child (or reaped already): watch it instead
+                if not lean_common.pid_alive(pid):
+                    return
+            except OSError:
+                return
+            time.sleep(0.05)
+
+
 def supervisor_term(signum, frame):
-    """SIGTERM to a supervisor: records why the run ended (a `runs --stop` records its own stopped row and removes the
-    marker), then dies of the signal as before."""
+    """SIGTERM to a supervisor: stops its worker, records why the run ended (a `runs --stop` records its own stopped
+    row and removes the marker), then dies of the signal as before."""
     try:
+        try:
+            stop_worker_of_run(RUN_CTX.get("workdir") or (home("work", RUN_CTX["id"]) if RUN_CTX.get("id") else None))
+        except Exception:  # noqa: BLE001 - recording why the run ended matters more
+            pass
         rid = RUN_CTX.get("id")
         for f in glob.glob(home("running", "*.json")):
             m = load_json(f, {})
