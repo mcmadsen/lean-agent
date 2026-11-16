@@ -1233,6 +1233,20 @@ class BudgetTest(Base):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             ap.parse_args(["codemod", "--appl"])
 
+    def test_review_learn_needs_todo_and_accepts_it_end_to_end(self):
+        sys.path.insert(0, ROOT)
+        import budget_hook
+        import lean_agent
+        run = "lean-agent review learn shop 12 --threads-cmd 'x {pr}'"
+        self.assertEqual(budget_hook.unlinked_worker(run), "lean-agent review")
+        for ok in (run + " --todo none", run + " --todo 4", "lean-agent review learn shop --list",
+                   "lean-agent review learn shop --rm-batch b1"):
+            self.assertEqual(budget_hook.unlinked_worker(ok), "", ok)
+        args = lean_agent.build_parser().parse_args(["review-learn", "shop", "12", "--todo", "none", "--thread", "t2"])
+        self.assertIsNone(args.todo)
+        self.assertEqual(args.thread_tag, "t2")
+        self.assertEqual(lean_agent.build_parser().parse_args(["review-learn", "shop", "--todo", "5"]).todo, 5)
+
     def test_strict_check_command_substitution_and_heredocs(self):
         sys.path.insert(0, ROOT)
         import budget_hook

@@ -10536,6 +10536,37 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(bad.returncode, 0)
         self.assertIn("--pr", bad.stderr)
 
+    def test_review_learn_takes_todo_and_thread_ends_with_a_summary_line_and_nothing_new_is_exit_0(self):
+        self.setup_learn_tracker()
+        thr = os.path.join(self.tmp.name, "threads3.json")
+        with open(thr, "w") as fh:
+            json.dump([{"id": 7, "comments": [{"author": {"displayName": "Sam Dev"}, "content": "Please reuse the wrapper"}]}], fh)
+        lesson = json.dumps({"checklist": ["Before adding retry code, check the wrapper"], "threads_read": [7]})
+        fb = '{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-CHECKLIST ' + lesson
+        out = self.cli("review", "learn", "proj", "--pr", "50", "--threads-file", thr, "--todo", "none", "--thread", "none",
+                       FAKE_FEEDBACK=fb).stdout
+        last = out.strip().splitlines()[-1]
+        m = re.match(r"learned 1 lines \(ids (\d+)-(\d+)\) in batch (\S+)$", last)
+        self.assertTrue(m, out)
+        batch = m.group(3)
+        listed = self.cli("review", "learn", "proj", "--list").stdout
+        self.assertIn(f"(batch {batch},", listed)
+        self.assertEqual(listed.count("(batch "), 2, listed)  # the setup's line has its own batch
+        # a run that finds nothing new: exit 0
+        empty = '{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-CHECKLIST {}'
+        thr2 = os.path.join(self.tmp.name, "threads4.json")
+        with open(thr2, "w") as fh:
+            json.dump([{"id": 8, "comments": [{"author": {"displayName": "Sam Dev"}, "content": "looks fine"}]}], fh)
+        r = self.cli("review", "learn", "proj", "--pr", "51", "--threads-file", thr2, "--todo", "none", FAKE_FEEDBACK=empty, check=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("nothing new to learn", r.stdout)
+        # remove the batch
+        out = self.cli("review", "learn", "proj", "--rm-batch", batch).stdout
+        self.assertIn("removed 1 lesson(s)", out)
+        self.assertNotIn("Before adding retry code", self.cli("review", "learn", "proj", "--list").stdout)
+        self.assertEqual(self.cli("review", "learn", "proj", "--rm-batch", batch, check=False).returncode, 1)
+        self.cli("review", "learn", "proj", "--rm", "1")  # by id
+
     def test_review_learn_filters_bots_slices_and_skips_when_nothing_is_new(self):
         self.setup_learn_tracker()
         thr = os.path.join(self.tmp.name, "threads2.json")
@@ -10552,12 +10583,14 @@ class CliTest(unittest.TestCase):
                        LEAN_AGENT_LEARN_CHUNK_CHARS="1500").stdout
         runs = self.calls()[n:]
         self.assertGreater(len(runs), 1, out)  # sliced into several runs inside one command
-        self.assertIn("skipped 2 bot/CI/own thread(s)", out)
-        self.assertNotIn("CI passed", json.dumps(runs))
+        self.assertIn("the owner is unknown", out)  # no pr query cached: the marker fallback skipped the LEAN-REVIEW thread
+        self.assertIn("skipped 1 thread(s) written by the owner", out)
+        self.assertIn("CI passed", json.dumps(runs))  # bots are learned from
+        self.assertNotIn("LEAN-REVIEW verdict", json.dumps(runs))
         again = len(self.calls())
         out = self.cli("review", "learn", "proj", "--pr", "70", "--threads-file", thr, FAKE_FEEDBACK=fb,
                        LEAN_AGENT_LEARN_CHUNK_CHARS="1500").stdout
-        self.assertIn("nothing new to learn (6 threads already learned)", out)
+        self.assertIn("nothing new to learn (7 threads already learned)", out)
         self.assertEqual(len(self.calls()), again)  # no model run started
         n = len(self.calls())
         self.cli("review", "learn", "proj", "--pr", "71", "--threads-file", thr, "--all-authors", FAKE_FEEDBACK=fb)
