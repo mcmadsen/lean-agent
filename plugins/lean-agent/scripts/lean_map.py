@@ -11,6 +11,8 @@ RING_SECONDS = 300
 RING_MAX = 400
 FADE = 30  # seconds without traffic before an edge is idle
 MAX_THREADS = 12
+MAX_WORKERS = 3  # placed per parent
+ENDED_S = 600  # an ended worker stays on the map this long
 STARTED = time.time()
 
 COLORS = {"message": "#2EC4B6", "report": "#F2A541", "request": "#7AA2F7", "idle": "#5B6475", "bad": "#F07167"}
@@ -85,6 +87,43 @@ def _dur(s):
     return f"{s} s" if s < 90 else f"{s // 60} min" if s < 5400 else f"{s // 3600} h"
 
 
+def _num(v, d):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else d
+
+
+def select(nodes):
+    """Which nodes get drawn (shared by the SVG and the live page): open threads ranked active/mid-turn, undelivered, then
+    most recent, at most MAX_THREADS; workers alive/orphaned or ended in the last ENDED_S, at most MAX_WORKERS per parent
+    (parent-less = under the front desk). -> {"placed": [ids], "more": number of threads/workers left out}."""
+    def trank(n):
+        st = n.get("state")
+        return (0 if st == "active" or n.get("mid") else 1 if st == "undelivered" or n.get("undelivered") else 2,
+                _num(n.get("idle_s"), 1e9), len(n["id"]), n["id"])
+    th = sorted([n for n in nodes if n.get("kind") == "thread" and n.get("state") != "closed" and not n.get("closed")], key=trank)
+    keep = th[:MAX_THREADS]
+    more = len(th) - len(keep)
+    ids = {n["id"] for n in keep}
+    by = {}
+    for n in nodes:
+        if n.get("kind") != "worker":
+            continue
+        p = n.get("parent")
+        if p in (None, "", "main"):
+            p = "main"
+        elif p not in ids:
+            continue
+        alive = n.get("state") in ("alive", "orphaned")
+        age = _num(n.get("ended_s"), _num(n.get("age_s"), 0))
+        if alive or age <= ENDED_S:
+            by.setdefault(p, []).append((0 if alive else 1, age, n["id"]))
+    placed = ["service", "main", "hooks"] + [n["id"] for n in keep]
+    for p, ws in by.items():
+        ws.sort()
+        placed += [w[2] for w in ws[:MAX_WORKERS]]
+        more += max(0, len(ws) - MAX_WORKERS)
+    return {"placed": placed, "more": more}
+
+
 def build(ctx, now=None):
     """Snapshot (contract v1) from plain data. ctx: service{pid,version,threads,up_s,cpu_pct,socket_ms}, paused, inbox,
     threads[{id,title,state,idle_s,mid,undelivered}], runs[{id,thread,model,age_s,progress_s,alive,done,orphaned}],
@@ -99,12 +138,13 @@ def build(ctx, now=None):
              {"id": "main", "kind": "desk", "label": "Front desk", "state": "idle" if ctx.get("desk_idle_s", 0) > 5 else "active",
               "detail": f"idle {_dur(ctx.get('desk_idle_s', 0))}"}]
     for t in ctx.get("threads") or []:
-        n = {"id": t["id"], "kind": "thread", "label": t.get("title") or t["id"], "state": t["state"], "detail": t.get("detail") or t["state"]}
+        n = {"id": t["id"], "kind": "thread", "label": t.get("title") or t["id"], "state": t["state"], "detail": t.get("detail") or t["state"],
+             "idle_s": t.get("idle_s", 0), "mid": bool(t.get("mid"))}
         nodes.append(n)
     for r in ctx.get("runs") or []:
         st = "done" if r.get("done") else "orphaned" if r.get("orphaned") else "alive" if r.get("alive", True) else "dead"
         nodes.append({"id": "run:" + r["id"], "kind": "worker", "parent": r.get("thread"), "label": "run " + r["id"].split("-")[-1],
-                      "model": r.get("model") or "", "state": st,
+                      "model": r.get("model") or "", "state": st, "age_s": r.get("age_s", 0), "ended_s": r.get("ended_s"),
                       "detail": f"{_dur(r.get('age_s', 0))} · progress {_dur(r.get('progress_s', 0))} ago"})
     have = {n["id"] for n in nodes}
     tids = {n["id"] for n in nodes if n["kind"] == "thread"}
@@ -114,10 +154,11 @@ def build(ctx, now=None):
         if m and node and node not in have and m.get("thread") in tids:
             have.add(node)
             nodes.append({"id": node, "kind": "worker", "parent": m["thread"], "label": "run " + node.split("-")[-1],
-                          "model": m.get("model") or "", "state": m["state"],
+                          "model": m.get("model") or "", "state": m["state"], "age_s": 0, "ended_s": _age(e["ts"], now),
                           "detail": m.get("status") or ("done" if m["state"] == "done" else "ended")})
     nodes.append({"id": "hooks", "kind": "hooks", "label": "Hooks", "state": "active" if reqs else "idle", "detail": f"{len(reqs)} a min"})
-    ids = {n["id"] for n in nodes}
+    sel = select(nodes)
+    ids = set(sel["placed"]) & {n["id"] for n in nodes}  # edges only between placed nodes
     newest = {}
     for e in ev:
         if e["from"] in ids and e["to"] in ids:
@@ -131,6 +172,8 @@ def build(ctx, now=None):
             edges.append({"from": f, "to": to, "kind": kd, "age_s": a, "label": e["label"]})
             busy.update((f, to))
     for t in ctx.get("threads") or []:
+        if t["id"] not in ids:
+            continue
         if t.get("undelivered"):
             edges.append({"from": "service", "to": t["id"], "kind": "message", "age_s": t.get("idle_s", 0), "label": "undelivered", "bad": True})
         elif t["id"] not in busy:
@@ -138,13 +181,14 @@ def build(ctx, now=None):
     if "main" not in busy:
         edges.append({"from": "main", "to": "service", "kind": "idle", "age_s": ctx.get("desk_idle_s", 0), "label": "idle"})
     for n in nodes:
-        if n["kind"] == "worker" and ("run:" + n["id"][4:]) not in busy and n["parent"] in ids:
+        if n["kind"] == "worker" and n["id"] in ids and n["id"] not in busy and n["parent"] in ids:
             edges.append({"from": n["id"], "to": n["parent"], "kind": "idle" if n["state"] != "done" else "report",
                           "age_s": 0, "label": "done" if n["state"] == "done" else "idle"})
     moving = [{"dir": e["dir"], "node": e["node"], "text": e["text"], "age_s": _age(e["ts"], now)}
               for e in sorted(ev, key=lambda e: -e["ts"]) if e.get("text") and e.get("node")][:8]
     return {"v": 1, "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)), "service": sv, "paused": bool(ctx.get("paused")),
-            "inbox": int(ctx.get("inbox") or 0), "nodes": nodes, "edges": edges, "moving": moving}
+            "inbox": int(ctx.get("inbox") or 0), "nodes": nodes, "edges": edges, "moving": moving,
+            "placed": sel["placed"], "more": sel["more"]}
 
 
 def down_snapshot(inbox=0, now=None):
@@ -161,6 +205,34 @@ def _cpu():
     return last
 
 
+THREAD_TTL = 8.0  # seconds a thread's liveness/turn state is reused
+RUNS_TTL = 4.0
+BUDGET_S = 0.06  # time the liveness probes may take per snapshot; stale entries refresh over the next snapshots
+_tcache = {}
+_rcache = [0.0, []]
+
+
+def _thread_state(tid, ss, lean_private):
+    alive = ss.alive_thread(tid)
+    pend = ss.spool_pending(tid)
+    mid = alive and ss.mid_turn(tid)
+    try:
+        idle = int(ss._quiet_secs(ss.session_transcript(tid))) if alive else 0
+    except Exception:
+        idle = 0
+    t = {"idle_s": idle, "mid": bool(mid)}
+    if pend and not mid:
+        why = ss.delivery_reason(tid) or "not delivered yet"
+        t.update(state="undelivered", undelivered=True, detail=str(why)[:80])
+    elif mid:
+        t.update(state="active", detail="mid-turn")
+    elif alive:
+        t.update(state="idle", detail=f"idle {_dur(idle)}")
+    else:
+        t.update(state="parked", detail="parked")
+    return t
+
+
 def service_context(now=None):
     """The ctx of the running service, from memory and the cached liveness helpers (hidden items left out)."""
     import lean_common
@@ -170,30 +242,28 @@ def service_context(now=None):
     now = now or time.time()
     data = lean_threads.load_ro()
     threads = []
-    for tid, rec in sorted((data.get("threads") or {}).items(), key=lambda x: (len(x[0]), x[0])):
-        if tid == "main" or not tid.startswith("t") or lean_private.hides(thread=tid):
-            continue
-        alive = ss.alive_thread(tid)
-        pend = ss.spool_pending(tid)
-        mid = alive and ss.mid_turn(tid)
-        try:
-            idle = int(ss._quiet_secs(ss.session_transcript(tid))) if alive else 0
-        except Exception:
-            idle = 0
-        t = {"id": tid, "title": rec.get("title") or tid, "idle_s": idle, "mid": bool(mid)}
-        if pend and not mid:
-            why = ss.delivery_reason(tid) or "not delivered yet"
-            t.update(state="undelivered", undelivered=True, detail=str(why)[:80])
-        elif mid:
-            t.update(state="active", detail="mid-turn")
-        elif alive:
-            t.update(state="idle", detail=f"idle {_dur(idle)}")
-        else:
-            t.update(state="parked", detail="parked")
-        threads.append(t)
+    mono = time.monotonic()
+    deadline = mono + BUDGET_S
+    items = [(tid, rec) for tid, rec in sorted((data.get("threads") or {}).items(), key=lambda x: (len(x[0]), x[0]))
+             if not (tid == "main" or not tid.startswith("t") or rec.get("closed") or lean_private.hides(thread=tid))]
+    for tid, rec in items:
+        c = _tcache.get(tid)
+        if (not c or mono - c[0] > THREAD_TTL) and time.monotonic() < deadline:
+            try:
+                c = (mono, _thread_state(tid, ss, lean_private))
+            except Exception:
+                c = c or (mono, {"idle_s": 0, "mid": False, "state": "parked", "detail": "parked"})
+            _tcache[tid] = c
+        elif not c:  # over budget, never probed: shown parked until a later snapshot probes it
+            c = (mono, {"idle_s": 10 ** 6, "mid": False, "state": "parked", "detail": "parked"})
+        threads.append(dict(c[1], id=tid, title=rec.get("title") or tid))
+    for tid in [k for k in _tcache if k not in {t["id"] for t in threads}]:
+        _tcache.pop(tid, None)
     runs = []
     try:
-        for rid, m in lean_common.running_runs(lean_common.lean_home()):
+        if mono - _rcache[0] > RUNS_TTL:
+            _rcache[:] = [mono, lean_common.running_runs(lean_common.lean_home())]
+        for rid, m in _rcache[1]:
             tid = m.get("thread") or ""
             if lean_private.hides(thread=tid or None) or (m.get("project") and lean_private.hides(project=m.get("project"))):
                 continue
@@ -292,10 +362,13 @@ def _clip(s, n):
 
 
 def layout(snap, width, height, mini=False):
-    """{node id: (cx, cy, w, h)}: service centre, desk left, threads in a column right (sorted by id), workers right of
-    their thread, hooks below the service. Threads beyond MAX_THREADS are not placed."""
+    """{node id: (cx, cy, w, h)} for the placed nodes only (see select): service centre, desk left, threads in a column
+    right (sorted by id), workers right of their thread (at most MAX_WORKERS), front-desk workers under the desk, hooks
+    below the service. Returns (pos, number left out)."""
     nodes = snap.get("nodes", [])
-    th = sorted([n for n in nodes if n["kind"] == "thread"], key=lambda n: (len(n["id"]), n["id"]))[:MAX_THREADS]
+    sel = {"placed": snap["placed"], "more": snap.get("more", 0)} if isinstance(snap.get("placed"), list) else select(nodes)
+    ok = set(sel["placed"])
+    th = sorted([n for n in nodes if n["kind"] == "thread" and n["id"] in ok], key=lambda n: (len(n["id"]), n["id"]))
     nw, nh = (92, 30) if mini else (170, 46)
     pos = {}
     top, bottom = 40, height - 40
@@ -306,18 +379,24 @@ def layout(snap, width, height, mini=False):
     xw = width * 0.86
     byp = {}
     for n in nodes:
-        if n["kind"] == "worker" and n.get("parent") in pos:
-            byp.setdefault(n["parent"], []).append(n)
-    for p, ws in byp.items():
-        py = pos[p][1]
-        ww = nw * 0.8
-        for j, w in enumerate(ws[:3]):
-            pos[w["id"]] = (xw, py + (j - (min(len(ws), 3) - 1) / 2) * min(step, nh * 0.9) / max(1, min(len(ws), 3)) * 1.0, ww, nh * 0.7)
+        if n["kind"] == "worker" and n["id"] in ok:
+            byp.setdefault(n.get("parent") if n.get("parent") in pos else "main", []).append(n)
+    ww, wh = nw * 0.8, nh * 0.7
     cy = height / 2
+    for p, ws in byp.items():
+        ws = ws[:MAX_WORKERS]
+        if p == "main":
+            for j, w in enumerate(ws):
+                pos[w["id"]] = (width * 0.08 + nw / 2, cy + nh + 14 + j * (wh + 6) + wh / 2, ww, wh)
+            continue
+        py = pos[p][1]
+        gap = min(wh + 4, step / max(1, len(ws)))
+        for j, w in enumerate(ws):
+            pos[w["id"]] = (xw, py + (j - (len(ws) - 1) / 2) * gap, ww, min(wh, gap - 1) if len(ws) > 1 else wh)
     pos["service"] = (width * 0.32, cy, nw, nh + 10)
     pos["main"] = (width * 0.08 + nw / 2, cy, nw, nh)
     pos["hooks"] = (width * 0.32, min(height - 30, cy + height * 0.28), nw, nh)
-    return pos, len([n for n in nodes if n["kind"] == "thread"]) - len(th)
+    return pos, int(sel.get("more") or 0)
 
 
 def svg(snap, width=1200, height=700, mini=False):
@@ -357,10 +436,10 @@ def svg(snap, width=1200, height=700, mini=False):
         (x1, y1), (x2, y2) = edge_pt(ed["from"], ed["to"])
         col = COLORS[kind]
         dash = ' stroke-dasharray="6 5"' if kind == "idle" else ""
-        op = max(0.35, 1 - ed.get("age_s", 0) / 300) if kind not in ("idle", "bad") else 1
-        out.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="{col}" stroke-width="2"{dash} '
+        op = 0.35 if kind == "idle" else max(0.35, 1 - ed.get("age_s", 0) / 300) if kind != "bad" else 1
+        out.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="{col}" stroke-width="{1 if kind == "idle" else 2}"{dash} '
                    f'opacity="{op:.2f}" marker-end="url(#a-{kind})" data-kind="{kind}"/>')
-        if not mini and ed.get("label"):
+        if not mini and ed.get("label") and kind != "idle":
             out.append(f'<text x="{(x1 + x2) / 2:.1f}" y="{(y1 + y2) / 2 - 4:.1f}" fill="{MUTED}" font-size="10" text-anchor="middle">{_e(_clip(ed["label"], 28))}</text>')
     for nid, (cx, cy, w, h) in pos.items():
         n = nodes.get(nid)

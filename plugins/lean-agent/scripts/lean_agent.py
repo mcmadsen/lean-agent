@@ -12120,8 +12120,8 @@ def cmd_doctor(a):
     report(True, text + " (lean-agent config compact-window N|default, compact-pct P|default)")
     report(True, f"auto clear: {clear_at_text()} (lean-agent config clear-at off|auto|N)")
     import lean_maplive
-    report(True if lean_maplive.is_up(lean_sock.home()) else None,
-           "live map page endpoint: " + ("up (127.0.0.1 only)" if lean_maplive.is_up(lean_sock.home()) else "not running (lean-agent up starts it)"))
+    ok, text = lean_maplive.doctor_line(lean_sock.home())
+    report(ok, text)
     report(True, "live map: the Claude Code desktop pane (lean-agent map --json|--svg) or the live page (lean-agent map --html)")
     fa = service_session.fresh_after()
     report(True, "auto fresh: " + service_session.fresh_text(fa) + (
@@ -14691,7 +14691,7 @@ def _fe(fn, a):
 
 
 def cmd_map(a):
-    if not a.project or a.svg or a.mini or a.watch or a.html:
+    if not a.project or a.svg or a.mini or a.watch or a.html or getattr(a, "probe", False):
         return cmd_live_map(a)
     def run(fe, slug, path, a):
         root = fe.work_dir(slug, path, a.dir)
@@ -16001,6 +16001,10 @@ def cmd_live_map(a):
             lean_map.watch(sys.stdout)
         except (KeyboardInterrupt, BrokenPipeError):
             pass
+        return 0
+    if getattr(a, "probe", False):
+        import lean_maplive
+        print(lean_maplive.write_probe(lean_sock.home()))
         return 0
     snap = lean_map.fetch()
     if getattr(a, "html", False):
@@ -18840,6 +18844,7 @@ def build_parser():
     s.add_argument("--mini", action="store_true", help="live map: the small round-node SVG")
     s.add_argument("--html", action="store_true", help="live map: write one self-contained live page (open it in the preview), print its path")
     s.add_argument("--out", metavar="FILE", help="with --html: where to write the page")
+    s.add_argument("--probe", action="store_true", help="live map: write a diagnostics page (what the preview allows: JS, WebSocket, fetch, img), print its path")
     s.add_argument("--watch", action="store_true", help="live map: one JSON line whenever it changes (twice a second at most)")
     s.add_argument("--width", type=int)
     s.add_argument("--height", type=int)
