@@ -65,6 +65,7 @@ import lean_feedback  # noqa: E402
 import lean_goals  # noqa: E402
 import lean_pr  # noqa: E402
 import lean_waiting  # noqa: E402
+import lean_compare  # noqa: E402
 import lean_poll  # noqa: E402
 import lean_own  # noqa: E402
 import lean_auth  # noqa: E402
@@ -10075,6 +10076,7 @@ def cmd_optimize(a):
             _unreject(a, slug)
             _cmd_optimize(a)
             _draft_proposals(a, slug)
+            compare_lines(slug)
         result = optimize_result(a, slug)
     if a.json:
         print(json.dumps(result))
@@ -10388,6 +10390,15 @@ def _suggestion_meta(c, t):
     return f"used in {used} of {offered} {t + ' ' if bt else ''}runs"
 
 
+def compare_lines(slug):
+    """The suggestions of the latest `lean-agent compare` report (no automatic changes)."""
+    rep = lean_compare.latest_report(sys.modules[__name__], slug)
+    if rep and rep.get("suggestions"):
+        print(f"From the latest compare ({str(rep.get('ts', ''))[:10]}, {rep.get('mode')}; lean-agent compare {slug} again to refresh):")
+        for x in rep["suggestions"]:
+            print(f"compare {x}")
+
+
 def optimize_result(a, slug):
     """What is left to decide, as one JSON-able dict."""
     skip = {x for x in (getattr(a, "skip", None) or "").split(",") if x}
@@ -10399,6 +10410,7 @@ def optimize_result(a, slug):
                              "used": c["used"], "offered": c["offered"], "meta": _suggestion_meta(c, t)}
                             for act, c, why, t in actions],
             "stale": stale_card_proposals(slug, load_cards(slug)),
+            "compare": (lean_compare.latest_report(sys.modules[__name__], slug) or {}).get("suggestions") or [],
             "drafts": [{"id": d["id"], "kind": d["kind"], "title": d["title"] if d["kind"] == "card" else
                         f"Preset {d['server']}:{d['name']}",
                         "name": d["card_id"] if d["kind"] == "card" else d["name"],
@@ -14173,6 +14185,10 @@ def recipe_check_result(slug, name, run_id=None, max_age_hours=2):
     return None
 
 
+def cmd_compare(a):
+    return lean_compare.cmd(sys.modules[__name__], a)
+
+
 def cmd_text_len(a):
     text = sys.stdin.read() if a.file == "-" else read_text(a.file)
     print(f"{len(text):,} characters · {len(text.split()):,} words · {len(text.splitlines()):,} lines")
@@ -15695,6 +15711,7 @@ def thread_files_cmd(a):
 SHORTCUTS = (
     ("?", "this list"),
     ("status / now", "the status table"),
+    ("compare <project>", "overhead of a clean session vs lean-agent's: `lean-agent compare <project>`"),
     ("more", "all threads (when the table says +N more)"),
     ("update", "sync and restart when idle (`lean-agent update`)"),
     ("s21", "summary of t21: last report, open questions, running work, next step"),
@@ -18036,6 +18053,18 @@ def build_parser():
     s.add_argument("--yes", action="store_true")
     s.add_argument("--todo", type=todo_arg, metavar="N", help="the work-queue item this is for")
     s.set_defaults(fn=cmd_do)
+
+    s = sub.add_parser("compare", help="measure a clean Claude Code session in the project against lean-agent's "
+                                       "(overhead by default, --task for one read-only task); learns from it")
+    s.add_argument("project", nargs="?")
+    s.add_argument("--model", "-m", default="haiku")
+    s.add_argument("--max-usd", type=float, default=0.5, help="cap for the whole comparison (task mode: per run)")
+    s.add_argument("--task", help="task mode: run this read-only task clean and as a lean-agent run, judge both")
+    s.add_argument("--task-file")
+    s.add_argument("--max-turns", type=int, default=12)
+    s.add_argument("--yes", action="store_true", help="needed when --max-usd is over 1")
+    s.add_argument("--history", action="store_true", help="list the saved reports")
+    s.set_defaults(fn=cmd_compare)
 
     s = sub.add_parser("text-len", help="characters/words/lines of a text, checked against limits in tracker notes")
     s.add_argument("file", help="a file, or - for stdin")
