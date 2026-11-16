@@ -47,9 +47,14 @@ class Detach(unittest.TestCase):
         caller = subprocess.Popen([sys.executable, "-c", script], env=env, stdout=subprocess.DEVNULL,
                                   stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
         deadline = time.time() + 20
-        while not os.path.exists(os.path.join(tmp, "pid")) and time.time() < deadline:
+        def pid_text():  # the file can exist before its write lands: wait for the content
+            try:
+                return open(os.path.join(tmp, "pid")).read().strip()
+            except OSError:
+                return ""
+        while not pid_text() and time.time() < deadline:
             time.sleep(0.1)
-        sup = int(open(os.path.join(tmp, "pid")).read())
+        sup = int(pid_text())
         self.addCleanup(lambda: os.path.exists(os.path.join(tmp, "done")) or os.kill(sup, signal.SIGKILL))
         self.assertNotIn(sup, tree(caller.pid))  # reparented: not in the caller's tree
         for pid in tree(caller.pid) + [caller.pid]:
