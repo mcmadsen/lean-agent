@@ -186,11 +186,16 @@ Other ways to run the orchestrator:
 The live map shows the front desk, threads and workers, with arrows for who asks whom. Two ways to look at it:
 
 - the pane of the `lean-agent-map` plugin in the Claude Code desktop app (see above);
-- `lean-agent map --html [--out FILE]` writes one self-contained page (default `~/.lean-agent/map/live.html`, no external
-  URLs) and prints its absolute path. Click the path to open it in the preview panel. While `lean-agent up` runs, the page
-  connects to a read-only WebSocket the service opens on 127.0.0.1 (random port, random token, kept in `map-live.json`,
-  mode 0600) and updates live, with a pulse along an edge for each request. Nothing is computed while no page is open.
-  Without the service it shows the snapshot it was written with; after a service restart run `map --html` again.
+- `lean-agent map --url` prints `http://127.0.0.1:<port>/?t=<token>` (exit 1 when the service endpoint is not running).
+  Open it in a normal browser: the full "Live map" window with the front desk, service socket, threads (the 12 most active
+  open ones, "+N more"), workers (3 per thread), hooks, labelled arrows that fade 30 s after the last message, a details
+  panel on click (Esc closes), a Pause button (pauses the view only), light and dark. The service serves it read-only on
+  127.0.0.1 (random port, random token kept in `map-live.json`, mode 0600) over a WebSocket, falling back to polling,
+  then to a server-drawn image. Nothing is computed while no page is open. `lean-agent map --probe` writes a diagnostics
+  page that shows which of these a viewer allows.
+- `lean-agent map --html [--out FILE]` writes the same page as one self-contained file (default
+  `~/.lean-agent/map/live.html`, no external URLs), prints its path, and the URL on a second line. Use it for viewers
+  that open files (the preview panel); the URL is the one that always works.
 
 `lean-agent map --json`, `--svg [--mini]` and `--watch` print the same data in the terminal.
 
@@ -487,7 +492,7 @@ Reply to the front desk with one of these on its own; its prompt hook turns it i
 |---|---|
 | `?` / `shortcuts` / `help` | this list |
 | `status` / `now` | the status table (needs-you and running threads first, max 10 rows) |
-| `map` | the live map: `lean-agent map --json`, `--svg [--mini]`, `--watch`, `--html` (the live page; the pane in the Claude Code desktop app shows it) |
+| `map` | the live map: `lean-agent map --json`, `--svg [--mini]`, `--watch`, `--url` (the live page's localhost URL), `--html` (the page as a file; the pane in the Claude Code desktop app shows it) |
 | `more` | all threads, when the table ends with `+N more threads` |
 | `s21` | summary of t21: last report, open questions, running work, next step (also `s t21`, `summary t21`, `show t21`) |
 | `a21 <question>` | send the question to t21 unchanged (`ask t21 <question>`); `a21` alone asks what to ask |

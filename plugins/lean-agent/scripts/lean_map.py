@@ -144,7 +144,7 @@ def build(ctx, now=None):
     for r in ctx.get("runs") or []:
         st = "done" if r.get("done") else "orphaned" if r.get("orphaned") else "alive" if r.get("alive", True) else "dead"
         nodes.append({"id": "run:" + r["id"], "kind": "worker", "parent": r.get("thread"), "label": "run " + r["id"].split("-")[-1],
-                      "model": r.get("model") or "", "state": st, "age_s": r.get("age_s", 0), "ended_s": r.get("ended_s"),
+                      "model": r.get("model") or "", "state": st, "age_s": r.get("age_s", 0), "ended_s": r.get("ended_s"), "progress_s": r.get("progress_s"),
                       "detail": f"{_dur(r.get('age_s', 0))} · progress {_dur(r.get('progress_s', 0))} ago"})
     have = {n["id"] for n in nodes}
     tids = {n["id"] for n in nodes if n["kind"] == "thread"}
@@ -156,7 +156,7 @@ def build(ctx, now=None):
             nodes.append({"id": node, "kind": "worker", "parent": m["thread"], "label": "run " + node.split("-")[-1],
                           "model": m.get("model") or "", "state": m["state"], "age_s": 0, "ended_s": _age(e["ts"], now),
                           "detail": m.get("status") or ("done" if m["state"] == "done" else "ended")})
-    nodes.append({"id": "hooks", "kind": "hooks", "label": "Hooks", "state": "active" if reqs else "idle", "detail": f"{len(reqs)} a min"})
+    nodes.append({"id": "hooks", "kind": "hooks", "label": "Hooks", "state": "active" if reqs else "idle", "detail": f"{len(reqs)} a min", "per_min": len(reqs)})
     sel = select(nodes)
     ids = set(sel["placed"]) & {n["id"] for n in nodes}  # edges only between placed nodes
     newest = {}
