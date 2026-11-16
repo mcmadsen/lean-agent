@@ -8600,8 +8600,13 @@ def reserve_auto_branch(a, slug, project, task):
                                      todo_task_id(getattr(a, "todo", None)), title,
                                      getattr(a, "branch_version", None))
         if sha:  # ensure_worktree would create it itself (and say why it can't); here it only reserves the name
-            subprocess.run(["git", "-C", project, "branch", "-q", "--no-track", a.worktree, sha],
-                           capture_output=True, text=True)
+            r = subprocess.run(["git", "-C", project, "branch", "-q", "--no-track", a.worktree, sha],
+                               capture_output=True, text=True)
+            created = r.returncode == 0
+        else:
+            created = False
+    if created:
+        print(f"worktree: created {a.worktree} from {base} ({sha[:10]})", flush=True)
     print(f"branch: {a.worktree}", flush=True)
     note = release_note(slug, a.worktree)
     if note:
