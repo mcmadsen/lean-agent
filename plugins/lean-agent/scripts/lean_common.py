@@ -298,7 +298,7 @@ def _log_takeover(what, holder):
         pass
 
 
-def flock_waiting(fh, mode, what, path, timeout=None, every=None):
+def flock_waiting(fh, mode, what, path, timeout=None, every=None, hook_wait=None):
     """flock(fh, mode) that says at once what it waits for ("waiting for lock X held by pid N"), repeats it every
     `every` seconds, and gives up after `timeout` seconds (None: lock_wait_timeout(); 0: never) with LockBusy.
     A holder pid that is gone (its lock inherited by a stray child) is taken over at once by replacing the lock file;
@@ -310,7 +310,8 @@ def flock_waiting(fh, mode, what, path, timeout=None, every=None):
         pass
     timeout = lock_wait_timeout() if timeout is None else timeout
     if HOOK["on"]:
-        timeout = HOOK_LOCK_WAIT if not timeout else min(timeout, HOOK_LOCK_WAIT)
+        cap = HOOK_LOCK_WAIT if hook_wait is None else hook_wait  # `hook_wait`: a lock whose holders are known to be short
+        timeout = cap if not timeout else min(timeout, cap)
     every = LOCK_NOTICE_EVERY if every is None else every
     holder = lock_holder(path)
     logged_wait = []

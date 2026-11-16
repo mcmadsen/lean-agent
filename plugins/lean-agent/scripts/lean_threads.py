@@ -188,6 +188,58 @@ def invalidate():
     _CACHE.update(key=None, data=None, blob=None)
 
 
+HOOK_THREADS_WAIT = 1.5  # seconds a hook waits for threads.json (its holders keep it for milliseconds)
+
+
+def _pending_path():
+    return path() + ".pending"
+
+
+def _apply_fields(data, tid, fields):
+    t = data["threads"].get(tid)
+    if t is None:
+        return False
+    for k, v in fields.items():
+        if v is None:
+            t.pop(k, None)
+        else:
+            t[k] = v
+    if fields.get("session_on"):
+        t["session_on_at"] = time.time()
+    return True
+
+
+def _fold_pending(data):
+    """Apply the set_session updates parked in threads.json.pending (one JSON line each, O_APPEND) by hooks that found
+    the lock busy. Called with the lock held: the file is claimed by rename, so a line is applied exactly once."""
+    pend, claimed = _pending_path(), _pending_path() + ".folding"
+    try:
+        if not os.path.exists(claimed):
+            os.replace(pend, claimed)
+    except OSError:
+        if not os.path.exists(claimed):
+            return
+    try:
+        with open(claimed) as fh:
+            lines = fh.readlines()
+    except OSError:
+        return
+    for line in lines:
+        try:
+            d = json.loads(line)
+            if isinstance(d, dict) and isinstance(d.get("fields"), dict):
+                _apply_fields(data, resolve(d.get("tid"), data["aliases"]), d["fields"])
+        except (ValueError, TypeError):
+            continue  # a torn last line of a writer that died
+
+
+def _fold_done():
+    try:
+        os.remove(_pending_path() + ".folding")  # (a crash before this re-applies them: they are idempotent field sets)
+    except OSError:
+        pass
+
+
 @contextlib.contextmanager
 def _locked():
     """Read-modify-write: hold the lock from load to the atomic replace; yields the data to change."""
@@ -195,7 +247,8 @@ def _locked():
     _migrate()
     with open(path() + ".lock", "a") as lock:
         if fcntl:
-            lock = lean_common.flock_waiting(lock, fcntl.LOCK_EX, "threads.json", path() + ".lock")
+            lock = lean_common.flock_waiting(lock, fcntl.LOCK_EX, "threads.json", path() + ".lock",
+                                             hook_wait=HOOK_THREADS_WAIT)
             try:
                 lock.truncate(0)
                 lock.write(f"{os.getpid()}\n")
@@ -204,14 +257,17 @@ def _locked():
                 pass
         data = load()
         before = json.dumps(data, sort_keys=True)
+        _fold_pending(data)  # the field updates hooks parked while this lock was busy
         yield data
         if json.dumps(data, sort_keys=True) == before:
+            _fold_done()
             return  # nothing changed: no write
         tmp = f"{path()}.{os.getpid()}.tmp"
         with open(tmp, "w") as fh:
             json.dump(data, fh, indent=1)
         os.replace(tmp, path())
         invalidate()
+        _fold_done()
 
 
 def resolve(tid, aliases=None):
@@ -383,17 +439,16 @@ def set_session(tid, **fields):
     """Record a thread's own Remote Control session in the registry: session_id (what --resume continues) and session_on
     (the service hosts it). A None value removes the field."""
     tid = resolve(norm(tid))
-    with _locked() as data:
-        t = data["threads"].get(tid)
-        if t is None:
-            raise ValueError(f"no such thread {tid}")
-        for k, v in fields.items():
-            if v is None:
-                t.pop(k, None)
-            else:
-                t[k] = v
-        if fields.get("session_on"):
-            t["session_on_at"] = time.time()  # when its session was started: a session newer than the live snapshot is restored too
+    try:
+        with _locked() as data:
+            if not _apply_fields(data, tid, fields):
+                raise ValueError(f"no such thread {tid}")
+    except lean_common.LockBusy:
+        if not lean_common.HOOK["on"]:
+            raise
+        # a hook never drops its update: parked in one atomic O_APPEND line, folded in by the next lock holder
+        with open(_pending_path(), "a") as fh:
+            fh.write(json.dumps({"tid": tid, "fields": fields}) + "\n")
     return tid
 
 
