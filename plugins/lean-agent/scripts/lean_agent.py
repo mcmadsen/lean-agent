@@ -3331,6 +3331,7 @@ def _cmd_run(a):
     if read_only:
         env["LEAN_AGENT_RO_CFG"] = ro_cfg  # `lean-agent poll` applies the same read-only checks to its command
     env["LEAN_AGENT_THREAD"] = thread_tag or "none"  # nested lean-agent commands in the worker record the same thread
+    env["LEAN_AGENT_RUN"] = run_id  # nested commands (worktree push) know which run is calling: it never counts as "another worker"
     env["BASH_MAX_OUTPUT_LENGTH"] = os.environ.get("LEAN_AGENT_WORKER_BASH_OUTPUT") or "8000"  # not the orchestrator's
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"  # memory comes from lean-agent cards instead
     env = push_guard.git_env(env)  # git refuses pushes to guarded branches (pre-push), whatever the worker runs
@@ -6644,10 +6645,11 @@ def workers_on(slug, path, head):
     """Workers running right now on the branch a review is about (fixes still coming)."""
     br = branch_of(path, head) or bare_ref(head)
     out = []
+    me = os.environ.get("LEAN_AGENT_RUN")
     for f in glob.glob(home("running", "*.json")):
         m = load_json(f, {})
-        if not pid_alive(m.get("pid")):
-            continue
+        if not pid_alive(m.get("pid")) or (me and m.get("run") == me):
+            continue  # the calling run itself waits for the review: it isn't editing meanwhile
         if m.get("project") == slug and m.get("role") != "reviewer" and br and bare_ref(m.get("branch")) == br:
             out.append(m.get("run"))
     return out
@@ -9177,6 +9179,15 @@ def push_gate_review(slug, path, branch, sha):
     """The push gate: no approval covers `sha` (the worktree's actual HEAD, also when detached or the branch ref
     lags), so run ONE review of it now (a delta re-review when an earlier head of the branch was approved: review
     picks that itself). Returns the approving review record of `sha` or None."""
+    me = os.environ.get("LEAN_AGENT_RUN")
+    root = worktree_path(path)
+    others = [m.get("run") or rid for rid, m in live_runs()
+              if m.get("run") != me and rid != me and m.get("role") != "reviewer" and m.get("path")
+              and (worktree_path(m["path"]) == root or worktree_path(m["path"]).startswith(root + os.sep))]
+    others += [r for r in workers_on(slug, path, branch) if r not in others]
+    if others:
+        die(f"{branch} is held by running run {', '.join(others)}: let it finish (or stop it), then run the push again "
+            "(only the run holding the worktree can push from it while it runs)", 2)
     head = branch if git(path, "rev-parse", "--verify", "--quiet", branch + "^{commit}") == sha else sha
     print(f"push gate: no approving review of {branch} @ {sha[:12]}: reviewing it now (once)", flush=True)
     subprocess.run([sys.executable, os.path.abspath(__file__), "review", slug, "--head", head, "--for-push"],
