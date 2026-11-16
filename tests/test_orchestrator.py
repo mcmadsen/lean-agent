@@ -9838,6 +9838,34 @@ class CliTest(unittest.TestCase):
         self.assertIn("known PRs only", known)
         self.assertIn("t1", known)
 
+    def test_pr_own_lists_only_the_users_open_prs_newest_first_and_no_live_uses_the_cache(self):
+        self.pr_setup()
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+        iso = lambda d: (now - datetime.timedelta(days=d)).isoformat()
+        rows = [{"pr": "700", "title": "Older own change", "author": "Ann Dev", "branch": "own/old", "status": "active", "created": iso(20), "updated": iso(5),
+                 "reviewers": [{"name": "Bob Dev", "vote": "approved"}], "ci": "failed", "threads": [{"kind": "human"}, {"kind": "bot"}, {"kind": "bot"}]},
+                {"pr": "512", "title": "Newer own change", "author": "Ann Dev", "branch": "own/new", "status": "active", "created": iso(2), "updated": iso(0.1),
+                 "reviewers": [], "ci": "passed", "threads": []},
+                {"pr": "800", "title": "Closed own change", "author": "Ann Dev", "branch": "own/closed", "status": "completed", "updated": iso(0.01)},
+                {"pr": "900", "title": "Someone elses change", "author": "Bob Dev", "branch": "bob/x", "status": "active", "updated": iso(0.01)}]
+        p = self.cli("pr", "own", FAKE_FEEDBACK=self.pr_q(rows))
+        out = p.stdout
+        self.assertIn("(2)", out)
+        self.assertNotIn("Closed own change", out)
+        self.assertNotIn("Someone elses change", out)
+        self.assertLess(out.index("Newer own change"), out.index("Older own change"))
+        self.assertIn("1 human / 2 bot", out)
+        self.assertIn("own/old", out)
+        self.assertIn("failed", out)
+        self.assertIn("approved", out)
+        self.assertIn("t1", out)  # PR 512 is owned by thread t1
+        self.assertIn("--creator", self.calls()[-1]["append"])
+        n = len(self.calls())
+        again = self.cli("pr", "own", "--no-live").stdout  # cache only, no helper
+        self.assertIn("Newer own change", again)
+        self.assertEqual(len(self.calls()), n)
+
     def test_pr_number_falls_back_to_the_single_project_or_asks_for_p(self):
         self.pr_setup(prs=("512",))
         p = self.cli("pr", "999", "--no-live")
@@ -9870,7 +9898,7 @@ class CliTest(unittest.TestCase):
         data = lt.load()
         for text, cmd in (("pr1", "lean-agent pr t1"), ("PR1", "lean-agent pr t1"), ("pr1 c", "lean-agent pr t1 --comments"),
                           ("pr1 ci", "lean-agent pr t1 --ci"), ("pr1 diff", "lean-agent pr t1 --diff"), ("pr list", "lean-agent pr list"),
-                          ("pr mine", "lean-agent pr mine"), ("pr stale", "lean-agent pr stale"), ("pr stale 5", "lean-agent pr stale --days 5"),
+                          ("pr mine", "lean-agent pr mine"), ("pr own", "lean-agent pr own"), ("pr stale", "lean-agent pr stale"), ("pr stale 5", "lean-agent pr stale --days 5"),
                           ("pr find Bob Dev", 'lean-agent pr find "Bob Dev"')):
             tid, line, kind = lt.decide(text, data)
             self.assertEqual((tid, kind), (None, "job"), text)
@@ -9883,7 +9911,7 @@ class CliTest(unittest.TestCase):
             self.assertTrue(line.endswith(f'lean-agent thread send t1 "{task}"'), line)
         self.assertNotIn("pr shortcut", lt.decide("pr99", data)[1])  # no such thread: not a shortcut
         out = self.cli("shortcuts").stdout
-        for k in ("| pr21 |", "| pr21 c |", "| pr21 ci |", "| pr21 diff |", "| pr list |", "| pr mine |", "| pr stale [days] |",
+        for k in ("| pr21 |", "| pr21 c |", "| pr21 ci |", "| pr21 diff |", "| pr list |", "| pr mine |", "| pr own |", "| pr stale [days] |",
                   "| pr find <text> |", "| pr21 fix |", "| pr21 reply |", "| pr21 review |"):
             self.assertIn(k, out)
 

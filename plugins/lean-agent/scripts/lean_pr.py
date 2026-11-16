@@ -16,7 +16,7 @@ AZ_CMDS = ["az repos pr show", "az repos pr list", "az repos pr policy list", "a
            "az devops user show", "az pipelines runs list", "az pipelines runs show"]
 GH_CMDS = ["gh pr view", "gh pr list", "gh pr checks", "gh pr diff", "gh api --method GET", "gh api user", "gh run view", "gh run list"]
 MODES = ("status", "comments", "ci", "diff")   # per-PR sections the helper can read
-QUERIES = ("mine", "stale", "find")            # project-wide lists
+QUERIES = ("mine", "stale", "own", "find")            # project-wide lists
 HEAD = ("PR", "Title", "Known state", "Last review", "Last push", "Next")
 
 
@@ -178,11 +178,15 @@ QUERY_HELP = {
              "gh": "List the OPEN PRs where the signed-in user is a reviewer: `gh pr list --search review-requested:@me`."},
     "stale": {"az": "List the signed-in user's OWN open PRs: `az repos pr list --status active --creator <me>`.",
               "gh": "List the signed-in user's OWN open PRs: `gh pr list --author @me --state open`."},
+    "own": {"az": "List the signed-in user's OWN open PRs: `az repos pr list --status active --creator <me>`; for each also `az repos pr show --id N`, `az repos pr policy list --id N` and its comment threads.",
+            "gh": "List the signed-in user's OWN open PRs: `gh pr list --author @me --state open`; for each also `gh pr view N --json ...`, `gh pr checks N` and its review threads."},
     "find": {"az": "List the project's open PRs (at most 100, newest first): `az repos pr list --status active --top 100`.",
              "gh": "List the project's open PRs (at most 100, newest first): `gh pr list --state open --limit 100 --json ...`."},
 }
 EXTRA_Q = {"mine": "Give `myVote` = the signed-in user's own vote on each (approved|suggestions|waiting|rejected|none).",
            "stale": "Give `updated` = the time of the PR's last activity (latest comment, push or vote; else its creation) as an ISO time.",
+           "own": "Give `created` and `updated` (last activity: latest comment, push or vote; else creation) as ISO times, reviewers with votes, `ci` (passed|failed|running|none|unknown) "
+                  "and `threads` = only the ACTIVE (unresolved) comment threads as [{\"kind\": \"human|bot\"}] (bots: CI/lint/coverage/automation accounts).",
            "find": "Give author, reviewers with votes, source branch and the linked work item ids."}
 ME_HELP = {"az": "Find who the signed-in user is: `az account show --query user.name` (or `az devops user show --user me`). ",
            "gh": "Find who the signed-in user is: `gh api user`. "}
@@ -198,7 +202,7 @@ def query_prompt(e, kind):
             f"({'Azure DevOps: use az repos/az devops' if f == 'az' else 'GitHub: use gh'}). " + who + QUERY_HELP[kind][f] + " " + EXTRA_Q[kind] +
             " Be quick: one or two commands.\n"
             'Answer with one line exactly like this (valid JSON, one line) before the LEAN-FEEDBACK line (me = the signed-in user\'s name or login):\n'
-            'LEAN-PR {"me": "...", "prs": [' + QUERY_ROW + ']}\n')
+            'LEAN-PR {"me": "...", "prs": [' + (QUERY_ROW[:-1] + ', "created": "ISO time", "ci": "passed", "threads": [{"kind": "human|bot"}]}' if kind == "own" else QUERY_ROW) + ']}\n')
 
 
 def web_url(remote, pr):
@@ -431,6 +435,9 @@ def filter_query(kind, rows, me="", days=3, text="", now=None):
     if kind == "stale":
         old = [r for r in rows if r.get("status", "active") == "active" and iso_epoch(r.get("updated")) and now - iso_epoch(r["updated"]) >= days * 86400]
         return sorted(old, key=lambda r: iso_epoch(r["updated"]))
+    if kind == "own":
+        mine = [r for r in rows if r.get("status", "active") == "active" and (not me or not r.get("author") or is_me(r.get("author"), me))]
+        return sorted(mine, key=lambda r: iso_epoch(r.get("updated")), reverse=True)
     needle = str(text or "").lower().strip().lstrip("#!")
     ids = needle.lstrip("ab#")
     return [r for r in rows if needle and (needle in str(r.get("author") or "").lower() or needle in str(r.get("title") or "").lower()
@@ -462,6 +469,38 @@ def query_table(rows, remote, owners, age=""):
          ("draft" if r.get("isDraft") else r.get("status") or "-") + (f" · updated {ago(r['updated'])}" if r.get("updated") else ""), owners.get(r["pr"]) or "-")
         for r in rows]
     return render(body) + (f"\n({age})" if age else "")
+
+
+def _age_d(iso, now=None):
+    e = iso_epoch(iso)
+    if not e:
+        return "-"
+    h = max(0, (time.time() if now is None else now) - e) / 3600
+    return f"{int(h // 24)}d" if h >= 24 else f"{int(h)}h"
+
+
+def own_table(rows, owners=None):
+    """Project/repo | PR (link) title | Branch | Age | Last activity | Votes | Open threads (human/bot) | CI | Thread.
+    rows carry `project`; owners: {(project, pr): thread}. Newest activity first (the caller sorts)."""
+    if not rows:
+        return "No open PRs of yours."
+    owners = owners or {}
+
+    def votes(r):
+        v = [str(x.get("vote")) for x in r.get("reviewers") or [] if isinstance(x, dict) and x.get("vote") not in (None, "", "none")]
+        return "/".join(v[:4]) or "none"
+
+    def threads(r):
+        ts = [t for t in r.get("threads") or [] if isinstance(t, dict)]
+        bots = sum(1 for t in ts if t.get("kind") == "bot")
+        return f"{len(ts) - bots} human / {bots} bot"
+    body = [("Project", "PR", "Branch", "Age", "Last activity", "Votes", "Open threads", "CI", "Thread")] + [
+        (r.get("project") or "-", link(r["pr"], r.get("remote"), r) + " " + short(r.get("title") or "-", 40), short(r.get("branch") or "-", 30),
+         _age_d(r.get("created")),
+         ago(r["updated"]) if r.get("updated") else "-", votes(r), threads(r),
+         "draft" if r.get("isDraft") else str(r.get("ci") or "-"), owners.get((r.get("project"), r["pr"])) or "-")
+        for r in rows]
+    return render(body)
 
 
 # ---- review context: the PR's title, description and linked work items, read-only, no model (cap ~3k chars)

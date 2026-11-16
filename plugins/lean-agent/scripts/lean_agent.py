@@ -15568,6 +15568,7 @@ SHORTCUTS = (
     ("pr21 diff", "changed files with +/- lines of t21's PRs"),
     ("pr list", "all PRs of every open thread"),
     ("pr mine", "open PRs waiting for your vote"),
+    ("pr own", "all your own open PRs: votes, comments, CI, thread"),
     ("pr stale [days]", "your own open PRs without activity (default 3 days)"),
     ("pr find <text>", "open PRs by author, reviewer, title, branch or work item"),
     ("pr21 fix", "send t21 the task: fix the open review comments, then one final report with the proposed push"),
@@ -16205,11 +16206,64 @@ def pr_query(a, kind):
     return 0
 
 
+def pr_own(a):
+    """`pr own`: the user's open PRs of every learned project (-p: one), one cached helper list per project, newest activity first."""
+    projs = projects()
+    if getattr(a, "project", None):
+        slug, path = resolve_project(a.project, register=False)
+        projs = {slug: {"path": path}}
+    if not projs:
+        die("no project is learned (lean-agent learn <path>)")
+    cache = lean_pr.load_cache()
+    pes = {s: pr_pseudo_entry(s, v["path"]) for s, v in projs.items()}
+    rows, notes, todo = [], [], []
+    for slug, pe in pes.items():
+        q = lean_pr.query_of("own", slug, cache)
+        if not a.no_live and pe["flavour"] and (a.refresh or not lean_pr.fresh(q)):
+            todo.append(pe)
+        elif q:
+            notes.append(f"{slug}: cached, {lean_pr.age_text(q['fetched'])} old" if not a.no_live else f"{slug}: cached only")
+    if todo and getattr(a, "async_", False):
+        for pe in todo:
+            pr_start_fetch([pe], wait=False, mode="own")
+        print(f"fetching live state in the background for {len(todo)} project(s) (haiku, ~$0.01 each); run `lean-agent pr own` again")
+        todo = []
+    for pe in todo:
+        print(f"fetching live state of {pe['project']} (haiku, ~$0.01)…", flush=True)
+        ok, cost, why = pr_start_fetch([pe], mode="own")
+        print(f"live state: {'fetched' if ok else 'not fetched (' + why + ')'}" + (f" · ${cost:.3f}" if cost else ""))
+    cache = lean_pr.load_cache()
+    owners = {}
+    for e in pr_entries(None):
+        if e.get("thread"):
+            owners[(e["project"], e["pr"])] = e["thread"]
+    for slug, pe in pes.items():
+        q = lean_pr.query_of("own", slug, cache)
+        if q:
+            for r in lean_pr.filter_query("own", q["rows"], q.get("me"), a.days):
+                rows.append(dict(r, project=slug, remote=r.get("remote") or pe["remote"]))
+    rows.sort(key=lambda r: lean_pr.iso_epoch(r.get("updated")), reverse=True)
+    print(f"Your open PRs ({len(rows)}):")
+    print(lean_pr.own_table(rows, owners))
+    if notes:
+        print("(" + "; ".join(notes) + "; --refresh for the current state)")
+    if getattr(a, "comments", False) or getattr(a, "ci", False):
+        for r in rows:
+            ts = [t for t in r.get("threads") or [] if isinstance(t, dict)]
+            if getattr(a, "comments", False) and ts:
+                print(f"{r['project']} #{r['pr']}: " + "; ".join(f"{t.get('kind') or 'human'}: {t.get('gist') or t.get('author') or '?'}" for t in ts))
+            if getattr(a, "ci", False):
+                print(f"{r['project']} #{r['pr']}: CI {r.get('ci') or '-'}")
+    return 0
+
+
 def cmd_pr(a):
-    """`pr tN | pr <PR> | pr list | mine | stale | find <text>`: known state at once, then the live state (cached 10 min;
+    """`pr tN | pr <PR> | pr list | mine | own | stale | find <text>`: known state at once, then the live state (cached 10 min;
     --refresh, --no-live, --async; --comments, --ci, --diff for one section)."""
     arg = (a.target or "list").strip()
     words = list(a.words or [])
+    if arg == "own":
+        return pr_own(a)
     if arg in lean_pr.QUERIES:
         return pr_query(a, arg)
     if arg not in ("list",) and not re.fullmatch(r"[tT#]\d+|!?\d+", arg):  # `pr find`-style words: a free-text search
@@ -18460,7 +18514,7 @@ def build_parser():
     s = sub.add_parser("pr", help="PR status per thread: `pr tN` | `pr <PR number>` | `pr list`. The known state (goal, last review, last push) "
                        "at once, then the live state (open comments, votes, CI) from one read-only haiku helper, cached 10 min "
                        "(config pr-cache-minutes). --refresh, --no-live, --async")
-    s.add_argument("target", nargs="?", help="tN, a PR number, list (default), mine, stale, or find <text>")
+    s.add_argument("target", nargs="?", help="tN, a PR number, list (default), mine, own, stale, or find <text>")
     s.add_argument("words", nargs="*", help="the search text of find")
     s.add_argument("--refresh", action="store_true", help="ignore the cache")
     s.add_argument("--no-live", action="store_true", help="the known state only (no helper, no network)")

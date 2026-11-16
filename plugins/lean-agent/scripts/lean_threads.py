@@ -537,7 +537,7 @@ STOP_RE = re.compile(rf"^(?:please\s+)?stop\s*(?:(idle)(?:\s+(\d+(?:\.\d+)?\s*[s
 PRIVATE_RE = re.compile(r"^(?:please\s+)?private\s+(on|off|status)\s*[.!]?$", re.I)
 REOPEN_RE = re.compile(r"^(?:please\s+)?o\s*t?(\d+)\s*[.!]?$", re.I)
 PR_RE = re.compile(r"^pr\s*t?(\d+)(?:\s+(c|comments|ci|diff|fix|reply|review))?$", re.I)
-PR_LIST_RE = re.compile(r"^pr\s+(list|mine|stale|find)(?:\s+(.+))?$", re.I)
+PR_LIST_RE = re.compile(r"^pr\s+(list|mine|own|stale|find)(?:\s+(.+))?$", re.I)
 PR_FLAGS = {"c": " --comments", "comments": " --comments", "ci": " --ci", "diff": " --diff", "": ""}
 PR_WORK = {
     "fix": "Fix the open review comments on your PR(s) with a worker; then send one consolidated final report with the proposed push",
@@ -952,7 +952,7 @@ def decide(text, data, session=None, now=None, idx=None):
     if pl:
         what, rest = pl.group(1), (pl.group(2) or "").strip()
         orig = text.split(None, 2)[2] if what == "find" and len(text.split(None, 2)) > 2 else rest
-        if what in ("list", "mine") and not rest:
+        if what in ("list", "mine", "own") and not rest:
             return None, f"Front desk job (pr {what} shortcut) \u2014 no thread: lean-agent pr {what}", "job"
         if what == "stale" and (not rest or re.fullmatch(r"\d+(\.\d+)?", rest)):
             return None, f"Front desk job (pr stale shortcut) \u2014 no thread: lean-agent pr stale" + (f" --days {rest}" if rest else ""), "job"
