@@ -5851,35 +5851,54 @@ def learn_pr_in_background(slug, pr, thread=None, head=None):
         return False
 
 
-def thread_pr_refs(tid):
-    """[(project, PR, head or None)] a thread's todos, runs and reviews refer to."""
+def pr_ref_index():
+    """thread tag -> [(kind, record, slug)] over todos, runs and reviews: read once, so many threads cost one pass."""
+    idx = {}
+    for t in todos()["items"]:
+        idx.setdefault(norm_thread_tag(t.get("thread")), []).append(("todo", t, None))
+    for r in ledger():
+        if r.get("role") not in INTERNAL_ROLES:
+            idx.setdefault(norm_thread_tag(r.get("thread")), []).append(("run", r, None))
+    for slug in projects():
+        for r in read_jsonl(reviews_path(slug)):
+            idx.setdefault(norm_thread_tag(r.get("thread")), []).append(("review", r, slug))
+    return idx
+
+
+def thread_pr_refs(tid, index=None):
+    """[(project, PR, head or None)] a thread's todos, runs and reviews refer to (`index`: pr_ref_index() when asking for many)."""
     out = []
+    seen = set()
 
     def add(slug, pr, head=None):
         if slug and push_guard.private_slug_of(slug):
             return  # a private project has no PRs
-        if slug and pr and (slug, str(pr)) not in [(s, p) for s, p, _ in out]:
+        if slug and pr and (slug, str(pr)) not in seen:
+            seen.add((slug, str(pr)))
             out.append((slug, str(pr), head))
-    for t in todos()["items"]:
-        if norm_thread_tag(t.get("thread")) == norm_thread_tag(tid):
+    index = pr_ref_index() if index is None else index
+    ev = index.get(norm_thread_tag(tid), [])
+    for kind, t, _ in ev:  # todos first, then runs, then reviews (the order of the sources)
+        if kind == "todo":
             add(t.get("project"), pr_of_ref(t.get("ref")), t.get("branch"))
-    for r in ledger():
-        if r.get("role") not in INTERNAL_ROLES and norm_thread_tag(r.get("thread")) == norm_thread_tag(tid):
+    for kind, r, _ in ev:
+        if kind == "run":
             m = PR_WORD_RE.search(str(r.get("task") or ""))
             add(r.get("project"), m and (m.group(1) or m.group(2)), r.get("branch"))
-    for slug in projects():
-        for r in read_jsonl(reviews_path(slug)):
-            if norm_thread_tag(r.get("thread")) == norm_thread_tag(tid):
-                add(slug, pr_of_ref(r.get("ref")), r.get("branch"))
+    for kind, r, slug in ev:
+        if kind == "review":
+            add(slug, pr_of_ref(r.get("ref")), r.get("branch"))
     return out
 
 
 def learn_on_threads_closed(tids):
     if not review_learn_auto_on():
         return
+    index = None
     for tid in tids:
         try:
-            for slug, pr, head in thread_pr_refs(tid):
+            index = pr_ref_index() if index is None else index
+            for slug, pr, head in thread_pr_refs(tid, index):
                 learn_pr_in_background(slug, pr, tid, head)
         except Exception as exc:
             print(f"review learn: skipped for {tid} ({exc})", file=sys.stderr)
@@ -15945,11 +15964,12 @@ def pr_entries(tids=None, only_pr=None):
         tids = [t["id"] for t in lean_threads.threads(include_expired=True) if re.fullmatch(r"t\d+", t["id"])
                 and (not t.get("closed") or norm_thread_tag(t["id"]) in open_goal_threads)]
     reviews_cache, pushes, out = {}, [p for p in read_jsonl(home("pushes.jsonl")) if p.get("ok")], []
+    index = pr_ref_index()  # todos, runs and reviews read once for all threads
     for tid in tids:
-        refs = thread_pr_refs(tid)
+        refs = thread_pr_refs(tid, index)
         slug0 = next((s for s, _, _ in refs), "")
         if not slug0:
-            slug0 = next((r.get("project") for r in reversed(ledger()) if r.get("role") not in INTERNAL_ROLES and norm_thread_tag(r.get("thread")) == norm_thread_tag(tid) and r.get("project")), "")
+            slug0 = next((r.get("project") for k, r, _ in reversed(index.get(norm_thread_tag(tid), [])) if k == "run" and r.get("project")), "")
         closed = bool((data["threads"].get(tid) or {}).get("closed"))
         for g in goals:  # PR goals of the thread that no todo/run/review names
             n = lean_goals.key_of(g.get("ref"))

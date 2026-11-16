@@ -11,9 +11,43 @@ HELD_MSG = "private projects are hidden: lean-agent private on"
 STOPPED_BY = "stopped by private off"
 
 
+_CACHE = {}  # (path, builder) -> (signature, value): re-parsed only when the file's mtime/size/inode change (also in persistent processes)
+
+
+def _sig(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+def _cached(path, build):  # keyed by (path, builder): one file can feed several indexes
+    """build(path) memoized per process, invalidated by the file's stat signature. Treat the value as read-only."""
+    sig = _sig(path)
+    key = (path, build)
+    hit = _CACHE.get(key)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    val = build(path)
+    if _sig(path) == sig:  # a file changing while it was read is not cached
+        _CACHE[key] = (sig, val)
+    else:
+        _CACHE.pop(key, None)
+    return val
+
+
+def _read_json(path):
+    return lean_common.read_json(path, {})
+
+
+def _json(path):
+    return _cached(path, _read_json)
+
+
 def hidden():
     """True while private mode is off (private projects and their items are not shown)."""
-    cfg = lean_common.read_json(lean_common.lean_home("config.json"), {})
+    cfg = _json(lean_common.lean_home("config.json"))
     return isinstance(cfg, dict) and cfg.get("private") == "off"
 
 
@@ -29,9 +63,13 @@ def set_hidden(off):
     lean_common.write_json_atomic(path, cfg)
 
 
+def _private_set(path):
+    projs = lean_common.read_json(path, {})
+    return frozenset(k for k, v in (projs.items() if isinstance(projs, dict) else []) if isinstance(v, dict) and v.get("private"))
+
+
 def private_slugs():
-    projs = lean_common.read_json(lean_common.lean_home("projects.json"), {})
-    return {k for k, v in (projs.items() if isinstance(projs, dict) else []) if isinstance(v, dict) and v.get("private")}
+    return set(_cached(lean_common.lean_home("projects.json"), _private_set))
 
 
 def _jsonl(path, tail=5000):
@@ -50,17 +88,29 @@ def _jsonl(path, tail=5000):
     return out
 
 
-def thread_projects(tid, data=None):
-    """The projects a thread's runs and worktrees are in (not its own tag)."""
-    out = set()
-    for r in _jsonl(lean_common.lean_home("ledger.jsonl")):
-        if r.get("thread") == tid and r.get("project"):
-            out.add(r["project"])
-    wts = lean_common.read_json(lean_common.lean_home("worktrees.json"), {})
+def _ledger_index(path):
+    idx = {}
+    for r in _jsonl(path):
+        if r.get("thread") and r.get("project"):
+            idx.setdefault(r["thread"], set()).add(r["project"])
+    return idx
+
+
+def _worktree_index(path):
+    idx = {}
+    wts = lean_common.read_json(path, {})
     for slug, entries in (wts.items() if isinstance(wts, dict) else []):
         for e in (entries.values() if isinstance(entries, dict) else []):
-            if isinstance(e, dict) and e.get("thread") == tid:
-                out.add(slug)
+            if isinstance(e, dict) and e.get("thread"):
+                idx.setdefault(e["thread"], set()).add(slug)
+    return idx
+
+
+def thread_projects(tid, data=None):
+    """The projects a thread's runs and worktrees are in (not its own tag). The ledger and worktrees are parsed once
+    per file change (not per call)."""
+    out = set(_cached(lean_common.lean_home("ledger.jsonl"), _ledger_index).get(tid, ()))
+    out |= _cached(lean_common.lean_home("worktrees.json"), _worktree_index).get(tid, set())
     return out
 
 
@@ -70,7 +120,8 @@ def thread_is_private(tid, data=None, priv=None):
     if not priv or not tid:
         return False
     if data is None:
-        data = lean_common.read_json(lean_common.lean_home("threads.json"), {})
+        data = _json(lean_common.lean_home("threads.json"))
+    data = data if isinstance(data, dict) else {}
     t = (data.get("threads") or {}).get((data.get("aliases") or {}).get(tid, tid)) or {}
     if t.get("project") in priv:
         return True
@@ -107,7 +158,7 @@ def mentions_private(text):
     hit = next((p for p in sorted(private_slugs()) if re.search(r"(?<![\w-])" + re.escape(p.lower()) + r"(?![\w-])", low)), None)
     if hit:
         return hit
-    projs = lean_common.read_json(lean_common.lean_home("projects.json"), {})
+    projs = _json(lean_common.lean_home("projects.json"))
     for slug in sorted(private_slugs()):
         base = os.path.realpath((projs.get(slug) or {}).get("path") or "")
         if not base:
