@@ -564,6 +564,10 @@ def _drop_placeholder(f, m):
     return True
 
 
+_PS_START = {}  # pid -> (checked at, token): the `ps` fallback (macOS) is not run on every look at a run
+PS_START_TTL = 15.0
+
+
 def proc_start(pid):
     """A token for when `pid` started (stable while it lives, differs for a reused pid): /proc stat field 22 on Linux,
     `ps -o lstart=` elsewhere (macOS). None when unknown."""
@@ -573,8 +577,16 @@ def proc_start(pid):
     except (OSError, IndexError, ValueError):
         pass
     try:
+        hit = _PS_START.get(int(pid))
+        if hit and time.time() - hit[0] < PS_START_TTL:
+            return hit[1]
         r = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=10)
-        return "s" + " ".join(r.stdout.split()) if r.returncode == 0 and r.stdout.strip() else None
+        tok = "s" + " ".join(r.stdout.split()) if r.returncode == 0 and r.stdout.strip() else None
+        if tok:
+            if len(_PS_START) > 256:
+                _PS_START.clear()
+            _PS_START[int(pid)] = (time.time(), tok)
+        return tok
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
