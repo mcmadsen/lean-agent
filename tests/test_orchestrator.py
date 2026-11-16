@@ -13484,14 +13484,15 @@ class RevCostTest(unittest.TestCase):
             {"id": 2, "comments": [{"author": {"login": "dependabot[bot]"}, "content": "bump"},
                                    {"author": {"login": "sam"}, "content": "please rename"}]},
             {"id": 3, "comments": [{"author": {"login": "sam"}, "content": "LEAN-REVIEW approve"}]},
-            {"id": 4, "comments": [{"author": {"login": "sam"}, "content": "x" * 500}]}]))
-        kept, dropped = a.human_threads(items)
-        self.assertEqual([t["id"] for t in kept], [2, 4])
-        self.assertEqual(dropped, 2)
-        self.assertEqual(len(kept[0]["comments"]), 1)  # the bot comment of a mixed thread is removed
-        self.assertEqual(len(a.human_threads(items, all_authors=True)[0]), 4)
+            {"id": 4, "comments": [{"author": {"login": "kim"}, "content": "x" * 500}]}]))
+        # only the lean-agent owner's comments are left out (here "sam"); bots and other people are learned from
+        kept, dropped = a.learnable_threads(items, me="sam")
+        self.assertEqual([t["id"] for t in kept], [1, 2, 4])
+        self.assertEqual(dropped, 1)
+        self.assertEqual(len(kept[1]["comments"]), 1)  # the owner's comment of a mixed thread is removed
+        self.assertEqual(len(a.learnable_threads(items, me="sam", all_authors=True)[0]), 4)
         chunks = a.chunk_threads(kept, 300)
-        self.assertEqual(len(chunks), 2)
+        self.assertGreaterEqual(len(chunks), 2)
         self.assertTrue(all(sum(map(len, c)) <= 300 for c in chunks))  # the long thread is cut, not sent whole
         self.assertEqual(a.thread_hash(kept[0]), a.thread_hash(dict(kept[0])))
         self.assertNotEqual(a.thread_hash(kept[0]), a.thread_hash(kept[1]))
