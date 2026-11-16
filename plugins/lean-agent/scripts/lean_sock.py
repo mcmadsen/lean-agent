@@ -274,9 +274,33 @@ class _Handler(socketserver.StreamRequestHandler):
             pass
 
 
+MAX_CONNECTIONS = 16  # connection threads at once: a client that connects and says nothing holds one for REQUEST_TIMEOUT
+MAX_WORKERS = 8  # request worker threads at once (a handler that outlives its request keeps its slot until it ends)
+
+
 class _Srv(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
     request_queue_size = 32
+
+    def __init__(self, *a, **kw):
+        self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        super().__init__(*a, **kw)
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):  # over the cap: refuse at once, no thread
+            try:
+                request.sendall(b'{"ok": false, "error": "busy"}\n')
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
 
 
 class Server:
@@ -288,6 +312,7 @@ class Server:
         self.started = time.time()
         self.srv = None
         self.thread = None
+        self.workers = threading.BoundedSemaphore(MAX_WORKERS)
 
     def dispatch(self, req):
         op = req.get("op")
@@ -304,7 +329,15 @@ class Server:
             except BaseException as exc:  # noqa: BLE001 - never leaks into the service
                 box["r"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
-        th = threading.Thread(target=work, daemon=True)
+        if not self.workers.acquire(blocking=False):
+            return {"ok": False, "error": "busy"}
+
+        def guarded():
+            try:
+                work()
+            finally:
+                self.workers.release()
+        th = threading.Thread(target=guarded, daemon=True)
         th.start()
         th.join(REQUEST_TIMEOUT - 0.1)
         if th.is_alive():
@@ -333,7 +366,7 @@ class Server:
             os.umask(old)
         os.chmod(self.path, 0o600)
         self.srv.owner = self
-        self.thread = threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
+        self.thread = threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True)
         self.thread.start()
         return self
 

@@ -2406,6 +2406,8 @@ def detach_run(workdir, run_id, spawn=None):
     def relay():
         for i, out in enumerate((sys.stdout, sys.stderr)):
             try:
+                if os.path.getsize(paths[i]) <= pos[i]:  # nothing new: no open/read
+                    continue
                 with open(paths[i], "rb") as fh:
                     fh.seek(pos[i])
                     data = fh.read()
@@ -2439,15 +2441,18 @@ def detach_run(workdir, run_id, spawn=None):
             left[sig] = signal.signal(sig, on_leave)
         except ValueError:
             break
+    nap, next_alive, last_data = 0.1, 0.0, time.time()
     try:
         while status is None:
             if leave:
                 break
             try:
                 if gpid:
-                    if not supervisor_alive(gpid):
-                        status = 0
-                        break
+                    if time.time() >= next_alive:  # liveness (ps on macOS) at most once a second
+                        next_alive = time.time() + 1.0
+                        if not supervisor_alive(gpid):
+                            status = 0
+                            break
                 else:
                     done, st = os.waitpid(pid, os.WNOHANG)
                     if done:
@@ -2460,8 +2465,13 @@ def detach_run(workdir, run_id, spawn=None):
                         signal_supervisor(gpid, signal.SIGINT)
                     else:
                         signal_group(pid, signal.SIGINT, wait=2)
+                before = pos[0] + pos[1]
                 relay()
-                time.sleep(0.1)
+                if pos[0] + pos[1] != before:
+                    nap, last_data = 0.1, time.time()
+                else:  # idle: back off 0.1 s -> 1 s (a Ctrl-C or TERM is still seen within that)
+                    nap = min(1.0, nap * 1.5)
+                time.sleep(nap)
             except ChildProcessError:
                 status = 0
             if interrupted and time.time() - interrupted > 60:
