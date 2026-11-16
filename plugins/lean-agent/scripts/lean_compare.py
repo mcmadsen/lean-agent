@@ -346,6 +346,208 @@ def front_desk_column(la, a, meter, clean, thread_col):
     return col
 
 
+# ------------------------------------------------------------------ memory breakdown
+
+BIG_SOURCE = 1000  # tokens: a source this large gets a suggestion line
+MEM_RUNS = 30
+
+
+def mem_kind(path):
+    """claude-md | rule | import: what kind of document a memory file is (rules are kept, imports may become cards)."""
+    base = os.path.basename(path)
+    if os.sep + os.path.join(".claude", "rules") + os.sep in path:
+        return "rule"
+    if base in ("CLAUDE.md", "CLAUDE.local.md"):
+        return "claude-md"
+    return "import"
+
+
+def file_sources(files, own=None, skip=None):
+    """[(source dict)] of memory_files() entries; `skip`: real path left out; `own`: real path that is lean-agent's guide."""
+    out = []
+    for label, path, chars in files:
+        rp = os.path.realpath(path)
+        if skip and rp == os.path.realpath(skip):
+            continue
+        out.append({"name": label, "kind": mem_kind(path), "tokens": (chars + 3) // 4,
+                    "own": bool(own and rp in own), "path": path})
+    return out
+
+
+def memory_breakdown(la, slug, project, kinds):
+    """{session kind: [source]} of what each kind loads at start; a source is {name, kind, tokens, own, path?}."""
+    import compact_hook
+    out = {}
+    h = la.home("home")
+    desk = la.front_desk_file(h)
+    own = {os.path.realpath(desk), os.path.realpath(os.path.join(h, "CLAUDE.md"))}
+    threads = (la.lean_threads.load().get("threads") or {}) if os.path.isdir(h) else {}
+    if "clean" in kinds:
+        out["clean"] = file_sources(memory_files(project))
+    if "worker" in kinds:
+        native = la.project_rules_on(slug)
+        src = [s for s in file_sources(memory_files(project)) if not s["name"].startswith("~")] if native else []
+        append, cards = worker_append(la, slug, project)
+        card_t = 0
+        for c in cards:
+            card_t += c.get("tokens", 0)
+            src.append({"name": "card:" + c["id"], "kind": "card", "tokens": c.get("tokens", 0), "own": True})
+        src.append({"name": "worker protocol (system prompt addition)", "kind": "protocol", "own": True,
+                    "tokens": max(0, la.est_tokens(append) - card_t)})
+        out["worker"] = src
+    if "thread session" in kinds:
+        src = file_sources(memory_files(h), own=own, skip=desk)
+        line = max([la.est_tokens(f'Thread {t} "{(v or {}).get("title") or t}"') for t, v in threads.items()] or [8])
+        src.append({"name": "thread line (SessionStart hook, every start)", "kind": "brief", "tokens": line, "own": True})
+        sizes = []
+        for t in list(threads)[-10:]:
+            try:
+                sizes.append(la.est_tokens(compact_hook.fresh_brief(t)))
+            except Exception:  # noqa: BLE001 - a thread without a brief is left out
+                pass
+        src.append({"name": "thread brief (first message of a fresh session)", "kind": "brief", "own": True,
+                    "tokens": max(sizes) if sizes else compact_hook.FRESH_BRIEF_TOKENS})
+        out["thread session"] = src
+    if "front desk" in kinds:
+        src = file_sources(memory_files(h), own=own, skip=os.path.join(h, "CLAUDE.md"))
+        cps = [n for n in compact_hook.load_notes() if n.get("kind") == "checkpoint" and compact_hook.checkpoint_owner(n) == "main"]
+        cp = compact_hook.cut_lines(str(cps[-1].get("text", "")), compact_hook.CHECKPOINT_CAP) if cps else ""
+        for name, text in (("checkpoint (brief at start)", cp), ("thread table (brief at start)", compact_hook.threads_summary() or ""),
+                           ("hand-off (brief at start)", compact_hook.handoff())):
+            src.append({"name": name, "kind": "brief", "tokens": la.est_tokens(text), "own": True})
+        out["front desk"] = src
+    return out
+
+
+def feedback_of(la, r):
+    """(used, unneeded) card ids a run recorded, or None: the run record's own field, else the LEAN-FEEDBACK line of its result."""
+    fb = r.get("feedback") if isinstance(r.get("feedback"), dict) else None
+    if fb is None and r.get("workdir"):
+        try:
+            fb = la.parse_feedback(la.run_result_text(r))[1] or None
+        except Exception:  # noqa: BLE001
+            fb = None
+    if not fb:
+        return None
+    return set(fb.get("used") or []), set(fb.get("unneeded") or [])
+
+
+def tool_call_text(path, cap=4000000):
+    """All tool-call inputs of a transcript as one lowercase string (never stored or printed)."""
+    parts, seen = [], 0
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                seen += len(line)
+                if seen > cap:
+                    break
+                if '"tool_use"' not in line:
+                    continue
+                try:
+                    msg = (json.loads(line).get("message") or {}).get("content")
+                except ValueError:
+                    continue
+                for b in msg if isinstance(msg, list) else []:
+                    if isinstance(b, dict) and b.get("type") == "tool_use":
+                        parts.append(json.dumps(b.get("input") or {}))
+    except OSError:
+        return ""
+    return "\n".join(parts).lower()
+
+
+def headings_of(path, n=8):
+    out = []
+    try:
+        for line in open(path, encoding="utf-8", errors="replace"):
+            m = re.match(r"#{1,4}\s+(\S.{3,80})$", line.rstrip())
+            if m:
+                out.append(m.group(1).strip().lower())
+                if len(out) >= n:
+                    break
+    except OSError:
+        pass
+    return out
+
+
+def usage_evidence(la, slug, project, bykind, n=MEM_RUNS):
+    """One record per distinct source: tokens, loaded_by, and used in X of N runs (cards: the recorded feedback; documents:
+    whether the file name or a heading shows in the tool calls of the last N run and thread transcripts)."""
+    runs = [r for r in la.ledger() if isinstance(r, dict) and r.get("project") == slug and not r.get("role")][-n:]
+    fbs = [(r, feedback_of(la, r)) for r in runs]
+    tpaths = []
+    for r in runs:
+        if r.get("session_id"):
+            tpaths.append(la.service_session.transcript_path(project, str(r["session_id"])))
+    try:
+        for t in (la.lean_threads.load().get("threads") or {}).values():
+            for sid in (list(t.get("session_history") or []) + [t.get("session_id")])[-n:]:
+                if sid:
+                    tpaths.append(la.transcript_of(str(sid)))
+    except Exception:  # noqa: BLE001
+        pass
+    tpaths = [p for p in dict.fromkeys(tpaths) if os.path.isfile(p)]
+    tpaths = sorted(tpaths, key=os.path.getmtime)[-n:]
+    texts = [tool_call_text(p) for p in tpaths]
+    srcs = {}
+    for kind, items in bykind.items():
+        for s in items:
+            e = srcs.setdefault(s["name"], {"name": s["name"], "kind": s["kind"], "tokens": s["tokens"], "loaded_by": [],
+                                            "_path": s.get("path"), "own": s.get("own", False)})
+            e["loaded_by"].append(kind)
+            e["tokens"] = max(e["tokens"], s["tokens"])
+    for e in srcs.values():
+        e.update(used=None, of=None, evidence="unknown")
+        if e["kind"] == "card":
+            cid = e["name"][len("card:"):]
+            seen = [fb for r, fb in fbs if fb is not None and cid in (r.get("cards") or [])]
+            if seen:
+                e.update(used=sum(1 for u, _ in seen if cid in u), of=len(seen), evidence="run feedback",
+                         unneeded=sum(1 for _, x in seen if cid in x))
+        elif e["_path"] and texts:
+            keys = [os.path.basename(e["_path"]).lower()] + headings_of(e["_path"])
+            e.update(used=sum(1 for t in texts if any(k in t for k in keys)), of=len(texts), evidence="tool calls")
+        e.pop("_path")
+    return {"runs_examined": len(runs), "transcripts_examined": len(tpaths), "sources": list(srcs.values())}
+
+
+def memory_suggestions(mem):
+    """One line per source above BIG_SOURCE tokens that thread sessions load: keep (rules) or a card candidate."""
+    out = []
+    for e in sorted(mem["sources"], key=lambda e: -e["tokens"]):
+        if e["tokens"] <= BIG_SOURCE or "thread session" not in e["loaded_by"]:
+            continue
+        ev = f"used in {e['used']} of {e['of']} runs/transcripts" if e["of"] else "usage unknown"
+        if e["kind"] in ("claude-md", "rule"):
+            out.append(f"thread sessions load {e['name']} ~{fmt(e['tokens'])} tokens ({ev}): keep (rules)")
+        elif e["kind"] == "brief":
+            out.append(f"thread sessions load {e['name']} ~{fmt(e['tokens'])} tokens ({ev}): keep (the thread's own state)")
+        else:
+            out.append(f"thread sessions load {e['name']} ~{fmt(e['tokens'])} tokens ({ev}): candidate for a card "
+                       f"(saves ~{fmt(e['tokens'])} tokens per thread start)")
+    return out
+
+
+def render_memory(mem, kinds):
+    rows = [("source", "tokens", "loaded by", "used in")]
+    for e in sorted(mem["sources"], key=lambda e: -e["tokens"]):
+        rows.append((e["name"], fmt(e["tokens"]), ", ".join(e["loaded_by"]),
+                     f"{e['used']} of {e['of']}" if e["of"] else "unknown"))
+    w = [min(60, max(len(r[i]) for r in rows)) for i in range(3)]
+    lines = [f"Memory sources at start (last {mem['runs_examined']} runs, {mem['transcripts_examined']} transcripts examined):"]
+    for r in rows:
+        lines.append(f"{r[0][:w[0]]:<{w[0] + 2}}{r[1]:>{w[1] + 2}}  {r[2]:<{w[2]}}  {r[3]}")
+    for k in kinds:
+        lines.append(f"{k}: ~{fmt(sum(s['tokens'] for s in mem['by_kind'].get(k, [])))} tokens in {len(mem['by_kind'].get(k, []))} sources")
+    return "\n".join(lines)
+
+
+def memory_report(la, slug, project, kinds):
+    by = memory_breakdown(la, slug, project, kinds)
+    mem = usage_evidence(la, slug, project, by)
+    mem["by_kind"] = {k: [{"name": s["name"], "kind": s["kind"], "tokens": s["tokens"]} for s in v] for k, v in by.items()}
+    return mem
+
+
 # ------------------------------------------------------------------ report
 
 def fixed_of(col):
@@ -377,7 +579,7 @@ def used_runs(la, slug, server, n=30):
     return sum(1 for r in runs if any(str(t).startswith(prefix) for t in (r.get("mcp_calls") or {}))), len(runs)
 
 
-def suggestions(la, slug, cols, task=None):
+def suggestions(la, slug, cols, task=None, memrep=None):
     out = []
     clean, wk, th, fd = (cols.get(n) for n in COLUMNS)
     if fd:
@@ -408,6 +610,8 @@ def suggestions(la, slug, cols, task=None):
     if clean and wk:
         out.append(f"a worker starts at {fmt(wk['total'])} vs {fmt(clean['total'])} clean "
                    f"({saving_pct(clean['total'], wk['total'])}% less)")
+    if memrep:
+        out += memory_suggestions(memrep)
     if task:
         out.append(f"task: lean-agent used {task['saving_pct']}% {'fewer' if task['saving_pct'] >= 0 else 'more'} "
                    f"sonnet-eq tokens than a clean run; judge: {task['judge'].get('winner', '?')}")
@@ -543,6 +747,8 @@ def cmd(la, a):
         cols["front desk"] = front_desk_column(la, a, meter, clean, cols["thread session"])
         cols = {k: v for k, v in cols.items() if v}
         print(render_table(cols))
+        mem = memory_report(la, slug, project, list(cols))
+        print(render_memory(mem, list(cols)))
         for k, v in cols.items():
             if k != "clean" and v["info"].get("cards"):
                 print(f"worker cards: " + ", ".join(f"{c['id']} ({fmt(c['tokens'])})" for c in v["info"]["cards"][:8]))
@@ -555,8 +761,8 @@ def cmd(la, a):
                    saving_pct=saving_pct(clean["total"], lean["total"]), flags_found=sorted(
                        f for f in ("--tools", "--strict-mcp-config", "--mcp-config", "--settings", "--disable-slash-commands",
                                    "--setting-sources", "--system-prompt", "--append-system-prompt-file") if f in has),
-                   skipped=meter.skipped)
-        rep["suggestions"] = suggestions(la, slug, cols)
+                   skipped=meter.skipped, memory=mem)
+        rep["suggestions"] = suggestions(la, slug, cols, memrep=mem)
     rep["cost_usd"] = round(meter.cost, 4)
     print(f"cost of this comparison: ${meter.cost:.3f} (cap ${a.max_usd})")
     print("Suggestions:")
