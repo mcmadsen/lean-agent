@@ -1865,6 +1865,36 @@ class AllowEditHookTest(Base):
         self.assertIsNone(self.ask("x", ["**"], raw=""))
 
 
+class TaskOutputReadTest(Base):
+    def deny(self, path, cwd="/home"):
+        sys.path.insert(0, ROOT)
+        import budget_hook
+        return budget_hook.strict_denial({"tool_name": "Read", "tool_input": {"file_path": path}}, cwd, "/home")
+
+    def test_task_output_files_are_readable(self):
+        for p in ("/tmp/claude-0/proj-slug/abc-123/tasks/b1x.output",
+                  "/private/tmp/claude-501/proj-slug/abc-123/tasks/b1x.output"):
+            self.assertEqual(self.deny(p), "", p)
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.join(d, "claude-7", "slug", "sess", "tasks")
+            os.makedirs(real)
+            link = os.path.join(d, "link")
+            os.symlink(d, link)
+            with mock.patch.dict(os.environ, {"TMPDIR": link}):
+                self.assertEqual(self.deny(os.path.join(link, "claude-7", "slug", "sess", "tasks", "t.output")), "")
+
+    def test_everything_else_is_refused_with_the_full_path(self):
+        long = "/srv/shop/" + "d/" * 60 + "main.py"
+        why = self.deny(long)
+        self.assertIn(long, why)
+        self.assertIn("lean-agent output", why)
+        for p in ("/srv/shop/src/main.py", "/tmp/claude-0/slug/sess/tasks/b1.txt",
+                  "/tmp/claude-0/slug/sess/other/b1.output", "/tmp/other/slug/sess/tasks/b1.output",
+                  "/tmp/claude-0/slug/sess/tasks/../../../../etc/passwd.output",
+                  "/tmp/claude-0/slug/sess/tasks/../secret/b1.output"):
+            self.assertTrue(self.deny(p), p)
+
+
 class ReadOnlyHookTest(Base):
     def setUp(self):
         super().setUp()

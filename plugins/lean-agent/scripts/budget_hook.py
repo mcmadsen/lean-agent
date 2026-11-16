@@ -710,6 +710,21 @@ def own_path(path, cwd, lean_root):
     return any(full == r or full.startswith(r + os.sep) for r in (os.path.realpath(lean_root), PLUGIN_ROOT))
 
 
+def task_output_path(path, cwd):
+    """Is `path` one of Claude Code's own background-task output files (<claude-* temp dir>/.../tasks/<id>.output)?"""
+    full = os.path.realpath(os.path.join(cwd, os.path.expanduser(str(path))))
+    parts = full.split(os.sep)
+    if not full.endswith(".output") or len(parts) < 4 or parts[-2] != "tasks" or len(parts[-1]) <= len(".output"):
+        return False
+    roots = {os.path.realpath(r) for r in (os.environ.get("TMPDIR"), "/tmp", "/private/tmp") if r}
+    for root in roots:
+        if full.startswith(root + os.sep):
+            rel = full[len(root) + 1:].split(os.sep)
+            if rel[0].startswith("claude-") and len(rel) >= 3:
+                return True
+    return False
+
+
 def strict_denial(event, cwd, lean_root):
     """Why the strict orchestrator may not make this call, or ''. In the main session the way out is the hand-over."""
     tool, tool_input = event.get("tool_name"), event.get("tool_input") or {}
@@ -744,8 +759,11 @@ def strict_denial(event, cwd, lean_root):
         pattern = str(tool_input.get("pattern") or "")
         if not path and tool == "Glob" and (os.path.isabs(os.path.expanduser(pattern)) or ".." in pattern.split("/")):
             path = pattern
+        if path and tool == "Read" and task_output_path(path, cwd):
+            return ""
         if path and not own_path(str(path), cwd, lean_root):
-            return f"strict mode: the orchestrator doesn't read project files ({str(path)[:80]}). " + hint(DELEGATE)
+            return (f"strict mode: the orchestrator doesn't read project files ({path}). " + hint(DELEGATE)
+                    + " For a background task's output use `lean-agent output <task-id or path>`.")
     return ""
 
 
