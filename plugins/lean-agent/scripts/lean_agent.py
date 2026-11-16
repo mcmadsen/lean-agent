@@ -16237,7 +16237,7 @@ def pr_query(a, kind):
     return 0
 
 
-def pr_own(a):
+def cmd_pr_own(a):
     """`pr own`: the user's open PRs of every learned project (-p: one), one cached helper list per project, newest activity first."""
     projs = projects()
     if getattr(a, "project", None):
@@ -16294,7 +16294,7 @@ def cmd_pr(a):
     arg = (a.target or "list").strip()
     words = list(a.words or [])
     if arg == "own":
-        return pr_own(a)
+        return cmd_pr_own(a)
     if arg in lean_pr.QUERIES:
         return pr_query(a, arg)
     if arg not in ("list",) and not re.fullmatch(r"[tT#]\d+|!?\d+", arg):  # `pr find`-style words: a free-text search
