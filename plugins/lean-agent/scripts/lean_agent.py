@@ -67,6 +67,7 @@ import lean_pr  # noqa: E402
 import lean_waiting  # noqa: E402
 import lean_compare  # noqa: E402
 import lean_poll  # noqa: E402
+import lean_map  # noqa: E402
 import lean_own  # noqa: E402
 import lean_auth  # noqa: E402
 import service_session  # noqa: E402
@@ -11977,6 +11978,7 @@ def cmd_doctor(a):
         report(None, "compaction setting ignored: " + msg, "lean-agent config compact-window N|default, compact-pct P|default")
     report(True, text + " (lean-agent config compact-window N|default, compact-pct P|default)")
     report(True, f"auto clear: {clear_at_text()} (lean-agent config clear-at off|auto|N)")
+    report(True, "live map: lean-agent map --open")
     fa = service_session.fresh_after()
     report(True, "auto fresh: " + service_session.fresh_text(fa) + (
         f" (thread sessions continue fresh at ~{kt(int(service_session.fresh_context_threshold(fa[1], service_session.up_compact_at())))} context)"
@@ -12377,12 +12379,15 @@ def sock_handlers(deliverer, helper):
         if not plain(tid, text):
             return {"ok": False, "error": "needs a session start: use the files"}
         own = service_session.spool_add(tid, text)  # the same spool as `thread send`: nothing is lost if the service dies
+        lean_map.record("message", "main", "service", "send · " + tid)
+        lean_map.record("message", "service", tid, "deliver", node=tid, dir="to", text="message delivered")
         return finish(tid, deliver_with_cap(tid, own, False, False, wait=SOCK_SEND_WAIT))
 
     def wake(req):
         tid = tid_of(req)
         if not plain(tid, None):
             return {"ok": False, "error": "needs a session start: use the files"}
+        lean_map.record("message", "service", tid, "wake", node=tid, dir="to", text="woken")
         line = deliver_with_cap(tid, service_session.spool_add(tid, None), False, False, wait=SOCK_SEND_WAIT)
         if service_session.spool_pending(tid):  # never silently left queued
             line += "; " + (service_session.delivery_reason(tid) or "still queued, the service retries every few seconds")
@@ -12391,10 +12396,18 @@ def sock_handlers(deliverer, helper):
     def pending(req):
         tid = str(req.get("thread") or "")
         text = service_session.inject_thread(tid) if tid else service_session.inject_main()
+        if text:
+            if tid:
+                lean_map.record("message", "service", tid, "tool boundary", node=tid, dir="to", text="message at tool boundary")
+            else:
+                lean_map.record("report", "service", "main", "report", node="main", dir="from", text="reports to you")
         return {"text": text}
 
+    def map_op(req):
+        return {"map": lean_map.snapshot_now()}
+
     return {
-        "send": send, "wake": wake, "pending": pending,
+        "send": send, "wake": wake, "pending": pending, "map": map_op,
         "now": lambda r: cli(r, ["now"] + [str(x) for x in r.get("args") or []]),
         "runs": lambda r: cli(r, ["runs"] + [str(x) for x in r.get("args") or []]),
         "show": lambda r: cli(r, ["runs", "--show", str(r.get("id") or "last")] + (["--tail", str(int(r["tail"]))] if r.get("tail") else [])),
@@ -12607,7 +12620,10 @@ def host_session(cmd, extra, env, h, name):
     sock_server = None
     try:
         sock_helper = lean_sock.Helper(os.path.abspath(__file__))
-        sock_server = lean_sock.Server(sock_handlers(deliverer, sock_helper), version=plugin_version(), on_stop=sock_helper.stop).start()
+        lean_map.VERSION = plugin_version()
+        sock_server = lean_sock.Server(sock_handlers(deliverer, sock_helper), version=plugin_version(), on_stop=sock_helper.stop)
+        sock_server.observer = lean_map.record_request
+        sock_server.start()
         threading.Thread(target=sock_helper.warm, daemon=True).start()
     except Exception as exc:  # noqa: BLE001 - the files keep working without the socket
         lean_log.log("warn", "sock", f"service socket not started: {exc}")
@@ -14522,6 +14538,8 @@ def _fe(fn, a):
 
 
 def cmd_map(a):
+    if not a.project or a.svg or a.mini or a.watch or a.open:
+        return cmd_live_map(a)
     def run(fe, slug, path, a):
         root = fe.work_dir(slug, path, a.dir)
         if a.exclude is not None or a.no_exclude:
@@ -15713,6 +15731,7 @@ SHORTCUTS = (
     ("status / now", "the status table"),
     ("compare <project>", "overhead of a clean session vs lean-agent's: `lean-agent compare <project>`"),
     ("more", "all threads (when the table says +N more)"),
+    ("map", "the live map (`lean-agent map --open`)"),
     ("update", "sync and restart when idle (`lean-agent update`)"),
     ("s21", "summary of t21: last report, open questions, running work, next step"),
     ("a21 <question>", "send the question to t21 unchanged"),
@@ -15773,6 +15792,25 @@ def cmd_myq(a):
         return 0
     thread = lean_threads.resolve(a.thread, lean_threads.load()["aliases"]) if a.thread else None
     print(lean_myq.table(open_only=a.open, thread=thread))
+    return 0
+
+
+def cmd_live_map(a):
+    """The live map: one snapshot (--json), the drawing (--svg/--mini), a line per change (--watch) or the local page (--open)."""
+    if getattr(a, "watch", False):
+        try:
+            lean_map.watch(sys.stdout)
+        except (KeyboardInterrupt, BrokenPipeError):
+            pass
+        return 0
+    if getattr(a, "open", False):
+        return 0 if lean_map.open_detached(browser=not os.environ.get("LEAN_AGENT_NO_BROWSER")) else 1
+    snap = lean_map.fetch()
+    if getattr(a, "svg", False) or getattr(a, "mini", False):
+        mini = bool(getattr(a, "mini", False))
+        print(lean_map.svg(snap, a.width or (480 if mini else 1200), a.height or (320 if mini else 700), mini=mini))
+    else:
+        print(json.dumps(snap, indent=None if getattr(a, "json", False) else 1))
     return 0
 
 
@@ -18586,8 +18624,15 @@ def build_parser():
     s.add_argument("--text", help="the content (default: stdin)")
     s.set_defaults(fn=cmd_doc)
 
-    s = sub.add_parser("map", help="the code's import graph (no model): who uses what, deps, routes, unused files")
-    s.add_argument("project")
+    s = sub.add_parser("map", help="the code's import graph (no model): who uses what, deps, routes, unused files; "
+                       "with no project (or --json/--svg/--mini/--watch/--open): the live map of the service")
+    s.add_argument("project", nargs="?")
+    s.add_argument("--svg", action="store_true", help="live map: one standalone SVG")
+    s.add_argument("--mini", action="store_true", help="live map: the small round-node SVG")
+    s.add_argument("--watch", action="store_true", help="live map: one JSON line whenever it changes (twice a second at most)")
+    s.add_argument("--open", action="store_true", help="live map: serve it on 127.0.0.1 (random port + token) and open it")
+    s.add_argument("--width", type=int)
+    s.add_argument("--height", type=int)
     s.add_argument("--who-uses", metavar="X", help="a file, folder, file name or exported name")
     s.add_argument("--deps", metavar="PATH", help="what a file or folder imports")
     s.add_argument("--route", nargs="?", const="all", metavar="/PATH", help="a route's entry and size (no value: all)")

@@ -464,6 +464,7 @@ Reply to the front desk with one of these on its own; its prompt hook turns it i
 |---|---|
 | `?` / `shortcuts` / `help` | this list |
 | `status` / `now` | the status table (needs-you and running threads first, max 10 rows) |
+| `map` | the live map: `lean-agent map --open` serves it on 127.0.0.1 with a random token |
 | `more` | all threads, when the table ends with `+N more threads` |
 | `s21` | summary of t21: last report, open questions, running work, next step (also `s t21`, `summary t21`, `show t21`) |
 | `a21 <question>` | send the question to t21 unchanged (`ask t21 <question>`); `a21` alone asks what to ask |

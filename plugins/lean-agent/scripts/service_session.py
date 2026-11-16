@@ -42,6 +42,7 @@ import lean_threads
 import lean_log
 import lean_private
 import lean_own
+import lean_map
 import lean_waiting
 import usage
 
@@ -1645,6 +1646,8 @@ class SpoolDeliverer:
             else:
                 self.failed[tid] = self.now()
                 self.fails[tid] = self.fails.get(tid, 0) + 1
+        if ok and err != "slot":
+            lean_map.record("message", "service", tid, "deliver", node=tid, dir="to", text="message delivered")
         if not ok:
             lean_log.log("warn", "spool", f"{tid}: delivery failed, will retry: {err}")
 
@@ -1919,6 +1922,8 @@ def queue_report(tid, kind, text, tag="", force=False, waiting=True):
             lean_common.write_json_atomic(reports_path(), {"items": items[-50:]})
             queued_ok = True
     if queued_ok:
+        lean_map.record("report", tid, "service", "report", node=tid, dir="from", text=f"report to you ({kind})")
+        lean_map.record("report", "service", "main", "report · " + tid)
         try:
             report_state(tid, seq, kind, text)
         except Exception:
@@ -2143,6 +2148,8 @@ def run_fallback(now=None):
         if st.get("reported"):
             continue
         if not st:  # first sight: a run that ended before the service saw the ledger gets the full window from now
+            if now - r["fin"] < lean_map.RING_SECONDS:
+                lean_map.run_ended(rid, r["thread"], r.get("status"), now=min(now, max(r["fin"], now - 60)))
             run_state_update(rid, seen=now)
             st = {"seen": now}
         if reported_at(r["thread"]) >= r["fin"]:
