@@ -449,20 +449,65 @@ def seed_collected(lean_home):
     return done
 
 
+def _pending_collected(lean_home):
+    """{id: ts} marks parked in collected.pending (appended without the lock while collected.json's lock was busy)."""
+    return _pending_collected_file(os.path.join(lean_home, "collected.pending"))
+
+
+def _pending_collected_file(path):
+    out = {}
+    try:
+        with open(path) as fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue  # a torn last line of a writer that died: the rest still counts
+                if isinstance(d, dict):
+                    out.update({k: v for k, v in d.items() if isinstance(k, str)})
+    except OSError:
+        pass
+    return out
+
+
+def collected_map(lean_home):
+    """{run id: when its result was shown} (plus the cutoff key): collected.json and the marks parked beside it."""
+    done = dict(seed_collected(lean_home))
+    done.update(_pending_collected(lean_home))
+    return done
+
+
 def mark_collected_ids(lean_home, run_ids):
-    """Record in collected.json that these runs' results were shown to someone."""
+    """Record in collected.json that these runs' results were shown to someone. A reader never waits long for the
+    lock (SHOW_LOCK_WAIT): when it is busy the marks are appended to collected.pending (one short line, atomic with
+    O_APPEND, no lock) and the next writer that holds the lock folds them in, so no mark is ever lost."""
     ids = [r for r in run_ids if r]
     if not ids:
         return
     seed_collected(lean_home)
     path = os.path.join(lean_home, "collected.json")
+    pending = os.path.join(lean_home, "collected.pending")
+    marks = {r: now_iso() for r in ids}
     try:
-        with file_lock(path, timeout=SHOW_LOCK_WAIT):  # a reader never waits minutes for a stuck holder: skip the mark
+        with file_lock(path, timeout=SHOW_LOCK_WAIT):
             done = read_json(path, {})
-            done.update({r: now_iso() for r in ids})
+            done.update(_pending_collected(lean_home))  # folded in, the file itself is never rewritten in place
+            done.update(marks)
             write_json_atomic(path, done)
+            try:  # it only grows under lock contention (rare); past 256 KB it is rotated away once folded in
+                if os.path.getsize(pending) > 256 * 1024:
+                    os.replace(pending, pending + ".old")
+                    done.update(_pending_collected_file(pending + ".old"))
+                    write_json_atomic(path, done)
+                    os.remove(pending + ".old")
+            except OSError:
+                pass
     except OSError:
-        pass
+        try:
+            with open(pending, "a") as fh:
+                fh.write(json.dumps(marks) + "\n")
+        except OSError:
+            pass
 
 
 def uncollected_ids(lean_home, live_ids=()):
@@ -470,7 +515,7 @@ def uncollected_ids(lean_home, live_ids=()):
     (not in collected.json, recorded after its cutoff), oldest first. The first call without a collected.json seeds
     the cutoff, so a ledger from before this existed isn't reported as waiting. A resumed run counts once, by its
     latest ledger entry."""
-    done = seed_collected(lean_home)
+    done = collected_map(lean_home)
     cutoff = done.get(COLLECTED_CUTOFF) or ""
     latest = {}
     try:

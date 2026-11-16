@@ -7948,7 +7948,9 @@ class CliTest(unittest.TestCase):
         procs = [subprocess.Popen([sys.executable, "-c", code, tag]) for tag in ("a", "b")]
         for p in procs:
             self.assertEqual(p.wait(timeout=scaled(60)), 0)
-        done = json.load(open(os.path.join(home, "collected.json")))
+        sys.path.insert(0, os.path.dirname(CLI))
+        import lean_common
+        done = lean_common.collected_map(home)  # collected.json plus marks parked while its lock was busy
         for tag in ("a", "b"):
             for i in range(30):
                 self.assertIn(f"{tag}{i}", done)
