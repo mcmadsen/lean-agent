@@ -3468,6 +3468,7 @@ class Host:
         self.log = None
         self.name = None
         self.thread = None     # the thread running run() (thread sessions)
+        self.created_at = time.time()  # a host nobody has typed into or heard from yet is idle since it was created, not since 1970
         self.last_output = 0.0
         self.last_input = 0.0  # when someone last typed into the session (the terminal, or a message sent to the bridge)
 
@@ -4025,7 +4026,7 @@ class Sessions:
                 rec = session_rec(tid)
                 out.append({"thread": tid, "name": rec.get("name"), "pid": host.proc.pid if up else None,
                             "state": "running" if up else "starting",
-                            "idle": round(time.time() - max(host.last_output, host.last_input))})
+                            "idle": round(time.time() - max(host.last_output, host.last_input, getattr(host, "created_at", 0)))})
         return out
 
     def dispatch(self, msg):
