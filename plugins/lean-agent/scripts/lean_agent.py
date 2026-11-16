@@ -18,6 +18,7 @@ if os.path.basename(sys.argv[0]) == "lean_agent.py" and sys.argv[1:2] in (["now"
         sys.stdout.flush()
         os._exit(_rc)
 import argparse
+import difflib
 import contextlib
 import datetime
 import fnmatch
@@ -17802,12 +17803,45 @@ def cmd_home(a):
 THREAD_HELP = "the thread this is recorded under (default: the current one; none = no thread)"
 
 
+class CliParser(argparse.ArgumentParser):
+    """Errors show the failing subcommand's own usage and, for an unknown option or subcommand, the closest name."""
+
+    def __init__(self, **kw):
+        kw.setdefault("allow_abbrev", False)
+        super().__init__(**kw)
+
+    def _options(self):
+        return [o for a in self._actions for o in a.option_strings]
+
+    def _choices(self):
+        return [c for a in self._actions if isinstance(a, argparse._SubParsersAction) for c in a.choices]
+
+    def parse_known_args(self, args=None, namespace=None):
+        ns, extras = super().parse_known_args(args, namespace)
+        if self.prog != "lean-agent" and extras:  # a subcommand: report its own unknown options here
+            bad = next((e for e in extras if e.startswith("-")), None)
+            if bad:
+                name = bad.split("=", 1)[0]
+                near = difflib.get_close_matches(name, self._options(), n=1)
+                self.error(f"unknown option {name}" + (f" (did you mean {near[0]}?)" if near else ""))
+        return ns, extras
+
+    def error(self, message):
+        import re as _re
+        m = _re.match(r"argument \S+: invalid choice: '([^']*)'", message)
+        if m:
+            near = difflib.get_close_matches(m.group(1), self._choices(), n=1)
+            message = f"unknown command {m.group(1)}" + (f" (did you mean {near[0]}?)" if near else "")
+        self.print_usage(sys.stderr)
+        self.exit(2, f"{self.prog}: {message}\n")
+
+
 def build_parser():
     # no abbreviated options (`--not` for `--note`): the strict-mode hook matches the full flag names
-    ap = argparse.ArgumentParser(prog="lean-agent", description=__doc__.split("\n\n")[0], allow_abbrev=False)
+    ap = CliParser(prog="lean-agent", description=__doc__.split("\n\n")[0], allow_abbrev=False)
     ap.add_argument("--version", action="version", version=f"lean-agent {plugin_version()}")
     sub = ap.add_subparsers(dest="cmd", required=True,
-                            parser_class=lambda **kw: argparse.ArgumentParser(allow_abbrev=False, **kw))
+                            parser_class=CliParser)
 
     s = sub.add_parser("up", help="start the orchestrator (Remote Control by default)")
     s.add_argument("--model", default="sonnet",
