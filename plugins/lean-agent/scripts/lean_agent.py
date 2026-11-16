@@ -11261,7 +11261,123 @@ def lost_report(r):
     return "\n".join(out) + "\n"
 
 
+def _alive_span(sec):
+    sec = max(0, int(sec))
+    if sec < 90:
+        return f"{sec} s"
+    if sec < 5400:
+        return f"{sec // 60} min"
+    return f"{sec // 3600}h{sec % 3600 // 60:02d}m"
+
+
+def _alive_find(target, markers):
+    """(run id, [markers of it], workdir) for a full id, unique prefix or `last`; None when unknown. Looks at the running
+    markers and the work folder names only: no ledger."""
+    ids = {}
+    for f, m in markers:
+        rid = m.get("run") or os.path.basename(f)[:-5]
+        ids.setdefault(rid, []).append(m)
+    try:
+        names = [n for n in os.listdir(home("work")) if RUN_ID_RE.fullmatch(n)]
+    except OSError:
+        names = []
+    pool = sorted(set(names) | set(ids))
+    if target == "last":
+        if not pool:
+            return None
+        rid = max(ids, key=lambda i: max(os.path.getmtime(f) for f, m in markers if (m.get("run") or os.path.basename(f)[:-5]) == i)) if ids else pool[-1]
+    elif target in pool:
+        rid = target
+    else:
+        hits = [i for i in pool if target and i.startswith(target)]
+        if len(hits) != 1:
+            return None
+        rid = hits[0]
+    ms = ids.get(rid, [])
+    wd = next((m["workdir"] for m in ms if m.get("workdir")), None) or home("work", rid)
+    if not ms and not os.path.isdir(wd):
+        return None
+    return rid, ms, wd
+
+
+def alive_line(rid, ms, wd):
+    """(exit code, one line) for `runs --alive`: alive | orphaned | ended | dead, from the markers, pids and run folder."""
+    now = time.time()
+    sup = next((m for m in ms if m.get("pid") and lean_common.pid_is(m["pid"], m.get("pid_start"))), None)
+    cpid = lean_common.claude_alive(wd)
+    prog = lean_common.last_progress(wd)
+    seen = f"last progress {_alive_span(now - prog)} ago" if prog else "no progress yet"
+    res = os.path.join(wd, "result.json")
+    if sup or cpid:
+        if sup:
+            up = ""
+            st = lean_common.proc_start(sup["pid"])
+            try:
+                if st and st.startswith("p"):  # clock ticks since boot -> uptime
+                    with open("/proc/uptime") as fh:
+                        boot = now - float(fh.read().split()[0])
+                    up = f" (up {_alive_span(now - (boot + int(st[1:]) / os.sysconf('SC_CLK_TCK')))})"
+            except (OSError, ValueError):
+                pass
+            text = f"alive  supervisor pid {sup['pid']}{up}"
+            text += f" · worker pid {cpid}" if cpid else " · no worker pid"
+        else:
+            text = f"orphaned  supervisor gone, worker pid {cpid} alive"
+        m0 = next((m for m in ms if m.get("worktree") or (m.get("fixed") or {}).get("worktree")), None)
+        if m0 and fcntl:
+            name = m0.get("worktree") or m0["fixed"]["worktree"]
+            slug = m0.get("project") or (m0.get("fixed") or {}).get("project")
+            lock = home("worktrees", str(slug), f".{name}.lock")
+            if os.path.exists(lock):
+                held = False
+                try:
+                    with open(lock) as fh:
+                        try:
+                            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            fcntl.flock(fh, fcntl.LOCK_UN)
+                        except OSError:
+                            held = True
+                except OSError:
+                    pass
+                seen += " · worktree lock " + ("held" if held else "free")
+        sep = " · " if text.startswith("alive") else ", "
+        return 0, f"{rid}  {text}{sep}{seen}"
+    try:
+        with open(res) as fh:
+            lines = [l for l in fh.read().splitlines() if l.strip()]
+    except OSError:
+        lines = []
+    if lines:
+        word = "done"
+        try:
+            if json.loads(lines[-1]).get("is_error"):
+                word = "failed"
+        except (ValueError, AttributeError):
+            pass
+        at = datetime.datetime.fromtimestamp(os.path.getmtime(res)).strftime("%H:%M")
+        return 1, f"{rid}  ended  {word} {at} (result recorded)"
+    return 1, f"{rid}  dead  no live pid, no result, {seen}"
+
+
+def cmd_alive(ids):
+    """`runs --alive <id>...|last`: liveness of runs, one line each. Exit 0 alive/orphaned, 1 ended/dead, 2 unknown id."""
+    markers = lean_common._marker_files(home())
+    code, ends = 0, False
+    for t in ids:
+        hit = _alive_find(t, markers)
+        if not hit:
+            print(f"{t}  unknown  no such run (lean-agent runs --running)")
+            code = 2
+            continue
+        rc, line = alive_line(*hit)
+        print(line)
+        ends = ends or rc == 1
+    return code or (1 if ends else 0)
+
+
 def cmd_runs(a):
+    if getattr(a, "alive", None):
+        return cmd_alive(a.alive)
     if getattr(a, "wait", None):
         return wait_for_runs(a.wait, a.timeout)
     os.environ.setdefault("LEAN_AGENT_LOCK_TIMEOUT", "4")  # listing/showing/stopping never queue behind a busy lock for minutes
@@ -15588,6 +15704,7 @@ SHORTCUTS = (
     ("x all", "close every thread session (not main, not the calling session)"),
     ("x all but 152 153", "close all except t152 t153 (`except` works too)"),
     ("x idle 2h", "close the sessions idle at least 2h with no running run"),
+    ("alive21 / alive <run id>", "is that run alive: `lean-agent runs --alive <id>` (supervisor, worker, last progress; exit 0 alive, 1 ended/dead)"),
     ("stop21 / stop 21 22", "stop the SESSION of t21 (t22 ...) only: checkpointed, the thread stays open, queued messages are kept, the next message restarts it"),
     ("stop idle [2h]", "stop every session idle that long (default: the session-idle-stop limit)"),
     ("o21", "reopen t21 and continue its previous transcript (`thread reopen t21 --resume-old`)"),
@@ -18342,6 +18459,8 @@ def build_parser():
     s.add_argument("--clear", action="store_true", help="with --lost: mark the lost runs lost-and-acknowledged so they stop appearing")
     s.add_argument("--stop", metavar="RUN_ID|last", help="stop a run in progress (only lean-agent's own run), mark it "
                    "stopped and list what it changed in its worktree")
+    s.add_argument("--alive", nargs="+", metavar="RUN_ID|last", help="is the run alive? one line per run (supervisor, worker, "
+                   "last progress, worktree lock); exit 0 alive/orphaned, 1 ended/dead, 2 unknown")
     s.add_argument("--wait", metavar="RUN_ID|all|last", help="block until those runs are recorded, then print each result "
                    "as `run` printed it (exit 1 if one failed, 124 on --timeout)")
     s.add_argument("--timeout", type=float, default=0, metavar="SECONDS", help="with --wait: give up after this long")
