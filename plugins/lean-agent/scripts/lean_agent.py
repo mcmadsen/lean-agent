@@ -66,6 +66,7 @@ import lean_goals  # noqa: E402
 import lean_pr  # noqa: E402
 import lean_waiting  # noqa: E402
 import lean_compare  # noqa: E402
+import lean_passes  # noqa: E402
 import lean_poll  # noqa: E402
 import lean_map  # noqa: E402
 import lean_own  # noqa: E402
@@ -4710,6 +4711,8 @@ def focus_text(fc):
         parts.append("Self-declared gaps: added lines and commit messages that say something isn't done (pass 0: "
                      "does each keep the change from doing what it promises? Put every one in \"gaps\"):\n"
                      + "\n".join(f"- {g}" for g in fc["gaps"]))
+    if fc.get("passes"):
+        parts.append(lean_passes.checklist_text(fc["passes"]))
     return ("\n".join(parts) + "\n") if parts else ""
 
 
@@ -7361,6 +7364,8 @@ def review_main(a):
         meta["resume"] = True
         focus = change_focus(path, since) if since else {"tests": [], "params": [], "state": [], "renamed": []}
         meta["edited_tests"] = focus["tests"]
+        focus["passes"] = meta["passes"] = lean_passes.triggered(
+            changed, (git(path, "diff", "-U0", "--no-color", *since) or "") if since else "")
         mb = meta.get("merge_base")
         if mb:  # gaps are about the whole change, not only what changed since the last review
             meta["gaps"] = self_declared_gaps(path, [mb, meta["head"]] if meta.get("mode") == "ref" else [mb],
@@ -7502,6 +7507,8 @@ def review_main(a):
                                        untracked_files(path) if mode != "ref" else (), base=base)
     focus["ci_parity"] = ci_parity(path, [merge_base, sha] if mode == "ref" else [merge_base],
                                    sha if mode == "ref" else "HEAD")
+    focus["passes"] = lean_passes.triggered(
+        names, git(path, "diff", "-U0", "--no-color", *([merge_base, sha] if mode == "ref" else [merge_base])) or "")
     grep_ref = sha if mode == "ref" else ""
     a._decisions = "" if a.independent else decisions_text(slug, label, path, sha)
     a._label = label
@@ -7566,7 +7573,7 @@ def review_main(a):
             "hunks": changed_hunks(path, [merge_base, sha] if mode == "ref" else [merge_base]),
             "edited_tests": focus["tests"], "independent": bool(a.independent), "gaps": focus.get("gaps") or [],
             "goal": (a.goal.splitlines()[0][:200] if getattr(a, "_goal_from_pr", False) else getattr(a, "goal", None)),
-            "ci_parity": focus.get("ci_parity") or [],
+            "ci_parity": focus.get("ci_parity") or [], "passes": focus.get("passes") or [],
             "scope": "full", "fallback": getattr(a, "_fallback", ""), "for_push": bool(getattr(a, "for_push", False))}
     ns = argparse.Namespace(resume=None, task=[task], task_file=None, model=model, estimate=getattr(a, "_estimate", None),
                             todo=getattr(a, "todo", None),
@@ -7747,7 +7754,7 @@ def reuse_follow_up(a, slug, meta, effort):
     return 0 if now.get("verdict") == "approve" and not any(g.get("unaddressed") for g in now.get("gaps") or []) else 2
 
 
-DESIGN_CATEGORIES = ("completeness", "duplication", "scope", "platform")
+DESIGN_CATEGORIES = ("completeness", "duplication", "scope", "platform", "stale-text")
 CATEGORY_ORDER = {c: i for i, c in enumerate(DESIGN_CATEGORIES + ("correctness", "security", "compatibility",
                                                                    "performance", "tests", "style"))}
 
@@ -8109,6 +8116,8 @@ def report_review(slug, project, entry, review, meta):
             f"  {i}. [{f.get('severity', '?')}{cat}] {loc}: {issue if len(issue) <= 140 else issue[:137] + '...'}")
         if f.get("suggestion"):
             detail(f"      fix: {f['suggestion']}")
+    for line in lean_passes.report_lines(meta.get("passes") or [], findings):
+        print(f"  {line}")
     uf = review.get("_user_facing") or []
     if uf:
         print("  User-facing changes (intended / unintended):")
