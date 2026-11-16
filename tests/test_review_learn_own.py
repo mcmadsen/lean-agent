@@ -17,7 +17,7 @@ def comment(body, author="pat"):
     return {"author": {"displayName": author}, "content": body}
 
 
-class OwnCommentTest(unittest.TestCase):
+class OwnerCommentTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -25,32 +25,50 @@ class OwnCommentTest(unittest.TestCase):
         p = mock.patch.dict(os.environ, env, clear=True)
         p.start()
         self.addCleanup(p.stop)
-        sys.modules.pop("lean_agent", None)
+        for m in ("lean_agent", "lean_pr"):
+            sys.modules.pop(m, None)
         import lean_agent
         self.agent = lean_agent
 
-    def test_robot_prefix_is_own_whoever_the_author(self):
-        for body in (":robot: 🐛 [bug] x is null", "  \n🤖 ⛏️ [nitpick] rename", "🤖 note"):
-            self.assertTrue(self.agent.comment_is_bot(comment(body, "Pat Smith")), body)
+    def kept(self, comments, me):
+        out, dropped = self.agent.learnable_threads([{"comments": comments}], me)
+        return [c["content"] for t in out for c in t["comments"]], dropped
 
-    def test_human_comment_is_human(self):
-        self.assertFalse(self.agent.comment_is_bot(comment("Please rename this")))
-        self.assertFalse(self.agent.comment_is_bot(comment("I disagree with the :robot: comment above")))
-        self.assertFalse(self.agent.comment_is_bot(comment("agreed 🤖 said it too", "Lee")))
+    def test_owner_comment_excluded_marker_or_not(self):
+        got, _ = self.kept([comment("plain note", "Pat Smith"), comment(":robot: 🐛 [bug] x", "Pat Smith"),
+                            comment("other view", "Lee")], "pat smith")
+        self.assertEqual(got, ["other view"])
 
-    def test_identity_with_marker_inside_first_400_chars(self):
-        with mock.patch.dict(os.environ, {"LEAN_AGENT_POST_AS": "pat smith"}):
-            self.assertTrue(self.agent.comment_is_bot(comment("Heads up\n:robot: finding", "Pat Smith")))
-            self.assertFalse(self.agent.comment_is_bot(comment("Heads up\n:robot: finding", "Lee")))
-            self.assertFalse(self.agent.comment_is_bot(comment("plain words", "Pat Smith")))
+    def test_owner_matched_by_login_and_id(self):
+        c = {"author": {"login": "pat-s", "id": "u-1"}, "content": "x"}
+        self.assertEqual(self.agent.learnable_threads([{"comments": [c]}], "pat-s"), ([], 1))
+        c = {"author": {"id": "u-1"}, "content": "x"}
+        self.assertEqual(self.agent.learnable_threads([{"comments": [c]}], "u-1"), ([], 1))
 
-    def test_human_reply_under_own_comment_is_kept(self):
-        t = {"comments": [comment(":robot: 🐛 [bug] x"), comment("Good catch, fixed", "Lee")]}
-        kept, dropped = self.agent.human_threads([t])
+    def test_other_users_robot_comment_and_bot_accounts_are_included(self):
+        got, dropped = self.kept([comment(":robot: 🐛 [bug] y", "Lee"), comment("🤖 ⛏️ [nitpick] z", "Sam"),
+                                  {"author": {"displayName": "review-bot", "isBot": True}, "content": "bot finding"},
+                                  comment("CI passed", "Build Service")], "pat smith")
+        self.assertEqual(len(got), 4)
         self.assertEqual(dropped, 0)
+
+    def test_replies_judged_by_their_own_author(self):
+        t = {"comments": [comment("first", "Pat Smith"), comment("Good catch, fixed", "Lee"), comment("thanks", "Pat Smith")]}
+        kept, dropped = self.agent.learnable_threads([t], "pat smith")
         self.assertEqual([c["content"] for c in kept[0]["comments"]], ["Good catch, fixed"])
-        kept, dropped = self.agent.human_threads([{"comments": [comment("🤖 ⛏️ [nitpick] y")]}])
-        self.assertEqual((kept, dropped), ([], 1))
+        self.assertEqual(self.agent.learnable_threads([{"comments": [comment("a", "Pat Smith")]}], "pat smith"), ([], 1))
+
+    def test_unknown_owner_falls_back_to_the_marker(self):
+        got, _ = self.kept([comment(":robot: 🐛 [bug] x", "Lee"), comment("  🤖 ⛏️ [nitpick] y", "Sam"),
+                            comment("see the :robot: remark above", "Kim"), comment("LEAN-REVIEW verdict", "Lee")], "")
+        self.assertEqual(got, ["see the :robot: remark above"])
+
+    def test_owner_identity_from_the_cached_pr_query_else_env_else_empty(self):
+        self.assertEqual(self.agent.owner_identity("proj"), "")
+        self.agent.lean_pr.save_query("own", "proj", [], me="pat-s")
+        self.assertEqual(self.agent.owner_identity("proj"), "pat-s")
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_POST_AS": "someone"}):
+            self.assertEqual(self.agent.owner_identity("proj"), "someone")
 
 
 class LessonRegistryTest(unittest.TestCase):

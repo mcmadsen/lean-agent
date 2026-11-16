@@ -5335,19 +5335,44 @@ LEARN_CHUNK_CHARS = 30000  # input per learn run: a run is never fed more, a big
 BOT_WORDS = ("[bot]", "bot", "pipeline", "build service", "continuous integration", "github-actions", "dependabot",
              "azure-devops", "lean-agent", "system")
 OWN_MARKERS = ("lean-review", "lean-agent review", "reviewed by lean-agent")
-# lean-agent posts its review comments under the user's own account, each starting with a robot marker (":robot: 🐛 [bug] ..."
-# or "🤖 ⛏️ [nitpick] ..."); a comment that starts so is ours whoever the author is. No code writes the prefix (the review
-# worker does), so this tuple is the one definition the reader here relies on.
+# lean-agent posts its review comments under the owner's own account, each starting with a robot marker (":robot: 🐛 [bug] ..."
+# or "🤖 ⛏️ [nitpick] ..."). Used only when the owner can't be identified; the review worker writes the prefix (no code does).
 OWN_PREFIXES = (":robot:", "\U0001F916")
+AUTHOR_KEYS = ("login", "name", "displayName", "uniqueName", "id")
 
 
-def own_identity():
-    """The account name lean-agent posts its review comments under (LEAN_AGENT_POST_AS), lowercased, or ''."""
-    return (os.environ.get("LEAN_AGENT_POST_AS") or "").strip().lower()
+def owner_identity(slug):
+    """The signed-in user lean-agent acts as (the `me` of `pr own|mine|stale`, as the helper reported it), or ''."""
+    env = (os.environ.get("LEAN_AGENT_POST_AS") or "").strip()
+    if env:
+        return env
+    cache = lean_pr.load_cache()
+    for kind in ("own", "stale", "mine"):
+        me = ((lean_pr.query_of(kind, slug, cache) or {}).get("me") or "").strip()
+        if me:
+            return me
+    for k, v in cache.items():  # a query of another project name still names the same signed-in user
+        if k.startswith("_q:") and isinstance(v, dict) and str(v.get("me") or "").strip():
+            return str(v["me"]).strip()
+    return ""
+
+
+def comment_is_owner(c, me):
+    """A comment written by the lean-agent owner: its author is `me` (as lean_pr.is_me matches), whatever the body says;
+    with no `me`, one that starts with lean-agent's own marker."""
+    if not isinstance(c, dict):
+        return False
+    au = c.get("author") or c.get("user") or c.get("createdBy") or {}
+    names = [str(au.get(k) or "") for k in AUTHOR_KEYS] if isinstance(au, dict) else [str(au)]
+    if me:
+        return any(lean_pr.is_me(n, me) for n in names)
+    raw = str(c.get("content") or c.get("body") or c.get("text") or "")
+    return raw.lstrip().startswith(OWN_PREFIXES) or any(m in raw.lower()[:400] for m in OWN_MARKERS)
 
 
 def comment_is_bot(c):
-    """A comment written by a bot, CI, a system/status event or this tool's own review."""
+    """A comment written by a bot, CI, a system/status event or this tool's own review. `review learn` no longer uses it
+    (it learns from bots too, see learnable_threads); it stays as the bot test for other callers."""
     if not isinstance(c, dict):
         return False
     au = c.get("author") or c.get("user") or c.get("createdBy") or {}
@@ -5361,13 +5386,8 @@ def comment_is_bot(c):
         return True
     if any(w in name for w in BOT_WORDS):
         return True
-    raw = str(c.get("content") or c.get("body") or c.get("text") or "")
-    if raw.lstrip().startswith(OWN_PREFIXES):
-        return True  # our own review comment, posted under the user's identity: whoever the author is
-    if any(m in raw.lower()[:400] for m in OWN_MARKERS):
-        return True
-    me = own_identity()
-    return bool(me and me in name and any(m in raw[:400] for m in OWN_PREFIXES))
+    body = str(c.get("content") or c.get("body") or c.get("text") or "").lower()
+    return any(m in body[:400] for m in OWN_MARKERS)
 
 
 def split_threads(text):
@@ -5384,9 +5404,9 @@ def split_threads(text):
     return [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
 
 
-def human_threads(items, all_authors=False):
-    """(kept, dropped): without --all-authors threads whose every comment is a bot/CI/system/own-review one are
-    dropped, and the bot comments of mixed threads are removed."""
+def learnable_threads(items, me="", all_authors=False):
+    """(kept, dropped): what `review learn` mines. Every comment is kept (humans, bots, CI) except the lean-agent
+    owner's own, judged per comment by its author; a thread left with no comment is dropped. --all-authors keeps all."""
     if all_authors:
         return list(items), 0
     kept, dropped = [], 0
@@ -5396,12 +5416,12 @@ def human_threads(items, all_authors=False):
             continue
         key = next((k for k in ("comments", "messages") if isinstance(t.get(k), list)), None)
         if key:
-            humans = [c for c in t[key] if not comment_is_bot(c)]
-            if not humans:
+            rest = [c for c in t[key] if not comment_is_owner(c, me)]
+            if not rest:
                 dropped += 1
                 continue
-            kept.append(dict(t, **{key: humans}) if len(humans) != len(t[key]) else t)
-        elif comment_is_bot(t):
+            kept.append(dict(t, **{key: rest}) if len(rest) != len(t[key]) else t)
+        elif comment_is_owner(t, me):
             dropped += 1
         else:
             kept.append(t)
@@ -6255,11 +6275,15 @@ def cmd_review_learn(a):
         chunks, hashes_by_chunk = [None], [[]]
         if threads is not None:
             items = split_threads(threads)
-            items, dropped = human_threads(items, all_authors)
+            me = owner_identity(slug)
+            if not me and not all_authors:
+                print("review learn: the owner is unknown (no signed-in identity from pr own/mine/stale), so comments "
+                      "starting with lean-agent's own marker were matched instead", flush=True)
+            items, dropped = learnable_threads(items, me, all_authors)
             known = learned_hashes(slug, a.pr)
             fresh = [t for t in items if thread_hash(t) not in known]
             if dropped:
-                print(f"review learn: skipped {dropped} bot/CI/own thread(s) (--all-authors includes them)", flush=True)
+                print(f"review learn: skipped {dropped} thread(s) written by the owner (--all-authors includes them)", flush=True)
             if not fresh:
                 print(f"nothing new to learn ({len(items) - len(fresh)} threads already learned)", flush=True)
                 if not (checklist or helpers):
@@ -6275,7 +6299,7 @@ def cmd_review_learn(a):
                 if len(chunks) > 1:
                     print(f"review learn: {len(fresh)} new threads in {len(chunks)} parts", flush=True)
         else:
-            ours += "\n\nLearn only from comments written by people, not bots, CI or tool-generated ones." if not all_authors else ""
+            ours += "\n\nSkip comments written by the signed-in user (they are lean-agent's own, e.g. starting with a robot marker); learn from everyone else, bots included." if not all_authors else ""
         got = {"checklist": [], "helpers": [], "replace": [], "declined": [], "threads_read": [], "last_comment": None}
         rc, run = 0, None
         for n, chunk in enumerate(chunks, 1):
@@ -18615,8 +18639,8 @@ def build_parser():
                    "text from this file (or - for stdin), e.g. from the tracker's CLI")
     s.add_argument("--threads-cmd", metavar="CMD", help="--pr without an MCP: a command that prints the threads, {pr} "
                    "replaced by the PR id (saved for the project; used by the automatic learning)")
-    s.add_argument("--all-authors", action="store_true", help="--pr: also learn from bot, CI, system and this tool's own "
-                   "comments (default: human-written threads only)")
+    s.add_argument("--all-authors", action="store_true", help="--pr: also learn from the owner's own comments "
+                   "(default: every comment except the lean-agent owner's)")
     s.add_argument("--list", action="store_true", help="list the learned checklist and helper lines: id, batch, date, text")
     s.add_argument("--rm", metavar="N|TEXT", help="remove a learned line by its --list id or a unique piece of its text")
     s.add_argument("--rm-batch", metavar="BATCH", help="remove every lesson a learn batch added (prints how many)")

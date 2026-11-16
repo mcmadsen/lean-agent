@@ -10583,12 +10583,14 @@ class CliTest(unittest.TestCase):
                        LEAN_AGENT_LEARN_CHUNK_CHARS="1500").stdout
         runs = self.calls()[n:]
         self.assertGreater(len(runs), 1, out)  # sliced into several runs inside one command
-        self.assertIn("skipped 2 bot/CI/own thread(s)", out)
-        self.assertNotIn("CI passed", json.dumps(runs))
+        self.assertIn("the owner is unknown", out)  # no pr query cached: the marker fallback skipped the LEAN-REVIEW thread
+        self.assertIn("skipped 1 thread(s) written by the owner", out)
+        self.assertIn("CI passed", json.dumps(runs))  # bots are learned from
+        self.assertNotIn("LEAN-REVIEW verdict", json.dumps(runs))
         again = len(self.calls())
         out = self.cli("review", "learn", "proj", "--pr", "70", "--threads-file", thr, FAKE_FEEDBACK=fb,
                        LEAN_AGENT_LEARN_CHUNK_CHARS="1500").stdout
-        self.assertIn("nothing new to learn (6 threads already learned)", out)
+        self.assertIn("nothing new to learn (7 threads already learned)", out)
         self.assertEqual(len(self.calls()), again)  # no model run started
         n = len(self.calls())
         self.cli("review", "learn", "proj", "--pr", "71", "--threads-file", thr, "--all-authors", FAKE_FEEDBACK=fb)
