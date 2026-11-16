@@ -194,8 +194,40 @@ def run_line(r):
     return " ".join((m.group(1) if m else str(r.get("task", ""))).split())[:100]
 
 
-def handoff(hours=RECENT_HOURS):
-    """The hand-off note: what a new or compacted orchestrator session needs, from lean-agent's records."""
+NOTE_DAYS = 7  # the start injection carries only notes from this many days
+NOTE_LINE = 160  # characters of one note in the start injection
+NOTE_TOKENS = 1500  # cap of the notes in the start injection (len/4, as lean-agent estimates tokens)
+
+
+def inject_notes(notes, now=None):
+    """The open (not closed) hand-off notes for the start injection: from the last NOTE_DAYS days, newest first, one line
+    of NOTE_LINE characters each, at most NOTE_TOKENS in all, and a last line counting what was left out. Numbers are the
+    `--done N` numbers. Checkpoints are not notes here. Closed notes are removed from the list, so they never show."""
+    now = now or datetime.datetime.now()
+    cutoff = (now - datetime.timedelta(days=NOTE_DAYS)).isoformat(timespec="seconds")
+    cand = [(i, n) for i, n in enumerate(notes, 1) if n.get("kind") != "checkpoint"]
+    stamp = lambda c: str(c[1].get("ts") or now.isoformat(timespec="seconds"))  # a note without a time counts as new
+    fresh = sorted((c for c in cand if stamp(c) >= cutoff), key=stamp, reverse=True)
+    out, used = [], 0
+    for i, n in fresh:
+        text = " ".join(str(n.get("text", "")).split())
+        line = f"  {i}. " + (text if len(text) <= NOTE_LINE else text[:NOTE_LINE - 1].rstrip() + "\u2026")
+        cost = (len(line) + 4) // 4
+        if used + cost > NOTE_TOKENS:
+            break
+        out.append(line)
+        used += cost
+    left = len(cand) - len(out)
+    if out:
+        out.insert(0, "Open items and pending decisions (newest first):")
+    if left:
+        out.append(f"{left} more notes (older or longer): lean-agent handoff")
+    return out
+
+
+def handoff(hours=RECENT_HOURS, inject=False):
+    """The hand-off note: what a new or compacted orchestrator session needs, from lean-agent's records. With `inject`,
+    the open items are the trimmed start version (see inject_notes); without, all of them in full."""
     home = usage.lean_home()
     now = datetime.datetime.now()
     lines = [f"lean-agent hand-off ({now:%Y-%m-%d %H:%M}; from lean-agent's records, not the transcript; "
@@ -215,7 +247,9 @@ def handoff(hours=RECENT_HOURS):
         lines += [f"  #{t['id']} {'[doing] ' if t.get('status') == 'doing' else ''}{t['text'][:100]}"
                   + (f" ({t['ref']})" if t.get("ref") else "") for t in todo[:10]]
     notes = load_notes()
-    if any(n.get("kind") != "checkpoint" for n in notes):  # checkpoints show in `brief`, not here; numbers stay
+    if inject:
+        lines += inject_notes(notes)
+    elif any(n.get("kind") != "checkpoint" for n in notes):  # checkpoints show in `brief`, not here; numbers stay
         lines.append("Open items and pending decisions:")
         lines += [f"  {i}. {n.get('text', '')}" for i, n in enumerate(notes, 1) if n.get("kind") != "checkpoint"]
     runs = read_jsonl(os.path.join(home, "ledger.jsonl"))
@@ -277,14 +311,32 @@ def cut_lines(text, limit):
     return (cut[:nl] if nl > 0 else cut).rstrip()
 
 
+def _parked(state):
+    """A thread-table State cell that is done, or idle for days (`idle 3d`): not worth a row at the start."""
+    return state.startswith("done") or bool(re.match(r"idle \d+d\b", state))
+
+
 def threads_summary(lines=12):
     """The open threads, one line each (`lean-agent now --short`, without closing idle ones), so a fresh session knows the topics and what is still running."""
     try:
         import lean_threads
-        text = lean_threads.short_text(max_lines=lines)
+        text = lean_threads.short_text(all_=True)
     except Exception:  # a broken registry must not break the brief
         return ""
-    return "" if text.startswith("No open") else text + "\nFull list: lean-agent now; one topic: lean-agent thread show tN"
+    if text.startswith("No open"):
+        return ""
+    head, rows = [], []
+    for ln in text.split("\n"):
+        if ln.startswith("| t"):
+            rows.append(ln)
+        elif not rows:
+            head.append(ln)
+    live = [r for r in rows if not _parked(r.split("|")[3].strip())]
+    left = len(rows) - len(live[:lines])
+    out = head + live[:lines]
+    if left:
+        out.append(f"\n{left} closed/parked: lean-agent now")
+    return "\n".join(out) + "\nFull list: lean-agent now; one topic: lean-agent thread show tN"
 
 
 PAYLOAD_MAX = 8000  # characters: a start payload above this is trimmed (it is part of every fresh session's context)
@@ -302,7 +354,7 @@ def brief(cap=None, peek=False):
             more = shown != body
             body = shown
         head = f"Checkpoint of {str(cps[-1].get('ts', ''))[:16].replace('T', ' ')} (your own soft state before the clear; continue from it):\n{body}\n\n"
-    rest = handoff()
+    rest = handoff(inject=True)
     topics = threads_summary()
     if topics:
         head += (cut_lines(topics, max(500, PAYLOAD_MAX - len(head) - cap)) if cap else topics) + "\n\n"
@@ -463,7 +515,7 @@ def main():
         if source == "clear" and os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1":
             return 0  # session_hook adds the brief (checkpoint first) there
         if source == "compact" or (source in ("startup", "clear") and has_recent_work()):
-            text = handoff()
+            text = handoff(inject=True)
             if source == "compact" and count_compaction(event.get("session_id") or "?") >= 2:
                 text += ("\nThis conversation has now compacted more than once. At the next good stopping point "
                          "(a topic done, no worker running), save open items with `lean-agent checkpoint` or "
