@@ -23,6 +23,7 @@ INTERVAL = 2.0
 QUEUE_MAX = 32
 MAX_FRAME = 1 << 16
 HANDSHAKE_S = 5.0
+POLL_S = 10.0  # a page that polled this recently counts as watching
 PING_S = 25.0
 FILE = "map-live.json"
 
@@ -93,6 +94,9 @@ class Live:
         self.clients = []
         self.last = None  # (hash, message)
         self.wake = threading.Event()
+        self.cache = None  # (monotonic, snapshot)
+        self.svg_cache = {}  # (w, h, mini) -> (monotonic, svg)
+        self.last_poll = 0.0
         self.stopped = threading.Event()
 
     def start(self):
@@ -129,6 +133,65 @@ class Live:
         except OSError:
             pass
 
+    def get_snap(self):
+        """The snapshot, computed at most every `interval` s however many clients ask; only ever called on demand."""
+        with self.lock:
+            c = self.cache
+            if c and time.monotonic() - c[0] < self.interval * 0.9:
+                return c[1]
+        snap = self.snapshot()
+        with self.lock:
+            self.cache = (time.monotonic(), snap)
+            self.svg_cache = {}
+        return snap
+
+    def get_svg(self, w, h, mini):
+        key = (w, h, mini)
+        snap = self.get_snap()
+        with self.lock:
+            c = self.svg_cache.get(key)
+            if c and time.monotonic() - c[0] < self.interval:
+                return c[1]
+        out = lean_map.svg(snap, w, h, mini=mini)
+        with self.lock:
+            self.svg_cache[key] = (time.monotonic(), out)
+        return out
+
+    def watching(self):
+        return bool(self.clients) or time.monotonic() - self.last_poll < POLL_S
+
+    def _reply(self, conn, code, text, body=b"", ctype="text/plain; charset=utf-8", cors=False):
+        head = [f"HTTP/1.1 {code} {text}", f"Content-Type: {ctype}", f"Content-Length: {len(body)}", "Connection: close",
+                "Cache-Control: no-store", "Referrer-Policy: no-referrer", "X-Content-Type-Options: nosniff"]
+        if cors:
+            head.append("Access-Control-Allow-Origin: *")
+        try:
+            conn.sendall(("\r\n".join(head) + "\r\n\r\n").encode() + body)
+        except OSError:
+            pass
+
+    def _route(self, conn, path, q):
+        """Plain GET routes (token already checked): / (the page), /snap (JSON), /map.svg (the drawing)."""
+        try:
+            if path == "/snap":
+                self.last_poll = time.monotonic()
+                return self._reply(conn, 200, "OK", json.dumps(self.get_snap()).encode(), "application/json", cors=True)
+            if path == "/map.svg":
+                self.last_poll = time.monotonic()
+                def dim(k, d):
+                    try:
+                        return max(100, min(2000, int((q.get(k) or [d])[0])))
+                    except ValueError:
+                        return d
+                svg = self.get_svg(dim("w", 900), dim("h", 700), (q.get("mini") or ["0"])[0] == "1")
+                return self._reply(conn, 200, "OK", svg.encode(), "image/svg+xml", cors=True)
+            if path == "/":
+                page = build_html(self.get_snap(), {"port": self.port, "token": self.token})
+                return self._reply(conn, 200, "OK", page.encode(), "text/html; charset=utf-8")
+            self._reply(conn, 404, "Not Found")
+        except Exception:
+            self._reply(conn, 500, "Error")
+
     # -- fan-out -------------------------------------------------------------------------------------------------------
     def _broadcast(self, msg):
         with self.lock:
@@ -158,7 +221,7 @@ class Live:
                 self.wake.clear()
                 continue
             try:
-                snap = self.snapshot()
+                snap = self.get_snap()
                 h = _sha(snap)
                 if not self.last or self.last[0] != h:
                     msg = json.dumps({"type": "snapshot", **snap})
@@ -203,8 +266,10 @@ class Live:
             self._http(conn, 403, "Forbidden")
             return None
         key = hdr.get("sec-websocket-key")
-        if hdr.get("upgrade", "").lower() != "websocket" or "upgrade" not in hdr.get("connection", "").lower() or not key \
-                or hdr.get("sec-websocket-version") != "13":
+        if hdr.get("upgrade", "").lower() != "websocket":
+            self._route(conn, u.path or "/", urllib.parse.parse_qs(u.query))
+            return None
+        if "upgrade" not in hdr.get("connection", "").lower() or not key or hdr.get("sec-websocket-version") != "13":
             self._http(conn, 400, "Bad Request")
             return None
         with self.lock:
@@ -308,8 +373,9 @@ header{display:flex;align-items:center;gap:8px;padding:8px 10px;flex-wrap:wrap}
 h1{font-size:14px;margin:0;flex:1}
 #chip{border:1px solid var(--bd);border-radius:999px;padding:2px 10px;font-size:12px;color:var(--mu)}
 #chip.live{color:var(--ok);border-color:var(--ok)}#chip.re{color:var(--rep);border-color:var(--rep)}#chip.bad{color:var(--bad);border-color:var(--bad)}
+#why{padding:0 10px 4px;color:var(--mu);font-size:11px}#why a{color:var(--req)}
 #meta{padding:0 10px;color:var(--mu);font-size:12px}
-#map{width:100%;max-width:900px;margin:0 auto;display:block}
+#map{width:100%;max-width:640px;margin:0 auto;display:block}
 svg{width:100%;height:auto;display:block}
 text{fill:var(--tx);font-family:system-ui,sans-serif}.mu{fill:var(--mu)}
 """
@@ -318,18 +384,30 @@ JS = r"""
 (function(){
 var SNAP=JSON.parse(document.getElementById('snap').textContent),EP=JSON.parse(document.getElementById('ep').textContent);
 var COL={message:'--ok',report:'--rep',request:'--req',idle:'--idle',bad:'--bad'};
-var W=460,H=520,CX=W/2,CY=H/2,pulses=[],pos={},raf=0,ws=null,delay=1000,gotLive=false,stopped=false,fails=0;
+var W=580,H=640,CX=W/2,CY=H/2,pulses=[],pos={},raf=0,ws=null,delay=1000,gotLive=false,stopped=false,fails=0;
+var mode='',viol=[],codes=[],base=EP&&EP.port?'http://127.0.0.1:'+EP.port:'',tq=EP&&EP.token?'t='+encodeURIComponent(EP.token):'';
 function $(i){return document.getElementById(i)}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function clip(s,n){s=String(s||'');return s.length>n?s.slice(0,n-1)+'…':s}
 function chip(t,c){var e=$('chip');e.textContent=t;e.className=c||''}
+function why(html){$('why').innerHTML=html||''}
+function reason(){
+  var p=[];if(viol.length)p.push('blocked by the preview: '+viol.map(esc).join(', '));
+  if(codes.length)p.push(codes.map(esc).join(', '));return p.join(' · ')}
+document.addEventListener('securitypolicyviolation',function(e){
+  var u=String(e.blockedURI||'').split('?')[0];viol.push((e.violatedDirective||'?')+(u?' ('+u+')':''));if(viol.length>6)viol.shift();
+  if(!mode)why(reason())});
+function placedSet(s){var o={};(Array.isArray(s.placed)?s.placed:[]).forEach(function(i){o[i]=1});return o}
 function layout(s){
-  var p={},ns=s.nodes||[],th=ns.filter(function(n){return n.kind==='thread'});
-  p.main=[CX,CY-16,104,30];p.service=[CX,CY+30,116,24];p.hooks=[CX-150,H-24,64,22];
-  th.forEach(function(n,i){var a=-Math.PI/2+2*Math.PI*i/Math.max(1,th.length);n._a=a;p[n.id]=[CX+Math.cos(a)*118*1.15,CY+Math.sin(a)*118*1.25,92,30]});
-  var by={};ns.forEach(function(n){if(n.kind!=='worker')return;var k=(n.parent&&p[n.parent]&&n.parent!=='service'&&n.parent!=='hooks')?n.parent:'main';(by[k]=by[k]||[]).push(n)});
-  Object.keys(by).forEach(function(k){var t=ns.filter(function(n){return n.id===k})[0],ws=by[k].slice(0,4);
-    var a0=(k==='main'||!t||t._a==null)?Math.PI/2:t._a;ws.forEach(function(w,j){var a=a0+(j-(ws.length-1)/2)*0.34;p[w.id]=[CX+Math.cos(a)*200,CY+Math.sin(a)*222,64,22]})});
+  var p={},ns=s.nodes||[],ok=placedSet(s),th=ns.filter(function(n){return n.kind==='thread'&&ok[n.id]});
+  th.sort(function(a,b){return a.id.length-b.id.length||(a.id<b.id?-1:a.id>b.id?1:0)});
+  p.main=[CX,CY-16,104,30];p.service=[CX,CY+30,116,24];p.hooks=[CX-170,H-24,64,22];
+  th.forEach(function(n,i){var a=-Math.PI/2+2*Math.PI*i/Math.max(1,th.length);n._a=a;p[n.id]=[CX+Math.cos(a)*170,CY+Math.sin(a)*205,92,30]});
+  var by={};ns.forEach(function(n){if(n.kind!=='worker'||!ok[n.id])return;var k=(n.parent&&p[n.parent]&&n.parent!=='service'&&n.parent!=='hooks')?n.parent:'main';(by[k]=by[k]||[]).push(n)});
+  Object.keys(by).forEach(function(k){var ws=by[k].slice(0,3);
+    if(k==='main'){ws.forEach(function(w,j){p[w.id]=[CX+(j-(ws.length-1)/2)*52,CY+78+0,46,18]});return}
+    var t=ns.filter(function(n){return n.id===k})[0],a0=(!t||t._a==null)?Math.PI/2:t._a;
+    ws.forEach(function(w,j){var a=a0+(j-(ws.length-1)/2)*0.17;p[w.id]=[CX+Math.cos(a)*252,CY+Math.sin(a)*287,44,18]})});
   return p}
 function clipPt(a,b){var dx=b[0]-a[0],dy=b[1]-a[1],t=Math.min(dx?a[2]/2/Math.abs(dx):1e9,dy?a[3]/2/Math.abs(dy):1e9);return[a[0]+dx*t,a[1]+dy*t]}
 function render(){
@@ -340,14 +418,16 @@ function render(){
   o.push('</defs>');
   if(!s.service||!s.service.up||!(s.nodes||[]).length){o.push('<text class="mu" x="'+CX+'" y="'+CY+'" text-anchor="middle" font-size="15">Service not running · inbox '+(s.inbox|0)+'</text></svg>');$('map').innerHTML=o.join('');return}
   (s.edges||[]).forEach(function(e){var a=pos[e.from],b=pos[e.to];if(!a||!b)return;
-    var k=e.bad?'bad':COL[e.kind]?e.kind:'idle',p=clipPt(a,b),q=clipPt(b,a),op=(k==='idle'||k==='bad')?1:Math.max(.35,1-(e.age_s||0)/300);
-    o.push('<line x1="'+p[0].toFixed(1)+'" y1="'+p[1].toFixed(1)+'" x2="'+q[0].toFixed(1)+'" y2="'+q[1].toFixed(1)+'" stroke-width="2" style="stroke:var('+COL[k]+')" opacity="'+op+'"'+(k==='idle'?' stroke-dasharray="6 5"':'')+' marker-end="url(#a-'+k+')"/>')});
+    var k=e.bad?'bad':COL[e.kind]?e.kind:'idle',p=clipPt(a,b),q=clipPt(b,a),op=k==='idle'?.35:k==='bad'?1:Math.max(.35,1-(e.age_s||0)/300);
+    o.push('<line x1="'+p[0].toFixed(1)+'" y1="'+p[1].toFixed(1)+'" x2="'+q[0].toFixed(1)+'" y2="'+q[1].toFixed(1)+'" stroke-width="'+(k==='idle'?1:2)+'" style="stroke:var('+COL[k]+')" opacity="'+op+'"'+(k==='idle'?' stroke-dasharray="6 5"':'')+' marker-end="url(#a-'+k+')"/>')});
   Object.keys(pos).forEach(function(id){var n=byid[id];if(!n)return;var c=pos[id],st=n.state,
     sc={active:'--ok',alive:'--ok',undelivered:'--bad',dead:'--bad',orphaned:'--rep',done:'--rep'}[st]||'--bd',
     dash=(st==='idle'||st==='parked'||st==='orphaned')?' stroke-dasharray="5 4"':'';
     o.push('<rect x="'+(c[0]-c[2]/2)+'" y="'+(c[1]-c[3]/2)+'" width="'+c[2]+'" height="'+c[3]+'" rx="8" stroke-width="'+(st==='active'||st==='alive'?2.5:1.5)+'"'+dash+' style="fill:var(--card);stroke:var('+sc+')"/>');
-    o.push('<text x="'+c[0]+'" y="'+(c[1]+(c[3]>26?-1:3))+'" text-anchor="middle" font-size="'+(c[3]>26?11:9)+'" font-weight="600">'+esc(clip(n.label,Math.floor(c[2]/(c[3]>26?6.6:5.6))))+'</text>');
-    if(c[3]>26)o.push('<text class="mu" x="'+c[0]+'" y="'+(c[1]+11)+'" text-anchor="middle" font-size="9">'+esc(clip(n.detail,20))+'</text>')});
+    var big=c[3]>26,sm=c[2]<50;
+    o.push('<text x="'+c[0]+'" y="'+(c[1]+(big?-1:3))+'" text-anchor="middle" font-size="'+(big?11:sm?8:9)+'" font-weight="600">'+esc(clip(n.label,Math.floor(c[2]/(big?6.6:sm?4.8:5.6))))+'</text>');
+    if(big)o.push('<text class="mu" x="'+c[0]+'" y="'+(c[1]+11)+'" text-anchor="middle" font-size="9">'+esc(clip(n.detail,20))+'</text>')});
+  if((s.more|0)>0)o.push('<text class="mu" x="'+(CX+170)+'" y="'+(H-20)+'" text-anchor="middle" font-size="12">+'+(s.more|0)+' more</text>');
   o.push('<g id="pl"></g></svg>');
   $('map').innerHTML=o.join('');
   $('meta').textContent='inbox '+(s.inbox|0)+(s.paused?' · paused':'')+' · '+(s.ts||'')}
@@ -359,24 +439,62 @@ function frame(){
   if(g)g.innerHTML=h.join('');
   raf=pulses.length?requestAnimationFrame(frame):0}
 function pulse(f,t){if(pulses.length>20)pulses.shift();pulses.push({f:f,to:t,t0:performance.now()});if(!raf)raf=requestAnimationFrame(frame)}
+function up(m,t,c){mode=m;chip(t,c||'live');why(m==='socket'?'':reason())}
+// transport 1: WebSocket
 function connect(){
-  if(stopped)return;
+  if(stopped||mode&&mode!=='socket')return;
   var open=false;
-  try{ws=new WebSocket('ws://127.0.0.1:'+EP.port+'/?t='+encodeURIComponent(EP.token))}catch(e){return later()}
-  ws.onopen=function(){open=true;gotLive=true;delay=1000;chip('live','live')};
+  try{ws=new WebSocket('ws://127.0.0.1:'+EP.port+'/?'+tq)}catch(e){codes.push('WebSocket: '+esc(e&&e.name||'error'));return fallback('poll')}
+  setTimeout(function(){if(!open&&!gotLive&&!mode){codes.push('WebSocket timeout');try{ws.close()}catch(e){}fallback('poll')}},5000);
+  ws.onopen=function(){open=true;gotLive=true;fails=0;delay=1000;up('socket','live (socket)')};
   ws.onmessage=function(m){var d;try{d=JSON.parse(m.data)}catch(e){return}
     if(d.type==='snapshot'){SNAP=d;render()}else if(d.type==='event')pulse(d.from,d.to)};
-  ws.onclose=function(){
-    if(open){fails=0}else fails++;
-    if(gotLive&&fails>=4){stopped=true;chip('service restarted - run lean-agent map --html again','bad');return}
-    later()};
-  ws.onerror=function(){}}
-function later(){
-  if(stopped)return;
-  if(!gotLive&&fails>=2)chip('snapshot (service not running)','bad');else chip('reconnecting','re');
-  setTimeout(connect,delay);delay=Math.min(15000,delay*2)}
+  ws.onerror=function(){if(!open)codes.push('WebSocket error')};
+  ws.onclose=function(ev){
+    if(!open){codes.push('WebSocket closed '+(ev&&ev.code))}
+    if(!gotLive)return fallback('poll');
+    if(open)fails=0;else fails++;
+    if(fails>=4){stopped=true;chip('service restarted - run lean-agent map --html again','bad');return}
+    chip('reconnecting','re');setTimeout(connect,delay);delay=Math.min(15000,delay*2)}}
+var tried={};
+function fallback(next){
+  if(stopped||tried[next])return;tried[next]=1;
+  if(next==='poll')return pollFetch();
+  if(next==='img')return pollImg();
+  blocked()}
+function blocked(){
+  mode='none';chip('preview blocks live updates','bad');
+  var l=base?' <a href="'+base+'/?'+tq+'" target="_blank" rel="noopener">Open in browser</a>':'';
+  why((reason()||'no live transport worked')+(location.protocol==='file:'||!/^https?:/.test(location.protocol)?l:''))}
+// transport 2: fetch polling
+function pollFetch(){
+  if(typeof fetch!=='function')return fallback('img');
+  var okOnce=false,bad=0;
+  function tick(){
+    if(stopped||mode&&mode!=='poll')return;
+    fetch(base+'/snap?'+tq,{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).then(function(d){
+      okOnce=true;bad=0;SNAP=d;render();if(mode!=='poll')up('poll','live (polling)');setTimeout(tick,2000)
+    }).catch(function(e){
+      if(!okOnce){codes.push('fetch failed');return fallback('img')}
+      if(++bad>=5){chip('service not reachable','bad');why(reason())}else chip('reconnecting','re');
+      setTimeout(tick,2000)})}
+  tick()}
+// transport 3: image polling (the server draws it)
+function pollImg(){
+  var n=0,okOnce=false,bad=0;
+  function tick(){
+    if(stopped||mode&&mode!=='img')return;
+    var im=new Image();
+    im.onload=function(){okOnce=true;bad=0;im.style.width='100%';im.style.height='auto';im.style.display='block';im.alt='live map';
+      $('map').innerHTML='';$('map').appendChild(im);if(mode!=='img')up('img','live (image)');setTimeout(tick,2000)};
+    im.onerror=function(){
+      if(!okOnce){codes.push('image failed');return blocked()}
+      if(++bad>=5){chip('service not reachable','bad');why(reason())}else chip('reconnecting','re');
+      setTimeout(tick,2000)};
+    im.src=base+'/map.svg?'+tq+'&w=900&h=700&n='+(++n)}
+  tick()}
 render();
-if(EP&&EP.port){chip('reconnecting','re');connect()}else chip('snapshot (service not running)','bad');
+if(EP&&EP.port){chip('connecting','re');connect()}else chip('snapshot (service not running)','bad');
 })();
 """
 
@@ -384,7 +502,7 @@ PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>lean-agent live map</title><style>%CSS%</style></head><body>
 <header><h1>lean-agent map</h1><span id="chip">snapshot (service not running)</span></header>
-<div id="meta"></div><div id="map"></div>
+<div id="why"></div><div id="meta"></div><div id="map"></div>
 <script type="application/json" id="snap">%SNAP%</script>
 <script type="application/json" id="ep">%EP%</script>
 <script>%JS%</script></body></html>
@@ -413,5 +531,65 @@ def write_html(home, snap, out=None):
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
         fh.write(build_html(snap, endpoint(home)))
+    os.chmod(p, 0o600)
+    return p
+
+
+PROBE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>lean-agent map probe</title>
+<style>body{font:13px system-ui,-apple-system,sans-serif;margin:12px;background:#fff;color:#1B2230}
+@media(prefers-color-scheme:dark){body{background:#0F1217;color:#E6E9EF}}
+li{margin:3px 0;font-family:ui-monospace,Menlo,monospace}.ok{color:#1B9E92}.no{color:#D6453B}</style></head><body>
+<h3>lean-agent map probe</h3><p>Send one screenshot of this page if the live map still does not update.</p>
+<ul id="out"><li class="no">inline JS: FAIL (this line never changed)</li></ul>
+<script type="application/json" id="ep">%EP%</script>
+<script>
+(function(){
+var EP=JSON.parse(document.getElementById('ep').textContent),out=document.getElementById('out'),viol=[];
+function row(t,ok){var l=document.createElement('li');l.className=ok===true?'ok':ok===false?'no':'';l.textContent=t;out.appendChild(l);return l}
+function set(l,t,ok){l.textContent=t;l.className=ok?'ok':'no'}
+out.innerHTML='';
+row('inline JS: ok',true);
+row('origin: '+location.origin+' | isSecureContext: '+window.isSecureContext+' | protocol: '+location.protocol);
+var meta=document.querySelector('meta[http-equiv]'),m=null;
+var all=document.getElementsByTagName('meta');for(var i=0;i<all.length;i++){if(/content-security-policy/i.test(all[i].getAttribute('http-equiv')||''))m=all[i]}
+row('meta CSP present: '+(m?'yes ('+m.getAttribute('content')+')':'no'));
+var vl=row('securitypolicyviolation: none so far');
+document.addEventListener('securitypolicyviolation',function(e){
+  viol.push(e.violatedDirective+' '+String(e.blockedURI||'').split('?')[0]);vl.textContent='securitypolicyviolation: '+viol.join(' ; ');vl.className='no'});
+if(!EP.port){row('live endpoint: not running (start the service: lean-agent up)',false);return}
+var base='http://127.0.0.1:'+EP.port,tq='t='+encodeURIComponent(EP.token);
+var wl=row('WebSocket: testing...');
+try{var w=new WebSocket('ws://127.0.0.1:'+EP.port+'/?'+tq),done=false;
+  w.onopen=function(){done=true;set(wl,'WebSocket: open ok',true);w.close()};
+  w.onerror=function(){if(!done)set(wl,'WebSocket: fail (error)',false)};
+  w.onclose=function(e){if(!done){done=true;set(wl,'WebSocket: fail (code '+e.code+')',false)}};
+  setTimeout(function(){if(!done){done=true;set(wl,'WebSocket: fail (timeout)',false)}},5000)
+}catch(e){set(wl,'WebSocket: fail ('+e.name+')',false)}
+var fl=row('fetch: testing...');
+try{fetch(base+'/snap?'+tq,{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).then(function(){set(fl,'fetch: ok',true)}).catch(function(e){set(fl,'fetch: fail ('+(e&&e.message)+')',false)})}catch(e){set(fl,'fetch: fail ('+e.name+')',false)}
+var il=row('img: testing...'),im=new Image();
+im.onload=function(){set(il,'img: ok',true)};im.onerror=function(){set(il,'img: fail',false)};
+im.src=base+'/map.svg?'+tq+'&w=200&h=150&n=1';
+})();
+</script></body></html>
+"""
+
+
+def build_probe(ep):
+    ep = {"port": ep["port"], "token": ep["token"]} if ep else {}
+    return PROBE.replace("%EP%", _json_safe(ep))
+
+
+def write_probe(home):
+    """Writes <home>/map/probe.html (0600, dir 0700) and returns its absolute path."""
+    d = os.path.join(home, "map")
+    os.makedirs(d, exist_ok=True)
+    os.chmod(d, 0o700)
+    p = os.path.join(d, "probe.html")
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(build_probe(endpoint(home)))
     os.chmod(p, 0o600)
     return p

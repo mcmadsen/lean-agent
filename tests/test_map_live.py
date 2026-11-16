@@ -101,9 +101,12 @@ class LiveTest(unittest.TestCase):
         s, head, _ = connect(self.live.port, self.live.token, method="POST")
         s.close()
         self.assertIn("405", head.split("\r\n")[0])
-        s, head, _ = connect(self.live.port, self.live.token, upgrade=False)
+        s, head, _ = connect(self.live.port, self.live.token, upgrade=False, path=f"/nope?t={self.live.token}")
         s.close()
-        self.assertIn("400", head.split("\r\n")[0])
+        self.assertIn("404", head.split("\r\n")[0])
+        s, head, _ = connect(self.live.port, self.live.token, path=f"/?t={self.live.token}",)
+        s.close()
+        self.assertIn("101", head.split("\r\n")[0])
 
     def test_event_frame(self):
         s, head, rest = connect(self.live.port, self.live.token)
@@ -159,6 +162,243 @@ class LiveTest(unittest.TestCase):
         self.assertIn("503", h2.split("\r\n")[0])
 
 
+def http_get(port, path, method="GET"):
+    s = socket.create_connection(("127.0.0.1", port), timeout=WAIT)
+    s.sendall(f"{method} {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+    buf = b""
+    while True:
+        d = s.recv(65536)
+        if not d:
+            break
+        buf += d
+    s.close()
+    head, _, body = buf.partition(b"\r\n\r\n")
+    lines = head.decode().split("\r\n")
+    return lines[0], {k.lower(): v for k, v in (ln.split(": ", 1) for ln in lines[1:])}, body
+
+
+class HttpRoutesTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.calls = 0
+
+        def fn():
+            self.calls += 1
+            return snap()
+        self.live = lean_maplive.Live(fn, self.tmp, interval=0.2).start()
+        self.addCleanup(self.live.stop)
+
+    def test_token_required(self):
+        for path in ("/snap", "/map.svg", "/", "/snap?t=bad", "/map.svg?t="):
+            st, _, _ = http_get(self.live.port, path)
+            self.assertIn("403", st, path)
+        self.assertEqual(self.calls, 0)
+
+    def test_get_only(self):
+        for m in ("POST", "PUT", "DELETE", "OPTIONS"):
+            st, _, _ = http_get(self.live.port, f"/snap?t={self.live.token}", method=m)
+            self.assertIn("405", st)
+
+    def test_snap_json_and_cors(self):
+        st, h, body = http_get(self.live.port, f"/snap?t={self.live.token}")
+        self.assertIn("200", st)
+        self.assertEqual(h["access-control-allow-origin"], "*")
+        self.assertIn("json", h["content-type"])
+        self.assertEqual(json.loads(body)["inbox"], 1)
+
+    def test_svg_and_cors(self):
+        st, h, body = http_get(self.live.port, f"/map.svg?t={self.live.token}&n=1")
+        self.assertIn("200", st)
+        self.assertEqual(h["access-control-allow-origin"], "*")
+        self.assertIn("svg", h["content-type"])
+        self.assertTrue(body.startswith(b"<svg"))
+
+    def test_page_without_cors(self):
+        st, h, body = http_get(self.live.port, f"/?t={self.live.token}")
+        self.assertIn("200", st)
+        self.assertIn("text/html", h["content-type"])
+        self.assertNotIn("access-control-allow-origin", h)
+        self.assertIn(b"lean-agent live map", body)
+        self.assertIn(self.live.token.encode(), body)
+
+    def test_cached_and_nothing_when_idle(self):
+        time.sleep(0.5)
+        self.assertEqual(self.calls, 0)
+        for _ in range(5):
+            http_get(self.live.port, f"/snap?t={self.live.token}")
+        http_get(self.live.port, f"/map.svg?t={self.live.token}")
+        self.assertEqual(self.calls, 1)  # one computation serves them all inside the interval
+        n = self.calls
+        time.sleep(0.8)
+        self.assertEqual(self.calls, n)  # polling stopped: no background work
+
+
+def big_snap(threads=300, runs=500):
+    ns = [{"id": "service", "kind": "service", "label": "S", "state": "active", "detail": "d"},
+          {"id": "main", "kind": "desk", "label": "Front desk", "state": "active", "detail": "d"},
+          {"id": "hooks", "kind": "hooks", "label": "Hooks", "state": "idle", "detail": "d"}]
+    edges = []
+    for i in range(1, threads + 1):
+        ns.append({"id": f"t{i}", "kind": "thread", "label": f"Thread number {i}", "state": "active" if i % 50 == 0 else "idle",
+                   "detail": "d", "idle_s": i * 7, "mid": i % 50 == 0, "closed": i % 11 == 0})
+    for r in range(runs):
+        st = ["alive", "done", "dead", "orphaned"][r % 4]
+        ns.append({"id": f"run:r-{r}", "kind": "worker", "parent": f"t{r % threads + 1}" if r % 25 else None, "label": f"run {r}",
+                   "state": st, "detail": "d", "age_s": r * 30, "ended_s": None if st in ("alive", "orphaned") else r * 30})
+    sel = lean_map.select(ns)
+    ok = set(sel["placed"])
+    for n in ns:
+        if n["kind"] == "thread" and n["id"] in ok:
+            edges.append({"from": "service", "to": n["id"], "kind": "idle", "age_s": 0, "label": "idle"})
+    return {"v": 1, "ts": "t", "service": {"up": True}, "paused": False, "inbox": 0, "moving": [], "nodes": ns, "edges": edges,
+            "placed": sel["placed"], "more": sel["more"]}
+
+
+class SelectTest(unittest.TestCase):
+    def test_caps_and_rules(self):
+        s = big_snap()
+        sel = lean_map.select(s["nodes"])
+        by = {n["id"]: n for n in s["nodes"]}
+        ths = [i for i in sel["placed"] if by[i]["kind"] == "thread"]
+        ws = [i for i in sel["placed"] if by[i]["kind"] == "worker"]
+        self.assertLessEqual(len(ths), 12)
+        self.assertFalse([i for i in ths if by[i].get("closed")])
+        self.assertTrue(all(by[i]["idle_s"] is not None for i in ths))
+        self.assertIn("t50", ths)  # mid-turn threads rank first
+        per = {}
+        for i in ws:
+            per[by[i]["parent"]] = per.get(by[i]["parent"], 0) + 1
+            self.assertTrue(by[i]["state"] in ("alive", "orphaned") or by[i]["ended_s"] <= 600)
+        self.assertLessEqual(max(per.values()), 3)
+        self.assertGreater(sel["more"], 200)
+        svg = lean_map.svg(s)
+        self.assertLessEqual(svg.count("<rect") - 1, len(sel["placed"]))  # minus the background
+        self.assertIn("more</text>", svg)
+        self.assertEqual(len(re.findall(r"<line ", svg)), len({(e["from"], e["to"]) for e in s["edges"] if e["from"] in sel["placed"] and e["to"] in sel["placed"]}))
+
+    def test_build_edges_only_between_placed(self):
+        ctx = {"service": {}, "threads": [{"id": f"t{i}", "state": "idle", "idle_s": i} for i in range(1, 80)], "runs": [], "desk_idle_s": 1}
+        s = lean_map.build(ctx)
+        ok = set(s["placed"])
+        self.assertTrue(all(e["from"] in ok and e["to"] in ok for e in s["edges"]))
+        self.assertEqual(s["more"], 79 - 12)
+
+
+class ProbeTest(unittest.TestCase):
+    def test_probe_written(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        live = lean_maplive.Live(snap, tmp).start()
+        self.addCleanup(live.stop)
+        p = lean_maplive.write_probe(tmp)
+        self.assertEqual(p, os.path.join(tmp, "map", "probe.html"))
+        self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600)
+        with open(p) as fh:
+            h = fh.read()
+        self.assertEqual([u for u in re.findall(r"https?://[^/'\" ]*", h) if "127.0.0.1" not in u], [])
+        for w in ("securitypolicyviolation", "isSecureContext", "WebSocket", "fetch", "img"):
+            self.assertIn(w, h)
+        self.assertIn(live.token, h)
+
+
+NODE = shutil.which("node") or "/opt/node22/bin/node"
+PW_PATH = os.environ.get("NODE_PATH") or "/opt/node22/lib/node_modules"
+BROWSER_JS = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [url, want, shot] = process.argv.slice(2);
+  const b = await chromium.launch();
+  const pg = await b.newPage({ viewport: { width: 700, height: 760 } });
+  await pg.goto(url);
+  const wants = want.split('|');
+  let chip = '';
+  const end = Date.now() + 45000;
+  while (Date.now() < end) {
+    chip = await pg.locator('#chip').innerText().catch(() => '');
+    if (wants.includes(chip)) break;
+    await new Promise(r => setTimeout(r, 300));
+  }
+  await new Promise(r => setTimeout(r, 500));
+  const rects = await pg.locator('#map svg rect').count();
+  const imgs = await pg.locator('#map img').count();
+  const why = await pg.locator('#why').innerText().catch(() => '');
+  if (shot) await pg.screenshot({ path: shot });
+  console.log(JSON.stringify({ chip, rects, imgs, why }));
+  await b.close();
+})().catch(e => { console.log(JSON.stringify({ error: String(e).slice(0, 300) })); });
+"""
+
+
+def node_env():
+    e = dict(os.environ, NODE_PATH=PW_PATH)
+    if not e.get("PLAYWRIGHT_BROWSERS_PATH") and os.path.isdir("/opt/pw-browsers"):
+        e["PLAYWRIGHT_BROWSERS_PATH"] = "/opt/pw-browsers"
+    return e
+
+
+def have_playwright():
+    if not os.path.exists(NODE):
+        return False
+    r = subprocess.run([NODE, "-e", "require('playwright').chromium.launch().then(b=>b.close()).catch(()=>process.exit(3))"],
+                       capture_output=True, env=node_env(), timeout=120)
+    return r.returncode == 0
+
+
+@unittest.skipUnless(have_playwright(), "node/playwright not available")
+class BrowserTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.js = os.path.join(self.tmp, "b.js")
+        with open(self.js, "w") as fh:
+            fh.write(BROWSER_JS)
+
+    def run_page(self, html, want, shot=""):
+        f = os.path.join(self.tmp, "page.html")
+        with open(f, "w") as fh:
+            fh.write(html)
+        r = subprocess.run([NODE, self.js, "file://" + f, want, shot], capture_output=True, text=True, timeout=120,
+                           env=node_env())
+        self.assertTrue(r.stdout.strip(), r.stderr)
+        d = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertNotIn("error", d)
+        return d
+
+    def live_html(self, snapshot, csp=None):
+        live = lean_maplive.Live(lambda: snapshot, self.tmp, interval=0.5).start()
+        self.addCleanup(live.stop)
+        h = lean_maplive.build_html(snapshot, lean_maplive.endpoint(self.tmp))
+        if csp:
+            h = h.replace("<head>", f'<head><meta http-equiv="Content-Security-Policy" content="{csp}">', 1)
+        return h
+
+    def test_socket(self):
+        d = self.run_page(self.live_html(snap()), "live (socket)")
+        self.assertEqual(d["chip"], "live (socket)")
+
+    def test_websocket_blocked_falls_back(self):
+        d = self.run_page(self.live_html(snap(), "connect-src 'none'"), "live (image)|preview blocks live updates")
+        self.assertIn(d["chip"], ("live (image)", "preview blocks live updates"))
+        if d["chip"] == "live (image)":
+            self.assertEqual(d["imgs"], 1)
+        self.assertIn("connect-src", d["why"])
+
+    def test_everything_blocked(self):
+        d = self.run_page(self.live_html(snap(), "connect-src 'none'; img-src 'none'"), "preview blocks live updates")
+        self.assertEqual(d["chip"], "preview blocks live updates")
+        self.assertIn("Open in browser", d["why"])
+
+    def test_big_snapshot_draws_within_caps(self):
+        shot = os.environ.get("MAP_SHOT") or ""
+        s = big_snap()
+        d = self.run_page(self.live_html(s), "live (socket)", shot)
+        self.assertEqual(d["chip"], "live (socket)")
+        # 12 threads + 3 workers each + desk + service + hooks + 3 desk workers + background-free
+        self.assertLessEqual(d["rects"], 12 + 3 * 12 + 3 + 3)
+        self.assertGreater(d["rects"], 5)
+
+
 class HtmlTest(unittest.TestCase):
     def test_html(self):
         tmp = tempfile.mkdtemp()
@@ -174,7 +414,7 @@ class HtmlTest(unittest.TestCase):
         self.assertIn(str(live.port), h)
         self.assertIn(live.token, h)
         self.assertIn('"Front desk"', h)
-        self.assertEqual(re.findall(r"https?://", h), [])
+        self.assertEqual([u for u in re.findall(r"https?://[^/'\" ]*", h) if "127.0.0.1" not in u], [])
         scripts = re.findall(r"<script>(.*?)</script>", h, re.S)
         self.assertEqual(len(scripts), 1)
         node = shutil.which("node")
