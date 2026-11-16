@@ -88,7 +88,7 @@ never shows the trust dialog, so without it every `lean-agent` call the orchestr
 The plugin can also be added in **Claude Desktop**: **+** next to the prompt → **Plugins** → **Add plugin** →
 marketplace `mcmadsen/lean-agent`.
 
-### Live map pane (Claude Desktop)
+### Live map pane (Claude Code desktop)
 
 A second plugin, `lean-agent-map`, shows the front desk, threads and workers as a live map in a pane beside the chat:
 
@@ -96,7 +96,7 @@ A second plugin, `lean-agent-map`, shows the front desk, threads and workers as 
 /plugin install lean-agent-map --marketplace mcmadsen/lean-agent
 ```
 
-(or add it from the same marketplace in **Plugins**). It does nothing outside a lean-agent front-desk session; there it opens the pane once, refreshes every 2 s (every 10 s while the service is down) and adds `/live-map` to show or hide it. The pane has buttons for **Show inbox**, **Open full map** and **Pause**/**Resume**. It runs only `lean-agent map ...` and `lean-agent waiting`, and never sends prompts or writes files.
+(or add it from the same marketplace in **Plugins**). It does nothing outside a lean-agent front-desk session; there it opens the pane once, refreshes every 2 s (every 10 s while the service is down) and adds `/live-map` to show or hide it. The pane has buttons for **Show inbox** and **Pause**/**Resume**. It runs only `lean-agent map ...` and `lean-agent waiting`, and never sends prompts or writes files.
 
 ## Use
 
@@ -183,9 +183,8 @@ Other ways to run the orchestrator:
 
 ## Live map
 
-`lean-agent map --open` shows the live map in the browser. On macOS, `lean-agent menubar --install` adds a menu bar
-item with the mini map, what is moving now and the inbox count (it starts at login; `--uninstall` removes it,
-`--status` shows it).
+The live map is the pane of the `lean-agent-map` plugin in the Claude Code desktop app (see above). `lean-agent map --json`,
+`--svg [--mini]` and `--watch` print the same data in the terminal.
 
 ## Run it as a service
 
@@ -480,7 +479,7 @@ Reply to the front desk with one of these on its own; its prompt hook turns it i
 |---|---|
 | `?` / `shortcuts` / `help` | this list |
 | `status` / `now` | the status table (needs-you and running threads first, max 10 rows) |
-| `map` | the live map: `lean-agent map --open` serves it on 127.0.0.1 with a random token |
+| `map` | the live map: `lean-agent map --json`, `--svg [--mini]`, `--watch` (the pane in the Claude Code desktop app shows it) |
 | `more` | all threads, when the table ends with `+N more threads` |
 | `s21` | summary of t21: last report, open questions, running work, next step (also `s t21`, `summary t21`, `show t21`) |
 | `a21 <question>` | send the question to t21 unchanged (`ask t21 <question>`); `a21` alone asks what to ask |

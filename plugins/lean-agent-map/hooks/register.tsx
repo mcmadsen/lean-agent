@@ -32,7 +32,6 @@ const JSON_ARGV = ['lean-agent', 'map', '--json'] as const
 const SVG_ARGV = [
   'lean-agent', 'map', '--svg', '--mini', '--width', '380', '--height', '220',
 ] as const
-const OPEN_ARGV = ['lean-agent', 'map', '--open'] as const
 const WAITING_ARGV = ['lean-agent', 'waiting'] as const
 
 let timer: { cancel: () => void } | null = null
@@ -218,13 +217,6 @@ export const register: Register = on => {
         </Box>
         {inboxText !== '' && <Text color={BLUE}>{inboxText}</Text>}
         <Box flexDirection="row" gap={1}>
-          <Button
-            key="open"
-            label="Open full map"
-            onPress={async () => {
-              await $.process.run(OPEN_ARGV)
-            }}
-          />
           <Button
             key="pause"
             label={paused ? 'Resume' : 'Pause'}

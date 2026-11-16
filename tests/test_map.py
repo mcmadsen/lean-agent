@@ -4,7 +4,6 @@ import json
 import os
 import sys
 import tempfile
-import threading
 import time
 import unittest
 import xml.dom.minidom
@@ -148,19 +147,6 @@ class MapTest(unittest.TestCase):
         self.assertTrue(r["map"]["service"]["up"])
         self.assertIn(t, [n["id"] for n in r["map"]["nodes"]])
 
-    def test_serve_needs_token(self):
-        import urllib.request
-        import urllib.error
-        out = io.StringIO()
-        srv, url = lean_map.serve(open_browser=False, out=out, once=True)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        self.addCleanup(srv.server_close)
-        self.addCleanup(srv.shutdown)
-        with mock.patch.object(lean_map, "fetch", return_value=lean_map.down_snapshot()):
-            self.assertIn(b"<svg", urllib.request.urlopen(url.replace("/?", "/svg?")).read())
-            with self.assertRaises(urllib.error.HTTPError):
-                urllib.request.urlopen(url.split("?")[0])
-
     def test_run_end_and_start_edges(self):
         now = time.time()
         lean_map.run_started("0116-1-aaaa", "t1", "sonnet", now=now - 5)
@@ -185,49 +171,6 @@ class MapTest(unittest.TestCase):
         ev = [e for e in lean_map.events() if e["label"] == "result"]
         self.assertEqual(len(ev), 1)
         self.assertEqual((ev[0]["from"], ev[0]["to"]), ("run:0116-9-dddd", "t1"))
-
-    def _open(self, extra=None):
-        import subprocess
-        env = {**os.environ, "LEAN_AGENT_NO_BROWSER": "1", "LEAN_AGENT_NO_SOCKET": "1", **(extra or {})}
-        t0 = time.monotonic()
-        r = subprocess.run([sys.executable, os.path.join(ROOT, "lean_agent.py"), "map", "--open"], env=env, capture_output=True,
-                           text=True, timeout=20)
-        return r, time.monotonic() - t0
-
-    def _pid(self, sf):
-        with open(sf) as fh:
-            return json.load(fh)["pid"]
-
-    def _stop(self):
-        try:
-            with open(os.path.join(self.tmp, "map-open.json")) as fh:
-                os.kill(json.load(fh)["pid"], 15)
-        except Exception:
-            pass
-
-    def test_open_detached_reuse_token_and_idle_exit(self):
-        import urllib.request
-        import urllib.error
-        r, dt = self._open({"LEAN_AGENT_MAP_IDLE": "3"})
-        self.addCleanup(self._stop)
-        log = os.path.join(self.tmp, "map-open.log")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr + (open(log).read() if os.path.exists(log) else "(no log)"))
-        self.assertLess(dt, 6.0 if os.environ.get("CI") else 2.0)  # returns once the server answers
-        url = r.stdout.strip().splitlines()[-1]
-        self.assertTrue(url.startswith("http://127.0.0.1:"))
-        sf = os.path.join(self.tmp, "map-open.json")
-        self.assertEqual(os.stat(sf).st_mode & 0o777, 0o600)
-        pid = self._pid(sf)
-        self.assertIn(b"<svg", urllib.request.urlopen(url.replace("/?", "/svg?"), timeout=3).read())
-        with self.assertRaises(urllib.error.HTTPError):
-            urllib.request.urlopen(url.split("?")[0] + "?token=wrong", timeout=3)
-        r2, _ = self._open({"LEAN_AGENT_MAP_IDLE": "3"})
-        self.assertEqual(r2.stdout.strip().splitlines()[-1], url)
-        self.assertEqual(self._pid(sf), pid)
-        end = time.time() + 12
-        while time.time() < end and os.path.exists(sf):
-            time.sleep(0.2)
-        self.assertFalse(os.path.exists(sf), "the server did not exit when idle")
 
 
 if __name__ == "__main__":

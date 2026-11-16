@@ -12105,7 +12105,7 @@ def cmd_doctor(a):
         report(None, "compaction setting ignored: " + msg, "lean-agent config compact-window N|default, compact-pct P|default")
     report(True, text + " (lean-agent config compact-window N|default, compact-pct P|default)")
     report(True, f"auto clear: {clear_at_text()} (lean-agent config clear-at off|auto|N)")
-    report(True, "live map: lean-agent map --open")
+    report(True, "live map: the Claude Code desktop pane (lean-agent map --json|--svg)")
     fa = service_session.fresh_after()
     report(True, "auto fresh: " + service_session.fresh_text(fa) + (
         f" (thread sessions continue fresh at ~{kt(int(service_session.fresh_context_threshold(fa[1], service_session.up_compact_at())))} context)"
@@ -15858,7 +15858,7 @@ SHORTCUTS = (
     ("status / now", "the status table"),
     ("compare <project>", "overhead of a clean session vs lean-agent's: `lean-agent compare <project>`"),
     ("more", "all threads (when the table says +N more)"),
-    ("map", "the live map (`lean-agent map --open`)"),
+    ("map", "the live map (`lean-agent map --json|--svg`)"),
     ("update", "sync and restart when idle (`lean-agent update`)"),
     ("s21", "summary of t21: last report, open questions, running work, next step"),
     ("a21 <question>", "send the question to t21 unchanged"),
@@ -15923,15 +15923,13 @@ def cmd_myq(a):
 
 
 def cmd_live_map(a):
-    """The live map: one snapshot (--json), the drawing (--svg/--mini), a line per change (--watch) or the local page (--open)."""
+    """The live map: one snapshot (--json), the drawing (--svg/--mini), a line per change (--watch)."""
     if getattr(a, "watch", False):
         try:
             lean_map.watch(sys.stdout)
         except (KeyboardInterrupt, BrokenPipeError):
             pass
         return 0
-    if getattr(a, "open", False):
-        return 0 if lean_map.open_detached(browser=not os.environ.get("LEAN_AGENT_NO_BROWSER")) else 1
     snap = lean_map.fetch()
     if getattr(a, "svg", False) or getattr(a, "mini", False):
         mini = bool(getattr(a, "mini", False))
@@ -16932,68 +16930,6 @@ def service_file():
     if service_platform() == "mac":
         return os.path.expanduser(f"~/Library/LaunchAgents/{SERVICE_LABEL}.plist")
     return os.path.expanduser("~/.config/systemd/user/lean-agent.service")
-
-
-MENUBAR_LABEL = SERVICE_LABEL.rsplit(".", 1)[0] + ".menubar"
-MENUBAR_UNSUPPORTED = ("the menu bar item is macOS-only; on Windows the tray item needs lean-agent's service on Windows "
-                       "first (not supported yet)")
-
-
-def menubar_script():
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "menubar.js")
-
-
-def menubar_plist_path():
-    return os.path.expanduser(f"~/Library/LaunchAgents/{MENUBAR_LABEL}.plist")
-
-
-def menubar_plist(script, bin_, log=None):
-    """The LaunchAgent for the menu bar item (a pure function: a dict for plistlib)."""
-    d = {"Label": MENUBAR_LABEL, "ProgramArguments": ["osascript", "-l", "JavaScript", script],
-         "RunAtLoad": True, "KeepAlive": False,
-         "EnvironmentVariables": {"PATH": os.environ.get("PATH", ""), "LEAN_AGENT_BIN": bin_}}
-    if log:
-        d["StandardOutPath"] = d["StandardErrorPath"] = log
-    return d
-
-
-def cmd_menubar(a):
-    if service_platform() != "mac":
-        print(MENUBAR_UNSUPPORTED, file=sys.stderr)
-        return 2
-    tool = os.environ.get("LEAN_AGENT_LAUNCHCTL") or "launchctl"
-    uid = str(os.getuid()) if hasattr(os, "getuid") else "0"
-    path = menubar_plist_path()
-
-    def ctl(*args):
-        p = subprocess.run([tool, *args], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
-        return p.returncode, (p.stdout + p.stderr).strip()
-
-    if a.install:
-        import plistlib
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        log = home("logs", "menubar.log")
-        os.makedirs(os.path.dirname(log), exist_ok=True)
-        with open(path, "wb") as fh:
-            plistlib.dump(menubar_plist(menubar_script(), os.path.join(PLUGIN_ROOT, "bin", "lean-agent"), log), fh)
-        ctl("bootout", f"gui/{uid}/{MENUBAR_LABEL}")
-        rc, out = ctl("bootstrap", f"gui/{uid}", path)
-        if rc != 0:
-            die(f"launchctl bootstrap failed: {out[:300]}")
-        print(f"menu bar item installed ({path}); it starts at login")
-        return 0
-    if a.uninstall:
-        ctl("bootout", f"gui/{uid}/{MENUBAR_LABEL}")
-        if os.path.exists(path):
-            os.remove(path)
-        print("menu bar item removed")
-        return 0
-    if a.status:
-        rc, _ = ctl("print", f"gui/{uid}/{MENUBAR_LABEL}")
-        print(f"menu bar item: {'installed' if os.path.exists(path) else 'not installed'}, "
-              f"{'loaded' if rc == 0 else 'not loaded'}")
-        return 0
-    os.execvp("osascript", ["osascript", "-l", "JavaScript", menubar_script()])
 
 
 SERVICE_STOP_WAIT = 90   # seconds `service stop|restart` waits for the old service to exit before it kills it
@@ -18817,19 +18753,12 @@ def build_parser():
     s.add_argument("--text", help="the content (default: stdin)")
     s.set_defaults(fn=cmd_doc)
 
-    s = sub.add_parser("menubar", help="macOS menu bar item showing the live map (--install: start at login)")
-    s.add_argument("--install", action="store_true", help="write a LaunchAgent and load it")
-    s.add_argument("--uninstall", action="store_true", help="unload and remove the LaunchAgent")
-    s.add_argument("--status", action="store_true")
-    s.set_defaults(fn=cmd_menubar)
-
     s = sub.add_parser("map", help="the code's import graph (no model): who uses what, deps, routes, unused files; "
-                       "with no project (or --json/--svg/--mini/--watch/--open): the live map of the service")
+                       "with no project (or --json/--svg/--mini/--watch): the live map of the service")
     s.add_argument("project", nargs="?")
     s.add_argument("--svg", action="store_true", help="live map: one standalone SVG")
     s.add_argument("--mini", action="store_true", help="live map: the small round-node SVG")
     s.add_argument("--watch", action="store_true", help="live map: one JSON line whenever it changes (twice a second at most)")
-    s.add_argument("--open", action="store_true", help="live map: serve it on 127.0.0.1 (random port + token) and open it")
     s.add_argument("--width", type=int)
     s.add_argument("--height", type=int)
     s.add_argument("--who-uses", metavar="X", help="a file, folder, file name or exported name")
