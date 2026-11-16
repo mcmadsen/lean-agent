@@ -301,7 +301,7 @@ def checkpoint_session(key="main", wait=None, now=time.time, sleep=time.sleep):
         st = transcript_state(path, offset)
         if st["ended"] and "checkpointed" in st["text"].lower():
             return True
-        sleep(0.5)
+        sleep(0.2)
     return False
 
 
@@ -471,6 +471,7 @@ CLEAR_MARGIN = 8000    # "auto" clears this far below the compaction point
 CLEAR_HARD = 3000      # within this of the compaction point the clear no longer waits for running workers
 CLEAR_PROMPT = "Checkpoint now: run lean-agent checkpoint with your soft state, then reply 'checkpointed'"
 CLEAR_PENDING = "clear requested: waiting for the turn to end"
+CLOSE_CHECKPOINT_WAIT = 25  # seconds `thread close` / a fresh restart waits for the checkpoint before it stops the session anyway
 CLEAR_WAIT = 120       # seconds to wait for the checkpoint before clearing anyway
 CLEAR_GAP = 600        # seconds between two clears
 REGROW = 0.3           # after a clear the session must grow by this share of the clear point before the next one

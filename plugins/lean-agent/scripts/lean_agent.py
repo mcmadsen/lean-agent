@@ -2352,6 +2352,7 @@ def detach_run(workdir, run_id, spawn=None):
             os.close(wfd)
         for sig, handler in held.items():
             signal.signal(sig, handler)
+        lean_slow.disarm()  # from here this process only relays the run's output until it ends: waiting is its job
     if pid == 0:
         try:
             os.close(rfd)
@@ -12465,6 +12466,7 @@ def sockcli_run(argv, env):
 def sockcli_main():
     """`lean_agent.py __sockcli__`: the service's persistent CLI helper. One JSON request line in ({argv, env}), one reply line
     out ({rc, out, err}); ends when the service closes its stdin."""
+    lean_slow.disarm()  # a helper that idles on stdin for requests is not a slow command
     proto = os.fdopen(os.dup(1), "w")
     os.dup2(2, 1)  # stray prints can never corrupt the reply stream
     proto.write("ready\n")
@@ -15254,7 +15256,8 @@ def close_thread_session(tid):
         hosted = bool(rec.get("host_pid")) and pid_alive(rec["host_pid"])
     if hosted:
         if service_session.alive(tid) and not lean_threads.orphan_reason(tid):
-            ok = service_session.checkpoint_session(tid)
+            ok = service_session.checkpoint_session(  # bounded: a busy session never holds the close for minutes
+                tid, wait=service_session._knob("LEAN_AGENT_CLOSE_CHECKPOINT_WAIT", service_session.CLOSE_CHECKPOINT_WAIT))
         res = service_session.sessions_request("stop", timeout=STOP_REQUEST_WAIT, thread=tid)
         if not res.get("ok") and rec.get("host_pid") and pid_alive(rec["host_pid"]):
             raise RuntimeError(f"{tid}: the session did not stop ({res.get('error') or 'stop request failed'}); "
