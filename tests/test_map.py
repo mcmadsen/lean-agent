@@ -161,6 +161,73 @@ class MapTest(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError):
                 urllib.request.urlopen(url.split("?")[0])
 
+    def test_run_end_and_start_edges(self):
+        now = time.time()
+        lean_map.run_started("0116-1-aaaa", "t1", "sonnet", now=now - 5)
+        lean_map.run_ended("0116-2-bbbb", "t2", "failed", now=now - 2)
+        lean_map.run_ended("0116-3-cccc", "t1", "done", now=now - 1)
+        s = lean_map.build(ctx(runs=False), now=now)
+        k = {(e["from"], e["to"], e["kind"], e["label"]) for e in s["edges"]}
+        self.assertIn(("t1", "run:0116-1-aaaa", "message", "task"), k)
+        self.assertIn(("run:0116-2-bbbb", "t2", "report", "result"), k)
+        st = {n["id"]: n["state"] for n in s["nodes"]}
+        self.assertEqual((st["run:0116-2-bbbb"], st["run:0116-3-cccc"], st["run:0116-1-aaaa"]), ("dead", "done", "alive"))
+        self.assertEqual(s["moving"][0]["text"], "result ready")
+        lean_map.run_started("0116-1-aaaa", "t1")  # once per run
+        self.assertEqual(len([e for e in lean_map.events() if e["label"] == "task"]), 1)
+
+    def test_service_records_run_end_once(self):
+        fin = time.time() - 5
+        run = {"id": "0116-9-dddd", "thread": "t1", "status": "done", "fin": fin, "task": "x"}
+        with mock.patch.object(ss, "finished_thread_runs", return_value=[run]), mock.patch.object(ss, "queue_report"):
+            ss.run_fallback()
+            ss.run_fallback()
+        ev = [e for e in lean_map.events() if e["label"] == "result"]
+        self.assertEqual(len(ev), 1)
+        self.assertEqual((ev[0]["from"], ev[0]["to"]), ("run:0116-9-dddd", "t1"))
+
+    def _open(self, extra=None):
+        import subprocess
+        env = {**os.environ, "LEAN_AGENT_NO_BROWSER": "1", "LEAN_AGENT_NO_SOCKET": "1", **(extra or {})}
+        t0 = time.monotonic()
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "lean_agent.py"), "map", "--open"], env=env, capture_output=True,
+                           text=True, timeout=20)
+        return r, time.monotonic() - t0
+
+    def _pid(self, sf):
+        with open(sf) as fh:
+            return json.load(fh)["pid"]
+
+    def _stop(self):
+        try:
+            with open(os.path.join(self.tmp, "map-open.json")) as fh:
+                os.kill(json.load(fh)["pid"], 15)
+        except Exception:
+            pass
+
+    def test_open_detached_reuse_token_and_idle_exit(self):
+        import urllib.request
+        import urllib.error
+        r, dt = self._open({"LEAN_AGENT_MAP_IDLE": "3"})
+        self.addCleanup(self._stop)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertLess(dt, 2.0)
+        url = r.stdout.strip().splitlines()[-1]
+        self.assertTrue(url.startswith("http://127.0.0.1:"))
+        sf = os.path.join(self.tmp, "map-open.json")
+        self.assertEqual(os.stat(sf).st_mode & 0o777, 0o600)
+        pid = self._pid(sf)
+        self.assertIn(b"<svg", urllib.request.urlopen(url.replace("/?", "/svg?"), timeout=3).read())
+        with self.assertRaises(urllib.error.HTTPError):
+            urllib.request.urlopen(url.split("?")[0] + "?token=wrong", timeout=3)
+        r2, _ = self._open({"LEAN_AGENT_MAP_IDLE": "3"})
+        self.assertEqual(r2.stdout.strip().splitlines()[-1], url)
+        self.assertEqual(self._pid(sf), pid)
+        end = time.time() + 12
+        while time.time() < end and os.path.exists(sf):
+            time.sleep(0.2)
+        self.assertFalse(os.path.exists(sf), "the server did not exit when idle")
+
 
 if __name__ == "__main__":
     unittest.main()

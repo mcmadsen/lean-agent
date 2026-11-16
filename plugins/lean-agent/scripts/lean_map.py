@@ -22,11 +22,31 @@ _reqs = collections.deque(maxlen=2000)  # (ts, op) of socket requests, last minu
 _state = {"ms": None, "cpu": (time.monotonic(), time.process_time(), 0.0)}
 
 
-def record(kind, frm, to, label, node=None, dir=None, text=None, now=None):
+def record(kind, frm, to, label, node=None, dir=None, text=None, now=None, meta=None):
     """One event: kind message|report|request, from/to node ids; `text`+`node`+`dir` also list it under `moving`."""
     with _lock:
         _ring.append({"ts": now or time.time(), "kind": kind, "from": frm, "to": to, "label": label,
-                      "node": node, "dir": dir, "text": text})
+                      "node": node, "dir": dir, "text": text, "meta": meta})
+
+
+_seen_runs = collections.OrderedDict()
+
+
+def run_ended(rid, thread, status, now=None):
+    """A run finished (done / failed / timed out / stopped): worker -> thread 'result'."""
+    ok = str(status or "").lower() in ("done", "ok", "success", "finished", "completed")
+    record("report", "run:" + rid, thread, "result", node="run:" + rid, dir="from", text="result ready", now=now,
+           meta={"thread": thread, "state": "done" if ok else "dead", "status": str(status or "")})
+
+
+def run_started(rid, thread, model="", now=None):
+    """A run marker appeared for a thread: thread -> worker 'task' (once per run)."""
+    if rid in _seen_runs:
+        return
+    _seen_runs[rid] = 1
+    while len(_seen_runs) > 500:
+        _seen_runs.popitem(last=False)
+    record("message", thread, "run:" + rid, "task", now=now, meta={"thread": thread, "state": "alive", "model": model})
 
 
 def record_request(op, ms, now=None):
@@ -86,6 +106,16 @@ def build(ctx, now=None):
         nodes.append({"id": "run:" + r["id"], "kind": "worker", "parent": r.get("thread"), "label": "run " + r["id"].split("-")[-1],
                       "model": r.get("model") or "", "state": st,
                       "detail": f"{_dur(r.get('age_s', 0))} · progress {_dur(r.get('progress_s', 0))} ago"})
+    have = {n["id"] for n in nodes}
+    tids = {n["id"] for n in nodes if n["kind"] == "thread"}
+    for e in sorted(ev, key=lambda e: e["ts"]):  # runs the ring knows (just ended or started) but the live list no longer / not yet shows
+        m = e.get("meta")
+        node = e["from"] if e["from"].startswith("run:") else e["to"] if e["to"].startswith("run:") else None
+        if m and node and node not in have and m.get("thread") in tids:
+            have.add(node)
+            nodes.append({"id": node, "kind": "worker", "parent": m["thread"], "label": "run " + node.split("-")[-1],
+                          "model": m.get("model") or "", "state": m["state"],
+                          "detail": m.get("status") or ("done" if m["state"] == "done" else "ended")})
     nodes.append({"id": "hooks", "kind": "hooks", "label": "Hooks", "state": "active" if reqs else "idle", "detail": f"{len(reqs)} a min"})
     ids = {n["id"] for n in nodes}
     newest = {}
@@ -172,6 +202,10 @@ def service_context(now=None):
                 age = now - (time.mktime(time.strptime(st[:19], "%Y-%m-%dT%H:%M:%S")) if isinstance(st, str) else float(st))
             except Exception:
                 age = 0
+            if tid and rid not in _seen_runs and age < 120:
+                run_started(rid, tid, m.get("model") or "")
+            elif rid not in _seen_runs:
+                _seen_runs[rid] = 1  # already running when the map first looked: not a new task
             runs.append({"id": rid, "thread": tid, "model": m.get("model"), "age_s": age,
                          "progress_s": max(0, now - (m.get("last_progress") or now)), "orphaned": bool(m.get("orphaned"))})
     except Exception:
@@ -370,12 +404,28 @@ t();setInterval(t,2000);
 </script></body>"""
 
 
-def serve(open_browser=True, out=None, once=False):
-    """A page served on 127.0.0.1 at a random port; every request needs the random token in the URL. Runs until killed."""
+def _home(*parts):
+    import lean_common
+    return lean_common.lean_home(*parts)
+
+
+def idle_limit():
+    try:
+        return float(os.environ.get("LEAN_AGENT_MAP_IDLE") or 600)
+    except ValueError:
+        return 600.0
+
+
+def serve(open_browser=False, out=None, once=False, idle=None, state_file=None):
+    """The map page on 127.0.0.1 at a random port; every request needs the random token in the URL. Writes port+token+pid
+    to a 0600 file, and exits by itself after `idle` seconds (default 10 min) without a request, or with the service gone
+    for as long. once=True: return (server, url) without serving (tests)."""
     import http.server
     import secrets
     import urllib.parse
     token = secrets.token_urlsafe(16)
+    idle = idle_limit() if idle is None else idle
+    seen = {"req": time.time(), "up": time.time()}
 
     class H(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -388,6 +438,7 @@ def serve(open_browser=True, out=None, once=False):
                 self.send_response(404)
                 self.end_headers()
                 return
+            seen["req"] = time.time()
             if u.path == "/":
                 body, ct = (PAGE % token).encode(), "text/html; charset=utf-8"
             else:
@@ -403,18 +454,106 @@ def serve(open_browser=True, out=None, once=False):
             self.wfile.write(body)
 
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
-    url = f"http://127.0.0.1:{srv.server_address[1]}/?token={token}"
-    print(url, file=out or __import__("sys").stdout, flush=True)
-    if open_browser:
-        try:
-            import webbrowser
-            webbrowser.open(url)
-        except Exception:
-            pass
+    port = srv.server_address[1]
+    url = f"http://127.0.0.1:{port}/?token={token}"
+    if state_file:
+        tmp = state_file + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"pid": os.getpid(), "port": port, "token": token}, fh)
+        os.replace(tmp, state_file)
     if once:
         return srv, url
+
+    def watcher():
+        step = max(0.05, min(5.0, idle / 4))
+        while True:
+            time.sleep(step)
+            now = time.time()
+            try:
+                import lean_sock
+                if lean_sock.call("ping", timeout=0.5):
+                    seen["up"] = now
+            except Exception:
+                pass
+            if now - seen["req"] > idle or now - seen["up"] > idle:
+                if state_file:
+                    try:
+                        os.remove(state_file)
+                    except OSError:
+                        pass
+                srv.shutdown()
+                return
+    threading.Thread(target=watcher, daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     return srv, url
+
+
+def _answers(rec):
+    """True when the recorded server's pid is alive and it answers its own token."""
+    import urllib.request
+    try:
+        os.kill(int(rec["pid"]), 0)
+        with urllib.request.urlopen(f"http://127.0.0.1:{int(rec['port'])}/?token={rec['token']}", timeout=0.7) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def open_detached(browser=True, out=None, wait=1.5):
+    """`map --open`: start the page server as a detached process (or reuse the running one), open the browser when there is
+    one, print the URL and return at once. Returns the URL, or None when the server did not come up."""
+    import subprocess
+    import sys
+    out = out or sys.stdout
+    state = _home("map-open.json")
+    rec = None
+    try:
+        with open(state) as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        pass
+    if not (isinstance(rec, dict) and _answers(rec)):
+        rec = None
+        try:
+            os.remove(state)
+        except OSError:
+            pass
+        os.makedirs(_home(), exist_ok=True)
+        log = os.open(_home("map-open.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        devnull = os.open(os.devnull, os.O_RDWR)
+        try:
+            subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve"], stdin=devnull, stdout=devnull, stderr=log,
+                             start_new_session=True, close_fds=True, cwd=_home())
+        finally:
+            os.close(log)
+            os.close(devnull)
+        end = time.time() + wait
+        while time.time() < end and rec is None:
+            try:
+                with open(state) as fh:
+                    rec = json.load(fh)
+            except (OSError, ValueError):
+                time.sleep(0.05)
+    if not rec:
+        print("lean-agent: the map page did not start (see map-open.log in the lean home)", file=out, flush=True)
+        return None
+    url = f"http://127.0.0.1:{rec['port']}/?token={rec['token']}"
+    print(url, file=out, flush=True)
+    if browser:
+        try:
+            import webbrowser
+            webbrowser.get().open(url)
+        except Exception:
+            pass  # headless: the URL is printed
+    return url
+
+
+if __name__ == "__main__":
+    import sys
+    if sys.argv[1:] == ["serve"]:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        serve(state_file=_home("map-open.json"))

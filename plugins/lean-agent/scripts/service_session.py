@@ -2148,6 +2148,8 @@ def run_fallback(now=None):
         if st.get("reported"):
             continue
         if not st:  # first sight: a run that ended before the service saw the ledger gets the full window from now
+            if now - r["fin"] < lean_map.RING_SECONDS:
+                lean_map.run_ended(rid, r["thread"], r.get("status"), now=min(now, max(r["fin"], now - 60)))
             run_state_update(rid, seen=now)
             st = {"seen": now}
         if reported_at(r["thread"]) >= r["fin"]:

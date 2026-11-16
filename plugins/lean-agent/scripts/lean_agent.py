@@ -15804,8 +15804,7 @@ def cmd_live_map(a):
             pass
         return 0
     if getattr(a, "open", False):
-        lean_map.serve(open_browser=not os.environ.get("LEAN_AGENT_NO_BROWSER"))
-        return 0
+        return 0 if lean_map.open_detached(browser=not os.environ.get("LEAN_AGENT_NO_BROWSER")) else 1
     snap = lean_map.fetch()
     if getattr(a, "svg", False) or getattr(a, "mini", False):
         mini = bool(getattr(a, "mini", False))
