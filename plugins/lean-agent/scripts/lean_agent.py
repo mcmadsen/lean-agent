@@ -2078,9 +2078,18 @@ def run_recorded(rid):
         with open(home("ledger.jsonl"), "rb") as fh:
             fh.seek(0, os.SEEK_END)
             fh.seek(max(0, fh.tell() - 262144))
-            return rid.encode() in fh.read()
+            data = fh.read()
     except OSError:
         return False
+    for line in data.splitlines():  # the row of THIS run: its id as the row's own "id", not a mention in another row's task text
+        if rid.encode() in line:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and row.get("id") == rid and row.get("status") != lean_common.LOST_NO_RECORD:
+                return True
+    return False
 
 
 def supervisor_linger_guard(poll=15, linger=None, exit=os._exit):
@@ -2119,7 +2128,7 @@ def own_marker(run_id, **extra):
     for f in glob.glob(home("running", "*.json")):
         m = load_json(f, {})
         if m.get("run") == run_id:
-            m.update(pid=os.getpid(), detached=True, **extra)
+            m.update(pid=os.getpid(), pid_start=lean_common.proc_start(os.getpid()), detached=True, **extra)
             save_json(f, m)
 
 
@@ -2146,8 +2155,14 @@ def supervisor_alive(pid):
         with open(f"/proc/{pid}/stat") as fh:
             return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
     except (OSError, IndexError):
-        r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
-        return bool(r.stdout.strip()) and not r.stdout.strip().startswith("Z")
+        pass
+    try:  # macOS: no /proc. A ps that fails or says nothing (fork pressure, a timeout) is "unknown", never "gone"
+        r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if r.returncode != 0 or not r.stdout.strip():
+        return pid_alive(pid)  # kill(pid, 0) said it exists
+    return not r.stdout.strip().startswith("Z")
 
 
 def signal_supervisor(pid, sig):
@@ -2383,8 +2398,20 @@ def detach_run(workdir, run_id, spawn=None):
     except ValueError:  # not the main thread
         previous = None
     sent = 0
+    leave = []  # a TERM/HUP to this waiting command (its tool was killed, its timeout hit): it stops waiting, the run goes on
+
+    def on_leave(signum, frame):
+        leave.append(signum)
+    left = {}
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            left[sig] = signal.signal(sig, on_leave)
+        except ValueError:
+            break
     try:
         while status is None:
+            if leave:
+                break
             try:
                 if gpid:
                     if not supervisor_alive(gpid):
@@ -2414,7 +2441,14 @@ def detach_run(workdir, run_id, spawn=None):
     finally:
         if previous is not None:
             signal.signal(signal.SIGINT, previous)
+        for sig, handler in left.items():
+            signal.signal(sig, handler)
     relay()
+    if leave and status is None:
+        sup = gpid or pid
+        print(f"run {run_id}: this command stopped waiting; the run is still running (pid {sup}), not failed; "
+              f"follow with lean-agent runs --show {run_id}", file=sys.stderr, flush=True)
+        return 124
     entry = next((r for r in reversed(ledger()) if r["id"] == run_id), None)
     if entry:
         LAST_RUN[:] = [entry]  # what the callers of cmd_run read after it
@@ -2428,10 +2462,22 @@ def detach_run(workdir, run_id, spawn=None):
         except (OSError, ValueError):
             if entry and entry.get("status") in ("done", "ok"):
                 return 0
+            if not entry and not FAIL_REASON:  # no result and no stated failure: but a live worker, or files written in the last minutes, mean it is not over
+                cpid = lean_common.claude_alive(workdir)
+                fresh = time.time() - lean_common.last_progress(workdir) < lean_common.PROGRESS_FRESH
+                if cpid or supervisor_alive(gpid) or fresh:
+                    print(f"run {run_id}: the supervisor is gone but the run is still running "
+                          f"(pid {cpid or gpid}), not failed; follow with lean-agent runs --show {run_id}",
+                          file=sys.stderr, flush=True)
+                    return 124
             if not FAIL_REASON:  # the detached worker left no result and no reason: say so, not "exited with code 1"
                 FAIL_REASON[:] = [death_reason(run_id, paths[1])]
             return 1
     rc = os.waitstatus_to_exitcode(status)
+    if spawned and rc != 0 and not entry and lean_common.claude_alive(workdir):  # the supervisor died, its worker did not
+        print(f"run {run_id}: the supervisor is gone but the run is still running (pid {lean_common.claude_alive(workdir)}), "
+              f"not failed; follow with lean-agent runs --show {run_id}", file=sys.stderr, flush=True)
+        return 124
     if spawned and rc != 0 and not FAIL_REASON:  # it died without saying why in a "run <id> failed:" line
         FAIL_REASON[:] = [death_reason(run_id, paths[1][:], exit_how(status))]
     return rc if rc >= 0 else 128 - rc
@@ -3737,6 +3783,47 @@ def note_auth(returncode, err, lines, source):
         pass
 
 
+def descendants(pid):
+    """Pids below `pid` (children, grandchildren, ...), from one ps listing; [] when ps is unavailable."""
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=15).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    kids = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            kids.setdefault(int(parts[1]), []).append(int(parts[0]))
+    found, todo = [], [pid]
+    while todo:
+        for k in kids.get(todo.pop(), []):
+            if k not in found:
+                found.append(k)
+                todo.append(k)
+    return found
+
+
+def stop_tree(proc, grace=5):
+    """The run's own timeout: TERM the worker and everything below it (a test runner's browser included), then KILL
+    what is left after `grace` seconds."""
+    pids = [proc.pid] + descendants(proc.pid)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for p in pids:
+            try:
+                os.kill(p, sig)
+            except OSError:
+                pass
+        if sig == signal.SIGTERM:
+            end = time.time() + grace
+            while time.time() < end and any(lean_common.pid_alive(p) and p != proc.pid for p in pids):
+                time.sleep(0.2)
+            try:
+                if proc.poll() is None:
+                    time.sleep(max(0.0, min(grace, end - time.time())))
+            except OSError:
+                pass
+
+
 def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd=None, warn_turns=0):
     """Run a worker and read its stream-json as it comes, so a run that keeps re-reading a large context
     can be stopped (after `max_reads` context tokens summed over its calls; 0 = never) and resumed later.
@@ -3751,10 +3838,11 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True,
                                 cwd=cwd or workdir, env=env, **lean_common.popen_umask())
         timed_out = []
+        lean_common.write_claude_pid(workdir, proc.pid)
 
         def on_timer():
             timed_out.append(True)  # lean-agent's own timer fired: the only kill it may call a timeout
-            proc.kill()
+            stop_tree(proc, grace=env_num("LEAN_AGENT_KILL_GRACE", 5, float))
         timer = threading.Timer(timeout, on_timer)
         timer.start()
         time_flag = env.get("LEAN_AGENT_TIMEWARN_FLAG")
