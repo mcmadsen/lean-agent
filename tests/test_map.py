@@ -210,7 +210,8 @@ class MapTest(unittest.TestCase):
         import urllib.error
         r, dt = self._open({"LEAN_AGENT_MAP_IDLE": "3"})
         self.addCleanup(self._stop)
-        self.assertEqual(r.returncode, 0, r.stderr)
+        log = os.path.join(self.tmp, "map-open.log")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr + (open(log).read() if os.path.exists(log) else "(no log)"))
         self.assertLess(dt, 6.0 if os.environ.get("CI") else 2.0)  # returns once the server answers
         url = r.stdout.strip().splitlines()[-1]
         self.assertTrue(url.startswith("http://127.0.0.1:"))

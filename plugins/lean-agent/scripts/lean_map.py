@@ -539,7 +539,14 @@ def open_detached(browser=True, out=None, wait=5.0):  # a fresh interpreter on a
             except (OSError, ValueError):
                 time.sleep(0.05)
     if not rec:
-        print("lean-agent: the map page did not start (see map-open.log in the lean home)", file=out, flush=True)
+        tail = ""
+        try:
+            with open(_home("map-open.log"), errors="replace") as fh:
+                tail = "".join(fh.readlines()[-15:]).strip()
+        except OSError:
+            pass
+        print("lean-agent: the map page did not start within %gs (%s)%s" % (wait, _home("map-open.log"),
+              (":\n" + tail) if tail else ", its log is empty"), file=sys.stderr, flush=True)
         return None
     url = f"http://127.0.0.1:{rec['port']}/?token={rec['token']}"
     print(url, file=out, flush=True)
