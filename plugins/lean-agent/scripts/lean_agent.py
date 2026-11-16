@@ -12106,8 +12106,8 @@ def cmd_doctor(a):
     report(True, text + " (lean-agent config compact-window N|default, compact-pct P|default)")
     report(True, f"auto clear: {clear_at_text()} (lean-agent config clear-at off|auto|N)")
     import lean_maplive
-    report(True if lean_maplive.is_up(lean_sock.home()) else None,
-           "live map page endpoint: " + ("up (127.0.0.1 only)" if lean_maplive.is_up(lean_sock.home()) else "not running (lean-agent up starts it)"))
+    ok, text = lean_maplive.doctor_line(lean_sock.home())
+    report(ok, text)
     report(True, "live map: the Claude Code desktop pane (lean-agent map --json|--svg) or the live page (lean-agent map --html)")
     fa = service_session.fresh_after()
     report(True, "auto fresh: " + service_session.fresh_text(fa) + (

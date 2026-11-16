@@ -234,6 +234,163 @@ class HttpRoutesTest(unittest.TestCase):
         self.assertEqual(self.calls, n)  # polling stopped: no background work
 
 
+class RobustTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.mode = "ok"
+        self.calls = 0
+        self.release = threading.Event()
+        self.addCleanup(self.release.set)
+        self.logs = []
+
+        def fn():
+            self.calls += 1
+            if self.mode == "boom":
+                raise RuntimeError("kaboom")
+            if self.mode == "hang":
+                self.release.wait(30)
+            d = snap()
+            d["inbox"] = self.calls
+            return d
+        self.fn = fn
+
+    def start(self, interval=0.2):
+        live = lean_maplive.Live(self.fn, self.tmp, interval=interval)
+        live.log = lambda *a: self.logs.append(a)
+        live.start()
+        self.addCleanup(live.stop)
+        return live
+
+    def frames(self, live, until, limit=WAIT):
+        s, head, rest = connect(live.port, live.token)
+        self.addCleanup(s.close)
+        got = []
+        end = time.time() + limit
+        while time.time() < end:
+            s.settimeout(1)
+            try:
+                _, text, rest = read_frame(s, rest)
+            except socket.timeout:
+                continue
+            got.append(json.loads(text))
+            if until(got[-1]):
+                break
+        return got
+
+    def test_first_snapshot_at_once(self):
+        live = self.start(interval=60)
+        t0 = time.time()
+        got = self.frames(live, lambda m: m["type"] == "snapshot")
+        self.assertEqual(got[-1]["type"], "snapshot")
+        self.assertLess(time.time() - t0, 10)
+
+    def test_failure_is_reported_logged_once_and_loop_survives(self):
+        self.mode = "boom"
+        live = self.start()
+        got = self.frames(live, lambda m: m["type"] == "error")
+        self.assertEqual(got[-1], {"type": "error", "text": "RuntimeError: kaboom"})
+        n = self.calls
+        deadline = time.time() + WAIT
+        while self.calls < n + 3 and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertGreaterEqual(self.calls, n + 3)  # the loop thread is still going
+        self.assertEqual(len(self.logs), 1)  # rate limited
+        self.assertIn("kaboom", self.logs[0][2])
+        self.mode = "ok"
+        got = self.frames(live, lambda m: m["type"] == "snapshot")
+        self.assertEqual(got[-1]["type"], "snapshot")
+
+    def test_last_good_snapshot_kept(self):
+        live = self.start()
+        st, _, body = http_get(live.port, f"/snap?t={live.token}")
+        good = json.loads(body)["inbox"]
+        self.mode = "boom"
+        time.sleep(0.5)
+        st, _, body = http_get(live.port, f"/snap?t={live.token}")
+        self.assertIn("200", st)
+        self.assertGreaterEqual(json.loads(body)["inbox"], good)
+        self.assertGreater(json.loads(body)["inbox"], 0)
+
+    def test_http_page_embeds_current_snapshot(self):
+        live = self.start(interval=0.2)
+        _, _, b1 = http_get(live.port, f"/?t={live.token}")
+        time.sleep(0.5)
+        _, _, b2 = http_get(live.port, f"/?t={live.token}")
+        m1 = re.search(rb'id="snap">(.*?)</script>', b1, re.S).group(1)
+        m2 = re.search(rb'id="snap">(.*?)</script>', b2, re.S).group(1)
+        self.assertNotEqual(m1, m2)  # recomputed once the cache expired
+
+    def test_check_states(self):
+        self.assertEqual(lean_maplive.check(self.tmp)[0], "down")
+        live = self.start()
+        self.assertEqual(lean_maplive.check(self.tmp, wait=WAIT)[0], "up")
+        self.assertTrue(lean_maplive.doctor_line(self.tmp, WAIT)[1].startswith("live map page endpoint: up"))
+        p = lean_maplive.live_path(self.tmp)
+        with open(p) as fh:
+            d = json.load(fh)
+        with open(p, "w") as fh:
+            json.dump(dict(d, token="old"), fh)
+        self.assertEqual(lean_maplive.check(self.tmp)[0], "token")
+        self.assertIn("token mismatch", lean_maplive.doctor_line(self.tmp)[1])
+        live.stop()
+        with open(p, "w") as fh:
+            json.dump(d, fh)
+        end = time.time() + WAIT
+        while lean_maplive.check(self.tmp, wait=1)[0] != "down" and time.time() < end:
+            time.sleep(0.2)
+        self.assertEqual(lean_maplive.check(self.tmp, wait=1)[0], "down")
+
+    def test_check_failing_snapshot(self):
+        self.mode = "boom"
+        self.start()
+        st, why = lean_maplive.check(self.tmp, wait=WAIT)
+        self.assertEqual(st, "no-snapshot")
+        self.assertIn("kaboom", why)
+
+    def test_check_hang(self):
+        self.mode = "hang"
+        self.start()
+        st, why = lean_maplive.check(self.tmp, wait=0.8)
+        self.assertEqual(st, "no-snapshot")
+        self.assertIn("no frame", why)
+        self.assertIn("accepts but sends no snapshot", lean_maplive.doctor_line(self.tmp, 0.5)[1])
+
+
+class CostTest(unittest.TestCase):
+    def test_build_is_cheap_on_a_big_home(self):
+        now = time.time()
+        for i in range(400):
+            lean_map.record("message", "service", f"t{i % 300 + 1}", "deliver", node=f"t{i % 300 + 1}", dir="to", text="x", now=now - i)
+        ctx = {"service": {}, "threads": [{"id": f"t{i}", "title": f"T{i}", "state": "idle", "idle_s": i} for i in range(1, 301)],
+               "runs": [{"id": f"r-{i}", "thread": f"t{i % 300 + 1}", "age_s": i, "alive": True} for i in range(500)], "desk_idle_s": 3}
+        t0 = time.perf_counter()
+        s = lean_map.build(ctx)
+        self.assertLess(time.perf_counter() - t0, 0.1)
+        self.assertLessEqual(len(s["placed"]), 3 + 12 + 36)
+
+    def test_service_context_is_time_boxed(self):
+        import lean_threads
+        import service_session as ss
+        threads = {f"t{i}": {"title": f"T{i}"} for i in range(1, 301)}
+
+        def slow_alive(tid):
+            time.sleep(0.005)
+            return True
+        lean_map._tcache.clear()
+        lean_map._rcache[:] = [0.0, []]
+        self.addCleanup(lean_map._tcache.clear)
+        with mock.patch.object(lean_threads, "load_ro", return_value={"threads": threads}), \
+                mock.patch.object(ss, "alive_thread", slow_alive), mock.patch.object(ss, "mid_turn", return_value=False), \
+                mock.patch.object(ss, "spool_pending", return_value=[]), mock.patch.object(ss, "session_transcript", return_value=None), \
+                mock.patch("lean_common.running_runs", return_value=[]):
+            t0 = time.perf_counter()
+            c = lean_map.service_context()
+            self.assertLess(time.perf_counter() - t0, 0.5)  # 300 x 5 ms probes would be 1.5 s unboxed
+            self.assertEqual(len(c["threads"]), 300)
+            self.assertLess(len(lean_map._tcache), 300 + 1)
+
+
 def big_snap(threads=300, runs=500):
     ns = [{"id": "service", "kind": "service", "label": "S", "state": "active", "detail": "d"},
           {"id": "main", "kind": "desk", "label": "Front desk", "state": "active", "detail": "d"},
@@ -302,8 +459,7 @@ class ProbeTest(unittest.TestCase):
         self.assertIn(live.token, h)
 
 
-NODE = shutil.which("node") or "/opt/node22/bin/node"
-PW_PATH = os.environ.get("NODE_PATH") or "/opt/node22/lib/node_modules"
+NODE = shutil.which("node") or ("/opt/node22/bin/node" if os.path.exists("/opt/node22/bin/node") else None)
 BROWSER_JS = r"""
 const { chromium } = require('playwright');
 (async () => {
@@ -331,22 +487,32 @@ const { chromium } = require('playwright');
 
 
 def node_env():
-    e = dict(os.environ, NODE_PATH=PW_PATH)
+    e = dict(os.environ)
+    if not e.get("NODE_PATH") and os.path.isdir("/opt/node22/lib/node_modules"):
+        e["NODE_PATH"] = "/opt/node22/lib/node_modules"
     if not e.get("PLAYWRIGHT_BROWSERS_PATH") and os.path.isdir("/opt/pw-browsers"):
         e["PLAYWRIGHT_BROWSERS_PATH"] = "/opt/pw-browsers"
     return e
 
 
 def have_playwright():
-    if not os.path.exists(NODE):
+    """True only when node, the playwright module and a launchable chromium all exist; never raises."""
+    try:
+        if not NODE or not os.path.exists(NODE):
+            return False
+        r = subprocess.run([NODE, "-e", "require('playwright').chromium.launch().then(b=>b.close()).catch(()=>process.exit(3))"],
+                           capture_output=True, env=node_env(), timeout=120)
+        return r.returncode == 0
+    except Exception:
         return False
-    r = subprocess.run([NODE, "-e", "require('playwright').chromium.launch().then(b=>b.close()).catch(()=>process.exit(3))"],
-                       capture_output=True, env=node_env(), timeout=120)
-    return r.returncode == 0
 
 
-@unittest.skipUnless(have_playwright(), "node/playwright not available")
 class BrowserTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not have_playwright():
+            raise unittest.SkipTest("node/playwright/browser not available")
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -365,10 +531,13 @@ class BrowserTest(unittest.TestCase):
         self.assertNotIn("error", d)
         return d
 
-    def live_html(self, snapshot, csp=None):
-        live = lean_maplive.Live(lambda: snapshot, self.tmp, interval=0.5).start()
+    def live_html(self, snapshot, csp=None, fn=None, port=None):
+        live = lean_maplive.Live(fn or (lambda: snapshot), self.tmp, interval=0.5).start()
         self.addCleanup(live.stop)
-        h = lean_maplive.build_html(snapshot, lean_maplive.endpoint(self.tmp))
+        ep = lean_maplive.endpoint(self.tmp)
+        if port:
+            ep = dict(ep, port=port)
+        h = lean_maplive.build_html(snapshot, ep)
         if csp:
             h = h.replace("<head>", f'<head><meta http-equiv="Content-Security-Policy" content="{csp}">', 1)
         return h
@@ -388,6 +557,20 @@ class BrowserTest(unittest.TestCase):
         d = self.run_page(self.live_html(snap(), "connect-src 'none'; img-src 'none'"), "preview blocks live updates")
         self.assertEqual(d["chip"], "preview blocks live updates")
         self.assertIn("Open in browser", d["why"])
+
+    def test_no_data_when_snapshots_fail(self):
+        def boom():
+            raise RuntimeError("kaboom")
+        d = self.run_page(self.live_html(snap(), fn=boom), "connected, no data (RuntimeError: kaboom)")
+        self.assertEqual(d["chip"], "connected, no data (RuntimeError: kaboom)")
+
+    def test_service_down_is_not_a_csp_block(self):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        d = self.run_page(self.live_html(snap(), port=port), "snapshot (service not running)|preview blocks live updates")
+        self.assertEqual(d["chip"], "snapshot (service not running)")
 
     def test_big_snapshot_draws_within_caps(self):
         shot = os.environ.get("MAP_SHOT") or ""

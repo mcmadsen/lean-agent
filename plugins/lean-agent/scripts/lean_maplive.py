@@ -23,6 +23,7 @@ INTERVAL = 2.0
 QUEUE_MAX = 32
 MAX_FRAME = 1 << 16
 HANDSHAKE_S = 5.0
+LOG_EVERY_S = 60.0
 POLL_S = 10.0  # a page that polled this recently counts as watching
 PING_S = 25.0
 FILE = "map-live.json"
@@ -42,6 +43,11 @@ def event_nodes(op, req):
     if op in ("map", "ping"):
         return None
     return "main", "service"
+
+
+def _default_log(level, component, message):
+    import lean_log
+    lean_log.log(level, component, message)
 
 
 def _sha(snap):
@@ -97,6 +103,10 @@ class Live:
         self.cache = None  # (monotonic, snapshot)
         self.svg_cache = {}  # (w, h, mini) -> (monotonic, svg)
         self.last_poll = 0.0
+        self.good = None  # last snapshot that computed
+        self.err = ""
+        self.err_logged = 0.0
+        self.log = _default_log
         self.stopped = threading.Event()
 
     def start(self):
@@ -139,11 +149,48 @@ class Live:
             c = self.cache
             if c and time.monotonic() - c[0] < self.interval * 0.9:
                 return c[1]
-        snap = self.snapshot()
+        try:
+            snap = self.snapshot()
+        except Exception as exc:  # noqa: BLE001 - a failing snapshot must never take the loop or a request down
+            self._fail(exc)
+            if self.good is not None:
+                return self.good
+            raise
         with self.lock:
             self.cache = (time.monotonic(), snap)
             self.svg_cache = {}
+            self.good = snap
+            self.err = ""
         return snap
+
+    def _fail(self, exc):
+        text = f"{type(exc).__name__}: {exc}"[:200]
+        now = time.monotonic()
+        with self.lock:
+            self.err = text
+            log_it = now - self.err_logged >= LOG_EVERY_S
+            if log_it:
+                self.err_logged = now
+        if log_it:
+            try:
+                self.log("warn", "map", "live map snapshot failed: " + text)
+            except Exception:
+                pass
+        self._broadcast(json.dumps({"type": "error", "text": text}))
+
+    def _first(self, c):
+        """A new client gets a snapshot at once, not after the next interval."""
+        if self.last:
+            return
+        try:
+            snap = self.get_snap()
+            msg = json.dumps({"type": "snapshot", **snap})
+            with self.lock:
+                if not self.last:
+                    self.last = (_sha(snap), msg)
+            c["q"].put_nowait(msg)
+        except Exception:
+            pass  # _fail already told every client, this one included
 
     def get_svg(self, w, h, mini):
         key = (w, h, mini)
@@ -227,8 +274,11 @@ class Live:
                     msg = json.dumps({"type": "snapshot", **snap})
                     self.last = (h, msg)
                     self._broadcast(msg)
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    self._fail(exc)
+                except Exception:
+                    pass
             if self.stopped.wait(self.interval):
                 break
 
@@ -280,6 +330,8 @@ class Live:
             self.clients.append(box["c"])
             if self.last:
                 box["c"]["q"].put_nowait(self.last[1])
+            if self.err:
+                box["c"]["q"].put_nowait(json.dumps({"type": "error", "text": self.err}))
         acc = base64.b64encode(hashlib.sha1(key.encode() + GUID).digest()).decode()
         conn.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                       f"Sec-WebSocket-Accept: {acc}\r\n\r\n").encode())
@@ -300,6 +352,7 @@ class Live:
                 return
             c = box["c"]
             self.wake.set()
+            self._first(c)
             conn.settimeout(5)
             buf, lastping = rest, time.monotonic()
             while not self.stopped.is_set():
@@ -353,6 +406,90 @@ def endpoint(home):
         return None
 
 
+def check(home, wait=3.0):
+    """Real handshake with the token from map-live.json, then wait for the first frame. -> (state, detail), state one of
+    up | no-snapshot | token | down."""
+    d = endpoint(home)
+    if not d:
+        return "down", ""
+    try:
+        s = socket.create_connection(("127.0.0.1", d["port"]), timeout=min(wait, 1.0))
+    except OSError:
+        return "down", ""
+    end = time.monotonic() + wait
+    try:
+        key = base64.b64encode(os.urandom(16)).decode()
+        s.sendall((f"GET /?t={urllib.parse.quote(d['token'])} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                   f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        buf = b""
+
+        def more():
+            left = end - time.monotonic()
+            if left <= 0:
+                raise socket.timeout()
+            s.settimeout(left)
+            b = s.recv(65536)
+            if not b:
+                raise EOFError()
+            return b
+        while b"\r\n\r\n" not in buf:
+            buf += more()
+        head, _, buf = buf.partition(b"\r\n\r\n")
+        status = head.split(b"\r\n")[0].decode("latin-1")
+        if " 403 " in status + " ":
+            return "token", ""
+        if " 101 " not in status + " ":
+            return "no-snapshot", status.split(" ", 1)[-1] or "bad handshake"
+        err = ""
+        while True:  # server frames are unmasked
+            while len(buf) < 2:
+                buf += more()
+            ln, i = buf[1] & 0x7F, 2
+            if ln == 126:
+                while len(buf) < 4:
+                    buf += more()
+                ln, i = struct.unpack(">H", buf[2:4])[0], 4
+            elif ln == 127:
+                while len(buf) < 10:
+                    buf += more()
+                ln, i = struct.unpack(">Q", buf[2:10])[0], 10
+            while len(buf) < i + ln:
+                buf += more()
+            op, data, buf = buf[0] & 0x0F, buf[i:i + ln], buf[i + ln:]
+            if op != 1:
+                continue
+            try:
+                m = json.loads(data.decode())
+            except ValueError:
+                continue
+            if m.get("type") == "snapshot":
+                return "up", ""
+            if m.get("type") == "error":
+                err = str(m.get("text") or "")
+                return "no-snapshot", "snapshot failed: " + err
+    except socket.timeout:
+        return "no-snapshot", f"no frame within {wait:g} s"
+    except (OSError, EOFError):
+        return "no-snapshot", "connection closed"
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def doctor_line(home, wait=3.0):
+    """(ok True/None, text) for `doctor`."""
+    st, why = check(home, wait)
+    if st == "up":
+        return True, "live map page endpoint: up (127.0.0.1 only, sends snapshots)"
+    if st == "no-snapshot":
+        return None, f"live map page endpoint: accepts but sends no snapshot ({why})"
+    if st == "token":
+        return None, "live map page endpoint: token mismatch (page from an older service?)"
+    return None, "live map page endpoint: not running (lean-agent up starts it)"
+
+
 def is_up(home, timeout=0.5):
     d = endpoint(home)
     if not d:
@@ -385,7 +522,7 @@ JS = r"""
 var SNAP=JSON.parse(document.getElementById('snap').textContent),EP=JSON.parse(document.getElementById('ep').textContent);
 var COL={message:'--ok',report:'--rep',request:'--req',idle:'--idle',bad:'--bad'};
 var W=580,H=640,CX=W/2,CY=H/2,pulses=[],pos={},raf=0,ws=null,delay=1000,gotLive=false,stopped=false,fails=0;
-var mode='',viol=[],codes=[],base=EP&&EP.port?'http://127.0.0.1:'+EP.port:'',tq=EP&&EP.token?'t='+encodeURIComponent(EP.token):'';
+var srvErr='',mode='',viol=[],codes=[],base=EP&&EP.port?'http://127.0.0.1:'+EP.port:'',tq=EP&&EP.token?'t='+encodeURIComponent(EP.token):'';
 function $(i){return document.getElementById(i)}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function clip(s,n){s=String(s||'');return s.length>n?s.slice(0,n-1)+'…':s}
@@ -405,7 +542,7 @@ function layout(s){
   th.forEach(function(n,i){var a=-Math.PI/2+2*Math.PI*i/Math.max(1,th.length);n._a=a;p[n.id]=[CX+Math.cos(a)*170,CY+Math.sin(a)*205,92,30]});
   var by={};ns.forEach(function(n){if(n.kind!=='worker'||!ok[n.id])return;var k=(n.parent&&p[n.parent]&&n.parent!=='service'&&n.parent!=='hooks')?n.parent:'main';(by[k]=by[k]||[]).push(n)});
   Object.keys(by).forEach(function(k){var ws=by[k].slice(0,3);
-    if(k==='main'){ws.forEach(function(w,j){p[w.id]=[CX+(j-(ws.length-1)/2)*52,CY+78+0,46,18]});return}
+    if(k==='main'){ws.forEach(function(w,j){p[w.id]=[CX+(j-(ws.length-1)/2)*52,CY+72,46,18]});return}
     var t=ns.filter(function(n){return n.id===k})[0],a0=(!t||t._a==null)?Math.PI/2:t._a;
     ws.forEach(function(w,j){var a=a0+(j-(ws.length-1)/2)*0.17;p[w.id]=[CX+Math.cos(a)*252,CY+Math.sin(a)*287,44,18]})});
   return p}
@@ -446,9 +583,14 @@ function connect(){
   var open=false;
   try{ws=new WebSocket('ws://127.0.0.1:'+EP.port+'/?'+tq)}catch(e){codes.push('WebSocket: '+esc(e&&e.name||'error'));return fallback('poll')}
   setTimeout(function(){if(!open&&!gotLive&&!mode){codes.push('WebSocket timeout');try{ws.close()}catch(e){}fallback('poll')}},5000);
-  ws.onopen=function(){open=true;gotLive=true;fails=0;delay=1000;up('socket','live (socket)')};
+  var gotSnap=false;
+  ws.onopen=function(){open=true;gotLive=true;fails=0;delay=1000;chip('connected, waiting for data','re');
+    setTimeout(function(){if(open&&!gotSnap&&ws&&ws.readyState===1){chip('connected, no data'+(srvErr?' ('+srvErr+')':''),'bad');why(srvErr?esc(srvErr):'')}},5000)};
   ws.onmessage=function(m){var d;try{d=JSON.parse(m.data)}catch(e){return}
-    if(d.type==='snapshot'){SNAP=d;render()}else if(d.type==='event')pulse(d.from,d.to)};
+    if(d.type==='snapshot'){SNAP=d;render();srvErr='';if(!gotSnap||mode!=='socket'){gotSnap=true;up('socket','live (socket)')}}
+    else if(d.type==='error'){srvErr=String(d.text||'error').slice(0,200);
+      if(!gotSnap){chip('connected, no data ('+srvErr+')','bad');why(esc(srvErr))}else why('last update failed: '+esc(srvErr))}
+    else if(d.type==='event')pulse(d.from,d.to)};
   ws.onerror=function(){if(!open)codes.push('WebSocket error')};
   ws.onclose=function(ev){
     if(!open){codes.push('WebSocket closed '+(ev&&ev.code))}
@@ -463,9 +605,10 @@ function fallback(next){
   if(next==='img')return pollImg();
   blocked()}
 function blocked(){
-  mode='none';chip('preview blocks live updates','bad');
-  var l=base?' <a href="'+base+'/?'+tq+'" target="_blank" rel="noopener">Open in browser</a>':'';
-  why((reason()||'no live transport worked')+(location.protocol==='file:'||!/^https?:/.test(location.protocol)?l:''))}
+  mode='none';
+  var l=base&&!/^https?:/.test(location.protocol)?' <a href="'+base+'/?'+tq+'" target="_blank" rel="noopener">Open in browser</a>':'';
+  if(viol.length){chip('preview blocks live updates','bad');why(reason()+l)}
+  else{chip('snapshot (service not running)','bad');why((reason()||'connection refused on every transport')+l)}}
 // transport 2: fetch polling
 function pollFetch(){
   if(typeof fetch!=='function')return fallback('img');

@@ -205,6 +205,34 @@ def _cpu():
     return last
 
 
+THREAD_TTL = 8.0  # seconds a thread's liveness/turn state is reused
+RUNS_TTL = 4.0
+BUDGET_S = 0.06  # time the liveness probes may take per snapshot; stale entries refresh over the next snapshots
+_tcache = {}
+_rcache = [0.0, []]
+
+
+def _thread_state(tid, ss, lean_private):
+    alive = ss.alive_thread(tid)
+    pend = ss.spool_pending(tid)
+    mid = alive and ss.mid_turn(tid)
+    try:
+        idle = int(ss._quiet_secs(ss.session_transcript(tid))) if alive else 0
+    except Exception:
+        idle = 0
+    t = {"idle_s": idle, "mid": bool(mid)}
+    if pend and not mid:
+        why = ss.delivery_reason(tid) or "not delivered yet"
+        t.update(state="undelivered", undelivered=True, detail=str(why)[:80])
+    elif mid:
+        t.update(state="active", detail="mid-turn")
+    elif alive:
+        t.update(state="idle", detail=f"idle {_dur(idle)}")
+    else:
+        t.update(state="parked", detail="parked")
+    return t
+
+
 def service_context(now=None):
     """The ctx of the running service, from memory and the cached liveness helpers (hidden items left out)."""
     import lean_common
@@ -214,30 +242,28 @@ def service_context(now=None):
     now = now or time.time()
     data = lean_threads.load_ro()
     threads = []
-    for tid, rec in sorted((data.get("threads") or {}).items(), key=lambda x: (len(x[0]), x[0])):
-        if tid == "main" or not tid.startswith("t") or rec.get("closed") or lean_private.hides(thread=tid):
-            continue
-        alive = ss.alive_thread(tid)
-        pend = ss.spool_pending(tid)
-        mid = alive and ss.mid_turn(tid)
-        try:
-            idle = int(ss._quiet_secs(ss.session_transcript(tid))) if alive else 0
-        except Exception:
-            idle = 0
-        t = {"id": tid, "title": rec.get("title") or tid, "idle_s": idle, "mid": bool(mid)}
-        if pend and not mid:
-            why = ss.delivery_reason(tid) or "not delivered yet"
-            t.update(state="undelivered", undelivered=True, detail=str(why)[:80])
-        elif mid:
-            t.update(state="active", detail="mid-turn")
-        elif alive:
-            t.update(state="idle", detail=f"idle {_dur(idle)}")
-        else:
-            t.update(state="parked", detail="parked")
-        threads.append(t)
+    mono = time.monotonic()
+    deadline = mono + BUDGET_S
+    items = [(tid, rec) for tid, rec in sorted((data.get("threads") or {}).items(), key=lambda x: (len(x[0]), x[0]))
+             if not (tid == "main" or not tid.startswith("t") or rec.get("closed") or lean_private.hides(thread=tid))]
+    for tid, rec in items:
+        c = _tcache.get(tid)
+        if (not c or mono - c[0] > THREAD_TTL) and time.monotonic() < deadline:
+            try:
+                c = (mono, _thread_state(tid, ss, lean_private))
+            except Exception:
+                c = c or (mono, {"idle_s": 0, "mid": False, "state": "parked", "detail": "parked"})
+            _tcache[tid] = c
+        elif not c:  # over budget, never probed: shown parked until a later snapshot probes it
+            c = (mono, {"idle_s": 10 ** 6, "mid": False, "state": "parked", "detail": "parked"})
+        threads.append(dict(c[1], id=tid, title=rec.get("title") or tid))
+    for tid in [k for k in _tcache if k not in {t["id"] for t in threads}]:
+        _tcache.pop(tid, None)
     runs = []
     try:
-        for rid, m in lean_common.running_runs(lean_common.lean_home()):
+        if mono - _rcache[0] > RUNS_TTL:
+            _rcache[:] = [mono, lean_common.running_runs(lean_common.lean_home())]
+        for rid, m in _rcache[1]:
             tid = m.get("thread") or ""
             if lean_private.hides(thread=tid or None) or (m.get("project") and lean_private.hides(project=m.get("project"))):
                 continue
