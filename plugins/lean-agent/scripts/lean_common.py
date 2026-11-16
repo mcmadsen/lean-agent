@@ -519,12 +519,85 @@ def _drop_placeholder(f, m):
     return True
 
 
+def proc_start(pid):
+    """A token for when `pid` started (stable while it lives, differs for a reused pid): /proc stat field 22 on Linux,
+    `ps -o lstart=` elsewhere (macOS). None when unknown."""
+    try:
+        with open(f"/proc/{int(pid)}/stat") as fh:
+            return "p" + fh.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError, ValueError):
+        pass
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=10)
+        return "s" + " ".join(r.stdout.split()) if r.returncode == 0 and r.stdout.strip() else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def pid_is(pid, token):
+    """True when `pid` is alive and (when a start token was recorded) is the same process, not a reused pid."""
+    if not pid_alive(pid):
+        return False
+    if not token:
+        return True
+    now = proc_start(pid)
+    return now is None or now == token  # unknown start time: alive counts
+
+
+def write_claude_pid(workdir, pid):
+    """Records the worker's (claude -p) pid and start token in the run dir, so a later look can tell it lives."""
+    try:
+        with open(os.path.join(workdir, "claude.pid"), "w") as fh:
+            json.dump({"pid": pid, "start": proc_start(pid)}, fh)
+    except OSError:
+        pass
+
+
+def claude_alive(workdir):
+    """The pid of the run's worker when it is alive (same process, start time checked), else None."""
+    try:
+        with open(os.path.join(workdir or "", "claude.pid")) as fh:
+            d = json.load(fh)
+        return d["pid"] if pid_is(d["pid"], d.get("start")) else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def last_progress(workdir):
+    """Epoch of the newest write to the run's progress/output files, or 0."""
+    best = 0
+    for n in ("progress.jsonl", "result.json", "supervisor.out", "supervisor.err"):
+        try:
+            best = max(best, os.path.getmtime(os.path.join(workdir or "", n)))
+        except OSError:
+            pass
+    return best
+
+
+PROGRESS_FRESH = 300  # seconds: a run whose files changed this recently is not gone
+
+
+def run_marker_alive(m):
+    """True when the run of marker `m` lives: its supervisor (start time checked), or its worker process. Sets
+    m["orphaned"] when only the worker lives."""
+    if m.get("pid") and pid_is(m["pid"], m.get("pid_start")):
+        return True
+    wd = m.get("workdir")
+    if wd:
+        cpid = claude_alive(wd)
+        if cpid:
+            m["orphaned"], m["worker_pid"] = True, cpid
+            return True
+    return False
+
+
 def running_runs(lean_home):
     """[(run id, marker)] of the runs in progress, oldest first: running/*.json whose process is alive. Two markers of
     one run (early + launch key) list once."""
     out = {}
     for f, m in _marker_files(lean_home):
-        if m.get("pid") and pid_alive(m["pid"]):
+        if run_marker_alive(m):
+            m["last_progress"] = last_progress(m.get("workdir"))
             rid = m.get("run") or os.path.basename(f)[:-5]
             if rid not in out or out[rid].get("early"):
                 out[rid] = m
@@ -589,7 +662,7 @@ def lost_runs(lean_home, acknowledged=False, days=None, archived=False):
         if _drop_placeholder(f, m):
             continue
         rid = m.get("run") or os.path.basename(f)[:-5]
-        if rid and not (m.get("pid") and pid_alive(m["pid"])) and rid not in done and (acknowledged or not m.get("lost_ack")):
+        if rid and not run_marker_alive(m) and rid not in done and (acknowledged or not m.get("lost_ack")):
             if cutoff is None or os.sep + "archive" + os.sep not in f or started_epoch(m, f) >= cutoff:
                 out.setdefault(rid, m)
     return sorted(out.items(), key=lambda x: (x[1].get("started") or "", x[0]))
