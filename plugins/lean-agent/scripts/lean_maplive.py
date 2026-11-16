@@ -325,11 +325,11 @@ function clip(s,n){s=String(s||'');return s.length>n?s.slice(0,n-1)+'…':s}
 function chip(t,c){var e=$('chip');e.textContent=t;e.className=c||''}
 function layout(s){
   var p={},ns=s.nodes||[],th=ns.filter(function(n){return n.kind==='thread'});
-  p.main=[CX,CY-14,96,30];p.service=[CX,CY+30,86,24];p.hooks=[CX-150,H-24,64,22];
+  p.main=[CX,CY-16,104,30];p.service=[CX,CY+30,116,24];p.hooks=[CX-150,H-24,64,22];
   th.forEach(function(n,i){var a=-Math.PI/2+2*Math.PI*i/Math.max(1,th.length);n._a=a;p[n.id]=[CX+Math.cos(a)*118*1.15,CY+Math.sin(a)*118*1.25,92,30]});
-  var by={};ns.forEach(function(n){if(n.kind==='worker'&&p[n.parent])(by[n.parent]=by[n.parent]||[]).push(n)});
+  var by={};ns.forEach(function(n){if(n.kind!=='worker')return;var k=(n.parent&&p[n.parent]&&n.parent!=='service'&&n.parent!=='hooks')?n.parent:'main';(by[k]=by[k]||[]).push(n)});
   Object.keys(by).forEach(function(k){var t=ns.filter(function(n){return n.id===k})[0],ws=by[k].slice(0,4);
-    ws.forEach(function(w,j){var a=t._a+(j-(ws.length-1)/2)*0.34;p[w.id]=[CX+Math.cos(a)*200,CY+Math.sin(a)*222,64,22]})});
+    var a0=(k==='main'||!t||t._a==null)?Math.PI/2:t._a;ws.forEach(function(w,j){var a=a0+(j-(ws.length-1)/2)*0.34;p[w.id]=[CX+Math.cos(a)*200,CY+Math.sin(a)*222,64,22]})});
   return p}
 function clipPt(a,b){var dx=b[0]-a[0],dy=b[1]-a[1],t=Math.min(dx?a[2]/2/Math.abs(dx):1e9,dy?a[3]/2/Math.abs(dy):1e9);return[a[0]+dx*t,a[1]+dy*t]}
 function render(){
@@ -346,7 +346,7 @@ function render(){
     sc={active:'--ok',alive:'--ok',undelivered:'--bad',dead:'--bad',orphaned:'--rep',done:'--rep'}[st]||'--bd',
     dash=(st==='idle'||st==='parked'||st==='orphaned')?' stroke-dasharray="5 4"':'';
     o.push('<rect x="'+(c[0]-c[2]/2)+'" y="'+(c[1]-c[3]/2)+'" width="'+c[2]+'" height="'+c[3]+'" rx="8" stroke-width="'+(st==='active'||st==='alive'?2.5:1.5)+'"'+dash+' style="fill:var(--card);stroke:var('+sc+')"/>');
-    o.push('<text x="'+c[0]+'" y="'+(c[1]+(c[3]>26?-1:3))+'" text-anchor="middle" font-size="'+(c[3]>26?11:9)+'" font-weight="600">'+esc(clip(n.label,c[3]>26?15:11))+'</text>');
+    o.push('<text x="'+c[0]+'" y="'+(c[1]+(c[3]>26?-1:3))+'" text-anchor="middle" font-size="'+(c[3]>26?11:9)+'" font-weight="600">'+esc(clip(n.label,Math.floor(c[2]/(c[3]>26?6.6:5.6))))+'</text>');
     if(c[3]>26)o.push('<text class="mu" x="'+c[0]+'" y="'+(c[1]+11)+'" text-anchor="middle" font-size="9">'+esc(clip(n.detail,20))+'</text>')});
   o.push('<g id="pl"></g></svg>');
   $('map').innerHTML=o.join('');
