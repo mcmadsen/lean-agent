@@ -11312,6 +11312,35 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("push gate:", p.stdout)
         self.assertEqual(len(self.review_records()), 1)
 
+    def live_marker(self, run, wt, name="holder"):
+        run_dir = os.path.join(self.env["LEAN_AGENT_HOME"], "running")
+        os.makedirs(run_dir, exist_ok=True)
+        marker = os.path.join(run_dir, name + ".json")
+        with open(marker, "w") as fh:
+            json.dump({"pid": os.getpid(), "run": run, "project": "proj", "path": wt, "branch": "feature", "fixed": {}}, fh)
+        return marker
+
+    def test_push_gate_reviews_when_the_caller_is_the_run_holding_the_worktree(self):
+        wt, origin, commit = self.push_gate_setup()
+        tip = commit("fix")
+        self.live_marker("r-hold", wt)
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        p = self.cli("worktree", "push", "proj", "feature", check=False, FAKE_REVIEW=approve, LEAN_AGENT_RUN="r-hold")
+        self.assertIn("push gate: no approving review", p.stdout)
+        self.assertIn("ACTION NEEDED", p.stdout)
+        recs = [r for r in self.review_records() if r.get("verdict") == "approve"]
+        self.assertEqual([r["head"] for r in recs], [tip])
+
+    def test_push_gate_refuses_while_another_run_holds_the_worktree(self):
+        wt, origin, commit = self.push_gate_setup()
+        commit("fix")
+        self.live_marker("r-other", wt)
+        approve = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))
+        p = self.cli("worktree", "push", "proj", "feature", check=False, FAKE_REVIEW=approve, LEAN_AGENT_RUN="r-me")
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("r-other", p.stderr)
+        self.assertEqual(self.review_records(), [])
+
     def test_push_gate_delta_reviews_fix_commits_after_an_approval(self):
         wt, origin, commit = self.push_gate_setup()
         commit("fix")
