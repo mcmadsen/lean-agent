@@ -5335,6 +5335,15 @@ LEARN_CHUNK_CHARS = 30000  # input per learn run: a run is never fed more, a big
 BOT_WORDS = ("[bot]", "bot", "pipeline", "build service", "continuous integration", "github-actions", "dependabot",
              "azure-devops", "lean-agent", "system")
 OWN_MARKERS = ("lean-review", "lean-agent review", "reviewed by lean-agent")
+# lean-agent posts its review comments under the user's own account, each starting with a robot marker (":robot: 🐛 [bug] ..."
+# or "🤖 ⛏️ [nitpick] ..."); a comment that starts so is ours whoever the author is. No code writes the prefix (the review
+# worker does), so this tuple is the one definition the reader here relies on.
+OWN_PREFIXES = (":robot:", "\U0001F916")
+
+
+def own_identity():
+    """The account name lean-agent posts its review comments under (LEAN_AGENT_POST_AS), lowercased, or ''."""
+    return (os.environ.get("LEAN_AGENT_POST_AS") or "").strip().lower()
 
 
 def comment_is_bot(c):
@@ -5352,8 +5361,13 @@ def comment_is_bot(c):
         return True
     if any(w in name for w in BOT_WORDS):
         return True
-    body = str(c.get("content") or c.get("body") or c.get("text") or "").lower()
-    return any(m in body[:400] for m in OWN_MARKERS)
+    raw = str(c.get("content") or c.get("body") or c.get("text") or "")
+    if raw.lstrip().startswith(OWN_PREFIXES):
+        return True  # our own review comment, posted under the user's identity: whoever the author is
+    if any(m in raw.lower()[:400] for m in OWN_MARKERS):
+        return True
+    me = own_identity()
+    return bool(me and me in name and any(m in raw[:400] for m in OWN_PREFIXES))
 
 
 def split_threads(text):
@@ -5500,12 +5514,14 @@ def set_card_lines(c, lines):
 def remove_review_line(slug, which):
     """Remove one learned line, by its number in `--list` or by a unique piece of its text; logged for --undo."""
     cards = load_cards(slug)
-    numbered = review_lines(cards)
+    reg = sync_lessons(slug)
+    numbered = [(e["cid"], e["line"]) for e in reg]
     if which.strip().isdigit():
         n = int(which)
-        if not 1 <= n <= len(numbered):
+        e = next((x for x in reg if x["id"] == n), None)
+        if not e:
             die(f"no line {n}: {len(numbered)} line(s) (see: lean-agent review learn {slug} --list)")
-        hit = numbered[n - 1]
+        hit = (e["cid"], e["line"])
     else:
         found = [x for x in numbered if which.lower() in x[1].lower()]
         if len(found) != 1:
@@ -5519,6 +5535,25 @@ def remove_review_line(slug, which):
     save_cards(slug, cards)
     log_batch(slug, [{"kind": "rm", "id": c["id"], "line": hit[1], "at": at}])
     return hit
+
+
+def remove_batch(slug, batch):
+    """Remove every lesson that `batch` added; one entry in the undo log. Returns how many."""
+    cards = load_cards(slug)
+    mine = [e for e in sync_lessons(slug) if e["batch"] == batch]
+    ops = []
+    for e in mine:
+        c = next((x for x in cards if x["id"] == e["cid"]), None)
+        lines = c["text"].splitlines() if c else []
+        if e["line"] in lines:
+            at = lines.index(e["line"])
+            del lines[at]
+            set_card_lines(c, lines)
+            ops.append({"kind": "rm", "id": c["id"], "line": e["line"], "at": at})
+    save_cards(slug, cards)
+    log_batch(slug, ops)
+    sync_lessons(slug)
+    return len(ops)
 
 
 def undo_review_learn(slug):
@@ -5921,14 +5956,48 @@ def review_learned_path(slug):
     return home(slug, "review-learned.json")
 
 
+LESSONS_KEY = "_lessons"  # the lesson registry shares review-learned.json with the per-PR entries
+
+
 def review_learned(slug):
+    """The per-PR entries of review-learned.json (the lesson registry is kept apart, see review_lessons)."""
     d = load_json(review_learned_path(slug), {})
-    return d if isinstance(d, dict) else {}
+    return {k: v for k, v in d.items() if k != LESSONS_KEY} if isinstance(d, dict) else {}
+
+
+def sync_lessons(slug, batch="legacy"):
+    """The lesson registry [{id, batch, date, cid, line, gone}] matched to the lines now in the review cards: a new line
+    gets the next id and `batch` (lines that predate ids: "legacy"), a vanished one is marked gone (an undo that puts it
+    back revives its id). Returns the live entries by id."""
+    with file_lock(review_learned_path(slug)):
+        d = load_json(review_learned_path(slug), {})
+        d = d if isinstance(d, dict) else {}
+        reg = [e for e in d.get(LESSONS_KEY) or [] if isinstance(e, dict) and e.get("id")]
+        rows = review_lines(load_cards(slug))
+        old = json.dumps(reg, sort_keys=True)
+        live = set()
+        for cid, line in rows:
+            e = next((x for x in reg if x["line"] == line and id(x) not in live and not x.get("gone")), None) \
+                or next((x for x in reg if x["line"] == line and id(x) not in live), None)
+            if e is None:
+                e = {"id": max([x["id"] for x in reg] + [0]) + 1, "batch": batch, "date": now_iso()[:10], "line": line}
+                reg.append(e)
+            e.pop("gone", None)
+            e["cid"] = cid
+            live.add(id(e))
+        for e in reg:
+            if id(e) not in live:
+                e["gone"] = True
+        if json.dumps(reg, sort_keys=True) != old:
+            d[LESSONS_KEY] = reg
+            save_json(review_learned_path(slug), d)
+    return sorted((e for e in reg if not e.get("gone")), key=lambda e: e["id"])
 
 
 def update_review_learned(slug, pr, **fields):
     with file_lock(review_learned_path(slug)):
-        d = review_learned(slug)
+        d = load_json(review_learned_path(slug), {})  # whole file: the lesson registry stays
+        d = d if isinstance(d, dict) else {}
         ent = d.get(str(pr)) if isinstance(d.get(str(pr)), dict) else {}
         ent.update({k: v for k, v in fields.items() if v is not None})
         d[str(pr)] = ent
@@ -6108,11 +6177,15 @@ def cmd_review_learn(a):
     if a.verify:
         return verify_review_cards(slug, path, a.head, apply=a.apply)
     if a.list:
-        rows = review_lines(load_cards(slug))
-        for i, (cid, line) in enumerate(rows, 1):
-            print(f"{i:>3}. [{cid}] {line[2:]}")
+        rows = sync_lessons(slug)
+        for e in rows:
+            print(f"{e['id']:>3}. [{e['cid']}] {e['line'][2:]}  (batch {e['batch']}, {e['date']})")
         print(f"{len(rows)} line(s)." if rows else "No learned lines yet.")
         return 0
+    if a.rm_batch:
+        n = remove_batch(slug, a.rm_batch)
+        print(f"removed {n} lesson(s) of batch {a.rm_batch}" + (f"  (undo: lean-agent review learn {slug} --undo)" if n else ""))
+        return 0 if n else 1
     if a.rm:
         cid, line = remove_review_line(slug, a.rm)
         print(f"removed from {cid}: {line[2:]}  (undo: lean-agent review learn {slug} --undo)")
@@ -6213,6 +6286,7 @@ def cmd_review_learn(a):
                                     mcp=None if threads is not None else a.mcp,
                                     tools=None, allow_send=None, max_turns=25, max_usd=1.5, max_context=2000,
                                     max_cards=4, ttype="read", role="review-learn", effort="medium",
+                                    todo=getattr(a, "todo", None), thread_tag=getattr(a, "thread_tag", None),
                                     role_rule=LEARN_RULE.format(
                                         pr=a.pr, ours=ours, existing=existing[:6000], project=path,
                                         source="the pull request threads given below" if threads is not None else "the pull request threads (MCP tools)",
@@ -6265,12 +6339,21 @@ def cmd_review_learn(a):
     if not checklist and not helpers and not replace and a.tracker and not a.pr:
         return 0
     if not checklist and not helpers and not replace:
+        if a.pr:  # the sub-runs found nothing: not a failure
+            print(f"nothing new to learn from PR {a.pr}")
+            return 0
         die("nothing to learn: give --text, --file, --helper \"name | where | what\", or --pr <id> --mcp <server>")
+    sync_lessons(slug)  # lines that predate ids are "legacy", not this batch's
+    batch = (locals().get("run") or {}).get("id") or "learn-" + now_iso().replace(":", "").replace("-", "")[:15]
     added = add_to_review_cards(slug, checklist, helpers, replace)
+    mine = [e for e in sync_lessons(slug, batch) if e["batch"] == batch]
     for cid, line in added:
         print(f"{cid}: {line}")
     print(f"{len(added)} lesson(s) added; every review of {slug} gets these cards "
           f"(see: lean-agent card show {slug} review-checklist)" if added else "Nothing new: already in the cards.")
+    ids = [e["id"] for e in mine]
+    print(f"learned {len(mine)} lines (ids {min(ids)}-{max(ids)}) in batch {batch}" if ids
+          else f"learned 0 lines in batch {batch}")
     return 0
 
 
@@ -18534,9 +18617,13 @@ def build_parser():
                    "replaced by the PR id (saved for the project; used by the automatic learning)")
     s.add_argument("--all-authors", action="store_true", help="--pr: also learn from bot, CI, system and this tool's own "
                    "comments (default: human-written threads only)")
-    s.add_argument("--list", action="store_true", help="list the learned checklist and helper lines, numbered")
-    s.add_argument("--rm", metavar="N|TEXT", help="remove a learned line by its --list number or a unique piece of its text")
+    s.add_argument("--list", action="store_true", help="list the learned checklist and helper lines: id, batch, date, text")
+    s.add_argument("--rm", metavar="N|TEXT", help="remove a learned line by its --list id or a unique piece of its text")
+    s.add_argument("--rm-batch", metavar="BATCH", help="remove every lesson a learn batch added (prints how many)")
     s.add_argument("--undo", action="store_true", help="undo the last learn batch (or removal)")
+    s.add_argument("--todo", type=todo_arg, metavar="N|none", default=argparse.SUPPRESS,
+                   help="the work-queue item the runs it starts are for (none: no item)")
+    s.add_argument("--thread", dest="thread_tag", metavar="tN|none", help=THREAD_HELP)
     s.add_argument("--mcp", action="append", metavar="SERVER[:TOOLS]", help="the tracker's MCP server, for --pr")
     s.add_argument("--head", metavar="REF", help="--pr: the branch the PR is for (to compare with its lean-agent review)")
     s.add_argument("--verify", action="store_true", help="list card lines whose helper can't be found (path or symbol) "

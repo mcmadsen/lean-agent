@@ -273,6 +273,8 @@ def unlinked_worker(command):
             continue  # decisions about a review, not work for the board
         if {"-h", "--help"} & set(rest):
             continue
+        if words[1] == "review" and rest[:1] == ["learn"] and {"--list", "--rm", "--rm-batch", "--undo", "--verify"} & set(rest):
+            continue  # reading or editing the lessons starts no worker
         for k, w in enumerate(rest):  # the options end at `--` (the task follows) or a heredoc
             if w == "--" or w.startswith("<<"):
                 rest = rest[:k]
