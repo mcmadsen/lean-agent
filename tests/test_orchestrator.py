@@ -545,7 +545,7 @@ class CliTest(unittest.TestCase):
         self.cli("learn", self.proj)
         p = self.cli("publish", "T", "--task-file", "-", input="x", check=False)
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("invalid choice", p.stderr)
+        self.assertIn("unknown command publish", p.stderr)
         self.assertNotEqual(self.cli("config", "artifacts", "off", check=False).returncode, 0)
         home_dir = self.env["LEAN_AGENT_HOME"]
         with open(os.path.join(home_dir, "config.json"), "w") as fh:
