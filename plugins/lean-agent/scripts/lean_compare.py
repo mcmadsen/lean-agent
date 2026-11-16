@@ -326,7 +326,7 @@ def front_desk_column(la, a, meter, clean, thread_col):
     cp = str(cps[-1].get("text", "")) if cps else ""
     if cp:
         cp = compact_hook.cut_lines(cp, compact_hook.CHECKPOINT_CAP)
-    inj = {"hand-off": la.est_tokens(compact_hook.handoff()),
+    inj = {"hand-off": la.est_tokens(compact_hook.handoff(inject=True)),
            "checkpoint": la.est_tokens(cp),
            "thread table": la.est_tokens(compact_hook.threads_summary() or ""),
            "brief (as injected)": la.est_tokens(compact_hook.brief(3000, peek=True))}

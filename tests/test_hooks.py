@@ -2,6 +2,7 @@
 """Smoke tests for the lean-agent hooks. Run: python3 tests/test_hooks.py"""
 import contextlib
 import io
+import datetime
 import json
 import os
 import subprocess
@@ -364,7 +365,7 @@ class SessionHookTest(Base):
         os.makedirs(home, exist_ok=True)
         with open(os.path.join(home, "handoff-notes.json"), "w") as fh:
             json.dump([{"ts": "2026-10-23T09:00:00", "text": "promised the user a summary by noon [thread:billing]",
-                        "kind": "checkpoint"}, {"ts": "2026-10-23T09:01:00", "text": "an open item"}], fh)
+                        "kind": "checkpoint"}, {"ts": datetime.datetime.now().isoformat(timespec="seconds"), "text": "an open item"}], fh)
         event = {"session_id": "c1", "transcript_path": "/x/c1.jsonl", "source": "clear"}
         out = self.hook_under_claude(event, LEAN_AGENT_SERVICE_SESSION="1")["hookSpecificOutput"]
         text = out["additionalContext"]
@@ -386,7 +387,7 @@ class SessionHookTest(Base):
         home = self.env["LEAN_AGENT_HOME"]
         os.makedirs(home, exist_ok=True)
         with open(os.path.join(home, "handoff-notes.json"), "w") as fh:
-            json.dump([{"ts": "2026-10-23T09:00:00", "text": "an open item"}], fh)
+            json.dump([{"ts": datetime.datetime.now().isoformat(timespec="seconds"), "text": "an open item"}], fh)
         event = {"session_id": "f1", "transcript_path": "/x/f1.jsonl", "source": "startup"}
         env = dict(LEAN_AGENT_SERVICE_SESSION="1", FAKE_FRESH_SID="f1")
         out = self.hook_under_claude(event, **env)["hookSpecificOutput"]
@@ -406,7 +407,7 @@ class SessionHookTest(Base):
         long_cp = "\n".join(f"soft state line {i:03d} " + "x" * 40 for i in range(200))
         with open(os.path.join(home, "handoff-notes.json"), "w") as fh:
             json.dump([{"ts": "2026-10-23T09:00:00", "text": long_cp, "kind": "checkpoint"},
-                       {"ts": "2026-10-23T09:01:00", "text": "keep this open item in the hand-off"}], fh)
+                       {"ts": datetime.datetime.now().isoformat(timespec="seconds"), "text": "keep this open item in the hand-off"}], fh)
         with mock.patch.dict(os.environ, base_env(LEAN_AGENT_HOME=home), clear=True):
             text = compact_hook.brief(3000)
         self.assertLessEqual(len(text), 3000)
