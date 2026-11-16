@@ -535,6 +535,7 @@ _NUMS = r"t?\d+(?:[\s,]+(?:x\s*)?t?\d+)*"
 CLOSE_RE = re.compile(rf"^(?:please\s+)?x\s*(?:(all)(?:\s+(?:but|except)\s+({_NUMS}))?|idle\s+(\d+(?:\.\d+)?\s*[smhd]?)|({_NUMS}))(\s+force)?\s*[.!]?$", re.I)
 STOP_RE = re.compile(rf"^(?:please\s+)?stop\s*(?:(idle)(?:\s+(\d+(?:\.\d+)?\s*[smhd]?))?|({_NUMS}))(\s+force)?\s*[.!]?$", re.I)
 PRIVATE_RE = re.compile(r"^(?:please\s+)?private\s+(on|off|status)\s*[.!]?$", re.I)
+ALIVE_RE = re.compile(r"^(?:please\s+)?alive\s*(\d{4}-\d{6}-[0-9a-f]{4}|last|t?\d+)?\s*[.!?]?$", re.I)  # alive21 | alive <run id>
 REOPEN_RE = re.compile(r"^(?:please\s+)?o\s*t?(\d+)\s*[.!]?$", re.I)
 PR_RE = re.compile(r"^pr\s*t?(\d+)(?:\s+(c|comments|ci|diff|fix|reply|review))?$", re.I)
 PR_LIST_RE = re.compile(r"^pr\s+(list|mine|own|stale|find)(?:\s+(.+))?$", re.I)
@@ -934,6 +935,12 @@ def decide(text, data, session=None, now=None, idx=None):
             cmd = " ".join(_tids(sm.group(3), data))
         if cmd:
             return None, f"Front desk job (stop shortcut: stops the session only, the thread stays open) \u2014 no thread: lean-agent thread stop {cmd}{force}", "job"
+    al = ALIVE_RE.match(text)
+    if al and al.group(1):
+        g = al.group(1).lower()
+        if g.lstrip("t").isdigit():  # a thread: its running runs
+            return None, f"Front desk job (alive shortcut) \u2014 no thread: lean-agent runs --running", "job"
+        return None, f"Front desk job (alive shortcut) \u2014 no thread: lean-agent runs --alive {g}", "job"
     om = REOPEN_RE.match(text)
     if om:
         tid = resolve(f"t{int(om.group(1))}", data["aliases"])

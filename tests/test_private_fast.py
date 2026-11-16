@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -72,6 +73,38 @@ class Fast(unittest.TestCase):
         self.write("config.json", {"private": "off"})
         out, _ = self.cli("runs")
         self.assertNotIn("0102-000001-abcd", out)
+
+    def test_run_commands_stay_fast_on_a_big_home(self):
+        """f117/f118: --show (tail, details+grep), --thread, --stop of a live run and --alive take no per-row re-read."""
+        rid = "0101-000007-abcd"  # the ledger's row 7 (thread t7, public); its folder has a summary and details
+        wd = os.path.join(self.tmp, "work", rid)
+        os.makedirs(wd)
+        for n, text in (("summary-1.txt", "".join(f"line {i} x\n" for i in range(100))), ("details-1.txt", "alpha x\nbeta\n")):
+            with open(os.path.join(wd, n), "w") as fh:
+                fh.write(text)
+        with open(os.path.join(wd, "progress.jsonl"), "w") as fh:
+            fh.write("{}\n")
+        live = "0301-000001-abcd"  # a fake live run: a sleeping process that leads its own group
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        self.addCleanup(proc.kill)
+        threading.Thread(target=proc.wait, daemon=True).start()  # reaped as soon as it dies: no zombie that still looks alive
+        lwd = os.path.join(self.tmp, "work", live)
+        os.makedirs(lwd)
+        os.makedirs(os.path.join(self.tmp, "running"))
+        self.write(os.path.join("running", live + ".json"), {"run": live, "pid": proc.pid, "pid_start": lean_private.lean_common.proc_start(proc.pid),
+                                                              "workdir": lwd, "project": "pub", "model": "sonnet", "task": "t", "started": "2026-03-01T00:00:00"})
+        self.write("config.json", {})  # private mode on
+        for args in (("runs", "--show", rid, "--tail", "30"), ("runs", "--show", rid, "--details", "--grep", "x"),
+                     ("runs", "--thread", "t7"), ("runs", "--alive", live), ("runs", "--alive", rid)):
+            out, secs = self.cli(*args)
+            self.assertLess(secs, LIMIT, f"{args} took {secs:.1f}s")
+        out, _ = self.cli("runs", "--show", rid, "--tail", "30")
+        self.assertIn(rid, out)
+        out, _ = self.cli("runs", "--alive", live)
+        self.assertIn(f"{live}  alive", out)
+        out, secs = self.cli("runs", "--stop", live)
+        self.assertLess(secs, LIMIT, f"--stop took {secs:.1f}s")
+        self.assertFalse(lean_private.lean_common.pid_alive(proc.pid))
 
     def test_in_process_filter_is_correct_and_refreshes(self):
         self.write("config.json", {"private": "off"})
