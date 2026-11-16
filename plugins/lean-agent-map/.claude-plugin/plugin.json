@@ -1,0 +1,6 @@
+{
+  "name": "lean-agent-map",
+  "version": "0.1.0",
+  "description": "Live map of lean-agent's front desk, threads and workers, as a pane beside the chat",
+  "types": "./types/index.d.ts"
+}
