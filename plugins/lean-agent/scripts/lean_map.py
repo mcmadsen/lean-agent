@@ -831,115 +831,115 @@ def _clip(s, n):
     return s if len(s) <= n else s[:n - 1] + "…"
 
 
-def layout(snap, width, height, mini=False):
-    """{node id: (cx, cy, w, h)} for the placed nodes only (see select): service centre, desk left, threads in a column
-    right (sorted by id), workers right of their thread (at most MAX_WORKERS), front-desk workers under the desk, hooks
-    below the service. Returns (pos, number left out)."""
+# Matrix palette of the radial drawing (dark): working green, attention amber, failed red, idle dim.
+MX = {"bg": "#070B08", "card": "#0E1710", "line": "#1C3A25", "text": "#C8F7D2", "dim": "#4F6B57", "working": "#2EE66B",
+      "attention": "#F2A541", "failed": COLORS["bad"], "idle": "#3E5546"}
+_WORKING = ("active", "alive", "running", "working", "busy")
+_ATTENTION = ("waiting", "stuck", "blocked", "attention", "queued", "warn")
+_FAILED = ("undelivered", "orphaned", "dead", "failed", "bad", "error")
+
+
+def health(node):
+    """working | attention | failed | idle for one node of the snapshot."""
+    st = str(node.get("state") or "")
+    if st in _FAILED or node.get("undelivered"):
+        return "failed"
+    if st in _ATTENTION:
+        return "attention"
+    if st in _WORKING:
+        return "working"
+    return "idle"
+
+
+def radial(snap):
+    """The agents (threads) and their sessions (workers) as plain rows for the radial drawing and the pane's text view:
+    [{id, label, health, tool, sessions: [{id, health}]}] and the number of agents left out."""
     nodes = snap.get("nodes", [])
-    sel = {"placed": snap["placed"], "more": snap.get("more", 0)} if isinstance(snap.get("placed"), list) else select(nodes)
-    ok = set(sel["placed"])
-    th = sorted([n for n in nodes if n["kind"] == "thread" and n["id"] in ok], key=lambda n: (len(n["id"]), n["id"]))
-    nw, nh = (92, 30) if mini else (170, 46)
-    pos = {}
-    top, bottom = 40, height - 40
-    step = (bottom - top) / max(1, len(th))
-    xt = width * 0.60
-    for i, n in enumerate(th):
-        pos[n["id"]] = (xt, top + step * (i + 0.5), nw, nh)
-    xw = width * 0.86
-    byp = {}
-    for n in nodes:
-        if n["kind"] == "worker" and n["id"] in ok:
-            byp.setdefault(n.get("parent") if n.get("parent") in pos else "main", []).append(n)
-    ww, wh = nw * 0.8, nh * 0.7
-    cy = height / 2
-    for p, ws in byp.items():
-        ws = ws[:MAX_WORKERS]
-        if p == "main":
-            for j, w in enumerate(ws):
-                pos[w["id"]] = (width * 0.08 + nw / 2, cy + nh + 14 + j * (wh + 6) + wh / 2, ww, wh)
-            continue
-        py = pos[p][1]
-        gap = min(wh + 4, step / max(1, len(ws)))
-        for j, w in enumerate(ws):
-            pos[w["id"]] = (xw, py + (j - (len(ws) - 1) / 2) * gap, ww, min(wh, gap - 1) if len(ws) > 1 else wh)
-    pos["service"] = (width * 0.32, cy, nw, nh + 10)
-    pos["main"] = (width * 0.08 + nw / 2, cy, nw, nh)
-    pos["hooks"] = (width * 0.32, min(height - 30, cy + height * 0.28), nw, nh)
-    return pos, int(sel.get("more") or 0)
+    sel = set(snap["placed"]) if isinstance(snap.get("placed"), list) else None
+    ags = [n for n in nodes if n["kind"] == "thread" and (sel is None or n["id"] in sel)]
+    ags.sort(key=lambda n: (len(n["id"]), n["id"]))
+    rows = []
+    for n in ags:
+        ss = [w for w in nodes if w["kind"] == "worker" and w.get("parent") == n["id"] and w["state"] != "done"]
+        tool = ((n.get("activity") or {}).get("now") or "")
+        tool = tool if isinstance(tool, str) else str((tool or {}).get("tool") or "")
+        rows.append({"id": n["id"], "label": n["label"], "health": health(n), "tool": tool,
+                     "sessions": [{"id": w["id"], "health": health(w)} for w in ss]})
+    return rows, int(snap.get("more") or 0)
+
+
+def plan_line(snap):
+    """'5h 42% resets 14:10' from the plan block, or ''."""
+    try:
+        import usage
+        for w in (snap.get("plan") or {}).get("windows") or []:
+            if w.get("name") == "five_hour" or w.get("label", "").startswith("5"):
+                s = f"5h {w['pct']:.0f}%"
+                return s + (f" ↻{usage.fmt_reset(w['resets_at'])}" if w.get("resets_at") else "")
+    except Exception:
+        pass
+    return ""
 
 
 def svg(snap, width=1200, height=700, mini=False):
-    """The snapshot as one standalone SVG document (no script, no external references)."""
+    """The snapshot as one standalone SVG document (no script, no external references): a radial mind map, the root sigil
+    in the centre, the agents as sigil nodes on a ring (health-ring colour), their sessions as dots outside them."""
+    import math
     snap = redact(snap)
     width, height = int(width or 1200), int(height or 700)
     if mini:
-        width, height = int(width or 480), int(height or 320)
+        width, height = int(width or 380), int(height or 220)
+    c = MX
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
-           f'font-family="Inter, system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">',
-           f'<rect width="{width}" height="{height}" fill="{BG}"/>', "<defs>"]
-    for k, c in COLORS.items():
-        out.append(f'<marker id="a-{k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">'
-                   f'<path d="M0 0L10 5L0 10z" fill="{c}"/></marker>')
-    out.append("</defs>")
+           f'font-family="ui-monospace, Menlo, Consolas, monospace">',
+           f'<rect width="{width}" height="{height}" fill="{c["bg"]}"/>']
+    hh = max(16, int(height * 0.09))
+    fs = max(9, int(hh * 0.62))
+    head = f"inbox {int(snap.get('inbox') or 0)}" + (" · paused" if snap.get("paused") else "")
+    pl = plan_line(snap)
+    head = (pl + " · " if pl else "") + head
     if not snap.get("service", {}).get("up") or not snap.get("nodes"):
-        out.append(f'<text x="{width / 2}" y="{height / 2}" fill="{MUTED}" font-size="18" text-anchor="middle">'
+        out.append(f'<text x="{width / 2}" y="{height / 2}" fill="{c["dim"]}" font-size="{fs + 4}" text-anchor="middle">'
                    f'Service not running · inbox {int(snap.get("inbox") or 0)}</text></svg>')
         return "\n".join(out)
-    pos, more = layout(snap, width, height, mini)
-    nodes = {n["id"]: n for n in snap["nodes"]}
-
-    def edge_pt(a, b):
-        ax, ay, aw, ah = pos[a]
-        bx, by, bw, bh = pos[b]
-        dx, dy = bx - ax, by - ay
-        def clip(cx, cy, w, h, sx, sy):
-            tx = (w / 2) / abs(sx) if sx else 1e9
-            ty = (h / 2) / abs(sy) if sy else 1e9
-            t = min(tx, ty)
-            return cx + sx * t, cy + sy * t
-        return clip(ax, ay, aw, ah, dx, dy), clip(bx, by, bw, bh, -dx, -dy)
-
-    for ed in snap.get("edges", []):
-        if ed["from"] not in pos or ed["to"] not in pos:
-            continue
-        kind = "bad" if ed.get("bad") else ed["kind"] if ed["kind"] in COLORS else "idle"
-        (x1, y1), (x2, y2) = edge_pt(ed["from"], ed["to"])
-        col = COLORS[kind]
-        dash = ' stroke-dasharray="6 5"' if kind == "idle" else ""
-        op = 0.35 if kind == "idle" else max(0.35, 1 - ed.get("age_s", 0) / 300) if kind != "bad" else 1
-        out.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="{col}" stroke-width="{1 if kind == "idle" else 2}"{dash} '
-                   f'opacity="{op:.2f}" marker-end="url(#a-{kind})" data-kind="{kind}"/>')
-        if not mini and ed.get("label") and kind != "idle":
-            out.append(f'<text x="{(x1 + x2) / 2:.1f}" y="{(y1 + y2) / 2 - 4:.1f}" fill="{MUTED}" font-size="10" text-anchor="middle">{_e(_clip(ed["label"], 28))}</text>')
-    for nid, (cx, cy, w, h) in pos.items():
-        n = nodes.get(nid)
-        if not n:
-            continue
-        st = n["state"]
-        stroke = {"active": COLORS["message"], "alive": COLORS["message"], "undelivered": COLORS["bad"], "dead": COLORS["bad"],
-                  "orphaned": COLORS["report"], "done": COLORS["report"]}.get(st, BORDER)
-        dash = ' stroke-dasharray="5 4"' if st in ("idle", "parked", "orphaned") else ""
-        sw = 2.5 if st in ("active", "alive", "undelivered") else 1.5
-        x, y = cx - w / 2, cy - h / 2
-        if mini:
-            out.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{h / 2 + 2:.1f}" fill="{CARD}" stroke="{stroke}" stroke-width="{sw}"{dash} data-node="{_e(nid)}"/>')
-            out.append(f'<text x="{cx:.1f}" y="{cy + 3:.1f}" fill="{TEXT}" font-size="9" text-anchor="middle" font-family="JetBrains Mono, ui-monospace, Menlo, monospace">{_e(_clip(nid.split(":")[-1][-6:], 6))}</text>')
-            continue
-        out.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" rx="8" fill="{CARD}" stroke="{stroke}" stroke-width="{sw}"{dash} data-node="{_e(nid)}"/>')
-        mono = "JetBrains Mono, ui-monospace, Menlo, Consolas, monospace"
-        idtxt = nid if n["kind"] in ("thread",) else ""
-        out.append(f'<text x="{x + 8:.1f}" y="{y + 16:.1f}" fill="{TEXT}" font-size="12" font-weight="600">{_e(_clip(n["label"], int(w / 7.2)))}</text>')
-        out.append(f'<text x="{x + 8:.1f}" y="{y + 31:.1f}" fill="{MUTED}" font-size="10">{_e(_clip(n.get("detail") or st, int(w / 5.6)))}</text>')
-        if idtxt:
-            out.append(f'<text x="{x + w - 6:.1f}" y="{y + 14:.1f}" fill="{MUTED}" font-size="9" text-anchor="end" font-family="{mono}">{_e(idtxt)}</text>')
+    out.append(f'<text x="8" y="{hh - 4}" fill="{c["text"]}" font-size="{fs}">{_e(head)}</text>')
+    rows, more = radial(snap)
+    cx, cy = width / 2, hh + (height - hh) / 2
+    R = min(width / 2 - 34, (height - hh) / 2 - 22)
+    rn = max(7, min(14, R * 0.17))
+    rows_shown = rows[:16]
+    more += len(rows) - len(rows_shown)
+    n = len(rows_shown)
+    spokes, nodes_o, dots, labels = [], [], [], []
+    for i, r in enumerate(rows_shown):
+        a = -math.pi / 2 + 2 * math.pi * i / max(1, n)
+        x, y = cx + R * math.cos(a), cy + R * math.sin(a)
+        col = c[r["health"]]
+        spokes.append(f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{x:.1f}" y2="{y:.1f}" stroke="{c["line"]}" stroke-width="1"/>')
+        nodes_o.append(f'<g class="agent {r["health"]}"><circle cx="{x:.1f}" cy="{y:.1f}" r="{rn:.1f}" fill="{c["card"]}" stroke="{col}" stroke-width="2"/>'
+                       f'<text x="{x:.1f}" y="{y + rn * 0.35:.1f}" fill="{col}" font-size="{rn * 1.0:.1f}" text-anchor="middle" font-weight="700">'
+                       f'{_e((r["label"] or "?")[:1].upper())}</text></g>')
+        ss = r["sessions"][:6]
+        for j, s in enumerate(ss):
+            sp = (j - (len(ss) - 1) / 2) * 0.32
+            d = rn + 7
+            dx, dy = x + d * math.cos(a + sp), y + d * math.sin(a + sp)
+            dots.append(f'<circle class="session" cx="{dx:.1f}" cy="{dy:.1f}" r="2.4" fill="{c[s["health"]]}"/>')
+        if not mini:
+            lx, ly = cx + (R + rn + 18) * math.cos(a), cy + (R + rn + 18) * math.sin(a)
+            anc = "start" if math.cos(a) > 0.3 else "end" if math.cos(a) < -0.3 else "middle"
+            txt = _clip(r["label"], 18) + (f" · {r['tool']}" if r["tool"] else "")
+            labels.append(f'<text x="{lx:.1f}" y="{ly:.1f}" fill="{c["dim"]}" font-size="{fs}" text-anchor="{anc}">{_e(txt)}</text>')
+    out += spokes
+    
+    out.append(f'<g class="root"><circle cx="{cx:.1f}" cy="{cy:.1f}" r="{rn * 1.5:.1f}" fill="{c["card"]}" stroke="{c["working"]}" stroke-width="2"/>'
+               f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{rn * 0.55:.1f}" fill="{c["working"]}"/></g>')
+    out += nodes_o + dots + labels
     if more > 0:
-        out.append(f'<text x="{width * 0.60:.1f}" y="{height - 12}" fill="{MUTED}" font-size="12" text-anchor="middle">+{more} more</text>')
+        out.append(f'<text x="{width - 8}" y="{hh - 4}" fill="{c["dim"]}" font-size="{fs}" text-anchor="end">+{more} more</text>')
     if not mini:
-        mv = snap.get("moving", [])[:5]
-        for i, m in enumerate(mv):
-            out.append(f'<text x="14" y="{height - 14 - 14 * i}" fill="{COLORS["message"] if m["dir"] == "to" else COLORS["report"]}" font-size="11">'
+        for i, m in enumerate(snap.get("moving", [])[:5]):
+            out.append(f'<text x="14" y="{height - 14 - 14 * i}" fill="{c["working"] if m["dir"] == "to" else c["attention"]}" font-size="11">'
                        f'{_e(m["node"])} · {_e(m["text"])} · {_dur(m["age_s"])} ago</text>')
-        out.append(f'<text x="14" y="20" fill="{MUTED}" font-size="12">inbox {int(snap.get("inbox") or 0)}{" · paused" if snap.get("paused") else ""}</text>')
     out.append("</svg>")
-    return "\n".join(out)
+    return "\n".join(o for o in out if o)
