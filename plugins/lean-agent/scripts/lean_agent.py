@@ -396,7 +396,62 @@ def is_core(c, ttype):
 
 # ---------------------------------------------------------------- projects & library
 
+INTERNAL_SLUG = "lean-internal"
+_internal_swept = [False]
+
+
+def is_internal_path(path):
+    """True for a directory inside the lean home that is lean-agent's own workdir (helper roles run there); the
+    worktrees and the source clone are real checkouts and do not count."""
+    if not path:
+        return False
+    real = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    base = os.path.realpath(home())
+    if real == base or not real.startswith(base + os.sep):
+        return False
+    return os.path.relpath(real, base).split(os.sep)[0] not in ("worktrees", "source")
+
+
+def internal_registered(projs=None):
+    """Slugs of registered projects that are lean-agent's internal workdirs (left over from before 0.45.87)."""
+    return sorted(s for s, v in (projs if projs is not None else load_json(home("projects.json"), {})).items()
+                  if isinstance(v, dict) and is_internal_path(v.get("path")))
+
+
+def sweep_internal_projects():
+    """Once per process: unlearn registered internal workdirs that have no open todos and no open threads (their data is
+    archived like `unlearn` does). Skipped while projects.json is locked (by anyone, including this process)."""
+    if _internal_swept[0]:
+        return
+    stale = internal_registered(load_json(home("projects.json"), {}))
+    if not stale:
+        _internal_swept[0] = True
+        return
+    lock = None
+    try:
+        import fcntl
+        os.makedirs(home(), exist_ok=True)
+        lock = open(home("projects.json") + ".lock", "a")
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+    except (ImportError, OSError):
+        if lock:
+            lock.close()
+        return
+    lock.close()
+    _internal_swept[0] = True
+    for slug in stale:
+        if any(t.get("project") == slug for t in open_todos()) or _unlearn_threads(slug):
+            continue
+        ns = argparse.Namespace(project=slug, move_todos=None, close_todos=False, force=False,
+                                remove_worktrees=False, dry_run=False)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            cmd_unlearn(ns)
+
+
 def projects():
+    if not _internal_swept[0]:
+        sweep_internal_projects()
     return load_json(home("projects.json"), {})
 
 
@@ -419,6 +474,8 @@ def resolve_project(ref, register=True):
         for s, v in projs.items():
             if same_path(v["path"], path):
                 return s, v["path"]
+        if is_internal_path(path):  # a helper role's own workdir: never a project
+            return INTERNAL_SLUG, path
         return (learn(path, quiet=True) if register else os.path.basename(path)), path
     die(f"unknown project {ref!r}; register it with: lean-agent learn <path>")
 
@@ -674,6 +731,8 @@ def learn(path, include_user_skills=False, quiet=False, name=None, rules=None, a
     if not os.path.isdir(path):
         die(f"not a directory: {path}")
     slug = next((s for s, v in projects().items() if same_path(v["path"], path)), None)
+    if not slug and not as_worktree and is_internal_path(path):
+        die(f"{path} is inside lean-agent's own home (an internal workdir); it cannot be a project")
     if name:
         slug = slugify(name, 32)
         other = projects().get(slug)
@@ -1042,7 +1101,9 @@ def cmd_unlearn(a):
         print("cleared defaults: " + ", ".join(cleared))
     for p in paths:
         if os.path.exists(p):
-            shutil.move(p, os.path.join(dest, os.path.relpath(p, home())))
+            target_p = os.path.join(dest, os.path.relpath(p, home()))
+            os.makedirs(os.path.dirname(target_p), exist_ok=True)
+            shutil.move(p, target_p)
     with file_lock(home("projects.json")):
         projs = projects()
         projs.pop(slug, None)
@@ -12438,6 +12499,10 @@ def cmd_doctor(a):
         install_block(slug)
     if is_in_project and projs[slug].get("private"):
         doctor_private(report, slug, root)
+    for s_ in internal_registered(projs):
+        report(None, f"{s_} is lean-agent's internal workdir: lean-agent unlearn {s_} --move-todos <project>")
+    for s_ in internal_registered(projs):
+        report(None, f"{s_} is lean-agent's internal workdir: lean-agent unlearn {s_} --move-todos <project>")
 
     files = instruction_files(path)
     print("  instruction files loaded here: " + (", ".join(files) or "none"))

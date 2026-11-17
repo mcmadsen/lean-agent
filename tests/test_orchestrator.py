@@ -9690,6 +9690,20 @@ class CliTest(unittest.TestCase):
         self.assertEqual(row["role"], "chaser")
         self.assertNotIn(row["id"], self.cli("runs").stdout)  # hidden from the runs list
 
+    def test_chaser_check_never_registers_its_workdir_as_a_project(self):
+        path = os.path.join(self.tmp.name, "chase-in.json")
+        with open(path, "w") as fh:
+            json.dump([{"id": "g1", "thread": "t21", "ref": "PR 512", "kind": "quiet", "run": "", "quiet_min": 45,
+                        "last_report": "", "last_chase": "", "last_reply": "", "runs": []}], fh)
+        fb = '{"status": "done", "used": [], "unneeded": [], "missing": ""}\nLEAN-CHASE {"decisions": []}'
+        for _ in range(2):
+            self.cli("chase-decide", path, FAKE_FEEDBACK=fb)
+        self.assertNotIn("chaser", self.cli("projects").stdout)
+        reg = os.path.join(self.env["LEAN_AGENT_HOME"], "projects.json")
+        if os.path.exists(reg):
+            with open(reg) as fh:
+                self.assertNotIn("chaser", fh.read())
+
     def test_a_helper_run_gets_no_thread_tag_even_when_launched_with_one_set(self):
         path = os.path.join(self.tmp.name, "chase-in.json")
         with open(path, "w") as fh:
@@ -12622,7 +12636,7 @@ class CliTest(unittest.TestCase):
         h = self.env["LEAN_AGENT_HOME"]
         os.makedirs(os.path.join(h, "reviews"), exist_ok=True)
         with open(os.path.join(h, "projects.json"), "w") as fh:
-            json.dump({s: {"path": os.path.join(h, "nowhere", s)} for s in projects}, fh)
+            json.dump({s: {"path": os.path.join(self.tmp.name, "nowhere", s)} for s in projects}, fh)
         for slug, rows in projects.items():
             with open(os.path.join(h, "reviews", slug + ".jsonl"), "w") as fh:
                 fh.writelines(json.dumps(r) + "\n" for r in rows)
