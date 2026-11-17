@@ -195,6 +195,9 @@ def heartbeat(session_id, transcript=None, now=None):
         rec = record()
         if rec.get("session_id") != session_id:
             return False
+        beat = rec.get("heartbeat")
+        if rec.get("pending") and not (isinstance(beat, (int, float)) and now - beat <= STALE_SECS):
+            rec["pending_since"] = now  # an expired record that revives starts waiting afresh (the max-pending clock)
         rec["heartbeat"] = now
         if transcript:
             rec["transcript"] = transcript

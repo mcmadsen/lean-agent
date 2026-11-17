@@ -852,27 +852,87 @@ class Trim(Base):
 
 
 class ModelEffort(Base):
-    def test_desk_folder_pins_sonnet_and_high_effort_idempotently(self):
+    """Only the front desk is pinned (sonnet, high effort); threads and the user's own choices are left alone."""
+
+    def la(self):
         import lean_agent as la
+        return la
+
+    def settings(self, h):
+        with open(os.path.join(h, ".claude", "settings.json")) as fh:
+            return json.load(fh)
+
+    def test_desk_folder_pins_sonnet_and_high_effort_idempotently(self):
+        la = self.la()
         h = la.home("home")
-        path = os.path.join(h, ".claude", "settings.json")
         la.refresh_desk_folder(h)
-        with open(path) as fh:
-            data = json.load(fh)
+        data = self.settings(h)
         self.assertEqual((data["model"], data["effortLevel"]), ("sonnet", "high"))
         self.assertFalse(la.refresh_desk_folder(h))  # idempotent
         data["model"] = "opus"  # a choice made in the folder stays
-        json.dump(data, open(path, "w"))
+        json.dump(data, open(os.path.join(h, ".claude", "settings.json"), "w"))
         la.refresh_desk_folder(h)
-        self.assertEqual(json.load(open(path))["model"], "opus")
-        with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_EFFORT": "medium"}):
-            self.assertEqual(la.desk_effort(), "medium")
-        self.assertEqual(la.desk_effort(), "high")
+        self.assertEqual(self.settings(h)["model"], "opus")
 
-    def test_hosted_desk_command_carries_the_effort(self):
-        import lean_agent as la
-        src = open(la.__file__).read()
-        self.assertIn('cmd += ["--effort", desk_effort()]', src)
+    def test_up_model_default_is_never_overridden_by_the_refresh(self):
+        la = self.la()
+        h = la.home("home")
+        la.refresh_desk_folder(h)
+        la.set_home_model(h, "default")  # `up --model default`: the user's own model
+        self.assertNotIn("model", self.settings(h))
+        la.refresh_desk_folder(h)  # home / update / service start
+        self.assertNotIn("model", self.settings(h))
+        la.set_home_model(h, "sonnet")
+        self.assertEqual(self.settings(h)["model"], "sonnet")
+
+    def test_effort_follows_the_env_and_is_validated(self):
+        la = self.la()
+        h = la.home("home")
+        la.refresh_desk_folder(h)
+        for env, want in (("medium", "medium"), ("bogus", "high"), ("XHIGH", "xhigh")):
+            with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_EFFORT": env}):
+                la.refresh_desk_folder(h)
+                self.assertEqual(self.settings(h)["effortLevel"], want, env)
+                self.assertEqual(la.desk_effort_args(), ["--effort", want])
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_EFFORT": "default"}):
+            self.assertEqual(la.desk_effort_args(), [])
+            la.refresh_desk_folder(h)  # what lean-agent wrote is removed again
+            self.assertNotIn("effortLevel", self.settings(h))
+        d = self.settings(h)
+        d["effortLevel"] = "low"  # the user's own value is never replaced
+        json.dump(d, open(os.path.join(h, ".claude", "settings.json"), "w"))
+        la.refresh_desk_folder(h)
+        self.assertEqual(self.settings(h)["effortLevel"], "low")
+
+    def test_only_the_hosted_main_gets_the_effort_flag(self):
+        la = self.la()
+        h = la.home("home")
+        main = la.main_session_argv(["claude"], [], h, "n", "11111111-1111-1111-1111-111111111111")
+        self.assertEqual(main[main.index("--effort") + 1], "high")
+        thread = la.session_argv(["claude"], [], h, "n", "11111111-1111-1111-1111-111111111111", "thread")
+        self.assertNotIn("--effort", thread)
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_EFFORT": "off"}):
+            self.assertNotIn("--effort", la.main_session_argv(["claude"], [], h, "n", "11111111-1111-1111-1111-111111111111"))
+
+    def test_thread_sessions_keep_the_users_own_effort(self):
+        la = self.la()
+        cfg = os.path.join(self.tmp, "userclaude")
+        os.makedirs(cfg)
+        json.dump({"effortLevel": "low"}, open(os.path.join(cfg, "settings.json"), "w"))
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": cfg}):
+            flags = la.session_flags(la.home("home"), "thread")
+            self.assertEqual(json.loads(flags[flags.index("--settings") + 1])["effortLevel"], "low")
+            flags = la.session_flags(la.home("home"), "main")
+            self.assertNotIn("effortLevel", json.loads(flags[flags.index("--settings") + 1]))
+
+
+class PendingClock(Base):
+    def test_a_revived_expired_record_restarts_the_pending_clock(self):
+        lean_desk.attach("s1", None, None, self.now)
+        lean_desk.set_pending(True)
+        later = self.now + lean_desk.STALE_SECS + 100
+        lean_desk.heartbeat("s1", None, later)
+        self.assertLess(lean_desk.pending_age(later + 5), 10)
 
 
 if __name__ == "__main__":

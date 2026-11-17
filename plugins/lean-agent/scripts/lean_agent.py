@@ -11216,6 +11216,11 @@ def session_flags(h, role):
     excludes = list(dict.fromkeys([own, os.path.realpath(own)]))
     settings = {"claudeMdExcludes": excludes,
                 "permissions": {"deny": [f"Agent({n})" for n in user_agent_names()]}}
+    if role == "thread":  # the desk folder carries the desk's effortLevel: a thread session keeps the user's own effort
+        cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        own_effort = load_json(os.path.join(cfg, "settings.json"), {}).get("effortLevel")
+        if own_effort is not None:
+            settings["effortLevel"] = own_effort
     return ["--strict-mcp-config", "--mcp-config", json.dumps({"mcpServers": {}}), "--disable-slash-commands",
             "--settings", json.dumps(settings)]
 
@@ -11245,17 +11250,52 @@ def register_source():
 
 DESK_MODEL = "sonnet"
 DESK_EFFORT = "high"
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")  # `claude --help`: --effort <level>
 
 
 def desk_effort():
-    """Reasoning effort of the front desk (hosted and app): LEAN_AGENT_DESK_EFFORT, default high. Claude Code: `--effort` flag,
-    `effortLevel` in settings, CLAUDE_CODE_EFFORT_LEVEL env."""
-    return os.environ.get("LEAN_AGENT_DESK_EFFORT") or DESK_EFFORT
+    """Reasoning effort of the front desk ONLY (the hosted main and an app session in the desk folder): LEAN_AGENT_DESK_EFFORT
+    (low|medium|high|xhigh|max; `default`/`off` = your own: none is set), else high. An invalid value is ignored (high).
+    Claude Code: `--effort` flag (hosted main), `effortLevel` in settings (app desk). None = leave it to Claude Code."""
+    v = (os.environ.get("LEAN_AGENT_DESK_EFFORT") or "").strip().lower()
+    if v in ("default", "off", "none"):
+        return None
+    return v if v in EFFORT_LEVELS else DESK_EFFORT
+
+
+def desk_effort_args():
+    e = desk_effort()
+    return ["--effort", e] if e else []
+
+
+def main_session_argv(cmd, extra, h, name, sid):
+    """The hosted main's command line: session_argv plus the desk's effort. Thread sessions use session_argv alone."""
+    return session_argv(list(cmd) + desk_effort_args(), extra, h, name, sid)
+
+
+def sync_desk_settings(data, h):
+    """Model and effort of an app session in the desk folder, in `data` (the folder's settings.json). Both are only set where
+    they are missing or still what lean-agent wrote last (a value you set yourself stays; `up --model default` is remembered and
+    keeps your own model); effortLevel follows LEAN_AGENT_DESK_EFFORT."""
+    mark_path = home("desk-effort.json")
+    written = load_json(mark_path, {}).get("effortLevel")
+    want = desk_effort()
+    if want is None:
+        if data.get("effortLevel") is not None and data.get("effortLevel") == written:
+            data.pop("effortLevel")
+    elif data.get("effortLevel") in (None, written):
+        data["effortLevel"] = want
+    new = data.get("effortLevel") if want is not None and data.get("effortLevel") == want else None
+    if new != written:
+        save_json(mark_path, {"effortLevel": new})
+    if load_json(home("desk-model.json"), {}).get("choice") != "default":
+        data.setdefault("model", DESK_MODEL)
 
 
 def refresh_desk_folder(h):
     """Make a session started in the desk folder (<home>/home, where the hosted desk's CLAUDE.md already lives) a proper desk,
-    automatically (prepare_home: `home`, `update`, service start): lean-agent's own env keys in its .claude/settings.json.
+    automatically (prepare_home: `home`, `update`, service start): lean-agent's own env keys, and the desk's model (sonnet) and effort
+    (effortLevel, high) where you have not set your own, in its .claude/settings.json.
     Idempotent (written only when changed). Nothing is written to the lean home root (workers under it would load it) and the
     user's global settings are never touched. Whether a session is the desk is decided by its session id, never by this file."""
     path = os.path.join(h, ".claude", "settings.json")
@@ -11267,8 +11307,7 @@ def refresh_desk_folder(h):
         if os.environ.get("LEAN_AGENT_HOME"):
             env["LEAN_AGENT_HOME"] = os.environ["LEAN_AGENT_HOME"]  # a GUI-launched session finds the same home and socket
         data["env"] = env
-        data.setdefault("model", DESK_MODEL)  # an app session in this folder starts as sonnet (a model you set here stays)
-        data.setdefault("effortLevel", desk_effort())  # ... with high reasoning effort
+        sync_desk_settings(data, h)
         if data != cur:
             save_json(path, data)
             return True
@@ -12713,6 +12752,7 @@ def set_home_model(h, model):
     else:
         data["model"] = model
     save_json(path, data)
+    save_json(home("desk-model.json"), {"choice": "default" if model in (None, "", "default") else model})  # an explicit choice, kept by refresh
 
 
 def claude_global_config():
@@ -13077,7 +13117,6 @@ def cmd_up(a):
     cmd = [os.environ.get("LEAN_AGENT_CLAUDE") or "claude"]
     if a.model:
         cmd += ["--model", a.model]
-    cmd += ["--effort", desk_effort()]  # same effort as the app desk's folder settings (effortLevel)
     use_session = service_session.supported() and not a.local
     if a.local:
         print(f"lean-agent: orchestrator in {h} (model {a.model or 'default'})")
@@ -13098,12 +13137,12 @@ def cmd_up(a):
     if a.local:
         env["LEAN_AGENT_LOCAL_UP"] = "1"  # a terminal session `up --local` runs is the front desk
         try:
-            os.execvpe(cmd[0], cmd + extra, env)  # e.g. `lean-agent up -- --debug --debug-file /tmp/rc.log`
+            os.execvpe(cmd[0], cmd + desk_effort_args() + extra, env)  # e.g. `lean-agent up -- --debug --debug-file /tmp/rc.log`
         except FileNotFoundError:
             die("'claude' not found on PATH")
     if use_session:
         return host_session(cmd, extra, env, h, a.name)
-    return remote_control(cmd + extra, env, h)
+    return remote_control(cmd + desk_effort_args() + extra, env, h)
 
 
 def session_argv(cmd, extra, h, name, sid, role="main"):
@@ -13123,7 +13162,7 @@ def host_session(cmd, extra, env, h, name):
         sid = load_json(home("up.json"), {}).get("session_id") or str(uuid.uuid4())
         if not re.fullmatch(r"[0-9a-fA-F-]{36}", sid):
             sid = str(uuid.uuid4())
-        return session_argv(cmd, extra, h, name, sid), sid
+        return main_session_argv(cmd, extra, h, name, sid), sid
 
     state = {"seen": "", "stale": False}
 
@@ -13272,7 +13311,7 @@ def first_turn_context(path):
                     continue
                 u = ((e.get("message") or {}).get("usage") if isinstance(e, dict) else None)
                 if isinstance(u, dict) and e.get("type") == "assistant":
-                    n = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+                    n = usage.context_tokens(u)
                     if n:
                         return n
     except OSError:
@@ -13281,7 +13320,7 @@ def first_turn_context(path):
 
 
 def desk_context_check(app_path=None, hosted_path=None):
-    """(ok, line) comparing the attached app desk's first-turn context with the hosted desk's; ("", None) when either is unknown."""
+    """(ok, line) comparing the attached app desk's first-turn context with the hosted desk's; (None, "") when either is unknown."""
     app_path = app_path or (lean_desk.attached() or {}).get("transcript")
     hosted_path = hosted_path or service_session.info("main").get("transcript")
     if not (app_path and hosted_path) or app_path == hosted_path:

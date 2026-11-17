@@ -13,7 +13,7 @@ long for a unix socket. Other lean-agent processes import this module:
 Socket protocol: one JSON object per connection, newline-terminated; one JSON line back.
     {"text": "..."}   paste (ESC[200~ text ESC[201~), then "\\r"      -> {"ok": true}
     {"keys": "..."}   raw keys written as they are                   -> {"ok": true}
-    {"ping": true}    -> {"ok": true, "alive": bool, "pid": int}
+    {"ping": true}    -> {"ok": true, "alive": bool, "pid": int | null}  (pid null and "external": true while the app is the desk)
     {"tail": true}    -> {"ok": true, "text": "<last output of the session>"}
     anything wrong    -> {"ok": false, "error": "..."}
 """
@@ -3635,7 +3635,7 @@ class ExternalHost:
         if msg.get("tail"):
             return {"ok": True, "text": ""}
         if msg.get("restart"):
-            return {"ok": True}
+            return {"ok": False, "error": "the front desk is external: there is no hosted session to restart"}
         return {"ok": False, "error": "the front desk is external: reports reach it through its hooks (nothing is typed)"}
 
     def close(self):
@@ -3660,15 +3660,17 @@ def child_env(env):
 class SwitchHost:
     """main's host in desk mode auto|external: hosts the service's own Remote Control main while no app session is the desk, and
     stands aside (ExternalHost) while one is. Switches: hosted -> app once an app session attached and the hosted main is idle
-    (no turn, nothing typed for IDLE_FOR s; checkpointed like a normal stop); app -> hosted once the desk's heartbeat is gone
-    (30 min). Never twice within SWITCH_GAP (auto); config desk hosted|external pins immediately. Same surface as Host."""
+    (no turn running, no dialog, no USER input for IDLE_FOR s - not what the service typed; checkpointed like a normal stop; after
+    desk_max_pending_s pending the typed-input rule is dropped); app -> hosted once the desk's heartbeat is gone (30 min). Two
+    switches are at least SWITCH_GAP apart (auto), except the first since the service started and a hosted main nobody has typed
+    into; config desk hosted|external pins immediately. Same surface as Host."""
 
     key = "main"
     IDLE_FOR = 60
     WATCH = 5
     STALE_TURN = 600   # s without transcript activity after which "mid-turn" no longer holds the switch
     CHECKPOINTS = 2    # checkpoint attempts before the hosted main is stopped without one
-    STOP_GRACE = 20    # s after the stop request before the process tree is killed
+    STOP_GRACE = 10    # s after the stop request before the process tree is killed (before Host.stop's own 15 s kill of the leader)
 
     def __init__(self, make_hosted, now=time.time, gap=None, on_message=None, serve=False):
         import lean_desk
@@ -3684,7 +3686,6 @@ class SwitchHost:
         self.last_switch = lean_desk.state().get("since") or 0
         self.attempts, self.refusal, self.forced_logged = 0, "", False
         self.switches = 0  # switches since this service started: the first one ignores the gap
-        self.boot_until = 0  # while now < boot_until the app desk was the last owner: wait for it, host nothing
 
     @property
     def external(self):
@@ -3774,8 +3775,6 @@ class SwitchHost:
                 self.set_wait(None)
             return None
         pinned = self.desk.mode() != "auto"
-        if want == "hosted" and now < self.boot_until:
-            return None
         fresh = self.switches == 0 or (have == "hosted" and not self.user_input())  # fresh and idle: no flap risk
         if not pinned and not fresh and now - self.last_switch < self.gap:
             self.set_wait("gap", self.last_switch + self.gap)
@@ -3864,17 +3863,15 @@ class SwitchHost:
         """The app desk was the last owner: give it up to desk_boot_wait_s to attach before hosting a main (reports wait in the
         inbox meanwhile). Returns the kind to start."""
         wait = self.desk.boot_wait_s()
-        start = self.now()
-        self.boot_until = start + wait
+        until = self.now() + wait
         self.cur = ExternalHost()
         msg = f"desk: the app desk was the last owner: waiting up to {int(wait)}s for it before hosting a main"
         lean_log.log("info", "desk", msg)
         print("lean-agent: " + msg, flush=True)
-        while not self.stopping.is_set() and self.now() < self.boot_until:
+        while not self.stopping.is_set() and self.now() < until:
             if self.wanted() == "app":
                 return "app"
             self.stopping.wait(min(1.0, self.WATCH))
-        self.boot_until = 0
         return self.wanted()
 
     def run(self):
@@ -4171,7 +4168,7 @@ class Host:
         if proc and proc.poll() is None:
             if not lean_common.signal_group(proc.pid, signal.SIGTERM):
                 proc.terminate()
-            killer = threading.Timer(15, lambda: proc.poll() is None and proc.kill())
+            killer = threading.Timer(15, lambda: proc.poll() is None and (lean_common.signal_group(proc.pid, signal.SIGKILL) or proc.kill()))
             killer.daemon = True
             killer.start()
 
