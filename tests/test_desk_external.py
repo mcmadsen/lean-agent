@@ -851,5 +851,29 @@ class Trim(Base):
         self.assertEqual(la.desk_context_check(self.transcript("app3.jsonl", 20000), os.path.join(self.tmp, "none"))[1], "")
 
 
+class ModelEffort(Base):
+    def test_desk_folder_pins_sonnet_and_high_effort_idempotently(self):
+        import lean_agent as la
+        h = la.home("home")
+        path = os.path.join(h, ".claude", "settings.json")
+        la.refresh_desk_folder(h)
+        with open(path) as fh:
+            data = json.load(fh)
+        self.assertEqual((data["model"], data["effortLevel"]), ("sonnet", "high"))
+        self.assertFalse(la.refresh_desk_folder(h))  # idempotent
+        data["model"] = "opus"  # a choice made in the folder stays
+        json.dump(data, open(path, "w"))
+        la.refresh_desk_folder(h)
+        self.assertEqual(json.load(open(path))["model"], "opus")
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_EFFORT": "medium"}):
+            self.assertEqual(la.desk_effort(), "medium")
+        self.assertEqual(la.desk_effort(), "high")
+
+    def test_hosted_desk_command_carries_the_effort(self):
+        import lean_agent as la
+        src = open(la.__file__).read()
+        self.assertIn('cmd += ["--effort", desk_effort()]', src)
+
+
 if __name__ == "__main__":
     unittest.main()

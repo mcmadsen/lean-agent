@@ -11243,6 +11243,16 @@ def register_source():
             fh.write(root + "\n")
 
 
+DESK_MODEL = "sonnet"
+DESK_EFFORT = "high"
+
+
+def desk_effort():
+    """Reasoning effort of the front desk (hosted and app): LEAN_AGENT_DESK_EFFORT, default high. Claude Code: `--effort` flag,
+    `effortLevel` in settings, CLAUDE_CODE_EFFORT_LEVEL env."""
+    return os.environ.get("LEAN_AGENT_DESK_EFFORT") or DESK_EFFORT
+
+
 def refresh_desk_folder(h):
     """Make a session started in the desk folder (<home>/home, where the hosted desk's CLAUDE.md already lives) a proper desk,
     automatically (prepare_home: `home`, `update`, service start): lean-agent's own env keys in its .claude/settings.json.
@@ -11257,6 +11267,8 @@ def refresh_desk_folder(h):
         if os.environ.get("LEAN_AGENT_HOME"):
             env["LEAN_AGENT_HOME"] = os.environ["LEAN_AGENT_HOME"]  # a GUI-launched session finds the same home and socket
         data["env"] = env
+        data.setdefault("model", DESK_MODEL)  # an app session in this folder starts as sonnet (a model you set here stays)
+        data.setdefault("effortLevel", desk_effort())  # ... with high reasoning effort
         if data != cur:
             save_json(path, data)
             return True
@@ -13065,6 +13077,7 @@ def cmd_up(a):
     cmd = [os.environ.get("LEAN_AGENT_CLAUDE") or "claude"]
     if a.model:
         cmd += ["--model", a.model]
+    cmd += ["--effort", desk_effort()]  # same effort as the app desk's folder settings (effortLevel)
     use_session = service_session.supported() and not a.local
     if a.local:
         print(f"lean-agent: orchestrator in {h} (model {a.model or 'default'})")
