@@ -143,6 +143,14 @@ async function status($: any, text: string) {
   }
 }
 
+// "desk: external, attached 3m ago" (empty when the desk is hosted or unknown); reports waiting for an idle desk are counted.
+function deskLine(snap: MapView["snap"] | null | undefined): string {
+  const d = snap?.service?.desk
+  if (!d || d.mode !== 'external') return ''
+  const base = d.attached ? `desk: external, attached ${d.age ?? '?'}` : 'desk: external, not attached'
+  return d.pending ? `${base} · ${d.pending} waiting for you` : base
+}
+
 function stateText(d: Diag): string {
   return d.error !== '' ? d.error : d.state
 }
@@ -197,7 +205,7 @@ async function poll($: any): Promise<boolean> {
   }
   await update($, view, () => ({ snap, svg, isDown: !isUp }))
   await setDiag($, { state, error, bin })
-  await status($, state)
+  await status($, deskLine(snap) ? `${state} · ${deskLine(snap)}` : state)
   return isUp
 }
 
@@ -277,7 +285,7 @@ export const register: Register = on => {
     const pillColor = isOk ? (paused ? MUTED : TEAL) : d.error !== '' ? RED : AMBER
     const head = svc?.up
       ? `Socket listening · ${svc.socket_ms ?? '?'} ms · CPU ${svc.cpu_pct ?? '?'}%`
-      : 'Socket not listening'
+      : `Service down · socket not listening${svc?.socket ? ` at ${svc.socket}` : ''}`
     const moving = (snap?.moving ?? []).slice(0, 8)
     const inbox = snap?.inbox ?? 0
     const alt =
@@ -336,6 +344,7 @@ export const register: Register = on => {
         </Box>
         {diagnosis}
         <Text color={MUTED}>{head}</Text>
+        {deskLine(snap) ? <Text color={MUTED}>{deskLine(snap)}</Text> : null}
         {v.svg !== '' && (
           <Svg source={v.svg} alt={alt} width={380} height={220} isInteractive />
         )}

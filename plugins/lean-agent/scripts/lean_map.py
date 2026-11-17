@@ -139,7 +139,8 @@ def build(ctx, now=None):
     nodes = [{"id": "service", "kind": "service", "label": "Service socket", "state": "active",
               "detail": f"{sv.get('socket_ms', 0)} ms · {sv.get('threads', 0)} threads"},
              {"id": "main", "kind": "desk", "label": "Front desk", "state": "idle" if ctx.get("desk_idle_s", 0) > 5 else "active",
-              "detail": f"idle {_dur(ctx.get('desk_idle_s', 0))}"}]
+              "detail": (f"external, {'attached ' + sv['desk'].get('age', '?') if sv['desk'].get('attached') else 'not attached'}"
+                          if (sv.get("desk") or {}).get("mode") == "external" else f"idle {_dur(ctx.get('desk_idle_s', 0))}")}]
     for t in ctx.get("threads") or []:
         n = {"id": t["id"], "kind": "thread", "label": t.get("title") or t["id"], "state": t["state"], "detail": t.get("detail") or t["state"],
              "idle_s": t.get("idle_s", 0), "mid": bool(t.get("mid"))}
@@ -647,8 +648,25 @@ def alerts_now():
     return snapshot_now().get("alerts") or []
 
 
+def desk_info(now=None):
+    """{mode, attached, age, pending}: the front desk as the pane shows it (external: attached from desk.json)."""
+    try:
+        import lean_desk
+        d = lean_desk.summary(now)
+        d["pending"] = inbox_from_files()
+        d["line"] = lean_desk.status_line(now)
+        return d
+    except Exception:  # noqa: BLE001
+        return {"mode": "hosted", "attached": False}
+
+
 def down_snapshot(inbox=0, now=None):
-    return {"v": 1, "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now or time.time())), "service": {"up": False},
+    try:
+        import lean_sock
+        sock = lean_sock.path()  # the same resolution the CLI and the hooks use
+    except Exception:  # noqa: BLE001
+        sock = ""
+    return {"v": 1, "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now or time.time())), "service": {"up": False, "socket": sock, "desk": desk_info(now)},
             "nodes": [], "edges": [], "moving": [], "inbox": inbox}
 
 
@@ -754,7 +772,7 @@ def service_context(now=None):
             ps = collections.Counter(r["project"] for r in rr if r["thread"] == t["id"] and r.get("project"))
             t["project"] = ps.most_common(1)[0][0] if ps else None
     return {"rows": rows, "home": lean_common.lean_home(), "service": {"pid": os.getpid(), "version": ctx_version(), "socket_ms": round(_state["ms"] or 0.0, 1), "cpu_pct": _cpu(),
-                        "threads": threading.active_count(), "up_s": int(now - STARTED)},
+                        "threads": threading.active_count(), "up_s": int(now - STARTED), "desk": desk_info(now)},
             "paused": _paused(), "inbox": inbox, "threads": threads,
             "runs": rr, "desk_idle_s": int(now - max(desk)) if desk else 3600}
 

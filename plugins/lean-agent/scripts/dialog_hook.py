@@ -55,7 +55,7 @@ def notification_line(text):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1":
+    if os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1" and os.environ.get("LEAN_AGENT_DESK_SESSION") != "1":
         return 0
     mode = argv[0] if argv else "close"
     event = {}

@@ -1,7 +1,13 @@
 export type MapView = {
   // the latest `lean-agent map --json` snapshot (contract v1), or null
   snap: {
-    service: { up: boolean; socket_ms?: number; cpu_pct?: number }
+    service: {
+      up: boolean
+      socket_ms?: number
+      cpu_pct?: number
+      socket?: string
+      desk?: { mode: string; attached: boolean; age?: string; pending?: number }
+    }
     inbox: number
     paused?: boolean
     nodes: {

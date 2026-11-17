@@ -334,6 +334,13 @@ def session_rec(key="main"):
     """One hosted session's record from up.json ({} when it never ran)."""
     up = _load(up_path())
     if key == "main":
+        try:
+            import lean_desk
+            desk = lean_desk.attached()  # the external front desk is "main": its session id and transcript
+        except Exception:  # noqa: BLE001
+            desk = None
+        if desk:
+            up = dict(up, session_id=desk["session_id"], desk=True, **({"transcript": desk["transcript"]} if desk.get("transcript") else {}))
         return up
     rec = (up.get("sessions") or {}).get(key)
     return rec if isinstance(rec, dict) else {}
@@ -386,8 +393,18 @@ def clear_state(key="main"):
 
 # ---------------------------------------------------------------- client
 
+def _external_desk():
+    try:
+        import lean_desk
+        return lean_desk.external()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def request(msg, timeout=5, key="main"):
     """Send one message to the bridge; the reply dict, or {"ok": False, "error": ...} (never raises)."""
+    if key == "main" and _external_desk():
+        return {"ok": False, "error": "no session bridge (the front desk is external: its hooks deliver)"}
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     except (OSError, AttributeError) as exc:
@@ -439,7 +456,11 @@ def keys(k, key="main"):
 
 def alive(key="main"):
     """Whether session `key` is up. A busy bridge (the ping times out, e.g. while it starts a thread session) is up:
-    only a socket nobody can connect to (gone, refused) means down. A failed ping is tried once more."""
+    only a socket nobody can connect to (gone, refused) means down. A failed ping is tried once more.
+    The external front desk is up while it is attached (fresh heartbeat)."""
+    if key == "main" and _external_desk():
+        import lean_desk
+        return lean_desk.attached() is not None
     for attempt in range(2):
         r = request({"ping": True}, timeout=2, key=key)
         if r.get("ok"):
@@ -2968,6 +2989,7 @@ class StuckWatch:
 
 
 REPORT_FORCE = 180      # seconds main may stay busy before queued reports are typed anyway (queued input, between turns)
+EXTERNAL_NOTIFY = 20   # seconds queued reports may wait for an external desk's hooks before a notification
 REPORTER_STALL = 60     # seconds without a Reporter tick before the supervisor restarts it
 
 
@@ -3390,6 +3412,8 @@ class Reporter(AutoClear):
                 run_fallback(self.now())
             except Exception as exc:  # noqa: BLE001 - the report queue must keep going
                 self.log(f"run follow-up failed: {exc}", "error")
+        if getattr(self.host, "external", False):
+            return self.external_tick()
         items = queued_reports()
         limit = stuck_limit()
         if items and limit and not loaded and self.now() - min(i.get("ts") or self.now() for i in items) > limit \
@@ -3495,7 +3519,30 @@ class Reporter(AutoClear):
         elif dropped:
             self.log(f"{dropped} stale thread report(s) dropped")
 
+    def external_tick(self):
+        """External desk: nothing is typed (hooks deliver). Reports still queued after EXTERNAL_NOTIFY seconds (the desk idle or
+        detached: no hook ran) wait in the inbox; one local notification per batch."""
+        now = self.now()
+        items = queued_reports()
+        if not items and not os.path.exists(pending_path()):
+            self.ext_batch = None
+            report_wait(None)
+            return
+        import lean_desk
+        if lean_desk.attached(now):
+            report_wait("front desk idle: delivered at its next prompt (hooks); shown in the pane inbox", now)
+        else:
+            report_wait("no front desk attached (external): start a session in the desk folder or `lean-agent desk attach`", now)
+        keys = sorted(item_key(i) for i in items)
+        oldest = min([i.get("ts") or now for i in items] or [now])
+        if keys and keys != getattr(self, "ext_batch", None) and now - oldest >= _knob("LEAN_AGENT_DESK_NOTIFY_AFTER", EXTERNAL_NOTIFY):
+            self.ext_batch = keys
+            lean_desk.notify(f"{len(keys)} thread report(s) waiting for the front desk")
+            self.log(f"{len(keys)} report(s) waiting for the external desk (notified)")
+
     def stuck_tick(self):
+        if getattr(self.host, "external", False):
+            return
         path = self.transcript()
         if path and os.path.exists(path):
             self.stuck.tick(path, transcript_state(path), self.prompting())
@@ -3512,6 +3559,40 @@ class Reporter(AutoClear):
 
 
 # ---------------------------------------------------------------- host (inside `up`)
+
+class ExternalHost:
+    """Stands in for main's Host when the front desk is an external local session (desk external): the service hosts no main
+    session and never types into one; reports reach the desk through its hooks. Same surface the Reporter reads."""
+
+    key = "main"
+    external = True
+    last_input = 0
+    last_output = 0
+    name = "external desk"
+
+    def __init__(self):
+        self.stopping = threading.Event()
+        self.env = None
+
+    def alive(self):
+        import lean_desk
+        return lean_desk.attached() is not None
+
+    def tail_text(self):
+        return ""
+
+    def paste(self, text):
+        raise RuntimeError("the front desk is external: reports are delivered by its hooks")
+
+    send = paste
+
+    def stop(self):
+        self.stopping.set()
+
+    def run(self):
+        self.stopping.wait()
+        return 0
+
 
 def child_env(env):
     out = {k: v for k, v in env.items() if not PARENT_SESSION_VARS.match(k)}

@@ -288,9 +288,10 @@ lean-agent optimize {{P}} --apply --skip checkout-notes
   output's first line names the full output and an errors-only copy: read the errors first.
 
 ## Keeping lean-agent current
-To update, run `lean-agent update` and end your turn: it syncs (code, plugin, this guide, settings, projects, repo blocks) and,
-when the version is newer, restarts the service once main is idle (threads stay open). Never run `service restart|stop|start`,
-`sync` or `up` yourself. In a terminal: `lean-agent sync`, then `lean-agent service restart` if it says so.
+To update, run `lean-agent update` and end your turn: it syncs (code, plugin, guide, settings, projects, repo blocks) and,
+when the version is newer, restarts the service once main is idle. Never run `service restart|stop|start`,
+`sync` or `up` yourself. In a terminal: `sync`, then `service restart` if it says so.
+Desk in the app: `lean-agent desk status`.
 
 ## CLI reference
 Every command and flag: `lean-agent guide --cli` or `lean-agent <command> --help` (kept out of this file so it isn't re-read each call).

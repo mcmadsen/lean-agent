@@ -40,8 +40,22 @@ def nothing_pending(tid=""):
 
 
 def main():
+    desk = False
     if os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1":
-        return 0
+        if os.environ.get("LEAN_AGENT_DESK_SESSION") != "1":
+            return 0
+        desk = True  # the external front desk (a local session): acts only when its session is the attached desk
+    if desk:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import json as _json
+        import lean_desk
+        try:
+            sid = (_json.load(sys.stdin) or {}).get("session_id")
+        except ValueError:
+            sid = None
+        if not lean_desk.is_desk(sid):
+            return 0
+        lean_desk.heartbeat(sid)
     tid = os.environ.get("LEAN_AGENT_THREAD") or ""
     if nothing_pending(tid if os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread" and tid else ""):
         return 0

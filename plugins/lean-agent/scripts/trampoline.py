@@ -26,6 +26,16 @@ def clone_scripts():
     return path if os.path.isdir(path) else None
 
 
+def _desk_external():
+    """config.json says desk external (a substring check: no JSON, no import)."""
+    try:
+        home = os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent"))
+        with open(os.path.join(home, "config.json")) as fh:
+            return '"external"' in fh.read() or os.environ.get("LEAN_AGENT_DESK") == "external"
+    except OSError:
+        return os.environ.get("LEAN_AGENT_DESK") == "external"
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__.strip())
@@ -41,8 +51,11 @@ def main():
             lean_activity.hook_send(json.loads(data))
         except Exception:  # noqa: BLE001
             pass
-    if script in ("inject_hook.py", "dialog_hook.py") and os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1":
-        return  # the inject hook acts in the sessions `lean-agent up` hosts only: no second interpreter anywhere else
+    if script in ("inject_hook.py", "dialog_hook.py") and os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1" \
+            and os.environ.get("LEAN_AGENT_DESK_SESSION") != "1":
+        return  # the inject hook acts in the sessions `lean-agent up` hosts (and the external desk) only: no second interpreter anywhere else
+    if script == "desk_hook.py" and (os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1" or not _desk_external()):
+        return  # only where the external desk mode is on
     target_dir = clone_scripts() or here
     target = os.path.join(target_dir, script)
     if not os.path.isfile(target):

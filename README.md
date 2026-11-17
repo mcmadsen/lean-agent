@@ -264,6 +264,32 @@ survive the restart.
 **Stop using it:** `lean-agent service uninstall`. **Without the service:** run `lean-agent up` in a terminal; it
 lasts until you close it or log out, and a restart of `up` continues the conversation.
 
+## Front desk in the Claude desktop app (with Remote Control)
+
+By default the service hosts the front desk session itself (`desk: hosted`). Alternatively the front desk can be a normal
+local session you start in the Claude desktop app ("on this computer"), which can show plugin panes (the live map) and has
+Remote Control for your phone. The service then runs everything else as before (threads, workers, socket, map, chaser,
+spool) but hosts no main session.
+
+```sh
+lean-agent desk setup            # once: writes the desk folder's .claude/settings.json (role main, orchestrator env; --model, --permission-mode)
+# in the app: new local session in the folder `desk setup` printed (~/.lean-agent/home), then turn on Remote Control
+lean-agent config desk external  # or: lean-agent up --desk external; then lean-agent service restart
+lean-agent desk status           # desk: external, attached 3m ago
+lean-agent desk detach           # let go of the desk (attach again with `desk attach` in the session)
+```
+
+- The first session whose SessionStart happens in the desk folder attaches itself as the desk (or run `lean-agent desk attach`
+  in it). Only one desk at a time; a second session is told so. A desk whose hooks were silent for 30 minutes counts as
+  detached: reports wait in the inbox.
+- Thread reports reach the desk through hooks: at SessionStart and with each prompt, at tool boundaries, and at the end of a
+  turn (the Stop hook hands pending reports over once per batch, never while a question dialog is open). An idle desk cannot be
+  woken: the reports show in the map pane ("desk: external, attached 3m ago · 2 waiting for you") and, on macOS, as a local
+  notification (`lean-agent config desk-notify on|off`, default on in external mode).
+- Back to hosted: `lean-agent config desk hosted`, then `lean-agent service restart`.
+- The map pane asks the service on the same socket path as the CLI. If it says "Service down", the message names the
+  socket it looked at; a desktop session without your shell's `LEAN_AGENT_HOME` falls back to the default home's socket.
+
 ## Sign-in
 
 Claude Code's browser login (`/login`) does not work from Remote Control, and the stored login can expire while the
