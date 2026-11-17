@@ -1072,12 +1072,12 @@ const { chromium } = require('playwright');
   };
   // 1280 dark
   let pg = await open(rich, { width: 1280, height: 800 }, 'dark');
-  out.now = await pg.locator('.nd[data-id="t1"] > .now').innerText();
-  out.chips = await pg.locator('.nd[data-id="t1"] > .chs .ch').allInnerTexts();
-  out.errBadge = await pg.locator('.nd[data-id="t1"] > .chs .eb').count();
-  out.mcp = await pg.locator('.nd[data-id="t1"] > .chs .mb').innerText();
-  out.worker = await pg.locator('.nd[data-id="w1"]').innerText();
-  out.bar = await pg.locator('.nd[data-id="w1"] .bar i').getAttribute('style');
+  await pg.locator('.nd[data-id="t1"]').click();
+  out.agentPanel = await pg.locator('#panel').innerText();
+  await pg.keyboard.press('Escape');
+  await pg.locator('.nd[data-id="w1"]').click();
+  out.worker = await pg.locator('#panel').innerText();
+  await pg.keyboard.press('Escape');
   out.totals = await pg.evaluate(() => ['m-thr', 'm-wk', 'm-inb', 'm-cost', 'm-sav', 'm-tpm'].map(i => { const m = document.getElementById(i), f = m.querySelector('.m-foot'); return [m.querySelector('.m-value').innerText, f.hidden ? null : f.innerText]; }));
   out.feed = await pg.locator('#fl button').count();
   out.feedVisible = await pg.locator('#feed').isVisible();
@@ -1091,7 +1091,7 @@ const { chromium } = require('playwright');
   out.slashFocus = await pg.evaluate(() => document.activeElement.id);
   await pg.keyboard.press('Escape');
   await pg.locator('.nd[data-id="main"]').focus();
-  await pg.keyboard.press('ArrowRight');
+  await pg.keyboard.press('ArrowDown');
   out.arrow = await pg.evaluate(() => document.activeElement.dataset.id || '');
   // feed click selects the node
   await pg.locator('#fl button[data-node="t3"]').click();
@@ -1124,7 +1124,7 @@ const { chromium } = require('playwright');
   // 400 light
   pg = await open(rich, { width: 400, height: 800 }, 'light');
   out.narrow = await pg.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
-  out.cardTitle = await pg.locator('.nd[data-id="t1"]').getAttribute('title');
+  out.cardTitle = await pg.locator('.nd[data-id="t1"]').getAttribute('aria-label');
   if (shots) await pg.screenshot({ path: shots + '/light-400.png', fullPage: true });
   await pg.close();
   // a snapshot without any of the new fields
@@ -1290,15 +1290,16 @@ class FeaturesTest(unittest.TestCase):
         self.assertNotIn("error", d)
         self.assertEqual(d["errors"], [])
         # in-progress tool, chips (at most 4), error badge, MCP badge
-        self.assertRegex(d["now"], r"Edit · lean_map\.py · \d+ s")
-        self.assertEqual(d["chips"], ["Edit 12", "Bash 7", "Read 5", "Grep 2"])
-        self.assertEqual(d["errBadge"], 1)
-        self.assertIn("github", d["mcp"])
+        self.assertRegex(d["agentPanel"], r"Edit · lean_map\.py · \d+ s")
+        self.assertIn("Edit 12, Bash 7, Read 5, Grep 2", d["agentPanel"])
+        self.assertRegex(d["agentPanel"], r"Failed calls \(30 min\)\s*1")
+        self.assertIn("github", d["agentPanel"])
+        self.assertIn("1 (1 active)", d["agentPanel"])  # sessions: health / workload in the panel
         self.assertIn("sonnet", d["worker"])
         self.assertIn("$0.52", d["worker"])
         self.assertIn("254k", d["worker"])
         self.assertIn("feature/x", d["worker"])
-        self.assertIn("width:9%", d["bar"])
+        self.assertIn("7 of 80", d["worker"])
         # metric cards: real totals, foots only when known
         t = d["totals"]
         self.assertEqual(t[0][0], "02 / 12")
@@ -1508,7 +1509,6 @@ const { chromium } = require('playwright');
   out.bell = (await pg.locator('#bell').innerText()).trim();
   out.marker = await pg.locator('.nd[data-id="t1"] .am.warn').count();
   out.groups = await txt(pg, '.pg');
-  out.tags = await txt(pg, '.nd .pj');
   out.chips = await txt(pg, '#projs .pc');
   if (shots) await pg.screenshot({ path: shots + '/dark-1280-alerts.png', fullPage: true });
   await pg.locator('.al[data-id="stuck:t1"] .ash').click();
@@ -1521,7 +1521,6 @@ const { chromium } = require('playwright');
   await pg.waitForTimeout(300);
   out.webCards = await pg.locator('.nd[data-id^="t"]').count();
   out.groupsFiltered = await pg.locator('.pg').count();
-  out.tagsFiltered = await pg.locator('.nd .pj').count();
   await pg.locator('#projs .pc[data-p=""]').click();
   await pg.waitForTimeout(300);
   out.allCards = await pg.locator('.nd[data-id^="t"]').count();
@@ -1529,8 +1528,8 @@ const { chromium } = require('playwright');
   await pg.evaluate((v) => { const s = document.getElementById('scr'); s.value = v; s.dispatchEvent(new Event('input')); }, T);
   await pg.waitForTimeout(900);
   out.rpEdge = await pg.locator('.nd[data-id="t1"][data-flow]').count() === 1;
-  out.rpTool = (await txt(pg, '.nd[data-id="t2"] .now')).join('|');
-  out.rpTool1 = await pg.locator('.nd[data-id="t1"] > .now:not(.idl)').count();
+  out.rpTool = (await pg.locator('.nd[data-id="t2"]').getAttribute('data-now')) || '';
+  out.rpTool1 = await pg.locator('.nd[data-id="t1"][data-now]').count();
   out.rpChip = await pg.locator('#tlc').textContent();
   await pg.locator('#live').click();
   await pg.waitForTimeout(500);
@@ -1636,10 +1635,8 @@ class Round2Test(unittest.TestCase):
         self.assertIn("api", d["chips"][1].lower())
         self.assertIn("$1.20", d["chips"][1])
         self.assertEqual([g.lower() for g in d["groups"]], ["api", "web"])
-        self.assertEqual(sorted(t.lower().lstrip("/ ") for t in d["tags"]), ["api", "api", "web"])
         self.assertEqual(d["webCards"], 1)
         self.assertEqual(d["groupsFiltered"], 0)
-        self.assertEqual(d["tagsFiltered"], 0)
         self.assertEqual(d["allCards"], 3)
         # replay at T
         self.assertTrue(d["rpEdge"])
@@ -1742,15 +1739,14 @@ const { chromium } = require('playwright');
     await pg.waitForTimeout(300);
     return pg;
   };
-  // every connector endpoint lies on the border of the card it joins; returns the number of bad ones
+  // every connector starts and ends at the centre of the node it joins; returns [connectors, bad ones]
   const ends = (pg) => pg.evaluate(() => {
     const mm = document.getElementById('mm').getBoundingClientRect(); let bad = 0, n = 0;
-    const on = (x, y, el) => { const r = el.getBoundingClientRect(), L = r.left - mm.left, T = r.top - mm.top, R = r.right - mm.left, B = r.bottom - mm.top, t = 2;
-      return (Math.abs(x - L) <= t || Math.abs(x - R) <= t) && y >= T - t && y <= B + t || (Math.abs(y - T) <= t || Math.abs(y - B) <= t) && x >= L - t && x <= R + t; };
+    const at = (x, y, el) => { const r = el.getBoundingClientRect(); return Math.abs(x - (r.left + r.width / 2 - mm.left)) <= 2 && Math.abs(y - (r.top + r.height / 2 - mm.top)) <= 2; };
     document.querySelectorAll('#mmsvg .cn').forEach(p => {
       n++; const nums = p.getAttribute('d').match(/-?[\d.]+/g).map(Number);
       const q = id => document.querySelector('.nd[data-id="' + id + '"]');
-      if (!on(nums[0], nums[1], q(p.dataset.from)) || !on(nums[nums.length - 2], nums[nums.length - 1], q(p.dataset.to))) bad++;
+      if (!at(nums[0], nums[1], q(p.dataset.from)) || !at(nums[nums.length - 2], nums[nums.length - 1], q(p.dataset.to))) bad++;
     });
     return [n, bad];
   });
@@ -1767,11 +1763,16 @@ const { chromium } = require('playwright');
   out.ends = await ends(pg);
   out.groups = await pg.locator('.pg').allInnerTexts();
   out.ghost = await pg.locator('.ghost[data-more="t6"]').innerText();
-  out.sesText = await pg.locator('.nd[data-id="w1"]').innerText();
+  await pg.locator('.nd[data-id="w1"]').click();
+  out.sesText = await pg.locator('#panel').innerText();
+  await pg.keyboard.press('Escape');
   out.noScroll = await pg.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
   out.hot = await pg.locator('#mmsvg .cn.hot').count();
-  out.layout = await pg.evaluate(() => { const r = id => document.querySelector('.nd[data-id="' + id + '"]').getBoundingClientRect(); return [r('main').right <= r('t1').left, r('t1').right <= r('w1').left]; });
-  out.chips = await pg.locator('.nd[data-kind="root"] .ichip').allInnerTexts();
+  out.layout = await pg.evaluate(() => { const c = id => { const r = document.querySelector('.nd[data-id="' + id + '"]').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; };
+    const d = id => Math.hypot(c(id)[0] - c('main')[0], c(id)[1] - c('main')[1]); return [d('t1') > 30, d('w1') > d('t1')]; });
+  out.chips = await pg.locator('.ichip').allInnerTexts();
+  out.rootBadge = await pg.locator('.nd[data-kind="root"] .ib').innerText();
+  out.noCards = await pg.evaluate(() => document.querySelectorAll('.nd .ag-hd,.nd .chs,.nd .hl').length);
   // pulse
   await pg.evaluate(() => __mm.pulse({ op: 'send', from: 'main', to: 't2' }));
   await pg.waitForTimeout(150);
@@ -1786,7 +1787,9 @@ const { chromium } = require('playwright');
   const act = () => pg.evaluate(() => document.activeElement.dataset.id || '');
   const key = async (k) => { await pg.keyboard.press(k); return act(); };
   await pg.locator('.nd[data-id="main"]').focus();
-  out.nav = [await key('ArrowRight'), await key('ArrowDown'), await key('ArrowUp'), await key('ArrowRight'), await key('ArrowLeft'), await key('ArrowLeft'), await key('ArrowLeft')];
+  out.nav1 = [await key('ArrowRight'), await key('ArrowDown'), await key('ArrowUp')];
+  await pg.locator('.nd[data-id="t1"]').focus();
+  out.nav2 = [await key('ArrowRight'), await key('ArrowLeft'), await key('ArrowDown'), await key('ArrowDown'), await key('ArrowUp'), await key('ArrowUp'), await key('ArrowUp'), await key('ArrowUp')];
   await pg.locator('.nd[data-id="t1"]').focus();
   await pg.keyboard.press('Enter');
   out.panel = await pg.locator('#panel h2').innerText();
@@ -1803,8 +1806,8 @@ const { chromium } = require('playwright');
     pg = await open({ width: w, height: 800 });
     const k = w === 400 ? 'narrow' : 'narrow700';
     out[k] = await pg.evaluate(() => { const r = id => document.querySelector('.nd[data-id="' + id + '"]').getBoundingClientRect();
-      return { scroll: document.documentElement.scrollWidth <= window.innerWidth, rootAbove: r('main').bottom <= r('t1').top, agentIndent: r('t1').left > r('main').left + 10,
-               stack: r('t2').top >= r('t1').bottom, sesIndent: r('w1').left > r('t1').left + 10, sesBelow: r('w1').top >= r('t1').bottom,
+      const small = [...document.querySelectorAll('.nd.agn,.nd.rootnd,.nd.sat')].filter(e => { const b = e.getBoundingClientRect(); return b.width < 31.5 || b.height < 31.5; }).length;
+      return { scroll: document.documentElement.scrollWidth <= window.innerWidth, small: window.innerWidth >= 560 || small === 0, rootAbove: r('main').bottom > 0,
                mapOverflow: document.querySelector('.map').scrollWidth <= document.querySelector('.map').clientWidth }; });
     out[k + 'Ends'] = await ends(pg);
     if (shots && w === 400) await pg.screenshot({ path: shots + '/matrix-400.png', fullPage: true });
@@ -1844,15 +1847,16 @@ class MindMapTest(unittest.TestCase):
         self.assertEqual(d["errors"], [])
         # hierarchy: root > agents > sessions, parent links in data attributes
         self.assertEqual((d["root"], d["agents"], d["sessions"]), (1, 8, 7))  # t6 shows 3 of its 4
-        for w in ("ROOT AGENT", "MAIN AGENT / FRONT DESK", "orchestrates and delegates work", "inbox 2"):
-            self.assertIn(w, d["rootText"])
+        self.assertIn("ROOT AGENT", d["rootText"])
+        self.assertEqual(d["rootBadge"], "2")  # inbox badge
+        self.assertEqual(d["noCards"], 0)  # compact nodes: no card bodies
         self.assertEqual([c.split("\n")[0].split(" ")[0].lower() for c in d["chips"]], ["sock", "hooks"])
         par = set(d["parents"])
         for i in range(1, 9):
             self.assertIn("t%d>main" % i, par)
         for w, p in (("w1", "t1"), ("w2", "t1"), ("w3", "t6"), ("w7", "main"), ("w8", "t4")):
             self.assertIn("%s>%s" % (w, p), par)
-        self.assertIn("RUN 8501", d["sesText"])
+        self.assertIn("8501", d["sesText"])
         self.assertIn("Fix the map layout", d["sesText"])
         self.assertIn("sonnet", d["sesText"])
         self.assertIn("$0.50", d["sesText"])
@@ -1870,7 +1874,7 @@ class MindMapTest(unittest.TestCase):
         self.assertEqual(d["cn"], 8 + 7)
         self.assertEqual(d["ends"], [15, 0])
         self.assertGreaterEqual(d["hot"], 1)
-        self.assertEqual(d["layout"], [True, True])  # root left of agents left of sessions
+        self.assertEqual(d["layout"], [True, True])  # sessions orbit farther out than their agent
         self.assertTrue(d["noScroll"])
         # live pulse along the connector, capped
         self.assertGreaterEqual(d["pulse1"], 1)
@@ -1879,15 +1883,183 @@ class MindMapTest(unittest.TestCase):
         self.assertGreaterEqual(d["pulseMany"], 10)
         self.assertEqual(d["pulseGone"], 0)
         # keyboard: right = first child, down/up = siblings, left = parent
-        self.assertEqual(d["nav"], ["t1", "t2", "t1", "w1", "t1", "main", "main"])
+        self.assertEqual(d["nav1"], ["main", "w7", "main"])  # root: left/right do nothing, down = its sessions, up = back
+        self.assertEqual(d["nav2"], ["t2", "t1", "w1", "w2", "w1", "t1", "main", "main"])
         self.assertIn("Agent task 1", d["panel"])
         self.assertGreater(d["classicNodes"], 10)
         self.assertNotEqual(d["classicRing"], "")
-        # narrow: a vertical tree, no sideways scroll
+        # narrow: the same radial map scaled down, no sideways scroll, nodes stay tappable
         for k in ("narrow", "narrow700"):
             self.assertTrue(all(d[k].values()), d[k])
             self.assertEqual(d[k + "Ends"][1], 0)
-            self.assertEqual(d[k + "Ends"][0], 15)
+            self.assertEqual(d[k + "Ends"][0], 15 if k == "narrow700" else 12)  # 400 px shows one satellite per agent (+N for the rest)
+
+
+def radial_snap(n=10):
+    """10 agents in 2 projects, sessions, one attention, one failed (documented schema)."""
+    now = time.time()
+    nodes = [{"id": "service", "kind": "service", "label": "S", "state": "active", "detail": "d"},
+             {"id": "main", "kind": "desk", "label": "Front desk", "state": "active", "detail": "talking"},
+             {"id": "hooks", "kind": "hooks", "label": "Hooks", "state": "active", "detail": "14 a min"}]
+    placed = ["service", "main", "hooks"]
+    for i in range(1, n + 1):
+        tid = "t%d" % (190 + i)
+        node = {"id": tid, "kind": "thread", "label": "Task number %d for the project" % i, "state": "active" if i % 3 else "parked",
+                "detail": "active", "project": "api" if i <= n // 2 else "web"}
+        if i == 1:
+            node["activity"] = {"now": {"tool": "Edit", "target": "lean_map.py", "since_s": 3.0}, "top": [["Edit", 12], ["Bash", 7]],
+                                "recent": [], "files": 4, "errors": 0, "mcp": ["github"], "last_ts": now - 5}
+        if i == 2:
+            node["activity"] = {"now": None, "top": [["Bash", 2]], "recent": [], "files": 1, "errors": 1, "mcp": [], "last_ts": now - 30}
+        if i == 3:
+            node["state"] = "dead"
+            node["detail"] = "dead"
+        nodes.append(node)
+        placed.append(tid)
+    for j, (par, st) in enumerate([("t191", "alive"), ("t191", "done"), ("t191", "orphaned"), ("t191", "alive"), ("t194", "alive"), ("t196", "dead"), ("main", "alive")]):
+        w = {"id": "w%d" % (j + 1), "kind": "worker", "label": "run w%d" % (j + 1), "state": st, "detail": "d", "parent": par, "model": "sonnet",
+             "task": "Do the thing %d" % j, "age_s": 600,
+             "stats": {"turns": 7, "max_turns": 80, "tokens": 254349, "usd": 0.52, "model": "sonnet", "branch": "feature/x"}}
+        if par != "main":
+            w["project"] = "api"
+        nodes.append(w)
+        placed.append(w["id"])
+    return {"v": 1, "ts": "t", "service": {"up": True, "version": "9.9.9", "threads": n, "up_s": 100, "socket_ms": 4}, "paused": False,
+            "inbox": 2, "moving": [], "more": 0,
+            "projects": [{"slug": "api", "threads": n // 2, "workers": 6, "usd_today": 1.2, "tokens_today": 4, "errors_30m": 0},
+                         {"slug": "web", "threads": n - n // 2, "workers": 0, "usd_today": 0.1, "tokens_today": 4, "errors_30m": 0}],
+            "totals": {"runs_today": 9, "usd_today": 3.1, "tokens_today": 1200000, "saved_today": 400000, "tools_per_min": 14.0, "errors_30m": 2,
+                       "usd_yesterday": 5.0, "fail_rate_30m": 0.8, "workers_done": 2, "workers_queued": 1, "projects_online": 2},
+            "feed": [], "nodes": nodes, "edges": [{"from": "main", "to": "t191", "kind": "message", "age_s": 3, "label": "hi"}], "placed": placed}
+
+
+RADIAL_JS = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const { file } = JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));
+  const b = await chromium.launch();
+  const out = { errors: [] };
+  const open = async (vp) => {
+    const pg = await b.newPage({ viewport: vp });
+    pg.setDefaultTimeout(10000);
+    pg.on('pageerror', e => out.errors.push(String(e).slice(0, 200)));
+    await pg.goto('file://' + file);
+    await pg.waitForSelector('#mmsvg .cn', { state: 'attached' });
+    await pg.waitForTimeout(300);
+    return pg;
+  };
+  const geo = (pg) => pg.evaluate(() => {
+    const mm = document.getElementById('mm').getBoundingClientRect();
+    const c = el => { const r = el.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; };
+    const rc = c(document.querySelector('.nd[data-id="main"]'));
+    const ang = el => Math.atan2(c(el)[1] - rc[1], c(el)[0] - rc[0]), dist = el => Math.hypot(c(el)[0] - rc[0], c(el)[1] - rc[1]);
+    const ag = [...document.querySelectorAll('.nd.agn')];
+    const angles = ag.map(ang).sort((x, y) => x - y);
+    const gaps = angles.map((a, i) => (i ? a - angles[i - 1] : angles[0] + 2 * Math.PI - angles[angles.length - 1]));
+    const ses = [...document.querySelectorAll('.nd.sat[data-parent^="t"]')].map(s => {
+      const p = document.querySelector('.nd[data-id="' + s.dataset.parent + '"]'); let d = Math.abs(ang(s) - ang(p)); if (d > Math.PI) d = 2 * Math.PI - d;
+      return [dist(s) - dist(p), d]; });
+    const box = ag.map(e => { const r = e.getBoundingClientRect(), l = e.querySelector('.lb').getBoundingClientRect();
+      return [Math.max(r.right, l.right) - Math.min(r.left, l.left), Math.max(r.bottom, l.bottom) - Math.min(r.top, l.top)]; });
+    const small = [...document.querySelectorAll('.nd.agn,.nd.rootnd,.nd.sat')].filter(e => { const r = e.getBoundingClientRect(); return r.width < 31.5 || r.height < 31.5; }).length;
+    return { rootOff: [Math.abs(rc[0] - (mm.left + mm.width / 2)) / mm.width, Math.abs(rc[1] - (mm.top + mm.height / 2)) / mm.height], n: ag.length, gaps,
+      ses, maxW: Math.max(...box.map(x => x[0])), maxH: Math.max(...box.map(x => x[1])), radii: ag.map(dist).sort((x, y) => x - y).filter((v, i, s) => i === 0 || v - s[i - 1] > 12).length,
+      mm: [mm.width, mm.height], small, scroll: document.documentElement.scrollWidth <= window.innerWidth,
+      pg: [...document.querySelectorAll('.pg')].length, arcs: document.querySelectorAll('.parc').length };
+  });
+  let pg = await open({ width: 1280, height: 900 });
+  out.g = await geo(pg);
+  out.lbl = await pg.locator('.nd[data-id="t191"] .lb').innerText();
+  out.badges = await pg.evaluate(() => [document.querySelectorAll('.nd.agn .bd.attn').length, document.querySelectorAll('.nd.agn .bd.fail').length, document.querySelectorAll('.nd.agn .td').length]);
+  out.ghost = await pg.locator('.ghost[data-more="t191"]').innerText();
+  // hover shows a tooltip, leaving hides it
+  await pg.locator('.nd[data-id="t191"]').hover();
+  await pg.waitForTimeout(100);
+  out.tip = await pg.locator('#ntip').isVisible() ? await pg.locator('#ntip').innerText() : '';
+  await pg.mouse.move(5, 5);
+  out.tipGone = !(await pg.locator('#ntip').isVisible());
+  // click opens the full details; the branch is highlighted, the rest dimmed
+  await pg.locator('.nd[data-id="t191"]').click();
+  out.panel = await pg.locator('#panel').innerText();
+  out.dim = await pg.evaluate(() => [document.querySelectorAll('.nd.dm').length, document.querySelector('.nd[data-id="t191"]').classList.contains('dm'), document.querySelector('.nd[data-id="w1"]').classList.contains('dm'), document.querySelector('.nd[data-id="t195"]').classList.contains('dm')]);
+  await pg.keyboard.press('Escape');
+  out.dimGone = await pg.locator('.nd.dm').count();
+  await pg.locator('.nd[data-id="t192"]').focus();
+  await pg.keyboard.press('Enter');
+  out.enter = await pg.locator('#panel h2').innerText();
+  await pg.close();
+  pg = await open({ width: 400, height: 800 });
+  out.n = await geo(pg);
+  await pg.close();
+  await b.close();
+  console.log(JSON.stringify(out));
+})().catch(e => { console.log(JSON.stringify({ error: String(e).slice(0, 600) })); process.exit(0); });
+"""
+
+
+class RadialMapTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not have_playwright():
+            raise unittest.SkipTest("node/playwright/browser not available")
+
+    def test_radial_layout_and_interaction(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        page = os.path.join(tmp, "rd.html")
+        with open(page, "w") as fh:
+            fh.write(lean_maplive.build_html(radial_snap(), None))
+        args = os.path.join(tmp, "args.json")
+        with open(args, "w") as fh:
+            json.dump({"file": page}, fh)
+        js = os.path.join(tmp, "r.js")
+        with open(js, "w") as fh:
+            fh.write(RADIAL_JS)
+        r = subprocess.run([NODE, js, args], capture_output=True, text=True, timeout=150, env=node_env())
+        self.assertTrue(r.stdout.strip(), r.stderr)
+        d = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertNotIn("error", d)
+        self.assertEqual(d["errors"], [])
+        g = d["g"]
+        # the root agent sits at the centre of a map of about 640 x 520
+        self.assertLess(g["rootOff"][0], 0.05)
+        self.assertLess(g["rootOff"][1], 0.05)
+        self.assertLessEqual(g["mm"][0], 641)
+        self.assertLessEqual(g["mm"][1], 521)
+        # ten agents evenly spread around it, on two rings
+        self.assertEqual(g["n"], 10)
+        for gap in g["gaps"]:
+            self.assertAlmostEqual(gap, 2 * 3.141592653589793 / 10, delta=0.06)
+        self.assertEqual(g["radii"], 2)
+        # session satellites lie outside their agent on about the same angle
+        self.assertEqual(len(g["ses"]), 5)  # 3 + 1 + 1 (t191 has a fourth, shown as +1)
+        for off, da in g["ses"]:
+            self.assertGreater(off, 15)
+            self.assertLess(da, 0.12)
+        # compact nodes (node plus its label)
+        self.assertLessEqual(g["maxW"], 120)
+        self.assertLessEqual(g["maxH"], 90)
+        self.assertEqual(d["lbl"].split("\n")[0].split(" ")[0], "t191")
+        self.assertEqual(d["badges"][0] >= 1 and d["badges"][1] >= 1 and d["badges"][2] >= 1, True)  # attention, failed, tool running
+        self.assertEqual(d["ghost"], "+1")  # 4 sessions on t191, 3 shown
+        self.assertEqual((g["pg"], g["arcs"]), (2, 2))  # project labels and faint arcs
+        # tooltip: name, status, tool now
+        self.assertIn("Task number 1", d["tip"])
+        self.assertIn("Edit", d["tip"])
+        self.assertTrue(d["tipGone"])
+        # click: full details, the branch stays lit and the others dim
+        for w in ("Edit · lean_map.py", "Top tools", "Health", "Project", "Sessions", "Cost today", "sonnet", "7/80 turns", "$0.52", "Do the thing 0"):
+            self.assertIn(w, d["panel"])
+        self.assertGreater(d["dim"][0], 5)
+        self.assertEqual(d["dim"][1:], [False, False, True])
+        self.assertEqual(d["dimGone"], 0)
+        self.assertIn("Task number 2", d["enter"])
+        # 400 px: no sideways scroll, nodes stay tappable, two rings for 10 agents
+        n = d["n"]
+        self.assertTrue(n["scroll"])
+        self.assertEqual(n["small"], 0)
+        self.assertEqual(n["radii"], 2)
+        self.assertLess(n["rootOff"][0], 0.05)
 
 
 if __name__ == "__main__":
