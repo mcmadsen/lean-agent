@@ -11254,9 +11254,53 @@ def register_source():
             fh.write(root + "\n")
 
 
+DESK_MODEL = "sonnet"
+DESK_EFFORT = "high"
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")  # `claude --help`: --effort <level>
+
+
+def desk_effort():
+    """Reasoning effort of the hosted front desk ONLY, as the `--effort` flag of its launch command: LEAN_AGENT_DESK_EFFORT
+    (low|medium|high|xhigh|max; `default`/`off` = leave it to Claude Code), else high; an invalid value is ignored (high). Thread
+    sessions get none. (The app desk's effort follows in 0.45.92, once threads have their own folder.)"""
+    v = (os.environ.get("LEAN_AGENT_DESK_EFFORT") or "").strip().lower()
+    if v in ("default", "off", "none"):
+        return None
+    return v if v in EFFORT_LEVELS else DESK_EFFORT
+
+
+def desk_effort_args():
+    e = desk_effort()
+    return ["--effort", e] if e else []
+
+
+def main_session_argv(cmd, extra, h, name, sid):
+    """The hosted main's command line: session_argv plus the desk's effort. Thread sessions use session_argv alone."""
+    return session_argv(list(cmd) + desk_effort_args(), extra, h, name, sid)
+
+
+def sync_desk_settings(data, h):
+    """The desk folder's model (sonnet) when none is set and `up --model default` was not chosen (`up --model` decides at every
+    start; default = your own model). No effortLevel is written: the folder is shared with thread sessions until 0.45.92, which
+    must keep Claude Code's default / your own effort. An effortLevel an earlier version wrote (recorded in desk-effort.json) is
+    removed again; one you set yourself never is."""
+    mark_path = home("desk-effort.json")
+    if os.path.exists(mark_path):
+        written = load_json(mark_path, {}).get("effortLevel")
+        if written is not None and data.get("effortLevel") == written:
+            data.pop("effortLevel")
+        try:
+            os.remove(mark_path)
+        except OSError:
+            pass
+    if load_json(home("desk-model.json"), {}).get("choice") != "default":
+        data.setdefault("model", DESK_MODEL)
+
+
 def refresh_desk_folder(h):
     """Make a session started in the desk folder (<home>/home, where the hosted desk's CLAUDE.md already lives) a proper desk,
-    automatically (prepare_home: `home`, `update`, service start): lean-agent's own env keys in its .claude/settings.json.
+    automatically (prepare_home: `home`, `update`, service start): lean-agent's own env keys and the desk's model (sonnet, unless you set one
+    or chose `up --model default`) in its .claude/settings.json.
     Idempotent (written only when changed). Nothing is written to the lean home root (workers under it would load it) and the
     user's global settings are never touched. Whether a session is the desk is decided by its session id, never by this file."""
     path = os.path.join(h, ".claude", "settings.json")
@@ -11268,6 +11312,7 @@ def refresh_desk_folder(h):
         if os.environ.get("LEAN_AGENT_HOME"):
             env["LEAN_AGENT_HOME"] = os.environ["LEAN_AGENT_HOME"]  # a GUI-launched session finds the same home and socket
         data["env"] = env
+        sync_desk_settings(data, h)
         if data != cur:
             save_json(path, data)
             return True
@@ -12740,6 +12785,7 @@ def set_home_model(h, model):
     else:
         data["model"] = model
     save_json(path, data)
+    save_json(home("desk-model.json"), {"choice": "default" if model in (None, "", "default") else model})  # an explicit choice, kept by refresh
 
 
 def claude_global_config():
@@ -13125,12 +13171,12 @@ def cmd_up(a):
     if a.local:
         env["LEAN_AGENT_LOCAL_UP"] = "1"  # a terminal session `up --local` runs is the front desk
         try:
-            os.execvpe(cmd[0], cmd + extra, env)  # e.g. `lean-agent up -- --debug --debug-file /tmp/rc.log`
+            os.execvpe(cmd[0], cmd + desk_effort_args() + extra, env)  # e.g. `lean-agent up -- --debug --debug-file /tmp/rc.log`
         except FileNotFoundError:
             die("'claude' not found on PATH")
     if use_session:
         return host_session(cmd, extra, env, h, a.name)
-    return remote_control(cmd + extra, env, h)
+    return remote_control(cmd + desk_effort_args() + extra, env, h)
 
 
 def session_argv(cmd, extra, h, name, sid, role="main"):
@@ -13154,7 +13200,7 @@ def host_session(cmd, extra, env, h, name):
         sid = load_json(home("up.json"), {}).get("session_id") or str(uuid.uuid4())
         if not re.fullmatch(r"[0-9a-fA-F-]{36}", sid):
             sid = str(uuid.uuid4())
-        return session_argv(cmd, extra, h, name, sid), sid
+        return main_session_argv(cmd, extra, h, name, sid), sid
 
     state = {"seen": "", "stale": False}
 
@@ -13293,7 +13339,7 @@ def first_turn_context(path):
                     continue
                 u = ((e.get("message") or {}).get("usage") if isinstance(e, dict) else None)
                 if isinstance(u, dict) and e.get("type") == "assistant":
-                    n = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+                    n = usage.context_tokens(u)
                     if n:
                         return n
     except OSError:
@@ -13302,7 +13348,7 @@ def first_turn_context(path):
 
 
 def desk_context_check(app_path=None, hosted_path=None):
-    """(ok, line) comparing the attached app desk's first-turn context with the hosted desk's; ("", None) when either is unknown."""
+    """(ok, line) comparing the attached app desk's first-turn context with the hosted desk's; (None, "") when either is unknown."""
     app_path = app_path or (lean_desk.attached() or {}).get("transcript")
     hosted_path = hosted_path or service_session.info("main").get("transcript")
     if not (app_path and hosted_path) or app_path == hosted_path:

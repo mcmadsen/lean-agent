@@ -252,7 +252,7 @@ While an app desk is pending, new thread reports are no longer typed into the ho
 through its hooks right after the switch. Only what a user typed counts for the idle rule (not what the service typed). A pending
 desk waits at most 5 minutes (`desk_max_pending_s` in `config.json`): after that the switch happens as soon as the hosted main is
 not mid-turn and has no dialog open, even after recent typing. A transcript quiet for 10 minutes no longer counts as mid-turn. A refused
-checkpoint is retried twice, then the main is stopped without it, and its process tree is killed if it does not end within 20 s.
+checkpoint is retried twice, then the main is stopped without it, and its process tree is killed if it does not end within 10 s.
 `lean-agent desk status` and `doctor` show why a pending switch waits, in one line.
 
 **Context size of the app desk.** The hosted desk starts with CLI flags (`--strict-mcp-config`, `--disable-slash-commands`, `--settings`) that
@@ -261,7 +261,11 @@ and the service start, lean-agent keys only, never your global settings) therefo
 `enabledPlugins` false for every plugin except lean-agent, `disableClaudeAiConnectors`, `enableAllProjectMcpServers`
 false, deny rules for the tools of your user/desktop MCP servers, `disableBundledSkills` and `syncClaudeAiSkills` false,
 `Agent(<name>)` deny for your custom agents, a deny list of built-in tools the desk never uses, and `claudeMdExcludes` for your
-global `CLAUDE.md`, `~/.claude/rules` and instruction files above the folder. `lean-agent doctor` compares the attached app desk's
+global `CLAUDE.md`, `~/.claude/rules` and instruction files above the folder. The desk folder's model is sonnet unless one is set there or
+`up --model default` was chosen (`up --model` decides at every start; `default` means your own model). Effort high applies to the hosted desk now
+(`--effort` on its launch command only; `LEAN_AGENT_DESK_EFFORT=low|medium|high|xhigh|max`, or `default` to leave it to Claude Code) and to the app
+desk from 0.45.92, when thread sessions move to their own folder (no `effortLevel` is written to the shared folder before that, so thread
+sessions keep Claude Code's default or your own effort). `lean-agent doctor` compares the attached app desk's
 first-turn context (from its transcript) with the hosted desk's and warns above 1.5x.
 
 Estimate, not measured here (the container's Claude Code is too old to start a desk and has no sign-in), from a field report of an
@@ -274,7 +278,7 @@ no longer loads the ~8k thread guide and lands near the hosted desk. Threads tha
 transcripts are copied to the new folder on update or service start and resumed from there. Check your own numbers with `/context` in the app session and the doctor line.
 
 The only manual steps: open a new local session in the Claude app with the folder `~/lean-agent-desk` (or `~/.lean-agent/home`; the app remembers it) and
-flip the app's Remote Control switch if you want it on your phone. The folder's settings (lean-agent's own env keys only, never
+flip the app's Remote Control switch if you want it on your phone. The folder's settings (lean-agent's own keys only: env, trimming, and the `model` default described above, never
 your global settings; nothing is written to `~/.lean-agent` itself) are written and refreshed by `lean-agent home`, `update` and the service start itself.
 
 ```sh

@@ -2896,7 +2896,7 @@ class CliTest(unittest.TestCase):
         self.cli("up", "--name", "la", "--", "--debug", "--debug-file", "/tmp/rc.log",
                  check=False, LEAN_AGENT_CLAUDE=argv_dumper)
         with open(fake_log) as fh:
-            self.assertRegex(fh.read(), r"^--model sonnet --strict-mcp-config --mcp-config \{\"mcpServers\": \{\}\} --disable-slash-commands --settings \{.*\} "
+            self.assertRegex(fh.read(), r"^--model sonnet --effort high --strict-mcp-config --mcp-config \{\"mcpServers\": \{\}\} --disable-slash-commands --settings \{.*\} "
                                         r"--remote-control la --session-id [0-9a-f-]{36} "
                                         r"--debug --debug-file /tmp/rc.log$")
 
