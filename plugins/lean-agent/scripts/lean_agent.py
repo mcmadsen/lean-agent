@@ -15785,7 +15785,7 @@ def report_orphaned_run(tid, run_id, status, summary):
             return
         first = next((ln.strip() for ln in str(summary or "").splitlines() if ln.strip()), "")
         bad = status in ("failed", "error", "timed out") or status.startswith("stopped")
-        service_session.queue_report(tid, "blocked" if bad else "done", f"run {run_id} {status}" + (f": {first[:200]}" if first else ""))
+        service_session.queue_report(tid, "blocked" if bad else "done", f"run {run_id} {status}" + (f": {first[:200]}" if first else ""), live_check=False)
     except Exception:
         pass
 
@@ -16312,13 +16312,14 @@ def thread_action(a):
             lean_goals.finished(tid, text)
         except Exception:
             pass
-        service_session.save_last_report(tid, "done", text)
+        rkind = "progress" if getattr(a, "kind", None) == "progress" else "done"
+        service_session.save_last_report(tid, rkind, text)
         try:  # the full report answers the user's open questions to this thread (queue_report then finds none open)
             import lean_myq
-            lean_myq.thread_report(tid, "done", text)
+            lean_myq.thread_report(tid, rkind, text)
         except Exception:
             pass
-        service_session.queue_report(tid, "done", service_session._short(text, tid=tid), tag="explicit", force=True)
+        service_session.queue_report(tid, rkind, service_session._short(text, tid=tid), tag="explicit", force=True)
         service_session.note_turn(tid, True, "done")
         print(f"report for {tid} queued, NOT yet delivered to the front desk. End your turn. Say it was sent only after "
               f"`lean-agent thread reports {tid} --mine` shows it as delivered.")
@@ -19128,6 +19129,7 @@ def build_parser():
     s.add_argument("args", nargs="*", help='new "title" ["<text>"]; send tN "<text>"; answer tN [qN] "<answer>"; other actions: ids')
     s.add_argument("--show", metavar="N", help="files: print file number N (Markdown/text, capped)")
     s.add_argument("--options", help="ask: the choices offered to main, \"a|b|c\"")
+    s.add_argument("--kind", choices=["done", "progress"], help="report: progress = work you started is still running (answers nothing); default done")
     s.add_argument("--from-run", action="append", metavar="RUN_ID", help="send|new: inline that run's final summary into the message (capped; repeatable)")
     s.add_argument("--prompt-file", "-F", help="new|send|report: the first message / the message for the thread's session (- = stdin); or give it as a positional argument, not both")
     s.add_argument("--json", action="store_true", help="list: as JSON")

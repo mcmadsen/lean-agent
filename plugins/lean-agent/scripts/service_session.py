@@ -1885,8 +1885,8 @@ def ensure_question_items():
                 pass
 
 
-def queue_report(tid, kind, text, tag="", force=False, waiting=True):
-    """Queue one thread report (kind: done | blocked | needs-you | question) for the main session; the mode filters it,
+def queue_report(tid, kind, text, tag="", force=False, waiting=True, live_check=True):
+    """Queue one thread report (kind: done | progress | blocked | needs-you | question) for the main session; the mode filters it,
     except an explicit question (`thread ask`) or an explicit report (`thread report`, force), which always go through.
     `tag` marks where it came from (explicit | auto)."""
     if tid != "main" and tid in lean_threads.cleared_ids():
@@ -1899,10 +1899,10 @@ def queue_report(tid, kind, text, tag="", force=False, waiting=True):
     if not force and kind not in ("question", "job-failed", "chase") and (mode == "off" or (mode == "questions-only" and kind != "needs-you")):
         return False
     os.makedirs(lean_home(), exist_ok=True)
-    if kind in ("done", "needs-you", "blocked", "question"):
-        try:  # the user's open questions to this thread: answered by its report (a counter-question keeps them open)
+    if kind in ("done", "needs-you", "blocked", "question", "progress"):
+        try:  # the user's open questions to this thread: answered by its report (a counter-question or progress keeps them open)
             import lean_myq
-            lean_myq.thread_report(tid, kind, text)
+            lean_myq.thread_report(tid, kind, text, live_check=live_check)
         except Exception:
             pass
     if kind != "chase":
@@ -2251,7 +2251,7 @@ def drop_reports(taken):
 ASK_LINE = ("NEEDS THE USER ({tids}): ask each question NOW with AskUserQuestion (its options), then run the answer with "
             "`{cmd}`. Do not answer for the user; never leave it waiting.")
 REPUSH_AFTER = 120  # seconds a thread question may stay unanswered before it is pushed to main once more
-REPORT_LABELS = {"needs-you": "QUESTION: ", "blocked": "STUCK: ", "job-failed": "FAILED: ", "chase": "CHASED: "}
+REPORT_LABELS = {"progress": "STILL WORKING: ", "needs-you": "QUESTION: ", "blocked": "STUCK: ", "job-failed": "FAILED: ", "chase": "CHASED: "}
 
 
 def reports_message(items, dropped=0):
