@@ -34,6 +34,8 @@ DEFAULT_PORT = 47821  # the stable, bookmarkable port (LEAN_AGENT_MAP_PORT chang
 REFRESH_FILE = "refresh.json"
 REFRESH_EVERY = 3.0  # a registered page file is rewritten at most this often, and only when the map changed
 HEARTBEAT = 20.0  # ... or when it is this old (so a quiet map is not mistaken for a stopped refresh)
+REPLAY_S = 3600  # the replay ring keeps this much of what the endpoint broadcasts
+REPLAY_MAX = 5000
 REFRESH_MIN = 30  # default minutes a `map --html` file keeps refreshing
 
 
@@ -158,6 +160,7 @@ class Live:
         self.last = None  # (hash, message)
         self.wake = threading.Event()
         self.cache = None  # (monotonic, snapshot)
+        self.replay = collections.deque(maxlen=REPLAY_MAX)  # what on_request already produces, memory only
         self.svg_cache = {}  # (w, h, mini) -> (monotonic, svg)
         self.last_poll = float("-inf")
         self.good = None  # last snapshot that computed
@@ -292,6 +295,19 @@ class Live:
             if path == "/snap":
                 self.last_poll = time.monotonic()
                 return self._reply(conn, 200, "OK", json.dumps(self.get_snap()).encode(), "application/json", cors=True)
+            if path == "/history":
+                try:
+                    days = max(1, min(90, int((q.get("days") or ["14"])[0])))
+                except ValueError:
+                    days = 14
+                body = json.dumps(lean_map.history_cached(self.home, days)).encode()
+                return self._reply(conn, 200, "OK", body, "application/json", cors=True)
+            if path == "/replay":
+                try:
+                    since = float((q.get("since") or ["0"])[0])
+                except ValueError:
+                    since = 0.0
+                return self._reply(conn, 200, "OK", json.dumps({"events": self.replay_since(since)}).encode(), "application/json", cors=True)
             if path == "/map.svg":
                 self.last_poll = time.monotonic()
                 def dim(k, d):
@@ -317,10 +333,38 @@ class Live:
                 except queue.Full:
                     pass  # a stuck page loses updates, never blocks the service
 
+    def record_replay(self, op, req, now=None):
+        """Keeps one broadcast-worthy item for /replay: socket events and finished tool calls (tool name + short safe target
+        only). Never raises, computes nothing."""
+        try:
+            now = now or time.time()
+            while self.replay and now - self.replay[0]["ts"] > REPLAY_S:
+                self.replay.popleft()
+            if op == "tool":
+                if not isinstance(req, dict) or req.get("phase") == "pre" or not req.get("node") or not req.get("tool"):
+                    return
+                import lean_activity as act
+                node = act._clean(req.get("node"), 40)
+                self.replay.append({"ts": now, "from": node, "to": "service", "op": "tool", "node": node,
+                                    "tool": act._clean(req.get("tool"), 30), "target": act._clean(req.get("target"), 70),
+                                    "ok": bool(req.get("ok", True))})
+                return
+            ft = event_nodes(op, req)
+            if ft:
+                self.replay.append({"ts": now, "from": ft[0], "to": ft[1], "op": str(op), "node": None, "tool": None, "target": None, "ok": True})
+        except Exception:
+            pass
+
+    def replay_since(self, since, now=None):
+        now = now or time.time()
+        lo = max(float(since), now - REPLAY_S)
+        return [dict(e, ts=round(e["ts"], 3)) for e in list(self.replay) if e["ts"] > lo]
+
     def on_request(self, op, req):
         """Called by the service socket per request; cheap and never raises."""
         if op == "map":
             self.rwake.set()  # `map --html` just registered a file: the refresher looks again
+        self.record_replay(op, req)
         if not self.clients:
             return
         try:
