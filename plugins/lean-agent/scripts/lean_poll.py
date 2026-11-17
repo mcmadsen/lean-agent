@@ -130,7 +130,7 @@ def finish(rec, status, line):
         import service_session
         tid = rec.get("thread") or "poll"
         service_session.queue_report(tid, "done" if status == "done" else ("blocked" if rec.get("thread") else "job-failed"),
-                                     text, force=True, waiting=False)
+                                     text, force=True, waiting=False, live_check=False)
     except Exception:  # noqa: BLE001
         pass
     save(rec)  # after the report is queued: whoever sees the final state finds the report

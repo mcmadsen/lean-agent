@@ -88,13 +88,34 @@ def _answer(items, e, text, ref, now):
     e.pop("reminded", None)
     e.pop("announced", None)
     e.pop("note", None)
+    e.pop("progress_ts", None)
 
 
-def thread_report(tid, kind, text, now=None):
+def live_run(tid):
+    """True when thread `tid` still has a live (non-helper) worker run it started."""
+    try:
+        for _rid, m in lean_common.running_runs(lean_common.lean_home()):
+            if m.get("thread") == tid and m.get("role") not in lean_common.INTERNAL_ROLES:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _first_sentence(text, n=160):
+    t = " ".join(str(text or "").split())
+    m = re.search(r"[.!?](?:\s|$)", t)
+    return (t[:m.start() + 1] if m else t)[:n]
+
+
+def thread_report(tid, kind, text, now=None, live_check=True):
     """A report of thread `tid` answers its open questions asked before now. A counter-question (kind question) keeps them
-    open and says so. Returns the entries changed."""
+    open and says so. An interim report (kind progress, or a done report while the thread still has a live run it started,
+    unless live_check is off) answers nothing: the question stays open with a note. Returns the entries changed."""
     now = time.time() if now is None else now
     out = []
+    if kind == "done" and live_check and live_run(tid):
+        kind = "progress"
     with lean_common.file_lock(path()):
         items = _load()
         for x in items:
@@ -102,6 +123,9 @@ def thread_report(tid, kind, text, now=None):
                 continue
             if kind == "question":
                 x["note"] = f"{tid} asked back: " + " ".join(str(text or "").split())[:200]
+            elif kind == "progress":
+                x["note"] = f"{tid} working: " + _first_sentence(text)
+                x["progress_ts"] = now
             elif kind in ("done", "needs-you", "blocked"):
                 _answer(items, x, text, f"{kind} report of {tid}", now)
             else:
@@ -237,16 +261,28 @@ def unread():
     return _unread(_load())
 
 
+def in_progress(items=None):
+    """Open questions whose thread reported interim progress (not answers: nothing to ack)."""
+    items = _load() if items is None else items
+    return [x for x in items if x.get("status") == "open" and x.get("progress_ts") and not lean_private.hides(thread=x.get("target"))]
+
+
 def header(now=None):
     u = unread()
-    return f"{len(u)} unread answer{'s' if len(u) != 1 else ''} ({', '.join(qn(x) for x in u)})" if u else ""
+    p = in_progress()
+    out = f"{len(u)} unread answer{'s' if len(u) != 1 else ''} ({', '.join(qn(x) for x in u)})" if u else ""
+    if p:
+        out += (" \u00b7 " if out else "") + f"{len(p)} in progress ({', '.join(qn(x) for x in p)})"
+    return out
 
 
 def block(now=None):
     """The front desk's first lines while answers are unread: one line per answer (max 5), before any table."""
     u = unread()
+    p = in_progress()
+    prog = [f"{qn(x)} ({x.get('target')}) in progress, not answered yet, nothing to ack: {_cell(x.get('note'), 120)}" for x in p[-BLOCK_MAX:]]
     if not u:
-        return ""
+        return "\n".join(["IN PROGRESS (not answers; never call them answers, no ack):"] + prog) if prog else ""
     lines = ["ANSWERS FOR YOU (start your reply with these lines, before any table, never inside one; "
              "put the line '" + header() + "' above any summary/status table):"]
     for x in u[-BLOCK_MAX:][::-1]:
@@ -256,6 +292,8 @@ def block(now=None):
     if len(u) > BLOCK_MAX:
         lines.append(f"+{len(u) - BLOCK_MAX} more: q unread")
     lines.append("When the user says ack / ack N, run `lean-agent myq ack` (all) or `lean-agent myq ack qN ...`.")
+    if prog:
+        lines += ["IN PROGRESS (not answers, no ack):"] + prog
     return "\n".join(lines)
 
 
@@ -343,7 +381,7 @@ def table(open_only=False, thread=None, now=None):
     out = ["| # | When | To | Status | Question | Answer |", "|---|---|---|---|---|---|"]
     for x in rows:
         ans = _cell(x.get("answer"), 60) or (_cell(x.get("note"), 60) if x.get("note") else "")
-        out.append(f"| {qn(x)} | {_age(x.get('ts'), now)} ago | {x.get('target')} | {x.get('status')} | "
+        out.append(f"| {qn(x)} | {_age(x.get('ts'), now)} ago | {x.get('target')} | {'in progress' if x.get('status') == 'open' and x.get('progress_ts') else x.get('status')} | "
                    f"{_cell(x.get('text'), 50).replace('|', '/')} | {ans.replace('|', '/')} |")
     return pre + "\n".join(out)
 
