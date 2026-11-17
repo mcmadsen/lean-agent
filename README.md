@@ -275,7 +275,18 @@ the app session's heartbeat has been gone for 30 minutes (app closed, Mac asleep
 Control main, so the phone keeps working. No flapping: at least 10 minutes between switches; every switch is logged and
 shown in `doctor`, `lean-agent desk status` and the map ("desk: app session" or "desk: hosted (Remote Control)").
 
-The only manual steps: open a new local session in the Claude app with the folder `~/.lean-agent/home` (the app remembers it) and
+The service creates a shortcut `~/lean-agent-desk` -> the desk folder (macOS and Linux; at service start, `home` and `update`;
+only if that path does not exist or already is this symlink, nothing else is ever overwritten; `lean-agent config desk-shortcut off`
+to skip it): open `~/lean-agent-desk` in the Claude app. A session started there is the same desk as one in `~/.lean-agent/home`.
+
+**On Mac:** the service starts at login (launchd). To have the app desk come back by itself, add the Claude app to macOS
+Login Items (System Settings > General > Login Items) and leave the desk session open in it; when the app reopens and that
+session resumes, its SessionStart (resume) attaches it, exactly like a new one. The service remembers who the desk was: when it
+was the app, a restarted service waits up to 3 minutes (`desk_boot_wait_s` in `config.json`, default 180) for the app desk to attach before
+hosting its own main (reports wait in the inbox meanwhile); if it attaches in time no hosted main is ever started. The 10-minute
+gap between switches does not apply to the first switch after a service start, nor to a hosted main nobody has typed into yet.
+
+The only manual steps: open a new local session in the Claude app with the folder `~/lean-agent-desk` (or `~/.lean-agent/home`; the app remembers it) and
 flip the app's Remote Control switch if you want it on your phone. The folder's settings (lean-agent's own env keys only, never
 your global settings; nothing is written to `~/.lean-agent` itself) are written and refreshed by `lean-agent home`, `update` and the service start itself.
 

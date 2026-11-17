@@ -17,6 +17,8 @@ import lean_common
 STALE_SECS = 30 * 60
 MODES = ("auto", "hosted", "external")
 SWITCH_GAP = 10 * 60  # seconds between two switches of the active desk in auto mode (no flapping)
+BOOT_WAIT = 180  # seconds a restarted service waits for the app desk (when it was the last owner) before hosting its own main
+SHORTCUT_NAME = "lean-agent-desk"
 
 
 lean_home = lean_common.lean_home
@@ -29,6 +31,35 @@ def desk_dir():
 
 def desk_dirs():
     return [desk_dir()]
+
+
+def shortcut_path():
+    return os.path.join(os.path.expanduser("~"), SHORTCUT_NAME)
+
+
+def shortcut_on():
+    v = config().get("desk_shortcut")
+    return v != "off" and sys.platform != "win32"
+
+
+def ensure_shortcut():
+    """~/lean-agent-desk -> the desk folder, idempotent. Created only when the path does not exist; an existing symlink
+    to the desk folder is left alone; anything else (file, folder, foreign symlink) is never touched. True when it exists as ours."""
+    if not shortcut_on():
+        return False
+    link, target = shortcut_path(), desk_dir()
+    try:
+        if os.path.lexists(link):
+            return os.path.islink(link) and os.readlink(link) == target
+        os.symlink(target, link)
+        return True
+    except OSError:
+        return False
+
+
+def boot_wait_s():
+    v = config().get("desk_boot_wait_s")
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 else BOOT_WAIT
 
 
 def _read(path):

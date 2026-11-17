@@ -346,11 +346,31 @@ class Auto(Base):
         sh.cur = ss.ExternalHost()
         sh.cur.stop = mock.Mock()
         lean_desk.attach("s1", None, None, self.clock[0] - 40 * 60)  # heartbeat gone
+        sh.switches = 1  # a later switch (the first one after a start ignores the gap)
         sh.last_switch = self.clock[0] - 300
         self.assertIsNone(sh.tick(self.clock[0]))
         sh.cur.stop.assert_not_called()
         sh.last_switch = self.clock[0] - 601
         self.assertEqual(sh.tick(self.clock[0]), "hosted")
+
+    def test_first_switch_after_start_ignores_the_gap(self):
+        sh = self.switch()
+        lean_desk.attach("s1", None, None, self.clock[0])
+        sh.last_switch = self.clock[0] - 5  # service just started
+        sh.cur.last_input = self.clock[0] - 120
+        with mock.patch.object(ss, "mid_turn", return_value=False), mock.patch.object(ss, "checkpoint_session"):
+            self.assertEqual(sh.tick(self.clock[0]), "app")
+
+    def test_later_switch_keeps_the_gap_unless_the_hosted_main_is_fresh(self):
+        sh = self.switch()
+        sh.switches = 1
+        lean_desk.attach("s1", None, None, self.clock[0])
+        sh.last_switch = self.clock[0] - 5
+        sh.cur.last_input = self.clock[0] - 120  # a user typed into it earlier
+        with mock.patch.object(ss, "mid_turn", return_value=False), mock.patch.object(ss, "checkpoint_session"):
+            self.assertIsNone(sh.tick(self.clock[0]))
+            sh.cur.last_input = 0  # never had a user turn since it started: fresh and idle
+            self.assertEqual(sh.tick(self.clock[0]), "app")
 
     def test_pinned_modes(self):
         lean_desk.set_mode("hosted")
@@ -490,6 +510,107 @@ class Reattach(Base):
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "87654321-1234-1234-1234-123456789abc"}):
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 la.cmd_desk(mock.Mock(action="attach"))  # one desk only
+
+
+class Boot(Base):
+    """Service start in auto mode: wait for the app desk when it was the last owner; a shortcut to the desk folder."""
+
+    def run_host(self, wait, last_owner):
+        if last_owner:
+            lean_desk.set_active(last_owner, "earlier", self.now - 3600)
+        self.clock = [self.now]
+        cfg = lean_desk.config()
+        cfg["desk_boot_wait_s"] = wait
+        lean_desk._write(lean_desk.lean_home("config.json"), cfg)
+        made = []
+        host = mock.Mock(last_input=0, run=mock.Mock(return_value=0))
+        sh = ss.SwitchHost(lambda: made.append(1) or host, now=lambda: self.clock[0])
+        sh.WATCH = 0.01
+        real_wait = sh.stopping.wait
+
+        def tick(_t=None):  # the clock jumps 30 s per poll
+            self.clock[0] += 30
+            if sh.stopping.is_set() or self.clock[0] > self.now + 400:
+                sh.stopping.set()
+            return real_wait(0)
+        sh.stopping = mock.Mock(wait=tick, is_set=real_wait.__self__.is_set, set=real_wait.__self__.set)
+        return sh, made
+
+    def test_app_last_owner_and_it_attaches_in_time_no_hosted_main(self):
+        sh, made = self.run_host(180, "app")
+        orig = sh.stopping.wait
+        n = [0]
+
+        def attach_later(t=None):
+            n[0] += 1
+            if n[0] == 2:
+                lean_desk.attach("s1", None, None, self.clock[0])
+            return orig(t)
+        sh.stopping.wait = attach_later
+        with mock.patch.object(ss.SwitchHost, "watch", lambda self: None):
+            with mock.patch.object(ss.ExternalHost, "run", lambda self: 0):
+                sh.run()
+        self.assertEqual(made, [])
+        self.assertEqual(lean_desk.state()["active"], "app")
+        self.assertFalse(lean_desk.record()["pending"])
+
+    def test_app_last_owner_and_no_attach_hosts_after_the_timeout(self):
+        sh, made = self.run_host(180, "app")
+        with mock.patch.object(ss.SwitchHost, "watch", lambda self: None):
+            sh.run()
+        self.assertEqual(made, [1])
+        self.assertEqual(lean_desk.state()["active"], "hosted")
+        self.assertGreaterEqual(self.clock[0], self.now + 180)
+
+    def test_hosted_or_unknown_last_owner_hosts_at_once(self):
+        for owner in ("hosted", None):
+            sh, made = self.run_host(180, owner)
+            with mock.patch.object(ss.SwitchHost, "watch", lambda self: None):
+                sh.run()
+            self.assertEqual(made, [1])
+            self.assertEqual(self.clock[0], self.now)  # no waiting
+
+    def test_shortcut_is_created_idempotently_and_never_overwrites(self):
+        home = os.path.join(self.tmp, "userhome")
+        os.makedirs(home)
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            os.makedirs(lean_desk.desk_dir(), exist_ok=True)
+            link = lean_desk.shortcut_path()
+            self.assertTrue(lean_desk.ensure_shortcut())
+            self.assertTrue(lean_desk.ensure_shortcut())
+            self.assertEqual(os.readlink(link), lean_desk.desk_dir())
+            os.remove(link)
+            open(link, "w").write("mine")  # a real file
+            self.assertFalse(lean_desk.ensure_shortcut())
+            self.assertEqual(open(link).read(), "mine")
+            os.remove(link)
+            os.makedirs(link)  # a real folder
+            self.assertFalse(lean_desk.ensure_shortcut())
+            self.assertTrue(os.path.isdir(link) and not os.path.islink(link))
+            os.rmdir(link)
+            os.symlink(home, link)  # a foreign symlink
+            self.assertFalse(lean_desk.ensure_shortcut())
+            self.assertEqual(os.readlink(link), home)
+            os.remove(link)
+            lean_desk._write(lean_desk.lean_home("config.json"), {"desk_shortcut": "off"})
+            self.assertFalse(lean_desk.ensure_shortcut())
+            self.assertFalse(os.path.lexists(link))
+
+    def test_shortcut_cwd_attaches_the_same_as_the_real_path(self):
+        home = os.path.join(self.tmp, "userhome")
+        os.makedirs(home)
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            os.makedirs(lean_desk.desk_dir(), exist_ok=True)
+            lean_desk.ensure_shortcut()
+            self.hook("start", "s1", cwd=lean_desk.shortcut_path())
+        self.assertEqual(lean_desk.record()["session_id"], "s1")
+
+    def test_resumed_and_compacted_sessions_attach_like_a_new_one(self):
+        for src in ("resume", "compact", "startup"):
+            lean_desk.detach()
+            ctx, _ = self.hook("start", "s1", source=src)
+            self.assertEqual(lean_desk.record()["session_id"], "s1", src)
+            self.assertIn("front desk", ctx)
 
 
 if __name__ == "__main__":

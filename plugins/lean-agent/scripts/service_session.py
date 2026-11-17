@@ -3626,6 +3626,8 @@ class SwitchHost:
         self.retry_at = 0
         self.next_kind = self.next_why = None
         self.last_switch = lean_desk.state().get("since") or 0
+        self.switches = 0  # switches since this service started: the first one ignores the gap
+        self.boot_until = 0  # while now < boot_until the app desk was the last owner: wait for it, host nothing
 
     @property
     def external(self):
@@ -3661,7 +3663,10 @@ class SwitchHost:
         if want == have or self.cur is None or self.switching:
             return None
         pinned = self.desk.mode() != "auto"
-        if not pinned and now - self.last_switch < self.gap:
+        if want == "hosted" and now < self.boot_until:
+            return None
+        fresh = self.switches == 0 or (have == "hosted" and not getattr(self.cur, "last_input", 0))  # fresh and idle: no flap risk
+        if not pinned and not fresh and now - self.last_switch < self.gap:
             return None
         if have == "hosted":
             if not self.idle(now):
@@ -3683,6 +3688,7 @@ class SwitchHost:
         self.next_kind, self.next_why = want, why
         self.switching = True
         self.last_switch = now
+        self.switches += 1
         lean_log.log("info", "desk", f"desk: {have} -> {want} ({why})")
         print(f"lean-agent: desk: {have} -> {want} ({why})", flush=True)
         self.cur.stop()
@@ -3700,10 +3706,29 @@ class SwitchHost:
         if self.cur is not None:
             self.cur.stop()
 
+    def boot_wait(self):
+        """The app desk was the last owner: give it up to desk_boot_wait_s to attach before hosting a main (reports wait in the
+        inbox meanwhile). Returns the kind to start."""
+        wait = self.desk.boot_wait_s()
+        start = self.now()
+        self.boot_until = start + wait
+        self.cur = ExternalHost()
+        msg = f"desk: the app desk was the last owner: waiting up to {int(wait)}s for it before hosting a main"
+        lean_log.log("info", "desk", msg)
+        print("lean-agent: " + msg, flush=True)
+        while not self.stopping.is_set() and self.now() < self.boot_until:
+            if self.wanted() == "app":
+                return "app"
+            self.stopping.wait(min(1.0, self.WATCH))
+        self.boot_until = 0
+        return self.wanted()
+
     def run(self):
-        threading.Thread(target=self.watch, daemon=True).start()
         kind = self.wanted()
         why = "service start"
+        if kind == "hosted" and self.desk.mode() == "auto" and self.desk.state().get("active") == "app":
+            kind, why = self.boot_wait(), "service start"
+        threading.Thread(target=self.watch, daemon=True).start()
         rc = 0
         while not self.stopping.is_set():
             if kind == "app":
