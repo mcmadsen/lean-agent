@@ -3539,7 +3539,6 @@ def _cmd_run(a):
     env = dict(os.environ)
     env.pop("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", None)  # never pull in the project's CLAUDE.md
     env.pop("LEAN_AGENT_SERVICE_SESSION", None)  # the service session's hooks (session, permission) must not act in a worker
-    env.pop("LEAN_AGENT_DESK_SESSION", None)  # nor the external desk's
     thread_tag = lean_threads.resolve_tag()
     if (getattr(a, "role", None) or (prev or {}).get("role")) in INTERNAL_ROLES:
         thread_tag = None  # a helper run is never a thread's work, whatever LEAN_AGENT_THREAD the caller had
@@ -11245,35 +11244,25 @@ def register_source():
 
 
 def refresh_desk_folder(h):
-    """Make a session started in the lean home folder a proper desk, automatically (prepare_home: `home`, `update`, service
-    start): the guide and rule file, and lean-agent's own keys in .claude/settings.json there (orchestrator permissions and env,
-    the desk marker, the pinned model). Idempotent (written only when changed); the user's global settings are never touched."""
-    root = home()
-    if os.path.realpath(root) == os.path.realpath(h):
-        return False
-    changed = False
+    """Make a session started in the desk folder (<home>/home, where the hosted desk's CLAUDE.md already lives) a proper desk,
+    automatically (prepare_home: `home`, `update`, service start): lean-agent's own env keys in its .claude/settings.json.
+    Idempotent (written only when changed). Nothing is written to the lean home root (workers under it would load it) and the
+    user's global settings are never touched. Whether a session is the desk is decided by its session id, never by this file."""
+    path = os.path.join(h, ".claude", "settings.json")
     try:
-        write_home_guide(root)
-        path = os.path.join(root, ".claude", "settings.json")
         cur = load_json(path, {})
-        data = orchestrator_settings(cur)
+        data = dict(cur)
         env = dict(data.get("env") or {})
         env.update(ORCHESTRATOR_ENV)
-        env["LEAN_AGENT_DESK_SESSION"] = "1"
-        env.pop("LEAN_AGENT_SESSION_ROLE", None)  # never a role marker here: a session that is not the desk stays a normal one
         if os.environ.get("LEAN_AGENT_HOME"):
             env["LEAN_AGENT_HOME"] = os.environ["LEAN_AGENT_HOME"]  # a GUI-launched session finds the same home and socket
         data["env"] = env
-        model = load_json(os.path.join(h, ".claude", "settings.json"), {}).get("model")
-        if model:
-            data["model"] = model
         if data != cur:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
             save_json(path, data)
-            changed = True
+            return True
     except Exception as exc:  # noqa: BLE001 - never blocks the service start
         lean_log.log("warn", "desk", f"desk folder settings not refreshed: {exc}")
-    return changed
+    return False
 
 
 def desk_hint_once():
@@ -11282,7 +11271,7 @@ def desk_hint_once():
     if os.path.exists(mark):
         return
     print(f"lean-agent: front desk in the Claude app (optional): open a new local session in the Claude app with the folder "
-          f"{home()} (the app remembers it) and flip the app's Remote Control switch if you want it on your phone. "
+          f"{home('home')} (the app remembers it) and flip the app's Remote Control switch if you want it on your phone. "
           "Everything else is automatic: that session becomes the desk, and the service hosts its own again when it goes away.")
     try:
         open(mark, "w").close()
@@ -14262,12 +14251,16 @@ def cmd_private(a):
 
 
 def desk_session_id(h):
-    """The id of the Claude session running this command: the session env var Claude Code sets, else the newest transcript of the desk folder."""
+    """(session id, transcript) of the session running this command: the id Claude Code exports, else the desk record of this
+    folder, else the newest transcript of this folder."""
     for k in ("LEAN_AGENT_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID"):
         v = os.environ.get(k) or ""
         if re.fullmatch(r"[0-9a-fA-F-]{36}", v):
             return v, ""
-    found = orchestrator_transcripts(h)
+    rec = lean_desk.record()
+    if rec.get("session_id") and os.path.realpath(rec.get("cwd") or "") == os.path.realpath(os.getcwd()):
+        return rec["session_id"], rec.get("transcript") or ""
+    found = orchestrator_transcripts(os.getcwd())
     if found:
         return os.path.splitext(os.path.basename(found[0]))[0], found[0]
     return "", ""
@@ -14275,7 +14268,7 @@ def desk_session_id(h):
 
 def this_session_role():
     """(role, strict): what THIS session is to lean-agent: hosted desk / app desk / thread / a normal session, and whether strict mode applies."""
-    on = strict_setting_on()
+    on = strict_on()
     if os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1" or os.environ.get("LEAN_AGENT_LOCAL_UP") == "1":
         if os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread":
             return "a thread session (hosted by the service)", on
@@ -14287,13 +14280,11 @@ def this_session_role():
             break
     if sid and lean_desk.is_desk(sid):
         return "the front desk (the attached app session)", on
+    if sid and lean_desk.is_pending(sid):
+        return "the pending front desk (waits for the service to stop hosting its own main; a normal session until then)", False
     if not sid:
         return "unknown (this session's id is not visible to the CLI); the hooks decide by session id", None
     return "a normal session (not the desk)", False
-
-
-def strict_setting_on():
-    return config_json().get("strict", "on") != "off"
 
 
 def this_session_line():
@@ -14313,23 +14304,17 @@ def cmd_desk(a):
     if a.action == "setup":
         h = prepare_home()
         refresh_desk_folder(h)
-        path = os.path.join(h, ".claude", "settings.json")
-        data = load_json(path, {})
-        env = dict(data.get("env") or {})
-        env.update(ORCHESTRATOR_ENV)
-        env.update({"LEAN_AGENT_SESSION_ROLE": "main", "LEAN_AGENT_DESK_SESSION": "1"})
-        if os.environ.get("LEAN_AGENT_HOME"):
-            env["LEAN_AGENT_HOME"] = os.environ["LEAN_AGENT_HOME"]  # a GUI-launched session finds the same home and socket
-        data["env"] = env
         if a.model:
-            data["model"] = a.model
+            set_home_model(h, a.model)
         if a.permission_mode:
+            path = os.path.join(h, ".claude", "settings.json")
+            data = load_json(path, {})
             data["permissions"] = dict(data.get("permissions") or {}, defaultMode=a.permission_mode)
-        save_json(path, data)
+            save_json(path, data)
         if not is_trusted(h):
             print(f"lean-agent: warning: {TRUST_HINT}", file=sys.stderr)
-        print(f"desk setup: wrote {path} (role main, orchestrator env, model {data.get('model') or 'your default'}). Start a Claude session "
-              f"in {h} (Claude app > Code > local), turn on Remote Control there, then: lean-agent config desk external; lean-agent desk status")
+        print(f"desk setup: refreshed the settings in {h} (done automatically by home, update and the service start). Open a "
+              "local session in that folder in the Claude app; it becomes the desk by itself.")
         return 0
     if a.action == "status":
         print(lean_desk.status_line())
@@ -14343,8 +14328,8 @@ def cmd_desk(a):
     if a.action == "detach":
         print("desk detached" if lean_desk.detach() else "no desk was attached")
         return 0
-    if not lean_desk.external():
-        die("the front desk is hosted: run `lean-agent config desk external` (then restart the service) first")
+    if not lean_desk.enabled():
+        die("the front desk is pinned to hosted: run `lean-agent config desk auto` first")
     sid, tpath = desk_session_id(h)
     if not sid:
         die("could not tell this session's id; start the session in the desk folder (it attaches itself at start)")
@@ -14364,7 +14349,7 @@ def cmd_config(a):
                 lean_desk.set_mode(a.value)
                 if a.value == "hosted":
                     lean_desk.detach()
-                print("restart the service to apply: lean-agent service restart" if service_platform() else "restart `lean-agent up` to apply")
+                print("applies live (the service reads the mode every few seconds)")
             print(lean_desk.status_line() + " \u00b7 set: lean-agent config desk auto|hosted|external")
         else:
             if a.value:
@@ -18558,7 +18543,7 @@ def clear_all_table(rows, main_line):
     return "\n".join([f"{'Thread':<{w}}  Result"] + [f"{t:<{w}}  {r}" for t, r in rows] + [main_line])
 
 
-SESSION_ENV_VARS = ("LEAN_AGENT_SESSION_ROLE", "LEAN_AGENT_THREAD", "LEAN_AGENT_CALLER_THREAD", "LEAN_AGENT_SERVICE_SESSION", "LEAN_AGENT_DESK_SESSION")
+SESSION_ENV_VARS = ("LEAN_AGENT_SESSION_ROLE", "LEAN_AGENT_THREAD", "LEAN_AGENT_CALLER_THREAD", "LEAN_AGENT_SERVICE_SESSION")
 
 
 def leave_session_env():

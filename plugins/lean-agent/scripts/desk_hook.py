@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Hook of the external front desk (desk external: a local Claude session, not one `lean-agent up` hosts).
 Arguments: `start` (SessionStart), `prompt` (UserPromptSubmit), `stop` (Stop).
-start: the session started in the desk folder (or with LEAN_AGENT_DESK_SESSION=1) attaches as the front desk when none is
+start: the session started in the desk folder attaches as the front desk when none is
 attached (a second one is told so); the desk gets its pending reports as additionalContext.
 prompt: heartbeat + pending reports as additionalContext. stop: heartbeat; with reports pending a block decision hands them to the
 desk so it processes them (once per batch: claimed reports are gone, stop_hook_active ends a chain, never while a dialog is open).
@@ -25,7 +25,7 @@ def main(argv=None, now=None):
         return 0
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import lean_desk
-    if not lean_desk.enabled() or os.environ.get("LEAN_AGENT_LOCAL_UP") == "1":
+    if not lean_desk.enabled() or os.environ.get("LEAN_AGENT_LOCAL_UP") == "1":  # (hosted sessions are never the app desk)
         return 0
     try:
         event = json.load(sys.stdin)
@@ -38,11 +38,15 @@ def main(argv=None, now=None):
     if mode == "start":
         cwd = event.get("cwd") or os.getcwd()
         in_desk_dir = os.path.realpath(cwd) in [os.path.realpath(d) for d in lean_desk.desk_dirs()]
-        if not (in_desk_dir or os.environ.get("LEAN_AGENT_DESK_SESSION") == "1"):
+        if not in_desk_dir:
             return 0
         ok, msg = lean_desk.attach(sid, event.get("transcript_path"), cwd, now)
         if not ok:
             out("SessionStart", "lean-agent: this session is NOT the front desk. " + msg + ".")
+            return 0
+        if msg == "pending":  # one owner at a time: the service still hosts main; reports go there until it has stopped
+            out("SessionStart", "lean-agent: this session will become the front desk as soon as the service has stopped hosting "
+                "its own main (when that is idle). Until then it is a normal session.")
             return 0
         text = "lean-agent: this session is the front desk (external mode); thread reports reach it as hidden context."
         import service_session
@@ -56,9 +60,10 @@ def main(argv=None, now=None):
         pend = service_session.inject_main(now)
         out("SessionStart", text + ("\n" + pend if pend else ""))
         return 0
-    if not lean_desk.is_desk(sid, now):
-        return 0
+    # every event of the attached session refreshes its heartbeat, even an expired one: it re-attaches itself
     lean_desk.heartbeat(sid, event.get("transcript_path"), now)
+    if not lean_desk.is_desk(sid, now):
+        return 0  # not attached, another desk's, or still pending (the service hosts main until it has stopped)
     import service_session
     if mode == "prompt":
         service_session.dialog_set("main", False, now)  # the user typed: no dialog is open

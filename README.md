@@ -268,24 +268,26 @@ lasts until you close it or log out, and a restart of `up` continues the convers
 
 Automatic by default (`desk: auto`). The service hosts a front desk session with Remote Control as before. If you open a
 local session in the Claude desktop app ("on this computer", which can show plugin panes such as the live map) with the
-folder `~/.lean-agent`, that session attaches itself as the desk (SessionStart hook), and the service stops hosting its own
-main as soon as that main is idle (no turn running, nothing typed for a minute; it is checkpointed like a normal stop). When
+folder `~/.lean-agent/home` (the front desk's own folder), that session attaches itself (SessionStart hook) and waits as "pending":
+it is a normal session, and reports keep going to the hosted main, until the service has stopped hosting its own
+main, which happens as soon as that main is idle (no turn running, nothing typed for a minute; it is checkpointed like a normal stop). When
 the app session's heartbeat has been gone for 30 minutes (app closed, Mac asleep) the service resumes hosting its own Remote
 Control main, so the phone keeps working. No flapping: at least 10 minutes between switches; every switch is logged and
 shown in `doctor`, `lean-agent desk status` and the map ("desk: app session" or "desk: hosted (Remote Control)").
 
-The only manual steps: open a new local session in the Claude app with the folder `~/.lean-agent` (the app remembers it) and
-flip the app's Remote Control switch if you want it on your phone. The folder's settings (lean-agent's own keys only, never
-your global settings) are written and refreshed by `lean-agent home`, `update` and the service start itself.
+The only manual steps: open a new local session in the Claude app with the folder `~/.lean-agent/home` (the app remembers it) and
+flip the app's Remote Control switch if you want it on your phone. The folder's settings (lean-agent's own env keys only, never
+your global settings; nothing is written to `~/.lean-agent` itself) are written and refreshed by `lean-agent home`, `update` and the service start itself.
 
 ```sh
 lean-agent desk status           # who is the desk now, and whether THIS session is the desk (strict mode applies to the desk only)
 lean-agent config desk auto      # default; hosted = always the service's own main (as before); external = never hosted
-lean-agent desk detach           # let go of the desk (it attaches again at the next session start)
+lean-agent desk attach           # make THIS session the desk now (works in auto too; one desk only)
+lean-agent desk detach           # let go of the desk (it re-attaches on its next hook event or session start)
 ```
 
 - Strict mode and the orchestrator rules apply only to the real front desk (the hosted main, or the attached app session). Any
-  other local session, in any folder including `~/.lean-agent`, is a normal session: never restricted, even after it ran
+  other local session, in any folder including `~/.lean-agent` and a pending desk, is a normal session: never restricted, even after it ran
   lean-agent commands. The attached app desk may use the app's own session tools (prefix list `DESK_APP_TOOL_PREFIXES` in
   `budget_hook.py`); other MCP tools and plain Bash stay refused for it.
 - Thread reports reach an app desk through hooks: at SessionStart and with each prompt, at tool boundaries, and at the end of

@@ -20,9 +20,7 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins",
 
 def base_env(**extra):
     """The caller's environment minus every LEAN_AGENT_* key and Claude Code compaction knob, plus what a test asks for."""
-    # these tests exercise the orchestrator rules in the lean home: they run as the front desk (LOCAL_UP); a session that is
-    # not the desk stays unrestricted (tests/test_desk_external.py)
-    return dict(clean_environ(), LEAN_AGENT_LOCAL_UP="1", **extra)
+    return dict(clean_environ(), **extra)
 
 
 def run_hook(script, event, **env):
@@ -160,6 +158,10 @@ class SqueezeTest(Base):
 
 
 class CompactTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.env["LEAN_AGENT_LOCAL_UP"] = "1"  # these tests are about the front desk; non-desk sessions: tests/test_desk_external.py
+
     def test_only_in_lean_home(self):
         home = self.env["LEAN_AGENT_HOME"]
         os.makedirs(home, exist_ok=True)
@@ -484,6 +486,7 @@ class McpTrimTest(Base):
 class BudgetTest(Base):
     def setUp(self):
         super().setUp()
+        self.env["LEAN_AGENT_LOCAL_UP"] = "1"  # the front desk; the non-desk cases below clear it
         self.transcript = os.path.join(self.tmp.name, "s1.jsonl")
         sub = os.path.join(self.tmp.name, "s1", "subagents")
         os.makedirs(sub)
@@ -1462,6 +1465,23 @@ class BudgetTest(Base):
         ev = dict(self.ev, cwd=home, tool_name="Bash", tool_input={"command": command, "run_in_background": background})
         out = run_hook("budget_hook.py", ev, LEAN_AGENT_SESSION_ROLE=role, LEAN_AGENT_THREAD="t1", **self.env)
         return (out or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+
+    def test_a_session_that_is_not_the_desk_is_never_restricted_in_the_lean_home_or_a_worker_folder(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        self.set_strict("on")
+        env = dict(self.env, LEAN_AGENT_LOCAL_UP="")  # not hosted, not the attached desk
+        for cwd in (home, os.path.join(home, "work", "r1"), os.path.join(home, "worktrees", "p", "wt")):
+            os.makedirs(cwd, exist_ok=True)
+            for tool, tin in (("Bash", {"command": "ls -la"}), ("Bash", {"command": "lean-agent run p -m haiku --why x t"}),
+                              ("mcp__other__thing", {}), ("Read", {"file_path": "/etc/hostname"})):
+                ev = dict(self.ev, cwd=cwd, tool_name=tool, tool_input=tin)
+                out = run_hook("budget_hook.py", ev, **env)
+                self.assertTrue(no_block(out), (cwd, tool, out))
+            ev = dict(self.ev, cwd=cwd, tool_name="Bash", tool_input={"command": "ls"})
+            self.assertTrue(no_block(run_hook("budget_hook.py", ev, **env)))
+        # the same calls as the desk are refused (strict mode), so the difference is the session, not the folder
+        ev = dict(self.ev, cwd=home, tool_name="Bash", tool_input={"command": "ls -la", "run_in_background": True})
+        self.assertEqual(run_hook("budget_hook.py", ev, LEAN_AGENT_TODO_REMINDER="0", **self.env)["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_a_plain_lean_agent_command_is_allowed_without_a_prompt_in_thread_and_main_sessions(self):
         body = ("Look up (read-only) https://example.test/a?b=1; then run: svc show; svc invoke | grep x\n"

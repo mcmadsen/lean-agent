@@ -26,6 +26,12 @@ def clone_scripts():
     return path if os.path.isdir(path) else None
 
 
+def _desk_attached():
+    """An external desk was ever attached (desk.json exists): only then can a session other than a hosted one be the desk."""
+    home = os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent"))
+    return os.path.exists(os.path.join(home, "desk.json"))
+
+
 def _desk_external():
     """The desk mode is not pinned to hosted (config.json: no JSON, no import): default is auto."""
     try:
@@ -52,7 +58,7 @@ def main():
         except Exception:  # noqa: BLE001
             pass
     if script in ("inject_hook.py", "dialog_hook.py") and os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1" \
-            and os.environ.get("LEAN_AGENT_DESK_SESSION") != "1":
+            and not _desk_attached():
         return  # the inject hook acts in the sessions `lean-agent up` hosts (and the external desk) only: no second interpreter anywhere else
     if script == "desk_hook.py" and (os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1" or not _desk_external()):
         return  # only where the external desk mode is on

@@ -3623,6 +3623,8 @@ class SwitchHost:
         self.stopping = threading.Event()
         self.cur = None
         self.switching = False
+        self.retry_at = 0
+        self.next_kind = self.next_why = None
         self.last_switch = lean_desk.state().get("since") or 0
 
     @property
@@ -3664,10 +3666,17 @@ class SwitchHost:
         if have == "hosted":
             if not self.idle(now):
                 return None
+            if now < self.retry_at:
+                return None
             try:
-                checkpoint_session("main", wait=_knob("LEAN_AGENT_CLOSE_CHECKPOINT_WAIT", CLOSE_CHECKPOINT_WAIT))
-            except Exception as exc:  # noqa: BLE001 - a stop without a checkpoint still resumes from the transcript
+                saved = checkpoint_session("main", wait=_knob("LEAN_AGENT_CLOSE_CHECKPOINT_WAIT", CLOSE_CHECKPOINT_WAIT))
+            except Exception as exc:  # noqa: BLE001
+                saved = False
                 lean_log.log("warn", "desk", f"checkpoint before the switch failed: {exc}")
+            if saved is False:  # timed out: main keeps running, the switch is tried again later
+                self.retry_at = now + _knob("LEAN_AGENT_DESK_RETRY", 120)
+                lean_log.log("warn", "desk", "checkpoint before the switch timed out: hosted main kept, retrying later")
+                return None
             why = "an app session attached as the desk" if want == "app" else "config desk"
         else:
             why = "the app desk's heartbeat is gone (30 min): hosting main again" if not pinned else "config desk hosted"
@@ -3701,7 +3710,9 @@ class SwitchHost:
                 self.cur = ExternalHost()
             else:
                 self.cur = self.make_hosted()
-            self.desk.set_active(kind, why, self.now()) if self.desk.state().get("active") != kind else None
+            if self.desk.state().get("active") != kind:
+                self.desk.set_active(kind, why, self.now())
+            self.desk.set_pending(kind != "app")  # the app session owns the desk only once no main is hosted
             self.switching = False
             if self.stopping.is_set():
                 break

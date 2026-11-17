@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dialog hook of the sessions `lean-agent up` hosts (LEAN_AGENT_SERVICE_SESSION=1); no effect anywhere else.
+"""Dialog hook of the sessions `lean-agent up` hosts (LEAN_AGENT_SERVICE_SESSION=1) and of the attached external desk; no effect anywhere else.
 
 Arguments: `pre` (PreToolUse AskUserQuestion: a dialog opens), `post` (PostToolUse AskUserQuestion: it was answered),
 `close` (Stop, UserPromptSubmit, SessionStart). While a dialog is open the service holds back thread-report and message
@@ -55,16 +55,19 @@ def notification_line(text):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1" and os.environ.get("LEAN_AGENT_DESK_SESSION") != "1":
-        return 0
+    desk = os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1"
     mode = argv[0] if argv else "close"
     event = {}
-    if mode == "post":
+    if mode == "post" or desk:
         try:
             event = json.load(sys.stdin)
         except ValueError:
             event = {}
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    if desk:  # the external desk (a local session): only the confirmed, attached one
+        import lean_desk
+        if not lean_desk.is_desk(event.get("session_id")):
+            return 0
     import lean_sock  # stdlib only
     _, tid = key_and_thread()
     lean_sock.call_nowait("dialog", state="open" if mode == "pre" else "closed", thread=tid)

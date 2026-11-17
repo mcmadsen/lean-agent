@@ -557,8 +557,9 @@ KEEP_ALWAYS = {"recipe", "doc"}
 MCP_ALWAYS = {"mcp"}
 MCP_ACTIONS = {"chrome": ({"check", "status"}, {"check"})}
 KEEP_NOTE_KINDS = ("checkpoint", "fyi", "decision")
-# The Claude desktop app's own tools (session management / wrap-up, preview, artifacts) by name prefix: strict mode lets the
-# front desk use them (it runs inside the app); every other MCP tool stays refused. Extend here when the app adds tools.
+# The Claude desktop app's own tools (session management / wrap-up, preview, artifacts): strict mode lets the front desk use
+# them (it runs inside the app); every other MCP tool stays refused. Matched on the tool name's full `mcp__<server>__` prefix
+# (the server name alone would match a user's own `mcp__ccd_session_x__` server), and only for the confirmed desk. Extend here.
 DESK_APP_TOOL_PREFIXES = ("mcp__ccd_session__", "mcp__ccd_directory__", "mcp__Claude_Preview__", "mcp__artifacts__")
 MCP_RESOURCE_TOOLS = ("ListMcpResources", "ListMcpResourcesTool", "ReadMcpResource", "ReadMcpResourceTool",
                       "ReadMcpResourceDir", "ReadMcpResourceDirTool")
@@ -1098,8 +1099,9 @@ def main():
     if (desk and os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1" and os.environ.get("LEAN_AGENT_LOCAL_UP") != "1"
             and not os.environ.get("LEAN_AGENT_SESSION_ROLE")):
         os.environ["LEAN_AGENT_SESSION_ROLE"] = "main"  # the attached external desk: main's hints and rules
-    # the orchestrator rules (strict mode, push/worker/read guards, caps) apply to the front desk only, never to another session
-    in_home = (cwd == home or cwd.startswith(home + os.sep)) and desk
+    in_home = cwd == home or cwd.startswith(home + os.sep)  # push guard, plan windows, session cap: as before, any session here
+    # the orchestrator rules (strict mode, front-desk rules, foreground/todo/read guards) apply to the front desk only
+    rules = in_home and desk
     if os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread" and event.get("tool_name") == "Bash" and orphan_denial(command):
         emit(permissionDecision="deny", permissionDecisionReason=(
             "lean-agent: you are an orphan session (your thread does not exist). lean-agent run/advise/thread commands are "
@@ -1112,12 +1114,12 @@ def main():
         return 0
     tool_input = event.get("tool_input") or {}
     worker_dir = cwd.startswith(os.path.join(home, "work") + os.sep)  # a worker's run folder is never the orchestrator
-    if (in_home or os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1") and not worker_dir:
+    if (rules or os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1") and not worker_dir:
         why = front_desk_denial(event)
         if why:
             emit(permissionDecision="deny", permissionDecisionReason="lean-agent: " + why)
             return 0
-    if ((in_home or os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1") and not worker_dir
+    if ((rules or os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1") and not worker_dir
             and strict_on(usage.lean_home())):
         why = strict_denial(event, cwd, usage.lean_home())
         if why:
@@ -1133,7 +1135,7 @@ def main():
         if why:
             emit(permissionDecision="deny", permissionDecisionReason="lean-agent push guard: " + why)
             return 0
-    if (in_home and event.get("tool_name") == "Bash" and not tool_input.get("run_in_background")
+    if (rules and event.get("tool_name") == "Bash" and not tool_input.get("run_in_background")
             and os.environ.get("LEAN_AGENT_BACKGROUND_RUNS") != "0"):
         which = foreground_worker(command)
         if which:
@@ -1144,13 +1146,13 @@ def main():
                 "prints it again)."))
             return 0
 
-    if in_home and event.get("tool_name") == "Bash" and os.environ.get("LEAN_AGENT_TODO_REMINDER") != "0":
+    if rules and event.get("tool_name") == "Bash" and os.environ.get("LEAN_AGENT_TODO_REMINDER") != "0":
         which = unlinked_worker(command)
         if which:
             emit(permissionDecision="deny", permissionDecisionReason=todo_reminder(which))
             return 0
 
-    if in_home and event.get("tool_name") == "Bash" and os.environ.get("LEAN_AGENT_READ_GUARD") != "0":
+    if rules and event.get("tool_name") == "Bash" and os.environ.get("LEAN_AGENT_READ_GUARD") != "0":
         why = long_run_read(command, usage.lean_home())
         if why:
             emit(permissionDecision="deny", permissionDecisionReason=(
@@ -1163,7 +1165,7 @@ def main():
     global ALLOW_REASON
     role = os.environ.get("LEAN_AGENT_SESSION_ROLE")
     if (event.get("tool_name") == "Bash" and not worker_dir and role in (None, "", "main", "thread")
-            and (in_home or role in ("main", "thread")) and single_lean_agent(command)):
+            and (rules or role in ("main", "thread")) and single_lean_agent(command)):
         ALLOW_REASON = "lean-agent command"  # the deny checks above passed; no permission prompt for a plain lean-agent call
 
     if in_home and not checking:  # the slow check (a transcript scan) comes after the cheap ones; the deadline skips it

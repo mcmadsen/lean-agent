@@ -7,53 +7,38 @@ Mode (config.json "desk": auto|hosted|external, default auto; env LEAN_AGENT_DES
 started in the lean home and hosts a Remote Control main otherwise, hosted never attaches, external never hosts) and the notify switch
 ("desk_notify", default on in external mode) live in config.json.
 """
-import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
+
+import lean_common
 
 STALE_SECS = 30 * 60
 MODES = ("auto", "hosted", "external")
 SWITCH_GAP = 10 * 60  # seconds between two switches of the active desk in auto mode (no flapping)
 
 
-def lean_home(*parts):
-    return os.path.join(os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent")), *parts)
+lean_home = lean_common.lean_home
 
 
 def desk_dir():
-    """The folder the desk session is started in (where the front desk CLAUDE.md and settings live)."""
+    """The folder the desk session is started in: the hosted desk's own folder, where the front desk CLAUDE.md lives."""
     return lean_home("home")
 
 
 def desk_dirs():
-    """Folders where a session attaches as the desk: the lean home (where the app remembers the folder) and the hosted desk's own."""
-    return [lean_home(), desk_dir()]
+    return [desk_dir()]
 
 
 def _read(path):
-    try:
-        with open(path) as fh:
-            data = json.load(fh)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    data = lean_common.read_json(path, {})
+    return data if isinstance(data, dict) else {}
 
 
 def _write(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-desk-")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            json.dump(data, fh, indent=2)
-        os.replace(tmp, path)
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+    lean_common.write_json_atomic(path, data)
 
 
 def config():
@@ -100,6 +85,7 @@ def set_active(which, why, now=None):
     log = list(st.get("log") or [])[-19:]
     log.append({"ts": now, "to": which, "why": why})
     _write(state_path(), {"active": which, "since": now, "why": why, "log": log})
+    set_pending(which != "app")  # the app session owns the desk only while the service hosts no main
 
 
 def set_mode(m):
@@ -142,29 +128,51 @@ def attached(now=None):
 
 
 def attach(session_id, transcript=None, cwd=None, now=None):
-    """(True, message) when this session is now the front desk; (False, why) when another live desk holds it."""
+    """(True, message) when this session is now the desk record; (False, why) when another live desk holds it. In mode auto the
+    desk is *pending* until the service has stopped hosting its own main (SwitchHost.confirm): only then is it the desk."""
     now = time.time() if now is None else now
-    cur = attached(now)
-    if cur and cur.get("session_id") != session_id:
-        return False, (f"another session is already the front desk (attached {age(cur.get('attached_ts'), now)} ago); "
-                       "run `lean-agent desk detach` there or here first")
-    rec = {"session_id": session_id, "transcript": transcript or (cur or {}).get("transcript") or "",
-           "cwd": cwd or (cur or {}).get("cwd") or "", "attached_ts": (cur or {}).get("attached_ts") or now, "heartbeat": now}
-    _write(path(), rec)
-    return True, "attached"
+    with lean_common.file_lock(path()):
+        cur = attached(now)
+        if cur and cur.get("session_id") != session_id:
+            return False, (f"another session is already the front desk (attached {age(cur.get('attached_ts'), now)} ago); "
+                           "run `lean-agent desk detach` there or here first")
+        same = cur and cur.get("session_id") == session_id
+        confirmed = mode() == "external" or bool(same and not cur.get("pending")) or \
+            (state().get("active") == "app" and not same)
+        rec = {"session_id": session_id, "transcript": transcript or (cur or {}).get("transcript") or "",
+               "cwd": cwd or (cur or {}).get("cwd") or "", "attached_ts": (cur or {}).get("attached_ts") or now,
+               "heartbeat": now, "pending": not confirmed}
+        _write(path(), rec)
+    return True, "attached" if confirmed else "pending"
 
 
 def heartbeat(session_id, transcript=None, now=None):
-    """Refresh the desk's heartbeat (and follow a /clear: a new id from the same desk is handled by attach in SessionStart)."""
+    """Refresh the heartbeat of the desk record named `session_id` (even an expired one: the next hook event of the same
+    session re-attaches it, unless another desk took over meanwhile). True when it was this session's record."""
     now = time.time() if now is None else now
-    rec = record()
-    if rec.get("session_id") != session_id:
-        return False
-    rec["heartbeat"] = now
-    if transcript:
-        rec["transcript"] = transcript
-    _write(path(), rec)
+    with lean_common.file_lock(path()):
+        rec = record()
+        if rec.get("session_id") != session_id or not enabled():
+            return False
+        rec["heartbeat"] = now
+        if transcript:
+            rec["transcript"] = transcript
+        _write(path(), rec)
     return True
+
+
+def set_pending(pending):
+    """The service confirms (False) or releases (True) the app session as the desk: one owner at a time."""
+    with lean_common.file_lock(path()):
+        rec = record()
+        if rec.get("session_id") and rec.get("pending") != pending:
+            rec["pending"] = pending
+            _write(path(), rec)
+
+
+def is_pending(session_id, now=None):
+    cur = attached(now)
+    return bool(cur and cur.get("session_id") == session_id and cur.get("pending"))
 
 
 def detach():
@@ -177,8 +185,9 @@ def detach():
 
 
 def is_desk(session_id, now=None):
+    """This session is the confirmed desk: attached, fresh, and the service no longer hosts a main."""
     cur = attached(now)
-    return bool(cur and session_id and cur.get("session_id") == session_id)
+    return bool(cur and session_id and cur.get("session_id") == session_id and not cur.get("pending"))
 
 
 def age(ts, now=None):
@@ -200,6 +209,7 @@ def summary(now=None):
     rec = record()
     cur = attached(now)
     out["attached"] = bool(cur)
+    out["pending"] = bool(cur and cur.get("pending"))
     st = state()
     if st.get("since"):
         out["since"] = age(st["since"], now)
@@ -218,6 +228,8 @@ def status_line(now=None):
     if s["mode"] == "hosted":
         return "desk: hosted (Remote Control) (pinned: config desk hosted)"
     act = s["label"] + tag + (f", since {s['since']} ago" if s.get("since") else "")
+    if s.get("pending") and s["attached"]:
+        return act + f", app session {s['session_id'][:8]} waits for the hosted main to stop (pending)"
     if s["attached"]:
         return act + f", app session attached {s['age']} ago, last seen {s['heartbeat_age']} ago (session {s['session_id'][:8]})"
     if s.get("session_id"):

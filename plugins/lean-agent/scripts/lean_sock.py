@@ -28,40 +28,11 @@ def home():
     return os.path.realpath(os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent")))
 
 
-def _sock_for(h):
-    p = os.path.join(h, "service.sock")
+def path():
+    p = os.path.join(home(), "service.sock")
     if len(os.fsencode(p)) <= SOCK_MAX:
         return p
-    return os.path.join("/tmp", f"lean-agent-{os.getuid()}", hashlib.sha256(os.fsencode(h)).hexdigest()[:12] + "-service.sock")
-
-
-def candidates():
-    """Where the service socket may be: the resolved home first, then the default home of this user (a session started from
-    the desktop app has no LEAN_AGENT_HOME / another HOME than the launchd service) and the short fallback paths."""
-    out = [_sock_for(home())]
-    try:
-        import pwd
-        out.append(_sock_for(os.path.realpath(os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".lean-agent"))))
-    except (ImportError, KeyError, OSError):
-        pass
-    try:
-        d = os.path.join("/tmp", f"lean-agent-{os.getuid()}")
-        out += sorted((os.path.join(d, n) for n in os.listdir(d) if n.endswith("-service.sock")),
-                      key=lambda p: -os.path.getmtime(p))
-    except OSError:
-        pass
-    return list(dict.fromkeys(out))
-
-
-def path():
-    """The socket the CLI, the hooks and the map pane all use: the resolved home's, else the first candidate that exists."""
-    first = _sock_for(home())
-    if os.path.exists(first):
-        return first
-    for p in candidates()[1:]:
-        if os.path.exists(p):
-            return p
-    return first
+    return os.path.join("/tmp", f"lean-agent-{os.getuid()}", hashlib.sha256(os.fsencode(home())).hexdigest()[:12] + "-service.sock")
 
 
 def _debug(why):
@@ -358,7 +329,7 @@ class Server:
     def __init__(self, handlers, sock=None, version="", on_stop=None):
         self.on_stop = on_stop
         self.handlers = dict(handlers)
-        self.path = sock or _sock_for(home())
+        self.path = sock or path()
         self.version = version
         self.started = time.time()
         self.srv = None
