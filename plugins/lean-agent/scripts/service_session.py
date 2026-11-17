@@ -122,6 +122,38 @@ def transcript_path(cwd, session_id):
     return os.path.join(cfg, "projects", project_slug(os.path.realpath(cwd)), session_id + ".jsonl")
 
 
+def threads_dir():
+    """The folder thread sessions start in (holds the thread guide); the desk folder <home>/home keeps only the front desk's."""
+    return lean_home("threads")
+
+
+def thread_transcript(sid):
+    """A thread session's transcript: in the threads folder, else (sessions started before threads had their own folder)
+    in the old desk folder <home>/home; the new location when neither exists."""
+    new = transcript_path(threads_dir(), sid)
+    old = transcript_path(lean_home("home"), sid)
+    return old if not os.path.exists(new) and os.path.exists(old) else new
+
+
+def migrate_thread_transcript(sid):
+    """Copy a thread session's transcript (and its session folder) from the old desk folder into the threads folder, so
+    `claude --resume` finds it from the new cwd. The old copy stays (fallback lookup). True when a copy was made."""
+    import shutil
+    new = transcript_path(threads_dir(), sid)
+    old = transcript_path(lean_home("home"), sid)
+    if os.path.exists(new) or not os.path.exists(old):
+        return False
+    try:
+        os.makedirs(os.path.dirname(new), exist_ok=True)
+        shutil.copy2(old, new)
+        side = old[:-len(".jsonl")]
+        if os.path.isdir(side) and not os.path.exists(new[:-len(".jsonl")]):
+            shutil.copytree(side, new[:-len(".jsonl")])
+        return True
+    except OSError:
+        return False
+
+
 def service_record(key="main"):
     """The SessionStart hook's record for a hosted session."""
     return lean_home("chat", "service.json" if key == "main" else f"service-{key}.json")

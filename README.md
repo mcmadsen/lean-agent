@@ -267,11 +267,11 @@ first-turn context (from its transcript) with the hosted desk's and warns above 
 Estimate, not measured here (the container's Claude Code is too old to start a desk and has no sign-in), from a field report of an
 app session at ~52k (MCP tools 18.8k, system tools 17.2k, memory files 11.6k, system prompt 10.6k, skills 10k, custom agents 0.7k, MCP
 server instructions 3k) against ~15k for the hosted desk: with the keys above honoured, MCP tools, MCP instructions, skills and custom
-agents (~32k) go and most of the system tools (denied tools leave the list) follow, leaving roughly 24k. **What settings cannot cut:**
-the Claude Code system prompt (~10k), and the full thread guide: thread sessions run in the same folder, so `CLAUDE.md` (~8k) loads
-in the app desk next to the short front-desk rule (~1.5k), while the hosted desk excludes it with a launch flag. So the app desk stays
-about 8-9k above the hosted one until the thread guide moves out of the desk folder (a separate change: thread sessions would need
-their own working folder). Check your own numbers with `/context` in the app session and the doctor line.
+agents (~32k) go and most of the system tools (denied tools leave the list) follow, leaving roughly 16k. **What settings cannot cut:**
+the Claude Code system prompt (~10k). Thread sessions start in their own folder (`<home>/threads`, which holds the full thread guide
+`CLAUDE.md` and the thread settings), so the desk folder (`<home>/home`) carries only the short front-desk rule (~1.5k): the app desk
+no longer loads the ~8k thread guide and lands near the hosted desk. Threads that started in the desk folder keep working: their
+transcripts are copied to the new folder on update or service start and resumed from there. Check your own numbers with `/context` in the app session and the doctor line.
 
 The only manual steps: open a new local session in the Claude app with the folder `~/lean-agent-desk` (or `~/.lean-agent/home`; the app remembers it) and
 flip the app's Remote Control switch if you want it on your phone. The folder's settings (lean-agent's own env keys only, never
