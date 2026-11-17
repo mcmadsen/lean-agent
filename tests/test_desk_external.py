@@ -613,5 +613,132 @@ class Boot(Base):
             self.assertIn("front desk", ctx)
 
 
+class Handover(Base):
+    """A pending app desk must get the desk: refusals escalate, deliveries stop, typed input is the user's only, bounded waits."""
+
+    def setUp(self):
+        super().setUp()
+        self.clock = [self.now]
+        self.sh = ss.SwitchHost(lambda: mock.Mock(), now=lambda: self.clock[0])
+        self.sh.cur = mock.Mock(last_input=0, last_user_input=0)
+        lean_desk.attach("s1", None, None, self.clock[0])
+
+    def tick(self, mid_turn=False):
+        with mock.patch.object(ss, "mid_turn", return_value=mid_turn):
+            return self.sh.tick(self.clock[0])
+
+    def test_checkpoint_refusal_is_retried_then_escalates_and_the_switch_completes(self):
+        sh = self.sh
+        with mock.patch.object(ss, "checkpoint_session", return_value=False) as cp:
+            self.assertIsNone(self.tick())
+            self.assertIn("checkpoint refused", lean_desk.wait_reason(self.clock[0]))
+            self.assertIsNone(self.tick())  # retry not due yet
+            self.assertEqual(cp.call_count, 1)
+            self.clock[0] += 121
+            self.assertIsNone(self.tick())
+            self.assertEqual(cp.call_count, 2)
+            self.clock[0] += 121
+            self.assertEqual(self.tick(), "app")  # stopped without a checkpoint
+            self.assertEqual(cp.call_count, 2)
+        sh.cur.stop.assert_called_once()
+        self.assertEqual(lean_desk.wait_reason(self.clock[0]), "")
+
+    def test_checkpoint_exception_counts_as_a_refusal_with_its_reason(self):
+        with mock.patch.object(ss, "checkpoint_session", side_effect=OSError("socket closed")):
+            self.assertIsNone(self.tick())
+        self.assertIn("socket closed", lean_desk.wait_reason(self.clock[0]))
+
+    def test_deliveries_while_pending_stay_queued_for_the_app_desk(self):
+        os.makedirs(os.path.join(self.tmp, "chat"), exist_ok=True)
+        tr = os.path.join(self.tmp, "main.jsonl")
+        with open(os.path.join(self.tmp, "chat", "service.json"), "w") as fh:
+            json.dump({"session_id": "m1", "transcript_path": tr, "ts": 1}, fh)
+        with open(tr, "w") as fh:
+            fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "stop_reason": "end_turn",
+                                                                  "content": [{"type": "text", "text": "ok"}]}}) + "\n")
+
+        class H:
+            key, last_input, last_output, external = "main", 0, 0.0, False
+            stopping = __import__("threading").Event()
+            pasted = []
+
+            def alive(self):
+                return True
+
+            def paste(self, text):
+                self.pasted.append(text)
+
+            def tail_text(self):
+                return ""
+        h = H()
+        rep = ss.Reporter(h, now=lambda: self.clock[0])
+        self.report()
+        for _ in range(8):  # the app desk is pending: nothing is typed into the hosted main
+            self.clock[0] += 10
+            rep.main_tick()
+        self.assertEqual(h.pasted, [])
+        self.assertEqual(len(ss.queued_reports()), 1)
+        lean_desk.detach()  # no app desk pending: delivered as always
+        for _ in range(8):
+            self.clock[0] += 10
+            rep.main_tick()
+        self.assertTrue(h.pasted)
+
+    def test_service_typed_input_does_not_reset_idle(self):
+        sh = self.sh
+        sh.cur.last_input = self.clock[0] - 5  # the checkpoint prompt the service typed
+        sh.cur.last_user_input = self.clock[0] - 300
+        with mock.patch.object(ss, "checkpoint_session", return_value=True):
+            self.assertEqual(self.tick(), "app")
+
+    def test_bridge_text_marked_svc_leaves_user_input_alone(self):
+        h = ss.Host(lambda: (["x"], "i"), {}, self.tmp)
+        h.paste = lambda text: None
+        h.dispatch({"text": "checkpoint", "svc": True})
+        self.assertGreater(h.last_input, 0)
+        self.assertEqual(h.last_user_input, 0)
+        h.dispatch({"text": "hello"})
+        self.assertGreater(h.last_user_input, 0)
+
+    def test_max_pending_forces_the_switch_when_not_mid_turn(self):
+        sh = self.sh
+        sh.switches = 1
+        sh.last_switch = 0
+        sh.cur.last_user_input = self.clock[0] - 5  # typed recently
+        with mock.patch.object(ss, "checkpoint_session", return_value=True):
+            self.assertIsNone(self.tick())
+            self.assertEqual(lean_desk.wait_reason(self.clock[0]), "user typed 5s ago")
+            self.clock[0] += 301
+            lean_desk.heartbeat("s1", None, self.clock[0])
+            sh.cur.last_user_input = self.clock[0] - 5
+            self.assertIsNone(self.tick(mid_turn=True))  # still never in the middle of a turn
+            self.assertEqual(self.tick(), "app")
+
+    def test_stale_mid_turn_is_ignored_after_ten_minutes(self):
+        sh = self.sh
+        tr = os.path.join(self.tmp, "t.jsonl")
+        open(tr, "w").write("{}\n")
+        with mock.patch.object(ss, "session_transcript", return_value=tr), \
+                mock.patch.object(ss, "checkpoint_session", return_value=True):
+            os.utime(tr, (self.clock[0] - 60, self.clock[0] - 60))
+            self.assertIsNone(self.tick(mid_turn=True))
+            self.assertEqual(lean_desk.wait_reason(self.clock[0]), "hosted main mid-turn")
+            os.utime(tr, (self.clock[0] - 601, self.clock[0] - 601))
+            self.assertEqual(self.tick(mid_turn=True), "app")
+
+    def test_status_shows_why_the_switch_waits_and_the_gap(self):
+        sh = self.sh
+        sh.cur.last_user_input = self.clock[0] - 20
+        self.tick()
+        line = lean_desk.status_line(self.clock[0])
+        self.assertIn("pending", line)
+        self.assertIn("user typed 20s ago", line)
+        sh.switches = 1
+        sh.last_switch = self.clock[0] - 5
+        sh.cur.last_user_input = self.clock[0] - 500
+        self.tick()
+        self.assertIn("anti-flap gap until", lean_desk.status_line(self.clock[0]))
+
+
 if __name__ == "__main__":
     unittest.main()

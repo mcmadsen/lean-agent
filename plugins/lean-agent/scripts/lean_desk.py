@@ -17,6 +17,7 @@ import lean_common
 STALE_SECS = 30 * 60
 MODES = ("auto", "hosted", "external")
 SWITCH_GAP = 10 * 60  # seconds between two switches of the active desk in auto mode (no flapping)
+MAX_PENDING = 300  # seconds an app desk may wait pending before the switch ignores recent typed input
 BOOT_WAIT = 180  # seconds a restarted service waits for the app desk (when it was the last owner) before hosting its own main
 SHORTCUT_NAME = "lean-agent-desk"
 
@@ -55,6 +56,11 @@ def ensure_shortcut():
         return True
     except OSError:
         return False
+
+
+def max_pending_s():
+    v = config().get("desk_max_pending_s")
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else MAX_PENDING
 
 
 def boot_wait_s():
@@ -173,6 +179,8 @@ def attach(session_id, transcript=None, cwd=None, now=None):
         rec = {"session_id": session_id, "transcript": transcript or (cur or {}).get("transcript") or "",
                "cwd": cwd or (cur or {}).get("cwd") or "", "attached_ts": (cur or {}).get("attached_ts") or now,
                "heartbeat": now, "pending": not confirmed}
+        if not confirmed:
+            rec["pending_since"] = (cur or {}).get("pending_since") or now if same and cur.get("pending") else now
         _write(path(), rec)
     return True, "attached" if confirmed else "pending"
 
@@ -200,7 +208,52 @@ def set_pending(pending):
         rec = record()
         if rec.get("session_id") and rec.get("pending") != pending:
             rec["pending"] = pending
+            if pending:
+                rec["pending_since"] = time.time()
+            else:
+                rec.pop("pending_since", None)
             _write(path(), rec)
+
+
+def pending_age(now=None):
+    """Seconds the attached app desk has been pending (waiting for the hosted main to stop), or None when none is pending."""
+    now = time.time() if now is None else now
+    cur = attached(now)
+    if not (cur and cur.get("pending")):
+        return None
+    return max(0.0, now - (cur.get("pending_since") or cur.get("attached_ts") or now))
+
+
+def set_wait(kind, ts=None, msg=""):
+    """The service records why a pending switch waits (kind None clears it); written only when it changes."""
+    st = state()
+    new = {"k": kind, "t": ts, "msg": msg} if kind else None
+    if (st.get("wait") or None) == new:
+        return
+    if new:
+        st["wait"] = new
+    else:
+        st.pop("wait", None)
+    _write(state_path(), st)
+
+
+def wait_reason(now=None):
+    """One line: why the pending switch waits right now (from the service's record), or ''."""
+    w = state().get("wait") or {}
+    k, t = w.get("k"), w.get("t")
+    now = time.time() if now is None else now
+    hhmm = lambda ts: time.strftime("%H:%M", time.localtime(ts)) if isinstance(ts, (int, float)) else "?"  # noqa: E731
+    if k == "mid_turn":
+        return "hosted main mid-turn"
+    if k == "dialog":
+        return "a dialog is open on the hosted main"
+    if k == "typed":
+        return f"user typed {age(t, now)} ago"
+    if k == "refused":
+        return f"checkpoint refused: {w.get('msg') or '?'}, retry at {hhmm(t)}"
+    if k == "gap":
+        return f"anti-flap gap until {hhmm(t)}"
+    return ""
 
 
 def is_pending(session_id, now=None):
@@ -262,7 +315,8 @@ def status_line(now=None):
         return "desk: hosted (Remote Control) (pinned: config desk hosted)"
     act = s["label"] + tag + (f", since {s['since']} ago" if s.get("since") else "")
     if s.get("pending") and s["attached"]:
-        return act + f", app session {s['session_id'][:8]} waits for the hosted main to stop (pending)"
+        why = wait_reason(now)
+        return act + f", app session {s['session_id'][:8]} waits for the hosted main to stop (pending)" + (f": {why}" if why else "")
     if s["attached"]:
         return act + f", app session attached {s['age']} ago, last seen {s['heartbeat_age']} ago (session {s['session_id'][:8]})"
     if s.get("session_id"):

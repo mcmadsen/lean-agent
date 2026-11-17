@@ -286,6 +286,13 @@ was the app, a restarted service waits up to 3 minutes (`desk_boot_wait_s` in `c
 hosting its own main (reports wait in the inbox meanwhile); if it attaches in time no hosted main is ever started. The 10-minute
 gap between switches does not apply to the first switch after a service start, nor to a hosted main nobody has typed into yet.
 
+While an app desk is pending, new thread reports are no longer typed into the hosted main: they stay queued and reach the app desk
+through its hooks right after the switch. Only what a user typed counts for the idle rule (not what the service typed). A pending
+desk waits at most 5 minutes (`desk_max_pending_s` in `config.json`): after that the switch happens as soon as the hosted main is
+not mid-turn and has no dialog open, even after recent typing. A transcript quiet for 10 minutes no longer counts as mid-turn. A refused
+checkpoint is retried twice, then the main is stopped without it, and its process tree is killed if it does not end within 20 s.
+`lean-agent desk status` and `doctor` show why a pending switch waits, in one line.
+
 The only manual steps: open a new local session in the Claude app with the folder `~/lean-agent-desk` (or `~/.lean-agent/home`; the app remembers it) and
 flip the app's Remote Control switch if you want it on your phone. The folder's settings (lean-agent's own env keys only, never
 your global settings; nothing is written to `~/.lean-agent` itself) are written and refreshed by `lean-agent home`, `update` and the service start itself.

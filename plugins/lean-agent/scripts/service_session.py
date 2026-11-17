@@ -272,7 +272,7 @@ def go_fresh(restart_host=False, wait=None, now=time.time, sleep=time.sleep):
     if alive():
         path = _load(lean_home("chat", "service.json")).get("transcript_path") or info().get("transcript") or ""
         offset = transcript_state(path)["size"]
-        sent, _ = send(checkpoint_prompt())
+        sent, _ = send(checkpoint_prompt(), svc=True)
         limit = now() + (_knob("LEAN_AGENT_CLEAR_WAIT", CLEAR_WAIT) if wait is None else wait)
         checkpointed = False
         while sent and now() < limit and not checkpointed:
@@ -288,12 +288,16 @@ def go_fresh(restart_host=False, wait=None, now=time.time, sleep=time.sleep):
     return sid, checkpointed
 
 
+CHECKPOINT_LAST = {"error": ""}  # why the last checkpoint prompt could not be sent (the desk switch logs it)
+
+
 def checkpoint_session(key="main", wait=None, now=time.time, sleep=time.sleep):
     """Have a live session save its soft state: sends the checkpoint prompt and waits (up to `wait` seconds, default
     CLEAR_WAIT) for its 'checkpointed' reply. None when the prompt could not be sent."""
     path = _load(service_record(key)).get("transcript_path") or info(key).get("transcript") or ""
     offset = transcript_state(path)["size"]
-    sent, _ = send(checkpoint_prompt(), key)
+    sent, err = send(checkpoint_prompt(), key, svc=True)
+    CHECKPOINT_LAST["error"] = err
     if not sent:
         return None
     limit = now() + (_knob("LEAN_AGENT_CLEAR_WAIT", CLEAR_WAIT) if wait is None else wait)
@@ -444,8 +448,9 @@ def _socket_listening(path, timeout=2):
         s.close()
 
 
-def send(text, key="main"):
-    r = request({"text": text}, key=key)
+def send(text, key="main", svc=False):
+    """Type a message into session `key`. svc: typed by the service itself (does not count as user input for the idle rules)."""
+    r = request({"text": text, "svc": True} if svc else {"text": text}, key=key)
     return bool(r.get("ok")), r.get("error", "")
 
 
@@ -3005,6 +3010,19 @@ def wait_path():
     return lean_home("report-wait.json")
 
 
+def app_desk_pending(now=None):
+    """An app session is attached and waits for the hosted main to stand aside (auto mode), and has not waited so long that the
+    switch itself has clearly failed (then reports go to the hosted main again rather than nowhere)."""
+    try:
+        import lean_desk
+        if lean_desk.mode() != "auto":
+            return False
+        age = lean_desk.pending_age(now)
+        return age is not None and age < 3 * lean_desk.max_pending_s()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def report_wait(why, now=None, eta=None):
     """Record why the queued reports wait (shown by `thread reports --mine/--all`); None clears it."""
     try:
@@ -3477,6 +3495,9 @@ class Reporter(AutoClear):
         if clear_pending("main") or main_fresh_pending(self):
             report_wait("a clear of main goes first", now)
             return  # a queued clear goes first: the reports reach the fresh session after it
+        if not getattr(self.host, "external", False) and app_desk_pending(now):
+            report_wait("an app desk is pending: new reports wait for it (delivered right after the switch)", now)
+            return  # not typed into the hosted main that is about to stand aside: they stay queued for the app desk's hooks
         urgent = any(i["kind"] in ("question", "needs-you", "done", "blocked") for i in items)
         oldest = min(i.get("ts") or now for i in items)
         if not urgent and now - oldest < _knob("LEAN_AGENT_REPORT_BATCH", REPORT_BATCH):
@@ -3614,6 +3635,9 @@ class SwitchHost:
     key = "main"
     IDLE_FOR = 60
     WATCH = 5
+    STALE_TURN = 600   # s without transcript activity after which "mid-turn" no longer holds the switch
+    CHECKPOINTS = 2    # checkpoint attempts before the hosted main is stopped without one
+    STOP_GRACE = 20    # s after the stop request before the process tree is killed
 
     def __init__(self, make_hosted, now=time.time, gap=None):
         import lean_desk
@@ -3626,6 +3650,7 @@ class SwitchHost:
         self.retry_at = 0
         self.next_kind = self.next_why = None
         self.last_switch = lean_desk.state().get("since") or 0
+        self.attempts, self.refusal, self.forced_logged = 0, "", False
         self.switches = 0  # switches since this service started: the first one ignores the gap
         self.boot_until = 0  # while now < boot_until the app desk was the last owner: wait for it, host nothing
 
@@ -3648,51 +3673,143 @@ class SwitchHost:
             return "app"
         return "app" if self.desk.attached(now) else "hosted"
 
-    def idle(self, now):
+    def user_input(self):
+        """When a user last typed into the hosted main (not what the service typed: checkpoint prompts, deliveries)."""
+        cur = self.cur
+        v = getattr(cur, "last_user_input", None)
+        if not isinstance(v, (int, float)):
+            v = getattr(cur, "last_input", 0)
+        return v or 0
+
+    def live_mid_turn(self, now):
+        """mid_turn("main"), except that a transcript with no activity for STALE_TURN seconds is not a running turn (a turn that
+        ended without a Stop record must not block the switch for ever)."""
+        if not mid_turn("main"):
+            return False
+        try:
+            path = session_transcript("main")
+            if path and os.path.exists(path) and now - os.path.getmtime(path) > self.STALE_TURN:
+                return False
+        except OSError:
+            pass
+        return True
+
+    def block(self, now, forced=False):
+        """(kind, ts) of what keeps the hosted main from standing aside right now, or None when it may."""
         cur = self.cur
         if isinstance(cur, ExternalHost) or cur is None:
-            return True
-        if now - (getattr(cur, "last_input", 0) or 0) < self.IDLE_FOR:
-            return False
-        return not (mid_turn("main") or dialog_held("main", now))
+            return None
+        if dialog_held("main", now):
+            return ("dialog", now)
+        if self.live_mid_turn(now):
+            return ("mid_turn", now)
+        last = self.user_input()
+        if not forced and now - last < self.IDLE_FOR:
+            return ("typed", last)
+        return None
+
+    def idle(self, now):
+        return self.block(now) is None
+
+    def alive(self):
+        cur = self.cur
+        return bool(cur is not None and cur.alive())
+
+    def set_wait(self, kind, ts=None, msg=""):
+        try:
+            self.desk.set_wait(kind, ts, msg)
+        except Exception:  # noqa: BLE001 - visibility only
+            pass
+
+    def refused(self, now, reason):
+        self.attempts += 1
+        self.refusal = reason
+        self.retry_at = now + _knob("LEAN_AGENT_DESK_RETRY", 120)
+        when = time.strftime("%H:%M", time.localtime(self.retry_at))
+        lean_log.log("warn", "desk", f"desk switch: checkpoint refused ({reason}); attempt {self.attempts}/{self.CHECKPOINTS}, "
+                                     f"retry at {when}" + (", then the main is stopped without it" if self.attempts >= self.CHECKPOINTS else ""))
+        self.set_wait("refused", self.retry_at, reason)
 
     def tick(self, now=None):
         """One decision; the new kind when a switch was started, else None."""
         now = self.now() if now is None else now
         want, have = self.wanted(now), "app" if self.external else "hosted"
         if want == have or self.cur is None or self.switching:
+            if want == have:
+                self.attempts, self.refusal = 0, ""
+                self.set_wait(None)
             return None
         pinned = self.desk.mode() != "auto"
         if want == "hosted" and now < self.boot_until:
             return None
-        fresh = self.switches == 0 or (have == "hosted" and not getattr(self.cur, "last_input", 0))  # fresh and idle: no flap risk
+        fresh = self.switches == 0 or (have == "hosted" and not self.user_input())  # fresh and idle: no flap risk
         if not pinned and not fresh and now - self.last_switch < self.gap:
+            self.set_wait("gap", self.last_switch + self.gap)
             return None
+        forced = False
         if have == "hosted":
-            if not self.idle(now):
+            pend = self.desk.pending_age(now) if want == "app" else None
+            forced = pend is not None and pend > self.desk.max_pending_s()
+            blocked = self.block(now, forced)
+            if forced and self.block(now) and not blocked and not self.forced_logged:
+                self.forced_logged = True
+                lean_log.log("info", "desk", f"desk switch: the app desk has been pending {int(pend)}s (max {int(self.desk.max_pending_s())}s): "
+                                              "switching although the hosted main had recent typed input")
+            if blocked:
+                self.set_wait(*blocked)
                 return None
             if now < self.retry_at:
+                self.set_wait("refused", self.retry_at, self.refusal)
                 return None
-            try:
-                saved = checkpoint_session("main", wait=_knob("LEAN_AGENT_CLOSE_CHECKPOINT_WAIT", CLOSE_CHECKPOINT_WAIT))
-            except Exception as exc:  # noqa: BLE001
-                saved = False
-                lean_log.log("warn", "desk", f"checkpoint before the switch failed: {exc}")
-            if saved is False:  # timed out: main keeps running, the switch is tried again later
-                self.retry_at = now + _knob("LEAN_AGENT_DESK_RETRY", 120)
-                lean_log.log("warn", "desk", "checkpoint before the switch timed out: hosted main kept, retrying later")
-                return None
+            if self.attempts >= self.CHECKPOINTS:
+                lean_log.log("warn", "desk", f"desk switch: checkpoint refused {self.attempts} times ({self.refusal}): "
+                                              "stopping the hosted main without it")
+            else:
+                reason = ""
+                try:
+                    saved = checkpoint_session("main", wait=_knob("LEAN_AGENT_CLOSE_CHECKPOINT_WAIT", CLOSE_CHECKPOINT_WAIT))
+                except Exception as exc:  # noqa: BLE001
+                    saved, reason = False, f"{type(exc).__name__}: {exc}"
+                if saved is False or saved is None:
+                    self.refused(now, reason or ("no 'checkpointed' reply in time" if saved is False else
+                                                 "the checkpoint prompt could not be sent: " + (CHECKPOINT_LAST.get("error") or "session not reachable")))
+                    return None
             why = "an app session attached as the desk" if want == "app" else "config desk"
+            if forced:
+                why += " (pending too long)"
         else:
             why = "the app desk's heartbeat is gone (30 min): hosting main again" if not pinned else "config desk hosted"
         self.next_kind, self.next_why = want, why
         self.switching = True
         self.last_switch = now
         self.switches += 1
+        self.forced_logged = False
+        self.attempts, self.refusal = 0, ""
+        self.set_wait(None)
         lean_log.log("info", "desk", f"desk: {have} -> {want} ({why})")
         print(f"lean-agent: desk: {have} -> {want} ({why})", flush=True)
-        self.cur.stop()
+        cur = self.cur
+        cur.stop()
+        threading.Thread(target=self.reap, args=(cur,), daemon=True).start()
         return want
+
+    def reap(self, cur):
+        """Escalation after the stop request: the hosted main gets STOP_GRACE s to end; then its whole process tree is killed (a
+        switch must never leave both owners or neither)."""
+        proc = getattr(cur, "proc", None)
+        if not isinstance(proc, subprocess.Popen):
+            return
+        end = time.time() + _knob("LEAN_AGENT_DESK_STOP_GRACE", self.STOP_GRACE)
+        while time.time() < end:
+            if self.stopping.is_set() or proc.poll() is not None:
+                return
+            time.sleep(0.2)
+        lean_log.log("warn", "desk", f"desk switch: the hosted main (pid {proc.pid}) did not end after the stop request: killing its process tree")
+        try:
+            if not lean_common.signal_group(proc.pid, signal.SIGKILL):
+                proc.kill()
+        except OSError:
+            pass
 
     def watch(self):
         while not self.stopping.wait(self.WATCH):
@@ -3775,6 +3892,7 @@ class Host:
         self.created_at = time.time()  # a host nobody has typed into or heard from yet is idle since it was created, not since 1970
         self.last_output = 0.0
         self.last_input = 0.0  # when someone last typed into the session (the terminal, or a message sent to the bridge)
+        self.last_user_input = 0.0  # same, but not what the service typed itself (checkpoint prompts): the desk switch's idle rule
 
     # -- output
     def _remember(self, raw):
@@ -3885,10 +4003,12 @@ class Host:
                 return {"ok": True}
             if isinstance(msg.get("text"), str):
                 self.last_input = time.time()
+                if not msg.get("svc"):
+                    self.last_user_input = self.last_input
                 self.paste(msg["text"])
                 return {"ok": True}
             if isinstance(msg.get("keys"), str):
-                self.last_input = time.time()
+                self.last_input = self.last_user_input = time.time()
                 k = msg["keys"]
                 self.write(KEY_NAMES.get(k.lower(), k).encode())
                 return {"ok": True}
@@ -3988,7 +4108,7 @@ class Host:
                     data = os.read(sys.stdin.fileno(), 4096)
                     if not data:
                         break
-                    self.last_input = time.time()
+                    self.last_input = self.last_user_input = time.time()
                     if self.alive():
                         with self.write_lock:
                             os.write(self.master, data)
