@@ -11216,11 +11216,6 @@ def session_flags(h, role):
     excludes = list(dict.fromkeys([own, os.path.realpath(own)]))
     settings = {"claudeMdExcludes": excludes,
                 "permissions": {"deny": [f"Agent({n})" for n in user_agent_names()]}}
-    if role == "thread":  # the desk folder carries the desk's effortLevel: a thread session keeps the user's own effort
-        cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-        own_effort = load_json(os.path.join(cfg, "settings.json"), {}).get("effortLevel")
-        if own_effort is not None:
-            settings["effortLevel"] = own_effort
     return ["--strict-mcp-config", "--mcp-config", json.dumps({"mcpServers": {}}), "--disable-slash-commands",
             "--settings", json.dumps(settings)]
 
@@ -11254,9 +11249,9 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")  # `claude --help`: --
 
 
 def desk_effort():
-    """Reasoning effort of the front desk ONLY (the hosted main and an app session in the desk folder): LEAN_AGENT_DESK_EFFORT
-    (low|medium|high|xhigh|max; `default`/`off` = your own: none is set), else high. An invalid value is ignored (high).
-    Claude Code: `--effort` flag (hosted main), `effortLevel` in settings (app desk). None = leave it to Claude Code."""
+    """Reasoning effort of the hosted front desk ONLY, as the `--effort` flag of its launch command: LEAN_AGENT_DESK_EFFORT
+    (low|medium|high|xhigh|max; `default`/`off` = leave it to Claude Code), else high; an invalid value is ignored (high). Thread
+    sessions get none. (The app desk's effort follows in 0.45.92, once threads have their own folder.)"""
     v = (os.environ.get("LEAN_AGENT_DESK_EFFORT") or "").strip().lower()
     if v in ("default", "off", "none"):
         return None
@@ -11274,28 +11269,27 @@ def main_session_argv(cmd, extra, h, name, sid):
 
 
 def sync_desk_settings(data, h):
-    """Model and effort of an app session in the desk folder, in `data` (the folder's settings.json). Both are only set where
-    they are missing or still what lean-agent wrote last (a value you set yourself stays; `up --model default` is remembered and
-    keeps your own model); effortLevel follows LEAN_AGENT_DESK_EFFORT."""
+    """The desk folder's model (sonnet) when none is set and `up --model default` was not chosen (`up --model` decides at every
+    start; default = your own model). No effortLevel is written: the folder is shared with thread sessions until 0.45.92, which
+    must keep Claude Code's default / your own effort. An effortLevel an earlier version wrote (recorded in desk-effort.json) is
+    removed again; one you set yourself never is."""
     mark_path = home("desk-effort.json")
-    written = load_json(mark_path, {}).get("effortLevel")
-    want = desk_effort()
-    if want is None:
-        if data.get("effortLevel") is not None and data.get("effortLevel") == written:
+    if os.path.exists(mark_path):
+        written = load_json(mark_path, {}).get("effortLevel")
+        if written is not None and data.get("effortLevel") == written:
             data.pop("effortLevel")
-    elif data.get("effortLevel") in (None, written):
-        data["effortLevel"] = want
-    new = data.get("effortLevel") if want is not None and data.get("effortLevel") == want else None
-    if new != written:
-        save_json(mark_path, {"effortLevel": new})
+        try:
+            os.remove(mark_path)
+        except OSError:
+            pass
     if load_json(home("desk-model.json"), {}).get("choice") != "default":
         data.setdefault("model", DESK_MODEL)
 
 
 def refresh_desk_folder(h):
     """Make a session started in the desk folder (<home>/home, where the hosted desk's CLAUDE.md already lives) a proper desk,
-    automatically (prepare_home: `home`, `update`, service start): lean-agent's own env keys, and the desk's model (sonnet) and effort
-    (effortLevel, high) where you have not set your own, in its .claude/settings.json.
+    automatically (prepare_home: `home`, `update`, service start): lean-agent's own env keys and the desk's model (sonnet, unless you set one
+    or chose `up --model default`) in its .claude/settings.json.
     Idempotent (written only when changed). Nothing is written to the lean home root (workers under it would load it) and the
     user's global settings are never touched. Whether a session is the desk is decided by its session id, never by this file."""
     path = os.path.join(h, ".claude", "settings.json")

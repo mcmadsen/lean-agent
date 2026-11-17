@@ -862,12 +862,12 @@ class ModelEffort(Base):
         with open(os.path.join(h, ".claude", "settings.json")) as fh:
             return json.load(fh)
 
-    def test_desk_folder_pins_sonnet_and_high_effort_idempotently(self):
+    def test_desk_folder_pins_sonnet_idempotently(self):
         la = self.la()
         h = la.home("home")
         la.refresh_desk_folder(h)
         data = self.settings(h)
-        self.assertEqual((data["model"], data["effortLevel"]), ("sonnet", "high"))
+        self.assertEqual(data["model"], "sonnet")
         self.assertFalse(la.refresh_desk_folder(h))  # idempotent
         data["model"] = "opus"  # a choice made in the folder stays
         json.dump(data, open(os.path.join(h, ".claude", "settings.json"), "w"))
@@ -885,45 +885,115 @@ class ModelEffort(Base):
         la.set_home_model(h, "sonnet")
         self.assertEqual(self.settings(h)["model"], "sonnet")
 
-    def test_effort_follows_the_env_and_is_validated(self):
+    def test_no_effort_level_is_written_and_an_earlier_one_is_removed(self):
         la = self.la()
         h = la.home("home")
         la.refresh_desk_folder(h)
-        for env, want in (("medium", "medium"), ("bogus", "high"), ("XHIGH", "xhigh")):
-            with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_EFFORT": env}):
-                la.refresh_desk_folder(h)
-                self.assertEqual(self.settings(h)["effortLevel"], want, env)
-                self.assertEqual(la.desk_effort_args(), ["--effort", want])
-        with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_EFFORT": "default"}):
-            self.assertEqual(la.desk_effort_args(), [])
-            la.refresh_desk_folder(h)  # what lean-agent wrote is removed again
-            self.assertNotIn("effortLevel", self.settings(h))
+        self.assertNotIn("effortLevel", self.settings(h))
+        path = os.path.join(h, ".claude", "settings.json")
         d = self.settings(h)
-        d["effortLevel"] = "low"  # the user's own value is never replaced
-        json.dump(d, open(os.path.join(h, ".claude", "settings.json"), "w"))
+        d["effortLevel"] = "high"  # written by an earlier version: its marker says so
+        json.dump(d, open(path, "w"))
+        json.dump({"effortLevel": "high"}, open(os.path.join(la.home(), "desk-effort.json"), "w"))
+        la.refresh_desk_folder(h)
+        self.assertNotIn("effortLevel", self.settings(h))
+        self.assertFalse(os.path.exists(os.path.join(la.home(), "desk-effort.json")))
+        d["effortLevel"] = "low"  # the user's own (no marker, or a different value) is never removed
+        json.dump(d, open(path, "w"))
+        la.refresh_desk_folder(h)
+        self.assertEqual(self.settings(h)["effortLevel"], "low")
+        json.dump({"effortLevel": "high"}, open(os.path.join(la.home(), "desk-effort.json"), "w"))
         la.refresh_desk_folder(h)
         self.assertEqual(self.settings(h)["effortLevel"], "low")
 
-    def test_only_the_hosted_main_gets_the_effort_flag(self):
+    def test_effort_env_is_validated(self):
+        la = self.la()
+        for env, want in (("medium", ["--effort", "medium"]), ("bogus", ["--effort", "high"]), ("XHIGH", ["--effort", "xhigh"]),
+                          ("default", []), ("off", []), ("", ["--effort", "high"])):
+            with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_EFFORT": env}):
+                self.assertEqual(la.desk_effort_args(), want, env)
+
+    def test_only_the_hosted_main_gets_the_effort_flag_and_threads_get_nothing(self):
         la = self.la()
         h = la.home("home")
-        main = la.main_session_argv(["claude"], [], h, "n", "11111111-1111-1111-1111-111111111111")
+        sid = "11111111-1111-1111-1111-111111111111"
+        main = la.main_session_argv(["claude"], [], h, "n", sid)
         self.assertEqual(main[main.index("--effort") + 1], "high")
-        thread = la.session_argv(["claude"], [], h, "n", "11111111-1111-1111-1111-111111111111", "thread")
+        thread = la.session_argv(["claude"], [], h, "n", sid, "thread")
         self.assertNotIn("--effort", thread)
-        with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_EFFORT": "off"}):
-            self.assertNotIn("--effort", la.main_session_argv(["claude"], [], h, "n", "11111111-1111-1111-1111-111111111111"))
-
-    def test_thread_sessions_keep_the_users_own_effort(self):
-        la = self.la()
         cfg = os.path.join(self.tmp, "userclaude")
         os.makedirs(cfg)
         json.dump({"effortLevel": "low"}, open(os.path.join(cfg, "settings.json"), "w"))
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": cfg}):
-            flags = la.session_flags(la.home("home"), "thread")
-            self.assertEqual(json.loads(flags[flags.index("--settings") + 1])["effortLevel"], "low")
-            flags = la.session_flags(la.home("home"), "main")
-            self.assertNotIn("effortLevel", json.loads(flags[flags.index("--settings") + 1]))
+            flags = la.session_flags(h, "thread")
+        self.assertNotIn("effortLevel", json.loads(flags[flags.index("--settings") + 1]))  # nothing of ours: Claude Code's / the user's own
+        la.refresh_desk_folder(h)
+        self.assertNotIn("effortLevel", self.settings(h))
+
+    def test_local_and_remote_control_paths_carry_the_desk_effort_args(self):
+        la = self.la()
+        self.assertEqual(la.desk_effort_args(), ["--effort", "high"])
+        src = open(la.__file__).read()
+        self.assertIn("return remote_control(cmd + desk_effort_args() + extra, env, h)", src)
+        self.assertIn("os.execvpe(cmd[0], cmd + desk_effort_args() + extra, env)", src)
+
+
+class StopTree(Base):
+    """A hosted main that ignores SIGTERM and has a child: the whole group is killed (Host.stop's kill, or SwitchHost.reap's)."""
+
+    def start_host(self, env):
+        import threading
+        script = os.path.join(self.tmp, "stubborn.sh")
+        pidfile = os.path.join(self.tmp, "child.pid")
+        with open(script, "w") as fh:
+            fh.write(f"#!/bin/sh\ntrap '' TERM\nsleep 300 &\necho $! > {pidfile}\nwhile :; do sleep 1; done\n")
+        os.chmod(script, 0o755)
+        patch = mock.patch.dict(os.environ, env)  # stays in force until the test ends (Host.stop reads the knob later)
+        patch.start()
+        self.addCleanup(patch.stop)
+        if True:
+            host = ss.Host(lambda: (["sh", script], "sid"), {}, self.tmp, key="t9")
+            host.name = "t9"
+            t = threading.Thread(target=host.run, daemon=True)
+            t.start()
+            end = time.time() + 15
+            while time.time() < end and not os.path.exists(pidfile):
+                time.sleep(0.1)
+            time.sleep(0.3)
+        self.assertTrue(os.path.exists(pidfile))
+        with open(pidfile) as fh:
+            child = int(fh.read())
+        self.addCleanup(lambda: os.path.exists(f"/proc/{child}") and os.kill(child, 9))
+        return host, child, t
+
+    def alive(self, pid):
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+        except OSError:
+            return False
+
+    def until_dead(self, pid, secs):
+        end = time.time() + secs
+        while time.time() < end and self.alive(pid):
+            time.sleep(0.2)
+        return not self.alive(pid)
+
+    def test_host_stop_kills_the_whole_group_after_the_grace(self):
+        host, child, t = self.start_host({"LEAN_AGENT_STOP_KILL": "1"})
+        self.assertTrue(self.alive(child))
+        host.stop()
+        self.assertTrue(self.until_dead(child, 10), "the child of the stubborn session survived Host.stop")
+        t.join(10)
+
+    def test_switch_reap_kills_the_tree_before_the_leaders_own_kill(self):
+        host, child, t = self.start_host({"LEAN_AGENT_STOP_KILL": "60"})
+        sh = ss.SwitchHost(lambda: mock.Mock())
+        host.stop()
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_STOP_GRACE": "1"}):
+            sh.reap(host)
+        self.assertTrue(self.until_dead(child, 10), "the child survived the reap")
+        t.join(10)
 
 
 class PendingClock(Base):

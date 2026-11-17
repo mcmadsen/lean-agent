@@ -299,10 +299,11 @@ and the service start, lean-agent keys only, never your global settings) therefo
 `enabledPlugins` false for every plugin except lean-agent and lean-agent-map, `disableClaudeAiConnectors`, `enableAllProjectMcpServers`
 false, deny rules for the tools of your user/desktop MCP servers, `disableBundledSkills` and `syncClaudeAiSkills` false,
 `Agent(<name>)` deny for your custom agents, a deny list of built-in tools the desk never uses, and `claudeMdExcludes` for your
-global `CLAUDE.md`, `~/.claude/rules` and instruction files above the folder. The desk (the hosted main and the app session) starts as sonnet with high effort (`LEAN_AGENT_DESK_EFFORT=low|medium|high|xhigh|max`, or `default` to leave
-effort to Claude Code; a model or effort you set in the folder's settings stays, and `up --model default` keeps your own model). Thread
-sessions are not pinned: they get no `--effort`, and your own `effortLevel` is passed to them explicitly, because they share
-the desk folder (if you have no global `effortLevel`, they inherit the folder's until the thread guide moves out of it). `lean-agent doctor` compares the attached app desk's
+global `CLAUDE.md`, `~/.claude/rules` and instruction files above the folder. The desk folder's model is sonnet unless one is set there or
+`up --model default` was chosen (`up --model` decides at every start; `default` means your own model). Effort high applies to the hosted desk now
+(`--effort` on its launch command only; `LEAN_AGENT_DESK_EFFORT=low|medium|high|xhigh|max`, or `default` to leave it to Claude Code) and to the app
+desk from 0.45.92, when thread sessions move to their own folder (no `effortLevel` is written to the shared folder before that, so thread
+sessions keep Claude Code's default or your own effort). `lean-agent doctor` compares the attached app desk's
 first-turn context (from its transcript) with the hosted desk's and warns above 1.5x.
 
 Estimate, not measured here (the container's Claude Code is too old to start a desk and has no sign-in), from a field report of an
@@ -315,7 +316,7 @@ about 8-9k above the hosted one until the thread guide moves out of the desk fol
 their own working folder). Check your own numbers with `/context` in the app session and the doctor line.
 
 The only manual steps: open a new local session in the Claude app with the folder `~/lean-agent-desk` (or `~/.lean-agent/home`; the app remembers it) and
-flip the app's Remote Control switch if you want it on your phone. The folder's settings (lean-agent's own keys only: env, trimming, and `model` sonnet / `effortLevel` high for the desk where you have not set your own, never
+flip the app's Remote Control switch if you want it on your phone. The folder's settings (lean-agent's own keys only: env, trimming, and the `model` default described above, never
 your global settings; nothing is written to `~/.lean-agent` itself) are written and refreshed by `lean-agent home`, `update` and the service start itself.
 
 ```sh

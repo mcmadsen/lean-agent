@@ -4168,7 +4168,7 @@ class Host:
         if proc and proc.poll() is None:
             if not lean_common.signal_group(proc.pid, signal.SIGTERM):
                 proc.terminate()
-            killer = threading.Timer(15, lambda: proc.poll() is None and (lean_common.signal_group(proc.pid, signal.SIGKILL) or proc.kill()))
+            killer = threading.Timer(_knob("LEAN_AGENT_STOP_KILL", 15), lambda: proc.poll() is None and (lean_common.signal_group(proc.pid, signal.SIGKILL) or proc.kill()))
             killer.daemon = True
             killer.start()
 
