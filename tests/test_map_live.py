@@ -225,8 +225,9 @@ class HttpRoutesTest(unittest.TestCase):
     def test_page_has_legend_and_footer(self):
         _, _, body = http_get(self.live.port, f"/?t={self.live.token}")
         text = body.decode()
-        for w in ("Live map", "Message to an agent", "Report or result back", "Socket request", "Idle link", "Undelivered or stuck",
-                  "Lines fade 30 s after the last message · click a node for details", "Pause", "updates as messages move"):
+        for w in ("LEAN<span>//</span>AGENT", "live map", "Active threads", "Workers alive", "Inbox · needs you", "Cost today", "Tokens saved", "Tool calls / min",
+                  "Agent topology", "Live activity", "Replay timeline", "SYSTEM VISIBILITY LAYER", "privacy filter active", "Local instance · 127.0.0.1",
+                  "01 / Map", "02 / Trends", "Pause", "id=\"raintg\"", "id=\"themetg\""):
             self.assertIn(w, text)
         self.assertEqual([u for u in re.findall(r"https?://[^/'\" ]*", text) if "127.0.0.1" not in u], [])
 
@@ -795,7 +796,7 @@ const { chromium } = require('playwright');
   let chip = '';
   const end = Date.now() + 45000;
   while (Date.now() < end) {
-    chip = await pg.locator('#chip').innerText().catch(() => '');
+    chip = await pg.locator('#chip').textContent().catch(() => '');
     if (wants.includes(chip)) break;
     await new Promise(r => setTimeout(r, 300));
   }
@@ -838,11 +839,11 @@ const { chromium } = require('playwright');
   const b = await chromium.launch();
   const out = {};
   const wait = async (pg, fn, arg, ms = 30000) => { try { await pg.waitForFunction(fn, arg, { timeout: ms }); return true; } catch (e) { return false; } };
-  const chipIs = (t) => () => document.getElementById('chip').innerText === t;
+  const chipIs = (t) => () => document.getElementById('chip').textContent === t;
   // desktop, dark
   let pg = await b.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: 'dark' });
   await pg.goto(url);
-  out.socket = await wait(pg, () => document.getElementById('chip').innerText === 'live (socket)');
+  out.socket = await wait(pg, () => document.getElementById('chip').textContent === 'live socket');
   await wait(pg, () => document.querySelectorAll('.nd').length > 3);
   out.nodes = await pg.locator('.nd').count();
   out.legend = await pg.locator('footer').innerText();
@@ -861,21 +862,21 @@ const { chromium } = require('playwright');
   await pg.locator('#px').click();
   out.panelClosedByButton = (await pg.locator('#panel.open').count()) === 0;
   // pause
-  const inbox = () => document.getElementById('inbox').innerText;
+  const inbox = () => document.querySelector('#m-inb .m-value').innerText;
   await pg.waitForTimeout(1500);
   await pg.locator('#pause').click();
-  out.pausedChip = await pg.locator('#chip').innerText();
-  const before = await pg.locator('#inbox').innerText();
+  out.pausedChip = await pg.locator('#chip').textContent();
+  const before = await pg.locator('#m-inb .m-value').innerText();
   await pg.waitForTimeout(3500);
-  out.heldWhilePaused = (await pg.locator('#inbox').innerText()) === before;
+  out.heldWhilePaused = (await pg.locator('#m-inb .m-value').innerText()) === before;
   await pg.locator('#pause').click();
-  out.resumed = await wait(pg, (b4) => document.getElementById('inbox').innerText !== b4, before);
-  out.chipAfterResume = await pg.locator('#chip').innerText();
+  out.resumed = await wait(pg, (b4) => document.querySelector('#m-inb .m-value').innerText !== b4, before);
+  out.chipAfterResume = await pg.locator('#chip').textContent();
   await pg.close();
   // narrow, light
   pg = await b.newPage({ viewport: { width: 400, height: 800 }, colorScheme: 'light' });
   await pg.goto(url);
-  await wait(pg, () => document.getElementById('chip').innerText === 'live (socket)');
+  await wait(pg, () => document.getElementById('chip').textContent === 'live socket');
   await wait(pg, () => document.querySelectorAll('.nd').length > 3);
   out.narrow = await pg.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
   out.narrowBg = await pg.evaluate(() => getComputedStyle(document.body).backgroundColor);
@@ -925,19 +926,19 @@ class BrowserTest(unittest.TestCase):
         return h
 
     def test_socket(self):
-        d = self.run_page(self.live_html(snap()), "live (socket)")
-        self.assertEqual(d["chip"], "live (socket)")
+        d = self.run_page(self.live_html(snap()), "live socket")
+        self.assertEqual(d["chip"], "live socket")
 
     def test_websocket_blocked_falls_back(self):
-        d = self.run_page(self.live_html(snap(), "connect-src 'none'"), "live (image)|preview blocks live updates")
-        self.assertIn(d["chip"], ("live (image)", "preview blocks live updates"))
-        if d["chip"] == "live (image)":
+        d = self.run_page(self.live_html(snap(), "connect-src 'none'"), "live image|preview blocks live updates")
+        self.assertIn(d["chip"], ("live image", "preview blocks live updates"))
+        if d["chip"] == "live image":
             self.assertEqual(d["imgs"], 1)
         self.assertIn("connect-src", d["why"])
 
     def test_everything_blocked(self):
-        d = self.run_page(self.live_html(snap(), "connect-src 'none'; img-src 'none'"), "live (file refresh · 3 s)")
-        self.assertEqual(d["chip"], "live (file refresh · 3 s)")
+        d = self.run_page(self.live_html(snap(), "connect-src 'none'; img-src 'none'"), "file refresh · 3 s")
+        self.assertEqual(d["chip"], "file refresh · 3 s")
         self.assertIn("Open in browser", d["why"])
 
     def test_window_ui(self):
@@ -968,19 +969,19 @@ class BrowserTest(unittest.TestCase):
         d = json.loads(r.stdout.strip().splitlines()[-1])
         self.assertNotIn("error", d)
         self.assertTrue(d["socket"])
-        self.assertGreaterEqual(d["nodes"], 6)
-        for w in ("Message to an agent", "Undelivered or stuck", "click a node for details"):
-            self.assertIn(w, d["legend"])
+        self.assertGreaterEqual(d["nodes"], 5)
+        for w in ("LEAN-AGENT // SYSTEM VISIBILITY LAYER", "click a card for details", "PRIVACY FILTER ACTIVE", "127.0.0.1"):
+            self.assertIn(w.lower(), d["legend"].lower())
         self.assertEqual(d["panelOpen"], 1)
         self.assertIn("E2E checks", d["panelText"])
         self.assertIn("mid-turn", d["panelText"])
         self.assertTrue(d["panelClosedByEsc"])
         self.assertEqual(d["panelByKey"], 1)
         self.assertTrue(d["panelClosedByButton"])
-        self.assertEqual(d["pausedChip"], "paused")
+        self.assertEqual(d["pausedChip"], "paused · view frozen")
         self.assertTrue(d["heldWhilePaused"])
         self.assertTrue(d["resumed"])
-        self.assertEqual(d["chipAfterResume"], "live (socket)")
+        self.assertEqual(d["chipAfterResume"], "live socket")
         self.assertLessEqual(d["narrow"][0], d["narrow"][1])  # no horizontal scroll at 400 px
 
     def test_no_data_when_snapshots_fail(self):
@@ -994,14 +995,14 @@ class BrowserTest(unittest.TestCase):
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
         s.close()
-        d = self.run_page(self.live_html(snap(), port=port), "snapshot (service not running)|preview blocks live updates")
-        self.assertEqual(d["chip"], "snapshot (service not running)")
+        d = self.run_page(self.live_html(snap(), port=port), "snapshot · service not running|preview blocks live updates")
+        self.assertEqual(d["chip"], "snapshot · service not running")
 
     def test_big_snapshot_draws_within_caps(self):
         shot = os.environ.get("MAP_SHOT") or ""
         s = big_snap()
-        d = self.run_page(self.live_html(s), "live (socket)", shot)
-        self.assertEqual(d["chip"], "live (socket)")
+        d = self.run_page(self.live_html(s), "live socket", shot)
+        self.assertEqual(d["chip"], "live socket")
         # 12 threads + 3 workers each + desk + service + hooks + 3 desk workers + background-free
         self.assertLessEqual(d["rects"], 12 + 3 * 12 + 3 + 3)
         self.assertGreater(d["rects"], 5)
@@ -1019,7 +1020,8 @@ def rich_snap():
         "v": 1, "ts": "t", "service": {"up": True, "version": "9.9.9", "threads": 3, "up_s": 100}, "paused": False,
         "inbox": 0, "moving": [], "more": 2,
         "totals": {"runs_today": 9, "usd_today": 3.1, "tokens_today": 1200000, "saved_today": 400000,
-                   "tools_per_min": 14.0, "errors_30m": 2},
+                   "tools_per_min": 14.0, "errors_30m": 2, "usd_yesterday": 5.0, "fail_rate_30m": 0.8, "workers_done": 2, "workers_queued": 1,
+                   "projects_online": 2},
         "feed": [{"ts": now - 5, "node": "t1", "kind": "tool", "text": "Edit lean_map.py"},
                  {"ts": now - 9, "node": "t3", "kind": "message", "text": "message to t3"},
                  {"ts": now - 20, "node": "t1", "kind": "error", "text": "Bash git failed"},
@@ -1068,33 +1070,20 @@ const { chromium } = require('playwright');
     await pg.waitForTimeout(300);
     return pg;
   };
-  const edgeCheck = (pg) => pg.evaluate(() => {
-    const cards = {}; document.querySelectorAll('.nd').forEach(n => { const s = n.style;
-      cards[n.dataset.id] = { l: parseFloat(s.left), t: parseFloat(s.top), r: parseFloat(s.left) + parseFloat(s.width), b: parseFloat(s.top) + parseFloat(s.height) }; });
-    const on = (c, x, y) => { const e = 0.6; const inx = x >= c.l - e && x <= c.r + e, iny = y >= c.t - e && y <= c.b + e;
-      return inx && iny && (Math.abs(x - c.l) < e || Math.abs(x - c.r) < e || Math.abs(y - c.t) < e || Math.abs(y - c.b) < e); };
-    let n = 0, bad = 0;
-    document.querySelectorAll('#stage line[data-from]').forEach(l => { n++;
-      const a = cards[l.dataset.from], z = cards[l.dataset.to];
-      if (!a || !z || !on(a, +l.getAttribute('x1'), +l.getAttribute('y1')) || !on(z, +l.getAttribute('x2'), +l.getAttribute('y2'))) bad++; });
-    return { n, bad };
-  });
   // 1280 dark
   let pg = await open(rich, { width: 1280, height: 800 }, 'dark');
-  out.now = await pg.locator('.nd[data-id="t1"] .now').innerText();
-  out.chips = await pg.locator('.nd[data-id="t1"] .ch').allInnerTexts();
-  out.errBadge = await pg.locator('.nd[data-id="t1"] .eb').count();
-  out.mcp = await pg.locator('.nd[data-id="t1"] .mb').innerText();
+  out.now = await pg.locator('.nd[data-id="t1"] > .now').innerText();
+  out.chips = await pg.locator('.nd[data-id="t1"] > .chs .ch').allInnerTexts();
+  out.errBadge = await pg.locator('.nd[data-id="t1"] > .chs .eb').count();
+  out.mcp = await pg.locator('.nd[data-id="t1"] > .chs .mb').innerText();
   out.worker = await pg.locator('.nd[data-id="w1"]').innerText();
   out.bar = await pg.locator('.nd[data-id="w1"] .bar i').getAttribute('style');
-  out.totals = await pg.evaluate(() => ['runs', 'usd', 'saved', 'tpm', 'errs'].map(i => document.getElementById(i).innerText));
+  out.totals = await pg.evaluate(() => ['m-thr', 'm-wk', 'm-inb', 'm-cost', 'm-sav', 'm-tpm'].map(i => { const m = document.getElementById(i), f = m.querySelector('.m-foot'); return [m.querySelector('.m-value').innerText, f.hidden ? null : f.innerText]; }));
   out.feed = await pg.locator('#fl button').count();
   out.feedVisible = await pg.locator('#feed').isVisible();
   out.ticks = await pg.locator('#tl .tk').count();
   out.tickErr = await pg.locator('#tl .tk.er').count();
-  out.edges1280 = await edgeCheck(pg);
-  out.wkRow = await pg.evaluate(() => { const t = document.querySelector('.nd[data-id="t1"]').style, w = document.querySelector('.nd[data-id="w1"]').style;
-    return [parseFloat(t.top) + parseFloat(t.height) / 2, parseFloat(w.top) + parseFloat(w.height) / 2, parseFloat(t.left) + parseFloat(t.width), parseFloat(w.left)]; });
+  out.wkNested = await pg.locator('.nd[data-id="t1"] .nd[data-id="w1"]').count();
   if (shots) await pg.screenshot({ path: shots + '/dark-1280.png', fullPage: true });
   // keyboard: slash focuses search, arrows move
   await pg.locator('body').click({ position: { x: 5, y: 5 } });
@@ -1124,11 +1113,6 @@ const { chromium } = require('playwright');
   await pg.locator('#ferr').click();
   out.onlyErr = await pg.evaluate(() => [...document.querySelectorAll('.nd')].map(n => n.dataset.id));
   await pg.locator('#ferr').click();
-  // legend toggle hides lines of that kind
-  const before = await pg.locator('#stage line[data-idle="1"]').count();
-  await pg.locator('.lg[data-k="idle"]').click();
-  out.idleLines = [before, await pg.locator('#stage line[data-idle="1"]').count()];
-  await pg.locator('.lg[data-k="idle"]').click();
   await pg.close();
   // 1280 light with details
   pg = await open(rich, { width: 1280, height: 800 }, 'light');
@@ -1140,14 +1124,13 @@ const { chromium } = require('playwright');
   // 400 light
   pg = await open(rich, { width: 400, height: 800 }, 'light');
   out.narrow = await pg.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
-  out.edges400 = await edgeCheck(pg);
   out.cardTitle = await pg.locator('.nd[data-id="t1"]').getAttribute('title');
   if (shots) await pg.screenshot({ path: shots + '/light-400.png', fullPage: true });
   await pg.close();
   // a snapshot without any of the new fields
   pg = await open(plain, { width: 1280, height: 800 }, 'dark');
   out.plainNodes = await pg.locator('.nd').count();
-  out.plainHidden = await pg.evaluate(() => ['runs', 'usd', 'saved', 'tpm'].every(i => document.getElementById(i).hidden));
+  out.plainHidden = await pg.evaluate(() => ['m-cost', 'm-sav', 'm-tpm'].every(i => { const m = document.getElementById(i); return m.querySelector('.m-foot').hidden && m.querySelector('.m-value').innerText === '–'; }));
   await pg.locator('.nd[data-id="main"]').click();
   out.plainPanel = await pg.locator('#panel.open').count();
   await pg.close();
@@ -1195,26 +1178,22 @@ class FeaturesTest(unittest.TestCase):
         self.assertIn("254k", d["worker"])
         self.assertIn("feature/x", d["worker"])
         self.assertIn("width:9%", d["bar"])
-        # header totals
-        self.assertEqual(d["totals"][0], "9 runs today")
-        self.assertEqual(d["totals"][1], "$3.10 today")
-        self.assertIn("saved ~400k tokens today", d["totals"][2])
-        self.assertEqual(d["totals"][3], "14 tools/min")
-        self.assertIn("2 errors", d["totals"][4])
+        # metric cards: real totals, foots only when known
+        t = d["totals"]
+        self.assertEqual(t[0][0], "02 / 12")
+        self.assertEqual(t[0][1], "2 projects online")
+        self.assertEqual(t[1][1], "2 completed · 1 queued")
+        self.assertEqual(t[2][0], "00")
+        self.assertEqual(t[3], ["$3.10", "\u221238% vs yesterday"])
+        self.assertEqual(t[4], ["400k", "lean-agent efficiency"])
+        self.assertEqual(t[5], ["14", "0.8% failure rate"])
         # feed + timeline (3 + 1 + 1 + 1 events within 10 minutes; one failed)
         self.assertEqual(d["feed"], 4)
         self.assertTrue(d["feedVisible"])
         self.assertEqual(d["ticks"], 6)
         self.assertEqual(d["tickErr"], 1)
-        # workers sit right beside their thread, on the same row
-        ty, wy, tr, wl = d["wkRow"]
-        self.assertAlmostEqual(ty, wy, delta=1)
-        self.assertLess(wl - tr, 60)
-        self.assertGreaterEqual(wl, tr)
-        # every edge ends on a card border, at both sizes
-        for k in ("edges1280", "edges400"):
-            self.assertGreater(d[k]["n"], 4)
-            self.assertEqual(d[k]["bad"], 0, k)
+        # workers are sub-cards of their thread
+        self.assertEqual(d["wkNested"], 1)
         # keyboard and feed
         self.assertEqual(d["slashFocus"], "q")
         self.assertNotEqual(d["arrow"], "main")
@@ -1229,8 +1208,6 @@ class FeaturesTest(unittest.TestCase):
         self.assertEqual(d["persisted"], "true")
         self.assertIn("t1", d["onlyErr"])
         self.assertNotIn("t3", d["onlyErr"])
-        self.assertGreater(d["idleLines"][0], 0)
-        self.assertEqual(d["idleLines"][1], 0)
         # details
         self.assertEqual(d["panelRows"], 3)
         for w in ("Recent tool calls", "lean_maplive.py", "Files touched", "github", "Edit lean_map.py"):
@@ -1255,27 +1232,27 @@ const fs = require('fs');
   pg.setDefaultTimeout(15000);
   pg.on('pageerror', e => out.errors.push(String(e).slice(0, 200)));
   await pg.goto('file://' + file);
-  await pg.waitForFunction(() => /file refresh/.test(document.getElementById('chip').innerText));
-  out.chip = await pg.locator('#chip').innerText();
+  await pg.waitForFunction(() => /file refresh/.test(document.getElementById('chip').textContent));
+  out.chip = await pg.locator('#chip').textContent();
   await pg.evaluate(() => { window.__m = 1; });
   await pg.locator('.nd[data-id="t1"]').click();
   await pg.locator('#q').fill('fix');
   out.hashBefore = await pg.evaluate(() => location.hash);
   fs.writeFileSync(file, fs.readFileSync(next, 'utf8'));  // the service rewrites the file
   out.step = 'reload'; await pg.waitForFunction(() => !window.__m);  // reloaded
-  await pg.waitForFunction(() => document.getElementById('inbox').innerText === 'Inbox 7');
-  out.inbox = await pg.locator('#inbox').innerText();
+  await pg.waitForFunction(() => document.querySelector('#m-inb .m-value').innerText === '07');
+  out.inbox = await pg.locator('#m-inb .m-value').innerText();
   out.sel = await pg.locator('#panel.open h2').innerText();
   out.q = await pg.locator('#q').inputValue();
   out.hash = await pg.evaluate(() => location.hash);
-  out.chip2 = await pg.locator('#chip').innerText();
+  out.chip2 = await pg.locator('#chip').textContent();
   out.link = await pg.locator('#why a').count();
   await pg.close();
   pg = await b.newPage({ viewport: { width: 1280, height: 800 } });
   pg.setDefaultTimeout(15000);
   await pg.goto('file://' + file + stale);
-  await pg.waitForFunction(() => /stopped/.test(document.getElementById('chip').innerText));
-  out.stale = await pg.locator('#chip').innerText();
+  await pg.waitForFunction(() => /stopped/.test(document.getElementById('chip').textContent));
+  out.stale = await pg.locator('#chip').textContent();
   await pg.evaluate(() => { window.__m = 1; });
   await pg.waitForTimeout(4000);
   out.noReload = await pg.evaluate(() => window.__m === 1);
@@ -1319,12 +1296,12 @@ class FileRefreshBrowserTest(unittest.TestCase):
         d = json.loads(r.stdout.strip().splitlines()[-1])
         self.assertNotIn("error", d)
         self.assertEqual(d["errors"], [])
-        self.assertEqual(d["chip"], "live (file refresh · 3 s)")
+        self.assertEqual(d["chip"], "file refresh · 3 s")
         self.assertIn("s=t1", d["hash"])
-        self.assertEqual(d["inbox"], "Inbox 7")
+        self.assertEqual(d["inbox"], "07")
         self.assertIn("Fix the map", d["sel"])
         self.assertEqual(d["q"], "fix")
-        self.assertEqual(d["chip2"], "live (file refresh · 3 s)")
+        self.assertEqual(d["chip2"], "file refresh · 3 s")
         self.assertEqual(d["link"], 1)
         self.assertIn("file refresh stopped", d["stale"])
         self.assertTrue(d["noReload"])
@@ -1430,15 +1407,14 @@ const { chromium } = require('playwright');
   // replay at T: an edge with a message within 30 s and a tool event within 30 s
   await pg.evaluate((v) => { const s = document.getElementById('scr'); s.value = v; s.dispatchEvent(new Event('input')); }, T);
   await pg.waitForTimeout(900);
-  out.rpEdge = await pg.evaluate(() => { const l = document.querySelector('#stage line[data-from="main"][data-to="t1"]:not([data-idle="1"])'); return !!l; });
-  out.rpLabel = await pg.evaluate(() => [...document.querySelectorAll('#stage text.elabel')].map(e => e.textContent));
+  out.rpEdge = await pg.locator('.nd[data-id="t1"][data-flow]').count() === 1;
   out.rpTool = (await txt(pg, '.nd[data-id="t2"] .now')).join('|');
-  out.rpTool1 = await pg.locator('.nd[data-id="t1"] .now').count();
-  out.rpChip = await pg.locator('#tlc').innerText();
+  out.rpTool1 = await pg.locator('.nd[data-id="t1"] > .now:not(.idl)').count();
+  out.rpChip = await pg.locator('#tlc').textContent();
   await pg.locator('#live').click();
   await pg.waitForTimeout(500);
-  out.liveEdge = await pg.evaluate(() => !!document.querySelector('#stage line[data-from="main"][data-to="t1"]:not([data-idle="1"])'));
-  out.liveHidden = await pg.locator('#live').isHidden();
+  out.liveEdge = (await pg.locator('.nd[data-id="t1"][data-flow]').count()) === 1;
+  out.liveHidden = (await pg.locator('#live').getAttribute('aria-pressed')) === 'true';
   await pg.locator('#r60').click();
   await pg.waitForTimeout(500);
   out.min60 = await pg.locator('#scr').getAttribute('min');
@@ -1535,18 +1511,17 @@ class Round2Test(unittest.TestCase):
         self.assertIn("Fix the api", d["panel"])
         # projects: chips, group labels, tags; the filter limits the cards
         self.assertEqual(len(d["chips"]), 3)
-        self.assertTrue(d["chips"][0].startswith("All"))
-        self.assertIn("api", d["chips"][1])
+        self.assertTrue(d["chips"][0].lower().startswith("all"))
+        self.assertIn("api", d["chips"][1].lower())
         self.assertIn("$1.20", d["chips"][1])
         self.assertEqual([g.lower() for g in d["groups"]], ["api", "web"])
-        self.assertEqual(sorted(d["tags"]), ["api", "api", "web"])
+        self.assertEqual(sorted(t.lower().lstrip("/ ") for t in d["tags"]), ["api", "api", "web"])
         self.assertEqual(d["webCards"], 1)
         self.assertEqual(d["groupsFiltered"], 0)
         self.assertEqual(d["tagsFiltered"], 0)
         self.assertEqual(d["allCards"], 3)
         # replay at T
         self.assertTrue(d["rpEdge"])
-        self.assertIn("send", d["rpLabel"])
         self.assertIn("Grep", d["rpTool"])
         self.assertEqual(d["rpTool1"], 0)
         self.assertIn("replay at", d["rpChip"])
