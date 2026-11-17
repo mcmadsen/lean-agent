@@ -12980,6 +12980,8 @@ def cmd_up(a):
     ask_attribution_once()
     h = prepare_home()
     refresh_blocks()
+    if not os.environ.get("LEAN_AGENT_TEST"):
+        threading.Thread(target=lambda: retire_map_plugin(lambda m: lean_log.log("info", "up", m)), daemon=True).start()
     marker = service_session.consume_clear_marker()
     keep = getattr(a, "keep_threads", False)  # internal (clear --all --restart): a clean main session only
     if getattr(a, "clear", False) and not keep and marker is None:
@@ -18680,6 +18682,32 @@ def self_update_helper():
     return 0
 
 
+RETIRED_PLUGIN = "lean-agent-map"  # folded into the lean-agent plugin in 0.45.91
+
+
+def retire_map_plugin(say=print, run=subprocess.run, which=shutil.which):
+    """The old pane plugin is part of lean-agent now: uninstall it through the claude CLI (never by editing settings.json), else
+    tell the user where to remove it. Silent when it is not installed."""
+    exe = which("claude")
+    if not exe:
+        return False
+    try:
+        r = run([exe, "plugin", "list", "--json"], capture_output=True, text=True, timeout=20)
+        rows = json.loads(r.stdout) if r.returncode == 0 else []
+    except Exception:  # noqa: BLE001
+        return False
+    old = [x for x in rows if isinstance(x, dict) and str(x.get("id", "")).split("@")[0] == RETIRED_PLUGIN]
+    for x in old:
+        argv = [exe, "plugin", "uninstall", x["id"]] + (["--scope", x["scope"]] if x.get("scope") in ("user", "project", "local") else [])
+        try:
+            ok = run(argv, capture_output=True, text=True, timeout=30).returncode == 0
+        except Exception:  # noqa: BLE001
+            ok = False
+        say(f"lean-agent: the pane is part of lean-agent now; removed the old plugin {x['id']}" if ok else
+            'lean-agent: the pane is part of lean-agent now; remove "Lean agent map" in the app\'s Plugins page')
+    return bool(old)
+
+
 def cmd_update(a):
     """`update`: sync (file replacement), then restart the service once main is idle when the installed version is newer
     than the running one. Allowed from the front desk; the restart is done by a detached helper, never by this command."""
@@ -18697,6 +18725,8 @@ def cmd_update(a):
         print("lean-agent: sync failed; not restarting")
         return rc
     new = plugin_version()
+    if not os.environ.get("LEAN_AGENT_TEST"):
+        retire_map_plugin()
     up = load_json(home("up.json"), {})
     running_now = bool(up) and pid_alive(up.get("pid"))
     if not running_now:

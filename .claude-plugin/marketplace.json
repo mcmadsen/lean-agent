@@ -16,17 +16,6 @@
         "budget",
         "cost"
       ]
-    },
-    {
-      "name": "lean-agent-map",
-      "source": "./plugins/lean-agent-map",
-      "description": "Live map of lean-agent's front desk, threads and workers, as a pane beside the chat",
-      "category": "productivity",
-      "tags": [
-        "map",
-        "threads",
-        "pane"
-      ]
     }
   ]
 }

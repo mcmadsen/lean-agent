@@ -536,15 +536,6 @@ def _hidden_now():
         return False
 
 
-def redact_events(events):
-    """/replay items: dropped when their node or ends are private or their target names a private project."""
-    if not _hidden_now():
-        return events
-    bad = private_nodes()
-    return [e for e in events if e.get("node") not in bad and e.get("from") not in bad and e.get("to") not in bad
-            and not _is_private_text(e.get("target"))]
-
-
 # ---------------------------------------------------------------- history
 HIST_TTL = 60.0
 _hcache = {}
@@ -875,7 +866,7 @@ def _clip(s, n):
     return s if len(s) <= n else s[:n - 1] + "…"
 
 
-# Matrix palette of the radial drawing (dark): working green, attention amber, failed red, idle dim.
+# Palette of the radial drawing (dark): working green, attention amber, failed red, idle dim.
 MX = {"bg": "#070B08", "card": "#0E1710", "line": "#1C3A25", "text": "#C8F7D2", "dim": "#4F6B57", "working": "#2EE66B",
       "attention": "#F2A541", "failed": COLORS["bad"], "idle": "#3E5546"}
 _WORKING = ("active", "alive", "running", "working", "busy")

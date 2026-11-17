@@ -258,7 +258,7 @@ checkpoint is retried twice, then the main is stopped without it, and its proces
 **Context size of the app desk.** The hosted desk starts with CLI flags (`--strict-mcp-config`, `--disable-slash-commands`, `--settings`) that
 an app session cannot get. The desk folder's `.claude/settings.json` and `settings.local.json` (written by `lean-agent home`, `update`
 and the service start, lean-agent keys only, never your global settings) therefore carry what settings can express:
-`enabledPlugins` false for every plugin except lean-agent and lean-agent-map, `disableClaudeAiConnectors`, `enableAllProjectMcpServers`
+`enabledPlugins` false for every plugin except lean-agent, `disableClaudeAiConnectors`, `enableAllProjectMcpServers`
 false, deny rules for the tools of your user/desktop MCP servers, `disableBundledSkills` and `syncClaudeAiSkills` false,
 `Agent(<name>)` deny for your custom agents, a deny list of built-in tools the desk never uses, and `claudeMdExcludes` for your
 global `CLAUDE.md`, `~/.claude/rules` and instruction files above the folder. `lean-agent doctor` compares the attached app desk's

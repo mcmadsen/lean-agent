@@ -1,4 +1,4 @@
-"""The live map: snapshot shape, edge ageing, private mode, service down, SVG, --watch, the bounded ring, socket speed."""
+"""Map data: snapshot shape, edge ageing, private mode, service down, SVG, --watch, the bounded ring, socket speed, pane --json."""
 import io
 import json
 import os
@@ -229,6 +229,33 @@ class PaneJsonTest(unittest.TestCase):
         self.assertEqual(sorted(d), ["answers", "desk", "goals", "inbox", "service", "ts", "v"])
         self.assertEqual((d["goals"], d["answers"], d["inbox"], d["service"]["up"]), ([], [], 0, False))
         self.assertLess(time.time() - t0, 5)
+
+
+class RetireMapPluginTest(unittest.TestCase):
+    def test_uninstalls_through_the_cli_only(self):
+        import lean_agent
+        calls, said = [], []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            out = json.dumps([{"id": "lean-agent-map@lean-agent", "scope": "user"}, {"id": "other@x", "scope": "user"}]) if argv[2] == "list" else ""
+            return type("R", (), {"returncode": 0, "stdout": out})()
+        self.assertTrue(lean_agent.retire_map_plugin(said.append, run, lambda n: "/x/claude"))
+        self.assertEqual(calls[1], ["/x/claude", "plugin", "uninstall", "lean-agent-map@lean-agent", "--scope", "user"])
+        self.assertEqual(len(calls), 2)
+        self.assertIn("removed the old plugin", said[0])
+
+    def test_failure_tells_the_user_and_no_cli_is_silent(self):
+        import lean_agent
+        said = []
+
+        def run(argv, **kw):
+            out = json.dumps([{"id": "lean-agent-map@m", "scope": "user"}]) if argv[2] == "list" else ""
+            return type("R", (), {"returncode": 0 if argv[2] == "list" else 1, "stdout": out})()
+        lean_agent.retire_map_plugin(said.append, run, lambda n: "/x/claude")
+        self.assertIn("Plugins page", said[0])
+        self.assertFalse(lean_agent.retire_map_plugin(said.append, run, lambda n: None))
+        self.assertEqual(len(said), 1)
 
 
 if __name__ == "__main__":

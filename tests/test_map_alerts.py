@@ -1,4 +1,4 @@
-"""Live map round 2: alerts (rules, thresholds, config, stable ids), projects, /history, /replay, timings."""
+"""Map alerts (rules, thresholds, config, stable ids), projects, history, timings."""
 import json
 import os
 import shutil
