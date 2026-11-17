@@ -713,6 +713,243 @@ class BrowserTest(unittest.TestCase):
         self.assertGreater(d["rects"], 5)
 
 
+def rich_snap():
+    """A snapshot that carries every optional activity field (built from the documented schema)."""
+    now = time.time()
+
+    def rec(tool, target, ago, ok=True, ms=120):
+        return {"ts": now - ago, "tool": tool, "target": target, "ok": ok, "ms": ms}
+
+    t1_recent = [rec("Edit", "lean_map.py", 20), rec("Bash", "git", 45, ok=False, ms=900), rec("Read", "lean_maplive.py", 90)]
+    return {
+        "v": 1, "ts": "t", "service": {"up": True, "version": "9.9.9", "threads": 3, "up_s": 100}, "paused": False,
+        "inbox": 0, "moving": [], "more": 2,
+        "totals": {"runs_today": 9, "usd_today": 3.1, "tokens_today": 1200000, "saved_today": 400000,
+                   "tools_per_min": 14.0, "errors_30m": 2},
+        "feed": [{"ts": now - 5, "node": "t1", "kind": "tool", "text": "Edit lean_map.py"},
+                 {"ts": now - 9, "node": "t3", "kind": "message", "text": "message to t3"},
+                 {"ts": now - 20, "node": "t1", "kind": "error", "text": "Bash git failed"},
+                 {"ts": now - 40, "node": "w1", "kind": "run", "text": "run started"}],
+        "nodes": [
+            {"id": "service", "kind": "service", "label": "S", "state": "active", "detail": "d"},
+            {"id": "main", "kind": "desk", "label": "Front desk", "state": "active", "detail": "talking",
+             "activity": {"now": None, "top": [["Read", 3]], "recent": [rec("Read", "README.md", 60)], "files": 1,
+                          "errors": 0, "mcp": [], "last_ts": now - 60}},
+            {"id": "hooks", "kind": "hooks", "label": "Hooks", "state": "active", "detail": "14 a min"},
+            {"id": "t1", "kind": "thread", "label": "Fix the map", "state": "active", "detail": "active · mid-turn",
+             "activity": {"now": {"tool": "Edit", "target": "lean_map.py", "since_s": 3.2},
+                          "top": [["Edit", 12], ["Bash", 7], ["Read", 5], ["Grep", 2], ["Glob", 1]],
+                          "recent": t1_recent, "files": 4, "errors": 1, "mcp": ["github"], "last_ts": now - 20}},
+            {"id": "t2", "kind": "thread", "label": "Parked one", "state": "parked", "detail": "parked 2 h"},
+            {"id": "t3", "kind": "thread", "label": "Tests", "state": "active", "detail": "active",
+             "activity": {"now": None, "top": [["pytest", 1]], "recent": [rec("Bash", "pytest", 30)], "files": 0,
+                          "errors": 0, "mcp": [], "last_ts": now - 30}},
+            {"id": "w1", "kind": "worker", "label": "w1", "state": "alive", "detail": "d", "parent": "t1", "model": "sonnet",
+             "age_s": 600, "stats": {"turns": 7, "max_turns": 80, "tokens": 254349, "usd": 0.52, "context": 31000,
+                                      "branch": "feature/x", "elapsed_s": 1382, "model": "sonnet"},
+             "activity": {"now": {"tool": "Write", "target": "x.py", "since_s": 1.0}, "top": [["Write", 2]],
+                          "recent": [rec("Write", "x.py", 10)], "files": 1, "errors": 0, "mcp": [], "last_ts": now - 10}}],
+        "edges": [{"from": "service", "to": "t1", "kind": "idle", "age_s": 0, "label": "idle"},
+                  {"from": "service", "to": "t2", "kind": "idle", "age_s": 0},
+                  {"from": "service", "to": "t3", "kind": "idle", "age_s": 0},
+                  {"from": "main", "to": "t1", "kind": "message", "age_s": 3, "label": "hello"},
+                  {"from": "t1", "to": "w1", "kind": "idle", "age_s": 0},
+                  {"from": "w1", "to": "t1", "kind": "report", "age_s": 5},
+                  {"from": "main", "to": "service", "kind": "request", "age_s": 1}],
+        "placed": ["service", "main", "hooks", "t1", "t2", "t3", "w1"]}
+
+
+FEATURES_JS = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const { rich, plain, shots } = JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));
+  const b = await chromium.launch();
+  const out = { errors: [] };
+  const open = async (file, vp, scheme) => {
+    const pg = await b.newPage({ viewport: vp, colorScheme: scheme });
+    pg.setDefaultTimeout(10000);
+    pg.on('pageerror', e => out.errors.push(String(e).slice(0, 200)));
+    await pg.goto('file://' + file);
+    await pg.waitForSelector('.nd');
+    await pg.waitForTimeout(300);
+    return pg;
+  };
+  const edgeCheck = (pg) => pg.evaluate(() => {
+    const cards = {}; document.querySelectorAll('.nd').forEach(n => { const s = n.style;
+      cards[n.dataset.id] = { l: parseFloat(s.left), t: parseFloat(s.top), r: parseFloat(s.left) + parseFloat(s.width), b: parseFloat(s.top) + parseFloat(s.height) }; });
+    const on = (c, x, y) => { const e = 0.6; const inx = x >= c.l - e && x <= c.r + e, iny = y >= c.t - e && y <= c.b + e;
+      return inx && iny && (Math.abs(x - c.l) < e || Math.abs(x - c.r) < e || Math.abs(y - c.t) < e || Math.abs(y - c.b) < e); };
+    let n = 0, bad = 0;
+    document.querySelectorAll('#stage line[data-from]').forEach(l => { n++;
+      const a = cards[l.dataset.from], z = cards[l.dataset.to];
+      if (!a || !z || !on(a, +l.getAttribute('x1'), +l.getAttribute('y1')) || !on(z, +l.getAttribute('x2'), +l.getAttribute('y2'))) bad++; });
+    return { n, bad };
+  });
+  // 1280 dark
+  let pg = await open(rich, { width: 1280, height: 800 }, 'dark');
+  out.now = await pg.locator('.nd[data-id="t1"] .now').innerText();
+  out.chips = await pg.locator('.nd[data-id="t1"] .ch').allInnerTexts();
+  out.errBadge = await pg.locator('.nd[data-id="t1"] .eb').count();
+  out.mcp = await pg.locator('.nd[data-id="t1"] .mb').innerText();
+  out.worker = await pg.locator('.nd[data-id="w1"]').innerText();
+  out.bar = await pg.locator('.nd[data-id="w1"] .bar i').getAttribute('style');
+  out.totals = await pg.evaluate(() => ['runs', 'usd', 'saved', 'tpm', 'errs'].map(i => document.getElementById(i).innerText));
+  out.feed = await pg.locator('#fl button').count();
+  out.feedVisible = await pg.locator('#feed').isVisible();
+  out.ticks = await pg.locator('#tl .tk').count();
+  out.tickErr = await pg.locator('#tl .tk.er').count();
+  out.edges1280 = await edgeCheck(pg);
+  out.wkRow = await pg.evaluate(() => { const t = document.querySelector('.nd[data-id="t1"]').style, w = document.querySelector('.nd[data-id="w1"]').style;
+    return [parseFloat(t.top) + parseFloat(t.height) / 2, parseFloat(w.top) + parseFloat(w.height) / 2, parseFloat(t.left) + parseFloat(t.width), parseFloat(w.left)]; });
+  if (shots) await pg.screenshot({ path: shots + '/dark-1280.png', fullPage: true });
+  // keyboard: slash focuses search, arrows move
+  await pg.locator('body').click({ position: { x: 5, y: 5 } });
+  await pg.keyboard.press('/');
+  out.slashFocus = await pg.evaluate(() => document.activeElement.id);
+  await pg.keyboard.press('Escape');
+  await pg.locator('.nd[data-id="main"]').focus();
+  await pg.keyboard.press('ArrowRight');
+  out.arrow = await pg.evaluate(() => document.activeElement.dataset.id || '');
+  // feed click selects the node
+  await pg.locator('#fl button[data-node="t3"]').click();
+  out.feedClick = await pg.locator('#panel h2').innerText();
+  await pg.keyboard.press('Escape');
+  // search
+  await pg.locator('#q').fill('pytest');
+  await pg.waitForTimeout(300);
+  out.search = await pg.evaluate(() => [...document.querySelectorAll('.nd')].map(n => n.dataset.id));
+  await pg.locator('#q').fill('');
+  await pg.waitForTimeout(300);
+  // hide idle + persistence
+  await pg.locator('#fidle').click();
+  out.hideIdle = await pg.evaluate(() => [...document.querySelectorAll('.nd')].map(n => n.dataset.id));
+  await pg.reload(); await pg.waitForSelector('.nd');
+  out.persisted = await pg.locator('#fidle').getAttribute('aria-pressed');
+  await pg.locator('#fidle').click();
+  // only errors
+  await pg.locator('#ferr').click();
+  out.onlyErr = await pg.evaluate(() => [...document.querySelectorAll('.nd')].map(n => n.dataset.id));
+  await pg.locator('#ferr').click();
+  // legend toggle hides lines of that kind
+  const before = await pg.locator('#stage line[data-idle="1"]').count();
+  await pg.locator('.lg[data-k="idle"]').click();
+  out.idleLines = [before, await pg.locator('#stage line[data-idle="1"]').count()];
+  await pg.locator('.lg[data-k="idle"]').click();
+  await pg.close();
+  // 1280 light with details
+  pg = await open(rich, { width: 1280, height: 800 }, 'light');
+  await pg.locator('.nd[data-id="t1"]').click();
+  out.panel = await pg.locator('#panel').innerText();
+  out.panelRows = await pg.locator('#panel #rt tbody tr').count();
+  if (shots) await pg.screenshot({ path: shots + '/light-1280-details.png', fullPage: true });
+  await pg.close();
+  // 400 light
+  pg = await open(rich, { width: 400, height: 800 }, 'light');
+  out.narrow = await pg.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
+  out.edges400 = await edgeCheck(pg);
+  out.cardTitle = await pg.locator('.nd[data-id="t1"]').getAttribute('title');
+  if (shots) await pg.screenshot({ path: shots + '/light-400.png', fullPage: true });
+  await pg.close();
+  // a snapshot without any of the new fields
+  pg = await open(plain, { width: 1280, height: 800 }, 'dark');
+  out.plainNodes = await pg.locator('.nd').count();
+  out.plainHidden = await pg.evaluate(() => ['runs', 'usd', 'saved', 'tpm'].every(i => document.getElementById(i).hidden));
+  await pg.locator('.nd[data-id="main"]').click();
+  out.plainPanel = await pg.locator('#panel.open').count();
+  await pg.close();
+  await b.close();
+  console.log(JSON.stringify(out));
+})().catch(e => { console.log(JSON.stringify({ error: String(e).slice(0, 600) })); process.exit(0); });
+"""
+
+
+class FeaturesTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not have_playwright():
+            raise unittest.SkipTest("node/playwright/browser not available")
+
+    def test_page_features(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        files = {}
+        for name, sn in (("rich", rich_snap()), ("plain", snap())):
+            files[name] = os.path.join(tmp, name + ".html")
+            with open(files[name], "w") as fh:
+                fh.write(lean_maplive.build_html(sn, None))
+        shots = os.environ.get("MAP_SHOTS_DIR", "")
+        if shots:
+            os.makedirs(shots, exist_ok=True)
+        args = os.path.join(tmp, "args.json")
+        with open(args, "w") as fh:
+            json.dump(dict(files, shots=shots), fh)
+        js = os.path.join(tmp, "f.js")
+        with open(js, "w") as fh:
+            fh.write(FEATURES_JS)
+        r = subprocess.run([NODE, js, args], capture_output=True, text=True, timeout=150, env=node_env())
+        self.assertTrue(r.stdout.strip(), r.stderr)
+        d = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertNotIn("error", d)
+        self.assertEqual(d["errors"], [])
+        # in-progress tool, chips (at most 4), error badge, MCP badge
+        self.assertRegex(d["now"], r"Edit · lean_map\.py · \d+ s")
+        self.assertEqual(d["chips"], ["Edit 12", "Bash 7", "Read 5", "Grep 2"])
+        self.assertEqual(d["errBadge"], 1)
+        self.assertIn("github", d["mcp"])
+        self.assertIn("sonnet", d["worker"])
+        self.assertIn("$0.52", d["worker"])
+        self.assertIn("254k", d["worker"])
+        self.assertIn("feature/x", d["worker"])
+        self.assertIn("width:9%", d["bar"])
+        # header totals
+        self.assertEqual(d["totals"][0], "9 runs today")
+        self.assertEqual(d["totals"][1], "$3.10 today")
+        self.assertIn("saved ~400k tokens today", d["totals"][2])
+        self.assertEqual(d["totals"][3], "14 tools/min")
+        self.assertIn("2 errors", d["totals"][4])
+        # feed + timeline (3 + 1 + 1 + 1 events within 10 minutes; one failed)
+        self.assertEqual(d["feed"], 4)
+        self.assertTrue(d["feedVisible"])
+        self.assertEqual(d["ticks"], 6)
+        self.assertEqual(d["tickErr"], 1)
+        # workers sit right beside their thread, on the same row
+        ty, wy, tr, wl = d["wkRow"]
+        self.assertAlmostEqual(ty, wy, delta=1)
+        self.assertLess(wl - tr, 60)
+        self.assertGreaterEqual(wl, tr)
+        # every edge ends on a card border, at both sizes
+        for k in ("edges1280", "edges400"):
+            self.assertGreater(d[k]["n"], 4)
+            self.assertEqual(d[k]["bad"], 0, k)
+        # keyboard and feed
+        self.assertEqual(d["slashFocus"], "q")
+        self.assertNotEqual(d["arrow"], "main")
+        self.assertTrue(d["arrow"])
+        self.assertIn("Tests", d["feedClick"])
+        # filters
+        self.assertIn("t3", d["search"])
+        self.assertNotIn("t1", d["search"])
+        self.assertNotIn("t2", d["search"])
+        self.assertNotIn("t2", d["hideIdle"])
+        self.assertIn("t1", d["hideIdle"])
+        self.assertEqual(d["persisted"], "true")
+        self.assertIn("t1", d["onlyErr"])
+        self.assertNotIn("t3", d["onlyErr"])
+        self.assertGreater(d["idleLines"][0], 0)
+        self.assertEqual(d["idleLines"][1], 0)
+        # details
+        self.assertEqual(d["panelRows"], 3)
+        for w in ("Recent tool calls", "lean_maplive.py", "Files touched", "github", "Edit lean_map.py"):
+            self.assertIn(w.lower(), d["panel"].lower())
+        # narrow screen: no sideways scroll, full text in the tooltip
+        self.assertLessEqual(d["narrow"][0], d["narrow"][1])
+        self.assertIn("Fix the map", d["cardTitle"])
+        # nothing new in the snapshot: still renders
+        self.assertGreaterEqual(d["plainNodes"], 2)
+        self.assertTrue(d["plainHidden"])
+        self.assertEqual(d["plainPanel"], 1)
+
+
 class HtmlTest(unittest.TestCase):
     def test_html(self):
         tmp = tempfile.mkdtemp()
