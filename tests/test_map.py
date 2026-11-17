@@ -104,10 +104,39 @@ class MapTest(unittest.TestCase):
             self.assertNotIn("http://", doc.replace("http://www.w3.org/2000/svg", ""))
             self.assertLess(len(doc.encode()), 128 * 1024)
         doc = lean_map.svg(s)
-        self.assertIn("+3 more", doc)
-        for col in ("#2EC4B6", "#F2A541", "#7AA2F7", "#5B6475"):
-            self.assertIn(col, doc)
+        self.assertIn("more</text>", doc)
         self.assertEqual(lean_map.svg(s), lean_map.svg(s))
+
+    def test_svg_radial(self):
+        c = ctx(4)
+        c["threads"][1].update(state="undelivered", undelivered=True)
+        c["threads"][2].update(state="waiting")
+        s = lean_map.build(c)
+        s["plan"] = {"windows": [{"name": "five_hour", "label": "5h", "pct": 42.0, "resets_at": int(time.time()) + 3600}]}
+        doc = lean_map.svg(s, 380, 220, mini=True)
+        dom = xml.dom.minidom.parseString(doc)
+        self.assertEqual(doc.count('class="agent '), 4)
+        self.assertEqual(doc.count('class="root"'), 1)
+        self.assertIn("5h 42%", doc)
+        self.assertIn("inbox 2", doc)
+        for st in ("working", "attention", "failed", "idle"):
+            self.assertIn(f'class="agent {st}"', doc)
+            self.assertIn(lean_map.MX[st], doc)
+        self.assertEqual(doc.count('class="session"'), 1)
+        root = [g for g in dom.getElementsByTagName("g") if g.getAttribute("class") == "root"][0]
+        circ = root.getElementsByTagName("circle")[0]
+        self.assertEqual((float(circ.getAttribute("cx")), float(circ.getAttribute("cy")) > 100), (190.0, True))
+        self.assertLess(len(doc.encode()), 8 * 1024)
+        self.assertIn("<svg", lean_map.svg(s, 1200, 700))
+
+    def test_svg_redaction_holds(self):
+        c = ctx(2)
+        c["threads"][0]["title"] = "SECRETPROJECT"
+        s = lean_map.build(c)
+        with mock.patch.object(lean_map, "redact", side_effect=lambda x: dict(x, nodes=[n for n in x["nodes"] if n["id"] != "t1"], placed=[i for i in x["placed"] if i != "t1"])):
+            doc = lean_map.svg(s, 380, 220, mini=True)
+        self.assertNotIn("SECRETPROJECT", doc)
+        self.assertNotIn("S</text>", doc.replace("Service", ""))
 
     def test_watch_emits_on_change_only(self):
         snaps = [lean_map.build(ctx(), now=time.time())]
@@ -171,6 +200,21 @@ class MapTest(unittest.TestCase):
         ev = [e for e in lean_map.events() if e["label"] == "result"]
         self.assertEqual(len(ev), 1)
         self.assertEqual((ev[0]["from"], ev[0]["to"]), ("run:0116-9-dddd", "t1"))
+
+
+class PaneCheckTest(unittest.TestCase):
+    def test_pane_check_output(self):
+        import subprocess
+        tmp = tempfile.mkdtemp()
+        env = {"HOME": tmp, "LEAN_AGENT_HOME": tmp, "PATH": "/usr/bin:/bin", "LEAN_AGENT_TEST": "1"}
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "lean_agent.py"), "map", "--pane-check"], env=env,
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.strip().splitlines()
+        self.assertEqual([l.split(":")[0] for l in lines], ["binary", "service up", "json ok", "svg ok"])
+        self.assertIn("service up: no", r.stdout)
+        self.assertRegex(r.stdout, r"json ok: yes \(\d+ bytes\)")
+        self.assertRegex(r.stdout, r"svg ok: yes \(\d+ bytes\)")
 
 
 if __name__ == "__main__":

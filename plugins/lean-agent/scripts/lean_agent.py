@@ -15092,7 +15092,7 @@ def _fe(fn, a):
 
 
 def cmd_map(a):
-    if not a.project or a.svg or a.mini or a.watch or a.html or getattr(a, "alerts", False) or getattr(a, "usage", False) or getattr(a, "probe", False) or getattr(a, "url", False):
+    if not a.project or a.svg or a.mini or a.watch or a.html or getattr(a, "alerts", False) or getattr(a, "pane_check", False) or getattr(a, "usage", False) or getattr(a, "probe", False) or getattr(a, "url", False):
         return cmd_live_map(a)
     def run(fe, slug, path, a):
         root = fe.work_dir(slug, path, a.dir)
@@ -16398,6 +16398,28 @@ def cmd_myq(a):
 live_box = []  # the running service's Live endpoint (so the `map` socket op shares its snapshot)
 
 
+def pane_check(snap):
+    """What the Claude Code pane would do, one line each: the binary it would run, the service, the json and the drawing."""
+    import shutil
+    exe = shutil.which("lean-agent") or "not on PATH (the pane then tries the plugin install and a login shell)"
+    up = bool((snap.get("service") or {}).get("up"))
+    try:
+        js = json.dumps(snap)
+        json_ok = isinstance(json.loads(js), dict) and "service" in snap
+    except Exception:
+        js, json_ok = "", False
+    try:
+        doc = lean_map.svg(snap, 380, 220, mini=True)
+        svg_ok = doc.lstrip().startswith("<svg")
+    except Exception:
+        doc, svg_ok = "", False
+    print(f"binary: {exe}")
+    print(f"service up: {'yes' if up else 'no'}")
+    print(f"json ok: {'yes' if json_ok else 'no'} ({len(js.encode())} bytes)")
+    print(f"svg ok: {'yes' if svg_ok else 'no'} ({len(doc.encode())} bytes)")
+    return 0 if json_ok and svg_ok else 1
+
+
 def cmd_live_map(a):
     """The live map: one snapshot (--json), the drawing (--svg/--mini), a line per change (--watch)."""
     if getattr(a, "watch", False):
@@ -16451,13 +16473,15 @@ def cmd_live_map(a):
             print("limit reached")
         return 0
     snap = lean_map.fetch()
+    if getattr(a, "pane_check", False):
+        return pane_check(snap)
     if getattr(a, "alerts", False):
         for x in snap.get("alerts") or []:
             print(f"{x['level']} {x['kind']} {x['text']}")
         return 0
     if getattr(a, "svg", False) or getattr(a, "mini", False):
         mini = bool(getattr(a, "mini", False))
-        print(lean_map.svg(snap, a.width or (480 if mini else 1200), a.height or (320 if mini else 700), mini=mini))
+        print(lean_map.svg(snap, a.width or (380 if mini else 1200), a.height or (220 if mini else 700), mini=mini))
     else:
         print(json.dumps(snap, indent=None if getattr(a, "json", False) else 1))
     return 0
@@ -19326,6 +19350,7 @@ def build_parser():
                    help="live map --html: the service keeps rewriting the file for MIN minutes (default 30) so a viewer that only reloads files stays live")
     s.add_argument("--probe", action="store_true", help="live map: write a diagnostics page (what the preview allows: JS, WebSocket, fetch, img), print its path")
     s.add_argument("--usage", action="store_true", help="print the plan usage windows (percent, reset time), one per line, exit 0")
+    s.add_argument("--pane-check", dest="pane_check", action="store_true", help="live map: print what the Claude Code pane would do (binary, service, json, svg, bytes)")
     s.add_argument("--alerts", action="store_true", help="live map: print the current alerts, one per line (level kind text), exit 0")
     s.add_argument("--watch", action="store_true", help="live map: one JSON line whenever it changes (twice a second at most)")
     s.add_argument("--width", type=int)
