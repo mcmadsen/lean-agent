@@ -407,12 +407,14 @@ def ledger_since(home, since_iso, max_bytes=16 << 20):
     return rows
 
 
-def tools_week(now, top=10):
+def tools_week(now, top=10, skip=()):
     """[[tool, count]] over the activity rings (what is still in memory, at most the last 7 days), most used first."""
     cnt = {}
     with _lock:
-        rings = [list(r) for r in _rings.values()]
-    for evs in rings:
+        rings = [(k, list(r)) for k, r in _rings.items()]
+    for node, evs in rings:
+        if node in skip:
+            continue
         for e in evs:
             if now - e["ts"] <= 7 * 86400:
                 cnt[e["tool"]] = cnt.get(e["tool"], 0) + 1
