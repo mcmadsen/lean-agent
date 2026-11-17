@@ -219,6 +219,7 @@ def activity_parts(ctx, nodes, placed, ev, now):
         per = {}
         errs = 0
         recent = 0
+        calls = 0
         for n in nodes:
             nid = n["id"]
             if nid not in placed or n["kind"] == "service":
@@ -238,13 +239,36 @@ def activity_parts(ctx, nodes, placed, ev, now):
                 if evs is None:
                     evs = [{"ts": e["ts"], "tool": e["tool"], "target": e["target"], "ok": e["ok"]} for e in a["recent"]]
                 recent += sum(1 for e in evs if now - e["ts"] <= 60)
+                calls += len(evs)
                 per[nid] = evs
         rows = ctx.get("rows") or []
         visible = {n["id"] for n in nodes}
-        return {"totals": act.totals(rows, ctx.get("home") or "", per_min=recent, errors=errs),
+        tot = act.totals(rows, ctx.get("home") or "", per_min=recent, errors=errs)
+        tot.update(_extra_totals(ctx, nodes, calls, errs, now))
+        return {"totals": tot,
                 "feed": act.feed_items(per, ev, rows, now, visible)}
     except Exception:
         return {}
+
+
+def _extra_totals(ctx, nodes, calls, errs, now):
+    """The few extra numbers the live page's metric cards show; each key is left out when it is not known."""
+    o = {}
+    try:
+        ws = [n for n in nodes if n["kind"] == "worker"]
+        o["workers_done"] = sum(1 for n in ws if n["state"] == "done")
+        o["workers_queued"] = sum(1 for n in ws if n["state"] == "queued")
+        o["projects_online"] = len({n.get("project") for n in nodes if n["kind"] == "thread" and n.get("project")
+                                    and n["state"] not in ("parked", "idle", "orphaned")})
+        if calls:
+            o["fail_rate_30m"] = round(100.0 * errs / calls, 1)
+        h = history_cached(ctx["home"], 2, now) if ctx.get("home") else None
+        days = h.get("days") if isinstance(h, dict) else None
+        if days and len(days) >= 2 and days[-1].get("date") != days[-2].get("date"):
+            o["usd_yesterday"] = round(float(days[-2].get("usd") or 0), 2)
+    except Exception:
+        pass
+    return o
 
 
 # ---------------------------------------------------------------- projects and alerts
