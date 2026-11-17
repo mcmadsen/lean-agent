@@ -336,7 +336,7 @@ def session_rec(key="main"):
     if key == "main":
         try:
             import lean_desk
-            desk = lean_desk.attached()  # the external front desk is "main": its session id and transcript
+            desk = lean_desk.attached() if lean_desk.external() else None  # the active app desk is "main": its session id and transcript
         except Exception:  # noqa: BLE001
             desk = None
         if desk:
@@ -1108,6 +1108,9 @@ class AutoClear:
     def run(self):
         poll = _knob("LEAN_AGENT_CLEAR_POLL", 2)
         while not self.host.stopping.is_set():
+            if getattr(self.host, "external", False):  # the app desk is never checkpointed or cleared by the service
+                self.host.stopping.wait(poll)
+                continue
             try:
                 self.tick()
             except Exception as exc:  # never take the session down
@@ -3600,6 +3603,113 @@ def child_env(env):
     lean_auth.apply_env(out)  # the stored long-lived sign-in, read now (a new `lean-agent login` reaches new spawns)
     out.setdefault("TERM", "xterm-256color")
     return out
+
+
+class SwitchHost:
+    """main's host in desk mode auto|external: hosts the service's own Remote Control main while no app session is the desk, and
+    stands aside (ExternalHost) while one is. Switches: hosted -> app once an app session attached and the hosted main is idle
+    (no turn, nothing typed for IDLE_FOR s; checkpointed like a normal stop); app -> hosted once the desk's heartbeat is gone
+    (30 min). Never twice within SWITCH_GAP (auto); config desk hosted|external pins immediately. Same surface as Host."""
+
+    key = "main"
+    IDLE_FOR = 60
+    WATCH = 5
+
+    def __init__(self, make_hosted, now=time.time, gap=None):
+        import lean_desk
+        self.desk = lean_desk
+        self.make_hosted, self.now = make_hosted, now
+        self.gap = lean_desk.SWITCH_GAP if gap is None else gap
+        self.stopping = threading.Event()
+        self.cur = None
+        self.switching = False
+        self.last_switch = lean_desk.state().get("since") or 0
+
+    @property
+    def external(self):
+        return isinstance(self.cur, ExternalHost)
+
+    def __getattr__(self, name):
+        cur = self.__dict__.get("cur")
+        if cur is None:
+            raise AttributeError(name)
+        return getattr(cur, name)
+
+    def wanted(self, now=None):
+        now = self.now() if now is None else now
+        m = self.desk.mode()
+        if m == "hosted":
+            return "hosted"
+        if m == "external":
+            return "app"
+        return "app" if self.desk.attached(now) else "hosted"
+
+    def idle(self, now):
+        cur = self.cur
+        if isinstance(cur, ExternalHost) or cur is None:
+            return True
+        if now - (getattr(cur, "last_input", 0) or 0) < self.IDLE_FOR:
+            return False
+        return not (mid_turn("main") or dialog_held("main", now))
+
+    def tick(self, now=None):
+        """One decision; the new kind when a switch was started, else None."""
+        now = self.now() if now is None else now
+        want, have = self.wanted(now), "app" if self.external else "hosted"
+        if want == have or self.cur is None or self.switching:
+            return None
+        pinned = self.desk.mode() != "auto"
+        if not pinned and now - self.last_switch < self.gap:
+            return None
+        if have == "hosted":
+            if not self.idle(now):
+                return None
+            try:
+                checkpoint_session("main", wait=_knob("LEAN_AGENT_CLOSE_CHECKPOINT_WAIT", CLOSE_CHECKPOINT_WAIT))
+            except Exception as exc:  # noqa: BLE001 - a stop without a checkpoint still resumes from the transcript
+                lean_log.log("warn", "desk", f"checkpoint before the switch failed: {exc}")
+            why = "an app session attached as the desk" if want == "app" else "config desk"
+        else:
+            why = "the app desk's heartbeat is gone (30 min): hosting main again" if not pinned else "config desk hosted"
+        self.next_kind, self.next_why = want, why
+        self.switching = True
+        self.last_switch = now
+        lean_log.log("info", "desk", f"desk: {have} -> {want} ({why})")
+        print(f"lean-agent: desk: {have} -> {want} ({why})", flush=True)
+        self.cur.stop()
+        return want
+
+    def watch(self):
+        while not self.stopping.wait(self.WATCH):
+            try:
+                self.tick()
+            except Exception as exc:  # noqa: BLE001
+                lean_log.log("error", "desk", f"desk switch check failed: {exc}")
+
+    def stop(self):
+        self.stopping.set()
+        if self.cur is not None:
+            self.cur.stop()
+
+    def run(self):
+        threading.Thread(target=self.watch, daemon=True).start()
+        kind = self.wanted()
+        why = "service start"
+        rc = 0
+        while not self.stopping.is_set():
+            if kind == "app":
+                self.cur = ExternalHost()
+            else:
+                self.cur = self.make_hosted()
+            self.desk.set_active(kind, why, self.now()) if self.desk.state().get("active") != kind else None
+            self.switching = False
+            if self.stopping.is_set():
+                break
+            rc = self.cur.run()
+            if self.stopping.is_set() or not self.switching:
+                return rc  # stopped, or a hosted start that fails (the service manager decides)
+            kind, why = self.next_kind, self.next_why
+        return rc
 
 
 class Host:

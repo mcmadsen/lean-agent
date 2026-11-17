@@ -52,8 +52,8 @@ class Base(unittest.TestCase):
 
 
 class Mode(Base):
-    def test_default_hosted_and_switch(self):
-        self.assertEqual(lean_desk.mode(), "hosted")
+    def test_default_auto_and_switch(self):
+        self.assertEqual(lean_desk.mode(), "auto")
         self.assertIsNone(lean_desk.attached())
         self.external()
         self.assertEqual(lean_desk.mode(), "external")
@@ -62,6 +62,7 @@ class Mode(Base):
         self.assertFalse(lean_desk.notify_on())
 
     def test_hooks_are_inert_when_hosted(self):
+        lean_desk.set_mode("hosted")
         self.assertEqual(self.hook("start"), (None, None))
         self.assertIsNone(lean_desk.record().get("session_id"))
 
@@ -79,11 +80,12 @@ class Mode(Base):
                 mock.patch("threading.Thread.start"), mock.patch.object(la, "print_still_running"):
             la.host_session(["claude"], [], {}, self.tmp, "lean-agent")
         self.assertEqual(started, [])
-        self.assertIsInstance(rep.call_args[0][0], ss.ExternalHost)
-        clear.assert_not_called()
+        self.assertIsInstance(rep.call_args[0][0], ss.SwitchHost)
+        self.assertTrue(rep.call_args[0][0].external)
 
     def test_hosted_still_starts_the_main_host(self):
         import lean_agent as la
+        lean_desk.set_mode("hosted")
         host = mock.Mock()
         host.run.return_value = 0
         with mock.patch.object(ss, "Host", return_value=host) as h, \
@@ -101,9 +103,9 @@ class Mode(Base):
 class Attach(Base):
     def test_attach_detach_status_one_desk(self):
         self.external()
-        self.assertIn("no desk attached", lean_desk.status_line(self.now))
+        self.assertIn("no app session attached", lean_desk.status_line(self.now))
         self.assertEqual(lean_desk.attach("s1", "/t/s1.jsonl", "/c", self.now), (True, "attached"))
-        self.assertIn("external, attached", lean_desk.status_line(self.now + 120))
+        self.assertIn("app session attached", lean_desk.status_line(self.now + 120))
         ok, msg = lean_desk.attach("s2", None, None, self.now + 5)
         self.assertFalse(ok)
         self.assertIn("already the front desk", msg)
@@ -219,10 +221,10 @@ class Resolution(Base):
         lean_desk.attach("s1", None, None, time.time())
         d = lean_map.desk_info()
         self.assertEqual((d["mode"], d["attached"]), ("external", True))
-        self.assertIn("external, attached", d["line"])
+        self.assertIn("app session attached", d["line"])
         snap = lean_map.build({"service": {"desk": d}, "threads": [], "runs": [], "inbox": 0, "desk_idle_s": 3})
         node = next(n for n in snap["nodes"] if n["id"] == "main")
-        self.assertIn("external, attached", node["detail"])
+        self.assertIn("app session, attached", node["detail"])
 
     def test_pane_state_uses_the_cli_socket_path(self):
         down = lean_map.down_snapshot()
@@ -242,6 +244,159 @@ class Resolution(Base):
         open(own, "w").close()
         with mock.patch.object(pwd, "getpwuid", return_value=mock.Mock(pw_dir=base)):
             self.assertEqual(lean_sock.path(), own)  # the resolved home always wins
+
+
+class Isolation(Base):
+    """Strict mode and the orchestrator rules apply to the real front desk only."""
+
+    def deny(self, event, **env):
+        import budget_hook
+        import budget_gate
+        event = {"hook_event_name": "PreToolUse", "cwd": self.tmp, "session_id": "sx", **event}
+        with mock.patch.dict(os.environ, env), mock.patch.object(budget_hook, "usage") as u:
+            u.lean_home.return_value = self.tmp
+            desk = budget_gate.is_front_desk(event)
+            return budget_hook.strict_denial(event, self.tmp, self.tmp) if desk else "", desk
+
+    BASH = {"tool_name": "Bash", "tool_input": {"command": "ls -la"}}
+    MCP = {"tool_name": "mcp__other__thing", "tool_input": {}}
+
+    def test_a_non_desk_session_in_the_lean_home_stays_unrestricted_even_after_lean_agent_commands(self):
+        for cmd in ("lean-agent runs", "lean-agent run x", "ls -la", "git push"):
+            why, desk = self.deny({"tool_name": "Bash", "tool_input": {"command": cmd}})
+            self.assertEqual((why, desk), ("", False), cmd)
+        self.assertEqual(self.deny(self.MCP), ("", False))
+
+    def test_the_attached_desk_and_the_hosted_main_are_restricted(self):
+        lean_desk.attach("sx", None, self.tmp, time.time())
+        why, desk = self.deny(self.BASH)
+        self.assertTrue(desk)
+        self.assertIn("strict mode", why)
+        self.assertIn("strict mode", self.deny(self.MCP)[0])
+        why, desk = self.deny(self.BASH, LEAN_AGENT_SERVICE_SESSION="1")
+        self.assertTrue(desk)
+        lean_desk.detach()
+        self.assertEqual(self.deny(self.BASH), ("", False))  # a detached desk is a normal session again
+
+    def test_the_apps_own_session_tools_are_allowed_for_the_desk_only(self):
+        import budget_hook
+        lean_desk.attach("sx", None, self.tmp, time.time())
+        for name in ("mcp__ccd_session__mark_chapter", "mcp__Claude_Preview__preview_start"):
+            self.assertEqual(self.deny({"tool_name": name, "tool_input": {}})[0], "", name)
+        self.assertIn("strict mode", self.deny({"tool_name": "mcp__ccd_sessionx__a", "tool_input": {}})[0])
+        self.assertTrue(all(p.startswith("mcp__") for p in budget_hook.DESK_APP_TOOL_PREFIXES))
+        self.assertIn("strict mode", self.deny({"tool_name": "mcp__github__create_issue", "tool_input": {}})[0])
+
+    def test_status_says_whether_this_session_is_the_desk(self):
+        import lean_agent as la
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "12345678-1234-1234-1234-123456789abc"}):
+            self.assertEqual(la.this_session_role(), ("a normal session (not the desk)", False))
+            self.assertIn("does not apply", la.this_session_line())
+            lean_desk.attach("12345678-1234-1234-1234-123456789abc", None, None, time.time())
+            self.assertEqual(la.this_session_role()[0], "the front desk (the attached app session)")
+            self.assertIn("strict mode applies", la.this_session_line())
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_SERVICE_SESSION": "1"}):
+            self.assertIn("hosted by the service", la.this_session_role()[0])
+
+
+class Auto(Base):
+    """desk auto: attach on SessionStart in the lean home; the hosted main stands aside when idle; it comes back when the desk goes."""
+
+    def switch(self, make=None):
+        made = []
+        sh = ss.SwitchHost(lambda: made.append(1) or mock.Mock(last_input=0, run=mock.Mock(return_value=0)), now=lambda: self.clock[0])
+        sh.cur = mock.Mock(last_input=0)  # a running hosted main
+        sh.made = made
+        return sh
+
+    def setUp(self):
+        super().setUp()
+        self.clock = [self.now]
+
+    def test_auto_is_the_default_and_attaches_on_start_in_the_lean_home(self):
+        self.assertEqual(lean_desk.mode(), "auto")
+        stdin = io.StringIO(json.dumps({"session_id": "s1", "cwd": self.tmp}))  # the lean home itself
+        with mock.patch.object(sys, "stdin", stdin), contextlib.redirect_stdout(io.StringIO()):
+            desk_hook.main(["start"], now=self.now)
+        self.assertEqual(lean_desk.record()["session_id"], "s1")
+
+    def test_hosted_main_is_stopped_only_when_idle(self):
+        sh = self.switch()
+        lean_desk.attach("s1", None, None, self.clock[0])
+        with mock.patch.object(ss, "mid_turn", return_value=True), mock.patch.object(ss, "checkpoint_session") as cp:
+            self.assertIsNone(sh.tick(self.clock[0]))  # a turn is running
+            sh.cur.last_input = self.clock[0] - 5
+            with mock.patch.object(ss, "mid_turn", return_value=False):
+                self.assertIsNone(sh.tick(self.clock[0]))  # typed 5 s ago
+            sh.cur.last_input = self.clock[0] - 120
+            cp.assert_not_called()
+            with mock.patch.object(ss, "mid_turn", return_value=False):
+                self.assertEqual(sh.tick(self.clock[0]), "app")
+            cp.assert_called_once()
+        sh.cur.stop.assert_called_once()
+
+    def test_heartbeat_loss_resumes_the_hosted_main_and_gaps_hold(self):
+        sh = ss.SwitchHost(lambda: mock.Mock(), now=lambda: self.clock[0])
+        sh.cur = ss.ExternalHost()
+        sh.cur.stop = mock.Mock()
+        lean_desk.attach("s1", None, None, self.clock[0])
+        lean_desk.set_active("app", "test", self.clock[0])
+        sh.last_switch = self.clock[0]
+        self.clock[0] += 31 * 60  # heartbeat gone, 31 min since the switch
+        self.assertEqual(sh.wanted(self.clock[0]), "hosted")
+        self.assertEqual(sh.tick(self.clock[0]), "hosted")
+        sh.cur.stop.assert_called_once()
+
+    def test_no_switch_within_ten_minutes(self):
+        sh = ss.SwitchHost(lambda: mock.Mock(), now=lambda: self.clock[0])
+        sh.cur = ss.ExternalHost()
+        sh.cur.stop = mock.Mock()
+        lean_desk.attach("s1", None, None, self.clock[0] - 40 * 60)  # heartbeat gone
+        sh.last_switch = self.clock[0] - 300
+        self.assertIsNone(sh.tick(self.clock[0]))
+        sh.cur.stop.assert_not_called()
+        sh.last_switch = self.clock[0] - 601
+        self.assertEqual(sh.tick(self.clock[0]), "hosted")
+
+    def test_pinned_modes(self):
+        lean_desk.set_mode("hosted")
+        sh = self.switch()
+        lean_desk.attach("s1", None, None, self.clock[0])
+        self.assertEqual(sh.wanted(self.clock[0]), "hosted")
+        lean_desk.set_mode("external")
+        self.assertEqual(sh.wanted(self.clock[0] + 99 * 60), "app")  # never hosts
+
+    def test_switch_is_recorded_for_status(self):
+        lean_desk.set_active("app", "an app session attached", self.now)
+        self.assertEqual(lean_desk.state()["active"], "app")
+        lean_desk.attach("s1", None, None, self.now)
+        self.assertEqual(lean_desk.summary(self.now)["label"], "desk: app session")
+        self.assertIn("app session", lean_desk.status_line(self.now))
+
+
+class Folder(Base):
+    def test_settings_refresh_is_idempotent_and_touches_only_lean_agent_keys(self):
+        import lean_agent as la
+        root = la.home()
+        path = os.path.join(root, ".claude", "settings.json")
+        os.makedirs(os.path.dirname(path))
+        with open(path, "w") as fh:
+            json.dump({"theme": "dark", "env": {"MINE": "1"}, "permissions": {"allow": ["Read"]}}, fh)
+        h = la.home("home")
+        os.makedirs(os.path.join(h, ".claude"), exist_ok=True)
+        self.assertTrue(la.refresh_desk_folder(h))
+        with open(path) as fh:
+            first = json.load(fh)
+        self.assertEqual(first["theme"], "dark")
+        self.assertEqual(first["env"]["MINE"], "1")
+        self.assertEqual(first["env"]["LEAN_AGENT_DESK_SESSION"], "1")
+        self.assertNotIn("LEAN_AGENT_SESSION_ROLE", first["env"])
+        self.assertIn("Read", first["permissions"]["allow"])
+        self.assertIn("Bash(lean-agent:*)", first["permissions"]["allow"])
+        self.assertFalse(la.refresh_desk_folder(h))  # unchanged: nothing written
+        with open(path) as fh:
+            self.assertEqual(json.load(fh), first)
+        self.assertTrue(os.path.exists(os.path.join(root, "CLAUDE.md")))
 
 
 if __name__ == "__main__":

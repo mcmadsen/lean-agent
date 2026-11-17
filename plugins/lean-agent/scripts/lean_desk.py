@@ -3,7 +3,8 @@ session `lean-agent up` hosts. Stdlib only (hooks import it).
 
 desk.json records the attached session {session_id, transcript, cwd, attached_ts, heartbeat}; the desk's hooks refresh
 the heartbeat. An attached desk whose heartbeat is older than STALE_SECS counts as detached (reports wait in the inbox).
-Mode (config.json "desk": external|hosted, default hosted; env LEAN_AGENT_DESK overrides) and the notify switch
+Mode (config.json "desk": auto|hosted|external, default auto; env LEAN_AGENT_DESK overrides: auto attaches an app session
+started in the lean home and hosts a Remote Control main otherwise, hosted never attaches, external never hosts) and the notify switch
 ("desk_notify", default on in external mode) live in config.json.
 """
 import json
@@ -14,7 +15,8 @@ import tempfile
 import time
 
 STALE_SECS = 30 * 60
-MODES = ("hosted", "external")
+MODES = ("auto", "hosted", "external")
+SWITCH_GAP = 10 * 60  # seconds between two switches of the active desk in auto mode (no flapping)
 
 
 def lean_home(*parts):
@@ -24,6 +26,11 @@ def lean_home(*parts):
 def desk_dir():
     """The folder the desk session is started in (where the front desk CLAUDE.md and settings live)."""
     return lean_home("home")
+
+
+def desk_dirs():
+    """Folders where a session attaches as the desk: the lean home (where the app remembers the folder) and the hosted desk's own."""
+    return [lean_home(), desk_dir()]
 
 
 def _read(path):
@@ -54,12 +61,45 @@ def config():
 
 
 def mode():
-    m = os.environ.get("LEAN_AGENT_DESK") or config().get("desk") or "hosted"
-    return m if m in MODES else "hosted"
+    m = os.environ.get("LEAN_AGENT_DESK") or config().get("desk") or "auto"
+    return m if m in MODES else "auto"
+
+
+def enabled():
+    """An app session may attach as the desk (mode auto or external)."""
+    return mode() != "hosted"
+
+
+def state_path():
+    return lean_home("desk-mode.json")
+
+
+def state():
+    return _read(state_path())
+
+
+def active(now=None):
+    """Who is the desk right now: "app" (an attached local session) or "hosted" (the service's Remote Control main)."""
+    m = mode()
+    if m == "hosted":
+        return "hosted"
+    if m == "external":
+        return "app"
+    return "app" if state().get("active") == "app" and attached(now) else "hosted"
 
 
 def external():
-    return mode() == "external"
+    """The attached app session is the active desk (the service types nothing into a main)."""
+    return active() == "app"
+
+
+def set_active(which, why, now=None):
+    """Record a switch of the active desk (the service does it): state file with the last switches, for status/doctor/map."""
+    now = time.time() if now is None else now
+    st = state()
+    log = list(st.get("log") or [])[-19:]
+    log.append({"ts": now, "to": which, "why": why})
+    _write(state_path(), {"active": which, "since": now, "why": why, "log": log})
 
 
 def set_mode(m):
@@ -89,7 +129,7 @@ def record():
 
 def attached(now=None):
     """The attached desk's record while its heartbeat is fresh and the mode is external, else None."""
-    if not external():
+    if not enabled():
         return None
     rec = record()
     now = time.time() if now is None else now
@@ -152,12 +192,18 @@ def summary(now=None):
     """The desk state for the pane, status and doctor: {mode, attached, age, session_id, heartbeat_age}."""
     now = time.time() if now is None else now
     m = mode()
-    out = {"mode": m, "attached": False}
-    if m != "external":
+    act = active(now)
+    out = {"mode": m, "attached": False, "active": act,
+           "label": "desk: app session" if act == "app" else "desk: hosted (Remote Control)"}
+    if m == "hosted":
         return out
     rec = record()
     cur = attached(now)
     out["attached"] = bool(cur)
+    st = state()
+    if st.get("since"):
+        out["since"] = age(st["since"], now)
+        out["why"] = st.get("why") or ""
     if rec.get("session_id"):
         out["session_id"] = rec["session_id"]
         out["age"] = age(rec.get("attached_ts"), now)
@@ -168,14 +214,15 @@ def summary(now=None):
 
 def status_line(now=None):
     s = summary(now)
-    if s["mode"] != "external":
-        return "desk: hosted (the service hosts the front desk session)"
+    tag = f" ({s['mode']})"
+    if s["mode"] == "hosted":
+        return "desk: hosted (Remote Control) (pinned: config desk hosted)"
+    act = s["label"] + tag + (f", since {s['since']} ago" if s.get("since") else "")
     if s["attached"]:
-        return f"desk: external, attached {s['age']} ago, last seen {s['heartbeat_age']} ago (session {s['session_id'][:8]})"
+        return act + f", app session attached {s['age']} ago, last seen {s['heartbeat_age']} ago (session {s['session_id'][:8]})"
     if s.get("session_id"):
-        return (f"desk: external, detached (last seen {s['heartbeat_age']} ago); reports wait in the inbox until a session "
-                f"started in {desk_dir()} attaches")
-    return f"desk: external, no desk attached; start a Claude session in {desk_dir()} (or run `lean-agent desk attach` there)"
+        return act + f", app session detached (last seen {s['heartbeat_age']} ago)"
+    return act + f", no app session attached; open a local session in {lean_home()}"
 
 
 def notify(text, now=None):

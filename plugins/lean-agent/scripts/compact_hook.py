@@ -42,7 +42,10 @@ the orchestrator guide (`lean-agent guide`), and finished side tasks. Don't repe
 def in_lean_home(event):
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     home = os.path.realpath(usage.lean_home())
-    return cwd == home or cwd.startswith(home + os.sep)
+    if not (cwd == home or cwd.startswith(home + os.sep)):
+        return False
+    from budget_gate import is_front_desk
+    return is_front_desk(event)  # a normal session in the home folder is not the orchestrator
 
 
 def read_jsonl(path, tail=400):

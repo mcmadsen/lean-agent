@@ -25,7 +25,7 @@ def main(argv=None, now=None):
         return 0
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import lean_desk
-    if not lean_desk.external():
+    if not lean_desk.enabled() or os.environ.get("LEAN_AGENT_LOCAL_UP") == "1":
         return 0
     try:
         event = json.load(sys.stdin)
@@ -37,7 +37,7 @@ def main(argv=None, now=None):
     now = time.time() if now is None else now
     if mode == "start":
         cwd = event.get("cwd") or os.getcwd()
-        in_desk_dir = os.path.realpath(cwd) == os.path.realpath(lean_desk.desk_dir())
+        in_desk_dir = os.path.realpath(cwd) in [os.path.realpath(d) for d in lean_desk.desk_dirs()]
         if not (in_desk_dir or os.environ.get("LEAN_AGENT_DESK_SESSION") == "1"):
             return 0
         ok, msg = lean_desk.attach(sid, event.get("transcript_path"), cwd, now)

@@ -33,7 +33,7 @@ MEMORY_MESSAGE_RE = r"^#[ \t]+\S"  # '# keep this', not '#12 is failing' or '#ta
 COMMAND_PROMPT_RE = r"^/(memory|init)(\s|$)"
 
 
-from budget_gate import in_home_or_service, prompt_needs_hook, nothing_to_do, NOOP_BASH_WORDS  # noqa: E402,F401
+from budget_gate import is_front_desk, in_home_or_service, prompt_needs_hook, nothing_to_do, NOOP_BASH_WORDS  # noqa: E402,F401
 
 
 STDIN = None
@@ -557,6 +557,9 @@ KEEP_ALWAYS = {"recipe", "doc"}
 MCP_ALWAYS = {"mcp"}
 MCP_ACTIONS = {"chrome": ({"check", "status"}, {"check"})}
 KEEP_NOTE_KINDS = ("checkpoint", "fyi", "decision")
+# The Claude desktop app's own tools (session management / wrap-up, preview, artifacts) by name prefix: strict mode lets the
+# front desk use them (it runs inside the app); every other MCP tool stays refused. Extend here when the app adds tools.
+DESK_APP_TOOL_PREFIXES = ("mcp__ccd_session__", "mcp__ccd_directory__", "mcp__Claude_Preview__", "mcp__artifacts__")
 MCP_RESOURCE_TOOLS = ("ListMcpResources", "ListMcpResourcesTool", "ReadMcpResource", "ReadMcpResourceTool",
                       "ReadMcpResourceDir", "ReadMcpResourceDirTool")
 DELEGATE_CHANGE = ("A worker makes the change and reads the project's cards: lean-agent run <project> --cards auto "
@@ -760,6 +763,8 @@ def strict_denial(event, cwd, lean_root):
                     f"itself (`lean-agent {what}`). " + (DELEGATE_KEEP_MAIN if main else DELEGATE_KEEP))
         if kind == "mcp":
             return f"strict mode: the orchestrator neither lists nor runs MCP servers (`lean-agent {what}`). " + hint(DELEGATE_MCP)
+    elif tool and tool.startswith(DESK_APP_TOOL_PREFIXES):
+        return ""  # the Claude desktop app's own session tools: the external desk may use them
     elif tool and (tool.startswith("mcp__") or tool in MCP_RESOURCE_TOOLS):
         return f"strict mode: the orchestrator uses no MCP tool ({tool[:60]}). " + hint(DELEGATE_MCP)
     elif tool in ("Read", "Grep", "Glob"):
@@ -1067,13 +1072,13 @@ def main():
     if event.get("hook_event_name") == "UserPromptSubmit":
         cwd = os.path.realpath(event.get("cwd") or os.getcwd())
         home = os.path.realpath(usage.lean_home())
-        if in_home_or_service(cwd, home) and not cwd.startswith(os.path.join(home, "work") + os.sep):
+        if is_front_desk(event) and in_home_or_service(cwd, home) and not cwd.startswith(os.path.join(home, "work") + os.sep):
             prompt_hook(event)
         return 0
     if event.get("hook_event_name") == "Stop":
         cwd = os.path.realpath(event.get("cwd") or os.getcwd())
         home = os.path.realpath(usage.lean_home())
-        if in_home_or_service(cwd, home) and not cwd.startswith(os.path.join(home, "work") + os.sep):
+        if is_front_desk(event) and in_home_or_service(cwd, home) and not cwd.startswith(os.path.join(home, "work") + os.sep):
             stop_hook(event)
         return 0
     transcript = event.get("transcript_path")
@@ -1089,7 +1094,12 @@ def main():
     # lean-agent's own status and budget commands always run, so a blocked session can see and lift its limits
     checking = event.get("tool_name") == "Bash" and command.startswith(tuple(
         "lean-agent " + c for c in ("limits", "stats", "budget", "runs", "logs", "doctor")))
-    in_home = cwd == home or cwd.startswith(home + os.sep)
+    desk = is_front_desk(event)
+    if (desk and os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1" and os.environ.get("LEAN_AGENT_LOCAL_UP") != "1"
+            and not os.environ.get("LEAN_AGENT_SESSION_ROLE")):
+        os.environ["LEAN_AGENT_SESSION_ROLE"] = "main"  # the attached external desk: main's hints and rules
+    # the orchestrator rules (strict mode, push/worker/read guards, caps) apply to the front desk only, never to another session
+    in_home = (cwd == home or cwd.startswith(home + os.sep)) and desk
     if os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread" and event.get("tool_name") == "Bash" and orphan_denial(command):
         emit(permissionDecision="deny", permissionDecisionReason=(
             "lean-agent: you are an orphan session (your thread does not exist). lean-agent run/advise/thread commands are "

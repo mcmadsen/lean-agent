@@ -146,8 +146,8 @@ async function status($: any, text: string) {
 // "desk: external, attached 3m ago" (empty when the desk is hosted or unknown); reports waiting for an idle desk are counted.
 function deskLine(snap: MapView["snap"] | null | undefined): string {
   const d = snap?.service?.desk
-  if (!d || d.mode !== 'external') return ''
-  const base = d.attached ? `desk: external, attached ${d.age ?? '?'}` : 'desk: external, not attached'
+  if (!d || d.mode === 'hosted') return ''
+  const base = d.active === 'app' ? `desk: app session, attached ${d.age ?? '?'}` : 'desk: hosted (Remote Control)'
   return d.pending ? `${base} · ${d.pending} waiting for you` : base
 }
 

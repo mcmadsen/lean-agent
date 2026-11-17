@@ -11244,6 +11244,52 @@ def register_source():
             fh.write(root + "\n")
 
 
+def refresh_desk_folder(h):
+    """Make a session started in the lean home folder a proper desk, automatically (prepare_home: `home`, `update`, service
+    start): the guide and rule file, and lean-agent's own keys in .claude/settings.json there (orchestrator permissions and env,
+    the desk marker, the pinned model). Idempotent (written only when changed); the user's global settings are never touched."""
+    root = home()
+    if os.path.realpath(root) == os.path.realpath(h):
+        return False
+    changed = False
+    try:
+        write_home_guide(root)
+        path = os.path.join(root, ".claude", "settings.json")
+        cur = load_json(path, {})
+        data = orchestrator_settings(cur)
+        env = dict(data.get("env") or {})
+        env.update(ORCHESTRATOR_ENV)
+        env["LEAN_AGENT_DESK_SESSION"] = "1"
+        env.pop("LEAN_AGENT_SESSION_ROLE", None)  # never a role marker here: a session that is not the desk stays a normal one
+        if os.environ.get("LEAN_AGENT_HOME"):
+            env["LEAN_AGENT_HOME"] = os.environ["LEAN_AGENT_HOME"]  # a GUI-launched session finds the same home and socket
+        data["env"] = env
+        model = load_json(os.path.join(h, ".claude", "settings.json"), {}).get("model")
+        if model:
+            data["model"] = model
+        if data != cur:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            save_json(path, data)
+            changed = True
+    except Exception as exc:  # noqa: BLE001 - never blocks the service start
+        lean_log.log("warn", "desk", f"desk folder settings not refreshed: {exc}")
+    return changed
+
+
+def desk_hint_once():
+    """The only manual step left, printed once (in `update`)."""
+    mark = home("desk-hint-shown")
+    if os.path.exists(mark):
+        return
+    print(f"lean-agent: front desk in the Claude app (optional): open a new local session in the Claude app with the folder "
+          f"{home()} (the app remembers it) and flip the app's Remote Control switch if you want it on your phone. "
+          "Everything else is automatic: that session becomes the desk, and the service hosts its own again when it goes away.")
+    try:
+        open(mark, "w").close()
+    except OSError:
+        pass
+
+
 def prepare_home():
     h = home("home")
     os.makedirs(os.path.join(h, ".claude"), exist_ok=True)
@@ -11255,6 +11301,8 @@ def prepare_home():
     local = os.path.join(h, ".claude", "settings.local.json")
     if os.environ.get("LEAN_AGENT_ORCHESTRATOR_TRIM") != "0":
         save_json(local, dict(load_json(local, {}), syncClaudeAiSkills=False))  # only honoured in local/user scope
+    if lean_desk.enabled():
+        refresh_desk_folder(h)
     return h
 
 
@@ -12365,9 +12413,9 @@ def cmd_doctor(a):
     report(True if sock_state == "listening" else None if sock_state == "missing" else False,
            f"service socket: {sock_state}" + (f" ({sock_secs * 1000:.0f} ms round trip)" if sock_state == "listening" else f" ({lean_sock.path()})"),
            "start the service: lean-agent up (or lean-agent service restart); a stale socket is replaced at start")
-    if lean_desk.external():
-        report(True if lean_desk.attached() else None, lean_desk.status_line(),
-               "start a Claude session in the desk folder (lean-agent desk setup), or `lean-agent desk attach` in it")
+    if lean_desk.enabled():
+        report(True, lean_desk.status_line(), None)
+        report(True, this_session_line(), None)
     for line in lean_slow.report_lines(3):  # commands/hooks that ran past 8 s / 4 s: where they were stuck
         report(None, line, "send this file with `lean-agent feedback add`")
     mark("socket, slow traces")
@@ -13035,21 +13083,19 @@ def cmd_up(a):
         cap = env.get("LEAN_AGENT_BUDGET")
         print(f"lean-agent: orchestrator in {h}, model {a.model or 'default'}"
               + (f", self-set session cap {int(cap):,} sonnet-eq" if cap else ""))
-        if lean_desk.external():
-            print(f"lean-agent: front desk is external: start a Claude session in {lean_desk.desk_dir()} (run `lean-agent desk "
-                  "setup` once), turn on Remote Control in the app; this service hosts the threads only")
-        else:
-            print(f"lean-agent: open the Claude app (Code) and pick \"{a.name}\"")
+        print(f"lean-agent: open the Claude app (Code) and pick \"{a.name}\"" if not lean_desk.enabled() else
+              "lean-agent: " + lean_desk.status_line())
     extra = a.extra[1:] if a.extra[:1] == ["--"] else a.extra
     os.chdir(h)
     sys.stdout.flush()  # exec replaces the process; unflushed output would be lost when piped
     sys.stderr.flush()
-    if a.local and not lean_desk.external():
+    if a.local:
+        env["LEAN_AGENT_LOCAL_UP"] = "1"  # a terminal session `up --local` runs is the front desk
         try:
             os.execvpe(cmd[0], cmd + extra, env)  # e.g. `lean-agent up -- --debug --debug-file /tmp/rc.log`
         except FileNotFoundError:
             die("'claude' not found on PATH")
-    if use_session or lean_desk.external():
+    if use_session:
         return host_session(cmd, extra, env, h, a.name)
     return remote_control(cmd + extra, env, h)
 
@@ -13118,14 +13164,16 @@ def host_session(cmd, extra, env, h, name):
 
     env["LEAN_AGENT_SESSION_ROLE"] = "main"
     sessions = service_session.Sessions(thread_host)
-    external = lean_desk.external()  # the front desk is a local session the user runs: no main session is hosted
-    if external:
-        host = service_session.ExternalHost()
-        print("lean-agent: front desk: external (no main session hosted); " + lean_desk.status_line(), flush=True)
-    else:
-        lean_desk.detach()  # a hosted main never resumes an external desk's session
-        host = service_session.Host(build, env, h, remote_control=True, on_text=on_text, on_stale=on_stale,
+    def make_main():
+        return service_session.Host(build, env, h, remote_control=True, on_text=on_text, on_stale=on_stale,
                                     on_message=sessions.dispatch)
+    external = lean_desk.enabled()  # auto|external: an app session may be the desk; the host switches between it and a hosted main
+    if external:
+        host = service_session.SwitchHost(make_main)
+        print("lean-agent: " + lean_desk.status_line(), flush=True)
+    else:
+        lean_desk.detach()  # pinned hosted: a hosted main never resumes an app desk's session
+        host = make_main()
     threading.Thread(target=schedule_timer, daemon=True).start()
     orphan_stop = threading.Event()
     try:
@@ -13147,8 +13195,7 @@ def host_session(cmd, extra, env, h, name):
             print(f"lean-agent: could not start the session of {tid}: {exc}", file=sys.stderr)
     print("lean-agent: " + service_session.restore_log(started_ids, snap_ts), flush=True)
     lean_log.log("info", "sessions", service_session.restore_log(started_ids, snap_ts))
-    if not external:
-        threading.Thread(target=service_session.AutoClear(host).run, daemon=True).start()
+    threading.Thread(target=service_session.AutoClear(host).run, daemon=True).start()  # (stands aside while the app is the desk)
     service_session.start_reporter(host)
     spool_stop = threading.Event()
     service_session.dialog_clear_all()  # a restart forgets every open-dialog mark
@@ -14226,11 +14273,46 @@ def desk_session_id(h):
     return "", ""
 
 
+def this_session_role():
+    """(role, strict): what THIS session is to lean-agent: hosted desk / app desk / thread / a normal session, and whether strict mode applies."""
+    on = strict_setting_on()
+    if os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1" or os.environ.get("LEAN_AGENT_LOCAL_UP") == "1":
+        if os.environ.get("LEAN_AGENT_SESSION_ROLE") == "thread":
+            return "a thread session (hosted by the service)", on
+        return "the front desk (hosted by the service)", on
+    sid = ""
+    for k in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "LEAN_AGENT_SESSION_ID"):
+        if re.fullmatch(r"[0-9a-fA-F-]{36}", os.environ.get(k) or ""):
+            sid = os.environ[k]
+            break
+    if sid and lean_desk.is_desk(sid):
+        return "the front desk (the attached app session)", on
+    if not sid:
+        return "unknown (this session's id is not visible to the CLI); the hooks decide by session id", None
+    return "a normal session (not the desk)", False
+
+
+def strict_setting_on():
+    return config_json().get("strict", "on") != "off"
+
+
+def this_session_line():
+    role, strict = this_session_role()
+    if strict is None:
+        verdict = "applies only if it is the desk"
+    elif strict:
+        verdict = "applies"
+    else:
+        verdict = "does not apply" + (" (a normal session: no refusals, ever)" if role.startswith("a normal") else " (config strict off)")
+    return f"this session: {role}; strict mode {verdict}"
+
+
 def cmd_desk(a):
     """External front desk: setup | attach | detach | status (see lean_desk.py)."""
     h = home("home")
     if a.action == "setup":
         h = prepare_home()
+        refresh_desk_folder(h)
         path = os.path.join(h, ".claude", "settings.json")
         data = load_json(path, {})
         env = dict(data.get("env") or {})
@@ -14251,6 +14333,7 @@ def cmd_desk(a):
         return 0
     if a.action == "status":
         print(lean_desk.status_line())
+        print(this_session_line())
         try:
             n = len(service_session.queued_reports())
         except Exception:  # noqa: BLE001
@@ -14277,12 +14360,12 @@ def cmd_config(a):
         if a.name == "desk":
             if a.value:
                 if a.value not in lean_desk.MODES:
-                    die("desk takes external or hosted")
+                    die("desk takes auto, hosted or external")
                 lean_desk.set_mode(a.value)
                 if a.value == "hosted":
                     lean_desk.detach()
                 print("restart the service to apply: lean-agent service restart" if service_platform() else "restart `lean-agent up` to apply")
-            print(lean_desk.status_line() + " \u00b7 set: lean-agent config desk external|hosted")
+            print(lean_desk.status_line() + " \u00b7 set: lean-agent config desk auto|hosted|external")
         else:
             if a.value:
                 if a.value not in ("on", "off"):
@@ -18604,6 +18687,7 @@ def cmd_update(a):
     than the running one. Allowed from the front desk; the restart is done by a detached helper, never by this command."""
     if getattr(a, "helper", False):
         return self_update_helper()
+    desk_hint_once()
     cur = load_json(self_update_path(), {})
     if isinstance(cur, dict) and cur.get("status") == "waiting" and pid_alive(cur.get("helper_pid")):
         print(f"update to {cur.get('to')} is already scheduled; the service restarts when main's turn ends. End your turn now.")
@@ -18828,8 +18912,9 @@ def build_parser():
     s.add_argument("--keep-threads", action="store_true", help=argparse.SUPPRESS)  # internal: --clear for main only
     s.add_argument("extra", nargs=argparse.REMAINDER,
                    help="after --: extra flags for claude / claude remote-control, e.g. -- --debug")
-    s.add_argument("--desk", choices=["external", "hosted"], help="who runs the front desk: hosted (the service hosts "
-                   "the main session, default) or external (a local Claude session you start; saved in config)")
+    s.add_argument("--desk", choices=["auto", "external", "hosted"], help="who runs the front desk: auto (default: a local Claude app "
+                   "session started in the lean home becomes the desk, else the service hosts one), hosted (always the service's "
+                   "main session) or external (never hosted); saved in config")
     s.set_defaults(fn=cmd_up)
 
     s = sub.add_parser("install", help="install the plugin and create the orchestrator home")

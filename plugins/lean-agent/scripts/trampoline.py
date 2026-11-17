@@ -27,13 +27,13 @@ def clone_scripts():
 
 
 def _desk_external():
-    """config.json says desk external (a substring check: no JSON, no import)."""
+    """The desk mode is not pinned to hosted (config.json: no JSON, no import): default is auto."""
     try:
         home = os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent"))
         with open(os.path.join(home, "config.json")) as fh:
-            return '"external"' in fh.read() or os.environ.get("LEAN_AGENT_DESK") == "external"
+            return '"desk":"hosted"' not in fh.read().replace(" ", "") and os.environ.get("LEAN_AGENT_DESK") != "hosted"
     except OSError:
-        return os.environ.get("LEAN_AGENT_DESK") == "external"
+        return os.environ.get("LEAN_AGENT_DESK") != "hosted"
 
 
 def main():

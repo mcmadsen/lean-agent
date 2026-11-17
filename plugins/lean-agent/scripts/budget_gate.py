@@ -7,6 +7,21 @@ def in_home_or_service(cwd, home):
     return cwd == home or cwd.startswith(home + os.sep) or os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1"
 
 
+def is_front_desk(event):
+    """Is this session the real front desk (and so subject to strict mode and the orchestrator rules)? Only the sessions
+    `lean-agent up` hosts (LEAN_AGENT_SERVICE_SESSION=1, or a `up --local` terminal session) and the attached external desk
+    (desk.json names this session id with a fresh heartbeat). Any other session, in any folder, is a normal session."""
+    if os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1" or os.environ.get("LEAN_AGENT_LOCAL_UP") == "1":
+        return True
+    try:
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import lean_desk
+        return lean_desk.is_desk(event.get("session_id"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def prompt_needs_hook(event):
     """Could the UserPromptSubmit hook act on this prompt here? Only in the orchestrator home or the service session
     (every prompt there is put in a thread), never in a worker's run folder."""

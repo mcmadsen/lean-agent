@@ -1818,13 +1818,14 @@ class CliTest(unittest.TestCase):
         transcript = os.path.join(self.tmp.name, "t.jsonl")
         open(transcript, "w").close()
 
-        def call(cwd, command="ls"):
+        def call(cwd, command="ls", desk=True):
             ev = {"session_id": "s", "transcript_path": transcript, "cwd": cwd, "tool_name": "Bash",
                   "tool_input": {"command": command}}
-            p = subprocess.run([sys.executable, hook], input=json.dumps(ev), capture_output=True, text=True,
-                               env=self.env)
+            env = dict(self.env, LEAN_AGENT_LOCAL_UP="1") if desk else self.env  # only the front desk is the orchestrator
+            p = subprocess.run([sys.executable, hook], input=json.dumps(ev), capture_output=True, text=True, env=env)
             return json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"] if p.stdout.strip() else None
         self.assertEqual(call(home), "deny")
+        self.assertIsNone(call(home, desk=False))  # a normal session in the home folder is never blocked
         self.assertIsNone(call(self.proj))                      # normal sessions are never blocked
         self.assertNotEqual(call(home, "lean-agent limits --5h 0"), "deny")  # the user can still raise it (allowed, never denied)
 

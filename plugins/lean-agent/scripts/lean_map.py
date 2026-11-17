@@ -139,8 +139,9 @@ def build(ctx, now=None):
     nodes = [{"id": "service", "kind": "service", "label": "Service socket", "state": "active",
               "detail": f"{sv.get('socket_ms', 0)} ms · {sv.get('threads', 0)} threads"},
              {"id": "main", "kind": "desk", "label": "Front desk", "state": "idle" if ctx.get("desk_idle_s", 0) > 5 else "active",
-              "detail": (f"external, {'attached ' + sv['desk'].get('age', '?') if sv['desk'].get('attached') else 'not attached'}"
-                          if (sv.get("desk") or {}).get("mode") == "external" else f"idle {_dur(ctx.get('desk_idle_s', 0))}")}]
+              "detail": (f"app session, attached {sv['desk'].get('age', '?')}"
+                          if (sv.get("desk") or {}).get("active") == "app" else f"idle {_dur(ctx.get('desk_idle_s', 0))}"
+                          + ("" if (sv.get("desk") or {}).get("mode") in (None, "hosted") else " · hosted (Remote Control)"))}]
     for t in ctx.get("threads") or []:
         n = {"id": t["id"], "kind": "thread", "label": t.get("title") or t["id"], "state": t["state"], "detail": t.get("detail") or t["state"],
              "idle_s": t.get("idle_s", 0), "mid": bool(t.get("mid"))}

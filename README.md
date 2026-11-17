@@ -266,27 +266,33 @@ lasts until you close it or log out, and a restart of `up` continues the convers
 
 ## Front desk in the Claude desktop app (with Remote Control)
 
-By default the service hosts the front desk session itself (`desk: hosted`). Alternatively the front desk can be a normal
-local session you start in the Claude desktop app ("on this computer"), which can show plugin panes (the live map) and has
-Remote Control for your phone. The service then runs everything else as before (threads, workers, socket, map, chaser,
-spool) but hosts no main session.
+Automatic by default (`desk: auto`). The service hosts a front desk session with Remote Control as before. If you open a
+local session in the Claude desktop app ("on this computer", which can show plugin panes such as the live map) with the
+folder `~/.lean-agent`, that session attaches itself as the desk (SessionStart hook), and the service stops hosting its own
+main as soon as that main is idle (no turn running, nothing typed for a minute; it is checkpointed like a normal stop). When
+the app session's heartbeat has been gone for 30 minutes (app closed, Mac asleep) the service resumes hosting its own Remote
+Control main, so the phone keeps working. No flapping: at least 10 minutes between switches; every switch is logged and
+shown in `doctor`, `lean-agent desk status` and the map ("desk: app session" or "desk: hosted (Remote Control)").
+
+The only manual steps: open a new local session in the Claude app with the folder `~/.lean-agent` (the app remembers it) and
+flip the app's Remote Control switch if you want it on your phone. The folder's settings (lean-agent's own keys only, never
+your global settings) are written and refreshed by `lean-agent home`, `update` and the service start itself.
 
 ```sh
-lean-agent desk setup            # once: writes the desk folder's .claude/settings.json (role main, orchestrator env; --model, --permission-mode)
-# in the app: new local session in the folder `desk setup` printed (~/.lean-agent/home), then turn on Remote Control
-lean-agent config desk external  # or: lean-agent up --desk external; then lean-agent service restart
-lean-agent desk status           # desk: external, attached 3m ago
-lean-agent desk detach           # let go of the desk (attach again with `desk attach` in the session)
+lean-agent desk status           # who is the desk now, and whether THIS session is the desk (strict mode applies to the desk only)
+lean-agent config desk auto      # default; hosted = always the service's own main (as before); external = never hosted
+lean-agent desk detach           # let go of the desk (it attaches again at the next session start)
 ```
 
-- The first session whose SessionStart happens in the desk folder attaches itself as the desk (or run `lean-agent desk attach`
-  in it). Only one desk at a time; a second session is told so. A desk whose hooks were silent for 30 minutes counts as
-  detached: reports wait in the inbox.
-- Thread reports reach the desk through hooks: at SessionStart and with each prompt, at tool boundaries, and at the end of a
-  turn (the Stop hook hands pending reports over once per batch, never while a question dialog is open). An idle desk cannot be
-  woken: the reports show in the map pane ("desk: external, attached 3m ago · 2 waiting for you") and, on macOS, as a local
-  notification (`lean-agent config desk-notify on|off`, default on in external mode).
-- Back to hosted: `lean-agent config desk hosted`, then `lean-agent service restart`.
+- Strict mode and the orchestrator rules apply only to the real front desk (the hosted main, or the attached app session). Any
+  other local session, in any folder including `~/.lean-agent`, is a normal session: never restricted, even after it ran
+  lean-agent commands. The attached app desk may use the app's own session tools (prefix list `DESK_APP_TOOL_PREFIXES` in
+  `budget_hook.py`); other MCP tools and plain Bash stay refused for it.
+- Thread reports reach an app desk through hooks: at SessionStart and with each prompt, at tool boundaries, and at the end of
+  a turn (the Stop hook hands pending reports over once per batch, never while a question dialog is open). An idle desk cannot
+  be woken: the reports show in the map pane ("desk: app session, attached 3m ago · 2 waiting for you") and, on macOS, as a
+  local notification (`lean-agent config desk-notify on|off`).
+- Back to the old behaviour: `lean-agent config desk hosted`, then `lean-agent service restart`.
 - The map pane asks the service on the same socket path as the CLI. If it says "Service down", the message names the
   socket it looked at; a desktop session without your shell's `LEAN_AGENT_HOME` falls back to the default home's socket.
 

@@ -6,7 +6,7 @@ export type MapView = {
       socket_ms?: number
       cpu_pct?: number
       socket?: string
-      desk?: { mode: string; attached: boolean; age?: string; pending?: number }
+      desk?: { mode: string; attached: boolean; active?: string; age?: string; pending?: number }
     }
     inbox: number
     paused?: boolean

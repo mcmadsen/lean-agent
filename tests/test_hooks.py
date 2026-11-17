@@ -20,7 +20,9 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins",
 
 def base_env(**extra):
     """The caller's environment minus every LEAN_AGENT_* key and Claude Code compaction knob, plus what a test asks for."""
-    return dict(clean_environ(), **extra)
+    # these tests exercise the orchestrator rules in the lean home: they run as the front desk (LOCAL_UP); a session that is
+    # not the desk stays unrestricted (tests/test_desk_external.py)
+    return dict(clean_environ(), LEAN_AGENT_LOCAL_UP="1", **extra)
 
 
 def run_hook(script, event, **env):
