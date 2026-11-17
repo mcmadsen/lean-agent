@@ -211,6 +211,8 @@ class DeskHookCostTest(unittest.TestCase):
         env = {**clean_environ(), "LEAN_AGENT_HOME": tmp}
         with open(os.path.join(tmp, "desk.json"), "w") as fh:
             json.dump({"session_id": "desk-1", "heartbeat": time.time(), "pending": False}, fh)
+        with open(os.path.join(tmp, "config.json"), "w") as fh:
+            json.dump({"desk": "auto"}, fh)  # the app desk is opt-in; this test is about a home that uses it
         lock = os.path.join(tmp, "desk.json.lock")
         event = json.dumps({"session_id": "other", "cwd": tmp, "hook_event_name": "PostToolUse", "prompt": "x"})
         tramp = os.path.join(ROOT, "trampoline.py")
