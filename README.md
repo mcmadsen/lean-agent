@@ -262,10 +262,10 @@ and the service start, lean-agent keys only, never your global settings) therefo
 false, deny rules for the tools of your user/desktop MCP servers, `disableBundledSkills` and `syncClaudeAiSkills` false,
 `Agent(<name>)` deny for your custom agents, a deny list of built-in tools the desk never uses, and `claudeMdExcludes` for your
 global `CLAUDE.md`, `~/.claude/rules` and instruction files above the folder. The desk folder's model is sonnet unless one is set there or
-`up --model default` was chosen (`up --model` decides at every start; `default` means your own model). Effort high applies to the hosted desk now
-(`--effort` on its launch command only; `LEAN_AGENT_DESK_EFFORT=low|medium|high|xhigh|max`, or `default` to leave it to Claude Code) and to the app
-desk from 0.45.92, when thread sessions move to their own folder (no `effortLevel` is written to the shared folder before that, so thread
-sessions keep Claude Code's default or your own effort). `lean-agent doctor` compares the attached app desk's
+`up --model default` was chosen (`up --model` decides at every start; `default` means your own model). The app desk starts as sonnet with effort high: `effortLevel` high is written to the desk folder's settings with a marker
+(`desk-effort.json`), so a value you set yourself is never overwritten; the hosted desk gets `--effort` on its launch command
+(`LEAN_AGENT_DESK_EFFORT=low|medium|high|xhigh|max`, or `default` to leave it to Claude Code). Thread sessions run in
+their own folder and carry no `effortLevel`, so they keep Claude Code's default or your own effort. `lean-agent doctor` compares the attached app desk's
 first-turn context (from its transcript) with the hosted desk's and warns above 1.5x.
 
 Estimate, not measured here (the container's Claude Code is too old to start a desk and has no sign-in), from a field report of an

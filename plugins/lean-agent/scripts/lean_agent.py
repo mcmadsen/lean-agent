@@ -11281,18 +11281,30 @@ def main_session_argv(cmd, extra, h, name, sid):
 
 def sync_desk_settings(data, h):
     """The desk folder's model (sonnet) when none is set and `up --model default` was not chosen (`up --model` decides at every
-    start; default = your own model). No effortLevel is written: the folder is shared with thread sessions until 0.45.92, which
-    must keep Claude Code's default / your own effort. An effortLevel an earlier version wrote (recorded in desk-effort.json) is
-    removed again; one you set yourself never is."""
+    start; default = your own model), and the app desk's effortLevel (desk_effort(): high unless LEAN_AGENT_DESK_EFFORT says
+    otherwise). Thread sessions run in their own folder (<home>/threads) and get no effortLevel. What we wrote is recorded in
+    desk-effort.json: an effortLevel we wrote is kept in step with the setting; one you set yourself (no marker, or a different
+    value) is never overwritten or removed."""
     mark_path = home("desk-effort.json")
-    if os.path.exists(mark_path):
-        written = load_json(mark_path, {}).get("effortLevel")
-        if written is not None and data.get("effortLevel") == written:
-            data.pop("effortLevel")
-        try:
-            os.remove(mark_path)
-        except OSError:
-            pass
+    written = load_json(mark_path, {}).get("effortLevel") if os.path.exists(mark_path) else None
+    want = desk_effort()
+    have = data.get("effortLevel")
+    if have is None or (written is not None and have == written):
+        if want:
+            data["effortLevel"] = want
+        else:
+            data.pop("effortLevel", None)
+        mine = want
+    else:
+        mine = None  # the user's own value stays
+    if mine != written:
+        if mine:
+            save_json(mark_path, {"effortLevel": mine})
+        else:
+            try:
+                os.remove(mark_path)
+            except OSError:
+                pass
     if load_json(home("desk-model.json"), {}).get("choice") != "default":
         data.setdefault("model", DESK_MODEL)
 
