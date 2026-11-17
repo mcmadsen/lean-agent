@@ -75,7 +75,7 @@ class MapTest(unittest.TestCase):
     def test_service_down(self):
         with mock.patch.object(lean_sock, "call", return_value=None):
             s = lean_map.fetch()
-        self.assertEqual((s["service"], s["nodes"], s["edges"], s["moving"]), ({"up": False}, [], [], []))
+        self.assertEqual((s["service"]["up"], s["nodes"], s["edges"], s["moving"]), (False, [], [], []))  # (+ the socket looked at, the desk)
         self.assertIn("not running", lean_map.svg(s))
         xml.dom.minidom.parseString(lean_map.svg(s))
 
