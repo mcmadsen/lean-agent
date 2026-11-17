@@ -5239,6 +5239,33 @@ class CliTest(unittest.TestCase):
             self.assertEqual(open(new).read(), open(old).read())
             self.assertEqual(ss_mod.thread_transcript(sid), new)
 
+    def test_a_pre_split_context_trim_reaches_both_folders_after_update(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        h = self.cli("home").stdout.strip()
+        t = os.path.join(os.path.dirname(h), "threads")
+        path = os.path.join(home, "context-trim.json")
+        with open(path, "w") as fh:  # 0.45.91 style: top level only
+            json.dump({"deny": ["Grep"], "exclude": ["/x/y.md"]}, fh)
+        self.cli("home")  # prepare_home: update / service start
+        data = json.load(open(path))
+        self.assertEqual(data["desk"], {"deny": ["Grep"], "exclude": ["/x/y.md"]})
+        self.assertEqual(data["threads"], data["desk"])
+        self.assertEqual((data["deny"], data["exclude"]), (["Grep"], ["/x/y.md"]))  # kept for older readers
+        for folder in (h, t):
+            st = json.load(open(os.path.join(folder, ".claude", "settings.json")))
+            self.assertIn("Grep", st["permissions"]["deny"])
+            self.assertIn("/x/y.md", st["claudeMdExcludes"])
+        before = open(path).read()
+        self.cli("home")
+        self.assertEqual(open(path).read(), before)  # idempotent
+        # an existing threads section is never overwritten
+        with open(path, "w") as fh:
+            json.dump({"deny": ["Grep"], "threads": {"deny": ["Glob"]}}, fh)
+        self.cli("home")
+        data = json.load(open(path))
+        self.assertEqual(data["threads"], {"deny": ["Glob"]})
+        self.assertEqual(data["desk"]["deny"], ["Grep"])
+
     def test_context_and_compare_measure_the_threads_folder_for_threads(self):
         h = self.cli("home").stdout.strip()
         t = os.path.join(os.path.dirname(h), "threads")

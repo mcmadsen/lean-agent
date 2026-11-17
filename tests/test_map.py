@@ -257,6 +257,24 @@ class RetireMapPluginTest(unittest.TestCase):
         self.assertFalse(lean_agent.retire_map_plugin(said.append, run, lambda n: None))
         self.assertEqual(len(said), 1)
 
+    def test_unreadable_list_is_silent_unless_the_old_plugin_is_known_installed_and_hints_once(self):
+        import lean_agent
+        import tempfile
+        from unittest import mock
+        tmp = tempfile.mkdtemp()
+        said = []
+        bad = lambda argv, **kw: type("R", (), {"returncode": 1, "stdout": "boom"})()
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": os.path.join(tmp, "cfg"), "LEAN_AGENT_HOME": os.path.join(tmp, "lh")}):
+            os.makedirs(os.path.join(tmp, "lh"))
+            for _ in range(2):  # not installed: silent every time
+                self.assertFalse(lean_agent.retire_map_plugin(said.append, bad, lambda n: "/x/claude"))
+            self.assertEqual(said, [])
+            os.makedirs(os.path.join(tmp, "cfg", "plugins", "cache", "mkt", "lean-agent-map"))  # known installed (read-only check)
+            for _ in range(3):
+                lean_agent.retire_map_plugin(said.append, bad, lambda n: "/x/claude")
+            self.assertEqual(len(said), 1)  # the hint, once
+            self.assertIn("Plugins page", said[0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,7 +35,7 @@ const SNAP = {
 const DOWN = { v: 1, service: { up: false }, desk: DESK, goals: [], answers: [], inbox: 2 }
 
 // A fake engine: answers `lean-agent` calls, records every argv.
-function fake(on: any, opts: { snap?: unknown; role?: string; deskFolder?: boolean; ackThrows?: boolean; limit?: number; closeAfter?: number; noBin?: boolean; jsonFail?: string }) {
+function fake(on: any, opts: { snap?: unknown; role?: string; deskFolder?: boolean; ackFails?: boolean; ackThrows?: boolean; limit?: number; closeAfter?: number; noBin?: boolean; jsonFail?: string }) {
   resetState()
   const calls: string[][] = []
   const statuses: string[] = []
@@ -52,7 +52,8 @@ function fake(on: any, opts: { snap?: unknown; role?: string; deskFolder?: boole
     calls.push([...e.argv])
     if (a === 'lean-agent pane --json' && opts.jsonFail) return { value: { exitCode: 3, stdout: '', stderr: opts.jsonFail + '\nmore' } }
     if (a === 'lean-agent pane --json') return { value: { exitCode: 0, stdout: JSON.stringify(state.snap), stderr: '' } }
-    if (opts.ackThrows && e.argv[1] === 'myq') return { value: { exitCode: 2, stdout: '', stderr: 'spawn failed' } }
+    if (opts.ackThrows && e.argv[1] === 'myq') throw new Error('spawn failed')
+    if (opts.ackFails && e.argv[1] === 'myq') return { value: { exitCode: 2, stdout: '', stderr: 'spawn failed' } }
     return { value: { exitCode: 0, stdout: 'waiting: t1', stderr: '' } }
   })
   on('ui.open', (_: any, e: any) => {
@@ -222,12 +223,23 @@ test('a goals/answers error from pane --json is shown, not "No open goals."', as
 })
 
 test('a failing ack shows the failure and refreshes the pane', async ($, on) => {
-  const f = fake(on, { role: 'main', ackThrows: true })
+  const f = fake(on, { role: 'main', ackFails: true })
   await start($)
   const before = panes(f.calls)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'ack-q7' })
   expect(panes(f.calls)).toBeGreaterThan(before)
   expect(await ui.find({ type: 'Text', text: /myq ack q7 failed \(exit 2\): spawn failed/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('an ack whose process rejects shows the failure (the catch branch) and refreshes the pane', async ($, on) => {
+  const f = fake(on, { role: 'main', ackThrows: true })
+  await start($)
+  const before = panes(f.calls)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'ack-q7' })
+  expect(panes(f.calls)).toBeGreaterThan(before)
+  expect(await ui.find({ type: 'Text', text: /myq ack q7 failed: / })).toBeTruthy()
   await ui.unmount()
 })

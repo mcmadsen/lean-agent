@@ -11213,11 +11213,32 @@ def orchestrator_settings(existing, kind="desk"):
 
 
 def context_trim(kind="desk"):
-    """What `lean-agent context --apply` took out, per folder: the desk's at the top level of context-trim.json, the thread
-    sessions' under "threads" (each from that folder's own tool usage and instruction files)."""
+    """What `lean-agent context --apply` took out, per folder: the "desk" section (else the top level, which older versions
+    wrote and still read) and the "threads" section; each from that folder's own tool usage and instruction files."""
     data = load_json(home("context-trim.json"), {})
-    sec = data.get("threads") if kind == "threads" else data
+    if not isinstance(data, dict):
+        return {}
+    sec = data.get("threads") if kind == "threads" else data.get("desk", data)
     return sec if isinstance(sec, dict) else {}
+
+
+def migrate_context_trim():
+    """Once (idempotent; prepare_home, so update and service start): a context-trim.json from before the thread folder split has
+    only top-level deny/exclude lists, which then applied to the thread sessions too (they shared the desk folder). Copy them
+    into the desk and threads sections when those are absent; the top level stays for older readers."""
+    path = home("context-trim.json")
+    data = load_json(path, {})
+    if not isinstance(data, dict) or not (data.get("deny") or data.get("exclude")):
+        return False
+    lists = {k: list(data.get(k) or []) for k in ("deny", "exclude")}
+    changed = False
+    for sect in ("desk", "threads"):
+        if not isinstance(data.get(sect), dict):
+            data[sect] = dict(lists)
+            changed = True
+    if changed:
+        save_json(path, data)
+    return changed
 
 
 def user_agent_names():
@@ -11367,6 +11388,7 @@ def prepare_home():
     local = os.path.join(h, ".claude", "settings.local.json")
     if os.environ.get("LEAN_AGENT_ORCHESTRATOR_TRIM") != "0":
         save_json(local, dict(load_json(local, {}), syncClaudeAiSkills=False))  # only honoured in local/user scope
+    migrate_context_trim()
     prepare_threads_home(h)
     if lean_desk.enabled():
         refresh_desk_folder(h)
@@ -13622,9 +13644,13 @@ def cmd_context(a):
                   "(--keep TOOL to keep one; --undo reverts)")
         return 0
     for kind, (unused, flagged_files) in found.items():
-        sec = trim if kind == "desk" else trim.setdefault("threads", {})
+        if kind == "desk":
+            sec = trim.setdefault("desk", {"deny": list(trim.get("deny") or []), "exclude": list(trim.get("exclude") or [])})
+        else:
+            sec = trim.setdefault("threads", {})
         sec["deny"] = sorted(set(sec.get("deny") or []) | set(unused))
         sec["exclude"] = sorted(set(sec.get("exclude") or []) | set(flagged_files))
+    trim["deny"], trim["exclude"] = trim["desk"]["deny"], trim["desk"]["exclude"]  # the top level mirrors the desk for older readers
     save_json(trim_path, trim)
     prepare_home()
     print("applied: denied " + ", ".join(f"{len(u)} tool(s) for the {k}" for k, (u, _) in found.items())
@@ -18845,24 +18871,51 @@ def self_update_helper():
 RETIRED_PLUGIN = "lean-agent-map"  # folded into the lean-agent plugin in 0.45.91
 
 
+def map_plugin_known_installed():
+    """Read-only: does the Claude config say the retired pane plugin is installed (installed-plugins file, plugin cache folder, or
+    an enabledPlugins entry in the user's settings)?"""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    try:
+        if f"{RETIRED_PLUGIN}@" in read_text(os.path.join(cfg, "plugins", "installed_plugins.json")):
+            return True
+    except OSError:
+        pass
+    if glob.glob(os.path.join(cfg, "plugins", "cache", "*", RETIRED_PLUGIN)):
+        return True
+    enabled = (load_json(os.path.join(cfg, "settings.json"), {}) or {}).get("enabledPlugins")
+    return isinstance(enabled, dict) and any(str(k).startswith(RETIRED_PLUGIN + "@") for k in enabled)
+
+
 def retire_map_plugin(say=print, run=subprocess.run, which=shutil.which):
     """The old pane plugin is part of lean-agent now: uninstall it through the claude CLI (never by editing settings.json), else
-    tell the user where to remove it. Silent when it is not installed."""
+    tell the user where to remove it (once, remembered in the lean home). Silent when it is not installed, and when the plugin
+    list cannot be read and nothing says the old plugin is installed."""
     exe = which("claude")
     if not exe:
         return False
-    manual = 'lean-agent: the pane is part of lean-agent now; remove "Lean agent map" in the app\'s Plugins page'
+    marker = home("map-plugin-hint-shown")
+
+    def hint():
+        if os.path.exists(marker):
+            return
+        say('lean-agent: the pane is part of lean-agent now; remove "Lean agent map" in the app\'s Plugins page')
+        try:
+            open(marker, "w").close()
+        except OSError:
+            pass
+
     try:
         r = run([exe, "plugin", "list", "--json"], capture_output=True, text=True, timeout=20)
         rows = json.loads(r.stdout) if r.returncode == 0 else None
     except Exception as exc:  # noqa: BLE001
         lean_log.log("warn", "plugin", f"plugin list failed: {exc}")
-        return False
+        rows = None
     if isinstance(rows, dict):  # tolerate {"plugins": [...]} / {"installed": [...]}
         rows = next((v for v in rows.values() if isinstance(v, list)), None)
     if not isinstance(rows, list):
-        lean_log.log("warn", "plugin", "claude plugin list --json: unexpected output, old pane plugin not checked")
-        say(manual)
+        lean_log.log("warn", "plugin", "claude plugin list --json: unreadable or unexpected output, old pane plugin not checked")
+        if map_plugin_known_installed():
+            hint()
         return False
     old = [x for x in rows if isinstance(x, dict) and str(x.get("id", "")).split("@")[0] == RETIRED_PLUGIN]
     for x in old:
@@ -18871,8 +18924,10 @@ def retire_map_plugin(say=print, run=subprocess.run, which=shutil.which):
             ok = run(argv, capture_output=True, text=True, timeout=30).returncode == 0
         except Exception:  # noqa: BLE001
             ok = False
-        say(f"lean-agent: the pane is part of lean-agent now; removed the old plugin {x['id']}" if ok else
-            manual)
+        if ok:
+            say(f"lean-agent: the pane is part of lean-agent now; removed the old plugin {x['id']}")
+        else:
+            hint()
     return bool(old)
 
 
