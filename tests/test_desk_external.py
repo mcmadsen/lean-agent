@@ -932,10 +932,25 @@ class ModelEffort(Base):
 
     def test_local_and_remote_control_paths_carry_the_desk_effort_args(self):
         la = self.la()
-        self.assertEqual(la.desk_effort_args(), ["--effort", "high"])
-        src = open(la.__file__).read()
-        self.assertIn("return remote_control(cmd + desk_effort_args() + extra, env, h)", src)
-        self.assertIn("os.execvpe(cmd[0], cmd + desk_effort_args() + extra, env)", src)
+        built = {}
+        with mock.patch.object(la.os, "execvpe", side_effect=lambda f, argv, env: built.update(local=argv) or (_ for _ in ()).throw(SystemExit(0))), \
+                mock.patch.object(la, "remote_control", side_effect=lambda argv, env, h: built.update(remote=argv) or 0), \
+                mock.patch.object(la.service_session, "supported", return_value=False), \
+                mock.patch.object(la, "ask_attribution_once"), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                la.main(["up", "--local"])
+            la.main(["up"])
+        for kind in ("local", "remote"):
+            argv = built[kind]
+            self.assertEqual(argv[argv.index("--effort") + 1], "high", kind)
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_EFFORT": "off"}), \
+                mock.patch.object(la, "remote_control", side_effect=lambda argv, env, h: built.update(off=argv) or 0), \
+                mock.patch.object(la.service_session, "supported", return_value=False), \
+                mock.patch.object(la, "ask_attribution_once"), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            la.main(["up"])
+        self.assertNotIn("--effort", built["off"])
 
 
 class StopTree(Base):
@@ -951,27 +966,28 @@ class StopTree(Base):
         patch = mock.patch.dict(os.environ, env)  # stays in force until the test ends (Host.stop reads the knob later)
         patch.start()
         self.addCleanup(patch.stop)
-        if True:
-            host = ss.Host(lambda: (["sh", script], "sid"), {}, self.tmp, key="t9")
-            host.name = "t9"
-            t = threading.Thread(target=host.run, daemon=True)
-            t.start()
-            end = time.time() + 15
-            while time.time() < end and not os.path.exists(pidfile):
-                time.sleep(0.1)
-            time.sleep(0.3)
+        host = ss.Host(lambda: (["sh", script], "sid"), {}, self.tmp, key="t9")
+        host.name = "t9"
+        t = threading.Thread(target=host.run, daemon=True)
+        t.start()
+        end = time.time() + 15
+        while time.time() < end and not os.path.exists(pidfile):
+            time.sleep(0.1)
+        time.sleep(0.3)
         self.assertTrue(os.path.exists(pidfile))
         with open(pidfile) as fh:
             child = int(fh.read())
-        self.addCleanup(lambda: os.path.exists(f"/proc/{child}") and os.kill(child, 9))
+        self.addCleanup(lambda: self.alive(child) and os.kill(child, 9))
         return host, child, t
 
     def alive(self, pid):
         try:
-            with open(f"/proc/{pid}/stat") as fh:
-                return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
-        except OSError:
+            os.kill(pid, 0)  # portable (no /proc); a killed grandchild is reaped by init / the namespace's init
+            return True
+        except ProcessLookupError:
             return False
+        except PermissionError:
+            return True
 
     def until_dead(self, pid, secs):
         end = time.time() + secs
