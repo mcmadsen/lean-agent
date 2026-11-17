@@ -41,7 +41,7 @@ def main():
             lean_activity.hook_send(json.loads(data))
         except Exception:  # noqa: BLE001
             pass
-    if script == "inject_hook.py" and os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1":
+    if script in ("inject_hook.py", "dialog_hook.py") and os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1":
         return  # the inject hook acts in the sessions `lean-agent up` hosts only: no second interpreter anywhere else
     target_dir = clone_scripts() or here
     target = os.path.join(target_dir, script)

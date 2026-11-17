@@ -1602,6 +1602,8 @@ class SpoolDeliverer:
                 continue  # restore grace: queued, delivered after it (or when the thread is up)
             if in_grace(self.now()) and spool_only_auto(tid) and lean_threads.no_nudge(lean_threads.load()["threads"].get(tid)):
                 continue  # user-stopped / user-parked: waits until the user opens it
+            if dialog_held(tid, self.now()):
+                continue  # a dialog is open on the thread session: delivered right after it closes
             spool_reclaim_stale(tid, age=200)
             try:
                 if mid_turn(tid) and alive_thread(tid):
@@ -2338,6 +2340,54 @@ def reports_digest(items, dropped=0, rid=""):
 
 
 SUMMARY_RE = re.compile(r"^lean-agent: \d+ thread reports? \(.*\) \[r([0-9a-f]{6})\]$")
+# Any line the service injects or types for a session about thread reports: the one-line summary, the one-line digest,
+# a report id. An AskUserQuestion answer that looks like this was an automatic notification, never the user's choice.
+NOTIFY_RE = re.compile(r"lean-agent: \d+ thread reports?\b|lean-agent thread reports?\b|\[r[0-9a-f]{6}\]")
+DIALOG_HOLD_MAX = 30 * 60  # seconds a "dialog open" mark holds deliveries back at most
+
+
+def dialog_path():
+    return lean_home("dialog-hold.json")
+
+
+def dialog_set(key, is_open, now=None):
+    """Mark session `key` (main or a thread id) as having an AskUserQuestion dialog open (or closed). Kept in a file so the
+    hook processes and the service see the same state; `up` clears it at start."""
+    now = time.time() if now is None else now
+    try:
+        os.makedirs(lean_home(), exist_ok=True)
+        with lean_common.file_lock(dialog_path()):
+            data = _load(dialog_path())
+            data = {k: v for k, v in data.items() if isinstance(v, (int, float)) and now - v < DIALOG_HOLD_MAX}
+            if is_open:
+                data[key] = now
+            else:
+                data.pop(key, None)
+            if data:
+                lean_common.write_json_atomic(dialog_path(), data)
+            else:
+                try:
+                    os.remove(dialog_path())
+                except OSError:
+                    pass
+    except Exception:  # noqa: BLE001 - a lost mark only means no hold
+        pass
+
+
+def dialog_held(key, now=None):
+    """True while a dialog is open on session `key` (and for at most DIALOG_HOLD_MAX seconds): deliveries to it wait."""
+    now = time.time() if now is None else now
+    ts = _load(dialog_path()).get(key)
+    return isinstance(ts, (int, float)) and 0 <= now - ts < DIALOG_HOLD_MAX
+
+
+def dialog_clear_all():
+    try:
+        os.remove(dialog_path())
+    except OSError:
+        pass
+
+
 PENDING_FALLBACK = 60  # seconds: the one wait after a paste; a paste that began no turn (the prompt hook never took the staged block) is retried then, typed in full
 REPORT_LOG_KEPT = 10
 
@@ -2431,6 +2481,8 @@ def inject_main(now=None):
     """Main's pending items at a tool boundary: the staged block (not yet taken by the prompt hook) or, else, the queued
     thread reports. Returns the additionalContext text or None. Claims by rename / under the queue lock and the ledger."""
     now = time.time() if now is None else now
+    if dialog_held("main", now):
+        return None  # a dialog is open: nothing is added until it is closed
     text = _inject_main(now)
     try:
         import lean_myq
@@ -2485,7 +2537,7 @@ def _inject_main(now):
 def inject_thread(tid):
     """Thread `tid`'s spooled messages/answers at a tool boundary, oldest first (claimed by rename: the spool deliverer
     never also types them). Returns the additionalContext text or None."""
-    if is_replacing(tid):
+    if is_replacing(tid) or dialog_held(tid):
         return None
     texts = []
     spool_confirm_injected(tid)  # a later tool boundary of the same session: the earlier text was consumed
@@ -3369,6 +3421,10 @@ class Reporter(AutoClear):
             if items:
                 report_wait("main session is not running", now)
             return
+        if dialog_held("main", now):
+            if items or os.path.exists(pending_path()):
+                report_wait("a dialog is open on main", now)
+            return  # queued reports (merged into one line) go out right after the dialog closes
         path = self.transcript()
         st = transcript_state(path)
         quiet = now - getattr(self.host, "last_output", 0)

@@ -958,7 +958,8 @@ def ask_answers(path):
             elif rec.get("type") == "user" and c.get("type") == "tool_result" and c.get("tool_use_id") in asks and not c.get("is_error"):
                 out = c.get("content")
                 out = out if isinstance(out, str) else " ".join(str(x.get("text") or "") for x in out or [] if isinstance(x, dict))
-                if out.strip() and "declined" not in out.lower()[:80] and "doesn't want to proceed" not in out.lower():
+                if out.strip() and "declined" not in out.lower()[:80] and "doesn't want to proceed" not in out.lower() \
+                        and not service_session.NOTIFY_RE.search(out):  # an automatic lean-agent notification is no answer
                     qs, ans = asks[c.get("tool_use_id")], out.strip()[:300]
     return qs, ans
 

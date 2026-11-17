@@ -12844,13 +12844,22 @@ def sock_handlers(deliverer, helper):
                 lean_map.record("report", "service", "main", "report", node="main", dir="from", text="reports to you")
         return {"text": text}
 
+    def dialog(req):
+        """An AskUserQuestion dialog opened / closed on a session (hooks, fire-and-forget): deliveries to it wait while open."""
+        key = str(req.get("thread") or "") or "main"
+        opened = req.get("state") == "open"
+        service_session.dialog_set(key, opened)
+        if not opened and key != "main":
+            deliverer.kick(key)
+        return {"ok": True}
+
     def map_op(req):
         lv = live_box[0] if live_box else None
         # the live endpoint already computes one snapshot every 2 s for everyone: share it instead of computing another here
         return {"map": lv.get_snap() if lv else lean_map.snapshot_now()}
 
     return {
-        "send": send, "wake": wake, "pending": pending, "map": map_op,
+        "send": send, "wake": wake, "pending": pending, "dialog": dialog, "map": map_op,
         "tool": lambda r: {"ok": __import__("lean_activity").ingest(r)},
         "now": lambda r: cli(r, ["now"] + [str(x) for x in r.get("args") or []]),
         "runs": lambda r: cli(r, ["runs"] + [str(x) for x in r.get("args") or []]),
@@ -13059,6 +13068,7 @@ def host_session(cmd, extra, env, h, name):
     threading.Thread(target=service_session.AutoClear(host).run, daemon=True).start()
     service_session.start_reporter(host)
     spool_stop = threading.Event()
+    service_session.dialog_clear_all()  # a restart forgets every open-dialog mark
     deliverer = service_session.SpoolDeliverer()
     threading.Thread(target=deliverer.loop, args=(spool_stop,), daemon=True).start()
     sock_server = None
