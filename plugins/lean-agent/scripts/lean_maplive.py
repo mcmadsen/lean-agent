@@ -218,17 +218,18 @@ class Live:
         """The snapshot, computed at most every `interval` s however many clients ask; only ever called on demand."""
         with self.lock:
             c = self.cache
-            if c and time.monotonic() - c[0] < self.interval * 0.9:
+            if c and time.monotonic() - c[0] < self.interval * 0.9 and c[2] == lean_map._hidden_now():
                 return c[1]
         try:
-            snap = self.snapshot()
+            hid = lean_map._hidden_now()
+            snap = lean_map.redact(self.snapshot())
         except Exception as exc:  # noqa: BLE001 - a failing snapshot must never take the loop or a request down
             self._fail(exc)
             if self.good is not None:
-                return self.good
+                return lean_map.redact(self.good)
             raise
         with self.lock:
-            self.cache = (time.monotonic(), snap)
+            self.cache = (time.monotonic(), snap, hid)
             self.svg_cache = {}
             self.good = snap
             self.err = ""
@@ -265,7 +266,7 @@ class Live:
             pass  # _fail already told every client, this one included
 
     def get_svg(self, w, h, mini):
-        key = (w, h, mini)
+        key = (w, h, mini, lean_map._hidden_now())
         snap = self.get_snap()
         with self.lock:
             c = self.svg_cache.get(key)
@@ -358,7 +359,7 @@ class Live:
     def replay_since(self, since, now=None):
         now = now or time.time()
         lo = max(float(since), now - REPLAY_S)
-        return [dict(e, ts=round(e["ts"], 3)) for e in list(self.replay) if e["ts"] > lo]
+        return lean_map.redact_events([dict(e, ts=round(e["ts"], 3)) for e in list(self.replay) if e["ts"] > lo])
 
     def on_request(self, op, req):
         """Called by the service socket per request; cheap and never raises."""

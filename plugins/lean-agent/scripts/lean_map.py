@@ -374,6 +374,120 @@ def _ts_day0(now):
     return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
 
 
+# ---------------------------------------------------------------- private projects: the one choke point
+_pn = {"key": None, "t": float("-inf"), "ids": frozenset()}
+
+
+def private_nodes():
+    """Node ids (threads "tN", runs "run:<id>") of hidden private projects, from the thread registry, the ledger (two days)
+    and the running runs. Empty while private mode is shown. Cached 2 s."""
+    try:
+        import lean_private
+        if not (lean_private.hidden() and lean_private.private_slugs()):
+            return frozenset()
+        mono = time.monotonic()
+        with _lock:
+            if _pn["key"] == 1 and mono - _pn["t"] < 2.0:
+                return _pn["ids"]
+        import lean_activity
+        import lean_common
+        import lean_threads
+        ids = set()
+        for tid in ((lean_threads.load_ro() or {}).get("threads") or {}):
+            if lean_private.hides(thread=tid):
+                ids.add(tid)
+        home = lean_common.lean_home()
+        since = time.strftime("%Y-%m-%dT00:00:00", time.localtime(time.time() - 2 * 86400))
+        for r in lean_activity.ledger_since(home, since):
+            if r.get("id") and (lean_private.hides(r) or (r.get("project") and lean_private.hides(project=r.get("project")))):
+                ids.add("run:" + str(r["id"]))
+                if r.get("thread"):
+                    ids.add(str(r["thread"]))
+        for rid, m in lean_common.running_runs(home):
+            if lean_private.hides(thread=m.get("thread") or None) or (m.get("project") and lean_private.hides(project=m.get("project"))):
+                ids.add("run:" + str(rid))
+        ids = frozenset(ids)
+        with _lock:
+            _pn.update(key=1, t=mono, ids=ids)
+        return ids
+    except Exception:
+        return frozenset()
+
+
+def _is_private_text(*texts):
+    try:
+        import lean_private
+        return any(t and lean_private.mentions_private(t) for t in texts)
+    except Exception:
+        return False
+
+
+def redact(snap):
+    """Every map output (snapshot, SVG, alerts, feed, ...) goes through here right before it leaves: while private mode is off
+    it drops the nodes of private projects (and what hangs off them: children, edges, moving texts, feed lines, alerts, project
+    rows, activity entries) plus free text that names a private project. Returns snap itself when nothing is hidden."""
+    try:
+        import lean_private
+        if not isinstance(snap, dict) or not (lean_private.hidden() and lean_private.private_slugs()):
+            return snap
+    except Exception:
+        return snap
+    priv = set(private_nodes())
+    txt = _is_private_text
+    drop = set()
+    for n in snap.get("nodes") or []:
+        if n.get("kind") in ("service", "desk", "hooks") or n.get("id") in ("service", "main", "hooks"):
+            continue
+        if (n.get("id") in priv or n.get("parent") in priv or lean_private.hides(project=n.get("project") or None)
+                or txt(n.get("title"), n.get("label"))):
+            drop.add(n.get("id"))
+    for n in snap.get("nodes") or []:  # children of a dropped thread
+        if n.get("parent") in drop:
+            drop.add(n.get("id"))
+    out = dict(snap)
+    out["nodes"] = []
+    for n in snap.get("nodes") or []:
+        if n.get("id") in drop:
+            continue
+        a = n.get("activity")
+        if isinstance(a, dict) and isinstance(a.get("recent"), list):
+            n = dict(n, activity=dict(a, recent=[e for e in a["recent"] if not txt(e.get("target"))]))
+            if txt(((a.get("now") or {}).get("target"))):
+                n["activity"]["now"] = None
+        out["nodes"].append(n)
+    bad = drop | priv
+    if "edges" in snap:
+        out["edges"] = [e for e in snap["edges"] if e.get("from") not in bad and e.get("to") not in bad and not txt(e.get("label"))]
+    if "moving" in snap:
+        out["moving"] = [m for m in snap["moving"] if m.get("node") not in bad and not txt(m.get("text"))]
+    if "placed" in snap:
+        out["placed"] = [i for i in snap["placed"] if i not in drop]
+    if "feed" in snap:
+        out["feed"] = [f for f in snap["feed"] if f.get("node") not in bad and not txt(f.get("text"))]
+    if "alerts" in snap:
+        out["alerts"] = [a for a in snap["alerts"] if a.get("node") not in bad and not txt(a.get("text"))]
+    if "projects" in snap:
+        out["projects"] = [p for p in snap["projects"] if not lean_private.hides(project=p.get("slug"))]
+    return out
+
+
+def _hidden_now():
+    try:
+        import lean_private
+        return bool(lean_private.hidden() and lean_private.private_slugs())
+    except Exception:
+        return False
+
+
+def redact_events(events):
+    """/replay items: dropped when their node or ends are private or their target names a private project."""
+    if not _hidden_now():
+        return events
+    bad = private_nodes()
+    return [e for e in events if e.get("node") not in bad and e.get("from") not in bad and e.get("to") not in bad
+            and not _is_private_text(e.get("target"))]
+
+
 # ---------------------------------------------------------------- history
 HIST_TTL = 60.0
 _hcache = {}
@@ -448,12 +562,16 @@ def history(home, days=14, now=None, rows=None):
         pass
     for t in top:
         t["usd"] = round(t["usd"], 2)
-    return {"days": out, "top_threads": top, "tools_7d": act.tools_week(now)}
+    return {"days": out, "top_threads": top, "tools_7d": act.tools_week(now, skip=private_nodes())}
 
 
 def history_cached(home, days=14, now=None):
     """history(), cached 60 s per (home, days); nothing is computed until asked."""
-    key = (home, int(days))
+    try:
+        import lean_private
+        key = (home, int(days), lean_private.hidden())
+    except Exception:
+        key = (home, int(days), None)
     mono = time.monotonic()
     with _lock:
         c = _hcache.get(key)
@@ -598,7 +716,7 @@ def _paused():
 
 
 def snapshot_now():
-    return build(service_context())
+    return redact(build(service_context()))
 
 
 def inbox_from_files():
@@ -615,7 +733,7 @@ def fetch(timeout=1.0):
         import lean_sock
         r = lean_sock.call("map", timeout=timeout)
         if r and r.get("ok") and isinstance(r.get("map"), dict):
-            return r["map"]
+            return redact(r["map"])
     except Exception:
         pass
     return down_snapshot(inbox_from_files())
@@ -694,6 +812,7 @@ def layout(snap, width, height, mini=False):
 
 def svg(snap, width=1200, height=700, mini=False):
     """The snapshot as one standalone SVG document (no script, no external references)."""
+    snap = redact(snap)
     width, height = int(width or 1200), int(height or 700)
     if mini:
         width, height = int(width or 480), int(height or 320)
