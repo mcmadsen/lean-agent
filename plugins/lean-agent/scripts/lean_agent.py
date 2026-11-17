@@ -14855,7 +14855,7 @@ def _fe(fn, a):
 
 
 def cmd_map(a):
-    if not a.project or a.svg or a.mini or a.watch or a.html or getattr(a, "alerts", False) or getattr(a, "probe", False) or getattr(a, "url", False):
+    if not a.project or a.svg or a.mini or a.watch or a.html or getattr(a, "alerts", False) or getattr(a, "usage", False) or getattr(a, "probe", False) or getattr(a, "url", False):
         return cmd_live_map(a)
     def run(fe, slug, path, a):
         root = fe.work_dir(slug, path, a.dir)
@@ -16197,6 +16197,21 @@ def cmd_live_map(a):
         u = lean_maplive.page_url(lean_sock.home())
         if u:
             print(u)
+        return 0
+    if getattr(a, "usage", False):
+        import usage
+        pl = usage.plan_report()
+        for w in pl["windows"]:
+            line = f"{w['label']} {w['pct']:.0f}%"
+            if w.get("resets_at"):
+                line += f" resets {usage.fmt_reset(w['resets_at'])}" + (f" (in {usage.fmt_in(w['resets_in_s'])})" if w["resets_in_s"] < 86400 else "")
+            if w.get("pace"):
+                line += f" ({w['pace']})"
+            print(line + ("  [estimate]" if w["source"] == "estimate" else ""))
+        if not pl["windows"]:
+            print("no plan usage recorded yet")
+        elif pl.get("status") == "rejected":
+            print("limit reached")
         return 0
     snap = lean_map.fetch()
     if getattr(a, "alerts", False):
@@ -19065,6 +19080,7 @@ def build_parser():
     s.add_argument("--refresh-for", dest="refresh_for", type=float, default=None, metavar="MIN",
                    help="live map --html: the service keeps rewriting the file for MIN minutes (default 30) so a viewer that only reloads files stays live")
     s.add_argument("--probe", action="store_true", help="live map: write a diagnostics page (what the preview allows: JS, WebSocket, fetch, img), print its path")
+    s.add_argument("--usage", action="store_true", help="print the plan usage windows (percent, reset time), one per line, exit 0")
     s.add_argument("--alerts", action="store_true", help="live map: print the current alerts, one per line (level kind text), exit 0")
     s.add_argument("--watch", action="store_true", help="live map: one JSON line whenever it changes (twice a second at most)")
     s.add_argument("--width", type=int)

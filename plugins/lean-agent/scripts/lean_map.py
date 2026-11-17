@@ -194,6 +194,11 @@ def build(ctx, now=None):
     moving = [{"dir": e["dir"], "node": e["node"], "text": e["text"], "age_s": _age(e["ts"], now)}
               for e in sorted(ev, key=lambda e: -e["ts"]) if e.get("text") and e.get("node")][:8]
     extra = activity_parts(ctx, nodes, sel["placed"], ev, now)
+    try:
+        import usage
+        extra["plan"] = usage.plan_report(now)
+    except Exception:
+        pass
     for k, fn in (("projects", lambda: project_rows(ctx, nodes, extra)), ("alerts", lambda: alerts(ctx, nodes, extra, now))):
         try:
             extra[k] = fn()
@@ -355,6 +360,21 @@ def alerts(ctx, nodes, extra, now):
     if lim and usd is not None and usd >= 0.8 * lim:
         day0 = _ts_day0(now)
         add("budget", None, "bad" if usd >= lim else "warn", f"today's cost ${usd:.2f} of ${lim:g} budget ({int(100 * usd / lim)} %)", day0)
+    try:
+        plan = extra.get("plan") or {}
+        wins = plan.get("windows") or []
+        top = max(wins, key=lambda w: w["pct"]) if wins else None
+        rejected = plan.get("status") == "rejected"
+        for w in wins:
+            lvl = "bad" if w["pct"] >= 95 or (rejected and w is top) else "warn" if w["pct"] >= 80 else None
+            if lvl:
+                import usage
+                when = f" - resets {usage.fmt_reset(w['resets_at'], now)} (in {_dur(w['resets_at'] - now)})" if w.get("resets_at") else ""
+                add("plan", w["name"], lvl, f"{w['label']} limit {w['pct']:.0f} %{when}", plan.get("as_of") or now)
+        if rejected and not wins:
+            add("plan", "limit", "bad", "plan limit reached", plan.get("as_of") or now)
+    except Exception:
+        pass
     sv = ctx.get("service") or {}
     over = _num(sv.get("socket_ms"), 0) > cfg["service_ms"] or _num(sv.get("cpu_pct"), 0) > cfg["service_cpu_pct"]
     if over:
@@ -448,7 +468,11 @@ def history(home, days=14, now=None, rows=None):
         pass
     for t in top:
         t["usd"] = round(t["usd"], 2)
-    return {"days": out, "top_threads": top, "tools_7d": act.tools_week(now)}
+    try:
+        plan = usage.plan_history(now)
+    except Exception:
+        plan = []
+    return {"days": out, "top_threads": top, "tools_7d": act.tools_week(now), "plan": plan}
 
 
 def history_cached(home, days=14, now=None):

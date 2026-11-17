@@ -667,6 +667,157 @@ def record_plan_usage(info):
         os.replace(tmp, plan_usage_path())
     except OSError:
         pass
+    _append_plan_history(merged)
+
+
+PLAN_HISTORY_DAYS = 7
+PLAN_HISTORY_MAX = 5000
+
+
+def plan_history_path():
+    return os.path.join(lean_home(), "plan-usage-history.jsonl")
+
+
+def plan_history(now=None):
+    """[{"ts", "five_hour", "seven_day"}] of the last PLAN_HISTORY_DAYS days, oldest first ([] without history)."""
+    import time as _t
+    cutoff = (now or _t.time()) - PLAN_HISTORY_DAYS * 86400
+    out = []
+    try:
+        with open(plan_history_path()) as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and isinstance(r.get("ts"), (int, float)) and r["ts"] >= cutoff:
+                    out.append(r)
+    except OSError:
+        pass
+    return out[-PLAN_HISTORY_MAX:]
+
+
+def _append_plan_history(windows, now=None):
+    """One line per recorded report; bounded to 7 days / 5000 lines (rewritten when it grows past that)."""
+    import time as _t
+    now = now or _t.time()
+    row = {"ts": int(now)}
+    for k in ("five_hour", "seven_day"):
+        w = windows.get(k)
+        row[k] = w["pct"] if isinstance(w, dict) and isinstance(w.get("pct"), (int, float)) else None
+    if row["five_hour"] is None and row["seven_day"] is None:
+        return
+    try:
+        os.makedirs(lean_home(), exist_ok=True)
+        path = plan_history_path()
+        with open(path, "a") as fh:
+            fh.write(json.dumps(row) + "\n")
+        keep = plan_history(now)
+        with open(path) as fh:
+            n = sum(1 for _ in fh)
+        if n > len(keep):
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with open(tmp, "w") as fh:
+                fh.write("".join(json.dumps(r) + "\n" for r in keep))
+            os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+_PLAN_LABELS = {"five_hour": "5-hour", "seven_day": "week", "seven_day_opus": "week Opus", "seven_day_sonnet": "week Sonnet"}
+_plan_cache = {}
+
+
+def _cached_json(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (st.st_mtime_ns, st.st_size)
+    c = _plan_cache.get(path)
+    if c and c[0] == key:
+        return c[1]
+    try:
+        with open(path) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    _plan_cache[path] = (key, d)
+    return d
+
+
+def _pace(pct, resets_at, now):
+    gone = max(0.0, min(100.0, 100 - (resets_at - now) * 100 / (7 * 24 * 3600)))
+    ahead = pct - gone
+    return f"{ahead:.0f} points ahead" if ahead > 10 else "on pace"
+
+
+def fmt_reset(epoch, now=None):
+    """'14:10' within a day, else 'Mon 09:00' (local time)."""
+    import time as _t
+    now = now or _t.time()
+    lt = _t.localtime(epoch)
+    return _t.strftime("%H:%M" if epoch - now < 86400 else "%a %H:%M", lt)
+
+
+def fmt_in(secs):
+    secs = int(max(0, secs))
+    h, m = divmod(secs // 60, 60)
+    return f"{h}h {m:02d}m" if h else f"{m} min"
+
+
+def plan_report(now=None, fresh_hours=6, estimate=True):
+    """The live map's "plan" block from plan-usage.json (cached by mtime): real numbers younger than `fresh_hours`,
+    else lean-agent's estimate from the cached transcript buckets (no scan). Reset windows show 0 % / unknown."""
+    import datetime, time as _t
+    now = now or _t.time()
+    data = _cached_json(plan_usage_path())
+    out = {"as_of": None, "age_s": None, "status": None, "windows": []}
+    if isinstance(data, dict) and data.get("at"):
+        try:
+            at = datetime.datetime.fromisoformat(data["at"]).timestamp()
+        except ValueError:
+            at = None
+        if at is not None:
+            out["as_of"], out["age_s"] = int(at), max(0, int(now - at))
+            out["status"] = data.get("status") if data.get("status") in ("allowed", "allowed_warning", "rejected") else None
+            if now - at <= fresh_hours * 3600:
+                wins = data.get("windows") or {}
+                names = [n for n in ("five_hour", "seven_day") if n in wins]
+                names += sorted(n for n in wins if n not in ("five_hour", "seven_day", "seven_day_oauth_apps") and n.startswith("seven_day_"))
+                for n in names:
+                    w = wins[n]
+                    if not isinstance(w, dict) or not isinstance(w.get("pct"), (int, float)):
+                        continue
+                    ra = w.get("resets_at")
+                    ra = ra if isinstance(ra, (int, float)) and not isinstance(ra, bool) else None
+                    if ra is not None and ra <= now:
+                        pct, ra = 0.0, None
+                    else:
+                        pct = float(w["pct"])
+                    out["windows"].append({"name": n, "label": _PLAN_LABELS.get(n, n.replace("_", " ")), "pct": pct,
+                                           "resets_at": int(ra) if ra else None,
+                                           "resets_in_s": int(ra - now) if ra else None,
+                                           "pace": _pace(pct, ra, now) if n == "seven_day" and ra else None,
+                                           "source": "claude"})
+    if not out["windows"] and estimate:
+        try:
+            buckets = (_cached_json(os.path.join(lean_home(), "windows.json")) or {}).get("buckets") or {}
+            est = window_usage(buckets, datetime.datetime.fromtimestamp(now, datetime.timezone.utc)) if buckets else {}
+        except Exception:
+            est = {}
+        for n, key in (("5h", "five_hour"), ("week", "seven_day")):
+            w = est.get(n) or {}
+            if w.get("plan_pct") is None:
+                continue
+            ra = w["reset"].timestamp() if w.get("reset") else None
+            if ra is not None and ra <= now:
+                ra = None
+            pct = float(w["plan_pct"])
+            out["windows"].append({"name": key, "label": _PLAN_LABELS[key], "pct": round(pct, 1),
+                                   "resets_at": int(ra) if ra else None, "resets_in_s": int(ra - now) if ra else None,
+                                   "pace": _pace(pct, ra, now) if key == "seven_day" and ra else None, "source": "estimate"})
+    return out
 
 
 def week_pace():

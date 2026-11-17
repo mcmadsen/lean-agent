@@ -210,6 +210,12 @@ The live map shows the front desk, threads and workers, with arrows for who asks
   shows `live (file refresh · 3 s)`: it reloads itself and keeps the selected node and filters in the URL hash. If the file
   stops changing for 60 s it says so and stops reloading.
 
+The header also shows your plan usage: a chip per window (5-hour, week, model-specific weeks) with a bar, the percent used
+and a countdown to the reset, amber from 80 % and red from 95 % or when the limit is reached. Click a chip for the details
+(exact reset time, pace, source). The numbers are the ones Claude reports to lean-agent's own runs (`plan-usage.json`);
+without a report from the last 6 hours the page shows lean-agent's estimate and says so. Trends adds a 7-day plan chart
+(`plan-usage-history.jsonl`), the bell warns from 80 %, and `lean-agent map --usage` prints the windows, one per line.
+
 `lean-agent map --json`, `--svg [--mini]` and `--watch` print the same data in the terminal.
 
 ## Run it as a service

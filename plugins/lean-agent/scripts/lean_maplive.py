@@ -838,10 +838,18 @@ button.tg[aria-pressed=true],#ftog[aria-pressed=true]{background:var(--hk-bg);bo
 .lgd{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--tx2);margin-top:4px}.lgd i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}
 .tcard table{width:100%;border-collapse:collapse;font-size:12px}.tcard th{text-align:left;color:var(--mu);font-weight:500;padding:3px 4px}.tcard td{padding:3px 4px;border-top:1px solid var(--line)}
 .lk{height:auto;padding:0 4px;border:0;background:none;color:var(--req);font-size:12px}
+#plan{display:inline-flex;flex-wrap:wrap;gap:6px;max-width:100%}#plan[hidden]{display:none}
+.pu2{display:inline-flex;flex-direction:column;gap:3px;padding:5px 10px 4px;border-radius:10px;background:var(--card);color:var(--tx2);font-size:12px;white-space:nowrap;border:1px solid transparent;cursor:pointer;font-family:inherit}
+.pu2 .pb{display:block;height:3px;border-radius:2px;background:var(--bd);overflow:hidden}.pu2 .pb b{display:block;height:100%;background:var(--ok)}
+.pu2.lv-warn{border-color:var(--rep)}.pu2.lv-warn .pb b{background:var(--rep)}.pu2.lv-bad{border-color:var(--bad)}.pu2.lv-bad .pb b{background:var(--bad)}
+.pu2 .lim{color:var(--bad);font-weight:600}
+#ppanel{position:fixed;top:72px;right:16px;width:380px;max-height:calc(100vh - 96px);overflow:auto;background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px 16px;box-shadow:0 8px 28px rgba(0,0,0,.35);z-index:8}#ppanel[hidden]{display:none}
+#ppanel h2{font-size:16px;margin:0 28px 8px 0}#ppanel table{width:100%;border-collapse:collapse;font-size:12px}#ppanel th{text-align:left;color:var(--mu);font-weight:500;padding:2px 4px}#ppanel td{padding:3px 4px;border-top:1px solid var(--bd)}#ppanel .x{position:absolute;top:8px;right:8px;height:28px;padding:0 10px}#ppanel p{color:var(--mu);font-size:12px;margin:10px 0 0}
+.pl5{stroke:var(--req);stroke-width:2;fill:none}.pl7{stroke:var(--rep);stroke-width:2;fill:none}
 @media(prefers-reduced-motion:reduce){.pd{animation:none}.al.nw{animation:none}}
 @media(max-width:999px){#feed{position:fixed;left:0;right:0;bottom:0;top:auto;width:auto;max-height:42vh;margin:0;border-radius:12px 12px 0 0;z-index:6;box-shadow:0 -8px 28px rgba(0,0,0,.3)}#main{display:block}}
 @media(max-width:700px){#app{padding:16px 12px}h1{font-size:20px}#chips{width:100%}
-#panel{top:auto;bottom:0;right:0;left:0;width:auto;max-height:60vh;border-radius:12px 12px 0 0}#q{max-width:none}}
+#panel,#ppanel{top:auto;bottom:0;right:0;left:0;width:auto;max-height:60vh;border-radius:12px 12px 0 0}#q{max-width:none}#plan{width:100%}.pu2{flex:1 1 auto;min-width:0;white-space:normal}}
 
 """
 JS = r"""
@@ -989,7 +997,32 @@ function render(){
   if(keep){var el=wrap.querySelector('[data-id="'+keep.replace(/"/g,'')+'"]');if(el)try{el.focus({preventScroll:true})}catch(e){}}
   timeline(sv);
   if(selId)fillPanel()}
-function chips(s){var sv=s.service||{},w=0;(s.nodes||[]).forEach(function(n){if(n.kind==='worker'&&(n.state==='alive'||n.state==='orphaned'))w++});
+// ---- plan usage
+function pwin(){var p=SNAP.plan;return p&&Array.isArray(p.windows)?p.windows.filter(function(w){return w&&w.name&&typeof w.pct==='number'}):[]}
+function pshort(w){return w.name==='five_hour'?'5h':w.name==='seven_day'?'week':String(w.label||w.name)}
+function pat(t){var d=new Date(t*1000),n=Date.now()/1000,hm=('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2);return t-n<86400?hm:['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()]+' '+hm}
+function pin(s){s=Math.max(0,Math.floor(s));var h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?h+'h '+('0'+m).slice(-2)+'m':m+'m '+('0'+(s%60)).slice(-2)+'s'}
+function prs(w){if(!w.resets_at)return '';var l=w.resets_at-Date.now()/1000;return l<=0?'resets now':l<86400?'resets '+pin(l):'resets '+pat(w.resets_at)}
+function plvl(w,top){var p=SNAP.plan||{};return w.pct>=95||(p.status==='rejected'&&w===top)?'bad':w.pct>=80?'warn':'ok'}
+function pold(){var p=SNAP.plan||{};return p.as_of?Math.max(0,Math.round((Date.now()/1000-p.as_of)/60)):null}
+function psrc(w){return w.source==='estimate'?'estimate':'as of '+(pold()==null?'?':pold()+' min ago')}
+function planChips(){var ws=pwin(),el=$('plan');if(!ws.length){el.hidden=true;el.innerHTML='';closePlan();return}
+  var top=ws.reduce(function(a,b){return b.pct>a.pct?b:a},ws[0]),rej=(SNAP.plan||{}).status==='rejected';
+  el.hidden=false;el.innerHTML=ws.map(function(w){var lv=plvl(w,top),pc=Math.round(w.pct);
+    var lim=rej&&w===top?'<span class="lim">limit reached'+(w.resets_at?' - resets '+esc(pat(w.resets_at)):'')+'</span>':'<span class="pr" data-n="'+esc(w.name)+'">'+esc(prs(w))+'</span>';
+    return '<button type="button" class="pu2 lv-'+lv+'" data-n="'+esc(w.name)+'" title="'+esc(w.label+' '+pc+'% · '+psrc(w))+'" aria-label="'+esc(w.label+' plan usage '+pc+'%')+'"><span><b>'+esc(pshort(w))+' '+pc+'%</b>'+(prs(w)||rej&&w===top?' · ':'')+lim+'</span><i class="pb"><b style="width:'+Math.max(0,Math.min(100,w.pct))+'%"></b></i></button>'}).join('');
+  if(!$('ppanel').hidden)fillPlan()}
+function planTick(){var ws=pwin();ws.forEach(function(w){var e=document.querySelector('#plan .pr[data-n="'+w.name+'"]');if(e)e.textContent=prs(w)});
+  var pp=$('ppanel');if(!pp.hidden){var c=pp.querySelectorAll('[data-in]');for(var i=0;i<c.length;i++){var t=+c[i].getAttribute('data-in')-Date.now()/1000;c[i].textContent=t>0?'in '+pin(t):'now'}}}
+setInterval(planTick,1000);
+function fillPlan(){var ws=pwin(),p=SNAP.plan||{},pp=$('ppanel');
+  pp.innerHTML='<button type="button" class="x" id="ppx" aria-label="Close plan usage">Close</button><h2>Plan usage</h2><table><thead><tr><th>Window</th><th>Used</th><th>Resets</th><th>Pace</th><th>Source</th></tr></thead><tbody>'
+   +ws.map(function(w){return '<tr><td>'+esc(w.label)+'</td><td>'+Math.round(w.pct)+'%</td><td>'+(w.resets_at?esc(new Date(w.resets_at*1000).toLocaleString([],{weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false}))+' (<span data-in="'+w.resets_at+'"></span>)':'unknown')+'</td><td>'+esc(w.pace||'')+'</td><td>'+esc(w.source==='estimate'?'estimate':'claude, '+psrc(w))+'</td></tr>'}).join('')
+   +'</tbody></table><p>'+(p.status==='rejected'?'Limit reached. ':'')+'lean-agent prefers haiku above 70% of the 5-hour window.</p>';
+  planTick();var x=$('ppx');if(x)x.addEventListener('click',closePlan)}
+function closePlan(){var pp=$('ppanel');pp.hidden=true;pp.innerHTML=''}
+$('plan').addEventListener('click',function(e){if(!e.target.closest||!e.target.closest('.pu2'))return;var pp=$('ppanel');if(pp.hidden){pp.hidden=false;fillPlan()}else closePlan()});
+function chips(s){planChips();var sv=s.service||{},w=0;(s.nodes||[]).forEach(function(n){if(n.kind==='worker'&&(n.state==='alive'||n.state==='orphaned'))w++});
   $('sub').textContent='lean-agent'+(sv.version?' '+sv.version:'')+' · service socket · updates as messages move';
   $('ms').textContent=sv.socket_ms!=null&&sv.up?' · '+sv.socket_ms+' ms':'';
   $('cpu').textContent='Service CPU '+(sv.cpu_pct!=null?Math.round(sv.cpu_pct):'–')+'%';
@@ -1131,7 +1164,7 @@ $('wrap').addEventListener('keydown',function(e){var t=e.target;if(!t.classList|
 document.addEventListener('keydown',function(e){
   var t=e.target,typing=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA');
   if(e.key==='/'&&!typing&&!e.ctrlKey&&!e.metaKey&&!e.altKey){e.preventDefault();$('q').focus();$('q').select();return}
-  if(e.key==='Escape'){if(selId){closePanel();return}if(typing){t.blur();return}if(feedOpen()){ST.feed=false;save();syncUi()}}});
+  if(e.key==='Escape'){if(!$('ppanel').hidden){closePlan();return}if(selId){closePanel();return}if(typing){t.blur();return}if(feedOpen()){ST.feed=false;save();syncUi()}}});
 $('q').addEventListener('input',function(){ST.q=this.value.slice(0,80);save();schedule()});
 $('fidle').addEventListener('click',function(){ST.idle=ST.idle?0:1;save();render()});
 $('ferr').addEventListener('click',function(){ST.err=ST.err?0:1;save();render()});
@@ -1307,12 +1340,19 @@ function chartCache(days,W){var H=170,L=44,R=14,T=12,B=28,pw=W-L-R,ph=H-T-B,n=da
   o.push('<polyline class="cl" fill="none" points="'+pts.map(function(p){return p[0].toFixed(1)+','+p[1].toFixed(1)}).join(' ')+'"/>');
   pts.forEach(function(p){var tip=p[2].date+' · cache read '+Math.round(p[3]*100)+'%';o.push('<circle class="cp" cx="'+p[0].toFixed(1)+'" cy="'+p[1].toFixed(1)+'" r="3.5" tabindex="0" data-tip="'+esc(tip)+'" aria-label="'+esc(tip)+'"/>')});
   o.push(xlabs(days,L,pw,H,W),'</svg>');return o.join('')}
+function chartPlan(rows,W){var H=170,L=44,R=14,T=12,B=28,pw=W-L-R,ph=H-T-B,t1=rows[rows.length-1].ts,t0=Math.min(rows[0].ts,t1-86400),sp=t1-t0||1,o=[svgOpen(W,H,'Plan usage over the last 7 days'),yaxis(L,R,T,ph,W,100,function(v){return Math.round(v)+'%'})];
+  function X(t){return L+(t-t0)/sp*pw}
+  [['five_hour','pl5','5-hour'],['seven_day','pl7','week']].forEach(function(k){var pts=rows.filter(function(r){return typeof r[k[0]]==='number'}).map(function(r){return X(r.ts).toFixed(1)+','+(T+ph-Math.max(0,Math.min(100,r[k[0]]))/100*ph).toFixed(1)});
+    if(pts.length)o.push('<polyline class="'+k[1]+'" points="'+pts.join(' ')+'"><title>'+k[2]+'</title></polyline>')});
+  for(var i=0;i<=Math.min(6,Math.floor(sp/86400));i++){var t=t1-i*86400;o.push('<text class="ax" x="'+X(t).toFixed(1)+'" y="'+(H-8)+'" text-anchor="middle">'+esc(new Date(t*1000).toLocaleDateString([],{weekday:'short',day:'numeric'}))+'</text>')}
+  o.push('</svg>');return o.join('')}
 function chartTools(tools,W){var rows=tools.slice(0,10),RH=22,L=84,R=44,H=rows.length*RH+8,mx=Math.max.apply(null,rows.map(function(t){return +t[1]||0}).concat([1])),o=[svgOpen(W,H,'Top tools in the last 7 days')];
   rows.forEach(function(t,i){var y=4+i*RH,w=(+t[1]||0)/mx*(W-L-R),tip=t[0]+' · '+t[1]+' calls';
     o.push('<text class="rl" x="'+(L-6)+'" y="'+(y+13)+'" text-anchor="end">'+esc(clip(t[0],12))+'</text><rect class="bc" x="'+L+'" y="'+y+'" width="'+Math.max(w,2).toFixed(1)+'" height="16" rx="2" tabindex="0" data-tip="'+esc(tip)+'" aria-label="'+esc(tip)+'"/><text class="ax" x="'+(L+w+4).toFixed(1)+'" y="'+(y+12)+'">'+esc(fmtN(t[1]))+'</text>')});
   o.push('</svg>');return o.join('')}
 function drawTrends(){var box=$('trends'),d=HIST;if(!d||view_!=='trends')return;
   var days=Array.isArray(d.days)?d.days.slice(-14):[],tt=Array.isArray(d.top_threads)?d.top_threads.slice(0,10):[],tools=Array.isArray(d.tools_7d)?d.tools_7d.slice(0,10):[];
+  var plan=Array.isArray(d.plan)?d.plan.filter(function(r){return r&&typeof r.ts==='number'}):[];
   if(!days.length){box.innerHTML='<div class="tcard tn0">No history yet.</div>';return}
   var sum=days.reduce(function(a,x){return a+(+x.usd||0)},0),pj={},last7=days.slice(-7);
   last7.forEach(function(x){var b=x.by_project||{};for(var k in b)pj[k]=(pj[k]||0)+(+b[k]||0)});
@@ -1323,9 +1363,10 @@ function drawTrends(){var box=$('trends'),d=HIST;if(!d||view_!=='trends')return;
    +'<div class="tcard"><h2>Cache read ratio</h2><div id="c3" class="chart"></div></div></div>'
    +'<div class="tg2"><div class="tcard"><h2>Projects</h2>'+(pn.length?'<table id="tpj"><thead><tr><th>Project</th><th>Today</th><th>7 days</th></tr></thead><tbody>'+pn.map(function(k){return '<tr><td>'+esc(k)+'</td><td>'+esc(usd(today[k]||0))+'</td><td>'+esc(usd(pj[k]||0))+'</td></tr>'}).join('')+'</tbody></table>':'<div class="mu">No project data.</div>')+'</div>'
    +'<div class="tcard"><h2>Top threads <span>7 days</span></h2>'+(tt.length?'<table id="ttt"><thead><tr><th>Thread</th><th>Cost</th><th>Tokens</th></tr></thead><tbody>'+tt.map(function(t){return '<tr><td title="'+esc(t.title)+'"><button type="button" class="lk mono" data-node="'+esc(t.node)+'">'+esc(t.node)+'</button> '+esc(clip(t.title,28))+'</td><td>'+esc(usd(t.usd))+'</td><td>'+esc(fmtN(t.tokens))+'</td></tr>'}).join('')+'</tbody></table>':'<div class="mu">No thread cost yet.</div>')+'</div></div>'
+   +(plan.length?'<div class="tcard"><h2>Plan usage <span>5-hour (blue) and week (amber) · % used</span></h2><div id="c5" class="chart"></div></div>':'')
    +'<div class="tcard"><h2>Top tools <span>7 days</span></h2><div id="c4" class="chart">'+(tools.length?'':'<div class="mu">No tool calls.</div>')+'</div></div>';
   function fill(id,fn,arg){var el=$(id);if(el&&arg.length)el.innerHTML=fn(arg,Math.max(260,el.clientWidth||600))}
-  fill('c1',chartCost,days);fill('c2',chartMix,days);fill('c3',chartCache,days);fill('c4',chartTools,tools)}
+  fill('c1',chartCost,days);fill('c2',chartMix,days);fill('c3',chartCache,days);fill('c4',chartTools,tools);fill('c5',chartPlan,plan)}
 $('trends').addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('.lk');if(b)showNode(b.getAttribute('data-node'))});
 render();
 if(HS.y&&HS.fr==='1')try{window.scrollTo(0,+HS.y)}catch(e){}
@@ -1344,6 +1385,7 @@ PAGE = """<!doctype html>
 <div id="chips"><span class="pill" id="pill"><span class="dot"></span><span id="chip">snapshot (service not running)</span><span id="ms"></span></span>
 <span class="pill" id="cpu">Service CPU –%</span><span class="pill" id="wk">0 workers</span><span class="pill" id="inbox">Inbox 0</span>
 <span class="pill" id="runs" hidden></span><span class="pill" id="usd" hidden></span><span class="pill" id="saved" hidden></span><span class="pill" id="tpm" hidden></span><span class="pill" id="errs" hidden></span>
+<span id="plan" role="group" aria-label="Plan usage" hidden></span>
 <button type="button" class="pill" id="bell" hidden></button>
 <span id="vsw" role="group" aria-label="View"><button type="button" id="vmap" aria-pressed="true">Map</button><button type="button" id="vtr" aria-pressed="false">Trends</button></span>
 <button type="button" id="pause" aria-label="Pause live updates">Pause</button></div></header>
@@ -1366,6 +1408,7 @@ PAGE = """<!doctype html>
 <button type="button" class="lg" data-k="bad" aria-pressed="true"><svg aria-hidden="true" width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5" fill="var(--bad)"/></svg>Undelivered or stuck</button>
 </div><span>Lines fade 30 s after the last message · click a node for details · legend items toggle lines</span></footer></div>
 <aside id="panel" role="dialog" aria-label="Node details"></aside>
+<aside id="ppanel" role="dialog" aria-label="Plan usage" hidden></aside>
 <script type="application/json" id="snap">%SNAP%</script>
 <script type="application/json" id="ep">%EP%</script>
 <script>%JS%</script></body></html>
