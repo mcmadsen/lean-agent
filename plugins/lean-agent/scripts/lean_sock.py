@@ -81,6 +81,28 @@ def call(op, timeout=READ_TIMEOUT, sock=None, **fields):
                 pass
 
 
+def call_nowait(op, timeout=0.04, **fields):
+    """Fire and forget: send one request and close without reading the reply. Never raises, never waits longer than
+    `timeout` (hooks: the session must not feel it). True when the line was sent."""
+    if os.environ.get("LEAN_AGENT_NO_SOCKET"):
+        return False
+    s = None
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(path())
+        s.sendall(json.dumps({"op": op, **fields}).encode() + b"\n")
+        return True
+    except OSError:
+        return False
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+
 CLI_OPS = ("now", "runs")
 CLI_NOT = ("--lost", "--wait", "--clear", "--project", "-p")
 CLI_ENV = ("LEAN_AGENT_SESSION_ROLE", "LEAN_AGENT_THREAD", "LEAN_AGENT_BRIEF", "LEAN_AGENT_CALLER_THREAD", "LEAN_AGENT_LOCK_TIMEOUT")
