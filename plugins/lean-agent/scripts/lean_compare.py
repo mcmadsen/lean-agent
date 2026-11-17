@@ -281,9 +281,10 @@ def lean_column(la, a, project, slug, meter, clean, has, kind):
             h = la.prepare_home()
         flags = merge_settings(la.session_flags(h, "thread"), {"disableAllHooks": True})
         env["LEAN_AGENT_SESSION_ROLE"] = "thread"
-        cwd = h
-        own = la.front_desk_file(h)
-        mem_tokens = sum(c for n, p, c in memory_files(h) if os.path.realpath(p) != os.path.realpath(own)) // 4
+        cwd = la.threads_home(h)  # thread sessions run in their own folder, with the thread guide
+        if not os.path.isdir(cwd):
+            la.prepare_home()
+        mem_tokens = sum(c for n, p, c in memory_files(cwd)) // 4
         n_tools = None
     r = meter.run(kind, flags, cwd, env)
     total = tokens_of(r)
@@ -318,7 +319,7 @@ def worker_append(la, slug, project):
 
 
 def front_desk_column(la, a, meter, clean, thread_col):
-    """No new session: the thread column's fixed part (the front desk loads its own guide instead of CLAUDE.md) plus
+    """No new session: the thread column's fixed part (thread guide in <home>/threads; the front desk's own guide is in <home>/home) plus
     the text lean-agent injects at start."""
     import compact_hook
     h = la.home("home")
@@ -335,8 +336,8 @@ def front_desk_column(la, a, meter, clean, thread_col):
     if not thread_col:
         return None
     rows = {k: dict(v) for k, v in thread_col["rows"].items() if k != "system prompt"}
-    home_md = os.path.join(h, "CLAUDE.md")
-    md_t = os.path.getsize(home_md) // 4 if os.path.isfile(home_md) else 0  # the front desk leaves CLAUDE.md out
+    home_md = os.path.join(la.threads_home(h), "CLAUDE.md")
+    md_t = os.path.getsize(home_md) // 4 if os.path.isfile(home_md) else 0  # the front desk's folder holds no thread guide
     rows["memory"] = table_cell(max(0, thread_col["rows"]["memory"]["tokens"] - md_t) + desk_t, "estimated")
     rows["messages"] = table_cell(rows["messages"]["tokens"] + inj["brief (as injected)"], "estimated")
     total = (thread_col["total"] - thread_col["rows"]["messages"]["tokens"] - thread_col["rows"]["memory"]["tokens"]
@@ -380,7 +381,9 @@ def memory_breakdown(la, slug, project, kinds):
     out = {}
     h = la.home("home")
     desk = la.front_desk_file(h)
-    own = {os.path.realpath(desk), os.path.realpath(os.path.join(h, "CLAUDE.md"))}
+    t = la.threads_home(h)
+    tguide = os.path.join(t, "CLAUDE.md")
+    own = {os.path.realpath(desk), os.path.realpath(tguide)}
     threads = (la.lean_threads.load().get("threads") or {}) if os.path.isdir(h) else {}
     if "clean" in kinds:
         out["clean"] = file_sources(memory_files(project))
@@ -396,7 +399,7 @@ def memory_breakdown(la, slug, project, kinds):
                     "tokens": max(0, la.est_tokens(append) - card_t)})
         out["worker"] = src
     if "thread session" in kinds:
-        src = file_sources(memory_files(h), own=own, skip=desk)
+        src = file_sources(memory_files(t), own=own)
         line = max([la.est_tokens(f'Thread {t} "{(v or {}).get("title") or t}"') for t, v in threads.items()] or [8])
         src.append({"name": "thread line (SessionStart hook, every start)", "kind": "brief", "tokens": line, "own": True})
         sizes = []
@@ -409,7 +412,7 @@ def memory_breakdown(la, slug, project, kinds):
                     "tokens": max(sizes) if sizes else compact_hook.FRESH_BRIEF_TOKENS})
         out["thread session"] = src
     if "front desk" in kinds:
-        src = file_sources(memory_files(h), own=own, skip=os.path.join(h, "CLAUDE.md"))
+        src = file_sources(memory_files(h), own=own)
         cps = [n for n in compact_hook.load_notes() if n.get("kind") == "checkpoint" and compact_hook.checkpoint_owner(n) == "main"]
         cp = compact_hook.cut_lines(str(cps[-1].get("text", "")), compact_hook.CHECKPOINT_CAP) if cps else ""
         for name, text in (("checkpoint (brief at start)", cp), ("thread table (brief at start)", compact_hook.threads_summary() or ""),

@@ -1,4 +1,4 @@
-"""The live map: snapshot shape, edge ageing, private mode, service down, SVG, --watch, the bounded ring, socket speed."""
+"""Map data: snapshot shape, edge ageing, private mode, service down, SVG, --watch, the bounded ring, socket speed, pane --json."""
 import io
 import json
 import os
@@ -215,6 +215,86 @@ class PaneCheckTest(unittest.TestCase):
         self.assertIn("service up: no", r.stdout)
         self.assertRegex(r.stdout, r"json ok: yes \(\d+ bytes\)")
         self.assertRegex(r.stdout, r"svg ok: yes \(\d+ bytes\)")
+
+
+class PaneJsonTest(unittest.TestCase):
+    def test_pane_json_cli(self):
+        import subprocess
+        tmp = tempfile.mkdtemp()
+        env = {"HOME": tmp, "LEAN_AGENT_HOME": tmp, "PATH": "/usr/bin:/bin", "LEAN_AGENT_TEST": "1"}
+        t0 = time.time()
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "lean_agent.py"), "pane", "--json"], env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        d = json.loads(r.stdout)
+        self.assertEqual(sorted(d), ["answers", "desk", "goals", "inbox", "service", "ts", "v"])
+        self.assertEqual((d["goals"], d["answers"], d["inbox"], d["service"]["up"]), ([], [], 0, False))
+        self.assertLess(time.time() - t0, 5)
+
+
+class RetireMapPluginTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from unittest import mock
+        self.tmp = tempfile.mkdtemp()
+        patch = mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": os.path.join(self.tmp, "lh"), "CLAUDE_CONFIG_DIR": os.path.join(self.tmp, "cfg")})
+        patch.start()
+        self.addCleanup(patch.stop)
+        os.makedirs(os.path.join(self.tmp, "lh"))
+
+    def test_uninstalls_through_the_cli_only(self):
+        import lean_agent
+        calls, said = [], []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            out = json.dumps([{"id": "lean-agent-map@lean-agent", "scope": "user"}, {"id": "other@x", "scope": "user"}]) if argv[2] == "list" else ""
+            return type("R", (), {"returncode": 0, "stdout": out})()
+        self.assertTrue(lean_agent.retire_map_plugin(said.append, run, lambda n: "/x/claude"))
+        self.assertEqual(calls[1], ["/x/claude", "plugin", "uninstall", "lean-agent-map@lean-agent", "--scope", "user"])
+        self.assertEqual(len(calls), 2)
+        self.assertIn("removed the old plugin", said[0])
+
+    def test_failure_tells_the_user_and_no_cli_is_silent(self):
+        import lean_agent
+        said = []
+
+        def run(argv, **kw):
+            out = json.dumps([{"id": "lean-agent-map@m", "scope": "user"}]) if argv[2] == "list" else ""
+            return type("R", (), {"returncode": 0 if argv[2] == "list" else 1, "stdout": out})()
+        lean_agent.retire_map_plugin(said.append, run, lambda n: "/x/claude")
+        self.assertIn("Plugins page", said[0])
+        self.assertFalse(lean_agent.retire_map_plugin(said.append, run, lambda n: None))
+        self.assertEqual(len(said), 1)
+
+    def test_unreadable_list_is_silent_unless_the_old_plugin_is_known_installed_and_hints_once(self):
+        import lean_agent
+        import tempfile
+        from unittest import mock
+        tmp = tempfile.mkdtemp()
+        said = []
+        bad = lambda argv, **kw: type("R", (), {"returncode": 1, "stdout": "boom"})()
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": os.path.join(tmp, "cfg"), "LEAN_AGENT_HOME": os.path.join(tmp, "lh")}):
+            os.makedirs(os.path.join(tmp, "lh"))
+            for _ in range(2):  # not installed: silent every time
+                self.assertFalse(lean_agent.retire_map_plugin(said.append, bad, lambda n: "/x/claude"))
+            self.assertEqual(said, [])
+            os.makedirs(os.path.join(tmp, "cfg", "plugins", "cache", "mkt", "lean-agent-map"))  # known installed (read-only check)
+            for _ in range(3):
+                lean_agent.retire_map_plugin(said.append, bad, lambda n: "/x/claude")
+            self.assertEqual(len(said), 1)  # the hint, once
+            self.assertIn("Plugins page", said[0])
+
+    def test_a_log_only_call_does_not_consume_the_hint(self):
+        import lean_agent
+        said, logged = [], []
+        bad = lambda argv, **kw: type("R", (), {"returncode": 1, "stdout": "boom"})()
+        os.makedirs(os.path.join(self.tmp, "cfg", "plugins", "cache", "mkt", "lean-agent-map"))
+        lean_agent.retire_map_plugin(logged.append, bad, lambda n: "/x/claude", shown=False)  # `up`: log only
+        self.assertEqual(len(logged), 1)
+        lean_agent.retire_map_plugin(said.append, bad, lambda n: "/x/claude")  # `update`: printed, once
+        lean_agent.retire_map_plugin(said.append, bad, lambda n: "/x/claude")
+        self.assertEqual(len(said), 1)
+        self.assertIn("Plugins page", said[0])
 
 
 if __name__ == "__main__":

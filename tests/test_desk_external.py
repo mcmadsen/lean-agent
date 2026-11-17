@@ -885,26 +885,34 @@ class ModelEffort(Base):
         la.set_home_model(h, "sonnet")
         self.assertEqual(self.settings(h)["model"], "sonnet")
 
-    def test_no_effort_level_is_written_and_an_earlier_one_is_removed(self):
+    def test_desk_folder_gets_effort_high_with_a_marker_and_the_threads_folder_none(self):
         la = self.la()
         h = la.home("home")
-        la.refresh_desk_folder(h)
-        self.assertNotIn("effortLevel", self.settings(h))
         path = os.path.join(h, ".claude", "settings.json")
-        d = self.settings(h)
-        d["effortLevel"] = "high"  # written by an earlier version: its marker says so
-        json.dump(d, open(path, "w"))
-        json.dump({"effortLevel": "high"}, open(os.path.join(la.home(), "desk-effort.json"), "w"))
+        mark = os.path.join(la.home(), "desk-effort.json")
         la.refresh_desk_folder(h)
+        self.assertEqual(self.settings(h)["effortLevel"], "high")
+        self.assertEqual(json.load(open(mark)), {"effortLevel": "high"})
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_EFFORT": "medium"}):
+            la.refresh_desk_folder(h)  # ours: follows the setting
+        self.assertEqual(self.settings(h)["effortLevel"], "medium")
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_EFFORT": "default"}):
+            la.refresh_desk_folder(h)
         self.assertNotIn("effortLevel", self.settings(h))
-        self.assertFalse(os.path.exists(os.path.join(la.home(), "desk-effort.json")))
-        d["effortLevel"] = "low"  # the user's own (no marker, or a different value) is never removed
+        self.assertFalse(os.path.exists(mark))
+        d = self.settings(h)
+        d["effortLevel"] = "low"  # the user's own is never overwritten
         json.dump(d, open(path, "w"))
         la.refresh_desk_folder(h)
         self.assertEqual(self.settings(h)["effortLevel"], "low")
-        json.dump({"effortLevel": "high"}, open(os.path.join(la.home(), "desk-effort.json"), "w"))
+        self.assertFalse(os.path.exists(mark))
+        json.dump({"effortLevel": "high"}, open(mark, "w"))  # a stale marker for another value changes nothing
         la.refresh_desk_folder(h)
         self.assertEqual(self.settings(h)["effortLevel"], "low")
+        # the threads folder never carries one
+        la.prepare_threads_home(h)
+        tset = json.load(open(os.path.join(la.threads_home(h), ".claude", "settings.json")))
+        self.assertNotIn("effortLevel", tset)
 
     def test_effort_env_is_validated(self):
         la = self.la()
@@ -927,8 +935,6 @@ class ModelEffort(Base):
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": cfg}):
             flags = la.session_flags(h, "thread")
         self.assertNotIn("effortLevel", json.loads(flags[flags.index("--settings") + 1]))  # nothing of ours: Claude Code's / the user's own
-        la.refresh_desk_folder(h)
-        self.assertNotIn("effortLevel", self.settings(h))
 
     def test_local_and_remote_control_paths_carry_the_desk_effort_args(self):
         la = self.la()

@@ -1,5 +1,4 @@
-"""Hidden private projects leave the live map entirely: snapshot, /snap, /history, /replay, /map.svg, --svg/--json/--html/--alerts,
-caches across a private on/off switch."""
+"""Hidden private projects leave the map entirely: snapshot, history, --svg/--json/--alerts, pane data, caches across a private on/off switch."""
 import json
 import os
 import shutil
@@ -16,11 +15,9 @@ sys.path.insert(0, ROOT)
 
 import lean_activity as act  # noqa: E402
 import lean_map  # noqa: E402
-import lean_maplive  # noqa: E402
 import lean_private  # noqa: E402
 import lean_threads  # noqa: E402
 import service_session as ss  # noqa: E402
-from test_map_alerts import http_get  # noqa: E402
 
 SLUG, TID, TITLE, RUN, FILE = "vaultcorp", "t1", "Secret roadmap", "0101-000001-priv", "secretplan.md"
 PUB_RUN = "0101-000002-pub"
@@ -115,8 +112,6 @@ class MapPrivate(unittest.TestCase):
         self.check_clean(lean_map.svg(raw, mini=True), "mini svg")
         for a in s.get("alerts") or []:
             self.assertNotIn(SLUG, a["text"])
-        page = lean_maplive.build_html(s, {"port": 1, "token": "x"})
-        self.check_clean(page, "html")
         self.assertTrue([n for n in s["nodes"] if n["id"] == "t2"])
 
     def test_history(self):
@@ -128,42 +123,39 @@ class MapPrivate(unittest.TestCase):
         h2 = lean_map.history_cached(self.tmp, 3)
         self.assertEqual(sum(d["usd"] for d in h2["days"]), 8.0)
 
-    def test_live_endpoints_and_switch(self):
-        live = lean_maplive.Live(lean_map.snapshot_now, self.tmp, interval=0.2).start()
-        self.addCleanup(live.stop)
-        live.record_replay("tool", {"node": TID, "tool": "Edit", "target": FILE, "ok": True})
-        live.record_replay("tool", {"node": "t2", "tool": "Edit", "target": "readme.md", "ok": True})
-        live.record_replay("tool", {"node": "t2", "tool": "Read", "target": SLUG + " notes", "ok": True})
-        live.record_replay("send", {"from": "main", "to": TID})
-
-        def get(path):
-            head, _, body = http_get(live.port, f"{path}{'&' if '?' in path else '?'}t={live.token}")
-            self.assertIn("200", head, path)
-            return body.decode()
-        for path in ("/snap", "/history", "/replay", "/map.svg", "/map.svg?mini=1", "/"):
-            self.check_clean(get(path), path)
-        self.assertIn("readme.md", get("/replay"))
-        self.set_hidden(False)
-        self.assertIn(SLUG, get("/snap"))
-        self.assertIn(FILE, get("/replay"))
-        self.assertIn(TITLE, get("/map.svg"))
-        self.set_hidden(True)
-        self.check_clean(get("/snap"), "/snap after switch")
-        self.check_clean(get("/map.svg"), "/map.svg after switch")
-        self.check_clean(get("/history"), "/history after switch")
-
-    def test_file_refresh_rewrites_on_switch(self):
-        live = lean_maplive.Live(lean_map.snapshot_now, self.tmp, interval=0.2)
-        out = os.path.join(self.tmp, "map.html")
-        self.set_hidden(False)
-        lean_maplive.register_refresh(self.tmp, out)
-        live._refresh_once()
-        with open(out) as fh:
-            self.assertIn(SLUG, fh.read())
-        self.set_hidden(True)
-        live._refresh_once()
-        with open(out) as fh:
-            self.check_clean(fh.read(), "refreshed html")
+    def test_pane_data_shape_redaction_and_speed(self):
+        now = time.time()
+        goals = [{"id": "g1", "ref": "PR#1", "thread": TID, "state": "active", "target": "pr", "next": "secret next", "created": "2026-01-01T00:00:00"},
+                 {"id": "g2", "ref": "PR#2", "thread": "t2", "state": "waiting-user", "target": "pr", "next": "answer: push",
+                  "last_activity": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now - 60))},
+                 {"id": "g3", "ref": "PR#3", "thread": "t2", "state": "stuck", "target": "pr", "next": "x",
+                  "last_activity": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now - 5))}]
+        self.write("goals.json", {"items": goals})
+        qs = [{"id": "u1", "ts": now - 90, "text": "how is it?\nsecond line", "target": TID, "status": "answered", "answer": "private reply",
+               "answered_ts": now - 60, "answer_read": False},
+              {"id": "u2", "ts": now - 90, "text": "what now?", "target": "t2", "status": "answered", "answer": "do this\nmore", "answered_ts": now - 30,
+               "answer_read": False},
+              {"id": "u3", "ts": now - 900, "text": "old one", "target": "t2", "status": "answered", "answer": "done", "answered_ts": now - 800,
+               "answer_read": True}]
+        self.write("my-questions.json", {"items": qs})
+        with mock.patch("lean_sock.call", return_value=None):
+            p = lean_map.pane_data(now)
+            self.assertEqual(sorted(p), ["answers", "desk", "goals", "inbox", "service", "ts", "v"])
+            self.assertFalse(p["service"]["up"])
+            self.assertEqual([g["id"] for g in p["goals"]], ["g3", "g2"])  # newest first, the private goal is left out
+            self.assertEqual([g["state"] for g in p["goals"]], ["stuck", "waiting"])
+            self.assertEqual([a["id"] for a in p["answers"]], ["q2", "q3"])  # unread first, the private answer is left out
+            self.assertEqual((p["answers"][0]["unread"], p["answers"][1]["unread"]), (True, False))
+            self.assertEqual(p["answers"][0]["a"], "do this")
+            self.check_clean(json.dumps(p), "pane data")
+            self.set_hidden(False)
+            p2 = lean_map.pane_data(now)
+            self.assertEqual(len(p2["goals"]), 3)
+            self.assertEqual([a["id"] for a in p2["answers"]], ["q2", "q1", "q3"])
+            t0 = time.time()
+            for _ in range(5):
+                lean_map.pane_data()
+            self.assertLess((time.time() - t0) / 5, 0.15)
 
 
 if __name__ == "__main__":

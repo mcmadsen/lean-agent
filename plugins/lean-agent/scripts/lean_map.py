@@ -95,7 +95,7 @@ def _num(v, d):
 
 
 def select(nodes):
-    """Which nodes get drawn (shared by the SVG and the live page): open threads ranked active/mid-turn, undelivered, then
+    """Which nodes get drawn (used by the SVG and the pane): open threads ranked active/mid-turn, undelivered, then
     most recent, at most MAX_THREADS; workers alive/orphaned or ended in the last ENDED_S, at most MAX_WORKERS per parent
     (parent-less = under the front desk). -> {"placed": [ids], "more": number of threads/workers left out}."""
     def trank(n):
@@ -254,7 +254,7 @@ def activity_parts(ctx, nodes, placed, ev, now):
 
 
 def _extra_totals(ctx, nodes, calls, errs, now):
-    """The few extra numbers the live page's metric cards show; each key is left out when it is not known."""
+    """The few extra numbers the pane and SVG metric cards show; each key is left out when it is not known."""
     o = {}
     try:
         ws = [n for n in nodes if n["kind"] == "worker"]
@@ -536,15 +536,6 @@ def _hidden_now():
         return False
 
 
-def redact_events(events):
-    """/replay items: dropped when their node or ends are private or their target names a private project."""
-    if not _hidden_now():
-        return events
-    bad = private_nodes()
-    return [e for e in events if e.get("node") not in bad and e.get("from") not in bad and e.get("to") not in bad
-            and not _is_private_text(e.get("target"))]
-
-
 # ---------------------------------------------------------------- history
 HIST_TTL = 60.0
 _hcache = {}
@@ -805,6 +796,31 @@ def inbox_from_files():
         return 0
 
 
+def pane_data(now=None):
+    """Everything the Claude desktop pane shows, in one cheap call: service, desk, goals, answers, inbox. No worker runs, no model."""
+    now = time.time() if now is None else now
+    up, version = False, ""
+    try:
+        import lean_sock
+        r = lean_sock.call("ping", timeout=0.3)
+        up, version = bool(r and r.get("ok")), str((r or {}).get("version") or "")
+    except Exception:  # noqa: BLE001
+        pass
+    out = {"v": 1, "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)), "service": {"up": up, "version": version},
+           "desk": desk_info(now), "goals": [], "answers": [], "inbox": inbox_from_files()}
+    try:
+        import lean_goals
+        out["goals"] = lean_goals.rows(now)
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"goals: {exc}"[:200]
+    try:
+        import lean_myq
+        out["answers"] = lean_myq.rows(now)
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = (out.get("error", "") + f" answers: {exc}")[:300]
+    return out
+
+
 def fetch(timeout=1.0):
     """One snapshot through the service socket, else the service-not-running one. Never raises."""
     try:
@@ -850,7 +866,7 @@ def _clip(s, n):
     return s if len(s) <= n else s[:n - 1] + "…"
 
 
-# Matrix palette of the radial drawing (dark): working green, attention amber, failed red, idle dim.
+# Palette of the radial drawing (dark): working green, attention amber, failed red, idle dim.
 MX = {"bg": "#070B08", "card": "#0E1710", "line": "#1C3A25", "text": "#C8F7D2", "dim": "#4F6B57", "working": "#2EE66B",
       "attention": "#F2A541", "failed": COLORS["bad"], "idle": "#3E5546"}
 _WORKING = ("active", "alive", "running", "working", "busy")

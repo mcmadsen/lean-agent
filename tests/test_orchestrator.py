@@ -2984,14 +2984,16 @@ class CliTest(unittest.TestCase):
         with open(os.path.join(self.tmp.name, "CLAUDE.md"), "w") as fh:  # ~/CLAUDE.md
             fh.write("Spawn subagents. " * 200)
         home = self.cli("home").stdout.strip()
-        guide = open(os.path.join(home, "CLAUDE.md")).read()
+        tdir = os.path.join(os.path.dirname(home), "threads")
+        guide = open(os.path.join(tdir, "CLAUDE.md")).read()
+        self.assertFalse(os.path.exists(os.path.join(home, "CLAUDE.md")))  # the desk folder holds no thread guide
         self.assertNotIn("usage: lean-agent", guide)  # the CLI reference isn't re-read on every call
         self.assertIn("lean-agent guide --cli", guide)
         self.assertIn("lean-agent run", self.cli("guide", "--cli").stdout)
         doc = self.cli("doctor", home, check=False).stdout
         self.assertRegex(doc, r"✓ orchestrator loads ~[\d,]+ tokens of instructions on every call: CLAUDE.md ~[\d,]+\n")
-        os.makedirs(os.path.join(home, ".claude", "rules"), exist_ok=True)
-        with open(os.path.join(home, ".claude", "rules", "extra.md"), "w") as fh:
+        os.makedirs(os.path.join(tdir, ".claude", "rules"), exist_ok=True)
+        with open(os.path.join(tdir, ".claude", "rules", "extra.md"), "w") as fh:
             fh.write("extra " * 100)
         doc = self.cli("doctor", home, check=False).stdout
         self.assertIn("! orchestrator loads", doc)
@@ -3055,7 +3057,7 @@ class CliTest(unittest.TestCase):
         self.assertRegex(out, r"~\s*[\d,]+  output    Bash: lean-agent run -p shop -m haiku x")
         self.assertIn("brief mode is off in this session", out)
         out = self.cli("context", "--apply", "--keep", "KeepTool", **env).stdout
-        self.assertIn("denied 1 tool(s), excluded 1 file(s)", out)
+        self.assertIn("denied 1 tool(s) for the desk, 0 tool(s) for the threads; excluded 1 file(s)", out)
         with open(os.path.join(home, ".claude", "settings.json")) as fh:
             data = json.load(fh)
         self.assertIn("NotebookEdit2", data["permissions"]["deny"])
@@ -5131,6 +5133,155 @@ class CliTest(unittest.TestCase):
         old = self.thread_calls(log)["t1"]["argv"][-1]
         return p, log, ss, old
 
+    def test_thread_session_starts_in_the_threads_folder_not_the_desk_folder(self):
+        p, log, ss, old = self.closed_thread_with_history()
+        home = self.env["LEAN_AGENT_HOME"]
+        call = self.thread_calls(log)["t1"]
+        self.assertEqual(os.path.realpath(call["cwd"]), os.path.realpath(os.path.join(home, "threads")))
+        slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(os.path.join(home, "threads")))
+        self.assertIn(os.path.join("projects", slug), ss.info("t1")["transcript"])
+        self.stop_up(p, 30)
+
+    def test_desk_folder_holds_only_the_front_desk_instructions(self):
+        h = self.cli("home").stdout.strip()
+        self.assertFalse(os.path.exists(os.path.join(h, "CLAUDE.md")))  # no thread guide in the desk folder
+        found = [os.path.join(d, f) for d, _, fs in os.walk(h) for f in fs if f.endswith(".md")]
+        self.assertEqual([os.path.relpath(f, h) for f in found], [os.path.join(".claude", "rules", "front-desk.md")])
+        self.assertLess(sum(os.path.getsize(f) for f in found), 6000)
+        self.assertGreater(os.path.getsize(os.path.join(os.path.dirname(h), "threads", "CLAUDE.md")), 10000)
+
+    def test_a_thread_transcript_in_the_old_desk_folder_is_found_and_migrated(self):
+        ss_mod = lean_agent_module().service_session
+        self.cli("home")
+        sid = "11111111-2222-3333-4444-555555555555"
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": self.env["LEAN_AGENT_HOME"], "CLAUDE_CONFIG_DIR": self.env["CLAUDE_CONFIG_DIR"]}):
+            old = ss_mod.transcript_path(ss_mod.lean_home("home"), sid)
+            os.makedirs(os.path.dirname(old))
+            with open(old, "w") as fh:
+                fh.write("{}\n")
+            self.assertEqual(ss_mod.thread_transcript(sid), old)  # fallback lookup
+            self.assertTrue(ss_mod.migrate_thread_transcript(sid))
+            new = ss_mod.transcript_path(ss_mod.threads_dir(), sid)
+            self.assertNotEqual(new, old)
+            self.assertTrue(os.path.exists(new))
+            self.assertTrue(os.path.exists(old))
+            self.assertEqual(ss_mod.thread_transcript(sid), new)
+            self.assertFalse(ss_mod.migrate_thread_transcript(sid))
+
+    def test_service_restart_resumes_a_thread_whose_session_lives_in_the_old_folder(self):
+        ss_mod = lean_agent_module().service_session
+        self.cli("home")
+        sid = "aaaaaaaa-2222-3333-4444-555555555555"
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": self.env["LEAN_AGENT_HOME"], "CLAUDE_CONFIG_DIR": self.env["CLAUDE_CONFIG_DIR"]}):
+            old = ss_mod.transcript_path(ss_mod.lean_home("home"), sid)
+            new = ss_mod.transcript_path(ss_mod.threads_dir(), sid)
+        os.makedirs(os.path.dirname(old))
+        with open(old, "w") as fh:
+            fh.write("{}\n")
+        self.cli("thread", "new", "Old one")
+        reg_path = os.path.join(self.env["LEAN_AGENT_HOME"], "threads.json")
+        reg = self.read_json(reg_path)
+        reg["threads"]["t1"]["session_id"] = sid
+        with open(reg_path, "w") as fh:
+            json.dump(reg, fh)
+        p, log, ss = self.start_up()
+        self.wait_for(lambda: "t1" in self.thread_calls(log), "t1 resumed")
+        call = self.thread_calls(log)["t1"]
+        self.assertEqual(call["argv"][-2:], ["--resume", sid])
+        self.assertTrue(os.path.exists(new))
+        self.stop_up(p, 30)
+
+    def test_threads_folder_is_trusted_on_update_when_the_desk_folder_is(self):
+        cfgfile = os.path.join(self.env["CLAUDE_CONFIG_DIR"], ".claude.json")
+        h = self.cli("home").stdout.strip()
+        t = os.path.join(os.path.dirname(h), "threads")
+        with open(cfgfile, "w") as fh:
+            json.dump({"projects": {h: {"hasTrustDialogAccepted": True}}}, fh)  # an existing user: only the desk folder
+        self.cli("home")  # prepare_home: also what update and the service start run
+        data = json.load(open(cfgfile))
+        self.assertTrue(data["projects"][t]["hasTrustDialogAccepted"])
+        self.assertTrue(data["projects"][h]["hasTrustDialogAccepted"])
+        self.assertIn("already trusted", self.cli("trust").stdout)
+        # an untrusted desk folder is never trusted on the user's behalf
+        with open(cfgfile, "w") as fh:
+            json.dump({"projects": {}}, fh)
+        self.cli("home")
+        self.assertFalse(json.load(open(cfgfile))["projects"].get(t))
+        self.cli("trust", "--write-config")
+        data = json.load(open(cfgfile))
+        self.assertTrue(data["projects"][t]["hasTrustDialogAccepted"] and data["projects"][h]["hasTrustDialogAccepted"])
+
+    def test_migration_copies_only_at_service_start_and_follows_a_growing_old_transcript(self):
+        ss_mod = lean_agent_module().service_session
+        self.cli("home")
+        sid, hist = "bbbbbbbb-2222-3333-4444-555555555555", "cccccccc-2222-3333-4444-555555555555"
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": self.env["LEAN_AGENT_HOME"], "CLAUDE_CONFIG_DIR": self.env["CLAUDE_CONFIG_DIR"]}):
+            old = ss_mod.transcript_path(ss_mod.lean_home("home"), sid)
+            old_h = ss_mod.transcript_path(ss_mod.lean_home("home"), hist)
+            new = ss_mod.transcript_path(ss_mod.threads_dir(), sid)
+            os.makedirs(os.path.dirname(old))
+            for f in (old, old_h):
+                with open(f, "w") as fh:
+                    fh.write("{}\n")
+            # home/doctor/sync/context never copy: an older service may still append to the old file
+            self.cli("home")
+            self.cli("doctor", "--fix", check=False)
+            self.assertFalse(os.path.exists(new))
+            rec = {"session_id": sid, "session_history": [hist]}
+            self.assertEqual(ss_mod.migrate_thread_transcripts([rec]), 2)  # service start
+            self.assertEqual(ss_mod.migrate_thread_transcripts([rec]), 0)  # idempotent
+            self.assertTrue(os.path.exists(ss_mod.transcript_path(ss_mod.threads_dir(), hist)))
+            with open(old, "a") as fh:  # the old service kept appending after the copy
+                fh.write('{"turn": 2}\n')
+            os.utime(old, (time.time() + 5, time.time() + 5))
+            self.assertEqual(ss_mod.thread_transcript(sid), old)  # the fuller one is found
+            self.assertEqual(ss_mod.migrate_thread_transcripts([rec]), 1)  # the restart brings the new copy up to date
+            self.assertEqual(open(new).read(), open(old).read())
+            self.assertEqual(ss_mod.thread_transcript(sid), new)
+
+    def test_a_pre_split_context_trim_reaches_both_folders_after_update(self):
+        home = self.env["LEAN_AGENT_HOME"]
+        h = self.cli("home").stdout.strip()
+        t = os.path.join(os.path.dirname(h), "threads")
+        path = os.path.join(home, "context-trim.json")
+        with open(path, "w") as fh:  # 0.45.91 style: top level only
+            json.dump({"deny": ["Grep"], "exclude": ["/x/y.md"]}, fh)
+        self.cli("home")  # prepare_home: update / service start
+        data = json.load(open(path))
+        self.assertEqual(data["desk"], {"deny": ["Grep"], "exclude": ["/x/y.md"]})
+        self.assertEqual(data["threads"], data["desk"])
+        self.assertEqual((data["deny"], data["exclude"]), (["Grep"], ["/x/y.md"]))  # kept for older readers
+        for folder in (h, t):
+            st = json.load(open(os.path.join(folder, ".claude", "settings.json")))
+            self.assertIn("Grep", st["permissions"]["deny"])
+            self.assertIn("/x/y.md", st["claudeMdExcludes"])
+        before = open(path).read()
+        self.cli("home")
+        self.assertEqual(open(path).read(), before)  # idempotent
+        # an existing threads section is never overwritten
+        with open(path, "w") as fh:
+            json.dump({"deny": ["Grep"], "threads": {"deny": ["Glob"]}}, fh)
+        self.cli("home")
+        data = json.load(open(path))
+        self.assertEqual(data["threads"], {"deny": ["Glob"]})
+        self.assertEqual(data["desk"]["deny"], ["Grep"])
+
+    def test_context_and_compare_measure_the_threads_folder_for_threads(self):
+        h = self.cli("home").stdout.strip()
+        t = os.path.join(os.path.dirname(h), "threads")
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "context-trim.json"), "w") as fh:
+            json.dump({"deny": ["Grep"], "threads": {"deny": ["Glob"], "exclude": ["/x/y.md"]}}, fh)
+        self.cli("home")
+        desk = json.load(open(os.path.join(h, ".claude", "settings.json")))
+        thr = json.load(open(os.path.join(t, ".claude", "settings.json")))
+        self.assertIn("Grep", desk["permissions"]["deny"])
+        self.assertIn("Glob", desk["permissions"]["deny"])  # in the orchestrator deny list anyway
+        self.assertNotIn("/x/y.md", desk["claudeMdExcludes"])
+        self.assertIn("/x/y.md", thr["claudeMdExcludes"])
+        out = self.cli("context", "--no-probe").stdout
+        self.assertIn(f"[thread sessions: {t}]", out)
+        self.assertIn(f"[front desk: {h}]", out)
+
     def test_reopen_and_send_after_close_start_a_new_session_from_a_brief(self):
         p, log, ss, old = self.closed_thread_with_history()
         self.assertIn("t1: session stopped", self.cli("thread", "close", "t1").stdout)
@@ -5198,7 +5349,8 @@ class CliTest(unittest.TestCase):
         h = os.path.join(self.tmp.name, "orchhome2")
         os.makedirs(h, exist_ok=True)
         L.write_home_guide(h)
-        full, desk = L.read_text(os.path.join(h, "CLAUDE.md")), L.read_text(L.front_desk_file(h))
+        full, desk = L.read_text(os.path.join(L.threads_home(h), "CLAUDE.md")), L.read_text(L.front_desk_file(h))
+        self.assertFalse(os.path.exists(os.path.join(h, "CLAUDE.md")))  # the desk folder holds no thread guide
         self.assertGreater(len(full), 10000)
         self.assertLess(len(desk), 6000)
         self.assertIn("front desk", desk)
@@ -5811,7 +5963,7 @@ class CliTest(unittest.TestCase):
         self.cli("run", "proj", "-m", "haiku", "--why", "x", "--cards", "none", "t")
 
     def test_home_guide_replaces_old_template_but_not_hand_written(self):
-        h = os.path.join(self.env["LEAN_AGENT_HOME"], "home")
+        h = os.path.join(self.env["LEAN_AGENT_HOME"], "threads")
         os.makedirs(h)
         with open(os.path.join(h, "CLAUDE.md"), "w") as fh:
             fh.write("<!-- lean-agent orchestrator template v5 (edit freely) -->\nold\n")
@@ -7330,7 +7482,7 @@ class CliTest(unittest.TestCase):
         h = os.path.join(self.tmp.name, "orchhome3")
         os.makedirs(h, exist_ok=True)
         L.write_home_guide(h)
-        for text in (L.read_text(os.path.join(h, "CLAUDE.md")), L.read_text(L.front_desk_file(h))):
+        for text in (L.read_text(os.path.join(L.threads_home(h), "CLAUDE.md")), L.read_text(L.front_desk_file(h))):
             self.assertIn("Before relaying a thread report", text)
             self.assertIn("thread show tN", text)
 
@@ -12358,7 +12510,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("orchestrator guide: changed", out)
         self.assertIn("re-learned: proj", out)
         self.assertIn("no need to restart `lean-agent up`", out)
-        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "home", "CLAUDE.md")) as fh:
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "threads", "CLAUDE.md")) as fh:
             self.assertIn("SYNC-MARKER", fh.read())
         self.assertIn(["plugin", "update", "lean-agent@lean-agent"], self.plugin_calls())
         out = run("sync")
@@ -12489,8 +12641,9 @@ class CliTest(unittest.TestCase):
 
     def test_home_template(self):
         h = self.cli("home").stdout.strip()
-        with open(os.path.join(h, "CLAUDE.md")) as fh:
+        with open(os.path.join(os.path.dirname(h), "threads", "CLAUDE.md")) as fh:
             self.assertIn("lean-agent orchestrator", fh.read())
+        self.assertTrue(os.path.exists(os.path.join(os.path.dirname(h), "threads", ".claude", "settings.json")))
         self.assertTrue(os.path.exists(os.path.join(h, ".claude", "settings.json")))
 
     APPROVE = json.dumps(dict(REUSE_CHECKED, verdict="approve", findings=[], checks=[]))

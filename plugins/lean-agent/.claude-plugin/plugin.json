@@ -1,7 +1,7 @@
 {
   "name": "lean-agent",
-  "version": "0.45.90",
-  "description": "Token-frugal orchestrator for Claude Code: isolated worker agents with learned, minimal context, explicit model choice, budgets, and noisy-output squeezing.",
+  "version": "0.45.92",
+  "description": "Token-frugal orchestrator for Claude Code: isolated worker agents with learned, minimal context, explicit model choice, budgets, and noisy-output squeezing. One plugin: command hooks plus a goals-and-answers pane for the Claude desktop app (local sessions).",
   "author": {
     "name": "McMadsen",
     "url": "https://github.com/mcmadsen"
@@ -17,5 +17,6 @@
     "orchestration",
     "subagents",
     "remote-control"
-  ]
+  ],
+  "types": "./types/index.d.ts"
 }
