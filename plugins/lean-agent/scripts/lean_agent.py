@@ -11161,7 +11161,7 @@ def orchestrator_settings(existing):
         return data
     servers = [n for n, v in lean_mcp.discover().items() if v["source"] in ("user", "desktop")]
     trim = load_json(home("context-trim.json"), {})  # what `lean-agent context --apply` took out
-    deny = set(ORCHESTRATOR_DENY)
+    deny = set(ORCHESTRATOR_DENY) | {f"Agent({n})" for n in user_agent_names()}  # also for an app session in this folder (no CLI flags there)
     perms["deny"] = sorted(deny | set(trim.get("deny") or [])
                            | {lean_mcp.tool_prefix(n).rstrip("_") for n in servers})
     data["permissions"] = perms
@@ -11243,9 +11243,53 @@ def register_source():
             fh.write(root + "\n")
 
 
+DESK_MODEL = "sonnet"
+DESK_EFFORT = "high"
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")  # `claude --help`: --effort <level>
+
+
+def desk_effort():
+    """Reasoning effort of the hosted front desk ONLY, as the `--effort` flag of its launch command: LEAN_AGENT_DESK_EFFORT
+    (low|medium|high|xhigh|max; `default`/`off` = leave it to Claude Code), else high; an invalid value is ignored (high). Thread
+    sessions get none. (The app desk's effort follows in 0.45.92, once threads have their own folder.)"""
+    v = (os.environ.get("LEAN_AGENT_DESK_EFFORT") or "").strip().lower()
+    if v in ("default", "off", "none"):
+        return None
+    return v if v in EFFORT_LEVELS else DESK_EFFORT
+
+
+def desk_effort_args():
+    e = desk_effort()
+    return ["--effort", e] if e else []
+
+
+def main_session_argv(cmd, extra, h, name, sid):
+    """The hosted main's command line: session_argv plus the desk's effort. Thread sessions use session_argv alone."""
+    return session_argv(list(cmd) + desk_effort_args(), extra, h, name, sid)
+
+
+def sync_desk_settings(data, h):
+    """The desk folder's model (sonnet) when none is set and `up --model default` was not chosen (`up --model` decides at every
+    start; default = your own model). No effortLevel is written: the folder is shared with thread sessions until 0.45.92, which
+    must keep Claude Code's default / your own effort. An effortLevel an earlier version wrote (recorded in desk-effort.json) is
+    removed again; one you set yourself never is."""
+    mark_path = home("desk-effort.json")
+    if os.path.exists(mark_path):
+        written = load_json(mark_path, {}).get("effortLevel")
+        if written is not None and data.get("effortLevel") == written:
+            data.pop("effortLevel")
+        try:
+            os.remove(mark_path)
+        except OSError:
+            pass
+    if load_json(home("desk-model.json"), {}).get("choice") != "default":
+        data.setdefault("model", DESK_MODEL)
+
+
 def refresh_desk_folder(h):
     """Make a session started in the desk folder (<home>/home, where the hosted desk's CLAUDE.md already lives) a proper desk,
-    automatically (prepare_home: `home`, `update`, service start): lean-agent's own env keys in its .claude/settings.json.
+    automatically (prepare_home: `home`, `update`, service start): lean-agent's own env keys and the desk's model (sonnet, unless you set one
+    or chose `up --model default`) in its .claude/settings.json.
     Idempotent (written only when changed). Nothing is written to the lean home root (workers under it would load it) and the
     user's global settings are never touched. Whether a session is the desk is decided by its session id, never by this file."""
     path = os.path.join(h, ".claude", "settings.json")
@@ -11257,6 +11301,7 @@ def refresh_desk_folder(h):
         if os.environ.get("LEAN_AGENT_HOME"):
             env["LEAN_AGENT_HOME"] = os.environ["LEAN_AGENT_HOME"]  # a GUI-launched session finds the same home and socket
         data["env"] = env
+        sync_desk_settings(data, h)
         if data != cur:
             save_json(path, data)
             return True
@@ -11292,6 +11337,7 @@ def prepare_home():
         save_json(local, dict(load_json(local, {}), syncClaudeAiSkills=False))  # only honoured in local/user scope
     if lean_desk.enabled():
         refresh_desk_folder(h)
+        lean_desk.ensure_shortcut()
     return h
 
 
@@ -12405,6 +12451,9 @@ def cmd_doctor(a):
     if lean_desk.enabled():
         report(True, lean_desk.status_line(), None)
         report(True, this_session_line(), None)
+        ok, msg = desk_context_check()
+        if msg:
+            report(ok, msg, "the app desk folder settings cut what Claude Code settings allow; see the README (Front desk in the Claude desktop app)")
     for line in lean_slow.report_lines(3):  # commands/hooks that ran past 8 s / 4 s: where they were stuck
         report(None, line, "send this file with `lean-agent feedback add`")
     mark("socket, slow traces")
@@ -12697,6 +12746,7 @@ def set_home_model(h, model):
     else:
         data["model"] = model
     save_json(path, data)
+    save_json(home("desk-model.json"), {"choice": "default" if model in (None, "", "default") else model})  # an explicit choice, kept by refresh
 
 
 def claude_global_config():
@@ -13081,12 +13131,12 @@ def cmd_up(a):
     if a.local:
         env["LEAN_AGENT_LOCAL_UP"] = "1"  # a terminal session `up --local` runs is the front desk
         try:
-            os.execvpe(cmd[0], cmd + extra, env)  # e.g. `lean-agent up -- --debug --debug-file /tmp/rc.log`
+            os.execvpe(cmd[0], cmd + desk_effort_args() + extra, env)  # e.g. `lean-agent up -- --debug --debug-file /tmp/rc.log`
         except FileNotFoundError:
             die("'claude' not found on PATH")
     if use_session:
         return host_session(cmd, extra, env, h, a.name)
-    return remote_control(cmd + extra, env, h)
+    return remote_control(cmd + desk_effort_args() + extra, env, h)
 
 
 def session_argv(cmd, extra, h, name, sid, role="main"):
@@ -13106,7 +13156,7 @@ def host_session(cmd, extra, env, h, name):
         sid = load_json(home("up.json"), {}).get("session_id") or str(uuid.uuid4())
         if not re.fullmatch(r"[0-9a-fA-F-]{36}", sid):
             sid = str(uuid.uuid4())
-        return session_argv(cmd, extra, h, name, sid), sid
+        return main_session_argv(cmd, extra, h, name, sid), sid
 
     state = {"seen": "", "stale": False}
 
@@ -13155,10 +13205,10 @@ def host_session(cmd, extra, env, h, name):
     sessions = service_session.Sessions(thread_host)
     def make_main():
         return service_session.Host(build, env, h, remote_control=True, on_text=on_text, on_stale=on_stale,
-                                    on_message=sessions.dispatch)
+                                    on_message=sessions.dispatch, shared_bridge=lean_desk.enabled())
     external = lean_desk.enabled()  # auto|external: an app session may be the desk; the host switches between it and a hosted main
     if external:
-        host = service_session.SwitchHost(make_main)
+        host = service_session.SwitchHost(make_main, on_message=sessions.dispatch, serve=True)
         print("lean-agent: " + lean_desk.status_line(), flush=True)
     else:
         lean_desk.detach()  # pinned hosted: a hosted main never resumes an app desk's session
@@ -13239,6 +13289,44 @@ def host_session(cmd, extra, env, h, name):
 
 
 KEEP_TOOLS = {"Bash", "Read", "BashOutput", "TaskOutput", "KillShell", "TaskStop", "AskUserQuestion", "ToolSearch"}
+
+
+DESK_CONTEXT_RATIO = 1.5  # doctor warns when the app desk starts with more than this many times the hosted desk's context
+
+
+def first_turn_context(path):
+    """Tokens of context at the first assistant turn of a transcript (input + cache write + cache read), or None."""
+    try:
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                u = ((e.get("message") or {}).get("usage") if isinstance(e, dict) else None)
+                if isinstance(u, dict) and e.get("type") == "assistant":
+                    n = usage.context_tokens(u)
+                    if n:
+                        return n
+    except OSError:
+        pass
+    return None
+
+
+def desk_context_check(app_path=None, hosted_path=None):
+    """(ok, line) comparing the attached app desk's first-turn context with the hosted desk's; (None, "") when either is unknown."""
+    app_path = app_path or (lean_desk.attached() or {}).get("transcript")
+    hosted_path = hosted_path or service_session.info("main").get("transcript")
+    if not (app_path and hosted_path) or app_path == hosted_path:
+        return None, ""
+    app, hosted = first_turn_context(app_path), first_turn_context(hosted_path)
+    if not (app and hosted):
+        return None, ""
+    ratio = app / hosted
+    line = f"app desk first-turn context {app / 1000:.0f}k vs hosted desk {hosted / 1000:.0f}k ({ratio:.1f}x)"
+    if ratio > DESK_CONTEXT_RATIO:
+        return False, line + f": more than {DESK_CONTEXT_RATIO}x the hosted desk (an app session cannot take CLI flags)"
+    return True, line
 
 
 def orchestrator_transcripts(h):
@@ -14341,6 +14429,16 @@ def cmd_desk(a):
 
 
 def cmd_config(a):
+    if a.name == "desk-shortcut":
+        if a.value:
+            if a.value not in ("on", "off"):
+                die("desk-shortcut takes on or off")
+            cfg = lean_desk.config()
+            cfg["desk_shortcut"] = a.value
+            lean_desk._write(lean_home("config.json"), cfg)
+        print(f"desk-shortcut: {'on' if lean_desk.shortcut_on() else 'off'} \u00b7 ~/lean-agent-desk -> the desk folder. "
+              "set: lean-agent config desk-shortcut on|off")
+        return 0
     if a.name in ("desk", "desk-notify"):
         if a.name == "desk":
             if a.value:
@@ -19034,7 +19132,7 @@ def build_parser():
     s = sub.add_parser("config", help="switches: update-channel release|main (what sync follows; default release), strict on|off (the orchestrator only runs lean-agent commands; default on), "
                        "allow-edit-outside <dir>|clear (extra dirs, besides ~/Downloads, where --allow-edit may name an explicit file outside the worktree), allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
                        "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), poll-allow <prefix>...|clear (commands a thread's `lean-agent poll` may run besides read-only ones; --project limits it), max-thread-sessions N (thread sessions the service runs; default 20), session-idle-stop DUR|off|default (the service stops a thread session idle that long; the thread stays open; default 3h), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-vote-own on|off (ask vote or post for reviews of your own PRs too; default off), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model>|default (default auto: by risk), approve-usd N|default (cost approved by itself per run; default 5 USD, above it the user is asked), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
-    s.add_argument("name", choices=["desk", "desk-notify", "strict", "private", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "poll-allow", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions", "session-idle-stop", "session-stuck",
+    s.add_argument("name", choices=["desk", "desk-notify", "desk-shortcut", "strict", "private", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "poll-allow", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions", "session-idle-stop", "session-stuck",
                                            "review-max-rerounds", "review-vote-own", "review-skip", "review-model", "approve-usd", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"] + ["map." + k for k in lean_map.DEFAULTS])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")

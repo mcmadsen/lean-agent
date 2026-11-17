@@ -351,11 +351,31 @@ class Auto(Base):
         sh.cur = ss.ExternalHost()
         sh.cur.stop = mock.Mock()
         lean_desk.attach("s1", None, None, self.clock[0] - 40 * 60)  # heartbeat gone
+        sh.switches = 1  # a later switch (the first one after a start ignores the gap)
         sh.last_switch = self.clock[0] - 300
         self.assertIsNone(sh.tick(self.clock[0]))
         sh.cur.stop.assert_not_called()
         sh.last_switch = self.clock[0] - 601
         self.assertEqual(sh.tick(self.clock[0]), "hosted")
+
+    def test_first_switch_after_start_ignores_the_gap(self):
+        sh = self.switch()
+        lean_desk.attach("s1", None, None, self.clock[0])
+        sh.last_switch = self.clock[0] - 5  # service just started
+        sh.cur.last_input = self.clock[0] - 120
+        with mock.patch.object(ss, "mid_turn", return_value=False), mock.patch.object(ss, "checkpoint_session"):
+            self.assertEqual(sh.tick(self.clock[0]), "app")
+
+    def test_later_switch_keeps_the_gap_unless_the_hosted_main_is_fresh(self):
+        sh = self.switch()
+        sh.switches = 1
+        lean_desk.attach("s1", None, None, self.clock[0])
+        sh.last_switch = self.clock[0] - 5
+        sh.cur.last_input = self.clock[0] - 120  # a user typed into it earlier
+        with mock.patch.object(ss, "mid_turn", return_value=False), mock.patch.object(ss, "checkpoint_session"):
+            self.assertIsNone(sh.tick(self.clock[0]))
+            sh.cur.last_input = 0  # never had a user turn since it started: fresh and idle
+            self.assertEqual(sh.tick(self.clock[0]), "app")
 
     def test_pinned_modes(self):
         lean_desk.set_mode("hosted")
@@ -495,6 +515,510 @@ class Reattach(Base):
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "87654321-1234-1234-1234-123456789abc"}):
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 la.cmd_desk(mock.Mock(action="attach"))  # one desk only
+
+
+class Boot(Base):
+    """Service start in auto mode: wait for the app desk when it was the last owner; a shortcut to the desk folder."""
+
+    def run_host(self, wait, last_owner):
+        if last_owner:
+            lean_desk.set_active(last_owner, "earlier", self.now - 3600)
+        self.clock = [self.now]
+        cfg = lean_desk.config()
+        cfg["desk_boot_wait_s"] = wait
+        lean_desk._write(lean_desk.lean_home("config.json"), cfg)
+        made = []
+        host = mock.Mock(last_input=0, run=mock.Mock(return_value=0))
+        sh = ss.SwitchHost(lambda: made.append(1) or host, now=lambda: self.clock[0])
+        sh.WATCH = 0.01
+        real_wait = sh.stopping.wait
+
+        def tick(_t=None):  # the clock jumps 30 s per poll
+            self.clock[0] += 30
+            if sh.stopping.is_set() or self.clock[0] > self.now + 400:
+                sh.stopping.set()
+            return real_wait(0)
+        sh.stopping = mock.Mock(wait=tick, is_set=real_wait.__self__.is_set, set=real_wait.__self__.set)
+        return sh, made
+
+    def test_app_last_owner_and_it_attaches_in_time_no_hosted_main(self):
+        sh, made = self.run_host(180, "app")
+        orig = sh.stopping.wait
+        n = [0]
+
+        def attach_later(t=None):
+            n[0] += 1
+            if n[0] == 2:
+                lean_desk.attach("s1", None, None, self.clock[0])
+            return orig(t)
+        sh.stopping.wait = attach_later
+        with mock.patch.object(ss.SwitchHost, "watch", lambda self: None):
+            with mock.patch.object(ss.ExternalHost, "run", lambda self: 0):
+                sh.run()
+        self.assertEqual(made, [])
+        self.assertEqual(lean_desk.state()["active"], "app")
+        self.assertFalse(lean_desk.record()["pending"])
+
+    def test_app_last_owner_and_no_attach_hosts_after_the_timeout(self):
+        sh, made = self.run_host(180, "app")
+        with mock.patch.object(ss.SwitchHost, "watch", lambda self: None):
+            sh.run()
+        self.assertEqual(made, [1])
+        self.assertEqual(lean_desk.state()["active"], "hosted")
+        self.assertGreaterEqual(self.clock[0], self.now + 180)
+
+    def test_hosted_or_unknown_last_owner_hosts_at_once(self):
+        for owner in ("hosted", None):
+            sh, made = self.run_host(180, owner)
+            with mock.patch.object(ss.SwitchHost, "watch", lambda self: None):
+                sh.run()
+            self.assertEqual(made, [1])
+            self.assertEqual(self.clock[0], self.now)  # no waiting
+
+    def test_shortcut_is_created_idempotently_and_never_overwrites(self):
+        home = os.path.join(self.tmp, "userhome")
+        os.makedirs(home)
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            os.makedirs(lean_desk.desk_dir(), exist_ok=True)
+            link = lean_desk.shortcut_path()
+            self.assertTrue(lean_desk.ensure_shortcut())
+            self.assertTrue(lean_desk.ensure_shortcut())
+            self.assertEqual(os.readlink(link), lean_desk.desk_dir())
+            os.remove(link)
+            open(link, "w").write("mine")  # a real file
+            self.assertFalse(lean_desk.ensure_shortcut())
+            self.assertEqual(open(link).read(), "mine")
+            os.remove(link)
+            os.makedirs(link)  # a real folder
+            self.assertFalse(lean_desk.ensure_shortcut())
+            self.assertTrue(os.path.isdir(link) and not os.path.islink(link))
+            os.rmdir(link)
+            os.symlink(home, link)  # a foreign symlink
+            self.assertFalse(lean_desk.ensure_shortcut())
+            self.assertEqual(os.readlink(link), home)
+            os.remove(link)
+            lean_desk._write(lean_desk.lean_home("config.json"), {"desk_shortcut": "off"})
+            self.assertFalse(lean_desk.ensure_shortcut())
+            self.assertFalse(os.path.lexists(link))
+
+    def test_shortcut_cwd_attaches_the_same_as_the_real_path(self):
+        home = os.path.join(self.tmp, "userhome")
+        os.makedirs(home)
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            os.makedirs(lean_desk.desk_dir(), exist_ok=True)
+            lean_desk.ensure_shortcut()
+            self.hook("start", "s1", cwd=lean_desk.shortcut_path())
+        self.assertEqual(lean_desk.record()["session_id"], "s1")
+
+    def test_resumed_and_compacted_sessions_attach_like_a_new_one(self):
+        for src in ("resume", "compact", "startup"):
+            lean_desk.detach()
+            ctx, _ = self.hook("start", "s1", source=src)
+            self.assertEqual(lean_desk.record()["session_id"], "s1", src)
+            self.assertIn("front desk", ctx)
+
+
+class Handover(Base):
+    """A pending app desk must get the desk: refusals escalate, deliveries stop, typed input is the user's only, bounded waits."""
+
+    def setUp(self):
+        super().setUp()
+        self.clock = [self.now]
+        self.sh = ss.SwitchHost(lambda: mock.Mock(), now=lambda: self.clock[0])
+        self.sh.cur = mock.Mock(last_input=0, last_user_input=0)
+        lean_desk.attach("s1", None, None, self.clock[0])
+
+    def tick(self, mid_turn=False):
+        with mock.patch.object(ss, "mid_turn", return_value=mid_turn):
+            return self.sh.tick(self.clock[0])
+
+    def test_checkpoint_refusal_is_retried_then_escalates_and_the_switch_completes(self):
+        sh = self.sh
+        with mock.patch.object(ss, "checkpoint_session", return_value=False) as cp:
+            self.assertIsNone(self.tick())
+            self.assertIn("checkpoint refused", lean_desk.wait_reason(self.clock[0]))
+            self.assertIsNone(self.tick())  # retry not due yet
+            self.assertEqual(cp.call_count, 1)
+            self.clock[0] += 121
+            self.assertIsNone(self.tick())
+            self.assertEqual(cp.call_count, 2)
+            self.clock[0] += 121
+            self.assertEqual(self.tick(), "app")  # stopped without a checkpoint
+            self.assertEqual(cp.call_count, 2)
+        sh.cur.stop.assert_called_once()
+        self.assertEqual(lean_desk.wait_reason(self.clock[0]), "")
+
+    def test_checkpoint_exception_counts_as_a_refusal_with_its_reason(self):
+        with mock.patch.object(ss, "checkpoint_session", side_effect=OSError("socket closed")):
+            self.assertIsNone(self.tick())
+        self.assertIn("socket closed", lean_desk.wait_reason(self.clock[0]))
+
+    def test_deliveries_while_pending_stay_queued_for_the_app_desk(self):
+        os.makedirs(os.path.join(self.tmp, "chat"), exist_ok=True)
+        tr = os.path.join(self.tmp, "main.jsonl")
+        with open(os.path.join(self.tmp, "chat", "service.json"), "w") as fh:
+            json.dump({"session_id": "m1", "transcript_path": tr, "ts": 1}, fh)
+        with open(tr, "w") as fh:
+            fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "stop_reason": "end_turn",
+                                                                  "content": [{"type": "text", "text": "ok"}]}}) + "\n")
+
+        class H:
+            key, last_input, last_output, external = "main", 0, 0.0, False
+            stopping = __import__("threading").Event()
+            pasted = []
+
+            def alive(self):
+                return True
+
+            def paste(self, text):
+                self.pasted.append(text)
+
+            def tail_text(self):
+                return ""
+        h = H()
+        rep = ss.Reporter(h, now=lambda: self.clock[0])
+        self.report()
+        for _ in range(8):  # the app desk is pending: nothing is typed into the hosted main
+            self.clock[0] += 10
+            rep.main_tick()
+        self.assertEqual(h.pasted, [])
+        self.assertEqual(len(ss.queued_reports()), 1)
+        lean_desk.detach()  # no app desk pending: delivered as always
+        for _ in range(8):
+            self.clock[0] += 10
+            rep.main_tick()
+        self.assertTrue(h.pasted)
+
+    def test_service_typed_input_does_not_reset_idle(self):
+        sh = self.sh
+        sh.cur.last_input = self.clock[0] - 5  # the checkpoint prompt the service typed
+        sh.cur.last_user_input = self.clock[0] - 300
+        with mock.patch.object(ss, "checkpoint_session", return_value=True):
+            self.assertEqual(self.tick(), "app")
+
+    def test_bridge_text_marked_svc_leaves_user_input_alone(self):
+        h = ss.Host(lambda: (["x"], "i"), {}, self.tmp)
+        h.paste = lambda text: None
+        h.dispatch({"text": "checkpoint", "svc": True})
+        self.assertGreater(h.last_input, 0)
+        self.assertEqual(h.last_user_input, 0)
+        h.dispatch({"text": "hello"})
+        self.assertGreater(h.last_user_input, 0)
+
+    def test_max_pending_forces_the_switch_when_not_mid_turn(self):
+        sh = self.sh
+        sh.switches = 1
+        sh.last_switch = 0
+        sh.cur.last_user_input = self.clock[0] - 5  # typed recently
+        with mock.patch.object(ss, "checkpoint_session", return_value=True):
+            self.assertIsNone(self.tick())
+            self.assertEqual(lean_desk.wait_reason(self.clock[0]), "user typed 5s ago")
+            self.clock[0] += 301
+            lean_desk.heartbeat("s1", None, self.clock[0])
+            sh.cur.last_user_input = self.clock[0] - 5
+            self.assertIsNone(self.tick(mid_turn=True))  # still never in the middle of a turn
+            self.assertEqual(self.tick(), "app")
+
+    def test_stale_mid_turn_is_ignored_after_ten_minutes(self):
+        sh = self.sh
+        tr = os.path.join(self.tmp, "t.jsonl")
+        open(tr, "w").write("{}\n")
+        with mock.patch.object(ss, "session_transcript", return_value=tr), \
+                mock.patch.object(ss, "checkpoint_session", return_value=True):
+            os.utime(tr, (self.clock[0] - 60, self.clock[0] - 60))
+            self.assertIsNone(self.tick(mid_turn=True))
+            self.assertEqual(lean_desk.wait_reason(self.clock[0]), "hosted main mid-turn")
+            os.utime(tr, (self.clock[0] - 601, self.clock[0] - 601))
+            self.assertEqual(self.tick(mid_turn=True), "app")
+
+    def test_status_shows_why_the_switch_waits_and_the_gap(self):
+        sh = self.sh
+        sh.cur.last_user_input = self.clock[0] - 20
+        self.tick()
+        line = lean_desk.status_line(self.clock[0])
+        self.assertIn("pending", line)
+        self.assertIn("user typed 20s ago", line)
+        sh.switches = 1
+        sh.last_switch = self.clock[0] - 5
+        sh.cur.last_user_input = self.clock[0] - 500
+        self.tick()
+        self.assertIn("anti-flap gap until", lean_desk.status_line(self.clock[0]))
+
+
+class Surface(Base):
+    """Whoever holds the host (AutoClear, Reporter, the bridge, the map) must never meet a missing attribute across a switch."""
+
+    HOST_SURFACE = ("alive", "paste", "stop", "stopping", "proc", "cwd", "env", "last_input", "last_user_input", "last_output",
+                    "tail_text", "tail_len", "write", "created_at", "key", "name", "terminate_for", "dispatch", "external")
+
+    def test_switch_host_always_has_a_host_and_answers_alive(self):
+        sh = ss.SwitchHost(lambda: mock.Mock())
+        self.assertIsNotNone(sh.cur)
+        self.assertFalse(sh.alive())  # before the first host is up: an answer, not AttributeError('alive')
+        for name in self.HOST_SURFACE:
+            getattr(sh, name)
+        self.assertIsNone(sh.tick())  # the placeholder is never "switched"
+
+    def test_external_host_has_the_full_host_surface(self):
+        eh = ss.ExternalHost()
+        for name in self.HOST_SURFACE:
+            self.assertTrue(hasattr(eh, name), name)
+        self.assertEqual(eh.dispatch({"ping": True})["ok"], True)
+        self.assertFalse(eh.dispatch({"text": "x"})["ok"])
+        with self.assertRaises(RuntimeError):
+            eh.write(b"x")
+
+    def test_external_host_run_blocks_until_stopped(self):
+        eh = ss.ExternalHost()
+        done = []
+        t = __import__("threading").Thread(target=lambda: done.append(eh.run()), daemon=True)
+        t.start()
+        time.sleep(0.3)
+        self.assertEqual(done, [])  # no busy return
+        eh.stop()
+        t.join(2)
+        self.assertEqual(done, [0])
+
+    def test_autoclear_survives_a_switch_host_without_a_running_main(self):
+        sh = ss.SwitchHost(lambda: mock.Mock())
+        ss.AutoClear(sh).tick()  # used to raise AttributeError: alive
+
+    def test_session_and_ping_requests_reach_the_bridge_while_the_app_is_the_desk(self):
+        lean_desk.set_mode("external")
+        with mock.patch.object(ss.socket, "socket") as sock:
+            sock.return_value.recv.side_effect = [b'{"ok": true}\n', b"", b'{"ok": true}\n', b""]
+            self.assertTrue(ss.sessions_request("list")["ok"])
+            self.assertTrue(ss.request({"ping": True})["ok"])
+        r = ss.request({"text": "x"})  # typing into the desk is still refused: its hooks deliver
+        self.assertFalse(r["ok"])
+        self.assertIn("front desk is external", r["error"])
+
+
+class Trim(Base):
+    """The desk folder's settings cut context as far as settings can (an app session takes no CLI flags); the doctor compares."""
+
+    def test_desk_folder_settings_carry_the_trimming_keys_and_leave_global_settings_alone(self):
+        import lean_agent as la
+        cfg = os.path.join(self.tmp, "userclaude")
+        os.makedirs(os.path.join(cfg, "agents"))
+        open(os.path.join(cfg, "agents", "reviewer.md"), "w").write("---\nname: reviewer\n---\nx\n")
+        glob = os.path.join(cfg, "settings.json")
+        mine = {"enabledPlugins": {"other@market": True, "lean-agent@lean-agent": True}, "theme": "dark"}
+        json.dump(mine, open(glob, "w"))
+        before = open(glob).read()
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": cfg}):
+            h = la.prepare_home()
+            la.refresh_desk_folder(h)
+            with open(os.path.join(h, ".claude", "settings.json")) as fh:
+                first = fh.read()
+            la.prepare_home()
+            la.refresh_desk_folder(h)
+            with open(os.path.join(h, ".claude", "settings.json")) as fh:
+                again = fh.read()
+        data = json.loads(first)
+        self.assertEqual(first, again)  # idempotent
+        self.assertEqual(open(glob).read(), before)  # the user's global settings are never touched
+        self.assertTrue(data["disableBundledSkills"])
+        self.assertTrue(data["disableClaudeAiConnectors"])
+        self.assertIs(data["enableAllProjectMcpServers"], False)
+        self.assertIs(data["enabledPlugins"]["other@market"], False)  # not needed by the desk
+        self.assertNotEqual(data["enabledPlugins"].get("lean-agent@lean-agent"), False)
+        self.assertIn(os.path.join(cfg, "CLAUDE.md"), data["claudeMdExcludes"])
+        self.assertIn(os.path.join(cfg, "rules", "**"), data["claudeMdExcludes"])
+        self.assertIn("Agent(reviewer)", data["permissions"]["deny"])  # no custom agents in the desk's context
+        self.assertIn("WebSearch", data["permissions"]["deny"])  # built-in tools the desk never uses
+        with open(os.path.join(h, ".claude", "settings.local.json")) as fh:
+            self.assertIs(json.load(fh)["syncClaudeAiSkills"], False)
+
+    def transcript(self, name, tokens):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w") as fh:
+            fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}) + "\n")
+            fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "usage": {
+                "input_tokens": 10, "cache_creation_input_tokens": tokens - 10, "cache_read_input_tokens": 0}}}) + "\n")
+        return path
+
+    def test_doctor_warns_when_the_app_desk_starts_above_one_and_a_half_times_the_hosted_desk(self):
+        import lean_agent as la
+        hosted = self.transcript("hosted.jsonl", 15000)
+        self.assertEqual(la.first_turn_context(hosted), 15000)
+        ok, line = la.desk_context_check(self.transcript("app.jsonl", 52000), hosted)
+        self.assertIs(ok, False)
+        self.assertIn("52k vs hosted desk 15k", line)
+        self.assertIn("3.5x", line)
+        ok, line = la.desk_context_check(self.transcript("app2.jsonl", 20000), hosted)
+        self.assertIs(ok, True)
+        self.assertEqual(la.desk_context_check(self.transcript("app3.jsonl", 20000), os.path.join(self.tmp, "none"))[1], "")
+
+
+class ModelEffort(Base):
+    """Only the front desk is pinned (sonnet, high effort); threads and the user's own choices are left alone."""
+
+    def la(self):
+        import lean_agent as la
+        return la
+
+    def settings(self, h):
+        with open(os.path.join(h, ".claude", "settings.json")) as fh:
+            return json.load(fh)
+
+    def test_desk_folder_pins_sonnet_idempotently(self):
+        la = self.la()
+        h = la.home("home")
+        la.refresh_desk_folder(h)
+        data = self.settings(h)
+        self.assertEqual(data["model"], "sonnet")
+        self.assertFalse(la.refresh_desk_folder(h))  # idempotent
+        data["model"] = "opus"  # a choice made in the folder stays
+        json.dump(data, open(os.path.join(h, ".claude", "settings.json"), "w"))
+        la.refresh_desk_folder(h)
+        self.assertEqual(self.settings(h)["model"], "opus")
+
+    def test_up_model_default_is_never_overridden_by_the_refresh(self):
+        la = self.la()
+        h = la.home("home")
+        la.refresh_desk_folder(h)
+        la.set_home_model(h, "default")  # `up --model default`: the user's own model
+        self.assertNotIn("model", self.settings(h))
+        la.refresh_desk_folder(h)  # home / update / service start
+        self.assertNotIn("model", self.settings(h))
+        la.set_home_model(h, "sonnet")
+        self.assertEqual(self.settings(h)["model"], "sonnet")
+
+    def test_no_effort_level_is_written_and_an_earlier_one_is_removed(self):
+        la = self.la()
+        h = la.home("home")
+        la.refresh_desk_folder(h)
+        self.assertNotIn("effortLevel", self.settings(h))
+        path = os.path.join(h, ".claude", "settings.json")
+        d = self.settings(h)
+        d["effortLevel"] = "high"  # written by an earlier version: its marker says so
+        json.dump(d, open(path, "w"))
+        json.dump({"effortLevel": "high"}, open(os.path.join(la.home(), "desk-effort.json"), "w"))
+        la.refresh_desk_folder(h)
+        self.assertNotIn("effortLevel", self.settings(h))
+        self.assertFalse(os.path.exists(os.path.join(la.home(), "desk-effort.json")))
+        d["effortLevel"] = "low"  # the user's own (no marker, or a different value) is never removed
+        json.dump(d, open(path, "w"))
+        la.refresh_desk_folder(h)
+        self.assertEqual(self.settings(h)["effortLevel"], "low")
+        json.dump({"effortLevel": "high"}, open(os.path.join(la.home(), "desk-effort.json"), "w"))
+        la.refresh_desk_folder(h)
+        self.assertEqual(self.settings(h)["effortLevel"], "low")
+
+    def test_effort_env_is_validated(self):
+        la = self.la()
+        for env, want in (("medium", ["--effort", "medium"]), ("bogus", ["--effort", "high"]), ("XHIGH", ["--effort", "xhigh"]),
+                          ("default", []), ("off", []), ("", ["--effort", "high"])):
+            with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_EFFORT": env}):
+                self.assertEqual(la.desk_effort_args(), want, env)
+
+    def test_only_the_hosted_main_gets_the_effort_flag_and_threads_get_nothing(self):
+        la = self.la()
+        h = la.home("home")
+        sid = "11111111-1111-1111-1111-111111111111"
+        main = la.main_session_argv(["claude"], [], h, "n", sid)
+        self.assertEqual(main[main.index("--effort") + 1], "high")
+        thread = la.session_argv(["claude"], [], h, "n", sid, "thread")
+        self.assertNotIn("--effort", thread)
+        cfg = os.path.join(self.tmp, "userclaude")
+        os.makedirs(cfg)
+        json.dump({"effortLevel": "low"}, open(os.path.join(cfg, "settings.json"), "w"))
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": cfg}):
+            flags = la.session_flags(h, "thread")
+        self.assertNotIn("effortLevel", json.loads(flags[flags.index("--settings") + 1]))  # nothing of ours: Claude Code's / the user's own
+        la.refresh_desk_folder(h)
+        self.assertNotIn("effortLevel", self.settings(h))
+
+    def test_local_and_remote_control_paths_carry_the_desk_effort_args(self):
+        la = self.la()
+        built = {}
+        with mock.patch.object(la.os, "execvpe", side_effect=lambda f, argv, env: built.update(local=argv) or (_ for _ in ()).throw(SystemExit(0))), \
+                mock.patch.object(la, "remote_control", side_effect=lambda argv, env, h: built.update(remote=argv) or 0), \
+                mock.patch.object(la.service_session, "supported", return_value=False), \
+                mock.patch.object(la, "ask_attribution_once"), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                la.main(["up", "--local"])
+            la.main(["up"])
+        for kind in ("local", "remote"):
+            argv = built[kind]
+            self.assertEqual(argv[argv.index("--effort") + 1], "high", kind)
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_EFFORT": "off"}), \
+                mock.patch.object(la, "remote_control", side_effect=lambda argv, env, h: built.update(off=argv) or 0), \
+                mock.patch.object(la.service_session, "supported", return_value=False), \
+                mock.patch.object(la, "ask_attribution_once"), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            la.main(["up"])
+        self.assertNotIn("--effort", built["off"])
+
+
+class StopTree(Base):
+    """A hosted main that ignores SIGTERM and has a child: the whole group is killed (Host.stop's kill, or SwitchHost.reap's)."""
+
+    def start_host(self, env):
+        import threading
+        script = os.path.join(self.tmp, "stubborn.sh")
+        pidfile = os.path.join(self.tmp, "child.pid")
+        with open(script, "w") as fh:
+            fh.write(f"#!/bin/sh\ntrap '' TERM\nsleep 300 &\necho $! > {pidfile}\nwhile :; do sleep 1; done\n")
+        os.chmod(script, 0o755)
+        patch = mock.patch.dict(os.environ, env)  # stays in force until the test ends (Host.stop reads the knob later)
+        patch.start()
+        self.addCleanup(patch.stop)
+        host = ss.Host(lambda: (["sh", script], "sid"), {}, self.tmp, key="t9")
+        host.name = "t9"
+        t = threading.Thread(target=host.run, daemon=True)
+        t.start()
+        end = time.time() + 15
+        while time.time() < end and not os.path.exists(pidfile):
+            time.sleep(0.1)
+        time.sleep(0.3)
+        self.assertTrue(os.path.exists(pidfile))
+        with open(pidfile) as fh:
+            child = int(fh.read())
+        self.addCleanup(lambda: self.alive(child) and os.kill(child, 9))
+        return host, child, t
+
+    def alive(self, pid):
+        try:
+            os.kill(pid, 0)  # portable (no /proc); a killed grandchild is reaped by init / the namespace's init
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def until_dead(self, pid, secs):
+        end = time.time() + secs
+        while time.time() < end and self.alive(pid):
+            time.sleep(0.2)
+        return not self.alive(pid)
+
+    def test_host_stop_kills_the_whole_group_after_the_grace(self):
+        host, child, t = self.start_host({"LEAN_AGENT_STOP_KILL": "1"})
+        self.assertTrue(self.alive(child))
+        host.stop()
+        self.assertTrue(self.until_dead(child, 10), "the child of the stubborn session survived Host.stop")
+        t.join(10)
+
+    def test_switch_reap_kills_the_tree_before_the_leaders_own_kill(self):
+        host, child, t = self.start_host({"LEAN_AGENT_STOP_KILL": "60"})
+        sh = ss.SwitchHost(lambda: mock.Mock())
+        host.stop()
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_DESK_STOP_GRACE": "1"}):
+            sh.reap(host)
+        self.assertTrue(self.until_dead(child, 10), "the child survived the reap")
+        t.join(10)
+
+
+class PendingClock(Base):
+    def test_a_revived_expired_record_restarts_the_pending_clock(self):
+        lean_desk.attach("s1", None, None, self.now)
+        lean_desk.set_pending(True)
+        later = self.now + lean_desk.STALE_SECS + 100
+        lean_desk.heartbeat("s1", None, later)
+        self.assertLess(lean_desk.pending_age(later + 5), 10)
 
 
 if __name__ == "__main__":
