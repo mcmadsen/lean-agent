@@ -1350,6 +1350,237 @@ class HtmlTest(unittest.TestCase):
             r = subprocess.run([node, "--check", f], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
 
+def r2_snap():
+    """Round-2 snapshot: projects, per-node project, alerts (built from the documented schema)."""
+    now = time.time()
+    return {
+        "v": 1, "ts": "t2", "service": {"up": True, "version": "9.9.9", "threads": 3, "up_s": 100}, "paused": False,
+        "inbox": 0, "moving": [], "more": 0,
+        "projects": [{"slug": "api", "threads": 2, "workers": 1, "usd_today": 1.2, "tokens_today": 400000, "errors_30m": 0},
+                     {"slug": "web", "threads": 1, "workers": 0, "usd_today": 0.4, "tokens_today": 90000, "errors_30m": 2}],
+        "alerts": [{"id": "stuck:t1", "level": "warn", "node": "t1", "kind": "stuck", "text": "t1 mid-turn with no tool activity for 12 min", "since": now - 700},
+                   {"id": "service:slow", "level": "bad", "node": None, "kind": "service", "text": "service socket round trip 300 ms", "since": now - 60}],
+        "nodes": [
+            {"id": "service", "kind": "service", "label": "S", "state": "active", "detail": "d"},
+            {"id": "main", "kind": "desk", "label": "Front desk", "state": "active", "detail": "talking"},
+            {"id": "t1", "kind": "thread", "label": "Fix the api", "state": "active", "detail": "active", "project": "api"},
+            {"id": "t2", "kind": "thread", "label": "Second api", "state": "parked", "detail": "parked", "project": "api"},
+            {"id": "t3", "kind": "thread", "label": "Web thing", "state": "parked", "detail": "parked", "project": "web"},
+            {"id": "w1", "kind": "worker", "label": "w1", "state": "alive", "detail": "d", "parent": "t1", "project": "api", "age_s": 10}],
+        "edges": [{"from": "service", "to": "t1", "kind": "idle", "age_s": 0, "label": "idle"}, {"from": "service", "to": "t2", "kind": "idle", "age_s": 0, "label": "idle"},
+                  {"from": "service", "to": "t3", "kind": "idle", "age_s": 0, "label": "idle"}, {"from": "main", "to": "t1", "kind": "idle", "age_s": 0, "label": "idle"}],
+        "placed": ["service", "main", "t1", "t2", "t3", "w1"]}
+
+
+def r2_history(home, days=14, now=None):
+    if str(home).endswith("-p"):
+        raise RuntimeError("no history")  # the 'older service' instance
+    day0 = time.time() - 13 * 86400
+    days = [{"date": time.strftime("%Y-%m-%d", time.gmtime(day0 + i * 86400)), "usd": round(0.2 * i, 2), "tokens": 1000 * i, "saved": 500 * i,
+             "runs": i, "cache_read_ratio": 0.5 + i / 40, "by_model": {"sonnet": round(0.15 * i, 2), "haiku": round(0.05 * i, 2)},
+             "by_project": {"api": round(0.15 * i, 2), "web": round(0.05 * i, 2)}} for i in range(14)]
+    return {"days": days, "top_threads": [{"node": "t1", "title": "Fix the api", "usd": 1.1, "tokens": 300000},
+                                           {"node": "t3", "title": "Web thing", "usd": 0.4, "tokens": 90000}],
+            "tools_7d": [["Edit", 120], ["Bash", 90]]}
+
+
+ROUND2_JS = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const { url, plain, shots, T } = JSON.parse(process.argv[2]);
+  const b = await chromium.launch();
+  const out = { errors: [] };
+  const open = async (u, vp, scheme, wait) => {
+    const pg = await b.newPage({ viewport: vp, colorScheme: scheme });
+    pg.setDefaultTimeout(10000);
+    pg.on('pageerror', e => out.errors.push(String(e).slice(0, 200)));
+    await pg.goto(u);
+    await pg.waitForSelector(wait || '.nd');
+    await pg.waitForTimeout(500);
+    return pg;
+  };
+  const txt = (pg, sel) => pg.locator(sel).allInnerTexts();
+  let pg = await open(url, { width: 1280, height: 900 }, 'dark');
+  out.alerts = await pg.locator('#alerts .al').count();
+  out.bell = (await pg.locator('#bell').innerText()).trim();
+  out.marker = await pg.locator('.nd[data-id="t1"] .am.warn').count();
+  out.groups = await txt(pg, '.pg');
+  out.tags = await txt(pg, '.nd .pj');
+  out.chips = await txt(pg, '#projs .pc');
+  if (shots) await pg.screenshot({ path: shots + '/dark-1280-alerts.png', fullPage: true });
+  await pg.locator('.al[data-id="stuck:t1"] .ash').click();
+  await pg.waitForTimeout(300);
+  out.sel = await pg.locator('.nd.sel[data-id="t1"]').count();
+  out.panel = await pg.locator('#panel.open h2').innerText();
+  await pg.keyboard.press('Escape');
+  // project filter
+  await pg.locator('#projs .pc[data-p="web"]').click();
+  await pg.waitForTimeout(300);
+  out.webCards = await pg.locator('.nd[data-id^="t"]').count();
+  out.groupsFiltered = await pg.locator('.pg').count();
+  out.tagsFiltered = await pg.locator('.nd .pj').count();
+  await pg.locator('#projs .pc[data-p=""]').click();
+  await pg.waitForTimeout(300);
+  out.allCards = await pg.locator('.nd[data-id^="t"]').count();
+  // replay at T: an edge with a message within 30 s and a tool event within 30 s
+  await pg.evaluate((v) => { const s = document.getElementById('scr'); s.value = v; s.dispatchEvent(new Event('input')); }, T);
+  await pg.waitForTimeout(900);
+  out.rpEdge = await pg.evaluate(() => { const l = document.querySelector('#stage line[data-from="main"][data-to="t1"]:not([data-idle="1"])'); return !!l; });
+  out.rpLabel = await pg.evaluate(() => [...document.querySelectorAll('#stage text.elabel')].map(e => e.textContent));
+  out.rpTool = (await txt(pg, '.nd[data-id="t2"] .now')).join('|');
+  out.rpTool1 = await pg.locator('.nd[data-id="t1"] .now').count();
+  out.rpChip = await pg.locator('#tlc').innerText();
+  await pg.locator('#live').click();
+  await pg.waitForTimeout(500);
+  out.liveEdge = await pg.evaluate(() => !!document.querySelector('#stage line[data-from="main"][data-to="t1"]:not([data-idle="1"])'));
+  out.liveHidden = await pg.locator('#live').isHidden();
+  await pg.locator('#r60').click();
+  await pg.waitForTimeout(500);
+  out.min60 = await pg.locator('#scr').getAttribute('min');
+  await pg.locator('#r10').click();
+  // dismiss
+  await pg.locator('.al[data-id="stuck:t1"] .adx').click();
+  await pg.waitForTimeout(300);
+  out.afterDismiss = await pg.locator('#alerts .al').count();
+  out.markerAfter = await pg.locator('.nd[data-id="t1"] .am').count();
+  await pg.reload(); await pg.waitForSelector('.nd'); await pg.waitForTimeout(500);
+  out.afterReload = await pg.locator('#alerts .al').count();
+  out.noHscroll = await pg.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+  await pg.close();
+  // trends, light
+  pg = await open(url, { width: 1280, height: 900 }, 'light');
+  await pg.locator('#vtr').click();
+  await pg.waitForSelector('#c1 svg');
+  await pg.waitForTimeout(300);
+  out.bars = await pg.locator('#c1 rect.bc').count();
+  out.saved = await pg.locator('#c1 circle.sp').count();
+  out.mix = await pg.locator('#c2 rect.mc').count();
+  out.cache = await pg.locator('#c3 circle.cp').count();
+  out.threads = await pg.locator('#ttt tbody tr').count();
+  out.tools = await pg.locator('#c4 rect.bc').count();
+  out.projRows = await pg.locator('#tpj tbody tr').count();
+  await pg.locator('#c1 rect.bc').nth(13).focus();
+  out.tip = await pg.locator('#tip').innerText();
+  out.mapHidden = await pg.locator('#main').isHidden();
+  if (shots) await pg.screenshot({ path: shots + '/light-1280-trends.png', fullPage: true });
+  await pg.close();
+  // 400 px
+  pg = await open(url, { width: 400, height: 800 }, 'light');
+  out.noHscroll400 = await pg.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+  if (shots) await pg.screenshot({ path: shots + '/light-400.png', fullPage: true });
+  await pg.locator('#vtr').click();
+  await pg.waitForSelector('#c1 svg');
+  await pg.waitForTimeout(300);
+  out.noHscroll400t = await pg.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+  await pg.close();
+  // an older service: no new fields, no /history
+  pg = await open(plain, { width: 1280, height: 800 }, 'dark');
+  out.plainNodes = await pg.locator('.nd').count();
+  out.plainAlerts = await pg.locator('#alerts').isHidden();
+  out.plainBell = await pg.locator('#bell').isHidden();
+  out.plainProjs = await pg.locator('#projs').isHidden();
+  await pg.locator('#vtr').click();
+  await pg.waitForTimeout(800);
+  out.plainTrends = await pg.locator('#trends').innerText();
+  await pg.close();
+  await b.close();
+  console.log(JSON.stringify(out));
+})().catch(e => { console.log(JSON.stringify({ error: String(e).slice(0, 600) })); process.exit(0); });
+"""
+
+
+class Round2Test(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not have_playwright():
+            raise unittest.SkipTest("node/playwright/browser not available")
+
+    def test_alerts_projects_trends_replay(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        p = mock.patch.object(lean_map, "history_cached", r2_history)
+        p.start()
+        self.addCleanup(p.stop)
+        live = lean_maplive.Live(r2_snap, tmp, interval=0.2).start()
+        self.addCleanup(live.stop)
+        live2 = lean_maplive.Live(snap, tmp + "-p", interval=0.2).start()
+        self.addCleanup(live2.stop)
+        now = time.time()
+        live.replay.append({"ts": now - 120, "from": "main", "to": "t1", "op": "send", "node": None, "tool": None, "target": None, "ok": True})
+        live.replay.append({"ts": now - 125, "from": "t2", "to": "service", "op": "tool", "node": "t2", "tool": "Grep", "target": "lean_map.py", "ok": True})
+        # the replay endpoint: oldest first, token required, only what was recorded
+        shots = os.environ.get("MAP_SHOTS_DIR", "")
+        if shots:
+            os.makedirs(shots, exist_ok=True)
+        arg = {"url": f"http://127.0.0.1:{live.port}/?t={live.token}", "plain": f"http://127.0.0.1:{live2.port}/?t={live2.token}",
+               "shots": shots, "T": -115}
+        js = os.path.join(tmp, "r2.js")
+        with open(js, "w") as fh:
+            fh.write(ROUND2_JS)
+        r = subprocess.run([NODE, js, json.dumps(arg)], capture_output=True, text=True, timeout=180, env=node_env())
+        self.assertTrue(r.stdout.strip(), r.stderr)
+        d = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertNotIn("error", d)
+        self.assertEqual(d["errors"], [])
+        # alerts bar, bell, node marker, "show" selects the node
+        self.assertEqual(d["alerts"], 2)
+        self.assertEqual(d["bell"], "2")
+        self.assertEqual(d["marker"], 1)
+        self.assertEqual(d["sel"], 1)
+        self.assertIn("Fix the api", d["panel"])
+        # projects: chips, group labels, tags; the filter limits the cards
+        self.assertEqual(len(d["chips"]), 3)
+        self.assertTrue(d["chips"][0].startswith("All"))
+        self.assertIn("api", d["chips"][1])
+        self.assertIn("$1.20", d["chips"][1])
+        self.assertEqual([g.lower() for g in d["groups"]], ["api", "web"])
+        self.assertEqual(sorted(d["tags"]), ["api", "api", "web"])
+        self.assertEqual(d["webCards"], 1)
+        self.assertEqual(d["groupsFiltered"], 0)
+        self.assertEqual(d["tagsFiltered"], 0)
+        self.assertEqual(d["allCards"], 3)
+        # replay at T
+        self.assertTrue(d["rpEdge"])
+        self.assertIn("send", d["rpLabel"])
+        self.assertIn("Grep", d["rpTool"])
+        self.assertEqual(d["rpTool1"], 0)
+        self.assertIn("replay at", d["rpChip"])
+        self.assertFalse(d["liveEdge"])
+        self.assertTrue(d["liveHidden"])
+        self.assertEqual(d["min60"], "-3600")
+        # dismiss (survives a reload of the page in this session)
+        self.assertEqual(d["afterDismiss"], 1)
+        self.assertEqual(d["markerAfter"], 0)
+        self.assertEqual(d["afterReload"], 1)
+        # trends
+        self.assertEqual((d["bars"], d["saved"], d["cache"]), (14, 14, 14))
+        self.assertGreater(d["mix"], 14)
+        self.assertEqual((d["threads"], d["tools"], d["projRows"]), (2, 2, 2))
+        self.assertRegex(d["tip"], r"\d{4}-\d\d-\d\d")
+        self.assertTrue(d["mapHidden"])
+        # layout
+        self.assertTrue(d["noHscroll"] and d["noHscroll400"] and d["noHscroll400t"])
+        # an older service
+        self.assertGreaterEqual(d["plainNodes"], 2)
+        self.assertTrue(d["plainAlerts"] and d["plainBell"] and d["plainProjs"])
+        self.assertIn("not available", d["plainTrends"])
+
+    def test_on_request_broadcasts_and_records_once(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        live = lean_maplive.Live(snap, tmp, interval=0.2)
+        got = []
+        live._broadcast = got.append
+        live.clients.append({"q": None})
+        live.on_request("send", {"thread": "t1"})
+        self.assertEqual(len(got), 1)
+        self.assertEqual(json.loads(got[0])["to"], "t1")
+        self.assertEqual([e["op"] for e in live.replay], ["send"])
+        live.clients.clear()
+        live.on_request("send", {"thread": "t2"})
+        self.assertEqual(len(got), 1)
+        self.assertEqual(len(live.replay), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
