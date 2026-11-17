@@ -77,6 +77,8 @@ def reset():
     with _lock:
         _ring.clear()
         _reqs.clear()
+        _track.clear()
+        _hcache.clear()
 
 
 def _age(t, now):
@@ -141,12 +143,16 @@ def build(ctx, now=None):
     for t in ctx.get("threads") or []:
         n = {"id": t["id"], "kind": "thread", "label": t.get("title") or t["id"], "state": t["state"], "detail": t.get("detail") or t["state"],
              "idle_s": t.get("idle_s", 0), "mid": bool(t.get("mid"))}
+        if t.get("project"):
+            n["project"] = t["project"]
         nodes.append(n)
     for r in ctx.get("runs") or []:
         st = "done" if r.get("done") else "orphaned" if r.get("orphaned") else "alive" if r.get("alive", True) else "dead"
         nodes.append({"id": "run:" + r["id"], "kind": "worker", "parent": r.get("thread"), "label": "run " + r["id"].split("-")[-1],
                       "model": r.get("model") or "", "state": st, "age_s": r.get("age_s", 0), "ended_s": r.get("ended_s"), "progress_s": r.get("progress_s"),
                       "detail": f"{_dur(r.get('age_s', 0))} · progress {_dur(r.get('progress_s', 0))} ago"})
+        if r.get("project"):
+            nodes[-1]["project"] = r["project"]
     have = {n["id"] for n in nodes}
     tids = {n["id"] for n in nodes if n["kind"] == "thread"}
     for e in sorted(ev, key=lambda e: e["ts"]):  # runs the ring knows (just ended or started) but the live list no longer / not yet shows
@@ -188,6 +194,11 @@ def build(ctx, now=None):
     moving = [{"dir": e["dir"], "node": e["node"], "text": e["text"], "age_s": _age(e["ts"], now)}
               for e in sorted(ev, key=lambda e: -e["ts"]) if e.get("text") and e.get("node")][:8]
     extra = activity_parts(ctx, nodes, sel["placed"], ev, now)
+    for k, fn in (("projects", lambda: project_rows(ctx, nodes, extra)), ("alerts", lambda: alerts(ctx, nodes, extra, now))):
+        try:
+            extra[k] = fn()
+        except Exception:
+            extra[k] = []
     return {"v": 1, "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)), "service": sv, "paused": bool(ctx.get("paused")),
             "inbox": int(ctx.get("inbox") or 0), "nodes": nodes, "edges": edges, "moving": moving,
             "placed": sel["placed"], "more": sel["more"], **extra}
@@ -229,6 +240,234 @@ def activity_parts(ctx, nodes, placed, ev, now):
                 "feed": act.feed_items(per, ev, rows, now, visible)}
     except Exception:
         return {}
+
+
+# ---------------------------------------------------------------- projects and alerts
+PROJECTS_MAX = 12
+ALERTS_MAX = 20
+DEFAULTS = {"stuck_warn_min": 10, "stuck_bad_min": 30, "no_progress_warn_min": 10, "no_progress_bad_min": 30,
+            "undelivered_bad_min": 2, "errors_n": 5, "errors_window_min": 10, "daily_budget_usd": None,
+            "service_ms": 200, "service_cpu_pct": 80, "service_for_s": 60}
+_track = {}  # condition key -> first-seen epoch (undelivered, service)
+_cfgc = {"sig": None, "v": {}}
+
+
+def map_config(home=None):
+    """The map.* thresholds: config.json {"map": {key: value}} over DEFAULTS (cached while the file is unchanged)."""
+    try:
+        import lean_common
+        p = lean_common.lean_home("config.json") if home is None else os.path.join(home, "config.json")
+        st = os.stat(p)
+        sig = (p, st.st_mtime_ns, st.st_size)
+        if _cfgc["sig"] != sig:
+            with open(p) as fh:
+                d = json.load(fh)
+            m = d.get("map") if isinstance(d, dict) else None
+            _cfgc.update(sig=sig, v=m if isinstance(m, dict) else {})
+    except (OSError, ValueError, ImportError):
+        _cfgc.update(sig=None, v={})
+    out = dict(DEFAULTS)
+    for k, v in _cfgc["v"].items():
+        if k in out and (v is None or (isinstance(v, (int, float)) and not isinstance(v, bool))):
+            out[k] = v
+    return out
+
+
+def project_rows(ctx, nodes, extra):
+    """Per project: open threads, alive workers, today's cost/tokens, failed tool calls (30 min). usd desc, max 12."""
+    import lean_activity as act
+    per = {}
+
+    def row(slug):
+        return per.setdefault(slug, {"slug": slug, "threads": 0, "workers": 0, "usd_today": 0.0, "tokens_today": 0, "errors_30m": 0})
+    for n in nodes:
+        slug = n.get("project")
+        if not slug:
+            continue
+        if n["kind"] == "thread" and n.get("state") != "closed":
+            row(slug)["threads"] += 1
+        elif n["kind"] == "worker" and n.get("state") in ("alive", "orphaned"):
+            row(slug)["workers"] += 1
+        if n["kind"] in ("thread", "worker"):
+            row(slug)["errors_30m"] += int((n.get("activity") or {}).get("errors") or 0)
+    import usage
+    for r in ctx.get("rows") or []:
+        slug = r.get("project")
+        if not slug:
+            continue
+        u = r.get("usage") if isinstance(r.get("usage"), dict) else {}
+        u = {k: _num(v, 0) for k, v in u.items()}
+        c = r.get("cost_usd")
+        x = row(slug)
+        x["usd_today"] += c if isinstance(c, (int, float)) else usage.estimate_usd(u, r.get("model"))
+        x["tokens_today"] += int(_num(r.get("weighted"), 0) or usage.weighted(u))
+    out = sorted(per.values(), key=lambda x: (-x["usd_today"], x["slug"]))[:PROJECTS_MAX]
+    for x in out:
+        x["usd_today"] = round(x["usd_today"], 2)
+    return out
+
+
+def alerts(ctx, nodes, extra, now):
+    """Active alerts, newest first, max 20 (ids stable per condition). Thresholds: map_config()."""
+    import lean_activity as act
+    cfg = map_config(ctx.get("home") or None)
+    out = []
+
+    def add(kind, node, level, text, since):
+        out.append({"id": f"{kind}:{node}" if node else kind, "level": level, "node": node, "kind": kind, "text": text, "since": int(since)})
+    thr = {t["id"]: t for t in ctx.get("threads") or []}
+    for tid, t in thr.items():
+        if t.get("mid"):
+            evs = act.node_events(tid)
+            quiet = now - evs[-1]["ts"] if evs else _num(t.get("idle_s"), 0)
+            m = quiet / 60.0
+            if m > cfg["stuck_warn_min"]:
+                add("stuck", tid, "bad" if m > cfg["stuck_bad_min"] else "warn",
+                    f"{tid} mid-turn with no tool activity for {_dur(quiet)}", now - quiet)
+    seen = set()
+    for t in thr.values():
+        if t.get("undelivered") and not t.get("mid"):
+            k = "undelivered:" + t["id"]
+            seen.add(k)
+            first = _track.setdefault(k, now - _num(t.get("undelivered_s"), 0))
+            if now - first > cfg["undelivered_bad_min"] * 60:
+                add("undelivered", t["id"], "bad", f"{t['id']} has a message undelivered for {_dur(now - first)}", first)
+    for r in ctx.get("runs") or []:
+        if r.get("done") or r.get("orphaned") or not r.get("alive", True):
+            continue
+        m = _num(r.get("progress_s"), 0) / 60.0
+        if m > cfg["no_progress_warn_min"]:
+            add("no_progress", "run:" + r["id"], "bad" if m > cfg["no_progress_bad_min"] else "warn",
+                f"run {r['id'].split('-')[-1]} alive with no progress for {_dur(m * 60)}", now - m * 60)
+    win = cfg["errors_window_min"] * 60
+    for n in nodes:
+        if n["kind"] not in ("thread", "worker"):
+            continue
+        if n["kind"] == "worker":
+            evs = [{"ts": e["ts"], "ok": e["ok"]} for e in ((n.get("activity") or {}).get("recent") or [])]
+        else:
+            evs = act.node_events(n["id"])
+        bad = [e["ts"] for e in evs if not e.get("ok", True) and now - e["ts"] <= win]
+        if len(bad) >= cfg["errors_n"]:
+            add("errors", n["id"], "warn", f"{n['id']}: {len(bad)} failed tool calls in {_dur(win)}", min(bad))
+    usd = (extra.get("totals") or {}).get("usd_today")
+    lim = cfg["daily_budget_usd"]
+    if lim and usd is not None and usd >= 0.8 * lim:
+        day0 = _ts_day0(now)
+        add("budget", None, "bad" if usd >= lim else "warn", f"today's cost ${usd:.2f} of ${lim:g} budget ({int(100 * usd / lim)} %)", day0)
+    sv = ctx.get("service") or {}
+    over = _num(sv.get("socket_ms"), 0) > cfg["service_ms"] or _num(sv.get("cpu_pct"), 0) > cfg["service_cpu_pct"]
+    if over:
+        seen.add("service")
+        first = _track.setdefault("service", now)
+        if now - first >= cfg["service_for_s"]:
+            why = f"socket {sv.get('socket_ms')} ms" if _num(sv.get("socket_ms"), 0) > cfg["service_ms"] else f"CPU {sv.get('cpu_pct')} %"
+            add("service", None, "warn", f"service slow: {why} for {_dur(now - first)}", first)
+    for k in [k for k in _track if k not in seen]:
+        _track.pop(k, None)
+    out.sort(key=lambda a: (-a["since"], a["id"]))
+    return out[:ALERTS_MAX]
+
+
+def _ts_day0(now):
+    lt = time.localtime(now)
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+
+
+# ---------------------------------------------------------------- history
+HIST_TTL = 60.0
+_hcache = {}
+
+
+def _row_usd(r, usage):
+    u = r.get("usage") if isinstance(r.get("usage"), dict) else {}
+    u = {k: _num(v, 0) for k, v in u.items()}
+    c = r.get("cost_usd")
+    return (c if isinstance(c, (int, float)) and not isinstance(c, bool) else usage.estimate_usd(u, r.get("model"))), u
+
+
+def history(home, days=14, now=None, rows=None):
+    """/history: per-day totals (oldest first, empty days zero), the last week's top threads and tools. Hidden private
+    projects are left out. `rows` (tests) replaces the ledger read."""
+    import lean_activity as act
+    import usage
+    now = now or time.time()
+    days = max(1, min(90, int(days)))
+    base = _ts_day0(now)
+    dates = [time.strftime("%Y-%m-%d", time.localtime(base - i * 86400 + 43200)) for i in range(days - 1, -1, -1)]
+    since = dates[0] + "T00:00:00"
+    wk = time.strftime("%Y-%m-%dT00:00:00", time.localtime(base - 6 * 86400 + 43200))
+    if rows is None:
+        rows = act.ledger_since(home, since)
+    per = {d: {"date": d, "usd": 0.0, "tokens": 0, "saved": 0, "runs": 0, "cache_read": 0, "ctx": 0, "by_model": {}, "by_project": {}} for d in dates}
+    threads = {}
+    try:
+        import lean_private
+        hides = lean_private.hides
+    except Exception:
+        hides = lambda *a, **k: False  # noqa: E731
+    for r in rows:
+        d = str(r.get("ts") or "")[:10]
+        x = per.get(d)
+        if x is None or hides(r) or (r.get("project") and hides(project=r.get("project"))):
+            continue
+        usd, u = _row_usd(r, usage)
+        x["usd"] += usd
+        x["tokens"] += int(_num(r.get("weighted"), 0) or usage.weighted(u))
+        try:
+            x["saved"] += act.run_saved(r, home)
+        except Exception:
+            pass
+        x["runs"] += 1
+        x["cache_read"] += u.get("cache_read_input_tokens", 0)
+        x["ctx"] += usage.context_tokens(u)
+        fam = act._family(r.get("model")) or "other"
+        x["by_model"][fam] = x["by_model"].get(fam, 0.0) + usd
+        proj = r.get("project") or "other"
+        x["by_project"][proj] = x["by_project"].get(proj, 0.0) + usd
+        tag = str(r.get("thread") or "")
+        if tag and str(r.get("ts") or "") >= wk:
+            tag = "t" + tag.lstrip("#t") if tag.lstrip("#t").isdigit() else tag
+            t = threads.setdefault(tag, {"node": tag, "title": tag, "usd": 0.0, "tokens": 0})
+            t["usd"] += usd
+            t["tokens"] += int(_num(r.get("weighted"), 0) or usage.weighted(u))
+    out = []
+    for d in dates:
+        x = per[d]
+        out.append({"date": d, "usd": round(x["usd"], 2), "tokens": x["tokens"], "saved": x["saved"], "runs": x["runs"],
+                    "cache_read_ratio": round(x["cache_read"] / x["ctx"], 2) if x["ctx"] else 0,
+                    "by_model": {k: round(v, 2) for k, v in sorted(x["by_model"].items(), key=lambda kv: -kv[1])},
+                    "by_project": {k: round(v, 2) for k, v in sorted(x["by_project"].items(), key=lambda kv: -kv[1])}})
+    top = sorted(threads.values(), key=lambda t: (-t["usd"], t["node"]))[:10]
+    try:
+        import lean_threads
+        reg = (lean_threads.load_ro() or {}).get("threads") or {}
+        for t in top:
+            t["title"] = (reg.get(t["node"]) or {}).get("title") or t["node"]
+    except Exception:
+        pass
+    for t in top:
+        t["usd"] = round(t["usd"], 2)
+    return {"days": out, "top_threads": top, "tools_7d": act.tools_week(now)}
+
+
+def history_cached(home, days=14, now=None):
+    """history(), cached 60 s per (home, days); nothing is computed until asked."""
+    key = (home, int(days))
+    mono = time.monotonic()
+    with _lock:
+        c = _hcache.get(key)
+        if c and mono - c[0] < HIST_TTL:
+            return c[1]
+    h = history(home, days, now)
+    with _lock:
+        _hcache[key] = (mono, h)
+    return h
+
+
+def alerts_now():
+    """Current alerts of the running service (for `map --alerts` and doctor)."""
+    return snapshot_now().get("alerts") or []
 
 
 def down_snapshot(inbox=0, now=None):
@@ -296,7 +535,7 @@ def service_context(now=None):
             _tcache[tid] = c
         elif not c:  # over budget, never probed: shown parked until a later snapshot probes it
             c = (mono, {"idle_s": 10 ** 6, "mid": False, "state": "parked", "detail": "parked"})
-        threads.append(dict(c[1], id=tid, title=rec.get("title") or tid))
+        threads.append(dict(c[1], id=tid, title=rec.get("title") or tid, project=rec.get("project") or None))
     for tid in [k for k in _tcache if k not in {t["id"] for t in threads}]:
         _tcache.pop(tid, None)
     runs = []
@@ -316,7 +555,7 @@ def service_context(now=None):
                 run_started(rid, tid, m.get("model") or "")
             elif rid not in _seen_runs:
                 _seen_runs[rid] = 1  # already running when the map first looked: not a new task
-            runs.append({"id": rid, "thread": tid, "model": m.get("model"), "age_s": age, "workdir": m.get("workdir"), "branch": m.get("branch"),
+            runs.append({"id": rid, "thread": tid, "model": m.get("model"), "project": m.get("project"), "age_s": age, "workdir": m.get("workdir"), "branch": m.get("branch"),
                          "progress_s": max(0, now - (m.get("last_progress") or now)), "orphaned": bool(m.get("orphaned"))})
     except Exception:
         pass
@@ -332,10 +571,15 @@ def service_context(now=None):
                 if not (lean_private.hides(r) or (r.get("project") and lean_private.hides(project=r.get("project"))))]
     except Exception:
         pass
+    rr = [r for r in runs if r["thread"] in {t["id"] for t in threads}]
+    for t in threads:  # a thread without its own project tag takes the project of its runs
+        if not t.get("project"):
+            ps = collections.Counter(r["project"] for r in rr if r["thread"] == t["id"] and r.get("project"))
+            t["project"] = ps.most_common(1)[0][0] if ps else None
     return {"rows": rows, "home": lean_common.lean_home(), "service": {"pid": os.getpid(), "version": ctx_version(), "socket_ms": round(_state["ms"] or 0.0, 1), "cpu_pct": _cpu(),
                         "threads": threading.active_count(), "up_s": int(now - STARTED)},
             "paused": _paused(), "inbox": inbox, "threads": threads,
-            "runs": [r for r in runs if r["thread"] in {t["id"] for t in threads}], "desk_idle_s": int(now - max(desk)) if desk else 3600}
+            "runs": rr, "desk_idle_s": int(now - max(desk)) if desk else 3600}
 
 
 VERSION = ""

@@ -1372,7 +1372,9 @@ def r2_snap():
         "placed": ["service", "main", "t1", "t2", "t3", "w1"]}
 
 
-def r2_history(days=14):
+def r2_history(home, days=14, now=None):
+    if str(home).endswith("-p"):
+        raise RuntimeError("no history")  # the 'older service' instance
     day0 = time.time() - 13 * 86400
     days = [{"date": time.strftime("%Y-%m-%d", time.gmtime(day0 + i * 86400)), "usd": round(0.2 * i, 2), "tokens": 1000 * i, "saved": 500 * i,
              "runs": i, "cache_read_ratio": 0.5 + i / 40, "by_model": {"sonnet": round(0.15 * i, 2), "haiku": round(0.05 * i, 2)},
@@ -1496,14 +1498,16 @@ class Round2Test(unittest.TestCase):
     def test_alerts_projects_trends_replay(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
-        live = lean_maplive.Live(r2_snap, tmp, interval=0.2, history=r2_history).start()
+        p = mock.patch.object(lean_map, "history_cached", r2_history)
+        p.start()
+        self.addCleanup(p.stop)
+        live = lean_maplive.Live(r2_snap, tmp, interval=0.2).start()
         self.addCleanup(live.stop)
         live2 = lean_maplive.Live(snap, tmp + "-p", interval=0.2).start()
         self.addCleanup(live2.stop)
         now = time.time()
-        live._keep({"ts": now - 120, "from": "main", "to": "t1", "op": "send", "node": None, "tool": None, "target": None, "ok": True})
-        live._keep({"ts": now - 125, "from": None, "to": None, "op": "tool", "node": "t2", "tool": "Grep", "target": "lean_map.py", "ok": True,
-                    "_k": ("t2", now - 125, "Grep")})
+        live.replay.append({"ts": now - 120, "from": "main", "to": "t1", "op": "send", "node": None, "tool": None, "target": None, "ok": True})
+        live.replay.append({"ts": now - 125, "from": "t2", "to": "service", "op": "tool", "node": "t2", "tool": "Grep", "target": "lean_map.py", "ok": True})
         # the replay endpoint: oldest first, token required, only what was recorded
         shots = os.environ.get("MAP_SHOTS_DIR", "")
         if shots:
@@ -1561,33 +1565,21 @@ class Round2Test(unittest.TestCase):
         self.assertTrue(d["plainAlerts"] and d["plainBell"] and d["plainProjs"])
         self.assertIn("not available", d["plainTrends"])
 
-    def test_replay_and_history_endpoints(self):
+    def test_on_request_broadcasts_and_records_once(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
-        calls = []
-        live = lean_maplive.Live(snap, tmp, interval=0.2, history=lambda days: calls.append(days) or {"days": [], "top_threads": [], "tools_7d": []}).start()
-        self.addCleanup(live.stop)
-        now = time.time()
+        live = lean_maplive.Live(snap, tmp, interval=0.2)
+        got = []
+        live._broadcast = got.append
+        live.clients.append({"q": None})
         live.on_request("send", {"thread": "t1"})
-        live._keep({"ts": now - 5000, "from": "a", "to": "b", "op": "old", "node": None, "tool": None, "target": None, "ok": True})
-        self.assertEqual(calls, [])  # zero work until asked
-        for path in ("/history?days=14", "/replay?since=0"):
-            self.assertNotIn("200", http_get(live.port, path)[0])  # the token is required
-        status, hdr, body = http_get(live.port, "/replay?t=" + live.token + "&since=0")
-        self.assertIn("200", status)
-        self.assertEqual(hdr.get("access-control-allow-origin"), "*")
-        ev = json.loads(body)["events"]
-        self.assertEqual([e["op"] for e in ev], ["send"])  # older than 60 min is not served
-        self.assertEqual(set(ev[0]), {"ts", "from", "to", "op", "node", "tool", "target", "ok"})
-        http_get(live.port, "/history?t=" + live.token + "&days=14")
-        http_get(live.port, "/history?t=" + live.token + "&days=14")
-        self.assertEqual(calls, [14])  # cached for 60 s
-        old = lean_maplive.Live(snap, tmp + "-o", interval=0.2).start()
-        self.addCleanup(old.stop)
-        self.assertIn("404", http_get(old.port, "/history?t=" + old.token)[0])
-        for _ in range(lean_maplive.REPLAY_MAX + 10):
-            live._keep({"ts": now, "from": "a", "to": "b", "op": "x", "node": None, "tool": None, "target": None, "ok": True})
-        self.assertLessEqual(len(live.replay), lean_maplive.REPLAY_MAX)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(json.loads(got[0])["to"], "t1")
+        self.assertEqual([e["op"] for e in live.replay], ["send"])
+        live.clients.clear()
+        live.on_request("send", {"thread": "t2"})
+        self.assertEqual(len(got), 1)
+        self.assertEqual(len(live.replay), 2)
 
 
 if __name__ == "__main__":

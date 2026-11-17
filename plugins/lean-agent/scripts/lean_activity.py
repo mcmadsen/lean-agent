@@ -372,6 +372,53 @@ def ledger_today(home, max_bytes=2 << 20):
     return rows
 
 
+def ledger_since(home, since_iso, max_bytes=16 << 20):
+    """Ledger rows with ts >= since_iso (read from the end of the file only), oldest first."""
+    p = os.path.join(home, "ledger.jsonl")
+    rows, buf = [], b""
+    try:
+        with open(p, "rb") as fh:
+            pos = fh.seek(0, 2)
+            start, read, done = pos, 0, False
+            while pos > 0 and read < max_bytes and not done:
+                n = min(1 << 20, pos)
+                pos -= n
+                fh.seek(pos)
+                buf = fh.read(n) + buf
+                read += n
+                lines = buf.split(b"\n")
+                buf = lines[0] if pos > 0 else b""
+                for line in reversed(lines[1:] if pos > 0 else lines):
+                    if not line.strip():
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(r, dict):
+                        continue
+                    if str(r.get("ts") or "") < since_iso:
+                        done = True
+                        break
+                    rows.append(r)
+    except OSError:
+        return []
+    rows.reverse()
+    return rows
+
+
+def tools_week(now, top=10):
+    """[[tool, count]] over the activity rings (what is still in memory, at most the last 7 days), most used first."""
+    cnt = {}
+    with _lock:
+        rings = [list(r) for r in _rings.values()]
+    for evs in rings:
+        for e in evs:
+            if now - e["ts"] <= 7 * 86400:
+                cnt[e["tool"]] = cnt.get(e["tool"], 0) + 1
+    return [[k, v] for k, v in sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))[:top]]
+
+
 def _num(v, d=0):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else d
 

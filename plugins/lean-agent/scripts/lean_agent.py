@@ -12240,6 +12240,11 @@ def cmd_doctor(a):
     import lean_maplive
     ok, text = lean_maplive.doctor_line(lean_sock.home())
     report(ok, text)
+    try:
+        bad = [x for x in (lean_map.fetch() or {}).get("alerts") or [] if x.get("level") == "bad"]
+        report(not bad if bad else True, f"live map alerts: {len(bad)} bad" + (" (lean-agent map --alerts)" if bad else ""))
+    except Exception:
+        pass
     report(True, "live map: the Claude Code desktop pane (lean-agent map --json|--svg) or the live page (lean-agent map --url)")
     fa = service_session.fresh_after()
     report(True, "auto fresh: " + service_session.fresh_text(fa) + (
@@ -14080,6 +14085,24 @@ def cmd_config(a):
         env_name = "LEAN_AGENT_" + key.upper()
         print(compaction_text() + (f" ({env_name} is set and wins)" if os.environ.get(env_name) else ""))
         return 0
+    if a.name.startswith("map."):
+        key = a.name[4:]
+        if a.value is not None:
+            v = a.value.lower()
+            if v not in ("default", "off") and not re.fullmatch(r"\d+(\.\d+)?", v):
+                die(f"{a.name} takes a number, off or default")
+            cfg = config_json()
+            m = cfg.get("map") if isinstance(cfg.get("map"), dict) else {}
+            if v == "default":
+                m.pop(key, None)
+            else:
+                m[key] = None if v == "off" else float(v) if "." in v else int(v)
+            cfg["map"] = m
+            save_json(home("config.json"), cfg)
+        cur = lean_map.map_config(home())[key]
+        print(f"{a.name}: {'off' if cur is None else cur} (default {lean_map.DEFAULTS[key] if lean_map.DEFAULTS[key] is not None else 'off'}) "
+              "\u00b7 thresholds of the live map's alerts; set: lean-agent config map.<key> <number>|off|default")
+        return 0
     if a.name == "session-stuck":
         if a.value is not None:
             v = a.value.lower()
@@ -14832,7 +14855,7 @@ def _fe(fn, a):
 
 
 def cmd_map(a):
-    if not a.project or a.svg or a.mini or a.watch or a.html or getattr(a, "probe", False) or getattr(a, "url", False):
+    if not a.project or a.svg or a.mini or a.watch or a.html or getattr(a, "alerts", False) or getattr(a, "probe", False) or getattr(a, "url", False):
         return cmd_live_map(a)
     def run(fe, slug, path, a):
         root = fe.work_dir(slug, path, a.dir)
@@ -16176,6 +16199,10 @@ def cmd_live_map(a):
             print(u)
         return 0
     snap = lean_map.fetch()
+    if getattr(a, "alerts", False):
+        for x in snap.get("alerts") or []:
+            print(f"{x['level']} {x['kind']} {x['text']}")
+        return 0
     if getattr(a, "svg", False) or getattr(a, "mini", False):
         mini = bool(getattr(a, "mini", False))
         print(lean_map.svg(snap, a.width or (480 if mini else 1200), a.height or (320 if mini else 700), mini=mini))
@@ -18565,7 +18592,7 @@ def build_parser():
                        "allow-edit-outside <dir>|clear (extra dirs, besides ~/Downloads, where --allow-edit may name an explicit file outside the worktree), allow-edit <project> <glob>... [--clear] (repo-owned paths every editing worker of the project may change, e.g. '.claude/rules/**' CLAUDE.md; default none), "
                        "attribution-emails <email>... (extra emails that count as yours for the attribution check; `clear` resets), poll-allow <prefix>...|clear (commands a thread's `lean-agent poll` may run besides read-only ones; --project limits it), max-thread-sessions N (thread sessions the service runs; default 20), session-idle-stop DUR|off|default (the service stops a thread session idle that long; the thread stays open; default 3h), run-timeout DUR (how long a worker may run; 45m, 2h; default 30m), review-vote-own on|off (ask vote or post for reviews of your own PRs too; default off), review-max-rerounds N (re-reviews of one branch before --resume refuses; default 2), review-model auto|<model>|default (default auto: by risk), approve-usd N|default (cost approved by itself per run; default 5 USD, above it the user is asked), review-skip <classes> (changes that get no review: version-bump,merge-only,docs-only,tests-only,branches=release/*; default all of those; off|default), desk-clear-at N|off|default (the front desk's own checkpoint-and-clear threshold; default 100000), clear-at off|auto|N (opt in to clearing the orchestrator's context above N tokens after a checkpoint; auto = 8000 below its compaction point; default off: clear with `lean-agent clear`), main-fresh-at 2x|N|off|default (replace main or a thread session with a fresh one at a turn end when its context passes this; 2x = times the compaction point; default 2x), compact-window N|default (N is 100000 or more) and compact-pct P|default (10-95) (compact the orchestrator earlier than Claude Code's own default; takes effect on service restart)")
     s.add_argument("name", choices=["strict", "private", "clear-at", "desk-clear-at", "project-rules", "attribution-emails", "poll-allow", "allow-edit", "allow-edit-outside", "branch-rules", "compact-window", "compact-pct", "max-thread-sessions", "session-idle-stop", "session-stuck",
-                                           "review-max-rerounds", "review-vote-own", "review-skip", "review-model", "approve-usd", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"])
+                                           "review-max-rerounds", "review-vote-own", "review-skip", "review-model", "approve-usd", "review-learn-auto", "thread-fresh-after", "thread-reports", "main-fresh-at", "update-channel", "run-timeout"] + ["map." + k for k in lean_map.DEFAULTS])
     s.add_argument("--project", "-p", help="project-rules, branch-rules, review-skip: the project (default: the current directory)")
     s.add_argument("value", nargs="?", help="branch-rules: feature=<pattern> bugfix=<pattern> release=<pattern> or default; on|off, or off|auto|a number for clear-at, a number|default for compact-window (100000 or more) and compact-pct (10-95)")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)
@@ -19037,6 +19064,7 @@ def build_parser():
     s.add_argument("--refresh-for", dest="refresh_for", type=float, default=None, metavar="MIN",
                    help="live map --html: the service keeps rewriting the file for MIN minutes (default 30) so a viewer that only reloads files stays live")
     s.add_argument("--probe", action="store_true", help="live map: write a diagnostics page (what the preview allows: JS, WebSocket, fetch, img), print its path")
+    s.add_argument("--alerts", action="store_true", help="live map: print the current alerts, one per line (level kind text), exit 0")
     s.add_argument("--watch", action="store_true", help="live map: one JSON line whenever it changes (twice a second at most)")
     s.add_argument("--width", type=int)
     s.add_argument("--height", type=int)

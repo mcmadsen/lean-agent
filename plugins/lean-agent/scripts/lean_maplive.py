@@ -30,13 +30,12 @@ LOG_EVERY_S = 60.0
 POLL_S = 10.0  # a page that polled this recently counts as watching
 PING_S = 25.0
 FILE = "map-live.json"
-REPLAY_MAX = 5000
-REPLAY_MAX_S = 3600
-HIST_CACHE_S = 60.0
 DEFAULT_PORT = 47821  # the stable, bookmarkable port (LEAN_AGENT_MAP_PORT changes it; busy -> an OS-chosen one)
 REFRESH_FILE = "refresh.json"
 REFRESH_EVERY = 3.0  # a registered page file is rewritten at most this often, and only when the map changed
 HEARTBEAT = 20.0  # ... or when it is this old (so a quiet map is not mistaken for a stopped refresh)
+REPLAY_S = 3600  # the replay ring keeps this much of what the endpoint broadcasts
+REPLAY_MAX = 5000
 REFRESH_MIN = 30  # default minutes a `map --html` file keeps refreshing
 
 
@@ -144,13 +143,8 @@ def parse_frames(buf):
 
 
 class Live:
-    def __init__(self, snapshot, home, interval=INTERVAL, max_clients=MAX_CLIENTS, port=None, history=None):
+    def __init__(self, snapshot, home, interval=INTERVAL, max_clients=MAX_CLIENTS, port=None):
         self.snapshot = snapshot
-        self.history = history  # callable(days) -> dict for GET /history; None = the route answers 404 (older service)
-        self.hist_cache = {}  # days -> (monotonic, dict)
-        self.replay = collections.deque(maxlen=REPLAY_MAX)  # last REPLAY_MAX_S of what is already broadcast, in memory only
-        self.replay_keys = collections.deque(maxlen=REPLAY_MAX)
-        self.replay_seen = set()
         self.want_port = wanted_port() if port is None else port
         self.fallback = False
         self.rwake = threading.Event()
@@ -166,6 +160,7 @@ class Live:
         self.last = None  # (hash, message)
         self.wake = threading.Event()
         self.cache = None  # (monotonic, snapshot)
+        self.replay = collections.deque(maxlen=REPLAY_MAX)  # what on_request already produces, memory only
         self.svg_cache = {}  # (w, h, mini) -> (monotonic, svg)
         self.last_poll = float("-inf")
         self.good = None  # last snapshot that computed
@@ -219,50 +214,6 @@ class Live:
         except OSError:
             pass
 
-    def _keep(self, ev):
-        """Remembers one replay entry (tool name + short safe target only); dedupes the per-node 'recent' items."""
-        with self.lock:
-            if len(self.replay) == self.replay.maxlen:
-                old = self.replay_keys[0]
-                self.replay_seen.discard(old)
-            self.replay.append(ev)
-            self.replay_keys.append(ev.get("_k"))
-            if ev.get("_k"):
-                self.replay_seen.add(ev["_k"])
-
-    def _record_recent(self, snap):
-        for n in snap.get("nodes") or []:
-            a = n.get("activity") if isinstance(n, dict) else None
-            for r in (a.get("recent") if isinstance(a, dict) else None) or []:
-                try:
-                    k = (n.get("id"), r.get("ts"), r.get("tool"))
-                    if k in self.replay_seen:
-                        continue
-                    self._keep({"ts": r["ts"], "from": None, "to": None, "op": "tool", "node": n.get("id"), "tool": str(r.get("tool") or "")[:40],
-                                "target": str(r.get("target") or "")[:60], "ok": r.get("ok") is not False, "_k": k})
-                except Exception:
-                    continue
-
-    def get_replay(self, since):
-        cut = max(float(since or 0), time.time() - REPLAY_MAX_S)
-        with self.lock:
-            ev = [{k: v for k, v in e.items() if k != "_k"} for e in self.replay if (e.get("ts") or 0) >= cut]
-        ev.sort(key=lambda e: e.get("ts") or 0)
-        return {"events": ev}
-
-    def get_history(self, days):
-        """Computed on demand only and cached HIST_CACHE_S; None when this service has no history function."""
-        if self.history is None:
-            return None
-        with self.lock:
-            c = self.hist_cache.get(days)
-            if c and time.monotonic() - c[0] < HIST_CACHE_S:
-                return c[1]
-        h = self.history(days)
-        with self.lock:
-            self.hist_cache = {days: (time.monotonic(), h)}
-        return h
-
     def get_snap(self):
         """The snapshot, computed at most every `interval` s however many clients ask; only ever called on demand."""
         with self.lock:
@@ -281,10 +232,6 @@ class Live:
             self.svg_cache = {}
             self.good = snap
             self.err = ""
-        try:
-            self._record_recent(snap)
-        except Exception:
-            pass
         return snap
 
     def _fail(self, exc):
@@ -350,19 +297,17 @@ class Live:
                 return self._reply(conn, 200, "OK", json.dumps(self.get_snap()).encode(), "application/json", cors=True)
             if path == "/history":
                 try:
-                    days = max(1, min(60, int((q.get("days") or ["14"])[0])))
+                    days = max(1, min(90, int((q.get("days") or ["14"])[0])))
                 except ValueError:
                     days = 14
-                h = self.get_history(days)
-                if h is None:
-                    return self._reply(conn, 404, "Not Found")
-                return self._reply(conn, 200, "OK", json.dumps(h).encode(), "application/json", cors=True)
+                body = json.dumps(lean_map.history_cached(self.home, days)).encode()
+                return self._reply(conn, 200, "OK", body, "application/json", cors=True)
             if path == "/replay":
                 try:
                     since = float((q.get("since") or ["0"])[0])
                 except ValueError:
                     since = 0.0
-                return self._reply(conn, 200, "OK", json.dumps(self.get_replay(since)).encode(), "application/json", cors=True)
+                return self._reply(conn, 200, "OK", json.dumps({"events": self.replay_since(since)}).encode(), "application/json", cors=True)
             if path == "/map.svg":
                 self.last_poll = time.monotonic()
                 def dim(k, d):
@@ -388,17 +333,44 @@ class Live:
                 except queue.Full:
                     pass  # a stuck page loses updates, never blocks the service
 
+    def record_replay(self, op, req, now=None):
+        """Keeps one broadcast-worthy item for /replay: socket events and finished tool calls (tool name + short safe target
+        only). Never raises, computes nothing."""
+        try:
+            now = now or time.time()
+            while self.replay and now - self.replay[0]["ts"] > REPLAY_S:
+                self.replay.popleft()
+            if op == "tool":
+                if not isinstance(req, dict) or req.get("phase") == "pre" or not req.get("node") or not req.get("tool"):
+                    return
+                import lean_activity as act
+                node = act._clean(req.get("node"), 40)
+                self.replay.append({"ts": now, "from": node, "to": "service", "op": "tool", "node": node,
+                                    "tool": act._clean(req.get("tool"), 30), "target": act._clean(req.get("target"), 70),
+                                    "ok": bool(req.get("ok", True))})
+                return
+            ft = event_nodes(op, req)
+            if ft:
+                self.replay.append({"ts": now, "from": ft[0], "to": ft[1], "op": str(op), "node": None, "tool": None, "target": None, "ok": True})
+        except Exception:
+            pass
+
+    def replay_since(self, since, now=None):
+        now = now or time.time()
+        lo = max(float(since), now - REPLAY_S)
+        return [dict(e, ts=round(e["ts"], 3)) for e in list(self.replay) if e["ts"] > lo]
+
     def on_request(self, op, req):
         """Called by the service socket per request; cheap and never raises."""
         if op == "map":
             self.rwake.set()  # `map --html` just registered a file: the refresher looks again
+        self.record_replay(op, req)
+        if not self.clients:
+            return
         try:
             ft = event_nodes(op, req)
             if ft:
-                ev = {"type": "event", "from": ft[0], "to": ft[1], "op": str(op), "ts": time.time()}
-                self._keep({"ts": ev["ts"], "from": ft[0], "to": ft[1], "op": str(op), "node": None, "tool": None, "target": None, "ok": True})
-                if self.clients:
-                    self._broadcast(json.dumps(ev))
+                self._broadcast(json.dumps({"type": "event", "from": ft[0], "to": ft[1], "op": str(op), "ts": time.time()}))
         except Exception:
             pass
 
@@ -1059,15 +1031,16 @@ function fetchReplay(){if(!canFetch())return;var r=rng;RPF[r]=1;
 function timelineNow(){if(!paused)schedule()}
 function replayView(s){var T=RT,ed=[],nw={},pair={};
   RP.forEach(function(e){if(e.ts>T||T-e.ts>30)return;
-    if(e.from&&e.to){pair[[e.from,e.to].sort().join('|')]=1;ed.push({from:e.from,to:e.to,kind:/^(send|wake|deliver)$/.test(e.op)?'message':'request',label:e.op,age_s:T-e.ts})}
-    else if(e.node&&e.tool){if(!nw[e.node]||e.ts>nw[e.node].ts)nw[e.node]={ts:e.ts,tool:e.tool,target:e.target||''}}});
+    if(e.node&&e.tool){if(!nw[e.node]||e.ts>nw[e.node].ts)nw[e.node]={ts:e.ts,tool:e.tool,target:e.target||''}}
+    else if(e.from&&e.to){pair[[e.from,e.to].sort().join('|')]=1;ed.push({from:e.from,to:e.to,kind:/^(send|wake|deliver)$/.test(e.op)?'message':'request',label:e.op,age_s:T-e.ts})}
+    });
   var o={};for(var k in s)o[k]=s[k];
   o.edges=(s.edges||[]).filter(function(e){return e.kind==='idle'&&!e.bad&&!pair[[e.from,e.to].sort().join('|')]}).concat(ed);
   o.nodes=(s.nodes||[]).map(function(n){var c={};for(var k in n)c[k]=n[k];var x=nw[n.id];
     c.activity={now:x?{tool:x.tool,target:x.target,since_s:T-x.ts}:null,top:[],errors:0,mcp:[],recent:[]};return c});
   return o}
 function evOf(n){var seen={},o=[],a=act(n);
-  function add(e){var k=e.ts+'|'+e.tool;if(seen[k])return;seen[k]=1;o.push(e)}
+  function add(e){var k=e.tool+'|'+Math.round(e.ts/2);if(seen[k]||seen[e.tool+'|'+(Math.round(e.ts/2)-1)]||seen[e.tool+'|'+(Math.round(e.ts/2)+1)])return;seen[k]=1;o.push(e)}
   if(a&&Array.isArray(a.recent))a.recent.forEach(function(r){if(r&&num(r.ts)!=null)add(r)});
   RP.forEach(function(e){if(e.node===n.id&&e.tool)add(e)});
   return o}
