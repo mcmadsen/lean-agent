@@ -266,7 +266,7 @@ lasts until you close it or log out, and a restart of `up` continues the convers
 
 ## Front desk in the Claude desktop app (with Remote Control)
 
-Automatic by default (`desk: auto`). The service hosts a front desk session with Remote Control as before. If you open a
+Opt-in for now: `lean-agent config desk auto` (the default is `hosted`, as before 0.45.88). In auto mode the service hosts a front desk session with Remote Control as before. If you open a
 local session in the Claude desktop app ("on this computer", which can show plugin panes such as the live map) with the
 folder `~/.lean-agent/home` (the front desk's own folder), that session attaches itself (SessionStart hook) and waits as "pending":
 it is a normal session, and reports keep going to the hosted main, until the service has stopped hosting its own
@@ -299,7 +299,7 @@ your global settings; nothing is written to `~/.lean-agent` itself) are written 
 
 ```sh
 lean-agent desk status           # who is the desk now, and whether THIS session is the desk (strict mode applies to the desk only)
-lean-agent config desk auto      # default; hosted = always the service's own main (as before); external = never hosted
+lean-agent config desk auto      # opt in; hosted = always the service's own main (the default); external = never hosted
 lean-agent desk attach           # make THIS session the desk now (works in auto too; one desk only)
 lean-agent desk detach           # let go of the desk (attaches again at the next session start; an expired desk re-attaches on its next hook event)
 ```

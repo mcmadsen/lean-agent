@@ -31,6 +31,7 @@ class Base(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
         self.now = time.time()
+        lean_desk.set_mode("auto")  # these tests exercise the app desk; hosted is the shipped default (Mode tests it)
 
     def external(self):
         lean_desk.set_mode("external")
@@ -53,6 +54,9 @@ class Base(unittest.TestCase):
 
 class Mode(Base):
     def test_default_auto_and_switch(self):
+        os.remove(lean_desk.lean_home("config.json"))  # no saved mode: the shipped default
+        self.assertEqual(lean_desk.mode(), "hosted")  # auto is opt-in until it is proven in the field
+        lean_desk.set_mode("auto")
         self.assertEqual(lean_desk.mode(), "auto")
         self.assertIsNone(lean_desk.attached())
         self.external()
@@ -304,6 +308,7 @@ class Auto(Base):
         self.clock = [self.now]
 
     def test_auto_is_the_default_and_attaches_on_start_in_the_lean_home(self):
+        lean_desk.set_mode("auto")
         self.assertEqual(lean_desk.mode(), "auto")
         ctx, _ = self.hook("start", "s1")  # in the desk folder (<home>/home)
         self.assertEqual(lean_desk.record()["session_id"], "s1")
