@@ -127,31 +127,53 @@ def threads_dir():
     return lean_home("threads")
 
 
+def _old_is_newer(old, new):
+    """Has the old copy grown past the new one (an older service kept appending to it after a copy was made)?"""
+    try:
+        return os.path.getmtime(old) > os.path.getmtime(new) and os.path.getsize(old) > os.path.getsize(new)
+    except OSError:
+        return False
+
+
 def thread_transcript(sid):
     """A thread session's transcript: in the threads folder, else (sessions started before threads had their own folder)
-    in the old desk folder <home>/home; the new location when neither exists."""
+    in the old desk folder <home>/home; the new location when neither exists. An old copy that grew past the new one wins."""
     new = transcript_path(threads_dir(), sid)
     old = transcript_path(lean_home("home"), sid)
-    return old if not os.path.exists(new) and os.path.exists(old) else new
+    if os.path.exists(old) and (not os.path.exists(new) or _old_is_newer(old, new)):
+        return old
+    return new
 
 
 def migrate_thread_transcript(sid):
     """Copy a thread session's transcript (and its session folder) from the old desk folder into the threads folder, so
-    `claude --resume` finds it from the new cwd. The old copy stays (fallback lookup). True when a copy was made."""
+    `claude --resume` finds it from the new cwd. Only called when this version's service (re)starts thread sessions, never
+    while an older service may still append to the old file. Idempotent: copies when the new one is missing or the old one
+    has grown past it. The old copy stays (fallback lookup). True when a copy was made."""
     import shutil
     new = transcript_path(threads_dir(), sid)
     old = transcript_path(lean_home("home"), sid)
-    if os.path.exists(new) or not os.path.exists(old):
+    if not os.path.exists(old) or (os.path.exists(new) and not _old_is_newer(old, new)):
         return False
     try:
         os.makedirs(os.path.dirname(new), exist_ok=True)
         shutil.copy2(old, new)
-        side = old[:-len(".jsonl")]
-        if os.path.isdir(side) and not os.path.exists(new[:-len(".jsonl")]):
-            shutil.copytree(side, new[:-len(".jsonl")])
+        side, nside = old[:-len(".jsonl")], new[:-len(".jsonl")]
+        if os.path.isdir(side):
+            shutil.copytree(side, nside, dirs_exist_ok=True)
         return True
     except OSError:
         return False
+
+
+def migrate_thread_transcripts(thread_records):
+    """Migrate every transcript of the given thread records (session_id and session_history). Returns how many were copied."""
+    n = 0
+    for th in thread_records:
+        for sid in [th.get("session_id"), *(th.get("session_history") or [])]:
+            if sid and re.fullmatch(r"[0-9a-fA-F-]{36}", str(sid)) and migrate_thread_transcript(sid):
+                n += 1
+    return n
 
 
 def service_record(key="main"):

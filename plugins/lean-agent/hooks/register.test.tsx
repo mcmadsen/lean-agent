@@ -1,4 +1,5 @@
 import { expect, test } from 'claude-code/testing'
+import { resetState } from './register'
 
 const PANE = {
   plugin: 'lean-agent',
@@ -34,11 +35,12 @@ const SNAP = {
 const DOWN = { v: 1, service: { up: false }, desk: DESK, goals: [], answers: [], inbox: 2 }
 
 // A fake engine: answers `lean-agent` calls, records every argv.
-function fake(on: any, opts: { snap?: unknown; role?: string; limit?: number; closeAfter?: number; noBin?: boolean; jsonFail?: string }) {
+function fake(on: any, opts: { snap?: unknown; role?: string; deskFolder?: boolean; ackThrows?: boolean; limit?: number; closeAfter?: number; noBin?: boolean; jsonFail?: string }) {
+  resetState()
   const calls: string[][] = []
   const statuses: string[] = []
   const state = { snap: opts.snap ?? SNAP, panes: [] as { id: string }[], timers: [] as { ms: number }[], store: new Map<string, unknown>(), commands: [] as string[] }
-  on('env.get', (_: any, e: any) => ({ value: e.name === 'PATH' ? '/usr/bin:/bin' : e.name === 'LEAN_AGENT_SESSION_ROLE' ? opts.role : undefined }))
+  on('env.get', (_: any, e: any) => ({ value: e.name === 'PATH' ? '/usr/bin:/bin' : e.name === 'LEAN_AGENT_SESSION_ROLE' ? opts.role : e.name === 'LEAN_AGENT_DESK_FOLDER' && opts.deskFolder ? '1' : undefined }))
   on('ui.status', (_: any, e: any) => { statuses.push(e.text); return { value: undefined } })
   on('command.register', (_: any, e: any) => { state.commands.push(e.name); return { value: { command: e.name } } })
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
@@ -50,6 +52,7 @@ function fake(on: any, opts: { snap?: unknown; role?: string; limit?: number; cl
     calls.push([...e.argv])
     if (a === 'lean-agent pane --json' && opts.jsonFail) return { value: { exitCode: 3, stdout: '', stderr: opts.jsonFail + '\nmore' } }
     if (a === 'lean-agent pane --json') return { value: { exitCode: 0, stdout: JSON.stringify(state.snap), stderr: '' } }
+    if (opts.ackThrows && e.argv[1] === 'myq') return { value: { exitCode: 2, stdout: '', stderr: 'spawn failed' } }
     return { value: { exitCode: 0, stdout: 'waiting: t1', stderr: '' } }
   })
   on('ui.open', (_: any, e: any) => {
@@ -192,4 +195,39 @@ test('the status line says when lean-agent is missing', async ($, on) => {
   const miss = fake(on, { role: 'main', noBin: true })
   await start($)
   expect(miss.statuses.some(t => t.startsWith('lean-agent: lean-agent not found'))).toBe(true)
+})
+
+test('a session without a role gets no pane, even while the service is up; /lean-agent opens it', async ($, on) => {
+  const f = fake(on, { role: undefined })
+  await start($)
+  expect(f.state.panes).toEqual([])
+  await $.command.run({ command: 'lean-agent', args: '' } as any)
+  expect(f.state.panes.map(p => p.id)).toEqual(['lean-agent'])
+})
+
+test('the app desk (a session in the desk folder) gets the pane by itself', async ($, on) => {
+  const f = fake(on, { role: undefined, deskFolder: true })
+  await start($)
+  expect(f.state.panes.map(p => p.id)).toEqual(['lean-agent'])
+})
+
+test('a goals/answers error from pane --json is shown, not "No open goals."', async ($, on) => {
+  fake(on, { role: 'main', snap: { ...SNAP, goals: [], answers: [], error: 'goals.json unreadable' } })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /goals unavailable: goals.json unreadable/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /answers unavailable: goals.json unreadable/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /No open goals/ })).toBeFalsy()
+  await ui.unmount()
+})
+
+test('a failing ack shows the failure and refreshes the pane', async ($, on) => {
+  const f = fake(on, { role: 'main', ackThrows: true })
+  await start($)
+  const before = panes(f.calls)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'ack-q7' })
+  expect(panes(f.calls)).toBeGreaterThan(before)
+  expect(await ui.find({ type: 'Text', text: /myq ack q7 failed \(exit 2\): spawn failed/ })).toBeTruthy()
+  await ui.unmount()
 })

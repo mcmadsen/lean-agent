@@ -95,7 +95,7 @@ def _num(v, d):
 
 
 def select(nodes):
-    """Which nodes get drawn (shared by the SVG and the live page): open threads ranked active/mid-turn, undelivered, then
+    """Which nodes get drawn (used by the SVG and the pane): open threads ranked active/mid-turn, undelivered, then
     most recent, at most MAX_THREADS; workers alive/orphaned or ended in the last ENDED_S, at most MAX_WORKERS per parent
     (parent-less = under the front desk). -> {"placed": [ids], "more": number of threads/workers left out}."""
     def trank(n):
@@ -254,7 +254,7 @@ def activity_parts(ctx, nodes, placed, ev, now):
 
 
 def _extra_totals(ctx, nodes, calls, errs, now):
-    """The few extra numbers the live page's metric cards show; each key is left out when it is not known."""
+    """The few extra numbers the pane and SVG metric cards show; each key is left out when it is not known."""
     o = {}
     try:
         ws = [n for n in nodes if n["kind"] == "worker"]

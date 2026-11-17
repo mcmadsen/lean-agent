@@ -41,6 +41,17 @@ let resolved: string | null = null // the binary, once found (cached for the ses
 let timer: { cancel: () => void } | null = null
 let isBusy = false
 let isActive = false
+let isStale = false // a poll was asked for while one ran: run once more when it ends (an ack's refresh is never lost)
+
+// Back to the start-up state (the module keeps its state for the session; specs reset it between cases).
+export function resetState() {
+  timer?.cancel()
+  resolved = null
+  timer = null
+  isBusy = false
+  isActive = false
+  isStale = false
+}
 
 const STATE_COLOR: Record<string, string> = { working: GREEN, waiting: AMBER, stuck: RED, quiet: MUTED }
 
@@ -112,7 +123,10 @@ function stop() {
 
 // One poll, never overlapping; returns whether the service is up. Every outcome is a diagnosis, never a blank.
 async function poll($: any): Promise<boolean> {
-  if (isBusy) return true
+  if (isBusy) {
+    isStale = true
+    return true
+  }
   isBusy = true
   let pane: PaneData | null = null
   let isUp = false
@@ -154,6 +168,10 @@ async function poll($: any): Promise<boolean> {
   await setDiag($, { state, error, bin })
   const desk = pane?.desk?.label ?? ''
   await status($, desk ? `${state} · ${desk}` : state)
+  if (isStale) {
+    isStale = false
+    return poll($)
+  }
   return isUp
 }
 
@@ -163,9 +181,15 @@ async function ack($: any, argv: readonly string[]) {
     await setDiag($, { error: NOT_FOUND })
     return
   }
-  const r = await $.process.run([bin, ...argv])
-  if (r.exitCode !== 0) await setDiag($, { error: `lean-agent ${argv.join(' ')} failed (exit ${r.exitCode}): ${firstLine(r.stderr)}` })
-  await poll($)
+  let failure = ''
+  try {
+    const r = await $.process.run([bin, ...argv])
+    if (r.exitCode !== 0) failure = `lean-agent ${argv.join(' ')} failed (exit ${r.exitCode}): ${firstLine(r.stderr)}`
+  } catch (err) {
+    failure = `lean-agent ${argv.join(' ')} failed: ${firstLine(String((err as Error)?.message ?? err))}`
+  }
+  await poll($) // refreshes the pane (and clears the error of the last poll); the ack's own failure is shown after it
+  if (failure) await setDiag($, { error: failure })
 }
 
 function schedule($: any, ms: number) {
@@ -213,9 +237,11 @@ export const register: Register = on => {
     const role = await $.env.get('LEAN_AGENT_SESSION_ROLE')
     await setDiag($, { ...EMPTY_DIAG, surface: String((e as any).surface ?? '') })
     await status($, 'starting…')
-    const isUp = await poll($)
-    // The front desk, or no role while the service is up. Everyone gets /lean-agent.
-    const isDesk = role === 'main' || (isUp && (role === undefined || role === ''))
+    await poll($)
+    // Auto-opens only in the front desk: the hosted main, or a local app session in the desk folder (its settings carry
+    // LEAN_AGENT_DESK_FOLDER). Never in other sessions; everyone gets /lean-agent to open it on request.
+    const deskFolder = await $.env.get('LEAN_AGENT_DESK_FOLDER')
+    const isDesk = role === 'main' || (deskFolder === '1' && role !== 'thread')
     await $.command.register({ name: 'lean-agent', description: 'Show or hide the lean-agent pane (goals and answers)' })
     await $.command.register({ name: 'live-map', description: 'Renamed to /lean-agent' })
     if (!isDesk) return next(e)
@@ -249,7 +275,7 @@ export const register: Register = on => {
       <Box flexDirection="column" gap={1}>
         <Text color={isOk ? GREEN : d.error !== '' ? RED : AMBER}>{header}</Text>
         <Text bold>Goals ({goals.length})</Text>
-        {goals.length === 0 && <Text color={MUTED}>No open goals.</Text>}
+        {p?.error ? <Text color={RED}>goals unavailable: {p.error}</Text> : goals.length === 0 && <Text color={MUTED}>No open goals.</Text>}
         {goals.map(g => (
           <Box flexDirection="column">
             <Box flexDirection="row" gap={1}>
@@ -264,7 +290,7 @@ export const register: Register = on => {
           <Text bold>Answers ({answers.length}, {unread} unread)</Text>
           {unread > 0 && <Button key="ack-all" label="ack all" onPress={async () => ack($, ACK_ALL)} />}
         </Box>
-        {answers.length === 0 && <Text color={MUTED}>No answers yet.</Text>}
+        {p?.error ? <Text color={RED}>answers unavailable: {p.error}</Text> : answers.length === 0 && <Text color={MUTED}>No answers yet.</Text>}
         {answers.map(a => (
           <Box flexDirection="column">
             <Box flexDirection="row" gap={1}>

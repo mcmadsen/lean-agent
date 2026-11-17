@@ -10988,7 +10988,7 @@ def render_guide(project=None, front_desk=False):
 
 
 def front_desk_file(h):
-    """The main session's short guide (a rule file in the home): thread sessions leave it out, the main session leaves CLAUDE.md out."""
+    """The front desk's short guide (a rule file in the desk folder <home>/home): thread sessions run in <home>/threads and never see it; the hosted desk leaves any CLAUDE.md there out."""
     return os.path.join(h, ".claude", "rules", "front-desk.md")
 
 
@@ -11087,7 +11087,7 @@ def guide_states(h):
 def threads_home(h=None):
     """The folder thread sessions start in, next to the desk folder (<home>/threads beside <home>/home): it holds the
     thread guide CLAUDE.md, so the desk folder carries only the front desk's instructions."""
-    return os.path.join(os.path.dirname(h), "threads") if h else home("threads")
+    return os.path.join(os.path.dirname(h), "threads") if h else service_session.threads_dir()
 
 
 def write_home_guide(h):
@@ -11154,7 +11154,7 @@ def strict_on():
     return config_json().get("strict", "on") != "off"
 
 
-def orchestrator_settings(existing):
+def orchestrator_settings(existing, kind="desk"):
     """lean-agent's keys for the home's .claude/settings.json; other keys (e.g. model) are kept."""
     data = dict(existing)
     if attribution() == "off":
@@ -11171,7 +11171,7 @@ def orchestrator_settings(existing):
             data.pop(key, None)
         return data
     servers = [n for n, v in lean_mcp.discover().items() if v["source"] in ("user", "desktop")]
-    trim = load_json(home("context-trim.json"), {})  # what `lean-agent context --apply` took out
+    trim = context_trim(kind)  # what `lean-agent context --apply` took out of this folder
     deny = set(ORCHESTRATOR_DENY) | {f"Agent({n})" for n in user_agent_names()}  # also for an app session in this folder (no CLI flags there)
     perms["deny"] = sorted(deny | set(trim.get("deny") or [])
                            | {lean_mcp.tool_prefix(n).rstrip("_") for n in servers})
@@ -11200,7 +11200,7 @@ def orchestrator_settings(existing):
             break
         p = os.path.dirname(p)
     # Claude Code matches resolved paths too: add the resolved form of each (e.g. macOS /var -> /private/var)
-    excludes += load_json(home("context-trim.json"), {}).get("exclude") or []
+    excludes += context_trim(kind).get("exclude") or []
     data["claudeMdExcludes"] = list(dict.fromkeys(excludes + [real_glob(x) for x in excludes]))
     user = load_json(os.path.join(cfg, "settings.json"), {})
     # the orchestrator carries no plugin tools (workers get plugin servers via --mcp): off also for synced
@@ -11210,6 +11210,14 @@ def orchestrator_settings(existing):
     plugins = {k: False for k in on if k != PLUGIN_ID and not k.startswith(PLUGIN_ID.split("@")[0] + "@")}
     data["enabledPlugins"] = dict(data.get("enabledPlugins") or {}, **plugins)
     return data
+
+
+def context_trim(kind="desk"):
+    """What `lean-agent context --apply` took out, per folder: the desk's at the top level of context-trim.json, the thread
+    sessions' under "threads" (each from that folder's own tool usage and instruction files)."""
+    data = load_json(home("context-trim.json"), {})
+    sec = data.get("threads") if kind == "threads" else data
+    return sec if isinstance(sec, dict) else {}
 
 
 def user_agent_names():
@@ -11262,7 +11270,7 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")  # `claude --help`: --
 def desk_effort():
     """Reasoning effort of the hosted front desk ONLY, as the `--effort` flag of its launch command: LEAN_AGENT_DESK_EFFORT
     (low|medium|high|xhigh|max; `default`/`off` = leave it to Claude Code), else high; an invalid value is ignored (high). Thread
-    sessions get none. (The app desk's effort follows in 0.45.92, once threads have their own folder.)"""
+    sessions get none. (The app desk's effort is written to its folder's settings: sync_desk_settings.)"""
     v = (os.environ.get("LEAN_AGENT_DESK_EFFORT") or "").strip().lower()
     if v in ("default", "off", "none"):
         return None
@@ -11310,9 +11318,9 @@ def sync_desk_settings(data, h):
 
 
 def refresh_desk_folder(h):
-    """Make a session started in the desk folder (<home>/home, where the hosted desk's CLAUDE.md already lives) a proper desk,
-    automatically (prepare_home: `home`, `update`, service start): lean-agent's own env keys and the desk's model (sonnet, unless you set one
-    or chose `up --model default`) in its .claude/settings.json.
+    """Make a session started in the desk folder (<home>/home, which holds only the front desk's instructions) a proper desk,
+    automatically (prepare_home: `home`, `update`, service start): lean-agent's own env keys, the desk's model (sonnet, unless you set
+    one or chose `up --model default`) and its effortLevel (high; never over your own value) in its .claude/settings.json.
     Idempotent (written only when changed). Nothing is written to the lean home root (workers under it would load it) and the
     user's global settings are never touched. Whether a session is the desk is decided by its session id, never by this file."""
     path = os.path.join(h, ".claude", "settings.json")
@@ -11323,6 +11331,7 @@ def refresh_desk_folder(h):
         env.update(ORCHESTRATOR_ENV)
         if os.environ.get("LEAN_AGENT_HOME"):
             env["LEAN_AGENT_HOME"] = os.environ["LEAN_AGENT_HOME"]  # a GUI-launched session finds the same home and socket
+        env["LEAN_AGENT_DESK_FOLDER"] = "1"  # the pane opens by itself in a session of this folder (not in threads)
         data["env"] = env
         sync_desk_settings(data, h)
         if data != cur:
@@ -11371,7 +11380,7 @@ def prepare_threads_home(h):
     t = threads_home(h)
     os.makedirs(os.path.join(t, ".claude"), exist_ok=True)
     settings = os.path.join(t, ".claude", "settings.json")
-    data = orchestrator_settings(load_json(settings, {}))
+    data = orchestrator_settings(load_json(settings, {}), "threads")
     env = dict(data.get("env") or {})
     env.update(ORCHESTRATOR_ENV)
     if os.environ.get("LEAN_AGENT_HOME"):
@@ -11381,13 +11390,39 @@ def prepare_threads_home(h):
     local = os.path.join(t, ".claude", "settings.local.json")
     if os.environ.get("LEAN_AGENT_ORCHESTRATOR_TRIM") != "0":
         save_json(local, dict(load_json(local, {}), syncClaudeAiSkills=False))
+    trust_threads_folder(h)
+
+
+def migrate_thread_transcripts():
+    """At service start, before any thread session starts: copy the transcripts of the open threads from the old desk folder
+    to the threads folder (see service_session.migrate_thread_transcript). Never from sync/doctor/home/context: an older
+    service may still host threads in the old folder and append to those files."""
     try:
-        for th in (lean_threads.load().get("threads") or {}).values():
-            for sid in [th.get("session_id"), *(th.get("session_history") or [])]:
-                if sid and re.fullmatch(r"[0-9a-fA-F-]{36}", sid):
-                    service_session.migrate_thread_transcript(sid)
+        n = service_session.migrate_thread_transcripts((lean_threads.load().get("threads") or {}).values())
+        if n:
+            lean_log.log("info", "threads", f"{n} thread transcript(s) copied to the threads folder")
     except Exception as exc:  # noqa: BLE001 - never blocks the service start
         lean_log.log("warn", "threads", f"thread transcripts not migrated: {exc}")
+
+
+def trust_threads_folder(h):
+    """The threads folder is trusted the way the desk folder is: when <home>/home is trusted (the user ran `lean-agent trust` or
+    accepted the dialog) and the threads folder is not yet, mark it in ~/.claude.json (re-read right before writing; Claude
+    Code writes that file too). Automatic on home/update/service start, so existing users see no new dialog. True when written."""
+    t = threads_home(h)
+    try:
+        if not is_trusted(h) or is_trusted(t):
+            return False
+        cfg = claude_global_config()
+        data = load_json(cfg, None)
+        if not isinstance(data, dict):
+            return False
+        data.setdefault("projects", {}).setdefault(t, {})["hasTrustDialogAccepted"] = True
+        save_json(cfg, data)
+        return True
+    except Exception as exc:  # noqa: BLE001 - never blocks the service start
+        lean_log.log("warn", "threads", f"threads folder not marked trusted: {exc}")
+        return False
 
 
 def cmd_guide(a):
@@ -12811,7 +12846,7 @@ def is_trusted(folder):
                for p in {folder, os.path.realpath(folder)})
 
 
-TRUST_HINT = ("the orchestrator home is not trusted yet, so Claude Code ignores its permission rules and every "
+TRUST_HINT = ("the orchestrator home (or its threads folder) is not trusted yet, so Claude Code ignores its permission rules and every "
               "`lean-agent` command will ask for approval. Fix once with: lean-agent trust")
 
 
@@ -12860,8 +12895,9 @@ def disable_home_mcp(h):
 
 def cmd_trust(a):
     h = prepare_home()
-    if is_trusted(h):
-        print(f"{h} is already trusted.")
+    folders = [f for f in (h, threads_home(h)) if not is_trusted(f)]
+    if not folders:
+        print(f"{h} and {threads_home(h)} are already trusted.")
         return 0
     if a.write_config:
         cfg = claude_global_config()
@@ -12873,17 +12909,19 @@ def cmd_trust(a):
         backup = cfg + ".lean-agent.bak"
         with open(cfg) as src, open(backup, "w") as dst:
             dst.write(src.read())
-        for folder in (h, threads_home(h)):
+        for folder in folders:
             data.setdefault("projects", {}).setdefault(folder, {})["hasTrustDialogAccepted"] = True
         save_json(cfg, data)
-        print(f"Marked {h} as trusted in {cfg} (backup: {backup}).")
+        print(f"Marked {', '.join(folders)} as trusted in {cfg} (backup: {backup}).")
         print("Do this while no Claude Code session is starting up, since Claude Code also writes that file.")
         return 0
-    print(f"Opening Claude Code in {h}.")
-    print("Accept the trust dialog, then type /exit. (Or rerun with --write-config to set it without the dialog.)")
-    os.chdir(h)
-    sys.stdout.flush()
-    return subprocess.run(["claude"]).returncode
+    rc = 0
+    for folder in folders:
+        print(f"Opening Claude Code in {folder}.")
+        print("Accept the trust dialog, then type /exit. (Or rerun with --write-config to set it without the dialog.)")
+        sys.stdout.flush()
+        rc = subprocess.run(["claude"], cwd=folder).returncode or rc
+    return rc
 
 
 def bridge_pointer(h):
@@ -13121,7 +13159,7 @@ def cmd_up(a):
             os.remove(home("chat", "service.json"))  # the transcript chain starts over with the new conversation
         except OSError:
             pass
-    if not is_trusted(h):
+    if not (is_trusted(h) and is_trusted(threads_home(h))):
         print(f"lean-agent: warning: {TRUST_HINT}", file=sys.stderr)
     off = disable_home_mcp(h)
     if off:
@@ -13258,6 +13296,7 @@ def host_session(cmd, extra, env, h, name):
         return th
 
     env["LEAN_AGENT_SESSION_ROLE"] = "main"
+    migrate_thread_transcripts()  # this version hosts the threads from now on: nothing appends to the old files any more
     sessions = service_session.Sessions(thread_host)
     def make_main():
         return service_session.Host(build, env, h, remote_control=True, on_text=on_text, on_stale=on_stale,
@@ -13504,28 +13543,23 @@ def probe_home(h):
     return init, ctx
 
 
-def cmd_context(a):
-    """What the orchestrator's context holds, what of it goes unused, and (--apply) taking that out."""
-    h = prepare_home()
-    trim_path = home("context-trim.json")
-    trim = load_json(trim_path, {})
-    if a.undo:
-        save_json(trim_path, {})
-        prepare_home()
-        print("context: removed lean-agent context's denies and excludes; applies from the next session")
-        return 0
-    paths = orchestrator_transcripts(h)[:a.sessions]
+def context_folder(a, kind, folder):
+    """The analysis of one orchestrator folder (kind desk|threads): its transcripts' tool use, what loads at start, and what
+    the latest conversation holds. Returns (unused tools, flagged instruction files), computed from this folder's own usage."""
+    paths = orchestrator_transcripts(folder)[:a.sessions]
     used = tool_use_counts(paths)
     calls = sum(used.values())
-    print(f"Orchestrator sessions looked at: {len(paths)} (the latest {a.sessions}), {calls} tool calls")
+    label = "front desk" if kind == "desk" else "thread sessions"
+    print(f"[{label}: {folder}]")
+    print(f"Sessions looked at: {len(paths)} (the latest {a.sessions}), {calls} tool calls")
 
     # what loads at start
-    init, ctx = ({}, 0) if a.no_probe else probe_home(h)
+    init, ctx = ({}, 0) if a.no_probe else probe_home(folder)
     if ctx:
         print(f"Start-up context: ~{ctx:,} tokens (system prompt, tools, instruction files; one small Haiku call)")
-    files = home_instruction_files(h)
-    guide = os.path.join(h, "CLAUDE.md")
-    own = {os.path.realpath(guide), os.path.realpath(front_desk_file(h))}  # the guides of the two session roles
+    files = home_instruction_files(folder)
+    guide = front_desk_file(folder) if kind == "desk" else os.path.join(folder, "CLAUDE.md")
+    own = {os.path.realpath(guide)}  # the guide of this folder's role
     extra = [(f, t) for f, t in files if os.path.realpath(f) not in own]
     print("Instruction files: " + ", ".join(f"{os.path.basename(f)} ~{t:,}" for f, t in files))
     flagged_files = [f for f, _ in extra]
@@ -13542,42 +13576,59 @@ def cmd_context(a):
     mcp = [s_.get("name") for s_ in init.get("mcp_servers") or [] if isinstance(s_, dict)]
     if mcp:
         print("  flag: MCP servers still load here: " + ", ".join(mcp) + " (lean-agent up switches them off)")
-    for kind in ("agents", "skills"):
-        names = [x if isinstance(x, str) else x.get("name", "?") for x in init.get(kind) or []]
+    for what in ("agents", "skills"):
+        names = [x if isinstance(x, str) else x.get("name", "?") for x in init.get(what) or []]
         if names:
-            print(f"  flag: {len(names)} {kind} load here ({', '.join(names[:8])}); the orchestrator doesn't use them"
-                  + (" (Agent is denied); they come from your ~/.claude/agents" if kind == "agents" else ""))
+            print(f"  flag: {len(names)} {what} load here ({', '.join(names[:8])}); the orchestrator doesn't use them"
+                  + (" (Agent is denied); they come from your ~/.claude/agents" if what == "agents" else ""))
 
     # what the conversation holds
     if paths:
         items = message_items(paths[0])
         total = sum(t for t, _, _ in items)
         by = {}
-        for t, kind, _ in items:
-            by[kind] = by.get(kind, 0) + t
+        for t, k, _ in items:
+            by[k] = by.get(k, 0) + t
         print(f"Messages now (latest session, since its last compaction): ~{total:,} tokens: "
               + ", ".join(f"{k} ~{v:,}" for k, v in sorted(by.items(), key=lambda kv: -kv[1])))
-        for t, kind, label in sorted(items, key=lambda x: -x[0])[:a.top]:
+        for t, k, lab in sorted(items, key=lambda x: -x[0])[:a.top]:
             if t < 300:
                 break
-            print(f"  ~{t:>6,}  {kind:<9} {label[:80]}")
-            tip = message_advice(kind, label)
+            print(f"  ~{t:>6,}  {k:<9} {lab[:80]}")
+            tip = message_advice(k, lab)
             if tip:
                 print(f"           -> {tip}")
         if total > 20000:
             print("  Messages can't be taken out of a running conversation: `lean-agent checkpoint` for what's "
                   "open, then /compact or /clear.")
+    return unused, flagged_files
 
+
+def cmd_context(a):
+    """What the orchestrator's context holds, what of it goes unused, and (--apply) taking that out. The front desk (<home>/home)
+    and the thread sessions (<home>/threads) are measured, and trimmed, each from its own usage."""
+    h = prepare_home()
+    trim_path = home("context-trim.json")
+    trim = load_json(trim_path, {})
+    if a.undo:
+        save_json(trim_path, {})
+        prepare_home()
+        print("context: removed lean-agent context's denies and excludes; applies from the next session")
+        return 0
+    found = {kind: context_folder(a, kind, folder) for kind, folder in (("desk", h), ("threads", threads_home(h)))}
     if not a.apply:
-        if unused or flagged_files:
+        if any(u or f for u, f in found.values()):
             print("Take the flagged tools and files out of the orchestrator's context: lean-agent context --apply "
                   "(--keep TOOL to keep one; --undo reverts)")
         return 0
-    trim["deny"] = sorted(set(trim.get("deny") or []) | set(unused))
-    trim["exclude"] = sorted(set(trim.get("exclude") or []) | set(flagged_files))
+    for kind, (unused, flagged_files) in found.items():
+        sec = trim if kind == "desk" else trim.setdefault("threads", {})
+        sec["deny"] = sorted(set(sec.get("deny") or []) | set(unused))
+        sec["exclude"] = sorted(set(sec.get("exclude") or []) | set(flagged_files))
     save_json(trim_path, trim)
     prepare_home()
-    print(f"applied: denied {len(unused)} tool(s), excluded {len(flagged_files)} file(s) in {h}/.claude/settings.json; "
+    print("applied: denied " + ", ".join(f"{len(u)} tool(s) for the {k}" for k, (u, _) in found.items())
+          + f"; excluded {sum(len(f) for _, f in found.values())} file(s) in the settings of {h} and {threads_home(h)}; "
           "applies from the next session (or /clear). Undo: lean-agent context --undo")
     return 0
 
@@ -14269,6 +14320,9 @@ def cmd_attribution(a):
         settings = os.path.join(h, ".claude", "settings.json")
         if os.path.isdir(os.path.join(h, ".claude")):
             save_json(settings, orchestrator_settings(load_json(settings, {})))
+            tset = os.path.join(threads_home(h), ".claude", "settings.json")
+            if os.path.isdir(os.path.dirname(tset)):
+                save_json(tset, orchestrator_settings(load_json(tset, {}), "threads"))
     v = attribution()
     if v is None:
         print("attribution: not set yet. Ask the user once: should commits and PRs credit Claude as co-author? "
@@ -15399,7 +15453,7 @@ def _fe(fn, a):
 
 
 def cmd_map(a):
-    if not a.project or a.svg or a.mini or a.watch or getattr(a, "alerts", False) or getattr(a, "pane_check", False) or getattr(a, "usage", False) or getattr(a, "probe", False) or getattr(a, "url", False):
+    if not a.project or a.svg or a.mini or a.watch or getattr(a, "alerts", False) or getattr(a, "pane_check", False) or getattr(a, "usage", False):
         return cmd_live_map(a)
     def run(fe, slug, path, a):
         root = fe.work_dir(slug, path, a.dir)
@@ -18797,10 +18851,18 @@ def retire_map_plugin(say=print, run=subprocess.run, which=shutil.which):
     exe = which("claude")
     if not exe:
         return False
+    manual = 'lean-agent: the pane is part of lean-agent now; remove "Lean agent map" in the app\'s Plugins page'
     try:
         r = run([exe, "plugin", "list", "--json"], capture_output=True, text=True, timeout=20)
-        rows = json.loads(r.stdout) if r.returncode == 0 else []
-    except Exception:  # noqa: BLE001
+        rows = json.loads(r.stdout) if r.returncode == 0 else None
+    except Exception as exc:  # noqa: BLE001
+        lean_log.log("warn", "plugin", f"plugin list failed: {exc}")
+        return False
+    if isinstance(rows, dict):  # tolerate {"plugins": [...]} / {"installed": [...]}
+        rows = next((v for v in rows.values() if isinstance(v, list)), None)
+    if not isinstance(rows, list):
+        lean_log.log("warn", "plugin", "claude plugin list --json: unexpected output, old pane plugin not checked")
+        say(manual)
         return False
     old = [x for x in rows if isinstance(x, dict) and str(x.get("id", "")).split("@")[0] == RETIRED_PLUGIN]
     for x in old:
@@ -18810,7 +18872,7 @@ def retire_map_plugin(say=print, run=subprocess.run, which=shutil.which):
         except Exception:  # noqa: BLE001
             ok = False
         say(f"lean-agent: the pane is part of lean-agent now; removed the old plugin {x['id']}" if ok else
-            'lean-agent: the pane is part of lean-agent now; remove "Lean agent map" in the app\'s Plugins page')
+            manual)
     return bool(old)
 
 
@@ -18832,7 +18894,9 @@ def cmd_update(a):
         return rc
     new = plugin_version()
     if not os.environ.get("LEAN_AGENT_TEST"):
-        retire_map_plugin()
+        t = threading.Thread(target=retire_map_plugin, daemon=True)  # bounded: never holds `update` for long
+        t.start()
+        t.join(8)
     up = load_json(home("up.json"), {})
     running_now = bool(up) and pid_alive(up.get("pid"))
     if not running_now:

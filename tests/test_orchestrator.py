@@ -3057,7 +3057,7 @@ class CliTest(unittest.TestCase):
         self.assertRegex(out, r"~\s*[\d,]+  output    Bash: lean-agent run -p shop -m haiku x")
         self.assertIn("brief mode is off in this session", out)
         out = self.cli("context", "--apply", "--keep", "KeepTool", **env).stdout
-        self.assertIn("denied 1 tool(s), excluded 1 file(s)", out)
+        self.assertIn("denied 1 tool(s) for the desk, 0 tool(s) for the threads; excluded 1 file(s)", out)
         with open(os.path.join(home, ".claude", "settings.json")) as fh:
             data = json.load(fh)
         self.assertIn("NotebookEdit2", data["permissions"]["deny"])
@@ -5138,7 +5138,8 @@ class CliTest(unittest.TestCase):
         home = self.env["LEAN_AGENT_HOME"]
         call = self.thread_calls(log)["t1"]
         self.assertEqual(os.path.realpath(call["cwd"]), os.path.realpath(os.path.join(home, "threads")))
-        self.assertIn(os.path.join(home, "threads").replace(os.sep, "-").strip("-")[-20:], ss.info("t1")["transcript"].replace(os.sep, "-"))
+        slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(os.path.join(home, "threads")))
+        self.assertIn(os.path.join("projects", slug), ss.info("t1")["transcript"])
         self.stop_up(p, 30)
 
     def test_desk_folder_holds_only_the_front_desk_instructions(self):
@@ -5189,6 +5190,70 @@ class CliTest(unittest.TestCase):
         self.assertEqual(call["argv"][-2:], ["--resume", sid])
         self.assertTrue(os.path.exists(new))
         self.stop_up(p, 30)
+
+    def test_threads_folder_is_trusted_on_update_when_the_desk_folder_is(self):
+        cfgfile = os.path.join(self.env["CLAUDE_CONFIG_DIR"], ".claude.json")
+        h = self.cli("home").stdout.strip()
+        t = os.path.join(os.path.dirname(h), "threads")
+        with open(cfgfile, "w") as fh:
+            json.dump({"projects": {h: {"hasTrustDialogAccepted": True}}}, fh)  # an existing user: only the desk folder
+        self.cli("home")  # prepare_home: also what update and the service start run
+        data = json.load(open(cfgfile))
+        self.assertTrue(data["projects"][t]["hasTrustDialogAccepted"])
+        self.assertTrue(data["projects"][h]["hasTrustDialogAccepted"])
+        self.assertIn("already trusted", self.cli("trust").stdout)
+        # an untrusted desk folder is never trusted on the user's behalf
+        with open(cfgfile, "w") as fh:
+            json.dump({"projects": {}}, fh)
+        self.cli("home")
+        self.assertFalse(json.load(open(cfgfile))["projects"].get(t))
+        self.cli("trust", "--write-config")
+        data = json.load(open(cfgfile))
+        self.assertTrue(data["projects"][t]["hasTrustDialogAccepted"] and data["projects"][h]["hasTrustDialogAccepted"])
+
+    def test_migration_copies_only_at_service_start_and_follows_a_growing_old_transcript(self):
+        ss_mod = lean_agent_module().service_session
+        self.cli("home")
+        sid, hist = "bbbbbbbb-2222-3333-4444-555555555555", "cccccccc-2222-3333-4444-555555555555"
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": self.env["LEAN_AGENT_HOME"], "CLAUDE_CONFIG_DIR": self.env["CLAUDE_CONFIG_DIR"]}):
+            old = ss_mod.transcript_path(ss_mod.lean_home("home"), sid)
+            old_h = ss_mod.transcript_path(ss_mod.lean_home("home"), hist)
+            new = ss_mod.transcript_path(ss_mod.threads_dir(), sid)
+            os.makedirs(os.path.dirname(old))
+            for f in (old, old_h):
+                with open(f, "w") as fh:
+                    fh.write("{}\n")
+            # home/doctor/sync/context never copy: an older service may still append to the old file
+            self.cli("home")
+            self.cli("doctor", "--fix", check=False)
+            self.assertFalse(os.path.exists(new))
+            rec = {"session_id": sid, "session_history": [hist]}
+            self.assertEqual(ss_mod.migrate_thread_transcripts([rec]), 2)  # service start
+            self.assertEqual(ss_mod.migrate_thread_transcripts([rec]), 0)  # idempotent
+            self.assertTrue(os.path.exists(ss_mod.transcript_path(ss_mod.threads_dir(), hist)))
+            with open(old, "a") as fh:  # the old service kept appending after the copy
+                fh.write('{"turn": 2}\n')
+            os.utime(old, (time.time() + 5, time.time() + 5))
+            self.assertEqual(ss_mod.thread_transcript(sid), old)  # the fuller one is found
+            self.assertEqual(ss_mod.migrate_thread_transcripts([rec]), 1)  # the restart brings the new copy up to date
+            self.assertEqual(open(new).read(), open(old).read())
+            self.assertEqual(ss_mod.thread_transcript(sid), new)
+
+    def test_context_and_compare_measure_the_threads_folder_for_threads(self):
+        h = self.cli("home").stdout.strip()
+        t = os.path.join(os.path.dirname(h), "threads")
+        with open(os.path.join(self.env["LEAN_AGENT_HOME"], "context-trim.json"), "w") as fh:
+            json.dump({"deny": ["Grep"], "threads": {"deny": ["Glob"], "exclude": ["/x/y.md"]}}, fh)
+        self.cli("home")
+        desk = json.load(open(os.path.join(h, ".claude", "settings.json")))
+        thr = json.load(open(os.path.join(t, ".claude", "settings.json")))
+        self.assertIn("Grep", desk["permissions"]["deny"])
+        self.assertIn("Glob", desk["permissions"]["deny"])  # in the orchestrator deny list anyway
+        self.assertNotIn("/x/y.md", desk["claudeMdExcludes"])
+        self.assertIn("/x/y.md", thr["claudeMdExcludes"])
+        out = self.cli("context", "--no-probe").stdout
+        self.assertIn(f"[thread sessions: {t}]", out)
+        self.assertIn(f"[front desk: {h}]", out)
 
     def test_reopen_and_send_after_close_start_a_new_session_from_a_brief(self):
         p, log, ss, old = self.closed_thread_with_history()
