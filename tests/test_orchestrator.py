@@ -1142,6 +1142,53 @@ class CliTest(unittest.TestCase):
         self.cli("advise", "do the steps", "--project", "proj", check=False)
         self.assertNotIn("EXECUTE the task", self.calls()[-1]["append"])
 
+    def advise_private_setup(self, hidden=True):
+        """proj (public), other (public, thread t5's), vault (private, holds the latest run)."""
+        home = self.env["LEAN_AGENT_HOME"]
+        self.cli("learn", self.proj)
+        for name in ("other", "vault"):
+            d = os.path.join(os.path.dirname(self.proj), name)
+            os.makedirs(d, exist_ok=True)
+            self.cli("learn", d)
+        with open(os.path.join(home, "projects.json")) as fh:
+            projs = json.load(fh)
+        slug = {os.path.basename(v["path"]): k for k, v in projs.items()}
+        projs[slug["vault"]]["private"] = True
+        with open(os.path.join(home, "projects.json"), "w") as fh:
+            json.dump(projs, fh)
+        with open(os.path.join(home, "ledger.jsonl"), "a") as fh:
+            for rid, name in (("0101-000001-aaaa", "proj"), ("0101-000002-bbbb", "vault")):
+                fh.write(json.dumps({"id": rid, "project": slug[name], "role": "worker", "task": "t", "status": "done",
+                                     "ts": "2026-01-01T00:00:00", "started": "2026-01-01T00:00:00", "model": "sonnet"}) + "\n")
+        with open(os.path.join(home, "threads.json"), "w") as fh:
+            json.dump({"threads": {"t5": {"project": slug["other"], "created": "2026-01-01T00:00:00"}},
+                       "aliases": {}, "overrides": {}}, fh)
+        if hidden:
+            with open(os.path.join(home, "config.json"), "w") as fh:
+                json.dump({"private": "off"}, fh)
+        return slug
+
+    def test_advise_never_falls_back_onto_a_hidden_private_project(self):
+        slug = self.advise_private_setup()
+        p = self.cli("advise", "do it", FAKE_ANSWER="ADVICE\nline 1")
+        self.assertNotIn("private projects are hidden", p.stdout + p.stderr)
+        self.assertIn(f"project {slug['proj']}", self.calls()[-1]["task"])  # the latest non-hidden run's project
+        self.cli("advise", "do it", "--thread", "t5", FAKE_ANSWER="ADVICE\nline 1")
+        self.assertIn(f"project {slug['other']}", self.calls()[-1]["task"])
+        self.cli("advise", "do it", FAKE_ANSWER="ADVICE\nline 1", LEAN_AGENT_THREAD="t5")  # the calling thread
+        self.assertIn(f"project {slug['other']}", self.calls()[-1]["task"])
+
+    def test_advise_refuses_only_an_explicitly_named_hidden_private_project(self):
+        slug = self.advise_private_setup()
+        p = self.cli("advise", "do it", "--project", slug["vault"], check=False, FAKE_ANSWER="ADVICE\nline 1")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn(f"{slug['vault']} is a private project and private projects are hidden (lean-agent private on shows them)", p.stderr)
+        self.cli("private", "on")
+        self.cli("advise", "do it", "--project", slug["vault"], FAKE_ANSWER="ADVICE\nline 1")
+        self.assertIn(f"project {slug['vault']}", self.calls()[-1]["task"])
+        self.cli("advise", "do it", FAKE_ANSWER="ADVICE\nline 1")  # shown again: the latest run (vault) is fine
+        self.assertIn(f"project {slug['vault']}", self.calls()[-1]["task"])
+
     def test_worker_reply_in_advisor_format_is_flagged_and_partial(self):
         self.cli("learn", self.proj)
         p = self.cli("run", "-p", "proj", "-m", "haiku", "--why", "x", "do the steps",

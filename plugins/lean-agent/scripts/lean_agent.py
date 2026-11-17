@@ -17519,11 +17519,36 @@ End your answer with one line per outcome and nothing after them:
 REMEMBER_LINE_RE = re.compile(r"^(REMEMBERED|UNCHANGED|CONFLICT) \S+ \S.*$", re.M)
 
 
+def held_project_msg(slug):
+    return f"{slug} is a private project and private projects are hidden (lean-agent private on shows them)"
+
+
+def thread_project(tid):
+    """The project a thread works in: its own tag, else its latest run's."""
+    if not tid:
+        return None
+    t = (lean_threads.load()["threads"].get(tid) or {})
+    return t.get("project") or next((r["project"] for r in reversed(ledger())
+                                     if r.get("thread") == tid and r.get("project")), None)
+
+
 def role_project(a, who):
-    """(slug, path) of the project a role worker runs in: --project, else the latest run's, else the first."""
+    """(slug, path) of the project a role worker runs in: --project, else the (calling) thread's, else the latest
+    run's, else the first. Never a hidden private project unless the caller named it (or its thread) explicitly."""
     projs = projects()
-    ref = a.project or next((r["project"] for r in reversed(ledger()) if r.get("project") in projs), None) \
-        or next(iter(projs), None)
+    hid = lambda p: lean_private.hides(project=p)
+    if a.project:
+        if hid(resolve_project(a.project)[0]):
+            die(held_project_msg(resolve_project(a.project)[0]))
+        return resolve_project(a.project)
+    explicit = getattr(a, "thread", None)
+    tid = lean_threads.resolve_tag(explicit) if explicit else lean_threads.resolve_tag(os.environ.get("LEAN_AGENT_THREAD") or "none")
+    ref = thread_project(tid)
+    if tid and explicit and lean_private.hides(thread=tid):
+        die(f"thread {tid} is private and private projects are hidden (lean-agent private on shows them)")
+    if not ref or ref not in projs or hid(ref):
+        ref = next((r["project"] for r in reversed(ledger()) if r.get("project") in projs and not hid(r["project"])), None) \
+            or next((p for p in projs if not hid(p)), None)
     return resolve_project(ref) if ref else die(f"no project to run the {who} in: --project <p> (or lean-agent learn <path>)")
 
 
@@ -17845,8 +17870,6 @@ def cmd_advise(a):
     if not what:
         die('what? lean-agent advise "<the user\'s request>" [--project <p>] [--thread <tag>]   (or --task-file -)')
     slug, path = role_project(a, "advisor")
-    if lean_private.hides(project=slug):
-        die(lean_private.HELD_MSG)
     projs = {k: v for k, v in projects().items() if not lean_private.hides(project=k)}
     thread = thread_key(a.thread) or "main"
     lean = os.path.join(PLUGIN_ROOT, "bin", "lean-agent")
