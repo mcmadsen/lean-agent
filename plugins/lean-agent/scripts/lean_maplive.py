@@ -9,8 +9,11 @@ import os
 import queue
 import secrets
 import select
+import shutil
 import socket
 import struct
+import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -27,6 +30,56 @@ LOG_EVERY_S = 60.0
 POLL_S = 10.0  # a page that polled this recently counts as watching
 PING_S = 25.0
 FILE = "map-live.json"
+DEFAULT_PORT = 47821  # the stable, bookmarkable port (LEAN_AGENT_MAP_PORT changes it; busy -> an OS-chosen one)
+REFRESH_FILE = "refresh.json"
+REFRESH_EVERY = 3.0  # a registered page file is rewritten at most this often, and only when the map changed
+HEARTBEAT = 20.0  # ... or when it is this old (so a quiet map is not mistaken for a stopped refresh)
+REFRESH_MIN = 30  # default minutes a `map --html` file keeps refreshing
+
+
+def wanted_port():
+    try:
+        p = int(os.environ.get("LEAN_AGENT_MAP_PORT") or DEFAULT_PORT)
+        return p if 0 <= p < 65536 else DEFAULT_PORT
+    except ValueError:
+        return DEFAULT_PORT
+
+
+def refresh_path(home):
+    return os.path.join(home, "map", REFRESH_FILE)
+
+
+def _atomic(path, text, mode=0o600):
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def load_refresh(home):
+    """{absolute file path: expiry epoch} of the page files the service keeps fresh."""
+    try:
+        with open(refresh_path(home)) as fh:
+            d = json.load(fh).get("files")
+        return {str(k): float(v) for k, v in d.items()} if isinstance(d, dict) else {}
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {}
+
+
+def register_refresh(home, path, minutes=None, now=None):
+    """Registers (or extends) `path` for `minutes` (default 30); returns the expiry. Expired entries are dropped."""
+    now = time.time() if now is None else now
+    try:
+        minutes = float(REFRESH_MIN if minutes is None else minutes)
+    except (TypeError, ValueError):
+        minutes = float(REFRESH_MIN)
+    files = {k: v for k, v in load_refresh(home).items() if v > now}
+    files[os.path.abspath(path)] = now + max(0.0, minutes) * 60
+    os.makedirs(os.path.dirname(refresh_path(home)), exist_ok=True)
+    _atomic(refresh_path(home), json.dumps({"files": files}))
+    return files[os.path.abspath(path)]
 
 
 def live_path(home):
@@ -88,8 +141,12 @@ def parse_frames(buf):
 
 
 class Live:
-    def __init__(self, snapshot, home, interval=INTERVAL, max_clients=MAX_CLIENTS):
+    def __init__(self, snapshot, home, interval=INTERVAL, max_clients=MAX_CLIENTS, port=None):
         self.snapshot = snapshot
+        self.want_port = wanted_port() if port is None else port
+        self.fallback = False
+        self.rwake = threading.Event()
+        self.rwritten = {}  # file -> (hash, monotonic of the last write)
         self.home = home
         self.interval = interval
         self.max_clients = max_clients
@@ -112,7 +169,14 @@ class Live:
     def start(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("127.0.0.1", 0))
+        try:
+            s.bind(("127.0.0.1", self.want_port))
+        except OSError:
+            s.close()
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", 0))
+            self.fallback = bool(self.want_port)
         s.listen(16)
         s.settimeout(0.5)
         self.lsock, self.port = s, s.getsockname()[1]
@@ -121,16 +185,20 @@ class Live:
         tmp = p + f".{os.getpid()}.tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as fh:
-            json.dump({"port": self.port, "token": self.token, "pid": os.getpid()}, fh)
+            json.dump({"port": self.port, "token": self.token, "pid": os.getpid(),
+                       **({"fallback": True, "wanted": self.want_port} if self.fallback else {})}, fh)
         os.chmod(tmp, 0o600)
         os.replace(tmp, p)
         threading.Thread(target=self._accept, daemon=True).start()
         threading.Thread(target=self._loop, daemon=True).start()
+        threading.Thread(target=self._refresh_loop, daemon=True).start()
+        self.rwake.set()  # a registration made before the service started
         return self
 
     def stop(self):
         self.stopped.set()
         self.wake.set()
+        self.rwake.set()
         try:
             self.lsock.close()
         except Exception:
@@ -251,6 +319,8 @@ class Live:
 
     def on_request(self, op, req):
         """Called by the service socket per request; cheap and never raises."""
+        if op == "map":
+            self.rwake.set()  # `map --html` just registered a file: the refresher looks again
         if not self.clients:
             return
         try:
@@ -283,6 +353,56 @@ class Live:
             if self.stopped.wait(self.interval):
                 break
 
+    # -- file refresh (viewers that can only reload a file) -----------------------------------------------------------
+    def _refresh_once(self, now=None):
+        """Rewrites every unexpired registered file when the map changed (or the file is HEARTBEAT old). Returns how many
+        files are still registered (0 = nothing to do: the loop then sleeps until the next `map --html`)."""
+        now = time.time() if now is None else now
+        files = {k: v for k, v in load_refresh(self.home).items() if v > now}
+        if not files:
+            self.rwritten = {}
+            if load_refresh(self.home):
+                try:
+                    _atomic(refresh_path(self.home), json.dumps({"files": {}}))
+                except OSError:
+                    pass
+            return 0
+        snap = self.get_snap()
+        h = _sha(snap)
+        mono = time.monotonic()
+        page = None
+        for p in files:
+            last = self.rwritten.get(p)
+            if last and last[0] == h and mono - last[1] < HEARTBEAT and os.path.exists(p):
+                continue
+            if page is None:
+                page = build_html(snap, endpoint(self.home))
+            try:
+                if os.path.isdir(os.path.dirname(p)):
+                    _atomic(p, page)
+                    self.rwritten[p] = (h, mono)
+            except OSError:
+                pass
+        for p in [k for k in self.rwritten if k not in files]:
+            self.rwritten.pop(p, None)
+        return len(files)
+
+    def _refresh_loop(self):
+        while not self.stopped.is_set():
+            try:
+                n = self._refresh_once()
+            except Exception as exc:  # noqa: BLE001 - never takes the service down
+                try:
+                    self._fail(exc)
+                except Exception:
+                    pass
+                n = 1
+            if n == 0:
+                self.rwake.wait()
+                self.rwake.clear()
+            elif self.stopped.wait(REFRESH_EVERY):
+                break
+
     # -- connections ---------------------------------------------------------------------------------------------------
     def _accept(self):
         while not self.stopped.is_set():
@@ -313,11 +433,18 @@ class Live:
             hdr[k.strip().lower()] = v.strip()
         u = urllib.parse.urlsplit(parts[1])
         tok = (urllib.parse.parse_qs(u.query).get("t") or [""])[0]
+        key = hdr.get("sec-websocket-key")
+        is_ws = hdr.get("upgrade", "").lower() == "websocket"
+        if not tok and not is_ws and (u.path or "/") == "/" and not u.query and hdr.get("host", "") in self.hosts():
+            self._route(conn, "/", {})  # the bookmarkable page: only for the endpoint's own Host (no DNS rebinding)
+            return None
         if not hmac.compare_digest(tok.encode(), self.token.encode()):
             self._http(conn, 403, "Forbidden")
             return None
-        key = hdr.get("sec-websocket-key")
-        if hdr.get("upgrade", "").lower() != "websocket":
+        if is_ws and hdr.get("origin", "null") not in self.origins():
+            self._http(conn, 403, "Forbidden")
+            return None
+        if not is_ws:
             self._route(conn, u.path or "/", urllib.parse.parse_qs(u.query))
             return None
         if "upgrade" not in hdr.get("connection", "").lower() or not key or hdr.get("sec-websocket-version") != "13":
@@ -337,6 +464,12 @@ class Live:
         conn.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                       f"Sec-WebSocket-Accept: {acc}\r\n\r\n").encode())
         return buf.split(b"\r\n\r\n", 1)[1]
+
+    def hosts(self):
+        return (f"127.0.0.1:{self.port}", f"localhost:{self.port}")
+
+    def origins(self):
+        return ("null", f"http://127.0.0.1:{self.port}", f"http://localhost:{self.port}")
 
     @staticmethod
     def _http(conn, code, text):
@@ -483,7 +616,11 @@ def doctor_line(home, wait=3.0):
     """(ok True/None, text) for `doctor`."""
     st, why = check(home, wait)
     if st == "up":
-        return True, "live map page endpoint: up (127.0.0.1 only, sends snapshots)"
+        d = endpoint(home) or {}
+        if d.get("fallback"):
+            return None, (f"live map page endpoint: up on port {d.get('port')} (the stable port {d.get('wanted')} was busy, so the URL "
+                          "changed; free it or set LEAN_AGENT_MAP_PORT)")
+        return True, f"live map page endpoint: up (127.0.0.1:{d.get('port')} only, sends snapshots)"
     if st == "no-snapshot":
         return None, f"live map page endpoint: accepts but sends no snapshot ({why})"
     if st == "token":
@@ -492,9 +629,42 @@ def doctor_line(home, wait=3.0):
 
 
 def page_url(home):
-    """http://127.0.0.1:<port>/?t=<token> of the running endpoint, or None."""
+    """The stable, token-free http://127.0.0.1:<port>/ of the running endpoint, or None."""
     d = endpoint(home)
-    return f"http://127.0.0.1:{d['port']}/?t={urllib.parse.quote(d['token'])}" if d else None
+    return f"http://127.0.0.1:{d['port']}/" if d else None
+
+
+def open_app(home, platform=None, env=None, apps_dirs=None, popen=None):
+    """Opens the stable URL in a chromeless app window of the user's own machine and returns at once.
+    -> (ok, message). Starts nothing when the endpoint is down."""
+    u = page_url(home)
+    if not u or not is_up(home):
+        return False, "live map endpoint not running: start the service (lean-agent up), then run lean-agent map --app again"
+    platform = platform or sys.platform
+    env = dict(os.environ if env is None else env)
+    pop = popen or (lambda cmd: subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                                   start_new_session=True, env=env))
+    try:
+        if platform == "darwin":
+            dirs = apps_dirs if apps_dirs is not None else ["/Applications", os.path.expanduser("~/Applications")]
+            for app in ("Google Chrome", "Microsoft Edge", "Brave Browser", "Chromium"):
+                if any(os.path.isdir(os.path.join(d, app + ".app")) for d in dirs):
+                    pop(["open", "-na", app, "--args", "--app=" + u])
+                    return True, f"opened {u} in a {app} app window"
+            pop(["open", u])
+            return True, f"opened {u} in the default browser"
+        for b in ("google-chrome", "chromium", "microsoft-edge", "brave-browser"):
+            exe = shutil.which(b, path=env.get("PATH"))
+            if exe:
+                pop([exe, "--app=" + u])
+                return True, f"opened {u} in a {b} app window"
+        exe = shutil.which("xdg-open", path=env.get("PATH"))
+        if exe:
+            pop([exe, u])
+            return True, f"opened {u} in the default browser"
+    except OSError as exc:
+        return False, f"could not open a browser ({exc}); open {u} yourself"
+    return False, f"no browser found to start; open {u} yourself"
 
 
 def is_up(home, timeout=0.5):
@@ -519,12 +689,13 @@ CSS = """
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--tx);font:13px/1.4 Inter,system-ui,-apple-system,Segoe UI,sans-serif;overflow-x:hidden}
 .mono{font-family:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace}
-#app{max-width:1216px;margin:0 auto;padding:24px 32px 24px}
+#app{max-width:1600px;margin:0 auto;padding:24px 32px 24px}
 header{display:flex;align-items:center;justify-content:space-between;gap:16px 24px;flex-wrap:wrap}
 h1{font-size:24px;line-height:30px;font-weight:700;letter-spacing:-.01em;margin:0}
 #sub{color:var(--mu);margin-top:4px}
 #chips{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .pill{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;background:var(--card);color:var(--tx2);font-size:13px;white-space:nowrap}
+.pill[hidden]{display:none}.pill.good{background:var(--okbg);color:var(--oktx)}.pill.bad{background:var(--badbg);color:var(--badtx)}
 .pill.warn{background:var(--warnbg);color:var(--warntx)}
 #pill{background:var(--okbg);color:var(--oktx);font-weight:500}
 #pill .dot{width:8px;height:8px;border-radius:50%;background:var(--ok)}
@@ -540,7 +711,8 @@ button:focus-visible,.nd:focus-visible,a:focus-visible{outline:2px solid var(--r
 #stage svg.edges{position:absolute;left:0;top:0;overflow:visible;pointer-events:none}
 .nd{position:absolute;display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--card);border:1px solid var(--bd);border-radius:12px;color:var(--mu);font-size:13px;line-height:18px;cursor:pointer;overflow:hidden}
 .nd b{color:var(--tx);font-weight:600}.nd .t{font-size:15px}
-.nd .tx{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nd .tx span{display:block;overflow:hidden;text-overflow:ellipsis}
+.nd .tx{min-width:0;flex:1;overflow:hidden;display:flex;flex-direction:column;gap:1px}.nd .tx>span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nr .nd{padding:8px 8px;gap:6px;font-size:12px;line-height:15px}.nr .nd .t{font-size:13px}.nr .nd .tx>span.sl{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .nd svg.i{flex:none}
 .nd.live{border:2px solid var(--ok)}
 .nd.dash{background:var(--park-bg);border:1px dashed var(--park-bd)}
@@ -555,8 +727,8 @@ button:focus-visible,.nd:focus-visible,a:focus-visible{outline:2px solid var(--r
 #more{position:absolute;color:var(--mu);font-size:12px}
 footer{display:flex;align-items:center;justify-content:space-between;gap:12px 24px;margin-top:20px;padding-top:16px;border-top:1px solid var(--line);color:var(--mu);flex-wrap:wrap}
 #legend{display:flex;align-items:center;gap:8px 20px;flex-wrap:wrap}
-#legend span{display:inline-flex;align-items:center;gap:8px}
-#panel{position:fixed;top:72px;right:16px;width:340px;max-height:calc(100vh - 96px);overflow:auto;background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px 16px;box-shadow:0 8px 28px rgba(0,0,0,.35);display:none;z-index:5}
+#legend .lg{display:inline-flex;align-items:center;gap:8px;height:28px;padding:0 8px;border:1px solid transparent;background:none;color:var(--mu);border-radius:6px}.lg[aria-pressed=false]{opacity:.4;text-decoration:line-through}.lg:hover{border-color:var(--bd)}
+#panel{position:fixed;top:72px;right:16px;width:380px;max-height:calc(100vh - 96px);overflow:auto;background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px 16px;box-shadow:0 8px 28px rgba(0,0,0,.35);display:none;z-index:7}
 #panel.open{display:block}
 #panel h2{font-size:16px;margin:0 28px 8px 0;word-break:break-word}
 #panel dl{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:0}
@@ -564,20 +736,72 @@ footer{display:flex;align-items:center;justify-content:space-between;gap:12px 24
 #panel h3{font-size:12px;color:var(--mu);margin:12px 0 4px;text-transform:uppercase;letter-spacing:.04em}
 #panel ul{margin:0;padding:0 0 0 16px}
 #panel .x{position:absolute;top:8px;right:8px;height:28px;padding:0 10px}
+#bar{display:flex;align-items:center;gap:8px 10px;flex-wrap:wrap;margin-top:14px}
+#q{height:36px;min-width:0;flex:1 1 200px;max-width:340px;padding:0 12px;border-radius:8px;border:1px solid var(--bd);background:var(--card);color:var(--tx);font:inherit}
+#q:focus-visible{outline:2px solid var(--req);outline-offset:1px}
+button.tg[aria-pressed=true],#ftog[aria-pressed=true]{background:var(--hk-bg);border-color:var(--hk-bd);color:var(--hk-tx)}
+#fc{color:var(--mu);font-size:12px}
+#main{display:flex;align-items:flex-start;gap:16px}#mapcol{flex:1;min-width:0}
+#feed{display:none;width:300px;flex:none;position:sticky;top:12px;max-height:calc(100vh - 24px);margin-top:20px;background:var(--card);border:1px solid var(--bd);border-radius:12px;overflow:hidden;flex-direction:column}
+#main.fo #feed{display:flex}
+#feed .fh{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--line)}
+#feed .fh button{height:28px;padding:0 10px}
+#fl{list-style:none;margin:0;padding:4px 0;overflow:auto;flex:1}
+#fl li{margin:0}#fl .empty{color:var(--mu);padding:12px}
+.fl{display:grid;grid-template-columns:auto auto 1fr;gap:0 8px;width:100%;height:auto;text-align:left;border:0;border-left:3px solid var(--idle);border-radius:0;background:none;padding:5px 12px;font-size:12px;line-height:16px;align-items:baseline}
+.fl:hover{background:var(--line)}
+.fl time{color:var(--mu);font-variant-numeric:tabular-nums}.fl b{color:var(--tx);font-weight:600;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fl em{display:none}.fl span{grid-column:1/-1;color:var(--tx2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fl.k-tool{border-left-color:var(--req)}.fl.k-message{border-left-color:var(--ok)}.fl.k-run{border-left-color:var(--rep)}.fl.k-error{border-left-color:var(--bad)}.fl.k-error span{color:var(--badtx)}
+#tlw{margin-top:16px;background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:10px 12px}
+#tlw h2{font-size:13px;margin:0 0 6px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}#tlc{color:var(--mu);font-weight:400}
+#tl{max-height:240px;overflow-y:auto;overflow-x:hidden}#tl svg{display:block}
+#tl .gl{stroke:var(--line);stroke-width:1}#tl .ax{fill:var(--mu);font-size:10px}#tl .rl{fill:var(--tx2);font-size:11px;cursor:pointer}
+#tl .tk{cursor:pointer}#tl .tk.ok{fill:var(--ok)}#tl .tk.er{fill:var(--bad)}#tl .tk:focus-visible{outline:2px solid var(--req)}#tl .tk:hover{stroke:var(--tx);stroke-width:1}
+#tip{position:fixed;z-index:9;pointer-events:none;background:var(--tx);color:var(--bg);padding:4px 8px;border-radius:6px;font-size:12px;max-width:80vw;display:none}#tip.on{display:block}
+.nd .now{display:flex;align-items:center;gap:6px;color:var(--oktx);font-weight:500}.nd .now>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pd{flex:none;width:7px;height:7px;border-radius:50%;background:var(--ok);animation:pd 1.2s ease-in-out infinite}
+@keyframes pd{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.7)}}
+.nd .chs{display:flex;gap:4px;flex-wrap:nowrap;overflow:hidden;margin-top:1px}
+.ch,.eb,.mb{flex:none;font-size:11px;line-height:14px;padding:1px 6px;border-radius:999px;white-space:nowrap}
+.ch{background:var(--line);color:var(--tx2)}.eb{background:var(--badbg);color:var(--badtx);font-weight:600}.mb{background:var(--hk-bg);color:var(--hk-tx);border:1px solid var(--hk-bd);overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0}
+.nd .br{color:var(--mu);font-size:11px}
+.nd .tb{display:flex;align-items:center;gap:6px}.nd .bar{flex:1;height:5px;border-radius:3px;background:var(--line);overflow:hidden}.nd .bar i{display:block;height:100%;background:var(--req)}.nd .tn{font-size:11px;color:var(--mu);font-variant-numeric:tabular-nums}
+#panel table{width:100%;border-collapse:collapse;font-size:12px}#panel th{text-align:left;color:var(--mu);font-weight:500;padding:2px 4px}#panel td{padding:2px 4px;border-top:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px}
+#panel tr.er td{color:var(--badtx)}
+@media(prefers-reduced-motion:reduce){.pd{animation:none}}
+@media(max-width:999px){#feed{position:fixed;left:0;right:0;bottom:0;top:auto;width:auto;max-height:42vh;margin:0;border-radius:12px 12px 0 0;z-index:6;box-shadow:0 -8px 28px rgba(0,0,0,.3)}#main{display:block}}
 @media(max-width:700px){#app{padding:16px 12px}h1{font-size:20px}#chips{width:100%}
-#panel{top:auto;bottom:0;right:0;left:0;width:auto;max-height:60vh;border-radius:12px 12px 0 0}}
-"""
+#panel{top:auto;bottom:0;right:0;left:0;width:auto;max-height:60vh;border-radius:12px 12px 0 0}#q{max-width:none}}
 
+"""
 JS = r"""
 (function(){
 var SNAP=JSON.parse(document.getElementById('snap').textContent),EP=JSON.parse(document.getElementById('ep').textContent);
 var KC={message:'--ok',report:'--rep',request:'--req',idle:'--idle',bad:'--bad'};
-var pulses=[],P={},raf=0,ws=null,delay=1000,gotLive=false,stopped=false,fails=0,paused=false,pendingSnap=null,selId=null,rcv=Date.now(),lastChip=['',''];
+var pulses=[],P={},raf=0,ws=null,delay=1000,gotLive=false,stopped=false,fails=0,paused=false,pendingSnap=null,selId=null,rcv=Date.now(),lastChip=['',''],dirty=0;
 var srvErr='',mode='',viol=[],codes=[],base=EP&&EP.port?'http://127.0.0.1:'+EP.port:'',tq=EP&&EP.token?'t='+encodeURIComponent(EP.token):'';
+var ST={q:'',idle:0,err:0,feed:null,hide:[]},SKEY='lean-agent-map-ui';
+try{var _s=JSON.parse(localStorage.getItem(SKEY)||'{}');if(_s&&typeof _s==='object'){ST.q=String(_s.q||'').slice(0,80);ST.idle=_s.idle?1:0;ST.err=_s.err?1:0;
+  ST.feed=typeof _s.feed==='boolean'?_s.feed:null;ST.hide=Array.isArray(_s.hide)?_s.hide.filter(function(k){return KC[k]}):[]}}catch(e){}
+function save(){try{localStorage.setItem(SKEY,JSON.stringify(ST))}catch(e){}}
+// state that must survive a reload of a file page (localStorage may be blocked there too) rides in location.hash
+var HS={},isFile=location.protocol==='file:',sameOrigin=!!(EP&&EP.port&&String(location.port)===String(EP.port)&&/^(127\.0\.0\.1|localhost)$/.test(location.hostname));
+try{String(location.hash||'').replace(/^#/,'').split('&').forEach(function(p){var i=p.indexOf('=');if(i>0)HS[p.slice(0,i)]=decodeURIComponent(p.slice(i+1))})}catch(e){}
+if(HS.fr==='1'){if('q' in HS)ST.q=String(HS.q).slice(0,80);if('i' in HS)ST.idle=HS.i==='1'?1:0;if('e' in HS)ST.err=HS.e==='1'?1:0;if('f' in HS&&HS.f!=='')ST.feed=HS.f==='1';
+  if('x' in HS)ST.hide=String(HS.x).split(',').filter(function(k){return KC[k]});if(HS.s)selId=HS.s}
+function saveHash(ts,lf){var h=['fr=1','lt='+encodeURIComponent(ts),'lf='+lf,'q='+encodeURIComponent(ST.q),'i='+ST.idle,'e='+ST.err,'f='+(ST.feed===null?'':ST.feed?1:0),'x='+ST.hide.join(','),'y='+Math.round(window.pageYOffset||0)];
+  if(selId)h.push('s='+encodeURIComponent(selId));try{history.replaceState(null,'','#'+h.join('&'))}catch(e){location.hash=h.join('&')}}
 function $(i){return document.getElementById(i)}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function clip(s,n){s=String(s||'');return s.length>n?s.slice(0,n-1)+'…':s}
 function dur(s){s=Math.max(0,Math.floor(s||0));return s<90?s+' s':s<5400?Math.round(s/60)+' min':Math.round(s/3600)+' h'}
+function num(v){return typeof v==='number'&&isFinite(v)?v:null}
+function fmtN(n){n=+n||0;return n>=1e6?(n/1e6).toFixed(1).replace(/\.0$/,'')+'M':n>=1e4?Math.round(n/1e3)+'k':n>=1e3?(n/1e3).toFixed(1).replace(/\.0$/,'')+'k':String(Math.round(n))}
+function usd(v){return '$'+(+v||0).toFixed(2)}
+function p2(n){return n<10?'0'+n:''+n}
+function clock(ts){var d=new Date(ts*1000);return isNaN(d.getTime())?'':p2(d.getHours())+':'+p2(d.getMinutes())+':'+p2(d.getSeconds())}
+function act(n){var a=n&&n.activity;return a&&typeof a==='object'?a:null}
 function paint(){var e=$('chip'),pl=$('pill');
   if(paused){e.textContent='paused';pl.className='pill paused'}else{e.textContent=lastChip[0];pl.className='pill '+(lastChip[1]==='live'?'':lastChip[1])}}
 function chip(t,c){lastChip=[t,c||''];paint()}
@@ -587,107 +811,221 @@ document.addEventListener('securitypolicyviolation',function(e){
   var u=String(e.blockedURI||'').split('?')[0];viol.push((e.violatedDirective||'?')+(u?' ('+u+')':''));if(viol.length>6)viol.shift();
   if(!mode)why(reason())});
 function placedSet(s){var o={};(Array.isArray(s.placed)?s.placed:[]).forEach(function(i){o[i]=1});return o}
+// ---- filters
+function isIdle(n){var a=act(n);if(a&&a.now&&a.now.tool)return false;return n.state==='idle'||n.state==='parked'||n.state==='orphaned'}
+function hasErr(n){var a=act(n);return n.state==='undelivered'||n.state==='dead'||!!(a&&a.errors>0)}
+function hay(n){var a=act(n),h=[n.id,n.label,n.kind,n.state,n.detail,n.model];
+  if(a){if(a.now)h.push(a.now.tool,a.now.target);(Array.isArray(a.top)?a.top:[]).forEach(function(t){h.push(t&&t[0])});
+    (Array.isArray(a.recent)?a.recent:[]).forEach(function(r){h.push(r&&r.tool,r&&r.target)});(Array.isArray(a.mcp)?a.mcp:[]).forEach(function(m){h.push(m)})}
+  return h.join(' ').toLowerCase()}
+function passes(n){if(ST.idle&&isIdle(n))return false;if(ST.err&&!hasErr(n))return false;if(ST.q&&hay(n).indexOf(ST.q.toLowerCase())<0)return false;return true}
+function view(s){
+  var ns=s.nodes||[],ok=placedSet(s),byid={},keep={},all=0,kept=0;ns.forEach(function(n){byid[n.id]=n});
+  var filt=!!(ST.idle||ST.err||ST.q);
+  ns.forEach(function(n){if(!ok[n.id]||n.kind!=='worker')return;if(passes(n)){keep[n.id]=1;var pa=n.parent;if(pa&&ok[pa]&&byid[pa]&&byid[pa].kind==='thread')keep[pa]=1}});
+  ns.forEach(function(n){if(!ok[n.id]||n.kind!=='thread')return;if(passes(n))keep[n.id]=1});
+  var pl=(Array.isArray(s.placed)?s.placed:[]).filter(function(i){var n=byid[i];if(!n)return false;all++;var k=filt?(n.kind!=='thread'&&n.kind!=='worker'?true:!!keep[i]):true;if(k)kept++;return k});
+  var o={};for(var k in s)o[k]=s[k];o.placed=pl;o._hidden=all-kept;return o}
 // ---- layout (stage coordinates; the stage is scaled to the window)
-function dims(wide){return wide?{W:1152,dw:208,dh:96,sw:240,sh:96,tw:208,th:80,ww:128,wh:64,hw:192,hh:72,xd:0,xs:336,xt:736,xw:1024,hy:150}
-  :{W:520,dw:104,dh:80,sw:116,sh:84,tw:132,th:70,ww:100,wh:56,hw:124,hh:60,xd:0,xs:132,xt:276,xw:420,hy:130}}
+function dims(wide){return wide?{W:1040,dw:216,dh:112,sw:216,sh:96,tw:232,th:100,ww:292,wh:96,hw:192,hh:72,xd:0,xs:248,xt:500,xw:748,hy:150,nr:0}
+  :{W:520,dw:100,dh:112,sw:124,sh:96,tw:140,th:112,ww:124,wh:104,hw:124,hh:60,xd:0,xs:112,xt:248,xw:396,hy:140,nr:1}}
 function layout(s,D){
   var ns=s.nodes||[],ok=placedSet(s),byid={},p={};ns.forEach(function(n){byid[n.id]=n});
   var th=ns.filter(function(n){return n.kind==='thread'&&ok[n.id]});
   th.sort(function(a,b){return a.id.length-b.id.length||(a.id<b.id?-1:a.id>b.id?1:0)});
   var wk={};ns.forEach(function(n){if(n.kind!=='worker'||!ok[n.id])return;
     var k=(n.parent&&byid[n.parent]&&byid[n.parent].kind==='thread'&&ok[n.parent])?n.parent:'main';(wk[k]=wk[k]||[]).push(n)});
-  var slots=th.map(function(t){return Math.max(D.th+16,((wk[t.id]||[]).length)*(D.wh+6))});
-  var tot=slots.reduce(function(a,b){return a+b},0),H=Math.max(tot+20,560),y=(H-tot)/2,cy=H/2;
+  var slots=th.map(function(t){return Math.max(D.th+16,Math.min(3,(wk[t.id]||[]).length)*(D.wh+6))});
+  var nm=Math.min(3,(wk.main||[]).length);
+  var tot=slots.reduce(function(a,b){return a+b},0),H=Math.max(tot+20,560,D.dh+40+2*nm*(D.wh+6)),y=(H-tot)/2,cy=H/2;
   th.forEach(function(t,i){var c=y+slots[i]/2;p[t.id]={cx:D.xt+D.tw/2,cy:c,w:D.tw,h:D.th};
     (wk[t.id]||[]).slice(0,3).forEach(function(w,j,a){p[w.id]={cx:D.xw+D.ww/2,cy:c+(j-(a.length-1)/2)*(D.wh+6),w:D.ww,h:D.wh}});y+=slots[i]});
-  p.main={cx:D.xd+D.dw/2,cy:cy,w:D.dw,h:D.dh};p.service={cx:D.xs+D.sw/2,cy:cy,w:D.sw,h:D.sh};
-  p.hooks={cx:D.xs+D.sw/2,cy:cy+D.hy,w:D.hw,h:D.hh};
+  if(byid.main)p.main={cx:D.xd+D.dw/2,cy:cy,w:D.dw,h:D.dh};
+  if(byid.service)p.service={cx:D.xs+D.sw/2,cy:cy,w:D.sw,h:D.sh};
+  if(byid.hooks)p.hooks={cx:D.xs+D.sw/2,cy:cy+D.hy,w:D.hw,h:D.hh};
   (wk.main||[]).slice(0,3).forEach(function(w,j){p[w.id]={cx:D.xd+D.dw/2,cy:cy+D.dh/2+20+D.wh/2+j*(D.wh+6),w:D.dw,h:D.wh}});
   return {p:p,H:H,th:th}}
+// where the ray from the point (px,py) heading (dx,dy) leaves the card rect c (the point lies inside it)
 function exitPt(c,dx,dy,px,py){var tx=dx?((dx>0?1:-1)*c.w/2-(px-c.cx))/dx:1e9,ty=dy?((dy>0?1:-1)*c.h/2-(py-c.cy))/dy:1e9,t=Math.max(0,Math.min(tx,ty));return[px+dx*t,py+dy*t]}
 // ---- node cards
 var DOT=function(f,c,r){return '<svg class="i" aria-hidden="true" width="'+r*2+'" height="'+r*2+'" viewBox="0 0 '+r*2+' '+r*2+'"><circle cx="'+r+'" cy="'+r+'" r="'+(f?r:r-1)+'" '+(f?'fill="var('+c+')"':'fill="none" stroke="var('+c+')" stroke-width="2"')+'/></svg>'};
 function stline(n){var st=String(n.state||''),d=String(n.detail||'');return !d||d===st?st:d.indexOf(st)===0?d:st+' · '+d}
+function nowText(a){if(!a||!a.now||!a.now.tool)return '';var sec=Math.floor((num(a.now.since_s)||0)+(Date.now()-rcv)/1000);return a.now.tool+(a.now.target?' · '+a.now.target:'')+' · '+Math.max(0,sec)+' s'}
+function actHtml(n,nr){var a=act(n);if(!a)return '';var o=[],nt=nowText(a);
+  if(nt)o.push('<span class="now"><i class="pd"></i><span>'+esc(nt)+'</span></span>');
+  var c=[];(Array.isArray(a.top)?a.top:[]).slice(0,nr?2:4).forEach(function(t){if(Array.isArray(t)&&t[0]!=null)c.push('<span class="ch">'+esc(t[0]+' '+(t[1]==null?'':t[1]))+'</span>')});
+  if(num(a.errors)>0)c.push('<span class="eb" title="'+esc(a.errors+' failed tool call(s) in the last 30 min')+'">'+esc(a.errors)+(nr?'':' err')+'</span>');
+  if(Array.isArray(a.mcp)&&a.mcp.length)c.push('<span class="mb" title="'+esc('MCP servers: '+a.mcp.join(', '))+'">MCP '+esc(a.mcp.join(', '))+'</span>');
+  if(c.length)o.push('<span class="chs">'+c.join('')+'</span>');
+  return o.join('')}
+function tipOf(n){var a=act(n),t=[(n.label||n.id)+' ('+n.kind+')',stline(n)],s=n.stats;
+  if(a){var nt=nowText(a);if(nt)t.push('now: '+nt);if(Array.isArray(a.top)&&a.top.length)t.push('tools: '+a.top.map(function(x){return x&&x[0]+' '+x[1]}).join(', '));
+    if(num(a.errors)>0)t.push(a.errors+' errors (30 min)');if(num(a.files)!=null)t.push(a.files+' files (30 min)');if(Array.isArray(a.mcp)&&a.mcp.length)t.push('MCP: '+a.mcp.join(', '))}
+  if(s&&typeof s==='object'){var q=[];if(s.model)q.push(s.model);if(num(s.usd)!=null)q.push(usd(s.usd));if(num(s.tokens)!=null)q.push(fmtN(s.tokens)+' tokens');if(num(s.turns)!=null)q.push('turn '+s.turns+(s.max_turns?'/'+s.max_turns:''));if(s.branch)q.push('branch '+s.branch);t.push(q.join(' · '))}
+  return t.join('\n')}
 function cardHtml(n,c,s){
-  var st=n.state,cls='',inner='';
+  var st=n.state,cls='',inner='',nr=!!c.nr;
   var live=st==='active'||st==='alive',bad=st==='undelivered'||st==='dead',dash=st==='idle'||st==='parked'||st==='orphaned';
   if(n.kind==='service'){var sv=s.service||{};cls='svc';
     inner='<svg class="i" aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg><span class="tx"><b class="t">Service socket</b><span>service.sock · '+esc(sv.socket_ms!=null?sv.socket_ms:'–')+' ms</span><span>'+esc((sv.threads|0)+' threads · up '+dur(sv.up_s))+'</span></span>'}
-  else if(n.kind==='desk'){inner=DOT(1,live||st==='active'?'--ok':'--idle',5)+'<span class="tx"><b class="t">Front desk</b><span>main · English to you</span><span>'+esc(n.detail||st)+'</span></span>'}
+  else if(n.kind==='desk'){inner=DOT(1,live||st==='active'?'--ok':'--idle',5)+'<span class="tx"><b class="t">Front desk</b><span>'+esc('main · '+(n.detail||st))+'</span>'+actHtml(n,nr)+'</span>'}
   else if(n.kind==='hooks'){cls='hk';inner='<svg class="i" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--req)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v6a3 3 0 0 0 6 0V3"/><path d="M12 12v9"/></svg><span class="tx"><b style="font-size:14px">Hooks</b><span>tool calls · '+esc(n.per_min!=null?n.per_min:parseInt(n.detail,10)||0)+' a min</span></span>'}
   else if(n.kind==='thread'){cls=bad?'bad':live?'live':dash?'dash':'';
-    inner=DOT(live||bad||st==='active'?1:st==='done'?1:0,bad?'--bad':live?'--ok':st==='done'?'--rep':'--idle',5)+'<span class="tx"><span><b class="mono">'+esc(n.id)+'</b> '+esc(clip(n.label===n.id?'':n.label,26))+'</span><span>'+esc(stline(n))+'</span></span>'}
-  else{cls='wk '+(bad?'bad':live?'live':dash?'dash':'');
-    inner='<span class="tx"><span><b class="mono">'+esc(n.label)+'</b></span><span>'+esc((n.model||'worker')+' · '+dur(n.age_s))+'</span><span>'+esc(st==='done'?'done · result ready':st+(n.progress_s!=null&&live?' · '+dur(n.progress_s)+' ago':''))+'</span></span>'}
-  return '<div class="nd '+cls+(selId===n.id?' sel':'')+'" tabindex="0" role="button" data-id="'+esc(n.id)+'" aria-label="'+esc(n.kind+' '+(n.label||n.id)+', '+stline(n))+'" style="left:'+(c.cx-c.w/2)+'px;top:'+(c.cy-c.h/2)+'px;width:'+c.w+'px;height:'+c.h+'px">'+inner+'</div>'}
-// ---- edges
+    inner=DOT(live||bad||st==='active'?1:st==='done'?1:0,bad?'--bad':live?'--ok':st==='done'?'--rep':'--idle',5)+'<span class="tx"><span><b class="mono">'+esc(n.id)+'</b> '+esc(clip(n.label===n.id?'':n.label,nr?18:30))+'</span><span class="sl">'+esc(stline(n))+'</span>'+actHtml(n,nr)+'</span>'}
+  else{cls='wk '+(bad?'bad':live?'live':dash?'dash':'');var t=n.stats&&typeof n.stats==='object'?n.stats:null,l2,bar='';
+    if(t){var m=[st==='done'?'done':st];if(t.model||n.model)m.push(t.model||n.model);if(num(t.usd)!=null)m.push(usd(t.usd));if(num(t.tokens)!=null)m.push(fmtN(t.tokens)+' tok');l2=m.join(' · ');
+      if(num(t.turns)!=null){var mx=num(t.max_turns),pc=mx>0?Math.max(2,Math.min(100,t.turns/mx*100)):0;
+        bar='<span class="tb" title="'+esc('turn '+t.turns+(mx?' of '+mx:''))+'"><span class="bar"><i style="width:'+pc.toFixed(0)+'%"></i></span><span class="tn">'+esc(t.turns+(mx?'/'+mx:''))+'</span></span>'}}
+    else l2=(n.model||'worker')+' · '+dur(n.age_s)+' · '+(st==='done'?'result ready':st+(n.progress_s!=null&&live?' · '+dur(n.progress_s)+' ago':''));
+    inner='<span class="tx"><span><b class="mono">'+esc(n.label)+'</b>'+(t&&t.branch&&!nr?' <span class="br mono">'+esc(clip(t.branch,24))+'</span>':'')+'</span><span class="sl">'+esc(l2)+'</span>'+bar+actHtml(n,nr)+'</span>'}
+  return '<div class="nd '+cls+(selId===n.id?' sel':'')+'" tabindex="0" role="button" data-id="'+esc(n.id)+'" title="'+esc(tipOf(n))+'" aria-label="'+esc(n.kind+' '+(n.label||n.id)+', '+stline(n))+'" style="left:'+(c.cx-c.w/2)+'px;top:'+(c.cy-c.h/2)+'px;width:'+c.w+'px;height:'+c.h+'px">'+inner+'</div>'}
+// ---- edges (each runs from the border of one card to the border of the other)
 function edgeSvg(s,p,W,H){
   var o=['<svg class="edges" width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'" aria-hidden="true"><defs>'];
-  Object.keys(KC).forEach(function(k){o.push('<marker id="a-'+k+'" orient="auto" markerWidth="6" markerHeight="6" refX="2" refY="2" overflow="visible"><path d="M0 0L4 2L0 4z" style="fill:var('+KC[k]+')"/></marker>')});
+  Object.keys(KC).forEach(function(k){o.push('<marker id="a-'+k+'" orient="auto" markerWidth="6" markerHeight="6" refX="4" refY="2" overflow="visible"><path d="M0 0L4 2L0 4z" style="fill:var('+KC[k]+')"/></marker>')});
   o.push('</defs>');
   var groups={},list=[];
-  (s.edges||[]).forEach(function(e){if(!p[e.from]||!p[e.to])return;var k=[e.from,e.to].sort().join('|');(groups[k]=groups[k]||[]).push(e);list.push(e)});
+  (s.edges||[]).forEach(function(e){if(!p[e.from]||!p[e.to])return;var kd=e.bad?'bad':KC[e.kind]?e.kind:'idle';if(ST.hide.indexOf(kd)>=0)return;e._k=kd;var k=[e.from,e.to].sort().join('|');(groups[k]=groups[k]||[]).push(e);list.push(e)});
   var nIdle=list.filter(function(e){return e.kind==='idle'&&!e.bad}).length;
   Object.keys(groups).forEach(function(k){var g=groups[k];g.forEach(function(e,i){
-    var a=p[e.from],b=p[e.to],dx=b.cx-a.cx,dy=b.cy-a.cy,L=Math.sqrt(dx*dx+dy*dy)||1,off=(i-(g.length-1)/2)*16,ids=[e.from,e.to].sort(),c0=p[ids[0]],c1=p[ids[1]],cx=c1.cx-c0.cx,cy=c1.cy-c0.cy,CL=Math.sqrt(cx*cx+cy*cy)||1,ox=-cy/CL*off,oy=cx/CL*off;
+    var a=p[e.from],b=p[e.to],dx=b.cx-a.cx,dy=b.cy-a.cy,off=(i-(g.length-1)/2)*16,ids=[e.from,e.to].sort(),c0=p[ids[0]],c1=p[ids[1]],cx=c1.cx-c0.cx,cy=c1.cy-c0.cy,CL=Math.sqrt(cx*cx+cy*cy)||1,ox=-cy/CL*off,oy=cx/CL*off;
     var q1=exitPt(a,dx,dy,a.cx+ox,a.cy+oy),q2=exitPt(b,-dx,-dy,b.cx+ox,b.cy+oy);
-    var kd=e.bad?'bad':KC[e.kind]?e.kind:'idle',idle=kd==='idle',age=(e.age_s||0),col='var('+KC[kd]+')';
-    o.push('<line data-age="'+age+'" data-idle="'+(idle?1:0)+'" x1="'+q1[0].toFixed(1)+'" y1="'+q1[1].toFixed(1)+'" x2="'+q2[0].toFixed(1)+'" y2="'+q2[1].toFixed(1)+'" stroke-width="'+(idle?1.5:2)+'" stroke-linecap="round" style="stroke:'+col+'"'+(idle?' stroke-dasharray="6 6" opacity=".6"':' marker-end="url(#a-'+kd+')" opacity="'+Math.max(.3,1-.7*Math.min(age,30)/30).toFixed(2)+'"')+'/>');
+    var kd=e._k,idle=kd==='idle',age=(e.age_s||0),col='var('+KC[kd]+')';
+    o.push('<line data-age="'+age+'" data-idle="'+(idle?1:0)+'" data-from="'+esc(e.from)+'" data-to="'+esc(e.to)+'" x1="'+q1[0].toFixed(1)+'" y1="'+q1[1].toFixed(1)+'" x2="'+q2[0].toFixed(1)+'" y2="'+q2[1].toFixed(1)+'" stroke-width="'+(idle?1.5:2)+'" stroke-linecap="round" style="stroke:'+col+'"'+(idle?' stroke-dasharray="6 6" opacity=".6"':' marker-end="url(#a-'+kd+')" opacity="'+Math.max(.3,1-.7*Math.min(age,30)/30).toFixed(2)+'"')+'/>');
     if(e.label&&(!idle||nIdle<=4))o.push('<text class="elabel" x="'+((q1[0]+q2[0])/2).toFixed(1)+'" y="'+((q1[1]+q2[1])/2-6).toFixed(1)+'" text-anchor="middle" style="fill:'+(idle?'var(--mu)':kd==='request'?'var(--reqtx)':col)+'">'+esc(clip(e.label,28))+'</text>')})});
   o.push('<g id="pl"></g></svg>');return o.join('')}
-// ---- render
+// ---- render (batched: snapshots only mark the page dirty, one pass runs per animation frame)
+function schedule(){if(dirty)return;dirty=1;var f=function(){dirty=0;render()};if(typeof requestAnimationFrame==='function')requestAnimationFrame(f);else setTimeout(f,16)}
 function render(){
-  var s=SNAP,wrap=$('wrap'),cw=wrap.clientWidth||600,wide=cw>=1000,D=dims(wide),sc=Math.min(cw/D.W,wide?1:1.6);
-  rcv=Date.now();chips(s);
-  if(!s.service||!s.service.up||!(s.nodes||[]).length){
-    wrap.style.height='120px';wrap.innerHTML='<div style="padding:40px 0;text-align:center;color:var(--mu);font-size:15px">Service not running · inbox '+(s.inbox|0)+'</div>';P={};return}
-  var act=document.activeElement,keep=act&&act.getAttribute&&act.getAttribute('data-id'),L=layout(s,D),byid={};
+  var s0=SNAP,wrap=$('wrap');rcv=Date.now();chips(s0);feedPanel();syncUi();
+  var cw=wrap.clientWidth||600,wide=cw>=700,D=dims(wide),sc=Math.min(cw/D.W,wide?1:1.6);
+  if(!s0.service||!s0.service.up||!(s0.nodes||[]).length){
+    wrap.style.height='120px';wrap.innerHTML='<div style="padding:40px 0;text-align:center;color:var(--mu);font-size:15px">Service not running · inbox '+(s0.inbox|0)+'</div>';P={};timeline(s0);return}
+  var s=view(s0),act0=document.activeElement,keep=act0&&act0.getAttribute&&act0.getAttribute('data-id'),L=layout(s,D),byid={};
   (s.nodes||[]).forEach(function(n){byid[n.id]=n});P=L.p;
   var h=[edgeSvg(s,L.p,D.W,L.H)];
-  Object.keys(L.p).forEach(function(id){if(byid[id])h.push(cardHtml(byid[id],L.p[id],s))});
-  if((s.more|0)>0)h.push('<div id="more" style="left:'+(D.xt)+'px;top:'+(L.H-18)+'px;width:'+D.tw+'px;text-align:center">+'+(s.more|0)+' more</div>');
+  Object.keys(L.p).forEach(function(id){if(byid[id]){var c=L.p[id];c.nr=D.nr;h.push(cardHtml(byid[id],c,s))}});
+  var more=(s.more|0);
+  if(more>0)h.push('<div id="more" style="left:'+(D.xt)+'px;top:'+(L.H-18)+'px;width:'+D.tw+'px;text-align:center">+'+more+' more</div>');
   wrap.style.height=Math.ceil((L.H)*sc)+'px';
-  wrap.innerHTML='<div id="stage" style="width:'+D.W+'px;height:'+L.H+'px;transform:scale('+sc+')">'+h.join('')+'</div>';
+  wrap.innerHTML='<div id="stage" class="'+(D.nr?'nr':'')+'" style="width:'+D.W+'px;height:'+L.H+'px;transform:scale('+sc+')">'+h.join('')+'</div>';
+  $('fc').textContent=s._hidden>0?s._hidden+' hidden by filters':'';
   if(keep){var el=wrap.querySelector('[data-id="'+keep.replace(/"/g,'')+'"]');if(el)try{el.focus({preventScroll:true})}catch(e){}}
+  timeline(s);
   if(selId)fillPanel()}
 function chips(s){var sv=s.service||{},w=0;(s.nodes||[]).forEach(function(n){if(n.kind==='worker'&&(n.state==='alive'||n.state==='orphaned'))w++});
   $('sub').textContent='lean-agent'+(sv.version?' '+sv.version:'')+' · service socket · updates as messages move';
   $('ms').textContent=sv.socket_ms!=null&&sv.up?' · '+sv.socket_ms+' ms':'';
   $('cpu').textContent='Service CPU '+(sv.cpu_pct!=null?Math.round(sv.cpu_pct):'–')+'%';
   $('wk').textContent=w+(w===1?' worker':' workers');
-  var ib=$('inbox');ib.textContent='Inbox '+(s.inbox|0);ib.className='pill'+((s.inbox|0)>0?' warn':'')}
+  var ib=$('inbox');ib.textContent='Inbox '+(s.inbox|0);ib.className='pill'+((s.inbox|0)>0?' warn':'');
+  var t=s.totals&&typeof s.totals==='object'?s.totals:{};
+  function pill(id,v,txt,tip,cls){var e=$(id);if(v==null){e.hidden=true;return}e.hidden=false;e.textContent=txt;e.title=tip||'';e.className='pill'+(cls?' '+cls:'')}
+  pill('runs',num(t.runs_today),num(t.runs_today)+(t.runs_today===1?' run today':' runs today'));
+  pill('usd',num(t.usd_today),usd(t.usd_today)+' today',num(t.tokens_today)!=null?fmtN(t.tokens_today)+' tokens today':'');
+  pill('saved',num(t.saved_today),'saved ~'+fmtN(t.saved_today)+' tokens today','Tokens lean-agent kept out of the model context today','good');
+  pill('tpm',num(t.tools_per_min),(+t.tools_per_min).toFixed(t.tools_per_min>=10?0:1)+' tools/min');
+  pill('errs',num(t.errors_30m)>0?t.errors_30m:null,t.errors_30m+(t.errors_30m===1?' error':' errors')+' (30 min)','Failed tool calls in the last 30 minutes','bad')}
+function syncUi(){
+  var q=$('q');if(q.value!==ST.q&&document.activeElement!==q)q.value=ST.q;
+  [['fidle','idle'],['ferr','err']].forEach(function(x){var b=$(x[0]);b.setAttribute('aria-pressed',ST[x[1]]?'true':'false')});
+  var ls=document.querySelectorAll('#legend .lg');for(var i=0;i<ls.length;i++)ls[i].setAttribute('aria-pressed',ST.hide.indexOf(ls[i].getAttribute('data-k'))>=0?'false':'true');
+  var fo=feedOpen();$('main').className=fo?'fo':'';$('ftog').setAttribute('aria-pressed',fo?'true':'false');
+  var n=Array.isArray(SNAP.feed)?SNAP.feed.length:0;$('ftog').textContent='Activity'+(n?' '+n:'')}
+function feedOpen(){return ST.feed===null?(window.innerWidth||1280)>=1200:!!ST.feed}
+// ---- activity feed
+function feedPanel(){
+  var f=Array.isArray(SNAP.feed)?SNAP.feed.slice(0,30):[],o=[];
+  f.forEach(function(x){if(!x||typeof x!=='object')return;var k=/^(tool|message|run|error)$/.test(x.kind)?x.kind:'tool';
+    o.push('<li><button type="button" class="fl k-'+k+'" data-node="'+esc(x.node)+'" title="'+esc(clock(x.ts)+' '+x.node+' '+x.text)+'"><time>'+esc(clock(x.ts))+'</time><b class="mono">'+esc(x.node)+'</b><em>'+k+'</em><span>'+esc(x.text)+'</span></button></li>')});
+  $('fl').innerHTML=o.length?o.join(''):'<li class="empty">No tool activity yet</li>'}
+// ---- timeline: the last 10 minutes, one row per placed node, one tick per tool event (a single SVG)
+var TLW=600,tlev=[];
+function timeline(s){
+  $('tlw').hidden=false;var host=$('tl'),rows=[],ids=Object.keys(P).filter(function(i){return i!=='service'&&i!=='hooks'}),byid={},evs=[],mx=0;
+  (s.nodes||[]).forEach(function(n){byid[n.id]=n});
+  ids.sort(function(a,b){return (a==='main'?-1:0)-(b==='main'?-1:0)});
+  ids.forEach(function(i){var n=byid[i];if(!n)return;rows.push(n);var a=act(n);if(a&&Array.isArray(a.recent))a.recent.forEach(function(r){if(r&&num(r.ts)!=null&&num(r.ts)>mx)mx=r.ts})});
+  var now=Date.now()/1000;if(mx&&now-mx>600)now=mx+5;
+  var W=Math.max(280,host.clientWidth||TLW),L=96,RW=W-L-10,RH=16,H=rows.length*RH+20,o=['<svg width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'" role="group" aria-label="Tool events in the last 10 minutes, one row per node">'],cnt=0;
+  [0,2,4,6,8,10].forEach(function(m){var x=L+RW-m/10*RW;o.push('<line x1="'+x.toFixed(1)+'" y1="14" x2="'+x.toFixed(1)+'" y2="'+H+'" class="gl"/>');
+    if(m%5===0||W>520)o.push('<text x="'+x.toFixed(1)+'" y="10" text-anchor="'+(m===0?'end':m===10?'start':'middle')+'" class="ax">'+(m===0?'now':'-'+m+' min')+'</text>')});
+  rows.forEach(function(n,r){var y=20+r*RH,a=act(n);
+    o.push('<text x="'+(L-6)+'" y="'+(y+9)+'" text-anchor="end" class="rl" data-node="'+esc(n.id)+'">'+esc(clip(n.kind==='desk'?'desk':n.kind==='worker'?(n.label||n.id):n.id,12))+'<title>'+esc(n.label||n.id)+'</title></text>');
+    if(a&&Array.isArray(a.recent))a.recent.slice(0,20).forEach(function(e){if(!e||num(e.ts)==null)return;var age=now-e.ts;if(age<0||age>600)return;cnt++;
+      var x=L+RW-age/600*RW,tip=clock(e.ts)+' '+(n.label||n.id)+' · '+e.tool+(e.target?' · '+e.target:'')+(e.ok===false?' · failed':' · ok')+(num(e.ms)!=null?' · '+e.ms+' ms':'');
+      o.push('<rect class="tk '+(e.ok===false?'er':'ok')+'" x="'+(x-1.5).toFixed(1)+'" y="'+(y+1)+'" width="3" height="11" rx="1" tabindex="0" data-node="'+esc(n.id)+'" data-tip="'+esc(tip)+'" aria-label="'+esc(tip)+'"/>')})});
+  o.push('</svg>');
+  host.innerHTML=rows.length?o.join(''):'';$('tlw').hidden=!rows.length;$('tlc').textContent=cnt?cnt+' events':'no tool events in the last 10 minutes'}
+function showTip(t){var tp=$('tip');if(!t){tp.className='';return}tp.textContent=t.getAttribute('data-tip');tp.className='on';
+  var r=t.getBoundingClientRect(),w=tp.offsetWidth;tp.style.left=Math.max(4,Math.min(window.innerWidth-w-4,r.left+r.width/2-w/2))+'px';tp.style.top=(r.top-tp.offsetHeight-6)+'px'}
+$('tl').addEventListener('mouseover',function(e){showTip(e.target.classList&&e.target.classList.contains('tk')?e.target:null)});
+$('tl').addEventListener('mouseout',function(){showTip(null)});
+$('tl').addEventListener('focusin',function(e){showTip(e.target.classList&&e.target.classList.contains('tk')?e.target:null)});
+$('tl').addEventListener('focusout',function(){showTip(null)});
+$('tl').addEventListener('click',function(e){var t=e.target.closest&&e.target.closest('[data-node]');if(t)openPanel(t.getAttribute('data-node'))});
 // ---- details panel
 function fillPanel(){
   var s=SNAP,n=null;(s.nodes||[]).forEach(function(x){if(x.id===selId)n=x});
   if(!n){closePanel();return}
-  var r=[],sk={id:1,kind:1,label:1,state:1,detail:1,per_min:1,placed:1};
+  var r=[],a=act(n),st=n.stats&&typeof n.stats==='object'?n.stats:null;
   function row(k,v){if(v==null||v==='')return;r.push('<dt>'+esc(k)+'</dt><dd>'+esc(v)+'</dd>')}
   row('Kind',n.kind);row('Id',n.id);row('Label',n.label);row('State',n.state);row('Detail',n.detail);
   if(n.parent)row('Parent thread',n.parent);if(n.model)row('Model',n.model);
   if(n.age_s!=null&&n.kind==='worker')row('Running for',dur(n.age_s));if(n.progress_s!=null)row('Last progress',dur(n.progress_s)+' ago');
   if(n.ended_s!=null)row('Ended',dur(n.ended_s)+' ago');if(n.kind==='thread'){row('Quiet for',dur(n.idle_s));row('Mid-turn',n.mid?'yes':'no')}
   if(n.per_min!=null)row('Tool calls a min',n.per_min);
+  if(st){row('Worker model',st.model);if(num(st.turns)!=null)row('Turns',st.turns+(st.max_turns?' of '+st.max_turns:''));if(num(st.tokens)!=null)row('Tokens',fmtN(st.tokens)+' ('+st.tokens+')');
+    if(num(st.usd)!=null)row('Cost',usd(st.usd));if(num(st.context)!=null)row('Context',fmtN(st.context)+' tokens');row('Branch',st.branch);if(num(st.elapsed_s)!=null)row('Elapsed',dur(st.elapsed_s))}
+  if(a){if(num(a.files)!=null)row('Files touched (30 min)',a.files);if(num(a.errors)!=null)row('Failed calls (30 min)',a.errors);
+    if(Array.isArray(a.mcp)&&a.mcp.length)row('MCP servers',a.mcp.join(', '));
+    if(Array.isArray(a.top)&&a.top.length)row('Top tools',a.top.map(function(t){return t&&t[0]+' '+t[1]}).join(', '));
+    var nt=nowText(a);if(nt)row('In progress',nt)}
   if(n.kind==='service'){var sv=s.service||{};row('Version',sv.version);row('Process',sv.pid);row('CPU',sv.cpu_pct!=null?sv.cpu_pct+' %':'');row('Socket latency',sv.socket_ms!=null?sv.socket_ms+' ms':'');row('Threads',sv.threads);row('Up',dur(sv.up_s))}
   if(n.kind==='desk'){row('Inbox',s.inbox|0);row('Paused',s.paused?'yes':'no')}
   var el=[],now=(Date.now()-rcv)/1000;
   (s.edges||[]).forEach(function(e){if(e.from!==n.id&&e.to!==n.id)return;
     el.push('<li>'+esc((e.from===n.id?'to ':'from ')+(e.from===n.id?e.to:e.from)+' · '+e.kind+(e.label?' · '+e.label:'')+' · '+dur((e.age_s||0)+now)+' ago'+(e.bad?' · stuck':''))+'</li>')});
   var ml=[];(s.moving||[]).forEach(function(m){if(m.node===n.id)ml.push('<li>'+esc(m.text+' · '+dur((m.age_s||0)+now)+' ago')+'</li>')});
+  var rc=a&&Array.isArray(a.recent)?a.recent.slice(0,20):[],tb='';
+  if(rc.length)tb='<h3>Recent tool calls</h3><table id="rt"><thead><tr><th>Time</th><th>Tool</th><th>Target</th><th>ms</th><th>OK</th></tr></thead><tbody>'+rc.map(function(e){
+    return '<tr class="'+(e.ok===false?'er':'')+'"><td>'+esc(clock(e.ts))+'</td><td>'+esc(e.tool)+'</td><td title="'+esc(e.target)+'">'+esc(clip(e.target,22))+'</td><td>'+esc(num(e.ms)!=null?e.ms:'')+'</td><td>'+(e.ok===false?'✗ failed':'✓')+'</td></tr>'}).join('')+'</tbody></table>';
+  var fl=[];(Array.isArray(s.feed)?s.feed:[]).forEach(function(x){if(x&&x.node===n.id)fl.push('<li>'+esc(clock(x.ts)+' · '+x.text)+'</li>')});
   var pn=$('panel');
-  pn.innerHTML='<button type="button" class="x" id="px" aria-label="Close details">Close</button><h2>'+esc(n.label||n.id)+'</h2><dl>'+r.join('')+'</dl>'
+  pn.innerHTML='<button type="button" class="x" id="px" aria-label="Close details">Close</button><h2>'+esc(n.label||n.id)+'</h2><dl>'+r.join('')+'</dl>'+tb
     +'<h3>Lines</h3>'+(el.length?'<ul>'+el.join('')+'</ul>':'<div style="color:var(--mu)">none</div>')
-    +(ml.length?'<h3>Recent messages</h3><ul>'+ml.join('')+'</ul>':'');
+    +(ml.length?'<h3>Recent messages</h3><ul>'+ml.join('')+'</ul>':'')
+    +(fl.length?'<h3>Feed</h3><ul id="pfeed">'+fl.slice(0,12).join('')+'</ul>':'');
   pn.className='open';pn.setAttribute('aria-label','Details of '+(n.label||n.id));$('px').onclick=closePanel}
 function openPanel(id){selId=id;fillPanel();var m=$('wrap').querySelectorAll('.nd');for(var i=0;i<m.length;i++)m[i].classList.toggle('sel',m[i].getAttribute('data-id')===id);var x=$('px');if(x)x.focus()}
 function closePanel(){var id=selId;selId=null;$('panel').className='';$('panel').innerHTML='';var m=$('wrap').querySelectorAll('.nd.sel');for(var i=0;i<m.length;i++)m[i].classList.remove('sel');
   if(id){var el=$('wrap').querySelector('[data-id="'+String(id).replace(/"/g,'')+'"]');if(el)try{el.focus({preventScroll:true})}catch(e){}}}
 $('wrap').addEventListener('click',function(e){var t=e.target.closest&&e.target.closest('.nd');if(t)openPanel(t.getAttribute('data-id'))});
-$('wrap').addEventListener('keydown',function(e){if((e.key==='Enter'||e.key===' ')&&e.target.classList&&e.target.classList.contains('nd')){e.preventDefault();openPanel(e.target.getAttribute('data-id'))}});
-document.addEventListener('keydown',function(e){if(e.key==='Escape'&&selId)closePanel()});
+$('fl').addEventListener('click',function(e){var t=e.target.closest&&e.target.closest('[data-node]');if(t)openPanel(t.getAttribute('data-node'))});
+// ---- keyboard: Enter/Space opens, arrows move between cards, / searches, Esc closes
+function nav(from,key){
+  var a=P[from];if(!a)return null;var best=null,bs=1e18;
+  Object.keys(P).forEach(function(id){if(id===from)return;var b=P[id],dx=b.cx-a.cx,dy=b.cy-a.cy,al=key==='ArrowRight'?dx:key==='ArrowLeft'?-dx:key==='ArrowDown'?dy:-dy,pe=(key==='ArrowRight'||key==='ArrowLeft')?Math.abs(dy):Math.abs(dx);
+    if(al<=4)return;var sc=al+pe*2.5;if(sc<bs){bs=sc;best=id}});
+  return best}
+$('wrap').addEventListener('keydown',function(e){var t=e.target;if(!t.classList||!t.classList.contains('nd'))return;
+  if(e.key==='Enter'||e.key===' '){e.preventDefault();openPanel(t.getAttribute('data-id'));return}
+  if(/^Arrow(Left|Right|Up|Down)$/.test(e.key)){e.preventDefault();var id=nav(t.getAttribute('data-id'),e.key);
+    if(id){var el=$('wrap').querySelector('[data-id="'+String(id).replace(/"/g,'')+'"]');if(el)el.focus()}}});
+document.addEventListener('keydown',function(e){
+  var t=e.target,typing=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA');
+  if(e.key==='/'&&!typing&&!e.ctrlKey&&!e.metaKey&&!e.altKey){e.preventDefault();$('q').focus();$('q').select();return}
+  if(e.key==='Escape'){if(selId){closePanel();return}if(typing){t.blur();return}if(feedOpen()){ST.feed=false;save();syncUi()}}});
+$('q').addEventListener('input',function(){ST.q=this.value.slice(0,80);save();schedule()});
+$('fidle').addEventListener('click',function(){ST.idle=ST.idle?0:1;save();render()});
+$('ferr').addEventListener('click',function(){ST.err=ST.err?0:1;save();render()});
+$('ftog').addEventListener('click',function(){ST.feed=!feedOpen();save();render()});
+$('fx').addEventListener('click',function(){ST.feed=false;save();render()});
+$('legend').addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('.lg');if(!b)return;var k=b.getAttribute('data-k'),i=ST.hide.indexOf(k);if(i>=0)ST.hide.splice(i,1);else ST.hide.push(k);save();render()});
 $('pause').addEventListener('click',function(){paused=!paused;this.textContent=paused?'Resume':'Pause';this.setAttribute('aria-label',paused?'Resume live updates':'Pause live updates');paint();
   if(!paused){pulses=[];if(pendingSnap){SNAP=pendingSnap;pendingSnap=null;render()}}});
 var rt=0;window.addEventListener('resize',function(){clearTimeout(rt);rt=setTimeout(function(){if(!paused&&mode!=='img')render()},150)});
-function apply(d){if(paused){pendingSnap=d;return}SNAP=d;render()}
+function apply(d){if(paused){pendingSnap=d;return}SNAP=d;schedule()}
 setInterval(function(){if(paused)return;var n=(Date.now()-rcv)/1000,ls=document.querySelectorAll('#stage line[data-age]');
   for(var i=0;i<ls.length;i++){if(ls[i].getAttribute('data-idle')==='1')continue;var a=+ls[i].getAttribute('data-age')+n;ls[i].setAttribute('opacity',Math.max(.3,1-.7*Math.min(a,30)/30).toFixed(2))}},1000);
 // ---- moving dots
@@ -715,10 +1053,10 @@ function connect(){
     else if(d.type==='event')pulse(d.from,d.to)};
   ws.onerror=function(){if(!open)codes.push('WebSocket error')};
   ws.onclose=function(ev){
-    if(!open){codes.push('WebSocket closed '+(ev&&ev.code))}
+    if(!open){codes.push('WebSocket closed '+(ev&&ev.code));checkFresh()}
     if(!gotLive)return fallback('poll');
     if(open)fails=0;else fails++;
-    if(fails>=4){stopped=true;chip('service restarted - run lean-agent map --url again','bad');return}
+    if(fails>=4&&!sameOrigin){stopped=true;chip('service restarted - run lean-agent map --url again','bad');return}
     chip('reconnecting','re');setTimeout(connect,delay);delay=Math.min(15000,delay*2)}}
 var tried={};
 function fallback(next){
@@ -728,9 +1066,21 @@ function fallback(next){
   blocked()}
 function blocked(){
   mode='none';
-  var l=base&&!/^https?:/.test(location.protocol)?' <a href="'+base+'/?'+tq+'" target="_blank" rel="noopener">Open in browser</a>':'';
+  var l=base&&!/^https?:/.test(location.protocol)?' <a href="'+base+'/" target="_blank" rel="noopener">Open in browser</a>':'';
+  if(isFile&&viol.length)return fileRefresh(l);
   if(viol.length){chip('preview blocks live updates','bad');why(reason()+l)}
   else{chip('snapshot (service not running)','bad');why((reason()||'connection refused on every transport')+l)}}
+// ---- transport 4: the file itself (a viewer that blocks every network call can still reload a file the service rewrites)
+function fileRefresh(l){
+  mode='refresh';var now=Date.now(),ts=String(SNAP.ts||''),lf=HS.lt===ts&&+HS.lf?+HS.lf:now;
+  if(now-lf>60000){chip('file refresh stopped - ask for the map again','bad');why('The page file stopped changing. Ask for the map again.'+(l||''));return}
+  chip('live (file refresh · 3 s)','live');why((l||'').trim());
+  (function wait(){setTimeout(function(){if(paused)return wait();saveHash(ts,lf);location.reload()},3000)})()}
+// ---- a bookmarked page after a service restart: fetch the page again, reload once when the token changed
+function checkFresh(){
+  if(!sameOrigin||typeof fetch!=='function')return;
+  fetch(location.pathname||'/',{cache:'no-store'}).then(function(r){return r.ok?r.text():''}).then(function(t){
+    var m=/"token": ?"([^"]+)"/.exec(t||'');if(m&&EP.token&&m[1]!==EP.token)location.reload()}).catch(function(){})}
 // ---- transport 2: fetch polling
 function pollFetch(){
   if(typeof fetch!=='function')return fallback('img');
@@ -741,6 +1091,7 @@ function pollFetch(){
       okOnce=true;bad=0;apply(d);if(mode!=='poll')up('poll','live (polling)');setTimeout(tick,2000)
     }).catch(function(e){
       if(!okOnce){codes.push('fetch failed');return fallback('img')}
+      checkFresh();
       if(++bad>=5){chip('service not reachable','bad');why(reason())}else chip('reconnecting','re');
       setTimeout(tick,2000)})}
   tick()}
@@ -759,9 +1110,13 @@ function pollImg(){
     im.src=base+'/map.svg?'+tq+'&w=900&h=700&n='+(++n)}
   tick()}
 render();
-if(EP&&EP.port){chip('connecting','re');connect()}else chip('snapshot (service not running)','bad');
+if(HS.y&&HS.fr==='1')try{window.scrollTo(0,+HS.y)}catch(e){}
+if(isFile&&HS.fr==='1'){fileRefresh(base?' <a href="'+base+'/" target="_blank" rel="noopener">Open in browser</a>':'')}
+else if(EP&&EP.port){chip('connecting','re');connect()}else chip('snapshot (service not running)','bad');
 })();
 """
+
+
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -770,16 +1125,23 @@ PAGE = """<!doctype html>
 <header><div><h1>Live map</h1><div id="sub">lean-agent · service socket · updates as messages move</div></div>
 <div id="chips"><span class="pill" id="pill"><span class="dot"></span><span id="chip">snapshot (service not running)</span><span id="ms"></span></span>
 <span class="pill" id="cpu">Service CPU –%</span><span class="pill" id="wk">0 workers</span><span class="pill" id="inbox">Inbox 0</span>
+<span class="pill" id="runs" hidden></span><span class="pill" id="usd" hidden></span><span class="pill" id="saved" hidden></span><span class="pill" id="tpm" hidden></span><span class="pill" id="errs" hidden></span>
 <button type="button" id="pause" aria-label="Pause live updates">Pause</button></div></header>
+<div id="bar"><input id="q" type="search" placeholder="Filter by node or tool  ( / )" aria-label="Filter nodes by id, title or tool" autocomplete="off" spellcheck="false">
+<button type="button" class="tg" id="fidle" aria-pressed="false">Hide idle</button><button type="button" class="tg" id="ferr" aria-pressed="false">Only errors</button>
+<button type="button" id="ftog" aria-pressed="false" aria-controls="feed">Activity</button><span id="fc" aria-live="polite"></span></div>
 <div id="why"></div>
-<div id="wrap"></div>
+<div id="main"><div id="mapcol"><div id="wrap"></div>
+<section id="tlw" aria-label="Timeline" hidden><h2>Last 10 minutes <span id="tlc"></span></h2><div id="tl"></div></section></div>
+<aside id="feed" aria-label="Activity feed"><div class="fh"><b>Activity</b><button type="button" id="fx" aria-label="Hide activity feed">Hide</button></div><ul id="fl"></ul></aside></div>
+<div id="tip" role="tooltip"></div>
 <footer><div id="legend">
-<span><svg aria-hidden="true" width="28" height="8" viewBox="0 0 28 8"><path d="M 0 4 L 22 4" stroke="var(--ok)" stroke-width="2" stroke-linecap="round"/><path d="M20 0 L28 4 L20 8 Z" fill="var(--ok)"/></svg>Message to an agent</span>
-<span><svg aria-hidden="true" width="28" height="8" viewBox="0 0 28 8"><path d="M 6 4 L 28 4" stroke="var(--rep)" stroke-width="2" stroke-linecap="round"/><path d="M8 0 L0 4 L8 8 Z" fill="var(--rep)"/></svg>Report or result back</span>
-<span><svg aria-hidden="true" width="28" height="8" viewBox="0 0 28 8"><path d="M 0 4 L 22 4" stroke="var(--req)" stroke-width="2" stroke-linecap="round"/><path d="M20 0 L28 4 L20 8 Z" fill="var(--req)"/></svg>Socket request</span>
-<span><svg aria-hidden="true" width="28" height="8" viewBox="0 0 28 8"><path d="M 0 4 L 28 4" stroke="var(--idle)" stroke-width="2" stroke-dasharray="6 6"/></svg>Idle link</span>
-<span><svg aria-hidden="true" width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5" fill="var(--bad)"/></svg>Undelivered or stuck</span>
-</div><span>Lines fade 30 s after the last message · click a node for details</span></footer></div>
+<button type="button" class="lg" data-k="message" aria-pressed="true"><svg aria-hidden="true" width="28" height="8" viewBox="0 0 28 8"><path d="M 0 4 L 22 4" stroke="var(--ok)" stroke-width="2" stroke-linecap="round"/><path d="M20 0 L28 4 L20 8 Z" fill="var(--ok)"/></svg>Message to an agent</button>
+<button type="button" class="lg" data-k="report" aria-pressed="true"><svg aria-hidden="true" width="28" height="8" viewBox="0 0 28 8"><path d="M 6 4 L 28 4" stroke="var(--rep)" stroke-width="2" stroke-linecap="round"/><path d="M8 0 L0 4 L8 8 Z" fill="var(--rep)"/></svg>Report or result back</button>
+<button type="button" class="lg" data-k="request" aria-pressed="true"><svg aria-hidden="true" width="28" height="8" viewBox="0 0 28 8"><path d="M 0 4 L 22 4" stroke="var(--req)" stroke-width="2" stroke-linecap="round"/><path d="M20 0 L28 4 L20 8 Z" fill="var(--req)"/></svg>Socket request</button>
+<button type="button" class="lg" data-k="idle" aria-pressed="true"><svg aria-hidden="true" width="28" height="8" viewBox="0 0 28 8"><path d="M 0 4 L 28 4" stroke="var(--idle)" stroke-width="2" stroke-dasharray="6 6"/></svg>Idle link</button>
+<button type="button" class="lg" data-k="bad" aria-pressed="true"><svg aria-hidden="true" width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5" fill="var(--bad)"/></svg>Undelivered or stuck</button>
+</div><span>Lines fade 30 s after the last message · click a node for details · legend items toggle lines</span></footer></div>
 <aside id="panel" role="dialog" aria-label="Node details"></aside>
 <script type="application/json" id="snap">%SNAP%</script>
 <script type="application/json" id="ep">%EP%</script>
@@ -796,8 +1158,7 @@ def build_html(snap, ep):
     return PAGE.replace("%CSS%", CSS).replace("%JS%", JS).replace("%SNAP%", _json_safe(snap)).replace("%EP%", _json_safe(ep))
 
 
-def write_html(home, snap, out=None):
-    """Writes the page (file 0600, default dir 0700) and returns its absolute path."""
+def html_path(home, out=None):
     if out:
         p = os.path.abspath(os.path.expanduser(out))
         os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -806,6 +1167,12 @@ def write_html(home, snap, out=None):
         os.makedirs(d, exist_ok=True)
         os.chmod(d, 0o700)
         p = os.path.join(d, "live.html")
+    return p
+
+
+def write_html(home, snap, out=None):
+    """Writes the page (file 0600, default dir 0700) and returns its absolute path."""
+    p = html_path(home, out)
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
         fh.write(build_html(snap, endpoint(home)))
