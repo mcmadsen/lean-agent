@@ -879,7 +879,7 @@ const { chromium } = require('playwright');
   await wait(pg, () => document.getElementById('chip').textContent === 'live socket');
   await wait(pg, () => document.querySelectorAll('.nd').length > 3);
   out.narrow = await pg.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
-  out.narrowBg = await pg.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  out.narrowBg = await pg.evaluate(() => getComputedStyle(document.documentElement).backgroundColor);
   if (shots) await pg.screenshot({ path: shots + '/light-400.png', fullPage: true });
   await b.close();
   console.log(JSON.stringify(out));
@@ -1138,6 +1138,127 @@ const { chromium } = require('playwright');
   console.log(JSON.stringify(out));
 })().catch(e => { console.log(JSON.stringify({ error: String(e).slice(0, 600) })); process.exit(0); });
 """
+
+
+MATRIX_JS = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const { file, shots } = JSON.parse(process.argv[2]);
+  const b = await chromium.launch();
+  const out = { errors: [] };
+  const open = async (opts, init) => {
+    const ctx = await b.newContext(Object.assign({ viewport: { width: 1280, height: 800 } }, opts));
+    const pg = await ctx.newPage();
+    pg.on('pageerror', e => out.errors.push(String(e).slice(0, 200)));
+    if (init) await pg.addInitScript(init);
+    await pg.goto('file://' + file);
+    await pg.waitForSelector('.nd');
+    return [ctx, pg];
+  };
+  const theme = (pg) => pg.evaluate(() => document.documentElement.getAttribute('data-theme'));
+  const rain = (pg) => pg.evaluate(() => document.documentElement.getAttribute('data-rain'));
+  // theme: matrix by default (also for light-scheme users), the toggle persists
+  let [ctx, pg] = await open({ colorScheme: 'light' });
+  out.themeDefault = await theme(pg);
+  out.bgMatrix = await pg.evaluate(() => getComputedStyle(document.documentElement).backgroundColor);
+  if (shots) await pg.screenshot({ path: shots + '/matrix-1280-light-scheme.png', fullPage: true });
+  await pg.locator('#themetg').click();
+  out.themeAfter = await theme(pg);
+  out.bgClassic = await pg.evaluate(() => getComputedStyle(document.documentElement).backgroundColor);
+  out.rainClassic = await rain(pg);
+  if (shots) await pg.screenshot({ path: shots + '/classic-1280-light.png', fullPage: true });
+  await pg.reload(); await pg.waitForSelector('.nd');
+  out.themePersist = await theme(pg);
+  await pg.locator('#themetg').click();
+  await pg.reload(); await pg.waitForSelector('.nd');
+  out.themeBack = await theme(pg);
+  await ctx.close();
+  // rain: on, cheap (no long tasks), stops when hidden / toggled off / reduced motion
+  [ctx, pg] = await open({ colorScheme: 'dark' }, () => {
+    window.__long = [];
+    try { new PerformanceObserver(l => l.getEntries().forEach(e => { if (e.startTime > 1500) window.__long.push(Math.round(e.duration)); })).observe({ entryTypes: ['longtask'] }); } catch (e) {}
+    window.__frames = 0;
+    const ff = CanvasRenderingContext2D.prototype.fillRect;
+    CanvasRenderingContext2D.prototype.fillRect = function () { window.__frames++; return ff.apply(this, arguments); };
+  });
+  out.rainOn = await rain(pg);
+  await pg.waitForTimeout(5000);
+  out.long = await pg.evaluate(() => window.__long);
+  out.frames = await pg.evaluate(() => window.__frames);
+  if (shots) await pg.screenshot({ path: shots + '/matrix-1280-map.png', fullPage: true });
+  await pg.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); document.dispatchEvent(new Event('visibilitychange')); });
+  out.rainHidden = await rain(pg);
+  const f0 = await pg.evaluate(() => window.__frames);
+  await pg.waitForTimeout(600);
+  out.hiddenFrames = (await pg.evaluate(() => window.__frames)) - f0;
+  await pg.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => false }); document.dispatchEvent(new Event('visibilitychange')); });
+  out.rainVisible = await rain(pg);
+  await pg.locator('#raintg').click();
+  out.rainToggled = await rain(pg);
+  await pg.reload(); await pg.waitForSelector('.nd');
+  out.rainPersist = await rain(pg);
+  await pg.locator('#raintg').click();
+  out.rainBack = await rain(pg);
+  await ctx.close();
+  [ctx, pg] = await open({ colorScheme: 'dark', reducedMotion: 'reduce' });
+  out.rainReduced = await rain(pg);
+  await ctx.close();
+  // 400 px: no horizontal scroll
+  [ctx, pg] = await open({ colorScheme: 'dark', viewport: { width: 400, height: 800 } });
+  out.narrow = await pg.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
+  if (shots) await pg.screenshot({ path: shots + '/matrix-400.png', fullPage: true });
+  // focus ring is visible on a button
+  await pg.keyboard.press('Tab');
+  out.focusOutline = await pg.evaluate(() => getComputedStyle(document.activeElement).outlineStyle);
+  await ctx.close();
+  await b.close();
+  console.log(JSON.stringify(out));
+})().catch(e => { console.log(JSON.stringify({ error: String(e).slice(0, 600) })); process.exit(0); });
+"""
+
+
+class MatrixThemeTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not have_playwright():
+            raise unittest.SkipTest("node/playwright/browser not available")
+
+    def test_theme_rain_and_layout(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        page = os.path.join(tmp, "rich.html")
+        with open(page, "w") as fh:
+            fh.write(lean_maplive.build_html(rich_snap(), {}))
+        js = os.path.join(tmp, "m.js")
+        with open(js, "w") as fh:
+            fh.write(MATRIX_JS)
+        shots = os.environ.get("LEAN_SHOTS") or "/tmp/claude-0/-home-user-lean-agent/ecf7a38c-d764-5e31-b359-10cc63491292/scratchpad/shots5"
+        arg = json.dumps({"file": page, "shots": shots if os.path.isdir(shots) else ""})
+        r = subprocess.run([NODE, js, arg], capture_output=True, text=True, timeout=180, env=node_env())
+        self.assertTrue(r.stdout.strip(), r.stderr)
+        d = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertNotIn("error", d)
+        self.assertEqual(d["errors"], [])
+        self.assertEqual(d["themeDefault"], "matrix")  # also for a light-scheme user
+        self.assertEqual(d["themeAfter"], "classic")
+        self.assertNotEqual(d["bgMatrix"], d["bgClassic"])
+        self.assertEqual(d["rainClassic"], "off")
+        self.assertEqual(d["themePersist"], "classic")
+        self.assertEqual(d["themeBack"], "matrix")
+        self.assertEqual(d["rainOn"], "on")
+        self.assertEqual(d["long"], [])  # no long task (> 50 ms) once the page has settled, with the rain running
+        self.assertLessEqual(d["frames"], 12 * 5 + 4)  # at most 12 frames a second
+        self.assertGreater(d["frames"], 10)
+        self.assertEqual(d["rainHidden"], "off")
+        self.assertEqual(d["hiddenFrames"], 0)
+        self.assertEqual(d["rainVisible"], "on")
+        self.assertEqual(d["rainToggled"], "off")
+        self.assertEqual(d["rainPersist"], "off")
+        self.assertEqual(d["rainBack"], "on")
+        self.assertEqual(d["rainReduced"], "off")
+        self.assertLessEqual(d["narrow"][0], d["narrow"][1])
+        self.assertNotEqual(d["focusOutline"], "none")
+
 
 
 class FeaturesTest(unittest.TestCase):
@@ -1443,12 +1564,12 @@ const { chromium } = require('playwright');
   await pg.locator('#c1 rect.bc').nth(13).focus();
   out.tip = await pg.locator('#tip').innerText();
   out.mapHidden = await pg.locator('#main').isHidden();
-  if (shots) await pg.screenshot({ path: shots + '/light-1280-trends.png', fullPage: true });
+  if (shots) await pg.screenshot({ path: shots + '/matrix-1280-trends.png', fullPage: true });
   await pg.close();
   // 400 px
   pg = await open(url, { width: 400, height: 800 }, 'light');
   out.noHscroll400 = await pg.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
-  if (shots) await pg.screenshot({ path: shots + '/light-400.png', fullPage: true });
+  if (shots) await pg.screenshot({ path: shots + '/matrix-400-alerts.png', fullPage: true });
   await pg.locator('#vtr').click();
   await pg.waitForSelector('#c1 svg');
   await pg.waitForTimeout(300);

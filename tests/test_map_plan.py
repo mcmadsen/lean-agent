@@ -244,8 +244,8 @@ class BrowserTest(Home):
         s2["plan"]["windows"][0]["pct"] = 100.0
         s3 = base_snap()
         o = self.node(CHECK_JS, {"url": self.page("a", s), "shots": SHOTS, "url2": self.page("c", s3)})
-        self.assertRegex(o["chips"][0], r"5h 42% · resets 2h 0\dm")
-        self.assertRegex(o["chips"][1], r"week 83% · resets \w{3} \d\d:\d\d")
+        self.assertRegex(o["chips"][0], r"(?is)5-hour window.*42% · resets in 2h 0\dm")
+        self.assertRegex(o["chips"][1], r"(?is)weekly window.*83% · resets \w{3} \d\d:\d\d")
         self.assertIn("lv-ok", o["levels"][0])
         self.assertIn("lv-warn", o["levels"][1])
         self.assertNotEqual(o["tick"][0], o["tick"][1])
@@ -259,7 +259,7 @@ class BrowserTest(Home):
         self.assertEqual(o["errs"], [])
         self.assertLessEqual(o["narrow"][0], o["narrow"][1])
         r = self.node(CHECK_JS, {"url": self.page("b", s2), "shots": None})
-        self.assertIn("limit reached - resets", r["chips"][0])
+        self.assertIn("limit reached - resets", r["chips"][0].lower())
         self.assertIn("lv-bad", r["levels"][0])
 
     def test_trends_chart(self):
@@ -270,7 +270,7 @@ class BrowserTest(Home):
         self.addCleanup(live.stop)
         o = self.node(TREND_JS, {"url": f"http://127.0.0.1:{live.port}/?t={live.token}", "shots": SHOTS})
         self.assertEqual(o["lines"], 2)
-        self.assertIn("Plan usage", o["title"])
+        self.assertIn("plan usage", o["title"].lower())
 
 
 if __name__ == "__main__":
