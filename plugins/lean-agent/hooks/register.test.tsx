@@ -35,7 +35,7 @@ const SNAP = {
 const DOWN = { v: 1, service: { up: false }, desk: DESK, goals: [], answers: [], inbox: 2 }
 
 // A fake engine: answers `lean-agent` calls, records every argv.
-function fake(on: any, opts: { snap?: unknown; role?: string; deskFolder?: boolean; ackFails?: boolean; ackThrows?: boolean; limit?: number; closeAfter?: number; noBin?: boolean; jsonFail?: string }) {
+function fake(on: any, opts: { snap?: unknown; role?: string; deskFolder?: boolean; ackFails?: boolean; gate?: { wait: Promise<void> | null }; ackThrows?: boolean; limit?: number; closeAfter?: number; noBin?: boolean; jsonFail?: string }) {
   resetState()
   const calls: string[][] = []
   const statuses: string[] = []
@@ -44,13 +44,14 @@ function fake(on: any, opts: { snap?: unknown; role?: string; deskFolder?: boole
   on('ui.status', (_: any, e: any) => { statuses.push(e.text); return { value: undefined } })
   on('command.register', (_: any, e: any) => { state.commands.push(e.name); return { value: { command: e.name } } })
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
-  on('process.run', (_: any, e: any) => {
+  on('process.run', async (_: any, e: any) => {
     const a = e.argv.join(' ')
     if (e.argv[0] === '/bin/sh' || e.argv[0].endsWith('sh') && e.argv[1] === '-lc') {
       return { value: { exitCode: opts.noBin ? 1 : 0, stdout: opts.noBin ? '' : 'lean-agent\n', stderr: '' } }
     }
     calls.push([...e.argv])
     if (a === 'lean-agent pane --json' && opts.jsonFail) return { value: { exitCode: 3, stdout: '', stderr: opts.jsonFail + '\nmore' } }
+    if (a === 'lean-agent pane --json' && opts.gate?.wait) await opts.gate.wait
     if (a === 'lean-agent pane --json') return { value: { exitCode: 0, stdout: JSON.stringify(state.snap), stderr: '' } }
     if (opts.ackThrows && e.argv[1] === 'myq') throw new Error('spawn failed')
     if (opts.ackFails && e.argv[1] === 'myq') return { value: { exitCode: 2, stdout: '', stderr: 'spawn failed' } }
@@ -241,5 +242,26 @@ test('an ack whose process rejects shows the failure (the catch branch) and refr
   await ui.press({ key: 'ack-q7' })
   expect(panes(f.calls)).toBeGreaterThan(before)
   expect(await ui.find({ type: 'Text', text: /myq ack q7 failed: / })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('an ack while a poll is in flight ends with the ack failure shown after the rerun', async ($, on) => {
+  const gate: { wait: Promise<void> | null } = { wait: null }
+  const f = fake(on, { role: 'main', ackFails: true, gate })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  let release = () => {}
+  gate.wait = new Promise<void>(r => { release = r })
+  const first = ui.press({ key: 'ack-q7' }) // its poll hangs on the gate: a poll is in flight
+  await settle()
+  const before = panes(f.calls)
+  const second = ui.press({ key: 'ack-all' }) // its failing ack lands while that poll runs
+  await settle()
+  gate.wait = null
+  release()
+  await Promise.all([first, second])
+  await settle()
+  expect(panes(f.calls)).toBeGreaterThan(before) // the queued rerun ran
+  expect(await ui.find({ type: 'Text', text: /myq ack --all failed \(exit 2\)/ })).toBeTruthy() // not overwritten by the poll
   await ui.unmount()
 })

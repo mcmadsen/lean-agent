@@ -39,7 +39,6 @@ const FIND_LOGIN = [
 let resolved: string | null = null // the binary, once found (cached for the session)
 
 let timer: { cancel: () => void } | null = null
-let isBusy = false
 let isActive = false
 let isStale = false // a poll was asked for while one ran: run once more when it ends (an ack's refresh is never lost)
 let current: Promise<boolean> | null = null // the poll in flight; callers that arrive meanwhile wait for it (and its rerun)
@@ -49,7 +48,6 @@ export function resetState() {
   timer?.cancel()
   resolved = null
   timer = null
-  isBusy = false
   isActive = false
   isStale = false
   current = null
@@ -126,24 +124,25 @@ function stop() {
 // One poll, never overlapping; returns whether the service is up. Every outcome is a diagnosis, never a blank.
 function poll($: any): Promise<boolean> {
   if (current) {
-    isStale = true
+    isStale = true // one rerun is queued; the in-flight run checks it with no await between the check and clearing `current`
     return current
   }
   current = (async () => {
-    let up = await pollOnce($)
-    while (isStale) {
-      isStale = false
-      up = await pollOnce($)
+    try {
+      let up = false
+      do {
+        isStale = false
+        up = await pollOnce($)
+      } while (isStale)
+      return up
+    } finally {
+      current = null
     }
-    return up
-  })().finally(() => {
-    current = null
-  })
+  })()
   return current
 }
 
 async function pollOnce($: any): Promise<boolean> {
-  isBusy = true
   let pane: PaneData | null = null
   let isUp = false
   let state = 'starting…'
@@ -178,7 +177,6 @@ async function pollOnce($: any): Promise<boolean> {
     error = `lean-agent pane --json failed (exit ?): ${firstLine(String((err as Error)?.message ?? err))}`
     state = 'pane --json failed'
   } finally {
-    isBusy = false
   }
   if (pane) await update($, data, () => pane)
   await setDiag($, { state, error, bin })

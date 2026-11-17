@@ -232,6 +232,15 @@ class PaneJsonTest(unittest.TestCase):
 
 
 class RetireMapPluginTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from unittest import mock
+        self.tmp = tempfile.mkdtemp()
+        patch = mock.patch.dict(os.environ, {"LEAN_AGENT_HOME": os.path.join(self.tmp, "lh"), "CLAUDE_CONFIG_DIR": os.path.join(self.tmp, "cfg")})
+        patch.start()
+        self.addCleanup(patch.stop)
+        os.makedirs(os.path.join(self.tmp, "lh"))
+
     def test_uninstalls_through_the_cli_only(self):
         import lean_agent
         calls, said = [], []
@@ -274,6 +283,18 @@ class RetireMapPluginTest(unittest.TestCase):
                 lean_agent.retire_map_plugin(said.append, bad, lambda n: "/x/claude")
             self.assertEqual(len(said), 1)  # the hint, once
             self.assertIn("Plugins page", said[0])
+
+    def test_a_log_only_call_does_not_consume_the_hint(self):
+        import lean_agent
+        said, logged = [], []
+        bad = lambda argv, **kw: type("R", (), {"returncode": 1, "stdout": "boom"})()
+        os.makedirs(os.path.join(self.tmp, "cfg", "plugins", "cache", "mkt", "lean-agent-map"))
+        lean_agent.retire_map_plugin(logged.append, bad, lambda n: "/x/claude", shown=False)  # `up`: log only
+        self.assertEqual(len(logged), 1)
+        lean_agent.retire_map_plugin(said.append, bad, lambda n: "/x/claude")  # `update`: printed, once
+        lean_agent.retire_map_plugin(said.append, bad, lambda n: "/x/claude")
+        self.assertEqual(len(said), 1)
+        self.assertIn("Plugins page", said[0])
 
 
 if __name__ == "__main__":

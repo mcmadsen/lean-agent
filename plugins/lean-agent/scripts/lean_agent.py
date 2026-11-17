@@ -13142,7 +13142,7 @@ def cmd_up(a):
     h = prepare_home()
     refresh_blocks()
     if not os.environ.get("LEAN_AGENT_TEST"):
-        threading.Thread(target=lambda: retire_map_plugin(lambda m: lean_log.log("info", "up", m)), daemon=True).start()
+        threading.Thread(target=lambda: retire_map_plugin(lambda m: lean_log.log("info", "up", m), shown=False), daemon=True).start()
     marker = service_session.consume_clear_marker()
     keep = getattr(a, "keep_threads", False)  # internal (clear --all --restart): a clean main session only
     if getattr(a, "clear", False) and not keep and marker is None:
@@ -18886,10 +18886,11 @@ def map_plugin_known_installed():
     return isinstance(enabled, dict) and any(str(k).startswith(RETIRED_PLUGIN + "@") for k in enabled)
 
 
-def retire_map_plugin(say=print, run=subprocess.run, which=shutil.which):
+def retire_map_plugin(say=print, run=subprocess.run, which=shutil.which, shown=True):
     """The old pane plugin is part of lean-agent now: uninstall it through the claude CLI (never by editing settings.json), else
     tell the user where to remove it (once, remembered in the lean home). Silent when it is not installed, and when the plugin
-    list cannot be read and nothing says the old plugin is installed."""
+    list cannot be read and nothing says the old plugin is installed. `shown=False`: `say` only logs (the user does not see it),
+    so the hint is not marked as shown and `update` still prints it once."""
     exe = which("claude")
     if not exe:
         return False
@@ -18899,10 +18900,11 @@ def retire_map_plugin(say=print, run=subprocess.run, which=shutil.which):
         if os.path.exists(marker):
             return
         say('lean-agent: the pane is part of lean-agent now; remove "Lean agent map" in the app\'s Plugins page')
-        try:
-            open(marker, "w").close()
-        except OSError:
-            pass
+        if shown:
+            try:
+                open(marker, "w").close()
+            except OSError:
+                pass
 
     try:
         r = run([exe, "plugin", "list", "--json"], capture_output=True, text=True, timeout=20)
