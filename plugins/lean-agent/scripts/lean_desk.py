@@ -150,9 +150,11 @@ def heartbeat(session_id, transcript=None, now=None):
     """Refresh the heartbeat of the desk record named `session_id` (even an expired one: the next hook event of the same
     session re-attaches it, unless another desk took over meanwhile). True when it was this session's record."""
     now = time.time() if now is None else now
+    if record().get("session_id") != session_id or not enabled():
+        return False  # not this session's record: no lock is taken (non-desk sessions pay nothing)
     with lean_common.file_lock(path()):
         rec = record()
-        if rec.get("session_id") != session_id or not enabled():
+        if rec.get("session_id") != session_id:
             return False
         rec["heartbeat"] = now
         if transcript:

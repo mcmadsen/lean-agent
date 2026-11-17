@@ -384,6 +384,14 @@ class Folder(Base):
         self.assertEqual(first["env"]["LEAN_AGENT_BRIEF"], "1")
         self.assertNotIn("LEAN_AGENT_SESSION_ROLE", first["env"])  # hosted thread sessions read this file too
         self.assertNotIn("LEAN_AGENT_DESK_SESSION", first["env"])
+        la.prepare_home()  # the orchestrator permissions and the lean-agent allow survive prepare_home + refresh
+        la.refresh_desk_folder(h)
+        with open(path) as fh:
+            kept = json.load(fh)
+        self.assertIn("Bash(lean-agent:*)", kept["permissions"]["allow"])
+        self.assertIn("Read", kept["permissions"]["allow"])
+        self.assertTrue(kept["permissions"].get("deny"))
+        self.assertEqual(kept["env"]["LEAN_AGENT_BRIEF"], "1")
         self.assertFalse(la.refresh_desk_folder(h))  # unchanged: nothing written
         self.assertFalse(os.path.exists(glob_settings))  # the user's global settings are never touched
         for leftover in ("CLAUDE.md", ".claude"):  # nothing in the lean home root: workers under it would load it

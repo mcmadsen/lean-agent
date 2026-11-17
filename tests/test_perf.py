@@ -201,5 +201,33 @@ class ThreadsCacheTest(unittest.TestCase):
         self.assertEqual(lean_threads.load()["threads"]["t2"]["title"], "outside")
 
 
+class DeskHookCostTest(unittest.TestCase):
+    """A session that is not the external desk pays nothing for the desk hooks, even with desk.json present: no lock, no import."""
+
+    def test_non_desk_session_runs_the_hooks_fast_and_never_touches_the_lock(self):
+        import json
+        import lean_desk
+        tmp = tempfile.mkdtemp()
+        env = {**clean_environ(), "LEAN_AGENT_HOME": tmp}
+        with open(os.path.join(tmp, "desk.json"), "w") as fh:
+            json.dump({"session_id": "desk-1", "heartbeat": time.time(), "pending": False}, fh)
+        lock = os.path.join(tmp, "desk.json.lock")
+        event = json.dumps({"session_id": "other", "cwd": tmp, "hook_event_name": "PostToolUse", "prompt": "x"})
+        tramp = os.path.join(ROOT, "trampoline.py")
+        t0 = time.monotonic()
+        for script, arg in (("inject_hook.py", []), ("dialog_hook.py", ["close"]), ("desk_hook.py", ["prompt"]),
+                            ("desk_hook.py", ["stop"])):
+            p = subprocess.run([sys.executable, tramp, script] + arg, input=event, capture_output=True, text=True, env=env, timeout=20)
+            self.assertEqual((p.returncode, p.stdout.strip()), (0, ""), script)
+        self.assertLess(time.monotonic() - t0, 4 * 2.0)  # four interpreter starts, nothing else
+        self.assertFalse(os.path.exists(lock))
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertFalse(lean_desk.heartbeat("other"))
+        self.assertFalse(os.path.exists(lock))
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertTrue(lean_desk.heartbeat("desk-1"))  # the desk's own record does take it
+        self.assertTrue(os.path.exists(lock))
+
+
 if __name__ == "__main__":
     unittest.main()

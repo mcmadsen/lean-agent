@@ -283,7 +283,7 @@ your global settings; nothing is written to `~/.lean-agent` itself) are written 
 lean-agent desk status           # who is the desk now, and whether THIS session is the desk (strict mode applies to the desk only)
 lean-agent config desk auto      # default; hosted = always the service's own main (as before); external = never hosted
 lean-agent desk attach           # make THIS session the desk now (works in auto too; one desk only)
-lean-agent desk detach           # let go of the desk (it re-attaches on its next hook event or session start)
+lean-agent desk detach           # let go of the desk (attaches again at the next session start; an expired desk re-attaches on its next hook event)
 ```
 
 - Strict mode and the orchestrator rules apply only to the real front desk (the hosted main, or the attached app session). Any
@@ -296,7 +296,7 @@ lean-agent desk detach           # let go of the desk (it re-attaches on its nex
   local notification (`lean-agent config desk-notify on|off`).
 - Back to the old behaviour: `lean-agent config desk hosted`, then `lean-agent service restart`.
 - The map pane asks the service on the same socket path as the CLI. If it says "Service down", the message names the
-  socket it looked at; a desktop session without your shell's `LEAN_AGENT_HOME` falls back to the default home's socket.
+  socket it looked at; if the app session resolves another home than the service, set `LEAN_AGENT_HOME` in the app's settings env (`desk setup` and the folder refresh already do this when it is set for them).
 
 ## Sign-in
 

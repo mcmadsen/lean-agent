@@ -27,9 +27,23 @@ def clone_scripts():
 
 
 def _desk_attached():
-    """An external desk was ever attached (desk.json exists): only then can a session other than a hosted one be the desk."""
+    """Is this event the external desk's? Its session id is the one in desk.json, or it runs in <home>/home (a session that
+    may attach). Stdlib text matching (no json import, no lock); stdin is kept for the hook; any other session pays one small read."""
+    import io
+    import re
     home = os.path.abspath(os.path.expanduser(os.environ.get("LEAN_AGENT_HOME") or "~/.lean-agent"))
-    return os.path.exists(os.path.join(home, "desk.json"))
+    data = sys.stdin.read()
+    sys.stdin = io.StringIO(data)
+    field = lambda text, key: (re.search(r'"%s"\s*:\s*"((?:[^"\\]|\\.)*)"' % key, text) or [None, ""])[1]
+    try:
+        cwd = field(data, "cwd") or os.getcwd()
+        if os.path.realpath(cwd.replace("\\/", "/")) == os.path.realpath(os.path.join(home, "home")):
+            return True
+        sid = field(data, "session_id")
+        with open(os.path.join(home, "desk.json")) as fh:
+            return bool(sid) and field(fh.read(), "session_id") == sid
+    except OSError:
+        return False
 
 
 def _desk_external():
@@ -60,8 +74,9 @@ def main():
     if script in ("inject_hook.py", "dialog_hook.py") and os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1" \
             and not _desk_attached():
         return  # the inject hook acts in the sessions `lean-agent up` hosts (and the external desk) only: no second interpreter anywhere else
-    if script == "desk_hook.py" and (os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1" or not _desk_external()):
-        return  # only where the external desk mode is on
+    if script == "desk_hook.py" and (os.environ.get("LEAN_AGENT_SERVICE_SESSION") == "1" or not _desk_external()
+                                     or not _desk_attached()):
+        return  # only where the external desk mode is on, and only for the desk's own events or a session in its folder
     target_dir = clone_scripts() or here
     target = os.path.join(target_dir, script)
     if not os.path.isfile(target):
