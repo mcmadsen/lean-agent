@@ -30,6 +30,17 @@ def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__.strip())
     script = os.path.basename(sys.argv[1])
+    if script == "inject_hook.py" and os.environ.get("LEAN_AGENT_SESSION_ROLE") in ("main", "thread"):
+        try:  # the live map's tool events: one fire-and-forget line to the service (30 ms at most), then the hook as before
+            import io
+            import json
+            data = sys.stdin.read()
+            sys.stdin = io.StringIO(data)
+            sys.path.insert(0, here)
+            import lean_activity
+            lean_activity.hook_send(json.loads(data))
+        except Exception:  # noqa: BLE001
+            pass
     if script == "inject_hook.py" and os.environ.get("LEAN_AGENT_SERVICE_SESSION") != "1":
         return  # the inject hook acts in the sessions `lean-agent up` hosts only: no second interpreter anywhere else
     target_dir = clone_scripts() or here

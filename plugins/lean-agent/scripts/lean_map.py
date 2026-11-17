@@ -186,9 +186,48 @@ def build(ctx, now=None):
                           "age_s": 0, "label": "done" if n["state"] == "done" else "idle"})
     moving = [{"dir": e["dir"], "node": e["node"], "text": e["text"], "age_s": _age(e["ts"], now)}
               for e in sorted(ev, key=lambda e: -e["ts"]) if e.get("text") and e.get("node")][:8]
+    extra = activity_parts(ctx, nodes, sel["placed"], ev, now)
     return {"v": 1, "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)), "service": sv, "paused": bool(ctx.get("paused")),
             "inbox": int(ctx.get("inbox") or 0), "nodes": nodes, "edges": edges, "moving": moving,
-            "placed": sel["placed"], "more": sel["more"]}
+            "placed": sel["placed"], "more": sel["more"], **extra}
+
+
+def activity_parts(ctx, nodes, placed, ev, now):
+    """Adds "activity" (and, on workers, "stats") to the placed nodes; -> {"totals", "feed"}. Never raises: the map renders
+    without any of it."""
+    try:
+        import lean_activity as act
+        placed = set(placed)
+        workdirs = {"run:" + r["id"]: r for r in ctx.get("runs") or []}
+        per = {}
+        errs = 0
+        recent = 0
+        for n in nodes:
+            nid = n["id"]
+            if nid not in placed or n["kind"] == "service":
+                continue
+            if n["kind"] == "worker":
+                r = workdirs.get(nid) or {}
+                a, st = act.read_run(r.get("workdir"), now) if r.get("workdir") else (None, None)
+                if st:
+                    n["stats"] = dict(st, branch=st.get("branch") or r.get("branch"))
+                evs = None
+            else:
+                evs = act.node_events(nid)
+                a = act.summarize(evs, now, act.node_now(nid, now))
+            if a:
+                n["activity"] = a
+                errs += a["errors"]
+                if evs is None:
+                    evs = [{"ts": e["ts"], "tool": e["tool"], "target": e["target"], "ok": e["ok"]} for e in a["recent"]]
+                recent += sum(1 for e in evs if now - e["ts"] <= 60)
+                per[nid] = evs
+        rows = ctx.get("rows") or []
+        visible = {n["id"] for n in nodes}
+        return {"totals": act.totals(rows, ctx.get("home") or "", per_min=recent, errors=errs),
+                "feed": act.feed_items(per, ev, rows, now, visible)}
+    except Exception:
+        return {}
 
 
 def down_snapshot(inbox=0, now=None):
@@ -276,7 +315,7 @@ def service_context(now=None):
                 run_started(rid, tid, m.get("model") or "")
             elif rid not in _seen_runs:
                 _seen_runs[rid] = 1  # already running when the map first looked: not a new task
-            runs.append({"id": rid, "thread": tid, "model": m.get("model"), "age_s": age,
+            runs.append({"id": rid, "thread": tid, "model": m.get("model"), "age_s": age, "workdir": m.get("workdir"), "branch": m.get("branch"),
                          "progress_s": max(0, now - (m.get("last_progress") or now)), "orphaned": bool(m.get("orphaned"))})
     except Exception:
         pass
@@ -285,7 +324,14 @@ def service_context(now=None):
     except Exception:
         inbox = 0
     desk = [e["ts"] for e in events(now) if e["from"] == "main" or e["to"] == "main"]
-    return {"service": {"pid": os.getpid(), "version": ctx_version(), "socket_ms": round(_state["ms"] or 0.0, 1), "cpu_pct": _cpu(),
+    rows = []
+    try:
+        import lean_activity
+        rows = [r for r in lean_activity.ledger_today(lean_common.lean_home())
+                if not (lean_private.hides(r) or (r.get("project") and lean_private.hides(project=r.get("project"))))]
+    except Exception:
+        pass
+    return {"rows": rows, "home": lean_common.lean_home(), "service": {"pid": os.getpid(), "version": ctx_version(), "socket_ms": round(_state["ms"] or 0.0, 1), "cpu_pct": _cpu(),
                         "threads": threading.active_count(), "up_s": int(now - STARTED)},
             "paused": _paused(), "inbox": inbox, "threads": threads,
             "runs": [r for r in runs if r["thread"] in {t["id"] for t in threads}], "desk_idle_s": int(now - max(desk)) if desk else 3600}
@@ -335,7 +381,9 @@ def signature(snap):
     return json.dumps([snap.get("service", {}).get("up"), snap.get("paused"), snap.get("inbox"),
                        [(n["id"], n["state"]) for n in snap.get("nodes", [])],
                        [(e["from"], e["to"], e["kind"], e["label"]) for e in snap.get("edges", [])],
-                       [(m["node"], m["text"]) for m in snap.get("moving", [])]])
+                       [(m["node"], m["text"]) for m in snap.get("moving", [])],
+                       [(n["id"], (n.get("activity") or {}).get("last_ts"), ((n.get("activity") or {}).get("now") or {}).get("tool"))
+                        for n in snap.get("nodes", []) if n.get("activity")]])
 
 
 def watch(out, fetcher=fetch, interval=0.5, stop=None, sleep=time.sleep):

@@ -3410,7 +3410,8 @@ def _cmd_run(a):
         with wt_lock:
             raw, err, reads = stream_worker(cmd, today_line() + "\n\n" + (f"Note: {WATCHER_NOTE}.\n\n" if watchers else "") + task + claims_section(claims), workdir, env,
                                             run_seconds, max_reads, note_session,
-                                            cwd=project if native_rules else None, warn_turns=a.max_turns)
+                                            cwd=project if native_rules else None, warn_turns=a.max_turns,
+                                            branch=(wt or {}).get("branch") if isinstance(wt, dict) else None)
     except FileNotFoundError:
         die(f"'{claude}' not found on PATH")
     finally:
@@ -3862,7 +3863,7 @@ def stop_tree(proc, grace=5):
                 pass
 
 
-def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd=None, warn_turns=0):
+def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd=None, warn_turns=0, branch=None):
     """Run a worker and read its stream-json as it comes, so a run that keeps re-reading a large context
     can be stopped (after `max_reads` context tokens summed over its calls; 0 = never) and resumed later.
     `on_session(id)` is called once, when the first event carries the session id.
@@ -3872,6 +3873,8 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
     reads = {"ctx": 0, "turns": 0, "usage": {k: 0 for k in usage.FIELDS}, "session_id": None, "stopped": False,
              "unauth": None, "timed_out": False, "last_text": "", "last_tools": []}
     seen, lines, mcp_tools, mcp_denied = set(), [], {}, {}
+    import lean_activity
+    tracker = lean_activity.RunTracker(workdir, cmd[cmd.index("--model") + 1] if "--model" in cmd else "", warn_turns or None, branch)
     with tempfile.TemporaryFile("w+") as errf:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True,
                                 cwd=cwd or workdir, env=env, **lean_common.popen_umask())
@@ -3910,6 +3913,7 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
                         continue
                     if not isinstance(ev, dict):
                         continue
+                    tracker.feed(ev)
                     server = mcp_unauthenticated(ev, mcp_tools, mcp_denied)
                     if server:
                         reads["unauth"] = server
@@ -3956,6 +3960,7 @@ def stream_worker(cmd, prompt, workdir, env, timeout, max_reads, on_session, cwd
             lines.append(proc.stdout.read() or "")  # not communicate(): stdin is closed already (3.9 flushes it)
             proc.wait()
         finally:
+            tracker.flush(force=True)
             timer.cancel()
             if warn_timer:
                 warn_timer.cancel()
@@ -12677,6 +12682,7 @@ def sock_handlers(deliverer, helper):
 
     return {
         "send": send, "wake": wake, "pending": pending, "map": map_op,
+        "tool": lambda r: {"ok": __import__("lean_activity").ingest(r)},
         "now": lambda r: cli(r, ["now"] + [str(x) for x in r.get("args") or []]),
         "runs": lambda r: cli(r, ["runs"] + [str(x) for x in r.get("args") or []]),
         "show": lambda r: cli(r, ["runs", "--show", str(r.get("id") or "last")] + (["--tail", str(int(r["tail"]))] if r.get("tail") else [])),
