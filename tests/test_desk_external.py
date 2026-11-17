@@ -740,5 +740,54 @@ class Handover(Base):
         self.assertIn("anti-flap gap until", lean_desk.status_line(self.clock[0]))
 
 
+class Surface(Base):
+    """Whoever holds the host (AutoClear, Reporter, the bridge, the map) must never meet a missing attribute across a switch."""
+
+    HOST_SURFACE = ("alive", "paste", "stop", "stopping", "proc", "cwd", "env", "last_input", "last_user_input", "last_output",
+                    "tail_text", "tail_len", "write", "created_at", "key", "name", "terminate_for", "dispatch", "external")
+
+    def test_switch_host_always_has_a_host_and_answers_alive(self):
+        sh = ss.SwitchHost(lambda: mock.Mock())
+        self.assertIsNotNone(sh.cur)
+        self.assertFalse(sh.alive())  # before the first host is up: an answer, not AttributeError('alive')
+        for name in self.HOST_SURFACE:
+            getattr(sh, name)
+        self.assertIsNone(sh.tick())  # the placeholder is never "switched"
+
+    def test_external_host_has_the_full_host_surface(self):
+        eh = ss.ExternalHost()
+        for name in self.HOST_SURFACE:
+            self.assertTrue(hasattr(eh, name), name)
+        self.assertEqual(eh.dispatch({"ping": True})["ok"], True)
+        self.assertFalse(eh.dispatch({"text": "x"})["ok"])
+        with self.assertRaises(RuntimeError):
+            eh.write(b"x")
+
+    def test_external_host_run_blocks_until_stopped(self):
+        eh = ss.ExternalHost()
+        done = []
+        t = __import__("threading").Thread(target=lambda: done.append(eh.run()), daemon=True)
+        t.start()
+        time.sleep(0.3)
+        self.assertEqual(done, [])  # no busy return
+        eh.stop()
+        t.join(2)
+        self.assertEqual(done, [0])
+
+    def test_autoclear_survives_a_switch_host_without_a_running_main(self):
+        sh = ss.SwitchHost(lambda: mock.Mock())
+        ss.AutoClear(sh).tick()  # used to raise AttributeError: alive
+
+    def test_session_and_ping_requests_reach_the_bridge_while_the_app_is_the_desk(self):
+        lean_desk.set_mode("external")
+        with mock.patch.object(ss.socket, "socket") as sock:
+            sock.return_value.recv.side_effect = [b'{"ok": true}\n', b"", b'{"ok": true}\n', b""]
+            self.assertTrue(ss.sessions_request("list")["ok"])
+            self.assertTrue(ss.request({"ping": True})["ok"])
+        r = ss.request({"text": "x"})  # typing into the desk is still refused: its hooks deliver
+        self.assertFalse(r["ok"])
+        self.assertIn("front desk is external", r["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

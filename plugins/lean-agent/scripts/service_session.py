@@ -407,7 +407,9 @@ def _external_desk():
 
 def request(msg, timeout=5, key="main"):
     """Send one message to the bridge; the reply dict, or {"ok": False, "error": ...} (never raises)."""
-    if key == "main" and _external_desk():
+    if key == "main" and _external_desk() and not (msg.get("sessions_op") or msg.get("ping")):
+        # typing into / reading the main session's terminal: the external desk has none (its hooks deliver). The bridge itself stays
+        # up whoever owns the desk, so session management (sessions_op) and ping still reach it.
         return {"ok": False, "error": "no session bridge (the front desk is external: its hooks deliver)"}
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -3586,17 +3588,30 @@ class Reporter(AutoClear):
 
 class ExternalHost:
     """Stands in for main's Host when the front desk is an external local session (desk external): the service hosts no main
-    session and never types into one; reports reach the desk through its hooks. Same surface the Reporter reads."""
+    session and never types into one; reports reach the desk through its hooks. Same surface as Host for everything that holds the
+    host (AutoClear, Reporter, the bridge, map): no attribute a component reads is ever missing."""
 
     key = "main"
     external = True
     last_input = 0
+    last_user_input = 0
     last_output = 0
+    created_at = 0
     name = "external desk"
+    proc = None
+    master = None
+    cwd = None
+    thread = None
+    server = None
+    reason = None
+    remote_control = False
+    tail_len = 0
+    on_message = None
 
     def __init__(self):
         self.stopping = threading.Event()
         self.env = None
+        self.created_at = time.time()
 
     def alive(self):
         import lean_desk
@@ -3608,7 +3623,23 @@ class ExternalHost:
     def paste(self, text):
         raise RuntimeError("the front desk is external: reports are delivered by its hooks")
 
-    send = paste
+    send = write = paste
+
+    def terminate_for(self, reason):
+        self.reason = reason
+
+    def dispatch(self, msg):
+        """The bridge's ops while the app is the desk: ping answers for the attached desk; typing is refused (hooks deliver)."""
+        if msg.get("ping"):
+            return {"ok": True, "alive": self.alive(), "pid": None, "external": True}
+        if msg.get("tail"):
+            return {"ok": True, "text": ""}
+        if msg.get("restart"):
+            return {"ok": True}
+        return {"ok": False, "error": "the front desk is external: reports reach it through its hooks (nothing is typed)"}
+
+    def close(self):
+        pass
 
     def stop(self):
         self.stopping.set()
@@ -3639,13 +3670,14 @@ class SwitchHost:
     CHECKPOINTS = 2    # checkpoint attempts before the hosted main is stopped without one
     STOP_GRACE = 20    # s after the stop request before the process tree is killed
 
-    def __init__(self, make_hosted, now=time.time, gap=None):
+    def __init__(self, make_hosted, now=time.time, gap=None, on_message=None, serve=False):
         import lean_desk
         self.desk = lean_desk
+        self.on_message, self.serve_bridge, self.bridge = on_message, serve, None
         self.make_hosted, self.now = make_hosted, now
-        self.gap = lean_desk.SWITCH_GAP if gap is None else gap
+        self.gap = _knob("LEAN_AGENT_DESK_GAP", lean_desk.SWITCH_GAP) if gap is None else gap
         self.stopping = threading.Event()
-        self.cur = None
+        self.placeholder = self.cur = ExternalHost()  # never None: components that hold the host may look at it at any time
         self.switching = False
         self.retry_at = 0
         self.next_kind = self.next_why = None
@@ -3659,7 +3691,9 @@ class SwitchHost:
         return isinstance(self.cur, ExternalHost)
 
     def __getattr__(self, name):
-        cur = self.__dict__.get("cur")
+        if name.startswith("__") or name in ("cur", "placeholder"):
+            raise AttributeError(name)
+        cur = self.__dict__.get("cur") or self.__dict__.get("placeholder")
         if cur is None:
             raise AttributeError(name)
         return getattr(cur, name)
@@ -3734,7 +3768,7 @@ class SwitchHost:
         """One decision; the new kind when a switch was started, else None."""
         now = self.now() if now is None else now
         want, have = self.wanted(now), "app" if self.external else "hosted"
-        if want == have or self.cur is None or self.switching:
+        if want == have or self.cur is None or self.cur is self.placeholder or self.switching:
             if want == have:
                 self.attempts, self.refusal = 0, ""
                 self.set_wait(None)
@@ -3823,6 +3857,9 @@ class SwitchHost:
         if self.cur is not None:
             self.cur.stop()
 
+    def dispatch(self, msg):
+        return self.cur.dispatch(msg)
+
     def boot_wait(self):
         """The app desk was the last owner: give it up to desk_boot_wait_s to attach before hosting a main (reports wait in the
         inbox meanwhile). Returns the kind to start."""
@@ -3841,6 +3878,16 @@ class SwitchHost:
         return self.wanted()
 
     def run(self):
+        if self.serve_bridge:  # the service socket belongs to the service, not to whoever owns the desk: it outlives every host
+            self.bridge = BridgeServer(self, self.on_message)
+            self.bridge.serve()
+        try:
+            return self.run_hosts()
+        finally:
+            if self.bridge:
+                self.bridge.close()
+
+    def run_hosts(self):
         kind = self.wanted()
         why = "service start"
         if kind == "hosted" and self.desk.mode() == "auto" and self.desk.state().get("active") == "app":
@@ -3868,7 +3915,9 @@ class SwitchHost:
 class Host:
     """Runs `cmd` in a pty this object owns, drains its output, restarts it when it dies, serves the socket."""
 
-    def __init__(self, build_cmd, env, cwd, remote_control=False, on_text=None, on_stale=None, key="main", on_message=None):
+    def __init__(self, build_cmd, env, cwd, remote_control=False, on_text=None, on_stale=None, key="main", on_message=None,
+                 shared_bridge=False):
+        self.shared_bridge = shared_bridge  # main under SwitchHost: the SwitchHost's BridgeServer owns the socket
         self.build_cmd = build_cmd  # () -> (argv, session_id): resume or start by whether the transcript exists
         self.env, self.cwd = child_env(env), cwd
         self._auth_tail = ""
@@ -4153,7 +4202,8 @@ class Host:
         if os.path.exists(logpath) and os.path.getsize(logpath) > (1 << 20):
             os.replace(logpath, logpath + ".1")
         self.log = open(logpath, "ab")
-        self.serve()
+        if not self.shared_bridge:
+            self.serve()
         restore = None
         if self.mirror:
             try:
@@ -4201,6 +4251,34 @@ class Host:
             self.close()
             if self.log:
                 self.log.close()
+
+
+class BridgeServer:
+    """The service's session bridge socket (what ping, `thread send`, session start/stop/list connect to), served for the whole life
+    of a SwitchHost: it stays up across desk switches (hosted main <-> app desk) and routes each message to whoever holds the desk."""
+
+    key = "main"
+    claim_socket = Host.claim_socket
+    serve = Host.serve
+    _handle = Host._handle
+
+    def __init__(self, owner, on_message=None):
+        self.owner, self.on_message = owner, on_message
+        self.stopping = threading.Event()
+        self.server = None
+        self.sock_ino = None
+
+    def dispatch(self, msg):
+        try:
+            if self.on_message and msg.get("sessions_op"):
+                return self.on_message(msg)
+            return self.owner.cur.dispatch(msg)
+        except Exception as exc:  # noqa: BLE001 - the socket answers whatever happens
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    def close(self):
+        self.stopping.set()
+        Host.close(self)
 
 
 # ---------------------------------------------------------------- thread sessions (inside `up`)

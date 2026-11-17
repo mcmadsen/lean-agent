@@ -13156,10 +13156,10 @@ def host_session(cmd, extra, env, h, name):
     sessions = service_session.Sessions(thread_host)
     def make_main():
         return service_session.Host(build, env, h, remote_control=True, on_text=on_text, on_stale=on_stale,
-                                    on_message=sessions.dispatch)
+                                    on_message=sessions.dispatch, shared_bridge=lean_desk.enabled())
     external = lean_desk.enabled()  # auto|external: an app session may be the desk; the host switches between it and a hosted main
     if external:
-        host = service_session.SwitchHost(make_main)
+        host = service_session.SwitchHost(make_main, on_message=sessions.dispatch, serve=True)
         print("lean-agent: " + lean_desk.status_line(), flush=True)
     else:
         lean_desk.detach()  # pinned hosted: a hosted main never resumes an app desk's session
