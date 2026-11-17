@@ -18897,9 +18897,9 @@ def build_parser():
     s.add_argument("--keep-threads", action="store_true", help=argparse.SUPPRESS)  # internal: --clear for main only
     s.add_argument("extra", nargs=argparse.REMAINDER,
                    help="after --: extra flags for claude / claude remote-control, e.g. -- --debug")
-    s.add_argument("--desk", choices=["auto", "external", "hosted"], help="who runs the front desk: auto (default: a local Claude app "
-                   "session started in the lean home becomes the desk, else the service hosts one), hosted (always the service's "
-                   "main session) or external (never hosted); saved in config")
+    s.add_argument("--desk", choices=["auto", "external", "hosted"], help="who runs the front desk: hosted (default: always the service's main session), auto (a local Claude app "
+                   "session started in the lean home becomes the desk, else the service hosts one; opt-in for now) or external "
+                   "(never hosted); saved in config")
     s.set_defaults(fn=cmd_up)
 
     s = sub.add_parser("install", help="install the plugin and create the orchestrator home")

@@ -46,8 +46,8 @@ def config():
 
 
 def mode():
-    m = os.environ.get("LEAN_AGENT_DESK") or config().get("desk") or "auto"
-    return m if m in MODES else "auto"
+    m = os.environ.get("LEAN_AGENT_DESK") or config().get("desk") or "hosted"  # auto is opt-in until the switch is proven in the field
+    return m if m in MODES else "hosted"
 
 
 def enabled():
