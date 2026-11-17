@@ -34,15 +34,21 @@ const DOWN = { v: 1, service: { up: false }, nodes: [], edges: [], moving: [], i
 const SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="380" height="220"></svg>'
 
 // A fake engine: answers `lean-agent` calls, records every argv.
-function fake(on: any, opts: { snap?: unknown; role?: string; limit?: number; closeAfter?: number }) {
+function fake(on: any, opts: { snap?: unknown; role?: string; limit?: number; closeAfter?: number; noBin?: boolean; jsonFail?: string }) {
   const calls: string[][] = []
+  const statuses: string[] = []
   const state = { snap: opts.snap ?? SNAP, panes: [] as { id: string }[], timers: [] as { ms: number }[], store: new Map<string, unknown>() }
-  on('env.get', () => ({ value: opts.role }))
+  on('env.get', (_: any, e: any) => ({ value: e.name === 'PATH' ? '/usr/bin:/bin' : e.name === 'LEAN_AGENT_SESSION_ROLE' ? opts.role : undefined }))
+  on('ui.status', (_: any, e: any) => { statuses.push(e.text); return { value: undefined } })
   on('command.register', () => ({ value: { command: 'live-map' } }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('process.run', (_: any, e: any) => {
-    calls.push([...e.argv])
     const a = e.argv.join(' ')
+    if (e.argv[0] === '/bin/sh' || e.argv[0].endsWith('sh') && e.argv[1] === '-lc') {
+      return { value: { exitCode: opts.noBin ? 1 : 0, stdout: opts.noBin ? '' : 'lean-agent\n', stderr: '' } }
+    }
+    calls.push([...e.argv])
+    if (a === 'lean-agent map --json' && opts.jsonFail) return { value: { exitCode: 3, stdout: '', stderr: opts.jsonFail + '\nmore' } }
     if (a === 'lean-agent map --json') return { value: { exitCode: 0, stdout: JSON.stringify(state.snap), stderr: '' } }
     if (a.startsWith('lean-agent map --svg')) return { value: { exitCode: 0, stdout: SVG, stderr: '' } }
     return { value: { exitCode: 0, stdout: 'waiting: t1', stderr: '' } }
@@ -58,7 +64,7 @@ function fake(on: any, opts: { snap?: unknown; role?: string; limit?: number; cl
     state.timers.push({ ms: e.ms })
     return state.timers.length > (opts.limit ?? 3) ? { deny: 'enough' } : { value: undefined }
   })
-  return { calls, state }
+  return { calls, state, statuses }
 }
 
 test('the pane opens in a front desk, not elsewhere', async ($, on) => {
@@ -105,7 +111,7 @@ test('service down shows the pill', async ($, on) => {
   fake(on, { role: 'main', snap: DOWN })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /Service down/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /service not running/ })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -152,4 +158,70 @@ test('Pause stops polling', async ($, on) => {
   await settle()
   expect(f.state.timers.length).toBeGreaterThan(0)
   expect(jsons(f.calls)).toBe(before)
+})
+
+test('lean-agent missing renders the diagnosis, not a blank pane', async ($, on) => {
+  const f = fake(on, { role: 'main', noBin: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(f.state.panes.map(p => p.id)).toEqual(['lean-agent-live-map'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /lean-agent not found on PATH \(\/usr\/bin:\/bin\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /last ok never/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('a json failure shows the exit code and the first stderr line', async ($, on) => {
+  fake(on, { role: 'main', jsonFail: 'boom: no socket' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /map --json failed \(exit 3\): boom: no socket/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /more/ })).toBeFalsy()
+  await ui.unmount()
+})
+
+test('/live-map opens the pane in a session that is not the desk', async ($, on) => {
+  const f = fake(on, { role: 'thread' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(f.state.panes).toEqual([])
+  await $.command.run({ command: 'live-map', args: '' } as any)
+  expect(f.state.panes.map(p => p.id)).toEqual(['lean-agent-live-map'])
+})
+
+test('the pane opens for the desk even when the first poll fails', async ($, on) => {
+  const f = fake(on, { role: 'main', jsonFail: 'x' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(f.state.panes.length).toBe(1)
+})
+
+test('a surface without Svg gets the compact text version', async ($, on) => {
+  const snap = {
+    ...SNAP,
+    nodes: [
+      ...SNAP.nodes,
+      { id: 't2', kind: 'thread', label: 'Docs', state: 'undelivered', activity: { now: 'Edit' } },
+      { id: 'run:r1', kind: 'worker', parent: 't192', label: 'run 1', state: 'alive' },
+    ],
+    plan: { windows: [{ name: 'five_hour', label: '5h', pct: 42, resets_at: null }] },
+  }
+  fake(on, { role: 'main', snap })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Svg' })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /● E2E checks · 1 session$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /✕ Docs · Edit · 0 sessions/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /Plan 5h 42%/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /surface terminal/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('the status line carries the state', async ($, on) => {
+  const up = fake(on, { role: 'main' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(up.statuses).toContain('lean-agent map: ok')
+})
+
+test('the status line says when lean-agent is missing', async ($, on) => {
+  const miss = fake(on, { role: 'main', noBin: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(miss.statuses.some(t => t.startsWith('lean-agent map: lean-agent not found'))).toBe(true)
 })
