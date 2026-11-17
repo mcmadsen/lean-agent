@@ -889,6 +889,168 @@ def cmd_projects(a):
         print(f"{slug:<32} {len(cards):>3} cards  {v['path']}" + ("  [private]" if v.get("private") else ""))
 
 
+def _unlearn_find(ref):
+    """The learned slug `ref` names (exact slug, folder name or slug prefix); never registers anything. A hidden private
+    project is found by its exact slug only."""
+    projs = projects()
+    if ref in projs:
+        return ref
+    hits = [s for s, v in projs.items() if not lean_private.hides(project=s)
+            and (os.path.basename(v["path"]) == ref or s.startswith(ref + "-"))]
+    if len(hits) > 1:
+        die(f"{ref!r} matches several projects ({', '.join(sorted(hits))}); name one exactly")
+    if not hits:
+        die(f"unknown project {ref!r}; nothing to unlearn (see: lean-agent projects)")
+    return hits[0]
+
+
+def _unlearn_threads(slug):
+    """(thread id, title) of the open threads working in the project."""
+    data = lean_threads.load()
+    last = {}
+    for r in ledger():
+        if r.get("thread") and r.get("project"):
+            last[r["thread"]] = r["project"]
+    out = []
+    for tid, t in sorted(data["threads"].items()):
+        if tid in data["aliases"] or t.get("closed") or tid == "optimize":
+            continue
+        if (t.get("project") or last.get(tid)) == slug:
+            out.append((tid, str(t.get("title") or "")))
+    return out
+
+
+def _unlearn_data_paths(slug):
+    """Per-project files and directories under the lean home (worktrees/ is handled apart)."""
+    out = []
+    root = home()
+    for d in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        full = os.path.join(root, d)
+        if d in ("archive", "worktrees", "work", "running") or not os.path.isdir(full):
+            continue
+        for name in sorted(os.listdir(full)):
+            if name == slug or name.startswith(slug + "."):
+                out.append(os.path.join(full, name))
+    return out
+
+
+def cmd_unlearn(a):
+    """Remove a project from the registry (never its repository); its lean-agent data is archived, not deleted."""
+    slug = _unlearn_find(a.project)
+    path = projects()[slug]["path"]
+    if a.move_todos and a.close_todos:
+        die("--move-todos and --close-todos exclude each other")
+    target = None
+    if a.move_todos:
+        target = _unlearn_find(a.move_todos)
+        if target == slug:
+            die("--move-todos: that is the project being unlearned")
+    todo_items = [t for t in open_todos() if t.get("project") == slug]
+    threads = _unlearn_threads(slug)
+    runs = [(rid, m) for rid, m in live_runs() if m.get("project") == slug]
+    wts = {n: e for n, e in (worktree_index().get(slug) or {}).items() if isinstance(e, dict) and e.get("path")}
+    wts = {n: e for n, e in wts.items() if os.path.isdir(e["path"])}
+    blocks, notes = [], []
+    if runs:
+        blocks.append("live worker runs in this project (stop them first: lean-agent runs, lean-agent stop <run>):\n"
+                      + "\n".join(f"  run {rid}: {' '.join(str(m.get('task') or '').split())[:70]}" for rid, m in runs))
+    if todo_items and not (target or a.close_todos):
+        blocks.append("open todos of this project:\n" + "\n".join(f"  #{t['id']} {t['text'][:80]}" for t in todo_items)
+                      + f"\nmove them: --move-todos <other project>   or close them: --close-todos")
+    if threads and not a.force:
+        blocks.append("open threads in this project (they keep running in their own directory):\n"
+                      + "\n".join(f"  {tid} {title[:70]}" for tid, title in threads) + "\nproceed anyway: --force")
+    if wts and not a.remove_worktrees:
+        notes.append("lean-agent worktrees of this project are left in place (remove them with --remove-worktrees):\n"
+                     + "\n".join(f"  {n}: {e['path']}" for n, e in sorted(wts.items())))
+    dirty = []
+    if wts and a.remove_worktrees:
+        dirty = [(n, e["path"]) for n, e in sorted(wts.items()) if git(e["path"], "status", "--porcelain")]
+        if dirty:
+            blocks.append("worktrees with uncommitted changes (commit or discard them, or leave them: drop --remove-worktrees):\n"
+                          + "\n".join(f"  {n}: {p}" for n, p in dirty))
+    paths = _unlearn_data_paths(slug)
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = home("archive", f"{slug}-{stamp}")
+    if blocks:
+        print(f"lean-agent unlearn {slug}: refused" + (" (dry run)" if a.dry_run else ""), file=sys.stderr)
+        print("\n".join(blocks), file=sys.stderr)
+        return 1
+    pre = "would " if a.dry_run else ""
+    print(f"{'Dry run: nothing changed. ' if a.dry_run else ''}Unlearning '{slug}' (the repository {path} is not touched).")
+    if todo_items:
+        print(f"{pre}{'move' if target else 'close'} {len(todo_items)} open todo(s)" + (f" to {target}" if target else " (note: project unlearned)")
+              + ": " + ", ".join(f"#{t['id']}" for t in todo_items))
+    if threads:
+        print(f"{pre}mark {len(threads)} open thread(s) as '{slug} (unlearned)': " + ", ".join(tid for tid, _ in threads))
+    if wts and a.remove_worktrees:
+        print(f"{pre}remove {len(wts)} lean-agent worktree(s): " + ", ".join(e["path"] for e in wts.values()))
+    for n in notes:
+        print(n)
+    print(f"{pre}archive to {dest}: " + (", ".join(os.path.relpath(p, home()) for p in paths) or "(no per-project data)"))
+    if a.dry_run:
+        return 0
+    os.makedirs(dest, exist_ok=True)
+    save_json(os.path.join(dest, "registry-entry.json"), {slug: projects()[slug]})
+    if todo_items:
+        with file_lock(home("todo.json")):
+            data = todos()
+            ids = {t["id"] for t in todo_items}
+            for t in data["items"]:
+                if t["id"] in ids:
+                    if target:
+                        t["project"] = target
+                    else:
+                        t["status"], t["done_at"] = "done", now_iso()
+                        t.setdefault("notes", []).append("project unlearned")
+            for ep in (data.get("epics") or {}).values():
+                if isinstance(ep, dict) and ep.get("project") == slug and target:
+                    ep["project"] = target
+            save_json(home("todo.json"), data)
+    if threads:
+        with lean_threads._locked() as data:
+            for tid, _ in threads:
+                if tid in data["threads"]:
+                    data["threads"][tid]["project"] = f"{slug} (unlearned)"
+    if wts and a.remove_worktrees:
+        idx = load_json(home("worktrees.json"), {})
+        for n, e in sorted(wts.items()):
+            r = subprocess.run(["git", "-C", path, "worktree", "remove", e["path"]], capture_output=True, text=True)
+            if r.returncode != 0 and os.path.isdir(e["path"]):
+                print(f"could not remove worktree {e['path']}: {(r.stderr or r.stdout).strip()[:200]}", file=sys.stderr)
+                continue
+            (idx.get(slug) or {}).pop(n, None)
+        save_json(home("worktrees.json"), idx)
+        left = idx.get(slug) or {}
+        if not left:
+            idx.pop(slug, None)
+            save_json(home("worktrees.json"), idx)
+            if os.path.isdir(home("worktrees", slug)):
+                paths.append(home("worktrees", slug))
+    cfg = config_json()
+    cleared = []
+    for k, v in list(cfg.items()):
+        if v == slug:
+            cleared.append(k)
+            del cfg[k]
+        elif isinstance(v, dict) and slug in v:
+            cleared.append(f"{k}.{slug}")
+            del v[slug]
+    if cleared:
+        save_json(home("config.json"), cfg)
+        save_json(os.path.join(dest, "config-cleared.json"), cleared)
+        print("cleared defaults: " + ", ".join(cleared))
+    for p in paths:
+        if os.path.exists(p):
+            shutil.move(p, os.path.join(dest, os.path.relpath(p, home())))
+    with file_lock(home("projects.json")):
+        projs = projects()
+        projs.pop(slug, None)
+        save_json(home("projects.json"), projs)
+    print(f"Unlearned '{slug}'. Archived to {dest} (restore by hand; `lean-agent learn {path}` starts clean).")
+    return 0
+
+
 def cmd_cards(a):
     slug, _ = resolve_project(a.project)
     sync_memory(slug)
@@ -18661,6 +18823,14 @@ def build_parser():
     s.set_defaults(fn=cmd_learn)
     s = sub.add_parser("projects", help="list learned projects")
     s.set_defaults(fn=cmd_projects)
+    s = sub.add_parser("unlearn", help="unregister a project (its repository is never touched; its lean-agent data is archived)")
+    s.add_argument("project")
+    s.add_argument("--move-todos", metavar="PROJECT", help="move its open todos to another project")
+    s.add_argument("--close-todos", action="store_true", help="close its open todos (note: project unlearned)")
+    s.add_argument("--force", action="store_true", help="also when threads are open in it (they keep working)")
+    s.add_argument("--remove-worktrees", action="store_true", help="git worktree remove lean-agent's worktrees of it")
+    s.add_argument("--dry-run", action="store_true", help="show what would be done, change nothing")
+    s.set_defaults(fn=cmd_unlearn)
     s = sub.add_parser("cards", help="list a project's context cards")
     s.add_argument("project")
     s.add_argument("filter", nargs="?", help="only cards whose id, title or source contains this")

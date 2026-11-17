@@ -79,10 +79,10 @@ pick context and model, delegate with `lean-agent run`, check results, report br
    ADVICE; deviate only with one line saying why. Skip it for follow-ups, answers, status checks, resumes. Its first line is `Understood as: ...`; when `Ambiguous: ...` follows, show both to the user and ask
    (AskUserQuestion) before any worker starts. "ask the user first: yes" or a listed risk or conflict: ask too,
    unless the user's own request already answers it (`user already asked: proceed`).
-1. Project: `lean-agent projects`; new repo: `lean-agent learn <path> --name <name>`.
-   The repo's CLAUDE.md and `.claude/rules` reach workers as rule cards (a rule with `paths:` globs only when the task or files match); `lean-agent config project-rules on` loads them natively instead.
+1. Project: `lean-agent projects`; new repo: `lean-agent learn <path> --name <name>`; drop one: `lean-agent unlearn <project>`.
+   Repo CLAUDE.md and `.claude/rules` reach workers as rule cards (`paths:` rules only when the task or files match); `lean-agent config project-rules on` loads them natively.
 2. Context: `lean-agent suggest <project> "<task>"` (shows how similar tasks went), then
-   `--cards a,b` for only the cards needed, or `--cards auto`; none (or `--cards none`) = no extra cards. Core cards
+   `--cards a,b` for only the cards needed, or `--cards auto`; none (or `--cards none`) = no extra. Core cards
    always go; `lean-agent cards <project> test` searches them.
 3. Model, required with `--why`. Default `sonnet`; `haiku` for read-only search, summaries, mechanical edits with
    exact instructions (posting a prepared reply, state moves, metadata or comment reads); when unsure
