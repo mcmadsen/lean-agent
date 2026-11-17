@@ -37,7 +37,7 @@ def cpu_seconds(pid):
 
 @unittest.skipUnless(os.path.isdir("/proc/self"), "needs /proc")
 class Base(unittest.TestCase):
-    pin = None
+    pin = None  # LEAN_AGENT_DESK for the service and the test
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -142,6 +142,8 @@ class Base(unittest.TestCase):
 
 
 class AutoSwitch(Base):
+    pin = "auto"  # opt-in mode (the default is hosted)
+
     def test_switch_to_the_app_desk_and_back_keeps_the_service_up(self):
         self.until("the hosted main", lambda: ss.request({"ping": True}).get("alive") is True)
         self.checks(True, "hosted")

@@ -11161,7 +11161,7 @@ def orchestrator_settings(existing):
         return data
     servers = [n for n, v in lean_mcp.discover().items() if v["source"] in ("user", "desktop")]
     trim = load_json(home("context-trim.json"), {})  # what `lean-agent context --apply` took out
-    deny = set(ORCHESTRATOR_DENY)
+    deny = set(ORCHESTRATOR_DENY) | {f"Agent({n})" for n in user_agent_names()}  # also for an app session in this folder (no CLI flags there)
     perms["deny"] = sorted(deny | set(trim.get("deny") or [])
                            | {lean_mcp.tool_prefix(n).rstrip("_") for n in servers})
     data["permissions"] = perms
@@ -12406,6 +12406,9 @@ def cmd_doctor(a):
     if lean_desk.enabled():
         report(True, lean_desk.status_line(), None)
         report(True, this_session_line(), None)
+        ok, msg = desk_context_check()
+        if msg:
+            report(ok, msg, "the app desk folder settings cut what Claude Code settings allow; see the README (Front desk in the Claude desktop app)")
     for line in lean_slow.report_lines(3):  # commands/hooks that ran past 8 s / 4 s: where they were stuck
         report(None, line, "send this file with `lean-agent feedback add`")
     mark("socket, slow traces")
@@ -13240,6 +13243,44 @@ def host_session(cmd, extra, env, h, name):
 
 
 KEEP_TOOLS = {"Bash", "Read", "BashOutput", "TaskOutput", "KillShell", "TaskStop", "AskUserQuestion", "ToolSearch"}
+
+
+DESK_CONTEXT_RATIO = 1.5  # doctor warns when the app desk starts with more than this many times the hosted desk's context
+
+
+def first_turn_context(path):
+    """Tokens of context at the first assistant turn of a transcript (input + cache write + cache read), or None."""
+    try:
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                u = ((e.get("message") or {}).get("usage") if isinstance(e, dict) else None)
+                if isinstance(u, dict) and e.get("type") == "assistant":
+                    n = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+                    if n:
+                        return n
+    except OSError:
+        pass
+    return None
+
+
+def desk_context_check(app_path=None, hosted_path=None):
+    """(ok, line) comparing the attached app desk's first-turn context with the hosted desk's; ("", None) when either is unknown."""
+    app_path = app_path or (lean_desk.attached() or {}).get("transcript")
+    hosted_path = hosted_path or service_session.info("main").get("transcript")
+    if not (app_path and hosted_path) or app_path == hosted_path:
+        return None, ""
+    app, hosted = first_turn_context(app_path), first_turn_context(hosted_path)
+    if not (app and hosted):
+        return None, ""
+    ratio = app / hosted
+    line = f"app desk first-turn context {app / 1000:.0f}k vs hosted desk {hosted / 1000:.0f}k ({ratio:.1f}x)"
+    if ratio > DESK_CONTEXT_RATIO:
+        return False, line + f": more than {DESK_CONTEXT_RATIO}x the hosted desk (an app session cannot take CLI flags)"
+    return True, line
 
 
 def orchestrator_transcripts(h):

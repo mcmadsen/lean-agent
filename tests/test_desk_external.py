@@ -794,5 +794,62 @@ class Surface(Base):
         self.assertIn("front desk is external", r["error"])
 
 
+class Trim(Base):
+    """The desk folder's settings cut context as far as settings can (an app session takes no CLI flags); the doctor compares."""
+
+    def test_desk_folder_settings_carry_the_trimming_keys_and_leave_global_settings_alone(self):
+        import lean_agent as la
+        cfg = os.path.join(self.tmp, "userclaude")
+        os.makedirs(os.path.join(cfg, "agents"))
+        open(os.path.join(cfg, "agents", "reviewer.md"), "w").write("---\nname: reviewer\n---\nx\n")
+        glob = os.path.join(cfg, "settings.json")
+        mine = {"enabledPlugins": {"other@market": True, "lean-agent@lean-agent": True}, "theme": "dark"}
+        json.dump(mine, open(glob, "w"))
+        before = open(glob).read()
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": cfg}):
+            h = la.prepare_home()
+            la.refresh_desk_folder(h)
+            with open(os.path.join(h, ".claude", "settings.json")) as fh:
+                first = fh.read()
+            la.prepare_home()
+            la.refresh_desk_folder(h)
+            with open(os.path.join(h, ".claude", "settings.json")) as fh:
+                again = fh.read()
+        data = json.loads(first)
+        self.assertEqual(first, again)  # idempotent
+        self.assertEqual(open(glob).read(), before)  # the user's global settings are never touched
+        self.assertTrue(data["disableBundledSkills"])
+        self.assertTrue(data["disableClaudeAiConnectors"])
+        self.assertIs(data["enableAllProjectMcpServers"], False)
+        self.assertIs(data["enabledPlugins"]["other@market"], False)  # not needed by the desk
+        self.assertNotEqual(data["enabledPlugins"].get("lean-agent@lean-agent"), False)
+        self.assertIn(os.path.join(cfg, "CLAUDE.md"), data["claudeMdExcludes"])
+        self.assertIn(os.path.join(cfg, "rules", "**"), data["claudeMdExcludes"])
+        self.assertIn("Agent(reviewer)", data["permissions"]["deny"])  # no custom agents in the desk's context
+        self.assertIn("WebSearch", data["permissions"]["deny"])  # built-in tools the desk never uses
+        with open(os.path.join(h, ".claude", "settings.local.json")) as fh:
+            self.assertIs(json.load(fh)["syncClaudeAiSkills"], False)
+
+    def transcript(self, name, tokens):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w") as fh:
+            fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}) + "\n")
+            fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "usage": {
+                "input_tokens": 10, "cache_creation_input_tokens": tokens - 10, "cache_read_input_tokens": 0}}}) + "\n")
+        return path
+
+    def test_doctor_warns_when_the_app_desk_starts_above_one_and_a_half_times_the_hosted_desk(self):
+        import lean_agent as la
+        hosted = self.transcript("hosted.jsonl", 15000)
+        self.assertEqual(la.first_turn_context(hosted), 15000)
+        ok, line = la.desk_context_check(self.transcript("app.jsonl", 52000), hosted)
+        self.assertIs(ok, False)
+        self.assertIn("52k vs hosted desk 15k", line)
+        self.assertIn("3.5x", line)
+        ok, line = la.desk_context_check(self.transcript("app2.jsonl", 20000), hosted)
+        self.assertIs(ok, True)
+        self.assertEqual(la.desk_context_check(self.transcript("app3.jsonl", 20000), os.path.join(self.tmp, "none"))[1], "")
+
+
 if __name__ == "__main__":
     unittest.main()

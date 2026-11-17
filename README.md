@@ -293,6 +293,24 @@ not mid-turn and has no dialog open, even after recent typing. A transcript quie
 checkpoint is retried twice, then the main is stopped without it, and its process tree is killed if it does not end within 20 s.
 `lean-agent desk status` and `doctor` show why a pending switch waits, in one line.
 
+**Context size of the app desk.** The hosted desk starts with CLI flags (`--strict-mcp-config`, `--disable-slash-commands`, `--settings`) that
+an app session cannot get. The desk folder's `.claude/settings.json` and `settings.local.json` (written by `lean-agent home`, `update`
+and the service start, lean-agent keys only, never your global settings) therefore carry what settings can express:
+`enabledPlugins` false for every plugin except lean-agent and lean-agent-map, `disableClaudeAiConnectors`, `enableAllProjectMcpServers`
+false, deny rules for the tools of your user/desktop MCP servers, `disableBundledSkills` and `syncClaudeAiSkills` false,
+`Agent(<name>)` deny for your custom agents, a deny list of built-in tools the desk never uses, and `claudeMdExcludes` for your
+global `CLAUDE.md`, `~/.claude/rules` and instruction files above the folder. `lean-agent doctor` compares the attached app desk's
+first-turn context (from its transcript) with the hosted desk's and warns above 1.5x.
+
+Estimate, not measured here (the container's Claude Code is too old to start a desk and has no sign-in), from a field report of an
+app session at ~52k (MCP tools 18.8k, system tools 17.2k, memory files 11.6k, system prompt 10.6k, skills 10k, custom agents 0.7k, MCP
+server instructions 3k) against ~15k for the hosted desk: with the keys above honoured, MCP tools, MCP instructions, skills and custom
+agents (~32k) go and most of the system tools (denied tools leave the list) follow, leaving roughly 24k. **What settings cannot cut:**
+the Claude Code system prompt (~10k), and the full thread guide: thread sessions run in the same folder, so `CLAUDE.md` (~8k) loads
+in the app desk next to the short front-desk rule (~1.5k), while the hosted desk excludes it with a launch flag. So the app desk stays
+about 8-9k above the hosted one until the thread guide moves out of the desk folder (a separate change: thread sessions would need
+their own working folder). Check your own numbers with `/context` in the app session and the doctor line.
+
 The only manual steps: open a new local session in the Claude app with the folder `~/lean-agent-desk` (or `~/.lean-agent/home`; the app remembers it) and
 flip the app's Remote Control switch if you want it on your phone. The folder's settings (lean-agent's own env keys only, never
 your global settings; nothing is written to `~/.lean-agent` itself) are written and refreshed by `lean-agent home`, `update` and the service start itself.
