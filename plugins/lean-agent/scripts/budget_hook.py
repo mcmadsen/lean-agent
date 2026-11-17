@@ -485,6 +485,12 @@ def single_lean_agent(command):
     return words[0] == "lean-agent" or os.path.realpath(os.path.expanduser(words[0])) == bin_dir + "lean-agent"
 
 
+def plain_echo(words):
+    """`echo` with plain words only: no variable, glob, home, escape or substitution characters, no option but -n."""
+    return (words[0] == "echo" and all(re.fullmatch(r"[A-Za-z0-9 _.,:;=@%+/-]*", w) for w in words[1:])
+            and not any(w.startswith("-") and w != "-n" and set(w) != {"-"} for w in words[1:]))
+
+
 def lean_agent_only(command):
     """True when every command in `command` is a lean-agent command (any first word with basename `lean-agent`,
     or the plugin's bin path); `cd` is fine. Quoted text is data, and an unparsable command is refused. Only
@@ -511,7 +517,7 @@ def lean_agent_only(command):
         if not first:
             if not (pipe_stage_ok(words) or any(pipe_stage_ok(words + [fd]) for at, fd in glued if at == n)):
                 return False
-        elif not (words[0] == "cd" or os.path.basename(words[0]) == "lean-agent"
+        elif not (words[0] == "cd" or os.path.basename(words[0]) == "lean-agent" or plain_echo(words)
                   or os.path.realpath(os.path.expanduser(words[0])).startswith(bin_dir)):
             return False
         first = False

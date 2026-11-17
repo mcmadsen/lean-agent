@@ -2125,8 +2125,21 @@ def run_result_sentence(r):
     return _short(m.group(1) if m else body, 200)
 
 
-def run_auto_text(r):
+def run_outcome(r, n=120):
+    """One line (max n chars) of what a finished run came to: the first sentence of its saved result, else the first
+    line of the ledger's result head; '' when it has none."""
     sentence = run_result_sentence(r)
+    if not sentence:
+        for line in str(r.get("result_head") or "").splitlines():
+            if line.strip() and not line.startswith("run "):
+                sentence = line
+                break
+    sentence = _short(sentence, 10 ** 6)
+    return sentence if len(sentence) <= n else sentence[:n - 1].rstrip() + "\u2026"
+
+
+def run_auto_text(r):
+    sentence = run_outcome(r)
     return f"run {r['id']}: {r.get('status')}" + (f" \u00b7 {sentence}" if sentence else "") + \
         f" (details: lean-agent runs --show {r['id']})"
 
