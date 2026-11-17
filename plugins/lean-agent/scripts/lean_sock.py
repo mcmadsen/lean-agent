@@ -336,7 +336,6 @@ class Server:
         self.thread = None
         self.workers = threading.BoundedSemaphore(MAX_WORKERS)
         self.observer = None  # (op, ms) -> None: the live map counts requests
-        self.on_request = None  # (op, req) -> None: the live page's pulses; must be cheap and non-blocking
 
     def dispatch(self, req):
         op = req.get("op")
@@ -346,11 +345,6 @@ class Server:
         if not fn:
             return {"ok": False, "error": f"unknown op {op!r}"}
         box = {}
-        if self.on_request:
-            try:
-                self.on_request(op, req)
-            except Exception:
-                pass
 
         def work():
             try:

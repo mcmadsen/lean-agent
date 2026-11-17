@@ -217,5 +217,19 @@ class PaneCheckTest(unittest.TestCase):
         self.assertRegex(r.stdout, r"svg ok: yes \(\d+ bytes\)")
 
 
+class PaneJsonTest(unittest.TestCase):
+    def test_pane_json_cli(self):
+        import subprocess
+        tmp = tempfile.mkdtemp()
+        env = {"HOME": tmp, "LEAN_AGENT_HOME": tmp, "PATH": "/usr/bin:/bin", "LEAN_AGENT_TEST": "1"}
+        t0 = time.time()
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "lean_agent.py"), "pane", "--json"], env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        d = json.loads(r.stdout)
+        self.assertEqual(sorted(d), ["answers", "desk", "goals", "inbox", "service", "ts", "v"])
+        self.assertEqual((d["goals"], d["answers"], d["inbox"], d["service"]["up"]), ([], [], 0, False))
+        self.assertLess(time.time() - t0, 5)
+
+
 if __name__ == "__main__":
     unittest.main()

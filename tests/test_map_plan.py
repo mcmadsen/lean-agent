@@ -1,4 +1,4 @@
-"""Plan usage on the live map: snapshot "plan", alerts, history series, `map --usage`, header chips (Playwright)."""
+"""Plan usage on the map: snapshot "plan", alerts, history series, `map --usage`."""
 import datetime
 import json
 import os
@@ -15,11 +15,8 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import lean_map  # noqa: E402
-import lean_maplive  # noqa: E402
 import usage  # noqa: E402
-from test_map_live import NODE, have_playwright, node_env, snap as base_snap  # noqa: E402
 
-SHOTS = "/tmp/claude-0/-home-user-lean-agent/ecf7a38c-d764-5e31-b359-10cc63491292/scratchpad/shots4"
 
 
 def iso(t):
@@ -165,112 +162,6 @@ class UsageCmdTest(Home):
         r = self.run_cmd()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("no plan usage", r.stdout)
-
-
-CHECK_JS = r"""
-const { chromium } = require('playwright');
-(async () => {
-  const { url, shots, url2 } = JSON.parse(process.argv[2]);
-  const b = await chromium.launch(); const out = {};
-  let pg = await b.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: 'dark' });
-  const errs = []; pg.on('pageerror', e => errs.push(String(e)));
-  await pg.goto(url); await pg.waitForTimeout(800);
-  out.chips = await pg.locator('#plan .pu2').allInnerTexts();
-  out.levels = await pg.locator('#plan .pu2').evaluateAll(l => l.map(x => x.className));
-  const c1 = await pg.locator('#plan .pr').last().innerText(); await pg.waitForTimeout(2200);
-  out.tick = [c1, await pg.locator('#plan .pr').last().innerText()];
-  out.tip = await pg.locator('#plan .pu2').first().getAttribute('title');
-  await pg.locator('#plan .pu2').first().click();
-  out.panel = await pg.locator('#ppanel').isVisible() ? await pg.locator('#ppanel').innerText() : '';
-  if (shots) await pg.screenshot({ path: shots + '/plan-dark-1280.png' });
-  await pg.keyboard.press('Escape'); out.closed = !(await pg.locator('#ppanel').isVisible());
-  if (url2) { await pg.goto(url2); await pg.waitForTimeout(800); out.noPlanHidden = await pg.locator('#plan').isHidden(); out.noPlanNodes = await pg.locator('.nd').count(); }
-  out.errs = errs;
-  await pg.close();
-  pg = await b.newPage({ viewport: { width: 400, height: 800 }, colorScheme: 'light' });
-  await pg.goto(url); await pg.waitForTimeout(800);
-  out.narrow = await pg.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
-  if (shots) await pg.screenshot({ path: shots + '/plan-light-400.png' });
-  await b.close();
-  console.log(JSON.stringify(out));
-})().catch(e => { console.log(JSON.stringify({ error: String(e).slice(0, 400) })); });
-"""
-
-TREND_JS = r"""
-const { chromium } = require('playwright');
-(async () => {
-  const { url, shots } = JSON.parse(process.argv[2]);
-  const b = await chromium.launch();
-  const pg = await b.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: 'dark' });
-  await pg.goto(url); await pg.waitForTimeout(1500);
-  await pg.locator('#vtr').click(); await pg.waitForTimeout(1500);
-  const out = { lines: await pg.locator('#c5 polyline').count(), title: await pg.locator('#trends').innerText() };
-  if (shots) await pg.screenshot({ path: shots + '/plan-trends.png', fullPage: true });
-  await b.close(); console.log(JSON.stringify(out));
-})().catch(e => { console.log(JSON.stringify({ error: String(e).slice(0, 400) })); });
-"""
-
-
-class BrowserTest(Home):
-    @classmethod
-    def setUpClass(cls):
-        if not have_playwright():
-            raise unittest.SkipTest("node/playwright/browser not available")
-
-    def page(self, name, snap):
-        d = os.path.join(self.tmp, name)
-        os.makedirs(d)
-        return "file://" + lean_maplive.write_html(d, snap)
-
-    def node(self, js, arg):
-        f = os.path.join(self.tmp, "x.js")
-        with open(f, "w") as fh:
-            fh.write(js)
-        r = subprocess.run([NODE, f, json.dumps(arg)], capture_output=True, text=True, env=node_env(), timeout=180)
-        out = json.loads(r.stdout.strip().splitlines()[-1])
-        self.assertNotIn("error", out, out)
-        return out
-
-    def test_chips_panel_rejected_and_missing(self):
-        os.makedirs(SHOTS, exist_ok=True)
-        now = time.time()
-        s = base_snap()
-        s["plan"] = {"as_of": int(now - 600), "age_s": 600, "status": "allowed", "windows": [
-            {"name": "five_hour", "label": "5-hour", "pct": 42.0, "resets_at": int(now + 7300), "resets_in_s": 7300, "pace": None, "source": "claude"},
-            {"name": "seven_day", "label": "week", "pct": 83.0, "resets_at": int(now + 3 * 86400), "resets_in_s": 3 * 86400, "pace": "30 points ahead", "source": "claude"},
-            {"name": "seven_day_opus", "label": "week Opus", "pct": 5.0, "resets_at": int(now + 300), "resets_in_s": 300, "pace": None, "source": "claude"}]}
-        s2 = json.loads(json.dumps(s))
-        s2["plan"]["status"] = "rejected"
-        s2["plan"]["windows"][0]["pct"] = 100.0
-        s3 = base_snap()
-        o = self.node(CHECK_JS, {"url": self.page("a", s), "shots": SHOTS, "url2": self.page("c", s3)})
-        self.assertRegex(o["chips"][0], r"(?is)5-hour window.*42% · resets in 2h 0\dm")
-        self.assertRegex(o["chips"][1], r"(?is)weekly window.*83% · resets \w{3} \d\d:\d\d")
-        self.assertIn("lv-ok", o["levels"][0])
-        self.assertIn("lv-warn", o["levels"][1])
-        self.assertNotEqual(o["tick"][0], o["tick"][1])
-        self.assertIn("as of 10 min ago", o["tip"])
-        self.assertIn("Plan usage", o["panel"])
-        self.assertIn("30 points ahead", o["panel"])
-        self.assertIn("haiku above 70%", o["panel"])
-        self.assertTrue(o["closed"])
-        self.assertTrue(o["noPlanHidden"])
-        self.assertGreater(o["noPlanNodes"], 0)
-        self.assertEqual(o["errs"], [])
-        self.assertLessEqual(o["narrow"][0], o["narrow"][1])
-        r = self.node(CHECK_JS, {"url": self.page("b", s2), "shots": None})
-        self.assertIn("limit reached - resets", r["chips"][0].lower())
-        self.assertIn("lv-bad", r["levels"][0])
-
-    def test_trends_chart(self):
-        now = time.time()
-        for i in range(30):
-            usage._append_plan_history({"five_hour": {"pct": (i * 7) % 100}, "seven_day": {"pct": i * 2}}, now - (30 - i) * 3600 * 5)
-        live = lean_maplive.Live(base_snap, self.tmp).start()
-        self.addCleanup(live.stop)
-        o = self.node(TREND_JS, {"url": f"http://127.0.0.1:{live.port}/?t={live.token}", "shots": SHOTS})
-        self.assertEqual(o["lines"], 2)
-        self.assertIn("plan usage", o["title"].lower())
 
 
 if __name__ == "__main__":

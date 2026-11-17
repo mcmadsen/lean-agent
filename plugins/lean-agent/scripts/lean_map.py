@@ -805,6 +805,31 @@ def inbox_from_files():
         return 0
 
 
+def pane_data(now=None):
+    """Everything the Claude desktop pane shows, in one cheap call: service, desk, goals, answers, inbox. No worker runs, no model."""
+    now = time.time() if now is None else now
+    up, version = False, ""
+    try:
+        import lean_sock
+        r = lean_sock.call("ping", timeout=0.3)
+        up, version = bool(r and r.get("ok")), str((r or {}).get("version") or "")
+    except Exception:  # noqa: BLE001
+        pass
+    out = {"v": 1, "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)), "service": {"up": up, "version": version},
+           "desk": desk_info(now), "goals": [], "answers": [], "inbox": inbox_from_files()}
+    try:
+        import lean_goals
+        out["goals"] = lean_goals.rows(now)
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"goals: {exc}"[:200]
+    try:
+        import lean_myq
+        out["answers"] = lean_myq.rows(now)
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = (out.get("error", "") + f" answers: {exc}")[:300]
+    return out
+
+
 def fetch(timeout=1.0):
     """One snapshot through the service socket, else the service-not-running one. Never raises."""
     try:

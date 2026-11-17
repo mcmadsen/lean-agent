@@ -16,7 +16,6 @@ sys.path.insert(0, ROOT)
 
 import lean_activity as act  # noqa: E402
 import lean_map  # noqa: E402
-import lean_maplive  # noqa: E402
 
 NOW = 1_800_000_000.0  # fixed clock
 
@@ -259,67 +258,6 @@ class HistoryTest(Base):
         t0 = time.perf_counter()
         lean_map.history(self.tmp, 14, now=NOW)
         self.assertLess(time.perf_counter() - t0, 1.0 if os.environ.get("CI") else 0.3)  # shared CI runners are slower
-
-
-class LiveRoutesTest(Base):
-    def setUp(self):
-        super().setUp()
-        ledger(self.tmp, [row(0, 1.0, now=time.time())])
-        self.live = lean_maplive.Live(lambda: {"v": 1, "nodes": [], "edges": []}, self.tmp, interval=0.2).start()
-        self.addCleanup(self.live.stop)
-
-    def get(self, path, token=True):
-        return http_get(self.live.port, path + (f"{'&' if '?' in path else '?'}t={self.live.token}" if token else ""))
-
-    def test_history_route(self):
-        self.assertTrue(self.get("/history?days=14", token=False)[0].endswith("403 Forbidden"))
-        self.assertTrue(http_get(self.live.port, "/history?t=nope")[0].endswith("403 Forbidden"))
-        st, hd, body = self.get("/history?days=5")
-        self.assertTrue(st.endswith("200 OK"))
-        self.assertEqual(hd["access-control-allow-origin"], "*")
-        d = json.loads(body)
-        self.assertEqual(len(d["days"]), 5)
-        self.assertEqual(d["days"][-1]["usd"], 1.0)
-        self.assertEqual(len(json.loads(self.get("/history")[2])["days"]), 14)
-        self.assertEqual(len(json.loads(self.get("/history?days=junk")[2])["days"]), 14)
-
-    def test_history_zero_work_unless_requested(self):
-        with mock.patch.object(lean_map, "history", side_effect=AssertionError("computed")):
-            self.get("/snap")
-            self.live.on_request("send", {"thread": "t1"})
-        self.assertEqual(lean_map._hcache, {})
-
-    def test_replay_bounds_and_since(self):
-        lv = self.live
-        for i in range(6000):
-            lv.record_replay("send", {"thread": "t1"}, now=NOW + i * 0.1)
-        self.assertEqual(len(lv.replay), 5000)
-        lv.replay.clear()
-        t0 = time.time()
-        lv.record_replay("send", {"thread": "t1"}, now=t0 - 4000)  # older than 60 min: dropped by the next record
-        lv.record_replay("tool", {"node": "t1", "tool": "Bash", "target": "git", "phase": "post", "ok": False,
-                                  "command": "rm -rf / secret"}, now=t0 - 30)
-        lv.record_replay("tool", {"node": "t1", "tool": "Bash", "phase": "pre"}, now=t0 - 20)  # pre phase: not kept
-        lv.record_replay("pending", {"thread": "t2"}, now=t0 - 10)
-        lv.record_replay("ping", {}, now=t0 - 5)  # unknown nodes: not kept
-        evs = json.loads(self.get("/replay")[2])["events"]
-        self.assertEqual([e["op"] for e in evs], ["tool", "pending"])
-        self.assertEqual(set(evs[0]), {"ts", "from", "to", "op", "node", "tool", "target", "ok"})
-        self.assertEqual((evs[0]["tool"], evs[0]["target"], evs[0]["ok"], evs[0]["node"]), ("Bash", "git", False, "t1"))
-        self.assertEqual((evs[1]["from"], evs[1]["to"]), ("t2", "service"))
-        self.assertNotIn("secret", json.dumps(evs))
-        since = t0 - 20
-        self.assertEqual([e["op"] for e in json.loads(self.get(f"/replay?since={since}")[2])["events"]], ["pending"])
-        self.assertEqual(json.loads(self.get("/replay?since=junk")[2])["events"][0]["op"], "tool")
-        self.assertTrue(http_get(self.live.port, "/replay")[0].endswith("403 Forbidden"))
-
-    def test_replay_records_without_clients_and_no_snapshot(self):
-        calls = []
-        self.live.snapshot = lambda: calls.append(1) or {}
-        self.assertFalse(self.live.clients)
-        self.live.on_request("wake", {"thread": "t4"})
-        self.assertEqual(calls, [])
-        self.assertEqual(len(self.live.replay), 1)
 
 
 class TimingTest(Base):

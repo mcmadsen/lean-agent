@@ -411,6 +411,27 @@ def table(open_only=False, thread=None, now=None):
     return pre + "\n".join(out)
 
 
+def _line(text, n=140):
+    for ln in str(text or "").splitlines():
+        if ln.strip():
+            return _cell(ln, n)
+    return ""
+
+
+def rows(now=None, limit=30):
+    """The answered questions as data (what `myq` lists), unread first, for the pane."""
+    now = time.time() if now is None else now
+    unread_ids = {x.get("id") for x in unread()}
+    out = [{"id": qn(x), "q": _line(x.get("text")), "a": _line(x.get("answer")), "thread": x.get("target") or "main",
+            "age": _age(x.get("answered_ts") or x.get("ts"), now), "unread": x.get("id") in unread_ids,
+            "_ts": float(x.get("answered_ts") or x.get("ts") or 0)}
+           for x in select() if x.get("status") == "answered"]
+    out.sort(key=lambda r: (not r["unread"], -r["_ts"]))
+    for r in out:
+        del r["_ts"]
+    return out[:limit]
+
+
 def show(num, now=None):
     now = time.time() if now is None else now
     i = parse_id(num)

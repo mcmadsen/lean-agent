@@ -477,6 +477,26 @@ def table(now=None, detail=False, show_all=False):
     return "\n".join("  ".join(r[i].ljust(w[i]) for i in range(5)) + "  " + r[5] for r in rows)
 
 
+def rows(now=None):
+    """The open goals of open threads as data (what `goals` lists), newest activity first, for the pane."""
+    now = time.time() if now is None else now
+    closed = _closed_threads()
+    qmin = quiet_minutes()
+    out = []
+    for g in open_goals():
+        if _tid(g.get("thread")) in closed:
+            continue
+        last = _epoch(g.get("last_activity")) or _epoch(g.get("created")) or 0
+        st = g.get("state")
+        show = {"waiting-user": "waiting", "blocked": "waiting", "stuck": "stuck"}.get(st) or ("quiet" if (now - last) / 60 >= qmin else "working")
+        out.append({"id": g["id"], "ref": g.get("ref", ""), "thread": g.get("thread") or "-", "state": show, "raw_state": st,
+                    "quiet": quiet_text(g, now), "next": (g.get("next") or f"target: {g.get('target')}")[:160], "_ts": last})
+    out.sort(key=lambda r: -r["_ts"])
+    for r in out:
+        del r["_ts"]
+    return out
+
+
 def now_text(now=None):
     t = table(now)
     return ("Goals (the front desk owns them):\n" + t) if t else ""

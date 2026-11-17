@@ -12506,15 +12506,12 @@ def cmd_doctor(a):
         report(None, "compaction setting ignored: " + msg, "lean-agent config compact-window N|default, compact-pct P|default")
     report(True, text + " (lean-agent config compact-window N|default, compact-pct P|default)")
     report(True, f"auto clear: {clear_at_text()} (lean-agent config clear-at off|auto|N)")
-    import lean_maplive
-    ok, text = lean_maplive.doctor_line(lean_sock.home())
-    report(ok, text)
     try:
         bad = [x for x in (lean_map.fetch() or {}).get("alerts") or [] if x.get("level") == "bad"]
         report(not bad if bad else True, f"live map alerts: {len(bad)} bad" + (" (lean-agent map --alerts)" if bad else ""))
     except Exception:
         pass
-    report(True, "live map: the Claude Code desktop pane (lean-agent map --json|--svg) or the live page (lean-agent map --url)")
+    report(True, "pane: the Claude desktop app shows goals and answers (lean-agent pane --json, map --pane-check)")
     fa = service_session.fresh_after()
     report(True, "auto fresh: " + service_session.fresh_text(fa) + (
         f" (thread sessions continue fresh at ~{kt(int(service_session.fresh_context_threshold(fa[1], service_session.up_compact_at())))} context)"
@@ -12965,9 +12962,7 @@ def sock_handlers(deliverer, helper):
         return {"ok": True}
 
     def map_op(req):
-        lv = live_box[0] if live_box else None
-        # the live endpoint already computes one snapshot every 2 s for everyone: share it instead of computing another here
-        return {"map": lv.get_snap() if lv else lean_map.snapshot_now()}
+        return {"map": lean_map.snapshot_now()}
 
     return {
         "send": send, "wake": wake, "pending": pending, "dialog": dialog, "map": map_op,
@@ -13195,22 +13190,12 @@ def host_session(cmd, extra, env, h, name):
     deliverer = service_session.SpoolDeliverer()
     threading.Thread(target=deliverer.loop, args=(spool_stop,), daemon=True).start()
     sock_server = None
-    live_box.clear()
     try:
         sock_helper = lean_sock.Helper(os.path.abspath(__file__))
         lean_map.VERSION = plugin_version()
         sock_server = lean_sock.Server(sock_handlers(deliverer, sock_helper), version=plugin_version(), on_stop=sock_helper.stop)
         sock_server.observer = lean_map.record_request
         sock_server.start()
-        try:
-            import lean_maplive
-            live = lean_maplive.Live(lean_map.snapshot_now, lean_sock.home()).start()
-            live_box.append(live)
-            sock_server.on_request = live.on_request
-            _prev_stop = sock_server.on_stop
-            sock_server.on_stop = lambda: (live.stop(), _prev_stop and _prev_stop())
-        except Exception as exc:  # noqa: BLE001 - the page is optional
-            lean_log.log("warn", "sock", f"live map endpoint not started: {exc}")
         threading.Thread(target=sock_helper.warm, daemon=True).start()
     except Exception as exc:  # noqa: BLE001 - the files keep working without the socket
         lean_log.log("warn", "sock", f"service socket not started: {exc}")
@@ -15306,7 +15291,7 @@ def _fe(fn, a):
 
 
 def cmd_map(a):
-    if not a.project or a.svg or a.mini or a.watch or a.html or getattr(a, "alerts", False) or getattr(a, "pane_check", False) or getattr(a, "usage", False) or getattr(a, "probe", False) or getattr(a, "url", False):
+    if not a.project or a.svg or a.mini or a.watch or getattr(a, "alerts", False) or getattr(a, "pane_check", False) or getattr(a, "usage", False) or getattr(a, "probe", False) or getattr(a, "url", False):
         return cmd_live_map(a)
     def run(fe, slug, path, a):
         root = fe.work_dir(slug, path, a.dir)
@@ -16545,7 +16530,7 @@ SHORTCUTS = (
     ("status / now", "the status table"),
     ("compare <project>", "overhead of a clean session vs lean-agent's: `lean-agent compare <project>`"),
     ("more", "all threads (when the table says +N more)"),
-    ("map", "the live map: reply with the URL `lean-agent map --url` prints (stable, clickable); `lean-agent map --app` opens it in an app window on your Mac; `map --html` only if a file is asked for"),
+    ("map", "the map: the Claude desktop pane shows goals and answers; `lean-agent map --json` for the data"),
     ("update", "sync and restart when idle (`lean-agent update`)"),
     ("s21", "summary of t21: last report, open questions, running work, next step"),
     ("a21 <question>", "send the question to t21 unchanged"),
@@ -16609,7 +16594,6 @@ def cmd_myq(a):
     return 0
 
 
-live_box = []  # the running service's Live endpoint (so the `map` socket op shares its snapshot)
 
 
 def pane_check(snap):
@@ -16642,35 +16626,6 @@ def cmd_live_map(a):
         except (KeyboardInterrupt, BrokenPipeError):
             pass
         return 0
-    if getattr(a, "url", False):
-        import lean_maplive
-        u = lean_maplive.page_url(lean_sock.home())
-        if not u:
-            print("live map endpoint not running: start the service (lean-agent up), then run lean-agent map --url again")
-            return 1
-        print(u)
-        return 0
-    if getattr(a, "app", False):
-        import lean_maplive
-        ok, text = lean_maplive.open_app(lean_sock.home())
-        print(text)
-        return 0 if ok else 1
-    if getattr(a, "probe", False):
-        import lean_maplive
-        print(lean_maplive.write_probe(lean_sock.home()))
-        return 0
-    if getattr(a, "html", False):
-        import lean_maplive
-        home = lean_sock.home()
-        path = lean_maplive.html_path(home, getattr(a, "out", None))
-        mins = getattr(a, "refresh_for", None)
-        lean_maplive.register_refresh(home, path, lean_maplive.REFRESH_MIN if mins is None else mins)  # before the map call: it wakes the refresher
-        snap = lean_map.fetch()
-        print(lean_maplive.write_html(home, snap, getattr(a, "out", None)))
-        u = lean_maplive.page_url(lean_sock.home())
-        if u:
-            print(u)
-        return 0
     if getattr(a, "usage", False):
         import usage
         pl = usage.plan_report()
@@ -16698,6 +16653,12 @@ def cmd_live_map(a):
         print(lean_map.svg(snap, a.width or (380 if mini else 1200), a.height or (220 if mini else 700), mini=mini))
     else:
         print(json.dumps(snap, indent=None if getattr(a, "json", False) else 1))
+    return 0
+
+
+def cmd_pane(a):
+    """The data of the Claude desktop pane in one call: service, desk, goals, answers, inbox."""
+    print(json.dumps(lean_map.pane_data(), indent=None if getattr(a, "json", False) else 1))
     return 0
 
 
@@ -19555,18 +19516,15 @@ def build_parser():
     s.add_argument("--text", help="the content (default: stdin)")
     s.set_defaults(fn=cmd_doc)
 
+    s = sub.add_parser("pane", help="what the Claude desktop pane shows (goals, answers, service, desk, inbox) as JSON, one cheap call")
+    s.add_argument("--json", action="store_true", help="compact JSON")
+    s.set_defaults(fn=cmd_pane)
+
     s = sub.add_parser("map", help="the code's import graph (no model): who uses what, deps, routes, unused files; "
                        "with no project (or --json/--svg/--mini/--watch): the live map of the service")
     s.add_argument("project", nargs="?")
     s.add_argument("--svg", action="store_true", help="live map: one standalone SVG")
     s.add_argument("--mini", action="store_true", help="live map: the small round-node SVG")
-    s.add_argument("--html", action="store_true", help="live map: write one self-contained live page (open it in the preview), print its path")
-    s.add_argument("--out", metavar="FILE", help="with --html: where to write the page")
-    s.add_argument("--url", action="store_true", help="live map: print the localhost URL of the live page (open it in a browser)")
-    s.add_argument("--app", action="store_true", help="live map: open the stable URL in a chromeless app window on this machine (returns at once)")
-    s.add_argument("--refresh-for", dest="refresh_for", type=float, default=None, metavar="MIN",
-                   help="live map --html: the service keeps rewriting the file for MIN minutes (default 30) so a viewer that only reloads files stays live")
-    s.add_argument("--probe", action="store_true", help="live map: write a diagnostics page (what the preview allows: JS, WebSocket, fetch, img), print its path")
     s.add_argument("--usage", action="store_true", help="print the plan usage windows (percent, reset time), one per line, exit 0")
     s.add_argument("--pane-check", dest="pane_check", action="store_true", help="live map: print what the Claude Code pane would do (binary, service, json, svg, bytes)")
     s.add_argument("--alerts", action="store_true", help="live map: print the current alerts, one per line (level kind text), exit 0")

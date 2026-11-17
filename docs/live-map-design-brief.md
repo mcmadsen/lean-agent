@@ -1,5 +1,7 @@
 # lean-agent Live Map: design brief
 
+> The hosted page was dropped in 0.45.91; the Claude Code pane is the surface now.
+
 A brief for a designer. It describes what the Live Map is, who uses it, what data it has, what it shows today and
 where it falls short. It ends with what we would like from you. Screens today work and are tested; the visual design
 is engineer-made and is the thing to improve.

@@ -88,16 +88,6 @@ never shows the trust dialog, so without it every `lean-agent` call the orchestr
 The plugin can also be added in **Claude Desktop**: **+** next to the prompt → **Plugins** → **Add plugin** →
 marketplace `mcmadsen/lean-agent`.
 
-### Live map pane (Claude Code desktop)
-
-A second plugin, `lean-agent-map`, shows the front desk, threads and workers as a live map in a pane beside the chat:
-
-```sh
-/plugin install lean-agent-map --marketplace mcmadsen/lean-agent
-```
-
-(or add it from the same marketplace in **Plugins**). It does nothing outside a lean-agent front-desk session; there it opens the pane once, refreshes every 2 s (every 10 s while the service is down) and adds `/live-map` to show or hide it. The pane has buttons for **Show inbox** and **Pause**/**Resume**. It runs only `lean-agent map ...` and `lean-agent waiting`, and never sends prompts or writes files.
-
 ## Use
 
 ```sh
@@ -182,42 +172,14 @@ Other ways to run the orchestrator:
 | `lean-agent output <command> [--grep TEXT]` | In brief mode (`LEAN_AGENT_BRIEF=1`, set for the orchestrator, or `--brief`), `optimize`, `tracker`, `stats`, `budget`, `cards`, `limits`, `projects`, `recipes` and `savings` print one line per item (at most 20); this prints what was left out. `--full` prints a command in full. `lean-agent output <path|task-id>` also reads a Claude Code background task's output file (only under a claude temp `tasks/` dir) and prints its first and last 20 lines. Reviews in brief mode print the verdict and one line per finding; `runs --show <id>` has the rest. |
 | `lean-agent savings [--days 7] [-p project] [--measure]` | Estimated tokens saved: worker context (vs a normal Claude Code turn in that project: measured with `--measure`, one tiny Haiku call, else assumed 30,000), model choice (vs Sonnet for every worker), and output the squeezer shortened. Each run's summary also has a `saved ~N` line. |
 
-## Live map
+## Pane
 
-The live map shows the front desk, threads and workers, with arrows for who asks whom. Two ways to look at it:
-
-- the pane of the `lean-agent-map` plugin in the Claude Code desktop app (see above);
-- `lean-agent map --url` prints the stable URL `http://127.0.0.1:47821/` (exit 1 when the service endpoint is not running).
-  Bookmark it, or open it once in the Browser pane of the Claude desktop app (Cmd+Shift+B), which keeps its profile. The port
-  is fixed; `LEAN_AGENT_MAP_PORT` changes it, and if it is busy the service takes a free one and `doctor` says so. The page
-  without a token is served only to a `Host` of `127.0.0.1:<port>` or `localhost:<port>` (no DNS rebinding); `/snap`,
-  `/map.svg` and the WebSocket still need the token, and the WebSocket also checks its `Origin`. After a service restart a
-  bookmarked page reloads itself once to pick up the new token.
-- `lean-agent map --app` opens that URL in a chromeless app window on your own machine and returns at once (macOS: the first
-  installed of Google Chrome, Microsoft Edge, Brave, Chromium via `open -na ... --args --app=URL`, else the default
-  browser; Linux: google-chrome, chromium, microsoft-edge or brave-browser with `--app=URL`, else `xdg-open`). It does
-  nothing when the endpoint is down. Safari users: open the stable URL, then File > Add to Dock for a standalone map app.
-  Open it in a normal browser: the full "Live map" window with the front desk, service socket, threads (the 12 most active
-  open ones, "+N more"), workers (3 per thread), hooks, labelled arrows that fade 30 s after the last message, a details
-  panel on click (Esc closes), a Pause button (pauses the view only), light and dark. The service serves it read-only on
-  127.0.0.1 (random port, random token kept in `map-live.json`, mode 0600) over a WebSocket, falling back to polling,
-  then to a server-drawn image. Nothing is computed while no page is open. `lean-agent map --probe` writes a diagnostics
-  page that shows which of these a viewer allows.
-- `lean-agent map --html [--out FILE]` writes the same page as one self-contained file (default
-  `~/.lean-agent/map/live.html`, no external URLs), prints its path, and the URL on a second line. Use it for viewers
-  that open files (the preview panel); the URL is the one that always works.
-  `--refresh-for MIN` (default 30) makes the service rewrite that file (atomically, at most every 3 s, only when the map
-  changed) for MIN minutes; asking for the map again extends it. When a preview blocks every network call, the page then
-  shows `live (file refresh · 3 s)`: it reloads itself and keeps the selected node and filters in the URL hash. If the file
-  stops changing for 60 s it says so and stops reloading.
-
-The header also shows your plan usage: a chip per window (5-hour, week, model-specific weeks) with a bar, the percent used
-and a countdown to the reset, amber from 80 % and red from 95 % or when the limit is reached. Click a chip for the details
-(exact reset time, pace, source). The numbers are the ones Claude reports to lean-agent's own runs (`plan-usage.json`);
-without a report from the last 6 hours the page shows lean-agent's estimate and says so. Trends adds a 7-day plan chart
-(`plan-usage-history.jsonl`), the bell warns from 80 %, and `lean-agent map --usage` prints the windows, one per line.
-
-`lean-agent map --json`, `--svg [--mini]` and `--watch` print the same data in the terminal.
+The Claude desktop app (local sessions) shows a "lean-agent" pane beside the front desk's chat. It has a header line (service, desk, inbox),
+**Goals** (the open goals, newest activity first: green working, amber waiting on you, red stuck, dim quiet) and **Answers** (answers to your
+questions, unread first, with an **ack** button per answer and **ack all**, which run only `lean-agent myq ack qN`), and a footer with the last
+refresh and any error. It refreshes every 5 s while it is visible (30 s while the service is down), never when closed. `/lean-agent` shows or
+hides it (`/live-map` is the old name for one more release). The data is one cheap call, `lean-agent pane --json`; more panels can follow.
+`lean-agent map --json`, `--svg [--mini]`, `--alerts`, `--usage`, `--watch` and `--pane-check` still print the map data in the terminal.
 
 ## Run it as a service
 
@@ -267,7 +229,7 @@ lasts until you close it or log out, and a restart of `up` continues the convers
 ## Front desk in the Claude desktop app (with Remote Control)
 
 Opt-in for now: `lean-agent config desk auto` (the default is `hosted`, as before 0.45.88). In auto mode the service hosts a front desk session with Remote Control as before. If you open a
-local session in the Claude desktop app ("on this computer", which can show plugin panes such as the live map) with the
+local session in the Claude desktop app ("on this computer", which can show the plugin pane) with the
 folder `~/.lean-agent/home` (the front desk's own folder), that session attaches itself (SessionStart hook) and waits as "pending":
 it is a normal session, and reports keep going to the hosted main, until the service has stopped hosting its own
 main, which happens as soon as that main is idle (no turn running, nothing typed for a minute; it is checkpointed like a normal stop). When
@@ -582,7 +544,7 @@ Reply to the front desk with one of these on its own; its prompt hook turns it i
 |---|---|
 | `?` / `shortcuts` / `help` | this list |
 | `status` / `now` | the status table (needs-you and running threads first, max 10 rows) |
-| `map` | the live map: `lean-agent map --json`, `--svg [--mini]`, `--watch`, `--url` (the live page's localhost URL), `--html` (the page as a file; the pane in the Claude Code desktop app shows it) |
+| `map` | the map data: `lean-agent map --json`, `--svg [--mini]`, `--alerts`, `--usage`, `--watch`, `--pane-check`; `lean-agent pane --json` is what the desktop pane shows |
 | `more` | all threads, when the table ends with `+N more threads` |
 | `s21` | summary of t21: last report, open questions, running work, next step (also `s t21`, `summary t21`, `show t21`) |
 | `a21 <question>` | send the question to t21 unchanged (`ask t21 <question>`); `a21` alone asks what to ask |
