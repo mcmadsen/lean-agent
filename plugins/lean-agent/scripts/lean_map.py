@@ -150,7 +150,7 @@ def build(ctx, now=None):
         st = "done" if r.get("done") else "orphaned" if r.get("orphaned") else "alive" if r.get("alive", True) else "dead"
         nodes.append({"id": "run:" + r["id"], "kind": "worker", "parent": r.get("thread"), "label": "run " + r["id"].split("-")[-1],
                       "model": r.get("model") or "", "state": st, "age_s": r.get("age_s", 0), "ended_s": r.get("ended_s"), "progress_s": r.get("progress_s"),
-                      "detail": f"{_dur(r.get('age_s', 0))} · progress {_dur(r.get('progress_s', 0))} ago"})
+                      "task": str(r.get("task") or "")[:60], "detail": f"{_dur(r.get('age_s', 0))} · progress {_dur(r.get('progress_s', 0))} ago"})
         if r.get("project"):
             nodes[-1]["project"] = r["project"]
     have = {n["id"] for n in nodes}
@@ -458,6 +458,17 @@ def private_nodes():
         return frozenset()
 
 
+def _task_text(m):
+    """A short, single-line task label for a run marker: its --why, else the first task line (max 60 chars)."""
+    try:
+        fx = m.get("fixed") if isinstance(m.get("fixed"), dict) else {}
+        t = str(m.get("why") or fx.get("why") or "").strip() or next((x.strip() for x in str(m.get("task") or "").splitlines() if x.strip()), "")
+        t = " ".join(t.split())
+        return t if len(t) <= 60 else t[:59] + "…"
+    except Exception:
+        return ""
+
+
 def _is_private_text(*texts):
     try:
         import lean_private
@@ -483,7 +494,7 @@ def redact(snap):
         if n.get("kind") in ("service", "desk", "hooks") or n.get("id") in ("service", "main", "hooks"):
             continue
         if (n.get("id") in priv or n.get("parent") in priv or lean_private.hides(project=n.get("project") or None)
-                or txt(n.get("title"), n.get("label"))):
+                or txt(n.get("title"), n.get("label"), n.get("task"))):
             drop.add(n.get("id"))
     for n in snap.get("nodes") or []:  # children of a dropped thread
         if n.get("parent") in drop:
@@ -721,7 +732,7 @@ def service_context(now=None):
                 run_started(rid, tid, m.get("model") or "")
             elif rid not in _seen_runs:
                 _seen_runs[rid] = 1  # already running when the map first looked: not a new task
-            runs.append({"id": rid, "thread": tid, "model": m.get("model"), "project": m.get("project"), "age_s": age, "workdir": m.get("workdir"), "branch": m.get("branch"),
+            runs.append({"id": rid, "thread": tid, "task": _task_text(m), "model": m.get("model"), "project": m.get("project"), "age_s": age, "workdir": m.get("workdir"), "branch": m.get("branch"),
                          "progress_s": max(0, now - (m.get("last_progress") or now)), "orphaned": bool(m.get("orphaned"))})
     except Exception:
         pass

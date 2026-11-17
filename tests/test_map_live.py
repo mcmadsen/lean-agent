@@ -226,7 +226,7 @@ class HttpRoutesTest(unittest.TestCase):
         _, _, body = http_get(self.live.port, f"/?t={self.live.token}")
         text = body.decode()
         for w in ("LEAN<span>//</span>AGENT", "live map", "Active threads", "Workers alive", "Inbox · needs you", "Cost today", "Tokens saved", "Tool calls / min",
-                  "Agent topology", "Live activity", "Replay timeline", "SYSTEM VISIBILITY LAYER", "privacy filter active", "Local instance · 127.0.0.1",
+                  "Agent mind map", "Live activity", "Replay timeline", "SYSTEM VISIBILITY LAYER", "privacy filter active", "Local instance · 127.0.0.1",
                   "01 / Map", "02 / Trends", "Pause", "id=\"raintg\"", "id=\"themetg\""):
             self.assertIn(w, text)
         self.assertEqual([u for u in re.findall(r"https?://[^/'\" ]*", text) if "127.0.0.1" not in u], [])
@@ -1083,7 +1083,7 @@ const { chromium } = require('playwright');
   out.feedVisible = await pg.locator('#feed').isVisible();
   out.ticks = await pg.locator('#tl .tk').count();
   out.tickErr = await pg.locator('#tl .tk.er').count();
-  out.wkNested = await pg.locator('.nd[data-id="t1"] .nd[data-id="w1"]').count();
+  out.wkNested = await pg.locator('.nd[data-id="w1"][data-parent="t1"][data-kind="session"]').count();
   if (shots) await pg.screenshot({ path: shots + '/dark-1280.png', fullPage: true });
   // keyboard: slash focuses search, arrows move
   await pg.locator('body').click({ position: { x: 5, y: 5 } });
@@ -1313,7 +1313,7 @@ class FeaturesTest(unittest.TestCase):
         self.assertTrue(d["feedVisible"])
         self.assertEqual(d["ticks"], 6)
         self.assertEqual(d["tickErr"], 1)
-        # workers are sub-cards of their thread
+        # sessions are children of their agent (parent link in the data attributes)
         self.assertEqual(d["wkNested"], 1)
         # keyboard and feed
         self.assertEqual(d["slashFocus"], "q")
@@ -1681,6 +1681,213 @@ class Round2Test(unittest.TestCase):
         live.on_request("send", {"thread": "t2"})
         self.assertEqual(len(got), 1)
         self.assertEqual(len(live.replay), 2)
+
+
+def mm_snap():
+    """Mind-map fixture: 8 agents in 2 projects (working / attention / failed / idle), sessions, a desk session, one alert."""
+    now = time.time()
+
+    def rec(tool, target, ago):
+        return {"ts": now - ago, "tool": tool, "target": target, "ok": True, "ms": 100}
+
+    def agent(i, state, project, detail=None, **kw):
+        n = {"id": "t%d" % i, "kind": "thread", "label": "Agent task %d" % i, "state": state, "detail": detail or state, "project": project}
+        n.update(kw)
+        return n
+
+    def run(i, parent, state="alive", task="", turns=7, usd=0.5, project=None):
+        n = {"id": "w%d" % i, "kind": "worker", "label": "run %d" % (8500 + i), "state": state, "detail": "d", "parent": parent, "model": "sonnet",
+             "age_s": 600, "task": task, "stats": {"turns": turns, "max_turns": 80, "tokens": 25000, "usd": usd, "model": "sonnet", "elapsed_s": 600}}
+        if project:
+            n["project"] = project
+        return n
+
+    nodes = [
+        {"id": "service", "kind": "service", "label": "S", "state": "active", "detail": "d"},
+        {"id": "main", "kind": "desk", "label": "Front desk", "state": "active", "detail": "talking",
+         "activity": {"now": {"tool": "Read", "target": "plan.md", "since_s": 2.0}, "top": [], "recent": [rec("Read", "plan.md", 2)], "files": 1, "errors": 0, "mcp": [], "last_ts": now - 2}},
+        {"id": "hooks", "kind": "hooks", "label": "Hooks", "state": "active", "detail": "14 a min", "per_min": 14},
+        agent(1, "active", "alpha", "active · mid-turn", activity={"now": {"tool": "Edit", "target": "lean_map.py", "since_s": 3.0}, "top": [["Edit", 3]], "recent": [rec("Edit", "lean_map.py", 3)], "files": 1, "errors": 0, "mcp": [], "last_ts": now - 3}),
+        agent(2, "undelivered", "alpha", "no reply yet"),
+        agent(3, "dead", "alpha"),
+        agent(4, "parked", "alpha", "parked 2 h"),
+        agent(5, "active", "beta"), agent(6, "active", "beta", "active", activity={"now": {"tool": "Bash", "target": "pytest", "since_s": 1.0}, "top": [], "recent": [rec("Bash", "pytest", 1)], "files": 0, "errors": 0, "mcp": [], "last_ts": now - 1}),
+        agent(7, "parked", "beta"), agent(8, "parked", "beta"),
+        run(1, "t1", task="Fix the map layout and connectors"), run(2, "t1", state="done", turns=40, usd=1.25),
+        run(3, "t6"), run(4, "t6"), run(5, "t6"), run(6, "t6"),
+        run(7, None, task="front desk errand"), run(8, "t4", state="orphaned")]
+    return {
+        "v": 1, "ts": "mm", "service": {"up": True, "version": "9.9.9", "threads": 8, "up_s": 100, "socket_ms": 12, "cpu_pct": 3}, "paused": False,
+        "inbox": 2, "moving": [], "more": 0,
+        "projects": [{"slug": "alpha", "threads": 4, "workers": 3, "usd_today": 1.2, "tokens_today": 400000, "errors_30m": 0},
+                     {"slug": "beta", "threads": 4, "workers": 4, "usd_today": 0.4, "tokens_today": 90000, "errors_30m": 0}],
+        "alerts": [{"id": "stuck:t5", "level": "warn", "node": "t5", "kind": "stuck", "text": "t5 mid-turn with no tool activity for 12 min", "since": now - 700}],
+        "nodes": nodes,
+        "edges": [{"from": "main", "to": "t1", "kind": "message", "age_s": 3, "label": "hello"}],
+        "placed": [n["id"] for n in nodes]}
+
+
+MINDMAP_JS = r"""
+const { chromium } = require('playwright');
+(async () => {
+  const { file, shots } = JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));
+  const b = await chromium.launch();
+  const out = { errors: [] };
+  const open = async (vp) => {
+    const pg = await b.newPage({ viewport: vp });
+    pg.setDefaultTimeout(10000);
+    pg.on('pageerror', e => out.errors.push(String(e).slice(0, 200)));
+    await pg.goto('file://' + file);
+    await pg.waitForSelector('#mmsvg .cn', { state: 'attached' });
+    await pg.waitForTimeout(300);
+    return pg;
+  };
+  // every connector endpoint lies on the border of the card it joins; returns the number of bad ones
+  const ends = (pg) => pg.evaluate(() => {
+    const mm = document.getElementById('mm').getBoundingClientRect(); let bad = 0, n = 0;
+    const on = (x, y, el) => { const r = el.getBoundingClientRect(), L = r.left - mm.left, T = r.top - mm.top, R = r.right - mm.left, B = r.bottom - mm.top, t = 2;
+      return (Math.abs(x - L) <= t || Math.abs(x - R) <= t) && y >= T - t && y <= B + t || (Math.abs(y - T) <= t || Math.abs(y - B) <= t) && x >= L - t && x <= R + t; };
+    document.querySelectorAll('#mmsvg .cn').forEach(p => {
+      n++; const nums = p.getAttribute('d').match(/-?[\d.]+/g).map(Number);
+      const q = id => document.querySelector('.nd[data-id="' + id + '"]');
+      if (!on(nums[0], nums[1], q(p.dataset.from)) || !on(nums[nums.length - 2], nums[nums.length - 1], q(p.dataset.to))) bad++;
+    });
+    return [n, bad];
+  });
+  let pg = await open({ width: 1280, height: 900 });
+  out.root = await pg.locator('.nd[data-kind="root"]').count();
+  out.rootText = await pg.locator('.nd[data-kind="root"]').innerText();
+  out.agents = await pg.locator('.nd[data-kind="agent"]').count();
+  out.sessions = await pg.locator('.nd[data-kind="session"]').count();
+  out.parents = await pg.evaluate(() => [...document.querySelectorAll('.nd[data-kind]')].map(n => n.dataset.id + '>' + n.dataset.parent));
+  out.attn = await pg.evaluate(() => { const o = {}; ['t1', 't2', 't3', 't4', 't5', 'w1', 'w2', 'w8', 'main'].forEach(i => { const e = document.querySelector('.nd[data-id="' + i + '"]'); o[i] = [e.dataset.attn, e.className.includes('st-' + e.dataset.attn)]; }); return o; });
+  out.sigils = await pg.evaluate(() => ['t1', 't2', 't3', 'main'].map(i => document.querySelector('.nd[data-id="' + i + '"] .sg').dataset.sigil));
+  out.sigilFn = await pg.evaluate(() => [__mm.sigil('t1') === __mm.sigil('t1'), __mm.sigil('t1') === __mm.sigil('t2')]);
+  out.cn = await pg.locator('#mmsvg .cn').count();
+  out.ends = await ends(pg);
+  out.groups = await pg.locator('.pg').allInnerTexts();
+  out.ghost = await pg.locator('.ghost[data-more="t6"]').innerText();
+  out.sesText = await pg.locator('.nd[data-id="w1"]').innerText();
+  out.noScroll = await pg.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+  out.hot = await pg.locator('#mmsvg .cn.hot').count();
+  out.layout = await pg.evaluate(() => { const r = id => document.querySelector('.nd[data-id="' + id + '"]').getBoundingClientRect(); return [r('main').right <= r('t1').left, r('t1').right <= r('w1').left]; });
+  out.chips = await pg.locator('.nd[data-kind="root"] .ichip').allInnerTexts();
+  // pulse
+  await pg.evaluate(() => __mm.pulse({ op: 'send', from: 'main', to: 't2' }));
+  await pg.waitForTimeout(150);
+  out.pulse1 = await pg.locator('#mmsvg .pls').count();
+  out.flash = await pg.locator('.nd[data-id="t2"].pulse').count();
+  await pg.evaluate(() => { for (let i = 0; i < 40; i++) __mm.pulse({ op: 'send', from: 'main', to: 't' + (1 + i % 8) }); });
+  await pg.waitForTimeout(150);
+  out.pulseMany = await pg.locator('#mmsvg .pls').count();
+  await pg.waitForTimeout(1500);
+  out.pulseGone = await pg.locator('#mmsvg .pls').count();
+  // keyboard tree navigation
+  const act = () => pg.evaluate(() => document.activeElement.dataset.id || '');
+  const key = async (k) => { await pg.keyboard.press(k); return act(); };
+  await pg.locator('.nd[data-id="main"]').focus();
+  out.nav = [await key('ArrowRight'), await key('ArrowDown'), await key('ArrowUp'), await key('ArrowRight'), await key('ArrowLeft'), await key('ArrowLeft'), await key('ArrowLeft')];
+  await pg.locator('.nd[data-id="t1"]').focus();
+  await pg.keyboard.press('Enter');
+  out.panel = await pg.locator('#panel h2').innerText();
+  await pg.keyboard.press('Escape');
+  if (shots) await pg.screenshot({ path: shots + '/matrix-1280.png', fullPage: true });
+  await pg.evaluate(() => document.documentElement.setAttribute('data-theme', 'classic'));
+  await pg.waitForTimeout(400);
+  out.classicNodes = await pg.locator('.nd').count();
+  out.classicRing = await pg.evaluate(() => getComputedStyle(document.querySelector('.nd[data-id="t1"] .ring')).borderTopColor);
+  if (shots) await pg.screenshot({ path: shots + '/classic-1280.png', fullPage: true });
+  await pg.close();
+  // narrow: a vertical tree
+  for (const w of [400, 700]) {
+    pg = await open({ width: w, height: 800 });
+    const k = w === 400 ? 'narrow' : 'narrow700';
+    out[k] = await pg.evaluate(() => { const r = id => document.querySelector('.nd[data-id="' + id + '"]').getBoundingClientRect();
+      return { scroll: document.documentElement.scrollWidth <= window.innerWidth, rootAbove: r('main').bottom <= r('t1').top, agentIndent: r('t1').left > r('main').left + 10,
+               stack: r('t2').top >= r('t1').bottom, sesIndent: r('w1').left > r('t1').left + 10, sesBelow: r('w1').top >= r('t1').bottom,
+               mapOverflow: document.querySelector('.map').scrollWidth <= document.querySelector('.map').clientWidth }; });
+    out[k + 'Ends'] = await ends(pg);
+    if (shots && w === 400) await pg.screenshot({ path: shots + '/matrix-400.png', fullPage: true });
+    await pg.close();
+  }
+  await b.close();
+  console.log(JSON.stringify(out));
+})().catch(e => { console.log(JSON.stringify({ error: String(e).slice(0, 600) })); process.exit(0); });
+"""
+
+
+class MindMapTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not have_playwright():
+            raise unittest.SkipTest("node/playwright/browser not available")
+
+    def test_mind_map(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        page = os.path.join(tmp, "mm.html")
+        with open(page, "w") as fh:
+            fh.write(lean_maplive.build_html(mm_snap(), None))
+        shots = os.environ.get("MAP_SHOTS_DIR", "")
+        if shots:
+            os.makedirs(shots, exist_ok=True)
+        args = os.path.join(tmp, "args.json")
+        with open(args, "w") as fh:
+            json.dump({"file": page, "shots": shots}, fh)
+        js = os.path.join(tmp, "m.js")
+        with open(js, "w") as fh:
+            fh.write(MINDMAP_JS)
+        r = subprocess.run([NODE, js, args], capture_output=True, text=True, timeout=150, env=node_env())
+        self.assertTrue(r.stdout.strip(), r.stderr)
+        d = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertNotIn("error", d)
+        self.assertEqual(d["errors"], [])
+        # hierarchy: root > agents > sessions, parent links in data attributes
+        self.assertEqual((d["root"], d["agents"], d["sessions"]), (1, 8, 7))  # t6 shows 3 of its 4
+        for w in ("ROOT AGENT", "MAIN AGENT / FRONT DESK", "orchestrates and delegates work", "inbox 2"):
+            self.assertIn(w, d["rootText"])
+        self.assertEqual([c.split("\n")[0].split(" ")[0].lower() for c in d["chips"]], ["sock", "hooks"])
+        par = set(d["parents"])
+        for i in range(1, 9):
+            self.assertIn("t%d>main" % i, par)
+        for w, p in (("w1", "t1"), ("w2", "t1"), ("w3", "t6"), ("w7", "main"), ("w8", "t4")):
+            self.assertIn("%s>%s" % (w, p), par)
+        self.assertIn("RUN 8501", d["sesText"])
+        self.assertIn("Fix the map layout", d["sesText"])
+        self.assertIn("sonnet", d["sesText"])
+        self.assertIn("$0.50", d["sesText"])
+        self.assertEqual(d["ghost"], "+1")  # 4 sessions on t6, 3 shown
+        self.assertEqual([g.lower() for g in d["groups"]], ["alpha", "beta"])
+        # attention states
+        want = {"t1": "work", "t2": "attn", "t3": "fail", "t4": "attn", "t5": "attn", "w1": "work", "w2": "idle", "w8": "attn", "main": "attn"}
+        self.assertEqual({k: v[0] for k, v in d["attn"].items()}, want)
+        self.assertTrue(all(v[1] for v in d["attn"].values()))
+        # sigils are deterministic per id and differ between ids
+        self.assertEqual(len(set(d["sigils"])), 4)
+        self.assertTrue(all(re.fullmatch("[01]{15}", x) for x in d["sigils"]))
+        self.assertEqual(d["sigilFn"], [True, False])
+        # connectors for every parent-child pair, endpoints on the card borders
+        self.assertEqual(d["cn"], 8 + 7)
+        self.assertEqual(d["ends"], [15, 0])
+        self.assertGreaterEqual(d["hot"], 1)
+        self.assertEqual(d["layout"], [True, True])  # root left of agents left of sessions
+        self.assertTrue(d["noScroll"])
+        # live pulse along the connector, capped
+        self.assertGreaterEqual(d["pulse1"], 1)
+        self.assertEqual(d["flash"], 1)
+        self.assertLessEqual(d["pulseMany"], 20)
+        self.assertGreaterEqual(d["pulseMany"], 10)
+        self.assertEqual(d["pulseGone"], 0)
+        # keyboard: right = first child, down/up = siblings, left = parent
+        self.assertEqual(d["nav"], ["t1", "t2", "t1", "w1", "t1", "main", "main"])
+        self.assertIn("Agent task 1", d["panel"])
+        self.assertGreater(d["classicNodes"], 10)
+        self.assertNotEqual(d["classicRing"], "")
+        # narrow: a vertical tree, no sideways scroll
+        for k in ("narrow", "narrow700"):
+            self.assertTrue(all(d[k].values()), d[k])
+            self.assertEqual(d[k + "Ends"][1], 0)
+            self.assertEqual(d[k + "Ends"][0], 15)
 
 
 if __name__ == "__main__":
