@@ -186,7 +186,16 @@ Other ways to run the orchestrator:
 The live map shows the front desk, threads and workers, with arrows for who asks whom. Two ways to look at it:
 
 - the pane of the `lean-agent-map` plugin in the Claude Code desktop app (see above);
-- `lean-agent map --url` prints `http://127.0.0.1:<port>/?t=<token>` (exit 1 when the service endpoint is not running).
+- `lean-agent map --url` prints the stable URL `http://127.0.0.1:47821/` (exit 1 when the service endpoint is not running).
+  Bookmark it, or open it once in the Browser pane of the Claude desktop app (Cmd+Shift+B), which keeps its profile. The port
+  is fixed; `LEAN_AGENT_MAP_PORT` changes it, and if it is busy the service takes a free one and `doctor` says so. The page
+  without a token is served only to a `Host` of `127.0.0.1:<port>` or `localhost:<port>` (no DNS rebinding); `/snap`,
+  `/map.svg` and the WebSocket still need the token, and the WebSocket also checks its `Origin`. After a service restart a
+  bookmarked page reloads itself once to pick up the new token.
+- `lean-agent map --app` opens that URL in a chromeless app window on your own machine and returns at once (macOS: the first
+  installed of Google Chrome, Microsoft Edge, Brave, Chromium via `open -na ... --args --app=URL`, else the default
+  browser; Linux: google-chrome, chromium, microsoft-edge or brave-browser with `--app=URL`, else `xdg-open`). It does
+  nothing when the endpoint is down. Safari users: open the stable URL, then File > Add to Dock for a standalone map app.
   Open it in a normal browser: the full "Live map" window with the front desk, service socket, threads (the 12 most active
   open ones, "+N more"), workers (3 per thread), hooks, labelled arrows that fade 30 s after the last message, a details
   panel on click (Esc closes), a Pause button (pauses the view only), light and dark. The service serves it read-only on
@@ -196,6 +205,10 @@ The live map shows the front desk, threads and workers, with arrows for who asks
 - `lean-agent map --html [--out FILE]` writes the same page as one self-contained file (default
   `~/.lean-agent/map/live.html`, no external URLs), prints its path, and the URL on a second line. Use it for viewers
   that open files (the preview panel); the URL is the one that always works.
+  `--refresh-for MIN` (default 30) makes the service rewrite that file (atomically, at most every 3 s, only when the map
+  changed) for MIN minutes; asking for the map again extends it. When a preview blocks every network call, the page then
+  shows `live (file refresh · 3 s)`: it reloads itself and keeps the selected node and filters in the URL hash. If the file
+  stops changing for 60 s it says so and stops reloading.
 
 `lean-agent map --json`, `--svg [--mini]` and `--watch` print the same data in the terminal.
 

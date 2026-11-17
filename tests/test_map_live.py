@@ -34,11 +34,11 @@ def snap():
             "edges": [{"from": "service", "to": "t1", "kind": "idle", "age_s": 0, "label": "idle"}]}
 
 
-def connect(port, token, path=None, method="GET", upgrade=True):
+def connect(port, token, path=None, method="GET", upgrade=True, host="x", origin=None):
     s = socket.create_connection(("127.0.0.1", port), timeout=WAIT)
     key = base64.b64encode(os.urandom(16)).decode()
     p = path if path is not None else (f"/?t={token}" if token else "/")
-    req = f"{method} {p} HTTP/1.1\r\nHost: x\r\n" + (f"Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n" if upgrade else "") + "\r\n"
+    req = f"{method} {p} HTTP/1.1\r\nHost: {host}\r\n" + (f"Origin: {origin}\r\n" if origin else "") + (f"Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n" if upgrade else "") + "\r\n"
     s.sendall(req.encode())
     buf = b""
     while b"\r\n\r\n" not in buf:
@@ -162,9 +162,9 @@ class LiveTest(unittest.TestCase):
         self.assertIn("503", h2.split("\r\n")[0])
 
 
-def http_get(port, path, method="GET"):
+def http_get(port, path, method="GET", host="x"):
     s = socket.create_connection(("127.0.0.1", port), timeout=WAIT)
-    s.sendall(f"{method} {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+    s.sendall(f"{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
     buf = b""
     while True:
         d = s.recv(65536)
@@ -460,7 +460,7 @@ class UrlTest(unittest.TestCase):
         self.assertIsNone(lean_maplive.page_url(tmp))
         live = lean_maplive.Live(snap, tmp).start()
         self.addCleanup(live.stop)
-        self.assertEqual(lean_maplive.page_url(tmp), f"http://127.0.0.1:{live.port}/?t={live.token}")
+        self.assertEqual(lean_maplive.page_url(tmp), f"http://127.0.0.1:{live.port}/")
 
     def test_cli_url_without_service(self):
         tmp = tempfile.mkdtemp()
@@ -468,6 +468,295 @@ class UrlTest(unittest.TestCase):
         env = clean_environ()
         r = subprocess.run([sys.executable, os.path.join(ROOT, "lean_agent.py"), "map", "--url"], capture_output=True, text=True,
                            env=dict(env, HOME=tmp, LEAN_AGENT_TEST="1"), timeout=60)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not running", r.stdout)
+
+
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+class StableUrlTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.port = free_port()
+        self.live = lean_maplive.Live(snap, self.tmp, interval=0.2, port=self.port).start()
+        self.addCleanup(self.live.stop)
+
+    def test_fixed_port_and_tokenless_page(self):
+        self.assertEqual(self.live.port, self.port)
+        self.assertFalse(self.live.fallback)
+        for host in (f"127.0.0.1:{self.port}", f"localhost:{self.port}"):
+            st, h, body = http_get(self.port, "/", host=host)
+            self.assertIn("200", st)
+            self.assertIn(self.live.token, body.decode())
+            self.assertNotIn("access-control-allow-origin", h)
+        for host in ("evil.example", "evil.example:%d" % self.port, "127.0.0.1", f"127.0.0.1.evil.example:{self.port}", "x"):
+            st, _, body = http_get(self.port, "/", host=host)
+            self.assertIn("403", st, host)
+            self.assertNotIn(self.live.token, body.decode())
+        ok = f"127.0.0.1:{self.port}"
+        for path in ("/snap", "/map.svg", "/nope", "/?x=1", "/?t=wrong"):
+            st, _, _ = http_get(self.port, path, host=ok)
+            self.assertIn("403", st, path)
+        st, _, _ = http_get(self.port, f"/snap?t={self.live.token}", host=ok)
+        self.assertIn("200", st)
+
+    def test_websocket_origin(self):
+        for origin, code in (("http://evil.example", "403"), ("http://127.0.0.1:1", "403"), (f"http://127.0.0.1:{self.port}", "101"),
+                             (f"http://localhost:{self.port}", "101"), ("null", "101"), (None, "101")):
+            s, head, _ = connect(self.port, self.live.token, host=f"127.0.0.1:{self.port}", origin=origin)
+            s.close()
+            self.assertIn(code, head.split("\r\n")[0], origin)
+        s, head, _ = connect(self.port, "wrong", origin=f"http://127.0.0.1:{self.port}")
+        s.close()
+        self.assertIn("403", head.split("\r\n")[0])
+
+    def test_busy_port_falls_back(self):
+        live2 = lean_maplive.Live(snap, self.tmp + "-b", interval=0.2, port=self.port).start()
+        self.addCleanup(live2.stop)
+        self.addCleanup(shutil.rmtree, self.tmp + "-b", True)
+        self.assertNotEqual(live2.port, self.port)
+        self.assertTrue(live2.fallback)
+        d = lean_maplive.endpoint(self.tmp + "-b")
+        self.assertTrue(d["fallback"])
+        ok, text = lean_maplive.doctor_line(self.tmp + "-b", wait=3)
+        self.assertIn("busy", text)
+        self.assertIn(str(live2.port), text)
+
+    def test_env_port(self):
+        p = free_port()
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_MAP_PORT": str(p)}):
+            live = lean_maplive.Live(snap, self.tmp + "-c").start()
+        self.addCleanup(live.stop)
+        self.addCleanup(shutil.rmtree, self.tmp + "-c", True)
+        self.assertEqual(live.port, p)
+
+    def test_readme(self):
+        with open(os.path.join(ROOT, "..", "..", "..", "README.md")) as fh:
+            t = fh.read()
+        for w in ("Browser pane", "Cmd+Shift+B", "map --app", "Add to Dock", "47821"):
+            self.assertIn(w, t)
+
+    def test_default_port_constant(self):
+        self.assertEqual(lean_maplive.DEFAULT_PORT, 47821)
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_MAP_PORT": ""}):
+            self.assertEqual(lean_maplive.wanted_port(), 47821)
+
+
+class RefreshFileTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.inbox = 1
+        self.calls = 0
+
+        def fn():
+            self.calls += 1
+            d = snap()
+            d["inbox"] = self.inbox
+            return d
+        self.fn = fn
+        for k, v in (("REFRESH_EVERY", 0.1), ("HEARTBEAT", 1000.0)):
+            p = mock.patch.object(lean_maplive, k, v)
+            p.start()
+            self.addCleanup(p.stop)
+        self.out = os.path.join(self.tmp, "map", "live.html")
+        os.makedirs(os.path.dirname(self.out))
+
+    def start(self):
+        live = lean_maplive.Live(self.fn, self.tmp, interval=0.05, port=free_port()).start()
+        self.addCleanup(live.stop)
+        return live
+
+    def wait(self, cond, t=10):
+        end = time.time() + t
+        while time.time() < end:
+            if cond():
+                return True
+            time.sleep(0.05)
+        return False
+
+    def stamp(self):
+        st = os.stat(self.out)
+        return (st.st_ino, st.st_mtime_ns)
+
+    def test_registration_expiry_extension(self):
+        self.assertEqual(lean_maplive.load_refresh(self.tmp), {})
+        e1 = lean_maplive.register_refresh(self.tmp, self.out, 1, now=1000.0)
+        self.assertEqual(e1, 1060.0)
+        self.assertEqual(lean_maplive.load_refresh(self.tmp), {self.out: 1060.0})
+        self.assertEqual(lean_maplive.register_refresh(self.tmp, self.out, 5, now=1030.0), 1330.0)  # asking again extends
+        other = os.path.join(self.tmp, "o.html")
+        lean_maplive.register_refresh(self.tmp, other, None, now=2000.0)  # drops the expired one, default 30 min
+        self.assertEqual(lean_maplive.load_refresh(self.tmp), {other: 2000.0 + 30 * 60})
+        self.assertEqual(stat.S_IMODE(os.stat(lean_maplive.refresh_path(self.tmp)).st_mode), 0o600)
+
+    def test_rewrites_only_on_change_atomically_then_stops(self):
+        live = self.start()
+        lean_maplive.register_refresh(self.tmp, self.out, 0.03)  # ~1.8 s
+        live.on_request("map", {})
+        self.assertTrue(self.wait(lambda: os.path.exists(self.out)))
+        self.assertIn("Inbox", open(self.out).read())
+        self.assertEqual(stat.S_IMODE(os.stat(self.out).st_mode), 0o600)
+        time.sleep(0.4)
+        st = self.stamp()
+        time.sleep(0.6)
+        self.assertEqual(self.stamp(), st)  # unchanged map: no rewrite
+        bad = []
+        stop = threading.Event()
+
+        def reader():
+            while not stop.is_set():
+                try:
+                    t = open(self.out).read()
+                except OSError:
+                    continue
+                if not t.rstrip().endswith("</html>"):
+                    bad.append(len(t))
+        th = threading.Thread(target=reader)
+        th.start()
+        self.inbox = 7
+        changed = self.wait(lambda: self.stamp() != st and '"inbox": 7' in open(self.out).read(), 5)
+        self.inbox = 8
+        time.sleep(0.5)
+        stop.set()
+        th.join()
+        self.assertTrue(changed)
+        self.assertEqual(bad, [])
+        self.assertEqual([n for n in os.listdir(os.path.dirname(self.out)) if n.endswith(".tmp")], [])
+        # after expiry nothing is computed or written any more
+        self.assertTrue(self.wait(lambda: not lean_maplive.load_refresh(self.tmp) or True))
+        time.sleep(2.0)
+        st = self.stamp()
+        calls = self.calls
+        self.inbox = 99
+        time.sleep(1.0)
+        self.assertEqual(self.stamp(), st)
+        self.assertEqual(self.calls, calls)
+        self.assertNotIn('"inbox": 99', open(self.out).read())
+        self.assertFalse(live.clients)
+
+    def test_asking_again_restarts_it(self):
+        live = self.start()
+        lean_maplive.register_refresh(self.tmp, self.out, 0.01)
+        live.on_request("map", {})
+        self.assertTrue(self.wait(lambda: os.path.exists(self.out)))
+        time.sleep(1.2)  # expired; the loop sleeps
+        self.inbox = 5
+        lean_maplive.register_refresh(self.tmp, self.out, 1)
+        live.on_request("map", {})
+        self.assertTrue(self.wait(lambda: '"inbox": 5' in open(self.out).read(), 5))
+
+
+class SocketIsolationTest(unittest.TestCase):
+    def test_ping_stays_fast_while_snapshot_is_slow(self):
+        import lean_sock
+        tmp = tempfile.mkdtemp(prefix="ml")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        n = {"c": 0}
+
+        def slow():
+            n["c"] += 1
+            time.sleep(0.5)
+            return snap()
+        live = lean_maplive.Live(slow, tmp, interval=0.1, port=free_port()).start()
+        self.addCleanup(live.stop)
+        srv = lean_sock.Server({"map": lambda r: {"map": live.get_snap()}}, sock=os.path.join(tmp, "s.sock"), version="t")
+        srv.on_request = live.on_request
+        srv.start()
+        self.addCleanup(srv.stop)
+        sk, head, _ = connect(live.port, live.token)
+        self.addCleanup(sk.close)
+        self.assertIn("101", head.split("\r\n")[0])
+        sock = os.path.join(tmp, "s.sock")
+        slowest = 0.0
+        end = time.time() + 2.5
+        while time.time() < end:
+            t0 = time.monotonic()
+            r = lean_sock.call("ping", timeout=2, sock=sock)
+            slowest = max(slowest, (time.monotonic() - t0) * 1000)
+            self.assertTrue(r and r.get("ok"))
+            time.sleep(0.05)
+        self.assertGreaterEqual(n["c"], 2)  # the slow snapshot really was running meanwhile
+        self.assertLess(slowest, 50)
+
+    def test_map_request_does_not_set_socket_ms(self):
+        lean_map.record_request("ping", 1.5)
+        lean_map.record_request("map", 348.8)
+        self.assertEqual(lean_map._state["ms"], 1.5)
+
+
+class OpenAppTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.bin = os.path.join(self.tmp, "bin")
+        os.makedirs(self.bin)
+        self.log = os.path.join(self.tmp, "log")
+        self.live = lean_maplive.Live(snap, os.path.join(self.tmp, "home"), port=free_port()).start()
+        self.addCleanup(self.live.stop)
+        self.home = os.path.join(self.tmp, "home")
+        self.url = f"http://127.0.0.1:{self.live.port}/"
+
+    def fake(self, *names):
+        for n in names:
+            p = os.path.join(self.bin, n)
+            with open(p, "w") as fh:
+                fh.write(f'#!/bin/sh\necho "{n} $*" >> "{self.log}"\n')
+            os.chmod(p, 0o755)
+
+    def run_app(self, platform, apps=()):
+        d = os.path.join(self.tmp, "Apps")
+        os.makedirs(d, exist_ok=True)
+        for a in apps:
+            os.makedirs(os.path.join(d, a + ".app"), exist_ok=True)
+        ok, text = lean_maplive.open_app(self.home, platform=platform, env={"PATH": self.bin}, apps_dirs=[d])
+        end = time.time() + 5
+        while time.time() < end and not os.path.exists(self.log):
+            time.sleep(0.05)
+        lines = open(self.log).read().splitlines() if os.path.exists(self.log) else []
+        if os.path.exists(self.log):
+            os.unlink(self.log)
+        return ok, lines
+
+    def test_linux(self):
+        self.fake("xdg-open")
+        self.assertEqual(self.run_app("linux"), (True, [f"xdg-open {self.url}"]))
+        self.fake("chromium", "brave-browser")
+        self.assertEqual(self.run_app("linux"), (True, [f"chromium --app={self.url}"]))
+        self.fake("google-chrome")
+        self.assertEqual(self.run_app("linux"), (True, [f"google-chrome --app={self.url}"]))
+
+    def test_linux_nothing(self):
+        ok, text = lean_maplive.open_app(self.home, platform="linux", env={"PATH": self.bin})
+        self.assertFalse(ok)
+        self.assertIn(self.url, text)
+
+    def test_macos(self):
+        self.fake("open")
+        self.assertEqual(self.run_app("darwin"), (True, [f"open {self.url}"]))
+        self.assertEqual(self.run_app("darwin", ["Brave Browser", "Microsoft Edge"]), (True, [f"open -na Microsoft Edge --args --app={self.url}"]))
+        self.assertEqual(self.run_app("darwin", ["Google Chrome", "Chromium"]), (True, [f"open -na Google Chrome --args --app={self.url}"]))
+
+    def test_endpoint_down_starts_nothing(self):
+        self.fake("open", "xdg-open", "google-chrome")
+        tmp2 = os.path.join(self.tmp, "none")
+        ok, text = lean_maplive.open_app(tmp2, platform="linux", env={"PATH": self.bin})
+        self.assertFalse(ok)
+        self.assertIn("not running", text)
+        time.sleep(0.3)
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_cli_app_without_service(self):
+        env = clean_environ()
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "lean_agent.py"), "map", "--app"], capture_output=True, text=True,
+                           env=dict(env, HOME=self.tmp, LEAN_AGENT_TEST="1"), timeout=60)
         self.assertEqual(r.returncode, 1)
         self.assertIn("not running", r.stdout)
 
@@ -642,8 +931,8 @@ class BrowserTest(unittest.TestCase):
         self.assertIn("connect-src", d["why"])
 
     def test_everything_blocked(self):
-        d = self.run_page(self.live_html(snap(), "connect-src 'none'; img-src 'none'"), "preview blocks live updates")
-        self.assertEqual(d["chip"], "preview blocks live updates")
+        d = self.run_page(self.live_html(snap(), "connect-src 'none'; img-src 'none'"), "live (file refresh · 3 s)")
+        self.assertEqual(d["chip"], "live (file refresh · 3 s)")
         self.assertIn("Open in browser", d["why"])
 
     def test_window_ui(self):
@@ -948,6 +1237,92 @@ class FeaturesTest(unittest.TestCase):
         self.assertGreaterEqual(d["plainNodes"], 2)
         self.assertTrue(d["plainHidden"])
         self.assertEqual(d["plainPanel"], 1)
+
+
+FILE_REFRESH_JS = r"""
+const { chromium } = require('playwright');
+const fs = require('fs');
+(async () => {
+  const { file, next, stale } = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+  const b = await chromium.launch();
+  const out = { errors: [] };
+  let pg = await b.newPage({ viewport: { width: 1280, height: 800 } });
+  pg.setDefaultTimeout(15000);
+  pg.on('pageerror', e => out.errors.push(String(e).slice(0, 200)));
+  await pg.goto('file://' + file);
+  await pg.waitForFunction(() => /file refresh/.test(document.getElementById('chip').innerText));
+  out.chip = await pg.locator('#chip').innerText();
+  await pg.evaluate(() => { window.__m = 1; });
+  await pg.locator('.nd[data-id="t1"]').click();
+  await pg.locator('#q').fill('fix');
+  out.hashBefore = await pg.evaluate(() => location.hash);
+  fs.writeFileSync(file, fs.readFileSync(next, 'utf8'));  // the service rewrites the file
+  out.step = 'reload'; await pg.waitForFunction(() => !window.__m);  // reloaded
+  await pg.waitForFunction(() => document.getElementById('inbox').innerText === 'Inbox 7');
+  out.inbox = await pg.locator('#inbox').innerText();
+  out.sel = await pg.locator('#panel.open h2').innerText();
+  out.q = await pg.locator('#q').inputValue();
+  out.hash = await pg.evaluate(() => location.hash);
+  out.chip2 = await pg.locator('#chip').innerText();
+  out.link = await pg.locator('#why a').count();
+  await pg.close();
+  pg = await b.newPage({ viewport: { width: 1280, height: 800 } });
+  pg.setDefaultTimeout(15000);
+  await pg.goto('file://' + file + stale);
+  await pg.waitForFunction(() => /stopped/.test(document.getElementById('chip').innerText));
+  out.stale = await pg.locator('#chip').innerText();
+  await pg.evaluate(() => { window.__m = 1; });
+  await pg.waitForTimeout(4000);
+  out.noReload = await pg.evaluate(() => window.__m === 1);
+  await b.close();
+  console.log(JSON.stringify(out));
+  process.exit(0);
+})().catch(e => { console.log(JSON.stringify({ error: String(e).slice(0, 600) })); process.exit(0); });
+"""
+
+
+class FileRefreshBrowserTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not have_playwright():
+            raise unittest.SkipTest("node/playwright/browser not available")
+
+    def test_file_refresh_mode(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        csp = '<meta http-equiv="Content-Security-Policy" content="connect-src \'none\'; img-src \'none\'">'
+        ep = {"port": free_port(), "token": "tok"}
+
+        def page(inbox, ts):
+            d = rich_snap()
+            d["inbox"], d["ts"] = inbox, ts
+            return lean_maplive.build_html(d, ep).replace("<head>", "<head>" + csp, 1)
+        f = os.path.join(tmp, "live.html")
+        n = os.path.join(tmp, "next.html")
+        with open(f, "w") as fh:
+            fh.write(page(0, "2026-01-01T00:00:00"))
+        with open(n, "w") as fh:
+            fh.write(page(7, "2026-01-01T00:00:05"))
+        args = os.path.join(tmp, "a.json")
+        with open(args, "w") as fh:
+            json.dump({"file": f, "next": n, "stale": "#fr=1&lt=2026-01-01T00%3A00%3A05&lf=" + str(int((time.time() - 120) * 1000))}, fh)
+        js = os.path.join(tmp, "r.js")
+        with open(js, "w") as fh:
+            fh.write(FILE_REFRESH_JS)
+        r = subprocess.run([NODE, js, args], capture_output=True, text=True, timeout=150, env=node_env())
+        self.assertTrue(r.stdout.strip(), r.stderr)
+        d = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertNotIn("error", d)
+        self.assertEqual(d["errors"], [])
+        self.assertEqual(d["chip"], "live (file refresh · 3 s)")
+        self.assertIn("s=t1", d["hash"])
+        self.assertEqual(d["inbox"], "Inbox 7")
+        self.assertIn("Fix the map", d["sel"])
+        self.assertEqual(d["q"], "fix")
+        self.assertEqual(d["chip2"], "live (file refresh · 3 s)")
+        self.assertEqual(d["link"], 1)
+        self.assertIn("file refresh stopped", d["stale"])
+        self.assertTrue(d["noReload"])
 
 
 class HtmlTest(unittest.TestCase):

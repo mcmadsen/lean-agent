@@ -55,7 +55,8 @@ def record_request(op, ms, now=None):
     """A socket request served (count per minute, last latency). `pending` is the hooks' question."""
     now = now or time.time()
     with _lock:
-        _state["ms"] = ms
+        if op != "map":  # a map request times the snapshot itself, not the socket
+            _state["ms"] = ms
         _reqs.append((now, op))
         if op == "pending":
             _ring.append({"ts": now, "kind": "request", "from": "hooks", "to": "service", "label": f"pending? {ms:.0f} ms",

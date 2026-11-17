@@ -9,8 +9,11 @@ import os
 import queue
 import secrets
 import select
+import shutil
 import socket
 import struct
+import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -27,6 +30,56 @@ LOG_EVERY_S = 60.0
 POLL_S = 10.0  # a page that polled this recently counts as watching
 PING_S = 25.0
 FILE = "map-live.json"
+DEFAULT_PORT = 47821  # the stable, bookmarkable port (LEAN_AGENT_MAP_PORT changes it; busy -> an OS-chosen one)
+REFRESH_FILE = "refresh.json"
+REFRESH_EVERY = 3.0  # a registered page file is rewritten at most this often, and only when the map changed
+HEARTBEAT = 20.0  # ... or when it is this old (so a quiet map is not mistaken for a stopped refresh)
+REFRESH_MIN = 30  # default minutes a `map --html` file keeps refreshing
+
+
+def wanted_port():
+    try:
+        p = int(os.environ.get("LEAN_AGENT_MAP_PORT") or DEFAULT_PORT)
+        return p if 0 <= p < 65536 else DEFAULT_PORT
+    except ValueError:
+        return DEFAULT_PORT
+
+
+def refresh_path(home):
+    return os.path.join(home, "map", REFRESH_FILE)
+
+
+def _atomic(path, text, mode=0o600):
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def load_refresh(home):
+    """{absolute file path: expiry epoch} of the page files the service keeps fresh."""
+    try:
+        with open(refresh_path(home)) as fh:
+            d = json.load(fh).get("files")
+        return {str(k): float(v) for k, v in d.items()} if isinstance(d, dict) else {}
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {}
+
+
+def register_refresh(home, path, minutes=None, now=None):
+    """Registers (or extends) `path` for `minutes` (default 30); returns the expiry. Expired entries are dropped."""
+    now = time.time() if now is None else now
+    try:
+        minutes = float(REFRESH_MIN if minutes is None else minutes)
+    except (TypeError, ValueError):
+        minutes = float(REFRESH_MIN)
+    files = {k: v for k, v in load_refresh(home).items() if v > now}
+    files[os.path.abspath(path)] = now + max(0.0, minutes) * 60
+    os.makedirs(os.path.dirname(refresh_path(home)), exist_ok=True)
+    _atomic(refresh_path(home), json.dumps({"files": files}))
+    return files[os.path.abspath(path)]
 
 
 def live_path(home):
@@ -88,8 +141,12 @@ def parse_frames(buf):
 
 
 class Live:
-    def __init__(self, snapshot, home, interval=INTERVAL, max_clients=MAX_CLIENTS):
+    def __init__(self, snapshot, home, interval=INTERVAL, max_clients=MAX_CLIENTS, port=None):
         self.snapshot = snapshot
+        self.want_port = wanted_port() if port is None else port
+        self.fallback = False
+        self.rwake = threading.Event()
+        self.rwritten = {}  # file -> (hash, monotonic of the last write)
         self.home = home
         self.interval = interval
         self.max_clients = max_clients
@@ -112,7 +169,14 @@ class Live:
     def start(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("127.0.0.1", 0))
+        try:
+            s.bind(("127.0.0.1", self.want_port))
+        except OSError:
+            s.close()
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", 0))
+            self.fallback = bool(self.want_port)
         s.listen(16)
         s.settimeout(0.5)
         self.lsock, self.port = s, s.getsockname()[1]
@@ -121,16 +185,20 @@ class Live:
         tmp = p + f".{os.getpid()}.tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as fh:
-            json.dump({"port": self.port, "token": self.token, "pid": os.getpid()}, fh)
+            json.dump({"port": self.port, "token": self.token, "pid": os.getpid(),
+                       **({"fallback": True, "wanted": self.want_port} if self.fallback else {})}, fh)
         os.chmod(tmp, 0o600)
         os.replace(tmp, p)
         threading.Thread(target=self._accept, daemon=True).start()
         threading.Thread(target=self._loop, daemon=True).start()
+        threading.Thread(target=self._refresh_loop, daemon=True).start()
+        self.rwake.set()  # a registration made before the service started
         return self
 
     def stop(self):
         self.stopped.set()
         self.wake.set()
+        self.rwake.set()
         try:
             self.lsock.close()
         except Exception:
@@ -251,6 +319,8 @@ class Live:
 
     def on_request(self, op, req):
         """Called by the service socket per request; cheap and never raises."""
+        if op == "map":
+            self.rwake.set()  # `map --html` just registered a file: the refresher looks again
         if not self.clients:
             return
         try:
@@ -283,6 +353,56 @@ class Live:
             if self.stopped.wait(self.interval):
                 break
 
+    # -- file refresh (viewers that can only reload a file) -----------------------------------------------------------
+    def _refresh_once(self, now=None):
+        """Rewrites every unexpired registered file when the map changed (or the file is HEARTBEAT old). Returns how many
+        files are still registered (0 = nothing to do: the loop then sleeps until the next `map --html`)."""
+        now = time.time() if now is None else now
+        files = {k: v for k, v in load_refresh(self.home).items() if v > now}
+        if not files:
+            self.rwritten = {}
+            if load_refresh(self.home):
+                try:
+                    _atomic(refresh_path(self.home), json.dumps({"files": {}}))
+                except OSError:
+                    pass
+            return 0
+        snap = self.get_snap()
+        h = _sha(snap)
+        mono = time.monotonic()
+        page = None
+        for p in files:
+            last = self.rwritten.get(p)
+            if last and last[0] == h and mono - last[1] < HEARTBEAT and os.path.exists(p):
+                continue
+            if page is None:
+                page = build_html(snap, endpoint(self.home))
+            try:
+                if os.path.isdir(os.path.dirname(p)):
+                    _atomic(p, page)
+                    self.rwritten[p] = (h, mono)
+            except OSError:
+                pass
+        for p in [k for k in self.rwritten if k not in files]:
+            self.rwritten.pop(p, None)
+        return len(files)
+
+    def _refresh_loop(self):
+        while not self.stopped.is_set():
+            try:
+                n = self._refresh_once()
+            except Exception as exc:  # noqa: BLE001 - never takes the service down
+                try:
+                    self._fail(exc)
+                except Exception:
+                    pass
+                n = 1
+            if n == 0:
+                self.rwake.wait()
+                self.rwake.clear()
+            elif self.stopped.wait(REFRESH_EVERY):
+                break
+
     # -- connections ---------------------------------------------------------------------------------------------------
     def _accept(self):
         while not self.stopped.is_set():
@@ -313,11 +433,18 @@ class Live:
             hdr[k.strip().lower()] = v.strip()
         u = urllib.parse.urlsplit(parts[1])
         tok = (urllib.parse.parse_qs(u.query).get("t") or [""])[0]
+        key = hdr.get("sec-websocket-key")
+        is_ws = hdr.get("upgrade", "").lower() == "websocket"
+        if not tok and not is_ws and (u.path or "/") == "/" and not u.query and hdr.get("host", "") in self.hosts():
+            self._route(conn, "/", {})  # the bookmarkable page: only for the endpoint's own Host (no DNS rebinding)
+            return None
         if not hmac.compare_digest(tok.encode(), self.token.encode()):
             self._http(conn, 403, "Forbidden")
             return None
-        key = hdr.get("sec-websocket-key")
-        if hdr.get("upgrade", "").lower() != "websocket":
+        if is_ws and hdr.get("origin", "null") not in self.origins():
+            self._http(conn, 403, "Forbidden")
+            return None
+        if not is_ws:
             self._route(conn, u.path or "/", urllib.parse.parse_qs(u.query))
             return None
         if "upgrade" not in hdr.get("connection", "").lower() or not key or hdr.get("sec-websocket-version") != "13":
@@ -337,6 +464,12 @@ class Live:
         conn.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                       f"Sec-WebSocket-Accept: {acc}\r\n\r\n").encode())
         return buf.split(b"\r\n\r\n", 1)[1]
+
+    def hosts(self):
+        return (f"127.0.0.1:{self.port}", f"localhost:{self.port}")
+
+    def origins(self):
+        return ("null", f"http://127.0.0.1:{self.port}", f"http://localhost:{self.port}")
 
     @staticmethod
     def _http(conn, code, text):
@@ -483,7 +616,11 @@ def doctor_line(home, wait=3.0):
     """(ok True/None, text) for `doctor`."""
     st, why = check(home, wait)
     if st == "up":
-        return True, "live map page endpoint: up (127.0.0.1 only, sends snapshots)"
+        d = endpoint(home) or {}
+        if d.get("fallback"):
+            return None, (f"live map page endpoint: up on port {d.get('port')} (the stable port {d.get('wanted')} was busy, so the URL "
+                          "changed; free it or set LEAN_AGENT_MAP_PORT)")
+        return True, f"live map page endpoint: up (127.0.0.1:{d.get('port')} only, sends snapshots)"
     if st == "no-snapshot":
         return None, f"live map page endpoint: accepts but sends no snapshot ({why})"
     if st == "token":
@@ -492,9 +629,42 @@ def doctor_line(home, wait=3.0):
 
 
 def page_url(home):
-    """http://127.0.0.1:<port>/?t=<token> of the running endpoint, or None."""
+    """The stable, token-free http://127.0.0.1:<port>/ of the running endpoint, or None."""
     d = endpoint(home)
-    return f"http://127.0.0.1:{d['port']}/?t={urllib.parse.quote(d['token'])}" if d else None
+    return f"http://127.0.0.1:{d['port']}/" if d else None
+
+
+def open_app(home, platform=None, env=None, apps_dirs=None, popen=None):
+    """Opens the stable URL in a chromeless app window of the user's own machine and returns at once.
+    -> (ok, message). Starts nothing when the endpoint is down."""
+    u = page_url(home)
+    if not u or not is_up(home):
+        return False, "live map endpoint not running: start the service (lean-agent up), then run lean-agent map --app again"
+    platform = platform or sys.platform
+    env = dict(os.environ if env is None else env)
+    pop = popen or (lambda cmd: subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                                   start_new_session=True, env=env))
+    try:
+        if platform == "darwin":
+            dirs = apps_dirs if apps_dirs is not None else ["/Applications", os.path.expanduser("~/Applications")]
+            for app in ("Google Chrome", "Microsoft Edge", "Brave Browser", "Chromium"):
+                if any(os.path.isdir(os.path.join(d, app + ".app")) for d in dirs):
+                    pop(["open", "-na", app, "--args", "--app=" + u])
+                    return True, f"opened {u} in a {app} app window"
+            pop(["open", u])
+            return True, f"opened {u} in the default browser"
+        for b in ("google-chrome", "chromium", "microsoft-edge", "brave-browser"):
+            exe = shutil.which(b, path=env.get("PATH"))
+            if exe:
+                pop([exe, "--app=" + u])
+                return True, f"opened {u} in a {b} app window"
+        exe = shutil.which("xdg-open", path=env.get("PATH"))
+        if exe:
+            pop([exe, u])
+            return True, f"opened {u} in the default browser"
+    except OSError as exc:
+        return False, f"could not open a browser ({exc}); open {u} yourself"
+    return False, f"no browser found to start; open {u} yourself"
 
 
 def is_up(home, timeout=0.5):
@@ -615,6 +785,13 @@ var ST={q:'',idle:0,err:0,feed:null,hide:[]},SKEY='lean-agent-map-ui';
 try{var _s=JSON.parse(localStorage.getItem(SKEY)||'{}');if(_s&&typeof _s==='object'){ST.q=String(_s.q||'').slice(0,80);ST.idle=_s.idle?1:0;ST.err=_s.err?1:0;
   ST.feed=typeof _s.feed==='boolean'?_s.feed:null;ST.hide=Array.isArray(_s.hide)?_s.hide.filter(function(k){return KC[k]}):[]}}catch(e){}
 function save(){try{localStorage.setItem(SKEY,JSON.stringify(ST))}catch(e){}}
+// state that must survive a reload of a file page (localStorage may be blocked there too) rides in location.hash
+var HS={},isFile=location.protocol==='file:',sameOrigin=!!(EP&&EP.port&&String(location.port)===String(EP.port)&&/^(127\.0\.0\.1|localhost)$/.test(location.hostname));
+try{String(location.hash||'').replace(/^#/,'').split('&').forEach(function(p){var i=p.indexOf('=');if(i>0)HS[p.slice(0,i)]=decodeURIComponent(p.slice(i+1))})}catch(e){}
+if(HS.fr==='1'){if('q' in HS)ST.q=String(HS.q).slice(0,80);if('i' in HS)ST.idle=HS.i==='1'?1:0;if('e' in HS)ST.err=HS.e==='1'?1:0;if('f' in HS&&HS.f!=='')ST.feed=HS.f==='1';
+  if('x' in HS)ST.hide=String(HS.x).split(',').filter(function(k){return KC[k]});if(HS.s)selId=HS.s}
+function saveHash(ts,lf){var h=['fr=1','lt='+encodeURIComponent(ts),'lf='+lf,'q='+encodeURIComponent(ST.q),'i='+ST.idle,'e='+ST.err,'f='+(ST.feed===null?'':ST.feed?1:0),'x='+ST.hide.join(','),'y='+Math.round(window.pageYOffset||0)];
+  if(selId)h.push('s='+encodeURIComponent(selId));try{history.replaceState(null,'','#'+h.join('&'))}catch(e){location.hash=h.join('&')}}
 function $(i){return document.getElementById(i)}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function clip(s,n){s=String(s||'');return s.length>n?s.slice(0,n-1)+'…':s}
@@ -876,10 +1053,10 @@ function connect(){
     else if(d.type==='event')pulse(d.from,d.to)};
   ws.onerror=function(){if(!open)codes.push('WebSocket error')};
   ws.onclose=function(ev){
-    if(!open){codes.push('WebSocket closed '+(ev&&ev.code))}
+    if(!open){codes.push('WebSocket closed '+(ev&&ev.code));checkFresh()}
     if(!gotLive)return fallback('poll');
     if(open)fails=0;else fails++;
-    if(fails>=4){stopped=true;chip('service restarted - run lean-agent map --url again','bad');return}
+    if(fails>=4&&!sameOrigin){stopped=true;chip('service restarted - run lean-agent map --url again','bad');return}
     chip('reconnecting','re');setTimeout(connect,delay);delay=Math.min(15000,delay*2)}}
 var tried={};
 function fallback(next){
@@ -889,9 +1066,21 @@ function fallback(next){
   blocked()}
 function blocked(){
   mode='none';
-  var l=base&&!/^https?:/.test(location.protocol)?' <a href="'+base+'/?'+tq+'" target="_blank" rel="noopener">Open in browser</a>':'';
+  var l=base&&!/^https?:/.test(location.protocol)?' <a href="'+base+'/" target="_blank" rel="noopener">Open in browser</a>':'';
+  if(isFile&&viol.length)return fileRefresh(l);
   if(viol.length){chip('preview blocks live updates','bad');why(reason()+l)}
   else{chip('snapshot (service not running)','bad');why((reason()||'connection refused on every transport')+l)}}
+// ---- transport 4: the file itself (a viewer that blocks every network call can still reload a file the service rewrites)
+function fileRefresh(l){
+  mode='refresh';var now=Date.now(),ts=String(SNAP.ts||''),lf=HS.lt===ts&&+HS.lf?+HS.lf:now;
+  if(now-lf>60000){chip('file refresh stopped - ask for the map again','bad');why('The page file stopped changing. Ask for the map again.'+(l||''));return}
+  chip('live (file refresh · 3 s)','live');why((l||'').trim());
+  (function wait(){setTimeout(function(){if(paused)return wait();saveHash(ts,lf);location.reload()},3000)})()}
+// ---- a bookmarked page after a service restart: fetch the page again, reload once when the token changed
+function checkFresh(){
+  if(!sameOrigin||typeof fetch!=='function')return;
+  fetch(location.pathname||'/',{cache:'no-store'}).then(function(r){return r.ok?r.text():''}).then(function(t){
+    var m=/"token": ?"([^"]+)"/.exec(t||'');if(m&&EP.token&&m[1]!==EP.token)location.reload()}).catch(function(){})}
 // ---- transport 2: fetch polling
 function pollFetch(){
   if(typeof fetch!=='function')return fallback('img');
@@ -902,6 +1091,7 @@ function pollFetch(){
       okOnce=true;bad=0;apply(d);if(mode!=='poll')up('poll','live (polling)');setTimeout(tick,2000)
     }).catch(function(e){
       if(!okOnce){codes.push('fetch failed');return fallback('img')}
+      checkFresh();
       if(++bad>=5){chip('service not reachable','bad');why(reason())}else chip('reconnecting','re');
       setTimeout(tick,2000)})}
   tick()}
@@ -920,7 +1110,9 @@ function pollImg(){
     im.src=base+'/map.svg?'+tq+'&w=900&h=700&n='+(++n)}
   tick()}
 render();
-if(EP&&EP.port){chip('connecting','re');connect()}else chip('snapshot (service not running)','bad');
+if(HS.y&&HS.fr==='1')try{window.scrollTo(0,+HS.y)}catch(e){}
+if(isFile&&HS.fr==='1'){fileRefresh(base?' <a href="'+base+'/" target="_blank" rel="noopener">Open in browser</a>':'')}
+else if(EP&&EP.port){chip('connecting','re');connect()}else chip('snapshot (service not running)','bad');
 })();
 """
 
@@ -966,8 +1158,7 @@ def build_html(snap, ep):
     return PAGE.replace("%CSS%", CSS).replace("%JS%", JS).replace("%SNAP%", _json_safe(snap)).replace("%EP%", _json_safe(ep))
 
 
-def write_html(home, snap, out=None):
-    """Writes the page (file 0600, default dir 0700) and returns its absolute path."""
+def html_path(home, out=None):
     if out:
         p = os.path.abspath(os.path.expanduser(out))
         os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -976,6 +1167,12 @@ def write_html(home, snap, out=None):
         os.makedirs(d, exist_ok=True)
         os.chmod(d, 0o700)
         p = os.path.join(d, "live.html")
+    return p
+
+
+def write_html(home, snap, out=None):
+    """Writes the page (file 0600, default dir 0700) and returns its absolute path."""
+    p = html_path(home, out)
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
         fh.write(build_html(snap, endpoint(home)))

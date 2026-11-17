@@ -12673,7 +12673,9 @@ def sock_handlers(deliverer, helper):
         return {"text": text}
 
     def map_op(req):
-        return {"map": lean_map.snapshot_now()}
+        lv = live_box[0] if live_box else None
+        # the live endpoint already computes one snapshot every 2 s for everyone: share it instead of computing another here
+        return {"map": lv.get_snap() if lv else lean_map.snapshot_now()}
 
     return {
         "send": send, "wake": wake, "pending": pending, "map": map_op,
@@ -12887,6 +12889,7 @@ def host_session(cmd, extra, env, h, name):
     deliverer = service_session.SpoolDeliverer()
     threading.Thread(target=deliverer.loop, args=(spool_stop,), daemon=True).start()
     sock_server = None
+    live_box.clear()
     try:
         sock_helper = lean_sock.Helper(os.path.abspath(__file__))
         lean_map.VERSION = plugin_version()
@@ -12896,6 +12899,7 @@ def host_session(cmd, extra, env, h, name):
         try:
             import lean_maplive
             live = lean_maplive.Live(lean_map.snapshot_now, lean_sock.home()).start()
+            live_box.append(live)
             sock_server.on_request = live.on_request
             _prev_stop = sock_server.on_stop
             sock_server.on_stop = lambda: (live.stop(), _prev_stop and _prev_stop())
@@ -16061,7 +16065,7 @@ SHORTCUTS = (
     ("status / now", "the status table"),
     ("compare <project>", "overhead of a clean session vs lean-agent's: `lean-agent compare <project>`"),
     ("more", "all threads (when the table says +N more)"),
-    ("map", "the live map: run `lean-agent map --url`, reply with the printed URL (clickable; `map --html` only if a file is asked for)"),
+    ("map", "the live map: reply with the URL `lean-agent map --url` prints (stable, clickable); `lean-agent map --app` opens it in an app window on your Mac; `map --html` only if a file is asked for"),
     ("update", "sync and restart when idle (`lean-agent update`)"),
     ("s21", "summary of t21: last report, open questions, running work, next step"),
     ("a21 <question>", "send the question to t21 unchanged"),
@@ -16125,6 +16129,9 @@ def cmd_myq(a):
     return 0
 
 
+live_box = []  # the running service's Live endpoint (so the `map` socket op shares its snapshot)
+
+
 def cmd_live_map(a):
     """The live map: one snapshot (--json), the drawing (--svg/--mini), a line per change (--watch)."""
     if getattr(a, "watch", False):
@@ -16141,18 +16148,28 @@ def cmd_live_map(a):
             return 1
         print(u)
         return 0
+    if getattr(a, "app", False):
+        import lean_maplive
+        ok, text = lean_maplive.open_app(lean_sock.home())
+        print(text)
+        return 0 if ok else 1
     if getattr(a, "probe", False):
         import lean_maplive
         print(lean_maplive.write_probe(lean_sock.home()))
         return 0
-    snap = lean_map.fetch()
     if getattr(a, "html", False):
         import lean_maplive
-        print(lean_maplive.write_html(lean_sock.home(), snap, getattr(a, "out", None)))
+        home = lean_sock.home()
+        path = lean_maplive.html_path(home, getattr(a, "out", None))
+        mins = getattr(a, "refresh_for", None)
+        lean_maplive.register_refresh(home, path, lean_maplive.REFRESH_MIN if mins is None else mins)  # before the map call: it wakes the refresher
+        snap = lean_map.fetch()
+        print(lean_maplive.write_html(home, snap, getattr(a, "out", None)))
         u = lean_maplive.page_url(lean_sock.home())
         if u:
             print(u)
         return 0
+    snap = lean_map.fetch()
     if getattr(a, "svg", False) or getattr(a, "mini", False):
         mini = bool(getattr(a, "mini", False))
         print(lean_map.svg(snap, a.width or (480 if mini else 1200), a.height or (320 if mini else 700), mini=mini))
@@ -19010,6 +19027,9 @@ def build_parser():
     s.add_argument("--html", action="store_true", help="live map: write one self-contained live page (open it in the preview), print its path")
     s.add_argument("--out", metavar="FILE", help="with --html: where to write the page")
     s.add_argument("--url", action="store_true", help="live map: print the localhost URL of the live page (open it in a browser)")
+    s.add_argument("--app", action="store_true", help="live map: open the stable URL in a chromeless app window on this machine (returns at once)")
+    s.add_argument("--refresh-for", dest="refresh_for", type=float, default=None, metavar="MIN",
+                   help="live map --html: the service keeps rewriting the file for MIN minutes (default 30) so a viewer that only reloads files stays live")
     s.add_argument("--probe", action="store_true", help="live map: write a diagnostics page (what the preview allows: JS, WebSocket, fetch, img), print its path")
     s.add_argument("--watch", action="store_true", help="live map: one JSON line whenever it changes (twice a second at most)")
     s.add_argument("--width", type=int)
