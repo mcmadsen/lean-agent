@@ -718,9 +718,14 @@ class OpenAppTest(unittest.TestCase):
             os.makedirs(os.path.join(d, a + ".app"), exist_ok=True)
         ok, text = lean_maplive.open_app(self.home, platform=platform, env={"PATH": self.bin}, apps_dirs=[d])
         end = time.time() + 5
-        while time.time() < end and not os.path.exists(self.log):
+        def text():  # the fake app runs detached: the file can exist before its line lands
+            try:
+                return open(self.log).read()
+            except OSError:
+                return ""
+        while time.time() < end and not text().endswith("\n"):
             time.sleep(0.05)
-        lines = open(self.log).read().splitlines() if os.path.exists(self.log) else []
+        lines = text().splitlines()
         if os.path.exists(self.log):
             os.unlink(self.log)
         return ok, lines
