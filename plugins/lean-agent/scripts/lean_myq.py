@@ -43,25 +43,29 @@ def parse_id(text):
     return "u" + str(int(m.group(1))) if m else ""
 
 
+_URL_RE = re.compile(r"(?:https?|ftp)://\S+|www\.\S+", re.I)
+_CODE_RE = re.compile(r"```.*?```|`[^`]*`", re.S)
+
+
+def _plain(text):
+    """The message without URLs and code spans (a '?' inside them says nothing about it being a question)."""
+    return " ".join(_CODE_RE.sub(" ", _URL_RE.sub(" ", str(text or ""))).split())
+
+
 def is_question(text):
-    """A front-desk message that is a question: ends with "?" or starts with a question word; short-ish; one message."""
+    """A front-desk message that is a question: ends with "?" or starts with a question word; short-ish; one message.
+    '?' inside URLs and code spans does not count."""
     t = " ".join(str(text or "").split())
-    if not t or len(t) > QUESTION_MAX or t == "?" or t.startswith("/"):
+    p = _plain(t)
+    if not p or len(p) > QUESTION_MAX or p == "?" or t.startswith("/"):
         return False
-    return t.endswith("?") or bool(_WORD_RE.match(t))
+    return "?" in p or bool(_WORD_RE.match(p))
 
 
 def split_questions(text):
-    """The questions of one prompt: each sentence that ends with "?" or starts with a question word (a single question
-    stays whole); nothing for a statement or command."""
+    """One message is ONE question entry: [whole message] when it is a question, else []. Kept for callers."""
     t = " ".join(str(text or "").split())
-    if not t or t.startswith("/"):
-        return []
-    if len(t) <= QUESTION_MAX and t.count("?") <= 1 and is_question(t):
-        return [t]
-    parts = [x.strip() for x in re.findall(r"[^?.!]*\?|[^?.!]+[.!]?", t) if x.strip()]
-    out = [x for x in parts if len(x) <= QUESTION_MAX and (x.endswith("?") or _WORD_RE.match(x)) and x != "?"]
-    return out if len(parts) > 1 else []
+    return [t] if is_question(t) else []
 
 
 def add(text, target="main", now=None):
@@ -251,10 +255,26 @@ REMIND_MIN = 10
 BLOCK_MAX = 5
 
 
+def _same_message(a, b):
+    """Entries split from one message by older versions: same target and status, same answer, asked within a second of each other (a loop's timestamps, never equal)."""
+    return a is not b and (a.get("target") == b.get("target") and a.get("status") == b.get("status")
+            and (a.get("answer") or "") == (b.get("answer") or "")
+            and 0 < abs(float(a.get("ts") or 0) - float(b.get("ts") or 0)) <= 1)
+
+
+def _collapse(items):
+    """Show entries split from the same message as one (the first)."""
+    out = []
+    for x in items:
+        if not any(_same_message(x, y) for y in out):
+            out.append(x)
+    return out
+
+
 def _unread(items):
     """Answered and not yet acknowledged; an answer without the flag (from before 0.45.55) counts as read."""
-    return sorted((x for x in items if x.get("status") == "answered" and x.get("answer_read") is False
-                   and not lean_private.hides(thread=x.get("target"))), key=lambda x: float(x.get("answered_ts") or 0))
+    return _collapse(sorted((x for x in items if x.get("status") == "answered" and x.get("answer_read") is False
+                             and not lean_private.hides(thread=x.get("target"))), key=lambda x: float(x.get("answered_ts") or 0)))
 
 
 def unread():
@@ -287,7 +307,7 @@ def block(now=None):
              "put the line '" + header() + "' above any summary/status table):"]
     for x in u[-BLOCK_MAX:][::-1]:
         t = x.get("target") if x.get("target") != "main" else "front desk"
-        a = _cell(x.get("answer"), 200)
+        a = _cell(x.get("answer"), 120)
         lines.append(f"{qn(x)} ({t}): {a} \u00b7 ack {qn(x)} when read")
     if len(u) > BLOCK_MAX:
         lines.append(f"+{len(u) - BLOCK_MAX} more: q unread")
@@ -317,7 +337,8 @@ def ack(nums=None, now=None):
     with lean_common.file_lock(path()):
         items = _load()
         for x in items:
-            if x.get("status") == "answered" and x.get("answer_read") is False and (not nums or x.get("id") in ids):
+            if x.get("status") == "answered" and x.get("answer_read") is False and (
+                    not nums or x.get("id") in ids or any(y.get("id") in ids and _same_message(x, y) for y in items)):
                 x["answer_read"] = True
                 out.append(x)
         if out:
@@ -339,11 +360,15 @@ def reminder(now=None):
     return "Reminder: unread answers for the user: " + ", ".join(qn(x) for x in due) + " (ack when read)."
 
 
-def unread_text():
+def unread_text(full=True):
+    """The unread answers: in full (`lean-agent myq unread`), or one short line each (the table's lead-in)."""
     u = unread()
     if not u:
         return "No unread answers."
-    return "\n\n".join(f"{qn(x)} to {x.get('target')}: {x.get('text')}\nAnswer: {x.get('answer')}" for x in u)
+    if full:
+        return "\n\n".join(f"{qn(x)} to {x.get('target')}: {x.get('text')}\nAnswer: {x.get('answer')}" for x in u)
+    return "\n".join(f"{qn(x)} to {x.get('target')}: {_cell(x.get('text'), 60)} -> {_cell(x.get('answer'), 120)}" for x in u) \
+        + "\n(full text: lean-agent myq unread, or myq show qN)"
 
 
 def _age(ts, now):
@@ -367,7 +392,7 @@ def select(open_only=False, thread=None):
         items = [x for x in items if x.get("status") == "open"]
     if thread:
         items = [x for x in items if x.get("target") == thread]
-    return sorted(items, key=lambda x: (x.get("status") != "open", -float(x.get("ts") or 0)))
+    return sorted(_collapse(items), key=lambda x: (x.get("status") != "open", -float(x.get("ts") or 0)))
 
 
 def table(open_only=False, thread=None, now=None):
@@ -375,7 +400,7 @@ def table(open_only=False, thread=None, now=None):
     rows = select(open_only, thread)
     pre = ""
     if not open_only and not thread and unread():
-        pre = header() + "\n\n" + unread_text() + "\n\n"
+        pre = header() + "\n\n" + unread_text(False) + "\n\n"
     if not rows:
         return "No questions" + (" open" if open_only else "") + (f" for {thread}" if thread else "") + " recorded."
     out = ["| # | When | To | Status | Question | Answer |", "|---|---|---|---|---|---|"]

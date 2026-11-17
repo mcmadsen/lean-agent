@@ -103,7 +103,7 @@ class MyqAck(unittest.TestCase):
     def test_question_answered_by_main_is_read(self):
         import budget_hook
         budget_hook.capture_question("What does the cache do? And why is it slow?", "s1")
-        self.assertEqual(len(self.m.select()), 2)
+        self.assertEqual(len(self.m.select()), 1)  # one message, one question
         self.m.main_reply("It caches; slow due to disk.")
         self.assertEqual({x["status"] for x in self.m.select()}, {"answered"})
         self.assertEqual(self.m.unread(), [])
