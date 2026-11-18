@@ -1,7 +1,7 @@
 // 1.0.6 learn flow: size budget, check (dry run), record, relies-on, covered-by, verify, stale scaling, sync all.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { MAX_PROJECT_CHARS, MAX_RULE_CHARS, checkRules, checkStale, globRe, parseRelies, pathsOf, recordRule, ruleMetrics, ruleProblems, staleLimit, syncAll, tokensOf, verifyRules, withRelies } from './rules'
+import { MAX_PROJECT_CHARS, MAX_RULE_CHARS, capLine, checkRules, checkStale, globRe, parseRelies, pathsOf, recordRule, ruleMetrics, ruleProblems, staleLimit, syncAll, tokensOf, verifyRules, withRelies } from './rules'
 import { addGap } from './rules'
 import { threadTool } from './delivery'
 
@@ -31,16 +31,35 @@ test('size budget: chars per rule, chars for _project, line width', () => {
   expect(ruleProblems('a.md', rule('- ' + 'z'.repeat(250))).some(p => p.includes('characters wide'))).toBe(true)
 })
 
-test('sync skips a rule over the char cap or with a wide line and says why', async () => {
+test('sync copies a rule over the char cap or with a wide line anyway (grandfathered) and says why; one far over it is skipped and its old copy stays', async () => {
   const h = setup()
   h.files.set(`${SRC}/rules/fat.md`, rule(Array.from({ length: 12 }, () => '- ' + 'x'.repeat(190)).join('\n')))
   h.files.set(`${SRC}/rules/wide.md`, rule('- ' + 'z'.repeat(250)))
   h.files.set(`${SRC}/rules/ok.md`, rule('- fine'))
+  const huge = rule(Array.from({ length: 80 }, () => '- ' + 'y'.repeat(100)).join('\n')) // 80 lines, 8000+ characters: past three times every cap
+  h.files.set(`${SRC}/rules/huge.md`, huge)
+  h.files.set('/repo/.claude/rules/lean-agent/huge.md', 'the last good copy') // synced by an older version
+  h.files.set('/repo/.claude/rules/lean-agent/gone.md', 'its store file is gone') // no longer in the store: removed
   const r = await syncAll(h.host, 'proj', '/repo', false)
   expect(h.files.has('/repo/.claude/rules/lean-agent/ok.md')).toBe(true)
-  expect(h.files.has('/repo/.claude/rules/lean-agent/fat.md')).toBe(false)
-  expect(r.lines.join('\n')).toContain('fat.md: more than 2000 characters')
-  expect(r.lines.join('\n')).toContain('wide.md: a line is 252 characters wide')
+  expect(h.files.has('/repo/.claude/rules/lean-agent/fat.md')).toBe(true) // over the cap: copied anyway, warned
+  expect(h.files.has('/repo/.claude/rules/lean-agent/wide.md')).toBe(true)
+  expect(h.files.get('/repo/.claude/rules/lean-agent/huge.md')).toBe('the last good copy') // skipped, never deleted by a cap
+  expect(h.files.has('/repo/.claude/rules/lean-agent/gone.md')).toBe(false)
+  const t = r.lines.join('\n')
+  expect(t).toContain('over the size cap but copied anyway')
+  expect(t).toContain('fat.md: more than 2000 characters')
+  expect(t).toContain('wide.md: a line is 252 characters wide')
+  expect(t).toContain('not synced, an earlier copy stays (shorten these): huge.md: more than 75 lines (81)')
+  expect(r.over.map(x => x.split(':')[0])).toEqual(['fat.md', 'wide.md'])
+  expect(r.skipped.map(x => x.split(':')[0])).toEqual(['huge.md'])
+  // the thread's first-context line
+  expect(capLine(r)).toBe('rules: 1 skipped (over cap: huge.md), 2 over the cap but loaded anyway (fat.md, wide.md); run learn --trim or lean_rules check')
+  expect(capLine({ over: [], skipped: [] })).toBeNull()
+  // re-synced after the store copy is shortened: the copy is replaced
+  h.files.set(`${SRC}/rules/huge.md`, rule('- short'))
+  await syncAll(h.host, 'proj', '/repo', false)
+  expect(h.files.get('/repo/.claude/rules/lean-agent/huge.md')).toContain('- short')
 })
 
 test('check is a dry run: lines and chars per rule, violations, no paths warning, covered and missing areas; nothing is copied', async () => {
@@ -89,7 +108,7 @@ test('record counts lines from the file, reports a differing caller value, write
 test('record: over-cap warns, a missing file warns, a footer is made when there is none, covered areas have no file', async () => {
   const h = setup()
   h.files.set(`${SRC}/rules/big.md`, rule(lines(30)))
-  expect(await recordRule(h.host, 'proj', 'big', { globs: ['a/**'], sha: 's' })).toContain('WARNING over the cap, sync will skip it: more than 25 lines')
+  expect(await recordRule(h.host, 'proj', 'big', { globs: ['a/**'], sha: 's' })).toContain('WARNING over the cap, sync still copies it but warns: more than 25 lines')
   expect(await recordRule(h.host, 'proj', 'none', { globs: ['a/**'], sha: 's' })).toContain('rules/none.md does not exist')
   h.files.set(`${SRC}/rules/bare.md`, '# bare\n- x\n')
   await recordRule(h.host, 'proj', 'bare', { globs: ['a/**'], sha: 'deadbeef00', relies: ['a/x.ts'] })
@@ -220,7 +239,7 @@ test('verify is bounded: names past the per-rule limit are reported as not check
 test('sync all: every worktree (git worktree list + worktrees.json) gets one summary line; verbose gives the paths', async () => {
   const h = setup()
   h.files.set(`${SRC}/rules/billing.md`, rule('- a'))
-  h.files.set(`${SRC}/rules/big.md`, rule(lines(30)))
+  h.files.set(`${SRC}/rules/big.md`, rule(lines(80)))
   h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ 'proj/feat': { path: '/h/.lean-agent/worktrees/proj/feat', repo: '/repo' }, 'other/x': { path: '/o/x' }, 'proj/gone': { path: '/h/.lean-agent/worktrees/proj/gone' } }))
   h.files.set('/h/.lean-agent/worktrees/proj/feat/.git', 'gitdir: x')
   h.files.set('/wt2/.git', 'gitdir: y')
@@ -235,7 +254,7 @@ test('sync all: every worktree (git worktree list + worktrees.json) gets one sum
     '/wt2: copied 1, removed 0, skipped 1, exclude ok',
     '/h/.lean-agent/worktrees/proj/feat: copied 1, removed 0, skipped 1, exclude ok',
     '/h/.lean-agent/worktrees/proj/gone: missing, skipped',
-    'not synced (shorten these): big.md: more than 25 lines (31)',
+    'not synced, an earlier copy stays (shorten these): big.md: more than 75 lines (81)',
   ])
   expect(h.files.has('/wt2/.claude/rules/lean-agent/billing.md')).toBe(true)
   expect(r.detail.find(d => d.path === '/wt2')!.out!.copied).toEqual(['/wt2/.claude/rules/lean-agent/billing.md'])

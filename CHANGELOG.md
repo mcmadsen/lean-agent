@@ -1,5 +1,57 @@
 # Changelog
 
+## Unreleased
+
+Urgent rule-loading, sync, guide and ledger fixes found on a real machine (field report: rules never reached threads, 16 of 17 synced
+copies deleted, a stale 0.45 guide still loaded, today's rows moved out of `ledger.jsonl`).
+
+### Fixed
+- **Learned rules never reached threads.** Measured with the engine (2.1.327): `.claude/rules` loads only beneath the session's ROOT.
+  A thread's root is its own folder and it reads the project by absolute path, so with the engine alone no rule loaded and no
+  `InstructionsLoaded` was ever fired (a session rooted elsewhere reading `<repo>/src/a.ts` loaded nothing, with or without
+  `--add-dir <repo>` or `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD`; only a session rooted in the repo did). The mod is now the
+  loader (`hooks/ruleload.ts`): on a thread's or its subagent's Read, Edit, Write, Grep, Glob of a path inside a registered project or
+  one of its worktrees, and on a read-only `cat`/`head`/`tail`/`rg`/`grep`/`ls` ... naming one, every rule of the store whose `paths:`
+  match is appended ONCE per context (the session, and each subagent separately) to that tool result; a repo-wide search does not
+  dump every rule. `_project.md` is a prompt section of the thread from its start, and a subagent's first tool result carries it.
+  Each injection is a row in `logs/rules-loaded.jsonl` (rule, project, session, thread, agent, trigger, sha) which `stats` counts;
+  a load the engine did itself (a session rooted in the checkout) marks the rule as given: nothing is injected twice (key: rule +
+  sha). A live run: control rooted elsewhere NONE and 0 events; with the mod, both the `_project` token and the path rule's token
+  reached the model and 2 rows were logged.
+- **Notices for a thread's first prompt never arrived.** `session.start` has no `context` field (the engine ignores it), so the
+  "rules for X are stale" line given there never reached a thread. Role-setup lines now go with the first `prompt.submit`.
+- **1.0.5 sync deleted 16 of 17 rule copies, and nobody was told.** The new size caps made sync skip the failing rules and
+  `mirror` then removed their old copies. Now a rule over a cap (written by an older version) is grandfathered: copied anyway and
+  reported, up to three times the cap; beyond that it is skipped, and a skipped rule never deletes the copy a checkout already has.
+  Only a rule whose store file is gone is removed. The thread start now uses the sync result: its first prompt says "rules: N
+  skipped (over cap: ...), M over the cap but loaded anyway (...); run learn --trim or lean_rules check"; `lean_rules stats`
+  returns `overCap`; and the desk's first session after an update runs `lean_rules check` for every project once and says so (pane
+  notice + the desk's next prompt). A thread start now syncs the checkout AND every worktree of the project (`git worktree list`,
+  so a plain `git worktree add` one too), not only the checkout.
+- **`"rules": "off"` in projects.json** (a 0.45 key): nothing in 1.0 read it. It is dropped (not honoured: a project with learned
+  rules wants them loaded) the first time the desk starts after the update, and the desk is told which project had it.
+- **`stats` and `compare` said "17 never loaded" when no load had ever been recorded.** They now say "no rule load has ever been
+  recorded (log absent): loading unverified", and `--trim` is suggested only for rules a recorded load came after (the log has an
+  event from after the rule was written); `lean_rules stats` returns `verified`, `events`, `neverConfirmed`.
+- **A stale 0.45 orchestrator guide kept loading into every thread** (`~/.lean-agent/threads/CLAUDE.md`). The tidy that moves it
+  ran once per version and never looked again (and a session reads its parent folders' CLAUDE.md before any mod hook runs). A cheap
+  `guardParents` check, outside the version gate, now runs at the `session.start` of every role, before the desk starts, wakes or
+  messages a thread, and in `doctor fix`: a parent CLAUDE.md that is the 0.45 guide (its "orchestrator guide" title, or
+  commands of the removed CLI such as `lean-agent run`) and that 1.0 did not write moves to `legacy-0.45/` (under a lock; an older
+  backup keeps its name, the new one gets a timestamp); a user's own file, even one that mentions lean-agent, is never touched. The tidy
+  version is 3, so the full tidy also runs once more for everyone on 1.0.x. 1.0 writes a one-line guard file
+  `~/.lean-agent/threads/CLAUDE.md` (about 40 tokens per thread, marked as generated) in its place, so a stale one coming back is
+  noticed and moved at the next start.
+- **The ledger rotation moved today's 1.0 rows out of `ledger.jsonl`, silently.** A ledger that starts with a 0.45 row is now split
+  by row format: 0.45 rows go to `ledger-legacy.jsonl`, 1.0 rows stay in `ledger.jsonl` (lossless: the 1.0 rows are only appended,
+  never swapped in by a rewrite, under a lock, verified before the legacy file is replaced, resumable without a duplicate). A
+  `ledger-legacy.jsonl` that 1.0.5 left holding 1.0 rows is repaired at the next start (and again at every start until it worked).
+  Every rotation or repair is announced once: a pane notice, and the desk's first prompt of its next start whichever session rotated. A rule given to a
+  thread is given again after a compaction. `stats` states its period and the ledger files
+  it read, and warns when `ledger.jsonl` starts inside the window. A rebuilt rollup no longer reads an empty file for a ledger over
+  4 MiB (`fs.read` rejects it: the text now comes from `tail`). A thread asks the desk for spend with `lean_ask` (the stats skill says
+  so; no new thread tool, so no new tool definition in every thread) and never reads `ledger.jsonl` itself.
+
 ## 1.0.5
 
 One combined release: the desk, thread and pane work, the learn flow, stats and compare work, and scripts over models with the

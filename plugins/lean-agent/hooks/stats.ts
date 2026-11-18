@@ -1,9 +1,9 @@
 // `lean_doctor stats`: spend, caps, rule loads and worker feedback as compact text, computed here (no model, no ledger read by
 // the caller). Spend comes from the rollup (ledger.ts), so it costs a stat and the tail of the ledger, not 27 MB.
 import { readConfig } from './budget'
-import { addTo, dayOf, merge, syncRollup, zero } from './ledger'
+import { LEDGER, addTo, dayOf, firstRow, merge, syncRollup, zero } from './ledger'
 import type { Agg, Dim } from './ledger'
-import { projectDir, rulesStats } from './rules'
+import { projectDir, rulesStats, unverifiedLine } from './rules'
 import { deskDir, homeDir, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
 import { deskChoice, threadChoice } from './models'
@@ -57,6 +57,12 @@ export async function statsText(h: Host, opts: { days?: number; project?: string
   const td = ro.days[today]
   const out: string[] = []
   out.push(`lean-agent stats: last ${n} day(s) to ${today}`)
+  // the period and the files this report read, and a warning when the live file starts inside the window (a rotation moved older rows)
+  const read = Object.keys(ro.files).sort()
+  out.push(`period: ${span[0]} 00:00Z to now; ledger files read: ${read.join(', ') || 'none'} (rows: ${ro.rows})`)
+  const start = await firstRow(h, `${leanDir(home)}/${LEDGER}`).catch(() => null)
+  const rotated = read.filter(f => f !== LEDGER)
+  if (start && rotated.length && start.ts > Date.parse(`${span[0]}T00:00:00Z`)) out.push(`WARNING: ledger.jsonl starts at ${new Date(start.ts).toISOString().slice(0, 16).replace('T', ' ')} UTC (rotated); older rows of this window are in ${rotated.join(', ')}, which this report read too`)
   out.push(`spend: today ${usd(td?.t[0] ?? 0)} (${td?.t[5] ?? 0} req) · ${n}d ${usd(sum.t[0])} (${sum.t[5]} req)`)
   // caps (config.json dailyCapUsd) against today, per role
   const cfg: any = await readConfig(h, home)
@@ -76,8 +82,14 @@ export async function statsText(h: Host, opts: { days?: number; project?: string
     const r = await rulesStats(h, p)
     const have = (await h.fs.list(`${projectDir(home, p)}/rules`).catch(() => [])).filter(f => f.name.endsWith('.md')).length
     if (!have) continue
+    if (!r.verified) {
+      // nothing was ever recorded: "never loaded" would only be the absence of a log
+      out.push(`rules ${p}: ${have} rule(s); ${unverifiedLine(p, r)}${r.overCap.length ? `; ${r.overCap.length} over the size cap (${r.overCap.slice(0, 4).map(x => x.split(':')[0]).join(', ')}${r.overCap.length > 4 ? ', ...' : ''}): learn ${p} --trim or lean_rules check` : ''}`)
+      continue
+    }
     const loads = Object.entries(r.loaded).filter(([f]) => !r.never.includes(f))
-    out.push(`rules ${p}: ${have} rule(s), ${have - r.never.length} loaded at least once (${loads.reduce((s, [, c]) => s + c, 0)} loads)${r.never.length ? `; never loaded: ${r.never.slice(0, 12).join(', ')}${r.never.length > 12 ? ` (+${r.never.length - 12})` : ''}` : ''}`)
+    const nv = r.neverConfirmed
+    out.push(`rules ${p}: ${have} rule(s), ${have - r.never.length} loaded at least once (${loads.reduce((s, [, c]) => s + c, 0)} loads)${nv.length ? `; never loaded since they were written: ${nv.slice(0, 12).join(', ')}${nv.length > 12 ? ` (+${nv.length - 12})` : ''}` : ''}${r.never.length > nv.length ? `; ${r.never.length - nv.length} not observed yet (written after the last recorded load)` : ''}${r.overCap.length ? `; ${r.overCap.length} over the size cap: learn ${p} --trim or lean_rules check` : ''}`)
   }
   // worker feedback and gaps (1.0 files: ~/.lean-agent/feedback.jsonl, gaps.jsonl, <project>/gaps.jsonl)
   const fb = await readJsonl<{ status?: string; agent?: string; missing?: boolean; refused?: number; ts?: number }>(h, `${leanDir(home)}/feedback.jsonl`)

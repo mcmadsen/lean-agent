@@ -83,9 +83,13 @@ test('rotation: a file that starts with a 0.45 row moves to ledger-legacy.jsonl 
   const h = setup()
   const mixed = old('2026-11-10T08:00:00') + old('2026-11-11T08:00:00') + row(NOON) + row(NOON, { usd: 2 })
   h.files.set(`${L}/ledger.jsonl`, mixed)
-  expect((await rotateLedger(h.host))[0]).toContain('moved to ledger-legacy.jsonl')
-  expect(h.files.has(`${L}/ledger.jsonl`)).toBe(false)
-  expect(h.files.get(`${L}/ledger-legacy.jsonl`)).toBe(mixed) // a rename: byte for byte
+  const before = await statsText(h.host)
+  expect((await rotateLedger(h.host))[0]).toContain('2 0.45 row(s) moved to ledger-legacy.jsonl, 2 1.0 row(s) kept in ledger.jsonl')
+  // split by row format: today's 1.0 rows STAY in ledger.jsonl, the 0.45 rows are the legacy file
+  expect(h.files.get(`${L}/ledger.jsonl`)).toBe(row(NOON) + row(NOON, { usd: 2 }))
+  expect(h.files.get(`${L}/ledger-legacy.jsonl`)).toBe(old('2026-11-10T08:00:00') + old('2026-11-11T08:00:00'))
+  const plain = (t: string) => t.replace(/^(period|WARNING|ledger):.*(\n|$)/gm, '')
+  expect(plain(await statsText(h.host))).toBe(plain(before)) // the same spend and tables before and after
   expect(await rotateLedger(h.host)).toEqual([]) // nothing left to rotate
   // new rows go to a fresh ledger.jsonl; the sum is the old file plus the new row, each once
   await record(h.host, { role: 'thread', tN: 't2' }, 'sonnet', { input_tokens: 1_000_000 })
@@ -101,6 +105,59 @@ test('rotation: a file that starts with a 0.45 row moves to ledger-legacy.jsonl 
   h.files.set(`${L}/ledger.jsonl`, old('2026-10-01T00:00:00'))
   await rotateLedger(h.host)
   expect(h.files.has(`${L}/ledger-legacy-2.jsonl`)).toBe(true)
+})
+
+test('repair: a legacy file that already holds 1.0 rows (what 1.0.5 produced) gives them back to ledger.jsonl; a row written meanwhile survives; stats period and files', async () => {
+  const h = setup()
+  h.files.set(`${L}/ledger-legacy.jsonl`, old('2026-11-10T08:00:00') + old('2026-11-11T08:00:00') + row(NOON - 5000, { usd: 5 }) + row(NOON - 4000, { usd: 6 }))
+  h.files.set(`${L}/ledger.jsonl`, row(NOON, { usd: 7 })) // what the desk wrote after the 1.0.5 rotation
+  const lines = await rotateLedger(h.host)
+  expect(lines.join('\n')).toContain('ledger repaired: 2 1.0 row(s) moved from ledger-legacy.jsonl back to ledger.jsonl, 2 0.45 row(s) stay')
+  expect(h.files.get(`${L}/ledger.jsonl`)).toBe(row(NOON, { usd: 7 }) + row(NOON - 5000, { usd: 5 }) + row(NOON - 4000, { usd: 6 })) // appended: the newer row is never rewritten
+  expect(h.files.get(`${L}/ledger-legacy.jsonl`)).toBe(old('2026-11-10T08:00:00') + old('2026-11-11T08:00:00'))
+  expect(await rotateLedger(h.host)).toEqual([]) // idempotent
+  const text = await statsText(h.host)
+  expect(text).toContain('period: 2026-11-12 00:00Z to now; ledger files read: ledger-legacy.jsonl, ledger.jsonl (rows: 5)')
+  expect(text).toContain('spend: today $18.00')
+  // a file that changes while it is being split is left alone (nothing lost); a ledger.jsonl that starts inside the window warns
+  const g = setup()
+  g.files.set(`${L}/ledger-legacy.jsonl`, old('2026-11-10T08:00:00') + row(NOON - 5000))
+  g.files.set(`${L}/ledger.jsonl`, row(NOON))
+  const size = g.host.fs.stat
+  let n = 0
+  g.host.fs.stat = async (p: string, o?: any) => { const s = await size(p, o); return p.endsWith('ledger-legacy.jsonl') && ++n > 2 ? { ...s, size: (s.size ?? 0) + 1 } : s }
+  expect(await rotateLedger(g.host)).toEqual([])
+  expect(g.files.get(`${L}/ledger-legacy.jsonl`)).toContain(String(NOON - 5000))
+  expect(await statsText(g.host)).toContain('WARNING: ledger.jsonl starts at')
+  // the repair was NOT marked done (it was not safe): the next start tries again, and this time it works
+  expect(await g.store.get('ledger-repair.v')).toBeUndefined()
+  g.host.fs.stat = size
+  expect((await rotateLedger(g.host)).join('\n')).toContain('ledger repaired: 1 1.0 row(s)')
+  expect(g.files.get(`${L}/ledger-legacy.jsonl`)).toBe(old('2026-11-10T08:00:00'))
+  expect(await g.store.get('ledger-repair.v')).toBe(1)
+})
+
+test('an interrupted split is retried without a duplicate: rows already in ledger.jsonl are not appended twice', async () => {
+  const h = setup()
+  // a crash after the 1.0 row was appended to ledger.jsonl and before the legacy file was rewritten
+  h.files.set(`${L}/ledger-legacy.jsonl`, old('2026-11-10T08:00:00') + row(NOON - 5000, { usd: 5 }))
+  h.files.set(`${L}/ledger.jsonl`, row(NOON, { usd: 7 }) + row(NOON - 5000, { usd: 5 }))
+  await rotateLedger(h.host)
+  expect(h.files.get(`${L}/ledger.jsonl`)).toBe(row(NOON, { usd: 7 }) + row(NOON - 5000, { usd: 5 })) // not twice
+  expect(h.files.get(`${L}/ledger-legacy.jsonl`)).toBe(old('2026-11-10T08:00:00'))
+  const ro = await syncRollup(h.host)
+  expect(ro.rows).toBe(3)
+  expect(ro.days[dayOf(NOON)]!.t[0]).toBe(12)
+})
+
+test('a ledger over 4 MiB: fs.read rejects, the whole text still comes from tail -c +1 (a rebuilt rollup is not empty)', async () => {
+  const h = setup()
+  h.files.set(`${L}/ledger.jsonl`, row(NOON) + row(NOON, { usd: 2 }))
+  const read = h.host.fs.read
+  h.host.fs.read = async (p: string) => { if (p.endsWith('ledger.jsonl')) throw new Error('too large'); return read(p) }
+  const ro = await syncRollup(h.host)
+  expect(ro.rows).toBe(2)
+  expect(ro.days[dayOf(NOON)]!.t[0]).toBe(3)
 })
 
 test('rotation: a file that starts in a past month moves to ledger-YYYY-MM.jsonl; the current month stays', async () => {
@@ -158,7 +215,7 @@ test('stats shows rule loads per project (_project.md counted), worker feedback 
   h.files.set(`${L}/feedback/feedback.jsonl`, '{}\n')
   h.files.set(`${L}/work/r1/gaps.json`, '{}')
   const t = await statsText(h.host)
-  expect(t).toContain('rules proj: 3 rule(s), 2 loaded at least once (3 loads); never loaded: api.md')
+  expect(t).toContain('rules proj: 3 rule(s), 2 loaded at least once (3 loads); never loaded since they were written: api.md')
   expect(t).toContain('worker feedback (feedback.jsonl): 2 row(s) · done 1, partial 1 · 1 with missing context · 2 refused command(s)')
   expect(t).toContain('gaps (gaps.jsonl): 3 (proj 2)')
   expect(t).toContain('0.45 leftovers, not counted: feedback/')
@@ -174,7 +231,7 @@ test('rule loads: the shell hook and the mod handler log the same event once; bo
   const sec = Math.floor(NOON / 1000)
   h.files.set(`${L}/logs/rules-loaded.jsonl`, h.files.get(`${L}/logs/rules-loaded.jsonl`)! + JSON.stringify({ ts: sec, e: ev }) + '\n') // the shell hook, same second
   expect(await logRuleLoad(h.host, { file_path: '/r/.claude/rules/mine.md' })).toBe(false)
-  expect(await rulesStats(h.host, 'proj')).toEqual({ loaded: { 'billing.md': 1 }, never: ['_project.md'], scriptCandidates: [] })
+  expect(await rulesStats(h.host, 'proj')).toMatchObject({ loaded: { 'billing.md': 1 }, never: ['_project.md'], events: 1, verified: true, scriptCandidates: [] })
 })
 
 test('the engine\'s InstructionsLoaded event is logged by the mod', async ($, on) => {

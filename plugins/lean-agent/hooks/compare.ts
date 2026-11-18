@@ -15,7 +15,7 @@
 // goes to the caller, not to a file.
 import { appendJsonl, atomicWrite, deskDir, homeDir, leanDir, mkdirp, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
-import { rulesStats, slugOk } from './rules'
+import { rulesStats, slugOk, unverifiedLine } from './rules'
 import { threadClaudeMd, threadSettings } from './threads'
 import { installedKeys } from './skew'
 
@@ -209,7 +209,8 @@ export async function suggestions(h: Host, project: string, slug: string, cols: 
   const mem = [...(clean?.ctx?.lists['memory files'] ?? [])].sort((a, b) => b.tokens - a.tokens).filter(x => x.tokens > 1500).slice(0, 3)
   for (const f of mem) out.push(`memory file ${shortName(f.name)} is ~${fmtTok(f.tokens)} tokens in every session: move area-specific parts into path rules (learn ${slug} --gaps)`)
   const rs = await rulesStats(h, slug).catch(() => null)
-  if (rs && rs.never.length) out.push(`${rs.never.length} learned rule(s) never loaded (${rs.never.slice(0, 4).join(', ')}${rs.never.length > 4 ? ', ...' : ''}): learn ${slug} --trim`)
+  if (rs && rs.never.length && !rs.verified) out.push(`${rs.never.length} learned rule(s): ${unverifiedLine(slug, rs)} (not a reason to trim)`)
+  else if (rs && rs.neverConfirmed.length) out.push(`${rs.neverConfirmed.length} learned rule(s) never loaded since they were written (${rs.neverConfirmed.slice(0, 4).join(', ')}${rs.neverConfirmed.length > 4 ? ', ...' : ''}): learn ${slug} --trim`)
   const gaps = await readJsonl<{ text?: string }>(h, `${leanDir(home)}/${slug}/gaps.jsonl`).catch(() => [])
   const mech = gaps.filter(g => /\b(count|list|how many|find all|diff|compare|grep|which (files|packages|worktrees))\b/i.test(g.text ?? '')).length
   if (mech) out.push(`${mech} gap(s) look like mechanical work: learn ${slug} --trim lists them as script candidates`)

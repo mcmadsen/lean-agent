@@ -149,7 +149,7 @@ into `<repo>/.claude/rules/lean-agent/` (symlinked rule folders do not load) and
 `worktree` skill. Recipes become `lean-agent-<name>` skills the same way.
 
 An area is stale after a commit touches many of its files, its manifest changes or workers report gaps for it; the
-desk then says "rules for X are stale: re-learn when you touch it". `stats` lists rules that never loaded.
+desk then says "rules for X are stale: re-learn when you touch it". `stats` lists rules that never loaded (and says "loading unverified" when no load was ever recorded).
 
 ## Compare
 

@@ -65,7 +65,8 @@ test('the cap cache is dropped by a rotation: a regrown ledger.jsonl is never re
   expect(await spentToday(h.host, 'desk')).toBe(2) // the cache now holds an offset into the mixed file
   expect((await rotateLedger(h.host)).length).toBe(1)
   // the fresh file outgrows that offset before this session's next request
-  h.files.set(`${L}/ledger.jsonl`, row(NOON, { role: 'desk', usd: 3 }) + row(NOON, { role: 'desk', usd: 4 }) + row(NOON, { role: 'desk', usd: 5 }) + row(NOON, { role: 'desk', usd: 6 }))
+  expect(h.files.get(`${L}/ledger.jsonl`)).toBe(row(NOON, { role: 'desk', usd: 2 })) // the 1.0 row stayed in ledger.jsonl (the split)
+  h.files.set(`${L}/ledger.jsonl`, h.files.get(`${L}/ledger.jsonl`)! + row(NOON, { role: 'desk', usd: 3 }) + row(NOON, { role: 'desk', usd: 4 }) + row(NOON, { role: 'desk', usd: 5 }) + row(NOON, { role: 'desk', usd: 6 }))
   expect(await spentToday(h.host, 'desk')).toBe(2 + 3 + 4 + 5 + 6)
   await record(h.host, { role: 'desk' }, 'sonnet', { input_tokens: 1_000_000 })
   expect(await spentToday(h.host, 'desk')).toBe(2 + 3 + 4 + 5 + 6 + 3)
