@@ -9,6 +9,7 @@ import { globRe, slugOk } from './rules'
 import { expandRun, hashText, recipeText } from './recipe'
 import type { Audit, Decision, Meta, Verdict, Version } from './recipe'
 import { refreshScriptRules } from './rulelines'
+import { withFolderLock } from './folderlock'
 import { unifiedDiff } from './textdiff'
 
 export { expandRun, hashText, recipeText }
@@ -38,32 +39,8 @@ const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is st
 // never got its token (a holder that died between mkdir and write: after ~4 s), is taken over by MOVING it aside (`mv` is atomic: one
 // taker wins, the others retry mkdir), and a holder releases only a lock that still carries its own token. A lock left behind by a
 // crash therefore blocks mutations for at most a minute. Every mutation reads the meta again inside the lock.
-const LOCK_STALE_MS = 60_000
-async function withLock<T>(h: Host, f: () => Promise<T>): Promise<T> {
-  const home = await homeDir(h)
-  const lock = `${scriptsDir(home)}/.lock`
-  await mkdirp(h, scriptsDir(home))
-  const token = `${await h.clock.now()}:${Math.floor(Math.random() * 1e9).toString(36)}`
-  let got = false
-  for (let n = 0; n < 25 && !got; n++) {
-    got = (await h.process.run(['mkdir', lock])).exitCode === 0
-    if (got) break
-    const at = Number(String(await h.fs.read(`${lock}/at`).catch(() => '')).split(':')[0]) || 0
-    if (at ? (await h.clock.now()) - at > LOCK_STALE_MS : n >= 20) {
-      const aside = `${lock}.stale-${token.replace(':', '-')}`
-      await h.process.run(['mv', lock, aside])
-      await h.process.run(['rm', '-rf', aside])
-    } else await h.process.run(['sleep', '0.2'])
-  }
-  if (!got) throw new Error('the script store is busy: try again')
-  try {
-    await h.fs.write(`${lock}/at`, token)
-    return await f()
-  } finally {
-    const mine = String(await h.fs.read(`${lock}/at`).catch(() => '')) === token
-    if (mine) await h.process.run(['rm', '-rf', lock]).catch(() => undefined)
-  }
-}
+// (the lock itself is folderlock.ts, shared with the rule files)
+const withLock = async <T,>(h: Host, f: () => Promise<T>): Promise<T> => withFolderLock(h, `${scriptsDir(await homeDir(h))}/.lock`, f)
 let queue: Promise<unknown> = Promise.resolve()
 const queued = <T,>(h: Host, f: () => Promise<T>): Promise<T> => {
   const r = queue.then(() => withLock(h, f), () => withLock(h, f))
@@ -100,6 +77,10 @@ const RISKY: [RegExp, string][] = [
   [/\brm\s+-|\bos\.(?:remove|unlink|rmdir)\b|\bshutil\.(?:rmtree|move)\b|\b(?:unlink|rmdir)(?:Sync)?\s*\(|\bfs\.(?:rm|rmSync|unlink|rmdir)\b|\bRemove-Item\b|-delete\b|\bmv\s+-f\b|\.truncate\s*\(/, 'deletes or moves over files (the mod\'s text scan)'],
 ]
 export const riskyText = (text: string): string[] => RISKY.filter(([re]) => re.test(text)).map(([, what]) => what)
+// a script that declares only stdout/stderr as outputs but opens a file for writing: its declaration is wrong (not a proof either way
+// for a script that declares files: the auditor's list is checked against those)
+const WRITE_API = /\bopen\s*\([^)\n]*,\s*(?:mode\s*=\s*)?['"][^'"]*[wax+][^'"]*['"]|\.write_(?:text|bytes)\s*\(|\bfs\.(?:writeFile|appendFile|createWriteStream)(?:Sync)?\b|\btee\s+\S/
+export const strayWriteText = (text: string, outputs: string[]): string[] => (outputs.every(o => /^(?:stdout|stderr)$/i.test(o)) && WRITE_API.test(text) ? ['writes a file although it declares only stdout/stderr (the mod\'s text scan)'] : [])
 
 // lean-agent's OWN data (the ledger, reports, rules stats ...): such a script belongs in the mod itself
 const OWN = /\.lean-agent\b|\b(?:ledger|feedback|gaps|inbox|questions|answers|goals|scheduled)\.jsonl?\b|\brules-loaded\b|\blearn\.json\b|\bnotes\.jsonl\b/
@@ -245,7 +226,7 @@ async function propose(h: Host, who: Who, i: any): Promise<Out> {
   if (same) return err(`this exact script is already ${same.meta.status} as ${same.meta.name}`)
   const have = all.find(x => x.meta.name === name)
   if (have && have.meta.status === 'adopted') return err(`${name} is already adopted: use another name, or retire it first`)
-  if (have && have.meta.status !== 'candidate' && have.meta.status !== 'rejected') return err(`${name} exists (${have.meta.status})`)
+  if (have && have.meta.status !== 'candidate' && have.meta.status !== 'audited' && have.meta.status !== 'rejected') return err(`${name} exists (${have.meta.status})`)
   if (have && have.meta.sha256 === sha) return { ok: true, text: `${name} is already proposed with this content (${verdictOf(have.meta)}); next: lean_script audit ${name}` }
   const file = fileOk(path.split('/').pop() ?? '')
   const core = ownData(text, purpose, ...inputs, ...outputs)
@@ -277,8 +258,27 @@ export function auditBrief(meta: Meta, dir: string): string {
     `Project: ${meta.project}`,
     'Judge by reading; end your reply with the LEAN-AUDIT line your agent definition describes.',
     '--- end ---',
-    'The mod records the verdict from the auditor\'s LEAN-AUDIT line when its Agent call returns, and only for the folder the prompt names. A script is audited once per content: after an adapt, fix it and propose it again.',
+    'The auditor must get that block as its WHOLE prompt, unchanged (the guard refuses any other prompt for it, and the mod ignores a verdict from one). The mod records the verdict from the auditor\'s LEAN-AUDIT line when its Agent call returns. A script is audited once per content: after an adapt, fix it and propose it again.',
   ].join('\n')
+}
+
+// The brief block (between the markers) is the one prompt a lean-agent:auditor may be started with: the mod generates it and the thread
+// passes it on unchanged. The guard checks the Agent call against the briefs the mod would hand out now; recordAudit checks the reply's
+// prompt against the brief of the script it names.
+const BRIEF_OPEN = '--- auditor brief ---'
+export const briefBlock = (brief: string): string => {
+  const a = brief.indexOf(BRIEF_OPEN)
+  const b = brief.indexOf('\n--- end ---', a)
+  return a < 0 || b < 0 ? '' : brief.slice(a + BRIEF_OPEN.length, b).trim()
+}
+const briefOf = (f: Found): string => {
+  const pend = f.meta.status === 'adopted' ? f.meta.pending : undefined
+  return briefBlock(pend ? updateBrief(f.meta, f.dir, pend) : f.meta.status === 'candidate' ? auditBrief(f.meta, f.dir) : '')
+}
+export async function auditorPromptProblem(h: Host, prompt: string): Promise<string | null> {
+  const want = String(prompt ?? '').trim()
+  if (want) for (const f of await allScripts(h)) if (briefOf(f) === want) return null
+  return 'lean-agent: a lean-agent:auditor is started only with the brief lean_script audit generates, as its whole prompt and unchanged (a brief goes stale when the script is proposed or updated again: ask lean_script audit once more)'
 }
 
 export type Reply = { name: string; sha: string; verdict: Verdict | null; reads: string[]; writes: string[]; network: boolean | null; deletes: boolean | null; secrets: boolean | null; hardcoded: string[]; deterministic: boolean; errorsHandled: boolean; generalises: boolean | null; changes: string[]; reason: string }
@@ -342,8 +342,10 @@ async function recordAudit(h: Host, by: string, reply: Reply, prompt: string): P
   const path = pend ? `${f.dir}/${pend.v}/${pend.file}` : `${f.dir}/${f.meta.file}`
   const sha = pend ? pend.sha256 : f.meta.sha256
   const prior = pend ? pend.audit : f.meta.audit
-  const named = new Set(prompt.match(/\/scripts\/(?:candidates\/[A-Za-z0-9._-]+|[A-Za-z0-9._-]+\/v\d+)\//g) ?? [])
-  if (!prompt.includes(folder) || named.size !== 1) return err(`${reply.name}: the auditor must be pointed at exactly this folder (${folder}), so its reply is not an audit of this script; use the brief lean_script audit gives`)
+  // the auditor was started with exactly the brief the mod generated for this script (and so names exactly this folder): any other
+  // prompt (extra instructions, another text) makes its verdict worthless
+  const expected = briefOf(f)
+  if (!expected || String(prompt ?? '').trim() !== expected || !expected.includes(folder)) return err(`${reply.name}: the auditor was not started with exactly the brief lean_script audit generates for this script (${folder}), so its verdict is ignored; ask lean_script audit again and pass that block unchanged`)
   if (prior && prior.sha === sha) return err(`${reply.name} was already audited at this content (${prior.verdict}); ${pend ? 'send a revised update' : 'propose a revised script'} to audit again`)
   // the auditor echoes the sha256 of the text it was given: a reply that read an older text (the script was proposed or updated again
   // while the auditor ran) is never recorded against the newer one
@@ -356,30 +358,42 @@ async function recordAudit(h: Host, by: string, reply: Reply, prompt: string): P
   const now = scan(text, await homeDir(h))
   // what the update changes in purpose or run line, against what is current NOW (a rollback may have moved current since it was sent)
   const moved = pend ? [...(pend.purpose !== f.meta.purpose ? [`changes the purpose (was: ${f.meta.purpose})`] : []), ...(pend.run !== f.meta.run ? [`changes the run line (was: ${f.meta.run})`] : [])] : []
-  const j = judge(f.meta, r, { ...now, risky: [...riskyText(text), ...moved] })
+  // The mod's own proof, whatever the auditor says. A script adopts on its own only when ALL hold: the run line is on the allowlist
+  // (runProblem), no secret and no privacy finding, no network and no delete or overwrite (the auditor's answer and the mod's text
+  // scan), no write outside its declared outputs (the auditor's list against the declaration; a stdout-only declaration against the
+  // text scan), and nothing hardcoded or specific to its first data. Anything else is not adopted automatically.
+  const runBad = runProblem(pend ? pend.run : f.meta.run)
+  const j = judge(f.meta, r, { ...now, risky: [...riskyText(text), ...strayWriteText(text, f.meta.outputs), ...(runBad ? [`its run line is not on the allowlist (${runBad})`] : []), ...moved] })
   const changes = [...r.changes, ...(j.verdict === 'adapt' && r.verdict === 'adopt' ? j.blockers.map(b => `mod: it ${b}`) : [])]
   if (j.verdict === 'adapt' && !changes.length) return err('an adapt verdict needs the concrete changes (changes: [...])')
   if (j.verdict === 'reject' && !r.reason && !j.blockers.length) return err('a reject verdict needs a reason')
+  // the auditor said adopt but the proof fails: not adapted by the thread, decided by the desk (a privacy finding or a bad run line is
+  // never adoptable, not even by the user: that one goes back to the thread as an adapt)
+  const waits = r.verdict === 'adopt' && j.verdict === 'adapt' && !now.privacy.length && !runBad
   const ts = await h.clock.now()
-  const audit: Audit = { ts, by, sha, claimed: r.verdict, verdict: j.verdict, reads: r.reads, writes: r.writes, network: r.network, deletes: r.deletes, secrets: r.secrets, hardcoded: r.hardcoded, deterministic: r.deterministic, errorsHandled: r.errorsHandled, generalises: r.generalises, changes, blockers: j.blockers, reason: r.reason || (j.verdict === 'reject' ? j.blockers.join('; ') : '') }
+  const audit: Audit = { ts, by, sha, claimed: r.verdict, verdict: j.verdict, reads: r.reads, writes: r.writes, network: r.network, deletes: r.deletes, secrets: r.secrets, hardcoded: r.hardcoded, deterministic: r.deterministic, errorsHandled: r.errorsHandled, generalises: r.generalises, changes, blockers: j.blockers, reason: r.reason || (j.verdict === 'reject' ? j.blockers.join('; ') : ''), ...(waits ? { waits: true } : {}) }
   const why = j.verdict !== r.verdict ? ` The auditor said ${r.verdict}; the mod's rules say ${j.verdict}: ${j.blockers.join('; ')}.` : ''
   const said = `audited: ${j.verdict}${j.verdict !== r.verdict ? ` (auditor said ${r.verdict})` : ''}`
+  const waitText = `waits for the desk's decision (lean_script decide adopt|reject with the user's yes, or the pane's Adopt / Reject)`
   if (pend) {
     if (j.verdict === 'reject') {
       await h.process.run(['rm', '-rf', `${f.dir}/${pend.v}`])
       await writeJson(h, `${f.dir}/meta.json`, note({ ...f.meta, pending: undefined }, ts, `update ${pend.v} rejected: ${audit.reason}`))
       return { ok: true, text: `${r.name}: the update ${pend.v} is rejected and dropped (${audit.reason}); ${f.meta.current} stays current.${why}` }
     }
-    const meta: Meta = note({ ...f.meta, pending: { ...pend, audit } }, ts, `update ${pend.v} ${said}`)
+    const meta: Meta = note({ ...f.meta, pending: { ...pend, audit } }, ts, `update ${pend.v} ${said}${waits ? ' (waits for the desk)' : ''}`)
     await writeJson(h, `${f.dir}/meta.json`, meta) // the audit is kept first, adopted or not
     if (j.verdict === 'adopt') return await adoptVersion(h, { meta, dir: f.dir }, 'audit')
+    if (waits) return { ok: true, text: `${r.name}: the update ${pend.v} ${waitText}.${why}` }
     return { ok: true, text: `${r.name}: the update ${pend.v} is adapt. Change: ${changes.join('; ')}. Then send the revised update again (lean_script update ${r.name}).${why}` }
   }
-  let meta: Meta = note({ ...f.meta, audit, scan: now.privacy }, ts, said)
+  let meta: Meta = note({ ...f.meta, audit, scan: now.privacy }, ts, `${said}${waits ? ' (waits for the desk)' : ''}`)
   if (j.verdict === 'reject') meta = { ...meta, status: 'rejected' }
+  if (waits) meta = { ...meta, status: 'audited' }
   await writeJson(h, `${f.dir}/meta.json`, meta) // the audit is kept first, adopted or not
   if (j.verdict === 'adopt') return await adopt(h, { meta, dir: f.dir }, 'audit')
   if (j.verdict === 'reject') return { ok: true, text: `${r.name}: reject${r.reason ? ` (${r.reason})` : ''}.${why}` }
+  if (waits) return { ok: true, text: `${r.name}: audited, the auditor said adopt, but it ${waitText}.${why}` }
   return { ok: true, text: `${r.name}: adapt. Change: ${changes.join('; ')}. Then propose the revised script again under the same name.${why}` }
 }
 
@@ -519,7 +533,7 @@ export function updateBrief(meta: Meta, dir: string, pend: Version): string {
     `Project: ${meta.project}`,
     'End your reply with the LEAN-AUDIT line your agent definition describes.',
     '--- end ---',
-    'The mod records the verdict from the auditor\'s LEAN-AUDIT line when its Agent call returns, and only for the folder the prompt names. A changed purpose or run line is shown in the verdict and is never adopted without the desk\'s decision.',
+    'The auditor must get that block as its WHOLE prompt, unchanged (the guard refuses any other prompt for it, and the mod ignores a verdict from one). The mod records the verdict from the auditor\'s LEAN-AUDIT line when its Agent call returns. A changed purpose or run line is shown in the verdict and is never adopted without the desk\'s decision.',
   ].join('\n')
 }
 
@@ -645,9 +659,9 @@ async function reportBad(h: Host, who: Who, i: any): Promise<Out> {
   return { ok: true, text: `${f.meta.name} is marked needs-update (${why}). If you can fix it: lean_script update ${f.meta.name} with the fixed file or edits; ${f.meta.current} stays current until the update is audited` }
 }
 
-async function diffOf(h: Host, i: any): Promise<Out> {
+async function diffOf(h: Host, who: Who, i: any): Promise<Out> {
   const f = await find(h, str(i.name))
-  if (!f) return err(`no script ${str(i.name)}`)
+  if (!f || !(await visible(h, who, f.meta))) return err(`no script ${str(i.name)}`)
   const m = f.meta
   if (m.status !== 'adopted' || !m.versions?.length) return err(`${m.name} is ${m.status}: only an adopted script has versions to compare`)
   const idx = m.versions.findIndex(v => v.v === m.current)
@@ -672,8 +686,15 @@ export async function useCounts(h: Host): Promise<Record<string, number>> {
 }
 
 const short = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
-async function list(h: Host): Promise<Out> {
-  const all = (await allScripts(h)).sort((a, b) => a.meta.name.localeCompare(b.meta.name))
+// a thread sees its own project's scripts and the global ones (other projects' names and purposes are not its business, a private
+// project's least of all); the desk sees all
+async function visible(h: Host, who: Who, meta: Meta): Promise<boolean> {
+  return who.kind !== 'thread' || meta.project === 'global' || (await threadProject(h, await homeDir(h), who.id)) === meta.project
+}
+async function list(h: Host, who: Who): Promise<Out> {
+  const all: Found[] = []
+  for (const x of await allScripts(h)) if (await visible(h, who, x.meta)) all.push(x)
+  all.sort((a, b) => a.meta.name.localeCompare(b.meta.name))
   const uses = await useCounts(h)
   const c = all.filter(x => x.meta.status === 'candidate').length
   const a = all.filter(x => x.meta.status === 'adopted').length
@@ -687,14 +708,28 @@ async function list(h: Host): Promise<Out> {
   return { ok: true, text: [`Scripts: ${c} candidates, ${a} adopted${bad ? `, ${bad} need attention (needs-update or edited)` : ''}`, ...lines].join('\n'), data: rows }
 }
 
-async function show(h: Host, i: any): Promise<Out> {
+async function show(h: Host, who: Who, i: any): Promise<Out> {
   const f = await find(h, str(i.name))
-  if (!f) return err(`no script ${str(i.name)}`)
+  if (!f || !(await visible(h, who, f.meta))) return err(`no script ${str(i.name)}`)
   const uses = (await useCounts(h))[f.meta.name] ?? 0
   const ig = await integrity(h, f.dir, f.meta)
   const versions = (f.meta.versions ?? []).map(v => `${v.v}${v.v === f.meta.current ? ' (current)' : ''} · ${v.sha256.slice(0, 8)} · ${v.author} · ${new Date(v.ts).toISOString().slice(0, 10)} · ${v.decision ? `user: ${v.decision.value}` : (v.audit?.verdict ?? 'unaudited')}${v.changes?.length ? ` · ${v.changes.join('; ')}` : ''}`)
   const extra = f.meta.status === 'adopted' ? { command: expandRun(f.meta, f.dir), health: healthOf(f.meta, ig.ok), ...(ig.ok ? {} : { integrity: ig.why }), versionList: versions, failures: f.meta.failures ?? 0 } : {}
   return { ok: true, text: JSON.stringify({ ...f.meta, dir: f.dir, script: `${f.dir}/${f.meta.file}`, verdict: verdictOf(f.meta), uses, ...extra }, null, 2), data: f.meta }
+}
+
+// scripts the auditor judged adopt that the mod's rules did not adopt on their own: they wait for the desk (candidates in status
+// `audited`, and updates whose audit waits). What the pane shows with Adopt / Reject.
+export type Waiting = { name: string; project: string; why: string; update?: string }
+export async function waitingScripts(h: Host): Promise<Waiting[]> {
+  const out: Waiting[] = []
+  for (const x of await allScripts(h)) {
+    const m = x.meta
+    const pend = m.status === 'adopted' ? m.pending : undefined
+    const a = pend ? pend.audit : m.status === 'audited' ? m.audit : undefined
+    if (a?.waits && a.sha === (pend ? pend.sha256 : m.sha256)) out.push({ name: m.name, project: m.project, why: short(a.blockers.join('; ') || a.reason || 'the mod\'s rules', 140), ...(pend ? { update: pend.v } : {}) })
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name))
 }
 
 export async function scriptCounts(h: Host): Promise<{ candidates: number; adopted: number; needsUpdate: number }> {
@@ -739,9 +774,9 @@ export async function scriptTool(h: Host, who: Who, i: any, io: Io = {}): Promis
       case 'propose':
         return await queued(h, () => propose(h, who, i))
       case 'list':
-        return await list(h)
+        return await list(h, who)
       case 'show':
-        return await show(h, i)
+        return await show(h, who, i)
       case 'retire':
         return await queued(h, () => retire(h, who, i))
       case 'decide':
@@ -757,11 +792,11 @@ export async function scriptTool(h: Host, who: Who, i: any, io: Io = {}): Promis
       case 'report-bad':
         return await queued(h, () => reportBad(h, who, i))
       case 'diff':
-        return await diffOf(h, i)
+        return await diffOf(h, who, i)
       case 'audit': {
         const name = str(i.name)
         const f = await find(h, name)
-        if (!f) return err(`no script ${name || '(name missing)'}`)
+        if (!f || !(await visible(h, who, f.meta))) return err(`no script ${name || '(name missing)'}`)
         const pend = f.meta.status === 'adopted' ? f.meta.pending : undefined
         if (f.meta.status !== 'candidate' && !pend) return err(`${name} is ${f.meta.status}${f.meta.status === 'adopted' ? ' with no update waiting (lean_script update sends one)' : ''}: only a candidate or an update is audited`)
         const brief = pend ? updateBrief(f.meta, f.dir, pend) : auditBrief(f.meta, f.dir)

@@ -4,7 +4,7 @@
 import { homeDir, leanDir, readJson, realPath, threadsDir, writeJson } from './state'
 import { greenReview, hasApproval, takeApproval } from './reviews'
 import { analyze, plainPipeline, plainWords, privateText, readOnlyForge, type Verdict } from './shell'
-import { unauditedRun } from './scripts'
+import { auditorPromptProblem, unauditedRun } from './scripts'
 import type { Host } from './state'
 import type { Role } from './role'
 
@@ -560,6 +560,11 @@ async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
       const who = ctx.agentId ? 'a subagent' : `a ${ctx.role.kind} session`
       return `lean-agent: this Agent call carries ${[g.cmds?.length ? 'allow-cmd' : '', g.edit?.length ? 'allow-edit' : ''].filter(Boolean).join(' and ')} lines, but ${who} cannot own grants (only a thread's own session records them), so the subagent could do nothing. Remove the lines or run this from a thread`
     }
+  }
+  // the script auditor judges what it is given: its prompt is exactly the brief the mod generated (a thread cannot add instructions)
+  if ((e.tool === 'Agent' || e.tool === 'Task') && /^(lean-agent:)?auditor$/.test(sub)) {
+    const p = await auditorPromptProblem($, String(e.prompt ?? ''))
+    if (p) return p
   }
   if (ctx.role.kind === 'desk' && !ctx.agentType && !ctx.agentId) {
     const d = await deskDenial($, ctx, e)

@@ -5,6 +5,7 @@
 import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, readJsonl, writeJson } from './state'
 import type { Host } from './state'
 import { SAFE_FILE, shippable } from './recipe'
+import { withFolderLock } from './folderlock'
 
 export const MAX_RULE_FILES = 40
 export const MAX_RULE_LINES = 25
@@ -262,7 +263,11 @@ export async function recordLearn(h: Host, project: string, area: string, a: Rec
 
 // The tool's record: `lines` is counted from the rule file here (a caller's number is ignored, and said so when it differs);
 // relies-on is written into the footer (or read back from it); an area covered by the repo's own docs has no rule file.
-export async function recordRule(h: Host, project: string, area: string, a: RecordIn): Promise<string> {
+// One writer of a project's rule files at a time, across processes (a learn thread's record and the script-rule rebuild of the desk or
+// another thread both read a rule and write it back): folderlock.ts, a lock folder in the project's own folder.
+export const withRulesLock = async <T,>(h: Host, project: string, f: () => Promise<T>): Promise<T> => withFolderLock(h, `${projectDir(await homeDir(h), project)}/.rules-lock`, f)
+export const recordRule = (h: Host, project: string, area: string, a: RecordIn): Promise<string> => withRulesLock(h, project, () => recordRuleLocked(h, project, area, a))
+async function recordRuleLocked(h: Host, project: string, area: string, a: RecordIn): Promise<string> {
   const home = await homeDir(h)
   const notes: string[] = []
   const file = `${projectDir(home, project)}/rules/${ruleFile(area)}`
@@ -542,10 +547,16 @@ export async function rulesStats(h: Host, project: string): Promise<{ loaded: Re
   const log = await readJsonl<{ ts?: number; e?: { file_path?: string; load_reason?: string; trigger_file_path?: string } }>(h, RULES_LOG(home))
   const loaded: Record<string, number> = {}
   const seen = new Set<string>()
+  // Only this project's loads: a rule loaded from one of its checkouts (the registered folder and its worktrees). Two projects often
+  // have a rule of the same name (`api.md`): counted by name alone, one would hide the other's never-loaded one. A project without
+  // a registered folder cannot be told apart, so every load counts, as before.
+  const repo = (await readJson<Record<string, { path?: string }>>(h, `${leanDir(home)}/projects.json`, {}))?.[project]?.path
+  const roots = typeof repo === 'string' && repo.startsWith('/') ? (await checkoutsOf(h, project, repo)).map(p => `${p}/.claude/rules/lean-agent/`) : null
   for (const r of log) {
     const f = r.e?.file_path ?? ''
     const i = f.indexOf('/rules/lean-agent/')
     if (i < 0) continue
+    if (roots && !roots.some(p => f.startsWith(p))) continue
     const key = `${f}\0${r.e?.load_reason ?? ''}\0${r.e?.trigger_file_path ?? ''}\0${r.ts ?? ''}`
     if (seen.has(key)) continue
     seen.add(key)

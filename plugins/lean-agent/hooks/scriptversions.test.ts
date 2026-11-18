@@ -4,7 +4,7 @@ import { readJsonl } from './state'
 import { MAX_PROJECT_LINES, bodyLines, looksMechanical, recordLearn, ruleProblems, rulesStats, syncRules } from './rules'
 import { threadTool } from './delivery'
 import { MARK_OPEN, PREFACE, rebuildScriptRules, syncWithScripts } from './rulelines'
-import { DONE_QUESTION, auditFromReply as audited0, bashFailed, doneQuestion, noteUse, resetScripts, scriptCounts, scriptTool } from './scripts'
+import { DONE_QUESTION, auditFromReply as audited0, bashFailed, briefBlock, doneQuestion, noteUse, resetScripts, scriptCounts, scriptTool } from './scripts'
 import type { Who } from './scripts'
 import { hashText } from './recipe'
 import { unifiedDiff } from './textdiff'
@@ -34,7 +34,12 @@ const line = (o: any = {}) =>
   `LEAN-AUDIT ${JSON.stringify({ name: 'count-lines', verdict: 'adopt', reads: [], writes: [], network: false, deletes: false, secrets: false, hardcoded: [], deterministic: true, errors_handled: true, generalises: true, changes: [], reason: '', ...o })}`
 // the audit line gets the sha256 of what is stored, as a real auditor copies it from the brief
 const audited = async (host: any, by: string, text: string, prompt: string) => audited0(host, by, await withSha(host, text), prompt)
-const aud = (h: any, text: string, prompt = `audit ${CAND}/`) => audited(h.host, 't1', text, prompt)
+// the prompt is exactly the brief the mod generated for the script (the candidate's, or the waiting update's): what `lean_script audit` hands the thread
+const brief = async (h: any, name = 'count-lines') => {
+  const r = await scriptTool(h.host, T, { action: 'audit', name })
+  return r.ok ? briefBlock(r.text) : `no brief for ${name}`
+}
+const aud = async (h: any, text: string, prompt?: string) => audited(h.host, 't1', text, prompt ?? (await brief(h, /"name":\s*"([^"]+)"/.exec(text)?.[1] ?? 'count-lines')))
 const meta = (h: any, dir = DIR) => JSON.parse(h.files.get(`${dir}/meta.json`))
 async function adopted(h: any, o: any = {}) {
   await prop(h, o)
@@ -44,7 +49,9 @@ async function adopted(h: any, o: any = {}) {
 const EDIT = [{ find: 'sum(1 for _ in open(sys.argv[1]))', replace: 'sum(1 for _ in open(sys.argv[1]) if _.strip())' }]
 const V2 = CODE.replace('sum(1 for _ in open(sys.argv[1]))', 'sum(1 for _ in open(sys.argv[1]) if _.strip())')
 const upd = (h: any, o: any = {}, who: Who = T) => scriptTool(h.host, who, { action: 'update', name: 'count-lines', edits: EDIT, ...o })
-const audV = (h: any, v: string, text = line()) => aud(h, text, `audit the update in ${DIR}/${v}/`)
+// the auditor of update <v>: it was handed the real brief while <v> is the update that waits; an older or another version number is a
+// stale folder (the prompt names it, the mod's brief does not)
+const audV = async (h: any, v: string, text = line()) => aud(h, text, meta(h).pending?.v === v ? await brief(h) : `audit the update in ${DIR}/${v}/`)
 
 // ---- the diff ---------------------------------------------------------------------------------------------------------------
 test('unified diff: head and tail trimmed, hunks with context, empty when equal', () => {
@@ -92,8 +99,8 @@ test('the update audit is bound to the update folder: the current version, the c
   const h = setup()
   await adopted(h)
   await upd(h)
-  expect(await audited(h.host, 't1', line(), `audit ${DIR}/v1/`)).toContain('exactly this folder')
-  expect(await audited(h.host, 't1', line(), `audit ${DIR}/v2/ and ${DIR}/v1/`)).toContain('exactly this folder')
+  expect(await audited(h.host, 't1', line(), `audit ${DIR}/v1/`)).toContain('exactly the brief')
+  expect(await audited(h.host, 't1', line(), `audit ${DIR}/v2/ and ${DIR}/v1/`)).toContain('exactly the brief')
   expect(meta(h).pending.audit).toBeUndefined()
   expect(await audV(h, 'v2', line({ network: true }))).toContain('adapt') // the mod's rules apply to updates too
   expect(await audV(h, 'v2')).toContain('already audited')
@@ -532,10 +539,10 @@ test('an audit that read an older text is never recorded against a newer one: ne
   await upd(h, { edits: [{ find: 'sum(1 for _ in open(sys.argv[1]))', replace: 'sum(1 for _ in open(sys.argv[1]) if len(_) > 1)' }] }) // replaces it: v3
   expect(meta(h).pending.v).toBe('v3')
   // the auditor started on v2 finishes now: its folder is gone, and with the old sha it would not match v3 either
-  expect(await audited(h.host, 't1', line(), `audit ${DIR}/v2/`)).toContain('exactly this folder')
-  expect(await audited0(h.host, 't1', line({ sha: old }), `audit ${DIR}/v3/`)).toContain('does not carry the sha256')
-  expect(await audited0(h.host, 't1', line({ sha: old.slice(0, 11) }), `audit ${DIR}/v3/`)).toContain('does not carry the sha256') // too short to count
-  expect(await audited0(h.host, 't1', line({ sha: undefined }), `audit ${DIR}/v3/`)).toContain('does not carry the sha256')
+  expect(await audited(h.host, 't1', line(), `audit ${DIR}/v2/`)).toContain('exactly the brief')
+  expect(await audited0(h.host, 't1', line({ sha: old }), await brief(h))).toContain('does not carry the sha256')
+  expect(await audited0(h.host, 't1', line({ sha: old.slice(0, 11) }), await brief(h))).toContain('does not carry the sha256') // too short to count
+  expect(await audited0(h.host, 't1', line({ sha: undefined }), await brief(h))).toContain('does not carry the sha256')
   expect(meta(h).pending.audit).toBeUndefined()
   // after a reject the number is not handed out again either
   expect(await audV(h, 'v3', line({ verdict: 'reject', reason: 'no' }))).toContain('rejected and dropped')
@@ -547,7 +554,7 @@ test('an audit that read an older text is never recorded against a newer one: ne
   const was = meta(h2, CAND).sha256
   h2.files.set(SRC, 'print(2)\n')
   await prop(h2) // replaces the candidate
-  expect(await audited0(h2.host, 't1', line({ sha: was }), `audit ${CAND}/`)).toContain('does not carry the sha256')
+  expect(await audited0(h2.host, 't1', line({ sha: was }), await brief(h2))).toContain('does not carry the sha256')
   expect(await aud(h2, line())).toContain('adopted') // the current sha is accepted (and a longer-than-12 prefix is enough)
 })
 
@@ -637,7 +644,7 @@ test('a script file named like a store file or a version folder is stored under 
     h.files.set(`/tmp/w/${f}`, `print(${i + 10})\n`)
     expect((await prop(h, { name: `s${i}`, path: `/tmp/w/${f}`, project: 'global' })).ok).toBe(true)
     expect(meta(h, `/h/.lean-agent/scripts/candidates/s${i}`).file).toBe(`script-${f}`)
-    const out = await audited(h.host, 't1', line({ name: `s${i}` }), `audit /h/.lean-agent/scripts/candidates/s${i}/`)
+    const out = await aud(h, line({ name: `s${i}` }))
     expect(out, f).toContain('adopted')
     expect(h.files.get(`/h/.lean-agent/scripts/s${i}/run`)).toBe(`print(${i + 10})\n`)
     expect(h.files.get(`/h/.lean-agent/scripts/s${i}/v1/script-${f}`)).toBe(`print(${i + 10})\n`)

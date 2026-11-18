@@ -6,6 +6,7 @@ import { CONFIRM_MS, confirming, isOpen, patchUi, readUi, resetPaneUi } from './
 import type { GoalTone, View } from './view'
 import { leanThread } from './threads'
 import { fmtUntil } from './limits'
+import { scriptTool } from './scripts'
 import { hostOf } from './host'
 import { skillStat } from './skilltrim'
 import { exportFeedback } from './feedbackexport'
@@ -254,6 +255,16 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const closeOne = (id: string) => twoStep(`close:${id}`, () => closeIds([id]))
     const closeDone = twoStep('close:done', () => closeIds('done'))
     const reopen = (id: string) => act(`reopen ${id}`, () => leanThread(host, $.plugin.root, { action: 'reopen', tN: id }))
+    // a script the auditor judged adopt that the mod's rules did not adopt on their own: the user's two presses decide (logged as the
+    // user's decision; a secret or privacy finding is never adopted, whatever is pressed)
+    const scriptDecide = (name: string, verdict: 'adopt' | 'reject') =>
+      twoStep(`script:${verdict}:${name}`, async () => {
+        const r = await scriptTool(host, { kind: 'desk' }, { action: 'decide', name, verdict, reason: 'decided in the pane', confirm: true })
+        resetViewCache()
+        notice = short(r.text, 200)
+        if (!r.ok) lastError = notice
+        tell()
+      })
 
     // threads whose last report is done and whose session is not working: what "Close all done" closes
     const doneThreads = (v?.threads ?? []).filter(t => t.done)
@@ -363,9 +374,18 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         )}
         {!!v && (
           <Text dimColor={!v.scripts.candidates && !v.scripts.adopted} color={v.scripts.needsUpdate ? 'yellow' : undefined}>
-            Scripts: {v.scripts.candidates} candidates, {v.scripts.adopted} adopted{v.scripts.needsUpdate ? `, ${v.scripts.needsUpdate} need an update` : ''}
+            Scripts: {v.scripts.candidates} candidates, {v.scripts.adopted} adopted{v.scripts.needsUpdate ? `, ${v.scripts.needsUpdate} need an update` : ''}{v.scripts.waiting.length ? `, ${v.scripts.waiting.length} waiting for you` : ''}
           </Text>
         )}
+        {v?.scripts.waiting.map(w => (
+          <Box key={`sw-${w.name}-${w.update ?? ''}`}>
+            <Text color="yellow">
+              {w.name}{w.update ? ` ${w.update}` : ''} ({w.project}) waits for you: <Text dimColor>{short(w.why, 60)}</Text>
+            </Text>
+            <Button key={`sa-${w.name}`} label={confirming(ui, `script:adopt:${w.name}`, now2) ? `Confirm adopt ${w.name}` : 'Adopt'} onPress={scriptDecide(w.name, 'adopt')} />
+            <Button key={`sr-${w.name}`} label={confirming(ui, `script:reject:${w.name}`, now2) ? `Confirm reject ${w.name}` : 'Reject'} onPress={scriptDecide(w.name, 'reject')} />
+          </Box>
+        ))}
         <Box>
           {section('threads', `Threads (${v?.threads.length ?? 0})`, true)}
           {doneThreads.length >= 2 && closable.length > 0 && (

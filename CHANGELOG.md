@@ -258,6 +258,20 @@ version lines in `plugin.json`, `marketplace.json` and `pane.tsx` are left to th
   it. `_project` gets once the line "Prefer scripts over model work ...". A thread's `lean_report` with state `done` is asked once per
   session whether a step could have been a script. `lean_rules stats` lists `scriptCandidates`: reported gaps that read like
   mechanical work (count, list, sum, find all, which files).
+- **An audit adopts on its own only when the mod proves the script clean.** An `adopt` verdict used to adopt at once, on an auditor
+  prompt the thread wrote. Now (1) the auditor's prompt must be exactly the brief the mod generated and returned to the thread
+  (`briefBlock`): the guard refuses any other prompt for `lean-agent:auditor` (extra instructions, a stale brief), and the mod ignores
+  a verdict whose prompt differs; (2) the script adopts by itself only when the run line is on the allowlist, there is no secret or
+  privacy finding, no network or delete (the auditor's answer and the mod's text scan), no write outside its declared outputs (a
+  stdout-only declaration with a file write in the text is caught) and nothing hardcoded; (3) otherwise, when the auditor said adopt,
+  the status becomes `audited` and it WAITS for the desk (an update waits the same way): the pane's Scripts line lists it with
+  Adopt / Reject (two presses, like Close), `lean_script decide` does the same, both logged as the user's decision (adopting over
+  the mod's rules needs confirm; a secret, a privacy finding or a bad run line is never adoptable). `lean_script` `list`, `show`,
+  `diff` and `audit` show a thread only its own project's scripts and the global ones.
+- Rules: `lean_rules stats` counts only the loads from the project's own checkouts (a same-named rule of another project no longer
+  hides this project's never-loaded one; a project with no registered folder counts every load, as before). The script-rule rebuild
+  and a learn `record` take one lock folder per project (`.rules-lock`, shared lock code in `folderlock.ts`, also used by the script
+  store), so a rule is never rewritten by both at once.
 - The `auditor` agent type gets the explorer's built-in read-only commands; an Agent call for it with `allow-*` lines from a
   session that cannot own grants is refused like the other agent types.
 

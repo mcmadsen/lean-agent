@@ -8,7 +8,7 @@
 // the line that says to prefer scripts over model work.
 import { atomicWrite, homeDir, leanDir, readJson } from './state'
 import type { Host } from './state'
-import { matches, pathsIn, projectDir, ruleProblems, slugOk, syncAll, syncRules } from './rules'
+import { matches, pathsIn, projectDir, ruleProblems, slugOk, syncAll, syncRules, withRulesLock } from './rules'
 import type { Learn, SyncAll } from './rules'
 import { expandRun, hashText } from './recipe'
 import type { Meta } from './recipe'
@@ -38,8 +38,12 @@ async function lineOf(h: Host, r: Row): Promise<string> {
   return `- ${purpose}: run \`${expandRun(r.meta, r.dir)}\` (script, do not compute this by reading files)${suffix}`
 }
 
+// (under the project's rules lock: a learn thread's `record` rewrites the same files)
 export async function rebuildScriptRules(h: Host, project: string): Promise<string[]> {
   if (!slugOk(project)) return []
+  return withRulesLock(h, project, () => rebuildLocked(h, project))
+}
+async function rebuildLocked(h: Host, project: string): Promise<string[]> {
   const home = await homeDir(h)
   const pdir = projectDir(home, project)
   const own = await adopted(h, `${pdir}/scripts`)

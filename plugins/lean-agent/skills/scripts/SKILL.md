@@ -14,8 +14,8 @@ adopted script with its verdict and use count.
 | action | who | input | effect |
 |---|---|---|---|
 | `propose` | thread | `path` (absolute), `name`, `purpose`, `run`, `inputs`, `outputs`, `project?` (default this thread's, or `global`) | the mod copies the script into `~/.lean-agent/scripts/candidates/<name>/` with `meta.json` (purpose, run, author, project, created, sha256). It never executes it. Secrets in the text refuse the proposal |
-| `audit` | thread, desk | `name` | thread: returns the auditor brief; start ONE `lean-agent:auditor` with it. The mod records the verdict from the auditor's `LEAN-AUDIT` line when the Agent call returns, only for the folder the prompt names, once per script content, and only when the line carries the sha256 of the stored text (the brief gives it; there is no way to hand the mod a verdict). Desk: starts a thread that does this |
-| `list` / `show` | thread, desk | `name` for show | candidates, adopted, verdicts, uses |
+| `audit` | thread, desk | `name` | thread: returns the auditor brief; start ONE `lean-agent:auditor` with the block between the markers as its WHOLE prompt, unchanged: the guard refuses any other prompt for that agent, and the mod ignores a verdict from one. The mod records the verdict from the auditor's `LEAN-AUDIT` line when the Agent call returns, once per script content, and only when the line carries the sha256 of the stored text (the brief gives it; there is no way to hand the mod a verdict). Desk: starts a thread that does this |
+| `list` / `show` | thread, desk | `name` for show | candidates, adopted, verdicts, uses (a thread sees its own project's scripts and the global ones; `diff` and `audit` follow the same rule) |
 | `retire` | thread, desk | `name`, `reason?` | moves it to `scripts/retired/`; its skill goes at the next `sync` |
 | `update` | thread, desk | `name`, a new file `path` or `edits: [{find, replace}]`, optional `purpose` / `run` | stores a pending version `vN` plus the diff against the current one (never run, never current). `audit` then gives the auditor the diff: it audits ONLY the change plus the checklist. On adopt `current` switches and `run` is overwritten: rule line and skill need no edit. A changed purpose or run line is shown in the verdict and needs the desk's `decide` |
 | `rollback` | desk; thread with `reason` | `name`, `version?` | switches back to an audited version (default: the one before current) instantly, logged. Also restores `run` after a hand edit |
@@ -33,6 +33,14 @@ script that uses the network, deletes or overwrites, writes outside its declared
 or an email in the text is found by a scan), or is right only for its original data is never `adopt` (`adapt`); one with a secret
 is `reject`. `adapt`: fix the script, then propose it again under the same name. `adopt` moves it to `~/.lean-agent/scripts/<name>/`
 (global) or `~/.lean-agent/<project>/scripts/<name>/` and writes its recipe skill.
+
+An `adopt` verdict adopts on its own ONLY when the mod's own checks prove the script clean: a run line on the allowlist, no secret or
+privacy finding, no network or delete (the auditor's answer and the mod's text scan), no write outside its declared outputs (a
+script declaring only stdout/stderr that opens a file for writing is caught), nothing hardcoded. When the auditor said adopt but one
+of those fails (and it is not a secret, a privacy finding or a bad run line, which go back as `adapt`), the status becomes
+`audited`: it is NOT adopted and waits for the desk. The pane's Scripts line lists it ("waits for you") with Adopt / Reject (two
+presses, like Close); the desk's `decide` does the same (adopt over the mod's rules needs `confirm: true`). Both are logged as the
+user's decision. An update waits the same way (a changed purpose or run line always does).
 
 Versions: an adopted script keeps `scripts/<name>/v1/`, `v2/` ... (sha256, author, date and audit verdict per version in
 `meta.json`) and a stable `scripts/<name>/run`, a copy of the current one; rule lines and skills always name `run`.

@@ -2,6 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { ackRows, loadView, resetViewCache, threadStatus } from './view'
 import { resetLocks } from './threads'
+import { hashText } from './recipe'
 
 const SID = '11111111-2222-3333-4444-555555555555'
 const PANE = {
@@ -51,12 +52,12 @@ test('view: goals by tone, answers unread first, threads with state and last lin
 test('view: the scripts line counts candidates and adopted scripts', async () => {
   const h = setup()
   const meta = (status: string) => JSON.stringify({ name: 'n', sha256: 'x', status })
-  expect((await loadView(h.host)).scripts).toEqual({ candidates: 0, adopted: 0, needsUpdate: 0 })
+  expect((await loadView(h.host)).scripts).toEqual({ candidates: 0, adopted: 0, needsUpdate: 0, waiting: [] })
   h.files.set('/h/.lean-agent/scripts/candidates/a/meta.json', meta('candidate'))
   h.files.set('/h/.lean-agent/scripts/candidates/b/meta.json', meta('rejected'))
   h.files.set('/h/.lean-agent/scripts/c/meta.json', meta('adopted'))
   h.files.set('/h/.lean-agent/p/scripts/d/meta.json', meta('adopted'))
-  expect((await loadView(h.host)).scripts).toEqual({ candidates: 1, adopted: 2, needsUpdate: 2 }) // adopted scripts without their files are not intact
+  expect((await loadView(h.host)).scripts).toEqual({ candidates: 1, adopted: 2, needsUpdate: 2, waiting: [] }) // adopted scripts without their files are not intact
 })
 
 test('view: ack one row and ack all move the read marker', async () => {
@@ -223,6 +224,36 @@ test('answers: the newest 5 and "show all (N)"; a row expands to its full text; 
   expect(await ui.find({ type: 'Button', key: 'row-0' })).toBeTruthy()
   await ui.press({ key: 'answers-less' })
   expect(await rowsDrawn()).toBe(5)
+  await ui.unmount()
+})
+
+test('a script waiting for the desk shows Adopt / Reject; each is two-step, Reject drops it, Adopt adopts through decide and logs the user\'s decision', async ($, on) => {
+  const h = setup(on, [])
+  const text = 'print(1)\n'
+  const sha = hashText(text)
+  const waiting = (name: string) => {
+    const dir = `/h/.lean-agent/scripts/candidates/${name}`
+    h.files.set(`${dir}/${name}.py`, text)
+    h.files.set(`${dir}/meta.json`, JSON.stringify({ name, purpose: 'Print one', run: 'python3 {script}', inputs: ['none'], outputs: ['stdout'], project: 'global', author: 't1', created: 1, sha256: sha, file: `${name}.py`, status: 'audited', audit: { ts: 1, by: 't1', sha, claimed: 'adopt', verdict: 'adapt', reads: [], writes: [], network: true, deletes: false, secrets: false, hardcoded: [], deterministic: true, errorsHandled: true, generalises: true, changes: ['mod: it uses the network'], blockers: ['uses the network'], reason: '', waits: true } }))
+  }
+  waiting('keep')
+  waiting('drop')
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  expect((await ui.find({ type: 'Text', text: /2 waiting for you/ }))).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /keep \(global\) waits for you: uses the network/ })).toBeTruthy()
+  await ui.press({ key: 'sr-drop' })
+  expect(await ui.find({ type: 'Button', text: /Confirm reject drop/ })).toBeTruthy()
+  expect(JSON.parse(h.files.get('/h/.lean-agent/scripts/candidates/drop/meta.json')!).status).toBe('audited') // armed only
+  await ui.press({ key: 'sr-drop' })
+  expect(JSON.parse(h.files.get('/h/.lean-agent/scripts/candidates/drop/meta.json')!).status).toBe('rejected')
+  await ui.press({ key: 'sa-keep' })
+  expect(h.files.has('/h/.lean-agent/scripts/keep/meta.json')).toBe(false) // armed only
+  await ui.press({ key: 'sa-keep' })
+  expect(JSON.parse(h.files.get('/h/.lean-agent/scripts/keep/meta.json')!).status).toBe('adopted')
+  const log = h.files.get('/h/.lean-agent/scripts/decisions.jsonl')!
+  expect(log).toContain('"value":"adopt"')
+  expect(log).toContain('"value":"reject"')
   await ui.unmount()
 })
 

@@ -21,6 +21,7 @@ export type Audit = {
   changes: string[]
   blockers: string[]
   reason: string
+  waits?: boolean // the auditor said adopt but the mod's rules did not let it adopt on its own: it waits for the desk's decision
 }
 export type Decision = { value: 'adopt' | 'reject'; by: 'user'; reason: string; ts: number; overrode?: string[] }
 // One version of an adopted script: scripts/<name>/v<N>/<file>. The stable copy of the current one is scripts/<name>/run.
@@ -36,7 +37,7 @@ export type Meta = {
   created: number
   sha256: string // of the current version (a candidate: of its file)
   file: string // a candidate: its file; adopted: always `run`, the stable path
-  status: 'candidate' | 'adopted' | 'rejected' | 'retired'
+  status: 'candidate' | 'audited' | 'adopted' | 'rejected' | 'retired' // audited: judged adopt by the auditor, waiting for the desk's decision
   core?: boolean
   scan?: string[] // privacy findings of the stored text (they block adoption)
   audit?: Audit // of the current version
