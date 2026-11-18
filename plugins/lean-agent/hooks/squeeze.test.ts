@@ -34,6 +34,6 @@ test('trimTools drops by glob per role and never lean-agent tools', () => {
   const tools = [{ name: 'Read' }, { name: 'Glob' }, { name: 'mcp__big__a' }, { name: 'mcp__lean-agent__lean_report' }]
   const cfg = { thread: { drop: ['Glob', 'mcp__*'] } }
   expect(trimTools(tools, 'thread', cfg).map(t => t.name)).toEqual(['Read', 'mcp__lean-agent__lean_report'])
-  expect(trimTools(tools, 'desk', cfg)).toHaveLength(4)
+  expect(trimTools(tools, 'desk', cfg).map(t => t.name)).toEqual(['Read', 'Glob', 'mcp__lean-agent__lean_report'])
   expect(trimTools(tools, 'thread', undefined)).toHaveLength(4)
 })

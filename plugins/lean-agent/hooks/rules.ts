@@ -23,7 +23,7 @@ export const slugOk = (s: unknown): s is string => typeof s === 'string' && /^[A
 export function globRe(g: string): RegExp {
   let r = ''
   for (let i = 0; i < g.length; i++) {
-    const c = g[i]
+    const c = g[i] as string
     if (c === '*' && g[i + 1] === '*') {
       i++
       if (g[i + 1] === '/') { i++; r += '(?:.*/)?' } else r += '.*'

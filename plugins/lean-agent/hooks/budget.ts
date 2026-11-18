@@ -14,7 +14,7 @@ export const PRICES: Record<string, Price> = {
 }
 export function priceOf(model: string): Price {
   const m = String(model ?? '').toLowerCase()
-  return PRICES[Object.keys(PRICES).find(k => m.includes(k)) ?? 'sonnet']
+  return PRICES[Object.keys(PRICES).find(k => m.includes(k)) ?? 'sonnet'] as Price
 }
 export function costUsd(model: string, u: Usage | null | undefined): number {
   if (!u) return 0

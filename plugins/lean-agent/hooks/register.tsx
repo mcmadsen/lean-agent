@@ -18,6 +18,7 @@ import { autoMigrate, check, fix, migrate } from './doctor'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
 import { hostOf } from './host'
+import { leanSkillsOnly } from './squeeze'
 import { parseGrants, recordGrant, releaseGrant } from './guard'
 import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
 
@@ -33,6 +34,8 @@ export const resetModState = () => {
   applied = ''
   attempted = ''
   done.clear()
+  noticed.clear()
+  pending = []
   chain = Promise.resolve()
   seen = ''
   registered.clear()
@@ -47,6 +50,8 @@ let seen = '' // the directories the role was last decided from
 let timers: Array<() => void> = []
 const registered = new Set<string>()
 let chain: Promise<unknown> = Promise.resolve()
+const noticed = new Set<string>() // threads whose stale-rules notice was given this session
+let pending: string[] = [] // notices a later role change found, handed over at the next prompt
 const roleKey = (r: Role) => (r.kind === 'thread' ? `thread:${r.id}` : r.kind)
 const stopTimers = () => {
   for (const c of timers.splice(0)) {
@@ -99,10 +104,31 @@ async function feedbackOf(host: Host, e: any, r: any): Promise<void> {
   await applyFeedback(host, { thread: role.kind === 'thread' ? role.id : undefined, project, agent: String(e.subagent_type ?? e.agent ?? '') || undefined }, fb)
 }
 
+// a step that hangs is given up after this long: it is reported like a failure and the queue goes on
+const STEP_MS = 5_000
+function bounded<T>($: any, p: Promise<T>, label: string): Promise<T> {
+  let timer: any
+  let limit: Promise<never> | null = null
+  try {
+    limit = new Promise<never>((_, rej) => {
+      timer = $.clock.after(STEP_MS, () => rej(new Error(`${label} timed out`)))
+    })
+  } catch {
+    /* no timer: the step runs unbounded */
+  }
+  return (limit ? Promise.race([p, limit]) : p).finally(() => {
+    try {
+      timer?.cancel?.()
+    } catch {
+      /* already fired */
+    }
+  })
+}
+
 // one failing step is reported (status line + debug log) and never stops the next one
 async function soft($: any, label: string, fn: () => Promise<unknown>): Promise<boolean> {
   try {
-    await fn()
+    await bounded($, Promise.resolve().then(fn), label)
     return true
   } catch (err) {
     const msg = `lean-agent: ${label} failed: ${String((err as Error)?.message ?? err).slice(0, 120)}`
@@ -120,7 +146,8 @@ async function soft($: any, label: string, fn: () => Promise<unknown>): Promise<
   }
 }
 
-async function registerOnce($: any, spec: { name: string }): Promise<void> {
+// the engine replaces a tool registered again under the same name, so a repeat is harmless; `registered` only saves the call
+async function registerOnce($: any, spec: any): Promise<void> {
   if (registered.has(spec.name)) return
   await $.tool.register(spec as any)
   registered.add(spec.name)
@@ -146,6 +173,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
   const key = roleKey(newRole)
   role = newRole
   if (key === applied) return []
+  const wasKey = attempted
   if (key !== attempted) {
     stopTimers()
     notified = 0
@@ -193,9 +221,9 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         notified = n
       })
       // the chaser: a goal untouched for an hour gets one status message to its open thread
-      every($, 60_000, 'desk', host2 => chase(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text })))
+      every($, 60_000, 'desk', async host2 => void (await chase(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }))))
       // scheduled sends: due lines of scheduled.jsonl go to their thread while the desk runs
-      every($, 30_000, 'desk', host2 => runSchedule(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text })))
+      every($, 30_000, 'desk', async host2 => void (await runSchedule(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }))))
     })
     // the desk folder's CLAUDE.md is generated: written only when it changed
     await step('desk CLAUDE.md', async () => {
@@ -218,12 +246,17 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       if (th.project && typeof repo === 'string' && repo.startsWith('/')) {
         await syncRules(host, th.project, repo)
         const stale = await checkStale(host, th.project, repo)
-        if (stale.length) ctx.push(`[lean-agent] ${stale.join('; ')}`)
+        if (stale.length && !noticed.has(newRole.id)) {
+          noticed.add(newRole.id)
+          ctx.push(`[lean-agent] ${stale.join('; ')}`)
+        }
       }
     } catch {
       /* rules are optional */
     }
   }
+  // the tool pool depends on the role (the desk's is trimmed): ask the engine for it again
+  if (!wasKey || wasKey !== key) await soft($, 'tool pool refresh', async () => void $.ui.invalidate('tool.list'))
   if (!ok) applied = '' // a failed step is tried again at the next check
   return ctx
 }
@@ -252,14 +285,20 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
 
 function redetect($: any, hint?: string): Promise<unknown> {
   return serial(async () => {
-    const dir = hint ?? (await $.session.cwd().catch(() => ''))
-    const root = await $.session.root().catch(() => '')
+    const dir = hint ?? (await bounded($, Promise.resolve($.session.cwd()), 'session.cwd').catch(() => ''))
+    const root = await bounded($, Promise.resolve($.session.root()), 'session.root').catch(() => '')
     if (!dir && !root) return
     const d = typeof dir === 'string' && dir ? dir : String(root)
     const rt = typeof root === 'string' ? root : ''
     if (applied && seen === `${d}\n${rt}`) return
-    await settle($, hostOf($), d, rt, !hint) // an event's own directory beats a root that may not have moved yet
+    pending.push(...(await settle($, hostOf($), d, rt, !hint))) // an event's own directory beats a root that may not have moved yet
   }).catch(() => undefined)
+}
+
+// the tool pool for a role, the CURRENT one unless given (a test's `$` cannot raise tool.list)
+export async function poolFor<T extends { name: string }>(host: Host, tools: T[], kind: Role['kind'] = role.kind): Promise<T[]> {
+  const cfg: any = await readConfig(host, await homeDir(host))
+  return trimTools(tools, kind, cfg.tools)
 }
 
 export const register: Register = on => {
@@ -267,7 +306,7 @@ export const register: Register = on => {
     // $ is only ever spelled $.noun.event(...): the helpers get this thin host instead of $ itself
     const host = hostOf($)
     resetModState()
-    const root = await $.session.root().catch(() => '')
+    const root = await bounded($, Promise.resolve($.session.root()), 'session.root').catch(() => '')
     const ctx = await serial(() => settle($, host, e.cwd, typeof root === 'string' ? root : ''))
     // the command is role-free: registered once here
     await $.command.register({ name: 'lean-agent', description: 'Open the lean-agent desk pane (goals, answers, threads)' }).catch(() => undefined)
@@ -304,17 +343,21 @@ export const register: Register = on => {
 
   registerPane(on)
 
-  // the tool pool per role: config.json `tools.<role>.drop` (globs); lean-agent's own tools stay
+  // the tool pool per role: the desk's is cut to what strict mode can allow; config.json `tools.<role>.drop` (globs) on top;
+  // lean-agent's own tools stay. Reads the CURRENT role, so a session that becomes the desk later is trimmed from then on.
   on('tool.list', async ($, e: any, next) => {
-    const list: any[] = await next(e)
-    try {
-      const host = hostOf($)
-      const cfg: any = await readConfig(host, await homeDir(host))
-      return trimTools(list, role.kind, cfg.tools)
-    } catch {
-      return list
-    }
-  })
+    const listed: any = await next(e)
+    if (!Array.isArray(listed?.value)) return listed
+    return { ...listed, value: await poolFor(hostOf($), listed.value) }
+  }).catch(($, e: any, next) => next(e))
+
+  // the desk reads only lean-agent's skills: another plugin's skill listing is dead weight there
+  on('prompt.attachment', { type: 'skill_listing' }, async ($, e: any, next) => {
+    const r: any = await next(e)
+    if (role.kind !== 'desk' || typeof r?.text !== 'string') return r
+    const text = leanSkillsOnly(r.text)
+    return text === null ? r : { ...r, text }
+  }).catch(($, e: any, next) => next(e))
 
   // a long Bash result is squeezed after the call; the full text is saved under ~/.lean-agent/output/
   on('tool.call', { tool: 'Bash' }, async ($, e: any, next) => squeezeResult(hostOf($), await next(e)))
@@ -402,10 +445,12 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e: any, next) => {
     const host = hostOf($)
     await redetect($)
-    let extra: string | null = null
+    let extra: string | null = pending.length ? pending.splice(0).join('\n') : null
     try {
-      if (role.kind === 'thread') extra = (await consumeWake(host, role.id, e.text)) ? null : await takeBatch(host, role.id)
-      else if (role.kind === 'desk') extra = await takeReports(host)
+      let more: string | null = null
+      if (role.kind === 'thread') more = (await consumeWake(host, role.id, e.text)) ? null : await takeBatch(host, role.id)
+      else if (role.kind === 'desk') more = await takeReports(host)
+      if (more) extra = extra ? `${extra}\n${more}` : more
     } catch {
       /* the prompt goes through without it */
     }

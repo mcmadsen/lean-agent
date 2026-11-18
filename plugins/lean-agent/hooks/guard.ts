@@ -238,8 +238,14 @@ async function pushDenial($: Host, c: string, cwd: string): Promise<string | nul
 }
 
 // ---- strict mode (desk): an allow-list, every other tool is denied ----------------------------------------------
-const DESK_READ = new Set(['Read', 'Grep', 'Glob'])
+// ONE list of what the desk may call: deskDenial decides by it, and the desk's tool pool (tool.list) is cut to it
+const DESK_READ = new Set(['Read', 'Grep', 'Glob']) // only under ~/.lean-agent
+const DESK_BASH = 'Bash' // only the commands deskBashOk lists
 const DESK_FREE = new Set(['Skill', 'ToolSearch', 'TodoWrite', 'AskUserQuestion'])
+const LEAN_TOOLS = 'mcp__lean-agent__'
+export const DESK_TOOLS: readonly string[] = [...DESK_READ, DESK_BASH, ...DESK_FREE]
+// can strict mode ever allow this tool (by name)? lean-agent's own tools always
+export const deskToolPossible = (name: string): boolean => DESK_TOOLS.includes(name) || name.startsWith(LEAN_TOOLS)
 
 function deskBashOk(c: string): boolean {
   if (hasMeta(c)) return false
@@ -257,8 +263,8 @@ async function deskDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
     const p = await resolve($, raw, ctx.cwd)
     return within(p, await realPath($, leanDir(await homeDir($)))) || within(p, leanDir(await homeDir($))) ? null : `${ROUTE}: ${e.tool} only under ${leanDir(await homeDir($))}`
   }
-  if (e.tool === 'Bash') return deskBashOk(String(e.command ?? '')) ? null : ROUTE
-  if (DESK_FREE.has(e.tool) || e.tool.startsWith('mcp__lean-agent__')) return null
+  if (e.tool === DESK_BASH) return deskBashOk(String(e.command ?? '')) ? null : ROUTE
+  if (DESK_FREE.has(e.tool) || e.tool.startsWith(LEAN_TOOLS)) return null
   return `${ROUTE}: ${e.tool} is not for the desk`
 }
 

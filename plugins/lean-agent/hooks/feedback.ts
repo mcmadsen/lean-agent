@@ -14,7 +14,7 @@ export function parseFeedback(text: string): Feedback | null {
   if (!last) return null
   let o: any
   try {
-    o = JSON.parse(last[1])
+    o = JSON.parse(last[1]!)
   } catch {
     return null
   }

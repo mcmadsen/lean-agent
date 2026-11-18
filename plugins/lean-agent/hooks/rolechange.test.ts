@@ -1,10 +1,14 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { resetLocks } from './threads'
+import { poolFor } from './register'
+import { DESK_TOOLS } from './guard'
+import { leanSkillsOnly, trimTools } from './squeeze'
 
 // A session the app pre-started in a spare folder, then moved into the user's folder.
 async function start($: any, on: any, first: string) {
   const h = fakeHost(on)
+  on('clock.after', () => new Promise(() => {})) // a step's timeout never fires here
   resetLocks()
   h.files.set('/p/templates/thread.md', '# {{id}}')
   h.files.set('/p/templates/front-desk.md', 'desk {{lean}}')
@@ -89,4 +93,66 @@ test('a failing migration does not stop the desk tools from registering', async 
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
   expect(deskTools(reg)).toEqual(['lean_doctor', 'lean_thread'])
+})
+
+// ---- the desk's tool pool ----------------------------------------------------------------------------------------
+const POOL = [
+  'Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write', 'Agent', 'WebFetch', 'Skill', 'ToolSearch', 'TodoWrite', 'AskUserQuestion',
+  'mcp__other__big_a', 'mcp__other__big_b', 'mcp__lean-agent__lean_thread', 'mcp__lean-agent__lean_doctor',
+].map(name => ({ name, description: '', mcp: name.startsWith('mcp__') }))
+
+const NAMES = async (h: any, kind: 'desk' | 'thread' | 'plain') => (await poolFor(h.host, POOL, kind)).map(t => t.name).sort()
+
+test('the desk tool pool is cut to what strict mode can allow; thread and plain pools are untouched', async () => {
+  const h = fakeHost(null)
+  expect(await NAMES(h, 'desk')).toEqual(
+    ['AskUserQuestion', 'Bash', 'Glob', 'Grep', 'Read', 'Skill', 'TodoWrite', 'ToolSearch', 'mcp__lean-agent__lean_doctor', 'mcp__lean-agent__lean_thread'].sort(),
+  )
+  expect(await NAMES(h, 'thread')).toHaveLength(POOL.length)
+  expect(await NAMES(h, 'plain')).toHaveLength(POOL.length)
+})
+
+test('config tools.desk.drop applies on top of the desk cut', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ tools: { desk: { drop: ['TodoWrite', 'mcp__lean-agent__lean_doctor'] } } }))
+  const n = await NAMES(h, 'desk')
+  expect(n).not.toContain('TodoWrite')
+  expect(n).toContain('mcp__lean-agent__lean_doctor') // lean-agent's own tools are never dropped
+  expect(n).not.toContain('Edit')
+})
+
+test('a tool strict mode allows is never trimmed from the desk pool', async () => {
+  const tools = [...DESK_TOOLS, 'mcp__lean-agent__lean_anything', 'Edit', 'mcp__x__y'].map(name => ({ name }))
+  const kept = trimTools(tools, 'desk', undefined).map(t => t.name)
+  for (const name of DESK_TOOLS) expect(kept).toContain(name)
+  expect(kept).toContain('mcp__lean-agent__lean_anything')
+  expect(kept).not.toContain('Edit')
+  expect(kept).not.toContain('mcp__x__y')
+})
+
+test('the desk keeps only lean-agent skills in the skill listing; other roles and odd formats are untouched', async () => {
+  const text = ['Skills:', '- lean-agent:thread: route work', '- other:big: a long', '  wrapped line', '- lean-agent:pr: prs'].join('\n')
+  expect(leanSkillsOnly(text)).toBe(['Skills:', '- lean-agent:thread: route work', '- lean-agent:pr: prs'].join('\n'))
+  expect(leanSkillsOnly('- other:big: x')).toBeNull()
+  expect(leanSkillsOnly('no list here')).toBeNull()
+})
+
+test('a hung step is given up after its timeout and the rest of the setup still runs', async ($, on) => {
+  const h = fakeHost(on)
+  resetLocks()
+  const reg: string[] = []
+  on('tool.register', (_: any, e: any) => { reg.push(e.name); return { value: { tool: `mcp__lean-agent__${e.name}` } } })
+  on('session.root', () => new Promise(() => {})) // never answers
+  on('clock.after', () => new Promise(r => (globalThis as any).setTimeout(() => r({ value: undefined }), 50)))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
+  expect(deskTools(reg)).toEqual(['lean_doctor', 'lean_thread'])
+})
+
+test('a second session.start in the same process registers by name again, never twice under one name', async ($, on) => {
+  const s = await start($, on, '/h/lean-agent-desk')
+  await $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
+  // the engine replaces a tool registered under the same name: two registrations of a name are one tool
+  expect(new Set(s.reg).size).toBe(2)
+  expect(s.reg.length).toBe(4)
 })
