@@ -248,3 +248,17 @@ test('a throwing guard denies (fail closed)', async ($, on) => {
   const r: any = await $.tool.call({ tool: 'Bash', command: 'git push --force' } as any)
   expect(r.deny).toBeDefined()
 })
+
+test('the review skill grants the reviewer exactly the read-only git commands for the range', async () => {
+  const h = setup()
+  const g = parseGrants('Review it.\nallow-cmd: git diff main...abc1234, git log main..abc1234, git show abc1234, git merge-base main abc1234')
+  await recordGrant(h.host, thread, 'c1', 'reviewer', g)
+  const bash = (command: string) => run(h, thread, { tool: 'Bash', command }, '/r/app', 'reviewer', 'r1')
+  expect(await bash('git diff main...abc1234 --stat')).toBeNull()
+  expect(await bash('git log main..abc1234 --oneline')).toBeNull()
+  expect(await bash('git show abc1234')).toBeNull()
+  expect(await bash('git merge-base main abc1234')).toBeNull()
+  expect(await bash('git diff main...abc1234 | cat')).toContain('granted')
+  expect(await bash('git push origin x')).toContain('granted')
+  expect(await bash('git diff')).toContain('granted')
+})
