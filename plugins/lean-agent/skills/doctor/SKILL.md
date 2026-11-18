@@ -10,7 +10,7 @@ desk session; report what it returned, never what you assume.
 
 If the tool is missing (no `lean_doctor` / `lean_thread`), this session is not the desk: tell the user to start a NEW
 session in `~/lean-agent-desk`. On 1.0.0 a session the app moved there from a spare folder never gets the tools; that
-needs 1.0.2 (`claude plugin update lean-agent`).
+needs 1.0.1 (`claude plugin update lean-agent`).
 Without the tool, setup still works from the mod: the user types `/lean-agent-setup` (check + fix, any session), or
 `/lean-agent` and presses **Set up lean-agent** / **Open desk**. Tell them that first.
 

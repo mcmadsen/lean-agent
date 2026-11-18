@@ -66,7 +66,9 @@ export function setupText(o: SetupOut, isDesk: boolean): string {
 async function appRunning(h: Host): Promise<boolean | null> {
   try {
     for (const argv of [['/usr/bin/pgrep', '-x', 'Claude'], ['/usr/bin/pgrep', '-f', '/Claude.app/Contents/MacOS/Claude']]) {
-      if ((await h.process.run(argv)).exitCode === 0) return true
+      const x = (await h.process.run(argv)).exitCode
+      if (x === 0) return true
+      if (x !== 1) return null // pgrep: 1 = no match; anything else = the check itself failed
     }
     return false
   } catch {

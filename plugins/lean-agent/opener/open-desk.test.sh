@@ -15,7 +15,7 @@ n=$(cat "$FAKE_N" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"$FAKE_N"
 [ "$n" -ge "$FAKE_UP_AT" ]
 X
 chmod +x "$t/bin/claude" "$t/bin/pgrep"
-run() { HOME="$t/home" PATH="$t/bin:$PATH" FAKE_CALLS="$t/calls" FAKE_N="$t/n" FAKE_UP_AT="$1" LEAN_OPEN_INTERVAL=0 LEAN_OPEN_SETTLE=0 LEAN_OPEN_TRIES="$2" sh "$here/open-desk.sh"; }
+run() { LEAN_PGREP="$t/bin/pgrep" HOME="$t/home" PATH="$t/bin:$PATH" FAKE_CALLS="$t/calls" FAKE_N="$t/n" FAKE_UP_AT="$1" LEAN_OPEN_INTERVAL=0 LEAN_OPEN_SETTLE=0 LEAN_OPEN_TRIES="$2" sh "$here/open-desk.sh"; }
 log="$t/home/.lean-agent/logs/opener.log"
 
 rm -f "$t/calls" "$t/n"; run 999 3

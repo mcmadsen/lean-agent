@@ -231,3 +231,24 @@ test('"started a copy as <id>" in the resume output moves the thread to the copy
   expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t1/thread.json')!).sid).toBe(COPY)
   expect(JSON.stringify(r)).toContain('started a copy')
 })
+
+test('a copy id that is not listed is not stored as a bare prefix; the old sid stays and the result says so', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  state.rows = [{ sessionId: SID, name: 't1 · a', cwd: '/h/.lean-agent/threads/t1', status: 'done', startedAt: 1 }]
+  h.clock.t += 60_000
+  const base = h.claude.handler
+  h.claude.handler = (a: string[]) => (a.includes('--resume') ? { exitCode: 0, stdout: '', stderr: 'started a copy as CAFE1234' } : base(a, {} as any))
+  const r = await call({ action: 'send', tN: 't1', text: 'one' })
+  expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t1/thread.json')!).sid).toBe(SID)
+  expect(JSON.stringify(r)).toContain('cafe1234')
+})
+
+test('close reports a failing claude stop', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  state.rows = [{ sessionId: SID, name: 'x', cwd: 'x', status: 'busy', startedAt: 1 }]
+  const base = h.claude.handler
+  h.claude.handler = (a: string[]) => (a[0] === 'stop' ? { exitCode: 1, stdout: '', stderr: 'no such session' } : base(a, {} as any))
+  expect((await call({ action: 'close', tN: 't1' })).text).toContain('no such session')
+})

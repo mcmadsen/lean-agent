@@ -151,3 +151,14 @@ test('Open desk elsewhere: second pgrep form finds the app; a pgrep that errors 
   expect(await ui.find({ type: 'Text', text: /not running/ })).toBeFalsy()
   await ui.unmount()
 })
+
+test('a pgrep that fails with a code other than 1 is not "app not running": claude --desktop is still tried', async ($, on) => {
+  const { h, start } = fresh(on, '/h/.claude/spares/spare-abc')
+  await start($)
+  const ui = await $.ui.mount(PANE as any)
+  await ui.press({ key: 'setup' })
+  h.app.pgrep = () => ({ exitCode: 2, stdout: '', stderr: 'syntax error' })
+  await ui.press({ key: 'open-desk' })
+  expect(h.calls.filter((c: any) => c.argv[0] === 'claude' && c.argv[1] === '--desktop')).toHaveLength(1)
+  await ui.unmount()
+})

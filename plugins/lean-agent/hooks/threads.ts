@@ -236,14 +236,16 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
   // the resume may carry a new session id: follow the newest session of this thread
   // (any extra flag on --resume makes the CLI start a copy and print "started a copy as <id>": follow it)
   const after = (await agents(h)) ?? []
-  const copy = /started a copy as\s+([0-9a-f][0-9a-f-]{5,})/i.exec(`${r.stdout}\n${r.stderr ?? ''}`)?.[1]
-  const copied = copy ? (after.find(a => a.sid === copy || a.sid.startsWith(copy))?.sid ?? copy) : undefined
+  const copy = /started a copy as\s+([0-9a-f][0-9a-f-]{5,})/i.exec(`${r.stdout}\n${r.stderr ?? ''}`)?.[1]?.toLowerCase()
+  // the CLI may print the short id: accept it only when it names exactly one listed session, never store a bare prefix
+  const hits = copy ? after.filter(a => a.sid.toLowerCase() === copy || a.sid.toLowerCase().startsWith(copy)) : []
+  const copied = hits.length === 1 ? hits[0]!.sid : copy && copy.length >= 32 ? copy : undefined
   const next = copied ? { sid: copied } : after.filter(a => a.sid !== t.sid && (a.name === label(t) || a.cwd === tpath(home, t.id)) && a.startedAt > (row?.startedAt ?? 0)).sort((a, b) => b.startedAt - a.startedAt)[0]
   if (next) t.sid = next.sid
   t.lastWake = now
   t.delivered = upTo
   await save(h, home, t)
-  return { ok: true, text: `${t.id} woken with ${msgs.length} message(s)${copied ? `; the CLI started a copy, the thread now follows session ${copied.slice(0, 8)}` : ''}` }
+  return { ok: true, text: `${t.id} woken with ${msgs.length} message(s)${copied ? `; the CLI started a copy, the thread now follows session ${copied.slice(0, 8)}` : copy ? `; the CLI started a copy as ${copy}, which is not in the session list yet: the thread keeps its old session id, check ${t.id} with threads` : ''}` }
 }
 
 async function list(h: Host, home: string): Promise<Out> {
@@ -313,7 +315,10 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           }
           t.state = 'closed'
           await save(h, home, t)
-          if (t.sid && isRunning((live ?? []).find(a => a.sid === t.sid))) await h.process.run(['claude', 'stop', t.sid.slice(0, 8)])
+          if (t.sid && isRunning((live ?? []).find(a => a.sid === t.sid))) {
+            const st = await h.process.run(['claude', 'stop', t.sid.slice(0, 8)])
+            if (st.exitCode !== 0) return { ok: true, text: `${id} closed, but claude stop ${t.sid.slice(0, 8)} failed: ${(st.stderr || st.stdout).trim().slice(0, 200)}. Stop it from the Claude app.` }
+          }
           return { ok: true, text: `${id} closed` }
         }
         case 'park':
