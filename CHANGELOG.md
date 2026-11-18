@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased
+
+Learn flow (the 1.0.6 work; the version lines in `plugin.json`, `marketplace.json` and `pane.tsx` are left to the desk, which also
+builds 1.0.5).
+
+### Fixed
+- **Version skew is visible.** A session keeps the hooks module it loaded at start, while skills, agents and templates are read from
+  the plugin folder again after `claude plugin update`: the skill text could say 1.0.4 while the guard refused like 1.0.3 (an explorer
+  was refused `rg`, `ls` and `cat`). The mod now compares its own version with the installed one (the plugin root's
+  `.claude-plugin/plugin.json` and Claude Code's `installed_plugins.json`, the higher wins; cached for a minute) at `session.start`
+  and every `turn.start`: a status line and one `prompt.compose` line say "lean-agent code X is running but Y is installed: start a
+  new session (threads: close and Start)". `lean_doctor check` reports it as a FIX row. Every guard refusal ends with
+  "(lean-agent <running version>)", and `feedback.jsonl` rows and `refusals.jsonl` carry the running version.
+
+### Added
+- **An explorer that can explore.** The learn skill runs ONE preflight explorer (`git -C <repo> ls-files <folder> | head -3`,
+  `rg -n <word> <file>`) before launching the rest; on a refusal the lead lists the files itself and hands each explorer a capped
+  `git ls-files` list, or uses `lean-agent:reader-sonnet`. The lead always passes the capped list. `agents/explorer.md` says Grep/Glob
+  may not exist, to use the read-only Bash commands and to stop and report a refused command. Small areas are explored inline by the
+  lead; explorers are for big ones. Judgment-heavy areas use `reader-sonnet`, listing work stays on the haiku explorer.
+- **LEAN-FEEDBACK `refused`, `unverified`, `unreached`** (explorer and readers): commands the guard refused with its text, claims not
+  checked, folders not covered. Counts and the first entries go to `feedback.jsonl`, refusals to `refusals.jsonl`.
+- **Deltas, not restatements.** The brief carries the area's folders, the capped file list and the repo's own docs
+  (`CLAUDE.md`, `.claude/rules`): "read these first, return only what they do not say, contradictions as `CONFLICT` with both sides".
+  A rule bullet may point at a doc (`see <path>`) but never restates it.
+- **Modes and budgets.** `--gaps` (default when the repo has its own docs) and `--full`. Size budget next to the line cap: 2,000
+  characters per rule (about 500 tokens), 600 for `_project` (about 150), no line wider than 240; lines count non-empty body lines.
+  `lean_rules check` is a dry run (lines, chars, cap violations, rules without `paths:`, covered and missing areas); `sync` skips a
+  rule over any cap and says why. `record` counts `lines` from the file itself (a differing caller value is reported) and warns when a
+  rule is over a cap. A rule's `paths:` takes several globs (and `{a,b}` braces): the way to wire areas together.
+- **Areas covered by repo docs** are recorded with `covered_by: <doc>` (no rule file): never stale, skipped by the next run.
+- **Verification.** Hard rule: a rule line is written or kept only if checked against the code in the run; the rest goes to an
+  `UNVERIFIED` list in the report. `lean_rules verify` extracts every backticked path, symbol and number of each rule (and its
+  `relies-on` list) and searches the repo with `git grep -F` / `git ls-files` (read-only, at most 150 names per call, 40 per rule); the
+  skill's `--verify` mode then re-checks semantically only what it cannot judge (KEEP / FIX / DROP).
+- **`relies-on:`** in the rule footer (written by `record` from `relies`): an area is stale when a relied-on file changed or vanished
+  since the recorded sha, not only by changed-file count; the count limit is `max(15, 10% of the area's files)`.
+- **Legacy 0.45 cards.** learn step 0 reads `legacy-0.45/index.md` and the project's cards as candidate facts (drop hashes, PR status,
+  sizes, counts, dates, diaries, `file:line` cites; keep mechanisms, invariants, commands, traps; narrative to `lean_remember`). The
+  migration, and the versioned tidy (now v2, so people migrated earlier get it too), write that index: per card file, title, size and
+  area guess.
+- **Subagent caps.** `learn.maxExplorers` in `config.json` (default 4) or a cap from the user's `CLAUDE.md`: areas are grouped into at
+  most that many assignments, 25 lines per area each; the explorer reports `unreached`.
+- **Sync of every worktree.** `lean_rules sync` with `all: true` syncs every worktree of the project (`git worktree list --porcelain`
+  plus `worktrees.json`) and answers one line per checkout ("<path>: copied N, removed M, skipped K, exclude ok") and the skipped
+  rules once; `verbose: true` lists every path. The skill says recipe skills are synced together with rules.
+
 ## 1.0.4
 
 ### Added
