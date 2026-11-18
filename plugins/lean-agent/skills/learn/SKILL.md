@@ -10,6 +10,7 @@ Run in a thread whose checkout is the project. Rules are written to `~/.lean-age
 truth) and COPIED into the checkout by the `lean_rules` tool; never write into `<repo>/.claude/rules/` yourself and
 never symlink (symlinked rule folders do not load).
 
+0. Never `cd` into the project: run `git -C <repo> ...` and use absolute paths everywhere (also in the explorer briefs).
 1. List the areas: workspace packages/services (`package.json` workspaces, `go.work`, `Cargo.toml`, `pyproject`), else
    first-level source folders. Skip areas the repo's own `CLAUDE.md` or `.claude/rules` already covers. With `--area`
    do only that one.

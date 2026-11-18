@@ -375,3 +375,27 @@ test('a grant that names the agent bare binds to the prefixed type, and the othe
   await recordGrant(h.host, thread, 'c2', 'lean-agent:reader-haiku', { cmds: ['ls'] })
   expect(await run(h, thread, { tool: 'Bash', command: 'ls' }, '/r', 'reader-haiku', 'r2')).toBeNull()
 })
+
+test('an unresolved agent type is a reader with no grants and says so; a subagent with no type at all too', async () => {
+  const h = fakeHost(null)
+  const thread = { kind: 'thread', id: 't1' } as any
+  await recordGrant(h.host, thread, 'c1', undefined, { cmds: ['git log'], edit: ['/h/.lean-agent/worktrees/app/t1'] })
+  for (const t of ['unresolved', undefined]) {
+    const bash = await run(h, thread, { tool: 'Bash', command: 'git log -2' }, '/r', t as any, 'x1')
+    expect(bash).toContain('type unresolved')
+    expect(bash).not.toContain('unknown')
+    expect(await run(h, thread, { tool: 'Bash', command: 'git ls-files src' }, '/r', t as any, 'x1')).toContain('type unresolved')
+    expect(await run(h, thread, { tool: 'Edit', file_path: '/h/.lean-agent/worktrees/app/t1/a.ts' }, '/r', t as any, 'x1')).toContain('read-only')
+  }
+})
+
+test('git -C reaches the session folder, ~/.lean-agent and registered projects only', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/h/code/app' } }))
+  const thread = { kind: 'thread', id: 't1' } as any
+  const bash = (c: string) => run(h, thread, { tool: 'Bash', command: c }, '/h/.lean-agent/threads/t1', 'lean-agent:explorer', 'e1')
+  expect(await bash('git -C /h/code/app ls-files src')).toBeNull()
+  expect(await bash('git -C /h/.lean-agent/worktrees/app/t1 log -3')).toBeNull()
+  expect(await bash('git -C /h/code/other ls-files')).toContain('granted')
+  expect(await bash('git -C /etc log')).toContain('granted')
+})

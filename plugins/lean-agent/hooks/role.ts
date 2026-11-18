@@ -18,3 +18,31 @@ export async function detectRole($: Host, cwd: string): Promise<Role> {
   }
   return { kind: 'plain' }
 }
+
+// A session whose id is a thread's recorded `sid` IS that thread, wherever its working directory is.
+export async function roleBySid($: Host, sid: string): Promise<Role | null> {
+  if (!sid) return null
+  const dir = threadsDir(await homeDir($))
+  for (const e of await $.fs.list(dir).catch(() => [] as { name: string }[])) {
+    if (!/^t\d+$/.test(e.name)) continue
+    try {
+      const t = JSON.parse(String(await $.fs.read(`${dir}/${e.name}/thread.json`)))
+      if (t && typeof t.sid === 'string' && t.sid === sid) return { kind: 'thread', id: e.name }
+    } catch {
+      /* an unreadable record is not a match */
+    }
+  }
+  return null
+}
+
+// The ONE role function. Order: the session id (a thread's sid), then the role the session already has (sticky: a desk or
+// thread session is never demoted by a cwd change, e.g. a Bash `cd` into the project repo), then the folder (dir, then the
+// root when asked). Only plain -> desk/thread happens on a cwd change.
+export async function resolveRole($: Host, o: { cwd: string; root?: string; sid?: string; current?: Role; useRoot?: boolean }): Promise<Role> {
+  const bySid = await roleBySid($, o.sid ?? '')
+  if (bySid) return bySid
+  if (o.current && o.current.kind !== 'plain') return o.current
+  let r = await detectRole($, o.cwd)
+  if (r.kind === 'plain' && o.useRoot !== false && o.root && o.root !== o.cwd) r = await detectRole($, o.root)
+  return r
+}

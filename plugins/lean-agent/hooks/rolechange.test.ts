@@ -22,6 +22,8 @@ async function start($: any, on: any, first: string) {
   on('clock.every', (_: any, e: any) => { timers.push(e.ms); return { value: { cancel() {} } } })
   on('session.cwd', () => ({ value: dir }))
   on('session.root', () => ({ value: dir }))
+  let sid = 'sess-x'
+  on('session.id', () => ({ value: sid }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('classic.CwdChanged', () => ({}))
   on('prompt.submit', (_: any, e: any) => e)
@@ -31,7 +33,7 @@ async function start($: any, on: any, first: string) {
     dir = to
     await $.classic.CwdChanged({ old_cwd: old, new_cwd: to } as any)
   }
-  return { h, reg, timers, move, set: (to: string) => { dir = to } }
+  return { h, reg, timers, move, set: (to: string) => { dir = to }, setSid: (x: string) => { sid = x } }
 }
 
 const SPARE = '/h/.claude/spares/spare-abc'
@@ -77,12 +79,23 @@ test('a session moved from a spare folder into a thread folder gets the thread t
   expect(s.reg.length).toBe(n)
 })
 
-test('leaving the desk stops its timers and the desk tool refuses', async ($, on) => {
+test('a desk session that moves elsewhere stays the desk: its tools work and strict mode stays on', async ($, on) => {
   const s = await start($, on, '/h/lean-agent-desk')
-  expect(deskTools(s.reg)).toEqual(['lean_doctor', 'lean_thread'])
-  await s.move(SPARE)
+  await s.move('/h/code/proj')
+  const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any)
+  expect(JSON.stringify(r)).not.toContain('only the desk')
+  const d: any = await $.tool.call({ tool: 'Write', file_path: '/h/code/proj/x', content: 'x' } as any)
+  expect(JSON.stringify(d)).toContain('deny') // the desk's allow-list still applies
+  await s.move('/h/lean-agent-desk')
+  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any))).not.toContain('only the desk')
+})
+
+test('a plain session refuses the desk tool, re-resolving once first', async ($, on) => {
+  const s = await start($, on, SPARE)
   const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any)
   expect(JSON.stringify(r)).toContain('only the desk')
+  s.set('/h/lean-agent-desk') // no CwdChanged came: the refusal path looks again and finds the desk
+  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any))).not.toContain('only the desk')
 })
 
 test('a failing migration does not stop the desk tools from registering', async ($, on) => {
@@ -158,9 +171,55 @@ test('a second session.start in the same process registers by name again, never 
   expect(s.reg.length).toBe(4)
 })
 
+// the AgentInfo the engine really returned for a lean-agent:explorer spawn (live run, claude 2.1.327): `type` carries the
+// prefixed name; there is no subagentType / agentType / name; the turn.step event has no agent_type
+const LIVE_INFO = { id: 'a245c6a231f79a1d8', description: 'git ls-files', type: 'lean-agent:explorer', status: 'running', kind: 'local_agent', taskStatus: 'running', label: 'x', startTime: 1, cwd: '/c', model: 'haiku', contextWindowSize: 1, effort: 'low', tokenCount: 0, tokenSamples: [], cost: 0, hasRow: true }
+test('the live AgentInfo shape resolves to the prefixed type; an unreadable one is unresolved (fail closed)', () => {
+  expect(typeOfAgent([LIVE_INFO], 'a245c6a231f79a1d8')).toBe('lean-agent:explorer')
+  expect(typeOfAgent([{ id: 'a1', agentType: 'lean-agent:reviewer' }], 'a1')).toBe('lean-agent:reviewer')
+  expect(typeOfAgent([], 'a1', { agent_type: 'lean-agent:reader-haiku' })).toBe('lean-agent:reader-haiku')
+  for (const bad of [[], [{ id: 'a1' }], [{ id: 'a1', type: '' }], [{ id: 'a1', type: 5 }], null as any]) expect(typeOfAgent(bad, 'a1')).toBe('unresolved')
+})
+
 test('the spawned agent type is read from AgentInfo.type (prefixed), not only subagentType', () => {
   const list = [{ id: 'a1', type: 'lean-agent:worker-sonnet' }, { id: 'a2', subagentType: 'general-purpose' }]
   expect(typeOfAgent(list, 'a1')).toBe('lean-agent:worker-sonnet')
   expect(typeOfAgent(list, 'a2')).toBe('general-purpose')
-  expect(typeOfAgent(list, 'zz')).toBe('unknown')
+  expect(typeOfAgent(list, 'zz')).toBe('unresolved')
+})
+
+// ---- a thread keeps its role (a Bash `cd` into the repo moves the session cwd) ---------------------------------------
+const callRules = ($: any) => $.tool.call({ tool: 'mcp__lean-agent__lean_rules', action: 'stats', project: 'proj' } as any)
+const callReport = ($: any) => $.tool.call({ tool: 'mcp__lean-agent__lean_report', text: 'hi' } as any)
+const refused = (r: any) => JSON.stringify(r).includes('only a thread')
+
+test('a thread session that cd\'s into the repo is still a thread (lean_rules and lean_report work), and cd back too', async ($, on) => {
+  const s = await start($, on, '/h/.lean-agent/threads/t1')
+  expect(refused(await callRules($))).toBe(false)
+  await s.move('/h/code/proj')
+  expect(refused(await callRules($))).toBe(false)
+  expect(refused(await callReport($))).toBe(false)
+  s.set('/h/code/proj/src') // a cd the hook never reported
+  expect(refused(await callRules($))).toBe(false)
+  await s.move('/h/.lean-agent/threads/t1')
+  expect(refused(await callRules($))).toBe(false)
+})
+
+test('a plain session that moves into a thread folder is promoted, then keeps the role when it leaves', async ($, on) => {
+  const s = await start($, on, '/h/code/proj')
+  expect(refused(await callRules($))).toBe(true)
+  await s.move('/h/.lean-agent/threads/t1')
+  expect(refused(await callRules($))).toBe(false)
+  await s.move('/h/code/proj')
+  expect(refused(await callRules($))).toBe(false)
+})
+
+test('a session whose id is a thread\'s sid is that thread from any directory', async ($, on) => {
+  const s = await start($, on, '/h/code/proj')
+  s.h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'proj', state: 'open', sid: 'sess-thread-1', created: 1, lastWake: 0, delivered: 0 }))
+  expect(refused(await callRules($))).toBe(true) // another sid: plain
+  s.setSid('sess-thread-1')
+  expect(refused(await callRules($))).toBe(false) // the refusal path resolves by sid first
+  await s.move('/h/code/other')
+  expect(refused(await callReport($))).toBe(false)
 })

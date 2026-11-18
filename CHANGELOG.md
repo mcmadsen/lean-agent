@@ -3,11 +3,19 @@
 ## 1.0.3
 
 ### Fixed
+- A subagent whose type cannot be read is `unresolved` (was `unknown`): a reader with no grants, refused with "agent type
+  unresolved" so it can be reported; the debug log line `agent fields` shows what the engine gave. Verified live: the engine's
+  AgentInfo carries `type: "lean-agent:explorer"`, which resolves, and the explorer ran `git ls-files` and `git log` with no grant.
+  `git -C <dir>` for the built-in git commands may point into the session folder, `~/.lean-agent` and registered projects.
+- A thread or desk keeps its role. A Bash `cd` into the repo no longer demotes it to plain (so `lean_rules` works after a
+  `cd`, and the desk stays in strict mode wherever it moves); only plain -> desk/thread is promoted on a folder change. A
+  session whose id is a thread's `sid` is that thread from any folder, and a thread/desk tool that would refuse looks the role
+  up once more first. The learn skill and thread template say to use `git -C <repo>` instead of `cd`.
 - Readers no longer depend on the brief for read-only git. `lean-agent:explorer` can always run `git ls-files` and `git log`;
   `lean-agent:reader-*` and `lean-agent:reviewer` can always run `git log`, `ls-files`, `show`, `diff`, `status` and `rev-parse`
   (a learn thread reported Bash refused for `git ls-files` / `git log`). Read-only by construction: one plain command, no redirect,
   pipe, quote-wrapped `; | < >`, expansion, brace, tilde or glob (`{ } ~ $ * ? [`; use Glob for patterns), no `-c` / `--config-env` / `--exec-path`, no `--output` / `-o` on log, diff and show, no `--ext-diff`,
-  one `-C <dir>` only inside the session folder (no `..`). `allow-cmd` grants still add on top; `other:explorer` and a bare `explorer` get nothing built in. Residual risk, accepted: the repo's own config can run programs for `status` / `diff` / `show` (fsmonitor, textconv), and `status` refreshes `.git/index`.
+  one `-C <dir>` only inside the session folder, `~/.lean-agent` or a registered project (no `..`). `allow-cmd` grants still add on top; `other:explorer` and a bare `explorer` get nothing built in. Residual risk, accepted: the repo's own config can run programs for `status` / `diff` / `show` (fsmonitor, textconv), and `status` refreshes `.git/index`.
 - The learn skill's explorer brief lists the area folders and points at Glob/Grep; the explorer prompt and the thread
   template say what is built in.
 

@@ -1,6 +1,6 @@
 import type { Register } from 'claude-code'
 
-import { detectRole } from './role'
+import { resolveRole } from './role'
 import type { Role } from './role'
 import { deskClaudeMd, leanThread } from './threads'
 import { ensureGitHooks } from './githooks'
@@ -92,19 +92,34 @@ const SCHEMA = {
 
 
 let cwd = ''
-// AgentInfo (`$.agent.list()`) names the spawned type `type` (`lean-agent:worker-sonnet`); `subagentType` is the spawn input's spelling, tolerated
-export const typeOfAgent = (list: any[], id: string): string => {
-  const a = list.find(x => x?.id === id)
-  return String(a?.type ?? a?.subagentType ?? 'unknown')
+// AgentInfo (`$.agent.list()`) names the spawned type `type` (`lean-agent:worker-sonnet`); the other spellings are tolerated,
+// then the event's own agent_type. Nothing found = UNRESOLVED: the guard treats it as a reader with no grants (fail closed).
+export const UNRESOLVED = 'unresolved'
+const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
+export const typeOfAgent = (list: any[], id: string, ev?: any): string => {
+  const a = (Array.isArray(list) ? list : []).find(x => x?.id === id || x?.agentId === id)
+  return str(a?.type) || str(a?.subagentType) || str(a?.agentType) || str(a?.agent_type) || str(ev?.agentType) || str(ev?.agent_type) || UNRESOLVED
 }
-async function agentType($: any, id?: string): Promise<string | undefined> {
+const shown = new Set<string>()
+async function agentType($: any, id?: string, ev?: any): Promise<string | undefined> {
   if (!id) return undefined
+  let l: any[] = []
   try {
-    const l = await $.agent.list()
-    return typeOfAgent(l as any[], id)
+    l = (await $.agent.list()) as any[]
   } catch {
-    return 'unknown' // a subagent of unknown type gets no special grant
+    /* an unreadable list leaves the type unresolved */
   }
+  const t = typeOfAgent(l, id, ev)
+  if (!shown.has(id + t)) {
+    shown.add(id + t) // once per agent: the fields the guard sees, names only (debug log, for a report)
+    const a: any = (Array.isArray(l) ? l : []).find(x => x?.id === id || x?.agentId === id)
+    try {
+      $.ui.log(`lean-agent: agent fields ${JSON.stringify({ resolved: t, id, listed: !!a, type: a?.type, subagentType: a?.subagentType, agentType: a?.agentType, name: a?.name, keys: a ? Object.keys(a) : [], event: Object.keys(ev ?? {}), event_agent_type: ev?.agent_type ?? ev?.agentType })}`, { to: 'debug' })
+    } catch {
+      /* no debug log */
+    }
+  }
+  return t
 }
 
 const spent = new Map<string, number>() // usd per subagent id, this session
@@ -266,8 +281,8 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
 async function settle($: any, host: Host, dir: string, root: string, useRoot = true): Promise<string[]> {
   let r: Role | null = null
   const ok = await soft($, 'role detection', async () => {
-    r = await detectRole(host, dir)
-    if (r.kind === 'plain' && useRoot && root && root !== dir) r = await detectRole(host, root)
+    const sid = await bounded($, Promise.resolve($.session.id()), 'session.id').catch(() => '')
+    r = await resolveRole(host, { cwd: dir, root, sid: typeof sid === 'string' ? sid : '', current: role, useRoot })
   })
   if (ok) {
     seen = `${dir}\n${root}`
@@ -285,14 +300,14 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
   return run
 }
 
-function redetect($: any, hint?: string): Promise<unknown> {
+function redetect($: any, hint?: string, force = false): Promise<unknown> {
   return serial(async () => {
     const dir = hint ?? (await bounded($, Promise.resolve($.session.cwd()), 'session.cwd').catch(() => ''))
     const root = await bounded($, Promise.resolve($.session.root()), 'session.root').catch(() => '')
     if (!dir && !root) return
     const d = typeof dir === 'string' && dir ? dir : String(root)
     const rt = typeof root === 'string' ? root : ''
-    if (applied && seen === `${d}\n${rt}`) return
+    if (!force && applied && seen === `${d}\n${rt}`) return
     pending.push(...(await settle($, hostOf($), d, rt, !hint && rt !== seenRoot))) // an event's own directory beats a root that may not have moved yet
   }).catch(() => undefined)
 }
@@ -331,7 +346,7 @@ export const register: Register = on => {
   // every model request: refuse past a cap, then price its usage into ledger.jsonl
   on('turn.step', async function* ($, e: any, next) {
     const host = hostOf($)
-    const type = e.agentId ? await agentType($, e.agentId) : undefined
+    const type = e.agentId ? await agentType($, e.agentId, e) : undefined
     const why = await overBudget(host, role.kind, e.agentId ? { type, spent: spent.get(e.agentId) ?? 0 } : null).catch(() => null)
     if (why) return { turnId: e.turnId, index: e.index, answer: why, toolUses: [], stopReason: 'end_turn', usage: null } as any
     const r: any = yield* next(e)
@@ -404,6 +419,7 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Bash' }, async ($, e: any, next) => squeezeResult(hostOf($), await next(e)))
 
   on('tool.call', { tool: `mcp__lean-agent__${TOOL}` }, async ($, e: any) => {
+    if (role.kind !== 'desk') await redetect($, undefined, true)
     if (role.kind !== 'desk') return { result: 'lean-agent: only the desk can use this tool', isError: true } as any
     const host = hostOf($)
     const out = await leanThread(host, $.plugin.root, e)
@@ -413,6 +429,7 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: `mcp__lean-agent__${DOCTOR}` }, async ($, e: any) => {
+    if (role.kind !== 'desk') await redetect($, undefined, true)
     if (role.kind !== 'desk') return { result: 'lean-agent: the doctor runs in the desk', isError: true } as any
     const host = hostOf($)
     try {
@@ -432,6 +449,7 @@ export const register: Register = on => {
 
   for (const t of THREAD_TOOLS) {
     on('tool.call', { tool: `mcp__lean-agent__${t.name}` }, async ($, e: any) => {
+      if (role.kind !== 'thread') await redetect($, undefined, true) // a stale role never refuses: look once more (session id, folder)
       if (role.kind !== 'thread') return { result: 'lean-agent: only a thread can use this tool', isError: true } as any
       const out = await threadTool(hostOf($), role.id, t.name, e)
       await ensureGitHooks(hostOf($)).catch(() => undefined) // lean_* tools may change projects.json
@@ -442,7 +460,7 @@ export const register: Register = on => {
   // every tool: guards first (fail closed), then delivery of queued messages to a busy session
   on('tool.call', async ($, e: any, next) => {
     const host = hostOf($)
-    const why = await decide(host, { role, cwd, agentType: await agentType($, e.agentId), agentId: e.agentId }, e)
+    const why = await decide(host, { role, cwd, agentType: await agentType($, e.agentId, e), agentId: e.agentId }, e)
     if (why) return { deny: why } as any
     // the thread's grants for the worker it spawns: recorded while the Agent call runs, removed when it returns
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null

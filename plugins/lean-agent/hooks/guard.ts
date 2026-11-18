@@ -341,7 +341,7 @@ async function grantFor($: Host, ctx: Ctx): Promise<Grants> {
 
 // Built-in read-only commands, so a reader never depends on a brief: only OUR agent types (exact `lean-agent:` prefix) get them;
 // other:explorer, a bare explorer and every other type get nothing (an allow-cmd grant adds on top). One plain `git` command
-// (shell.ts lexer, no meta character, no expansion), the only global options are --no-pager and -C <dir inside the session cwd>,
+// (shell.ts lexer, no meta character, no expansion), the only global options are --no-pager and -C <dir inside those roots>,
 // and no option that writes a file, runs a program or reads outside the repository. Accepted residual risk: the repository's own
 // config can run programs for status (core.fsmonitor) and diff/show/log -p (diff.external, textconv drivers), git status refreshes
 // .git/index, and `git diff A B` with paths outside the work tree reads them; -c / --ext-diff / -C escapes are what is refused.
@@ -357,6 +357,15 @@ const BAD_LONG = (o: string, sub: string) =>
   (o.length > 0 && ('output'.startsWith(o) || 'ext-diff'.startsWith(o) || 'exec-path'.startsWith(o) || 'help'.startsWith(o))) || /^exec/.test(o) || /^ext-d/.test(o)
 // -o <file> (git has no -o for log/diff/show, the spec refuses it anyway) and -h (help starts a pager)
 const SHORT_O = (a: string) => a.startsWith('-o') || a === '-h'
+// where `git -C <dir>` may point: the session folder, ~/.lean-agent (threads, worktrees) and the registered projects' folders
+async function cRoots($: Host, ctx: Ctx): Promise<string[]> {
+  const home = await homeDir($)
+  const projs = await readJson<Record<string, { path?: unknown }>>($, `${leanDir(home)}/projects.json`, {})
+  const raw = [ctx.cwd, leanDir(home), ...Object.values(projs && typeof projs === 'object' ? projs : {}).map(x => x?.path).filter((x): x is string => typeof x === 'string' && x.startsWith('/'))]
+  const out: string[] = []
+  for (const r of raw) out.push(norm(r), norm(await realPath($, r)))
+  return out
+}
 async function builtinReadOnly($: Host, ctx: Ctx, c: string): Promise<boolean> {
   const allowed = builtinGit(ctx.agentType)
   // hasMeta also refuses ; | < > inside quotes; { } ~ $ * ? [ \ are refused anywhere too: the shell expands them after this check
@@ -371,7 +380,7 @@ async function builtinReadOnly($: Host, ctx: Ctx, c: string): Promise<boolean> {
     else if (w[i] === '-C' && w[i + 1] && !seenC && !w[i + 1]!.split('/').includes('..')) {
       seenC = true
       const d = await resolve($, w[i + 1]!, ctx.cwd)
-      if (!(within(d, norm(ctx.cwd)) || within(d, norm(await realPath($, ctx.cwd))))) return false
+      if (!(await cRoots($, ctx)).some(r => within(d, r))) return false
       i += 2
     } else return false
   }
@@ -386,13 +395,14 @@ async function builtinReadOnly($: Host, ctx: Ctx, c: string): Promise<boolean> {
 }
 
 async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
-  const t = ctx.agentType
+  const t = ctx.agentType ?? 'unresolved' // a subagent whose type is not known is a reader with no grants
   const edits = e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'NotebookEdit'
   if (e.tool === 'AskUserQuestion') return 'lean-agent: a subagent never asks the user; report the question to the thread'
   if (isReader(t)) {
     if (edits) return `lean-agent: ${t} is read-only`
     if (e.tool === 'Bash') {
       const c = String(e.command ?? '').trim()
+      if (t === 'unresolved') return 'lean-agent: agent type unresolved, so it is a reader with no grants; report this (feedback skill) with the debug log line "agent fields"'
       if (await builtinReadOnly($, ctx, c)) return null
       const g = await grantFor($, ctx)
       const ok = !hasMeta(c) && (g.cmds ?? []).some(x => c === x || c.startsWith(x + ' '))
@@ -418,7 +428,7 @@ export async function decide($: Host, ctx: Ctx, e: Call): Promise<string | null>
     if (d) return d
   }
   if (ctx.role.kind === 'thread' && !ctx.agentType && e.tool === 'AskUserQuestion') return 'lean-agent: a thread never asks the user directly; use lean_ask (the desk relays it)'
-  if (ctx.agentType) {
+  if (ctx.agentType || ctx.agentId) {
     const d = await workerDenial($, ctx, e)
     if (d) return d
   }
