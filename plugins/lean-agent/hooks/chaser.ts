@@ -1,0 +1,42 @@
+// Goals chaser (design 25): a goal nobody touched for STALE_MS gets one "status?" message to its open thread, then
+// is left alone for another STALE_MS. A thread that has an unread question to the user is waiting, not stuck.
+import { homeDir, leanDir, readJson, writeJson } from './state'
+import type { Host } from './state'
+import { unreadReports } from './delivery'
+import type { Thread } from './threads'
+import { threadsDir } from './state'
+
+export const STALE_MS = 60 * 60_000
+export type Goal = { text: string; ts: number; chased?: number }
+export const CHASE_TEXT = 'Status check from the desk: where are you on your goal, and are you blocked? Reply with lean_report.'
+
+// `send` queues the message and wakes the thread once if it is idle (a running one only gets it queued)
+export async function chase(h: Host, send: (id: string, text: string) => Promise<unknown>): Promise<string[]> {
+  const home = await homeDir(h)
+  const file = `${leanDir(home)}/goals.json`
+  const goals = await readJson<Record<string, Goal>>(h, file, {})
+  const now = await h.clock.now()
+  const asking = new Set((await unreadReports(h)).recs.filter(r => r.kind === 'ask').map(r => r.from))
+  const chased: string[] = []
+  for (const [id, g] of Object.entries(goals)) {
+    if (!g || typeof g.text !== 'string' || asking.has(id)) continue
+    if (now - (g.ts || 0) <= STALE_MS || now - (g.chased || 0) <= STALE_MS) continue
+    const t = await readJson<Thread | null>(h, `${threadsDir(home)}/${id}/thread.json`, null)
+    if (!t || t.state !== 'open' || !t.sid) continue
+    g.chased = now
+    chased.push(id)
+    await send(id, CHASE_TEXT)
+  }
+  if (chased.length) await writeJson(h, file, goals)
+  return chased
+}
+
+// ---- review record (push gate): written by the review skill's tool call, read by guard.pushDenial ---------------
+export type Review = { green: boolean; sha: string; project: string; passes?: number; findings?: string[]; ts?: number }
+export async function writeReview(h: Host, r: Review): Promise<string> {
+  if (!/^[0-9a-f]{7,64}$/.test(r.sha)) throw new Error('review needs a full commit sha')
+  const home = await homeDir(h)
+  const file = `${leanDir(home)}/${r.project}/reviews/${r.sha}.json`
+  await writeJson(h, file, { ...r, ts: await h.clock.now() })
+  return file
+}

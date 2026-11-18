@@ -12,6 +12,7 @@ import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
 import { checkStale, syncRules } from './rules'
 import { readJson, threadsDir } from './state'
+import { chase } from './chaser'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
 
@@ -102,6 +103,15 @@ export const register: Register = on => {
         }
       })
       void timer
+      // the chaser: a goal untouched for an hour gets one status message to its open thread
+      $.clock.every(60_000, async () => {
+        try {
+          const h2 = hostOf($)
+          await chase(h2, (id, text) => leanThread(h2, $.plugin.root, { action: 'send', tN: id, text }))
+        } catch {
+          /* the next tick tries again */
+        }
+      })
       // the desk folder's CLAUDE.md is generated: written only when it changed
       try {
         const want = await deskClaudeMd(h, $.plugin.root)

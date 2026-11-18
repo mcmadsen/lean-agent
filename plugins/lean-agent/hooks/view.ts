@@ -12,7 +12,8 @@ export type AnswerRow = { n: number; rec: DeskRec; unread: boolean }
 export type ThreadRow = { id: string; title: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean }
 export type View = { goals: GoalRow[]; answers: AnswerRow[]; unread: number; total: number; threads: ThreadRow[]; budget: string; errors: string[] }
 
-export const STALE_MS = 60 * 60_000
+import { STALE_MS } from './chaser'
+export { STALE_MS }
 const ID = /^t\d+$/
 
 const lastLine = (t: string) => t.split('\n').map(s => s.trim()).filter(Boolean).pop() ?? ''
