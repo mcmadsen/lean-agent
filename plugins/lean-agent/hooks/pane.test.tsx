@@ -110,3 +110,16 @@ test('view: the budget footer sums usd from ledger rows', async () => {
   h.files.set('/h/.lean-agent/ledger.jsonl', JSON.stringify({ ts: h.clock.t, role: 'desk', model: 'x', in: 1, out: 1, cache_read: 0, cache_write: 0, usd: 1.5 }) + '\n')
   expect((await loadView(h.host)).budget).toBe('$1.50')
 })
+
+test('view and pane: an open question shows until an answer row closes it', async ($, on) => {
+  const h = setup(on, [])
+  const q = (o: unknown) => JSON.stringify(o) + '\n'
+  h.files.set('/h/.lean-agent/questions.jsonl', q({ ts: 1, from: 't1', question: 'which db?' }) + q({ ts: 2, from: 't2', question: 'which cache?' }))
+  h.files.set('/h/.lean-agent/answers.jsonl', q({ ts: 3, q: 2, thread: 't2', text: 'redis' }))
+  const v = await loadView(h.host)
+  expect(v.openQuestions.map(x => [x.q, x.from, x.question])).toEqual([[1, 't1', 'which db?']])
+  const ui = await $.ui.mount(PANE as any)
+  expect((await ui.find({ type: 'Text', text: /open \? t1: which db\?/ }))?.text).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /which cache/ })).toBeFalsy()
+  await ui.unmount()
+})

@@ -6,7 +6,7 @@ argument-hint: create | status [tN] | comments <n>
 
 # Pull requests
 
-Never in a private project (the guard denies `gh pr create` and comments there) and never before the `review` skill
+Never in a private project (the guard denies every gh/az call that is not read-only, and any push, there) and never before the `review` skill
 has recorded a green review for HEAD (the push guard enforces it).
 
 - **create**: `git push -u origin <branch>` (after a green review), then

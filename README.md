@@ -160,11 +160,13 @@ All fail closed (a guard that throws denies):
 
 - **Desk strict mode**: the desk may read lean-agent state and use its own tools; it may not edit code or run builds.
 - **Push gate**: see above.
-- **Private projects**: every outward action is refused, review or not, no override: `git push`, `git remote add|set-url`,
-  `gh pr create|comment|merge|edit|close|reopen|ready|review`, `gh issue create|comment|edit|close|reopen|delete|transfer|pin|lock`,
-  `gh release *`, `gh repo create|edit|fork|delete|rename|archive`, `gh api` writes (`-X/--method POST|PUT|PATCH|DELETE`, or
-  `-f/-F/--field/--raw-field/--input` without an explicit GET), `az repos|devops|boards` unless list/show/query/get. Read-only calls
-  (`gh pr view|list`, `gh api` GET, `git fetch|log|status`) pass. Other projects only get the push gate and the protected-branch / `--force` guard.
+- **Private projects**: an allow-list, review or not, no override. `git push` and `git remote add|set-url` are refused. Every `gh` or `az`
+  call found anywhere in a command (also inside `bash -c`, `$(...)`, backticks, subshells, after `;` `&&` `|`, with global flags such as
+  `gh -R o/r`) must be read-only, or the whole command is denied: `gh pr view|list|diff|checks|status`, `gh issue view|list|status`,
+  `gh repo view|list`, `gh run view|list`, `gh auth status`, `gh api` with no write method or field flags, `az ... list|show|query|get`.
+  Subcommands are matched by position, so `gh issue list --label release` passes. Commands that cannot be parsed (unbalanced quotes,
+  `eval`, a `$variable` as program name) are denied. Everything else (gist, workflow run, secret set, ...) is denied as not on the list.
+  `git fetch|log|status` pass. Other projects only get the push gate and the protected-branch / `--force` guard.
 - **Workers**: readers are read-only; an edit grant is explicit (`allow-edit`).
 
 ## State files

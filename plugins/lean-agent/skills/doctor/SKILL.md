@@ -23,7 +23,7 @@ means nothing is opened; that is by design.
 ## What migrate does (design section 4)
 
 - Kept as is: `projects.json`, handovers, reviews, passes, `memory/`, `todo.json`, `worktrees.json`, `config.json`, `ledger.jsonl`.
-- Open goals without a thread and open questions to the desk become `goals.json` / `questions.jsonl`; the old files are archived. Migrated open questions show in the pane's Answers section until a thread's message answers them (oldest first).
+- Open goals without a thread and open questions to the desk become `goals.json` / `questions.jsonl`; the old files are archived. Open 0.45 questions to the desk are recorded and closed at migration (no thread can answer them), so they do not show in the pane.
 - **Every open 0.45 thread is closed.** Nothing is carried over; a readable list is kept in `~/.lean-agent/legacy-0.45/closed-threads.md`.
 - Recipes become `<project>/skills/<name>/SKILL.md`. Cards move to `legacy-0.45/`; tell the user which projects to
   re-learn (the `learn` skill) and offer to run it.

@@ -58,7 +58,7 @@ Legend: **KEEP** (how in pure Claude Code), **CHANGE** (what changes), **DROP** 
 | 21 | Push gate (review before push) | KEEP | mod `tool.call` on Bash `git push`: deny unless `reviews/<HEAD sha>.json` is green |
 | 22 | Worktrees + shared worktrees | KEEP | skill `worktree` (git worktree under `~/.lean-agent/worktrees/<project>/<branch>`), registry `worktrees.json` |
 | 23 | Push guard (protected branches, never `--force` to shared) | KEEP | same mod `tool.call` Bash guard as 21 |
-| 24 | Private projects (never push/publish) | KEEP | `projects.json` `private: true`; mod denies `git push`, `gh pr create`, `gh pr comment`, `gh issue comment`, `gh pr merge` and gh review comments in their paths (as in 0.45, plus `pr merge`); read-only `gh api` and other gh calls pass |
+| 24 | Private projects (never push/publish) | KEEP | `projects.json` `private: true`; mod denies every Bash command in their paths that contains a `gh`/`az` call not on the read-only allow-list (found anywhere in the text, also in `bash -c`, `$(...)`, subshells), plus `git push` and `git remote add|set-url`; unparsable commands are denied; read-only `gh pr view|list|diff|checks|status`, `gh issue view|list`, `gh api` GET and `az ... list|show` pass |
 | 25 | Goals + chaser/watchdog | KEEP | `goals.json`; desk mod `$.clock.every(60s)` marks stale goals, wakes the owning idle thread with a "status?" message, shows red in the pane |
 | 26 | myq / waiting / answers / inbox | KEEP | thread mod tool `lean_ask` -> `questions.jsonl`; desk asks with AskUserQuestion; answer goes to the thread inbox; pane "Answers" with ack |
 | 27 | Dialog hook (AskUserQuestion bookkeeping) | KEEP | mod `tool.call` on AskUserQuestion: after `next(e)` records the answer against the open question ids |
