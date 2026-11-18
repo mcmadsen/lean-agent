@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { check, fix } from './doctor'
-import { mergeModelSettings, readModelSettings } from './models'
+import { mergeModelSettings, readModelSettings, threadChoice } from './models'
 
 const DESK = '/h/lean-agent-desk/.claude/settings.json'
 
@@ -38,4 +38,20 @@ test('a settings file that does not parse is never overwritten', async () => {
   h.files.set(DESK, '{ broken')
   expect(await mergeModelSettings(h.host, DESK, { model: 'sonnet', effort: 'high' })).toBe(false)
   expect(h.files.get(DESK)).toBe('{ broken')
+})
+
+test('threads.effort from config.json applies; the thread\'s recorded choice beats config; a bad call value is an error', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ threads: { effort: 'low' } }))
+  expect(await threadChoice(h.host, '/h', {})).toEqual({ model: 'sonnet', effort: 'low' })
+  expect(await threadChoice(h.host, '/h', {}, { model: 'opus', effort: 'high' })).toEqual({ model: 'opus', effort: 'high' })
+  expect(typeof (await threadChoice(h.host, '/h', { effort: 'max' }))).toBe('string')
+})
+
+test('check says when the desk settings file does not parse, and merge refuses an array', async () => {
+  const h = fakeHost(null)
+  h.files.set(DESK, '{ broken')
+  expect((await check(h.host, '/p')).find(l => l.includes('does not parse'))).toContain('FIX')
+  h.files.set(DESK, '[]')
+  expect(await mergeModelSettings(h.host, DESK, { model: 'sonnet', effort: 'high' })).toBe(false)
 })

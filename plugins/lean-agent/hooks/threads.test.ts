@@ -366,3 +366,36 @@ test('new and start pass --model/--effort (call > config.json > default), record
   const resumes = h.claudeCalls().filter(a => a.includes('--resume'))
   for (const r of resumes) expect(r.some(x => x === '--model' || x === '--effort')).toBe(false)
 })
+
+test('a dead status with a lingering process is stopped and resumed, not left queued', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  const calls = alive(state, h, { ...ROW, pid: 42, status: 'failed', state: 'failed' })
+  h.clock.t += 60_000
+  await call({ action: 'send', tN: 't1', text: 'one' })
+  expect(calls).toEqual(['stop 11111111', '--bg --resume'])
+})
+
+test('a row that vanishes after the stop, or a pid that clears on a later poll, still resumes', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  state.rows = [{ ...ROW, pid: 42, status: 'idle', state: 'done' }]
+  let polls = 0
+  const calls: string[] = []
+  h.claude.handler = (a: string[]) => {
+    if (a[0] === 'agents') { if (a[1] === '--json' && calls.includes('stop 11111111') && ++polls >= 3) state.rows = []; return { exitCode: 0, stdout: JSON.stringify(state.rows) } }
+    calls.push(a.slice(0, 2).join(' '))
+    return { exitCode: 0, stdout: '' }
+  }
+  h.clock.t += 60_000
+  await call({ action: 'send', tN: 't1', text: 'one' })
+  expect(calls).toEqual(['stop 11111111', '--bg --resume'])
+})
+
+test('close stops a finished session whose process is still alive, by the listed id', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  const calls = alive(state, h, { ...ROW, id: 'abcd1234', pid: 42, status: 'idle', state: 'done' })
+  await call({ action: 'close', tN: 't1' })
+  expect(calls).toEqual(['stop abcd1234'])
+})

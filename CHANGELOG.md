@@ -26,7 +26,7 @@
 - Thread resume ran `claude --bg --resume <sid> -n <label> -- <prompt>`; any extra flag makes the CLI start a copy of the
   session. It now passes only `--resume <sid> -- <prompt>`. That continues the session itself only once its process has exited:
   a finished session whose process is still alive (listed with a pid, state done) is stopped first (`claude stop`, then
-  waited for), a working one is never stopped or resumed. If the CLI still prints "started a copy as <id>" the thread
+  waited for), a working one is never stopped or resumed (the listing is read again right before the stop). Closing a thread also stops a finished session that still has its process. If the CLI still prints "started a copy as <id>" the thread
   follows the copy (when the id names exactly one listed session) and the result says so.
 - The desk's skill-listing trim did not take effect on a real Mac: the engine caches `prompt.attachment`, and a listing built
   while the session was still in its spare folder (role not yet the desk) stayed. The role change now asks for the

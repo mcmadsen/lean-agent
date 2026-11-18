@@ -59,7 +59,6 @@ export function parseAgents(text: string): AgentRow[] {
 // Only these mean "no live work": anything else (busy, running, waiting, an unknown word) counts as running,
 // so an uncertain session is never resumed (a resume of a running session forks it).
 const IDLE = new Set(['idle', 'done', 'completed', 'complete', 'finished', 'stopped', 'exited', 'failed', 'error', 'dead'])
-const FINISHED = new Set(['idle', 'done', 'completed', 'complete', 'finished'])
 export const isRunning = (r: AgentRow | undefined) => !!r && !IDLE.has(r.status)
 
 // null = the listing failed or was not JSON: the caller must not treat that as "nothing is running"
@@ -247,18 +246,25 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
   // `claude --bg --resume` continues the session itself only once its process has exited; while the process still lives (finished,
   // idle) the same command starts a copy. So a finished-but-alive one is stopped first (never a working one), then resumed.
   if (row && row.pid > 0) {
-    if (!FINISHED.has(row.status)) return { ok: true, text: `${t.id} is not finished (${row.status || 'unknown'}): ${msgs.length} message(s) queued, no stop, no resume` }
-    const short = row.id || t.sid.slice(0, 8)
-    const st = await h.process.run(['claude', 'stop', short])
-    if (st.exitCode !== 0) return err(`${t.id}: claude stop ${short} failed (${(st.stderr || st.stdout).trim().slice(0, 200)}): not resumed, messages stay queued`)
-    let gone = false
-    for (let n = 0; n < 8 && !gone; n++) {
-      const l = await agents(h)
-      const cur = l?.find(a => a.sid === t.sid)
-      gone = !!l && (!cur || cur.pid === 0)
-      if (!gone) await h.process.run(['sleep', '1'])
+    // (a working or unknown status was handled above: only a finished or dead session with a lingering process gets here)
+    const fresh = (await agents(h))?.find(a => a.sid === t.sid) // look again right before stopping: never stop live work
+    if (!fresh) return err(`${t.id}: cannot list sessions (claude agents failed), so it is not resumed; messages stay queued`)
+    if (isRunning(fresh)) return { ok: true, text: `${t.id} is running again: ${msgs.length} message(s) queued, no stop, no resume` }
+    const short = fresh.id || t.sid.slice(0, 8)
+    if (fresh.pid > 0) {
+      const st = await h.process.run(['claude', 'stop', short])
+      if (st.exitCode !== 0) return err(`${t.id}: claude stop ${short} failed (${(st.stderr || st.stdout).trim().slice(0, 200)}): not resumed, messages stay queued`)
+      let gone = false
+      let listed = false
+      for (let n = 0; n < 8 && !gone; n++) {
+        const l = await agents(h)
+        if (l) listed = true
+        const cur = l?.find(a => a.sid === t.sid)
+        gone = !!l && (!cur || cur.pid === 0)
+        if (!gone && n < 7) await h.process.run(['sleep', '1'])
+      }
+      if (!gone) return err(listed ? `${t.id}: the session is still running after claude stop ${short}: not resumed, messages stay queued` : `${t.id}: could not confirm the stop (claude agents failed): not resumed, messages stay queued`)
     }
-    if (!gone) return err(`${t.id}: the session is still running after claude stop ${short}: not resumed, messages stay queued`)
   }
   const upTo = u.upTo
   const prompt = [opts.lead, batchPrompt(msgs), wakeMark(upTo)].filter(Boolean).join('\n\n')
@@ -348,9 +354,11 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           }
           t.state = 'closed'
           await save(h, home, t)
-          if (t.sid && isRunning((live ?? []).find(a => a.sid === t.sid))) {
-            const st = await h.process.run(['claude', 'stop', t.sid.slice(0, 8)])
-            if (st.exitCode !== 0) return { ok: true, text: `${id} closed, but claude stop ${t.sid.slice(0, 8)} failed: ${(st.stderr || st.stdout).trim().slice(0, 200)}. Stop it from the Claude app.` }
+          const lrow = (live ?? []).find(a => a.sid === t.sid)
+          if (t.sid && lrow && (isRunning(lrow) || lrow.pid > 0)) {
+            const stopId = lrow.id || t.sid.slice(0, 8)
+            const st = await h.process.run(['claude', 'stop', stopId])
+            if (st.exitCode !== 0) return { ok: true, text: `${id} closed, but claude stop ${stopId} failed: ${(st.stderr || st.stdout).trim().slice(0, 200)}. Stop it from the Claude app.` }
           }
           return { ok: true, text: `${id} closed` }
         }
