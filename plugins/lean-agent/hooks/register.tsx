@@ -33,6 +33,7 @@ export const resetModState = () => {
   applied = ''
   attempted = ''
   done.clear()
+  chain = Promise.resolve()
   seen = ''
   registered.clear()
   cwd = ''
@@ -147,6 +148,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
   if (key === applied) return []
   if (key !== attempted) {
     stopTimers()
+    notified = 0
     attempted = key
     done.clear()
   }
@@ -227,31 +229,37 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
 }
 
 // Decide the role from the session's directories and apply it. A failed detection leaves the role as it is.
-async function settle($: any, host: Host, dir: string, root: string): Promise<string[]> {
-  seen = `${dir}\n${root}`
+async function settle($: any, host: Host, dir: string, root: string, useRoot = true): Promise<string[]> {
   let r: Role | null = null
-  await soft($, 'role detection', async () => {
+  const ok = await soft($, 'role detection', async () => {
     r = await detectRole(host, dir)
-    if (r.kind === 'plain' && root && root !== dir) r = await detectRole(host, root)
+    if (r.kind === 'plain' && useRoot && root && root !== dir) r = await detectRole(host, root)
   })
-  cwd = dir
+  if (ok) {
+    seen = `${dir}\n${root}` // a failed detection is tried again at the next check
+    cwd = dir
+  }
   return applyRole($, host, r ?? role)
 }
 
 // Re-check the directory (CwdChanged, turn.start, prompt.submit): nothing happens unless it changed.
+// All role changes run one after the other.
+function serial<T>(fn: () => Promise<T>): Promise<T> {
+  const run = chain.then(fn)
+  chain = run.catch(() => undefined)
+  return run
+}
+
 function redetect($: any, hint?: string): Promise<unknown> {
-  chain = chain
-    .then(async () => {
-      const dir = hint ?? (await $.session.cwd().catch(() => ''))
-      const root = await $.session.root().catch(() => '')
-      if (!dir && !root) return
-      const d = typeof dir === 'string' && dir ? dir : String(root)
-      const rt = typeof root === 'string' ? root : ''
-      if (applied && seen === `${d}\n${rt}`) return
-      await settle($, hostOf($), d, rt)
-    })
-    .catch(() => undefined)
-  return chain
+  return serial(async () => {
+    const dir = hint ?? (await $.session.cwd().catch(() => ''))
+    const root = await $.session.root().catch(() => '')
+    if (!dir && !root) return
+    const d = typeof dir === 'string' && dir ? dir : String(root)
+    const rt = typeof root === 'string' ? root : ''
+    if (applied && seen === `${d}\n${rt}`) return
+    await settle($, hostOf($), d, rt, !hint) // an event's own directory beats a root that may not have moved yet
+  }).catch(() => undefined)
 }
 
 export const register: Register = on => {
@@ -260,7 +268,7 @@ export const register: Register = on => {
     const host = hostOf($)
     resetModState()
     const root = await $.session.root().catch(() => '')
-    const ctx = await settle($, host, e.cwd, typeof root === 'string' ? root : '')
+    const ctx = await serial(() => settle($, host, e.cwd, typeof root === 'string' ? root : ''))
     // the command is role-free: registered once here
     await $.command.register({ name: 'lean-agent', description: 'Open the lean-agent desk pane (goals, answers, threads)' }).catch(() => undefined)
     if (ctx.length) return next({ ...e, context: [...((e as any).context ?? []), ...ctx] } as any)
