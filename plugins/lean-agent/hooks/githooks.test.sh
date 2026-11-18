@@ -51,4 +51,56 @@ chmod 755 "$root/app/.husky/pre-push"
 git -C "$root/app" config core.hooksPath .husky
 push "$root/app" >/dev/null || { echo "FAIL: push with husky refused"; exit 1; }
 grep -q husky-pre-push "$root/log" || { echo "FAIL: husky hook did not run"; exit 1; }
+# live registry: projects.json newer than private.list is parsed directly (private path, remote, worktree by key)
+git -C "$root/app" config --unset core.hooksPath
+mk late; mk viaurl; mkdir -p "$lean/worktrees/wt"
+push "$root/late" >/dev/null || { echo "FAIL: late project should push before registration"; exit 1; }
+sleep 1
+cat > "$lean/projects.json" <<JSON
+{
+  "late": {
+    "path": "$root/late",
+    "private": true
+  },
+  "viaurl": {
+    "path": "$root/viaurl-x",
+    "remote": "$root/VIAURL.git/",
+    "private": true
+  },
+  "open": {
+    "path": "$root/app",
+    "private": false
+  },
+  "wt": {
+    "path": "$root/nowhere",
+    "private": true
+  }
+}
+JSON
+if out=$(push "$root/late"); then echo "FAIL: live projects.json ignored (private path)"; exit 1; fi
+echo "$out" | grep -q 'private project' || { echo "FAIL: no refusal text for live path: $out"; exit 1; }
+if push "$root/viaurl" >/dev/null; then echo "FAIL: live projects.json ignored (remote)"; exit 1; fi
+push "$root/app" >/dev/null || { echo "FAIL: non-private project refused by live parse"; exit 1; }
+# a list newer than projects.json is trusted again
+sleep 1
+printf 'path %s\n' "$root/secret" > "$lean/githooks/private.list"
+push "$root/late" >/dev/null || { echo "FAIL: fresh list should win over older projects.json"; exit 1; }
+# neither readable: fail closed
+touch "$lean/projects.json"; chmod 000 "$lean/projects.json"
+if [ "$(id -u)" != 0 ]; then
+  if push "$root/app" >/dev/null; then echo "FAIL: unreadable projects.json allowed a push"; exit 1; fi
+fi
+chmod 644 "$lean/projects.json"; rm "$lean/projects.json"; mv "$lean/githooks/private.list" "$lean/githooks/private.list.off"
+if push "$root/app" >/dev/null; then echo "FAIL: no registry at all allowed a push"; exit 1; fi
+mv "$lean/githooks/private.list.off" "$lean/githooks/private.list"
+# the chain honours a global core.hooksPath (and ignores lean-agent's own env override)
+mkdir "$root/ghooks"
+printf '#!/bin/sh\necho global-pre-commit >> "%s/log"\n' "$root" > "$root/ghooks/pre-commit"
+chmod 755 "$root/ghooks/pre-commit"
+rm -f "$root/app/.git/hooks/pre-commit"
+git config --file "$root/.gitconfig" core.hooksPath "$root/ghooks"
+: > "$root/log"
+g "$root/app" commit -q --allow-empty -m g >/dev/null || { echo "FAIL: commit with global hooksPath"; exit 1; }
+grep -q global-pre-commit "$root/log" || { echo "FAIL: global core.hooksPath hook did not run"; exit 1; }
+git config --file "$root/.gitconfig" --unset core.hooksPath
 echo "ok githooks"

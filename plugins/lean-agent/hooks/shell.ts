@@ -9,9 +9,24 @@ export type Verdict = { push: boolean; write: boolean; unsure: boolean }
 
 const EXP = '\u0001' // stands for any expansion inside a word
 const PUSH_TEXT = /\bgit\b[^;&|\n]*\bpush\b/
-// cheap whole-text check for private projects (wrappers like python -c / ssh are not parsed; a documented residual risk):
-// git push, gh create|comment|merge anywhere in the text, and the ways to skip the pre-push backstop
-export const PRIVATE_TEXT = /\bgit\b[^\n]*\bpush\b|\bgh\b[^\n]*\b(create|comment|merge)\b|(^|[\s'"])-c\s*["']?core\.hooksPath|\bGIT_CONFIG_(COUNT|KEY_\d*|PARAMETERS)/i
+// cheap whole-text check for private projects (wrappers like python -c / ssh are not parsed; a documented residual risk).
+// It runs on the command with quoted strings and heredoc bodies stripped, and matches `git push` / `gh <create|comment|merge>`
+// only at COMMAND positions (start, ; & && || | ( $( ` newline, after env assignments and env/sudo/command/exec/nohup/time
+// prefixes), so `git commit -m 'add push notifications'`, `git log --grep=push` and `ls src/gh && git merge main` pass.
+// The ways to skip the pre-push backstop (-c core.hooksPath, GIT_CONFIG_*) are matched on the raw text.
+export function stripData(c: string): string {
+  let out = c.replace(/<<-?[ \t]*(['"]?)([A-Za-z_]\w*)\1[^\n]*\n[\s\S]*?(\n[ \t]*\2[ \t]*(?=\n|$)|$)/g, m => m.slice(0, m.indexOf('\n')) + '\n')
+  out = out.replace(/'[^']*'|"(?:\\[\s\S]|[^"\\])*"/g, '""')
+  return out
+}
+const CMD = String.raw`(?:^|[;&|(\n\x60]|\$\()[ \t]*(?:(?:\w+=\S*|(?:env|sudo|command|exec|nohup|time)(?:[ \t]+-\S+)*)[ \t]+)*(?:\S*/)?`
+const GIT_PUSH = new RegExp(CMD + String.raw`git(?:[ \t]+(?:-[Cc][ \t]+\S+|-\S+))*[ \t]+push\b`)
+const GH_WRITE = new RegExp(CMD + String.raw`gh(?:[ \t]+(?:-R[ \t]+\S+|--repo[ \t]+\S+|-\S+))*[ \t]+(?:[\w-]+[ \t]+)?(?:create|comment|merge)\b`)
+const SKIP_HOOK = /(^|[\s'"])-c\s*["']?core\.hooksPath|\bGIT_CONFIG_(COUNT|KEY_\d*|PARAMETERS)/i
+export function privateText(c: string): boolean {
+  const d = stripData(c)
+  return GIT_PUSH.test(d) || GH_WRITE.test(d) || SKIP_HOOK.test(c)
+}
 const LEAN_OUT = /\blean-agent\b[^;&|\n]*(\bworktree\s+push\b|\bpr\s+create\b|\breview\b[^;&|\n]*--(post|comment)\b)/
 const GHAZ = /(^|[^\w./-])(gh|az)($|[^\w-])/
 const DYNAMIC = /(^|[;&|(`\n]|\$\()\s*(\w+=\S*\s+)*["']?\$[\w{(]/

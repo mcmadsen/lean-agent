@@ -26,9 +26,50 @@ name=$(basename "$0")
 here=$(cd "$(dirname "$0")" && pwd -P)
 norm() { printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's:/*$::; s:\\.git$::'; }
 if [ "$name" = pre-push ]; then
+  # the private registry is read live: projects.json is the truth; private.list is its cache, trusted only while it is
+  # strictly newer than projects.json (else the private entries are parsed straight from projects.json, which lean-agent
+  # writes pretty-printed: 2-space keys per project, 4-space fields). Neither readable: fail closed.
   list="$here/private.list"
-  if [ ! -r "$list" ]; then
-    echo "lean-agent: cannot read $list: git push is refused (fail closed)" >&2
+  lean=$(cd "$here/.." && pwd -P)
+  proj="$lean/projects.json"
+  entries=
+  if [ -e "$proj" ] && [ ! -r "$proj" ]; then
+    echo "lean-agent: cannot read $proj: git push is refused (fail closed)" >&2
+    exit 1
+  fi
+  if [ -r "$list" ] && { [ ! -e "$proj" ] || [ "$list" -nt "$proj" ]; }; then
+    entries=$(cat "$list")
+  elif [ -r "$proj" ]; then
+    if grep -q '[^[:space:]]' "$proj"; then
+      if [ "$(head -c 1 "$proj")" != "{" ] || { [ "$(wc -l < "$proj")" -lt 1 ] && [ "$(tr -d '[:space:]' < "$proj")" != "{}" ]; }; then
+        echo "lean-agent: cannot parse $proj: git push is refused (fail closed)" >&2
+        exit 1
+      fi
+    fi
+    entries=$(awk -v lean="$lean" '
+      function val(s,   v) { v = s; sub(/^[^:]*:[[:space:]]*"/, "", v); sub(/"[[:space:]]*,?[[:space:]]*$/, "", v); return v }
+      function flush() {
+        if (key != "" && priv) {
+          if (path != "") print "path " path
+          print "path " lean "/worktrees/" key
+          if (remote != "") print "url " remote
+          if (url != "") print "url " url
+        }
+        key = ""
+      }
+      /^  "[^"]*"[[:space:]]*:[[:space:]]*[{]/ { flush(); key = $0; sub(/^  "/, "", key); sub(/".*$/, "", key); path = ""; remote = ""; url = ""; priv = 0; next }
+      /^    "path"[[:space:]]*:/ { path = val($0) }
+      /^    "remote"[[:space:]]*:/ { remote = val($0) }
+      /^    "url"[[:space:]]*:/ { url = val($0) }
+      /^    "private"[[:space:]]*:[[:space:]]*true/ { priv = 1 }
+      END { flush() }' "$proj")
+    # a project path also counts through its symlink-resolved form
+    extra=$(printf '%s\\n' "$entries" | while IFS= read -r line; do
+      case "$line" in "path "*) r=$(cd "\${line#path }" 2>/dev/null && pwd -P) && [ -n "$r" ] && echo "path $r" ;; esac
+    done)
+    entries=$(printf '%s\\n%s\\n' "$entries" "$extra")
+  else
+    echo "lean-agent: cannot read $list or $proj: git push is refused (fail closed)" >&2
     exit 1
   fi
   top=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
@@ -40,18 +81,25 @@ if [ "$name" = pre-push ]; then
     val=\${line#* }
     [ -n "$val" ] || continue
     case "$kind" in
-      path) case "$top/" in "$val"/*) hit=$val ;; esac ;;
-      url) if printf '%s\\n' "$urls" | grep -qxF -- "$val"; then hit=$val; fi ;;
+      path) val=\${val%/}; case "$top/" in "$val"/*) hit=$val ;; esac ;;
+      url) val=$(norm "$val"); if printf '%s\\n' "$urls" | grep -qxF -- "$val"; then hit=$val; fi ;;
     esac
     [ -n "$hit" ] && break
-  done < "$list"
+  done <<EOF_ENTRIES
+$entries
+EOF_ENTRIES
   if [ -n "$hit" ]; then
     echo "lean-agent: $hit is a private project: git push is refused (no override)" >&2
     exit 1
   fi
 fi
-# chain: the repo's own core.hooksPath (its local config, e.g. husky) else <common git dir>/hooks
-orig=$(git config --local --get core.hooksPath 2>/dev/null)
+# chain: the repo's effective core.hooksPath (local, then global, then system config; lean-agent's own env override is
+# not a config file, so it is never seen here) else <common git dir>/hooks
+orig=
+for scope in --local --global --system; do
+  orig=$(git config $scope --get core.hooksPath 2>/dev/null) && [ -n "$orig" ] && break
+  orig=
+done
 if [ -n "$orig" ]; then
   case "$orig" in "~/"*) orig="$HOME/\${orig#"~/"}" ;; esac
   case "$orig" in /*) ;; *) orig="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/$orig" ;; esac
@@ -69,7 +117,7 @@ exit 0
 type Proj = { path?: string; private?: boolean; remote?: string; url?: string }
 const normUrl = (u: string) => u.trim().toLowerCase().replace(/\/+$/, '').replace(/\.git$/, '')
 
-// the list is rewritten on every thread start from projects.json
+// the cache of projects.json's private entries (the pre-push hook also reads projects.json itself when it is newer)
 export async function privateList(h: Host, home: string): Promise<string> {
   const projs = await readJson<Record<string, Proj>>(h, `${leanDir(home)}/projects.json`, {})
   const lean = await realPath(h, leanDir(home))
@@ -86,12 +134,28 @@ export async function privateList(h: Host, home: string): Promise<string> {
   return [...new Set(out)].join('\n') + '\n'
 }
 
-// idempotent: wrappers and list are rewritten on every thread start
+// Atomic: every file is written under a temp name (executable bit set for wrappers) and renamed into place, so a git
+// process never runs a half-written wrapper or reads a half-written list. The list is rewritten on EVERY call (the mod
+// calls this at desk/thread start, on every lean_thread action and after every lean_* tool); wrappers only when changed.
+let seq = 0
+async function putAtomic(h: Host, path: string, text: string, exec: boolean): Promise<void> {
+  const tmp = `${path}.tmp-${++seq}-${Math.floor(Math.random() * 1e9).toString(36)}`
+  await h.fs.write(tmp, text)
+  if (exec) {
+    const c = await h.process.run(['chmod', '755', tmp])
+    if (c.exitCode !== 0) { await h.process.run(['rm', '-f', tmp]); throw new Error(`chmod ${tmp} failed`) }
+  }
+  const r = await h.process.run(['mv', '-f', tmp, path])
+  if (r.exitCode !== 0) { await h.process.run(['rm', '-f', tmp]); throw new Error(`atomic write to ${path} failed`) }
+}
+
 export async function ensureGitHooks(h: Host): Promise<void> {
   const home = await homeDir(h)
   const dir = hooksDir(home)
   await mkdirp(h, dir)
-  await h.fs.write(`${dir}/${LIST}`, await privateList(h, home))
-  for (const n of HOOK_NAMES) await h.fs.write(`${dir}/${n}`, HOOK)
-  await h.process.run(['chmod', '755', ...HOOK_NAMES.map(n => `${dir}/${n}`)])
+  for (const n of HOOK_NAMES) {
+    const have = await h.fs.read(`${dir}/${n}`).catch(() => null)
+    if (have !== HOOK) await putAtomic(h, `${dir}/${n}`, HOOK, true)
+  }
+  await putAtomic(h, `${dir}/${LIST}`, await privateList(h, home), false)
 }

@@ -3,7 +3,7 @@
 // register.tsx wraps it fail-closed: a throwing guard denies.
 import { homeDir, leanDir, readJson, realPath, threadsDir, writeJson } from './state'
 import { greenReview } from './reviews'
-import { analyze, PRIVATE_TEXT } from './shell'
+import { analyze, privateText } from './shell'
 import type { Host } from './state'
 import type { Role } from './role'
 
@@ -102,7 +102,7 @@ async function protectedDenial($: Host, c: string, dir: string): Promise<string 
 async function pushDenial($: Host, c: string, cwd: string): Promise<string | null> {
   const a = analyze(c)
   const pushing = a.push
-  const text = PRIVATE_TEXT.test(c)
+  const text = privateText(c)
   if (!a.push && !a.write && !text) return null
   const dirs = dirsOf(c, cwd)
   for (const d of dirs) {

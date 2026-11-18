@@ -143,8 +143,8 @@ test('private projects never push or publish, review or not', async () => {
     'find . -exec gh pr merge 3 ;', 'if true; then gh pr merge 3; fi', "g''h pr merge 3", '\\gh pr merge 3', '/usr/bin/gh pr create', 'bash -c \'echo "x"; gh pr merge 3\'', 'echo ok <<< "$(gh pr merge 3)"',
     "cat <<EOF\n$(gh pr merge 3)\nEOF", "bash <<'EOF'\ngh pr merge 3\nEOF", 'echo "gh pr merge 3" | bash', 'bash <<< "gh pr merge 3"', 'git -C x push', 'git -c a=b push', 'echo "it\'s" > "$f"; gh pr merge 3',
     // whole-text check (quoted data included) and the ways to skip the pre-push backstop
-    'echo gh pr create', 'echo "gh pr create"', 'git commit -m "docs: gh pr create and git push"', "git commit -m 'run gh pr merge later'", 'cat <<EOF\nit\'s fine, gh pr create\nEOF', "cat <<'EOF' > \"$f\"\ndon't gh pr merge\nEOF", 'grep -r "gh pr create" .',
-    'python3 -c "import os; os.system(\'git push\')"', 'ssh h "git push origin x"', 'git push --no-verify', 'git -c core.hooksPath=/dev/null commit -m x', 'GIT_CONFIG_COUNT=1 git status', 'export GIT_CONFIG_KEY_0=core.hooksPath',
+    'gh pr create', 'FOO=1 git push', 'echo hi; git push', 'true && git push origin x', 'false || gh pr merge 3', 'cat f | git push', 'env -i git push', 'git push --no-verify',
+ 'git -c core.hooksPath=/dev/null commit -m x', 'GIT_CONFIG_COUNT=1 git status', 'export GIT_CONFIG_KEY_0=core.hooksPath',
     'lean-agent worktree push vault feature', 'lean-agent review vault --post']
   for (const command of denied)
     expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/secret')]).toEqual([command, expect.stringContaining('private project')])
@@ -154,7 +154,10 @@ test('private projects never push or publish, review or not', async () => {
     'gh issue list --label release', 'gh pr list --search release', 'gh api repos/o/r', 'gh -R o/r pr view 3', 'gh auth status', 'gh run list', 'gh pr diff 3', 'az --only-show-errors repos pr list',
     'bash -c "gh pr view 3"', 'x=$(gh pr list)', 'which gh', 'command -v gh', 'command -v az', 'type az', 'gh --version', 'gh', 'az', 'az --version', 'gh help', 'gh pr', 'cd src/gh', 'ls gh az',
     'echo x > "$f"', 'echo x >> $f 2>&1', 'echo x &> "$f"', 'grep p <<< "$o"',
-    'echo "unbalanced', 'echo it\'s', 'for f in gh az; do echo $f; done', 'echo $(date)', 'FOO=1 ls', 'sudo ls', '$HOME/bin/tool x', 'bash script.sh', 'eval "echo hi"', 'cat file | grep gh', 'ls src/az', 'gh pr view 3 --json title | jq .title'])
+    'echo "unbalanced', 'echo it\'s', 'for f in gh az; do echo $f; done', 'echo $(date)', 'FOO=1 ls', 'sudo ls', '$HOME/bin/tool x', 'bash script.sh', 'eval "echo hi"', 'cat file | grep gh', 'ls src/az', 'gh pr view 3 --json title | jq .title',
+    // quoted data / heredoc bodies / non-command positions are not commands
+    'echo gh pr create', 'echo "gh pr create"', 'git commit -m "docs: gh pr create and git push"', "git commit -m 'run gh pr merge later'", "cat <<EOF\nit's fine, gh pr create\nEOF", "cat <<'EOF' > \"$f\"\ndon't gh pr merge\nEOF", 'grep -r "gh pr create" .',
+    "git commit -m 'add push notifications'", 'git log --grep=push', 'ls src/gh && git merge main', 'git log --grep push --oneline', 'git diff main | grep merge', 'python3 -c "import os; os.system(\'git push\')"', 'ssh h "git push origin x"'])
     expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/secret')]).toEqual([command, null])
   // non-private: no publishing denial
   for (const command of ['gh pr create --fill', 'gh release create v1', 'gh api -X POST x', 'git remote add x u'])
