@@ -44,10 +44,15 @@ export const kTokens = (n: number) => `${Math.round(n / 1000)}k`
 
 // ---- the session's context size (main loop only) -----------------------------------------------------------------
 let ctxTokens = 0
+let sawUsage = false // a request of this session reported its usage (after a compaction the size is unknown until the next one)
 export const noteUsage = (u: Usage): void => {
   const n = contextTokens(u)
-  if (n > 0) ctxTokens = n
+  if (n > 0) {
+    ctxTokens = n
+    sawUsage = true
+  }
 }
+export const hasUsage = (): boolean => sawUsage
 export const contextSize = (): number => ctxTokens
 export const forgetContext = (): void => {
   ctxTokens = 0 // after a compaction: the next request tells the new size
@@ -75,6 +80,8 @@ export const watch = (): Watch => w
 export const resetCheckpoints = (): void => {
   w = fresh()
   ctxTokens = 0
+  sawUsage = false
+  sweeping = false
   ds = freshDesk()
 }
 const busy = () => w.agents > 0 || w.pushes > 0
@@ -107,7 +114,7 @@ export async function blocked(h: Host, id: string): Promise<string | null> {
 // At a tool boundary of the main loop: the ONE instruction, or null. Never twice per session, never while a subagent or a push runs.
 // `idle` (asked last, only when everything else says yes): false while the engine still lists a running subagent.
 export async function takeAsk(h: Host, id: string, idle?: () => Promise<boolean>): Promise<string | null> {
-  if (w.asked || w.reported || w.ready || busy()) return null
+  if (w.asked || w.reported || w.ready || busy() || ctxTokens < MIN_TOKENS) return null // (cheap checks first: this runs at every tool call)
   const cfg = await checkpointConfig(h)
   if (!cfg.enabled || ctxTokens < cfg.threadTokens) return null
   if (await blocked(h, id)) return null
@@ -131,6 +138,22 @@ async function markReady(h: Host, id: string, source: 'report' | 'fallback', sid
   await writeRequest(h, await homeDir(h), id, { phase: 'ready', ts: await h.clock.now(), source, tokens: ctxTokens, sid })
 }
 
+// A new main turn started in a session whose checkpoint was ready but not yet taken (the user typed in the app, a wake, a resume):
+// the report predates that work, so the request is withdrawn and the thread is asked again at a later boundary.
+export async function turnStarted(h: Host, id: string): Promise<void> {
+  if (!w.ready) return
+  w.ready = false
+  w.asked = false
+  w.reported = false
+  w.reminded = false
+  const home = await homeDir(h)
+  const rq = await readRequest(h, home, id)
+  if (rq?.phase === 'ready') await writeRequest(h, home, id, { ...rq, phase: 'done' })
+}
+
+// A request older than the thread's last wake predates work that session did since: it is stale
+export const staleRequest = (rq: Request, t: Thread): boolean => rq.ts < (t.lastWake || 0)
+
 // A main turn ended (`aborted` and `error` do not count). Returns what happened: 'ready' (the desk may start the fresh session),
 // 'reminded' (one more turn was started), null.
 export async function turnEnded(h: Host, id: string, o: { reason?: string; sid: string; submit?: (text: string) => Promise<unknown>; idle?: () => Promise<boolean> }): Promise<'ready' | 'reminded' | null> {
@@ -142,7 +165,11 @@ export async function turnEnded(h: Host, id: string, o: { reason?: string; sid: 
     await markReady(h, id, 'report', o.sid)
     return 'ready'
   }
-  // asked, never reported: one reminder turn, then a checkpoint from the reports the thread has already written
+  // asked, never reported. A thread whose last report is done has finished its work: no reminder, no fresh session for it.
+  const home = await homeDir(h)
+  const mine = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r && r.from === id)
+  if (mine[mine.length - 1]?.state === 'done') return null
+  // one reminder turn, then a checkpoint from the reports the thread has already written
   if (!w.reminded && o.submit) {
     w.reminded = true
     try {
@@ -159,7 +186,17 @@ export async function turnEnded(h: Host, id: string, o: { reason?: string; sid: 
 // ---- desk side: the 10 s tick -------------------------------------------------------------------------------------
 // Threads whose request is ready, oldest id first; `run` is leanThread's `checkpoint` action. A start that failed is tried again
 // after TRY_GAP_MS and given up after MAX_TRIES (a notice says so).
+let sweeping = false // the desk's ticks overlap when a start is slow (a stop waits up to 8 s): one sweep at a time
 export async function sweepCheckpoints(h: Host, run: (id: string) => Promise<{ ok: boolean; text: string } | unknown>): Promise<string[]> {
+  if (sweeping) return []
+  sweeping = true
+  try {
+    return await sweepAll(h, run)
+  } finally {
+    sweeping = false
+  }
+}
+async function sweepAll(h: Host, run: (id: string) => Promise<{ ok: boolean; text: string } | unknown>): Promise<string[]> {
   const home = await homeDir(h)
   const did: string[] = []
   let ents: { name: string }[] = []
@@ -174,6 +211,10 @@ export async function sweepCheckpoints(h: Host, run: (id: string) => Promise<{ o
     if (!t || t.state !== 'open' || !t.sid) continue
     const rq = await readRequest(h, home, e.name)
     if (rq?.phase !== 'ready') continue
+    if (staleRequest(rq, t)) {
+      await writeRequest(h, home, e.name, { ...rq, phase: 'done' })
+      continue
+    }
     if ((rq.tries ?? 0) >= MAX_TRIES) {
       await writeRequest(h, home, e.name, { ...rq, phase: 'failed' })
       await setNotice(h, `checkpoint-${e.name}`, `${e.name}: the checkpoint could not start a fresh session after ${MAX_TRIES} tries; start it with reopen or resume`)
@@ -199,8 +240,10 @@ export type DeskDeps = {
   status: (text: string) => void
   reset: () => void // forget the context size: the next request tells the new one
 }
-type Desk = { retryAt: number; fallback: number } // fallback: the context size the handover file was written at (0 = none)
-const freshDesk = (): Desk => ({ retryAt: 0, fallback: 0 })
+type Desk = { retryAt: number; fallback: number; rejected: number } // fallback: the context size the handover file was written at (0 = none)
+const freshDesk = (): Desk => ({ retryAt: 0, fallback: 0, rejected: 0 })
+// an engine without session.compact (a TypeError, "not available"): no retry will help
+const hopeless = (e: unknown) => e instanceof TypeError || /not (a function|available|supported)|unsupported|no implementation/i.test(String((e as Error)?.message ?? e))
 let ds: Desk = freshDesk()
 // the sentence the pane footer and the status line carry while only the handover file is possible
 export const deskNote = (): string => (ds.fallback ? `desk context ${kTokens(ds.fallback)}: start a new desk session (it reads the handover)` : '')
@@ -209,7 +252,9 @@ export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'ski
   const cfg = await checkpointConfig(h)
   const tokens = cfg.enabled ? await d.tokens().catch(() => 0) : 0
   if (!cfg.enabled || tokens < cfg.deskTokens) {
+    if (ds.fallback) d.status('') // the "start a new desk session" line goes away with the reason for it
     ds.fallback = 0
+    ds.rejected = 0
     return 'quiet'
   }
   if (d.busy()) return 'busy'
@@ -223,17 +268,25 @@ export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'ski
   let res: any
   try {
     res = await d.compact(DESK_COMPACT_INSTRUCTIONS)
-  } catch {
+  } catch (err) {
     if (d.busy()) {
       ds.retryAt = now + 30_000 // rejected because a turn started meanwhile: try again soon
       return 'busy'
+    }
+    // a rejection can be transient (a turn that just started, an API error, a limit): once more soon; twice in a row, or an engine
+    // that has no session.compact, is "not possible": the handover file
+    if (!hopeless(err) && ++ds.rejected < 2) {
+      ds.retryAt = now + 30_000
+      return 'skipped'
     }
     await writeDeskHandover(h, tokens, await d.recent().catch(() => []))
     ds.fallback = tokens
     d.status(deskNote())
     return 'fallback'
   }
+  ds.rejected = 0
   if (res && typeof res === 'object' && typeof res.skip === 'string') return 'skipped' // a hook vetoed it: later
+  if (ds.fallback) d.status('')
   ds.fallback = 0
   d.reset()
   return 'compacted'

@@ -30,7 +30,7 @@ import { rotateLedger } from './ledger'
 import { SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 import { syncWithScripts } from './rulelines'
 import { exportFeedback, logRefusal } from './feedbackexport'
-import { contextSize, deskTick, enter, forgetContext, isPush, noteReported, noteUsage, resetCheckpoints, sweepCheckpoints, takeAsk, turnEnded } from './checkpoint'
+import { contextSize, deskTick, enter, forgetContext, hasUsage, isPush, noteReported, noteUsage, resetCheckpoints, sweepCheckpoints, takeAsk, turnEnded, turnStarted } from './checkpoint'
 
 setRunning(VERSION) // the code in this session; skew.ts compares it with what is installed
 
@@ -316,7 +316,8 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
           return (Array.isArray(m) ? m : []).filter((x: any) => x?.role === 'user' && typeof x.text === 'string' && x.text.trim() && !x.text.startsWith('[lean-agent]')).slice(-6).map((x: any) => x.text as string)
         }
         const out = await deskTick(host2, {
-          tokens: async () => contextSize() || Number((await $.session.usage())?.context?.tokens) || 0,
+          // (the engine's own figure only before this session's first request: right after a compaction it may still be the old one)
+          tokens: async () => contextSize() || (hasUsage() ? 0 : Number((await $.session.usage())?.context?.tokens) || 0),
           busy: () => busySince > 0 && now - busySince < BUSY_MAX_MS,
           compact: async instructions => $.session.compact({ instructions }), // (an engine without it, or a turn that started, rejects: the handover file)
           // (the engine runs every session.compact hook but the calling plugin's own, checked live: the notes are written here)
@@ -463,6 +464,7 @@ export const register: Register = on => {
   on('turn.start', async ($, e: any, next) => {
     if (!e.agentId) busySince = (await $.clock.now()) || 1
     await redetect($)
+    if (role.kind === 'thread' && !e.agentId) await turnStarted(hostOf($), role.id).catch(() => undefined) // work after a ready checkpoint withdraws it
     await showSkew($)
     return next(e)
   })

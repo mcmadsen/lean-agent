@@ -198,6 +198,7 @@ context size and, past a threshold, shrinks it:
 { "checkpoint": { "enabled": true, "threadTokens": 100000, "deskTokens": 100000 } }
 ```
 
+- `enabled` is off only for the JSON value `false`; a threshold below 10000 (or not a number) is ignored and the default 100000 used.
 - A **thread** over `threadTokens` is told once, at a tool boundary, to finish its step and report with `lean_report` state
   `checkpoint` (branch, worktree, last commit, pushed, done, open items, next step). The desk then starts a new background session for
   the same tN with a handover built from that report and the rest of what lean-agent keeps, and stops the old one. At most one

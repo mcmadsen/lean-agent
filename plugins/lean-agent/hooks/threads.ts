@@ -8,7 +8,7 @@ import type { Choice } from './models'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { buildHandover, olderVersion, pluginVersion } from './handover'
 import { LIMIT_PROMPT, isLimitRow, readLimit, usable } from './limits'
-import { GAP_MS as CHECKPOINT_GAP_MS, kTokens, readRequest, writeRequest } from './checkpoint'
+import { GAP_MS as CHECKPOINT_GAP_MS, TRY_GAP_MS, kTokens, readRequest, staleRequest, writeRequest } from './checkpoint'
 
 export const WAKE_GAP_MS = 30_000
 
@@ -467,6 +467,12 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           const rq = await readRequest(h, home, id)
           if (rq?.phase !== 'ready') return err(`${id}: no checkpoint is waiting`)
           const now = await h.clock.now()
+          // (checked again inside the lock: a tick that waited here may find the request stale, or just tried)
+          if (staleRequest(rq, t)) {
+            await writeRequest(h, home, id, { ...rq, phase: 'done' })
+            return { ok: true, text: `${id}: the session worked on after its checkpoint report: no new session` }
+          }
+          if (rq.lastTry && now - rq.lastTry < TRY_GAP_MS) return { ok: true, text: `${id}: the last try to start a checkpoint was less than a minute ago` }
           if (t.lastCheckpoint && now - t.lastCheckpoint < CHECKPOINT_GAP_MS) {
             await writeRequest(h, home, id, { ...rq, phase: 'done' }) // at most one per 20 minutes: the request is dropped, the session goes on as it is
             return { ok: true, text: `${id}: the last checkpoint is less than 20 minutes old, no new session` }
@@ -551,10 +557,13 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           await appendJsonl(h, `${tpath(home, id)}/history.jsonl`, { ts: await h.clock.now(), kind: 'approve-push', sha, project: t.project, reason: (i.reason ?? '').trim().slice(0, 200) || undefined })
           return { ok: true, text: `approved: one push of ${sha.slice(0, 8)} for ${t.project} by ${id}, valid 2 h, single use` }
         }
-        case 'park':
+        case 'park': {
           t.state = 'parked'
           await save(h, home, t)
+          const rq = await readRequest(h, home, id)
+          if (rq?.phase === 'ready') await writeRequest(h, home, id, { ...rq, phase: 'done' }) // a parked thread is never checkpointed, nor later when reopened
           return { ok: true, text: `${id} parked` }
+        }
         case 'reopen': {
           if (t.state === 'closing') return err(`${id} is closing, not closed: stop its session from the Claude app, close ${id} again, then reopen`)
           if (t.state !== 'closed') {
