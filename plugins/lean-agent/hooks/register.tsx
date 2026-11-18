@@ -2,7 +2,8 @@ import type { Register } from 'claude-code'
 
 import { recordSid, resolveRole, roleReport } from './role'
 import type { Role } from './role'
-import { deskClaudeMd, leanThread } from './threads'
+import { deskClaudeMd, leanThread, listAgents } from './threads'
+import { limitFromUsage, limitTick, readLimit, writeLimit } from './limits'
 import { ensureGitHooks } from './githooks'
 import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
@@ -185,6 +186,19 @@ async function registerOnce($: any, spec: any): Promise<void> {
   registered.add(spec.name)
 }
 
+// thread side of the usage-limit resume: the exhausted rate-limit windows give the reset (limitFromUsage); the record is kept as it is
+// when it is already there for the same reset (it may carry the "already resumed" mark)
+async function noteLimit($: any, id: string): Promise<void> {
+  const host = hostOf($)
+  const now = await host.clock.now()
+  const resetAt = limitFromUsage(await $.session.usage(), now)
+  if (!resetAt || !lastSid) return
+  const home = await homeDir(host)
+  const old = await readLimit(host, home, id)
+  if (old && old.sid === lastSid && old.resetAt === resetAt) return
+  await writeLimit(host, home, id, { resetAt, seenAt: now, source: 'mod', sid: lastSid })
+}
+
 // every timer asks the CURRENT role, so a stray tick after a role change does nothing
 function every($: any, ms: number, want: Role['kind'], fn: (host: Host) => Promise<void>): void {
   const t = $.clock.every(ms, async () => {
@@ -261,6 +275,18 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       })
       // the chaser: a goal untouched for an hour gets one status message to its open thread
       every($, 60_000, 'desk', async host2 => void (await chase(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }))))
+      // usage limit: a thread blocked by it is resumed once, two minutes after the reset (docs/usage-limit-resume.md; config desk.autoResume)
+      every($, 60_000, 'desk', async host2 => {
+        const did = await limitTick(host2, {
+          agents: async () => (await listAgents(host2)) as any,
+          logs: async row => {
+            const r = await host2.process.run(['claude', 'logs', row.id || row.sid.slice(0, 8)], { timeoutMs: 20_000 })
+            return r.exitCode === 0 ? r.stdout.slice(-20_000) : null
+          },
+          resume: id => leanThread(host2, $.plugin.root, { action: 'limit-resume', tN: id }),
+        })
+        for (const line of did) $.ui.log(`lean-agent: ${line}`, { to: 'debug' })
+      })
       // scheduled sends: due lines of scheduled.jsonl go to their thread while the desk runs
       every($, 30_000, 'desk', async host2 => void (await runSchedule(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }))))
     })
@@ -398,6 +424,8 @@ export const register: Register = on => {
   })
   on('turn.complete', async ($, e: any, next) => {
     if (!e.agentId) busySince = 0
+    // a thread's turn that died on an API error: if a rate-limit window is spent, keep its reset for the desk's resume
+    if (role.kind === 'thread' && !e.agentId && e.reason === 'error') await noteLimit($, role.id).catch(() => undefined)
     return next(e)
   })
 

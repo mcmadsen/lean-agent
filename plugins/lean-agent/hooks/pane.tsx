@@ -5,6 +5,7 @@ import { ackRows, loadView, resetViewCache, threadStatus } from './view'
 import { CONFIRM_MS, confirming, isOpen, patchUi, readUi, resetPaneUi } from './panestate'
 import type { GoalTone, View } from './view'
 import { leanThread } from './threads'
+import { fmtUntil } from './limits'
 import { hostOf } from './host'
 import { skillStat } from './skilltrim'
 import { NEXT_STEP, bounded, openDesk, setupCheck, setupFix, setupText } from './setup'
@@ -363,6 +364,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
                 <Text>
                   {t.id}{t.model ? ` · ${t.model}/${t.effort}` : ''} {short(t.title, 30)} [{t.run}] <Text dimColor>{short(t.last, 50)}</Text>
                   {t.needsYou ? <Text color="yellow"> needs you: open it in the app</Text> : null}
+                  {t.pausedUntil ? <Text color="yellow"> paused until {fmtUntil(t.pausedUntil, now2)}</Text> : null}
                 </Text>
                 {t.resumable && <Button key={`resume-${t.id}`} label="Resume" onPress={thread('resume', t.id)} />}
                 {t.resumable && <Button key={`start-${t.id}`} label="Start" onPress={thread('start', t.id)} />}

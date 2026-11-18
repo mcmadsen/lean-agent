@@ -90,6 +90,8 @@ Talk to the desk in plain language. It starts a thread for anything that touches
   ones that never started. **Close** (press twice) and **Close all done** never touch a working thread; closed threads sit in a
   collapsed "Closed (N)" with **Reopen**. Section headers fold and unfold; an answer row expands to its full text.
 - Threads send a question or a done / blocked report straight to the desk's session; the inbox and the pane keep every report.
+- A thread stopped by the usage limit shows "paused until 16:00" and is resumed by the desk two minutes after the reset, once per
+  reset and never when you parked or closed it (`{ "desk": { "autoResume": false } }` turns it off; [spec](docs/usage-limit-resume.md)).
 
 `/lean-agent` opens the pane. Threads run with an allow-list: Edit, Write and Bash inside their own worktrees and the
 lean-agent folder without asking. Pushes stay behind the review gate and the private-project rule.

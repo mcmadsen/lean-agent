@@ -7,6 +7,7 @@ import { settingsKeys, threadChoice } from './models'
 import type { Choice } from './models'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { buildHandover, olderVersion, pluginVersion } from './handover'
+import { LIMIT_PROMPT, isLimitRow, readLimit, usable } from './limits'
 
 export const WAKE_GAP_MS = 30_000
 
@@ -76,6 +77,7 @@ export const isWorking = (r: AgentRow | undefined) => isRunning(r) || r?.state =
 export const needsYou = (r: AgentRow | undefined) => !!r && (!!r.waitingFor || r.state === 'blocked')
 
 // null = the listing failed or was not JSON: the caller must not treat that as "nothing is running"
+export { agents as listAgents }
 async function agents(h: Host): Promise<AgentRow[] | null> {
   const r = await h.process.run(['claude', 'agents', '--json', '--all'])
   if (r.exitCode !== 0) return null
@@ -276,12 +278,13 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
 }
 
 // Stop a finished-but-alive session before anything takes its place (a resume, a fresh session). null = it is gone, go on; an Out =
-// stop here with that answer. Never stops live work: the listing is read again right before the stop.
-async function stopAlive(h: Host, t: Thread, queued: string, did: string): Promise<Out | null> {
+// stop here with that answer. Never stops live work: the listing is read again right before the stop. `limit`: a session blocked by
+// the usage limit (state blocked, nothing it waits for) is not live work and may be stopped.
+async function stopAlive(h: Host, t: Thread, queued: string, did: string, limit = false): Promise<Out | null> {
   const fresh = (await agents(h))?.find(a => a.sid === t.sid) // look again right before stopping: never stop live work
   const stays = queued ? 'messages stay queued' : 'nothing was started'
   if (!fresh) return err(`${t.id}: cannot list sessions (claude agents failed), so it is not ${did}; ${stays}`)
-  if (isRunning(fresh)) return { ok: true, text: `${t.id} is running again: ${queued || 'nothing'} queued, no stop, no ${did === 'resumed' ? 'resume' : 'new session'}` }
+  if (isRunning(fresh) && !(limit && isLimitRow(fresh))) return { ok: true, text: `${t.id} is running again: ${queued || 'nothing'} queued, no stop, no ${did === 'resumed' ? 'resume' : 'new session'}` }
   const short = fresh.id || t.sid.slice(0, 8)
   if (fresh.pid > 0) {
     const st = await h.process.run(['claude', 'stop', short])
@@ -341,7 +344,9 @@ async function pending(h: Host, home: string, t: Thread): Promise<Inbox[]> {
 
 // Resume the thread's session with the queued batch, unless it is running (never resume a running session)
 // or was woken less than 30 s ago (the batch stays queued for the next wake).
-async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; lead?: string; installed?: string } = {}): Promise<Out> {
+// `limit`: the resume after a usage limit (docs/usage-limit-resume.md): a session blocked by the limit counts as not running, is
+// stopped when its process lingers, and the 30 s gap does not apply (the desk's tick marks one resume per reset itself).
+async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; lead?: string; installed?: string; limit?: boolean } = {}): Promise<Out> {
   if (t.state !== 'open') return { ok: true, text: `${t.id} is ${t.state}: message queued, no wake` }
   if (!t.sid) return { ok: true, text: `${t.id} has no session yet: queued; use start` }
   const u = await unconsumed(h, home, t.id) // one read: the messages and the position they end at
@@ -350,15 +355,15 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
   const listed = await agents(h)
   if (!listed) return err(`${t.id}: cannot list sessions (claude agents failed), so it is not resumed; messages stay queued`)
   const row = listed.find(a => a.sid === t.sid)
-  if (isRunning(row)) return { ok: true, text: `${t.id} is running: ${msgs.length} message(s) queued, it reads them itself` }
+  if (isRunning(row) && !(opts.limit && isLimitRow(row))) return { ok: true, text: `${t.id} is running: ${msgs.length} message(s) queued, it reads them itself`, data: { resumed: false } }
   const now = await h.clock.now()
-  if (t.lastWake && now - t.lastWake < WAKE_GAP_MS) return { ok: true, text: `${t.id} was woken ${Math.round((now - t.lastWake) / 1000)} s ago: queued for the next wake` }
+  if (!opts.limit && t.lastWake && now - t.lastWake < WAKE_GAP_MS) return { ok: true, text: `${t.id} was woken ${Math.round((now - t.lastWake) / 1000)} s ago: queued for the next wake` }
   // `claude --bg --resume` continues the session itself only once its process has exited; while the process still lives (finished,
   // idle) the same command starts a copy. So a finished-but-alive one is stopped first (never a working one), then resumed.
   if (row && row.pid > 0) {
     // (a working or unknown status was handled above: only a finished or dead session with a lingering process gets here)
-    const stopped = await stopAlive(h, t, `${msgs.length} message(s)`, 'resumed')
-    if (stopped) return stopped
+    const stopped = await stopAlive(h, t, `${msgs.length} message(s)`, 'resumed', !!opts.limit)
+    if (stopped) return stopped.ok ? { ...stopped, data: { resumed: false } } : stopped
   }
   const upTo = u.upTo
   const prompt = [opts.lead, batchPrompt(msgs), wakeMark(upTo)].filter(Boolean).join('\n\n')
@@ -374,7 +379,7 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
   t.delivered = upTo
   if (opts.installed) t.version = opts.installed // the resumed process loads the code installed now
   await save(h, home, t)
-  return { ok: true, text: `${t.id} woken with ${msgs.length} message(s)${copied ? `; the CLI started a copy, the thread now follows session ${copied.slice(0, 8)}` : copy ? `; the CLI started a copy as ${copy}, which ${hits.length > 1 ? 'matches several sessions' : 'is not in the session list yet'}: the thread keeps its old session id, check ${t.id} with threads` : ''}` }
+  return { ok: true, data: { resumed: true }, text: `${t.id} woken with ${msgs.length} message(s)${copied ? `; the CLI started a copy, the thread now follows session ${copied.slice(0, 8)}` : copy ? `; the CLI started a copy as ${copy}, which ${hits.length > 1 ? 'matches several sessions' : 'is not in the session list yet'}: the thread keeps its old session id, check ${t.id} with threads` : ''}` }
 }
 
 async function list(h: Host, home: string): Promise<Out> {
@@ -431,6 +436,14 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
             return fresh(r) ? { ...r, text: `${id} started as a new session instead of a resume: the old one ran lean-agent ${was}, ${installed} is installed (old conversation kept read-only). ${r.text}` } : r
           }
           return await wake(h, home, t, { force: true, lead: 'Continue where you left off.', installed })
+        }
+        case 'limit-resume': {
+          // only the desk's tick calls this (not in the tool's schema): the session was seen blocked by the usage limit and its reset
+          // has passed. Checked again here, inside the lock: an open thread, a record for this very session that no parking cancelled.
+          if (t.state !== 'open') return err(`${id} is ${t.state}: not resumed after the usage limit`)
+          const rec = await readLimit(h, home, id)
+          if (!usable(rec, t.sid, await h.clock.now()) || rec.cancelled) return err(`${id}: no usable usage-limit record for its session, nothing resumed`)
+          return await wake(h, home, t, { force: true, lead: LIMIT_PROMPT, limit: true })
         }
         case 'start': {
           if (t.state === 'closed' || t.state === 'closing') return err(`${id} is ${t.state}; reopen it first`)

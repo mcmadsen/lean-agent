@@ -136,6 +136,18 @@ version lines in `plugin.json`, `marketplace.json` and `pane.tsx` are left to th
   collapsed "Closed (N)" with a Reopen button each. A session waiting on a prompt nobody answers (`claude agents` `waitingFor`) is
   marked "needs you: open it in the app".
 
+### Added (desk, threads)
+- **Usage-limit auto-resume** (spec: `docs/usage-limit-resume.md`). A thread session blocked by the account's usage limit (`claude
+  agents --json` state `blocked` without `waitingFor`) used to sit there until someone noticed. The desk's mod (every 60 s) finds
+  the reset time (the thread's own mod records the exhausted rate-limit windows at the failed turn; else the last "You've hit your
+  ... limit · resets 4pm (UTC)" line of `claude logs <id>`, parsed: `4pm`, `16:00`, `(UTC)` / `(GMT+2)` / IANA zones, `Nov 20, 4pm`,
+  `in 2h`; anything else is no answer), and two minutes after it stops a lingering process (`claude stop`, wait until no pid) and
+  runs `claude --bg --resume <sid> -- "The usage limit reset; check your worktree state and continue."` (queued desk messages ride
+  along). Once per reset (`threads/tN/limit.json` holds the mark, set before the resume; a failed start gives it back, three tries),
+  never for a parked or closed thread (marked cancelled, a later reopen does not revive it), never over a working or
+  permission-blocked session. The pane row says "paused until 16:00" (instead of "needs you") and keeps Close.
+  `desk.autoResume: false` in `config.json` turns it off. Not yet seen on a live limit: see the spec's last section.
+
 ### Fixed (desk, threads)
 - Background threads blocked silently on permission prompts nobody answers. The `worktree` skill and the thread template say to create
   worktrees with `git -C <repo> worktree add <abs path>` under `~/.lean-agent/worktrees` and never with Claude Code's EnterWorktree

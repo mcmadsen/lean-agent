@@ -7,6 +7,7 @@ import { openQuestions } from './extras'
 import { readNotices } from './notices'
 import { spendLine } from './stats'
 import { isRunning, isWorking, needsYou, parseAgents } from './threads'
+import { isLimitRow, pausedRec, readLimit } from './limits'
 import type { Thread } from './threads'
 
 export type GoalTone = 'working' | 'waiting' | 'stuck' | 'quiet'
@@ -15,7 +16,7 @@ export type AnswerRow = { n: number; rec: DeskRec; unread: boolean }
 // working: the session is busy or reports state working (never closed from the pane); done: the thread's LAST record is a done report
 // (a later question or progress makes it not done); asking: its last record is a question or one is unread; needsYou: the session
 // waits on a prompt nobody answers (open it in the app)
-export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean }
+export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number }
 export type ClosedRow = { id: string; title: string; last: string }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
@@ -90,7 +91,7 @@ export async function loadView(h: Host): Promise<View> {
       .slice(0, ANSWERS_MAX)
   })
   await guard('questions', async () => { v.openQuestions = await openQuestions(h) })
-  const rows = new Map<string, { run: boolean; working: boolean; needsYou: boolean }>()
+  const rows = new Map<string, { run: boolean; working: boolean; needsYou: boolean; limit: boolean }>()
   let agentsOk = true
   await guard('agents', async () => {
     const t = await h.clock.now()
@@ -104,7 +105,7 @@ export async function loadView(h: Host): Promise<View> {
       agentsOk = false
       throw new Error(`claude agents exited ${r.exitCode}`)
     }
-    for (const a of parseAgents(r.stdout)) rows.set(a.sid, { run: isRunning(a), working: isWorking(a), needsYou: needsYou(a) })
+    for (const a of parseAgents(r.stdout)) rows.set(a.sid, { run: isRunning(a), working: isWorking(a), needsYou: needsYou(a), limit: isLimitRow(a) })
   })
   const asking = new Set<string>()
   const owner = new Map<string, string>() // tN -> last record text
@@ -132,6 +133,8 @@ export async function loadView(h: Host): Promise<View> {
       const ag = t.sid ? rows.get(t.sid) : undefined
       const running = !!ag?.run
       const lr = lastRec.get(t.id)
+      // blocked by the usage limit with a known reset (and the desk's auto-resume not given up): paused, not "needs you", not working
+      const paused = t.state === 'open' && ag?.limit ? pausedRec(await readLimit(h, home, t.id), t.sid, now) : null
       v.threads.push({
         id: t.id,
         title: t.title,
@@ -141,11 +144,12 @@ export async function loadView(h: Host): Promise<View> {
         run: t.state === 'parked' ? 'parked' : running ? 'running' : 'idle',
         last: lastLine(typeof notes === 'string' ? notes : '') || owner.get(t.id) || '',
         resumable: t.state === 'open' && !running && agentsOk,
-        working: !!ag?.working || !agentsOk, // an unreadable listing is never "not working": nothing is closed on a guess
+        working: (!!ag?.working && !paused) || !agentsOk, // an unreadable listing is never "not working": nothing is closed on a guess
         done: !!lr && lr.kind === 'report' && lr.state === 'done',
         asking: asking.has(t.id) || lr?.kind === 'ask',
         blocked: !!lr && lr.kind === 'report' && lr.state === 'blocked',
-        needsYou: !!ag?.needsYou,
+        needsYou: !!ag?.needsYou && !paused,
+        ...(paused ? { pausedUntil: paused.resetAt } : {}),
       })
     }
   })
