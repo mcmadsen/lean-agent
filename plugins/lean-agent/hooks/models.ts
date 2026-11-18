@@ -58,6 +58,42 @@ export async function mergeModelSettings(h: Host, path: string, c: Choice): Prom
   return true
 }
 
+// The Claude app opens a file only inside the session's folders ("This file is outside this session's folders"): the desk folder's
+// settings list ~/.lean-agent in permissions.additionalDirectories so the desk can open the feedback export, handovers and
+// reviews there. Merged, never replaced: every other key (and every other directory the user listed) stays. A file that does not
+// parse is left alone (false).
+export async function mergeAdditionalDirectory(h: Host, path: string, dir: string): Promise<boolean> {
+  let cur: Record<string, any> = {}
+  if (await h.fs.exists(path)) {
+    try {
+      const t = String(await h.fs.read(path))
+      const v = t.trim() ? JSON.parse(t) : {}
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return false
+      cur = v
+    } catch {
+      return false
+    }
+  }
+  const perms = cur.permissions && typeof cur.permissions === 'object' && !Array.isArray(cur.permissions) ? cur.permissions : {}
+  const dirs: unknown[] = Array.isArray(perms.additionalDirectories) ? perms.additionalDirectories : []
+  if (dirs.includes(dir)) return true
+  const next = { ...cur, permissions: { ...perms, additionalDirectories: [...dirs, dir] } }
+  await mkdirp(h, dirOf(path))
+  await atomicWrite(h, path, JSON.stringify(next, null, 2) + '\n')
+  return true
+}
+
+// Is `dir` in the settings file's permissions.additionalDirectories? (A missing or unparsable file: no.)
+export async function hasAdditionalDirectory(h: Host, path: string, dir: string): Promise<boolean> {
+  try {
+    const v = JSON.parse(String(await h.fs.read(path)))
+    const dirs = v?.permissions?.additionalDirectories
+    return Array.isArray(dirs) && dirs.includes(dir)
+  } catch {
+    return false
+  }
+}
+
 export async function readModelSettings(h: Host, path: string): Promise<Partial<Choice> | null> {
   try {
     const v = JSON.parse(String(await h.fs.read(path)))

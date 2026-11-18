@@ -75,7 +75,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       const o = await bounded($, exportFeedback(hostOf($), $.plugin.root, { notes: typeof e?.args === 'string' ? e.args : undefined, version: VERSION }), 'feedback export', 60_000)
       return { text: o.text }
     } catch (err) {
-      return { text: `feedback export failed: ${String((err as Error)?.message ?? err).slice(0, 200)}` }
+      return { text: `Feedback export failed: ${String((err as Error)?.message ?? err).slice(0, 200)}. Nothing was posted.` }
     }
   })
 

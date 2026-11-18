@@ -25,10 +25,11 @@ Nothing here is ever posted without an explicit yes from the user in this chat.
 "export", `/lean-agent-feedback [notes]` (any session, no model turn) or, desk: `lean_doctor` action `export`
 (`notes?`): the mod, as a script and not a model, writes ONE file `~/.lean-agent/feedback-export/<YYYY-MM-DD-HHMM>.md` and
 prints its path. It holds: the user's notes, the environment (running vs installed lean-agent version, Claude Code version,
-OS family), the doctor's problem lines, every draft in `feedback-drafts/` not exported before, the worker feedback since the
-last export (counts by status; the `missing`, `refused`, `unverified` and `unreached` texts grouped, de-duplicated, with
-counts), the guard refusals (text, agent type, counts), the script candidates for lean-agent core and the threads that
-reported `blocked`. It is anonymised by code (home dir and user name, project names as project-A, B ..., emails, URLs, hashes,
+OS family), the doctor's problem lines, every draft in `feedback-drafts/` not exported before (titled by its first heading), the
+worker feedback since the last export (old and new `feedback.jsonl` both read; counts by status; the `missing`, `refused`,
+`unverified` and `unreached` texts grouped, de-duplicated, with counts), the guard refusals (text, agent type, counts), the
+script candidates for lean-agent core and the threads that reported `blocked`. Every section is always there, saying `none` when
+empty. It is anonymised by code (home dir and user name, project names as project-A, B ..., emails, URLs, hashes,
 ticket numbers, tokens) and refuses to write the file when a known private string survived, saying which rule missed. Over 40 KB
 the oldest and least repeated items are summarised.
 
