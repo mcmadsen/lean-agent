@@ -7,6 +7,7 @@ import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
 import { THREAD_TOOLS, consumeWake, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide } from './guard'
+import { paneStart, registerPane } from './pane'
 
 let notified = 0
 let role: Role = { kind: 'plain' }
@@ -75,7 +76,7 @@ export const register: Register = on => {
           const h2 = hostOf($)
           await sweep(h2, id => leanThread(h2, $.plugin.root, { action: 'wake', tN: id }))
           const n = (await unreadReports(h2)).recs.length
-          if (n && n !== notified) $.ui.notify({ text: `${n} unread report(s) from threads`, key: 'lean-reports' })
+          if (n && n !== notified) $.ui.notify(`${n} unread report(s) from threads`, { key: 'lean-reports' })
           notified = n
         } catch {
           /* the next tick tries again */
@@ -92,8 +93,11 @@ export const register: Register = on => {
         /* a desk without its CLAUDE.md still has the skill and the tool */
       }
     }
+    await paneStart($, role).catch(() => undefined)
     return next(e)
   })
+
+  registerPane(on)
 
   on('tool.call', { tool: `mcp__lean-agent__${TOOL}` }, async ($, e: any) => {
     const h = hostOf($)
