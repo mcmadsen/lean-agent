@@ -1,7 +1,7 @@
 // The desk pane (design 2.5): goals, answers with ack, threads with Resume/Start, footer. Opens by itself only in the
 // desk and through /lean-agent anywhere. Never blank: a failure is drawn as a red line. Resume/Start go through
 // leanThread (the lean_thread tool), so the logic exists once.
-import { ackRows, loadView, threadStatus } from './view'
+import { ackRows, loadView, resetViewCache, threadStatus } from './view'
 import type { GoalTone, View } from './view'
 import { leanThread } from './threads'
 import { hostOf } from './host'
@@ -13,6 +13,12 @@ const TONE: Record<GoalTone, string> = { working: 'green', waiting: 'yellow', st
 let lastError = ''
 let lastRefresh = ''
 let notice = ''
+export const resetPaneState = () => {
+  lastError = ''
+  lastRefresh = ''
+  notice = ''
+  resetViewCache()
+}
 
 export async function openPane($: any): Promise<void> {
   await $.ui.open({ id: PANE, title: 'lean-agent' })
@@ -42,6 +48,7 @@ export function registerPane(on: any) {
     lastError = errors[0] ?? ''
     const act = (label: string, f: () => Promise<unknown>) => async () => {
       try {
+        resetViewCache()
         const r: any = await f()
         notice = r && r.ok === false ? String(r.text) : ''
         if (notice) lastError = notice

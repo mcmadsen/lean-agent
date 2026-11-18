@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { ackRows, loadView, threadStatus } from './view'
+import { ackRows, loadView, resetViewCache, threadStatus } from './view'
 import { resetLocks } from './threads'
 
 const SID = '11111111-2222-3333-4444-555555555555'
@@ -14,6 +14,7 @@ const PANE = {
 
 function setup(on: any = null, rows: any[] = []) {
   resetLocks()
+  resetViewCache()
   const h = fakeHost(on)
   const f = (p: string, o: unknown) => h.files.set(`/h/.lean-agent/${p}`, typeof o === 'string' ? o : JSON.stringify(o))
   f('goals.json', { t1: { text: 'ship it', ts: 1_000_000 }, t2: { text: 'old goal', ts: 1 } })

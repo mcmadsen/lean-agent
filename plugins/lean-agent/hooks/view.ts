@@ -2,7 +2,6 @@
 import { homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { deskState, unconsumed } from './delivery'
-import { spentToday } from './budget'
 import type { DeskRec } from './delivery'
 import { isRunning, parseAgents } from './threads'
 import type { Thread } from './threads'
@@ -19,10 +18,27 @@ const ID = /^t\d+$/
 
 const lastLine = (t: string) => t.split('\n').map(s => s.trim()).filter(Boolean).pop() ?? ''
 
+// The pane refreshes every 5 s: `claude agents` and the whole-ledger sum are cached for a while (a pressed button
+// drops the cache so its result shows at once).
+const AGENTS_TTL = 10_000
+const BUDGET_TTL = 60_000
+let agentsCache: { at: number; out: { exitCode: number; stdout: string } } | null = null
+let budgetCache: { at: number; text: string | null } | null = null
+export const resetViewCache = () => {
+  agentsCache = null
+  budgetCache = null
+}
+
 // USD spent today from ledger.jsonl (rows carry usd, not tokens); null when there is no ledger.
 async function loadBudget(h: Host, home: string): Promise<string | null> {
-  if (!(await readJsonl(h, `${leanDir(home)}/ledger.jsonl`)).length) return null
-  return `$${(await spentToday(h)).toFixed(2)}`
+  const now = await h.clock.now()
+  if (budgetCache && now - budgetCache.at < BUDGET_TTL && now >= budgetCache.at) return budgetCache.text
+  const rows = await readJsonl<{ ts: number; usd?: number }>(h, `${leanDir(home)}/ledger.jsonl`)
+  const today = new Date(now).toISOString().slice(0, 10)
+  const total = rows.filter(r => new Date(r.ts).toISOString().slice(0, 10) === today).reduce((a, r) => a + (r.usd || 0), 0)
+  const text = rows.length ? `$${total.toFixed(2)}` : null
+  budgetCache = { at: now, text }
+  return text
 }
 
 // The pane's own read marker (never the desk's inbox-read.json): rows below `upTo` plus single acked rows.
@@ -65,7 +81,13 @@ export async function loadView(h: Host): Promise<View> {
   const rows = new Map<string, { run: boolean }>()
   let agentsOk = true
   await guard('agents', async () => {
-    const r = await h.process.run(['claude', 'agents', '--json', '--all'])
+    const t = await h.clock.now()
+    let r: { exitCode: number; stdout: string }
+    if (agentsCache && t - agentsCache.at < AGENTS_TTL && t >= agentsCache.at) r = agentsCache.out
+    else {
+      r = await h.process.run(['claude', 'agents', '--json', '--all'])
+      if (r.exitCode === 0) agentsCache = { at: t, out: r }
+    }
     if (r.exitCode !== 0) {
       agentsOk = false
       throw new Error(`claude agents exited ${r.exitCode}`)

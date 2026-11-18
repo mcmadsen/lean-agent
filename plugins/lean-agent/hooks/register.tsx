@@ -7,7 +7,7 @@ import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
 import { THREAD_TOOLS, consumeWake, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide } from './guard'
-import { paneStart, registerPane } from './pane'
+import { paneStart, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
 import { checkStale, syncRules } from './rules'
@@ -29,6 +29,7 @@ export const resetModState = () => {
   spent.clear()
   role = { kind: 'plain' }
   cwd = ''
+  resetPaneState()
 }
 let role: Role = { kind: 'plain' }
 export const currentRole = () => role
