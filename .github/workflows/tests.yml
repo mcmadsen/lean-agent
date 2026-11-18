@@ -26,6 +26,8 @@ jobs:
         run: claude plugin validate plugins/lean-agent
       - name: Shell hook spec
         run: sh plugins/lean-agent/hooks/rules-loaded.test.sh
+      - name: Skills contract
+        run: sh plugins/lean-agent/hooks/skills-contract.test.sh
       - name: Opener spec
         run: sh plugins/lean-agent/opener/open-desk.test.sh
       - name: Mod specs (*.test.ts, *.test.tsx)
