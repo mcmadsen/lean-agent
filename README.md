@@ -116,12 +116,12 @@ Agent definitions in `plugins/lean-agent/agents/`:
 
 | Agent | For |
 |---|---|
-| `worker-haiku` | small mechanical edits, renames, formatting, simple lookups. Use first for anything routine |
-| `worker-sonnet` | ordinary implementation, tests, bug fixes (default) |
-| `worker-opus` | hard design or debugging, only after a cheaper worker failed |
-| `reader-haiku`, `reader-sonnet` | read-only lookup and analysis |
-| `reviewer` | read-only review of a diff |
-| `explorer` | explores one area for the `learn` skill |
+| `lean-agent:worker-haiku` | small mechanical edits, renames, formatting, simple lookups. Use first for anything routine |
+| `lean-agent:worker-sonnet` | ordinary implementation, tests, bug fixes (default) |
+| `lean-agent:worker-opus` | hard design or debugging, only after a cheaper worker failed |
+| `lean-agent:reader-haiku`, `lean-agent:reader-sonnet` | read-only lookup and analysis |
+| `lean-agent:reviewer` | read-only review of a diff |
+| `lean-agent:explorer` | explores one area for the `learn` skill |
 
 A worker's last line is `LEAN-FEEDBACK {...}`: `missing` context becomes an entry in the project's `gaps.jsonl` (three
 for one area mark its rules stale) and `remember` items go to shared memory. A long Bash result is squeezed (head, tail
@@ -129,7 +129,7 @@ and every error kept; the full text is saved under `~/.lean-agent/output/`) and 
 
 ## Learned rules
 
-`learn` explores each area of a repository with `explorer` subagents and writes at most 25 lines per area to
+`learn` explores each area of a repository with `lean-agent:explorer` subagents and writes at most 25 lines per area to
 `~/.lean-agent/<project>/rules/<area>.md` with `paths:` frontmatter. The `lean_rules` tool copies them as real files
 into `<repo>/.claude/rules/lean-agent/` (symlinked rule folders do not load) and keeps them out of git through
 `.git/info/exclude`: nothing shows in `git status` and nothing is committed. Worktrees get their own copy through the
@@ -140,7 +140,7 @@ desk then says "rules for X are stale: re-learn when you touch it". `stats` list
 
 ## Reviews and the push gate
 
-`review` runs the read-only `reviewer` on the diff, one full pass and then deltas, and writes
+`review` runs the read-only `lean-agent:reviewer` on the diff, one full pass and then deltas, and writes
 `~/.lean-agent/<project>/reviews/<sha>.json`. A green record unlocks `git push` and PR publishing for that commit
 only; a new commit needs a new review. `review-learn` turns repeated reviewer comments into rules: it learns from every
 author except the lean-agent owner's own comments.
@@ -150,7 +150,7 @@ author except the lean-agent owner's own comments.
 Cost-only, from the per-request usage the mod sees. `~/.lean-agent/config.json`:
 
 ```json
-{ "dailyCapUsd": { "desk": 5, "thread": 20 }, "workerCapUsd": 2, "workerCaps": { "worker-opus": 4 } }
+{ "dailyCapUsd": { "desk": 5, "thread": 20 }, "workerCapUsd": 2, "workerCaps": { "lean-agent:worker-opus": 4 } }
 ```
 
 Past a cap the next model request is refused with a notice; a worker past its cap ends and reports what is left. Every

@@ -269,9 +269,15 @@ async function deskDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
 }
 
 // ---- workers -------------------------------------------------------------------------------------------------
-export const isWorker = (t?: string) => !!t && /^worker-/.test(t)
-// every subagent that is not a known worker (readers, the reviewer, explorer, general-purpose, an unknown type) is read-only
+// The plugin's subagents carry the plugin prefix in the Agent tool (`lean-agent:worker-sonnet`). Only a type with exactly that
+// leading prefix is ours: a bare `worker-x` can only come from a user or project agent, and `other:worker-x` from another plugin.
+export const OWN_PREFIX = 'lean-agent:'
+export const ownName = (t?: string): string | null => (t && t.startsWith(OWN_PREFIX) ? t.slice(OWN_PREFIX.length) : null)
+export const isWorker = (t?: string) => /^worker-/.test(ownName(t) ?? '')
+// every subagent that is not one of our workers (our readers, the reviewer, explorer, general-purpose, foreign or unknown types) is read-only
 export const isReader = (t?: string) => !!t && !isWorker(t)
+// the same agent under either spelling (a grant may name it bare or with the prefix)
+export const sameAgent = (a?: string, b?: string) => !!a && !!b && (a === b || a.replace(/^lean-agent:/, '') === b.replace(/^lean-agent:/, ''))
 
 export async function grantsFile($: Host, role: Role): Promise<string> {
   const home = await homeDir($)
@@ -324,7 +330,7 @@ async function grantFor($: Host, ctx: Ctx): Promise<Grants> {
     const d = await readDoc($, file)
     const bound = d.agents[ctx.agentId!]
     if (bound) return bound
-    const i = d.pending.findIndex(g => !g.type || g.type === ctx.agentType)
+    const i = d.pending.findIndex(g => !g.type || sameAgent(g.type, ctx.agentType))
     if (i < 0) return {}
     const [g] = d.pending.splice(i, 1)
     d.agents[ctx.agentId!] = g!
@@ -339,7 +345,7 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
   if (e.tool === 'AskUserQuestion') return 'lean-agent: a subagent never asks the user; report the question to the thread'
   if (isReader(t)) {
     if (edits) return `lean-agent: ${t} is read-only`
-    if (e.tool === 'Bash' && t === 'explorer') {
+    if (e.tool === 'Bash' && ownName(t) === 'explorer') {
       const c = String(e.command ?? '').trim()
       return !hasMeta(c) && /^git (log|ls-files)( |$)/.test(c) ? null : 'lean-agent: explorer may run only git log and git ls-files'
     }

@@ -103,12 +103,20 @@ export async function spentToday(h: Host, role?: string): Promise<number> {
   return role ? c.byRole[role] ?? 0 : Object.values(c.byRole).reduce((a, b) => a + b, 0)
 }
 
+// workerCaps keys may spell an agent bare (`worker-opus`) or with the plugin prefix (`lean-agent:worker-opus`)
+export function capFor(caps: Record<string, number> | undefined, type?: string): number | undefined {
+  if (!caps || !type) return undefined
+  const bare = type.replace(/^lean-agent:/, '')
+  for (const k of [type, bare, `lean-agent:${bare}`]) if (Object.prototype.hasOwnProperty.call(caps, k) && typeof caps[k] === 'number') return caps[k]
+  return undefined
+}
+
 // A reason to refuse the next request, or null. `spent` is what this worker has used so far.
 export async function overBudget(h: Host, role: string, agent: { type?: string; spent: number; cap?: number } | null): Promise<string | null> {
   const home = await homeDir(h)
   const cfg = await readConfig(h, home)
   if (agent) {
-    const cap = agent.cap ?? cfg.workerCaps?.[agent.type ?? ''] ?? cfg.workerCapUsd
+    const cap = agent.cap ?? capFor(cfg.workerCaps, agent.type) ?? cfg.workerCapUsd
     if (cap !== undefined && agent.spent >= cap) return `lean-agent: this worker used $${agent.spent.toFixed(2)} of its $${cap.toFixed(2)} budget; stop and report what is done and what is left`
   }
   const cap = cfg.dailyCapUsd?.[role as 'desk']
@@ -125,7 +133,7 @@ export function summarize(rows: Row[], since = 0): { total: number; byModel: Rec
     if (r.ts < since) continue
     out.total += r.usd
     out.byModel[r.model] = (out.byModel[r.model] ?? 0) + r.usd
-    const a = r.agent ?? 'main'
+    const a = (r.agent ?? 'main').replace(/^lean-agent:/, '') // both spellings of an agent type are one line
     out.byAgent[a] = (out.byAgent[a] ?? 0) + r.usd
     const t = r.tN ?? r.role
     out.byThread[t] = (out.byThread[t] ?? 0) + r.usd

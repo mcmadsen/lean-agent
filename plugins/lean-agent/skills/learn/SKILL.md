@@ -13,7 +13,7 @@ never symlink (symlinked rule folders do not load).
 1. List the areas: workspace packages/services (`package.json` workspaces, `go.work`, `Cargo.toml`, `pyproject`), else
    first-level source folders. Skip areas the repo's own `CLAUDE.md` or `.claude/rules` already covers. With `--area`
    do only that one.
-2. Per area start one `explorer` subagent (Agent tool). Its brief names the area and lists the gaps from
+2. Per area start one `lean-agent:explorer` subagent (Agent tool). Its brief names the area and lists the gaps from
    `~/.lean-agent/<project>/gaps.jsonl` and the memory notes for that path. It returns at most 25 lines.
 3. Write `rules/<area>.md` (at most 25 lines of body):
 

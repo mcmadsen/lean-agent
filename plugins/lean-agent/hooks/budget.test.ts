@@ -77,3 +77,18 @@ test('the daily cache loses no row when another writer appended behind its back'
   expect(await spentToday(h.host)).toBe(8)
   expect(await spentToday(h.host, 'thread')).toBe(2)
 })
+
+test('workerCaps accept the bare and the prefixed key for either spelling of the type', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ workerCaps: { 'worker-opus': 5, 'lean-agent:worker-sonnet': 3 } }))
+  expect(await overBudget(h.host, 'thread', { type: 'lean-agent:worker-opus', spent: 5 })).toContain('$5.00 budget')
+  expect(await overBudget(h.host, 'thread', { type: 'worker-opus', spent: 5 })).toContain('$5.00 budget')
+  expect(await overBudget(h.host, 'thread', { type: 'lean-agent:worker-sonnet', spent: 3 })).toContain('$3.00 budget')
+  expect(await overBudget(h.host, 'thread', { type: 'worker-sonnet', spent: 3 })).toContain('$3.00 budget')
+  expect(await overBudget(h.host, 'thread', { type: 'lean-agent:worker-sonnet', spent: 2 })).toBeNull()
+})
+
+test('stats merge both spellings of an agent type into one line', () => {
+  const r = (o: any) => ({ ts: 10, role: 'thread', model: 'haiku', in: 0, out: 0, usd: 1, ...o })
+  expect(summarize([r({ agent: 'lean-agent:worker-haiku' }), r({ agent: 'worker-haiku' })], 0).byAgent).toEqual({ 'worker-haiku': 2 })
+})

@@ -20,6 +20,12 @@
   attachment and section names seen this session, so a report needs no debug log.
 
 ### Fixed
+- The plugin's subagents are named with the plugin prefix in the Agent tool (`lean-agent:worker-sonnet`, `lean-agent:reviewer`,
+  ...). The guard matched `/^worker-/`, so a real worker counted as a reader and could not edit even with an `allow-edit`
+  grant. Only a type with exactly a leading `lean-agent:` is ours now (`lean-agent:worker-*` = worker; a bare `worker-x`
+  from a user/project agent and another plugin's `x:worker-y` are readers). Grants bind with either spelling, `workerCaps`
+  keys may be `worker-opus` or `lean-agent:worker-opus`, stats and feedback merge both spellings, and the templates, skills
+  and README name the agents with the prefix.
 - **Open desk** no longer says "The Claude app is not running" inside the Claude app: a pane drawn on the desktop surface
   skips the check. Elsewhere the check calls `/usr/bin/pgrep` (`-x Claude`, then `-f` on the app binary path), and if the
   check itself errors `claude --desktop` is tried anyway and its real error is shown. The login opener uses the same two checks.

@@ -51,7 +51,7 @@ test('an Agent call records the thread\'s grants while it runs and removes them 
       return { result: 'done' } as any
     }),
   )
-  await $.tool.call({ tool: 'Agent', subagent_type: 'worker-sonnet', prompt: 'do it\nallow-edit: /w/t1' } as any)
+  await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:worker-sonnet', prompt: 'do it\nallow-edit: /w/t1' } as any)
   expect(during).toContain('/w/t1')
   const after = JSON.parse(h.files.get('/h/.lean-agent/threads/t1/grants.json'))
   expect(after.pending).toEqual([])

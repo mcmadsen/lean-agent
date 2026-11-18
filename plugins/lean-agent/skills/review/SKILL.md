@@ -11,7 +11,7 @@ Run in a thread, in the repo or worktree to push. The push guard allows `git pus
 the review must be redone after every change.
 
 1. `git rev-parse HEAD` (full sha), `git diff <base>...HEAD --stat`; base defaults to the default branch.
-2. Pass 1: spawn the `reviewer` agent with the diff command and the project's test command. It lists findings by
+2. Pass 1: spawn the `lean-agent:reviewer` agent with the diff command and the project's test command. It lists findings by
    severity with `path:line`. A reviewer is read-only and may run only the commands the Agent call grants, so put
    exactly these lines in its prompt, with the real base and full HEAD sha filled in (a grant matches the command
    or a prefix of it followed by a space; nothing else, no pipes or redirects):

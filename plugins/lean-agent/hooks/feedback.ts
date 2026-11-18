@@ -30,7 +30,7 @@ export type FbCtx = { thread?: string; project?: string; agent?: string }
 export async function applyFeedback(h: Host, ctx: FbCtx, fb: Feedback): Promise<{ gaps: number; remembered: number }> {
   const home = await homeDir(h)
   const ts = await h.clock.now()
-  await appendJsonl(h, `${leanDir(home)}/feedback.jsonl`, { ts, thread: ctx.thread, agent: ctx.agent, project: ctx.project, status: fb.status, missing: !!fb.missing })
+  await appendJsonl(h, `${leanDir(home)}/feedback.jsonl`, { ts, thread: ctx.thread, agent: ctx.agent?.replace(/^lean-agent:/, ''), project: ctx.project, status: fb.status, missing: !!fb.missing })
   let gaps = 0
   if (fb.missing) {
     const paths = pathsIn(fb.missing)

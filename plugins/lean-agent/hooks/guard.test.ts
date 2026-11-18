@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { decide, parseGrants, recordGrant, releaseGrant } from './guard'
+import { decide, isWorker, parseGrants, recordGrant, releaseGrant } from './guard'
 import { writeReview } from './reviews'
 
 const SHA = 'abc1234def5678abc1234def5678abc1234def56'
@@ -218,7 +218,7 @@ test('push gate: the review must be green for the pushed ref, not for HEAD', asy
 test('threads never ask the user directly; neither do subagents', async () => {
   const h = setup()
   expect(await run(h, thread, { tool: 'AskUserQuestion' })).toContain('lean_ask')
-  expect(await run(h, thread, { tool: 'AskUserQuestion' }, '/r', 'worker-sonnet')).toContain('never asks')
+  expect(await run(h, thread, { tool: 'AskUserQuestion' }, '/r', 'lean-agent:worker-sonnet')).toContain('never asks')
   expect(await run(h, plain, { tool: 'AskUserQuestion' })).toBeNull()
 })
 
@@ -264,24 +264,24 @@ test('private projects never push or publish, review or not', async () => {
 test('workers: readers are read-only; unknown subagent types are readers; grants come from the Agent call', async () => {
   const h = setup()
   expect(parseGrants('do it\nallow-edit: /a/b, /c\nallow-cmd: git log, ls\n--allow-edit=rel')).toEqual({ edit: ['/a/b', '/c', ], cmds: ['git log', 'ls'] })
-  await recordGrant(h.host, thread, 'call1', 'reader-sonnet', { cmds: ['git log', 'ls'] })
-  await recordGrant(h.host, thread, 'call2', 'worker-sonnet', { edit: ['/h/.lean-agent/worktrees/app/t1'] })
+  await recordGrant(h.host, thread, 'call1', 'lean-agent:reader-sonnet', { cmds: ['git log', 'ls'] })
+  await recordGrant(h.host, thread, 'call2', 'lean-agent:worker-sonnet', { edit: ['/h/.lean-agent/worktrees/app/t1'] })
   const edit = (p: string) => ({ tool: 'Edit', file_path: p })
-  expect(await run(h, thread, edit('/anything'), '/r', 'reader-haiku')).toContain('read-only')
+  expect(await run(h, thread, edit('/anything'), '/r', 'lean-agent:reader-haiku')).toContain('read-only')
   expect(await run(h, thread, edit('/anything'), '/r', 'unknown')).toContain('read-only')
   expect(await run(h, thread, edit('/anything'), '/r', 'general-purpose')).toContain('read-only')
-  expect(await run(h, thread, { tool: 'Bash', command: 'git log -5' }, '/r', 'reader-sonnet', 'r1')).toBeNull()
-  expect(await run(h, thread, { tool: 'Bash', command: 'rm -rf x' }, '/r', 'reader-sonnet', 'r1')).toContain('granted')
-  expect(await run(h, thread, { tool: 'Bash', command: 'ls; rm x' }, '/r', 'reader-sonnet', 'r1')).toContain('granted')
+  expect(await run(h, thread, { tool: 'Bash', command: 'git log -5' }, '/r', 'lean-agent:reader-sonnet', 'r1')).toBeNull()
+  expect(await run(h, thread, { tool: 'Bash', command: 'rm -rf x' }, '/r', 'lean-agent:reader-sonnet', 'r1')).toContain('granted')
+  expect(await run(h, thread, { tool: 'Bash', command: 'ls; rm x' }, '/r', 'lean-agent:reader-sonnet', 'r1')).toContain('granted')
   expect(await run(h, thread, { tool: 'Bash', command: 'git log' }, '/r', 'unknown', 'u1')).toContain('granted')
-  expect(await run(h, thread, { tool: 'Read', file_path: '/x' }, '/r', 'reader-sonnet', 'r1')).toBeNull()
-  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/src/a.ts'), '/r', 'worker-sonnet', 'w1')).toBeNull()
-  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/../t2/a.ts'), '/r', 'worker-sonnet', 'w1')).toContain('outside')
-  expect(await run(h, thread, edit('/etc/x'), '/r', 'worker-opus', 'w2')).toContain('outside')
-  expect(await run(h, plain, edit('/h/.lean-agent/worktrees/app/t1/a'), '/r', 'worker-opus', 'w3')).toContain('outside') // no grants for plain
+  expect(await run(h, thread, { tool: 'Read', file_path: '/x' }, '/r', 'lean-agent:reader-sonnet', 'r1')).toBeNull()
+  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/src/a.ts'), '/r', 'lean-agent:worker-sonnet', 'w1')).toBeNull()
+  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/../t2/a.ts'), '/r', 'lean-agent:worker-sonnet', 'w1')).toContain('outside')
+  expect(await run(h, thread, edit('/etc/x'), '/r', 'lean-agent:worker-opus', 'w2')).toContain('outside')
+  expect(await run(h, plain, edit('/h/.lean-agent/worktrees/app/t1/a'), '/r', 'lean-agent:worker-opus', 'w3')).toContain('outside') // no grants for plain
   expect(await run(h, thread, edit('/anything'), '/r')).toBeNull() // the thread's own main loop is not a worker
   await releaseGrant(h.host, thread, 'call2')
-  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/src/a.ts'), '/r', 'worker-sonnet', 'w1')).toContain('outside')
+  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/src/a.ts'), '/r', 'lean-agent:worker-sonnet', 'w1')).toContain('outside')
 })
 
 test('a throwing guard denies (fail closed)', async ($, on) => {
@@ -298,8 +298,8 @@ test('a throwing guard denies (fail closed)', async ($, on) => {
 test('the review skill grants the reviewer exactly the read-only git commands for the range', async () => {
   const h = setup()
   const g = parseGrants('Review it.\nallow-cmd: git diff main...abc1234, git log main..abc1234, git show abc1234, git merge-base main abc1234')
-  await recordGrant(h.host, thread, 'c1', 'reviewer', g)
-  const bash = (command: string) => run(h, thread, { tool: 'Bash', command }, '/r/app', 'reviewer', 'r1')
+  await recordGrant(h.host, thread, 'c1', 'lean-agent:reviewer', g)
+  const bash = (command: string) => run(h, thread, { tool: 'Bash', command }, '/r/app', 'lean-agent:reviewer', 'r1')
   expect(await bash('git diff main...abc1234 --stat')).toBeNull()
   expect(await bash('git log main..abc1234 --oneline')).toBeNull()
   expect(await bash('git show abc1234')).toBeNull()
@@ -307,4 +307,34 @@ test('the review skill grants the reviewer exactly the read-only git commands fo
   expect(await bash('git diff main...abc1234 | cat')).toContain('granted')
   expect(await bash('git push origin x')).toContain('granted')
   expect(await bash('git diff')).toContain('granted')
+})
+
+test('the plugin-prefixed agent types: lean-agent:worker-* edits under a grant; reviewer, readers, foreign and bare types are read-only', async () => {
+  const h = fakeHost(null)
+  const thread = { kind: 'thread', id: 't1' } as any
+  await recordGrant(h.host, thread, 'c1', 'lean-agent:worker-sonnet', { edit: ['/h/.lean-agent/worktrees/app/t1'] })
+  const edit = (p: string) => ({ tool: 'Edit', file_path: p })
+  const ok = '/h/.lean-agent/worktrees/app/t1/src/a.ts'
+  expect(await run(h, thread, edit(ok), '/r', 'lean-agent:worker-sonnet', 'w1')).toBeNull()
+  expect(await run(h, thread, edit('/etc/x'), '/r', 'lean-agent:worker-sonnet', 'w1')).toContain('outside')
+  expect(await run(h, thread, edit(ok), '/r', 'lean-agent:worker-opus', 'w9')).toContain('outside') // no grant of its own
+  for (const t of ['lean-agent:reviewer', 'lean-agent:reader-haiku', 'lean-agent:explorer', 'other:worker-x', 'worker-x', 'lean-agent:lean-agent:worker-x'])
+    expect(await run(h, thread, edit(ok), '/r', t, 'x1')).toContain('read-only')
+  expect([isWorker('lean-agent:worker-opus'), isWorker('worker-opus'), isWorker('other:worker-opus'), isWorker(undefined)]).toEqual([true, false, false, false])
+})
+
+test('the explorer (prefixed) may run only git log / ls-files; a bare explorer needs a grant', async () => {
+  const h = fakeHost(null)
+  const thread = { kind: 'thread', id: 't1' } as any
+  const bash = (command: string, t: string) => run(h, thread, { tool: 'Bash', command }, '/r', t, 'e1')
+  expect(await bash('git log -3', 'lean-agent:explorer')).toBeNull()
+  expect(await bash('rm x', 'lean-agent:explorer')).toContain('explorer may run only')
+  expect(await bash('git log -3', 'explorer')).toContain('granted')
+})
+
+test('a grant that names the agent bare still binds to the prefixed type', async () => {
+  const h = fakeHost(null)
+  const thread = { kind: 'thread', id: 't1' } as any
+  await recordGrant(h.host, thread, 'c1', 'lean-agent:reviewer', { cmds: ['git log'] })
+  expect(await run(h, thread, { tool: 'Bash', command: 'git log -2' }, '/r', 'lean-agent:reviewer', 'r1')).toBeNull()
 })
