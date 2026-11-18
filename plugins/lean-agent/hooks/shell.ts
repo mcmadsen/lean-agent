@@ -33,7 +33,7 @@ const LEAN_OUT = /\blean-agent\b[^;&|\n]*(\bworktree\s+push\b|\bpr\s+create\b|\b
 const GHAZ = /(^|[^\w./-])(gh|az)($|[^\w-])/
 const DYNAMIC = /(^|[;&|(`\n]|\$\()\s*(\w+=\S*\s+)*["']?\$[\w{(]/
 const VALUE_FLAGS = new Set(['-R', '--repo', '--hostname', '--subscription', '-o', '--output', '--query', '--organization', '--org', '--project', '--resource-group', '-g'])
-const GH_READ: Record<string, string[]> = { pr: ['view', 'list', 'diff', 'checks', 'status'], issue: ['view', 'list', 'status'], repo: ['view', 'list'], run: ['view', 'list'], auth: ['status'] }
+const GH_READ: Record<string, string[]> = { pr: ['view', 'list', 'diff', 'checks', 'status'], issue: ['view', 'list', 'status'], search: ['prs', 'issues', 'repos', 'commits', 'code'], repo: ['view', 'list'], run: ['view', 'list'], auth: ['status'] }
 const KW = new Set(['if', 'then', 'do', 'else', 'elif', 'while', 'until', '!', '{', '}', 'time'])
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash'])
 // programs that run a command given among their own arguments (the git word is looked for anywhere after them)
@@ -67,6 +67,20 @@ function azDenied(rest: string[]): boolean {
   for (; i < rest.length && !rest[i]!.startsWith('-'); i++) pos.push(rest[i]!)
   if (!pos.length || pos[0] === 'version' || pos[0] === 'help') return false
   return !/^(list|show|query|get|list-.*|show-.*)$/.test(pos[pos.length - 1]!)
+}
+
+// The desk's read-only forge commands (strict mode): ONE plain command whose program is gh or az and that the SAME classification
+// the private-project guard uses (ghDenied / azDenied) calls read-only, narrowed to PR status: gh pr view|list|status, gh search prs,
+// az repos pr list|show. No leading option (the subcommand sits at a fixed position) and no flag that opens a browser, takes a
+// template or writes a file (--web, --output-file, --out*, --file, --template).
+const FORGE_FLAG = /^(-w|--web|--template|-t|--output-file|--out(put)?-?file|--file|--out)(=|$)/
+export function readOnlyForge(w: string[]): boolean {
+  const [prog, a, b, c] = w
+  if (prog !== 'gh' && prog !== 'az') return false
+  // also: an @file value for az (it reads the file; gh's `--author @me` is fine), --debug/--verbose (request headers), a bundled short flag with w or t (-cw)
+  if (w.some(x => FORGE_FLAG.test(x) || (prog === 'az' && /^@|=@/.test(x)) || /^--(debug|verbose)$/.test(x) || /^-[a-zA-Z]*[wt][a-zA-Z]*$/.test(x))) return false
+  if (prog === 'gh') return !ghDenied(w.slice(1)) && ((a === 'pr' && ['view', 'list', 'status'].includes(b ?? '')) || (a === 'search' && b === 'prs'))
+  return !azDenied(w.slice(1)) && a === 'repos' && b === 'pr' && (c === 'list' || c === 'show')
 }
 
 // index of the ')' closing a $( that starts at c[from] (just after the opening paren)
@@ -357,4 +371,12 @@ export function plainPipeline(c: string): string[][] | null {
   }
   if (!endSeg()) return null
   return segs
+}
+
+// The words of ONE plain simple command (quotes resolved), or null for anything else: a pipe, several commands, a redirect,
+// an expansion or substitution, an unquoted glob. It is plainPipeline with exactly one segment, so the proof of "plain" is the
+// same strict scanner (a redirect is refused there, not dropped).
+export function plainWords(c: string): string[] | null {
+  const segs = plainPipeline(c)
+  return segs && segs.length === 1 ? segs[0]! : null
 }

@@ -12,8 +12,8 @@ Both modes run in the mod: you call one tool and show its answer. Nothing is mea
 **Overhead mode** (cheap: about a dozen one-turn calls on haiku, capped at $0.25, `/context` itself is free).
 - Desk: `lean_doctor` with `action: compare`, `project: <registered name>` (`mode: history` lists the saved reports).
 - Thread: `lean_compare` with `mode: overhead` and the project.
-- What it does: in the project folder with lean-agent switched off (clean), in a throw-away thread-shaped folder (thread) and
-  in the desk folder (desk), it runs `claude -p "Reply with OK."` and `/context`. Rows: the first turn's input tokens (measured),
+- What it does: in the project folder with lean-agent switched off (the clean column), in a throw-away thread-shaped folder (the
+  thread column) and in the desk folder (the desk column), it runs `claude -p "Reply with OK."` and `/context`. Rows: the first turn's input tokens (measured),
   its cost, and `/context`'s estimates (system prompt, system tools, MCP tools, custom agents, memory files, skills,
   messages). On the clean column it also switches skills and MCP servers off one at a time and reports each one's share.
 - Read the table to the user as it is, then the suggestions: each names the concrete step (a plugin to switch off for the
@@ -23,10 +23,11 @@ Both modes run in the mod: you call one tool and show its answer. Nothing is mea
 - The thread and desk columns are `-p` runs: what the mod trims by role only counts if its hooks module loaded there (the
   report says so when it did not); the live desk's own `/context` is the check.
 
-**Task mode** (explicit; costs money, up to about $2 for the two runs plus a few cents for the judge). The desk never runs it:
-it tells the user the cost, waits for a yes, then starts a thread (`lean_thread` `new`, project and a brief that says "use the
-compare skill, task mode, task: ..."). The thread calls `lean_compare` with `mode: task`, `project` and `task` (one read-only
-task about the project, specific enough to have a checkable answer). The mod runs it clean and as a thread (same model,
+**Task mode** (explicit; costs money, up to about $2 for the two runs plus a few cents for the judge). The desk never runs it.
+- desk: tells the user the cost, waits for a yes, then starts a thread (`lean_thread` `new`, project and a brief that says "use the compare skill, task mode, task: ...").
+- thread: calls `lean_compare` with `mode: task`, `project` and `task` (one read-only task about the project, specific enough to have a checkable answer).
+
+The mod runs it clean and as a thread (same model,
 sonnet, effort high, same read-only tools), then a haiku judge compares correctness and completeness only (the order of the two
 answers alternates). It reports tokens, cost, turns, time and the verdict. If the verdict is `tie` or `?`, you may spot-check the
 two claims with `lean-agent:reviewer`; say that this is your judgment, not the judge's.

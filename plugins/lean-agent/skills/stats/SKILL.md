@@ -1,6 +1,7 @@
 ---
 name: stats
 description: Show what lean-agent sessions and workers cost (per model, role, agent and thread), the daily caps, which learned rules load, and how workers rated their briefs. Use when the user asks about spend, usage or whether the rules help.
+roles: desk, thread
 ---
 
 Desk: call `lean_doctor` with `action: stats` (optional `days`, default 7, max 90; `project` for one project's rules). The mod
@@ -10,10 +11,11 @@ thread (top 10 and the rest), rule loads per project (including `_project.md` an
 feedback and gaps, and how many ledger lines were 0.45 rows or unparsable. **Never read `~/.lean-agent/ledger.jsonl`
 yourself** (it can be tens of megabytes; the mod keeps per-day totals in `rollup.json`) and never start a thread to sum it.
 Show the tables as they are, then one or two sentences on where the money went (cache reads, output, an expensive model, a
-thread that dominates). `lean_doctor` `check` also names live sessions on an unexpected model.
+thread that dominates).
+Desk: `lean_doctor` `check` also names live sessions on an unexpected model.
 
-A thread has no `lean_doctor`: for rules it calls `lean_rules` `stats` (loads per rule, rules that never loaded); for spend it
-says so and the desk answers.
+Thread: has no `lean_doctor`; for rules call `lean_rules` `stats` (loads per rule, rules that never loaded); for spend say so
+and the desk answers.
 
 The budget is cost-only: a daily cap per role (`dailyCapUsd`) and an optional per-worker cap (`workerCapUsd`, `workerCaps`) in
 `~/.lean-agent/config.json`; no plan-window percentage exists. Files, one place each: the ledger is `~/.lean-agent/ledger.jsonl`

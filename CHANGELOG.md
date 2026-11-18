@@ -2,10 +2,10 @@
 
 ## Unreleased
 
-Learn flow (the 1.0.6 work; the version lines in `plugin.json`, `marketplace.json` and `pane.tsx` are left to the desk, which also
-builds 1.0.5).
+One combined release: the desk, thread and pane work, and the learn flow, stats and compare work. The sections are grouped by area; the
+version lines in `plugin.json`, `marketplace.json` and `pane.tsx` are left to the desk.
 
-### Fixed
+### Fixed (learn flow, stats, mod)
 - **Version skew is visible.** A session keeps the hooks module it loaded at start, while skills, agents and templates are read from
   the plugin folder again after `claude plugin update`: the skill text could say 1.0.4 while the guard refused like 1.0.3 (an explorer
   was refused `rg`, `ls` and `cat`). The mod now compares its own version with the installed one (the plugin root's
@@ -14,7 +14,7 @@ builds 1.0.5).
   new session (threads: close and Start)". `lean_doctor check` reports it as a FIX row. Every refusal of the guard (`decide`) ends with
   "(lean-agent <running version>)", and `feedback.jsonl` rows and `refusals.jsonl` carry the running version.
 
-### Added
+### Added (learn flow, stats, compare)
 - **An explorer that can explore.** The learn skill runs ONE preflight explorer (`git -C <repo> ls-files <folder> | head -3`,
   `rg -n <word> <file>`) before launching the rest; on a refusal the lead lists the files itself and hands each explorer a capped
   `git ls-files` list, or uses `lean-agent:reader-sonnet`. The lead always passes the capped list. `agents/explorer.md` says Grep/Glob
@@ -92,13 +92,88 @@ builds 1.0.5).
   completeness. Reports: `~/.lean-agent/compare/<date>-<project>.md` and `history.jsonl`, names and numbers only; a private project is
   never compared. README section "Compare".
 
-### Fixed (2)
+### Fixed (squeeze)
 - **A long failing Bash command failed the whole tool call.** `squeezeResult` rewrote the Bash result as a string. The engine validates
   a hook's answer against the tool's output schema, and Bash's result is the record `{ stdout, stderr, interrupted, ... }` (a failed
   call's is its error text): the string answer was refused ("expected object, received string"), so any long output of a command that
   exited non-zero failed outright, and the successful ones, being records, were never squeezed at all. It now squeezes `stdout` and
   `stderr` of the record, keeps its shape and every other field, saves the full text first, and leaves every other shape (error text,
   content blocks) untouched.
+
+### Changed (desk, threads, pane)
+- **Effort defaults go up where mistakes are expensive.** Threads default to sonnet / effort **high** (was medium); `config.json`
+  `threads.effort` and `lean_thread new|start` `effort` still override. `worker-sonnet` and `reviewer` run at effort high,
+  `reader-sonnet` at medium (was low), `worker-opus` stays high, `worker-haiku`, `reader-haiku` and `explorer` stay low.
+- **Reopen is a fresh session, never a resume.** `lean_thread reopen` (and the pane's Reopen) on a CLOSED thread starts a new
+  background session in the same folder (same tN, project, worktree, branch; `--model` / `--effort` from `thread.json`) with a
+  handover the mod builds: brief, project / worktree / branch, goal (a close keeps the cleared goal's text), notes.md, the thread's
+  report history (oldest first, about 4k tokens, the newest report whole), its `lean_remember` items and queued desk messages. The
+  old session id stays in `sids`; its conversation is never resumed. It also regenerates the thread's own CLAUDE.md from the current
+  template (only when lean-agent wrote it), so a fresh session runs today's code and rules. Result: "tN reopened as a new session
+  (old conversation kept read-only)". A parked thread's `reopen` still only flips the state.
+- `resume` of a thread that is not closed stays a resume, except when `thread.json` `version` (the lean-agent version installed when
+  its session started or was resumed) is older than the installed one: then it starts fresh the same way and says why. An unrecorded
+  version is unknown and resumes. `close` clears the thread's goal itself; it never deletes anything.
+- A `done` report is a handover: the thread template asks for branch, worktree path, last commit, pushed or not, open items and next
+  step, and `lean_report` answers a done report that lacks most of them with a one-line reminder.
+- **Thread -> desk direct.** `lean_report` (done, blocked, or `important: true`) and `lean_ask` still write the inbox (source of truth,
+  pane, dedupe) and also `$.session.send` one compact line (`[lean-agent] t3 done: ... (close t3 when nothing is left)`) to the
+  desk's session; the desk records its session id in `~/.lean-agent/desk.json` when it resolves as desk. The desk's `session.receive`
+  hook (origin plugin lean-agent) marks that inbox row delivered, so the next prompt does not repeat it. A missing desk id or a refused
+  or failed send falls back to the inbox alone (and the desk's own 10 s `prompt.submit` relay, `desk.autoRelay`), and the tool result
+  says so. Verified live: a message sent from one background session to another session id on the same machine arrives as a peer
+  message and starts a turn in an idle session. Desk -> thread keeps the inbox queue (read at the thread's next tool step, a wake for
+  an idle one): for a running thread `$.session.send` would add nothing and could deliver twice.
+- **Pane.** Every section header (Goals, Answers, Projects, Threads, Closed) is a toggle button with a count (`▾ Answers (14, 2
+  unread)`); the fold state lives in `$.state` (declared in `types/index.d.ts`), so it survives redraws and mod reloads. Defaults:
+  Goals open when there is a goal, Answers open, Projects folded, Threads open, Closed folded. Answers show the newest 5 and "show all
+  (N)"; with more than 8 rows "show all" groups them by thread (foldable, the folded group shows its newest line). A row is a button
+  that expands to the full report text; unread rows come first with a dot, read ones are dimmed.
+- **Pane: Close.** Each thread row has Close (first press arms "Confirm close tN" for 10 s, the second closes through
+  `lean_thread close`: stops a finished-but-alive session, clears the goal, no model turn); a working thread shows "busy" instead. A
+  "Close all done" button appears when 2+ threads reported done and closes only those whose last report is done and whose session is
+  not working (blocked, asking and working threads stay; the check is repeated at the second press). Closed threads move to a
+  collapsed "Closed (N)" with a Reopen button each. A session waiting on a prompt nobody answers (`claude agents` `waitingFor`) is
+  marked "needs you: open it in the app".
+
+### Fixed (desk, threads)
+- Background threads blocked silently on permission prompts nobody answers. The `worktree` skill and the thread template say to create
+  worktrees with `git -C <repo> worktree add <abs path>` under `~/.lean-agent/worktrees` and never with Claude Code's EnterWorktree
+  tool (it asks for a path outside `.claude/worktrees/`); the thread template adds three work rules (edit files only with Edit / Write,
+  one simple command per Bash call with absolute paths and `git -C`, never `cd`, no EnterWorktree). The skills contract fails when a
+  skill, template or command names EnterWorktree without forbidding it.
+- A worktree or branch folder no longer lands in `projects.json`: `project-add` refuses a path that is a linked git worktree, lives
+  under `~/.lean-agent/worktrees` or is in `worktrees.json` (it names the main checkout to register instead), and `lean_doctor check`
+  flags an existing entry whose path is a worktree (offering `project-remove`, which never deletes files).
+
+### Fixed (desk skills, relay)
+- The `pr` skill no longer promises the desk what strict mode refuses. Every step names its role: the desk only reads status
+  (`gh pr view|list|status`, `gh search prs`, `az repos pr list|show`); create, comments, update and every push are "route to the
+  thread that owns the branch". The host comes from the project's origin URL: github.com uses `gh`; dev.azure.com and
+  `*.visualstudio.com` use `az repos pr list|show|create|update` (REST with a PAT as the fallback); a missing or logged-out CLI is
+  reported plainly instead of "command not found".
+- Desk strict mode allows those read-only forms (`deskBashOk` reuses the private-project guard's own gh/az read-only classifier,
+  so the two cannot drift; no `--web`, `--output-file`, `--template`, pipe, redirect or expansion) and `git -C <dir> remote get-url
+  <remote>` (to find the host). `gh search` is now read-only in private projects too.
+- Skills offered to the desk no longer name thread-only tools or the desk's missing Write/Edit: each step says who runs it
+  (`thread: lean_report; desk: tell the user`). The `goals` skill sets and clears through new `lean_thread` actions `goal-set` /
+  `goal-clear` (tN, text): two enum words in a tool the desk already has, no new tool, the mod writes the file, and it works for a
+  parked or closed thread that a `send` would not wake.
+- `lean_thread new` refuses a project that is not registered and answers with the known names (nothing is created); `list` shows
+  each thread's project; `commands/new.md` and the `thread` skill say projects come from `lean_thread projects`.
+- Reports reach an idle desk. The engine's `$.prompt.submit` starts a turn once the session is idle, so a question or a `done` /
+  `blocked` report now starts ONE desk turn with the unread reports (at most once a minute, never while a turn runs, never for
+  `working` progress; `desk.autoRelay: false` in `config.json` turns it off and reports wait for the user's next message). A
+  refused submit marks the reports unread again.
+- Finished threads are closed by the desk: the desk template and `thread` skill say "close it yourself (and clear its goal); never
+  ask a thread to close itself", the thread template says a thread cannot close itself and reports done, and a delivered `done`
+  report ends with "(close tN when nothing is left)".
+
+### Added (skills roles)
+- Skills declare `roles: desk, thread` in their front matter. `hooks/skills-contract.mjs` (run by `skills-contract.test.sh`) checks
+  that every `lean_*` tool a skill names exists for a role the skill is offered to (and is marked where only one role has it) and
+  extracts the Bash commands a skill gives the desk; `hooks/skills-roles.test.ts` runs them through `deskBashOk`.
+  `hooks/skills-desk-commands.ts` is generated (`node plugins/lean-agent/hooks/skills-contract.mjs --write`).
 
 ## 1.0.4
 

@@ -45,6 +45,50 @@ async function readForWrite(h: Host, home: string): Promise<Record<string, any> 
   }
 }
 
+// Is this folder a linked git worktree (or a thread's worktree), not a project checkout? A linked worktree has a `.git` FILE
+// ("gitdir: <main>/.git/worktrees/<name>"); the worktree skill keeps its worktrees under ~/.lean-agent/worktrees and in worktrees.json.
+// null = a normal folder; otherwise `repo` is the main checkout when it can be read from the .git file.
+export async function worktreeInfo(h: Host, home: string, path: string): Promise<{ repo?: string; why: string } | null> {
+  const real = await realPath(h, path)
+  let repo: string | undefined
+  let linked = false
+  const st = await h.fs.stat(`${real}/.git`).catch(() => null)
+  if (st && st.kind === 'file') {
+    linked = true
+    const body = await h.fs.read(`${real}/.git`).catch(() => '')
+    const m = typeof body === 'string' ? /^gitdir:\s*(.+?)\/\.git\/worktrees\/[^/\n]+\s*$/m.exec(body) : null
+    if (m) repo = m[1]
+  }
+  const under = `${await realPath(h, `${leanDir(home)}/worktrees`)}/`
+  if (real.startsWith(under)) return { repo, why: 'it lives under ~/.lean-agent/worktrees' }
+  const reg = await readJson<Record<string, { path?: unknown }>>(h, `${leanDir(home)}/worktrees.json`, {})
+  for (const w of Object.values(isObj(reg) ? reg : {})) if (isObj(w) && typeof w.path === 'string' && (await realPath(h, w.path)) === real) return { repo, why: 'worktrees.json lists it as a worktree' }
+  return linked ? { repo, why: 'it is a linked git worktree' } : null
+}
+
+// the registered project (name) whose checkout is `repo`
+async function projectAt(h: Host, projs: Record<string, any>, repo: string | undefined): Promise<string | undefined> {
+  if (!repo) return undefined
+  const real = await realPath(h, repo)
+  for (const [k, v] of Object.entries(projs)) if (isObj(v) && typeof v.path === 'string' && (await realPath(h, v.path)) === real) return k
+  return undefined
+}
+
+// registered projects whose path is a git worktree (doctor flags them; project-remove unregisters, no file is deleted)
+export async function worktreeProjects(h: Host): Promise<{ name: string; path: string; of?: string; why: string }[]> {
+  const home = await homeDir(h)
+  const projs = await readForWrite(h, home)
+  const out: { name: string; path: string; of?: string; why: string }[] = []
+  for (const [name, v] of Object.entries(projs ?? {})) {
+    if (!isObj(v) || typeof v.path !== 'string' || !v.path) continue
+    const w = await worktreeInfo(h, home, v.path).catch(() => null)
+    if (!w) continue
+    const of = await projectAt(h, projs!, w.repo)
+    out.push({ name, path: v.path, of: of && of !== name ? of : undefined, why: w.why })
+  }
+  return out
+}
+
 // the 0.45 global switch: config.json `private: "off"` hides private projects everywhere
 export const privateHidden = async (h: Host, home: string) => (await readJson<Record<string, unknown>>(h, `${leanDir(home)}/config.json`, {})).private === 'off'
 
@@ -98,6 +142,15 @@ export async function listProjects(h: Host, all = false): Promise<{ rows: Projec
   return { rows, hidden, ...(wr === null ? { damaged: true } : {}) }
 }
 
+// `new` with a project: null when it is registered (and not hidden by the private switch), else the refusal naming the known projects
+export async function unknownProject(h: Host, name: string): Promise<string | null> {
+  const { rows, damaged } = await listProjects(h)
+  if (damaged) return 'projects.json is unreadable or not an object: fix it by hand first; no thread was created'
+  if (rows.some(r => r.name === name)) return null
+  const known = rows.map(r => r.name)
+  return `unknown project ${name}: ${known.length ? `known projects: ${known.join(', ')}` : 'none registered'}. Register a folder with project-add (project, path), or leave project out. No thread was created.`
+}
+
 type PIn = { action: string; project?: string; path?: string; on?: boolean; all?: boolean; confirm?: boolean }
 export const projectsAction = (h: Host, i: PIn): Promise<Out> => (i.action === 'projects' ? run(h, i) : queued(() => run(h, i)))
 
@@ -127,6 +180,13 @@ async function run(h: Host, i: PIn): Promise<Out> {
       const st = await h.fs.stat(raw).catch(() => null)
       if (!st || st.kind !== 'dir') return err(`${raw} does not exist or is not a folder`)
       const real = await realPath(h, raw)
+      // a worktree or branch folder is not a project: it would sit in the list next to the real one (threads get their own
+      // worktrees from the worktree skill; the project is the main checkout)
+      const wt = await worktreeInfo(h, home, real)
+      if (wt) {
+        const of = await projectAt(h, projs, wt.repo)
+        return err(`${real} is a git worktree (${wt.why})${of ? ` of ${of}` : wt.repo ? ` of ${wt.repo}` : ''}: register the main checkout${of ? ` (already registered as ${of})` : wt.repo ? ` ${wt.repo}` : ''}, never a worktree or branch folder`)
+      }
       for (const [k, v] of Object.entries(projs)) {
         if (k !== name && isObj(v) && typeof v.path === 'string' && (await realPath(h, v.path)) === real) return err(hide && v.private === true ? `${real} is already registered` : `${real} is already registered as ${k}`)
       }

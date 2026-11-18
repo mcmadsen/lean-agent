@@ -1,6 +1,7 @@
 ---
 name: doctor
 description: Check and repair the lean-agent install (desk folder, login opener, trust), and migrate 0.45 state to 1.0 once. Use when the user says doctor, migrate, "desk did not open at login", or after updating from 0.45.
+roles: desk
 ---
 
 # Doctor and migrate

@@ -6,16 +6,22 @@ import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
 import { readNotices } from './notices'
 import { spendLine } from './stats'
-import { isRunning, parseAgents } from './threads'
+import { isRunning, isWorking, needsYou, parseAgents } from './threads'
 import type { Thread } from './threads'
 
 export type GoalTone = 'working' | 'waiting' | 'stuck' | 'quiet'
 export type GoalRow = { id: string; text: string; ts: number; tone: GoalTone }
 export type AnswerRow = { n: number; rec: DeskRec; unread: boolean }
-export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean }
+// working: the session is busy or reports state working (never closed from the pane); done: the thread's LAST record is a done report
+// (a later question or progress makes it not done); asking: its last record is a question or one is unread; needsYou: the session
+// waits on a prompt nobody answers (open it in the app)
+export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean }
+export type ClosedRow = { id: string; title: string; last: string }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
-export type View = { projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; budget: string; errors: string[] }
+export type View = { projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; errors: string[] }
+export const ANSWERS_MAX = 200 // rows the view hands the pane (it draws only what is unfolded)
+export const CLOSED_MAX = 40
 
 import { STALE_MS } from './chaser'
 export { STALE_MS }
@@ -52,7 +58,7 @@ async function paneAck(h: Host, home: string): Promise<PaneAck> {
 }
 
 export async function loadView(h: Host): Promise<View> {
-  const v: View = { projects: [], goals: [], answers: [], openQuestions: [], unread: 0, total: 0, threads: [], budget: 'n/a', errors: [] }
+  const v: View = { projects: [], goals: [], answers: [], openQuestions: [], unread: 0, total: 0, threads: [], closed: [], budget: 'n/a', errors: [] }
   const guard = async (what: string, f: () => Promise<void>) => {
     try {
       await f()
@@ -81,10 +87,10 @@ export async function loadView(h: Host): Promise<View> {
     v.answers = recs
       .map((rec, n) => ({ n, rec, unread: isUnread(n) }))
       .sort((a, b) => Number(b.unread) - Number(a.unread) || b.n - a.n)
-      .slice(0, 30)
+      .slice(0, ANSWERS_MAX)
   })
   await guard('questions', async () => { v.openQuestions = await openQuestions(h) })
-  const rows = new Map<string, { run: boolean }>()
+  const rows = new Map<string, { run: boolean; working: boolean; needsYou: boolean }>()
   let agentsOk = true
   await guard('agents', async () => {
     const t = await h.clock.now()
@@ -98,12 +104,16 @@ export async function loadView(h: Host): Promise<View> {
       agentsOk = false
       throw new Error(`claude agents exited ${r.exitCode}`)
     }
-    for (const a of parseAgents(r.stdout)) rows.set(a.sid, { run: isRunning(a) })
+    for (const a of parseAgents(r.stdout)) rows.set(a.sid, { run: isRunning(a), working: isWorking(a), needsYou: needsYou(a) })
   })
   const asking = new Set<string>()
   const owner = new Map<string, string>() // tN -> last record text
+  const lastRec = new Map<string, DeskRec>() // tN -> its last record (report or question)
   for (const r of recs.slice(read)) if (r.kind === 'ask') asking.add(r.from)
-  for (const r of recs) owner.set(r.from, r.text)
+  for (const r of recs) {
+    owner.set(r.from, r.text)
+    lastRec.set(r.from, r)
+  }
   await guard('threads', async () => {
     let ents: { name: string }[] = []
     try {
@@ -113,9 +123,15 @@ export async function loadView(h: Host): Promise<View> {
     }
     for (const e of ents.filter(x => ID.test(x.name)).sort((a, b) => Number(b.name.slice(1)) - Number(a.name.slice(1)))) {
       const t = await readJson<Thread | null>(h, `${threadsDir(home)}/${e.name}/thread.json`, null)
-      if (!t || t.state === 'closed') continue
-      const running = !!t.sid && !!rows.get(t.sid)?.run
+      if (!t) continue
       const notes = (await h.fs.read(`${threadsDir(home)}/${e.name}/notes.md`).catch(() => '')) as string
+      if (t.state === 'closed') {
+        if (v.closed.length < CLOSED_MAX) v.closed.push({ id: t.id, title: t.title, last: lastLine(typeof notes === 'string' ? notes : '') || owner.get(t.id) || '' })
+        continue
+      }
+      const ag = t.sid ? rows.get(t.sid) : undefined
+      const running = !!ag?.run
+      const lr = lastRec.get(t.id)
       v.threads.push({
         id: t.id,
         title: t.title,
@@ -125,6 +141,11 @@ export async function loadView(h: Host): Promise<View> {
         run: t.state === 'parked' ? 'parked' : running ? 'running' : 'idle',
         last: lastLine(typeof notes === 'string' ? notes : '') || owner.get(t.id) || '',
         resumable: t.state === 'open' && !running && agentsOk,
+        working: !!ag?.working || !agentsOk, // an unreadable listing is never "not working": nothing is closed on a guess
+        done: !!lr && lr.kind === 'report' && lr.state === 'done',
+        asking: asking.has(t.id) || lr?.kind === 'ask',
+        blocked: !!lr && lr.kind === 'report' && lr.state === 'blocked',
+        needsYou: !!ag?.needsYou,
       })
     }
   })

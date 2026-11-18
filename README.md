@@ -83,9 +83,13 @@ Talk to the desk in plain language. It starts a thread for anything that touches
   reports; the report appears in the pane and in the desk's next answer.
 - "Tell t2 to also update the changelog": queued for t2, handed over at its next step.
 - "What is everyone working on?": the `goals` skill lists one line per thread.
-- "Park t3", "close t1", "reopen t3": flips the thread's state; closing also stops a running session.
+- "Park t3", "close t1", "reopen t3": flips the thread's state; closing also stops a finished-but-alive session and clears
+  the goal. Reopening a **closed** thread starts a new session in the same folder with a handover built from its brief, notes,
+  reports and remembered items (the old conversation is never resumed).
 - After a restart nothing is running. The pane offers **Resume** for threads that had a session and **Start** for the
-  ones that never started.
+  ones that never started. **Close** (press twice) and **Close all done** never touch a working thread; closed threads sit in a
+  collapsed "Closed (N)" with **Reopen**. Section headers fold and unfold; an answer row expands to its full text.
+- Threads send a question or a done / blocked report straight to the desk's session; the inbox and the pane keep every report.
 
 `/lean-agent` opens the pane. Threads run with an allow-list: Edit, Write and Bash inside their own worktrees and the
 lean-agent folder without asking. Pushes stay behind the review gate and the private-project rule.
@@ -99,7 +103,7 @@ lean-agent folder without asking. Pushes stay behind the review gate and the pri
 | `handover` | write a handover note for the next session |
 | `worktree` | create, list, remove worktrees under `~/.lean-agent/worktrees` and sync learned rules into them |
 | `branch` | branch names the way the project wants them (no `lean/` prefix, optional type and task id) |
-| `pr` | open, inspect and update pull requests with `gh` |
+| `pr` | pull requests on GitHub (`gh`) or Azure DevOps (`az`), by the origin URL: a thread opens and updates them, the desk only reads status |
 | `review` | review the branch diff in passes and record the verdict for HEAD |
 | `review-learn` | learn from review comments on pull requests |
 | `learn` | write path-scoped rules for a project |
@@ -123,6 +127,10 @@ Agent definitions in `plugins/lean-agent/agents/`:
 | `lean-agent:reader-haiku`, `lean-agent:reader-sonnet` | read-only lookup and analysis |
 | `lean-agent:reviewer` | read-only review of a diff |
 | `lean-agent:explorer` | explores one area for the `learn` skill |
+
+Defaults (mistakes are expensive where the work happens): threads run on sonnet / effort high (`config.json` `threads.model` /
+`threads.effort` override; `lean_thread new|start` `model` / `effort` override per thread); the desk is sonnet / high;
+`worker-sonnet`, `worker-opus` and `reviewer` run at effort high, `reader-sonnet` at medium, the haiku agents and the explorer at low.
 
 A worker's last line is `LEAN-FEEDBACK {...}`: `missing` context becomes an entry in the project's `gaps.jsonl` (three
 for one area mark its rules stale) and `remember` items go to shared memory. A long Bash result is squeezed (head, tail
@@ -171,6 +179,9 @@ Cost-only, from the per-request usage the mod sees. `~/.lean-agent/config.json`:
 { "dailyCapUsd": { "desk": 5, "thread": 20 }, "workerCapUsd": 2, "workerCaps": { "lean-agent:worker-opus": 4 } }
 ```
 
+Desk reports: while the desk is idle, a thread's question or `done` / `blocked` report starts one desk turn (at most once a minute);
+`{ "desk": { "autoRelay": false } }` in the same file turns that off, and reports then wait for your next message.
+
 Past a cap the next model request is refused with a notice; a worker past its cap ends and reports what is left. Every
 step is a row in `ledger.jsonl`. There is no plan-window percentage (no verified source exists).
 
@@ -178,7 +189,7 @@ step is a row in `ledger.jsonl`. There is no plan-window percentage (no verified
 
 All fail closed (a guard that throws denies):
 
-- **Desk strict mode**: the desk may read lean-agent state and use its own tools; it may not edit code or run builds.
+- **Desk strict mode**: the desk may read lean-agent state and use its own tools; it may not edit code or run builds. Its shell is limited to read-only status commands (`gh pr view|list|status`, `gh search prs`, `az repos pr list|show`, `git -C <dir> log|status|remote get-url`).
 - **Push gate**: see above. The review must be green for the commit each pushed ref points at (not just HEAD).
 - **Guarded branches** (every repo): a plain `git push` to `main`, `master`, `develop` or `release/*` (or a project's own `guards.push-deny`
   list in `projects.json`, even an empty one) is refused in the shell guard and in the pre-push hook: "Push your own branch and open a

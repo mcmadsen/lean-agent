@@ -36,6 +36,9 @@ need worktree 'npm ci'
 need worktree 'Never symlink'
 need worktree 'byte-identical'
 need worktree '\*\*adopt\*\*'
+need worktree 'Never the EnterWorktree tool'
+grep -q 'never with the EnterWorktree tool' "$root/templates/thread.md" || fail "thread.md must forbid the EnterWorktree tool"
+grep -q 'edit files only with the Edit' "$root/templates/thread.md" || fail "thread.md lacks the work rules (Edit/Write only, one simple command, no cd)"
 need review 'lean_review'
 need review 'approve-push'
 need review 'only the tool'
@@ -77,4 +80,6 @@ pv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.js
 mv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/../../.claude-plugin/marketplace.json" | head -1)
 vv=$(sed -n "s/^export const VERSION = '\([^']*\)'.*/\1/p" "$root/hooks/pane.tsx")
 [ -n "$pv" ] && [ "$pv" = "$mv" ] && [ "$pv" = "$vv" ] || fail "version mismatch: plugin.json=$pv marketplace.json=$mv pane.tsx=$vv"
+# roles: tools named per role, and the desk's commands (hooks/skills-roles.test.ts runs them through strict mode)
+node "$root/hooks/skills-contract.mjs" || fail "skills roles (see above)"
 echo "ok skills-contract"

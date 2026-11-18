@@ -2,6 +2,7 @@
 name: review
 description: Review the current branch's diff in passes with the read-only reviewer agent and record a verdict for the HEAD commit; a green record is what unlocks `git push`. Use before any push or when asked to review.
 argument-hint: [base-branch]
+roles: thread
 ---
 
 # Review and push gate

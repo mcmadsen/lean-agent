@@ -2,6 +2,7 @@
 name: handover
 description: Write a handover note (what was done, state, next steps, open questions) as a Markdown file so the next session or person can continue. Use when ending a long thread or when asked for a handoff.
 argument-hint: [tN]
+roles: thread
 ---
 
 # Handover

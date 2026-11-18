@@ -2,6 +2,7 @@
 name: learn
 description: Learn a project's build/test commands, conventions and gotchas into path-scoped rules that load only when a file of that area is read. Run in a thread, never the desk. Use for "learn <project>", "re-learn <area>", "verify the rules" or "trim the rules".
 argument-hint: <project> [--gaps | --full] [--area <dir>] [--verify] [--trim]
+roles: thread
 ---
 
 # Learn project rules

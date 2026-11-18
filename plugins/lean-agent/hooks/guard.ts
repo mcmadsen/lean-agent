@@ -3,7 +3,7 @@
 // register.tsx wraps it fail-closed: a throwing guard denies.
 import { homeDir, leanDir, readJson, realPath, threadsDir, writeJson } from './state'
 import { greenReview, hasApproval, takeApproval } from './reviews'
-import { analyze, plainPipeline, privateText, type Verdict } from './shell'
+import { analyze, plainPipeline, plainWords, privateText, readOnlyForge, type Verdict } from './shell'
 import type { Host } from './state'
 import type { Role } from './role'
 
@@ -258,11 +258,15 @@ export const DESK_TOOLS: readonly string[] = [...DESK_READ, DESK_BASH, ...DESK_F
 // can strict mode ever allow this tool (by name)? lean-agent's own tools always
 export const deskToolPossible = (name: string): boolean => DESK_TOOLS.includes(name) || name.startsWith(LEAN_TOOLS)
 
-function deskBashOk(c: string): boolean {
+export function deskBashOk(c: string): boolean {
   if (hasMeta(c)) return false
   const w = words(c.trim())
   if (w[0] === 'claude') return w[1] === '--bg' || w[1] === 'agents'
-  if (w[0] === 'gh') return w[1] === 'pr' && (w[2] === 'view' || w[2] === 'list')
+  if (w[0] === 'gh' || w[0] === 'az') {
+    const p = plainWords(c.trim()) // quotes resolved, no expansion or second command; the read-only test is the private guard's own
+    return !!p && readOnlyForge(p)
+  }
+  if (w[0] === 'git' && w[1] === '-C' && w.length === 6 && w[3] === 'remote' && w[4] === 'get-url') return !w[5]!.startsWith('-') // where a project's origin is (the pr skill picks gh or az by it)
   if (w[0] === 'git' && w[1] === '-C' && w.length >= 4) return (w[3] === 'log' || w[3] === 'status') && !w.some(x => x.startsWith('--output'))
   return false
 }

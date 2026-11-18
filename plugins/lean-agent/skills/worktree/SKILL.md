@@ -2,6 +2,7 @@
 name: worktree
 description: Create, adopt, list and remove git worktrees for a project under ~/.lean-agent/worktrees, so threads never share a checkout; installs dependencies in a fresh one. Use when a thread needs its own branch checkout, a PR branch made with plain `git worktree add` should be registered, or a worktree must be cleaned up.
 argument-hint: new <project> <branch> | adopt <path> | list | rm <project> <branch>
+roles: thread
 ---
 
 # Worktrees
@@ -10,7 +11,9 @@ Layout: `~/.lean-agent/worktrees/<project>/<branch-dir>` (slashes in the branch 
 `~/.lean-agent/worktrees.json`, an object keyed `<project>/<branch>` with `{path, repo, branch, thread?, shared?}`.
 
 - **new**: path of the project's main checkout from `projects.json`; branch name per the `branch` skill.
-  `git -C <repo> worktree add <path> -b <branch> <base>` (existing branch: omit `-b`). Then copy learned rules
+  `git -C <repo> worktree add <path> -b <branch> <base>` (existing branch: omit `-b`), `<path>` absolute under `~/.lean-agent/worktrees`.
+  **Never the EnterWorktree tool**: for a path outside `.claude/worktrees/` it asks a permission prompt that a background thread
+  cannot answer, so the thread blocks silently. After creating the worktree work with absolute paths and `git -C <path>`, no `cd`. Then copy learned rules
   into it: call `lean_rules` `sync` with `project` and `repo` = the new worktree path (rules are copied files, git-excluded, and a
   worktree is its own checkout). Add the registry entry (Read, edit the JSON, Write).
 - **dependencies** (after `new`, and after `adopt` when `node_modules` is missing): when the worktree has a lockfile, a
