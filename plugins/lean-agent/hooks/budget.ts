@@ -58,13 +58,14 @@ async function cache(h: Host): Promise<Cache | null> {
   const c = (await h.store.get(CACHE).catch(() => null)) as Cache | null
   return c && typeof c.day === 'string' && c.byRole && typeof c.byRole === 'object' ? c : null
 }
-// caps count 1.0 rows by role; a 0.45 row has role "unknown" and is never capped
+// caps count 1.0 rows by role; a row with role "unknown" (a 0.45 row, or a 1.0 row without a role) is never capped, here and in
+// the rollup path of syncCache alike
 function addRows(c: Cache, text: string): number {
   const end = text.lastIndexOf('\n') + 1 // a torn last line waits for the next sync
   for (const line of text.slice(0, end).split('\n')) {
     try {
       const r = normalizeRow(JSON.parse(line))
-      if (r && !r.legacy && day(r.ts) === c.day) c.byRole[r.role] = (c.byRole[r.role] ?? 0) + (r.usd || 0)
+      if (r && r.role !== 'unknown' && day(r.ts) === c.day) c.byRole[r.role] = (c.byRole[r.role] ?? 0) + (r.usd || 0)
     } catch {
       /* damaged line */
     }

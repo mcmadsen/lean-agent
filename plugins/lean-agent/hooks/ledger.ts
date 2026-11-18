@@ -47,8 +47,11 @@ export function normalizeRow(o: unknown): Norm | null {
 // ---- aggregates ------------------------------------------------------------------------------------------------
 export type Agg = [usd: number, input: number, output: number, cacheRead: number, cacheWrite: number, requests: number]
 export type Dim = Record<string, Agg>
-export type Day = { t: Agg; model: Dim; agent: Dim; role: Dim; tN: Dim; rm: Dim } // rm: `role|model`
-export type Rollup = { v: 1; files: Record<string, number>; days: Record<string, Day>; rows: number; legacy: number; bad: number }
+export type Day = { t: Agg; model: Dim; agent: Dim; role: Dim; tN: Dim; rm: Dim; rmm: Dim } // rm: `role|model`; rmm: the same, main requests only
+// files: bytes folded per ledger file; ids: the start of each file's first line (a file is the same file only while its start is)
+export type Rollup = { v: 2; files: Record<string, number>; ids: Record<string, string>; days: Record<string, Day>; rows: number; legacy: number; bad: number }
+const ID_LEN = 256
+const idOf = (text: string) => text.split('\n')[0]!.slice(0, ID_LEN) // the first line (a 1.0 row is one line of about 150 bytes)
 
 export const zero = (): Agg => [0, 0, 0, 0, 0, 0]
 export function addTo(a: Agg, r: Norm) {
@@ -63,8 +66,8 @@ export function merge(a: Agg, b: Agg) {
   for (let i = 0; i < 6; i++) a[i] = (a[i] ?? 0) + (b[i] ?? 0)
 }
 const bump = (d: Dim, k: string, r: Norm) => addTo((d[k] ??= zero()), r)
-const emptyDay = (): Day => ({ t: zero(), model: {}, agent: {}, role: {}, tN: {}, rm: {} })
-export const emptyRollup = (): Rollup => ({ v: 1, files: {}, days: {}, rows: 0, legacy: 0, bad: 0 })
+const emptyDay = (): Day => ({ t: zero(), model: {}, agent: {}, role: {}, tN: {}, rm: {}, rmm: {} })
+export const emptyRollup = (): Rollup => ({ v: 2, files: {}, ids: {}, days: {}, rows: 0, legacy: 0, bad: 0 })
 
 export function addRow(ro: Rollup, r: Norm) {
   const d = (ro.days[dayOf(r.ts)] ??= emptyDay())
@@ -74,6 +77,7 @@ export function addRow(ro: Rollup, r: Norm) {
   bump(d.role, r.role, r)
   bump(d.tN, r.tN, r)
   bump(d.rm, `${r.role}|${r.model}`, r)
+  if (r.agent === 'main') bump(d.rmm, `${r.role}|${r.model}`, r) // the session's own requests: a worker's model is chosen per call
   ro.rows++
   if (r.legacy) ro.legacy++
 }
@@ -121,8 +125,9 @@ export async function ledgerFiles(h: Host, home: string): Promise<string[]> {
 // ---- the rollup ------------------------------------------------------------------------------------------------
 const rollupFile = (home: string) => `${leanDir(home)}/${ROLLUP}`
 function valid(r: any): r is Rollup {
-  return !!r && r.v === 1 && r.files && typeof r.files === 'object' && r.days && typeof r.days === 'object' && Number.isFinite(r.rows)
+  return !!r && r.v === 2 && r.files && typeof r.files === 'object' && r.ids && typeof r.ids === 'object' && r.days && typeof r.days === 'object' && Number.isFinite(r.rows)
 }
+const head = async (h: Host, path: string): Promise<string> => idOf(String((await h.process.run(['head', '-c', '320', path]).catch(() => null))?.stdout ?? ''))
 const prune = (ro: Rollup, now: number) => {
   const keep = Object.keys(ro.days).sort().slice(-KEEP_DAYS)
   for (const d of Object.keys(ro.days)) if (!keep.includes(d) && d < dayOf(now)) delete ro.days[d]
@@ -140,17 +145,39 @@ export async function syncRollup(h: Host, now?: number): Promise<Rollup> {
     rebuilt = true
   }
   const names = await ledgerFiles(h, home)
-  for (let pass = 0; pass < 2; pass++) {
+  for (let pass = 0; pass < 3; pass++) {
     let changed = rebuilt
     let shrank = false
+    const sizes = new Map<string, number | null>()
+    for (const n of names) sizes.set(n, await fileSize(h, `${leanDir(home)}/${n}`))
+    // a recorded file that is gone was renamed (rotation by another session, a crash between the rename and the rollup's write,
+    // or by hand): an unrecorded file that starts with the same bytes is it, and keeps its offset (nothing is folded twice)
+    const gone = Object.keys(ro.files).filter(g => !sizes.get(g) && sizes.get(g) !== 0)
+    for (const n of names) {
+      if (!gone.length || n in ro.files || sizes.get(n) == null) continue
+      const id = await head(h, `${leanDir(home)}/${n}`)
+      const from = gone.find(g => id && ro.ids[g] === id)
+      if (from) {
+        ro.files[n] = ro.files[from]!
+        ro.ids[n] = id
+        delete ro.files[from]
+        delete ro.ids[from]
+        gone.splice(gone.indexOf(from), 1)
+        changed = true
+      }
+    }
     for (const n of names) {
       const path = `${leanDir(home)}/${n}`
-      const size = await fileSize(h, path)
-      if (size === null) continue
+      const size = sizes.get(n)
+      if (size == null) continue
       const off = ro.files[n] ?? 0
       if (size < off) { shrank = true; break }
       if (size === off) continue
-      const used = foldText(ro, await readFrom(h, path, off))
+      // longer than folded: the same file only if it still starts as it did (a fresh file that outgrew an old offset does not)
+      if (off > 0 && ro.ids[n] !== undefined && (await head(h, path)) !== ro.ids[n]) { shrank = true; break }
+      const text = await readFrom(h, path, off)
+      const used = foldText(ro, text)
+      if (used > 0 && off === 0) ro.ids[n] = idOf(text)
       ro.files[n] = off + used
       changed = true
     }
@@ -197,12 +224,16 @@ export async function rotateLedger(h: Host): Promise<string[]> {
   if (!target) return []
   const ro = await syncRollup(h)
   if ((await firstRow(h, cur))?.ts !== first.ts) return [] // another session rotated it meanwhile
-  const r = await h.process.run(['mv', cur, `${leanDir(home)}/${target}`])
+  const r = await h.process.run(['mv', '-n', cur, `${leanDir(home)}/${target}`]) // -n: never replace a file another session just made
   if (r.exitCode !== 0) return []
   if (ro.files[LEDGER] !== undefined) {
     ro.files[target] = ro.files[LEDGER]!
+    if (ro.ids[LEDGER] !== undefined) ro.ids[target] = ro.ids[LEDGER]!
     delete ro.files[LEDGER]
+    delete ro.ids[LEDGER]
+    // (if this write is lost, or another sync ran in between, the next sync finds the renamed file by its start: syncRollup)
     await atomicWrite(h, rollupFile(home), JSON.stringify(ro)).catch(() => undefined)
   }
+  await h.store.set('ledger-today', null).catch(() => undefined) // budget.ts: its byte offset belonged to the file that just moved
   return [`ledger.jsonl (${(size / 1e6).toFixed(1)} MB) moved to ${target}${first.legacy ? ' (it starts with a 0.45 row)' : ''}; stats still read it`]
 }

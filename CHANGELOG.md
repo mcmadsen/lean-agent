@@ -63,7 +63,10 @@ builds 1.0.5).
 - **Ledger rotation, no row lost.** At session start a `ledger.jsonl` that begins with a 0.45 row is renamed once to
   `ledger-legacy.jsonl`, and one that begins in a past month to `ledger-YYYY-MM.jsonl`; a fresh `ledger.jsonl` follows. It is a
   rename (a concurrent writer lands in the old or the new file), the rollup offset moves with the file, and every reader (stats,
-  caps) reads all `ledger*.jsonl`. New rows leave out zero token counts (about 100 bytes shorter; a missing number reads as 0).
+  caps) reads all `ledger*.jsonl`. The rollup also remembers each file's first line: a renamed file (a crash between the rename and
+  the rollup write, another session in between) is recognised by it and not folded twice, and a fresh `ledger.jsonl` that outgrew an
+  old offset rebuilds instead of being read mid-line; the cap cache is dropped by a rotation. (0.45 wrote naive timestamps: read as
+  UTC, which only moves an old row across midnight.) New rows leave out zero token counts (about 100 bytes shorter; a missing number reads as 0).
 - **Rule loads are counted again.** `lean_rules stats` showed no load for rules that had loaded. The `InstructionsLoaded` shell hook
   was the only path, so the mod now also logs `classic.InstructionsLoaded` itself into the same log; a load seen by both counts once,
   and `_project.md` is listed (it was left out of "never loaded"). Not checked on a live Claude Code session in this work (a nested

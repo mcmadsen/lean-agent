@@ -138,7 +138,7 @@ export async function modelMismatches(h: Host): Promise<string[]> {
     if (t?.sid) sids.set(t.sid, { id: e.name, model: t.model })
   }
   const ro = await syncRollup(h, now)
-  const rm = ro.days[dayOf(now)]?.rm ?? {}
+  const rm = ro.days[dayOf(now)]?.rmm ?? {} // the sessions' own requests: a worker's model is chosen per call and is no mismatch
   for (const [k, a] of Object.entries(rm)) {
     const [role, model = ''] = k.split('|')
     if (role === 'desk' && family(model) !== desk) out.push(`the desk spent ${usd(a[0])} today on ${model}, lean-agent pins ${desk}: that session started before setup pinned the model; close it and open the desk again`)

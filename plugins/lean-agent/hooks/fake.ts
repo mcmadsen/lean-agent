@@ -58,6 +58,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       if (c === 'wc') { const t = files.get(a[a.length - 1]); return t === undefined ? { exitCode: 1, stdout: '', stderr: 'no such file' } : ok(new TextEncoder().encode(t).length + ' ' + a[a.length - 1]) }
       if (c === 'tail' && a[0] === '-c' && /^\+\d+$/.test(a[1] ?? '')) { const t = files.get(a[2]); if (t === undefined) return { exitCode: 1, stdout: '', stderr: 'no such file' }; return ok(new TextDecoder().decode(new TextEncoder().encode(t).subarray(Number(a[1].slice(1)) - 1))) }
       if (c === 'head' && a[0] === '-n' && a[1] === '1') { const t = files.get(a[2]); return t === undefined ? { exitCode: 1, stdout: '', stderr: 'no such file' } : ok(t.split('\n')[0] + '\n') }
+      if (c === 'head' && a[0] === '-c' && /^\d+$/.test(a[1] ?? '')) { const t = files.get(a[2]); return t === undefined ? { exitCode: 1, stdout: '', stderr: 'no such file' } : ok(new TextDecoder().decode(new TextEncoder().encode(t).subarray(0, Number(a[1])))) }
       if (c === 'tee') { const p = a[a.length - 1]; files.set(p, (files.get(p) ?? '') + (call.stdin ?? '')); return ok(call.stdin) }
       if (c === 'claude') { const r = claude.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
       if (c === 'git') { const r = git.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
