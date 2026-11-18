@@ -112,12 +112,13 @@ export async function writeApproval(h: Host, a: { project: string; sha: string; 
   const exp = ts + APPROVAL_TTL_MS
   const file = approvalFile(home, a.project, a.sha)
   await writeJson(h, file, { ...a, ts, exp, sig: await signApproval(key, a.project, a.sha, a.thread, exp) } satisfies Approval)
-  await h.store.set(`approval.used.${exp}.${a.project}.${a.sha}.${a.thread}`, false).catch(() => undefined) // a re-approval starts unused
+  await h.store.set(`approval.used.${exp}.${a.project}.${a.sha}.${a.thread}`, false) // a re-approval starts unused (a failure surfaces: no approval is reported that could never be used)
   return file
 }
 // Consumption lives in the mod's own store (outside what a session can edit), never in the record: a thread that rewrites the file
 // cannot make a used approval valid again. One approval per (project, sha, thread, exp); a re-approval has a new exp.
 const usedKey = (r: { project: string; sha: string; thread: string; exp: number }) => `approval.used.${r.exp}.${r.project}.${r.sha}.${r.thread}`
+// (in one process: each session has its own mod, so two sessions could both read `unused`; an approval is bound to one thread, which keeps that window narrow)
 let gate: Promise<unknown> = Promise.resolve()
 const exclusive = <T>(f: () => Promise<T>): Promise<T> => { const r = gate.then(f, f); gate = r.catch(() => undefined); return r }
 async function validApproval(h: Host, project: string, sha: string, thread: string): Promise<Approval | null> {

@@ -63,7 +63,9 @@ export async function recordSid($: Host, id: string, sid: string): Promise<boole
   if (t.sid === sid || (Array.isArray(t.sids) && t.sids.includes(sid))) return true
   const other = await roleBySid($, sid)
   if (other && other.kind === 'thread' && other.id !== id) return false
-  await writeJson($, file, { ...t, sids: [...(Array.isArray(t.sids) ? t.sids : []), sid].slice(-20) })
+  const fresh = await readJson<Record<string, any> | null>($, file, null) // the desk may have saved meanwhile: write onto the latest record
+  if (!fresh || fresh.id !== id || fresh.state === 'closed') return false
+  await writeJson($, file, { ...fresh, sids: [...new Set([...(Array.isArray(fresh.sids) ? fresh.sids : []), sid])].slice(-20) })
   return true
 }
 

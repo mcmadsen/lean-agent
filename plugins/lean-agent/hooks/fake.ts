@@ -13,7 +13,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
   const os = { name: 'Darwin' } // what `uname` answers
   const app = { running: true, pgrep: null as null | ((a: string[]) => any) } // is the Claude app running (pgrep)
   const claude = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 0, stdout: '' }) }
-  const res = (p: string) => links.get(p) ?? p
+  const res = (p: string): string => { for (const [k, v] of links) if (p === k || p.startsWith(k + '/')) return v + p.slice(k.length); return p } // a symlink anywhere in the path, as the OS follows it
   const made = new Set<string>() // folders a `mkdir` made (a folder alone has no file in `files`)
   const dirs = () => {
     const d = new Set<string>(['/', ...made])
