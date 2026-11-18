@@ -9,6 +9,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
   const links = new Map<string, string>()
   const calls: Call[] = []
   const writes: string[] = []
+  const git = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 1, stdout: '' }) }
   const claude = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 0, stdout: '' }) }
   const res = (p: string) => links.get(p) ?? p
   const dirs = () => {
@@ -45,6 +46,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       if (c === 'mkdir') return ok()
       if (c === 'tee') { const p = a[a.length - 1]; files.set(p, (files.get(p) ?? '') + (call.stdin ?? '')); return ok(call.stdin) }
       if (c === 'claude') { const r = claude.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
+      if (c === 'git') { const r = git.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
       return { exitCode: 127, stdout: '', stderr: 'unknown ' + c }
     },
   }
@@ -66,6 +68,6 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     on('process.run', (_: any, e: any) => ({ value: impl.run(e.argv, e.init) }))
   }
   if (on) on('clock.now', () => ({ value: clock.t }))
-  return { host, files, links, calls, writes, claude, clock, home, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
+  return { host, files, links, calls, writes, claude, git, clock, home, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
 }
 
