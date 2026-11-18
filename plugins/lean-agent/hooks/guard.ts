@@ -3,7 +3,7 @@
 // register.tsx wraps it fail-closed: a throwing guard denies.
 import { homeDir, leanDir, readJson, realPath, threadsDir, writeJson } from './state'
 import { greenReview } from './reviews'
-import { analyze, privateText, type Verdict } from './shell'
+import { analyze, plainWords, privateText, type Verdict } from './shell'
 import type { Host } from './state'
 import type { Role } from './role'
 
@@ -339,21 +339,56 @@ async function grantFor($: Host, ctx: Ctx): Promise<Grants> {
   })
 }
 
+// Built-in read-only commands, so a reader never depends on a brief: only OUR agent types (exact `lean-agent:` prefix) get them;
+// other:explorer, a bare explorer and every other type get nothing (an allow-cmd grant adds on top). One plain `git` command
+// (shell.ts lexer, no meta character, no expansion), the only global options are --no-pager and -C <dir inside the session cwd>,
+// and no option that writes a file, runs a program or reads outside the repository.
+const GIT_EXPLORER = ['log', 'ls-files']
+const GIT_READER = ['log', 'ls-files', 'show', 'diff', 'status', 'rev-parse']
+export const builtinGit = (t?: string): string[] => {
+  const n = ownName(t) ?? ''
+  return n === 'explorer' ? GIT_EXPLORER : /^reader-/.test(n) || n === 'reviewer' ? GIT_READER : []
+}
+// long options git accepts by any unambiguous prefix: --out, --output=f, --ext, --ext-diff, --exec, --exec-path ...
+const BAD_LONG = (o: string) => /^(output|ext-d|exec|config|git-dir|work-tree|no-index|upload-pack|receive-pack|paginate)/.test(o) || (o.length > 0 && ('output'.startsWith(o) || 'ext-diff'.startsWith(o) || 'exec-path'.startsWith(o)))
+// -o <file> and clusters like -po (a short cluster with an o is refused, even -Sfoo: write --pickaxe-all style long options instead)
+const SHORT_O = (a: string) => a.startsWith('-o') || /^-[A-Za-z]{2,4}$/.test(a) && a.includes('o')
+async function builtinReadOnly($: Host, ctx: Ctx, c: string): Promise<boolean> {
+  const allowed = builtinGit(ctx.agentType)
+  if (!allowed.length || hasMeta(c)) return false
+  const w = plainWords(c)
+  if (!w || w[0] !== 'git') return false
+  let i = 1
+  for (; i < w.length && w[i]!.startsWith('-'); ) {
+    if (w[i] === '--no-pager') i++
+    else if (w[i] === '-C' && w[i + 1]) {
+      const d = await resolve($, w[i + 1]!, ctx.cwd)
+      if (!(within(d, norm(ctx.cwd)) || within(d, norm(await realPath($, ctx.cwd))))) return false
+      i += 2
+    } else return false
+  }
+  const sub = w[i++]
+  if (!sub || !allowed.includes(sub)) return false
+  for (const a of w.slice(i)) {
+    if (a === '--') break
+    if (a.startsWith('--')) { if (BAD_LONG(a.slice(2).split('=')[0]!)) return false }
+    else if (a.startsWith('-') && SHORT_O(a) && ['log', 'diff', 'show'].includes(sub)) return false
+  }
+  return true
+}
+
 async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   const t = ctx.agentType
   const edits = e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'NotebookEdit'
   if (e.tool === 'AskUserQuestion') return 'lean-agent: a subagent never asks the user; report the question to the thread'
   if (isReader(t)) {
     if (edits) return `lean-agent: ${t} is read-only`
-    if (e.tool === 'Bash' && ownName(t) === 'explorer') {
-      const c = String(e.command ?? '').trim()
-      return !hasMeta(c) && /^git (log|ls-files)( |$)/.test(c) ? null : 'lean-agent: explorer may run only git log and git ls-files'
-    }
     if (e.tool === 'Bash') {
-      const g = await grantFor($, ctx)
       const c = String(e.command ?? '').trim()
+      if (await builtinReadOnly($, ctx, c)) return null
+      const g = await grantFor($, ctx)
       const ok = !hasMeta(c) && (g.cmds ?? []).some(x => c === x || c.startsWith(x + ' '))
-      return ok ? null : `lean-agent: ${t} may run only the commands the thread granted (allow-cmd)`
+      return ok ? null : `lean-agent: ${t} may run only its built-in read-only git commands and the commands the thread granted (allow-cmd)`
     }
     return null
   }

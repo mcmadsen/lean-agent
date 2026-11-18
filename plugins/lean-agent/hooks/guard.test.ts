@@ -306,7 +306,8 @@ test('the review skill grants the reviewer exactly the read-only git commands fo
   expect(await bash('git merge-base main abc1234')).toBeNull()
   expect(await bash('git diff main...abc1234 | cat')).toContain('granted')
   expect(await bash('git push origin x')).toContain('granted')
-  expect(await bash('git diff')).toContain('granted')
+  expect(await bash('git diff')).toBeNull() // built in for a reviewer
+  expect(await bash('git merge-base main x')).toContain('granted')
 })
 
 test('the plugin-prefixed agent types: lean-agent:worker-* edits under a grant; reviewer, readers, foreign and bare types are read-only', async () => {
@@ -323,13 +324,43 @@ test('the plugin-prefixed agent types: lean-agent:worker-* edits under a grant; 
   expect([isWorker('lean-agent:worker-opus'), isWorker('worker-opus'), isWorker('other:worker-opus'), isWorker(undefined)]).toEqual([true, false, false, false])
 })
 
-test('the explorer (prefixed) may run only git log / ls-files; a bare explorer needs a grant', async () => {
+test('built-in read-only git: the explorer runs ls-files / log without a grant; refusals; readers run show; foreign, bare and worker types differ', async () => {
   const h = fakeHost(null)
   const thread = { kind: 'thread', id: 't1' } as any
   const bash = (command: string, t: string) => run(h, thread, { tool: 'Bash', command }, '/r', t, 'e1')
-  expect(await bash('git log -3', 'lean-agent:explorer')).toBeNull()
-  expect(await bash('rm x', 'lean-agent:explorer')).toContain('explorer may run only')
-  expect(await bash('git log -3', 'explorer')).toContain('granted')
+  const ex = (c: string) => bash(c, 'lean-agent:explorer')
+  expect(await ex('git ls-files src')).toBeNull()
+  expect(await ex('git log --oneline -5 -- src')).toBeNull()
+  expect(await ex('git log -3')).toBeNull()
+  expect(await ex('rm x')).toContain('built-in')
+  expect(await ex('git show HEAD:file')).toContain('built-in') // explorer: only log / ls-files
+  for (const c of ['git log --output=x', 'git log --out=x', 'git log -o x', 'git -c core.pager=sh log', 'git --exec-path=/x log', 'git ls-files > x', 'git diff --ext-diff', 'git log | sh', 'git log; rm x', 'git log $(id)', 'git log $HOME', 'GIT_PAGER=sh git log', 'git -C /etc log', 'git --config-env=a=b log', 'git push origin x'])
+    expect(await bash(c, 'lean-agent:reviewer'), c).toContain('granted')
+  expect(await bash('git ls-files > x', 'lean-agent:explorer')).toContain('granted')
+  expect(await bash('git log --output=x', 'lean-agent:explorer')).toContain('granted')
+  expect(await bash('git -c core.pager=sh log', 'lean-agent:explorer')).toContain('granted')
+  expect(await bash('git log | sh', 'lean-agent:explorer')).toContain('granted')
+  for (const t of ['lean-agent:reader-haiku', 'lean-agent:reader-sonnet', 'lean-agent:reviewer']) {
+    expect(await bash('git show HEAD:file', t)).toBeNull()
+    expect(await bash('git diff --stat main...HEAD', t)).toBeNull()
+    expect(await bash('git status --short', t)).toBeNull()
+    expect(await bash('git rev-parse HEAD', t)).toBeNull()
+    expect(await bash('git -C /r/sub log -2', t)).toBeNull()
+  }
+  expect(await bash('git diff --ext-diff', 'lean-agent:reader-haiku')).toContain('granted')
+  for (const t of ['other:explorer', 'explorer', 'other:reader-haiku', 'reader-haiku'])
+    expect(await bash('git log -3', t), t).toContain('granted')
+  expect(await bash('git log -3', 'lean-agent:worker-sonnet')).toBeNull() // a worker is unchanged
+  expect(await bash('git push origin x', 'lean-agent:worker-sonnet')).not.toContain('built-in')
+})
+
+test('a grant adds on top of the built-in git commands', async () => {
+  const h = fakeHost(null)
+  const thread = { kind: 'thread', id: 't1' } as any
+  await recordGrant(h.host, thread, 'c1', 'lean-agent:explorer', { cmds: ['ls'] })
+  const bash = (command: string) => run(h, thread, { tool: 'Bash', command }, '/r', 'lean-agent:explorer', 'e1')
+  expect(await bash('ls src')).toBeNull()
+  expect(await bash('git ls-files src')).toBeNull()
 })
 
 test('a grant that names the agent bare binds to the prefixed type, and the other way round', async () => {

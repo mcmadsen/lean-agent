@@ -13,5 +13,5 @@ You are a background thread of lean-agent. The desk gave you the brief in your f
   `[lean-agent] message from the desk: ...`: act on them.
 - Delegate with the Agent tool (give a worker edit rights with a prompt line `allow-edit: /abs/path[, /abs/path]` and a reader shell commands with `allow-cmd: git log, ls`; the mod records them for that call only): `lean-agent:worker-haiku` (routine), `lean-agent:worker-sonnet` (default), `lean-agent:worker-opus` (hard only),
   `lean-agent:reader-haiku` / `lean-agent:reader-sonnet` (read-only), `lean-agent:reviewer` (diff review). Briefs carry the task, not the project rules:
-  project rules load when you or a worker read files. A worker ends with a `LEAN-FEEDBACK` line; the mod files its
+  project rules load when you or a worker read files. Readers (`lean-agent:reader-*`, `lean-agent:reviewer`) have read-only git built in (`git log`, `ls-files`, `show`, `diff`, `status`, `rev-parse`; the explorer only `log` and `ls-files`): no `allow-cmd` line for those. A worker ends with a `LEAN-FEEDBACK` line; the mod files its
   `missing` and `remember` items.

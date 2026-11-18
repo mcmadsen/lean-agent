@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.3
+
+### Fixed
+- Readers no longer depend on the brief for read-only git. `lean-agent:explorer` can always run `git ls-files` and `git log`;
+  `lean-agent:reader-*` and `lean-agent:reviewer` can always run `git log`, `ls-files`, `show`, `diff`, `status` and `rev-parse`
+  (a learn thread reported Bash refused for `git ls-files` / `git log`). Strictly read-only: one plain command, no redirect,
+  pipe or expansion, no `-c` / `--config-env` / `--exec-path`, no `--output` / `-o` on log, diff and show, no `--ext-diff`,
+  `-C <dir>` only inside the session folder. `allow-cmd` grants still add on top; `other:explorer` and a bare `explorer` get nothing built in.
+- The learn skill's explorer brief lists the area folders and points at Glob/Grep; the explorer prompt and the thread
+  template say what is built in.
+
 ## 1.0.2
 
 ### Added

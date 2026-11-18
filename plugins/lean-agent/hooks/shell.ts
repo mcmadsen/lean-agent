@@ -309,3 +309,19 @@ export function analyze(c: string): Verdict {
   }
   return v
 }
+
+// The words of ONE plain simple command (quotes and escapes resolved), or null when it is anything else: several commands,
+// a heredoc / here-string, an expansion or substitution in a word, or text that cannot be lexed. Redirections are dropped by the
+// lexer, so callers that must refuse them check the raw text too (hasMeta in guard.ts).
+export function plainWords(c: string): string[] | null {
+  const v: Verdict = { push: false, write: false, unsure: false, pushes: [] }
+  try {
+    const segs = lex(c, 0, v)
+    const s = segs[0]
+    if (segs.length !== 1 || !s || s.docs.length || !s.words.length || v.unsure) return null
+    return s.words.some(w => w.includes(EXP)) ? null : s.words
+  } catch (e) {
+    if (e instanceof Bad) return null
+    throw e
+  }
+}

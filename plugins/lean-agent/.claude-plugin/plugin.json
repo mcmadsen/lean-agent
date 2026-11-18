@@ -1,6 +1,6 @@
 {
   "name": "lean-agent",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Token-frugal orchestration for Claude Code: a desk session that routes work to background threads, learned path-scoped rules, review gates and budgets. One plugin: skills, a TypeScript mod and plain state files.",
   "author": {
     "name": "McMadsen",
