@@ -127,7 +127,8 @@ const rollupFile = (home: string) => `${leanDir(home)}/${ROLLUP}`
 function valid(r: any): r is Rollup {
   return !!r && r.v === 2 && r.files && typeof r.files === 'object' && r.ids && typeof r.ids === 'object' && r.days && typeof r.days === 'object' && Number.isFinite(r.rows)
 }
-const head = async (h: Host, path: string): Promise<string> => idOf(String((await h.process.run(['head', '-c', '320', path]).catch(() => null))?.stdout ?? ''))
+// the same id from the file itself (whole first line, then the same cut: bytes and characters never disagree)
+const head = async (h: Host, path: string): Promise<string> => idOf(String((await h.process.run(['head', '-n', '1', path]).catch(() => null))?.stdout ?? ''))
 const prune = (ro: Rollup, now: number) => {
   const keep = Object.keys(ro.days).sort().slice(-KEEP_DAYS)
   for (const d of Object.keys(ro.days)) if (!keep.includes(d) && d < dayOf(now)) delete ro.days[d]
@@ -226,6 +227,10 @@ export async function rotateLedger(h: Host): Promise<string[]> {
   if ((await firstRow(h, cur))?.ts !== first.ts) return [] // another session rotated it meanwhile
   const r = await h.process.run(['mv', '-n', cur, `${leanDir(home)}/${target}`]) // -n: never replace a file another session just made
   if (r.exitCode !== 0) return []
+  // `mv -n` skips without an error on some systems: the file must really have moved (the target exists, and ledger.jsonl is gone
+  // or is a fresh file) before the rollup follows it
+  const there = await fileSize(h, `${leanDir(home)}/${target}`)
+  if (there === null || ((await fileSize(h, cur)) !== null && (await firstRow(h, cur))?.ts === first.ts)) return []
   if (ro.files[LEDGER] !== undefined) {
     ro.files[target] = ro.files[LEDGER]!
     if (ro.ids[LEDGER] !== undefined) ro.ids[target] = ro.ids[LEDGER]!
