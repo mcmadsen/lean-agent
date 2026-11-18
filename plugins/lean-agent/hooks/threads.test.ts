@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { leanThread, parseAgents, resetLocks, trustFolder } from './threads'
+import { REPORT_BUDGET, olderVersion, reportHistory } from './handover'
 
 const SID = '11111111-2222-3333-4444-555555555555'
 const ROOT = '/p'
@@ -38,10 +39,10 @@ test('new records the sid, writes the folder, settings and trust', async () => {
   expect(h.files.has('/h/.lean-agent/githooks/private.list')).toBe(true)
   expect(JSON.parse(h.files.get('/h/.claude.json')!).projects['/h/.lean-agent/threads/t1'].hasTrustDialogAccepted).toBe(true)
   const argv = h.claudeCalls().find(a => a[0] === '--bg')!
-  expect(argv).toEqual(['--bg', '-n', 't1 · fix login', '--model', 'sonnet', '--effort', 'medium', '--', 'fix the login bug'])
+  expect(argv).toEqual(['--bg', '-n', 't1 · fix login', '--model', 'sonnet', '--effort', 'high', '--', 'fix the login bug'])
   expect(s.model).toBe('sonnet')
-  expect(s.effortLevel).toBe('medium')
-  expect([t.model, t.effort]).toEqual(['sonnet', 'medium'])
+  expect(s.effortLevel).toBe('high')
+  expect([t.model, t.effort]).toEqual(['sonnet', 'high'])
   expect(h.calls.find(c => c.argv[0] === 'claude' && c.argv[1] === '--bg')!.cwd).toBe('/h/.lean-agent/threads/t1')
   expect((await call({ action: 'new', title: 'second' })).ok).toBe(true)
   expect(h.files.has('/h/.lean-agent/threads/t2/thread.json')).toBe(true)
@@ -134,8 +135,11 @@ test('trust writer keeps every other key and survives a damaged file', async () 
 
 test('agents JSON parser is tolerant', () => {
   const row = { sessionId: 'a', name: 'n', cwd: '/c', status: 'Busy', startedAt: 5, extra: { z: 1 } }
-  expect(parseAgents(JSON.stringify([row]))).toEqual([{ sid: 'a', name: 'n', cwd: '/c', status: 'busy', startedAt: 5, pid: 0, id: '' }])
-  expect(parseAgents(JSON.stringify({ sessions: [{ session_id: 'b', state: 'idle' }, null, 7, {}] }))).toEqual([{ sid: 'b', name: '', cwd: '', status: 'idle', startedAt: 0, pid: 0, id: '' }])
+  expect(parseAgents(JSON.stringify([row]))).toEqual([{ sid: 'a', name: 'n', cwd: '/c', status: 'busy', startedAt: 5, pid: 0, id: '', state: '', waitingFor: '' }])
+  expect(parseAgents(JSON.stringify({ sessions: [{ session_id: 'b', state: 'idle' }, null, 7, {}] }))).toEqual([{ sid: 'b', name: '', cwd: '', status: 'idle', startedAt: 0, pid: 0, id: '', state: 'idle', waitingFor: '' }])
+  // the working state and a prompt the session waits on are read from the listing
+  const w = parseAgents(JSON.stringify([{ sessionId: 'c', status: 'busy', state: 'working' }, { sessionId: 'd', status: 'busy', waitingFor: 'permission prompt' }, { sessionId: 'e', status: 'busy', waitingFor: { kind: 'permission', tool: 'Bash' } }]))
+  expect(w.map(r => [r.state, r.waitingFor])).toEqual([['working', ''], ['', 'permission prompt'], ['', '{"kind":"permission","tool":"Bash"}']])
   expect(parseAgents('not json')).toEqual([])
   expect(parseAgents('')).toEqual([])
   expect(parseAgents('{"agents":5}')).toEqual([])
@@ -344,7 +348,7 @@ test('new and start pass --model/--effort (call > config.json > default), record
   const { h, state, call } = setup()
   h.files.set('/h/.lean-agent/config.json', JSON.stringify({ threads: { model: 'haiku' } }))
   await call({ action: 'new', title: 'cheap', text: 'x' })
-  expect(h.claudeCalls().find(a => a[0] === '--bg')!.slice(3, 7)).toEqual(['--model', 'haiku', '--effort', 'medium'])
+  expect(h.claudeCalls().find(a => a[0] === '--bg')!.slice(3, 7)).toEqual(['--model', 'haiku', '--effort', 'high']) // the default effort is high
   await call({ action: 'new', title: 'hard', text: 'x', model: 'opus', effort: 'high' })
   expect(h.claudeCalls().filter(a => a[0] === '--bg')[1]!.slice(3, 7)).toEqual(['--model', 'opus', '--effort', 'high'])
   const t2 = JSON.parse(h.files.get('/h/.lean-agent/threads/t2/thread.json')!)
@@ -366,6 +370,17 @@ test('new and start pass --model/--effort (call > config.json > default), record
   await call({ action: 'send', tN: 't2', text: 'again' })
   const resumes = h.claudeCalls().filter(a => a.includes('--resume'))
   for (const r of resumes) expect(r.some(x => x === '--model' || x === '--effort')).toBe(false)
+})
+
+test('thread defaults are sonnet/high; config.json threads.effort and the call still override', async () => {
+  const { h, call } = setup()
+  await call({ action: 'new', title: 'plain', text: 'x' })
+  expect(h.claudeCalls().filter(a => a[0] === '--bg')[0]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ threads: { effort: 'low' } }))
+  await call({ action: 'new', title: 'cfg', text: 'x' })
+  expect(h.claudeCalls().filter(a => a[0] === '--bg')[1]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'low'])
+  await call({ action: 'new', title: 'call', text: 'x', effort: 'medium' })
+  expect(h.claudeCalls().filter(a => a[0] === '--bg')[2]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'medium'])
 })
 
 test('a dead status with a lingering process is stopped and resumed, not left queued', async () => {
@@ -463,4 +478,151 @@ test('a desk save keeps the session ids the thread\'s own mod appended meanwhile
   const rec = JSON.parse(String(s.h.files.get(f)))
   expect(rec.state).toBe('parked')
   expect(rec.sids).toEqual(['sess-a'])
+})
+
+// ---- reopen = a fresh session with a handover; resume of an older-version session starts fresh -------------------------------
+const SID2 = '99999999-2222-3333-4444-555555555555'
+function fresh(version = '1.0.5') {
+  const s = setup()
+  s.h.files.set(`${ROOT}/.claude-plugin/plugin.json`, JSON.stringify({ version }))
+  let n = 0
+  const bg: string[][] = []
+  s.h.claude.handler = (a: string[]) => {
+    if (a[0] === '--bg' && a.includes('--resume')) return { exitCode: 0, stdout: 'resumed\n' }
+    if (a[0] === '--bg') { bg.push(a); return { exitCode: 0, stdout: `started ${n++ ? SID2 : SID}\n` } }
+    if (a[0] === 'agents') return { exitCode: 0, stdout: JSON.stringify(s.state.rows) }
+    return { exitCode: 0, stdout: '' }
+  }
+  return { ...s, bg }
+}
+const tfile = (h: any, f: string) => `/h/.lean-agent/threads/t1/${f}`
+const jf = (h: any, p: string) => JSON.parse(String(h.files.get(p)))
+
+test('close clears the thread goal (and says so); the folder and the reports stay', async () => {
+  const { h, call } = fresh()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  h.files.set('/h/.lean-agent/goals.json', JSON.stringify({ t1: { text: 'ship it', ts: 1 }, t2: { text: 'other', ts: 2 } }))
+  const r = await call({ action: 'close', tN: 't1' })
+  expect(r.text).toBe('t1 closed, goal cleared')
+  expect(Object.keys(jf(h, '/h/.lean-agent/goals.json'))).toEqual(['t2'])
+  expect(h.files.has(tfile(h, 'brief.md'))).toBe(true)
+  expect((await call({ action: 'close', tN: 't1' })).text).toBe('t1 closed') // nothing left to clear
+})
+
+test('reopen of a closed thread starts a NEW session (claude --bg, never --resume) with a handover; the old sid stays as history', async () => {
+  const { h, state, bg, call } = fresh()
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
+  await call({ action: 'new', title: 'fix login', text: 'fix the login bug in the api', project: 'app', model: 'opus', effort: 'low' })
+  h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ 'app/fix-login': { path: '/h/.lean-agent/worktrees/app/fix-login', repo: '/r/app', branch: 'fix-login', thread: 't1' }, 'app/other': { path: '/w/other', branch: 'other', thread: 't2' } }))
+  h.files.set('/h/.lean-agent/goals.json', JSON.stringify({ t1: { text: 'login fixed and reviewed', ts: 1 } }))
+  h.files.set(tfile(h, 'notes.md'), '# notes\nthe flaky part is the clock\n')
+  h.files.set('/h/.lean-agent/memory/notes.jsonl', JSON.stringify({ from: 't1', text: 'api uses pnpm' }) + '\n' + JSON.stringify({ from: 't2', text: 'someone elses' }) + '\n')
+  h.files.set('/h/.lean-agent/desk/inbox.jsonl', [
+    { ts: 1, from: 't1', kind: 'report', text: 'first look done', state: 'working' },
+    { ts: 2, from: 't2', kind: 'report', text: 'unrelated thread', state: 'done' },
+    { ts: 3, from: 't1', kind: 'report', text: 'branch fix-login, last commit abc1234, not pushed; next: open the PR', state: 'done' },
+  ].map(r => JSON.stringify(r)).join('\n') + '\n')
+  await call({ action: 'close', tN: 't1' })
+  await call({ action: 'send', tN: 't1', text: 'also bump the changelog' }) // queued while closed
+  state.rows = []
+  const r = await call({ action: 'reopen', tN: 't1' })
+  expect(r.ok).toBe(true)
+  expect(r.text).toContain('t1 reopened as a new session (old conversation kept read-only)')
+  expect(h.claudeCalls().some(a => a.includes('--resume'))).toBe(false)
+  expect(bg).toHaveLength(2) // the first start and the fresh one
+  const argv = bg[1]!
+  expect(argv.slice(0, 7)).toEqual(['--bg', '-n', 't1 · fix login', '--model', 'opus', '--effort', 'low']) // thread.json's model/effort
+  const prompt = argv[argv.length - 1]!
+  for (const need of ['NEW session', 'fix the login bug in the api', 'login fixed and reviewed', 'branch fix-login', 'worktrees/app/fix-login', 'the flaky part is the clock', 'api uses pnpm', 'also bump the changelog', 'first look done', 'last commit abc1234, not pushed']) expect(prompt).toContain(need)
+  expect(prompt).not.toContain('unrelated thread')
+  expect(prompt).not.toContain('someone elses')
+  expect(prompt.indexOf('first look done')).toBeLessThan(prompt.indexOf('last commit abc1234')) // oldest first, newest last
+  const t = jf(h, tfile(h, 'thread.json'))
+  expect([t.state, t.sid, t.model, t.effort, t.version]).toEqual(['open', SID2, 'opus', 'low', '1.0.5'])
+  expect(t.sids).toContain(SID) // the old session id is history
+  expect(t.delivered).toBe(1) // the queued message went into the handover
+})
+
+test('reopen refuses while the old session still runs, and a parked thread reopens as before (same session, use resume)', async () => {
+  const { h, state, bg, call } = fresh()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  await call({ action: 'park', tN: 't1' })
+  expect((await call({ action: 'reopen', tN: 't1' })).text).toBe('t1 reopened; use resume to wake it')
+  expect(bg).toHaveLength(1) // no new session for a parked thread
+  await call({ action: 'close', tN: 't1' })
+  state.rows = [{ ...ROW, status: 'busy', pid: 7 }]
+  const r = await call({ action: 'reopen', tN: 't1' })
+  expect(r.text).toContain('running')
+  expect(bg).toHaveLength(1)
+  expect(jf(h, tfile(h, 'thread.json')).state).toBe('closed')
+  // a failed start leaves it closed
+  state.rows = []
+  h.claude.handler = (a: string[]) => (a[0] === '--bg' ? { exitCode: 1, stdout: '', stderr: 'boom' } : { exitCode: 0, stdout: '[]' })
+  const bad = await call({ action: 'reopen', tN: 't1' })
+  expect(bad.ok).toBe(false)
+  expect(jf(h, tfile(h, 'thread.json')).state).toBe('closed')
+})
+
+test('resume of an idle thread stays a resume when the recorded version is current or unknown; an older one starts fresh and says why', async () => {
+  const { h, state, bg, call } = fresh('1.0.5')
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  expect(jf(h, tfile(h, 'thread.json')).version).toBe('1.0.5')
+  state.rows = [{ ...ROW, status: 'idle', state: 'done' }]
+  h.clock.t += 60_000
+  await call({ action: 'resume', tN: 't1' })
+  expect(h.claudeCalls().filter(a => a.includes('--resume'))).toHaveLength(1) // same version: a resume
+  expect(bg).toHaveLength(1)
+  // no version recorded (a thread from before the field): unknown, so a resume
+  const rec = jf(h, tfile(h, 'thread.json'))
+  delete rec.version
+  h.files.set(tfile(h, 'thread.json'), JSON.stringify(rec))
+  h.clock.t += 60_000
+  await call({ action: 'resume', tN: 't1' })
+  expect(h.claudeCalls().filter(a => a.includes('--resume'))).toHaveLength(2)
+  expect(jf(h, tfile(h, 'thread.json')).version).toBe('1.0.5') // a resume records the installed version
+  // an older recorded version: fresh session with the handover, the old sid kept as history
+  h.files.set(tfile(h, 'thread.json'), JSON.stringify({ ...jf(h, tfile(h, 'thread.json')), version: '1.0.4' }))
+  h.clock.t += 60_000
+  const r = await call({ action: 'resume', tN: 't1' })
+  expect(r.text).toContain('new session instead of a resume')
+  expect(r.text).toContain('1.0.4')
+  expect(r.text).toContain('1.0.5')
+  expect(h.claudeCalls().filter(a => a.includes('--resume'))).toHaveLength(2) // no third resume
+  expect(bg).toHaveLength(2)
+  expect(bg[1]![bg[1]!.length - 1]).toContain('instead of a resume')
+  const t = jf(h, tfile(h, 'thread.json'))
+  expect([t.sid, t.version]).toEqual([SID2, '1.0.5'])
+  expect(t.sids).toContain(SID)
+  // 1.0.10 is newer than 1.0.9 (numeric compare)
+  expect(olderVersion('1.0.9', '1.0.10')).toBe(true)
+  expect(olderVersion('1.0.10', '1.0.9')).toBe(false)
+  expect(olderVersion(undefined, '1.0.5')).toBe(false)
+})
+
+test('a fresh session regenerates the thread CLAUDE.md only when lean-agent wrote it', async () => {
+  const { h, state, call } = fresh()
+  h.files.set(`${ROOT}/templates/thread.md`, '<!-- generated by lean-agent for thread {{id}} -->\nnew rules {{id}}')
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  h.files.set(tfile(h, 'CLAUDE.md'), '<!-- generated by lean-agent for thread t1 -->\nold rules')
+  await call({ action: 'close', tN: 't1' })
+  state.rows = []
+  await call({ action: 'reopen', tN: 't1' })
+  expect(h.files.get(tfile(h, 'CLAUDE.md'))).toContain('new rules t1')
+  // the user's own file is left alone
+  await call({ action: 'close', tN: 't1' })
+  h.files.set(tfile(h, 'CLAUDE.md'), 'my own notes')
+  await call({ action: 'reopen', tN: 't1' })
+  expect(h.files.get(tfile(h, 'CLAUDE.md'))).toBe('my own notes')
+})
+
+test('the handover keeps the newest report whole and cuts older ones to the budget', () => {
+  const recs = Array.from({ length: 40 }, (_, n) => ({ ts: n, from: 't1', kind: 'report' as const, text: `report ${n} ` + 'x'.repeat(900), state: 'working' }))
+  recs.push({ ts: 99, from: 't1', kind: 'report', text: 'FINAL ' + 'y'.repeat(5000), state: 'done' })
+  const { lines, omitted } = reportHistory(recs)
+  expect(lines[lines.length - 1]).toContain('y'.repeat(5000)) // newest whole
+  expect(lines.join('\n').length).toBeLessThan(REPORT_BUDGET + 6000)
+  expect(omitted).toBeGreaterThan(0)
+  expect(lines.some(l => l.includes('report 39'))).toBe(true)
+  expect(lines.some(l => l.includes('report 0 '))).toBe(false)
+  expect(reportHistory([]).lines).toEqual([])
 })

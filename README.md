@@ -123,6 +123,10 @@ Agent definitions in `plugins/lean-agent/agents/`:
 | `lean-agent:reviewer` | read-only review of a diff |
 | `lean-agent:explorer` | explores one area for the `learn` skill |
 
+Defaults (mistakes are expensive where the work happens): threads run on sonnet / effort high (`config.json` `threads.model` /
+`threads.effort` override; `lean_thread new|start` `model` / `effort` override per thread); the desk is sonnet / high;
+`worker-sonnet`, `worker-opus` and `reviewer` run at effort high, `reader-sonnet` at medium, the haiku agents and the explorer at low.
+
 A worker's last line is `LEAN-FEEDBACK {...}`: `missing` context becomes an entry in the project's `gaps.jsonl` (three
 for one area mark its rules stale) and `remember` items go to shared memory. A long Bash result is squeezed (head, tail
 and every error kept; the full text is saved under `~/.lean-agent/output/`) and each role sees only the tools it needs.

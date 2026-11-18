@@ -31,7 +31,7 @@ Projects come from `projects.json`: run `lean_thread projects` to see the names,
 
 The desk may also Read files under `~/.lean-agent` itself (`projects.json`, `config.json`).
 
-Threads start on sonnet/medium (config.json `threads.model` / `threads.effort` change that; the call's `model` / `effort` win); the choice is recorded in `thread.json` and shown by `list` and the pane. A resume passes no flags: the session keeps its saved options.
+Threads start on sonnet/high (config.json `threads.model` / `threads.effort` change that; the call's `model` / `effort` win); the choice is recorded in `thread.json` and shown by `list` and the pane. A resume passes no flags: the session keeps its saved options.
 
 Rules: a running thread is never resumed (its messages stay queued and it reads them itself); a thread is woken at
 most once per 30 seconds; a parked or closed thread only queues. Report what the tool returned, not what you assume.

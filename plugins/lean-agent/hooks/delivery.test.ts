@@ -136,6 +136,17 @@ test('relay: one desk turn for a question or a done/blocked report; never for pr
   expect(await takeReports(h.host)).toBeNull()
 })
 
+test('a done report without handover fields gets a one-line reminder; a complete one and progress reports do not', async () => {
+  const { h } = setup()
+  const bare = await threadTool(h.host, 't1', 'lean_report', { text: 'all done, tests pass', state: 'done' })
+  expect(bare.text).toContain('Reminder')
+  for (const w of ['the branch', 'the worktree path', 'the last commit', 'pushed or not', 'the open items', 'the next step']) expect(bare.text).toContain(w)
+  const full = await threadTool(h.host, 't1', 'lean_report', { text: 'branch fix-x in /h/.lean-agent/worktrees/app/fix-x, last commit abc1234, not pushed; open items: none; next: open the PR', state: 'done' })
+  expect(full.text).toBe('reported to the desk')
+  expect((await threadTool(h.host, 't1', 'lean_report', { text: 'halfway', state: 'working' })).text).toBe('reported to the desk')
+  expect((await unreadReports(h.host)).recs).toHaveLength(3) // the report is written either way
+})
+
 test('lean_report superseded: true is kept, shown to the desk text and the pane row', async () => {
   const h = fakeHost(null)
   await threadTool(h.host, 't1', 'lean_report', { text: 'user changed the target branch', superseded: true })

@@ -36,6 +36,9 @@ need worktree 'npm ci'
 need worktree 'Never symlink'
 need worktree 'byte-identical'
 need worktree '\*\*adopt\*\*'
+need worktree 'Never the EnterWorktree tool'
+grep -q 'never with the EnterWorktree tool' "$root/templates/thread.md" || fail "thread.md must forbid the EnterWorktree tool"
+grep -q 'edit files only with the Edit' "$root/templates/thread.md" || fail "thread.md lacks the work rules (Edit/Write only, one simple command, no cd)"
 need review 'lean_review'
 need review 'approve-push'
 need review 'only the tool'

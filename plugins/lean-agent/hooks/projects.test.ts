@@ -1,7 +1,8 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { leanThread, resetLocks } from './threads'
-import { resetProjectsQueue } from './projects'
+import { resetProjectsQueue, worktreeProjects } from './projects'
+import { check } from './doctor'
 import { loadView } from './view'
 
 const L = '/h/.lean-agent'
@@ -137,6 +138,41 @@ test('a hidden private project is neither named nor reachable without all: true'
   expect(dup.text).not.toContain('as secret')
   expect((await call({ action: 'project-private', project: 'secret', on: false, confirm: true })).ok).toBe(false)
   expect(projects().secret.private).toBe(true)
+})
+
+test('project-add refuses a git worktree or branch folder (the project is the main checkout); doctor flags one already registered', async () => {
+  const { h, call, projects } = setup()
+  // a linked worktree of the registered app: its .git is a file pointing into the main checkout
+  h.files.set('/w/bugfix-login-ab12cd/.git', 'gitdir: /w/app/.git/worktrees/bugfix-login-ab12cd\n')
+  const r = await call({ action: 'project-add', project: 'bugfix-login-ab12cd', path: '/w/bugfix-login-ab12cd' })
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain('git worktree')
+  expect(r.text).toContain('already registered as app')
+  expect(Object.keys(projects())).toEqual(['app', 'secret'])
+  // a folder under ~/.lean-agent/worktrees is one too, even without a readable .git file
+  h.files.set(`${L}/worktrees/app/fix-x/README`, 'x')
+  const u = await call({ action: 'project-add', project: 'fix-x', path: `${L}/worktrees/app/fix-x` })
+  expect(u.ok).toBe(false)
+  expect(u.text).toContain('~/.lean-agent/worktrees')
+  // one in worktrees.json
+  h.files.set('/w/other-branch/README', 'x')
+  h.files.set(`${L}/worktrees.json`, JSON.stringify({ 'app/other': { path: '/w/other-branch', branch: 'other', thread: 't1' } }))
+  expect((await call({ action: 'project-add', project: 'other', path: '/w/other-branch' })).ok).toBe(false)
+  // a normal folder (a real .git directory) still registers
+  h.files.set('/w/real/.git/HEAD', 'ref: refs/heads/main')
+  expect((await call({ action: 'project-add', project: 'real', path: '/w/real' })).ok).toBe(true)
+  // doctor: an entry that is a worktree of another registered project is flagged, with the removal to offer; files stay
+  h.files.set(`${L}/projects.json`, JSON.stringify({ app: { path: '/w/app' }, 'bugfix-login-ab12cd': { path: '/w/bugfix-login-ab12cd' }, real: { path: '/w/real' } }))
+  const found = await worktreeProjects(h.host)
+  expect(found.map(f => [f.name, f.of])).toEqual([['bugfix-login-ab12cd', 'app']])
+  const lines = (await check(h.host, '/plug')).filter(l => l.includes('git worktree'))
+  expect(lines).toHaveLength(1)
+  expect(lines[0]).toContain('FIX')
+  expect(lines[0]).toContain('project-remove bugfix-login-ab12cd')
+  expect(lines[0]).toContain('no file is deleted')
+  expect(h.files.has('/w/bugfix-login-ab12cd/.git')).toBe(true)
+  h.files.set(`${L}/projects.json`, JSON.stringify({ app: { path: '/w/app' } }))
+  expect((await check(h.host, '/plug')).join('\n')).toContain('no project entry is a git worktree')
 })
 
 test('a damaged projects.json is reported by projects, not shown as empty', async () => {

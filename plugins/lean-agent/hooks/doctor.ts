@@ -5,6 +5,7 @@ import type { Host } from './state'
 import { trustFolder } from './threads'
 import { deskChoice, mergeModelSettings, readModelSettings } from './models'
 import { setNotice } from './notices'
+import { worktreeProjects } from './projects'
 import { seenNames, skillStat } from './skilltrim'
 
 export const OLD_LABEL = 'com.lean-agent.up'
@@ -115,6 +116,9 @@ export async function check(h: Host, root: string): Promise<string[]> {
   row(await h.fs.exists(`${leanDir(home)}/migrated-1.0.json`) || !(await legacyPresent(h, home)), 'state is 1.0 (no 0.45 leftovers)')
   const alien = await foreignGuides(h)
   row(!alien.length, alien.length ? `CLAUDE.md that mentions lean-agent and 1.0 did not write (a thread or the desk may load it as memory; run migrate, or move a per-thread one by hand): ${alien.join(', ')}` : 'no foreign CLAUDE.md under ~/.lean-agent')
+  const wtp = await worktreeProjects(h).catch(() => [])
+  if (wtp.length) for (const w of wtp) out.push(`FIX  project ${w.name} (${w.path}) is a git worktree${w.of ? ` of ${w.of}` : ''} (${w.why}), not a project: unregister it with lean_thread project-remove ${w.name} (no file is deleted)`)
+  else out.push('ok   no project entry is a git worktree')
   out.push(`desk skill listing: ${skillStat()}`)
   out.push(`seen this session - ${seenNames()}`)
   return out

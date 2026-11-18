@@ -69,10 +69,21 @@ export async function consumeWake(h: Host, id: string, prompt: string): Promise<
 export type DeskRec = { ts: number; from: string; kind: 'report' | 'ask'; text: string; state?: string; options?: string[]; superseded?: boolean }
 export type Tool = { name: string; description: string; inputSchema: unknown }
 
+// what a done report should carry so a fresh session can take over: the fields a text does not mention (a heuristic on words)
+const HANDOVER_FIELDS: [string, RegExp][] = [
+  ['the branch', /\bbranch\b/i],
+  ['the worktree path', /worktree|\/worktrees\//i],
+  ['the last commit', /\bcommit|\b[0-9a-f]{7,40}\b/i],
+  ['pushed or not', /\bpush(ed)?\b/i],
+  ['the open items', /\bopen (items?|questions?)\b|\bnothing (is )?(left|open)\b|\bremaining\b|\bleft to do\b/i],
+  ['the next step', /\bnext\b/i],
+]
+export const handoverGaps = (text: string): string[] => HANDOVER_FIELDS.filter(([, re]) => !re.test(text)).map(([w]) => w)
+
 const obj = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required })
 export const THREAD_TOOLS: Tool[] = [
   { name: 'lean_review', description: 'Record the review verdict for a commit (the push gate reads it; only this tool can write it). green only when tests pass and no blocker/major finding is open.', inputSchema: obj({ project: { type: 'string' }, sha: { type: 'string', description: 'full HEAD sha that was reviewed' }, green: { type: 'boolean' }, passes: { type: 'number' }, findings: { type: 'array', items: { type: 'string' } } }, ['project', 'sha', 'green']) },
-  { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done.', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done'] }, superseded: { type: 'boolean', description: 'true: the brief you were given is superseded by a later message from the user (say which in text); the desk shows it' } }, ['text']) },
+  { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done. A done report is a handover for whoever continues the thread: branch, worktree path, last commit, pushed or not, open items, next step.', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done'] }, superseded: { type: 'boolean', description: 'true: the brief you were given is superseded by a later message from the user (say which in text); the desk shows it' } }, ['text']) },
   { name: 'lean_ask', description: 'Ask the user a question through the desk, with optional answer options.', inputSchema: obj({ question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, ['question']) },
   { name: 'lean_goal', description: 'Update the goal this thread serves (one line).', inputSchema: obj({ update: { type: 'string' } }, ['update']) },
   { name: 'lean_remember', description: 'Save a durable fact for future sessions.', inputSchema: obj({ text: { type: 'string' }, project: { type: 'string' } }, ['text']) },
@@ -91,7 +102,8 @@ export async function threadTool(h: Host, id: string, name: string, i: any): Pro
     if (name === 'lean_report') {
       if (!str(i.text)) return { ok: false, text: 'lean_report needs text' }
       await appendJsonl(h, `${deskState(home)}/inbox.jsonl`, { ts, from: id, kind: 'report', text: str(i.text), state: str(i.state) || 'working', ...(i.superseded === true ? { superseded: true } : {}) } satisfies DeskRec)
-      return { ok: true, text: 'reported to the desk' }
+      const missing = str(i.state) === 'done' ? handoverGaps(str(i.text)) : []
+      return { ok: true, text: missing.length >= 3 ? `reported to the desk. Reminder: a done report is the handover (a closed thread is reopened as a new session from it): also say ${missing.join(', ')}.` : 'reported to the desk' }
     }
     if (name === 'lean_ask') {
       if (!str(i.question)) return { ok: false, text: 'lean_ask needs a question' }

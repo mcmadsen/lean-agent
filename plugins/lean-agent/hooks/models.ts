@@ -1,4 +1,4 @@
-// Which model and effort a session runs on. The desk is pinned (sonnet, high); a thread gets sonnet/medium unless the
+// Which model and effort a session runs on. The desk is pinned (sonnet, high); a thread gets sonnet/high unless the
 // brief asks for more or less. config.json: `desk: { model, effort }`, `threads: { model, effort }` override the defaults.
 import { atomicWrite, dirOf, leanDir, mkdirp, readJson } from './state'
 import type { Host } from './state'
@@ -7,7 +7,7 @@ export const MODELS = ['haiku', 'sonnet', 'opus'] as const
 export const EFFORTS = ['low', 'medium', 'high'] as const
 export type Choice = { model: string; effort: string }
 export const DESK_DEFAULT: Choice = { model: 'sonnet', effort: 'high' }
-export const THREAD_DEFAULT: Choice = { model: 'sonnet', effort: 'medium' }
+export const THREAD_DEFAULT: Choice = { model: 'sonnet', effort: 'high' }
 
 const okModel = (m: unknown): m is string => typeof m === 'string' && (MODELS as readonly string[]).includes(m)
 const okEffort = (e: unknown): e is string => typeof e === 'string' && (EFFORTS as readonly string[]).includes(e)
