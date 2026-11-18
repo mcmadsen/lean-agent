@@ -178,18 +178,21 @@ export async function relayReports(h: Host, o: { busy: boolean; last: number; su
     Promise.resolve()
       .then(() => o.submit(`${RELAY_LEAD}\n${renderReports(recs)}`))
       // refused: they show again at the next prompt, unless something was marked read meanwhile (then nothing is rewound: no repeats)
-      .catch(() => serial('reports', async () => { if ((await readJson<{ n: number }>(h, `${deskState(await homeDir(h))}/inbox-read.json`, { n: 0 })).n === upTo) await markRead(h, was) }).catch(() => undefined))
+      .catch(() => serial('reports', async () => { if ((await readJson<{ n: number }>(h, `${deskState(await homeDir(h))}/inbox-read.json`, { n: 0 })).n === upTo) await markRead(h, was); else redo.push(...recs) }).catch(() => undefined))
     return true
   })
 }
+
+let redo: DeskRec[] = [] // relayed reports whose submit was refused after the marker had moved on: handed over with the next ones
 
 // Desk busy (a tool call) or the user typing: hand over pending reports once.
 export async function takeReports(h: Host): Promise<string | null> {
   return serial('reports', async () => {
     const { recs, upTo } = await unreadReports(h)
-    if (!recs.length) return null
+    const back = redo.splice(0)
+    if (!recs.length && !back.length) return null
     await markRead(h, upTo)
-    return renderReports(recs)
+    return renderReports([...back, ...recs])
   })
 }
 

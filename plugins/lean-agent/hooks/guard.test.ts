@@ -55,6 +55,8 @@ const deskTable: [string, any, boolean][] = [
   ['az @file eq', { tool: 'Bash', command: 'az repos pr show --id 3 --project=@/etc/passwd' }, false],
   ['az debug', { tool: 'Bash', command: 'az repos pr show --id 3 --debug' }, false],
   ['gh bundled web', { tool: 'Bash', command: 'gh pr view 3 -cw' }, false],
+  ['gh author me', { tool: 'Bash', command: 'gh pr list --author @me --state all -L 5' }, true],
+  ['gh author eq', { tool: 'Bash', command: 'gh pr list --author=@me' }, true],
   ['gh comments flag', { tool: 'Bash', command: 'gh pr view 3 -c' }, true],
   ['az output-file', { tool: 'Bash', command: 'az repos pr list --output-file /h/x' }, false],
   ['az other', { tool: 'Bash', command: 'az account list' }, false],

@@ -122,6 +122,7 @@ test('relay: one desk turn for a question or a done/blocked report; never for pr
   expect(await relay({ submit: () => Promise.reject(new Error('no')) })).toBe(true)
   for (let n = 0; n < 30; n++) await Promise.resolve() // the refused submit is undone in the background
   expect((await unreadReports(h.host)).recs.map(r => r.text)).toEqual(['again'])
+  await takeReports(h.host) // 'again' (rewound above) is delivered
   // a refusal after the user's next prompt already took newer reports rewinds nothing (no repeats)
   await threadTool(h.host, 't1', 'lean_report', { text: 'mid', state: 'done' })
   let fail: (e: Error) => void = () => {}
@@ -130,5 +131,6 @@ test('relay: one desk turn for a question or a done/blocked report; never for pr
   expect(await takeReports(h.host)).toContain('newer') // the user's prompt took it
   fail(new Error('no'))
   for (let n = 0; n < 30; n++) await Promise.resolve()
+  expect(await takeReports(h.host)).toContain('mid') // handed over once more with the next delivery, not lost
   expect(await takeReports(h.host)).toBeNull()
 })

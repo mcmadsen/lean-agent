@@ -77,8 +77,8 @@ const FORGE_FLAG = /^(-w|--web|--template|-t|--output-file|--out(put)?-?file|--f
 export function readOnlyForge(w: string[]): boolean {
   const [prog, a, b, c] = w
   if (prog !== 'gh' && prog !== 'az') return false
-  // also: an @file value (az reads the file), --debug/--verbose (request headers), a bundled short flag with w or t (-cw)
-  if (w.some(x => FORGE_FLAG.test(x) || /^@|=@/.test(x) || /^--(debug|verbose)$/.test(x) || /^-[a-zA-Z]*[wt][a-zA-Z]*$/.test(x))) return false
+  // also: an @file value for az (it reads the file; gh's `--author @me` is fine), --debug/--verbose (request headers), a bundled short flag with w or t (-cw)
+  if (w.some(x => FORGE_FLAG.test(x) || (prog === 'az' && /^@|=@/.test(x)) || /^--(debug|verbose)$/.test(x) || /^-[a-zA-Z]*[wt][a-zA-Z]*$/.test(x))) return false
   if (prog === 'gh') return !ghDenied(w.slice(1)) && ((a === 'pr' && ['view', 'list', 'status'].includes(b ?? '')) || (a === 'search' && b === 'prs'))
   return !azDenied(w.slice(1)) && a === 'repos' && b === 'pr' && (c === 'list' || c === 'show')
 }
