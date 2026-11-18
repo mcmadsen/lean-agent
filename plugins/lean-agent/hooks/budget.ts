@@ -39,14 +39,33 @@ export async function record(h: Host, ctx: { role: string; tN?: string; agentId?
     usd: costUsd(model, u),
   }
   await appendJsonl(h, ledgerFile(home), row)
+  // the ledger is append-only: add the new row to today's cached sum (spentToday rebuilds the cache when the day changes)
+  const c = await cache(h)
+  if (c && c.day === day(row.ts)) {
+    c.byRole[row.role] = (c.byRole[row.role] ?? 0) + (row.usd || 0)
+    await h.store.set(CACHE, c).catch(() => undefined)
+  }
   return row
+}
+
+// daily sums per role, kept in the mod's store: the ledger is read (once) only when the day changes
+const CACHE = 'ledger-today'
+type Cache = { day: string; byRole: Record<string, number> }
+async function cache(h: Host): Promise<Cache | null> {
+  const c = (await h.store.get(CACHE).catch(() => null)) as Cache | null
+  return c && typeof c.day === 'string' && c.byRole && typeof c.byRole === 'object' ? c : null
 }
 
 export async function spentToday(h: Host, role?: string): Promise<number> {
   const home = await homeDir(h)
   const today = day(await h.clock.now())
-  const rows = await readJsonl<Row>(h, ledgerFile(home))
-  return rows.filter(r => day(r.ts) === today && (!role || r.role === role)).reduce((s, r) => s + (r.usd || 0), 0)
+  let c = await cache(h)
+  if (!c || c.day !== today) {
+    c = { day: today, byRole: {} }
+    for (const r of await readJsonl<Row>(h, ledgerFile(home))) if (day(r.ts) === today) c.byRole[r.role] = (c.byRole[r.role] ?? 0) + (r.usd || 0)
+    await h.store.set(CACHE, c).catch(() => undefined)
+  }
+  return role ? c.byRole[role] ?? 0 : Object.values(c.byRole).reduce((a, b) => a + b, 0)
 }
 
 // A reason to refuse the next request, or null. `spent` is what this worker has used so far.

@@ -46,3 +46,22 @@ test('summarize groups by model, agent and thread', () => {
   expect(s.byAgent).toEqual({ main: 3, 'worker-haiku': 1 })
   expect(s.byThread).toEqual({ t1: 2, desk: 2 })
 })
+
+test('the daily sum is cached in the store: new rows are added, the ledger is re-read only when the day changes', async () => {
+  const h = fakeHost(null)
+  const reads = () => h.files.get('/h/.lean-agent/ledger.jsonl') !== undefined
+  let n = 0
+  const read = h.host.fs.read
+  h.host.fs.read = async (p: string) => { if (p.endsWith('ledger.jsonl')) n++; return read(p) }
+  await record(h.host, { role: 'desk' }, 'sonnet', { input_tokens: 1_000_000 })
+  expect(reads()).toBe(true)
+  expect(await spentToday(h.host, 'desk')).toBe(3) // first call: builds the cache (one read)
+  const first = n
+  await record(h.host, { role: 'desk' }, 'sonnet', { input_tokens: 1_000_000 })
+  expect(await spentToday(h.host, 'desk')).toBe(6)
+  expect(await spentToday(h.host)).toBe(6)
+  expect(n).toBe(first) // no re-read after new rows
+  h.clock.t += 86_400_000 // next day: rebuilt from the ledger
+  expect(await spentToday(h.host, 'desk')).toBe(0)
+  expect(n).toBe(first + 1)
+})
