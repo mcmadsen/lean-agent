@@ -2,6 +2,7 @@
 name: branch
 description: Name a git branch the way this project wants it (no lean/ prefix, optional type and task id). Use whenever a thread creates a branch.
 argument-hint: [--type feature|bugfix|release] [--task ID] "<title>"
+roles: thread
 ---
 
 # Branch names

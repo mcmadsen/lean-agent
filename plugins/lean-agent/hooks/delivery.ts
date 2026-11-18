@@ -148,8 +148,34 @@ export async function markRead(h: Host, upTo: number): Promise<void> {
   await writeJson(h, `${deskState(await homeDir(h))}/inbox-read.json`, { n: upTo })
 }
 
+// a done report carries the hint that closing is the desk's job (a thread cannot close itself)
 export const renderReports = (recs: DeskRec[]) =>
-  recs.map(r => `[lean-agent] ${r.kind === 'ask' ? 'question' : 'report'} from ${r.from}${r.state ? ` (${r.state})` : ''}: ${r.text}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}`).join('\n')
+  recs.map(r => `[lean-agent] ${r.kind === 'ask' ? 'question' : 'report'} from ${r.from}${r.state ? ` (${r.state})` : ''}: ${r.text}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`).join('\n')
+
+// ---- relay to an idle desk ---------------------------------------------------------------------------------
+// $.prompt.submit starts a desk turn of its own once the session is idle. Only what needs the user or ends a thread is worth a
+// turn: a question, or a report that is done or blocked; `working` progress waits for the user's next message.
+export const RELAY_GAP_MS = 60_000
+export const BUSY_MAX_MS = 15 * 60_000 // a turn that never reported its end (aborted) stops blocking the relay after this
+export const worthRelay = (recs: DeskRec[]) => recs.some(r => r.kind === 'ask' || r.state === 'done' || r.state === 'blocked')
+export const RELAY_LEAD = '[lean-agent] Threads reported while you were idle. Relay this to the user now: ask each question with AskUserQuestion and send the answer to its thread; when a thread is done and the user needs nothing more, close it and clear its goal.'
+
+// One relay: hands ALL unread reports to `submit` (marked read first; marked unread again if the submit is refused). Returns whether it
+// submitted. `busy` (a desk turn runs) and `last` (the previous relay, ms) debounce it. Never for progress alone.
+export async function relayReports(h: Host, o: { busy: boolean; last: number; submit: (text: string) => Promise<unknown> }): Promise<boolean> {
+  if (o.busy) return false
+  return serial('reports', async () => {
+    if ((await h.clock.now()) - o.last < RELAY_GAP_MS) return false
+    const { recs, upTo } = await unreadReports(h)
+    if (!worthRelay(recs)) return false
+    const was = upTo - recs.length
+    await markRead(h, upTo)
+    Promise.resolve()
+      .then(() => o.submit(`${RELAY_LEAD}\n${renderReports(recs)}`))
+      .catch(() => serial('reports', () => markRead(h, was)).catch(() => undefined)) // refused: they show again at the next prompt
+    return true
+  })
+}
 
 // Desk busy (a tool call) or the user typing: hand over pending reports once.
 export async function takeReports(h: Host): Promise<string | null> {

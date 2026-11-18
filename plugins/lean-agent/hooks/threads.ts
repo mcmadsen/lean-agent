@@ -1,7 +1,7 @@
 import { appendJsonl, atomicWrite, homeDir, leanDir, mkdirp, readJson, readJsonl, realPath, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { unconsumed, wakeMark } from './delivery'
-import { projectsAction } from './projects'
+import { projectsAction, unknownProject } from './projects'
 import { settingsKeys, threadChoice } from './models'
 import type { Choice } from './models'
 import { ensureGitHooks, gitEnv } from './githooks'
@@ -209,10 +209,15 @@ async function create(h: Host, root: string, home: string, i: Input): Promise<Ou
   if (!title) return err('new needs a title')
   const pre = await threadChoice(h, home, i)
   if (typeof pre === 'string') return err(pre) // a bad model/effort stops here, before any folder exists
+  const project = (i.project ?? '').trim()
+  if (project) {
+    const bad = await unknownProject(h, project) // before any folder exists
+    if (bad) return err(bad)
+  }
   const id = await nextId(h, home)
   const dir = tpath(home, id)
   await mkdirp(h, dir)
-  const t: Thread = { id, title, project: i.project ?? '', state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0 }
+  const t: Thread = { id, title, project, state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0 }
   const vars = { id, title, project: t.project, lean: leanDir(home) }
   await h.fs.write(`${dir}/CLAUDE.md`, fill(await template(h, root, 'thread.md'), vars))
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
@@ -297,7 +302,7 @@ async function list(h: Host, home: string): Promise<Out> {
     const q = (await pending(h, home, t)).length
     out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(rows.find(a => a.sid === t.sid)), sid: t.sid, queued: q })
   }
-  const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title} [${o.state}${o.running ? ', running' : ''}${o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}`).join('\n') : 'no threads'
+  const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.running ? ', running' : ''}${o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}`).join('\n') : 'no threads'
   return { ok: true, text, data: out }
 }
 
@@ -361,6 +366,22 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
             if (st.exitCode !== 0) return { ok: true, text: `${id} closed, but claude stop ${stopId} failed: ${(st.stderr || st.stdout).trim().slice(0, 200)}. Stop it from the Claude app.` }
           }
           return { ok: true, text: `${id} closed` }
+        }
+        // the goals file belongs to the mod: the desk sets or clears a thread's goal here (a thread uses lean_goal)
+        case 'goal-set': {
+          const text = (i.text ?? '').trim()
+          if (!text) return err('goal-set needs text')
+          const goals = await readJson<Record<string, unknown>>(h, `${leanDir(home)}/goals.json`, {})
+          goals[id] = { text, ts: await h.clock.now() }
+          await writeJson(h, `${leanDir(home)}/goals.json`, goals)
+          return { ok: true, text: `${id} goal set` }
+        }
+        case 'goal-clear': {
+          const goals = await readJson<Record<string, unknown>>(h, `${leanDir(home)}/goals.json`, {})
+          if (!Object.prototype.hasOwnProperty.call(goals, id)) return { ok: true, text: `${id} has no goal` }
+          delete goals[id]
+          await writeJson(h, `${leanDir(home)}/goals.json`, goals)
+          return { ok: true, text: `${id} goal cleared` }
         }
         case 'park':
           t.state = 'parked'

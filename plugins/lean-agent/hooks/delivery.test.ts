@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { consumeWake, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
+import { RELAY_GAP_MS, consumeWake, markRead, relayReports, renderReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { leanThread, resetLocks } from './threads'
 
 const SID = '11111111-2222-3333-4444-555555555555'
@@ -80,4 +80,47 @@ test('lean_report, lean_ask, lean_goal and lean_remember write; the desk reads e
   expect(text).toContain('question from t1')
   expect(text).toContain('a | b')
   expect(await takeReports(h.host)).toBeNull()
+})
+
+test('a delivered done report carries the close hint; progress, blocked and questions do not', () => {
+  const t = renderReports([
+    { ts: 1, from: 't1', kind: 'report', text: 'all merged', state: 'done' },
+    { ts: 2, from: 't2', kind: 'report', text: 'halfway', state: 'working' },
+    { ts: 3, from: 't3', kind: 'report', text: 'stuck', state: 'blocked' },
+    { ts: 4, from: 't4', kind: 'ask', text: 'which db?' },
+  ])
+  expect(t).toContain('report from t1 (done): all merged (close t1 when nothing is left)')
+  expect(t.match(/close t\d when nothing is left/g)).toHaveLength(1)
+})
+
+test('relay: one desk turn for a question or a done/blocked report; never for progress, never while busy, debounced, undone when refused', async () => {
+  const { h } = setup()
+  const sent: string[] = []
+  const submit = async (t: string) => void sent.push(t)
+  const relay = (o: { busy?: boolean; last?: number; submit?: (t: string) => Promise<unknown> } = {}) => relayReports(h.host, { busy: false, last: 0, submit, ...o })
+  expect(await relay()).toBe(false) // nothing unread
+  await threadTool(h.host, 't1', 'lean_report', { text: 'step 1 of 3', state: 'working' })
+  expect(await relay()).toBe(false) // progress alone never starts a turn
+  expect((await unreadReports(h.host)).recs).toHaveLength(1) // and it stays unread for the user's next message
+  await threadTool(h.host, 't2', 'lean_ask', { question: 'which db?', options: ['a', 'b'] })
+  expect(await relay({ busy: true })).toBe(false) // never over a running turn
+  expect(await relay({ last: h.clock.t - RELAY_GAP_MS + 1 })).toBe(false) // debounced
+  expect(sent).toEqual([])
+  expect(await relay()).toBe(true)
+  expect(sent).toHaveLength(1)
+  expect(sent[0]).toContain('question from t2: which db? [options: a | b]')
+  expect(sent[0]).toContain('report from t1 (working): step 1 of 3') // the progress rides along with the turn
+  expect(await takeReports(h.host)).toBeNull() // marked read: the next prompt does not repeat them
+  // done and blocked count too
+  await threadTool(h.host, 't1', 'lean_report', { text: 'merged', state: 'done' })
+  expect(await relay()).toBe(true)
+  expect(sent[1]).toContain('(close t1 when nothing is left)')
+  await threadTool(h.host, 't3', 'lean_report', { text: 'need creds', state: 'blocked' })
+  expect(await relay()).toBe(true)
+  // a refused submit puts the reports back
+  await threadTool(h.host, 't1', 'lean_report', { text: 'again', state: 'done' })
+  expect(await relay({ submit: () => Promise.reject(new Error('no')) })).toBe(true)
+  for (let n = 0; n < 30; n++) await Promise.resolve() // the refused submit is undone in the background
+  expect((await unreadReports(h.host)).recs.map(r => r.text)).toEqual(['again'])
+  await markRead(h.host, (await unreadReports(h.host)).upTo)
 })

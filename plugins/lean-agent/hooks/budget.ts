@@ -23,7 +23,7 @@ export function costUsd(model: string, u: Usage | null | undefined): number {
   return Math.round(usd * 1e6) / 1e6
 }
 
-export type Config = { dailyCapUsd?: { desk?: number; thread?: number; plain?: number }; workerCapUsd?: number; workerCaps?: Record<string, number> }
+export type Config = { dailyCapUsd?: { desk?: number; thread?: number; plain?: number }; workerCapUsd?: number; workerCaps?: Record<string, number>; desk?: { autoRelay?: boolean } }
 export type Row = { ts: number; role: string; tN?: string; agentId?: string; agent?: string; model: string; in: number; out: number; cache_read: number; cache_write: number; usd: number }
 
 export const ledgerFile = (home: string) => `${leanDir(home)}/ledger.jsonl`

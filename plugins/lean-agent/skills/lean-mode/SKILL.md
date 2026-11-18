@@ -1,6 +1,7 @@
 ---
 name: lean-mode
 description: Work in a token-frugal way for long or unattended agent runs. Use when the user asks to save tokens, run cheaply, or keep an agent going for a long time, or when lean-agent reports the budget is getting low.
+roles: thread
 ---
 
 Follow these rules for the rest of the session:

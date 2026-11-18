@@ -35,4 +35,6 @@ need review 'only the tool'
 need review 'allow-cmd: git diff <base>...<sha>, git log <base>..<sha>, git show <sha>, git merge-base <base> <sha>'
 grep -q 'allow-cmd' "$root/agents/reviewer.md" || fail "reviewer.md does not mention the allow-cmd limit"
 if grep -q 'Write `~/.lean-agent/<project>/reviews' "$here/review/SKILL.md"; then echo "FAIL: review skill still writes the record by hand"; exit 1; fi
+# roles: tools named per role, and the desk's commands (hooks/skills-roles.test.ts runs them through strict mode)
+node "$root/hooks/skills-contract.mjs" || fail "skills roles (see above)"
 echo "ok skills-contract"

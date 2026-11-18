@@ -6,7 +6,7 @@ import { deskClaudeMd, leanThread } from './threads'
 import { ensureGitHooks } from './githooks'
 import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
-import { THREAD_TOOLS, consumeWake, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
+import { BUSY_MAX_MS, THREAD_TOOLS, consumeWake, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide } from './guard'
 import { dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
@@ -27,8 +27,12 @@ export { hostOf }
 
 let notified = 0
 let grantSeq = 0
+let busySince = 0 // ms the desk's main turn started (0 = idle): the report relay never starts a turn over a running one
+let lastRelay = 0
 export const resetModState = () => {
   notified = 0
+  busySince = 0
+  lastRelay = 0
   spent.clear()
   shown.clear()
   stopTimers()
@@ -76,11 +80,11 @@ const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private'] },
-    tN: { type: 'string', description: 'thread id, like t3 (every action except new and list)' },
-    text: { type: 'string', description: 'new: the brief; send: the message' },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'goal-set', 'goal-clear'] },
+    tN: { type: 'string', description: 'thread id, like t3 (every action except new, list and project-*)' },
+    text: { type: 'string', description: 'new: the brief; send: the message; goal-set: the goal line' },
     title: { type: 'string', description: 'new: short title' },
-    project: { type: 'string', description: 'new / project-*: project name' },
+    project: { type: 'string', description: 'new / project-*: a registered project (see projects)' },
     model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'new/start: default sonnet' },
     effort: { type: 'string', enum: ['low', 'medium', 'high'], description: 'new/start: default medium' },
     path: { type: 'string', description: 'project-add: folder (must exist)' },
@@ -214,7 +218,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, start; and projects: projects (list), project-add, project-remove (unregister only), project-private. A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, start; and projects: projects (list), project-add, project-remove (unregister only), project-private; goals: goal-set, goal-clear (tN). A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)
@@ -232,6 +236,13 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         const n = (await unreadReports(host2)).recs.length
         if (n && n !== notified) $.ui.notify(`${n} unread report(s) from threads`, { key: 'lean-reports' })
         notified = n
+        // an idle desk gets ONE turn for a question or a done/blocked report (config desk.autoRelay, default on)
+        if (n && (await readConfig(host2, await homeDir(host2))).desk?.autoRelay !== false) {
+          const now = await host2.clock.now()
+          const busy = busySince > 0 && now - busySince < BUSY_MAX_MS
+          const sent = await relayReports(host2, { busy, last: lastRelay, submit: text => $.prompt.submit({ text }) })
+          if (sent) lastRelay = now
+        }
       })
       // the chaser: a goal untouched for an hour gets one status message to its open thread
       every($, 60_000, 'desk', async host2 => void (await chase(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }))))
@@ -341,7 +352,12 @@ export const register: Register = on => {
   })
   // fallback when the hook is not delivered: a cheap compare of the session's directory
   on('turn.start', async ($, e: any, next) => {
+    if (!e.agentId) busySince = (await $.clock.now()) || 1
     await redetect($)
+    return next(e)
+  })
+  on('turn.complete', async ($, e: any, next) => {
+    if (!e.agentId) busySince = 0
     return next(e)
   })
 

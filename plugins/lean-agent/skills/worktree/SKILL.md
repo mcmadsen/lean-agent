@@ -2,6 +2,7 @@
 name: worktree
 description: Create, list and remove git worktrees for a project under ~/.lean-agent/worktrees, so threads never share a checkout. Use when a thread needs its own branch checkout or a worktree must be cleaned up.
 argument-hint: new <project> <branch> | list | rm <project> <branch>
+roles: thread
 ---
 
 # Worktrees

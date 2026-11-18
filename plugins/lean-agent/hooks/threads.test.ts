@@ -24,6 +24,7 @@ function setup(on: any = null) {
 
 test('new records the sid, writes the folder, settings and trust', async () => {
   const { h, call } = setup()
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
   const r = await call({ action: 'new', title: 'fix login', text: 'fix the login bug', project: 'app' })
   expect(r.ok).toBe(true)
   const t = JSON.parse(h.files.get('/h/.lean-agent/threads/t1/thread.json')!)
@@ -398,4 +399,44 @@ test('close stops a finished session whose process is still alive, by the listed
   const calls = alive(state, h, { ...ROW, id: 'abcd1234', pid: 42, status: 'idle', state: 'done' })
   await call({ action: 'close', tN: 't1' })
   expect(calls).toEqual(['stop abcd1234'])
+})
+
+test('new refuses an unknown project with the known names and creates nothing; list shows the project', async () => {
+  const { h, call } = setup()
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' }, vault: { path: '/r/vault', private: true } }))
+  const bad = await call({ action: 'new', title: 'x', text: 'y', project: 'apps' })
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('unknown project apps')
+  expect(bad.text).toContain('app, vault')
+  expect(h.files.has('/h/.lean-agent/threads/t1/thread.json')).toBe(false)
+  expect(h.claudeCalls().some(a => a[0] === '--bg')).toBe(false)
+  // the private switch hides a private project: its name is neither accepted nor leaked
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ private: 'off' }))
+  const hid = await call({ action: 'new', title: 'x', text: 'y', project: 'vault' })
+  expect(hid.ok).toBe(false)
+  expect(hid.text).toContain('known projects: app.') // (the name asked for is echoed; the hidden one is not listed)
+  h.files.delete('/h/.lean-agent/config.json')
+  expect((await call({ action: 'new', title: 'ok', text: 'y', project: 'app' })).ok).toBe(true)
+  expect((await call({ action: 'new', title: 'none', text: 'y' })).ok).toBe(true) // no project: fine
+  const l = (await call({ action: 'list' })).text
+  expect(l).toContain('t1 · ok · app [')
+  expect(l).toContain('t2 · none [')
+  h.files.set('/h/.lean-agent/projects.json', '{broken')
+  expect((await call({ action: 'new', title: 'x', text: 'y', project: 'app' })).text).toContain('unreadable')
+})
+
+test('the desk sets and clears a thread goal through lean_thread; nothing else in goals.json changes', async () => {
+  const { h, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'b' })
+  h.files.set('/h/.lean-agent/goals.json', JSON.stringify({ t9: { text: 'other', ts: 5 } }))
+  expect((await call({ action: 'goal-set', tN: 't1' })).ok).toBe(false)
+  expect((await call({ action: 'goal-set', tN: 't7', text: 'x' })).ok).toBe(false) // no such thread
+  expect((await call({ action: 'goal-set', tN: 't1', text: ' ship login ' })).ok).toBe(true)
+  let g = JSON.parse(h.files.get('/h/.lean-agent/goals.json')!)
+  expect(g.t1).toEqual({ text: 'ship login', ts: h.clock.t })
+  expect(g.t9.text).toBe('other')
+  expect((await call({ action: 'goal-clear', tN: 't1' })).text).toBe('t1 goal cleared')
+  g = JSON.parse(h.files.get('/h/.lean-agent/goals.json')!)
+  expect(Object.keys(g)).toEqual(['t9'])
+  expect((await call({ action: 'goal-clear', tN: 't1' })).text).toBe('t1 has no goal')
 })

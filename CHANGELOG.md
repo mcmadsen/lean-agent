@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- The `pr` skill no longer promises the desk what strict mode refuses. Every step names its role: the desk only reads status
+  (`gh pr view|list|status`, `gh search prs`, `az repos pr list|show`); create, comments, update and every push are "route to the
+  thread that owns the branch". The host comes from the project's origin URL: github.com uses `gh`; dev.azure.com and
+  `*.visualstudio.com` use `az repos pr list|show|create|update` (REST with a PAT as the fallback); a missing or logged-out CLI is
+  reported plainly instead of "command not found".
+- Desk strict mode allows those read-only forms (`deskBashOk` reuses the private-project guard's own gh/az read-only classifier,
+  so the two cannot drift; no `--web`, `--output-file`, `--template`, pipe, redirect or expansion) and `git -C <dir> remote get-url
+  <remote>` (to find the host). `gh search` is now read-only in private projects too.
+- Skills offered to the desk no longer name thread-only tools or the desk's missing Write/Edit: each step says who runs it
+  (`thread: lean_report; desk: tell the user`). The `goals` skill sets and clears through new `lean_thread` actions `goal-set` /
+  `goal-clear` (tN, text): two enum words in a tool the desk already has, no new tool, the mod writes the file, and it works for a
+  parked or closed thread that a `send` would not wake.
+- `lean_thread new` refuses a project that is not registered and answers with the known names (nothing is created); `list` shows
+  each thread's project; `commands/new.md` and the `thread` skill say projects come from `lean_thread projects`.
+- Reports reach an idle desk. The engine's `$.prompt.submit` starts a turn once the session is idle, so a question or a `done` /
+  `blocked` report now starts ONE desk turn with the unread reports (at most once a minute, never while a turn runs, never for
+  `working` progress; `desk.autoRelay: false` in `config.json` turns it off and reports wait for the user's next message). A
+  refused submit marks the reports unread again.
+- Finished threads are closed by the desk: the desk template and `thread` skill say "close it yourself (and clear its goal); never
+  ask a thread to close itself", the thread template says a thread cannot close itself and reports done, and a delivered `done`
+  report ends with "(close tN when nothing is left)".
+
+### Added
+- Skills declare `roles: desk, thread` in their front matter. `hooks/skills-contract.mjs` (run by `skills-contract.test.sh`) checks
+  that every `lean_*` tool a skill names exists for a role the skill is offered to (and is marked where only one role has it) and
+  extracts the Bash commands a skill gives the desk; `hooks/skills-roles.test.ts` runs them through `deskBashOk`.
+  `hooks/skills-desk-commands.ts` is generated (`node plugins/lean-agent/hooks/skills-contract.mjs --write`).
+
 ## 1.0.3
 
 ### Fixed

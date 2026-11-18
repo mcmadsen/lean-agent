@@ -98,6 +98,15 @@ export async function listProjects(h: Host, all = false): Promise<{ rows: Projec
   return { rows, hidden, ...(wr === null ? { damaged: true } : {}) }
 }
 
+// `new` with a project: null when it is registered (and not hidden by the private switch), else the refusal naming the known projects
+export async function unknownProject(h: Host, name: string): Promise<string | null> {
+  const { rows, damaged } = await listProjects(h)
+  if (damaged) return 'projects.json is unreadable or not an object: fix it by hand first; no thread was created'
+  if (rows.some(r => r.name === name)) return null
+  const known = rows.map(r => r.name)
+  return `unknown project ${name}: ${known.length ? `known projects: ${known.join(', ')}` : 'none registered'}. Register a folder with project-add (project, path), or leave project out. No thread was created.`
+}
+
 type PIn = { action: string; project?: string; path?: string; on?: boolean; all?: boolean; confirm?: boolean }
 export const projectsAction = (h: Host, i: PIn): Promise<Out> => (i.action === 'projects' ? run(h, i) : queued(() => run(h, i)))
 

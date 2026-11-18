@@ -1,6 +1,7 @@
 ---
 name: stats
 description: Show what lean-agent sessions and workers cost (per model, agent and thread), which learned rules load, and how workers rated their briefs. Use when the user asks about spend, usage or whether the rules help.
+roles: desk, thread
 ---
 
 Read `~/.lean-agent/ledger.jsonl` (one JSON line per model request: `ts`, `role`, `tN`, `agent`, `model`, `in`, `out`,
@@ -9,5 +10,5 @@ Read `~/.lean-agent/ledger.jsonl` (one JSON line per model request: `ts`, `role`
 reads, output, an expensive worker model). The budget is cost-only: a daily cap per role (`dailyCapUsd`) and an
 optional per-worker cap (`workerCapUsd`, `workerCaps`) in `~/.lean-agent/config.json`; no plan-window percentage exists.
 
-For rules, call `lean_rules` `stats` (loads per rule, rules that never loaded). `~/.lean-agent/feedback.jsonl` holds each
+For rules, thread: call `lean_rules` `stats` (loads per rule, rules that never loaded); desk: the tool is not there, so `send` a thread the question or skip the rules part. `~/.lean-agent/feedback.jsonl` holds each
 worker's LEAN-FEEDBACK status; `gaps.jsonl` the context it had to discover.

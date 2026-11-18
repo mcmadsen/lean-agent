@@ -2,6 +2,7 @@
 name: review-learn
 description: Learn from the review comments on a pull request or a project's recent PRs (what reviewers repeatedly ask for) and feed them into the project's rules. Excludes only the lean-agent owner's own comments. Use for "learn from reviews" or after a PR round.
 argument-hint: <project> [PR number]
+roles: thread
 ---
 
 # Learn from reviews

@@ -2,6 +2,7 @@
 name: find
 description: Search lean-agent's own state (threads, notes, memory, handovers, saved command output, reviews) for a word or topic. Use for "where did we...", "find the thread about...", or to read a squeezed command output.
 argument-hint: <text>
+roles: desk, thread
 ---
 
 # Find
