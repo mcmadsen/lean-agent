@@ -217,6 +217,11 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {p.stale > 0 ? <Text color="yellow"> · {p.stale} rule area(s) stale</Text> : null}
           </Text>
         ))}
+        {!!v && (
+          <Text dimColor={!v.scripts.candidates && !v.scripts.adopted}>
+            Scripts: {v.scripts.candidates} candidates, {v.scripts.adopted} adopted
+          </Text>
+        )}
         <Text bold>Threads</Text>
         {v && !v.threads.length && <Text dimColor>No open threads.</Text>}
         {v?.threads.map(t => (

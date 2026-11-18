@@ -22,6 +22,7 @@ import { hostOf } from './host'
 import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, noteSection, skillsSeen, trimListing } from './skilltrim'
 import { parseGrants, recordGrant, releaseGrant } from './guard'
 import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
+import { SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 
 export { hostOf }
 
@@ -47,6 +48,7 @@ export const resetModState = () => {
   cwd = ''
   resetPaneState()
   resetSkillStat()
+  resetScripts()
 }
 let role: Role = { kind: 'plain' }
 let tries = 0
@@ -133,9 +135,9 @@ async function agentType($: any, id?: string, ev?: any): Promise<string | undefi
 const spent = new Map<string, number>() // usd per subagent id, this session
 
 // a worker's reply ends with LEAN-FEEDBACK: gaps and memory go to the files, the thread's own turn is unchanged
+const texts = (v: any): string[] => (typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(texts) : v && typeof v === 'object' ? Object.values(v).flatMap(texts) : [])
 async function feedbackOf(host: Host, e: any, r: any): Promise<void> {
   if (e.agentId || (e.tool !== 'Agent' && e.tool !== 'Task') || r?.deny !== undefined) return
-  const texts = (v: any): string[] => (typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(texts) : v && typeof v === 'object' ? Object.values(v).flatMap(texts) : [])
   const fb = parseFeedback(texts(r?.result).join('\n'))
   if (!fb) return
   let project: string | undefined
@@ -211,6 +213,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
   if (newRole.kind === 'thread') {
     await step('thread tools', async () => {
       for (const t of THREAD_TOOLS) await registerOnce($, { ...t, isDeferred: false })
+      await registerOnce($, { ...SCRIPT_SPEC, isDeferred: false })
     })
   }
   await step('0.45 migration check', () => autoMigrate(host, $.plugin.root)) // leftover 0.45 service: unloaded at once, then the idempotent migrate
@@ -230,6 +233,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         inputSchema: DOCTOR_SCHEMA,
         isDeferred: false,
       } as any)
+      await registerOnce($, { ...SCRIPT_SPEC, isDeferred: false })
     })
     await step('desk timers', async () => {
       every($, 10_000, 'desk', async host2 => {
@@ -439,6 +443,37 @@ export const register: Register = on => {
     return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
   })
 
+  // scripts over models: thread and desk (propose is a thread's, decide the desk's; scripts.ts checks per action)
+  on('tool.call', { tool: `mcp__lean-agent__${SCRIPT_TOOL}` }, async ($, e: any) => {
+    if (role.kind !== 'thread' && role.kind !== 'desk') await redetect($, undefined, true)
+    const r = role
+    if (r.kind !== 'thread' && r.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: SCRIPT_TOOL, need: 'thread', role: r, startDir, sid: lastSid }), isError: true } as any
+    const host = hostOf($)
+    const out = await scriptTool(host, r.kind === 'thread' ? { kind: 'thread', id: r.id } : { kind: 'desk' }, e, { startThread: (title, text, project) => leanThread(host, $.plugin.root, { action: 'new', title, text, project }) })
+    return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
+  })
+
+  // what a thread writes and runs: a scratch script that ran without a proposal is nudged once (prompt.submit); a run of an adopted script counts
+  on('tool.call', { tool: 'Write' }, async ($, e: any, next) => {
+    const r: any = await next(e)
+    if (role.kind === 'thread' && r?.deny === undefined) noteWrite(e.file_path)
+    return r
+  })
+  on('tool.call', { tool: 'Bash' }, async ($, e: any, next) => {
+    const r: any = await next(e)
+    const rl = role
+    if (rl.kind === 'thread' && r?.deny === undefined && typeof e.command === 'string') {
+      try {
+        const host = hostOf($)
+        noteBash(e.command, leanDir(await homeDir(host)), rl.id)
+        await noteUse(host, e.command, rl.id)
+      } catch {
+        /* tracking never stops a command */
+      }
+    }
+    return r
+  })
+
   on('tool.call', { tool: `mcp__lean-agent__${DOCTOR}` }, async ($, e: any) => {
     if (role.kind !== 'desk') await redetect($, undefined, true)
     if (role.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: 'lean_doctor', need: 'desk', role, startDir, sid: lastSid }), isError: true } as any
@@ -484,6 +519,11 @@ export const register: Register = on => {
       if (gcall) await releaseGrant(host, role, gcall).catch(() => undefined)
     }
     await feedbackOf(host, e, r).catch(() => undefined)
+    // a script auditor's LEAN-AUDIT line: the mod records the verdict (and tells the thread what the rules made of it)
+    if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined && /^(lean-agent:)?auditor$/.test(String(e.subagent_type ?? ''))) {
+      const said = await auditFromReply(host, role.id, texts(r?.result).join('\n')).catch(() => null)
+      if (said) r = { ...r, context: [...(r.context ?? []), said] }
+    }
     if (e.agentId || r?.deny !== undefined) return r
     try {
       const batch = role.kind === 'thread' ? await takeBatch(host, role.id) : role.kind === 'desk' ? await takeReports(host) : null
@@ -525,6 +565,8 @@ export const register: Register = on => {
       if (role.kind === 'thread') more = (await consumeWake(host, role.id, e.text)) ? null : await takeBatch(host, role.id)
       else if (role.kind === 'desk') more = await takeReports(host)
       if (more) extra = extra ? `${extra}\n${more}` : more
+      const nudge = role.kind === 'thread' ? await takeNudges(host) : null
+      if (nudge) extra = extra ? `${extra}\n${nudge}` : nudge
     } catch {
       /* the prompt goes through without it */
     }

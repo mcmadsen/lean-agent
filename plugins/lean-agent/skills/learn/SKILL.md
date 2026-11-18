@@ -39,5 +39,9 @@ never symlink (symlinked rule folders do not load).
 5. `--trim`: call `lean_rules` `stats`. Rewrite rules that loaded often but have gaps in `gaps.jsonl`; delete rules in
    `never` after 30 days; `sync` again.
 
+Scripts over models: counting, listing, summing or diffing while learning (files per area, manifests, changed paths) is a
+script's or a command's job (`git ls-files | wc -l`), not reading; look for an adopted `lean-agent-script-*` skill first. A
+project-specific script that worked and is reusable: `lean_script` propose it, with the project name.
+
 Freshness: `lean_rules` `stale` (run at thread start automatically) names areas whose files changed a lot since they
 were learned or that have three gaps; re-learn those with `--area` when you touch them. There is no background re-learn.

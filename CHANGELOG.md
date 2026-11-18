@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Scripts over models.** If a simple script can do a job (counting, summing, aggregating, listing, transforming, diffing,
+  validating), run it instead of a model reading the data; and any script a session fabricates is audited and judged before it
+  is reused. The thread template, the worker and reader prompts, the `learn` skill and the desk template say so (2-3 lines each).
+- New tool `lean_script` (thread and desk) and skill `scripts`:
+  - `propose` (thread): the mod copies the script into `~/.lean-agent/scripts/candidates/<name>/` with `meta.json` (purpose, run
+    with `{script}`, inputs, outputs, author, project or `global`, created, sha256) and **never executes it**. A secret in the text
+    refuses the proposal. A script about lean-agent's own data (`~/.lean-agent` files) is also filed in `feedback.jsonl` as
+    a "candidate for lean-agent core".
+  - Nudge: when a thread's Bash runs a script file it wrote this session from a scratch place (`/tmp`, a scratchpad, its own
+    folder) and nothing proposed it, the next prompt carries one line, once per file: "you ran <file>; if it is reusable,
+    lean_script propose it".
+  - `audit`: a thread gets the brief for the new read-only `lean-agent:auditor` agent (sonnet/high, a fixed checklist: reads,
+    writes, network, deletes, secrets, hardcoded values, determinism, error handling, other data); the desk starts a thread that
+    does it. The auditor ends with a `LEAN-AUDIT` line and **the mod records the verdict** when the Agent call returns, applying
+    its own rules: network, deletes or overwrites, writes outside the declared outputs, hardcoded values, a home path or email in
+    the text, or a script right only for its original data are never `adopt` (they become `adapt` with the concrete changes); a
+    secret is `reject`. Verdicts are `adopt`, `adapt` (changes), `reject` (reason); a tampered copy (sha256) is refused.
+  - `adopt` moves the script to `~/.lean-agent/scripts/<name>/` or `~/.lean-agent/<project>/scripts/<name>/` and writes a recipe
+    skill `lean-agent-script-<name>` with `run: <command>`; `lean_rules sync` copies it into checkouts (git-excluded).
+    `list`, `show`, `retire` (kept under `scripts/retired/`); a Bash run of an adopted script is counted in `scripts/uses.jsonl`.
+  - Desk: the pane shows "Scripts: N candidates, M adopted"; `lean_script decide <name> adopt|reject` (desk only, with a reason, logged in
+    `scripts/decisions.jsonl`) lets the user override a verdict. Adopting over an audit that said otherwise needs `confirm: true`;
+    a script with a secret or a hardcoded home path or email is never adopted, not even by the user, and a script that was never
+    audited cannot be adopted.
+- The `auditor` agent type gets the explorer's built-in read-only commands; an Agent call for it with `allow-*` lines from a
+  session that cannot own grants is refused like the other agent types.
+
 ## 1.0.4
 
 ### Added

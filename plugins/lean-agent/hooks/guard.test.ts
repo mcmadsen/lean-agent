@@ -321,7 +321,7 @@ test('the plugin-prefixed agent types: lean-agent:worker-* edits under a grant; 
   expect(await run(h, thread, edit(ok), '/r', 'lean-agent:worker-sonnet', 'w1')).toBeNull()
   expect(await run(h, thread, edit('/etc/x'), '/r', 'lean-agent:worker-sonnet', 'w1')).toContain('outside')
   expect(await run(h, thread, edit(ok), '/r', 'lean-agent:worker-opus', 'w9')).toContain('outside') // no grant of its own
-  for (const t of ['lean-agent:reviewer', 'lean-agent:reader-haiku', 'lean-agent:explorer', 'other:worker-x', 'worker-x', 'lean-agent:lean-agent:worker-x'])
+  for (const t of ['lean-agent:reviewer', 'lean-agent:reader-haiku', 'lean-agent:explorer', 'lean-agent:auditor', 'other:worker-x', 'worker-x', 'lean-agent:lean-agent:worker-x'])
     expect(await run(h, thread, edit(ok), '/r', t, 'x1')).toContain('read-only')
   expect([isWorker('lean-agent:worker-opus'), isWorker('worker-opus'), isWorker('other:worker-opus'), isWorker(undefined)]).toEqual([true, false, false, false])
 })
@@ -459,12 +459,13 @@ test('built-in search commands: rg, grep, find, ls, wc, head, tail, cat inside t
   const as = (t: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, '/h/.lean-agent/worktrees/app/t1', t, 'x1')
   const ok = ['rg foo src', "rg 'a|b' src", 'rg -n --glob "*.ts" foo /h/code/app/src', 'rg foo', 'grep -rn foo src', "grep -rn '/api/v1' src", 'grep -rn foo /h/code/app', 'find . -name "*.ts"', 'find /h/code/app -type f -name x',
     'ls -la src', 'ls /h/code/app', 'wc -l src/a.ts', 'head -20 src/a.ts', 'tail -n 5 src/a.ts', 'cat src/a.ts', 'rg foo src | head -5', 'git log --oneline | grep fix | wc -l', 'git ls-files src | rg ts', 'cat /h/.lean-agent/memory/notes.jsonl']
-  for (const t of ['lean-agent:explorer', 'lean-agent:reader-haiku', 'lean-agent:reviewer']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
+  for (const t of ['lean-agent:explorer', 'lean-agent:reader-haiku', 'lean-agent:reviewer', 'lean-agent:auditor']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
   const bad = ['rg foo > out', 'rg foo >> out', 'cat a.ts > b', 'rg foo | sh', 'rg foo | tee x', 'rg foo || ls', 'ls; rm x', 'ls && rm x', 'rg foo &', 'cat < /etc/passwd', 'cat $(id)', 'cat `id`', 'cat "$HOME/x"', 'cat ~/x', 'cat src/*', 'cat {a,b}', 'rg foo ../../../../etc', 'cat /etc/passwd', 'ls /', 'ls ../../../..', 'rg -f /etc/passwd x', 'rg --file=/etc/passwd x', 'rg foo /etc', 'grep -r foo /h', 'cat /h/other/x',
     'find . -exec rm {} ;', 'find . -exec sh -c x ;', 'find . -execdir ls ;', 'find . -delete', 'find . -ok ls ;', 'find . -fprint x', 'find . -fprintf x y', 'find . -fls x', 'find . -fprint0 x', 'rg --pre cat foo', 'rg --pre=cat foo', 'rg -z foo', 'rg --search-zip foo', 'tail -f x', 'tail -F x', 'xargs ls', 'sed -n 1p x', 'awk 1 x', 'env ls', 'sh -c ls', 'rg foo\nrm x', 'FOO=1 rg x']
   for (const c of bad) expect(await as('lean-agent:reader-sonnet')(c), c).toContain('granted')
+  for (const c of ['rg foo > out', 'cat /etc/passwd', 'python3 x.py', 'git show HEAD:f']) expect(await as('lean-agent:auditor')(c), `auditor: ${c}`).toContain('granted') // read-only, never runs the script
   // foreign, bare and worker types get no search built in (a worker is not restricted by it either)
-  for (const t of ['other:explorer', 'explorer', 'reader-haiku']) expect(await as(t)('rg foo src'), t).toContain('granted')
+  for (const t of ['other:explorer', 'explorer', 'reader-haiku', 'other:auditor', 'auditor']) expect(await as(t)('rg foo src'), t).toContain('granted')
   expect(await as('lean-agent:worker-sonnet')('rg foo src')).toBeNull()
 })
 

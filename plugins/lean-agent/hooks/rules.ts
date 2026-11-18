@@ -89,6 +89,14 @@ export async function syncRules(h: Host, project: string, repo: string): Promise
     const t = await h.fs.read(`${pdir}/skills/${d.name}/SKILL.md`).catch(() => null)
     if (t !== null && slugOk(d.name)) recipes.push({ name: `lean-agent-${d.name}`, text: String(t) })
   }
+  // adopted scripts (scripts.ts) are recipe skills too: the project's own, then the global ones
+  for (const base of [`${pdir}/scripts`, `${leanDir(home)}/scripts`]) {
+    for (const d of (await h.fs.list(base).catch(() => [])).filter(f => f.kind === 'dir' && f.name !== 'candidates' && f.name !== 'retired')) {
+      const t = await h.fs.read(`${base}/${d.name}/SKILL.md`).catch(() => null)
+      const name = `lean-agent-script-${d.name}`
+      if (t !== null && slugOk(d.name) && !recipes.some(r => r.name === name)) recipes.push({ name, text: String(t) })
+    }
+  }
   // git-exclude first: nothing we copy is ever visible to git, not even for a moment
   if (rules.size || recipes.length) out.excluded = await exclude(h, repo)
   await mirror(h, rules, `${repo}/.claude/rules/lean-agent`, n => n.endsWith('.md'), out)

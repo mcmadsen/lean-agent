@@ -103,6 +103,7 @@ lean-agent folder without asking. Pushes stay behind the review gate and the pri
 | `review` | review the branch diff in passes and record the verdict for HEAD |
 | `review-learn` | learn from review comments on pull requests |
 | `learn` | write path-scoped rules for a project |
+| `scripts` | scripts over models: propose, audit, adopt and reuse small scripts (`lean_script`) |
 | `todo` | the user's to-do list in `~/.lean-agent/todo.json` |
 | `stats`, `budget` | what sessions and workers cost, which rules load, caps |
 | `find` | search lean-agent's own state (threads, notes, memory, handovers, saved output, reviews) |
@@ -122,6 +123,7 @@ Agent definitions in `plugins/lean-agent/agents/`:
 | `lean-agent:reader-haiku`, `lean-agent:reader-sonnet` | read-only lookup and analysis |
 | `lean-agent:reviewer` | read-only review of a diff |
 | `lean-agent:explorer` | explores one area for the `learn` skill |
+| `lean-agent:auditor` | read-only audit of one candidate script (`scripts` skill) |
 
 A worker's last line is `LEAN-FEEDBACK {...}`: `missing` context becomes an entry in the project's `gaps.jsonl` (three
 for one area mark its rules stale) and `remember` items go to shared memory. A long Bash result is squeezed (head, tail
@@ -189,6 +191,7 @@ Everything is plain JSON or JSONL under `~/.lean-agent` (one folder, resolved fr
 | `threads/tN/thread.json`, `brief.md`, `inbox.jsonl` | a thread, its brief and queued messages |
 | `desk/inbox.jsonl`, `goals.json`, `questions.jsonl` | what threads reported, goals, open questions |
 | `<project>/rules`, `skills`, `gaps.jsonl`, `reviews/`, `learn.json` | per-project learning and reviews |
+| `scripts/candidates/<name>/`, `scripts/<name>/`, `<project>/scripts/<name>/`, `scripts/uses.jsonl`, `decisions.jsonl` | proposed and adopted scripts (script, `meta.json`, recipe `SKILL.md`), their uses and the user's overrides |
 | `memory/`, `todo.json`, `worktrees.json`, `handovers/` | shared notes and lists |
 | `config.json`, `ledger.jsonl` | caps and spend |
 | `bin/open-desk.sh`, `logs/opener.log`, `migrated-1.0.json`, `legacy-0.45/` | opener, its log, migration marker and archive |
