@@ -14,7 +14,8 @@ import { applyFeedback, parseFeedback } from './feedback'
 import { checkStale, syncRules } from './rules'
 import { leanDir, readJson, threadsDir } from './state'
 import { chase } from './chaser'
-import { autoMigrate, check, fix, migrate } from './doctor'
+import { autoMigrate, check, migrate } from './doctor'
+import { setupFix, setupText } from './setup'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
 import { hostOf } from './host'
@@ -311,7 +312,8 @@ export const register: Register = on => {
     const root = await bounded($, Promise.resolve($.session.root()), 'session.root').catch(() => '')
     const ctx = await serial(() => settle($, host, e.cwd, typeof root === 'string' ? root : ''))
     // the command is role-free: registered once here
-    await $.command.register({ name: 'lean-agent', description: 'Open the lean-agent desk pane (goals, answers, threads)' }).catch(() => undefined)
+    await $.command.register({ name: 'lean-agent', description: 'Open the lean-agent pane (setup, desk, threads)' }).catch(() => undefined)
+    await $.command.register({ name: 'lean-agent-setup', description: 'Set up or repair lean-agent (desk folder, login opener, trust); no model turn needed' }).catch(() => undefined)
     if (ctx.length) return next({ ...e, context: [...((e as any).context ?? []), ...ctx] } as any)
     return next(e)
   })
@@ -343,7 +345,7 @@ export const register: Register = on => {
     return r
   })
 
-  registerPane(on)
+  registerPane(on, () => role)
 
   // the tool pool per role: the desk's is cut to what strict mode can allow; config.json `tools.<role>.drop` (globs) on top;
   // lean-agent's own tools stay. Reads the CURRENT role, so a session that becomes the desk later is trimmed from then on.
@@ -380,7 +382,7 @@ export const register: Register = on => {
     try {
       await ensureGitHooks(host).catch(() => undefined)
       if (e.action === 'check') return { result: (await check(host, $.plugin.root)).join('\n') } as any
-      if (e.action === 'fix') return { result: (await fix(host, $.plugin.root)).lines.join('\n') } as any
+      if (e.action === 'fix') return { result: setupText(await setupFix(host, $.plugin.root), true) } as any
       if (e.action === 'migrate') return { result: (await migrate(host, $.plugin.root)).lines.join('\n') } as any
       return { result: 'doctor: action must be check, fix or migrate', isError: true } as any
     } catch (err) {

@@ -5,15 +5,25 @@ import { ackRows, loadView, resetViewCache, threadStatus } from './view'
 import type { GoalTone, View } from './view'
 import { leanThread } from './threads'
 import { hostOf } from './host'
+import { NEXT_STEP, openDesk, setupCheck, setupFix, setupText } from './setup'
+import type { Role } from './role'
 
 export const PANE = 'lean-agent'
-export const VERSION = '1.0.0'
+export const VERSION = '1.0.1'
 const TONE: Record<GoalTone, string> = { working: 'green', waiting: 'yellow', stuck: 'red', quiet: 'gray' }
 
 let lastError = ''
 let lastRefresh = ''
 let notice = ''
+// setup state: the last doctor check (kept 30 s; any press drops it), the lines of the last fix, a press in flight
+let chk: { at: number; problems: string[] } | null = null
+let lastSetup: string[] = []
+let busy = false
+const CHECK_MS = 30_000
 export const resetPaneState = () => {
+  chk = null
+  lastSetup = []
+  busy = false
   lastError = ''
   lastRefresh = ''
   notice = ''
@@ -26,11 +36,22 @@ export async function openPane($: any): Promise<void> {
 
 const short = (s: string, n = 90) => (s.length > n ? s.slice(0, n - 1) + '…' : s).replace(/\s+/g, ' ')
 
-export function registerPane(on: any) {
+export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain' })) {
   // the pane opens by itself in the desk only; the mod's own session.start hook calls this after the role is known
   on('command.run', { command: 'lean-agent' }, async ($: any) => {
     await openPane($)
     return { text: 'lean-agent pane opened.' }
+  })
+
+  // /lean-agent-setup: check + fix with no model turn and no lean_doctor tool, in every session
+  on('command.run', { command: 'lean-agent-setup' }, async ($: any) => {
+    try {
+      const o = await setupFix(hostOf($), $.plugin.root)
+      chk = null
+      return { text: setupText(o, roleOf().kind === 'desk') }
+    } catch (err) {
+      return { text: `setup failed: ${String((err as Error)?.message ?? err).slice(0, 200)}` }
+    }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($: any, e: any) => {
@@ -57,9 +78,86 @@ export function registerPane(on: any) {
       }
       $.ui.invalidate('ui.render')
     }
+    const kind = roleOf().kind
+    const now = await host.clock.now()
+    if (!chk || now - chk.at > CHECK_MS) {
+      try {
+        chk = { at: now, problems: (await setupCheck(host, $.plugin.root)).problems }
+      } catch (err) {
+        chk = { at: now, problems: [`check failed: ${String((err as Error)?.message ?? err).slice(0, 120)}`] }
+      }
+    }
+    const problems = chk.problems
+    // one press at a time; a press that finds a run in flight does nothing
+    const setupPress = (label: string, f: () => Promise<{ ok: boolean; text: string } | void>) => async () => {
+      if (busy) return
+      busy = true
+      try {
+        const r = await f()
+        notice = r && !r.ok ? r.text : r?.text ?? ''
+      } catch (err) {
+        notice = lastError = `${label} failed: ${String((err as Error)?.message ?? err).slice(0, 160)}`
+      } finally {
+        busy = false
+      }
+      $.ui.invalidate('ui.render')
+    }
+    const runSetup = setupPress('setup', async () => {
+      resetViewCache()
+      const o = await setupFix(host, $.plugin.root)
+      lastSetup = o.fixed
+      chk = { at: await host.clock.now(), problems: o.problems }
+    })
+    const openIt = setupPress('open desk', () => openDesk(host))
+    const setupRows = lastSetup.map((l, i) => (
+      <Text key={`su-${i}`} dimColor>
+        {l}
+      </Text>
+    ))
+    const footer = (
+      <Text dimColor>
+        lean-agent {VERSION} · refreshed {lastRefresh || 'never'} · last error: {lastError || 'none'}
+      </Text>
+    )
+    const problemRows = (
+      <Box flexDirection="column">
+        <Text bold color="yellow">
+          lean-agent is not set up
+        </Text>
+        <Button key="setup" label="Set up lean-agent" onPress={runSetup} />
+        {problems.map((m, i) => (
+          <Text key={`pb-${i}`} color="red">
+            {m}
+          </Text>
+        ))}
+      </Box>
+    )
+    if (kind !== 'desk') {
+      // a session that is not the desk: setup first (or the way to the desk), the desk's own view only in the desk
+      return (
+        <Box flexDirection="column">
+          {problems.length > 0 ? (
+            problemRows
+          ) : (
+            <Box flexDirection="column">
+              <Text bold>This is not the desk</Text>
+              <Text>{NEXT_STEP}</Text>
+              <Box>
+                <Button key="open-desk" label="Open desk" onPress={openIt} />
+                <Button key="rerun-setup" label="Re-run setup" onPress={runSetup} />
+              </Box>
+            </Box>
+          )}
+          {setupRows}
+          {!!notice && <Text color="yellow">{notice}</Text>}
+          {footer}
+        </Box>
+      )
+    }
     const thread = (action: 'resume' | 'start', tN: string) => act(`${action} ${tN}`, () => leanThread(host, $.plugin.root, { action, tN }))
     return (
       <Box flexDirection="column">
+        {problems.length > 0 && problemRows}
         <Text bold>Goals</Text>
         {v && !v.goals.length && <Text dimColor>No open goals.</Text>}
         {v?.goals.map(g => (
@@ -100,6 +198,8 @@ export function registerPane(on: any) {
             error: {m}
           </Text>
         ))}
+        <Button key="repair" label="Setup / repair" onPress={runSetup} />
+        {setupRows}
         {!!notice && !errors.includes(notice) && <Text color="yellow">{notice}</Text>}
         <Text dimColor>
           lean-agent {VERSION} · refreshed {lastRefresh || 'never'} · last error: {lastError || 'none'} · budget today: {v?.budget ?? 'n/a'}
@@ -111,11 +211,6 @@ export function registerPane(on: any) {
 
 // Called by the mod's session.start once the role is known: /lean-agent exists everywhere, the pane opens by itself
 // only in the desk (and refreshes every 5 s); a thread gets its status line instead.
-export async function paneStart($: any, role: { kind: string; id?: string }): Promise<Array<() => void>> {
-  await $.command.register({ name: 'lean-agent', description: 'Open the lean-agent desk pane (goals, answers, threads)' })
-  return paneRole($, role)
-}
-
 // the role-dependent part of the pane: the desk opens it, a thread gets a status line; returns the timers' cancels
 export async function paneRole($: any, role: { kind: string; id?: string }): Promise<Array<() => void>> {
   const cancels: Array<() => void> = []

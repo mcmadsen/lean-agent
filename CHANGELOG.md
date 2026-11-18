@@ -2,6 +2,11 @@
 
 ## 1.0.1
 
+### Added
+- Setup without a model turn: `/lean-agent-setup` (check + fix, any session) and a **Set up lean-agent** button in the
+  `/lean-agent` pane, which now opens in every session: setup first, **Open desk** in a session that is not the desk,
+  **Setup / repair** in the desk. One code path with `lean_doctor fix`.
+
 ### Changed
 - The desk's tool pool is cut to the tools strict mode can allow (plus lean-agent's own), its skill listing to lean-agent's
   skills: far less context before the first message. `tools.desk.drop` still applies on top; threads and plain sessions are unchanged.

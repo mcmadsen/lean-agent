@@ -10,10 +10,12 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
   const calls: Call[] = []
   const writes: string[] = []
   const git = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 1, stdout: '' }) }
+  const app = { running: true } // is the Claude app running (pgrep)
   const claude = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 0, stdout: '' }) }
   const res = (p: string) => links.get(p) ?? p
+  const made = new Set<string>() // folders a `mkdir` made (a folder alone has no file in `files`)
   const dirs = () => {
-    const d = new Set<string>(['/'])
+    const d = new Set<string>(['/', ...made])
     for (const k of [...files.keys(), ...links.values()]) for (let i = k.indexOf('/', 1); i > 0; i = k.indexOf('/', i + 1)) d.add(k.slice(0, i))
     return d
   }
@@ -44,9 +46,11 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       const a = c === 'mv' ? rest.filter(y => !y.startsWith('-')) : rest
       if (c === 'mv') { const s = files.get(a[0]); if (s === undefined) { const ks = [...files.keys()].filter(k => k.startsWith(a[0] + '/')); if (!ks.length) return { exitCode: 1, stdout: '', stderr: 'no such file' }; for (const k of ks) { files.set(a[1] + k.slice(a[0].length), files.get(k)!); files.delete(k) } return ok() } files.set(a[1], s); files.delete(a[0]); return ok() }
       if (c === 'rm') { for (const x of a.filter(y => !y.startsWith('-'))) for (const k of [...files.keys()]) if (k === x || k.startsWith(x + '/')) files.delete(k); return ok() }
-      if (c === 'mkdir' || c === 'chmod' || c === 'systemctl' || c === 'launchctl') return ok()
+      if (c === 'mkdir') { for (const x of a.filter(y => !y.startsWith('-'))) made.add(x); return ok() }
+      if (c === 'chmod' || c === 'systemctl' || c === 'launchctl') return ok()
       if (c === 'shasum') { let x = 5381; for (const ch of call.stdin ?? '') x = ((x * 33) ^ ch.charCodeAt(0)) >>> 0; return ok(x.toString(16).padStart(8, '0').repeat(8) + '  -') }
       if (c === 'openssl') return ok('ab'.repeat(32))
+      if (c === 'pgrep') return app.running ? ok('123') : { exitCode: 1, stdout: '', stderr: '' }
       if (c === 'id') return ok('501')
       if (c === 'uname') return ok('Darwin')
       if (c === 'wc') { const t = files.get(a[a.length - 1]); return t === undefined ? { exitCode: 1, stdout: '', stderr: 'no such file' } : ok(new TextEncoder().encode(t).length + ' ' + a[a.length - 1]) }
@@ -75,6 +79,6 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     on('process.run', (_: any, e: any) => ({ value: impl.run(e.argv, e.init) }))
   }
   if (on) on('clock.now', () => ({ value: clock.t }))
-  return { host, store, files, links, calls, writes, claude, git, clock, home, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
+  return { host, store, files, links, calls, writes, claude, git, app, clock, home, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
 }
 

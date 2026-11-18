@@ -45,10 +45,11 @@ claude plugin marketplace add mcmadsen/lean-agent
 claude plugin install lean-agent@lean-agent
 ```
 
-1. Open the Claude app and start a new **local** session in the folder `~/lean-agent-desk` (create it in the folder
-   chooser if it is missing).
-2. Type `doctor fix`. The desk creates the folder, installs the opener at `~/.lean-agent/bin/open-desk.sh` plus the
-   launch agent `com.lean-agent.desk`, and trusts the desk folder.
+1. Open the Claude app and start a new **local** session in any folder (no desk needed yet).
+2. Type `/lean-agent-setup` (or type `/lean-agent` and press **Set up lean-agent**). No model turn and no tool are
+   needed: it creates `~/lean-agent-desk`, installs the opener at `~/.lean-agent/bin/open-desk.sh` plus the launch agent
+   `com.lean-agent.desk`, and trusts the desk folder. In a session that is not the desk, `/lean-agent` then shows
+   **Open desk** (it never launches the Claude app); or start a new local session in `~/lean-agent-desk`.
 3. From the next login the desk opens by itself once the Claude app is running.
 
 ## Upgrade from 0.45
@@ -197,8 +198,8 @@ Writes are atomic (temp file then rename); appends are single `O_APPEND` writes;
 ## Troubleshooting
 
 - **The desk did not open at login**: `doctor check` shows the last opener line. The opener only acts while the Claude
-  app is running (it waits ten minutes and never launches it). `doctor fix` reinstalls it.
-- **"folder not trusted" from a thread start**: the desk trusts folders by real path (`~/.claude.json`). `doctor fix`
+  app is running (it waits ten minutes and never launches it). `/lean-agent-setup` (or `doctor fix`) reinstalls it.
+- **"folder not trusted" from a thread start**: the desk trusts folders by real path (`~/.claude.json`). `/lean-agent-setup`
   repeats it; if `~/.claude.json` does not parse, lean-agent leaves it alone: accept the trust dialog once.
 - **A rule does not load**: it must be a real file in `.claude/rules/lean-agent/`; `lean_rules sync` recreates it.
 - **A thread seems stuck**: `goals` shows its last goal line; a status request goes out after an hour of quiet.

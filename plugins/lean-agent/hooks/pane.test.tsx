@@ -28,8 +28,11 @@ function setup(on: any = null, rows: any[] = []) {
     if (a[0] === '--bg') return { exitCode: 0, stdout: `started ${SID}\n` }
     return { exitCode: 0, stdout: '' }
   }
+  if (on) on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   return h
 }
+// a pane test runs in the desk unless it says otherwise
+const inDesk = ($: any, cwd = '/h/lean-agent-desk') => $.session.start({ cwd, surface: 'desktop', isInteractive: true } as any)
 
 test('view: goals by tone, answers unread first, threads with state and last line', async () => {
   const h = setup(null, [{ sessionId: SID, name: 'x', cwd: '/x', status: 'busy', startedAt: 1 }])
@@ -76,10 +79,11 @@ test('thread status line: id, budget, unread inbox', async () => {
 
 test('pane renders on every surface; Resume presses one claude --bg --resume', async ($, on) => {
   const h = setup(on, [])
+  await inDesk($)
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface } as any)
     expect((await ui.find({ type: 'Text', text: /ship it/ }))?.text).toContain('t1')
-    expect(await ui.find({ type: 'Text', text: /1\.0\.0/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /1\.0\.1/ })).toBeTruthy()
     await ui.unmount()
   }
   const ui = await $.ui.mount(PANE as any)
@@ -93,6 +97,7 @@ test('pane renders on every surface; Resume presses one claude --bg --resume', a
 test('pane shows the error instead of going blank', async ($, on) => {
   const h = setup(on)
   h.claude.handler = () => ({ exitCode: 3, stdout: '' })
+  await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   expect((await ui.find({ type: 'Text', text: /error: agents/ }))?.text).toContain('exited 3')
   await ui.unmount()
@@ -118,6 +123,7 @@ test('view and pane: an open question shows until an answer row closes it', asyn
   h.files.set('/h/.lean-agent/answers.jsonl', q({ ts: 3, q: 2, thread: 't2', text: 'redis' }))
   const v = await loadView(h.host)
   expect(v.openQuestions.map(x => [x.q, x.from, x.question])).toEqual([[1, 't1', 'which db?']])
+  await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   expect((await ui.find({ type: 'Text', text: /open \? t1: which db\?/ }))?.text).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /which cache/ })).toBeFalsy()
