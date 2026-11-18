@@ -119,12 +119,19 @@ test('private projects never push or publish, review or not', async () => {
     'gh repo create foo', 'gh repo edit', 'gh repo fork',
     'gh api -X POST repos/o/r/issues', 'gh api --method DELETE repos/o/r', 'gh api repos/o/r/issues -f title=x', 'gh api repos/o/r --input f.json',
     'az repos pr create --title x', 'az repos create --name x', 'az devops project create', 'az boards work-item create',
+    'bash -c "gh api -X POST repos/o/r/issues"', "sh -c 'gh pr merge 3'", 'x=$(gh api -X POST repos/o/r/issues)', '(gh api repos/o/r -f a=b)', 'echo `gh pr merge 3`',
+    'gh -R o/r api -X POST repos/o/r/issues', 'gh --repo o/r pr merge 3', 'az repos pr create --title list', 'az --only-show-errors repos pr create --title x',
+    'FOO=1 gh pr view 3 && gh pr merge 3', 'gh pr view 3; gh gist create f', 'gh workflow run x', 'gh secret set X', 'gh label create x', '$GH pr view 3', 'eval "gh pr view 3"', 'echo "unbalanced',
     'lean-agent worktree push vault feature', 'lean-agent review vault --post']
   for (const command of denied)
     expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/secret')]).toEqual([command, expect.stringContaining('private project')])
   expect(await run(h, thread, { tool: 'Bash', command: 'git -C /r/secret push' }, '/r/app')).toContain('private project')
+  for (const command of ['cat /h/.lean-agent/rev*/x.json', 'cat /h/.lean-agent/review.k?y', 'cat /h/.lean-agent/secret/reviews/*'])
+    expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/app')]).toEqual([command, expect.stringContaining('review records')])
   for (const command of ['gh pr view 3', 'gh pr list', 'gh api repos/o/r/pulls/3/comments', 'gh api user --jq .login', 'gh api -X GET repos/o/r -f per_page=1',
-    'git fetch origin', 'git pull', 'git log', 'git status', 'git ls-remote origin', 'git remote -v', 'az repos pr list', 'az repos show'])
+    'git fetch origin', 'git pull', 'git log', 'git status', 'git ls-remote origin', 'git remote -v', 'az repos pr list', 'az repos show',
+    'gh issue list --label release', 'gh pr list --search release', 'gh api repos/o/r', 'gh -R o/r pr view 3', 'gh auth status', 'gh run list', 'gh pr diff 3', 'az --only-show-errors repos pr list',
+    'bash -c "gh pr view 3"', 'x=$(gh pr list)'])
     expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/secret')]).toEqual([command, null])
   // non-private: no publishing denial
   for (const command of ['gh pr create --fill', 'gh release create v1', 'gh api -X POST x', 'git remote add x u'])

@@ -41,32 +41,66 @@ function words(c: string): string[] {
 
 // The command reaches git push / gh publishing anywhere in its text (quotes, eval and bash -c included).
 export const PUSH = /\bgit\b[^;&|\n]*\bpush\b/
-// PRIVATE projects: every outward action is refused (no override). The exact list:
-//   git push; git remote add / set-url;
-//   gh pr create|comment|merge|edit|close|reopen|ready|review; gh issue create|comment|edit|close|reopen|delete|transfer|pin|unpin|lock|unlock;
-//   gh release <anything>; gh repo create|edit|fork|delete|rename|archive; gh api with a write method (-X/--method POST|PUT|PATCH|DELETE,
-//   or -f/-F/--field/--raw-field/--input without an explicit GET); az repos|devops|boards unless the verb is list/show/query/get;
-//   lean-agent worktree push / pr create / review --post|--comment (0.45 CLI forms).
-// Read-only calls (gh pr view/list, gh api GET, git fetch/log/status, az ... list/show) pass.
+// PRIVATE projects: an ALLOW-list. A Bash command is denied (no override) when ANY invocation found anywhere in its text
+// (inside bash -c / sh -c strings, $(...), backticks, ( ... ) subshells, after ; && || | and env assignments, with global
+// flags such as gh -R o/r or az --only-show-errors before the subcommand) is not read-only:
+//   gh: pr view|list|diff|checks|status; issue view|list|status; repo view|list; run view|list; auth status;
+//       api with no write method (-X/--method other than GET) and no -f/-F/--field/--raw-field/--input.
+//   az: only commands whose verb is list/show/query/get (list-*, show-*).
+//   git push and git remote add|set-url are always refused; so are lean-agent worktree push / pr create / review --post|--comment.
+// Subcommands are matched by position (after global flags), never by a bare word: `gh issue list --label release` passes.
+// A command that cannot be parsed confidently (unbalanced quotes, eval, a $variable as the program name) is denied too.
+// Other outward tools (gh gist, workflow run, secret set, label create ...) are not on the list, so they are denied as well.
 // In non-private projects none of this applies: only the push gate and the protected-branch / --force guard do.
-const GH_WRITE = /\bgh\b[^;&|\n]*\b(pr\s+(create|comment|merge|edit|close|reopen|ready|review)|issue\s+(create|comment|edit|close|reopen|delete|transfer|pin|unpin|lock|unlock)|release|repo\s+(create|edit|fork|delete|rename|archive))\b/
 const GIT_REMOTE_WRITE = /\bgit\b[^;&|\n]*\bremote\s+(add|set-url)\b/
 const LEAN_OUT = /\blean-agent\b[^;&|\n]*(\bworktree\s+push\b|\bpr\s+create\b|\breview\b[^;&|\n]*--(post|comment)\b)/
+const VALUE_FLAGS = new Set(['-R', '--repo', '--hostname', '--subscription', '-o', '--output', '--query', '--organization', '--org', '--project', '--resource-group', '-g'])
+const GH_READ: Record<string, string[]> = { pr: ['view', 'list', 'diff', 'checks', 'status'], issue: ['view', 'list', 'status'], repo: ['view', 'list'], run: ['view', 'list'], auth: ['status'] }
+
+function balanced(c: string): boolean {
+  let q = ''
+  for (let i = 0; i < c.length; i++) {
+    const ch = c[i]!
+    if (q) { if (ch === q) q = ''; else if (q === '"' && ch === '\\') i++ }
+    else if (ch === '\\') i++
+    else if (ch === '"' || ch === "'") q = ch
+  }
+  return !q
+}
+function ghDenied(rest: string[]): boolean {
+  const pos: string[] = []
+  for (let i = 0; i < rest.length; i++) {
+    const x = rest[i]!
+    if (VALUE_FLAGS.has(x)) i++
+    else if (!x.startsWith('-')) pos.push(x)
+  }
+  if (pos[0] === 'api') {
+    const m = rest.map((x, i) => (/^(-X|--method)$/.test(x) ? rest[i + 1] : /^(-X|--method)=/.test(x) ? x.split('=')[1] : /^-X\S/.test(x) ? x.slice(2) : '')).filter(Boolean).pop()
+    if (m) return !/^GET$/i.test(m)
+    return rest.some(x => /^(-f|-F|--field|--raw-field|--input)(=|$)/.test(x) || /^-[fF]\S/.test(x))
+  }
+  return !(GH_READ[pos[0] ?? '']?.includes(pos[1] ?? ''))
+}
+function azDenied(rest: string[]): boolean {
+  let i = 0
+  while (i < rest.length && rest[i]!.startsWith('-')) i += VALUE_FLAGS.has(rest[i]!) ? 2 : 1
+  const pos: string[] = []
+  for (; i < rest.length && !rest[i]!.startsWith('-'); i++) pos.push(rest[i]!)
+  return !/^(list|show|query|get|list-.*|show-.*)$/.test(pos[pos.length - 1] ?? '')
+}
 function privateOutward(c: string): boolean {
-  if (PUSH.test(c) || GH_WRITE.test(c) || GIT_REMOTE_WRITE.test(c) || LEAN_OUT.test(c)) return true
-  for (const seg of c.split(/[;&|\n]+/)) {
-    const w = words(seg)
-    const at = w.findIndex(x => x === 'gh' || x === 'az' || x.endsWith('/gh') || x.endsWith('/az'))
-    if (at < 0) continue
-    const rest = w.slice(at + 1)
-    const pos = rest.filter(x => !x.startsWith('-'))
-    if (w[at]!.endsWith('az') && ['repos', 'devops', 'boards'].includes(pos[0] ?? '')) {
-      if (!pos.slice(1).some(x => /^(list|show|query|get|list-.*|show-.*)$/.test(x))) return true
-    }
-    if (w[at]!.endsWith('gh') && pos[0] === 'api') {
-      const m = rest.map((x, i) => (/^(-X|--method)$/.test(x) ? rest[i + 1] : /^(-X|--method)=/.test(x) ? x.split('=')[1] : /^-X\S/.test(x) ? x.slice(2) : '')).filter(Boolean).pop()
-      if (m) { if (/^(POST|PUT|PATCH|DELETE)$/i.test(m)) return true }
-      else if (rest.some(x => /^(-f|-F|--field|--raw-field|--input)(=|$)/.test(x) || /^-[fF]\S/.test(x))) return true
+  if (PUSH.test(c) || GIT_REMOTE_WRITE.test(c) || LEAN_OUT.test(c)) return true
+  if (!balanced(c)) return true
+  const flat = c.replace(/["'\\]/g, '')
+  for (const seg of flat.split(/\$\(|[;&|\n\r`(){}<>]+/)) {
+    const w = seg.trim().split(/\s+/).filter(Boolean)
+    if (w.includes('eval')) return true
+    const first = w.find(x => !/^[A-Za-z_]\w*=/.test(x))
+    if (first && /^\$/.test(first)) return true
+    for (let at = 0; at < w.length; at++) {
+      const base = w[at]!.split('/').pop()
+      if (base === 'gh' && ghDenied(w.slice(at + 1))) return true
+      if (base === 'az' && azDenied(w.slice(at + 1))) return true
     }
   }
   return false
@@ -160,7 +194,7 @@ async function reviewStoreDenial($: Host, ctx: Ctx, e: Call): Promise<string | n
   }
   if (e.tool === 'Bash') {
     const c = String(e.command ?? '')
-    if (/review\.key/.test(c) || /\.lean-agent\/(?!worktrees\/|threads\/)[^\s/]+\/reviews\b/.test(c)) return NO
+    if (/review\.key/.test(c) || /\breview\.[\w]*[*?[]|\brev[\w.]*[*?[]/.test(c) || /\.lean-agent\/(?!worktrees\/|threads\/)[^\s"']*[*?[]/.test(c) || /\.lean-agent\/(?!worktrees\/|threads\/)[^\s/]+\/reviews\b/.test(c)) return NO
     if (/(^|[\s;&|(])cd\s+["']?\S*\.lean-agent(\/(?!worktrees\b|threads\b)[^\s\/"']+)?\/?["']?(\s|;|&|$)/.test(c) && /\breviews\b/.test(c)) return NO
   }
   return null
