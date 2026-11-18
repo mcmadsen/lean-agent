@@ -29,7 +29,7 @@ export type Inbox = { ts: number; text: string; from?: string }
 // Fields used (Claude Code 2.1.x prints an array): sessionId, name, cwd, status ("idle" | "busy" | ...), startedAt (ms),
 // kind, pid. Tolerated: a wrapper object ({agents|sessions|items: [...]}), snake_case ids (session_id, id), stray
 // non-object entries, damaged JSON (-> []).
-export type AgentRow = { sid: string; name: string; cwd: string; status: string; startedAt: number; pid: number; id: string }
+export type AgentRow = { sid: string; name: string; cwd: string; status: string; startedAt: number; pid: number; id: string; model?: string }
 
 export function parseAgents(text: string): AgentRow[] {
   let v: unknown
@@ -53,6 +53,7 @@ export function parseAgents(text: string): AgentRow[] {
       startedAt: Number(r.startedAt ?? r.started_at ?? 0) || 0,
       pid: Number(r.pid) || 0, // a listed process: set while the background process is alive, absent once it exited
       id: String(r.id ?? ''),
+      ...(typeof r.model === 'string' && r.model ? { model: r.model } : {}),
     })
   }
   return out

@@ -102,8 +102,8 @@ test('stats: counts loads of lean-agent rules from the hook log and lists rules 
   const h = setup()
   h.files.set(`${SRC}/rules/billing.md`, rule())
   h.files.set(`${SRC}/rules/api.md`, rule())
-  const ev = (f: string) => JSON.stringify({ ts: 1, e: { file_path: f } })
-  h.files.set('/h/.lean-agent/logs/rules-loaded.jsonl', [ev('/r/.claude/rules/lean-agent/billing.md'), ev('/r/.claude/rules/lean-agent/billing.md')].join('\n') + '\n')
+  const ev = (f: string, ts = 1) => JSON.stringify({ ts, e: { file_path: f } })
+  h.files.set('/h/.lean-agent/logs/rules-loaded.jsonl', [ev('/r/.claude/rules/lean-agent/billing.md'), ev('/r/.claude/rules/lean-agent/billing.md', 2)].join('\n') + '\n')
   expect(await rulesStats(h.host, 'proj')).toEqual({ loaded: { 'billing.md': 2 }, never: ['api.md'] })
 })
 

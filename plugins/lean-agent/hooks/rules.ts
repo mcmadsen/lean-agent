@@ -500,16 +500,32 @@ export async function verifyRules(h: Host, project: string, repo: string, only?:
   return { lines, missing }
 }
 
-// Which lean-agent rules loaded (hooks/rules-loaded.sh logs one line per load) and which never did.
+// Which lean-agent rules loaded and which never did. Loads are logged by hooks/rules-loaded.sh (the InstructionsLoaded command
+// hook) AND by the mod's own classic.InstructionsLoaded handler (logRuleLoad), into the same file; the same load seen by both
+// (same file, reason, trigger and second) counts once. Counted by rule file name, `_project.md` included (it loads at session
+// start, with no `paths:`), across every checkout of the project.
+export const RULES_LOG = (home: string) => `${leanDir(home)}/logs/rules-loaded.jsonl`
+export async function logRuleLoad(h: Host, e: any): Promise<boolean> {
+  const f = typeof e?.file_path === 'string' ? e.file_path : ''
+  if (!f.includes('/rules/lean-agent/')) return false
+  const home = await homeDir(h)
+  await appendJsonl(h, RULES_LOG(home), { ts: Math.floor((await h.clock.now()) / 1000), src: 'mod', e: { file_path: f, load_reason: e.load_reason, trigger_file_path: e.trigger_file_path, memory_type: e.memory_type } })
+  return true
+}
 export async function rulesStats(h: Host, project: string): Promise<{ loaded: Record<string, number>; never: string[] }> {
   const home = await homeDir(h)
-  const log = await readJsonl<{ e?: { file_path?: string } }>(h, `${leanDir(home)}/logs/rules-loaded.jsonl`)
+  const log = await readJsonl<{ ts?: number; e?: { file_path?: string; load_reason?: string; trigger_file_path?: string } }>(h, RULES_LOG(home))
   const loaded: Record<string, number> = {}
+  const seen = new Set<string>()
   for (const r of log) {
     const f = r.e?.file_path ?? ''
     const i = f.indexOf('/rules/lean-agent/')
-    if (i >= 0) loaded[f.slice(i + 18)] = (loaded[f.slice(i + 18)] ?? 0) + 1
+    if (i < 0) continue
+    const key = `${f}\0${r.e?.load_reason ?? ''}\0${r.e?.trigger_file_path ?? ''}\0${r.ts ?? ''}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    loaded[f.slice(i + 18)] = (loaded[f.slice(i + 18)] ?? 0) + 1
   }
-  const have = (await h.fs.list(`${projectDir(home, project)}/rules`).catch(() => [])).map(f => f.name).filter(n => n.endsWith('.md') && n !== '_project.md')
+  const have = (await h.fs.list(`${projectDir(home, project)}/rules`).catch(() => [])).map(f => f.name).filter(n => n.endsWith('.md'))
   return { loaded, never: have.filter(n => !loaded[n]) }
 }

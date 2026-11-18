@@ -7,6 +7,7 @@ import { deskChoice, mergeModelSettings, readModelSettings } from './models'
 import { setNotice } from './notices'
 import { seenNames, skillStat } from './skilltrim'
 import { compareVersions, installedVersion, running, skewText } from './skew'
+import { modelMismatches } from './stats'
 
 export const OLD_LABEL = 'com.lean-agent.up'
 export const DESK_LABEL = 'com.lean-agent.desk'
@@ -111,6 +112,9 @@ export async function check(h: Host, root: string): Promise<string[]> {
   const same = have?.model === want.model && have?.effort === want.effort
   const exists = await h.fs.exists(`${deskDir(home)}/.claude/settings.json`)
   row(same, same ? `desk model ${want.model} / effort ${want.effort}` : exists && have === null ? 'desk .claude/settings.json does not parse: fix the file by hand' : `desk model is ${have?.model ?? 'not set'} / effort ${have?.effort ?? 'not set'}, want ${want.model} / ${want.effort}`)
+  const odd = await modelMismatches(h).catch(() => [] as string[])
+  for (const m of odd) row(false, m)
+  if (!odd.length) out.push('ok   no session on an unexpected model today')
   const sh = await text(h, `${leanDir(home)}/bin/open-desk.sh`)
   row(sh !== null && sh === (await text(h, `${root}/opener/open-desk.sh`)), 'opener script current')
   const mac = (await run(h, ['uname', '-s'])).out === 'Darwin'

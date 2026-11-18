@@ -11,7 +11,7 @@ import { decide } from './guard'
 import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
-import { checkStale, syncRules } from './rules'
+import { checkStale, logRuleLoad, syncRules } from './rules'
 import { leanDir, readJson, threadsDir } from './state'
 import { chase } from './chaser'
 import { autoMigrate, check, migrate } from './doctor'
@@ -23,6 +23,8 @@ import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, n
 import { parseGrants, recordGrant, releaseGrant } from './guard'
 import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
 import { resetSkew, setRunning, skewNote } from './skew'
+import { statsText } from './stats'
+import { rotateLedger } from './ledger'
 
 setRunning(VERSION) // the code in this session; skew.ts compares it with what is installed
 
@@ -81,7 +83,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate'] } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats'] }, days: { type: 'number', description: 'stats: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules" } }, required: ['action'] }
 const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
@@ -232,7 +234,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       } as any)
       await registerOnce($, {
         name: DOCTOR,
-        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent).',
+        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent), stats (spend by model/role/agent/thread, caps, rule loads, feedback: computed here, never read the ledger yourself).',
         inputSchema: DOCTOR_SCHEMA,
         isDeferred: false,
       } as any)
@@ -354,6 +356,8 @@ export const register: Register = on => {
     const root = await bounded($, Promise.resolve($.session.root()), 'session.root').catch(() => '')
     const ctx = await serial(() => settle($, host, e.cwd, typeof root === 'string' ? root : ''))
     await showSkew($)
+    // the ledger grows with every model request: a past month (or a file that starts with a 0.45 row) is renamed away, never rewritten
+    await soft($, 'ledger rotation', () => rotateLedger(host))
     // the command is role-free: registered once here
     await $.command.register({ name: 'lean-agent', description: 'Open the lean-agent pane (setup, desk, threads)' }).catch(() => undefined)
     await $.command.register({ name: 'lean-agent-setup', description: 'Set up or repair lean-agent (desk folder, login opener, trust); no model turn needed' }).catch(() => undefined)
@@ -364,6 +368,12 @@ export const register: Register = on => {
   // the app moves a pre-started session from a spare folder into the user's folder: the role is decided again
   on('classic.CwdChanged', async ($, e: any, next) => {
     await redetect($, typeof e?.new_cwd === 'string' ? e.new_cwd : undefined)
+    return next(e)
+  })
+  // a lean-agent rule was loaded into context: counted for `stats` (the shell hook in hooks.json logs the same event;
+  // rulesStats counts a load seen by both once)
+  on('classic.InstructionsLoaded', async ($, e: any, next) => {
+    await logRuleLoad(hostOf($), e).catch(() => false)
     return next(e)
   })
   // fallback when the hook is not delivered: a cheap compare of the session's directory
@@ -471,7 +481,8 @@ export const register: Register = on => {
         return { result: setupText(o, true) } as any
       }
       if (e.action === 'migrate') return { result: (await migrate(host, $.plugin.root)).lines.join('\n') } as any
-      return { result: 'doctor: action must be check, fix or migrate', isError: true } as any
+      if (e.action === 'stats') return { result: await statsText(host, { days: e.days, project: typeof e.project === 'string' && e.project ? e.project : undefined }) } as any
+      return { result: 'doctor: action must be check, fix, migrate or stats', isError: true } as any
     } catch (err) {
       return { result: `doctor failed: ${String((err as Error)?.message ?? err)}`, isError: true } as any
     }

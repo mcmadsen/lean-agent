@@ -28,8 +28,9 @@ export function bounded<T>($: any, p: Promise<T>, label: string, ms = 5_000): Pr
 
 // the `FIX ` lines of a doctor check, without their marker
 const fixLines = (lines: string[]): string[] => lines.filter(l => l.startsWith('FIX')).map(l => l.replace(/^FIX\s+/, ''))
-// what no setup press can repair: the host is not macOS, or `claude` is not on the app's PATH
-const UNFIXABLE = /needs Claude Desktop|not on PATH/
+// what no setup press can repair: the host is not macOS, `claude` is not on the app's PATH, or a session runs old code or an
+// unexpected model (the user closes it and starts a new one)
+const UNFIXABLE = /needs Claude Desktop|not on PATH|start a new session|close it and|lean-agent pins|lean-agent started it/
 export const problemsOf = (lines: string[]): string[] => fixLines(lines).filter(l => !UNFIXABLE.test(l))
 export const notesOf = (lines: string[]): string[] => fixLines(lines).filter(l => UNFIXABLE.test(l))
 
