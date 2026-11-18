@@ -10,7 +10,7 @@ import { NEXT_STEP, bounded, openDesk, setupCheck, setupFix, setupText } from '.
 import type { Role } from './role'
 
 export const PANE = 'lean-agent'
-export const VERSION = '1.0.3'
+export const VERSION = '1.0.4'
 const TONE: Record<GoalTone, string> = { working: 'green', waiting: 'yellow', stuck: 'red', quiet: 'gray' }
 
 let lastError = ''

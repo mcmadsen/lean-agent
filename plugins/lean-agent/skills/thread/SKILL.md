@@ -16,6 +16,7 @@ ever touches threads through the `lean_thread` tool (full name `mcp__lean-agent_
 | `wake` | `tN` | resumes an idle thread with everything queued |
 | `resume` | `tN` | same, with no message (after a restart) |
 | `start` | `tN`, `model?`, `effort?` | starts a thread that has no session yet (brief + queued messages) |
+| `approve-push` | `tN`, `sha` (full), `reason?` | desk only, ONLY after the user explicitly approved that push in the chat: one sha, single use, 2 h, signed, logged in the thread's `history.jsonl`; a private project is never pushed |
 | `park` / `reopen` / `close` | `tN` | flips the state; close also stops a running session |
 | `list` | none | every thread with its state, running flag and queued count |
 | `projects` | `all?` | every registered project: path, private, guards, learned rules (areas, last learned, stale), open threads; private ones hidden by the private switch (`config.json` `private: "off"`) only with `all: true` |

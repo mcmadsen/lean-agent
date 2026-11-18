@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.0.4
+
+### Added
+- **Push approval.** The review-gate refusal named an override that did not exist. Now the desk's `lean_thread` has
+  `approve-push` (tN, full sha, reason?): a signed (same HMAC store as `lean_review`), single-use record, valid 2 hours, logged in
+  the thread's `history.jsonl`; the push gate accepts it like a green review. Only the desk has the tool, and a thread cannot
+  forge the record. The desk template says to use it only when the user explicitly approved in the chat. The refusal says
+  "ask the desk: approve-push tN <sha>" and prints the manual `git -C <worktree> push <remote> <branch>`. Private projects are
+  still never pushed.
+- **Read-only search without Grep/Glob.** This Claude Code build has neither tool. `lean-agent:reader-*`, `reviewer` and
+  `explorer` now always run `rg`, `grep`, `find` (not `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fprint*`, `-fls`),
+  `ls`, `wc`, `head`, `tail`, `cat` on paths inside the session folder, `~/.lean-agent` or a registered project, and pipes
+  between such commands (and the built-in git reads). A strict scanner proves each pipeline plain: no redirect, substitution,
+  `;`/`&`/`||`, and no unquoted glob, brace, tilde or `$`; quote patterns. The desk may run the same under `~/.lean-agent`.
+  The agent prompts, the learn / review / find / lean-mode skills and the templates say so.
+- An Agent call with `allow-cmd` / `allow-edit` lines from a session that cannot own grants (not a thread's own loop) is
+  refused up front, with the reason.
+- The worktree skill installs dependencies in a fresh worktree from the lockfile (`yarn install --frozen-lockfile` / `--immutable`
+  by yarn version, `npm ci`, `pnpm install --frozen-lockfile`) through a worker and reports it; it never symlinks
+  `node_modules` (borrowing only from a donor with byte-identical lockfile and `link:` / `file:` targets, and it says which),
+  and it can **adopt** a worktree made with plain `git worktree add`.
+- A thread can report `superseded: true` with `lean_report` (its brief was replaced by a later user message); the desk text and the
+  pane row show it.
+- Threads get the attribution setting in their CLAUDE.md (`attribution: off - ...`), from config.json `attribution` (default false).
+
+### Changed
+- A session first resolved as thread tN records its id in `threads/tN/thread.json` `sids` (`sid` stays), so a later start from
+  any folder resolves by id. Every refusal of a role-bound tool says the tool, the role, where the session started and what
+  its id matched.
+- A versioned tidy runs for everyone, also on 1.0.x: 0.45 `CLAUDE.md` guides above a thread or the desk (they tell threads to use
+  the removed CLI) and `current-thread.json` (written by the 0.45 CLI; 1.0 never reads it) move to `legacy-0.45/`. `lean_doctor
+  check` flags any `CLAUDE.md` under `~/.lean-agent` that 1.0 did not write.
+
 ## 1.0.3
 
 ### Fixed
