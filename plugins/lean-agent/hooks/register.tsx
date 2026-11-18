@@ -38,6 +38,7 @@ export const resetModState = () => {
   pending = []
   chain = Promise.resolve()
   seen = ''
+  seenRoot = ''
   registered.clear()
   cwd = ''
   resetPaneState()
@@ -46,6 +47,7 @@ let role: Role = { kind: 'plain' }
 let attempted = '' // the role key whose steps `done` lists
 const done = new Set<string>()
 let applied = '' // the role applyRole last set up ('' = none yet, or a step failed and wants a retry)
+let seenRoot = '' // the root the role was last decided with
 let seen = '' // the directories the role was last decided from
 let timers: Array<() => void> = []
 const registered = new Set<string>()
@@ -173,7 +175,6 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
   const key = roleKey(newRole)
   role = newRole
   if (key === applied) return []
-  const wasKey = attempted
   if (key !== attempted) {
     stopTimers()
     notified = 0
@@ -256,7 +257,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
     }
   }
   // the tool pool depends on the role (the desk's is trimmed): ask the engine for it again
-  if (!wasKey || wasKey !== key) await soft($, 'tool pool refresh', async () => void $.ui.invalidate('tool.list'))
+  await step('tool pool refresh', async () => void $.ui.invalidate('tool.list')) // once per role; retried if it failed
   if (!ok) applied = '' // a failed step is tried again at the next check
   return ctx
 }
@@ -269,7 +270,8 @@ async function settle($: any, host: Host, dir: string, root: string, useRoot = t
     if (r.kind === 'plain' && useRoot && root && root !== dir) r = await detectRole(host, root)
   })
   if (ok) {
-    seen = `${dir}\n${root}` // a failed detection is tried again at the next check
+    seen = `${dir}\n${root}`
+    seenRoot = root // a failed detection is tried again at the next check
     cwd = dir
   }
   return applyRole($, host, r ?? role)
@@ -291,7 +293,7 @@ function redetect($: any, hint?: string): Promise<unknown> {
     const d = typeof dir === 'string' && dir ? dir : String(root)
     const rt = typeof root === 'string' ? root : ''
     if (applied && seen === `${d}\n${rt}`) return
-    pending.push(...(await settle($, hostOf($), d, rt, !hint))) // an event's own directory beats a root that may not have moved yet
+    pending.push(...(await settle($, hostOf($), d, rt, !hint && rt !== seenRoot))) // an event's own directory beats a root that may not have moved yet
   }).catch(() => undefined)
 }
 
@@ -347,6 +349,7 @@ export const register: Register = on => {
   // lean-agent's own tools stay. Reads the CURRENT role, so a session that becomes the desk later is trimmed from then on.
   on('tool.list', async ($, e: any, next) => {
     const listed: any = await next(e)
+    if (Array.isArray(listed)) return await poolFor(hostOf($), listed) // an engine that answers a bare list
     if (!Array.isArray(listed?.value)) return listed
     return { ...listed, value: await poolFor(hostOf($), listed.value) }
   }).catch(($, e: any, next) => next(e))

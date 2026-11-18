@@ -2,10 +2,15 @@
 
 ## 1.0.1
 
+### Changed
+- The desk's tool pool is cut to the tools strict mode can allow (plus lean-agent's own), its skill listing to lean-agent's
+  skills: far less context before the first message. `tools.desk.drop` still applies on top; threads and plain sessions are unchanged.
+
 ### Fixed
 - A desk (or thread) session the Claude app pre-starts in a spare folder and then moves into the chosen folder now gets
   its tools, timers and git hooks: the role is decided again when the directory changes (`CwdChanged`, checked lazily at
-  each turn and prompt too). Session start is fail-soft: one failing setup step no longer stops tool registration.
+  each turn and prompt too). Session start is fail-soft: one failing setup step no longer stops tool registration. `tool.list` now answers the engine's `{ value }` shape, so
+  `tools.<role>.drop` takes effect.
 
 ## 1.0.0
 

@@ -121,7 +121,8 @@ export async function paneRole($: any, role: { kind: string; id?: string }): Pro
   const cancels: Array<() => void> = []
   if (role.kind === 'desk') {
     await openPane($).catch(() => undefined)
-    cancels.push($.clock.every(5_000, () => $.ui.invalidate('ui.render')).cancel)
+    const t = $.clock.every(5_000, () => $.ui.invalidate('ui.render'))
+    cancels.push(() => t.cancel())
   } else if (role.kind === 'thread' && role.id) {
     const id = role.id
     const tick = async () => {
@@ -132,7 +133,8 @@ export async function paneRole($: any, role: { kind: string; id?: string }): Pro
       }
     }
     await tick()
-    cancels.push($.clock.every(5_000, tick).cancel)
+    const t = $.clock.every(5_000, tick)
+    cancels.push(() => t.cancel())
   }
   return cancels
 }
