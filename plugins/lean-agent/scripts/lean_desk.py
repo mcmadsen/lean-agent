@@ -115,13 +115,61 @@ def external():
     return active() == "app"
 
 
+def open_at_start():
+    """Config desk_open_at_start on|off; default on in auto mode, off otherwise."""
+    v = config().get("desk_open_at_start")
+    if v in ("on", "off"):
+        return v == "on"
+    return mode() == "auto"
+
+
+def open_argv():
+    """The claude command that reopens the app desk session: --resume <last id>, else --continue."""
+    sid = record().get("session_id") or state().get("last_sid")
+    return ["claude", "--desktop"] + (["--resume", sid] if sid else ["--continue"])
+
+
+def open_desk(now=None, popen=subprocess.Popen, which=None):
+    """Reopen the app desk in the Claude Desktop app, detached; never blocks. (ok, message); the attempt is recorded in the state
+    file for doctor. Linux has no Desktop app: said so, not an error."""
+    import shutil
+    now = time.time() if now is None else now
+    argv = open_argv()
+    if sys.platform not in ("darwin", "win32") and not os.environ.get("LEAN_AGENT_TEST_DESKTOP"):
+        ok, msg = True, "no Claude Desktop app on this platform: open the desk session by hand"
+    elif not (which or shutil.which)("claude"):
+        ok, msg = False, "claude is not on PATH: cannot reopen the app desk"
+    else:
+        try:
+            logf = open(os.path.join(lean_home(), "desk-open.log"), "ab")
+            popen(argv, cwd=desk_dir(), stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+            ok, msg = True, "opened: " + " ".join(argv)
+        except OSError as exc:
+            ok, msg = False, f"could not run claude: {exc}"
+    st = state()
+    st["open"] = {"ts": now, "ok": ok, "msg": msg}
+    _write(state_path(), st)
+    return ok, msg
+
+
+def open_line(now=None):
+    o = state().get("open")
+    if not o:
+        return ""
+    return f"last desk open attempt {age(o.get('ts'), now)} ago: {o.get('msg')}"
+
+
 def set_active(which, why, now=None):
     """Record a switch of the active desk (the service does it): state file with the last switches, for status/doctor/map."""
     now = time.time() if now is None else now
     st = state()
     log = list(st.get("log") or [])[-19:]
     log.append({"ts": now, "to": which, "why": why})
-    _write(state_path(), {"active": which, "since": now, "why": why, "log": log})
+    new = {"active": which, "since": now, "why": why, "log": log}
+    for k in ("open", "last_sid"):
+        if st.get(k):
+            new[k] = st[k]
+    _write(state_path(), new)
     set_pending(which != "app")  # the app session owns the desk only while the service hosts no main
 
 
@@ -175,6 +223,13 @@ def takeover_ok(source, transcript, now=None):
     return source == "resume" and bool(transcript) and transcript == cur.get("transcript")
 
 
+def _remember_sid(session_id):
+    st = state()
+    if st.get("last_sid") != session_id:
+        st["last_sid"] = session_id
+        _write(state_path(), st)
+
+
 def attach(session_id, transcript=None, cwd=None, now=None, takeover=False):
     """(True, message) when this session is now the desk record; (False, why) when another live desk holds it. In mode auto the
     desk is *pending* until the service has stopped hosting its own main (SwitchHost.confirm): only then is it the desk."""
@@ -187,6 +242,7 @@ def attach(session_id, transcript=None, cwd=None, now=None, takeover=False):
             rec = dict(cur, session_id=session_id, transcript=transcript or "", heartbeat=now)
             rec.pop("ctx_asked", None)
             _write(path(), rec)
+            _remember_sid(session_id)
             try:
                 st = state()
                 st["log"] = (list(st.get("log") or [])[-19:] +
@@ -207,6 +263,7 @@ def attach(session_id, transcript=None, cwd=None, now=None, takeover=False):
         if not confirmed:
             rec["pending_since"] = (cur or {}).get("pending_since") or now if same and cur.get("pending") else now
         _write(path(), rec)
+        _remember_sid(session_id)
     return True, "attached" if confirmed else "pending"
 
 

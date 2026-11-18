@@ -241,9 +241,15 @@ The service creates a shortcut `~/lean-agent-desk` -> the desk folder (macOS and
 only if that path does not exist or already is this symlink, nothing else is ever overwritten; `lean-agent config desk-shortcut off`
 to skip it): open `~/lean-agent-desk` in the Claude app. A session started there is the same desk as one in `~/.lean-agent/home`.
 
-**On Mac:** the service starts at login (launchd). To have the app desk come back by itself, add the Claude app to macOS
-Login Items (System Settings > General > Login Items) and leave the desk session open in it; when the app reopens and that
-session resumes, its SessionStart (resume) attaches it, exactly like a new one. The service remembers who the desk was: when it
+**On Mac:** the service starts at login (launchd). To have the app desk come back by itself, run `lean-agent config desk auto` once
+and open the desk session once in `~/lean-agent-desk` with Remote Control on. When the service starts (also after a reboot) and the
+app was the last desk owner, it runs `lean-agent desk open` once by itself: `claude --desktop --resume <last desk session id>` from the
+desk folder (`--continue` when no id is known), detached; when that session resumes, its SessionStart attaches it like a new one.
+`config.json` `desk_open_at_start` on|off (default on in auto mode, off otherwise) controls it; `lean-agent desk open` does it by hand
+(on Linux there is no Desktop app: it says so). The service never reopens the app on its own later: if the app is closed the desk
+heartbeat expires and main is hosted after 30 minutes as before. `claude --help` does not say that `--desktop` starts the app when it
+is not running, so keep the Claude app in Login Items (System Settings > General > Login Items) as the fallback. `lean-agent doctor`
+shows the last open attempt. The service remembers who the desk was: when it
 was the app, a restarted service waits up to 3 minutes (`desk_boot_wait_s` in `config.json`, default 180) for the app desk to attach before
 hosting its own main (reports wait in the inbox meanwhile); if it attaches in time no hosted main is ever started. The 10-minute
 gap between switches does not apply to the first switch after a service start, nor to a hosted main nobody has typed into yet.

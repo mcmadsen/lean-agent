@@ -12556,6 +12556,8 @@ def cmd_doctor(a):
            "start the service: lean-agent up (or lean-agent service restart); a stale socket is replaced at start")
     if lean_desk.enabled():
         report(True, lean_desk.status_line(), None)
+        if lean_desk.open_line():
+            report(True, lean_desk.open_line(), None)
         report(True, this_session_line(), None)
         ok, msg = desk_context_check()
         if msg:
@@ -14540,6 +14542,10 @@ def cmd_desk(a):
             n = 0
         print(f"reports waiting: {n} \u00b7 notify: {'on' if lean_desk.notify_on() else 'off'}")
         return 0
+    if a.action == "open":
+        ok, msg = lean_desk.open_desk()
+        print(("desk open: " if ok else "lean-agent: ") + msg, file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
     if a.action == "detach":
         print("desk detached" if lean_desk.detach() else "no desk was attached")
         return 0
@@ -14576,6 +14582,8 @@ def cmd_config(a):
                     lean_desk.detach()
                 print("applies live (the service reads the mode every few seconds)")
             print(lean_desk.status_line() + " \u00b7 set: lean-agent config desk auto|hosted|external")
+            if a.name == "desk" and lean_desk.open_line():
+                print(lean_desk.open_line())
         else:
             if a.value:
                 if a.value not in ("on", "off"):
@@ -19978,7 +19986,7 @@ def build_parser():
 
     s = sub.add_parser("desk", help="the front desk as a local Claude app session (config desk external): "
                        "setup | attach | detach | status")
-    s.add_argument("action", choices=["setup", "attach", "detach", "status"])
+    s.add_argument("action", choices=["setup", "attach", "detach", "status", "open"])
     s.add_argument("--model", help="setup: pin the desk's model in the desk folder's settings")
     s.add_argument("--permission-mode", help="setup: the desk's default permission mode, e.g. acceptEdits")
     s.set_defaults(fn=cmd_desk)

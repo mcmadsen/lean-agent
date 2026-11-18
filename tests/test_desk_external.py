@@ -1110,5 +1110,81 @@ class ContextAsk(Base):
         self.assertIn("context 2,000 tokens (clear point 1,000)", line)
 
 
+class Open(Base):
+    def fake_open(self, **env):
+        calls = []
+        popen = lambda argv, **kw: calls.append((argv, kw))  # noqa: E731
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_TEST_DESKTOP": "1", **env}):
+            res = lean_desk.open_desk(self.now, popen=popen, which=lambda n: "/bin/" + n)
+        return res, calls
+
+    def test_resume_id_or_continue_detached(self):
+        res, calls = self.fake_open()
+        self.assertTrue(res[0])
+        self.assertEqual(calls[0][0], ["claude", "--desktop", "--continue"])
+        kw = calls[0][1]
+        self.assertTrue(kw["start_new_session"])
+        self.assertEqual(kw["cwd"], lean_desk.desk_dir())
+        self.assertEqual(kw["stdin"], __import__("subprocess").DEVNULL)
+        lean_desk.attach("abc-123", None, None, self.now)
+        lean_desk.detach()
+        res, calls = self.fake_open()
+        self.assertEqual(calls[0][0], ["claude", "--desktop", "--resume", "abc-123"])
+        self.assertIn("last desk open attempt", lean_desk.open_line(self.now))
+
+    def test_missing_claude_and_linux(self):
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_TEST_DESKTOP": "1"}):
+            ok, msg = lean_desk.open_desk(self.now, popen=mock.Mock(), which=lambda n: None)
+        self.assertFalse(ok)
+        self.assertIn("not on PATH", msg)
+        popen = mock.Mock()
+        with mock.patch.object(sys, "platform", "linux"):
+            ok, msg = lean_desk.open_desk(self.now, popen=popen)
+        self.assertTrue(ok)
+        self.assertIn("no Claude Desktop app", msg)
+        popen.assert_not_called()
+
+    def test_open_at_start_default_and_config(self):
+        self.assertTrue(lean_desk.open_at_start())
+        lean_desk.set_mode("hosted")
+        self.assertFalse(lean_desk.open_at_start())
+        lean_desk.set_mode("auto")
+        cfg = lean_desk.config()
+        cfg["desk_open_at_start"] = "off"
+        lean_desk._write(lean_desk.lean_home("config.json"), cfg)
+        self.assertFalse(lean_desk.open_at_start())
+
+
+class BootOpen(Boot):
+    def run_it(self, owner, **cfg):
+        c = lean_desk.config()
+        c.update(cfg)
+        lean_desk._write(lean_desk.lean_home("config.json"), c)
+        sh, made = self.run_host(180, owner)
+        with mock.patch.object(ss.SwitchHost, "watch", lambda self: None), \
+                mock.patch.object(lean_desk, "open_desk", return_value=(True, "opened")) as op:
+            sh.run()
+        return op, made
+
+    def test_opens_once_when_app_was_last_owner(self):
+        op, made = self.run_it("app")
+        self.assertEqual(op.call_count, 1)
+        self.assertEqual(made, [1])  # no attach: hosts as today
+
+    def test_not_otherwise(self):
+        self.assertEqual(self.run_it("hosted")[0].call_count, 0)
+
+    def test_config_off_disables(self):
+        self.assertEqual(self.run_it("app", desk_open_at_start="off")[0].call_count, 0)
+
+    def test_no_reopen_on_heartbeat_loss(self):
+        lean_desk.attach("s1", None, None, self.now)
+        lean_desk.set_active("app", "x", self.now)
+        with mock.patch.object(lean_desk, "open_desk") as op:
+            lean_desk.attached(self.now + 3 * 3600)
+            ss.SwitchHost(lambda: mock.Mock(), now=lambda: self.now + 3 * 3600).wanted()
+        op.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

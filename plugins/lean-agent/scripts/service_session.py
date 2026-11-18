@@ -3919,6 +3919,9 @@ class SwitchHost:
         wait = self.desk.boot_wait_s()
         until = self.now() + wait
         self.cur = ExternalHost()
+        if self.desk.open_at_start() and not self.desk.attached(self.now()):  # once per service start (boot_wait runs once)
+            ok, omsg = self.desk.open_desk(self.now())
+            lean_log.log("info" if ok else "warn", "desk", "desk open at start: " + omsg)
         msg = f"desk: the app desk was the last owner: waiting up to {int(wait)}s for it before hosting a main"
         lean_log.log("info", "desk", msg)
         print("lean-agent: " + msg, flush=True)
