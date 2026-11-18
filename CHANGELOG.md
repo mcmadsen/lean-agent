@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Added (lazy loading: MCP servers and plugin skills per project)
+- **Project profile = allow-list.** `~/.lean-agent/<project>/profile.json` holds `mcp: [...]` and `plugins: [...]`. A project without
+  one behaves exactly as before (nothing is held back; a list left out of a profile is not restricted either). A thread started in a
+  project with a profile loads that set: plugins outside `plugins` are switched off in the thread folder's `.claude/settings.json`
+  (`enabledPlugins`, like `model` and `effortLevel`; only plugins that are skills and nothing else: never lean-agent itself, and never a
+  plugin with an MCP server, hooks, agents, commands or tools of its own, which would be removed instead of deferred, or one whose folder
+  cannot be read), and MCP servers outside `mcp` are DEFERRED, not removed: the thread's mod answers `tool.describe`
+  with `isDeferred: true` for their tools, so their names stay findable through ToolSearch and a thread that unexpectedly needs one
+  still calls it. lean-agent's own tools are never touched. (`--strict-mcp-config` was not used: it needs the config of every server
+  regenerated, which cannot be done for connectors and plugin servers; the mod's deferral works for every source.)
+- **`needs`** on `lean_thread new` / `start` / `reopen` (closed thread): `needs: ["azure-devops"]` adds to the profile for that thread
+  only (kept in `thread.json`, so a later start keeps it). The thread's CLAUDE.md says what is loaded and how to ask for more (ToolSearch
+  the server name; else `lean_ask` the desk, which starts it with `needs`).
+- **`lean_thread profile`** (desk): show a project's profile with the usage counted in its threads, set `mcp` / `plugins`, `fill: true`
+  to add what the threads really called, `on: false` to remove. **`lean_profile`** (thread tool, used by the learn skill) shows or fills
+  the same from usage. Threads count the MCP servers and skills they call in `threads/tN/usage.json` (names and counts, never arguments);
+  `fill` never removes a name, learns nothing from threads that have no counter yet, creates an `mcp` list only where a server was really
+  called (a project whose threads called none gets no empty allow-list), and never creates a `plugins` list (a skill run by slash command
+  is not counted: the used plugins are reported, a list the profile already has grows). A profile with a damaged list counts as no
+  profile (and `profile` says so). `lean_profile` is a deferred tool in threads.
+- **What a thread loaded is visible.** `new` / `start` / `reopen` answer `... · mcp: a,b · plugins: x` and `list` shows it per thread
+  (only for projects with a profile). `compare` starts its thread column like a thread of the project (profile applied) and adds a
+  "Loaded in thread" line.
+- **Ledger rows carry effort and the thread's model** (from `thread.json`). `stats` adds "by thread model/effort" and one line
+  "threads at the default (sonnet/high): N, $X, median $Y", plus the share of thread spend from before the rows carried it.
+
+### Changed
+- **`compare` suggestions no longer mislead.** Per-server and per-plugin figures are labelled "definition size, mostly deferred, not
+  first-turn cost" (the measured effect is the "One source off at a time" line). A server or plugin with recorded use reads "used 41
+  times in 12 threads: keep"; lean-agent's own server is never suggested; advice is given for the thread column only (not the clean
+  column, not the desk); the lever printed is the project profile, not the global `tools.thread.drop`.
+
 ## 1.0.5
 
 One combined release: the desk, thread and pane work, the learn flow, stats and compare work, and scripts over models with the

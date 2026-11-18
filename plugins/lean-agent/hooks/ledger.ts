@@ -22,7 +22,8 @@ const dec = new TextDecoder()
 export const dayOf = (ts: number) => new Date(ts).toISOString().slice(0, 10)
 
 // ---- rows ------------------------------------------------------------------------------------------------------
-export type Norm = { ts: number; role: string; tN: string; agent: string; model: string; in: number; out: number; cr: number; cw: number; usd: number; legacy: boolean }
+// effort / tmodel: a thread's row carries the effort and model the thread was started with (absent on older rows and on 0.45 rows)
+export type Norm = { ts: number; role: string; tN: string; agent: string; model: string; in: number; out: number; cr: number; cw: number; usd: number; legacy: boolean; effort?: string; tmodel?: string }
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
 const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
 const shortAgent = (a: string) => a.replace(/^lean-agent:/, '')
@@ -32,7 +33,7 @@ export function normalizeRow(o: unknown): Norm | null {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return null
   const r = o as Record<string, any>
   if (typeof r.ts === 'number' && Number.isFinite(r.ts) && typeof r.usd === 'number') {
-    return { ts: r.ts, role: str(r.role) || 'unknown', tN: str(r.tN) || '-', agent: shortAgent(str(r.agent)) || 'main', model: str(r.model) || '?', in: num(r.in), out: num(r.out), cr: num(r.cache_read), cw: num(r.cache_write), usd: r.usd, legacy: false }
+    return { ts: r.ts, role: str(r.role) || 'unknown', tN: str(r.tN) || '-', agent: shortAgent(str(r.agent)) || 'main', model: str(r.model) || '?', in: num(r.in), out: num(r.out), cr: num(r.cache_read), cw: num(r.cache_write), usd: r.usd, legacy: false, ...(str(r.effort) ? { effort: str(r.effort) } : {}), ...(str(r.tmodel) ? { tmodel: str(r.tmodel) } : {}) }
   }
   if (typeof r.ts === 'string' && ('cost_usd' in r || (r.usage && typeof r.usage === 'object'))) {
     const iso = /(?:Z|[+-]\d\d:?\d\d)$/.test(r.ts) ? r.ts : `${r.ts}Z` // 0.45 wrote naive times: read as UTC
@@ -47,7 +48,9 @@ export function normalizeRow(o: unknown): Norm | null {
 // ---- aggregates ------------------------------------------------------------------------------------------------
 export type Agg = [usd: number, input: number, output: number, cacheRead: number, cacheWrite: number, requests: number]
 export type Dim = Record<string, Agg>
-export type Day = { t: Agg; model: Dim; agent: Dim; role: Dim; tN: Dim; rm: Dim; rmm: Dim } // rm: `role|model`; rmm: the same, main requests only
+// rm: `role|model`; rmm: the same, main requests only; tme: the rows of a real thread that carry an effort (written since this version; a
+// row or a day folded earlier has none), keyed `tN|model|effort` = the thread's own choice (thread.json)
+export type Day = { t: Agg; model: Dim; agent: Dim; role: Dim; tN: Dim; rm: Dim; rmm: Dim; tme?: Dim }
 // files: bytes folded per ledger file; ids: the start of each file's first line (a file is the same file only while its start is)
 export type Rollup = { v: 2; files: Record<string, number>; ids: Record<string, string>; days: Record<string, Day>; rows: number; legacy: number; bad: number }
 const ID_LEN = 256
@@ -78,6 +81,7 @@ export function addRow(ro: Rollup, r: Norm) {
   bump(d.tN, r.tN, r)
   bump(d.rm, `${r.role}|${r.model}`, r)
   if (r.agent === 'main') bump(d.rmm, `${r.role}|${r.model}`, r) // the session's own requests: a worker's model is chosen per call
+  if (r.role === 'thread' && /^t\d{1,9}$/.test(r.tN) && r.effort) bump((d.tme ??= {}), `${r.tN}|${r.tmodel || r.model}|${r.effort}`, r) // a worker's rows count for the thread's choice (compare's throw-away t9<time> folders are no thread)
   ro.rows++
   if (r.legacy) ro.legacy++
 }

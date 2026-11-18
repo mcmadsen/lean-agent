@@ -47,12 +47,13 @@ export async function statsText(h: Host, opts: { days?: number; project?: string
   const ro = await syncRollup(h, now)
   const span = lastDays(now, n)
   const today = dayOf(now)
-  const sum = { t: zero(), model: {} as Dim, agent: {} as Dim, role: {} as Dim, tN: {} as Dim, rm: {} as Dim }
+  const sum = { t: zero(), model: {} as Dim, agent: {} as Dim, role: {} as Dim, tN: {} as Dim, rm: {} as Dim, tme: {} as Dim }
   for (const d of span) {
     const day = ro.days[d]
     if (!day) continue
     merge(sum.t, day.t)
     for (const k of ['model', 'agent', 'role', 'tN', 'rm'] as const) mergeDim(sum[k], day[k])
+    if (day.tme) mergeDim(sum.tme, day.tme)
   }
   const td = ro.days[today]
   const out: string[] = []
@@ -69,6 +70,7 @@ export async function statsText(h: Host, opts: { days?: number; project?: string
   out.push(...table(`by role (${n}d)`, sum.role))
   out.push(...table(`by agent (${n}d; main = the session itself)`, sum.agent))
   out.push(...table(`by thread (${n}d)`, sum.tN))
+  out.push(...(await threadChoices(h, home, sum.tme, sum.role.thread?.[0] ?? 0, n)))
   // rules
   const projects = await readJson<Record<string, unknown>>(h, `${leanDir(home)}/projects.json`, {})
   const names = opts.project ? [opts.project].filter(p => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p) && !p.includes('..')) : Object.keys(projects && typeof projects === 'object' ? projects : {}).filter(p => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p))
@@ -106,6 +108,37 @@ export async function statsText(h: Host, opts: { days?: number; project?: string
   if (await h.fs.exists(`${leanDir(home)}/work`).catch(() => false)) old.push('work/*/gaps.json (0.45 per-run gaps)')
   if (old.length) out.push(`0.45 leftovers, not counted: ${old.join(', ')}`)
   return out.join('\n')
+}
+
+// Threads by the model/effort they were started with (thread.json, written into each ledger row since the version that added it):
+// a table, the share of thread spend that predates it, and "threads at the default" so the user can judge the default.
+// Keys of `tme` are `tN|model|effort`; one thread with two choices counts once under each.
+export async function threadChoices(h: Host, home: string, tme: Dim, threadUsd: number, n: number): Promise<string[]> {
+  const rows = Object.entries(tme).map(([k, a]) => {
+    const [tN = '', model = '', effort = ''] = k.split('|')
+    return { tN, group: `${family(model)}/${effort}`, a }
+  })
+  if (!rows.length) return [`by thread model/effort (${n}d): none recorded yet (thread rows carry model and effort since this version)`]
+  const groups: Dim = {}
+  const threads = new Map<string, Set<string>>()
+  for (const r of rows) {
+    merge((groups[r.group] ??= zero()), r.a)
+    if (!threads.has(r.group)) threads.set(r.group, new Set())
+    threads.get(r.group)!.add(r.tN)
+  }
+  const named: Dim = {}
+  for (const [g, a] of Object.entries(groups)) named[`${g} · ${threads.get(g)!.size} thread(s)`] = a
+  const out = table(`by thread model/effort (${n}d; the thread's own choice, rows since effort was recorded)`, named)
+  const split = rows.reduce((s, r) => s + r.a[0], 0)
+  if (threadUsd - split > 0.005) out.push(`  (+ ${usd(threadUsd - split)} of thread spend from before model and effort were recorded: not split)`)
+  const def = await threadChoice(h, home, {})
+  if (typeof def !== 'string') {
+    const key = `${family(def.model)}/${def.effort}`
+    const mine = rows.filter(r => r.group === key).map(r => r.a[0]).sort((a, b) => a - b)
+    const median = mine.length ? (mine.length % 2 ? mine[(mine.length - 1) / 2]! : (mine[mine.length / 2 - 1]! + mine[mine.length / 2]!) / 2) : 0
+    out.push(`threads at the default (${key}): ${threads.get(key)?.size ?? 0}, ${usd(mine.reduce((s, x) => s + x, 0))}, median ${usd(median)}`)
+  }
+  return out
 }
 
 // "Today $x · 7d $y" for the pane footer and a thread's status line; null when there is no ledger at all

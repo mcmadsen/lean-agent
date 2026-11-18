@@ -25,13 +25,14 @@ export function costUsd(model: string, u: Usage | null | undefined): number {
 }
 
 export type Config = { dailyCapUsd?: { desk?: number; thread?: number; plain?: number }; workerCapUsd?: number; workerCaps?: Record<string, number>; attribution?: boolean; learn?: { maxExplorers?: number }; desk?: { autoRelay?: boolean; autoResume?: boolean } }
-export type Row = { ts: number; role: string; tN?: string; agentId?: string; agent?: string; model: string; in: number; out: number; cache_read: number; cache_write: number; usd: number }
+// effort / tmodel: a thread's row carries the effort and the model the thread was started with (thread.json); `model` is what answered
+export type Row = { ts: number; role: string; tN?: string; agentId?: string; agent?: string; effort?: string; tmodel?: string; model: string; in: number; out: number; cache_read: number; cache_write: number; usd: number }
 
 export const ledgerFile = (home: string) => `${leanDir(home)}/${LEDGER}`
 export const readConfig = (h: Host, home: string) => readJson<Config>(h, `${leanDir(home)}/config.json`, {})
 const day = (ts: number) => new Date(ts).toISOString().slice(0, 10)
 
-export async function record(h: Host, ctx: { role: string; tN?: string; agentId?: string; agent?: string }, model: string, u: Usage | null | undefined): Promise<Row | null> {
+export async function record(h: Host, ctx: { role: string; tN?: string; agentId?: string; agent?: string; effort?: string; tmodel?: string }, model: string, u: Usage | null | undefined): Promise<Row | null> {
   if (!u) return null
   const home = await homeDir(h)
   const row: Row = {

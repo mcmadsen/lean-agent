@@ -30,6 +30,8 @@ import { rotateLedger } from './ledger'
 import { SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 import { syncWithScripts } from './rulelines'
 import { exportFeedback, logRefusal } from './feedbackexport'
+import { deferOutside, noteToolUse, readLoaded } from './profile'
+import type { Loaded } from './profile'
 
 setRunning(VERSION) // the code in this session; skew.ts compares it with what is installed
 
@@ -59,12 +61,16 @@ export const resetModState = () => {
   seenRoot = ''
   registered.clear()
   cwd = ''
+  loaded = null
+  started = {}
   resetPaneState()
   resetSkillStat()
   resetSkew()
   skew = null
   resetScripts()
 }
+let loaded: Loaded | null = null // a thread's profile (profile.ts): the MCP servers outside it are deferred; null = nothing held back
+let started: { model?: string; effort?: string } = {} // a thread's model and effort as it was started (thread.json): written into its ledger rows
 let skew: string | null = null // the version-skew sentence of this session, or null
 let role: Role = { kind: 'plain' }
 let tries = 0
@@ -98,7 +104,7 @@ const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'goal-set', 'goal-clear', 'approve-push'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push'] },
     tN: { type: 'string', description: 'thread id, like t3 (every action except new, list and project-*)' },
     text: { type: 'string', description: 'new: the brief; send: the message; goal-set: the goal line' },
     title: { type: 'string', description: 'new: short title' },
@@ -108,7 +114,11 @@ const SCHEMA = {
     model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'new/start: default sonnet' },
     effort: { type: 'string', enum: ['low', 'medium', 'high'], description: 'new/start: default high' },
     path: { type: 'string', description: 'project-add: folder (must exist)' },
-    on: { type: 'boolean', description: 'project-private: true or false' },
+    on: { type: 'boolean', description: 'project-private: true or false; profile: false removes the project profile' },
+    needs: { type: 'array', items: { type: 'string' }, description: 'new/start/reopen: MCP servers or plugins this thread needs on top of its project profile (e.g. ["azure-devops"]); this thread only. Everything else stays deferred' },
+    mcp: { type: 'array', items: { type: 'string' }, description: 'profile: the MCP servers the project loads (allow-list; others are deferred, still found by ToolSearch)' },
+    plugins: { type: 'array', items: { type: 'string' }, description: 'profile: the plugins the project loads (allow-list; skill-only plugins outside it are off)' },
+    fill: { type: 'boolean', description: 'profile: add the servers and plugins the project\'s threads actually used' },
     all: { type: 'boolean', description: 'projects: include private ones hidden by the private switch' },
     confirm: { type: 'boolean', description: 'project-private off: only after the user agreed' },
   },
@@ -244,10 +254,22 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
     else ok = false
   }
   if (newRole.kind === 'thread') {
+    const tid = newRole.id
     await step('thread tools', async () => {
-      for (const t of THREAD_TOOLS) await registerOnce($, { ...t, isDeferred: false })
+      // (lean_profile is used once per learn run: behind ToolSearch, so it adds nothing to a thread's first turn)
+      for (const t of THREAD_TOOLS) await registerOnce($, { ...t, isDeferred: t.name === 'lean_profile' })
       await registerOnce($, { ...SCRIPT_SPEC, isDeferred: false })
     })
+    // what this thread was started with: its profile (tool.describe defers the MCP servers outside it), model and effort (ledger rows)
+    await step('thread profile', async () => {
+      const home = await homeDir(host)
+      loaded = await readLoaded(host, home, tid)
+      const t = await readJson<{ model?: unknown; effort?: unknown }>(host, `${threadsDir(home)}/${tid}/thread.json`, {})
+      started = { ...(typeof t.model === 'string' ? { model: t.model } : {}), ...(typeof t.effort === 'string' ? { effort: t.effort } : {}) }
+    })
+  } else {
+    loaded = null
+    started = {}
   }
   await step('0.45 migration check', () => autoMigrate(host, $.plugin.root)) // leftover 0.45 service: unloaded at once, then the idempotent migrate
   if (newRole.kind === 'desk' || newRole.kind === 'thread') await step('git hooks', () => ensureGitHooks(host))
@@ -256,7 +278,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, start; and projects: projects (list), project-add, project-remove (unregister only), project-private; goals: goal-set, goal-clear (tN). A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, start (new/start/reopen take needs: MCP servers or plugins that thread needs on top of its project profile); and projects: projects (list), project-add, project-remove (unregister only), project-private, profile (a project\'s MCP/plugin allow-list: show, set mcp/plugins, fill from usage, on: false removes); goals: goal-set, goal-clear (tN). A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)
@@ -448,7 +470,7 @@ export const register: Register = on => {
     if (why) return { turnId: e.turnId, index: e.index, answer: why, toolUses: [], stopReason: 'end_turn', usage: null } as any
     const r: any = yield* next(e)
     try {
-      const row = await record(host, { role: role.kind, tN: role.kind === 'thread' ? role.id : undefined, agentId: e.agentId, agent: type }, r?.usage?.model ?? e.model, r?.usage)
+      const row = await record(host, { role: role.kind, tN: role.kind === 'thread' ? role.id : undefined, agentId: e.agentId, agent: type, ...(role.kind === 'thread' ? { effort: started.effort, tmodel: started.model } : {}) }, r?.usage?.model ?? e.model, r?.usage)
       if (row && e.agentId) spent.set(e.agentId, (spent.get(e.agentId) ?? 0) + row.usd)
     } catch {
       /* a ledger write that fails never stops the turn */
@@ -495,6 +517,14 @@ export const register: Register = on => {
     if (t.text === null) return r
     skillsSeen('Skill tool description', t.reason)
     return { ...r, description: t.text, breakPromptCache: true }
+  }).catch(($, e: any, next) => next(e))
+
+  // a thread's profile (profile.ts): an MCP server outside it is DEFERRED, never removed: its tools stay findable through ToolSearch
+  // (a thread that unexpectedly needs one still gets it). lean-agent's own server and every other tool are untouched.
+  on('tool.describe', async ($, e: any, next) => {
+    const r: any = await next(e)
+    if (role.kind !== 'thread' || !r || typeof r !== 'object' || !deferOutside(loaded, String(e?.tool ?? ''))) return r
+    return { ...r, isDeferred: true }
   }).catch(($, e: any, next) => next(e))
 
   // system-prompt sections: noted by id; an MCP-instructions section is left out on the desk
@@ -634,6 +664,9 @@ export const register: Register = on => {
       const said = await auditFromReply(host, role.id, texts(r?.result).join('\n'), String(e.prompt ?? '')).catch(() => null)
       if (said) r = { ...r, context: [...(r.context ?? []), said] }
     }
+    // the thread's usage counter: which MCP servers and skills it really called (names and counts, never arguments); a worker's
+    // call counts for the thread. This is what a project profile is learned from.
+    if (role.kind === 'thread' && r?.deny === undefined) await noteToolUse(host, role.id, String(e.tool ?? ''), e).catch(() => false)
     if (e.agentId || r?.deny !== undefined) return r
     try {
       const batch = role.kind === 'thread' ? await takeBatch(host, role.id) : role.kind === 'desk' ? await takeReports(host) : null

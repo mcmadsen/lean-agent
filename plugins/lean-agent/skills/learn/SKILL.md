@@ -102,6 +102,9 @@ goes to an `UNVERIFIED` list in your final report, never into a rule.
      `git worktree list`). It copies the rules AND the project's recipe skills, removes stale copies, adds
      `.claude/rules/lean-agent/` and `.claude/skills/lean-agent-*/` to the shared `.git/info/exclude`, and answers ONE line
      per checkout (`<path>: copied N, removed M, skipped K, exclude ok`) plus what it skipped; `verbose: true` lists paths.
+   - `lean_profile` `fill`: adds the MCP servers and plugins the project's threads really called to the project's profile, so new
+     threads load only those (the rest is deferred, still found by ToolSearch). `show` first lists what was used and how often. It
+     never removes a name, and with no usage recorded yet it changes nothing and says so. Put its answer in the report in one line.
 5. **`--verify`** (rules that exist): `lean_rules` `verify` with `repo` (optionally `area`): it takes every backticked path,
    symbol and number (three digits or more) of each rule, as whole words, at most 150 names per call (later rules
    print NOT CHECKED: run again with `area`), and the `relies-on` list, searches the repo for it (fixed strings, read-only) and lists

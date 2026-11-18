@@ -9,6 +9,7 @@ import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, 
 import { syncWithScripts } from './rulelines'
 import { readConfig } from './budget'
 import { writeReview } from './reviews'
+import { fillProfile, profileText } from './profile'
 
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
 export const deskState = (home: string) => `${leanDir(home)}/desk`
@@ -106,6 +107,11 @@ export const THREAD_TOOLS: Tool[] = [
       all: { type: 'boolean', description: 'sync: every worktree of the project, not just repo' },
       verbose: { type: 'boolean', description: 'sync: every path copied/removed/skipped, as JSON' },
     }, ['action']),
+  },
+  {
+    name: 'lean_profile',
+    description: 'The project profile: which MCP servers and plugins its threads load (the rest is deferred, still found by ToolSearch). show: the profile and what this project\'s threads really used; fill: add what they used (the learn skill does this after learning).',
+    inputSchema: obj({ action: { type: 'string', enum: ['show', 'fill'] }, project: { type: 'string', description: 'default: this thread\'s project' } }, ['action']),
   },
 ]
 
@@ -254,6 +260,15 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       if (i.action === 'stale') return { ok: true, text: JSON.stringify(await checkStale(h, project, repo)) }
       if (i.action === 'verify') return { ok: true, text: (await verifyRules(h, project, repo, str(i.area) || undefined)).lines.join('\n') }
       return { ok: false, text: `unknown lean_rules action ${String(i.action)}` }
+    }
+    if (name === 'lean_profile') {
+      const own = (await readJson<Partial<Thread>>(h, `${tdir(home, id)}/thread.json`, {})).project ?? ''
+      const project = str(i.project) || own
+      if (!slugOk(project)) return { ok: false, text: 'lean_profile needs a project name (this thread has none)' }
+      if (project !== own && i.action === 'fill') return { ok: false, text: `lean_profile fill changes this thread's own project${own ? ` (${own})` : ' (this thread has none)'} only: ask the desk for ${project}` }
+      if (i.action === 'fill') return await fillProfile(h, home, project)
+      if (i.action === 'show') return { ok: true, text: await profileText(h, home, project) }
+      return { ok: false, text: `unknown lean_profile action ${String(i.action)}` }
     }
     return { ok: false, text: `unknown tool ${name}` }
   } catch (e) {

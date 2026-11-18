@@ -8,6 +8,9 @@ import type { Choice } from './models'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { buildHandover, olderVersion, pluginVersion } from './handover'
 import { LIMIT_PROMPT, isLimitRow, readLimit, usable } from './limits'
+import { disabledPlugins, fillProfile, loadedLine, loadedText, nameOk, names, profileText, readLoaded, readProfile, removeProfile, resolveLoaded, startUsage, writeLoaded, writeProfile } from './profile'
+import type { Loaded } from './profile'
+import { slugOk } from './rules'
 
 export const WAKE_GAP_MS = 30_000
 
@@ -24,6 +27,7 @@ export type Thread = {
   delivered: number // inbox.jsonl lines already handed to the session
   model?: string // haiku | sonnet | opus, as started (a resume keeps the session's saved options)
   effort?: string // low | medium | high
+  needs?: string[] // MCP servers / plugins this thread asked for on top of its project's profile (profile.ts)
   lastGoal?: string // the goal a close cleared (a reopen's handover names it)
   version?: string // the lean-agent version installed when the session was last started or resumed (a session runs the code it started with)
 }
@@ -128,7 +132,8 @@ export async function trustFolder(h: Host, folder: string): Promise<boolean> {
 export const attributionLine = (on: boolean) => (on ? 'attribution: on - end commits and PR text with the attribution lines the session was given' : 'attribution: off - no Co-Authored-By trailers, no generated-with lines')
 const fill = (t: string, vars: Record<string, string>) => t.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? '')
 
-export async function threadSettings(h: Host, id: string, hooks = true, choice?: Choice): Promise<string> {
+// `plugins`: the installed plugins outside the project's profile, switched off for this thread (profile.ts disabledPlugins)
+export async function threadSettings(h: Host, id: string, hooks = true, choice?: Choice, plugins: Record<string, false> = {}): Promise<string> {
   const lean = leanDir(await homeDir(h))
   // Edit/Write/Bash without asking, inside the lean-agent folder (which holds the worktrees); nothing global.
   const abs = `//${lean.replace(/^\//, '')}`
@@ -142,6 +147,7 @@ export async function threadSettings(h: Host, id: string, hooks = true, choice?:
       // so the repo's own hooks keep running (the failure shows as a notice)
       ...(hooks ? { env: gitEnv(await homeDir(h)) } : {}),
       ...(choice ? settingsKeys(choice) : {}), // a session opened in the folder from the app matches
+      ...(Object.keys(plugins).length ? { enabledPlugins: plugins } : {}),
     },
     null,
     2,
@@ -154,10 +160,13 @@ async function template(h: Host, root: string, name: string): Promise<string> {
 }
 
 // the CLAUDE.md a new thread gets (compare builds a throw-away thread-shaped folder with the same text)
-export async function threadClaudeMd(h: Host, root: string, id: string, title: string, project: string): Promise<string> {
+export async function threadClaudeMd(h: Host, root: string, id: string, title: string, project: string, loaded: Loaded | null = null): Promise<string> {
   const home = await homeDir(h)
   const cfg = await readJson<{ attribution?: unknown }>(h, `${leanDir(home)}/config.json`, {})
-  return fill(await template(h, root, 'thread.md'), { id, title, project, lean: leanDir(home), attribution: attributionLine(cfg?.attribution === true) })
+  // the <!-- profile --> block of the template (what is loaded and how to ask for more) is only there when a profile applies: a thread
+  // of a project without one is told nothing new
+  const text = (await template(h, root, 'thread.md')).replace(/<!-- profile -->\n([\s\S]*?)<!-- \/profile -->\n?/, (_m, block: string) => (restricted(loaded) ? block : ''))
+  return fill(text, { id, title, project, lean: leanDir(home), attribution: attributionLine(cfg?.attribution === true), loaded: loadedLine(loaded) })
 }
 
 export async function deskClaudeMd(h: Host, root: string): Promise<string> {
@@ -165,7 +174,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string }
+export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -234,8 +243,18 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   if (typeof choice === 'string') return err(choice)
   t.model = choice.model
   t.effort = choice.effort
+  // before the session exists its mod reads model, effort and needs from thread.json (at its first request): only these three are saved now,
+  // the rest of the record (state, sid) is saved when the start worked
+  const disk = await load(h, home, t.id)
+  if (disk) await save(h, home, { ...disk, model: t.model, effort: t.effort, ...(t.needs ? { needs: t.needs } : {}) })
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
-  await h.fs.write(`${folder}/.claude/settings.json`, await threadSettings(h, t.id, hooks, choice))
+  // the project's profile (plus this thread's needs): plugins outside it are switched off in the thread's settings; its MCP servers
+  // outside it are deferred by the thread's own mod, which reads loaded.json (profile.ts). No profile = nothing held back.
+  const loaded = await resolveLoaded(h, home, t.project, t.needs ?? [])
+  const off = await disabledPlugins(h, loaded.plugins).catch(() => ({}))
+  await h.fs.write(`${folder}/.claude/settings.json`, await threadSettings(h, t.id, hooks, choice, off))
+  await writeLoaded(h, home, t.id, loaded).catch(() => undefined)
+  await startUsage(h, home, t.id).catch(() => undefined)
   const r = await h.process.run(['claude', '--bg', '-n', label(t), '--model', choice.model, '--effort', choice.effort, '--', prompt], { cwd: folder, timeoutMs: 120_000 })
   if (r.exitCode !== 0) return err(`claude --bg failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
   let sid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(r.stdout + '\n' + r.stderr)?.[0] ?? ''
@@ -249,7 +268,26 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   t.lastWake = await h.clock.now()
   if (installed) t.version = installed
   await save(h, home, t)
-  return sid ? { ok: true, text: `${t.id} started (${sid})`, data: { fresh: true } } : { ok: true, text: `${t.id} started, but its session id was not found; list will retry`, data: { fresh: true } }
+  const lt = restricted(loaded) ? ` · ${loadedText(loaded)}` : ''
+  return sid ? { ok: true, text: `${t.id} started (${sid})${lt}`, data: { fresh: true } } : { ok: true, text: `${t.id} started, but its session id was not found; list will retry${lt}`, data: { fresh: true } }
+}
+
+// start / reopen with needs: added to what the thread already asked for (kept in thread.json, so a later start keeps them); a string = refusal
+function addNeeds(t: Thread, v: unknown): string | null {
+  const n = needsOf(v)
+  if (typeof n === 'string') return n
+  if (n?.length) t.needs = [...new Set([...(t.needs ?? []), ...n])].slice(0, 50)
+  return null
+}
+
+// a profile applies (some list is an allow-list); otherwise nothing is held back and nothing is said
+const restricted = (l: Loaded | null) => !!l && (l.mcp !== null || l.plugins !== null)
+
+// `needs`: plain names of MCP servers or plugins; a string = the refusal
+function needsOf(v: unknown): string[] | string | undefined {
+  if (v === undefined) return undefined
+  if (!Array.isArray(v) || v.length > 50 || !v.every(nameOk)) return 'needs must be a list of server or plugin names (letters, digits, . _ : @ -), at most 50'
+  return names(v)
 }
 
 async function create(h: Host, root: string, home: string, i: Input, installed = ''): Promise<Out> {
@@ -262,11 +300,13 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
     const bad = await unknownProject(h, project) // before any folder exists
     if (bad) return err(bad)
   }
+  const needs = needsOf(i.needs)
+  if (typeof needs === 'string') return err(needs)
   const id = await nextId(h, home)
   const dir = tpath(home, id)
   await mkdirp(h, dir)
-  const t: Thread = { id, title, project, state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0 }
-  await h.fs.write(`${dir}/CLAUDE.md`, await threadClaudeMd(h, root, id, title, t.project))
+  const t: Thread = { id, title, project, state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0, ...(needs?.length ? { needs } : {}) }
+  await h.fs.write(`${dir}/CLAUDE.md`, await threadClaudeMd(h, root, id, title, t.project, await resolveLoaded(h, home, t.project, t.needs ?? [])))
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
   await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id, hooks, pre))
   const brief = (i.text ?? '').trim() || title
@@ -331,7 +371,7 @@ async function refreshGuide(h: Host, root: string, home: string, t: Thread): Pro
   try {
     const have = await h.fs.read(file)
     if (typeof have !== 'string' || !have.startsWith('<!-- generated by lean-agent')) return // the user's own file stays
-    const want = await threadClaudeMd(h, root, t.id, t.title, t.project)
+    const want = await threadClaudeMd(h, root, t.id, t.title, t.project, await resolveLoaded(h, home, t.project, t.needs ?? []))
     if (want && want !== have) await h.fs.write(file, want)
   } catch {
     /* no guide yet: nothing to refresh */
@@ -395,10 +435,29 @@ async function list(h: Host, home: string): Promise<Out> {
     const t = await load(h, home, e.name)
     if (!t) continue
     const q = (await pending(h, home, t)).length
-    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(rows.find(a => a.sid === t.sid)), sid: t.sid, queued: q })
+    const lo = await readLoaded(h, home, t.id)
+    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(rows.find(a => a.sid === t.sid)), sid: t.sid, queued: q, ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}) })
   }
-  const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.running ? ', running' : ''}${o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}`).join('\n') : 'no threads'
+  const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.running ? ', running' : ''}${o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}`).join('\n') : 'no threads'
   return { ok: true, text, data: out }
+}
+
+// the desk's `profile`: show a project's profile with what its threads used; mcp / plugins set the lists (a list left out stays as it is);
+// fill: true adds what the threads used; on: false removes the profile (every thread loads everything again)
+async function profileAction(h: Host, home: string, i: Input): Promise<Out> {
+  const project = (i.project ?? '').trim()
+  if (!slugOk(project)) return err('profile needs project: a registered project name')
+  const bad = await unknownProject(h, project)
+  if (bad) return err(bad.replace(/ No thread was created\.$/, ''))
+  if (i.on === false) return { ok: true, text: (await removeProfile(h, home, project)) ? `${project} profile removed: every thread of it loads everything again` : `${project} has no profile` }
+  for (const [k, v] of [['mcp', i.mcp], ['plugins', i.plugins]] as const) if (v !== undefined && (!Array.isArray(v) || v.length > 50 || !v.every(nameOk))) return err(`${k} must be a list of names (letters, digits, . _ : @ -), at most 50`)
+  if (i.mcp !== undefined || i.plugins !== undefined) {
+    const cur = await readProfile(h, home, project)
+    await writeProfile(h, home, project, { mcp: names(i.mcp) ?? cur?.mcp, plugins: names(i.plugins) ?? cur?.plugins }, 'desk')
+    return { ok: true, text: `${await profileText(h, home, project)}\nnew threads of ${project} start with it; running ones keep what they started with` }
+  }
+  if (i.fill === true) return await fillProfile(h, home, project)
+  return { ok: true, text: await profileText(h, home, project) }
 }
 
 export async function leanThread(h: Host, root: string, i: Input): Promise<Out> {
@@ -406,6 +465,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
     const home = await homeDir(h)
     await ensureGitHooks(h).catch(() => undefined) // every action (resume and wake too) refreshes the private registry
     if (i.action === 'list') return await list(h, home)
+    if (i.action === 'profile') return await profileAction(h, home, i)
     if (/^projects$|^project-(add|remove|private)$/.test(i.action)) {
       const r = await projectsAction(h, i)
       if (i.action !== 'projects') await ensureGitHooks(h).catch(() => undefined) // projects.json changed: the private list follows
@@ -451,9 +511,11 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
         }
         case 'start': {
           if (t.state === 'closed' || t.state === 'closing') return err(`${id} is ${t.state}; reopen it first`)
+          const bad = addNeeds(t, i.needs)
+          if (bad) return err(bad)
           const live = t.sid ? await agents(h) : []
           if (!live) return err(`${id}: cannot list sessions (claude agents failed), so it is not started`)
-          if (t.sid && isRunning(live.find(a => a.sid === t.sid))) return { ok: true, text: `${id} is already running` }
+          if (t.sid && isRunning(live.find(a => a.sid === t.sid))) return { ok: true, text: `${id} is already running${i.needs?.length ? ' (needs apply to a new session only: nothing was changed)' : ''}` }
           const brief = (await h.fs.read(`${tpath(home, id)}/brief.md`).catch(() => t.title)) as string
           const u = await unconsumed(h, home, id)
           const msgs = u.msgs
@@ -522,8 +584,10 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           if (t.state !== 'closed') {
             t.state = 'open' // parked: the same session, use resume
             await save(h, home, t)
-            return { ok: true, text: `${id} reopened; use resume to wake it` }
+            return { ok: true, text: `${id} reopened; use resume to wake it${i.needs?.length ? ' (needs apply to a new session only: a resume keeps the session\'s settings; use start or close and reopen)' : ''}` }
           }
+          const badNeeds = addNeeds(t, i.needs)
+          if (badNeeds) return err(badNeeds)
           // A closed thread is never resumed: a NEW session starts in the same folder (same tN, project, worktree and branch) with a
           // handover built from brief, goal, notes, reports, remembered items and queued messages. A fresh session also runs today's code.
           t.state = 'open'

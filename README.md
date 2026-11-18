@@ -159,9 +159,15 @@ anything: in the project folder with lean-agent switched off (`--settings` with 
 --output-format json` and `claude -p "/context"` (local, free) and prints clean / thread / desk side by side: the first
 turn's input tokens (measured) and cost, and `/context`'s categories (system prompt, system tools, MCP tools, custom agents,
 memory files, skills, messages). On the clean column it switches skills and MCP servers off one at a time to show each share.
-The suggestions below the table name the concrete step: another plugin's skills to switch off for the project, an MCP server
-to drop (`tools.thread.drop` in `config.json`), a big memory file to move into path rules, rules that never loaded, gaps that
-look like script candidates. Runs cost a few cents and are capped at $0.25.
+The suggestions below the table name the concrete step: another plugin's skills or an MCP server to leave out of the project
+profile (`lean_thread profile`: outside it a server is deferred, not removed; the sizes shown are definition sizes, mostly deferred,
+not first-turn cost, and a server or plugin the project's threads really used reads "keep"), a big memory file to move into path
+rules, rules that never loaded, gaps that look like script candidates. Runs cost a few cents and are capped at $0.25.
+
+**Project profile.** A project can carry an allow-list of MCP servers and plugins (`~/.lean-agent/<project>/profile.json`, written
+by `lean_thread profile`, learned from what its threads really called with `fill`). Threads of that project start with it:
+plugins outside it are switched off in the thread's settings, MCP servers outside it are deferred (still found by ToolSearch).
+`needs: ["azure-devops"]` on `lean_thread new` adds a server for one thread. A project without a profile loads everything, as before.
 
 Task mode (the `compare` skill, run in a thread, only after the user agrees to the cost) runs one read-only task clean and as
 a thread on the same model and effort, then a haiku judge compares correctness and completeness only. Reports are saved as

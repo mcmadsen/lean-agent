@@ -18,6 +18,8 @@ import type { Host } from './state'
 import { rulesStats, slugOk } from './rules'
 import { threadClaudeMd, threadSettings } from './threads'
 import { installedKeys } from './skew'
+import { disabledPlugins, isOwn, loadedText, nameMatches, norm, projectUsage, resolveLoaded, usedText, writeLoaded } from './profile'
+import type { Loaded } from './profile'
 
 export const PROMPT = 'Reply with OK.'
 export const OVERHEAD_CAP_USD = 0.25
@@ -130,7 +132,7 @@ async function claude(h: Host, m: Meter, label: string, cwd: string, args: strin
 }
 
 // ---- the overhead columns -----------------------------------------------------------------------------------------
-export type Col = { name: string; input: number | null; cost: number; seconds: number; ctx: Ctx | null; notes: string[] }
+export type Col = { name: string; input: number | null; cost: number; seconds: number; ctx: Ctx | null; notes: string[]; loaded?: string; profile?: Loaded }
 const JSON_ARGS = (model: string, prompt: string) => ['-p', prompt, '--output-format', 'json', '--model', model]
 
 async function column(h: Host, m: Meter, name: string, cwd: string, extra: string[], env: Record<string, string> | undefined, model: string): Promise<Col> {
@@ -185,7 +187,7 @@ export function bySource(ctx: Col['ctx'], list: string): [string, number, number
 }
 
 // Suggestions computed from the numbers, each with the concrete step.
-export async function suggestions(h: Host, project: string, slug: string, cols: Col[]): Promise<string[]> {
+export async function suggestions(h: Host, project: string, slug: string, cols: Col[], who: 'desk' | 'thread' = 'desk'): Promise<string[]> {
   const out: string[] = []
   const home = await homeDir(h)
   const clean = cols.find(c => c.name === 'clean')
@@ -195,15 +197,30 @@ export async function suggestions(h: Host, project: string, slug: string, cols: 
       out.push(`a ${c.name} session starts at ${fmtTok(c.input)} tokens vs ${fmtTok(clean.input)} clean${diffs.length ? `; most of the difference: ${diffs.map(([r, d]) => `${r} +${fmtTok(d)}`).join(', ')}` : ''}`)
     }
   }
-  // other plugins' skills and MCP servers, on the desk and thread columns (a clean run has them too: they are the user's)
-  for (const c of cols) {
-    for (const [src, tok, n] of bySource(c.ctx, 'skills')) {
+  // Other plugins' skills and MCP servers: advice for the THREAD column only (the clean column is no thread, the desk's pool is already cut by
+  // role). The sizes are /context definition sizes, mostly deferred by the engine: NOT first-turn cost (the measured effect of all MCP off is
+  // the "One source off" line). A source with recorded use is "keep"; lean-agent's own server is never a candidate. The lever is the
+  // project profile (lean_thread profile): outside it a server is deferred (still found by ToolSearch), never removed.
+  const use = await projectUsage(h, home, slug).catch(() => null)
+  const known = !!use && use.threads > 0
+  const thread = cols.find(c => c.name === 'thread')
+  // a thread cannot set a profile (lean_thread is the desk's): it asks the desk
+  const lever = (what: string) => `${who === 'thread' ? 'ask the desk (lean_ask) to run ' : ''}lean_thread profile, project ${slug}, ${what}: [...]`
+  if (thread) {
+    for (const [src, tok, n] of bySource(thread.ctx, 'skills')) {
       if (/^(built-in|user|claude\.ai sync|\?)$/i.test(src) || /lean-agent/.test(src) || tok < 300) continue
-      out.push(`${c.name}: ${src} adds ~${fmtTok(tok)} tokens (${n} skills) to every session: switch it off for this project with "enabledPlugins": {"<name>@<marketplace>": false} in ${project}/.claude/settings.json`)
+      const plugin = src.replace(/^plugin /, '')
+      const seen = use?.plugins[plugin]
+      out.push(seen ? `plugin ${plugin}: its skills or servers ${usedText(seen)}: keep` : `plugin ${plugin}: lists ${n} skills (~${fmtTok(tok)} tokens, definition size, an estimate)${known ? ", none used by this project's threads" : ' (no usage recorded yet)'}: leave it out of the project profile (${lever('plugins')}) to switch it off for new threads`)
     }
-    for (const [src, tok, n] of bySource(c.ctx, 'mcp tools')) {
-      if (tok < 300) continue
-      out.push(`${c.name}: MCP server ${src} adds ~${fmtTok(tok)} tokens (${n} tools): add "mcp__${src}__*" to tools.${c.name === 'clean' ? 'thread' : c.name}.drop in ~/.lean-agent/config.json`)
+    for (const [src, tok, n] of bySource(thread.ctx, 'mcp tools')) {
+      if (tok < 300 || isOwn(norm(src)) || /lean-agent/.test(src)) continue
+      const hits = Object.entries(use?.mcp ?? {}).filter(([k]) => nameMatches(src, k) || nameMatches(k, src))
+      const calls = hits.reduce((s, [, x]) => s + x.calls, 0)
+      const threads = Math.max(0, ...hits.map(([, x]) => x.threads))
+      const outside = !!thread.profile?.mcp && !thread.profile.mcp.some(x => nameMatches(x, src) || nameMatches(src, x)) // already deferred in this column
+      if (!calls && outside) continue
+      out.push(calls ? `MCP server ${src}: ${usedText({ calls, threads })}: ${outside ? 'outside the profile (deferred, still found by ToolSearch); add it with a profile fill if threads need it in front' : 'keep'}` : `MCP server ${src}: definition size ~${fmtTok(tok)} (${n} tools; mostly deferred, not first-turn cost)${known ? ", never called by this project's threads" : ' (no usage recorded yet)'}: leave it out of the project profile (${lever('mcp')}): it is then deferred, its tools stay findable by ToolSearch`)
     }
   }
   const mem = [...(clean?.ctx?.lists['memory files'] ?? [])].sort((a, b) => b.tokens - a.tokens).filter(x => x.tokens > 1500).slice(0, 3)
@@ -238,7 +255,8 @@ export function renderReport(r: Report, redact: (s: string) => string): string {
     const mem = (c.ctx?.lists['memory files'] ?? []).slice(0, 6)
     if (mem.length) out.push(`Memory files in ${c.name}: ${mem.map(f => `${shortName(f.name)} ${fmtTok(f.tokens)}`).join(', ')}`)
     const mcp = bySource(c.ctx, 'mcp tools').slice(0, 6)
-    if (mcp.length) out.push(`MCP servers in ${c.name}: ${mcp.map(([s, t, n]) => `${s} ${fmtTok(t)} (${n})`).join(', ')}`)
+    if (mcp.length) out.push(`MCP servers in ${c.name} (definition size, an estimate: mostly deferred, not first-turn cost): ${mcp.map(([s, t, n]) => `${s} ${fmtTok(t)} (${n})`).join(', ')}`)
+    if (c.loaded) out.push(`Loaded in ${c.name} (project profile; MCP servers outside it are deferred, still found by ToolSearch): ${c.loaded}`)
   }
   for (const c of r.cols) for (const n of c.notes) out.push(`Note (${c.name}): ${n}`)
   if (r.skipped.length) out.push(`Not run (cap reached or failed): ${r.skipped.map(s => scrub(redact(s)).slice(0, 100)).join(', ')}`)
@@ -283,7 +301,9 @@ async function projectOf(h: Host, home: string, name: string): Promise<{ slug: s
 // thread.json is never written, so no list shows it, and every compare run first sweeps the ones an hour old (a killed run's).
 const TEMP = /^t9\d{16}$/
 const TEMP_DIR = /\/threads\/t9\d{16}$/
-async function tempThread(h: Host, root: string, home: string, project: string): Promise<string> {
+// It gets the project's profile like a real thread (plugins outside it off in its settings, loaded.json for the mod's deferral), so the
+// column shows what a thread of this project really starts with.
+async function tempThread(h: Host, root: string, home: string, project: string): Promise<{ dir: string; loaded: Loaded }> {
   const now = await h.clock.now()
   for (const e of await h.fs.list(threadsDir(home)).catch(() => [] as { name: string }[])) {
     if (TEMP.test(e.name) && Number(e.name.slice(2, 15)) < now - 3_600_000) await h.process.run(['rm', '-rf', `${threadsDir(home)}/${e.name}`]).catch(() => undefined)
@@ -291,9 +311,11 @@ async function tempThread(h: Host, root: string, home: string, project: string):
   const id = `t9${now}${String(Math.floor(Math.random() * 1000)).padStart(3, '0')}`
   const dir = `${threadsDir(home)}/${id}`
   await mkdirp(h, dir)
-  await h.fs.write(`${dir}/CLAUDE.md`, await threadClaudeMd(h, root, id, 'compare', project))
-  await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id, false))
-  return dir
+  const loaded = await resolveLoaded(h, home, project, [])
+  await h.fs.write(`${dir}/CLAUDE.md`, await threadClaudeMd(h, root, id, 'compare', project, loaded))
+  await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id, false, undefined, await disabledPlugins(h, loaded.plugins).catch(() => ({}))))
+  await writeLoaded(h, home, id, loaded).catch(() => undefined)
+  return { dir, loaded }
 }
 const dropDir = async (h: Host, dir: string) => {
   if (TEMP_DIR.test(dir)) await h.process.run(['rm', '-rf', dir]).catch(() => undefined)
@@ -303,7 +325,7 @@ const THREAD_NOTE = 'the thread folder does not load the project\'s CLAUDE.md or
 const meterOf = async (h: Host, cap: number): Promise<Meter> => ({ cost: 0, cap, runs: 0, skipped: [], has: await helpFlags(h) })
 
 // ---- overhead mode ---------------------------------------------------------------------------------------------------
-export async function overhead(h: Host, root: string, name: string, o: { model?: string; maxUsd?: number } = {}): Promise<{ ok: boolean; text: string }> {
+export async function overhead(h: Host, root: string, name: string, o: { model?: string; maxUsd?: number; who?: 'desk' | 'thread' } = {}): Promise<{ ok: boolean; text: string }> {
   const home = await homeDir(h)
   const p = await projectOf(h, home, name)
   if (typeof p === 'string') return { ok: false, text: p }
@@ -317,9 +339,11 @@ export async function overhead(h: Host, root: string, name: string, o: { model?:
   if (!cols[0]!.input) return { ok: false, text: `the clean run gave no usage (${cols[0]!.notes.join('; ') || m.skipped.join(', ') || 'is `claude` signed in?'})` }
   let tdir = ''
   try {
-    tdir = await tempThread(h, root, home, p.slug)
+    const t = await tempThread(h, root, home, p.slug)
+    tdir = t.dir
     cols.push(await column(h, m, 'thread', tdir, plugin, undefined, model))
     cols[cols.length - 1]!.notes.push(THREAD_NOTE)
+    if (t.loaded.mcp !== null || t.loaded.plugins !== null) Object.assign(cols[cols.length - 1]!, { loaded: loadedText(t.loaded), profile: t.loaded })
   } finally {
     if (tdir) await dropDir(h, tdir)
   }
@@ -335,7 +359,7 @@ export async function overhead(h: Host, root: string, name: string, o: { model?:
     const r = await claude(h, m, 'clean without MCP', p.path, [...JSON_ARGS(model, PROMPT), '--max-turns', '1', ...off, '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'], { env: { CLAUDE_CODE_PLUGIN_DIRS: '' } })
     if (r?.out && !r.out.error && r.out.input) attribution.push(`MCP servers: ${fmtTok(clean.input! - r.out.input)} tokens (${fmtTok(clean.input)} -> ${fmtTok(r.out.input)} with MCP off)`)
   }
-  const rep: Report = { project: p.slug, model, cols, attribution, suggestions: await suggestions(h, p.path, p.slug, cols), cost: m.cost, skipped: m.skipped, ts: await h.clock.now() }
+  const rep: Report = { project: p.slug, model, cols, attribution, suggestions: await suggestions(h, p.path, p.slug, cols, o.who), cost: m.cost, skipped: m.skipped, ts: await h.clock.now() }
   const md = renderReport(rep, redactor(home, p.path))
   const get = (n: string) => cols.find(c => c.name === n)?.input ?? null
   const file = await saveReport(h, home, p.slug, md, { date: new Date(rep.ts).toISOString().slice(0, 16), project: p.slug, mode: 'overhead', model, totals: { clean: get('clean'), thread: get('thread'), desk: get('desk') }, cost: +m.cost.toFixed(4), skipped: m.skipped.length })
@@ -370,7 +394,7 @@ export async function taskMode(h: Host, root: string, name: string, task: string
   let tdir = ''
   let lean: Call | null = null
   try {
-    tdir = await tempThread(h, root, home, p.slug)
+    tdir = (await tempThread(h, root, home, p.slug)).dir
     const plug = !keys.length && m.has.has('--plugin-dir') ? ['--plugin-dir', root] : []
     lean = await claude(h, m, 'thread task', tdir, run([...plug, ...(m.has.has('--add-dir') ? ['--add-dir', p.path] : [])], prompt), { timeoutMs: 600_000, max: cap })
   } finally {
@@ -422,7 +446,7 @@ export async function compare(h: Host, root: string, i: { project?: string; mode
   const mode = i.mode || 'overhead'
   if (mode === 'history') return { ok: true, text: await historyText(h, i.project || undefined) }
   if (!i.project) return { ok: false, text: 'compare needs project (a registered name)' }
-  if (mode === 'overhead') return overhead(h, root, i.project, { model: i.model, maxUsd: i.maxUsd })
+  if (mode === 'overhead') return overhead(h, root, i.project, { model: i.model, maxUsd: i.maxUsd, who })
   if (mode === 'task') {
     if (who !== 'thread') return { ok: false, text: 'task mode costs money and runs in a thread: ask the user, then start a thread with the compare skill and the task (lean_thread new)' }
     return taskMode(h, root, i.project, i.task ?? '', { model: i.model, maxUsd: i.maxUsd })
