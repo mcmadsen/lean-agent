@@ -87,7 +87,7 @@ export function parseRun(stdout: string): Run | null {
   const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0)
   const sum = (o: any) => n(o.input_tokens) + n(o.cache_creation_input_tokens) + n(o.cache_read_input_tokens)
   const models = v.modelUsage && typeof v.modelUsage === 'object' ? Object.keys(v.modelUsage) : []
-  return { input: sum(it), output: n(u.output_tokens), cost: n(v.total_cost_usd), turns: n(v.num_turns), ms: n(v.duration_ms), model: models[0] ?? '', error: v.is_error ? String(v.subtype ?? 'error') : '', text: typeof v.result === 'string' ? v.result : '' }
+  return { input: sum(it), output: n(u.output_tokens), cost: n(v.total_cost_usd), turns: n(v.num_turns), ms: n(v.duration_ms), model: models[0] ?? '', error: v.is_error === true || String(v.subtype ?? '').startsWith('error') ? (v.subtype && v.subtype !== 'success' ? String(v.subtype) : 'error') : '', text: typeof v.result === 'string' ? v.result : '' }
 }
 // every token the whole run used (a task run has many turns)
 export function allTokens(stdout: string): number {
@@ -124,7 +124,7 @@ async function claude(h: Host, m: Meter, label: string, cwd: string, args: strin
     return { out: run, raw: r.stdout, stderr: r.stderr, seconds: Math.round(((await h.clock.now()) - t0) / 100) / 10 }
   } catch (e) {
     if (o.budget !== false) m.cost += budget
-    m.skipped.push(`${label} (${scrub(String((e as Error)?.message ?? e)).slice(0, 80)})`)
+    m.skipped.push(`${label} (${String((e as Error)?.message ?? e).slice(0, 200)})`) // raw: the report redacts the project and home first, then scrubs
     return null
   }
 }
@@ -153,8 +153,15 @@ async function column(h: Host, m: Meter, name: string, cwd: string, extra: strin
 // and `scrub` cuts every other absolute path to its last component: a memory file in a folder above the project, or a path in an
 // error text, never reaches a report.
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-export const redactor = (home: string, project: string) => (s: string) => s.replace(new RegExp(`${esc(project)}(?![\\w.-])`, 'g'), '<project>').replace(new RegExp(`${esc(home)}(?![\\w.-])`, 'g'), '~')
-export const scrub = (s: string) => s.replace(/(?:^|(?<=[\s("'=:,]))\/(?:[^\s/"'),;:]+\/)+([^\s/"'),;:]*)/g, (_m, last: string) => `…/${last}`)
+export const redactor = (home: string, project: string) => (s: string) => {
+  let t = s
+  if (project.length > 1) t = t.replace(new RegExp(`${esc(project)}(?![\\w-])`, 'g'), '<project>')
+  if (home.length > 1) t = t.replace(new RegExp(`${esc(home)}(?![\\w-])`, 'g'), '~')
+  return t
+}
+// every absolute path is cut to its last component; a path may hold spaces (it runs to the next quote, bracket, comma or line end)
+// (also the `<project>/...` and `~/...` forms the redactor leaves: folders inside the project or home are cut too; a URL is no path)
+export const scrub = (s: string) => s.replace(/file:\/\//g, '').replace(/(?<![^\s("'`\[<{=,])(?:\/|~\/|<project>\/)(?:[^"'`),;:()<>\n]*\/)([^"'`),;:()<>/\n]*)/g, (_m, last: string) => `…/${last}`)
 // a /context item name that is a path: its last component (names only; the folders above stay out)
 export const shortName = (name: string) => (name.includes('/') ? name.replace(/^.*\//, '…/') : name)
 
@@ -234,9 +241,9 @@ export function renderReport(r: Report, redact: (s: string) => string): string {
     if (mcp.length) out.push(`MCP servers in ${c.name}: ${mcp.map(([s, t, n]) => `${s} ${fmtTok(t)} (${n})`).join(', ')}`)
   }
   for (const c of r.cols) for (const n of c.notes) out.push(`Note (${c.name}): ${n}`)
-  if (r.skipped.length) out.push(`Not run (cap reached or failed): ${r.skipped.join(', ')}`)
+  if (r.skipped.length) out.push(`Not run (cap reached or failed): ${r.skipped.map(s => scrub(redact(s)).slice(0, 100)).join(', ')}`)
   out.push('', 'Suggestions:', ...(r.suggestions.length ? r.suggestions.map(s => `- ${s}`) : ['- nothing to suggest from these numbers']), '', '(numbers and source names only; no file contents)')
-  return redact(out.join('\n')) + '\n'
+  return redact(out.join('\n')) + '\n' // (the skipped lines were redacted above, before they were scrubbed)
 }
 
 // ---- saved reports -------------------------------------------------------------------------------------------------
@@ -355,6 +362,11 @@ export async function taskMode(h: Host, root: string, name: string, task: string
   // the same prompt for both (it never starts with "/", so a task is never a slash command)
   const prompt = `Read-only task about the repository at ${p.path} (use absolute paths; never cd):\n${task}`
   const clean = await claude(h, m, 'clean task', p.path, run(off, prompt), { env: { CLAUDE_CODE_PLUGIN_DIRS: '' }, timeoutMs: 600_000, max: cap })
+  // a run that hit its turn or budget limit, or answered nothing, is no answer: no judge, no verdict (and no second run to pay for
+  // when the first one already failed)
+  const why = (c: Call | null, label: string) => (!c?.out ? `the ${label} run gave no result` : c.out.error ? `the ${label} run stopped: ${c.out.error}` : !c.out.text.trim() ? `the ${label} run gave no answer` : '')
+  const refuse = (bad: string[]) => ({ ok: false, text: `task mode needs both runs to answer: ${bad.map(scrub).join('; ')} (cost so far $${m.cost.toFixed(3)}; raise maxTurns or maxUsd, or pick a smaller task)` })
+  if (why(clean, 'clean')) return refuse([why(clean, 'clean'), ...m.skipped])
   let tdir = ''
   let lean: Call | null = null
   try {
@@ -364,10 +376,7 @@ export async function taskMode(h: Host, root: string, name: string, task: string
   } finally {
     if (tdir) await dropDir(h, tdir)
   }
-  // a run that hit its turn or budget limit, or answered nothing, is no answer: no judge, no verdict
-  const why = (c: Call | null, label: string) => (!c?.out ? `the ${label} run gave no result` : c.out.error ? `the ${label} run stopped: ${c.out.error}` : !c.out.text.trim() ? `the ${label} run gave no answer` : '')
-  const bad = [why(clean, 'clean'), why(lean, 'thread'), ...m.skipped].filter(Boolean)
-  if (bad.length || !clean?.out || !lean?.out) return { ok: false, text: `task mode needs both runs to answer: ${bad.join('; ')} (cost so far $${m.cost.toFixed(3)}; raise maxTurns or maxUsd, or pick a smaller task)` }
+  if (why(lean, 'thread') || !clean?.out || !lean?.out) return refuse([why(lean, 'thread'), ...m.skipped].filter(Boolean))
   await mkdirp(h, compareDir(home)) // the judge's neutral folder (it runs with lean-agent's plain role, not in a project)
   // the judge sees both answers in an order that alternates, so a position bias does not always favour one side
   const swap = (await h.clock.now()) % 2 === 1
@@ -399,7 +408,7 @@ export async function taskMode(h: Host, root: string, name: string, task: string
     `| turns | ${cs.turns} | ${ls.turns} |`,
     `| time | ${cs.seconds}s | ${ls.seconds}s |`,
     '',
-    `Judge (correctness and completeness only): ${verdict}. The thread used ${saving >= 0 ? `${saving}% fewer` : `${-saving}% more`} tokens than the clean run.`,
+    `Judge (correctness and completeness only): ${verdict}${j ? '' : ' (the judge did not run: its budget or the cap was used up, or it failed)'}. The thread used ${saving >= 0 ? `${saving}% fewer` : `${-saving}% more`} tokens than the clean run.`,
     '',
     `Note: ${THREAD_NOTE}.`,
     '(numbers only; neither answer nor the judge\'s reason is saved)',

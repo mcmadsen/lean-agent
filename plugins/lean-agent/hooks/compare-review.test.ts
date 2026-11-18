@@ -24,6 +24,10 @@ test('scrub, shortName and redactor keep folders out: whole path words only, eve
   expect(scrub('could not read /home/someone/work/acme/CLAUDE.md (denied)')).toBe('could not read …/CLAUDE.md (denied)')
   expect(scrub('timed out in /h/.lean-agent/threads/t9/x')).toBe('timed out in …/x')
   expect(scrub('no path here, 12/3 ratio')).toBe('no path here, 12/3 ratio')
+  expect(scrub('see `/a/b/c.md` and [/x/y/z] and <</p/q/r> and {/m/n/o}')).toBe('see `…/c.md` and […/z] and <<…/r> and {…/o}')
+  expect(scrub('open file:///a/b/c now')).toBe('open …/c now')
+  expect(scrub('read /Users/John Smith/x/y.md (denied)')).toBe('read …/y.md (denied)')
+  expect(scrub('url https://host/a/b stays? and key=/p/q')).toBe('url https://host/a/b stays? and key=…/q')
   expect(shortName('/work/acme/CLAUDE.md')).toBe('…/CLAUDE.md')
   expect(shortName('CLAUDE.md')).toBe('CLAUDE.md')
   const r = redactor('/home/u', '/home/u/app')
@@ -102,18 +106,40 @@ test('a run that stopped at its turn limit or answered nothing is no answer: no 
   expect((await taskMode(empty.h.host, ROOT, 'proj', 'x')).text).toContain('the thread run gave no answer')
 })
 
-test('a run killed by its timeout counts at its full budget: the cap holds, and the other run is not starved', async () => {
-  let n = 0
+test('a run killed by its timeout counts at its full budget, and then no second run is paid for', async () => {
   const { h, seen } = taskSetup(() => {
-    if (++n === 1) throw new Error('timed out')
-    return { exitCode: 0, stdout: runJson(1000, { result: 'an answer', total_cost_usd: 0.1 }) }
+    throw new Error('timed out')
   })
   const r = await taskMode(h.host, ROOT, 'proj', 'x', { maxUsd: 1 })
   expect(r.ok).toBe(false)
   expect(r.text).toContain('the clean run gave no result')
-  expect(r.text).toContain('cost so far $1.100') // the killed run's $1, the thread run's real $0.1
+  expect(r.text).toContain('cost so far $1.000') // the killed run counts at its $1 budget
+  expect(seen.some(s => s.cwd?.includes('/threads/t9'))).toBe(false) // the first run failed: nothing more to spend
+  expect(h.files.has(`${L}/compare/history.jsonl`)).toBe(false)
+})
+
+test('the thread run keeps its own full budget when the clean run was cheap; a failed thread run is reported with its cost', async () => {
+  const { h, seen } = taskSetup((a, call) => (call.cwd === '/repo' ? { exitCode: 0, stdout: runJson(1000, { result: 'fine', total_cost_usd: 0.1 }) } : { exitCode: 0, stdout: runJson(1000, { subtype: 'error_max_budget_usd', is_error: false, result: 'partial', total_cost_usd: 1 }) }))
+  const r = await taskMode(h.host, ROOT, 'proj', 'x', { maxUsd: 1 })
   const th = seen.find(s => s.cwd?.includes('/threads/t9'))!
-  expect(th.args[th.args.indexOf('--max-budget-usd') + 1]).toBe('1') // its own budget, not what the shared cap had left
+  expect(th.args[th.args.indexOf('--max-budget-usd') + 1]).toBe('1')
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain('the thread run stopped: error_max_budget_usd') // a limit hit with is_error false is still a stop
+  expect(r.text).toContain('cost so far $1.100')
+})
+
+test('a path in a failed run\'s error text never reaches the report: the project and home go first, then every other path is cut', async () => {
+  const { h } = setup()
+  h.claude.handler = (a: string[], call: any) => {
+    if (a[0] === '--help') return { exitCode: 0, stdout: HELP }
+    if (a[a.indexOf('-p') + 1] === '/context') return { exitCode: 0, stdout: ctx('') }
+    if (call.cwd === '/h/lean-agent-desk') throw new Error('cannot start in /repo/sub/dir and /h/.claude/x and /work/acme/other')
+    return { exitCode: 0, stdout: runJson(30000) }
+  }
+  await overhead(h.host, ROOT, 'proj')
+  const md = h.files.get(`${L}/compare/2026-11-18-proj.md`)!
+  expect(md).toContain('desk turn (cannot start in …/other') // (a path may hold spaces, so a run of paths and words collapses to its last component: over-cut, never under-cut)
+  for (const bad of ['/repo', '/h/', '/work', 'acme', 'sub']) expect(md).not.toContain(bad)
 })
 
 test('the judge runs in a folder that exists (made before it), on haiku with no tools and its own small budget', async () => {
@@ -126,7 +152,8 @@ test('the judge runs in a folder that exists (made before it), on haiku with no 
   expect(mkAt).toBeLessThan(judgeAt)
   const j = seen.find(s => s.args[s.args.indexOf('-p') + 1]!.startsWith('Two answers'))!
   expect(j.cwd).toBe(`${L}/compare`)
-  expect(j.args).toEqual(expect.arrayContaining(['--model', 'haiku', '--tools', '', '--max-budget-usd', '0.1']))
+  const at = (f: string) => j.args[j.args.indexOf(f) + 1]
+  expect([at('--model'), at('--tools'), at('--max-budget-usd'), at('--max-turns')]).toEqual(['haiku', '', '0.1', '1'])
 })
 
 test('a task that starts with a slash is not a slash command in either run', async () => {
