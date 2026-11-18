@@ -42,7 +42,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       const [c, ...rest] = argv
       const a = c === 'mv' ? rest.filter(y => !y.startsWith('-')) : rest
       if (c === 'mv') { const s = files.get(a[0]); if (s === undefined) return { exitCode: 1, stdout: '', stderr: 'no such file' }; files.set(a[1], s); files.delete(a[0]); return ok() }
-      if (c === 'rm') { for (const x of a.filter(y => !y.startsWith('-'))) files.delete(x); return ok() }
+      if (c === 'rm') { for (const x of a.filter(y => !y.startsWith('-'))) for (const k of [...files.keys()]) if (k === x || k.startsWith(x + '/')) files.delete(k); return ok() }
       if (c === 'mkdir') return ok()
       if (c === 'tee') { const p = a[a.length - 1]; files.set(p, (files.get(p) ?? '') + (call.stdin ?? '')); return ok(call.stdin) }
       if (c === 'claude') { const r = claude.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }

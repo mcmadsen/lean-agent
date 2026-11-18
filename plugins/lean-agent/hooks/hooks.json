@@ -1,5 +1,17 @@
 {
   "modules": [
     "./register.tsx"
-  ]
+  ],
+  "hooks": {
+    "InstructionsLoaded": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/rules-loaded.sh\""
+          }
+        ]
+      }
+    ]
+  }
 }

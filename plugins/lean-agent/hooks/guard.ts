@@ -110,7 +110,7 @@ async function deskDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
 }
 
 // ---- workers -------------------------------------------------------------------------------------------------
-export const isReader = (t?: string) => !!t && (/^reader-/.test(t) || t === 'reviewer')
+export const isReader = (t?: string) => !!t && (/^reader-/.test(t) || t === 'reviewer' || t === 'explorer')
 export const isWorker = (t?: string) => !!t && /^worker-/.test(t)
 
 export async function grantsFile($: Host, role: Role): Promise<string> {
@@ -123,6 +123,10 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
   const edits = e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'NotebookEdit'
   if (isReader(t)) {
     if (edits) return `lean-agent: ${t} is read-only`
+    if (e.tool === 'Bash' && t === 'explorer') {
+      const c = String(e.command ?? '').trim()
+      return !hasMeta(c) && /^git (log|ls-files)( |$)/.test(c) ? null : 'lean-agent: explorer may run only git log and git ls-files'
+    }
     if (e.tool === 'Bash') {
       const g = await readJson<Grants>($, await grantsFile($, ctx.role), {})
       const c = String(e.command ?? '').trim()

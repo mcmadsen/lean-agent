@@ -5,6 +5,7 @@
 import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import type { Inbox, Thread } from './threads'
+import { checkStale, recordLearn, rulesStats, slugOk, syncRules } from './rules'
 
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
 export const deskState = (home: string) => `${leanDir(home)}/desk`
@@ -60,6 +61,11 @@ export const THREAD_TOOLS: Tool[] = [
   { name: 'lean_ask', description: 'Ask the user a question through the desk, with optional answer options.', inputSchema: obj({ question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, ['question']) },
   { name: 'lean_goal', description: 'Update the goal this thread serves (one line).', inputSchema: obj({ update: { type: 'string' } }, ['update']) },
   { name: 'lean_remember', description: 'Save a durable fact for future sessions.', inputSchema: obj({ text: { type: 'string' }, project: { type: 'string' } }, ['text']) },
+  {
+    name: 'lean_rules',
+    description: 'Learned project rules: sync (copy rules and recipe skills into a checkout or worktree), stale (areas to re-learn), record (area, globs, sha, lines after learning), stats (which rules load).',
+    inputSchema: obj({ action: { type: 'string', enum: ['sync', 'stale', 'record', 'stats'] }, project: { type: 'string' }, repo: { type: 'string', description: 'absolute path of the checkout or worktree' }, area: { type: 'string' }, globs: { type: 'array', items: { type: 'string' } }, sha: { type: 'string' }, lines: { type: 'number' } }, ['action']),
+  },
 ]
 
 export async function threadTool(h: Host, id: string, name: string, i: any): Promise<{ ok: boolean; text: string }> {
@@ -90,6 +96,22 @@ export async function threadTool(h: Host, id: string, name: string, i: any): Pro
       if (!str(i.text)) return { ok: false, text: 'lean_remember needs text' }
       await appendJsonl(h, `${leanDir(home)}/memory/notes.jsonl`, { ts, from: id, project: str(i.project), text: str(i.text) })
       return { ok: true, text: 'remembered' }
+    }
+    if (name === 'lean_rules') {
+      const th = await readJson<Partial<Thread>>(h, `${tdir(home, id)}/thread.json`, {})
+      const project = str(i.project) || (th.project ?? '')
+      if (!slugOk(project)) return { ok: false, text: 'lean_rules needs a project name' }
+      const repo = str(i.repo)
+      if (i.action === 'stats') return { ok: true, text: JSON.stringify(await rulesStats(h, project)) }
+      if (i.action === 'record') {
+        if (!str(i.area) || !Array.isArray(i.globs) || !str(i.sha)) return { ok: false, text: 'record needs area, globs and sha' }
+        await recordLearn(h, project, str(i.area), { globs: i.globs.filter((x: unknown) => typeof x === 'string'), sha: str(i.sha), lines: Number(i.lines) || 0 })
+        return { ok: true, text: 'recorded' }
+      }
+      if (!repo.startsWith('/')) return { ok: false, text: `${i.action} needs repo (an absolute path)` }
+      if (i.action === 'sync') return { ok: true, text: JSON.stringify(await syncRules(h, project, repo)) }
+      if (i.action === 'stale') return { ok: true, text: JSON.stringify(await checkStale(h, project, repo)) }
+      return { ok: false, text: `unknown lean_rules action ${String(i.action)}` }
     }
     return { ok: false, text: `unknown tool ${name}` }
   } catch (e) {

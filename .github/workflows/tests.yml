@@ -24,6 +24,8 @@ jobs:
       - run: npm i -g @anthropic-ai/claude-code@2.1.327
       - name: Validate the plugin
         run: claude plugin validate plugins/lean-agent
+      - name: Shell hook spec
+        run: sh plugins/lean-agent/hooks/rules-loaded.test.sh
       - name: Mod specs (*.test.ts, *.test.tsx)
         run: claude plugin test plugins/lean-agent
   release:
