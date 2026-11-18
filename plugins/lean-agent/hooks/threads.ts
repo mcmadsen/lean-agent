@@ -103,7 +103,7 @@ export async function trustFolder(h: Host, folder: string): Promise<boolean> {
 // ---- templates -----------------------------------------------------------------------------------------------
 const fill = (t: string, vars: Record<string, string>) => t.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? '')
 
-export async function threadSettings(h: Host, id: string): Promise<string> {
+export async function threadSettings(h: Host, id: string, hooks = true): Promise<string> {
   const lean = leanDir(await homeDir(h))
   // Edit/Write/Bash without asking, inside the lean-agent folder (which holds the worktrees); nothing global.
   const abs = `//${lean.replace(/^\//, '')}`
@@ -113,7 +113,9 @@ export async function threadSettings(h: Host, id: string): Promise<string> {
         allow: ['Bash', `Edit(${abs}/**)`, `Write(${abs}/**)`],
         additionalDirectories: [lean],
       },
-      env: gitEnv(await homeDir(h)), // git itself refuses a push from a private project (githooks.ts)
+      // git itself refuses a push from a private project (githooks.ts); without working wrappers core.hooksPath is not set,
+      // so the repo's own hooks keep running (the failure shows as a notice)
+      ...(hooks ? { env: gitEnv(await homeDir(h)) } : {}),
     },
     null,
     2,
@@ -174,8 +176,8 @@ function batchPrompt(msgs: Inbox[]): string {
 
 async function startSession(h: Host, home: string, t: Thread, prompt: string): Promise<Out> {
   const folder = tpath(home, t.id)
-  await ensureGitHooks(h)
-  await h.fs.write(`${folder}/.claude/settings.json`, await threadSettings(h, t.id))
+  const hooks = await ensureGitHooks(h).then(() => true, () => false)
+  await h.fs.write(`${folder}/.claude/settings.json`, await threadSettings(h, t.id, hooks))
   const r = await h.process.run(['claude', '--bg', '-n', label(t), '--', prompt], { cwd: folder, timeoutMs: 120_000 })
   if (r.exitCode !== 0) return err(`claude --bg failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
   let sid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(r.stdout + '\n' + r.stderr)?.[0] ?? ''
@@ -199,8 +201,8 @@ async function create(h: Host, root: string, home: string, i: Input): Promise<Ou
   const t: Thread = { id, title, project: i.project ?? '', state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0 }
   const vars = { id, title, project: t.project, lean: leanDir(home) }
   await h.fs.write(`${dir}/CLAUDE.md`, fill(await template(h, root, 'thread.md'), vars))
-  await ensureGitHooks(h)
-  await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id))
+  const hooks = await ensureGitHooks(h).then(() => true, () => false)
+  await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id, hooks))
   const brief = (i.text ?? '').trim() || title
   await h.fs.write(`${dir}/brief.md`, brief + '\n')
   await save(h, home, t)

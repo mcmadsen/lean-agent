@@ -4,6 +4,7 @@ import type { Host } from './state'
 import { deskState, unconsumed } from './delivery'
 import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
+import { readNotices } from './notices'
 import { isRunning, parseAgents } from './threads'
 import type { Thread } from './threads'
 
@@ -135,6 +136,7 @@ export async function loadView(h: Host): Promise<View> {
   await guard('budget', async () => {
     v.budget = (await loadBudget(h, home)) ?? 'n/a'
   })
+  v.errors.push(...(await readNotices(h)))
   return v
 }
 
@@ -152,5 +154,6 @@ export async function threadStatus(h: Host, id: string): Promise<string> {
   const home = await homeDir(h)
   const n = (await unconsumed(h, home, id)).msgs.length
   const b = (await loadBudget(h, home)) ?? 'budget n/a'
-  return `${id} · ${b} · ${n} unread`
+  const notes = (await readNotices(h)).length
+  return `${id} · ${b} · ${n} unread${notes ? ` · ⚠ ${notes} notice${notes > 1 ? 's' : ''} (see the desk pane)` : ''}`
 }

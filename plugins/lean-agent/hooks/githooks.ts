@@ -4,6 +4,7 @@
 // commit-msg, git-lfs ... keep running. This is a backstop, not a guarantee: `git push --no-verify`, `-c core.hooksPath=`
 // or other GIT_CONFIG_* overrides skip it, so the shell check in guard.ts refuses those in private projects too.
 import { homeDir, leanDir, mkdirp, readJson, realPath } from './state'
+import { setNotice } from './notices'
 import type { Host } from './state'
 
 export const hooksDir = (home: string) => `${leanDir(home)}/githooks`
@@ -19,59 +20,26 @@ export const HOOK_NAMES = [
   'post-receive', 'post-update', 'p4-changelist', 'p4-prepare-changelist', 'p4-post-changelist', 'p4-pre-submit', 'post-merge-commit',
 ]
 
-// private.list: `path <real path>` and `url <lowercased url without .git or trailing />` lines, one per private project
+// private.list (one entry per line, grep-friendly): `path <real path>` and `url <lowercased url without .git or trailing />` per private
+// project; `own <path>` for a project with its own guards.push-deny (even an empty one) and `deny <path>|<glob>` per glob of it
 export const HOOK = `#!/bin/sh
 # lean-agent: runs lean-agent's own check, then chains to the repo's original hook. Written by the mod; edits are overwritten.
 name=$(basename "$0")
 here=$(cd "$(dirname "$0")" && pwd -P)
 norm() { printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's:/*$::; s:\\.git$::'; }
 if [ "$name" = pre-push ]; then
-  # the private registry is read live: projects.json is the truth; private.list is its cache, trusted only while it is
-  # strictly newer than projects.json (else the private entries are parsed straight from projects.json, which lean-agent
-  # writes pretty-printed: 2-space keys per project, 4-space fields). Neither readable: fail closed.
+  # git's ref list ("<local ref> <local sha> <remote ref> <remote sha>" per line) is read once, then handed on to the repo's own hook
+  refs=$(cat)
+  # private.list is the only registry this hook trusts (the mod rewrites it atomically on every change). Missing,
+  # unreadable or older than projects.json: the repo cannot be classified, so the push is refused (fail closed).
   list="$here/private.list"
   lean=$(cd "$here/.." && pwd -P)
   proj="$lean/projects.json"
-  entries=
-  if [ -e "$proj" ] && [ ! -r "$proj" ]; then
-    echo "lean-agent: cannot read $proj: git push is refused (fail closed)" >&2
+  if [ ! -r "$list" ] || { [ -e "$proj" ] && [ "$proj" -nt "$list" ]; }; then
+    echo "lean-agent: the private-project list ($list) is missing, unreadable or older than projects.json, so this repo cannot be classified: git push is refused (fail closed). Open any lean-agent session to refresh it." >&2
     exit 1
   fi
-  if [ -r "$list" ] && { [ ! -e "$proj" ] || [ "$list" -nt "$proj" ]; }; then
-    entries=$(cat "$list")
-  elif [ -r "$proj" ]; then
-    if grep -q '[^[:space:]]' "$proj"; then
-      if [ "$(head -c 1 "$proj")" != "{" ] || { [ "$(wc -l < "$proj")" -lt 1 ] && [ "$(tr -d '[:space:]' < "$proj")" != "{}" ]; }; then
-        echo "lean-agent: cannot parse $proj: git push is refused (fail closed)" >&2
-        exit 1
-      fi
-    fi
-    entries=$(awk -v lean="$lean" '
-      function val(s,   v) { v = s; sub(/^[^:]*:[[:space:]]*"/, "", v); sub(/"[[:space:]]*,?[[:space:]]*$/, "", v); return v }
-      function flush() {
-        if (key != "" && priv) {
-          if (path != "") print "path " path
-          print "path " lean "/worktrees/" key
-          if (remote != "") print "url " remote
-          if (url != "") print "url " url
-        }
-        key = ""
-      }
-      /^  "[^"]*"[[:space:]]*:[[:space:]]*[{]/ { flush(); key = $0; sub(/^  "/, "", key); sub(/".*$/, "", key); path = ""; remote = ""; url = ""; priv = 0; next }
-      /^    "path"[[:space:]]*:/ { path = val($0) }
-      /^    "remote"[[:space:]]*:/ { remote = val($0) }
-      /^    "url"[[:space:]]*:/ { url = val($0) }
-      /^    "private"[[:space:]]*:[[:space:]]*true/ { priv = 1 }
-      END { flush() }' "$proj")
-    # a project path also counts through its symlink-resolved form
-    extra=$(printf '%s\\n' "$entries" | while IFS= read -r line; do
-      case "$line" in "path "*) r=$(cd "\${line#path }" 2>/dev/null && pwd -P) && [ -n "$r" ] && echo "path $r" ;; esac
-    done)
-    entries=$(printf '%s\\n%s\\n' "$entries" "$extra")
-  else
-    echo "lean-agent: cannot read $list or $proj: git push is refused (fail closed)" >&2
-    exit 1
-  fi
+  entries=$(cat "$list")
   top=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
   top=$(cd "$top" && pwd -P)
   urls=$( { git remote -v 2>/dev/null | awk '{print $2}'; printf '%s\\n' "$2"; } | while IFS= read -r u; do [ -n "$u" ] && norm "$u"; echo; done)
@@ -92,6 +60,57 @@ EOF_ENTRIES
     echo "lean-agent: $hit is a private project: git push is refused (no override)" >&2
     exit 1
   fi
+  # guarded branches (release/*, develop, main, master, or the project's own guards.push-deny: own/deny lines of the list);
+  # a push to a local path or file:// URL is not checked unless LEAN_AGENT_PUSH_GUARD_LOCAL=1; LEAN_AGENT_PUSH_GUARD_OVERRIDE=1 skips
+  skip=
+  [ "\${LEAN_AGENT_PUSH_GUARD_OVERRIDE:-}" = 1 ] && skip=1
+  if [ -z "$skip" ] && [ "\${LEAN_AGENT_PUSH_GUARD_LOCAL:-}" != 1 ]; then
+    case "$2" in
+      file://*) skip=1 ;;
+      *://*) ;;
+      *) printf '%s' "$2" | grep -Eq '^([^/@]+@)?[^/:]+:' || skip=1 ;;
+    esac
+  fi
+  if [ -z "$skip" ]; then
+    own=
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in "own "*) v=\${line#own }; v=\${v%/}; case "$top/" in "$v"/*) own=1 ;; esac ;; esac
+    done <<EOF_OWN
+$entries
+EOF_OWN
+    pats=
+    if [ -n "$own" ]; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in "deny "*) v=\${line#deny }; dp=\${v%%|*}; dp=\${dp%/}; case "$top/" in "$dp"/*) pats="$pats
+\${v#*|}" ;; esac ;; esac
+      done <<EOF_DENY
+$entries
+EOF_DENY
+    else
+      pats="release/*
+develop
+main
+master"
+    fi
+    while IFS= read -r ref || [ -n "$ref" ]; do
+      [ -n "$ref" ] || continue
+      rref=$(printf '%s' "$ref" | awk '{print $3}')
+      case "$rref" in refs/heads/*) ;; *) continue ;; esac
+      branch=\${rref#refs/heads/}
+      while IFS= read -r g; do
+        [ -n "$g" ] || continue
+        case "$branch" in
+          $g)
+            echo "lean-agent: git push would update $branch, which lean-agent never pushes to (guard '$g'). Push your own branch and open a pull request." >&2
+            exit 1 ;;
+        esac
+      done <<EOF_PATS
+$pats
+EOF_PATS
+    done <<EOF_REFS
+$refs
+EOF_REFS
+  fi
 fi
 # chain: the repo's effective core.hooksPath (local, then global, then system config; lean-agent's own env override is
 # not a config file, so it is never seen here) else <common git dir>/hooks
@@ -110,11 +129,17 @@ fi
 [ -d "$orig" ] || exit 0
 orig=$(cd "$orig" && pwd -P)
 [ "$orig" = "$here" ] && exit 0
-if [ -f "$orig/$name" ] && [ -x "$orig/$name" ]; then exec "$orig/$name" "$@"; fi
+if [ -f "$orig/$name" ] && [ -x "$orig/$name" ]; then
+  if [ "$name" = pre-push ]; then
+    if [ -n "$refs" ]; then printf '%s\\n' "$refs" | "$orig/$name" "$@"; else "$orig/$name" "$@" </dev/null; fi
+    exit $?
+  fi
+  exec "$orig/$name" "$@"
+fi
 exit 0
 `
 
-type Proj = { path?: string; private?: boolean; remote?: string; url?: string }
+type Proj = { path?: string; private?: boolean; remote?: string; url?: string; guards?: { 'push-deny'?: unknown } }
 const normUrl = (u: string) => u.trim().toLowerCase().replace(/\/+$/, '').replace(/\.git$/, '')
 
 // the cache of projects.json's private entries (the pre-push hook also reads projects.json itself when it is newer)
@@ -123,13 +148,20 @@ export async function privateList(h: Host, home: string): Promise<string> {
   const lean = await realPath(h, leanDir(home))
   const out: string[] = []
   for (const [k, v] of Object.entries(projs ?? {})) {
-    if (!v || typeof v !== 'object' || v.private !== true) continue
-    if (v.path) {
-      out.push(`path ${await realPath(h, v.path)}`)
-      out.push(`path ${v.path.replace(/\/+$/, '')}`)
+    if (!v || typeof v !== 'object') continue
+    const paths: string[] = []
+    if (v.path) paths.push(await realPath(h, v.path), v.path.replace(/\/+$/, ''))
+    if (/^[\w.-]+$/.test(k)) paths.push(`${lean}/worktrees/${k}`)
+    if (v.private === true) {
+      for (const p of paths) out.push(`path ${p}`)
+      for (const u of [v.remote, v.url]) if (typeof u === 'string' && u.trim()) out.push(`url ${normUrl(u)}`)
     }
-    if (/^[\w.-]+$/.test(k)) out.push(`path ${lean}/worktrees/${k}`)
-    for (const u of [v.remote, v.url]) if (typeof u === 'string' && u.trim()) out.push(`url ${normUrl(u)}`)
+    const pd = v.guards?.['push-deny']
+    if (Array.isArray(pd))
+      for (const p of paths) {
+        out.push(`own ${p}`)
+        for (const g of pd) if (typeof g === 'string' && g && !/[\n|]/.test(g)) out.push(`deny ${p}|${g}`)
+      }
   }
   return [...new Set(out)].join('\n') + '\n'
 }
@@ -149,7 +181,19 @@ async function putAtomic(h: Host, path: string, text: string, exec: boolean): Pr
   if (r.exitCode !== 0) { await h.process.run(['rm', '-f', tmp]); throw new Error(`atomic write to ${path} failed`) }
 }
 
+// chmod 755 is re-applied to every wrapper on EVERY call (cheap), even when its content is unchanged: one that lost +x
+// is skipped by git silently. Throws when the wrappers cannot be made ready (the caller must then not point git at them).
 export async function ensureGitHooks(h: Host): Promise<void> {
+  try {
+    await writeGitHooks(h)
+  } catch (e) {
+    await setNotice(h, 'githooks', `lean-agent: git hooks not installed (${String((e as Error)?.message ?? e).slice(0, 160)}); push protection is off, thread sessions use the repo's own hooks`)
+    throw e
+  }
+  await setNotice(h, 'githooks', null)
+}
+
+async function writeGitHooks(h: Host): Promise<void> {
   const home = await homeDir(h)
   const dir = hooksDir(home)
   await mkdirp(h, dir)
@@ -157,5 +201,7 @@ export async function ensureGitHooks(h: Host): Promise<void> {
     const have = await h.fs.read(`${dir}/${n}`).catch(() => null)
     if (have !== HOOK) await putAtomic(h, `${dir}/${n}`, HOOK, true)
   }
+  const c = await h.process.run(['chmod', '755', ...HOOK_NAMES.map(n => `${dir}/${n}`)])
+  if (c.exitCode !== 0) throw new Error(`chmod 755 on the git hook wrappers in ${dir} failed`)
   await putAtomic(h, `${dir}/${LIST}`, await privateList(h, home), false)
 }

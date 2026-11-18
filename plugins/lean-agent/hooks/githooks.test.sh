@@ -51,48 +51,59 @@ chmod 755 "$root/app/.husky/pre-push"
 git -C "$root/app" config core.hooksPath .husky
 push "$root/app" >/dev/null || { echo "FAIL: push with husky refused"; exit 1; }
 grep -q husky-pre-push "$root/log" || { echo "FAIL: husky hook did not run"; exit 1; }
-# live registry: projects.json newer than private.list is parsed directly (private path, remote, worktree by key)
+# the registry: only private.list is trusted. projects.json newer than the list (in ANY layout, even one line) fails closed
+# with how to refresh; a list at least as new as projects.json is used.
 git -C "$root/app" config --unset core.hooksPath
-mk late; mk viaurl; mkdir -p "$lean/worktrees/wt"
+mk late; mk viaurl
 push "$root/late" >/dev/null || { echo "FAIL: late project should push before registration"; exit 1; }
 sleep 1
-cat > "$lean/projects.json" <<JSON
-{
-  "late": {
-    "path": "$root/late",
-    "private": true
-  },
-  "viaurl": {
-    "path": "$root/viaurl-x",
-    "remote": "$root/VIAURL.git/",
-    "private": true
-  },
-  "open": {
-    "path": "$root/app",
-    "private": false
-  },
-  "wt": {
-    "path": "$root/nowhere",
-    "private": true
-  }
-}
-JSON
-if out=$(push "$root/late"); then echo "FAIL: live projects.json ignored (private path)"; exit 1; fi
-echo "$out" | grep -q 'private project' || { echo "FAIL: no refusal text for live path: $out"; exit 1; }
-if push "$root/viaurl" >/dev/null; then echo "FAIL: live projects.json ignored (remote)"; exit 1; fi
-push "$root/app" >/dev/null || { echo "FAIL: non-private project refused by live parse"; exit 1; }
-# a list newer than projects.json is trusted again
+printf '{"late":{"path":"%s","private":true},"open":{"path":"%s","private":false}}' "$root/late" "$root/app" > "$lean/projects.json"
+if out=$(push "$root/app"); then echo "FAIL: stale private.list (one-line projects.json) allowed a push"; exit 1; fi
+echo "$out" | grep -q 'Open any lean-agent session' || { echo "FAIL: no refresh hint: $out"; exit 1; }
 sleep 1
-printf 'path %s\n' "$root/secret" > "$lean/githooks/private.list"
-push "$root/late" >/dev/null || { echo "FAIL: fresh list should win over older projects.json"; exit 1; }
-# neither readable: fail closed
-touch "$lean/projects.json"; chmod 000 "$lean/projects.json"
-if [ "$(id -u)" != 0 ]; then
-  if push "$root/app" >/dev/null; then echo "FAIL: unreadable projects.json allowed a push"; exit 1; fi
-fi
-chmod 644 "$lean/projects.json"; rm "$lean/projects.json"; mv "$lean/githooks/private.list" "$lean/githooks/private.list.off"
-if push "$root/app" >/dev/null; then echo "FAIL: no registry at all allowed a push"; exit 1; fi
+printf 'path %s\nurl %s\n' "$root/late" "$(printf '%s' "$root/VIAURL.git/" | tr 'A-Z' 'a-z' | sed 's:/*$::; s:\.git$::')" > "$lean/githooks/private.list"
+if out=$(push "$root/late"); then echo "FAIL: fresh list ignored (private path)"; exit 1; fi
+echo "$out" | grep -q 'private project' || { echo "FAIL: no refusal text for list path: $out"; exit 1; }
+git -C "$root/viaurl" remote set-url origin "$root/VIAURL.git/"
+if push "$root/viaurl" >/dev/null; then echo "FAIL: list url ignored"; exit 1; fi
+push "$root/app" >/dev/null || { echo "FAIL: non-private project refused by fresh list"; exit 1; }
+# unreadable / missing list: fail closed
+mv "$lean/githooks/private.list" "$lean/githooks/private.list.off"
+if push "$root/app" >/dev/null; then echo "FAIL: no list at all allowed a push"; exit 1; fi
 mv "$lean/githooks/private.list.off" "$lean/githooks/private.list"
+# guarded branches (0.45 test_push_guards as specs): plain pushes refused, other branches pass, own list replaces defaults,
+# local destinations and the override variable skip; the repo's own pre-push hook still gets git's ref list on stdin
+touch "$lean/githooks/private.list"
+Z=0000000000000000000000000000000000000000
+hook() { # hook <repo> <url> <remote branch>: run the pre-push hook directly with git's stdin format
+  r=$1; u=$2; br=$3
+  printf 'refs/heads/topic %s refs/heads/%s %s\n' "$Z" "$br" "$Z" | (cd "$r" && env HOME="$root" "$lean/githooks/pre-push" origin "$u" 2>&1)
+}
+R=git@github.com:o/r.git
+for b in main master develop release/1.0; do
+  if out=$(hook "$root/app" $R "$b"); then echo "FAIL: push to $b allowed"; exit 1; fi
+  echo "$out" | grep -q 'Push your own branch and open a pull request' || { echo "FAIL: no guard text for $b: $out"; exit 1; }
+done
+for b in feature bugfix/b-1 maintenance; do hook "$root/app" $R "$b" >/dev/null || { echo "FAIL: push to $b refused"; exit 1; }; done
+# local destinations are not checked unless LEAN_AGENT_PUSH_GUARD_LOCAL=1; the override variable skips the check
+hook "$root/app" "$root/app.git" main >/dev/null || { echo "FAIL: local destination was checked"; exit 1; }
+hook "$root/app" file:///srv/x.git main >/dev/null || { echo "FAIL: file:// destination was checked"; exit 1; }
+if printf 'refs/heads/t %s refs/heads/main %s\n' "$Z" "$Z" | (cd "$root/app" && env HOME="$root" LEAN_AGENT_PUSH_GUARD_LOCAL=1 "$lean/githooks/pre-push" origin "$root/app.git" >/dev/null 2>&1); then echo "FAIL: LOCAL=1 ignored"; exit 1; fi
+printf 'refs/heads/t %s refs/heads/main %s\n' "$Z" "$Z" | (cd "$root/app" && env HOME="$root" LEAN_AGENT_PUSH_GUARD_OVERRIDE=1 "$lean/githooks/pre-push" origin $R >/dev/null 2>&1) || { echo "FAIL: override ignored"; exit 1; }
+# a project's own guards.push-deny (own/deny lines) replaces the defaults, even when empty
+printf 'own %s\ndeny %s|prod-*\n' "$root/app" "$root/app" > "$lean/githooks/private.list"
+hook "$root/app" $R main >/dev/null || { echo "FAIL: own list should replace the defaults"; exit 1; }
+if hook "$root/app" $R prod-1 >/dev/null; then echo "FAIL: own deny glob ignored"; exit 1; fi
+printf 'own %s\n' "$root/app" > "$lean/githooks/private.list"
+hook "$root/app" $R main >/dev/null || { echo "FAIL: empty own list should allow main"; exit 1; }
+# the repo's own pre-push hook still receives git's ref list on stdin and its exit code
+mkdir -p "$root/app/.git/hooks"
+printf '#!/bin/sh\ncat > "%s/stdin"\nexit 3\n' "$root" > "$root/app/.git/hooks/pre-push"
+chmod 755 "$root/app/.git/hooks/pre-push"
+: > "$lean/githooks/private.list"
+if hook "$root/app" $R feature >/dev/null; then echo "FAIL: repo pre-push exit code lost"; exit 1; fi
+grep -q 'refs/heads/feature' "$root/stdin" || { echo "FAIL: repo pre-push did not get the ref list"; exit 1; }
+rm "$root/app/.git/hooks/pre-push"
 # the chain honours a global core.hooksPath (and ignores lean-agent's own env override)
 mkdir "$root/ghooks"
 printf '#!/bin/sh\necho global-pre-commit >> "%s/log"\n' "$root" > "$root/ghooks/pre-commit"
