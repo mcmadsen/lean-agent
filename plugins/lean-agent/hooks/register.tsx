@@ -12,6 +12,8 @@ import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
 import { checkStale, syncRules } from './rules'
 import { readJson, threadsDir } from './state'
+import { squeezeResult, trimTools } from './squeeze'
+import { readConfig } from './budget'
 
 let notified = 0
 let role: Role = { kind: 'plain' }
@@ -144,6 +146,21 @@ export const register: Register = on => {
   })
 
   registerPane(on)
+
+  // the tool pool per role: config.json `tools.<role>.drop` (globs); lean-agent's own tools stay
+  on('tool.list', async ($, e: any, next) => {
+    const list: any[] = await next(e)
+    try {
+      const h = hostOf($)
+      const cfg: any = await readConfig(h, await homeDir(h))
+      return trimTools(list, role.kind, cfg.tools)
+    } catch {
+      return list
+    }
+  })
+
+  // a long Bash result is squeezed after the call; the full text is saved under ~/.lean-agent/output/
+  on('tool.call', { tool: 'Bash' }, async ($, e: any, next) => squeezeResult(hostOf($), await next(e)))
 
   on('tool.call', { tool: `mcp__lean-agent__${TOOL}` }, async ($, e: any) => {
     const h = hostOf($)
