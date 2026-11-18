@@ -16,7 +16,7 @@ export type AnswerRow = { n: number; rec: DeskRec; unread: boolean }
 // working: the session is busy or reports state working (never closed from the pane); done: the thread's LAST record is a done report
 // (a later question or progress makes it not done); asking: its last record is a question or one is unread; needsYou: the session
 // waits on a prompt nobody answers (open it in the app)
-export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number }
+export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; checkpoints?: number }
 export type ClosedRow = { id: string; title: string; last: string }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
@@ -155,6 +155,7 @@ export async function loadView(h: Host): Promise<View> {
         blocked: !!lr && lr.kind === 'report' && lr.state === 'blocked',
         needsYou: !!ag?.needsYou && !paused,
         ...(paused ? { pausedUntil: paused.resetAt } : {}),
+        ...(typeof t.checkpoints === 'number' && t.checkpoints > 0 ? { checkpoints: t.checkpoints } : {}), // continued in a fresh session because the context grew large
       })
     }
   })

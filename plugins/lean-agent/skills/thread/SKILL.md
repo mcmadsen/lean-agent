@@ -39,4 +39,6 @@ most once per 30 seconds; a parked or closed thread only queues. Report what the
 
 Reports: what a thread reports or asks reaches the desk. While the desk is idle, a question or a `done` / `blocked` report starts one desk turn by itself (at most once a minute, never over a running turn, never for `working` progress; `desk.autoRelay: false` in `config.json` turns that off, then reports arrive with the user's next message). Relay them: ask each question with AskUserQuestion, then `send` the answer.
 
+Checkpoints (automatic, nothing to call): a thread whose context passed `checkpoint.threadTokens` (default 100000) reports with `lean_report` state `checkpoint`; the desk's own tick then starts a NEW session for the same tN with a handover (like a reopen) and stops the old one, and the pane row shows "checkpoint N". A checkpoint report is not a question or a done report: nothing to relay. Do not `resume` or `send` to a thread to "wake" it during that: the tick does it within seconds.
+
 Closing: when a thread reports done and the user needs nothing more, close it yourself (`close tN`) and clear its goal (`goal-clear`). Never ask a thread to close itself: it cannot, it only reports done.

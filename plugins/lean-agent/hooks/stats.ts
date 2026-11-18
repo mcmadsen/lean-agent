@@ -69,6 +69,17 @@ export async function statsText(h: Host, opts: { days?: number; project?: string
   out.push(...table(`by role (${n}d)`, sum.role))
   out.push(...table(`by agent (${n}d; main = the session itself)`, sum.agent))
   out.push(...table(`by thread (${n}d)`, sum.tN))
+  // checkpoints (checkpoint.ts): threads that continued in a fresh session because their context grew large (all time, from thread.json)
+  const cks: string[] = []
+  let ckTotal = 0
+  for (const e of (await h.fs.list(threadsDir(home)).catch(() => [] as { name: string }[])).filter(x => /^t\d+$/.test(x.name)).sort((a, b) => Number(a.name.slice(1)) - Number(b.name.slice(1)))) {
+    const c = (await readJson<{ checkpoints?: unknown } | null>(h, `${threadsDir(home)}/${e.name}/thread.json`, null))?.checkpoints
+    if (typeof c === 'number' && c > 0) {
+      cks.push(`${e.name} ${c}`)
+      ckTotal += c
+    }
+  }
+  if (cks.length) out.push(`checkpoints: ${ckTotal} (${cks.join(', ')})`)
   // rules
   const projects = await readJson<Record<string, unknown>>(h, `${leanDir(home)}/projects.json`, {})
   const names = opts.project ? [opts.project].filter(p => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p) && !p.includes('..')) : Object.keys(projects && typeof projects === 'object' ? projects : {}).filter(p => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p))

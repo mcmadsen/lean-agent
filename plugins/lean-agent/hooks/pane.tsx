@@ -12,6 +12,7 @@ import { skillStat } from './skilltrim'
 import { exportFeedback } from './feedbackexport'
 import { NEXT_STEP, bounded, openDesk, setupCheck, setupFix, setupText } from './setup'
 import type { Role } from './role'
+import { contextSize, deskNote, kTokens } from './checkpoint'
 
 export const PANE = 'lean-agent'
 export const VERSION = '1.0.5'
@@ -402,6 +403,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
               <Box key={`t-${t.id}`}>
                 <Text>
                   {t.id}{t.model ? ` · ${t.model}/${t.effort}` : ''} {short(t.title, 30)} [{t.run}] <Text dimColor>{short(t.last, 50)}</Text>
+                  {t.checkpoints ? <Text dimColor> checkpoint {t.checkpoints}</Text> : null}
                   {t.needsYou ? <Text color="yellow"> needs you: open it in the app</Text> : null}
                   {t.pausedUntil ? <Text color="yellow"> paused until {fmtUntil(t.pausedUntil, now2)}</Text> : null}
                 </Text>
@@ -440,7 +442,9 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         {!!notice && !errors.includes(notice) && <Text color="yellow">{notice}</Text>}
         <Text dimColor>
           lean-agent {VERSION} · refreshed {lastRefresh || 'never'} · last error: {lastError || 'none'} · budget today: {v?.budget ?? 'n/a'}
+          {contextSize() > 0 ? ` · desk context ${kTokens(contextSize())}` : ''}
         </Text>
+        {!!deskNote() && <Text color="yellow">{deskNote()}</Text>}
       </Box>
     )
   })

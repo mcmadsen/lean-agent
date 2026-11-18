@@ -45,7 +45,7 @@ test('a session started in a spare folder gets the desk tools once it moves to t
   expect(s.timers).toEqual([])
   await s.move('/h/lean-agent-desk')
   expect(deskTools(s.reg)).toEqual(['lean_doctor', 'lean_thread'])
-  expect(s.timers.filter(m => m === 10_000 || m === 60_000 || m === 30_000).sort()).toEqual([10_000, 30_000, 60_000, 60_000]) // reports/sweep, schedule, chaser, usage-limit resume
+  expect(s.timers.filter(m => m === 10_000 || m === 60_000 || m === 30_000).sort()).toEqual([10_000, 30_000, 30_000, 60_000, 60_000]) // reports/sweep (and checkpoints), desk context, schedule, chaser, usage-limit resume
   const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any)
   expect(JSON.stringify(r)).toContain('t1')
 })
