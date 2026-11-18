@@ -398,6 +398,8 @@ test('git -C reaches the session folder, ~/.lean-agent and registered projects o
   expect(await bash('git -C /h/.lean-agent/worktrees/app/t1 log -3')).toBeNull()
   expect(await bash('git -C /h/code/other ls-files')).toContain('granted')
   expect(await bash('git -C /etc log')).toContain('granted')
+  expect(await bash('git -C sub log')).toContain('granted') // relative: it would resolve against the agent's own cwd
+  expect(await bash('git diff --no-ind a b')).toContain('granted')
 })
 
 test('an unknown or root session cwd widens no git -C root; a desk subagent without a type is refused as unresolved', async () => {

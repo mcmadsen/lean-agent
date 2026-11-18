@@ -354,7 +354,7 @@ export const builtinGit = (t?: string): string[] => {
 // long options git accepts by any unambiguous prefix: --out, --output=f, --ext, --ext-diff, --exec, --exec-path ...
 const BAD_LONG = (o: string, sub: string) =>
   /^(config|work-tree|no-index|upload-pack|receive-pack|paginate|help|textconv-)/.test(o) || (sub !== 'rev-parse' && /^git-dir/.test(o)) || (/^output/.test(o) && !/^output-indicator-/.test(o)) ||
-  (o.length > 0 && ('output'.startsWith(o) || 'ext-diff'.startsWith(o) || 'exec-path'.startsWith(o) || 'help'.startsWith(o))) || /^exec/.test(o) || /^ext-d/.test(o)
+  (o.length > 0 && ('output'.startsWith(o) || 'ext-diff'.startsWith(o) || 'exec-path'.startsWith(o) || 'help'.startsWith(o) || 'no-index'.startsWith(o))) || /^exec/.test(o) || /^ext-d/.test(o)
 // -o <file> (git has no -o for log/diff/show, the spec refuses it anyway) and -h (help starts a pager)
 const SHORT_O = (a: string) => a.startsWith('-o') || a === '-h'
 // where `git -C <dir>` may point: the session folder, ~/.lean-agent (threads, worktrees) and the registered projects' folders
@@ -378,7 +378,7 @@ async function builtinReadOnly($: Host, ctx: Ctx, c: string): Promise<boolean> {
   let seenC = false // one -C only (git chains them)
   for (; i < w.length && w[i]!.startsWith('-'); ) {
     if (w[i] === '--no-pager') i++
-    else if (w[i] === '-C' && w[i + 1] && !seenC && !w[i + 1]!.split('/').includes('..')) {
+    else if (w[i] === '-C' && w[i + 1] && !seenC && w[i + 1]!.startsWith('/') && !w[i + 1]!.split('/').includes('..')) {
       seenC = true
       const d = await resolve($, w[i + 1]!, ctx.cwd)
       if (!(await cRoots($, ctx)).some(r => within(d, r))) return false
@@ -400,7 +400,7 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
   const edits = e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'NotebookEdit'
   if (e.tool === 'AskUserQuestion') return 'lean-agent: a subagent never asks the user; report the question to the thread'
   if (isReader(t)) {
-    if (edits) return `lean-agent: ${t} is read-only`
+    if (edits) return t === 'unresolved' ? 'lean-agent: agent type unresolved, so it is a reader (read-only); report this with the debug log line "agent fields"' : `lean-agent: ${t} is read-only`
     if (e.tool === 'Bash') {
       const c = String(e.command ?? '').trim()
       if (t === 'unresolved') return 'lean-agent: agent type unresolved, so it is a reader with no grants; report this (feedback skill) with the debug log line "agent fields"'

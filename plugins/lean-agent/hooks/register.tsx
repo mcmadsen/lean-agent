@@ -111,8 +111,9 @@ async function agentType($: any, id?: string, ev?: any): Promise<string | undefi
     /* an unreadable list leaves the type unresolved */
   }
   const t = typeOfAgent(l, id, ev)
-  if (!shown.has(id + t)) {
-    shown.add(id + t) // once per agent: the fields the guard sees, names only (debug log, for a report)
+  if (!shown.has(`${id}\0${t}`)) {
+    shown.size > 500 && shown.clear()
+    shown.add(`${id}\0${t}`) // once per agent: the fields the guard sees, names only (debug log, for a report)
     const a: any = (Array.isArray(l) ? l : []).find(x => x?.id === id || x?.agentId === id)
     try {
       $.ui.log(`lean-agent: agent fields ${JSON.stringify({ resolved: t, id, listed: !!a, type: a?.type, subagentType: a?.subagentType, agentType: a?.agentType, name: a?.name, keys: a ? Object.keys(a) : [], event: Object.keys(ev ?? {}), event_agent_type: ev?.agent_type ?? ev?.agentType })}`, { to: 'debug' })
