@@ -524,9 +524,9 @@ test('search: attached and clustered -e/-f, symlink-following flags, recursion w
   const thread = { kind: 'thread', id: 't1' } as any
   const at = (cwd: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, cwd, 'lean-agent:reader-haiku', 'x1')
   const lean = at('/h/.lean-agent/worktrees/app/t1')
-  for (const c of ['grep -rf /etc/passwd src', 'rg -nf/etc/shadow x', 'rg -nfpats x src', 'grep -ePAT src', 'rg -L secret src', 'rg --follow secret src', 'grep -R x src', 'grep --dereference-recursive x src', 'find -L . -name x', 'find -H . -name x', 'find . -follow', "find . -exec ls '{}' ';'", "find . -execdir ls '{}' ';'", "find . -ok ls '{}' ';'", "find . -okdir ls '{}' ';'", 'tail --fo x', 'tail --ret x', 'tail --follow=name x'])
+  for (const c of ['grep -rf /etc/passwd src', 'rg -nf/etc/shadow x', 'rg -nfpats x src', 'rg -L secret src', 'rg --follow secret src', 'grep -R x src', 'grep --dereference-recursive x src', 'find -L . -name x', 'find -H . -name x', 'find . -follow', "find . -exec ls '{}' ';'", "find . -execdir ls '{}' ';'", "find . -ok ls '{}' ';'", "find . -okdir ls '{}' ';'", 'tail --fo x', 'tail --ret x', 'tail --follow=name x'])
     expect(await lean(c), c).toContain('granted')
-  for (const c of ["grep -rn -e '/api' src", "rg -e 'a..b' src", "grep -rn 'foo\\|bar' src", 'grep -rn "\\bword\\b" src', 'git log HEAD~1', 'git diff @{u}', 'git log -3 --format="%h %s"', "rg 'x|y' src | head -3"])
+  for (const c of ['grep -ePAT src', "grep -rn -e '/api' src", "rg -e 'a..b' src", "grep -rn 'foo\\|bar' src", 'grep -rn "\\bword\\b" src', 'git log HEAD~1', 'git diff @{u}', 'git log -3 --format="%h %s"', "rg 'x|y' src | head -3"])
     expect(await lean(c), c).toBeNull()
   for (const c of ['git log {a,b}', 'git log {1..3}', 'git log ~x', 'cat ~/x'])
     expect(await lean(c), c).toContain('granted')
@@ -556,4 +556,17 @@ test('search: separate-value options do not shift the pattern; rg --files; grep 
   const desk = { kind: 'desk' } as any
   expect(await run(h, desk, { tool: 'Bash', command: 'cat /h/.lean-agent/memory/notes.jsonl | grep foo' }, '/h/lean-agent-desk')).toBeNull()
   expect(await run(h, desk, { tool: 'Bash', command: 'grep foo' }, '/h/lean-agent-desk')).toContain('route this')
+})
+
+test('search: every flag must be on the command\'s own list (the reviewers\' bypass shapes)', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/h/code/app' } }))
+  const thread = { kind: 'thread', id: 't1' } as any
+  const at = (cwd: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, cwd, 'lean-agent:reader-haiku', 'x1')
+  const app = at('/h/code/app/src')
+  for (const c of ['rg -v -- -x /etc/shadow', 'grep -rv -- -x /etc', 'grep -rv - /etc', 'rg -v - /etc', 'grep -r --color pat /etc', 'grep -r -5f /etc/passwd src', 'grep /etc -rn5e pat', 'ls -RL .', 'ls -L .', 'ls -H .', 'ls --dereference .', 'ls -I x', 'tail -5f x', 'rg --ignore-file /etc/x pat', 'rg -f /etc/x pat', 'grep -f /etc/x pat', 'rg --type-add x:y pat', 'rg -z pat', 'find . -newer /etc/passwd', 'find . -name', 'wc -c --files0-from=x', 'head --foo x', 'cat -f x', 'grep -d recurse x', 'rg --pat x'])
+    expect(await app(c), c).toContain('granted')
+  const home = at('/h')
+  for (const c of ['rg -vnA 2 .lean-agent', 'grep -rvnA 2 .lean-agent', 'find -name .lean-agent/x', 'ls -w 80', 'ls', 'rg -v pat', 'grep -r pat', 'grep pat']) expect(await home(c), c).toContain('granted')
+  for (const c of ['rg -- -x src', 'grep -rv -e -x src', 'grep -rn -A 2 -m 3 foo .', 'find . -newer a.ts -name x', 'find src -type f -mtime -1 -name "*.ts"', 'ls -RFh src', 'head -n 5 a.ts', 'tail -c 20 a.ts', 'wc -lw a.ts', 'cat -n a.ts', 'rg -C3 foo', 'rg --max-count=2 -ni foo src']) expect(await app(c), c).toBeNull()
 })

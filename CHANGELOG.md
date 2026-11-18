@@ -14,9 +14,11 @@
 - **Read-only search without Grep/Glob.** This Claude Code build has neither tool. `lean-agent:reader-*`, `reviewer` and
   `explorer` now always run `rg`, `grep`, `find` (not `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fprint*`, `-fls`),
   `ls`, `wc`, `head`, `tail`, `cat` on paths inside `~/.lean-agent` (thread folders, worktrees) or a registered project (the session
-  folder alone is no root), without symlink-following flags, and pipes
+  folder alone is no root), and pipes
   between such commands (and the built-in git reads). A strict scanner proves each pipeline plain: no redirect, substitution,
-  `;`/`&`/`||`, and no unquoted glob, `{a,b}` brace expansion, word-initial tilde or `$`; quote patterns. The desk may run the same under `~/.lean-agent`.
+  `;`/`&`/`||`, and no unquoted glob, `{a,b}` brace expansion, word-initial tilde or `$`; quote patterns. Each command has an allow-list of flags (and `find` of predicates): any other flag, abbreviation or
+  cluster letter refuses the command, so there is no `-exec`, `-delete`, `-fprint*`, `-L`/`-H`/`--follow`, `-f`/`--file`,
+  `--pre`, `-z`, `tail -f`, `--files0-from`; any `..` word is refused. The desk may run the same under `~/.lean-agent`.
   The agent prompts, the learn / review / find / lean-mode skills and the templates say so.
 - An Agent call for one of our agent types with `allow-cmd` / `allow-edit` lines from a session that cannot own grants (not a
   thread's own loop) is refused up front, with the reason.

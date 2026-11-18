@@ -393,75 +393,91 @@ async function cRoots($: Host, ctx: Ctx): Promise<string[]> {
 // (shell.ts plainPipeline) proves plain and that are each allowed here. Relative words resolve against the session cwd, which must
 // itself be inside the roots when a command names no path.
 const SEARCH_CMDS = new Set(['rg', 'grep', 'find', 'ls', 'wc', 'head', 'tail', 'cat'])
-const FIND_BAD = new Set(['-exec', '-execdir', '-ok', '-okdir', '-delete', '-fprint', '-fprint0', '-fprintf', '-fls', '-L', '-H', '-follow', '-files0-from']) // exec / write / follow symlinks / read a path list
-const RG_BAD = /^--(pre|pre-glob|hostname-bin|search-zip|follow)(=|$)|^-[A-Za-z]*[zL]/ // runs a program or a decompressor, follows symlinks
-const GREP_BAD = /^--(dereference-recursive|devices|binary-files)(=|$)|^-[A-Za-z]*R/ // -R follows symlinks
-const TAIL_BAD = /^--[fr]|^-[A-Za-z]*[fF]/ // --follow / --retry and their abbreviations, -f, -F
-// grep takes its long options by ANY unambiguous prefix (--fil = --file): only these exact names pass
-const GREP_LONG = new Set(['ignore-case', 'line-number', 'recursive', 'include', 'exclude', 'exclude-dir', 'count', 'files-with-matches', 'files-without-match', 'no-filename', 'with-filename', 'invert-match', 'word-regexp', 'fixed-strings', 'extended-regexp', 'perl-regexp', 'basic-regexp', 'max-count', 'context', 'after-context', 'before-context', 'only-matching', 'quiet', 'silent', 'no-messages', 'null', 'color', 'colour', 'regexp', 'file', 'text', 'no-ignore-case', 'line-buffered', 'initial-tab', 'byte-offset', 'label', 'null-data'])
-// options that take their value as the NEXT word (so that word is not the pattern): -m 1, -A 2, -g '*.ts', --max-count 1 ...
-const VAL_SHORT = { rg: 'ABCmgtTjrMEdDfe', grep: 'ABCmdDfe' } as const
-const VAL_LONG = new Set(['max-count', 'glob', 'iglob', 'type', 'type-not', 'type-add', 'context', 'after-context', 'before-context', 'replace', 'threads', 'max-depth', 'maxdepth', 'max-columns', 'max-filesize', 'encoding', 'sort', 'sortr', 'regexp', 'file', 'ignore-file', 'include', 'exclude', 'exclude-dir', 'label', 'color', 'colors', 'dfa-size-limit', 'regex-size-limit', 'context-separator', 'path-separator', 'field-context-separator', 'field-match-separator', 'engine', 'pcre2-version', 'directories', 'devices'])
-const PATH_VALUE = /^(-f|--file|--ignore-file)$/ // the value is a file that is read: a path
+// Every flag a built-in search command may carry is listed here; ANY other flag (or abbreviation, or cluster letter) refuses the
+// command, so no option can shift which word is a pattern, read a file, run a program, write, or follow a symlink out of the roots.
+// no: letters without a value; val: letters whose value is attached or the next word; lnone / lval: long names without / with a value
+// (`--name=v` or `--name v`); digits: `-5` / `-A5` style counts.
+type Spec = { no: string; val: string; lnone: string[]; lval: string[]; digits?: boolean }
+const SPECS: Record<string, Spec> = {
+  rg: { no: 'nNiSslcvwxFoqIuUHha', val: 'ABCmgtTMde', digits: true,
+    lnone: ['hidden', 'files', 'no-ignore', 'no-ignore-vcs', 'no-ignore-parent', 'no-ignore-dot', 'ignore-case', 'case-sensitive', 'smart-case', 'line-number', 'no-line-number', 'count', 'files-with-matches', 'files-without-match', 'fixed-strings', 'word-regexp', 'line-regexp', 'invert-match', 'only-matching', 'heading', 'no-heading', 'column', 'with-filename', 'no-filename', 'no-messages', 'sort-files', 'trim', 'type-list', 'stats', 'text', 'multiline', 'unrestricted', 'vimgrep', 'no-config', 'crlf'],
+    lval: ['max-count', 'glob', 'iglob', 'type', 'type-not', 'context', 'after-context', 'before-context', 'regexp', 'max-depth'] },
+  grep: { no: 'rnilLcvwxFEGoqsHhIaTbU', val: 'ABCme', digits: true,
+    lnone: ['ignore-case', 'no-ignore-case', 'line-number', 'recursive', 'count', 'files-with-matches', 'files-without-match', 'no-filename', 'with-filename', 'invert-match', 'word-regexp', 'fixed-strings', 'extended-regexp', 'perl-regexp', 'basic-regexp', 'only-matching', 'quiet', 'silent', 'no-messages', 'null', 'color', 'colour', 'text', 'line-buffered', 'initial-tab', 'byte-offset', 'null-data'],
+    lval: ['include', 'exclude', 'exclude-dir', 'max-count', 'context', 'after-context', 'before-context', 'regexp'] },
+  ls: { no: 'laAhrRtSsd1FpiknGCxXuUcvmq', val: '', lnone: ['all', 'almost-all', 'human-readable', 'recursive', 'reverse', 'directory', 'classify', 'color'], lval: [] },
+  cat: { no: 'nbsAETv', val: '', lnone: ['number', 'number-nonblank', 'squeeze-blank', 'show-all', 'show-ends', 'show-tabs'], lval: [] },
+  head: { no: 'qv', val: 'nc', digits: true, lnone: ['quiet', 'silent', 'verbose'], lval: ['lines', 'bytes'] },
+  tail: { no: 'qv', val: 'nc', digits: true, lnone: ['quiet', 'silent', 'verbose'], lval: ['lines', 'bytes'] }, // no -f / -F / --follow / --retry
+  wc: { no: 'lwcmL', val: '', lnone: ['lines', 'words', 'bytes', 'chars', 'max-line-length'], lval: [] },
+}
+// find: starting points are the words before the first predicate; only these predicates (argument count) exist for us
+const FIND_PRED: Record<string, number> = { '-name': 1, '-iname': 1, '-path': 1, '-ipath': 1, '-wholename': 1, '-regex': 1, '-type': 1, '-maxdepth': 1, '-mindepth': 1, '-size': 1, '-mtime': 1, '-atime': 1, '-ctime': 1, '-mmin': 1, '-user': 1, '-group': 1, '-perm': 1, '-newer': 1, '-empty': 0, '-print': 0, '-print0': 0, '-prune': 0, '-not': 0, '-a': 0, '-o': 0, '-true': 0, '-false': 0, '-readable': 0, '-writable': 0, '-executable': 0, '-depth': 0, '-xdev': 0, '-mount': 0 }
+
 async function pathOk($: Host, ctx: Ctx, roots: string[], word: string): Promise<boolean> {
   if (!ctx.cwd || ctx.cwd === '/' || word.split('/').includes('..')) return false // `..` after a symlink would leave the roots: no `..` at all
   const d = await resolve($, word, ctx.cwd)
   return roots.some(r => within(d, r))
 }
+// flags parsed against the spec; the positional words come back (null = a flag that is not allowed)
+function parseFlags(cmd: string, rest: string[]): { pos: string[]; given: boolean; recursive: boolean; noPattern: boolean } | null {
+  const sp = SPECS[cmd]!
+  const pos: string[] = []
+  let given = false
+  let recursive = false
+  let noPattern = false
+  let dashdash = false
+  for (let i = 0; i < rest.length; i++) {
+    const x = rest[i]!
+    if (dashdash || x === '-' || !x.startsWith('-')) { pos.push(x); continue }
+    if (x === '--') { dashdash = true; continue }
+    if (x.startsWith('--')) {
+      const eq = x.indexOf('=')
+      const name = x.slice(2, eq < 0 ? undefined : eq)
+      if (sp.lnone.includes(name) && eq < 0) { if (name === 'recursive') recursive = true; if (name === 'files' || name === 'type-list') noPattern = true; continue }
+      if (sp.lval.includes(name)) { if (name === 'regexp') given = true; if (eq < 0) { if (i + 1 >= rest.length) return null; i++ } continue }
+      if ((name === 'color' || name === 'colour') && eq > 0 && cmd === 'grep') continue
+      return null
+    }
+    for (let k = 1; k < x.length; k++) { // a short cluster, letter by letter
+      const c = x[k]!
+      if (/\d/.test(c)) { if (sp.digits) continue; return null }
+      if (sp.no.includes(c)) { if (c === 'r' && cmd === 'grep') recursive = true; if (c === 'R' && cmd === 'ls') recursive = true; continue }
+      if (sp.val.includes(c)) {
+        if (c === 'e') given = true
+        if (k === x.length - 1) { if (i + 1 >= rest.length) return null; i++ } // the value is the next word
+        break // else the rest of the word is the value
+      }
+      return null
+    }
+  }
+  return { pos, given, recursive, noPattern }
+}
 async function searchOk($: Host, ctx: Ctx, w: string[], roots: string[], first = true): Promise<boolean> {
   const cmd = w[0]!
   if (!SEARCH_CMDS.has(cmd)) return false
   const rest = w.slice(1)
-  if (cmd === 'find' && rest.some(x => FIND_BAD.has(x))) return false
-  if (cmd === 'rg' && rest.some(x => RG_BAD.test(x))) return false
-  if (cmd === 'grep' && rest.some(x => GREP_BAD.test(x) || (x.startsWith('--') && x.length > 2 && !GREP_LONG.has(x.slice(2).split('=')[0]!)))) return false
-  if (cmd === 'tail' && rest.some(x => TAIL_BAD.test(x))) return false
-  if (cmd === 'wc' && rest.some(x => /^--f/.test(x))) return false // --files0-from reads a path list
-  const grepLike = cmd === 'grep' || cmd === 'rg'
-  // a short flag word that carries -e / -f among other letters or an attached value (-rf, -nf/path, -ePAT) is not parsed: refused
-  if (grepLike && rest.some(x => x.length > 2 && /^-[A-Za-z]*[ef]/.test(x))) return false
-  const valShort = cmd === 'rg' ? VAL_SHORT.rg : VAL_SHORT.grep
-  const noPattern = cmd === 'rg' && rest.some(x => x === '--files' || x === '--type-list') // no pattern word at all
-  const given = grepLike && rest.some(x => /^(-e|-f|--regexp|--file)(=|$)/.test(x)) // the pattern comes from -e / -f
-  let patternSeen = !grepLike || noPattern || given
-  let named = false
-  let uncertain = false
-  const cands: string[] = []
-  for (let i = 0; i < rest.length; i++) {
-    const x = rest[i]!
-    if (x === '--' || x === '-') continue
-    if (x.startsWith('--')) {
-      const name = x.slice(2).split('=')[0]!
-      if (x.includes('=')) { if (!/^(regexp)$/.test(name)) cands.push(x.slice(x.indexOf('=') + 1)); continue }
-      if (grepLike && VAL_LONG.has(name)) {
-        const v = rest[++i]
-        if (v !== undefined && PATH_VALUE.test(x)) cands.push(v) // a file that is read
-        continue
-      }
-      if (cmd === 'rg' && !/^(hidden|files|no-ignore|ignore-case|case-sensitive|smart-case|line-number|no-line-number|count|files-with-matches|files-without-match|fixed-strings|word-regexp|line-regexp|invert-match|only-matching|quiet|stats|type-list|no-messages|null|heading|no-heading|column|json|text|binary|unrestricted|multiline|no-config|trim|vimgrep|with-filename|no-filename|sort-files|crlf|pcre2|no-pcre2|auto-hybrid-regex|passthru|version|help)$/.test(name)) uncertain = true // unknown: do not guess the pattern
-      continue
+  if (cmd === 'find') {
+    let i = 0
+    const starts: string[] = []
+    for (; i < rest.length && !rest[i]!.startsWith('-'); i++) starts.push(rest[i]!)
+    for (; i < rest.length; i++) {
+      const n = FIND_PRED[rest[i]!]
+      if (n === undefined) return false // -exec, -delete, -fprint*, -L, -files0-from ... and anything unknown
+      if (n === 1) { if (i + 1 >= rest.length) return false; i++; if (rest[i - 1] === '-newer') starts.push(rest[i]!) } // -newer names a file to compare with: a path
     }
-    if (x.startsWith('-') && x.length > 1) {
-      if (/^-\d+$/.test(x)) continue
-      if (x.length === 2 && grepLike && valShort.includes(x[1]!)) {
-        const v = rest[++i]
-        if (v !== undefined && PATH_VALUE.test(x)) cands.push(v)
-        continue
-      }
-      if (x.length > 2 && /^-[A-Za-z]/.test(x) && grepLike && valShort.includes(x[1]!)) continue // -m1, -A3: attached value (e/f handled above)
-      if (x.length > 2 && /^-[A-Za-z]/.test(x)) { const v = x.slice(2); if (/[/.]/.test(v)) cands.push(v); if (cmd === 'find' || cmd === 'ls' || cmd === 'cat' || cmd === 'head' || cmd === 'tail' || cmd === 'wc') continue }
-      continue
-    }
-    if (!patternSeen) { patternSeen = true; if (!uncertain) continue } // the pattern is data (unless a flag we could not parse came before it)
-    cands.push(x)
-    named = true
+    for (const p of starts) if (!(await pathOk($, ctx, roots, p))) return false
+    return starts.length > 0 || (await pathOk($, ctx, roots, '.')) // no starting point: the cwd
   }
-  for (const cand of cands) if (!(await pathOk($, ctx, roots, cand))) return false
-  // rg, ls and find always work from the cwd; a grep that is first in its pipeline or recurses does too; an uncertain parse as well
-  const recursive = cmd === 'grep' && rest.some(x => /^-[A-Za-z]*[rR][A-Za-z]*$|^--(r|d)/.test(x) || x === '-d')
-  const needCwd = uncertain || (!named && (cmd === 'rg' || cmd === 'ls' || cmd === 'find' || recursive || (cmd === 'grep' && first)))
-  if (needCwd && !(await pathOk($, ctx, roots, '.'))) return false
-  return true
+  const f = parseFlags(cmd, rest)
+  if (!f) return false
+  const grepLike = cmd === 'grep' || cmd === 'rg'
+  const paths = grepLike && !f.given && !f.noPattern ? f.pos.slice(1) : f.pos // the first positional of grep / rg is the pattern: data
+  if (grepLike && !f.given && !f.noPattern && !f.pos.length) return false // no pattern
+  for (const p of paths) if (!(await pathOk($, ctx, roots, p))) return false
+  // rg and ls always look at the cwd when no path is named; grep when it is first in its pipeline or recursive; the others read stdin
+  const needCwd = !paths.length && (cmd === 'rg' || cmd === 'ls' || f.recursive || (cmd === 'grep' && first))
+  return !needCwd || (await pathOk($, ctx, roots, '.'))
 }
 // the whole command: every pipeline segment is a built-in git read or a search command
 async function builtinReadOnly($: Host, ctx: Ctx, c: string): Promise<boolean> {
