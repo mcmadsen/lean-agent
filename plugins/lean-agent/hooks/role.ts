@@ -13,7 +13,7 @@ export async function detectRole($: Host, cwd: string): Promise<Role> {
   if (inside(real, deskDir(home))) return { kind: 'desk' }
   const t = threadsDir(home)
   if (real.startsWith(t + '/')) {
-    const id = real.slice(t.length + 1).split('/')[0]
+    const id = real.slice(t.length + 1).split('/')[0] ?? ''
     if (/^t\d+$/.test(id)) return { kind: 'thread', id }
   }
   return { kind: 'plain' }

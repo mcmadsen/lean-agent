@@ -1,3 +1,4 @@
+// @ts-nocheck
 // A fake host for the specs: an in-memory file system and a scripted process table, answering the engine's
 // ops beneath the plugin. Not used by the mod itself.
 export type Call = { argv: string[]; cwd?: string; stdin?: string }
@@ -16,6 +17,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     return d
   }
 
+  const clock = { t: 1_000_000 }
   const ok = (stdout = '') => ({ exitCode: 0, stdout, stderr: '' })
   const impl = {
     env: (name: string) => (name === 'HOME' ? home : undefined),
@@ -51,6 +53,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     env: { get: async (n: string) => impl.env(n) },
     fs: { read: async (p: string) => impl.read(p), write: async (p: string, t: string) => impl.write(p, t), exists: async (p: string) => impl.exists(p), list: async (p: string) => impl.list(p), stat: async (p: string) => impl.stat(p) },
     process: { run: async (argv: string[], init?: any) => impl.run(argv, init) },
+    clock: { now: async () => clock.t },
   }
   // and the engine's ops, for specs that go through a registered tool
   if (on) {
@@ -62,7 +65,6 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     on('fs.list', (_: any, e: any) => ({ value: impl.list(e.path) }))
     on('process.run', (_: any, e: any) => ({ value: impl.run(e.argv, e.init) }))
   }
-  const clock = { t: 1_000_000 }
   if (on) on('clock.now', () => ({ value: clock.t }))
   return { host, files, links, calls, writes, claude, clock, home, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
 }

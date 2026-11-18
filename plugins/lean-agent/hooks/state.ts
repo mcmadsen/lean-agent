@@ -12,6 +12,7 @@ export type Host = {
   }
   process: { run: (argv: readonly string[], init?: any) => Promise<{ exitCode: number; stdout: string; stderr: string }> }
   env: { get: (n: string) => Promise<string | undefined> }
+  clock: { now: () => Promise<number> }
 }
 
 let seq = 0

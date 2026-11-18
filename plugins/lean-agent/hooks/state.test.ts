@@ -8,7 +8,7 @@ test('atomic write goes temp then rename, never straight to the target', async (
   expect(h.files.get('/h/.lean-agent/a.json')).toBe('{"a":1}')
   expect([...h.files.keys()].filter(k => k.includes('.tmp-'))).toEqual([])
   expect(h.writes.length).toBe(1)
-  expect(h.writes[0].includes('.tmp-')).toBe(true) // the only fs.write went to a temp name
+  expect(h.writes[0]!.includes('.tmp-')).toBe(true) // the only fs.write went to a temp name
 })
 
 test('jsonl append adds one line per record and reads skip torn lines', async ($, on) => {
