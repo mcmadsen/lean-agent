@@ -174,7 +174,7 @@ test('rule loads: the shell hook and the mod handler log the same event once; bo
   const sec = Math.floor(NOON / 1000)
   h.files.set(`${L}/logs/rules-loaded.jsonl`, h.files.get(`${L}/logs/rules-loaded.jsonl`)! + JSON.stringify({ ts: sec, e: ev }) + '\n') // the shell hook, same second
   expect(await logRuleLoad(h.host, { file_path: '/r/.claude/rules/mine.md' })).toBe(false)
-  expect(await rulesStats(h.host, 'proj')).toEqual({ loaded: { 'billing.md': 1 }, never: ['_project.md'] })
+  expect(await rulesStats(h.host, 'proj')).toEqual({ loaded: { 'billing.md': 1 }, never: ['_project.md'], scriptCandidates: [] })
 })
 
 test('the engine\'s InstructionsLoaded event is logged by the mod', async ($, on) => {

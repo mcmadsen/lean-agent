@@ -118,6 +118,10 @@ goes to an `UNVERIFIED` list in your final report, never into a rule.
 the `UNVERIFIED` list, `SCRIPT CANDIDATES` (mechanical tasks without a script), the folders explorers did not reach, commands that were refused (command and text), and how many
 explorers ran against inline work.
 
+Scripts over models: counting, listing, summing or diffing while learning (files per area, manifests, changed paths) is a
+script's or a command's job (`git ls-files | wc -l`), not reading; look for an adopted `lean-agent-script-*` skill first. A
+project-specific script that worked and is reusable: `lean_script` propose it, with the project name.
+
 Freshness: `lean_rules` `stale` (run at thread start automatically) names areas whose relied-on files changed or vanished,
 whose manifest changed, whose changed files exceed max(15, 10% of the area's files), or that have three gaps; re-learn
 those with `--area` when you touch them. There is no background re-learn.

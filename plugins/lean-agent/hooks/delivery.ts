@@ -5,7 +5,8 @@
 import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import type { Inbox, Thread } from './threads'
-import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, syncAll, verifyRules } from './rules'
+import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, verifyRules } from './rules'
+import { syncWithScripts } from './rulelines'
 import { readConfig } from './budget'
 import { writeReview } from './reviews'
 
@@ -246,7 +247,8 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       }
       if (!repo.startsWith('/')) return { ok: false, text: `${i.action} needs repo (an absolute path)` }
       if (i.action === 'sync') {
-        const r = await syncAll(h, project, repo, i.all === true)
+        // the adopted scripts' rule lines are rebuilt first (rulelines.ts), then every checkout asked for is synced (1.0.6's all / verbose)
+        const r = await syncWithScripts(h, project, repo, i.all === true)
         return { ok: true, text: i.verbose === true ? JSON.stringify(r.detail) : r.lines.join('\n') }
       }
       if (i.action === 'stale') return { ok: true, text: JSON.stringify(await checkStale(h, project, repo)) }

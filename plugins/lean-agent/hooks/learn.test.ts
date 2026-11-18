@@ -119,7 +119,7 @@ test('lean_rules tool: check, record (lines from the file, covered_by) and sync 
   expect((await call({ action: 'record', area: '../x', globs: ['a'], sha: 's' })).ok).toBe(false)
   expect((await call({ action: 'verify' })).ok).toBe(false) // needs repo
   const s = await call({ action: 'sync', repo: '/repo', all: true })
-  expect(s.text).toBe('/repo: copied 1, removed 0, skipped 0, exclude ok')
+  expect(s.text).toBe('/repo: copied 2, removed 0, skipped 0, exclude ok') // the rule, and _project with the "prefer scripts" line (rulelines.ts)
 })
 
 test('globs: braces expand, several globs in one rule match any of them', () => {

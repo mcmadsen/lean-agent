@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-One combined release: the desk, thread and pane work, and the learn flow, stats and compare work. The sections are grouped by area; the
+One combined release: the desk, thread and pane work, the learn flow, stats and compare work, and scripts over models with the feedback export. The sections are grouped by area; the
 version lines in `plugin.json`, `marketplace.json` and `pane.tsx` are left to the desk.
 
 ### Fixed (learn flow, stats, mod)
@@ -186,6 +186,80 @@ version lines in `plugin.json`, `marketplace.json` and `pane.tsx` are left to th
   that every `lean_*` tool a skill names exists for a role the skill is offered to (and is marked where only one role has it) and
   extracts the Bash commands a skill gives the desk; `hooks/skills-roles.test.ts` runs them through `deskBashOk`.
   `hooks/skills-desk-commands.ts` is generated (`node plugins/lean-agent/hooks/skills-contract.mjs --write`).
+
+### Added (scripts, feedback export)
+- **Scripts over models.** If a simple script can do a job (counting, summing, aggregating, listing, transforming, diffing,
+  validating), run it instead of a model reading the data; and any script a session fabricates is audited and judged before it
+  is reused. The thread template, the worker and reader prompts, the `learn` skill and the desk template say so (2-3 lines each).
+- New tool `lean_script` (thread and desk) and skill `scripts`:
+  - `propose` (thread): the mod copies the script into `~/.lean-agent/scripts/candidates/<name>/` with `meta.json` (purpose, run
+    with `{script}`, inputs, outputs, author, project or `global`, created, sha256) and **never executes it**. A secret in the text
+    refuses the proposal. A script about lean-agent's own data (`~/.lean-agent` files) is also filed in `feedback.jsonl` as
+    a "candidate for lean-agent core".
+  - Nudge: when a thread's Bash runs a script file it wrote this session from a scratch place (`/tmp`, a scratchpad, its own
+    folder) and nothing proposed it, the next prompt carries one line, once per file: "you ran <file>; if it is reusable,
+    lean_script propose it".
+  - `audit`: a thread gets the brief for the new read-only `lean-agent:auditor` agent (sonnet/high, a fixed checklist: reads,
+    writes, network, deletes, secrets, hardcoded values, determinism, error handling, other data); the desk starts a thread that
+    does it. The auditor ends with a `LEAN-AUDIT` line and **the mod records the verdict** when the Agent call returns, applying
+    its own rules: network, deletes or overwrites, writes outside the declared outputs, hardcoded values, a home path or email in
+    the text, or a script right only for its original data are never `adopt` (they become `adapt` with the concrete changes); a
+    secret is `reject`. Verdicts are `adopt`, `adapt` (changes), `reject` (reason); a tampered copy (sha256) is refused. There is
+    no way to hand the mod a verdict: it is taken only from an auditor's Agent reply, only for the candidate folder that call's
+    prompt names, once per script content.
+  - The `run` line is a bare interpreter (python3, node, bash, sh, ruby, perl ...) then `{script}`, no inline-code flags, quotes or
+    shell operators; `outputs` may not be a catch-all; inputs/outputs/purpose are one line and scanned like the script; a thread
+    proposes only for its own project or `global`. The store is changed under a lock folder (threads and the desk are separate
+    processes; a stale lock is moved aside by one taker, a holder releases only its own) and `lean_rules sync` generates a
+    script's skill from the verified meta, only while it is still adopted, still the audited text, with an audit for exactly it.
+    The mod also scans the text for network and delete patterns (never `adopt`); the auditor's other claims are its judgement,
+    and `decide` is the human gate. The sha-256 moved to `sha.ts` (reviews and the script store share it).
+  - `adopt` moves the script to `~/.lean-agent/scripts/<name>/` or `~/.lean-agent/<project>/scripts/<name>/` and writes a recipe
+    skill `lean-agent-script-<name>` with `run: <command>`; `lean_rules sync` copies it into checkouts (git-excluded).
+    `list`, `show`, `retire` (kept under `scripts/retired/`); a Bash run of an adopted script is counted in `scripts/uses.jsonl`.
+  - Desk: the pane shows "Scripts: N candidates, M adopted"; `lean_script decide <name> adopt|reject` (desk only, with a reason, logged in
+    `scripts/decisions.jsonl`) lets the user override a verdict. Adopting over an audit that said otherwise needs `confirm: true`;
+    a script with a secret or a hardcoded home path or email is never adopted, not even by the user, and a script that was never
+    audited cannot be adopted.
+- **Feedback export, done by the mod.** `/lean-agent-feedback [notes]` (a mod command, any session, no model turn) and the desk's
+  `lean_doctor` action `export` write ONE markdown file `~/.lean-agent/feedback-export/<YYYY-MM-DD-HHMM>.md` and print its path:
+  the notes, the environment (running vs installed lean-agent version with a SKEW flag, `claude --version`, OS family), the doctor's
+  problem lines, every draft in `feedback-drafts/` not exported before, the LEAN-FEEDBACK since the last export (counts by status;
+  the `missing` / `refused` / `unverified` / `unreached` texts grouped and de-duplicated with counts; gap lines count as `missing`),
+  the guard refusals (text, agent type, counts; the mod logs each refusal it makes, `src: "guard"`, to `refusals.jsonl`: the ONE file
+  and the one writer, `appendRefusal`, that also takes the refusals workers report in LEAN-FEEDBACK as `src: "worker"` rows; the
+  export counts the guard rows as refusals and takes the worker rows for the `refused` texts, and reads the `unverified` /
+  `unreached` texts from the feedback rows' `unverifiedClaims` / `unreachedFolders`; `core-candidate` rows are skipped), the script candidates
+  flagged for lean-agent core and the threads that reported `blocked`. It is anonymised by code, deterministically: home dir and
+  any user's home folder (macOS or Linux style) to `~`, the OS user name, registered project names to project-A, B ... (a stable local map in
+  `feedback-export/projects.map.json`, never exported; thread ids stay), emails, URLs other than the lean-agent repo, azure
+  organisations, hex of 7+ characters, numbers after PR / issue / ticket words and `#`, tokens and keys. A final check REFUSES to write
+  the file when a known private string survived and names the rule that missed. Over 40 KB the oldest and least repeated items are
+  summarised. The stable project-name map lives in `~/.lean-agent/.private/`, not in the export folder; scp-style remotes, IPs,
+  host names, env-style credentials (`DB_PASSWORD=...`) and a registered project's folder name are masked too. It never posts and uses no network; `skills/feedback` says: a single report is a draft as before (post with `gh` only
+  if installed and only on an explicit yes), "export" is this.
+- **Scripts are easy to update.** An adopted script keeps versions (`scripts/<name>/v1/`, `v2/` ..., sha256, author, date and audit
+  verdict per version, `current` in `meta.json`) and a stable `scripts/<name>/run` that the rule line and the recipe skill always
+  name, so an update never edits a rule or a skill. `lean_script update <name>` (thread or desk; a new file or exact `edits`) stores a
+  pending version with a diff and the auditor audits only the change plus the checklist; a changed purpose or run line is shown in
+  the verdict and needs the desk's `decide`. On adopt `current` switches and `run` is overwritten. `rollback <name> [version]` (desk;
+  a thread gives a reason) switches back at once and is logged; `diff` and `show` print versions, verdicts, uses and failures.
+  A failed Bash run of an adopted script is counted, two failures (or `report-bad <name> <why>`) mark it `needs-update` (rule line,
+  `list`, desk pane; the next thread that uses it is nudged once to send a fix). A script edited by hand (sha mismatch) is
+  `edited, unaudited`: no skill is shipped for it, the rule line says so, a thread run is warned about, a subagent may not run it.
+  Hardening: the auditor echoes the sha256 of the text it read (`"sha"` in its `LEAN-AUDIT` line, taken from the brief) and the mod
+  refuses a reply that does not match the stored text, so an audit started on an older text is never recorded against a newer one;
+  version numbers are never reused (not after a replaced, rejected or rolled-back update); a rollback drops the update that waits; a
+  thread changes only its own project's scripts and global ones (update, rollback, report-bad, retire, as propose); the desk's
+  audit thread is started after the store lock is released.
+- **"Can this be a script" lives in the rules.** On adopt, and at every `lean_rules sync`, the mod writes ONE line per adopted
+  script between `<!-- lean-agent:scripts -->` markers into the rule of its area (else `_project`), regenerated from the store so
+  learn/trim rewrites keep it, within the rule caps (overflow goes to `_project`, then one "N more scripts" pointer); retire removes
+  it. `_project` gets once the line "Prefer scripts over model work ...". A thread's `lean_report` with state `done` is asked once per
+  session whether a step could have been a script. `lean_rules stats` lists `scriptCandidates`: reported gaps that read like
+  mechanical work (count, list, sum, find all, which files).
+- The `auditor` agent type gets the explorer's built-in read-only commands; an Agent call for it with `allow-*` lines from a
+  session that cannot own grants is refused like the other agent types.
 
 ## 1.0.4
 

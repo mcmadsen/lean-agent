@@ -4,6 +4,7 @@
 // .claude/skills/lean-agent-<n>/SKILL.md).
 import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, readJsonl, writeJson } from './state'
 import type { Host } from './state'
+import { SAFE_FILE, shippable } from './recipe'
 
 export const MAX_RULE_FILES = 40
 export const MAX_RULE_LINES = 25
@@ -107,6 +108,8 @@ export function withRelies(t: string, relies: string[], sha: string, date: strin
   const inner = m[1]!.replace(/\s*relies-on:[\s\S]*$/, '').trimEnd()
   return t.replace(re, () => `<!-- lean-agent:${inner}${list ? ` relies-on: ${list}` : ''} -->`) // a function: `$&` in a symbol is text
 }
+// non-empty body lines of a rule: what the line cap counts (the scripts block's lines too; frontmatter and comments are free)
+export const bodyLines = (t: string): number => ruleMetrics(t).lines
 
 export type SyncOut = { copied: string[]; removed: string[]; skipped: string[]; excluded: boolean; exclude?: 'ok' | 'failed' | 'n/a' }
 
@@ -155,6 +158,19 @@ export async function syncRules(h: Host, project: string, repo: string): Promise
   for (const d of (await h.fs.list(`${pdir}/skills`).catch(() => [])).filter(f => f.kind === 'dir')) {
     const t = await h.fs.read(`${pdir}/skills/${d.name}/SKILL.md`).catch(() => null)
     if (t !== null && slugOk(d.name)) recipes.push({ name: `lean-agent-${d.name}`, text: String(t) })
+  }
+  // adopted scripts (scripts.ts) are recipe skills too: the project's own, then the global ones
+  for (const base of [`${pdir}/scripts`, `${leanDir(home)}/scripts`]) {
+    for (const d of (await h.fs.list(base).catch(() => [])).filter(f => f.kind === 'dir' && f.name !== 'candidates' && f.name !== 'retired')) {
+      // only a script that is still adopted and still the audited text ships a skill, and the skill is generated from the verified
+      // meta (recipe.ts), never read from a file that could have been edited
+      const dir = `${base}/${d.name}`
+      const meta = await readJson<{ file?: unknown } | null>(h, `${dir}/meta.json`, null)
+      const code = typeof meta?.file === 'string' && SAFE_FILE.test(meta.file) ? await h.fs.read(`${dir}/${meta.file}`).catch(() => null) : null
+      const text = shippable(meta, code, dir)
+      const name = `lean-agent-script-${d.name}`
+      if (text !== null && slugOk(d.name) && !recipes.some(r => r.name === name)) recipes.push({ name, text })
+    }
   }
   // git-exclude first: nothing we copy is ever visible to git, not even for a moment
   if (rules.size || recipes.length) out.excluded = await exclude(h, repo)
@@ -517,7 +533,11 @@ export async function logRuleLoad(h: Host, e: any): Promise<boolean> {
   await appendJsonl(h, RULES_LOG(home), { ts: Math.floor((await h.clock.now()) / 1000), src: 'mod', e: { file_path: f, load_reason: e.load_reason, trigger_file_path: e.trigger_file_path, memory_type: e.memory_type } })
   return true
 }
-export async function rulesStats(h: Host, project: string): Promise<{ loaded: Record<string, number>; never: string[] }> {
+// A reported gap that reads like mechanical work (count, list, sum, find all, which files ...): a script could have done it.
+const MECHANICAL = /\b(?:count(?:ing)?|how many|number of|list(?:ing)? (?:all|every|the)|find(?:ing)? all|every (?:file|place|usage|caller)|all (?:the )?(?:files|usages|occurrences|callers)|sum(?:ming)?|total(?:s|ling)?|which files|aggregat\w*|tally|enumerat\w*)\b/i
+export const looksMechanical = (text: string) => MECHANICAL.test(text)
+
+export async function rulesStats(h: Host, project: string): Promise<{ loaded: Record<string, number>; never: string[]; scriptCandidates: string[] }> {
   const home = await homeDir(h)
   const log = await readJsonl<{ ts?: number; e?: { file_path?: string; load_reason?: string; trigger_file_path?: string } }>(h, RULES_LOG(home))
   const loaded: Record<string, number> = {}
@@ -531,6 +551,17 @@ export async function rulesStats(h: Host, project: string): Promise<{ loaded: Re
     seen.add(key)
     loaded[f.slice(i + 18)] = (loaded[f.slice(i + 18)] ?? 0) + 1
   }
-  const have = (await h.fs.list(`${projectDir(home, project)}/rules`).catch(() => [])).map(f => f.name).filter(n => n.endsWith('.md'))
-  return { loaded, never: have.filter(n => !loaded[n]) }
+  const have = (await h.fs.list(`${projectDir(home, project)}/rules`).catch(() => [])).map(f => f.name).filter(n => n.endsWith('.md')) // _project.md included (1.0.6)
+  // gaps whose text looks mechanical are candidates for a script (lean_script propose); one line each, repeats counted once
+  const seenGap = new Set<string>()
+  const scriptCandidates: string[] = []
+  for (const g of await readJsonl<{ path?: string; text?: string }>(h, `${projectDir(home, project)}/gaps.jsonl`)) {
+    const t = String(g?.text ?? '').replace(/\s+/g, ' ').trim()
+    const key = t.toLowerCase()
+    if (t && looksMechanical(t) && !seenGap.has(key) && scriptCandidates.length < 10) {
+      seenGap.add(key)
+      scriptCandidates.push(`${g.path ? `${g.path}: ` : ''}${t.slice(0, 160)}`)
+    }
+  }
+  return { loaded, never: have.filter(n => !loaded[n]), scriptCandidates }
 }

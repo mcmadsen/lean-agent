@@ -87,3 +87,19 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
   return { host, store, files, links, calls, writes, claude, git, app, os, clock, home, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
 }
 
+// An auditor's LEAN-AUDIT line carries the sha256 of the text it was given. The specs' lines are written without it: this adds the
+// sha of what is stored now for the script the line names (a pending update first, else the candidate, else the adopted one).
+export async function withSha(host: any, text: string, home = '/h'): Promise<string> {
+  if (/"sha"\s*:/.test(text)) return text
+  const name = /"name"\s*:\s*"([^"]+)"/.exec(text)?.[1]
+  if (!name) return text
+  for (const dir of [`${home}/.lean-agent/proj/scripts/${name}`, `${home}/.lean-agent/scripts/${name}`, `${home}/.lean-agent/scripts/candidates/${name}`]) {
+    const m = await host.fs.read(`${dir}/meta.json`).catch(() => null)
+    if (!m) continue
+    const meta = JSON.parse(m)
+    const sha = meta.pending?.sha256 ?? meta.sha256
+    return text.replace('LEAN-AUDIT {', `LEAN-AUDIT {"sha":"${sha}",`)
+  }
+  return text
+}
+

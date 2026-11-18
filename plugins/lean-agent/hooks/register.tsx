@@ -12,7 +12,7 @@ import { decide } from './guard'
 import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
-import { checkStale, logRuleLoad, syncRules } from './rules'
+import { checkStale, logRuleLoad } from './rules'
 import { leanDir, readJson, threadsDir } from './state'
 import { chase } from './chaser'
 import { autoMigrate, check, migrate } from './doctor'
@@ -27,6 +27,9 @@ import { resetSkew, setRunning, skewNote } from './skew'
 import { statsText } from './stats'
 import { compare } from './compare'
 import { rotateLedger } from './ledger'
+import { SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
+import { syncWithScripts } from './rulelines'
+import { exportFeedback, logRefusal } from './feedbackexport'
 
 setRunning(VERSION) // the code in this session; skew.ts compares it with what is installed
 
@@ -60,6 +63,7 @@ export const resetModState = () => {
   resetSkillStat()
   resetSkew()
   skew = null
+  resetScripts()
 }
 let skew: string | null = null // the version-skew sentence of this session, or null
 let role: Role = { kind: 'plain' }
@@ -89,7 +93,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare'] }, days: { type: 'number', description: 'stats: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export'] }, days: { type: 'number', description: 'stats: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
 const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
@@ -147,9 +151,9 @@ async function agentType($: any, id?: string, ev?: any): Promise<string | undefi
 const spent = new Map<string, number>() // usd per subagent id, this session
 
 // a worker's reply ends with LEAN-FEEDBACK: gaps and memory go to the files, the thread's own turn is unchanged
+const texts = (v: any): string[] => (typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(texts) : v && typeof v === 'object' ? Object.values(v).flatMap(texts) : [])
 async function feedbackOf(host: Host, e: any, r: any): Promise<void> {
   if (e.agentId || (e.tool !== 'Agent' && e.tool !== 'Task') || r?.deny !== undefined) return
-  const texts = (v: any): string[] => (typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(texts) : v && typeof v === 'object' ? Object.values(v).flatMap(texts) : [])
   const fb = parseFeedback(texts(r?.result).join('\n'))
   if (!fb) return
   let project: string | undefined
@@ -242,6 +246,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
   if (newRole.kind === 'thread') {
     await step('thread tools', async () => {
       for (const t of THREAD_TOOLS) await registerOnce($, { ...t, isDeferred: false })
+      await registerOnce($, { ...SCRIPT_SPEC, isDeferred: false })
     })
   }
   await step('0.45 migration check', () => autoMigrate(host, $.plugin.root)) // leftover 0.45 service: unloaded at once, then the idempotent migrate
@@ -257,10 +262,11 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       } as any)
       await registerOnce($, {
         name: DOCTOR,
-        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent), stats (spend by model/role/agent/thread, caps, rule loads, feedback: computed here, never read the ledger yourself), compare (what a session costs at start: clean vs thread vs desk, from a few one-turn runs; project required; mode history lists saved reports).',
+        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent), stats (spend by model/role/agent/thread, caps, rule loads, feedback: computed here, never read the ledger yourself), compare (what a session costs at start: clean vs thread vs desk, from a few one-turn runs; project required; mode history lists saved reports), export (write ONE anonymised feedback file, print its path; never posts).',
         inputSchema: DOCTOR_SCHEMA,
         isDeferred: false,
       } as any)
+      await registerOnce($, { ...SCRIPT_SPEC, isDeferred: false })
     })
     await step('desk timers', async () => {
       every($, 10_000, 'desk', async host2 => {
@@ -313,7 +319,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       const projs = await readJson<Record<string, { path?: string }>>(host, `${leanDir(await homeDir(host))}/projects.json`, {})
       const repo = th.project ? projs?.[th.project]?.path : undefined
       if (th.project && typeof repo === 'string' && repo.startsWith('/')) {
-        await syncRules(host, th.project, repo)
+        await syncWithScripts(host, th.project, repo) // the learned rules, the adopted scripts' rule lines and recipe skills
         const stale = await checkStale(host, th.project, repo)
         if (stale.length && !noticed.has(newRole.id)) {
           noticed.add(newRole.id)
@@ -403,6 +409,7 @@ export const register: Register = on => {
     await soft($, 'ledger rotation', () => rotateLedger(host))
     // the command is role-free: registered once here
     await $.command.register({ name: 'lean-agent', description: 'Open the lean-agent pane (setup, desk, threads)' }).catch(() => undefined)
+    await $.command.register({ name: 'lean-agent-feedback', description: 'Write ONE anonymised feedback export file and print its path (never posts); optional notes as the argument' }).catch(() => undefined)
     await $.command.register({ name: 'lean-agent-setup', description: 'Set up or repair lean-agent (desk folder, login opener, trust); no model turn needed' }).catch(() => undefined)
     if (ctx.length) return next({ ...e, context: [...((e as any).context ?? []), ...ctx] } as any)
     return next(e)
@@ -518,6 +525,39 @@ export const register: Register = on => {
     return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
   })
 
+  // scripts over models: thread and desk (propose is a thread's, decide the desk's; scripts.ts checks per action)
+  on('tool.call', { tool: `mcp__lean-agent__${SCRIPT_TOOL}` }, async ($, e: any) => {
+    if (role.kind !== 'thread' && role.kind !== 'desk') await redetect($, undefined, true)
+    const r = role
+    if (r.kind !== 'thread' && r.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: SCRIPT_TOOL, need: 'thread', role: r, startDir, sid: lastSid }), isError: true } as any
+    const host = hostOf($)
+    const out = await scriptTool(host, r.kind === 'thread' ? { kind: 'thread', id: r.id } : { kind: 'desk' }, e, { startThread: (title, text, project) => leanThread(host, $.plugin.root, { action: 'new', title, text, project }) })
+    return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
+  })
+
+  // what a thread writes and runs: a scratch script that ran without a proposal is nudged once (prompt.submit); a run of an adopted script counts
+  on('tool.call', { tool: 'Write' }, async ($, e: any, next) => {
+    const r: any = await next(e)
+    if (role.kind === 'thread' && r?.deny === undefined) noteWrite(e.file_path)
+    return r
+  })
+  on('tool.call', { tool: 'Bash' }, async ($, e: any, next) => {
+    let r: any = await next(e)
+    const rl = role
+    if (rl.kind === 'thread' && r?.deny === undefined && typeof e.command === 'string') {
+      try {
+        const host = hostOf($)
+        noteBash(e.command, leanDir(await homeDir(host)), rl.id)
+        // an adopted script ran: counted; a failed run is counted toward needs-update, an edited copy is warned about
+        const said = await noteUse(host, e.command, rl.id, bashFailed(r))
+        if (said) r = { ...r, context: [...(r.context ?? []), said] }
+      } catch {
+        /* tracking never stops a command */
+      }
+    }
+    return r
+  })
+
   on('tool.call', { tool: `mcp__lean-agent__${DOCTOR}` }, async ($, e: any) => {
     if (role.kind !== 'desk') await redetect($, undefined, true)
     if (role.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: 'lean_doctor', need: 'desk', role, startDir, sid: lastSid }), isError: true } as any
@@ -536,7 +576,11 @@ export const register: Register = on => {
         const out = await compare(host, $.plugin.root, { project: typeof e.project === 'string' ? e.project : undefined, mode: typeof e.mode === 'string' ? e.mode : undefined }, 'desk')
         return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
       }
-      return { result: 'doctor: action must be check, fix, migrate, stats or compare', isError: true } as any
+      if (e.action === 'export') {
+        const o = await exportFeedback(host, $.plugin.root, { notes: typeof e.notes === 'string' ? e.notes : undefined, version: VERSION })
+        return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any
+      }
+      return { result: 'doctor: action must be check, fix, migrate, stats, compare or export', isError: true } as any
     } catch (err) {
       return { result: `doctor failed: ${String((err as Error)?.message ?? err)}`, isError: true } as any
     }
@@ -552,7 +596,9 @@ export const register: Register = on => {
         // every other tool: a done / blocked report and every question also goes straight to the desk's session (the inbox keeps it either way)
         : await threadTool(hostOf($), role.id, t.name, e, (sid, text) => $.session.send({ to: { sessionId: sid }, text }))
       await ensureGitHooks(hostOf($)).catch(() => undefined) // lean_* tools may change projects.json
-      return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
+      // a thread that reports done is asked once per session whether a step could have been a script (never a worker's call)
+      const ask = t.name === 'lean_report' && out.ok && e.state === 'done' && !e.agentId ? doneQuestion(role.id) : null
+      return { result: ask ? `${out.text}\n${ask}` : out.text, ...(out.ok ? {} : { isError: true as const }) } as any
     })
   }
 
@@ -566,8 +612,12 @@ export const register: Register = on => {
   // every tool: guards first (fail closed), then delivery of queued messages to a busy session
   on('tool.call', async ($, e: any, next) => {
     const host = hostOf($)
-    const why = await decide(host, { role, cwd, agentType: await agentType($, e.agentId, e), agentId: e.agentId, version: VERSION }, e)
-    if (why) return { deny: why } as any
+    const atype = await agentType($, e.agentId, e)
+    const why = await decide(host, { role, cwd, agentType: atype, agentId: e.agentId, version: VERSION }, e)
+    if (why) {
+      await logRefusal(host, { text: why, agent: atype, tool: e.tool, thread: role.kind === 'thread' ? role.id : undefined, version: VERSION }).catch(() => undefined) // for the feedback export
+      return { deny: why } as any
+    }
     // the thread's grants for the worker it spawns: recorded while the Agent call runs, removed when it returns
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null
     const gcall = g && (g.edit?.length || g.cmds?.length) ? String(e.toolUseId ?? `g${++grantSeq}`) : ''
@@ -579,6 +629,11 @@ export const register: Register = on => {
       if (gcall) await releaseGrant(host, role, gcall).catch(() => undefined)
     }
     await feedbackOf(host, e, r).catch(() => undefined)
+    // a script auditor's LEAN-AUDIT line: the mod records the verdict (and tells the thread what the rules made of it)
+    if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined && /^(lean-agent:)?auditor$/.test(String(e.subagent_type ?? ''))) {
+      const said = await auditFromReply(host, role.id, texts(r?.result).join('\n'), String(e.prompt ?? '')).catch(() => null)
+      if (said) r = { ...r, context: [...(r.context ?? []), said] }
+    }
     if (e.agentId || r?.deny !== undefined) return r
     try {
       const batch = role.kind === 'thread' ? await takeBatch(host, role.id) : role.kind === 'desk' ? await takeReports(host) : null
@@ -621,6 +676,8 @@ export const register: Register = on => {
       if (role.kind === 'thread') more = (await consumeWake(host, role.id, e.text)) ? null : await takeBatch(host, role.id)
       else if (role.kind === 'desk') more = await takeReports(host)
       if (more) extra = extra ? `${extra}\n${more}` : more
+      const nudge = role.kind === 'thread' ? await takeNudges(host) : null
+      if (nudge) extra = extra ? `${extra}\n${nudge}` : nudge
     } catch {
       /* the prompt goes through without it */
     }

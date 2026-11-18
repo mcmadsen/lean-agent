@@ -43,6 +43,12 @@ need review 'lean_review'
 need review 'approve-push'
 need review 'only the tool'
 need review 'allow-cmd: git diff <base>...<sha>, git log <base>..<sha>, git show <sha>, git merge-base <base> <sha>'
+need scripts 'never executes'
+need scripts 'LEAN-AUDIT'
+need scripts 'is never `adopt`'
+need scripts 'decide'
+need scripts 'lean-agent-script-'
+grep -q 'LEAN-AUDIT' "$root/agents/auditor.md" || fail "auditor.md does not describe the LEAN-AUDIT line"
 grep -q 'allow-cmd' "$root/agents/reviewer.md" || fail "reviewer.md does not mention the allow-cmd limit"
 if grep -q 'Write `~/.lean-agent/<project>/reviews' "$here/review/SKILL.md"; then echo "FAIL: review skill still writes the record by hand"; exit 1; fi
 # the learn flow's promises
@@ -70,7 +76,7 @@ need compare 'enabledPlugins'
 need compare 'never file contents'
 need compare 'The desk never runs it'
 grep -q 'compare' "$root/../../README.md" || fail "README has no compare section"
-for a in explorer reader-haiku reader-sonnet; do
+for a in explorer reader-haiku reader-sonnet auditor; do
   for k in refused unverified unreached; do grep -q "\"$k\"" "$root/agents/$a.md" || fail "$a.md: LEAN-FEEDBACK lacks $k"; done
 done
 grep -q 'Grep and Glob may not exist' "$root/agents/explorer.md" || fail "explorer.md does not say Grep/Glob may be missing"

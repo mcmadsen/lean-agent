@@ -1,0 +1,920 @@
+// Scripts over models: a script that did a job a model would otherwise read through is kept, audited, and reused.
+// A thread PROPOSES a script (the mod copies it into the candidate store and never runs it); a read-only auditor judges it
+// (`LEAN-AUDIT` line, recorded by the mod); the mod, not the model, applies the verdict rules; an adopted script moves to
+// ~/.lean-agent/scripts/<name>/ (global) or ~/.lean-agent/<project>/scripts/<name>/ and becomes a recipe skill that
+// `lean_rules sync` copies into checkouts (rules.ts). Pure helpers over a Host; register.tsx wires them to the engine.
+import { appendJsonl, homeDir, leanDir, mkdirp, readJson, readJsonl, threadsDir, writeJson } from './state'
+import type { Host } from './state'
+import { globRe, slugOk } from './rules'
+import { expandRun, hashText, recipeText } from './recipe'
+import type { Audit, Decision, Meta, Verdict, Version } from './recipe'
+import { refreshScriptRules } from './rulelines'
+import { unifiedDiff } from './textdiff'
+
+export { expandRun, hashText, recipeText }
+export type { Audit, Meta, Verdict, Version }
+
+export const SCRIPT_TOOL = 'lean_script'
+export const MAX_SCRIPT_BYTES = 256 * 1024
+export const scriptsDir = (home: string) => `${leanDir(home)}/scripts`
+// folder names the stores use themselves, and the top-level folders of ~/.lean-agent: never a script or project name here
+const RESERVED = new Set(['candidates', 'retired'])
+const LEAN_DIRS = new Set(['scripts', 'threads', 'worktrees', 'logs', 'memory', 'output', 'desk', 'bin', 'recipes', 'legacy-0.45', 'feedback-drafts', 'handovers', 'global'])
+
+export type Who = { kind: 'thread'; id: string } | { kind: 'desk' }
+export type Out = { ok: boolean; text: string; data?: unknown }
+export type Io = { startThread?: (title: string, text: string, project: string) => Promise<Out> }
+
+const err = (text: string): Out => ({ ok: false, text })
+// every text field (purpose, inputs, outputs, reasons, changes) is one line without control characters: a newline could add lines
+// to the recipe skill or the auditor brief. `str` (names, paths, the run line) only trims: a newline there is refused by its own check.
+const one = (s: string) => s.replace(/[\s\x00-\x1f\x7f]+/g, ' ').trim()
+const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
+const txt = (v: unknown) => one(str(v))
+const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').map(one).filter(Boolean) : typeof v === 'string' && one(v) ? [one(v)] : [])
+
+// One store mutation at a time: in this process by a queue, across sessions (every thread and the desk is its own process) by
+// a lock folder (`mkdir` is atomic) whose `at` file holds the holder's token (time:random). A lock older than a minute, or one that
+// never got its token (a holder that died between mkdir and write: after ~4 s), is taken over by MOVING it aside (`mv` is atomic: one
+// taker wins, the others retry mkdir), and a holder releases only a lock that still carries its own token. A lock left behind by a
+// crash therefore blocks mutations for at most a minute. Every mutation reads the meta again inside the lock.
+const LOCK_STALE_MS = 60_000
+async function withLock<T>(h: Host, f: () => Promise<T>): Promise<T> {
+  const home = await homeDir(h)
+  const lock = `${scriptsDir(home)}/.lock`
+  await mkdirp(h, scriptsDir(home))
+  const token = `${await h.clock.now()}:${Math.floor(Math.random() * 1e9).toString(36)}`
+  let got = false
+  for (let n = 0; n < 25 && !got; n++) {
+    got = (await h.process.run(['mkdir', lock])).exitCode === 0
+    if (got) break
+    const at = Number(String(await h.fs.read(`${lock}/at`).catch(() => '')).split(':')[0]) || 0
+    if (at ? (await h.clock.now()) - at > LOCK_STALE_MS : n >= 20) {
+      const aside = `${lock}.stale-${token.replace(':', '-')}`
+      await h.process.run(['mv', lock, aside])
+      await h.process.run(['rm', '-rf', aside])
+    } else await h.process.run(['sleep', '0.2'])
+  }
+  if (!got) throw new Error('the script store is busy: try again')
+  try {
+    await h.fs.write(`${lock}/at`, token)
+    return await f()
+  } finally {
+    const mine = String(await h.fs.read(`${lock}/at`).catch(() => '')) === token
+    if (mine) await h.process.run(['rm', '-rf', lock]).catch(() => undefined)
+  }
+}
+let queue: Promise<unknown> = Promise.resolve()
+const queued = <T,>(h: Host, f: () => Promise<T>): Promise<T> => {
+  const r = queue.then(() => withLock(h, f), () => withLock(h, f))
+  queue = r.catch(() => undefined)
+  return r
+}
+
+// ---- the privacy and secret scrub (deterministic, no model) --------------------------------------------------------
+const SECRETS: [RegExp, string][] = [
+  [/AKIA[0-9A-Z]{16}/, 'an access key id'],
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----/, 'a private key'],
+  [/\bgh[pousr]_[A-Za-z0-9]{30,}/, 'a code-host token'],
+  [/\bsk-[A-Za-z0-9_-]{20,}/, 'an API key'],
+  [/\bxox[abprs]-[A-Za-z0-9-]{10,}/, 'a chat token'],
+  [/\b(?:password|passwd|secret|token|api[_-]?key)\w*["']?\s*[:=]\s*["'][^"'\s]{8,}["']/i, 'a literal credential assignment'],
+  [/\bAuthorization["']?\s*[:=]\s*["']?(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/i, 'an authorization header'],
+]
+// a user's home path (a parameterised one, $HOME or expanduser, has no user name after the /Users or /home folder) and an email address
+export function scan(text: string, home = ''): { privacy: string[]; secrets: string[] } {
+  const privacy: string[] = []
+  const secrets: string[] = []
+  if (home.length > 1 && text.includes(`${home}/`)) privacy.push("contains this machine's home path")
+  const m = /\/(?:Users|home)\/[A-Za-z0-9._-]+/.exec(text)
+  if (m) privacy.push(`hardcoded user path ${m[0]}: use $HOME or an argument`)
+  if (/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/.test(text)) privacy.push('contains an email address or user@host')
+  for (const [re, what] of SECRETS) if (re.test(text)) secrets.push(`contains ${what}`)
+  return { privacy, secrets }
+}
+
+// What the mod itself sees in the text, whatever the auditor says: network tools and libraries, deleting or moving over files.
+// A hit makes the verdict `adapt` at best (the user can still decide with confirm). Not a proof either way: the auditor reads it too.
+const RISKY: [RegExp, string][] = [
+  [/\b(?:curl|wget|ncat|scp|rsync|ssh|sftp|ftp)\s|\b(?:requests|urllib|urllib3|httpx|aiohttp|http\.client|socket|smtplib|ftplib|XMLHttpRequest)\b|\bfetch\s*\(|\bgit\s+(?:push|fetch|pull|clone)\b|\b(?:pip3?|npm|yarn|pnpm|apt(?:-get)?|brew)\s+install\b/, 'uses the network (the mod\'s text scan)'],
+  [/\brm\s+-|\bos\.(?:remove|unlink|rmdir)\b|\bshutil\.(?:rmtree|move)\b|\b(?:unlink|rmdir)(?:Sync)?\s*\(|\bfs\.(?:rm|rmSync|unlink|rmdir)\b|\bRemove-Item\b|-delete\b|\bmv\s+-f\b|\.truncate\s*\(/, 'deletes or moves over files (the mod\'s text scan)'],
+]
+export const riskyText = (text: string): string[] => RISKY.filter(([re]) => re.test(text)).map(([, what]) => what)
+
+// lean-agent's OWN data (the ledger, reports, rules stats ...): such a script belongs in the mod itself
+const OWN = /\.lean-agent\b|\b(?:ledger|feedback|gaps|inbox|questions|answers|goals|scheduled)\.jsonl?\b|\brules-loaded\b|\blearn\.json\b|\bnotes\.jsonl\b/
+export const ownData = (...texts: string[]) => texts.some(t => OWN.test(t))
+
+const INTERP = /^(?:python[0-9.]*|node|nodejs|bash|sh|zsh|ruby|perl|deno|bun|tsx|ts-node)$/
+// the only flags allowed before {script} in a run line, by interpreter family (inline code and modules are never among them)
+const okFlag = (base: string, a: string) => (/^(?:ba|z)?sh$/.test(base) ? /^-[exu]+$/.test(a) : /^python/.test(base) ? /^-(?:u|B|O|OO|s|S|E|I|q)$/.test(a) : a === '--no-warnings')
+
+// the run line shows the command with {script} where the script's path goes: an interpreter first, plain words, <placeholders> for arguments
+export function runProblem(run: string): string | null {
+  if (!run) return 'run is required: the command with {script} where the script goes, e.g. `python3 {script} <input.jsonl>`'
+  if (run.length > 300) return 'run is over 300 characters'
+  if (!run.includes('{script}')) return 'run must contain {script} where the script goes, e.g. `python3 {script} <input.jsonl>`'
+  const w = run.trim().split(/\s+/)
+  if (!INTERP.test(w[0]!)) return 'run must start with a bare interpreter (python3, node, bash, sh, ruby, perl ...), then {script}'
+  const k = w.indexOf('{script}')
+  if (k < 1 || w.filter(x => x.includes('{script}')).length !== 1) return 'run must contain {script} once, as a word of its own'
+  if (w.slice(1, k).some(x => !okFlag(w[0]!, x))) return 'run: between the interpreter and {script} only plain flags (python3 -u -B, bash -e -x) are allowed, never inline code (-c, -e, -m) or modules'
+  const rest = run.replace(/<[A-Za-z0-9_. /-]{1,40}>/g, ' ').replace(/\{script\}/g, ' ')
+  if (/[;&|`\n\r<>"'\\#~*?!(){}[\]]|\$/.test(rest.slice(w[0]!.length))) return 'run is one plain command: no quotes, ; & | redirects, substitution or expansion (write arguments as <placeholders>)'
+  return null
+}
+
+// ---- store layout --------------------------------------------------------------------------------------------------
+const candDir = (home: string, name: string) => `${scriptsDir(home)}/candidates/${name}`
+const adoptedDir = (home: string, project: string, name: string) => (project === 'global' ? `${scriptsDir(home)}/${name}` : `${leanDir(home)}/${project}/scripts/${name}`)
+const nameOk = (n: string) => slugOk(n) && n.length <= 48 && !RESERVED.has(n)
+const projectOk = (p: string) => p === 'global' || (slugOk(p) && !LEAN_DIRS.has(p) && p.length <= 48 && !/\.(?:jsonl?|md|txt|log)$/.test(p))
+// the stored file never takes the name of the store's own files
+const fileOk = (f: string) => {
+  const n = f.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_').slice(0, 64) || 'script'
+  return n === 'meta.json' || n === 'SKILL.md' || n === 'run' || /^v\d+$/.test(n) ? `script-${n}` : n // never a store file or a version folder
+}
+
+type Found = { meta: Meta; dir: string }
+async function readMeta(h: Host, dir: string): Promise<Meta | null> {
+  const m = await readJson<Meta | null>(h, `${dir}/meta.json`, null)
+  return m && typeof m === 'object' && typeof m.name === 'string' && typeof m.sha256 === 'string' ? m : null
+}
+async function dirsIn(h: Host, dir: string): Promise<string[]> {
+  return (await h.fs.list(dir).catch(() => [])).filter(f => f.kind === 'dir').map(f => f.name)
+}
+// every stored script: candidates, global adopted, and each project's adopted (retired ones are left out)
+export async function allScripts(h: Host): Promise<Found[]> {
+  const home = await homeDir(h)
+  const out: Found[] = []
+  const add = async (dir: string) => {
+    const meta = await readMeta(h, dir)
+    if (meta) out.push({ meta, dir })
+  }
+  for (const n of await dirsIn(h, `${scriptsDir(home)}/candidates`)) await add(`${scriptsDir(home)}/candidates/${n}`)
+  for (const n of (await dirsIn(h, scriptsDir(home))).filter(n => !RESERVED.has(n))) await add(`${scriptsDir(home)}/${n}`)
+  for (const p of (await dirsIn(h, leanDir(home))).filter(p => slugOk(p) && !LEAN_DIRS.has(p)))
+    for (const n of await dirsIn(h, `${leanDir(home)}/${p}/scripts`)) await add(`${leanDir(home)}/${p}/scripts/${n}`)
+  return out
+}
+async function find(h: Host, name: string): Promise<Found | null> {
+  if (!nameOk(name)) return null
+  const home = await homeDir(h)
+  for (const dir of [candDir(home, name), adoptedDir(home, 'global', name)]) {
+    const meta = await readMeta(h, dir)
+    if (meta) return { meta, dir }
+  }
+  for (const p of (await dirsIn(h, leanDir(home))).filter(p => slugOk(p) && !LEAN_DIRS.has(p))) {
+    const dir = adoptedDir(home, p, name)
+    const meta = await readMeta(h, dir)
+    if (meta) return { meta, dir }
+  }
+  return null
+}
+const verdictOf = (m: Meta) => m.decision?.value ?? m.audit?.verdict ?? 'unaudited'
+const note = (m: Meta, ts: number, what: string) => ({ ...m, history: [...(m.history ?? []), { ts, what }].slice(-30) })
+const readText = async (h: Host, p: string): Promise<string | null> => {
+  const t = await h.fs.read(p).catch(() => null)
+  return typeof t === 'string' ? t : null
+}
+
+// An adopted script is trusted only while its stable copy (`run`) and its current version file are still the audited text.
+// A hand edit is never trusted silently: it shows as "edited, unaudited" everywhere until a new audit (update) or a rollback.
+export async function integrity(h: Host, dir: string, meta: Meta): Promise<{ ok: boolean; why: string }> {
+  if (meta.status !== 'adopted') return { ok: true, why: '' }
+  const run = await readText(h, `${dir}/${meta.file}`)
+  if (run === null || hashText(run) !== meta.sha256) return { ok: false, why: `${meta.file} differs from the audited version` }
+  const cur = meta.versions?.find(v => v.v === meta.current)
+  if (cur) {
+    const t = await readText(h, `${dir}/${cur.v}/${cur.file}`)
+    if (t === null || hashText(t) !== cur.sha256) return { ok: false, why: `${cur.v}/${cur.file} was edited` }
+  }
+  return { ok: true, why: '' }
+}
+export type Health = 'ok' | 'needs-update' | 'edited, unaudited'
+const healthOf = (meta: Meta, ok: boolean): Health => (!ok ? 'edited, unaudited' : meta.state === 'needs-update' ? 'needs-update' : 'ok')
+const refresh = (h: Host, project: string) => refreshScriptRules(h, project).catch(() => undefined) // rule lines and the copy into the checkout
+const ver = (m: Meta, v?: string) => m.versions?.find(x => x.v === (v ?? m.current))
+const vnum = (v: string) => Number(v.slice(1)) || 0
+
+// ---- propose -------------------------------------------------------------------------------------------------------
+const proposed = new Set<string>() // source paths this session proposed (the nudge leaves them alone)
+
+async function threadProject(h: Host, home: string, id: string): Promise<string> {
+  return str((await readJson<{ project?: string }>(h, `${threadsDir(home)}/${id}/thread.json`, {})).project)
+}
+
+async function propose(h: Host, who: Who, i: any): Promise<Out> {
+  if (who.kind !== 'thread') return err('propose is for threads: the desk cannot write scripts (ask a thread)')
+  const home = await homeDir(h)
+  const name = str(i.name)
+  const path = str(i.path)
+  if (!nameOk(name)) return err(`propose needs a name: letters, digits . _ - (at most 48), not ${[...RESERVED].join(' or ')}`)
+  if (!path.startsWith('/') || path.split('/').includes('..')) return err('propose needs path: the absolute path of the script file')
+  const purpose = txt(i.purpose)
+  if (!purpose) return err('propose needs purpose: what the script does, in a sentence')
+  if (purpose.length > 300) return err('purpose is over 300 characters')
+  const run = str(i.run)
+  const rp = runProblem(run)
+  if (rp) return err(rp)
+  const inputs = strs(i.inputs)
+  const outputs = strs(i.outputs)
+  if (!inputs.length || !outputs.length) return err('propose needs inputs and outputs (what it reads, what it writes; "stdout" if it only prints)')
+  if ([...inputs, ...outputs].some(x => x.length > 300)) return err('an inputs/outputs entry is over 300 characters')
+  const own = await threadProject(h, home, who.id)
+  const project = str(i.project) || own || 'global'
+  if (!projectOk(project)) return err(`project must be a project name or "global" (got ${project})`)
+  if (project !== 'global' && project !== own) return err(`project must be this thread's own project${own ? ` (${own})` : ''} or "global"`)
+  const broad = outputs.find(broadOutput)
+  if (broad) return err(`outputs entry "${broad}" is too broad to declare what the script writes: name the files or a folder of its own`)
+  const fields = scan([purpose, run, ...inputs, ...outputs].join('\n'), home)
+  if (fields.secrets.length || fields.privacy.length) return err(`purpose, run, inputs or outputs ${[...fields.secrets, ...fields.privacy].join('; ')}: use $HOME or a <placeholder> instead`)
+  const st = await h.fs.stat(path).catch(() => null)
+  if (!st) return err(`no such file: ${path}`)
+  if (st.kind && st.kind !== 'file') return err(`${path} is not a file`)
+  if (typeof st.size === 'number' && st.size > MAX_SCRIPT_BYTES) return err(`${path} is over ${MAX_SCRIPT_BYTES / 1024} KiB: a reusable script is small`)
+  const text = await h.fs.read(path).catch(() => null)
+  if (typeof text !== 'string' || text.includes('\0')) return err(`${path} is not a text file`)
+  if (text.length > MAX_SCRIPT_BYTES) return err(`${path} is over ${MAX_SCRIPT_BYTES / 1024} KiB: a reusable script is small`)
+  const found = scan(text, home)
+  if (found.secrets.length) return err(`not stored: the script ${found.secrets.join(', ')}. Take it out (read it from the environment or an argument) and propose again`)
+  const sha = hashText(text)
+  const ts = await h.clock.now()
+  const all = await allScripts(h)
+  const same = all.find(x => x.meta.sha256 === sha && x.meta.name !== name)
+  if (same) return err(`this exact script is already ${same.meta.status} as ${same.meta.name}`)
+  const have = all.find(x => x.meta.name === name)
+  if (have && have.meta.status === 'adopted') return err(`${name} is already adopted: use another name, or retire it first`)
+  if (have && have.meta.status !== 'candidate' && have.meta.status !== 'rejected') return err(`${name} exists (${have.meta.status})`)
+  if (have && have.meta.sha256 === sha) return { ok: true, text: `${name} is already proposed with this content (${verdictOf(have.meta)}); next: lean_script audit ${name}` }
+  const file = fileOk(path.split('/').pop() ?? '')
+  const core = ownData(text, purpose, ...inputs, ...outputs)
+  const dir = candDir(home, name)
+  if (have) await h.process.run(['rm', '-rf', have.dir]) // a revised candidate replaces the old one (its audit no longer applies)
+  await h.fs.write(`${dir}/${file}`, text)
+  const meta: Meta = { name, purpose, run, inputs, outputs, project, author: who.id, created: ts, sha256: sha, file, status: 'candidate', ...(core ? { core: true } : {}), scan: found.privacy, history: [{ ts, what: have ? `re-proposed by ${who.id}` : `proposed by ${who.id}` }] }
+  await writeJson(h, `${dir}/meta.json`, meta)
+  proposed.add(path)
+  if (core) {
+    // about lean-agent's own data: also filed for the maintainers, who can move it into the mod
+    await appendJsonl(h, `${leanDir(home)}/feedback.jsonl`, { ts, kind: 'core-candidate', note: 'candidate for lean-agent core', thread: who.id, script: name, purpose, run, sha256: sha })
+  }
+  const hits = found.privacy.length ? ` The scan found: ${found.privacy.join('; ')}; fix that before it can be adopted.` : ''
+  return { ok: true, text: `${name} stored as a candidate (copied, not run; ${project}${core ? '; about lean-agent\'s own data, also filed as a core candidate' : ''}).${hits} Next: lean_script audit ${name}`, data: { name, dir } }
+}
+
+// ---- audit ---------------------------------------------------------------------------------------------------------
+export function auditBrief(meta: Meta, dir: string): string {
+  return [
+    `Audit the candidate script "${meta.name}" for lean-agent. Start ONE \`lean-agent:auditor\` subagent (Agent tool) with the block below as its prompt. Never run the script yourself.`,
+    '--- auditor brief ---',
+    `Audit the candidate script ${meta.name}. Folder: ${dir} (the script is ${dir}/${meta.file}; meta.json beside it).`,
+    `Script sha256: ${meta.sha256} (put it in the LEAN-AUDIT line as "sha")`,
+    `Declared purpose: ${meta.purpose}`,
+    `Declared run: ${meta.run}`,
+    `Declared inputs: ${meta.inputs.join('; ')}`,
+    `Declared outputs: ${meta.outputs.join('; ')}`,
+    `Project: ${meta.project}`,
+    'Judge by reading; end your reply with the LEAN-AUDIT line your agent definition describes.',
+    '--- end ---',
+    'The mod records the verdict from the auditor\'s LEAN-AUDIT line when its Agent call returns, and only for the folder the prompt names. A script is audited once per content: after an adapt, fix it and propose it again.',
+  ].join('\n')
+}
+
+export type Reply = { name: string; sha: string; verdict: Verdict | null; reads: string[]; writes: string[]; network: boolean | null; deletes: boolean | null; secrets: boolean | null; hardcoded: string[]; deterministic: boolean; errorsHandled: boolean; generalises: boolean | null; changes: string[]; reason: string }
+export function parseAudit(text: string): Reply | null {
+  const all = [...String(text ?? '').matchAll(/^\s*`?LEAN-AUDIT\s+(\{.*\})`?\s*$/gm)]
+  const last = all[all.length - 1]
+  if (!last) return null
+  let o: any
+  try {
+    o = JSON.parse(last[1]!)
+  } catch {
+    return null
+  }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return null
+  const bool = (v: unknown): boolean | null => (typeof v === 'boolean' ? v : null)
+  const verdict: Verdict | null = o.verdict === 'adopt' || o.verdict === 'adapt' || o.verdict === 'reject' ? o.verdict : null
+  return { name: str(o.name), sha: str(o.sha).toLowerCase(), verdict, reads: strs(o.reads), writes: strs(o.writes), network: bool(o.network), deletes: bool(o.deletes), secrets: bool(o.secrets), hardcoded: strs(o.hardcoded), deterministic: o.deterministic !== false, errorsHandled: o.errors_handled !== false, generalises: bool(o.generalises), changes: strs(o.changes), reason: txt(o.reason).slice(0, 400) }
+}
+
+// an output entry that would cover (nearly) anything is no declaration
+// (judged by its literal folders before the first wildcard: an absolute entry needs two of them, a relative or ~ one: `/tmp/out/`,
+// `~/reports/*.csv`, `<outdir>/*.csv`; refused: `/`, `/tmp`, `/*`, `/**/*`, `~`, `~/**/*`, `.`, `./**/*`, `*`, anything with `..`)
+export function broadOutput(o: string): boolean {
+  if (/(?:^|\/)\.\.(?:\/|$)/.test(o) || /^[*?[]/.test(o)) return true
+  const star = o.search(/[*?[]/)
+  const folders = (star < 0 ? o : o.slice(0, star).replace(/[^/]*$/, '')).split('/').filter(s => s && s !== '.' && s !== '~' && s !== '$HOME')
+  return folders.length < (o.startsWith('/') ? 2 : 1)
+}
+// an output entry covers a written thing: equal, a glob match, or a folder prefix; stdout/stderr are always fine. A `..` never counts.
+const covered = (w: string, outputs: string[]) => /^(?:stdout|stderr)$/i.test(w) || (!/(?:^|\/)\.\.(?:\/|$)/.test(w) && outputs.some(o => o === w || (o.endsWith('/') && w.startsWith(o)) || (o.includes('*') && globRe(o).test(w))))
+
+// The verdict rules (the mod, not the model): network, deletes/overwrites, writes outside the declared outputs, hardcoded
+// paths/ids/names, a scrub hit or a script that is right only for its original data are never `adopt`; a secret is `reject`.
+export function judge(meta: Meta, r: Reply & { verdict: Verdict }, now: { privacy: string[]; secrets: string[]; risky?: string[] }): { verdict: Verdict; blockers: string[] } {
+  const blockers: string[] = []
+  if (r.network) blockers.push('uses the network')
+  if (r.deletes) blockers.push('deletes or overwrites files')
+  blockers.push(...(now.risky ?? []))
+  const stray = r.writes.filter(w => !covered(w, meta.outputs))
+  if (stray.length) blockers.push(`writes outside its declared outputs: ${stray.join(', ')}`)
+  if (!r.generalises) blockers.push('is correct only for the original data')
+  if (r.hardcoded.length) blockers.push(`hardcoded: ${r.hardcoded.join(', ')}`)
+  blockers.push(...now.privacy)
+  if (r.secrets || now.secrets.length) return { verdict: 'reject', blockers: [...blockers, 'contains secrets'] }
+  return { verdict: r.verdict === 'adopt' && blockers.length ? 'adapt' : r.verdict, blockers }
+}
+
+// `prompt` is what the auditor was asked: only a script whose folder it names is audited by this reply, and one sha is audited once
+// (a revised script has a new sha). The reply comes from a real auditor Agent call; there is no way to hand the mod a verdict.
+// The subject is a candidate (its script file) or, for an adopted script, its pending update (the new version file): the folder the
+// auditor must be pointed at, the sha it must still have, and what the update changes in purpose or run line (never auto-adopted).
+async function recordAudit(h: Host, by: string, reply: Reply, prompt: string): Promise<Out> {
+  const f = await find(h, reply.name)
+  if (!f) return err(`no script ${reply.name || '(no name in the audit)'}`)
+  const pend = f.meta.status === 'adopted' ? f.meta.pending : undefined
+  if (f.meta.status !== 'candidate' && !pend) return err(`${reply.name} is ${f.meta.status}${f.meta.status === 'adopted' ? ' with no update waiting' : ''}: only a candidate or an update is audited`)
+  const folder = pend ? `${f.dir}/${pend.v}/` : `${f.dir}/`
+  const path = pend ? `${f.dir}/${pend.v}/${pend.file}` : `${f.dir}/${f.meta.file}`
+  const sha = pend ? pend.sha256 : f.meta.sha256
+  const prior = pend ? pend.audit : f.meta.audit
+  const named = new Set(prompt.match(/\/scripts\/(?:candidates\/[A-Za-z0-9._-]+|[A-Za-z0-9._-]+\/v\d+)\//g) ?? [])
+  if (!prompt.includes(folder) || named.size !== 1) return err(`${reply.name}: the auditor must be pointed at exactly this folder (${folder}), so its reply is not an audit of this script; use the brief lean_script audit gives`)
+  if (prior && prior.sha === sha) return err(`${reply.name} was already audited at this content (${prior.verdict}); ${pend ? 'send a revised update' : 'propose a revised script'} to audit again`)
+  // the auditor echoes the sha256 of the text it was given: a reply that read an older text (the script was proposed or updated again
+  // while the auditor ran) is never recorded against the newer one
+  if (reply.sha.length < 12 || !sha.startsWith(reply.sha)) return err(`${reply.name}: the audit does not carry the sha256 of the stored text (${sha.slice(0, 12)}...), so it may be about an older text; run the auditor again with the current brief`)
+  if (reply.verdict === null) return err('audit verdict must be adopt, adapt or reject')
+  const r = reply as Reply & { verdict: Verdict }
+  if (r.network === null || r.deletes === null || r.secrets === null || r.generalises === null) return err('audit incomplete: network, deletes, secrets and generalises must each be answered true or false')
+  const text = await readText(h, path)
+  if (text === null || hashText(text) !== sha) return err(`${r.name}: the stored script changed since it was ${pend ? 'sent as an update' : 'proposed'}, so this audit does not apply; ${pend ? 'send the update again' : 'propose it again'}`)
+  const now = scan(text, await homeDir(h))
+  // what the update changes in purpose or run line, against what is current NOW (a rollback may have moved current since it was sent)
+  const moved = pend ? [...(pend.purpose !== f.meta.purpose ? [`changes the purpose (was: ${f.meta.purpose})`] : []), ...(pend.run !== f.meta.run ? [`changes the run line (was: ${f.meta.run})`] : [])] : []
+  const j = judge(f.meta, r, { ...now, risky: [...riskyText(text), ...moved] })
+  const changes = [...r.changes, ...(j.verdict === 'adapt' && r.verdict === 'adopt' ? j.blockers.map(b => `mod: it ${b}`) : [])]
+  if (j.verdict === 'adapt' && !changes.length) return err('an adapt verdict needs the concrete changes (changes: [...])')
+  if (j.verdict === 'reject' && !r.reason && !j.blockers.length) return err('a reject verdict needs a reason')
+  const ts = await h.clock.now()
+  const audit: Audit = { ts, by, sha, claimed: r.verdict, verdict: j.verdict, reads: r.reads, writes: r.writes, network: r.network, deletes: r.deletes, secrets: r.secrets, hardcoded: r.hardcoded, deterministic: r.deterministic, errorsHandled: r.errorsHandled, generalises: r.generalises, changes, blockers: j.blockers, reason: r.reason || (j.verdict === 'reject' ? j.blockers.join('; ') : '') }
+  const why = j.verdict !== r.verdict ? ` The auditor said ${r.verdict}; the mod's rules say ${j.verdict}: ${j.blockers.join('; ')}.` : ''
+  const said = `audited: ${j.verdict}${j.verdict !== r.verdict ? ` (auditor said ${r.verdict})` : ''}`
+  if (pend) {
+    if (j.verdict === 'reject') {
+      await h.process.run(['rm', '-rf', `${f.dir}/${pend.v}`])
+      await writeJson(h, `${f.dir}/meta.json`, note({ ...f.meta, pending: undefined }, ts, `update ${pend.v} rejected: ${audit.reason}`))
+      return { ok: true, text: `${r.name}: the update ${pend.v} is rejected and dropped (${audit.reason}); ${f.meta.current} stays current.${why}` }
+    }
+    const meta: Meta = note({ ...f.meta, pending: { ...pend, audit } }, ts, `update ${pend.v} ${said}`)
+    await writeJson(h, `${f.dir}/meta.json`, meta) // the audit is kept first, adopted or not
+    if (j.verdict === 'adopt') return await adoptVersion(h, { meta, dir: f.dir }, 'audit')
+    return { ok: true, text: `${r.name}: the update ${pend.v} is adapt. Change: ${changes.join('; ')}. Then send the revised update again (lean_script update ${r.name}).${why}` }
+  }
+  let meta: Meta = note({ ...f.meta, audit, scan: now.privacy }, ts, said)
+  if (j.verdict === 'reject') meta = { ...meta, status: 'rejected' }
+  await writeJson(h, `${f.dir}/meta.json`, meta) // the audit is kept first, adopted or not
+  if (j.verdict === 'adopt') return await adopt(h, { meta, dir: f.dir }, 'audit')
+  if (j.verdict === 'reject') return { ok: true, text: `${r.name}: reject${r.reason ? ` (${r.reason})` : ''}.${why}` }
+  return { ok: true, text: `${r.name}: adapt. Change: ${changes.join('; ')}. Then propose the revised script again under the same name.${why}` }
+}
+
+// Move a candidate to its adopted folder and write its recipe skill. Never for a script that fails the scrub.
+async function adopt(h: Host, f: Found, via: 'audit' | 'user'): Promise<Out> {
+  const home = await homeDir(h)
+  const text = await h.fs.read(`${f.dir}/${f.meta.file}`).catch(() => null)
+  if (typeof text !== 'string' || hashText(text) !== f.meta.sha256) return err(`${f.meta.name}: the stored script changed since it was proposed; propose it again`)
+  const now = scan(text, home)
+  if (now.secrets.length || now.privacy.length) return err(`${f.meta.name} cannot be adopted: it ${[...now.secrets, ...now.privacy].join('; ')}`)
+  const dest = adoptedDir(home, f.meta.project, f.meta.name)
+  if (await h.fs.exists(dest).catch(() => false)) return err(`${dest} already exists: retire it first`)
+  const ts = await h.clock.now()
+  await mkdirp(h, dest.replace(/\/[^/]+$/, ''))
+  const mv = await h.process.run(['mv', f.dir, dest])
+  if (mv.exitCode !== 0) return err(`could not move ${f.meta.name} into ${dest}`)
+  // versions: v1/<file> is the audited text; `run` is the stable copy of the current version (rules and skills point at it)
+  const orig = f.meta.file
+  await mkdirp(h, `${dest}/v1`)
+  await h.process.run(['mv', `${dest}/${orig}`, `${dest}/v1/${orig}`])
+  await h.fs.write(`${dest}/run`, text)
+  const v1: Version = { v: 'v1', file: orig, sha256: f.meta.sha256, author: f.meta.author, ts, purpose: f.meta.purpose, run: f.meta.run, audit: f.meta.audit, decision: f.meta.decision }
+  const meta: Meta = note({ ...f.meta, status: 'adopted', adopted: ts, scan: [], file: 'run', current: 'v1', versions: [v1], failures: 0 }, ts, via === 'user' ? 'adopted by the user' : 'adopted after audit')
+  await writeJson(h, `${dest}/meta.json`, meta)
+  await h.fs.write(`${dest}/SKILL.md`, recipeText(meta, dest))
+  await refresh(h, meta.project)
+  return { ok: true, text: `${meta.name} adopted (${meta.project === 'global' ? 'global' : meta.project}): ${dest}. It is now the recipe skill lean-agent-script-${meta.name} and a line in the project rules (rules synced). run: ${expandRun(meta, dest)}`, data: { name: meta.name, dir: dest } }
+}
+
+// Switch an adopted script to its audited pending version: the version file is already stored; `run` is overwritten with its text,
+// `current` and the mirror fields move, the failure counters reset. Rules and skills point at `run`, so they need no edit.
+async function adoptVersion(h: Host, f: Found, via: 'audit' | 'user'): Promise<Out> {
+  const pend = f.meta.pending
+  if (!pend || f.meta.status !== 'adopted') return err(`${f.meta.name} has no update waiting`)
+  const text = await readText(h, `${f.dir}/${pend.v}/${pend.file}`)
+  if (text === null || hashText(text) !== pend.sha256) return err(`${f.meta.name}: the stored update changed since it was sent; send it again`)
+  const now = scan(text, await homeDir(h))
+  if (now.secrets.length || now.privacy.length) return err(`${f.meta.name} ${pend.v} cannot be adopted: it ${[...now.secrets, ...now.privacy].join('; ')}`)
+  if (!pend.audit || pend.audit.sha !== pend.sha256) return err(`${f.meta.name} ${pend.v} was never audited`)
+  const ts = await h.clock.now()
+  await h.fs.write(`${f.dir}/${f.meta.file}`, text)
+  const entry: Version = { ...pend, changes: pend.changes }
+  const meta: Meta = note(
+    { ...f.meta, versions: [...(f.meta.versions ?? []), entry], current: pend.v, sha256: pend.sha256, purpose: pend.purpose, run: pend.run, audit: pend.audit, decision: pend.decision, pending: undefined, failures: 0, state: undefined, badWhy: undefined },
+    ts,
+    via === 'user' ? `${pend.v} adopted by the user` : `${pend.v} adopted after audit`,
+  )
+  await writeJson(h, `${f.dir}/meta.json`, meta)
+  await h.fs.write(`${f.dir}/SKILL.md`, recipeText(meta, f.dir))
+  await refresh(h, meta.project)
+  const moved = (pend.changes ?? []).length ? ` Note: ${(pend.changes ?? []).join('; ')}.` : ''
+  return { ok: true, text: `${meta.name} is now ${pend.v} (rules and skill unchanged: they point at ${f.dir}/run).${moved}`, data: { name: meta.name, dir: f.dir } }
+}
+
+// An auditor's Agent reply: when it ends with a LEAN-AUDIT line the mod records the verdict. null = no such line.
+export async function auditFromReply(h: Host, by: string, text: string, prompt: string): Promise<string | null> {
+  const r = parseAudit(text)
+  if (!r) return null
+  try {
+    return await queued(h, async () => {
+      const o = await recordAudit(h, by, r, prompt)
+      return `[lean-agent] ${o.ok ? '' : 'audit refused: '}${o.text}`
+    })
+  } catch (e) {
+    return `[lean-agent] audit refused: ${String((e as Error)?.message ?? e).slice(0, 120)}; run the auditor again`
+  }
+}
+
+// ---- decide, retire, list, show ------------------------------------------------------------------------------------
+async function decide(h: Host, who: Who, i: any): Promise<Out> {
+  if (who.kind !== 'desk') return err('decide is for the desk, and only after the user said so in the chat')
+  const value = str(i.verdict)
+  if (value !== 'adopt' && value !== 'reject') return err('decide needs verdict: adopt or reject')
+  const reason = txt(i.reason).slice(0, 300)
+  if (!reason) return err('decide needs reason (why the user decided so)')
+  const f = await find(h, str(i.name))
+  if (!f) return err(`no script ${str(i.name)}`)
+  const pend = f.meta.status === 'adopted' ? f.meta.pending : undefined // for an adopted script the decision is about its waiting update
+  if (f.meta.status === 'retired' || (f.meta.status === 'adopted' && !pend)) return err(`${f.meta.name} is ${f.meta.status}${pend === undefined && f.meta.status === 'adopted' ? ' with no update waiting' : ''}: use retire to take an adopted script out, rollback to go back a version`)
+  const ts = await h.clock.now()
+  const log = async (extra: object) => appendJsonl(h, `${scriptsDir(await homeDir(h))}/decisions.jsonl`, { ts, name: f.meta.name, by: 'user', value, reason, prior: pend ? `update ${pend.v}: ${pend.audit?.verdict ?? 'unaudited'}` : verdictOf(f.meta), ...(pend ? { version: pend.v } : {}), ...extra })
+  if (value === 'reject') {
+    if (pend) {
+      await h.process.run(['rm', '-rf', `${f.dir}/${pend.v}`])
+      await writeJson(h, `${f.dir}/meta.json`, note({ ...f.meta, pending: undefined }, ts, `update ${pend.v} rejected by the user: ${reason}`))
+    } else await writeJson(h, `${f.dir}/meta.json`, note({ ...f.meta, status: 'rejected', decision: { value, by: 'user', reason, ts } }, ts, `rejected by the user: ${reason}`))
+    await log({})
+    return { ok: true, text: `${f.meta.name}${pend ? ` update ${pend.v}` : ''} rejected (the user's decision, logged)` }
+  }
+  const audit = pend ? pend.audit : f.meta.audit
+  if (!audit) return err(`${f.meta.name}${pend ? ` ${pend.v}` : ''} was never audited: audit it first (lean_script audit); a verdict can be overridden, a missing one cannot`)
+  const text = await readText(h, pend ? `${f.dir}/${pend.v}/${pend.file}` : `${f.dir}/${f.meta.file}`)
+  if (text === null) return err(`${f.meta.name}: the stored script is unreadable`)
+  const now = scan(text, await homeDir(h))
+  if (now.secrets.length || now.privacy.length) return err(`${f.meta.name} cannot be adopted, not even by the user: it ${[...now.secrets, ...now.privacy].join('; ')}. Have a thread fix it and propose it again`)
+  if (audit.secrets) return err(`${f.meta.name}: the audit found secrets in it, so it is not adopted, not even by the user. Have a thread remove them and propose it again`)
+  const over = [...(audit.verdict === 'adopt' && !audit.blockers.length ? [] : [`the audit said ${audit.verdict}`]), ...audit.blockers]
+  if (over.length && i.confirm !== true) return err(`adopting ${f.meta.name}${pend ? ` ${pend.v}` : ''} overrides the audit (${over.join('; ')}). Tell the user that, and only if they still want it call decide again with confirm: true`)
+  const decision: Decision = { value, by: 'user', reason, ts, ...(over.length ? { overrode: over } : {}) }
+  const out = pend ? await adoptVersion(h, { meta: { ...f.meta, pending: { ...pend, decision } }, dir: f.dir }, 'user') : await adopt(h, { meta: { ...f.meta, decision }, dir: f.dir }, 'user')
+  if (out.ok) await log({ overrode: over })
+  return out
+}
+
+async function retire(h: Host, who: Who, i: any): Promise<Out> {
+  const f = await find(h, str(i.name))
+  if (!f) return err(`no script ${str(i.name)}`)
+  const no = await mayTouch(h, who, f.meta)
+  if (no) return no
+  const home = await homeDir(h)
+  const ts = await h.clock.now()
+  const dest = `${scriptsDir(home)}/retired/${f.meta.name}-${ts}`
+  await mkdirp(h, `${scriptsDir(home)}/retired`)
+  const mv = await h.process.run(['mv', f.dir, dest])
+  if (mv.exitCode !== 0) return err(`could not retire ${f.meta.name}`)
+  await h.fs.write(`${dest}/meta.json`, JSON.stringify(note({ ...f.meta, status: 'retired' }, ts, `retired by ${who.kind === 'thread' ? who.id : 'the desk'}`), null, 2) + '\n')
+  await h.process.run(['rm', '-f', `${dest}/SKILL.md`]) // the recipe skill goes at the next lean_rules sync
+  await appendJsonl(h, `${scriptsDir(home)}/decisions.jsonl`, { ts, name: f.meta.name, by: who.kind === 'thread' ? who.id : 'desk', value: 'retire', reason: txt(i.reason).slice(0, 300), prior: f.meta.status })
+  await refresh(h, f.meta.project) // its rule line and its skill go with the next sync, done now
+  return { ok: true, text: `${f.meta.name} retired (kept in ${dest}); its rule line and skill are removed at the next sync` }
+}
+
+// ---- versions: update, rollback, report-bad, diff -------------------------------------------------------------------------
+export function updateBrief(meta: Meta, dir: string, pend: Version): string {
+  const cur = ver(meta)
+  const was = (a: string, b: string) => (a === b ? '' : ` (was: ${a})`)
+  return [
+    `Audit the UPDATE ${pend.v} of the adopted script "${meta.name}" (current ${meta.current}). Start ONE \`lean-agent:auditor\` subagent (Agent tool) with the block below as its prompt. Never run the script yourself.`,
+    '--- auditor brief ---',
+    `Audit the update ${pend.v} of script ${meta.name}. Folder: ${dir}/${pend.v}/ (the new script is ${dir}/${pend.v}/${pend.file}).`,
+    `Script sha256: ${pend.sha256} (put it in the LEAN-AUDIT line as "sha")`,
+    `The change against the current version is ${dir}/${pend.v}/.changes.diff: read it first. Audit ONLY the change plus the checklist: apply every item to the changed lines, and to the rest of the script only where the change touches it, then answer the checklist for the resulting script.`,
+    `Declared purpose: ${pend.purpose}${was(cur?.purpose ?? '', pend.purpose)}`,
+    `Declared run: ${pend.run}${was(cur?.run ?? '', pend.run)}`,
+    `Declared inputs: ${meta.inputs.join('; ')}`,
+    `Declared outputs: ${meta.outputs.join('; ')}`,
+    `Project: ${meta.project}`,
+    'End your reply with the LEAN-AUDIT line your agent definition describes.',
+    '--- end ---',
+    'The mod records the verdict from the auditor\'s LEAN-AUDIT line when its Agent call returns, and only for the folder the prompt names. A changed purpose or run line is shown in the verdict and is never adopted without the desk\'s decision.',
+  ].join('\n')
+}
+
+// The new text: a file the thread wrote (`path`) or exact `edits` [{find, replace}] on the current version (each `find` must occur once).
+async function newText(h: Host, i: any, base: string): Promise<string | Out> { // the new text, or the refusal (an object)
+  if (str(i.path)) {
+    const path = str(i.path)
+    if (!path.startsWith('/') || path.split('/').includes('..')) return err('update needs path: the absolute path of the new script file')
+    const st = await h.fs.stat(path).catch(() => null)
+    if (!st) return err(`no such file: ${path}`)
+    if (st.kind && st.kind !== 'file') return err(`${path} is not a file`)
+    const t = await readText(h, path)
+    if (t === null || t.includes('\0')) return err(`${path} is not a text file`)
+    return t
+  }
+  if (Array.isArray(i.edits) && i.edits.length) {
+    let t = base
+    for (const [n, e] of (i.edits as any[]).entries()) {
+      const find = typeof e?.find === 'string' ? e.find : ''
+      const rep = typeof e?.replace === 'string' ? e.replace : ''
+      const at = find ? t.split(find).length - 1 : 0
+      if (at !== 1) return err(`edit ${n + 1}: "find" must occur exactly once in the current script (found ${at})`)
+      t = t.replace(find, () => rep)
+    }
+    return t
+  }
+  return err('update needs path (the new script file) or edits: [{find, replace}] applied to the current version')
+}
+
+type Started = Out & { start?: { title: string; brief: string; project: string } }
+async function update(h: Host, who: Who, i: any, io: Io): Promise<Started> {
+  const f = await find(h, str(i.name))
+  if (!f) return err(`no script ${str(i.name)}`)
+  const m = f.meta
+  if (m.status !== 'adopted') return err(`${m.name} is ${m.status}: only an adopted script is updated (a candidate is proposed again)`)
+  const no = await mayTouch(h, who, m)
+  if (no) return no
+  const cur = ver(m)
+  const curText = cur ? await readText(h, `${f.dir}/${cur.v}/${cur.file}`) : null
+  if (!cur || curText === null || hashText(curText) !== cur.sha256) return err(`${m.name}: the stored ${m.current} file is missing or was edited, so there is nothing sound to update: roll back to an older version`)
+  const made = await newText(h, i, curText)
+  if (typeof made !== 'string') return made
+  const text = made
+  if (text.length > MAX_SCRIPT_BYTES) return err(`the update is over ${MAX_SCRIPT_BYTES / 1024} KiB: a reusable script is small`)
+  const found = scan(text, await homeDir(h))
+  if (found.secrets.length) return err(`not stored: the update ${found.secrets.join(', ')}. Take it out and send it again`)
+  const sha = hashText(text)
+  const dup = m.versions?.find(v => v.sha256 === sha)
+  if (dup) return err(dup.v === m.current ? `the update is identical to the current version ${m.current}` : `the update is identical to ${dup.v}: use rollback ${m.name} ${dup.v}`)
+  const purpose = txt(i.purpose) || m.purpose
+  const run = str(i.run) || m.run
+  if (purpose.length > 300) return err('purpose is over 300 characters')
+  if (run !== m.run) {
+    const rp = runProblem(run)
+    if (rp) return err(rp)
+  }
+  const fields = scan(`${purpose}\n${run}`, await homeDir(h))
+  if (fields.secrets.length || fields.privacy.length) return err(`purpose or run ${[...fields.secrets, ...fields.privacy].join('; ')}`)
+  const changes = [...(purpose !== m.purpose ? [`changes the purpose (was: ${m.purpose})`] : []), ...(run !== m.run ? [`changes the run line (was: ${m.run})`] : [])]
+  const ts = await h.clock.now()
+  // a version number is never reused (not after a replaced or rejected update either): an auditor still running on an older text
+  // names an older folder, which no longer matches
+  const n = Math.max(m.nextV ?? 0, ...(m.versions ?? []).map(x => vnum(x.v)), m.pending ? vnum(m.pending.v) : 0) + 1
+  const v = `v${n}`
+  if (m.pending) await h.process.run(['rm', '-rf', `${f.dir}/${m.pending.v}`]) // a newer update replaces the one still waiting
+  await h.fs.write(`${f.dir}/${v}/${cur.file}`, text)
+  await h.fs.write(`${f.dir}/${v}/.changes.diff`, unifiedDiff(curText, text, `${cur.v}/${cur.file}`, `${v}/${cur.file}`))
+  const pend: Version = { v, file: cur.file, sha256: sha, author: who.kind === 'thread' ? who.id : 'desk', ts, purpose, run, changes }
+  const meta: Meta = note({ ...m, pending: pend, nextV: n }, ts, `update ${v} sent by ${pend.author}`)
+  await writeJson(h, `${f.dir}/meta.json`, meta)
+  const brief = updateBrief(meta, f.dir, pend)
+  const head = `${m.name}: update ${v} stored (not run, not current; ${m.current} stays current until it is audited).${changes.length ? ` Shown for the verdict: ${changes.join('; ')}.` : ''}`
+  if (who.kind === 'thread') return { ok: true, text: `${head}\n${brief}` }
+  if (!io.startThread) return { ok: true, text: `${head}\nRoute this to a thread (lean_thread new) with this brief:\n${brief}` }
+  // the thread is started by the caller after the lock is released (its first lean_script call needs the lock)
+  return { ok: true, text: head, start: { title: `audit update of script ${m.name}`, brief, project: m.project === 'global' ? '' : m.project } }
+}
+
+// a thread changes only its own project's scripts and the global ones (as propose does)
+async function mayTouch(h: Host, who: Who, meta: Meta): Promise<Out | null> {
+  if (who.kind !== 'thread' || meta.project === 'global') return null
+  return (await threadProject(h, await homeDir(h), who.id)) === meta.project ? null : err(`${meta.name} belongs to project ${meta.project}: a thread changes only its own project's scripts and global ones`)
+}
+
+async function rollback(h: Host, who: Who, i: any): Promise<Out> {
+  const f = await find(h, str(i.name))
+  if (!f) return err(`no script ${str(i.name)}`)
+  const m = f.meta
+  if (m.status !== 'adopted' || !m.versions?.length) return err(`${m.name} is ${m.status}: only an adopted script has versions to go back to`)
+  const no = await mayTouch(h, who, m)
+  if (no) return no
+  const reason = txt(i.reason).slice(0, 300)
+  if (who.kind === 'thread' && !reason) return err('a thread gives a reason to roll back (reason: why)')
+  const idx = m.versions.findIndex(v => v.v === m.current)
+  const target = str(i.version) ? ver(m, str(i.version)) : m.versions[idx - 1]
+  if (!target) return err(`${str(i.version) ? `no version ${str(i.version)}` : `${m.name} has no version before ${m.current}`}; versions: ${m.versions.map(v => v.v).join(', ')}`)
+  if (!target.audit || target.audit.sha !== target.sha256 || (target.audit.verdict !== 'adopt' && target.decision?.value !== 'adopt')) return err(`${target.v} was never adopted by an audit or by the user, so it is not a version to go back to`)
+  const text = await readText(h, `${f.dir}/${target.v}/${target.file}`)
+  if (text === null || hashText(text) !== target.sha256) return err(`${target.v}/${target.file} is missing or was edited by hand: it is no longer the audited text`)
+  const ts = await h.clock.now()
+  await h.fs.write(`${f.dir}/${m.file}`, text)
+  if (m.pending) await h.process.run(['rm', '-rf', `${f.dir}/${m.pending.v}`]) // an update that waits was written against the version being left: it is dropped
+  const meta: Meta = note({ ...m, current: target.v, sha256: target.sha256, purpose: target.purpose, run: target.run, audit: target.audit, decision: target.decision, failures: 0, state: undefined, badWhy: undefined, pending: undefined, nextV: Math.max(m.nextV ?? 0, ...(m.pending ? [vnum(m.pending.v)] : [])) || undefined }, ts, `rolled back to ${target.v}${target.v === m.current ? ' (restored)' : ` from ${m.current}`} by ${who.kind === 'thread' ? who.id : 'the desk'}${reason ? `: ${reason}` : ''}`)
+  await writeJson(h, `${f.dir}/meta.json`, meta)
+  await h.fs.write(`${f.dir}/SKILL.md`, recipeText(meta, f.dir))
+  await appendJsonl(h, `${scriptsDir(await homeDir(h))}/decisions.jsonl`, { ts, name: m.name, by: who.kind === 'thread' ? who.id : 'desk', value: 'rollback', from: m.current, to: target.v, reason })
+  await refresh(h, m.project)
+  return { ok: true, text: `${m.name} is back to ${target.v} (${target.v === m.current ? 'restored from its stored version' : `was ${m.current}`}); rules and skill point at the same ${f.dir}/${m.file}` }
+}
+
+async function reportBad(h: Host, who: Who, i: any): Promise<Out> {
+  if (who.kind !== 'thread') return err('report-bad is for threads that ran the script')
+  const f = await find(h, str(i.name))
+  if (!f) return err(`no script ${str(i.name)}`)
+  if (f.meta.status !== 'adopted') return err(`${f.meta.name} is ${f.meta.status}: only an adopted script is reported`)
+  const no = await mayTouch(h, who, f.meta)
+  if (no) return no
+  const why = txt(i.why).slice(0, 200)
+  if (!why) return err('report-bad needs why: what was wrong')
+  const ts = await h.clock.now()
+  await writeJson(h, `${f.dir}/meta.json`, note({ ...f.meta, failures: (f.meta.failures ?? 0) + 1, state: 'needs-update', badWhy: why }, ts, `reported wrong by ${who.id}: ${why}`))
+  await refresh(h, f.meta.project)
+  return { ok: true, text: `${f.meta.name} is marked needs-update (${why}). If you can fix it: lean_script update ${f.meta.name} with the fixed file or edits; ${f.meta.current} stays current until the update is audited` }
+}
+
+async function diffOf(h: Host, i: any): Promise<Out> {
+  const f = await find(h, str(i.name))
+  if (!f) return err(`no script ${str(i.name)}`)
+  const m = f.meta
+  if (m.status !== 'adopted' || !m.versions?.length) return err(`${m.name} is ${m.status}: only an adopted script has versions to compare`)
+  const idx = m.versions.findIndex(v => v.v === m.current)
+  const all = [...m.versions, ...(m.pending ? [m.pending] : [])]
+  const find2 = (v: string) => all.find(x => x.v === v)
+  const a = str(i.a) ? find2(str(i.a)) : m.pending ? m.versions[idx] : m.versions[idx - 1]
+  const b = str(i.b) ? find2(str(i.b)) : m.pending ?? m.versions[idx]
+  if (!a || !b) return err(`give two versions (a, b) that exist: ${all.map(v => v.v).join(', ')}${m.versions.length < 2 && !m.pending ? '; there is only one version' : ''}`)
+  const ta = await readText(h, `${f.dir}/${a.v}/${a.file}`)
+  const tb = await readText(h, `${f.dir}/${b.v}/${b.file}`)
+  if (ta === null || tb === null) return err('a version file is missing')
+  const d = unifiedDiff(ta, tb, `${a.v}/${a.file}`, `${b.v}/${b.file}`)
+  const lines = d.split('\n')
+  return { ok: true, text: d ? (lines.length > 300 ? `${lines.slice(0, 300).join('\n')}\n[... ${lines.length - 300} more lines]` : d) : `${a.v} and ${b.v} are identical` }
+}
+
+export async function useCounts(h: Host): Promise<Record<string, number>> {
+  const rows = await readJsonl<{ name?: string }>(h, `${scriptsDir(await homeDir(h))}/uses.jsonl`)
+  const n: Record<string, number> = {}
+  for (const r of rows) if (typeof r.name === 'string') n[r.name] = (n[r.name] ?? 0) + 1
+  return n
+}
+
+const short = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
+async function list(h: Host): Promise<Out> {
+  const all = (await allScripts(h)).sort((a, b) => a.meta.name.localeCompare(b.meta.name))
+  const uses = await useCounts(h)
+  const c = all.filter(x => x.meta.status === 'candidate').length
+  const a = all.filter(x => x.meta.status === 'adopted').length
+  const rows = []
+  for (const x of all) {
+    const health = x.meta.status === 'adopted' ? healthOf(x.meta, (await integrity(h, x.dir, x.meta)).ok) : null
+    rows.push({ name: x.meta.name, project: x.meta.project, status: x.meta.status, verdict: verdictOf(x.meta), overridden: !!x.meta.decision, uses: uses[x.meta.name] ?? 0, core: !!x.meta.core, purpose: x.meta.purpose, version: x.meta.current ?? null, health, update: x.meta.pending ? x.meta.pending.v : null })
+  }
+  const bad = rows.filter(r => r.health && r.health !== 'ok').length
+  const lines = rows.map(r => `${r.name} · ${r.project} · ${r.status}${r.version ? ` ${r.version}` : ''} · ${r.verdict}${r.overridden ? ' (user decision)' : ''} · ${r.uses} use(s)${r.health && r.health !== 'ok' ? ` · ${r.health.toUpperCase()}` : ''}${r.update ? ` · update ${r.update} waiting` : ''}${r.core ? ' · core candidate' : ''} · ${short(r.purpose, 80)}`)
+  return { ok: true, text: [`Scripts: ${c} candidates, ${a} adopted${bad ? `, ${bad} need attention (needs-update or edited)` : ''}`, ...lines].join('\n'), data: rows }
+}
+
+async function show(h: Host, i: any): Promise<Out> {
+  const f = await find(h, str(i.name))
+  if (!f) return err(`no script ${str(i.name)}`)
+  const uses = (await useCounts(h))[f.meta.name] ?? 0
+  const ig = await integrity(h, f.dir, f.meta)
+  const versions = (f.meta.versions ?? []).map(v => `${v.v}${v.v === f.meta.current ? ' (current)' : ''} · ${v.sha256.slice(0, 8)} · ${v.author} · ${new Date(v.ts).toISOString().slice(0, 10)} · ${v.decision ? `user: ${v.decision.value}` : (v.audit?.verdict ?? 'unaudited')}${v.changes?.length ? ` · ${v.changes.join('; ')}` : ''}`)
+  const extra = f.meta.status === 'adopted' ? { command: expandRun(f.meta, f.dir), health: healthOf(f.meta, ig.ok), ...(ig.ok ? {} : { integrity: ig.why }), versionList: versions, failures: f.meta.failures ?? 0 } : {}
+  return { ok: true, text: JSON.stringify({ ...f.meta, dir: f.dir, script: `${f.dir}/${f.meta.file}`, verdict: verdictOf(f.meta), uses, ...extra }, null, 2), data: f.meta }
+}
+
+export async function scriptCounts(h: Host): Promise<{ candidates: number; adopted: number; needsUpdate: number }> {
+  const all = await allScripts(h)
+  let needsUpdate = 0
+  for (const x of all) if (x.meta.status === 'adopted' && (x.meta.state === 'needs-update' || !(await integrity(h, x.dir, x.meta)).ok)) needsUpdate++
+  return { candidates: all.filter(x => x.meta.status === 'candidate').length, adopted: all.filter(x => x.meta.status === 'adopted').length, needsUpdate }
+}
+
+// ---- the tool ------------------------------------------------------------------------------------------------------
+export const SCRIPT_SCHEMA = {
+  type: 'object',
+  properties: {
+    action: { type: 'string', enum: ['propose', 'audit', 'list', 'show', 'retire', 'decide', 'update', 'rollback', 'report-bad', 'diff'] },
+    name: { type: 'string', description: 'script name (letters, digits . _ -)' },
+    path: { type: 'string', description: 'propose: absolute path of the script file (copied, never run)' },
+    purpose: { type: 'string', description: 'propose: what it does, one sentence' },
+    run: { type: 'string', description: 'propose: the command with {script} where the script goes, e.g. `python3 {script} <ledger.jsonl>`' },
+    inputs: { type: 'array', items: { type: 'string' }, description: 'propose: what it reads (arguments, files)' },
+    outputs: { type: 'array', items: { type: 'string' }, description: 'propose: what it writes ("stdout" if it only prints; any file it writes must be listed)' },
+    project: { type: 'string', description: 'propose: project name, or "global" (default: this thread\'s project)' },
+    verdict: { type: 'string', enum: ['adopt', 'reject'], description: 'decide (desk): the user\'s decision' },
+    reason: { type: 'string', description: 'decide / retire / rollback: why (a thread must give one to roll back)' },
+    edits: { type: 'array', items: { type: 'object', properties: { find: { type: 'string' }, replace: { type: 'string' } } }, description: 'update: exact replacements on the current version (each find occurs once), instead of a new file' },
+    version: { type: 'string', description: 'rollback: the version to go back to, like v1 (default: the one before the current)' },
+    a: { type: 'string', description: 'diff: first version (default: the one before current, or current when an update waits)' },
+    b: { type: 'string', description: 'diff: second version (default: the update, or current)' },
+    why: { type: 'string', description: 'report-bad: what was wrong with the script\'s result' },
+    confirm: { type: 'boolean', description: 'decide adopt over an audit that said otherwise: only after the user was told and agreed' },
+  },
+  required: ['action'],
+}
+export const SCRIPT_SPEC = {
+  name: SCRIPT_TOOL,
+  description: 'Scripts over models: propose (copy a script you wrote into the candidate store, never run), audit (a read-only auditor judges it; the mod applies the rules), list, show, diff, retire; update (a new file or edits for an adopted script: audited as a diff, then current), rollback, report-bad (it was wrong); decide (desk, the user overrides a verdict). An adopted script becomes a rule line and a recipe skill (lean-agent-script-<name>) with its stable run command.',
+  inputSchema: SCRIPT_SCHEMA,
+}
+
+export async function scriptTool(h: Host, who: Who, i: any, io: Io = {}): Promise<Out> {
+  try {
+    switch (i?.action) {
+      case 'propose':
+        return await queued(h, () => propose(h, who, i))
+      case 'list':
+        return await list(h)
+      case 'show':
+        return await show(h, i)
+      case 'retire':
+        return await queued(h, () => retire(h, who, i))
+      case 'decide':
+        return await queued(h, () => decide(h, who, i))
+      case 'update': {
+        const u = await queued(h, () => update(h, who, i, io))
+        if (!u.start || !io.startThread) return u
+        const t = await io.startThread(u.start.title, u.start.brief, u.start.project) // after the lock: the new thread needs it
+        return t.ok ? { ok: true, text: `${u.text} The audit started in a thread: ${t.text}` } : t
+      }
+      case 'rollback':
+        return await queued(h, () => rollback(h, who, i))
+      case 'report-bad':
+        return await queued(h, () => reportBad(h, who, i))
+      case 'diff':
+        return await diffOf(h, i)
+      case 'audit': {
+        const name = str(i.name)
+        const f = await find(h, name)
+        if (!f) return err(`no script ${name || '(name missing)'}`)
+        const pend = f.meta.status === 'adopted' ? f.meta.pending : undefined
+        if (f.meta.status !== 'candidate' && !pend) return err(`${name} is ${f.meta.status}${f.meta.status === 'adopted' ? ' with no update waiting (lean_script update sends one)' : ''}: only a candidate or an update is audited`)
+        const brief = pend ? updateBrief(f.meta, f.dir, pend) : auditBrief(f.meta, f.dir)
+        if (who.kind === 'thread') return { ok: true, text: brief }
+        if (!io.startThread) return { ok: true, text: `Route this to a thread (lean_thread new) with this brief:\n${brief}` }
+        const t = await io.startThread(`audit script ${name}`, brief, f.meta.project === 'global' ? '' : f.meta.project)
+        return t.ok ? { ok: true, text: `audit of ${name} started in a thread: ${t.text}` } : t
+      }
+      default:
+        return err(`unknown lean_script action ${String(i?.action)}`)
+    }
+  } catch (e) {
+    return err(`lean_script failed: ${String((e as Error)?.message ?? e).slice(0, 200)}`)
+  }
+}
+
+// ---- the nudge: a scratch script that ran and was never proposed -------------------------------------------------------
+const created = new Set<string>() // files written this session (Write tool, shell redirect, tee)
+const ran = new Map<string, { nudged: boolean }>()
+const SEG = /&&|\|\||[;|\n]/
+export const resetScripts = () => {
+  created.clear()
+  ran.clear()
+  proposed.clear()
+  warned.clear()
+  asked.clear()
+}
+export const noteWrite = (path: unknown) => {
+  if (typeof path === 'string' && path.startsWith('/')) created.add(path)
+}
+// scratch = a temp root, a `tmp` / `scratchpad` folder under ~/.claude (job and session scratchpads), or the thread's own folder; a repo's own tmp folder is not
+const scratch = (p: string, lean: string, thread: string) => /^\/(?:private\/)?(?:tmp|var\/tmp|var\/folders)\//.test(p) || /\/\.claude\/(?:[^/]+\/)*(?:tmp|scratch|scratchpad)\//.test(p) || p.startsWith(`${lean}/threads/${thread}/`)
+
+// -c / -m / -e / -p and --eval are inline code or a module for that interpreter (bash -e or -x is not)
+const inlineFlag = (base: string, a: string) =>
+  /^(?:ba|z)?sh$/.test(base) ? /^-[a-zA-Z]*c[a-zA-Z]*$/.test(a) : /^python/.test(base) ? /^-[a-zA-Z]*[cm]$/.test(a) : /^-[a-zA-Z]*[eEp]$/.test(a) || a === '--eval' || a === '--print'
+// the file a command segment runs: `python3 /abs/file`, `node file`, `bash file ...`, or an absolute path run directly; null = inline code or no file
+function runTarget(seg: string): string | null {
+  const w = seg.trim().split(/\s+/)
+  while (w.length && /^(?:[A-Za-z_]\w*=\S*|env|time|nohup|exec)$/.test(w[0]!)) w.shift()
+  const base = w[0]?.split('/').pop() ?? '' // the interpreter is the command itself (after env assignments, time, nohup ...), not any word of a line
+  if (!INTERP.test(base)) return w[0]?.startsWith('/') ? w[0].replace(/^["']|["']$/g, '') : null
+  const args = w.slice(1)
+  if (args.some(a => inlineFlag(base, a))) return null
+  return args.find(a => !a.startsWith('-'))?.replace(/^["']|["']$/g, '') ?? null
+}
+
+// A Bash command: files it writes count as created; `python3 /abs/file` (and node, bash, sh ...) of a file created this session
+// in a scratch place is remembered for the nudge. Inline code and relative paths are not tracked.
+export function noteBash(cmd: string, lean: string, thread: string): void {
+  for (const m of cmd.matchAll(/(?:>>?|\btee\s+(?:-a\s+)?)\s*(["']?)(\/[^\s"';&|<>]+)\1/g)) created.add(m[2]!)
+  for (const seg of cmd.split(SEG)) {
+    const file = runTarget(seg)
+    if (file && file.startsWith('/') && created.has(file) && scratch(file, lean, thread) && !ran.has(file)) ran.set(file, { nudged: false })
+  }
+}
+
+// One short line per file, once, at the next prompt: you ran it and did not propose it.
+export async function takeNudges(h: Host): Promise<string | null> {
+  const out: string[] = []
+  for (const [file, st] of ran) {
+    if (st.nudged || proposed.has(file)) continue
+    st.nudged = true
+    if (!(await h.fs.exists(file).catch(() => false))) continue
+    out.push(`[lean-agent] you ran ${file}; if it is reusable, lean_script propose it`)
+    if (out.length >= 3) break
+  }
+  return out.length ? out.join('\n') : null
+}
+
+// ---- uses: a Bash run of an adopted script counts ----------------------------------------------------------------------
+// (only a command that RUNS the adopted script file counts, not a cat or ls of its folder)
+type Run = { name: string; project: string; dir: string; meta: Meta }
+async function adoptedRuns(h: Host, cmd: string): Promise<Run[]> {
+  if (!cmd.includes('/scripts/')) return []
+  const home = await homeDir(h)
+  const lean = leanDir(home)
+  const seen = new Set<string>()
+  const out: Run[] = []
+  for (const seg of cmd.split(SEG)) {
+    const file = runTarget(seg)
+    if (!file || !file.startsWith(`${lean}/`) || file.includes('..')) continue
+    const rel = file.slice(lean.length + 1)
+    const m = /^scripts\/([A-Za-z0-9._-]+)\/[^/]+$/.exec(rel) ?? /^([A-Za-z0-9._-]+)\/scripts\/([A-Za-z0-9._-]+)\/[^/]+$/.exec(rel)
+    if (!m) continue
+    const project = m.length === 3 && m[2] ? m[1]! : 'global'
+    const name = m[2] ?? m[1]!
+    if (RESERVED.has(name) || (project !== 'global' && LEAN_DIRS.has(project)) || seen.has(`${project}/${name}`)) continue
+    seen.add(`${project}/${name}`)
+    const dir = adoptedDir(home, project, name)
+    const meta = await readMeta(h, dir)
+    if (meta && meta.status === 'adopted' && file === `${dir}/${meta.file}`) out.push({ name, project, dir, meta })
+  }
+  return out
+}
+
+// did a Bash result fail? (an error flag, or the "Exit code N" line the Bash tool prints for a non-zero exit)
+export function bashFailed(r: any): boolean {
+  if (!r || r.deny !== undefined) return false
+  if (r.isError === true) return true
+  const t = typeof r.result === 'string' ? r.result : Array.isArray(r.result) ? r.result.map((b: any) => (typeof b?.text === 'string' ? b.text : '')).join('\n') : ''
+  return /(?:^|\n)Exit code [1-9]\d*/.test(t)
+}
+
+const warned = new Set<string>() // needs-update nudges given this session, once per script
+// A thread's Bash ran an adopted script: count the use; a hand-edited copy is warned about (one line, every run); a failed run is
+// counted and the second failure marks the script needs-update; a script that needs an update nudges once per session to propose a fix.
+// Returns the lines to add to the tool result, or null.
+export async function noteUse(h: Host, cmd: string, thread: string, failed = false): Promise<string | null> {
+  const runs = await adoptedRuns(h, cmd)
+  if (!runs.length) return null
+  const home = await homeDir(h)
+  const notes: string[] = []
+  for (const r of runs) {
+    await appendJsonl(h, `${scriptsDir(home)}/uses.jsonl`, { ts: await h.clock.now(), name: r.name, project: r.project, thread, ...(failed ? { failed: true } : {}) })
+    const ig = await integrity(h, r.dir, r.meta)
+    if (!ig.ok) notes.push(`[lean-agent] WARNING: ${r.name} was edited by hand since its audit (${ig.why}): unaudited. Trust this run only if you made or reviewed the edit; propose it with lean_script update ${r.name} to have the change audited.`)
+    let meta = r.meta
+    if (failed) {
+      const flagged = await queued(h, async () => {
+        const m = await readMeta(h, r.dir)
+        if (!m || m.status !== 'adopted') return null
+        const n = (m.failures ?? 0) + 1
+        const flag = n >= 2 && m.state !== 'needs-update'
+        const next = note({ ...m, failures: n, ...(flag ? { state: 'needs-update' as const } : {}) }, await h.clock.now(), `run failed (${n})`)
+        await writeJson(h, `${r.dir}/meta.json`, next)
+        if (flag) await refresh(h, m.project)
+        return { n, flag, next }
+      }).catch(() => null)
+      if (flagged) {
+        meta = flagged.next
+        notes.push(`[lean-agent] ${r.name} failed (${flagged.n} failure${flagged.n > 1 ? 's' : ''}${flagged.flag ? '; it is now marked needs-update' : '; two mark it needs-update'}).`)
+      }
+    }
+    if (meta.state === 'needs-update' && !warned.has(r.name)) {
+      warned.add(r.name)
+      notes.push(`[lean-agent] ${r.name} is marked needs-update (${meta.badWhy ?? `${meta.failures ?? 0} failed run(s)`}): if you can fix it, propose the fix with lean_script update ${r.name} (a new file or edits); it is audited as a diff.`)
+    }
+  }
+  return notes.length ? notes.join('\n') : null
+}
+
+// A subagent never runs an adopted script that was edited by hand (it is unaudited); the built-in commands run no script at all.
+export async function unauditedRun(h: Host, cmd: string): Promise<string | null> {
+  for (const r of await adoptedRuns(h, cmd)) {
+    const ig = await integrity(h, r.dir, r.meta)
+    if (!ig.ok) return `lean-agent: ${r.name} was edited by hand since its audit (${ig.why}), so it is unaudited and a subagent does not run it; audit it (lean_script update) or roll it back first`
+  }
+  return null
+}
+
+// When a thread reports done: one question per thread and session, never for workers (the caller passes only a thread's own call).
+const asked = new Set<string>()
+export const DONE_QUESTION = 'Could any step of this task have been a script? If yes: lean_script propose.'
+export function doneQuestion(thread: string): string | null {
+  if (asked.has(thread)) return null
+  asked.add(thread)
+  return DONE_QUESTION
+}

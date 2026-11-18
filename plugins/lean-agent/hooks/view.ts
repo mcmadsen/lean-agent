@@ -20,7 +20,8 @@ export type ThreadRow = { id: string; title: string; model?: string; effort?: st
 export type ClosedRow = { id: string; title: string; last: string }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
-export type View = { projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; errors: string[] }
+import { scriptCounts } from './scripts'
+export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; errors: string[] }
 export const ANSWERS_MAX = 200 // rows the view hands the pane (it draws only what is unfolded)
 export const CLOSED_MAX = 40
 
@@ -59,7 +60,7 @@ async function paneAck(h: Host, home: string): Promise<PaneAck> {
 }
 
 export async function loadView(h: Host): Promise<View> {
-  const v: View = { projects: [], goals: [], answers: [], openQuestions: [], unread: 0, total: 0, threads: [], closed: [], budget: 'n/a', errors: [] }
+  const v: View = { scripts: { candidates: 0, adopted: 0, needsUpdate: 0 }, projects: [], goals: [], answers: [], openQuestions: [], unread: 0, total: 0, threads: [], closed: [], budget: 'n/a', errors: [] }
   const guard = async (what: string, f: () => Promise<void>) => {
     try {
       await f()
@@ -74,6 +75,9 @@ export async function loadView(h: Host): Promise<View> {
   if (!home) return v
   await guard('projects', async () => {
     v.projects = (await listProjects(h)).rows
+  })
+  await guard('scripts', async () => {
+    v.scripts = await scriptCounts(h)
   })
   const now = await h.clock.now().catch(() => Date.now())
   const recs: DeskRec[] = []

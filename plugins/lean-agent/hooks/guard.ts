@@ -4,6 +4,7 @@
 import { homeDir, leanDir, readJson, realPath, threadsDir, writeJson } from './state'
 import { greenReview, hasApproval, takeApproval } from './reviews'
 import { analyze, plainPipeline, plainWords, privateText, readOnlyForge, type Verdict } from './shell'
+import { unauditedRun } from './scripts'
 import type { Host } from './state'
 import type { Role } from './role'
 
@@ -374,7 +375,7 @@ const GIT_EXPLORER = ['log', 'ls-files']
 const GIT_READER = ['log', 'ls-files', 'show', 'diff', 'status', 'rev-parse']
 export const builtinGit = (t?: string): string[] => {
   const n = ownName(t) ?? ''
-  return n === 'explorer' ? GIT_EXPLORER : /^reader-/.test(n) || n === 'reviewer' ? GIT_READER : []
+  return n === 'explorer' || n === 'auditor' ? GIT_EXPLORER : /^reader-/.test(n) || n === 'reviewer' ? GIT_READER : []
 }
 // long options git accepts by any unambiguous prefix: --out, --output=f, --ext, --ext-diff, --exec, --exec-path ...
 const BAD_LONG = (o: string, sub: string) =>
@@ -553,7 +554,7 @@ async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   // grants are owned by a thread's own loop: an Agent call with allow-cmd / allow-edit lines from anyone else would start a
   // subagent that can do nothing, so it is refused up front with the reason
   const sub = typeof e.subagent_type === 'string' ? e.subagent_type : ''
-  if ((e.tool === 'Agent' || e.tool === 'Task') && /^(lean-agent:)?(worker-|reader-|reviewer$|explorer$)/.test(sub) && !(ctx.role.kind === 'thread' && !ctx.agentId)) {
+  if ((e.tool === 'Agent' || e.tool === 'Task') && /^(lean-agent:)?(worker-|reader-|reviewer$|explorer$|auditor$)/.test(sub) && !(ctx.role.kind === 'thread' && !ctx.agentId)) {
     const g = parseGrants(e.prompt)
     if (g.edit?.length || g.cmds?.length) {
       const who = ctx.agentId ? 'a subagent' : `a ${ctx.role.kind} session`
@@ -565,6 +566,10 @@ async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
     if (d) return d
   }
   if (ctx.role.kind === 'thread' && !ctx.agentType && !ctx.agentId && e.tool === 'AskUserQuestion') return 'lean-agent: a thread never asks the user directly; use lean_ask (the desk relays it)'
+  if ((ctx.agentType || ctx.agentId) && e.tool === 'Bash') {
+    const u = await unauditedRun($, String(e.command ?? '')) // a subagent never runs an adopted script that was edited by hand
+    if (u) return u
+  }
   if (ctx.agentType || ctx.agentId) {
     const d = await workerDenial($, ctx, e)
     if (d) return d

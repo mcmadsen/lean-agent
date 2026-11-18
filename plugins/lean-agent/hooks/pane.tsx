@@ -8,6 +8,7 @@ import { leanThread } from './threads'
 import { fmtUntil } from './limits'
 import { hostOf } from './host'
 import { skillStat } from './skilltrim'
+import { exportFeedback } from './feedbackexport'
 import { NEXT_STEP, bounded, openDesk, setupCheck, setupFix, setupText } from './setup'
 import type { Role } from './role'
 
@@ -64,6 +65,16 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       return { text: setupText(o, roleOf().kind === 'desk') }
     } catch (err) {
       return { text: `setup failed: ${String((err as Error)?.message ?? err).slice(0, 200)}` }
+    }
+  })
+
+  // /lean-agent-feedback [notes]: ONE anonymised export file, written by the mod (no model turn, no network, never posts); any role
+  on('command.run', { command: 'lean-agent-feedback' }, async ($: any, e: any) => {
+    try {
+      const o = await bounded($, exportFeedback(hostOf($), $.plugin.root, { notes: typeof e?.args === 'string' ? e.args : undefined, version: VERSION }), 'feedback export', 60_000)
+      return { text: o.text }
+    } catch (err) {
+      return { text: `feedback export failed: ${String((err as Error)?.message ?? err).slice(0, 200)}` }
     }
   })
 
@@ -349,6 +360,11 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
               </Text>
             ))}
           </Box>
+        )}
+        {!!v && (
+          <Text dimColor={!v.scripts.candidates && !v.scripts.adopted} color={v.scripts.needsUpdate ? 'yellow' : undefined}>
+            Scripts: {v.scripts.candidates} candidates, {v.scripts.adopted} adopted{v.scripts.needsUpdate ? `, ${v.scripts.needsUpdate} need an update` : ''}
+          </Text>
         )}
         <Box>
           {section('threads', `Threads (${v?.threads.length ?? 0})`, true)}

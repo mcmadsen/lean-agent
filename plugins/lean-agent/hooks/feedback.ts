@@ -1,7 +1,7 @@
 // LEAN-FEEDBACK: the last line of a worker's reply. `missing` goes to the project's gaps.jsonl (paths it names mark
 // areas stale after three), `remember` to memory/notes.jsonl, the status to feedback.jsonl for `stats`. An explorer or
 // reader also reports `refused` (commands the guard refused, with its text: they go to refusals.jsonl with the running
-// version), `unverified` (claims it did not check) and `unreached` (folders it did not cover): counts and the first few
+// version; the guard's own refusals are written there too, appendRefusal), `unverified` (claims it did not check) and `unreached` (folders it did not cover): counts and the first few
 // entries are kept in the feedback row.
 import { addGap, pathsIn, slugOk } from './rules'
 import { appendJsonl, homeDir, leanDir } from './state'
@@ -40,12 +40,23 @@ export function parseFeedback(text: string): Feedback | null {
 
 export type FbCtx = { thread?: string; project?: string; agent?: string; version?: string } // version: the lean-agent code that is running
 
+// The ONE writer of refusals.jsonl (~/.lean-agent/refusals.jsonl). Two kinds of row, told apart by `src`: "guard" is a refusal the
+// mod itself saw (register.tsx, every denied tool call: text, agent type, tool, thread, running version); "worker" is a refusal a
+// worker REPORTED in its LEAN-FEEDBACK (the command and the text it quotes). The feedback export counts the guard rows as the
+// refusals and takes the worker rows for the `refused` texts, so one refusal is never counted twice.
+export type RefusalRow = { src: 'guard' | 'worker'; text: string; agent?: string; tool?: string; thread?: string; version?: string; command?: string }
+export async function appendRefusal(h: Host, row: RefusalRow): Promise<void> {
+  const home = await homeDir(h)
+  const clean = Object.fromEntries(Object.entries({ ts: await h.clock.now(), ...row, text: String(row.text ?? '').slice(0, 300), agent: row.agent?.replace(/^lean-agent:/, '') }).filter(([, v]) => v !== undefined))
+  await appendJsonl(h, `${leanDir(home)}/refusals.jsonl`, clean)
+}
+
 export async function applyFeedback(h: Host, ctx: FbCtx, fb0: Feedback): Promise<{ gaps: number; remembered: number }> {
   const fb: Feedback = { ...fb0, refused: fb0.refused ?? [], unverified: fb0.unverified ?? [], unreached: fb0.unreached ?? [] }
   const home = await homeDir(h)
   const ts = await h.clock.now()
   await appendJsonl(h, `${leanDir(home)}/feedback.jsonl`, { ts, thread: ctx.thread, agent: ctx.agent?.replace(/^lean-agent:/, ''), project: ctx.project, status: fb.status, missing: !!fb.missing, version: ctx.version, ...(fb.refused.length ? { refused: fb.refused.length } : {}), ...(fb.unverified.length ? { unverified: fb.unverified.length, unverifiedClaims: fb.unverified.slice(0, 5) } : {}), ...(fb.unreached.length ? { unreached: fb.unreached.length, unreachedFolders: fb.unreached.slice(0, 10) } : {}) })
-  for (const r of fb.refused) await appendJsonl(h, `${leanDir(home)}/refusals.jsonl`, { ts, thread: ctx.thread, agent: ctx.agent?.replace(/^lean-agent:/, ''), version: ctx.version, command: r.command, text: r.text })
+  for (const r of fb.refused) await appendRefusal(h, { src: 'worker', thread: ctx.thread, agent: ctx.agent, version: ctx.version, command: r.command, text: r.text })
   let gaps = 0
   if (fb.missing) {
     const paths = pathsIn(fb.missing)

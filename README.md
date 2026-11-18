@@ -110,10 +110,11 @@ lean-agent folder without asking. Pushes stay behind the review gate and the pri
 | `review-learn` | learn from review comments on pull requests |
 | `learn` | write path-scoped rules for a project |
 | `compare` | what a session costs at start vs a clean Claude Code session (overhead), or one read-only task both ways with a judge |
+| `scripts` | scripts over models: propose, audit, adopt and reuse small scripts (`lean_script`) |
 | `todo` | the user's to-do list in `~/.lean-agent/todo.json` |
 | `stats`, `budget` | what sessions and workers cost, which rules load, caps |
 | `find` | search lean-agent's own state (threads, notes, memory, handovers, saved output, reviews) |
-| `feedback` | draft a bug report; posting needs the user's OK |
+| `feedback` | draft a bug report (posting needs the user's OK), or `/lean-agent-feedback`: one anonymised export file written by the mod |
 | `lean-mode` | work frugally on long unattended runs |
 | `doctor` | check and repair the install, migrate from 0.45 |
 
@@ -129,6 +130,7 @@ Agent definitions in `plugins/lean-agent/agents/`:
 | `lean-agent:reader-haiku`, `lean-agent:reader-sonnet` | read-only lookup and analysis |
 | `lean-agent:reviewer` | read-only review of a diff |
 | `lean-agent:explorer` | explores one area for the `learn` skill |
+| `lean-agent:auditor` | read-only audit of one candidate script (`scripts` skill) |
 
 Defaults (mistakes are expensive where the work happens): threads run on sonnet / effort high (`config.json` `threads.model` /
 `threads.effort` override; `lean_thread new|start` `model` / `effort` override per thread); the desk is sonnet / high;
@@ -220,6 +222,7 @@ Everything is plain JSON or JSONL under `~/.lean-agent` (one folder, resolved fr
 | `threads/tN/thread.json`, `brief.md`, `inbox.jsonl` | a thread, its brief and queued messages |
 | `desk/inbox.jsonl`, `goals.json`, `questions.jsonl` | what threads reported, goals, open questions |
 | `<project>/rules`, `skills`, `gaps.jsonl`, `reviews/`, `learn.json` | per-project learning and reviews |
+| `scripts/candidates/<name>/`, `scripts/<name>/`, `<project>/scripts/<name>/`, `scripts/uses.jsonl`, `decisions.jsonl` | proposed and adopted scripts (script, `meta.json`, recipe `SKILL.md`), their uses and the user's overrides |
 | `memory/`, `todo.json`, `worktrees.json`, `handovers/` | shared notes and lists |
 | `config.json`, `ledger.jsonl` | caps and spend |
 | `bin/open-desk.sh`, `logs/opener.log`, `migrated-1.0.json`, `legacy-0.45/` | opener, its log, migration marker and archive |

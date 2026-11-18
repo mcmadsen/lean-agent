@@ -1,0 +1,359 @@
+import { expect, test } from 'claude-code/testing'
+import { fakeHost } from './fake'
+import { readJsonl } from './state'
+import { applyFeedback } from './feedback'
+import { EXPORT_CAP, exportFeedback, logRefusal, makeAnonymiser } from './feedbackexport'
+import { resetLocks } from './threads'
+import { resetViewCache } from './view'
+
+// sensitive-looking text built from pieces: this file holds no real-looking path, address or key
+const USERS = `/${'Users'}`
+const HOMES = `/${'home'}`
+const EMAIL = `dev${'@'}example.org`
+const AKIA = `AKIA${'ABCDEFGHIJKLMNOP'}`
+const GH = `ghp_${'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6'}`
+const LONG = 'Zq'.repeat(20)
+const T0 = Date.UTC(2026, 10, 18, 14, 7)
+const EXP = '/h/.lean-agent/feedback-export'
+const PRIVATE = '/h/.lean-agent/.private/projects.map.json'
+const ROOT = '/p'
+
+function setup(home = '/h') {
+  const h = fakeHost(null, { home })
+  h.clock.t = T0
+  h.files.set(`${ROOT}/.claude-plugin/plugin.json`, JSON.stringify({ version: '1.0.4' }))
+  h.claude.handler = (a: string[]) => ({ exitCode: 0, stdout: a[0] === '--version' ? '2.1.327 (Claude Code)\n' : '' })
+  h.files.set(`${home}/.lean-agent/projects.json`, JSON.stringify({ alpha: { path: '/r/alpha' }, beta: { path: '/r/beta' } }))
+  return h
+}
+const lean = (h: any, p: string) => `${h.home}/.lean-agent/${p}`
+const jl = (rows: unknown[]) => rows.map(r => JSON.stringify(r)).join('\n') + '\n'
+const run = (h: any, o: { notes?: string; version?: string } = {}) => exportFeedback(h.host, ROOT, { version: '1.0.4', ...o })
+const read = (h: any, r: { path?: string }) => h.files.get(r.path!)!
+
+// ---- the anonymiser, rule by rule -------------------------------------------------------------------------------------------
+test('the home dir and any user\'s home folder (macOS or Linux style) become ~', async () => {
+  const h = setup()
+  const a = await makeAnonymiser(h.host)
+  expect(a.anonymise('see /h/.lean-agent/x and /h')).toBe('see ~/.lean-agent/x and ~')
+  expect(a.anonymise(`${USERS}/someone/code/a.ts then ${HOMES}/other/b and ${HOMES}/other`)).toBe('~/code/a.ts then ~/b and ~')
+  expect(a.anonymise(`${HOMES}/other/b/c`)).toBe('~/b/c')
+  expect(a.anonymise('/hx/not-home')).toBe('/hx/not-home')
+})
+
+test('emails, URLs (only the lean-agent repo stays), azure organisations', async () => {
+  const a = await makeAnonymiser(setup().host)
+  expect(a.anonymise(`mail ${EMAIL}.`)).toBe('mail <email>.')
+  expect(a.anonymise('see https://github.com/mcmadsen/lean-agent/issues/12 and https://github.com/someone/else and http://x.example/a?b=1.')).toBe('see https://github.com/mcmadsen/lean-agent/issues/12 and <url> and <url>.')
+  expect(a.anonymise('dev.azure.com/acme/widgets/_git/repo')).toBe('dev.azure.com/<org>/<org>/_git/repo')
+  expect(a.anonymise('https://dev.azure.com/acme/widgets/_git/repo')).toBe('<url>')
+  expect(a.anonymise('acme.visualstudio.com/widgets')).toBe('<org>.visualstudio.com/widgets')
+})
+
+test('project names become project-A, B ... through a stable local map that is never exported; a name inside a longer word is left', async () => {
+  const h = setup()
+  const a = await makeAnonymiser(h.host)
+  expect(a.anonymise('alpha failed, beta ok, alpha-api and alpha/src, Alpha again, alphabet')).toBe('project-A failed, project-B ok, project-A-api and project-A/src, project-A again, alphabet')
+  expect(JSON.parse(h.files.get(PRIVATE)!)).toEqual({ alpha: 'project-A', beta: 'project-B' })
+  expect([...h.files.keys()].some(k => k.startsWith(`${EXP}/`))).toBe(false) // the real names are not next to the files a user sends
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ gamma: {}, beta: {}, alpha: {} })) // another order, one more
+  const b = await makeAnonymiser(h.host)
+  expect(b.anonymise('gamma alpha beta')).toBe('project-C project-A project-B') // the labels stay with their names
+  h.files.set('/h/.lean-agent/threads/t3/thread.json', JSON.stringify({ id: 't3', project: 'delta' })) // a thread's project counts too
+  expect((await makeAnonymiser(h.host)).anonymise('delta t3')).toBe('project-D t3')
+})
+
+test('review round: env-style credentials, scp remotes, IPs and hosts, a registered project\'s folder, case, short and numeric names', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ alpha: { path: '/r/alpha' }, ledgerx: { path: '/work/ledger-repo' }, '123': { path: '/w/n' }, delta: {}, ab: {} }))
+  const a = await makeAnonymiser(h.host)
+  expect(a.anonymise('DB_PASSWORD=hunter22hunter and MY_API_KEY: abcdefgh12345678 and {"token": "abcdefgh12345678"}')).toBe('DB_PASSWORD=<secret> and MY_API_KEY: <secret> and {"token": "<secret>"}')
+  expect(a.missed('DB_PASSWORD=hunter22hunter')).toContain('token or key') // the check does not depend on the rule
+  expect(a.anonymise('remote git@github.com:acme/repo.git and also dev@host.example.org:/srv/x')).toBe('remote <url> and also <url>')
+  expect(a.anonymise('box 10.1.2.3, build.internal.corp, and https://github.com/mcmadsen/lean-agent plus github.com')).toBe('box <ip>, <host>, and https://github.com/mcmadsen/lean-agent plus github.com')
+  expect(a.missed('box 10.1.2.3')).toContain('IP address')
+  expect(a.missed('build.internal.corp')).toContain('host name')
+  // labels follow the order the names were first seen (a JSON object lists "123" first): 123 = A, alpha = B, ledgerx = C, delta = D
+  expect(a.anonymise('repo at /work/ledger-repo, dir ledger-repo, name ledgerx')).toBe('repo at project-C, dir project-C, name project-C')
+  expect(a.anonymise('id 123 and delta, ab stays')).toBe('id project-A and project-D, ab stays') // a numeric name is fine; a 2-letter name is too short to mask
+  expect(a.anonymise('Alpha ALPHA')).toBe('project-B project-B')
+  const u = await makeAnonymiser(setup('/q/Zeldaquux').host)
+  expect(u.anonymise('zeldaquux ZELDAQUUX')).toBe('<user> <user>')
+  // a short, common user name is not a leak by itself: "tests" does not make the export refuse
+  const t = await makeAnonymiser(setup('/q/test').host)
+  expect(t.anonymise('the tests ran')).toBe('the tests ran')
+  expect(t.missed('the tests ran')).toEqual([])
+  const s = await makeAnonymiser(setup('/q/kimbo').host) // 5 letters, not generic: a word is a leak, a longer word is not
+  expect(s.missed('kimbo is here')).toContain('user name')
+  expect(s.missed('kimbos and kimboard')).toEqual([])
+})
+
+test('second review round: github paths, file names that look like hosts, build numbers, placeholder characters, common folder names', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ alpha: { path: '/work/repo' }, gamma: { path: '/work/lean-agent' }, kappa: { path: '/work/kappa-tools' } }))
+  const a = await makeAnonymiser(h.host)
+  expect(a.anonymise('see github.com/acme/private-repo and github.com/mcmadsen/lean-agent and https://github.com/mcmadsen/lean-agent/issues/9')).toBe('see github.com/<org>/<repo> and github.com/mcmadsen/lean-agent and https://github.com/mcmadsen/lean-agent/issues/9')
+  expect(a.anonymise(a.anonymise('github.com/acme/x'))).toBe('github.com/<org>/<repo>') // twice: the same
+  expect(a.missed('github.com/acme/x')).toContain('code-host path')
+  expect(a.missed('github.com/mcmadsen/lean-agent')).toEqual([])
+  expect(a.anonymise('edit settings.local.json and .claude/settings.json; build 10.0.19045.3693 on 2.1.327; srv.example.dev up')).toBe('edit settings.local.json and .claude/settings.json; build 10.0.19045.3693 on 2.1.327; <host> up')
+  expect(a.anonymise('ip 192.168.1.20 and 999.1.1.1')).toBe('ip <ip> and 999.1.1.1')
+  expect(a.anonymise('a\u0001b\u0002c alpha')).toBe('abc project-A') // the placeholder characters cannot come from the text
+  // a common folder name is not masked as a project (the project itself still is); "lean-agent" is never a project name here
+  expect(a.anonymise('in /work/repo and repo and kappa-tools and lean-agent running')).toBe('in project-A and repo and project-C and lean-agent running')
+  const u = await makeAnonymiser(setup('/q/systemx').host)
+  expect(u.anonymise('systemx and filesystemx')).toBe('<user> and file<user>')
+})
+
+test('thread ids stay; hashes, ticket and PR numbers, tokens and keys are replaced', async () => {
+  const a = await makeAnonymiser(setup().host)
+  expect(a.anonymise('t12 and t3 reported')).toBe('t12 and t3 reported')
+  expect(a.anonymise('commit abc1234def and 1234567 and 20261118')).toBe('commit <sha> and 1234567 and 20261118') // digits alone are not a hash
+  expect(a.anonymise('PR #42, pull request 7, ticket 99, issue#5, #123, ABC-123, UTF-8, SHA-256')).toBe('PR #<id>, pull request <id>, ticket <id>, issue#<id>, #<id>, <id>, UTF-8, SHA-256')
+  expect(a.anonymise(`key ${AKIA} and ${GH} and ${LONG}`)).toBe('key <secret> and <secret> and <secret>')
+  expect(a.anonymise('token = "abcdefgh12345678" and password: hunter2hunter2 and Authorization: Bearer abcdef1234567890xyz')).toBe('token = "<secret>" and password: <secret> and Authorization: <secret>')
+  expect(a.anonymise('-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----')).toBe('<secret>')
+})
+
+test('the OS user name becomes <user> (as a word); running the anonymiser twice changes nothing', async () => {
+  const h = setup('/q/zeldaquux')
+  const a = await makeAnonymiser(h.host)
+  expect(a.anonymise('zeldaquux-laptop and /q/zeldaquux/code')).toBe('<user>-laptop and ~/code')
+  const all = `${USERS}/x/y alpha ${EMAIL} https://example.com PR #4 abc1234def ${AKIA} /q/zeldaquux zeldaquux t1`
+  const once = a.anonymise(all)
+  expect(a.anonymise(once)).toBe(once)
+  const g = await makeAnonymiser(setup('/home/root').host) // a generic user name is not replaced as a word
+  expect(g.anonymise('root cause')).toBe('root cause')
+  const p = await makeAnonymiser((() => { const x = setup(); x.files.set('/h/.lean-agent/projects.json', JSON.stringify({ project: {} })); return x })().host)
+  const once2 = p.anonymise('the project failed')
+  expect(p.anonymise(once2)).toBe(once2) // a project called "project" does not eat its own label
+})
+
+// ---- the survival check -----------------------------------------------------------------------------------------------------
+test('a private string the rules cannot catch makes the export refuse: nothing is written, no state changes, the rule is named, the string is not echoed', async () => {
+  const h = setup('/q/zeldaquux')
+  h.files.set('/q/zeldaquux/.lean-agent/feedback-drafts/2026-11-18-bug.md', '# bug\nthe laptop is called zeldaquuxbox and it hangs\n')
+  const a = await makeAnonymiser(h.host)
+  expect(a.anonymise('zeldaquuxbox')).toBe('<user>box') // a long name is masked inside longer words too
+  expect(a.missed('zeldaquuxbox')).toEqual(['user name']) // and the check would still flag it
+  expect(a.missed('fine ~/code <user> project-A <url> <email>')).toEqual([])
+  // a rule that regressed (the user name is no longer masked): the final check refuses, whatever the rules did
+  const faulty = (real: any) => ({ anonymise: (t: string) => real.anonymise(t).replace(/<user>/g, 'zeldaquux'), missed: real.missed })
+  const r = await exportFeedback(h.host, ROOT, { version: '1.0.4' }, { wrap: faulty })
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain('refused')
+  expect(r.text).toContain('user name')
+  expect(r.text).not.toContain('zeldaquuxbox')
+  expect([...h.files.keys()].some(k => k.includes('feedback-export/2'))).toBe(false)
+  expect(h.files.has('/q/zeldaquux/.lean-agent/feedback-export/state.json')).toBe(false)
+  expect(h.writes.some(w => w.endsWith('.md') && w.includes('feedback-export'))).toBe(false)
+})
+
+test('the check names each kind of miss', async () => {
+  const h = setup('/q/zeldaquux')
+  const a = await makeAnonymiser(h.host)
+  expect(a.missed('/q/zeldaquux/code')).toContain('home directory')
+  expect(a.missed(`${USERS}/x/y`)).toContain('/Users or /home path')
+  expect(a.missed(`x ${EMAIL}`)).toContain('email address')
+  expect(a.missed(`x ${AKIA}`)).toContain('token or key')
+  expect(a.missed('https://example.com/a')).toContain('URL')
+  expect(a.missed('dev.azure.com/acme/x')).toContain('azure organisation')
+  expect(a.missed('the alpha repo')).toContain('project name')
+})
+
+// ---- the export -------------------------------------------------------------------------------------------------------------
+test('the file has the environment, doctor problems and notes first; the path is returned; nothing is posted', async () => {
+  const h = setup()
+  h.files.set(`${ROOT}/.claude-plugin/plugin.json`, JSON.stringify({ version: '1.0.5' })) // installed newer than running
+  const r = await run(h, { notes: `the desk froze in alpha, mail ${EMAIL}` })
+  expect(r.ok).toBe(true)
+  expect(r.path).toBe(`${EXP}/2026-11-18-1407.md`)
+  expect(r.text).toContain(r.path!)
+  expect(r.text).toContain('Nothing was posted')
+  const t = read(h, r)
+  expect(t.indexOf('## Notes')).toBeGreaterThan(-1)
+  expect(t.indexOf('## Notes')).toBeLessThan(t.indexOf('## Environment'))
+  expect(t).toContain('the desk froze in project-A, mail <email>')
+  expect(t).toContain('lean-agent running: 1.0.4; installed: 1.0.5 (SKEW')
+  expect(t).toContain('Claude Code: 2.1.327 (Claude Code)')
+  expect(t).toContain('OS family: macOS (Darwin)')
+  expect(t).toContain('## Doctor check: problems')
+  expect(t).toMatch(/- desk folder/)
+  expect(t).not.toContain('alpha')
+  h.files.set(`${ROOT}/.claude-plugin/plugin.json`, JSON.stringify({ version: '1.0.4' }))
+  expect(read(h, await run(h))).toContain('installed: 1.0.4')
+  expect(read(h, await run(h))).not.toContain('SKEW')
+})
+
+test('LEAN-FEEDBACK since the last export: counts by status, texts grouped and de-duplicated with counts, most repeated first', async () => {
+  const h = setup()
+  h.files.set(lean(h, 'feedback.jsonl'), jl([
+    { ts: 1, status: 'done' }, { ts: 2, status: 'done' }, { ts: 3, status: 'done', refused: 'git push was refused for t4' }, { ts: 4, status: 'partial', unverified: 'did not run the tests', unreached: 'the staging box' },
+    { ts: 5, status: 'done', refused: 'Git push was  refused for t4' }, { ts: 6, kind: 'core-candidate', script: 'x' }, { ts: 7, status: 'failed', missing: true },
+  ]))
+  h.files.set(lean(h, 'gaps.jsonl'), jl([{ ts: 8, text: 'build flags for src/a.ts' }, { ts: 9, text: 'Build flags for src/a.ts ' }, { ts: 10, text: 'build  flags for SRC/A.ts' }, { ts: 11, text: 'which db does alpha use' }]))
+  h.files.set(lean(h, 'alpha/gaps.jsonl'), jl([{ ts: 12, text: 'which db does alpha use' }]))
+  const t = read(h, await run(h))
+  expect(t).toContain('Reports: 6 (done 4, partial 1, failed 1)') // the core candidate row is not a report
+  expect(t).toContain('done 4')
+  expect(t).toContain('partial 1')
+  expect(t).toContain('failed 1')
+  expect(t).toContain('### missing')
+  expect(t.indexOf('- (x3) build flags for src/a.ts')).toBeGreaterThan(-1)
+  expect(t.indexOf('- (x3) build flags for src/a.ts')).toBeLessThan(t.indexOf('- (x2) which db does project-A use')) // most repeated first
+  expect(t).toContain('### refused')
+  expect(t).toContain('- (x2) git push was refused for t4')
+  expect(t).toContain('### unverified\n\n- did not run the tests')
+  expect(t).toContain('### unreached\n\n- the staging box')
+})
+
+test('the rows feedback.ts really writes (counts, claims, folders, worker refusals) reach the export; one refusal is not counted twice', async () => {
+  const h = setup()
+  const fb = { status: 'partial', used: [], unneeded: [], missing: '', remember: [], refused: [{ command: 'rg -n foo src', text: 'lean-agent: rg is not allowed here' }], unverified: ['the cache is rebuilt nightly'], unreached: ['vendor/'] }
+  await applyFeedback(h.host, { thread: 't1', agent: 'lean-agent:explorer', version: '1.0.4' }, fb as any)
+  await applyFeedback(h.host, { thread: 't1', agent: 'lean-agent:explorer', version: '1.0.4' }, { ...fb, refused: [], unverified: [], unreached: [] } as any)
+  await logRefusal(h.host, { text: 'lean-agent: rg is not allowed here', agent: 'lean-agent:explorer', tool: 'Bash', thread: 't1', version: '1.0.4' }) // what the guard saw of the same call
+  h.files.set(lean(h, 'feedback.jsonl'), h.files.get(lean(h, 'feedback.jsonl'))! + JSON.stringify({ ts: T0 + 5, kind: 'core-candidate', note: 'x', script: 's' }) + '\n') // no status: not a report
+  const rows = await readJsonl<any>(h.host, lean(h, 'refusals.jsonl'))
+  expect(rows.map(r => r.src)).toEqual(['worker', 'guard'])
+  expect(rows[0]).toMatchObject({ command: 'rg -n foo src', agent: 'explorer', version: '1.0.4', thread: 't1' })
+  const t = read(h, await run(h))
+  expect(t).toContain('Reports: 2 (partial 2)')
+  expect(t).toContain('### refused\n\n- rg -n foo src -> lean-agent: rg is not allowed here')
+  expect(t).toContain('### unverified\n\n- the cache is rebuilt nightly')
+  expect(t).toContain('### unreached\n\n- vendor/')
+  expect(t).toContain('- (x1) [explorer] lean-agent: rg is not allowed here') // the guard section: one, the worker's report is not a second refusal
+})
+
+test('guard refusals: grouped by text and agent type with counts', async () => {
+  const h = setup()
+  await logRefusal(h.host, { text: 'lean-agent: reader-haiku is read-only', agent: 'lean-agent:reader-haiku', tool: 'Edit', thread: 't1' })
+  await logRefusal(h.host, { text: 'lean-agent: reader-haiku is read-only', agent: 'lean-agent:reader-haiku', tool: 'Edit' })
+  await logRefusal(h.host, { text: 'lean-agent: reader-haiku is read-only', agent: 'lean-agent:worker-sonnet', tool: 'Edit' })
+  await logRefusal(h.host, { text: 'strict mode: route this to a thread' })
+  const rows = await readJsonl<any>(h.host, lean(h, 'refusals.jsonl')) // the one file (feedback.ts appendRefusal)
+  expect(rows).toHaveLength(4)
+  expect(rows[0]).toMatchObject({ src: 'guard', text: 'lean-agent: reader-haiku is read-only', agent: 'reader-haiku', tool: 'Edit', thread: 't1' })
+  expect(h.files.has(lean(h, 'logs/refusals.jsonl'))).toBe(false)
+  const t = read(h, await run(h))
+  expect(t).toContain('## Guard refusals since the last export')
+  expect(t).toContain('- (x2) [reader-haiku] lean-agent: reader-haiku is read-only')
+  expect(t).toContain('- (x1) [worker-sonnet] lean-agent: reader-haiku is read-only')
+  expect(t).toContain('- (x1) [session] strict mode: route this to a thread')
+})
+
+test('drafts, core candidates and blocked reports go in once; the next export has only what is new', async () => {
+  const h = setup()
+  h.files.set(lean(h, 'feedback-drafts/2026-11-18-a.md'), '# draft a\nsteps in alpha\n')
+  h.files.set(lean(h, 'scripts/candidates/ledger-total/meta.json'), JSON.stringify({ name: 'ledger-total', status: 'candidate', core: true, purpose: 'Total the cost ledger', run: 'python3 {script} <ledger.jsonl>', inputs: ['ledger.jsonl'], outputs: ['stdout'], sha256: 'x', file: 'a.py' }))
+  h.files.set(lean(h, 'scripts/candidates/plain/meta.json'), JSON.stringify({ name: 'plain', status: 'candidate', purpose: 'x', run: 'python3 {script}', inputs: ['x'], outputs: ['stdout'], sha256: 'y', file: 'a.py' }))
+  h.files.set(lean(h, 'desk/inbox.jsonl'), jl([
+    { ts: 1, from: 't1', kind: 'report', state: 'blocked', text: 'cannot reach the repo\nsecond line' }, { ts: 2, from: 't2', kind: 'report', state: 'working', text: 'fine' },
+    { ts: 3, from: 't3', kind: 'report', state: 'blocked', text: 'needs a decision about alpha' }, { ts: 4, from: 't4', kind: 'ask', state: 'blocked', text: 'a question' },
+  ]))
+  const first = read(h, await run(h))
+  expect(first).toContain('### 2026-11-18-a.md')
+  expect(first).toContain('steps in project-A')
+  expect(first).toContain('## Script candidates for lean-agent core')
+  expect(first).toContain('ledger-total: Total the cost ledger')
+  expect(first).not.toContain('- plain:')
+  expect(first).toContain('- t3: needs a decision about project-A')
+  expect(first).toContain('- t1: cannot reach the repo\n')
+  expect(first).not.toContain('second line')
+  expect(first).not.toContain('t2: fine')
+  expect(first).not.toContain('a question')
+  expect(JSON.parse(h.files.get(`${EXP}/state.json`)!)).toEqual({ at: T0, drafts: ['2026-11-18-a.md'], core: ['ledger-total'] })
+  h.clock.t = T0 + 30_000 // the same minute: the file gets a suffix, nothing is overwritten
+  h.files.set(lean(h, 'feedback-drafts/2026-11-18-b.md'), '# draft b\n')
+  h.files.set(lean(h, 'desk/inbox.jsonl'), h.files.get(lean(h, 'desk/inbox.jsonl'))! + jl([{ ts: T0 + 10_000, from: 't9', kind: 'report', state: 'blocked', text: 'new block' }]))
+  const second = await run(h)
+  expect(second.path).toBe(`${EXP}/2026-11-18-1407-2.md`)
+  const t = read(h, second)
+  expect(t).toContain('### 2026-11-18-b.md')
+  expect(t).not.toContain('2026-11-18-a.md')
+  expect(t).not.toContain('Script candidates')
+  expect(t).toContain('- t9: new block')
+  expect(t).not.toContain('t1: cannot reach')
+  expect(h.files.get(`${EXP}/2026-11-18-1407.md`)).toBe(first) // the first file is untouched
+  expect(JSON.parse(h.files.get(`${EXP}/state.json`)!).drafts).toEqual(['2026-11-18-a.md', '2026-11-18-b.md'])
+  // a third export with nothing new still works and says what it covers
+  h.clock.t = T0 + 120_000
+  const third = read(h, await run(h))
+  expect(third).toContain('since the last export')
+  expect(third).not.toContain('## Drafts')
+})
+
+test('a size cap of 40 KB: the oldest and least repeated items are summarised, long drafts are cut', async () => {
+  const h = setup()
+  h.files.set(lean(h, 'feedback-drafts/2026-11-18-long.md'), `# long\n${'a long draft line about nothing in particular\n'.repeat(5000)}`)
+  h.files.set(lean(h, 'gaps.jsonl'), jl(Array.from({ length: 800 }, (_, i) => ({ ts: 100 + i, text: `gap number ${i} with a fairly long description of the missing context ${'x'.repeat(60)}` }))))
+  h.files.set(lean(h, 'gaps.jsonl'), h.files.get(lean(h, 'gaps.jsonl'))! + jl(Array.from({ length: 5 }, () => ({ ts: 5000, text: 'the one that repeats' }))))
+  const r = await run(h)
+  expect(r.ok).toBe(true)
+  const t = read(h, r)
+  expect(new TextEncoder().encode(t).length).toBeLessThanOrEqual(EXPORT_CAP)
+  expect(t).toContain('(truncated at')
+  expect(t).toMatch(/_\.\.\. \d+ more entries summarised \(oldest \/ least repeated\)\._/)
+  expect(t).toContain('- (x5) the one that repeats') // the repeated one survives the cut
+  expect(t).not.toContain('gap number 0 ') // an old single one does not
+})
+
+test('no network and no posting: the only processes are claude --version, uname and the file helpers', async () => {
+  const h = setup()
+  h.files.set(lean(h, 'feedback-drafts/a.md'), '# x\n')
+  await run(h, { notes: 'hello' })
+  const used = new Set(h.calls.map(c => c.argv[0]))
+  for (const bad of ['gh', 'curl', 'wget', 'git', 'ssh', 'nc', 'open']) expect(used.has(bad), bad).toBe(false)
+  expect([...used].every(c => ['claude', 'uname', 'mkdir', 'mv', 'rm', 'tee', 'sleep'].includes(c!))).toBe(true)
+  // (the doctor check the export runs lists live sessions for 1.0.6's model check: local, read-only)
+  expect(h.calls.filter(c => c.argv[0] === 'claude').every(c => c.argv[1] === '--version' || (c.argv[1] === 'agents' && c.argv.includes('--json')))).toBe(true)
+})
+
+// ---- wiring -----------------------------------------------------------------------------------------------------------------
+const PLUGIN = decodeURIComponent(new URL('..', (import.meta as any).url).pathname).replace(/\/$/, '')
+async function session($: any, on: any, cwd: string) {
+  const h = fakeHost(on)
+  resetLocks()
+  resetViewCache()
+  h.clock.t = T0
+  on('clock.after', () => new Promise(() => {}))
+  on('clock.every', () => ({ value: { cancel() {} } }))
+  h.files.set(`${PLUGIN}/templates/front-desk.md`, 'desk {{lean}}')
+  h.files.set(`${PLUGIN}/templates/thread.md`, '# {{id}}')
+  h.files.set(`${PLUGIN}/.claude-plugin/plugin.json`, JSON.stringify({ version: '1.0.4' }))
+  h.claude.handler = (a: string[]) => ({ exitCode: 0, stdout: a[0] === '--version' ? '2.1.327' : a[0] === 'agents' ? '[]' : '' })
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ alpha: { path: '/r/alpha' } }))
+  on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__lean-agent__${e.name}` } }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  on('command.run', () => ({}))
+  await $.session.start({ cwd, surface: 'desktop', isInteractive: true } as any)
+  return h
+}
+
+test('/lean-agent-feedback works in any session: writes the file, prints its path, takes the notes as the argument', async ($, on) => {
+  const h = await session($, on, '/h/.claude/spares/spare-abc') // a plain session
+  const r: any = await $.command.run({ command: 'lean-agent-feedback', args: 'the opener failed in alpha' } as any)
+  expect(r.text).toContain(`${EXP}/2026-11-18-1407.md`)
+  const t = h.files.get(`${EXP}/2026-11-18-1407.md`)!
+  expect(t).toContain('the opener failed in project-A')
+  expect(t).not.toContain('alpha')
+})
+
+test('the desk\'s lean_doctor export writes the same file; a refusal is an error result', async ($, on) => {
+  const h = await session($, on, '/h/lean-agent-desk')
+  const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_doctor', action: 'export', notes: 'from the desk' } as any)
+  expect(r.isError).toBeUndefined()
+  expect(r.result).toContain('feedback export written')
+  expect(h.files.get(`${EXP}/2026-11-18-1407.md`)).toContain('from the desk')
+})
+
+test('a refused guard decision is logged for the export', async ($, on) => {
+  const h = await session($, on, '/h/lean-agent-desk')
+  const r: any = await $.tool.call({ tool: 'Edit', file_path: '/r/x.ts' } as any) // strict mode: the desk edits nothing
+  expect(r.deny).toBeTruthy()
+  const rows = await readJsonl<any>(h.host, '/h/.lean-agent/refusals.jsonl')
+  expect(rows).toHaveLength(1)
+  expect(rows[0]).toMatchObject({ src: 'guard', tool: 'Edit' })
+  expect(typeof rows[0].version).toBe('string') // the running version (1.0.6's skew work)
+  expect(rows[0].text).toContain('strict mode')
+})
