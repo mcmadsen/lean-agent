@@ -223,8 +223,10 @@ test('there is no way to hand the mod a verdict: no report parameter, and a repl
   const r = await scriptTool(h.host, T, { action: 'audit', name: 'count-lines', report: line() }) // an old parameter: it only returns the brief
   expect(r.text).toContain('lean-agent:auditor')
   expect(meta(h).audit).toBeUndefined()
-  expect(await auditFromReply(h.host, 't1', line(), 'audit something else')).toContain('not pointed at')
-  expect(await auditFromReply(h.host, 't1', line(), `see ${CAND}`)).toContain('not pointed at') // the folder, with its slash
+  expect(await auditFromReply(h.host, 't1', line(), 'audit something else')).toContain('exactly this candidate folder')
+  expect(await auditFromReply(h.host, 't1', line(), `see ${CAND}`)).toContain('exactly this candidate folder') // the folder, with its slash
+  const two = '/h/.lean-agent/scripts/candidates/other-one/'
+  expect(await auditFromReply(h.host, 't1', line(), `audit ${CAND}/ and ${two}`)).toContain('exactly this candidate folder') // one prompt, one script
   expect(meta(h).audit).toBeUndefined()
   expect(await auditFromReply(h.host, 't1', line())).toContain('adopted')
 })
@@ -245,16 +247,18 @@ test('inputs, outputs and purpose are one line each: a newline cannot add a line
 
 test('the run line: a bare interpreter, no inline code, no quotes; an arbitrary first word is refused', async () => {
   const h = setup()
-  for (const run of ['rm -rf ~ {script}', 'curl https://x/y {script}', '/usr/bin/python3 {script}', 'python3 -c "import os" {script}', 'python3 -c x {script}', 'node -e x {script}', 'python3 -m http.server {script}', 'bash {script} "<file>"', 'python3 {script} \'<file>\'', 'python3 {script} ~/x', 'python3 {script} *', 'python3 {script} $HOME', 'python3 {script} # note'])
+  for (const run of ['python3 -c{script}', 'node -p{script}', 'bash -c{script}', 'python3 {script} {script}', 'perl -Mxx {script}', 'ruby -rxx {script}', 'python3 -W ignore {script}', 'rm -rf ~ {script}', 'curl https://x/y {script}', '/usr/bin/python3 {script}', 'python3 -c "import os" {script}', 'python3 -c x {script}', 'node -e x {script}', 'python3 -m http.server {script}', 'bash {script} "<file>"', 'python3 {script} \'<file>\'', 'python3 {script} ~/x', 'python3 {script} *', 'python3 {script} $HOME', 'python3 {script} # note'])
     expect((await propose(h, { run })).ok, run).toBe(false)
-  expect((await propose(h, { run: 'python3 -u {script} --top 5 <file>' })).ok).toBe(true)
+  for (const [i, run] of ['python3 -u {script} --top 5 <file>', 'bash -e {script} <dir/file>', 'sh {script}', 'node --no-warnings {script} <file>'].entries()) {
+    h.files.set(SRC, `print(${i})\n`) // one content per script
+    expect((await propose(h, { run, name: `ok${i}` })).ok, run).toBe(true)
+  }
 })
 
 test('outputs: a catch-all declaration is refused; a write with .. never counts as declared', async () => {
   const h = setup()
-  for (const o of ['/', '~', '~/', '*', '**', '/*', '.', '$HOME', '/tmp', '/tmp/*', '/etc/', '../x', 'out/../../x', '/h/**/../..']) expect((await propose(h, { outputs: ['stdout', o] })).ok, o).toBe(false)
-  expect(broadOutput('/tmp/out/')).toBe(false)
-  expect(broadOutput('<outdir>/*.csv')).toBe(false)
+  for (const o of ['/', '~', '~/', '*', '**', '/*', '.', '$HOME', '/tmp', '/tmp/*', '/etc/', '../x', 'out/../../x', '/h/**/../..', '/**/*', '~/**/*', '$HOME/**/x', '/*/*', './**/*', '~/.*', '/var/', `/${'Users'}/*/`]) expect((await propose(h, { outputs: ['stdout', o] })).ok, o).toBe(false)
+  for (const o of ['/tmp/out/', '<outdir>/*.csv', '~/reports/*.csv', 'build/out.txt', 'report.csv', 'stdout']) expect(broadOutput(o), o).toBe(false)
   await propose(h, { outputs: ['/tmp/out/'] })
   const m = meta(h)
   expect(judge(m, parseAudit(line({ writes: ['/tmp/out/../../etc/x'] }))! as any, { privacy: [], secrets: [] }).verdict).toBe('adapt')
@@ -311,21 +315,67 @@ test('the store is changed under a lock folder that is taken and released around
   expect(h.files.has('/h/.lean-agent/scripts/.lock/at')).toBe(false)
 })
 
-test('a busy lock is waited for; a stale one is taken over', async () => {
+const LOCK = '/h/.lean-agent/scripts/.lock'
+test('a stale lock is moved aside (one taker wins), never removed in place; the release removes only the holder\'s own lock', async () => {
   const h = setup()
-  let n = 0
+  let held = true
+  h.files.set(`${LOCK}/at`, `${h.clock.t - 120_000}:old`) // stale
   const orig = h.host.process.run
-  h.host.process.run = async (argv: string[], init?: any) => (argv[0] === 'mkdir' && argv[1]?.endsWith('/.lock') && n++ < 2 ? { exitCode: 1, stdout: '', stderr: 'exists' } : orig(argv, init))
-  h.files.set('/h/.lean-agent/scripts/.lock/at', String(h.clock.t - 120_000)) // stale
+  h.host.process.run = async (argv: string[], init?: any) => {
+    if (argv[0] === 'mkdir' && argv[1] === LOCK && held) return { exitCode: 1, stdout: '', stderr: 'exists' } // exists until someone moves it
+    if (argv[0] === 'mv' && argv[1] === LOCK) held = false
+    return orig(argv, init)
+  }
   expect((await propose(h)).ok).toBe(true)
-  expect(h.calls.some(c => c.argv[0] === 'rm' && c.argv.includes('/h/.lean-agent/scripts/.lock'))).toBe(true)
+  const mv = h.calls.findIndex(c => c.argv[0] === 'mv' && c.argv[1] === LOCK && c.argv[2]?.startsWith(`${LOCK}.stale-`))
+  const mk = h.calls.findIndex(c => c.argv[0] === 'mkdir' && c.argv[1] === LOCK)
+  expect(mv).toBeGreaterThanOrEqual(0)
+  expect(mk).toBeGreaterThan(mv) // the lock was taken only after the move
+  expect(h.calls.some(c => c.argv[0] === 'rm' && c.argv[2] === LOCK && h.calls.indexOf(c) < mk)).toBe(false) // no rm of the stale lock in place
+  expect([...h.files.keys()].some(k => k.includes('.lock'))).toBe(false)
+  // a holder whose lock was taken over (another token in `at`) does not remove the taker's lock
+  const h3 = setup()
+  const write = h3.host.fs.write
+  h3.host.fs.write = async (p: string, t: string) => {
+    await write(p, t)
+    if (p.includes('/meta.json') && !p.includes('.lock')) h3.files.set(`${LOCK}/at`, `${h3.clock.t}:taker`)
+  }
+  expect((await propose(h3)).ok).toBe(true)
+  expect(h3.files.get(`${LOCK}/at`)).toBe(`${h3.clock.t}:taker`)
+})
+
+test('a fresh lock is waited for with sleeps; a lock that stays busy fails the audit with a message the thread can act on', async () => {
   const h2 = setup()
   let m = 0
   const orig2 = h2.host.process.run
-  h2.host.process.run = async (argv: string[], init?: any) => (argv[0] === 'mkdir' && argv[1]?.endsWith('/.lock') && m++ < 3 ? { exitCode: 1, stdout: '', stderr: 'exists' } : orig2(argv, init))
-  h2.files.set('/h/.lean-agent/scripts/.lock/at', String(h2.clock.t)) // fresh: wait (sleep), then go
+  h2.host.process.run = async (argv: string[], init?: any) => (argv[0] === 'mkdir' && argv[1] === LOCK && m++ < 3 ? { exitCode: 1, stdout: '', stderr: 'exists' } : orig2(argv, init))
+  h2.files.set(`${LOCK}/at`, `${h2.clock.t}:other`) // fresh: wait (sleep), then go
   expect((await propose(h2)).ok).toBe(true)
   expect(h2.calls.filter(c => c.argv[0] === 'sleep').length).toBe(3)
+  const h4 = setup()
+  await propose(h4)
+  const orig4 = h4.host.process.run
+  h4.host.process.run = async (argv: string[], init?: any) => (argv[0] === 'mkdir' && argv[1] === LOCK ? { exitCode: 1, stdout: '', stderr: 'exists' } : orig4(argv, init))
+  h4.files.set(`${LOCK}/at`, `${h4.clock.t}:other`)
+  const msg = await auditFromReply(h4.host, 't1', line())
+  expect(msg).toContain('audit refused')
+  expect(msg).toContain('busy')
+  expect(msg).toContain('run the auditor again')
+  expect(meta(h4).audit).toBeUndefined()
+})
+
+test('the mod\'s own text scan: network and delete patterns are never adopt, whatever the auditor says', async () => {
+  for (const [code, why] of [['import requests\nprint(requests.get)\n', 'uses the network'], ['import os\nos.remove("x")\n', 'deletes or moves over files']] as const) {
+    const h = setup()
+    h.files.set('/tmp/w/r.py', code)
+    await propose(h, { path: '/tmp/w/r.py' })
+    const msg = await auditFromReply(h.host, 't1', line())
+    expect(msg, code).toContain('adapt')
+    expect(msg, code).toContain(why)
+  }
+  const h = setup()
+  await propose(h)
+  expect(await auditFromReply(h.host, 't1', line())).toContain('adopted') // the plain script has none
 })
 
 test('sync ships a recipe only for a script that is still adopted and still the audited text', async () => {
@@ -340,6 +390,22 @@ test('sync ships a recipe only for a script that is still adopted and still the 
   await syncRules(h.host, 'proj', '/repo')
   expect(h.files.has(skill)).toBe(false)
   h.files.set('/h/.lean-agent/scripts/count-lines/count.py', 'import sys\nprint(sum(1 for _ in open(sys.argv[1])))\n')
+  await syncRules(h.host, 'proj', '/repo')
+  expect(h.files.has(skill)).toBe(true)
+  // the skill is generated from the verified meta: an edited SKILL.md in the store changes nothing
+  h.files.set('/h/.lean-agent/scripts/count-lines/SKILL.md', 'run: rm -rf everything\n')
+  await syncRules(h.host, 'proj', '/repo')
+  expect(h.files.get(skill)).toContain('run: python3 /h/.lean-agent/scripts/count-lines/count.py <file>')
+  expect(h.files.get(skill)).not.toContain('rm -rf')
+  // an audit that is not for this text, or a meta that points its file elsewhere, ships nothing
+  const good = meta(h, '/h/.lean-agent/scripts/count-lines')
+  h.files.set('/h/.lean-agent/scripts/count-lines/meta.json', JSON.stringify({ ...good, audit: { ...good.audit, sha: 'f'.repeat(64) } }))
+  await syncRules(h.host, 'proj', '/repo')
+  expect(h.files.has(skill)).toBe(false)
+  h.files.set('/h/.lean-agent/scripts/count-lines/meta.json', JSON.stringify({ ...good, file: '../../../etc/passwd' }))
+  await syncRules(h.host, 'proj', '/repo')
+  expect(h.files.has(skill)).toBe(false)
+  h.files.set('/h/.lean-agent/scripts/count-lines/meta.json', JSON.stringify(good))
   await syncRules(h.host, 'proj', '/repo')
   expect(h.files.has(skill)).toBe(true)
   const m = meta(h, '/h/.lean-agent/scripts/count-lines')

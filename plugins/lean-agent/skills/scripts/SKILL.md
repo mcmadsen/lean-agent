@@ -29,6 +29,10 @@ or an email in the text is found by a scan), or is right only for its original d
 is `reject`. `adapt`: fix the script, then propose it again under the same name. `adopt` moves it to `~/.lean-agent/scripts/<name>/`
 (global) or `~/.lean-agent/<project>/scripts/<name>/` and writes its recipe skill.
 
+The mod also scans the text itself, whatever the auditor says: network tools or libraries and deleting or moving over files make
+the verdict `adapt` at best. What the mod cannot re-derive (writes, "right on other data") is the auditor's judgement; the
+user's `decide` is the human gate.
+
 `decide` adopt over an audit that said otherwise needs `confirm: true`, only after the user was told what they override; a
 script with a secret or a hardcoded home path or email is never adopted, even by the user. A script that was never audited
 cannot be adopted by `decide`.

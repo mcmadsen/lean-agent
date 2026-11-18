@@ -25,7 +25,10 @@
   - The `run` line is a bare interpreter (python3, node, bash, sh, ruby, perl ...) then `{script}`, no inline-code flags, quotes or
     shell operators; `outputs` may not be a catch-all; inputs/outputs/purpose are one line and scanned like the script; a thread
     proposes only for its own project or `global`. The store is changed under a lock folder (threads and the desk are separate
-    processes) and `lean_rules sync` ships a script's skill only while it is still adopted and still the audited text.
+    processes; a stale lock is moved aside by one taker, a holder releases only its own) and `lean_rules sync` generates a
+    script's skill from the verified meta, only while it is still adopted, still the audited text, with an audit for exactly it.
+    The mod also scans the text for network and delete patterns (never `adopt`); the auditor's other claims are its judgement,
+    and `decide` is the human gate. The sha-256 moved to `sha.ts` (reviews and the script store share it).
   - `adopt` moves the script to `~/.lean-agent/scripts/<name>/` or `~/.lean-agent/<project>/scripts/<name>/` and writes a recipe
     skill `lean-agent-script-<name>` with `run: <command>`; `lean_rules sync` copies it into checkouts (git-excluded).
     `list`, `show`, `retire` (kept under `scripts/retired/`); a Bash run of an adopted script is counted in `scripts/uses.jsonl`.

@@ -6,7 +6,11 @@
 import { appendJsonl, homeDir, leanDir, mkdirp, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { globRe, slugOk } from './rules'
-import { sha256 } from './reviews'
+import { expandRun, hashText, recipeText } from './recipe'
+import type { Audit, Meta, Verdict } from './recipe'
+
+export { expandRun, hashText, recipeText }
+export type { Audit, Meta, Verdict }
 
 export const SCRIPT_TOOL = 'lean_script'
 export const MAX_SCRIPT_BYTES = 256 * 1024
@@ -15,79 +19,47 @@ export const scriptsDir = (home: string) => `${leanDir(home)}/scripts`
 const RESERVED = new Set(['candidates', 'retired'])
 const LEAN_DIRS = new Set(['scripts', 'threads', 'worktrees', 'logs', 'memory', 'output', 'desk', 'bin', 'recipes', 'legacy-0.45', 'feedback-drafts', 'handovers', 'global'])
 
-export type Verdict = 'adopt' | 'adapt' | 'reject'
-export type Audit = {
-  ts: number
-  by: string
-  sha: string // the stored script the auditor judged
-  claimed: Verdict // what the auditor said
-  verdict: Verdict // after the mod's rules
-  reads: string[]
-  writes: string[]
-  network: boolean
-  deletes: boolean
-  secrets: boolean
-  hardcoded: string[]
-  deterministic: boolean
-  errorsHandled: boolean
-  generalises: boolean
-  changes: string[]
-  blockers: string[]
-  reason: string
-}
-export type Meta = {
-  name: string
-  purpose: string
-  run: string // contains {script}
-  inputs: string[]
-  outputs: string[]
-  project: string // a project slug or "global"
-  author: string // tN
-  created: number
-  sha256: string
-  file: string
-  status: 'candidate' | 'adopted' | 'rejected' | 'retired'
-  core?: boolean
-  scan?: string[] // privacy findings of the stored text (they block adoption)
-  audit?: Audit
-  decision?: { value: 'adopt' | 'reject'; by: 'user'; reason: string; ts: number; overrode?: string[] }
-  adopted?: number
-  history?: { ts: number; what: string }[]
-}
 export type Who = { kind: 'thread'; id: string } | { kind: 'desk' }
 export type Out = { ok: boolean; text: string; data?: unknown }
 export type Io = { startThread?: (title: string, text: string, project: string) => Promise<Out> }
 
 const err = (text: string): Out => ({ ok: false, text })
-// every text field is one line: a newline in inputs/outputs/purpose could add lines to the recipe skill or the auditor brief
-const one = (s: string) => s.replace(/\s+/g, ' ').trim()
-const str = (v: unknown) => (typeof v === 'string' ? one(v) : '')
+// every text field (purpose, inputs, outputs, reasons, changes) is one line without control characters: a newline could add lines
+// to the recipe skill or the auditor brief. `str` (names, paths, the run line) only trims: a newline there is refused by its own check.
+const one = (s: string) => s.replace(/[\s\x00-\x1f\x7f]+/g, ' ').trim()
+const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
+const txt = (v: unknown) => one(str(v))
 const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').map(one).filter(Boolean) : typeof v === 'string' && one(v) ? [one(v)] : [])
-const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
-export const hashText = (t: string) => hex(sha256(new TextEncoder().encode(t)))
 
 // One store mutation at a time: in this process by a queue, across sessions (every thread and the desk is its own process) by
-// a lock folder (`mkdir` is atomic). A lock older than a minute, or one that never got its timestamp, is taken over.
-// Every mutation reads the meta again inside the lock.
+// a lock folder (`mkdir` is atomic) whose `at` file holds the holder's token (time:random). A lock older than a minute, or one that
+// never got its token (a holder that died between mkdir and write: after ~4 s), is taken over by MOVING it aside (`mv` is atomic: one
+// taker wins, the others retry mkdir), and a holder releases only a lock that still carries its own token. A lock left behind by a
+// crash therefore blocks mutations for at most a minute. Every mutation reads the meta again inside the lock.
 const LOCK_STALE_MS = 60_000
 async function withLock<T>(h: Host, f: () => Promise<T>): Promise<T> {
   const home = await homeDir(h)
   const lock = `${scriptsDir(home)}/.lock`
   await mkdirp(h, scriptsDir(home))
+  const token = `${await h.clock.now()}:${Math.floor(Math.random() * 1e9).toString(36)}`
   let got = false
   for (let n = 0; n < 25 && !got; n++) {
     got = (await h.process.run(['mkdir', lock])).exitCode === 0
     if (got) break
-    const at = Number(await h.fs.read(`${lock}/at`).catch(() => 0)) || 0
-    if ((at && (await h.clock.now()) - at > LOCK_STALE_MS) || (!at && n >= 20)) await h.process.run(['rm', '-rf', lock])
-    else await h.process.run(['sleep', '0.2'])
+    const at = Number(String(await h.fs.read(`${lock}/at`).catch(() => '')).split(':')[0]) || 0
+    if (at ? (await h.clock.now()) - at > LOCK_STALE_MS : n >= 20) {
+      const aside = `${lock}.stale-${token.replace(':', '-')}`
+      await h.process.run(['mv', lock, aside])
+      await h.process.run(['rm', '-rf', aside])
+    } else await h.process.run(['sleep', '0.2'])
   }
   if (!got) throw new Error('the script store is busy: try again')
   try {
-    await h.fs.write(`${lock}/at`, String(await h.clock.now()))
+    await h.fs.write(`${lock}/at`, token)
     return await f()
   } finally {
-    await h.process.run(['rm', '-rf', lock]).catch(() => undefined)
+    const mine = String(await h.fs.read(`${lock}/at`).catch(() => '')) === token
+    if (mine) await h.process.run(['rm', '-rf', lock]).catch(() => undefined)
   }
 }
 let queue: Promise<unknown> = Promise.resolve()
@@ -119,12 +91,21 @@ export function scan(text: string, home = ''): { privacy: string[]; secrets: str
   return { privacy, secrets }
 }
 
+// What the mod itself sees in the text, whatever the auditor says: network tools and libraries, deleting or moving over files.
+// A hit makes the verdict `adapt` at best (the user can still decide with confirm). Not a proof either way: the auditor reads it too.
+const RISKY: [RegExp, string][] = [
+  [/\b(?:curl|wget|ncat|scp|rsync|ssh|sftp|ftp)\s|\b(?:requests|urllib|urllib3|httpx|aiohttp|http\.client|socket|smtplib|ftplib|XMLHttpRequest)\b|\bfetch\s*\(|\bgit\s+(?:push|fetch|pull|clone)\b|\b(?:pip3?|npm|yarn|pnpm|apt(?:-get)?|brew)\s+install\b/, 'uses the network (the mod\'s text scan)'],
+  [/\brm\s+-|\bos\.(?:remove|unlink|rmdir)\b|\bshutil\.(?:rmtree|move)\b|\b(?:unlink|rmdir)(?:Sync)?\s*\(|\bfs\.(?:rm|rmSync|unlink|rmdir)\b|\bRemove-Item\b|-delete\b|\bmv\s+-f\b|\.truncate\s*\(/, 'deletes or moves over files (the mod\'s text scan)'],
+]
+export const riskyText = (text: string): string[] => RISKY.filter(([re]) => re.test(text)).map(([, what]) => what)
+
 // lean-agent's OWN data (the ledger, reports, rules stats ...): such a script belongs in the mod itself
 const OWN = /\.lean-agent\b|\b(?:ledger|feedback|gaps|inbox|questions|answers|goals|scheduled)\.jsonl?\b|\brules-loaded\b|\blearn\.json\b|\bnotes\.jsonl\b/
 export const ownData = (...texts: string[]) => texts.some(t => OWN.test(t))
 
 const INTERP = /^(?:python[0-9.]*|node|nodejs|bash|sh|zsh|ruby|perl|deno|bun|tsx|ts-node)$/
-const INLINE = /^-[a-zA-Z]*[cemEp]$/ // an interpreter flag that takes inline code or a module (-c, -e, -m, -p ...)
+// the only flags allowed before {script} in a run line, by interpreter family (inline code and modules are never among them)
+const okFlag = (base: string, a: string) => (/^(?:ba|z)?sh$/.test(base) ? /^-[exu]+$/.test(a) : /^python/.test(base) ? /^-(?:u|B|O|OO|s|S|E|I|q)$/.test(a) : a === '--no-warnings')
 
 // the run line shows the command with {script} where the script's path goes: an interpreter first, plain words, <placeholders> for arguments
 export function runProblem(run: string): string | null {
@@ -134,8 +115,9 @@ export function runProblem(run: string): string | null {
   const w = run.trim().split(/\s+/)
   if (!INTERP.test(w[0]!)) return 'run must start with a bare interpreter (python3, node, bash, sh, ruby, perl ...), then {script}'
   const k = w.indexOf('{script}')
-  if (w.slice(1, k < 0 ? 1 : k).some(x => !/^-[A-Za-z]{1,3}$/.test(x) || INLINE.test(x))) return 'run: only plain flags (-u, -B ...) may sit between the interpreter and {script}, never -c / -e / -m (inline code)'
-  const rest = run.replace(/<[A-Za-z0-9_. -]{1,30}>/g, ' ').replace(/\{script\}/g, ' ')
+  if (k < 1 || w.filter(x => x.includes('{script}')).length !== 1) return 'run must contain {script} once, as a word of its own'
+  if (w.slice(1, k).some(x => !okFlag(w[0]!, x))) return 'run: between the interpreter and {script} only plain flags (python3 -u -B, bash -e -x) are allowed, never inline code (-c, -e, -m) or modules'
+  const rest = run.replace(/<[A-Za-z0-9_. /-]{1,40}>/g, ' ').replace(/\{script\}/g, ' ')
   if (/[;&|`\n\r<>"'\\#~*?!(){}[\]]|\$/.test(rest.slice(w[0]!.length))) return 'run is one plain command: no quotes, ; & | redirects, substitution or expansion (write arguments as <placeholders>)'
   return null
 }
@@ -189,32 +171,6 @@ async function find(h: Host, name: string): Promise<Found | null> {
 }
 const verdictOf = (m: Meta) => m.decision?.value ?? m.audit?.verdict ?? 'unaudited'
 const note = (m: Meta, ts: number, what: string) => ({ ...m, history: [...(m.history ?? []), { ts, what }].slice(-30) })
-export const expandRun = (meta: Meta, dir: string) => {
-  const p = `${dir}/${meta.file}`
-  const q = /^[\w./@+-]+$/.test(p) ? p : `'${p.replace(/'/g, `'\\''`)}'`
-  return meta.run.replace(/\{script\}/g, () => q)
-}
-
-// ---- the recipe skill an adopted script becomes ----------------------------------------------------------------------
-export function recipeText(meta: Meta, dir: string): string {
-  const desc = `Scripts over models: ${meta.purpose}`.replace(/\s+/g, ' ').slice(0, 200)
-  return [
-    '---',
-    `name: lean-agent-script-${meta.name}`,
-    `description: ${JSON.stringify(desc)}`,
-    '---',
-    `# ${meta.name} (adopted script)`,
-    '',
-    meta.purpose,
-    '',
-    `- inputs: ${meta.inputs.join('; ')}`,
-    `- outputs: ${meta.outputs.join('; ')}`,
-    `- run: ${expandRun(meta, dir)}`,
-    '',
-    'Audited and adopted by lean-agent: run it instead of reading the data with a model, and do not edit it in place. If it is wrong for your data, change a copy and `lean_script` propose it under a new name.',
-    '',
-  ].join('\n')
-}
 
 // ---- propose -------------------------------------------------------------------------------------------------------
 const proposed = new Set<string>() // source paths this session proposed (the nudge leaves them alone)
@@ -230,7 +186,7 @@ async function propose(h: Host, who: Who, i: any): Promise<Out> {
   const path = str(i.path)
   if (!nameOk(name)) return err(`propose needs a name: letters, digits . _ - (at most 48), not ${[...RESERVED].join(' or ')}`)
   if (!path.startsWith('/') || path.split('/').includes('..')) return err('propose needs path: the absolute path of the script file')
-  const purpose = str(i.purpose).replace(/\s+/g, ' ')
+  const purpose = txt(i.purpose)
   if (!purpose) return err('propose needs purpose: what the script does, in a sentence')
   if (purpose.length > 300) return err('purpose is over 300 characters')
   const run = str(i.run)
@@ -313,20 +269,28 @@ export function parseAudit(text: string): Reply | null {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return null
   const bool = (v: unknown): boolean | null => (typeof v === 'boolean' ? v : null)
   const verdict: Verdict | null = o.verdict === 'adopt' || o.verdict === 'adapt' || o.verdict === 'reject' ? o.verdict : null
-  return { name: str(o.name), verdict, reads: strs(o.reads), writes: strs(o.writes), network: bool(o.network), deletes: bool(o.deletes), secrets: bool(o.secrets), hardcoded: strs(o.hardcoded), deterministic: o.deterministic !== false, errorsHandled: o.errors_handled !== false, generalises: bool(o.generalises), changes: strs(o.changes), reason: str(o.reason).slice(0, 400) }
+  return { name: str(o.name), verdict, reads: strs(o.reads), writes: strs(o.writes), network: bool(o.network), deletes: bool(o.deletes), secrets: bool(o.secrets), hardcoded: strs(o.hardcoded), deterministic: o.deterministic !== false, errorsHandled: o.errors_handled !== false, generalises: bool(o.generalises), changes: strs(o.changes), reason: txt(o.reason).slice(0, 400) }
 }
 
 // an output entry that would cover (nearly) anything is no declaration
-export const broadOutput = (o: string) => /^(?:~|\$HOME|\.|\/)?\/?\*{0,2}$/.test(o) || /^\*/.test(o) || /(?:^|\/)\.\.(?:\/|$)/.test(o) || /^(?:\/(?:Users|home|root|tmp|var|etc))\/?(?:\*{1,2})?$/.test(o) || o === '~/'
+// (judged by its literal folders before the first wildcard: an absolute entry needs two of them, a relative or ~ one: `/tmp/out/`,
+// `~/reports/*.csv`, `<outdir>/*.csv`; refused: `/`, `/tmp`, `/*`, `/**/*`, `~`, `~/**/*`, `.`, `./**/*`, `*`, anything with `..`)
+export function broadOutput(o: string): boolean {
+  if (/(?:^|\/)\.\.(?:\/|$)/.test(o) || /^[*?[]/.test(o)) return true
+  const star = o.search(/[*?[]/)
+  const folders = (star < 0 ? o : o.slice(0, star).replace(/[^/]*$/, '')).split('/').filter(s => s && s !== '.' && s !== '~' && s !== '$HOME')
+  return folders.length < (o.startsWith('/') ? 2 : 1)
+}
 // an output entry covers a written thing: equal, a glob match, or a folder prefix; stdout/stderr are always fine. A `..` never counts.
 const covered = (w: string, outputs: string[]) => /^(?:stdout|stderr)$/i.test(w) || (!/(?:^|\/)\.\.(?:\/|$)/.test(w) && outputs.some(o => o === w || (o.endsWith('/') && w.startsWith(o)) || (o.includes('*') && globRe(o).test(w))))
 
 // The verdict rules (the mod, not the model): network, deletes/overwrites, writes outside the declared outputs, hardcoded
 // paths/ids/names, a scrub hit or a script that is right only for its original data are never `adopt`; a secret is `reject`.
-export function judge(meta: Meta, r: Reply & { verdict: Verdict }, now: { privacy: string[]; secrets: string[] }): { verdict: Verdict; blockers: string[] } {
+export function judge(meta: Meta, r: Reply & { verdict: Verdict }, now: { privacy: string[]; secrets: string[]; risky?: string[] }): { verdict: Verdict; blockers: string[] } {
   const blockers: string[] = []
   if (r.network) blockers.push('uses the network')
   if (r.deletes) blockers.push('deletes or overwrites files')
+  blockers.push(...(now.risky ?? []))
   const stray = r.writes.filter(w => !covered(w, meta.outputs))
   if (stray.length) blockers.push(`writes outside its declared outputs: ${stray.join(', ')}`)
   if (!r.generalises) blockers.push('is correct only for the original data')
@@ -342,7 +306,8 @@ async function recordAudit(h: Host, by: string, reply: Reply, prompt: string): P
   const f = await find(h, reply.name)
   if (!f) return err(`no candidate ${reply.name || '(no name in the audit)'}`)
   if (f.meta.status !== 'candidate') return err(`${reply.name} is ${f.meta.status}: only a candidate is audited`)
-  if (!prompt.includes(`${f.dir}/`)) return err(`${reply.name}: the auditor was not pointed at ${f.dir}, so its reply is not an audit of this script; use the brief lean_script audit gives`)
+  const named = new Set(prompt.match(/\/scripts\/candidates\/[A-Za-z0-9._-]+\//g) ?? [])
+  if (!prompt.includes(`${f.dir}/`) || named.size !== 1) return err(`${reply.name}: the auditor must be pointed at exactly this candidate folder (${f.dir}/), so its reply is not an audit of this script; use the brief lean_script audit gives`)
   if (f.meta.audit && f.meta.audit.sha === f.meta.sha256) return err(`${reply.name} was already audited at this content (${f.meta.audit.verdict}); propose a revised script to audit again`)
   if (reply.verdict === null) return err('audit verdict must be adopt, adapt or reject')
   const r = reply as Reply & { verdict: Verdict }
@@ -350,7 +315,7 @@ async function recordAudit(h: Host, by: string, reply: Reply, prompt: string): P
   const text = await h.fs.read(`${f.dir}/${f.meta.file}`).catch(() => null)
   if (typeof text !== 'string' || hashText(text) !== f.meta.sha256) return err(`${r.name}: the stored script changed since it was proposed, so this audit does not apply; propose it again`)
   const now = scan(text, await homeDir(h))
-  const j = judge(f.meta, r, now)
+  const j = judge(f.meta, r, { ...now, risky: riskyText(text) })
   const changes = [...r.changes, ...(j.verdict === 'adapt' && r.verdict === 'adopt' ? j.blockers.map(b => `mod: it ${b}`) : [])]
   if (j.verdict === 'adapt' && !changes.length) return err('an adapt verdict needs the concrete changes (changes: [...])')
   if (j.verdict === 'reject' && !r.reason && !j.blockers.length) return err('a reject verdict needs a reason')
@@ -388,10 +353,14 @@ async function adopt(h: Host, f: Found, via: 'audit' | 'user'): Promise<Out> {
 export async function auditFromReply(h: Host, by: string, text: string, prompt: string): Promise<string | null> {
   const r = parseAudit(text)
   if (!r) return null
-  return queued(h, async () => {
-    const o = await recordAudit(h, by, r, prompt)
-    return `[lean-agent] ${o.ok ? '' : 'audit refused: '}${o.text}`
-  })
+  try {
+    return await queued(h, async () => {
+      const o = await recordAudit(h, by, r, prompt)
+      return `[lean-agent] ${o.ok ? '' : 'audit refused: '}${o.text}`
+    })
+  } catch (e) {
+    return `[lean-agent] audit refused: ${String((e as Error)?.message ?? e).slice(0, 120)}; run the auditor again`
+  }
 }
 
 // ---- decide, retire, list, show ------------------------------------------------------------------------------------
@@ -399,7 +368,7 @@ async function decide(h: Host, who: Who, i: any): Promise<Out> {
   if (who.kind !== 'desk') return err('decide is for the desk, and only after the user said so in the chat')
   const value = str(i.verdict)
   if (value !== 'adopt' && value !== 'reject') return err('decide needs verdict: adopt or reject')
-  const reason = str(i.reason).slice(0, 300)
+  const reason = txt(i.reason).slice(0, 300)
   if (!reason) return err('decide needs reason (why the user decided so)')
   const f = await find(h, str(i.name))
   if (!f) return err(`no script ${str(i.name)}`)
@@ -435,7 +404,7 @@ async function retire(h: Host, who: Who, i: any): Promise<Out> {
   if (mv.exitCode !== 0) return err(`could not retire ${f.meta.name}`)
   await h.fs.write(`${dest}/meta.json`, JSON.stringify(note({ ...f.meta, status: 'retired' }, ts, `retired by ${who.kind === 'thread' ? who.id : 'the desk'}`), null, 2) + '\n')
   await h.process.run(['rm', '-f', `${dest}/SKILL.md`]) // the recipe skill goes at the next lean_rules sync
-  await appendJsonl(h, `${scriptsDir(home)}/decisions.jsonl`, { ts, name: f.meta.name, by: who.kind === 'thread' ? who.id : 'desk', value: 'retire', reason: str(i.reason).slice(0, 300), prior: f.meta.status })
+  await appendJsonl(h, `${scriptsDir(home)}/decisions.jsonl`, { ts, name: f.meta.name, by: who.kind === 'thread' ? who.id : 'desk', value: 'retire', reason: txt(i.reason).slice(0, 300), prior: f.meta.status })
   return { ok: true, text: `${f.meta.name} retired (kept in ${dest}); run lean_rules sync to drop its skill from checkouts` }
 }
 
@@ -547,10 +516,9 @@ const inlineFlag = (base: string, a: string) =>
 function runTarget(seg: string): string | null {
   const w = seg.trim().split(/\s+/)
   while (w.length && /^(?:[A-Za-z_]\w*=\S*|env|time|nohup|exec)$/.test(w[0]!)) w.shift()
-  const k = w.findIndex(x => INTERP.test(x.split('/').pop() ?? ''))
-  if (k < 0) return w[0]?.startsWith('/') ? w[0].replace(/^["']|["']$/g, '') : null
-  const base = w[k]!.split('/').pop() ?? ''
-  const args = w.slice(k + 1)
+  const base = w[0]?.split('/').pop() ?? '' // the interpreter is the command itself (after env assignments, time, nohup ...), not any word of a line
+  if (!INTERP.test(base)) return w[0]?.startsWith('/') ? w[0].replace(/^["']|["']$/g, '') : null
+  const args = w.slice(1)
   if (args.some(a => inlineFlag(base, a))) return null
   return args.find(a => !a.startsWith('-'))?.replace(/^["']|["']$/g, '') ?? null
 }
