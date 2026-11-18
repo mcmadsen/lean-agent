@@ -18,7 +18,7 @@ never symlink (symlinked rule folders do not load).
 
 **Budget** (`lean_rules` `check` prints the live numbers): a rule is at most 25 non-empty body lines AND about 500 tokens
 (2,000 characters), no line wider than 240 characters; `_project` at most 10 lines and 150 tokens (600 characters); at most
-40 rule files. Sync skips a rule over any cap.
+40 rule files. Sync skips a rule over any cap (and removes its older copy from the checkout).
 
 **Hard rule**: a line is written or kept only if it was checked against the code in THIS run. A claim you could not check
 goes to an `UNVERIFIED` list in your final report, never into a rule.
@@ -81,7 +81,7 @@ goes to an `UNVERIFIED` list in your final report, never into a rule.
 4. **Record, check, sync.**
    - `lean_rules` `record` per area: `area` (the rule file is `rules/<area>.md`), `globs`, `sha` = `git rev-parse HEAD`,
      `relies` (up to about 10 files and symbols the rule stands on; the mod writes them into the footer as `relies-on:`;
-     `stale` and `verify` use them). `lines` is counted from the file: do not pass it. An area the repo's own docs fully
+     `stale` uses the files among them, `verify` all of them). `lines` is counted from the file: do not pass it. An area the repo's own docs fully
      cover gets `covered_by: <doc path>` and no rule file: it is never stale and the next run skips it.
    - `lean_rules` `check` (a dry run, nothing copied): lines and characters per rule, cap violations. Shorten what it flags.
    - `lean_rules` `sync` with `repo` = the checkout and `all: true` (every worktree of the project, also the ones from
@@ -89,7 +89,8 @@ goes to an `UNVERIFIED` list in your final report, never into a rule.
      `.claude/rules/lean-agent/` and `.claude/skills/lean-agent-*/` to the shared `.git/info/exclude`, and answers ONE line
      per checkout (`<path>: copied N, removed M, skipped K, exclude ok`) plus what it skipped; `verbose: true` lists paths.
 5. **`--verify`** (rules that exist): `lean_rules` `verify` with `repo` (optionally `area`): it takes every backticked path,
-   symbol and number of each rule and the `relies-on` list, searches the repo for it (fixed strings, read-only) and lists
+   symbol and number (two digits or more) of each rule, as whole words, at most 150 names per call (later rules
+   print NOT CHECKED: run again with `area`), and the `relies-on` list, searches the repo for it (fixed strings, read-only) and lists
    the names that no longer exist per rule, and relied-on files that changed or vanished since the recorded sha. Then, only
    for what it cannot judge (behaviour, numbers' meaning, commands that still work), re-check by bullet group and decide
    KEEP / FIX / DROP; `record` again (new `sha`), `check`, `sync`.

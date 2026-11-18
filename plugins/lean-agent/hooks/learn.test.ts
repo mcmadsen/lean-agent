@@ -179,6 +179,10 @@ test('tokensOf: backticked paths, numbers and symbols; commands only by their pa
   ])
 })
 
+test('tokensOf never turns a path outside the repo or a pathspec magic into a check', () => {
+  expect(tokensOf('`../../etc/passwd` and `a/../b.ts` and `:(top)x/y`').map(t => t.text)).toEqual([])
+})
+
 test('verify reports names that no longer exist, per rule; relies-on counts; read-only git only', async () => {
   const h = setup()
   h.files.set(`${SRC}/rules/billing.md`, rule('- Class `LedgerRow` in `services/billing/db.ts`, retry `RETRY_MS`, old `GoneThing`, dir `services/billing/old/`'))
@@ -187,7 +191,7 @@ test('verify reports names that no longer exist, per rule; relies-on counts; rea
   await recordRule(h.host, 'proj', 'billing', { globs: ['services/billing/**'], sha: 'abc', relies: ['services/billing/db.ts', 'RelyGone'] })
   const present = new Set(['LedgerRow', 'RETRY_MS', 'Client'])
   h.git.handler = a => {
-    if (a[0] === 'grep') return present.has(a[a.length - 1]!) ? { exitCode: 0, stdout: '' } : { exitCode: 1, stdout: '' }
+    if (a[0] === 'grep') return present.has(a[a.indexOf('-e') + 1]!) ? { exitCode: 0, stdout: '' } : { exitCode: 1, stdout: '' }
     if (a[0] === 'ls-files') return { exitCode: 0, stdout: '' }
     if (a[0] === 'diff') return ST({ 'services/billing/db.ts': 'D' })
     return { exitCode: 1, stdout: '' }
@@ -198,7 +202,7 @@ test('verify reports names that no longer exist, per rule; relies-on counts; rea
   expect(t).toContain('billing.md: 6 checked, missing: `GoneThing`, `services/billing/old/`, `RelyGone`; relied-on file gone: services/billing/db.ts')
   expect(t).toContain('api.md: 1 checked, all found')
   expect(h.calls.filter(c => c.argv[0] === 'git').every(c => ['grep', 'ls-files', 'diff'].includes(c.argv[1]!))).toBe(true)
-  expect(h.calls.some(c => c.argv[0] === 'git' && c.argv[1] === 'grep' && c.argv.includes('-F') && c.argv.includes('-q'))).toBe(true)
+  expect(h.calls.some(c => c.argv[0] === 'git' && c.argv[1] === 'grep' && c.argv.includes('-F') && c.argv.includes('-w') && c.argv.includes('-q') && c.argv.includes(':(exclude).claude/rules/lean-agent'))).toBe(true) // whole words, never the synced copies
   // only one rule
   expect((await verifyRules(h.host, 'proj', '/repo', 'api')).lines.join('\n')).not.toContain('billing.md')
 })
@@ -246,4 +250,35 @@ test('sync all: every worktree (git worktree list + worktrees.json) gets one sum
 test('sync summary says exclude n/a when there is nothing to copy', async () => {
   const h = setup()
   expect((await syncAll(h.host, 'proj', '/repo', false)).lines).toEqual(['/repo: copied 0, removed 0, skipped 0, exclude n/a'])
+})
+
+test('relies-on entries with $ patterns, commas or ./ survive the footer rewrite', async () => {
+  const h = setup()
+  h.files.set(`${SRC}/rules/billing.md`, rule('- a') + 'TAIL\n')
+  await recordRule(h.host, 'proj', 'billing', { globs: ['a/**'], sha: 'abcdef12', relies: ["$$store", "$'", "$&x", 'foo(a, b)'] })
+  const t = h.files.get(`${SRC}/rules/billing.md`)!
+  expect(parseRelies(t)).toEqual(['$$store', "$'", '$&x', 'foo(a  b)'])
+  expect(t.match(/TAIL/g)!.length).toBe(1) // nothing spliced into the footer
+})
+
+test('relied-on folders (trailing /) and ./ paths count as changed or gone', async () => {
+  const h = setup()
+  await recordRule(h.host, 'proj', 'a', { globs: ['a/**'], sha: 'abc', relies: ['a/core/'] })
+  await recordRule(h.host, 'proj', 'b', { globs: ['b/**'], sha: 'abc', relies: ['./b/x.ts'] })
+  h.git.handler = x => (x[0] === 'diff' ? ST({ 'a/core/m.ts': 'D', 'b/x.ts': 'M' }) : { exitCode: 1, stdout: '' })
+  expect(await checkStale(h.host, 'proj', '/repo')).toHaveLength(2)
+  const l = JSON.parse(h.files.get(`${SRC}/learn.json`)!)
+  expect(l.areas.a.stale).toBe('relied-on file gone: a/core/m.ts')
+  expect(l.areas.b.stale).toBe('relied-on file changed: b/x.ts')
+})
+
+test('inline paths with braces, single-alternative braces; verify says NOT CHECKED when the budget ran out', async () => {
+  expect(pathsOf('---\npaths: src/**/*.{ts,tsx}, lib/**\n---\nx')).toEqual(['src/**/*.{ts,tsx}', 'lib/**'])
+  expect(globRe('a/{b}.ts').test('a/b.ts')).toBe(true)
+  const h = setup()
+  for (let i = 0; i < 4; i++) h.files.set(`${SRC}/rules/r${i}.md`, rule(Array.from({ length: 40 }, (_, j) => `- \`N${i}x${j}\``).join('\n')))
+  h.git.handler = () => ({ exitCode: 0, stdout: '' })
+  const t = (await verifyRules(h.host, 'proj', '/repo')).lines.join('\n')
+  expect(t).toContain('r3.md: 30 checked') // 150 names in all
+  expect(t).not.toContain('NOT CHECKED (limit reached), all found')
 })

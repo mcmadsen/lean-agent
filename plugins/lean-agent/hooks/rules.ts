@@ -39,6 +39,7 @@ export function expandBraces(g: string): string[] {
 
 export function globRe(g: string): RegExp {
   const alts = expandBraces(g)
+  if (alts.length === 1 && alts[0] !== g) return globRe(alts[0]!)
   if (alts.length > 1) return new RegExp(alts.map(a => globRe(a).source).join('|'))
   let r = ''
   for (let i = 0; i < g.length; i++) {
@@ -81,7 +82,7 @@ export function pathsOf(t: string): string[] {
   if (!m) return []
   const unq = (x: string) => x.trim().replace(/^["']|["']$/g, '')
   const items = m[2]!.split('\n').map(l => /^\s*-\s*(.*)$/.exec(l)?.[1]).filter((x): x is string => x !== undefined).map(unq)
-  if (m[1]!.trim()) items.push(...m[1]!.split(',').map(unq))
+  if (m[1]!.trim()) items.push(...m[1]!.split(/,(?![^{]*\})/).map(unq)) // a comma inside braces is part of the glob
   return items.filter(Boolean)
 }
 // the footer's `relies-on:` list (symbols and files; the last field of the footer comment)
@@ -90,7 +91,7 @@ export function parseRelies(t: string): string[] {
   const m = /relies-on:\s*([\s\S]*)$/.exec(f)
   return m ? m[1]!.split(',').map(x => x.trim()).filter(Boolean) : []
 }
-const looksLikePath = (s: string) => !/\s/.test(s) && !/[<>$]/.test(s) && (s.includes('/') || /\.[A-Za-z][A-Za-z0-9]{0,5}$/.test(s)) && !/^(https?:|\/|~)/.test(s)
+const looksLikePath = (s: string) => !/\s/.test(s) && !/[<>$]/.test(s) && !s.split('/').includes('..') && !s.startsWith(':') && (s.includes('/') || /\.[A-Za-z][A-Za-z0-9]{0,5}$/.test(s)) && !/^(https?:|\/|~)/.test(s)
 // the footer gets `relies-on:` last (an existing one is replaced); no footer: one is made
 export function withRelies(t: string, relies: string[], sha: string, date: string): string {
   const list = relies.join(', ')
@@ -98,7 +99,7 @@ export function withRelies(t: string, relies: string[], sha: string, date: strin
   const m = re.exec(t)
   if (!m) return t.replace(/\n*$/, '\n') + `<!-- lean-agent: learned ${sha.slice(0, 8)} ${date}${list ? ` relies-on: ${list}` : ''} -->\n`
   const inner = m[1]!.replace(/\s*relies-on:[\s\S]*$/, '').trimEnd()
-  return t.replace(re, `<!-- lean-agent:${inner}${list ? ` relies-on: ${list}` : ''} -->`)
+  return t.replace(re, () => `<!-- lean-agent:${inner}${list ? ` relies-on: ${list}` : ''} -->`) // a function: `$&` in a symbol is text
 }
 
 export type SyncOut = { copied: string[]; removed: string[]; skipped: string[]; excluded: boolean; exclude?: 'ok' | 'failed' | 'n/a' }
@@ -245,7 +246,7 @@ export async function recordRule(h: Host, project: string, area: string, a: Reco
   const file = `${projectDir(home, project)}/rules/${ruleFile(area)}`
   let lines = 0
   let chars: number | undefined
-  let relies = (a.relies ?? []).map(x => x.trim()).filter(x => x && !/[\n]|-->/.test(x)).map(x => x.slice(0, 120))
+  let relies = (a.relies ?? []).map(x => x.replace(/,/g, ' ').trim()).filter(x => x && !/[\n]|-->/.test(x)).map(x => x.slice(0, 120)) // a comma would split the entry on read-back
   if (relies.length > MAX_RELIES) { notes.push(`relies-on cut to ${MAX_RELIES} entries`); relies = relies.slice(0, MAX_RELIES) }
   if (a.coveredBy) {
     notes.push(`covered by ${a.coveredBy}: no rule file, never stale, skipped by the next run`)
@@ -297,8 +298,14 @@ async function changedSince(h: Host, repo: string, sha: string): Promise<Map<str
 }
 // relied-on FILES (entries that look like paths) that changed or vanished since the area was recorded
 function reliesHit(a: Area, changed: Map<string, string>): string | null {
-  for (const r of a.relies ?? []) {
+  for (const r0 of a.relies ?? []) {
+    const r = r0.replace(/^\.\//, '')
     if (!looksLikePath(r)) continue
+    if (r.endsWith('/')) { // a folder: any change under it
+      const hit = [...changed].find(([p]) => p.startsWith(r))
+      if (hit) return `relied-on ${hit[1] === 'D' ? 'file gone' : 'file changed'}: ${hit[0]}`
+      continue
+    }
     const st = changed.get(r)
     if (st === 'D') return `relied-on file gone: ${r}`
     if (st) return `relied-on file changed: ${r}`
@@ -427,7 +434,8 @@ async function exists(h: Host, repo: string, t: Token, cache: Map<string, boolea
   let res: boolean | null = null
   try {
     const grep = async () => {
-      const r = await h.process.run(['git', 'grep', '--untracked', '-F', '-q', '-e', t.text], { cwd: repo })
+      // whole words (`Client` is not `ClientFactory`, `3000` is not `30001`); the synced rule copies are never a hit, excluded or not
+      const r = await h.process.run(['git', 'grep', '--untracked', '--exclude-standard', '-F', '-w', '-q', '-e', t.text, '--', '.', ':(exclude).claude/rules/lean-agent', ':(exclude).claude/skills/lean-agent-*'], { cwd: repo })
       return r.exitCode === 0 ? true : r.exitCode === 1 ? false : null
     }
     if (t.kind === 'path') {
@@ -484,7 +492,7 @@ export async function verifyRules(h: Host, project: string, repo: string, only?:
       const hit = c ? reliesHit(a, c) : null
       if (hit) notes.push(hit)
     }
-    lines.push(`${n}: ${take.length} checked, ${gone.length ? `missing: ${gone.map(x => `\`${x}\``).join(', ')}` : 'all found'}${notes.length ? `; ${notes.join('; ')}` : ''}`)
+    lines.push(`${n}: ${take.length ? `${take.length} checked, ` : 'NOT CHECKED (limit reached), '}${gone.length ? `missing: ${gone.map(x => `\`${x}\``).join(', ')}` : 'all found'}${notes.length ? `; ${notes.join('; ')}` : ''}`)
   }
   lines.unshift(`verify: ${missing} name(s) missing in ${names.length} rule(s); a missing name is a candidate, judge it before dropping the bullet`)
   return { lines, missing }

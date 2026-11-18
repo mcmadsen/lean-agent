@@ -11,7 +11,7 @@ builds 1.0.5).
   was refused `rg`, `ls` and `cat`). The mod now compares its own version with the installed one (the plugin root's
   `.claude-plugin/plugin.json` and Claude Code's `installed_plugins.json`, the higher wins; cached for a minute) at `session.start`
   and every `turn.start`: a status line and one `prompt.compose` line say "lean-agent code X is running but Y is installed: start a
-  new session (threads: close and Start)". `lean_doctor check` reports it as a FIX row. Every guard refusal ends with
+  new session (threads: close and Start)". `lean_doctor check` reports it as a FIX row. Every refusal of the guard (`decide`) ends with
   "(lean-agent <running version>)", and `feedback.jsonl` rows and `refusals.jsonl` carry the running version.
 
 ### Added

@@ -40,6 +40,15 @@ test('skewNote: only a difference is a note; unknown running version or manifest
   expect(await skewNote(h.host, '/plug', '1.0.3')).toBeNull()
 })
 
+test('an install that is older or the same (pre-release) is not skew', async () => {
+  const h = fakeHost(null)
+  h.files.set('/plug/.claude-plugin/plugin.json', JSON.stringify({ version: '1.0.4' }))
+  resetSkew()
+  expect(await skewNote(h.host, '/plug', '1.0.5')).toBeNull() // a dev copy newer than the install
+  resetSkew()
+  expect(await skewNote(h.host, '/plug', '1.0.4-rc.1')).toBeNull()
+})
+
 test('a session that runs older code than is installed: status line, one prompt line, guard refusals and feedback carry the running version', async ($, on) => {
   const h = fakeHost(on)
   resetLocks()

@@ -6,7 +6,7 @@ import { trustFolder } from './threads'
 import { deskChoice, mergeModelSettings, readModelSettings } from './models'
 import { setNotice } from './notices'
 import { seenNames, skillStat } from './skilltrim'
-import { installedVersion, running, skewText } from './skew'
+import { compareVersions, installedVersion, running, skewText } from './skew'
 
 export const OLD_LABEL = 'com.lean-agent.up'
 export const DESK_LABEL = 'com.lean-agent.desk'
@@ -94,7 +94,7 @@ export async function check(h: Host, root: string): Promise<string[]> {
   row(v.ok, v.ok ? `claude ${v.out}` : 'claude is not on PATH')
   if (running.version) {
     const inst = await installedVersion(h, root)
-    if (inst && inst !== running.version) row(false, skewText(running.version, inst))
+    if (inst && compareVersions(inst, running.version) > 0) row(false, skewText(running.version, inst))
     else out.push(`ok   lean-agent code ${running.version}${inst ? ' = installed' : ' (installed version could not be read)'}`)
   }
   row(await h.fs.exists(deskDir(home)), 'desk folder ~/lean-agent-desk')
@@ -158,6 +158,7 @@ export async function foreignGuides(h: Host): Promise<string[]> {
 }
 // ---- legacy-0.45/index.md: one line per old card (title, size, area guess) so `learn` can pick candidate facts ----------------
 const MAX_CARDS = 400
+const MAX_CARD_BYTES = 65_536
 const wordsOf = (t: string) => t.replace(/[|\n\r]/g, ' ').replace(/\s+/g, ' ').trim()
 // the card's own title: a JSON `title`/`name`, else the first Markdown heading or first line; the file name when nothing reads
 function cardTitle(file: string, body: string): { title: string; area: string } {
@@ -173,9 +174,9 @@ function cardTitle(file: string, body: string): { title: string; area: string } 
     /* not JSON: Markdown */
   }
   if (!title) title = /^#+\s*(.+)$/m.exec(body)?.[1] ?? body.split('\n').find(l => l.trim()) ?? ''
-  if (!area) area = /(?:^|[\s`(])((?:[\w.@-]+\/)+[\w.@*-]*)/.exec(body)?.[1] ?? '' // the first path the card names
+  if (!area) area = /(?:^|[\s`(])((?:[\w.@-]+\/)+[\w.@-]+\.\w+|(?:[\w.@-]+\/){2,})/.exec(body)?.[1] ?? '' // the first file path (or a deep folder) the card names; prose like and/or is no area
   const first = area.replace(/^\.?\//, '').split('/')[0] ?? ''
-  return { title: wordsOf(title).slice(0, 80) || file.replace(/\.[^.]+$/, ''), area: first && first !== '*' ? first : '?' }
+  return { title: wordsOf(title).slice(0, 80) || file.replace(/\.[^.]+$/, ''), area: first && !first.includes('*') ? first : '?' }
 }
 // Writes legacy-0.45/index.md from the cards-<project>/ folders there; returns a line for the migration/tidy report ('' = no cards).
 export async function legacyIndex(h: Host): Promise<string> {
@@ -188,9 +189,10 @@ export async function legacyIndex(h: Host): Promise<string> {
     const cards: string[] = []
     for (const f of (await h.fs.list(`${leg}/${d.name}`).catch(() => [])).filter(x => x.kind === 'file').sort((a, b) => a.name.localeCompare(b.name))) {
       if (++n > MAX_CARDS) break
-      const body = (await text(h, `${leg}/${d.name}/${f.name}`)) ?? ''
+      const size = Number((await h.fs.stat(`${leg}/${d.name}/${f.name}`).catch(() => null))?.size) || 0
+      const body = size > MAX_CARD_BYTES ? '' : ((await text(h, `${leg}/${d.name}/${f.name}`)) ?? '') // a huge card is listed by name, not read
       const c = cardTitle(f.name, body)
-      cards.push(`- ${f.name} | ${c.title} | ${new TextEncoder().encode(body).length} bytes | area? ${c.area}`)
+      cards.push(`- ${f.name} | ${c.title} | ${size || new TextEncoder().encode(body).length} bytes | area? ${c.area}`)
     }
     if (cards.length) rows.push(`## ${project}`, `Folder: ~/.lean-agent/${LEGACY}/${d.name}/`, ...cards, '')
   }

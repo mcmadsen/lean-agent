@@ -63,12 +63,12 @@ export async function installedVersion(h: Host, root: string): Promise<string | 
 export const skewText = (run: string, installed: string) =>
   `lean-agent code ${run} is running but ${installed} is installed: start a new session (threads: close and Start)`
 
-// The skew sentence, or null (same version, or either one unknown). Cached for a minute: cheap enough for every turn.
+// The skew sentence, or null (same or older install, or either one unknown). Cached for a minute: cheap enough for every turn.
 export async function skewNote(h: Host, root: string, run: string = running.version): Promise<string | null> {
   if (!run) return null
   const now = await h.clock.now()
   const key = `${root}\0${run}`
   if (!cache || cache.key !== key || now - cache.at > CACHE_MS || now < cache.at) cache = { at: now, key, installed: await installedVersion(h, root) }
   const inst = cache.installed
-  return inst && inst !== run ? skewText(run, inst) : null
+  return inst && compareVersions(inst, run) > 0 ? skewText(run, inst) : null // only a NEWER install: a dev copy or a rollback is not skew
 }
