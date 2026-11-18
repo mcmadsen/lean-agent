@@ -197,7 +197,12 @@ test('task mode runs the same read-only task clean and thread-shaped on one mode
   }
   expect(clean.args[clean.args.indexOf('--settings') + 1]).toContain('"lean-agent@mk":false')
   expect(th.args).toEqual(expect.arrayContaining(['--add-dir', '/repo']))
-  expect(th.args[th.args.indexOf('-p') + 1]).toContain('Work on the repository at /repo (use absolute paths; never cd)')
+  // the same prompt in both runs, and it never starts with "/"
+  expect(th.args[th.args.indexOf('-p') + 1]).toBe('Read-only task about the repository at /repo (use absolute paths; never cd):\nWhich module owns retries?')
+  expect(clean.args[clean.args.indexOf('-p') + 1]).toBe(th.args[th.args.indexOf('-p') + 1])
+  // each run has its own budget (the per-run cap, $1), the judge $0.1
+  expect(clean.args[clean.args.indexOf('--max-budget-usd') + 1]).toBe('1')
+  expect(th.args[th.args.indexOf('--max-budget-usd') + 1]).toBe('1')
   const judge = seen.find(s => s.args[s.args.indexOf('-p') + 1]!.startsWith('Two answers'))!
   expect(judge.args).toEqual(expect.arrayContaining(['--model', 'haiku', '--tools', '']))
   // numbers, verdict; the clock is even, so A is the clean answer and "A" means the clean run won

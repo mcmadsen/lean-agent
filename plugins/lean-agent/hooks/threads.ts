@@ -185,7 +185,7 @@ async function nextId(h: Host, home: string): Promise<string> {
   let max = 0
   try {
     for (const e of await h.fs.list(threadsDir(home))) {
-      const m = /^t(\d+)$/.exec(e.name)
+      const m = /^t(\d{1,9})$/.exec(e.name) // (compare's throw-away folders are t9 + a 13-digit time: never a thread number)
       if (m) max = Math.max(max, Number(m[1]))
     }
   } catch {
