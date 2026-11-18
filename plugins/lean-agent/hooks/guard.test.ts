@@ -348,6 +348,10 @@ test('built-in read-only git: the explorer runs ls-files / log without a grant; 
     expect(await bash('git -C /r/sub log -2', t)).toBeNull()
   }
   expect(await bash('git diff --ext-diff', 'lean-agent:reader-haiku')).toContain('granted')
+  for (const c of ['git log --{output=/tmp/x,}', 'git log {--output=/tmp/x,}', 'git diff {--ext-diff,}', 'git -C ~ log', 'git -C sub/../.. log', 'git -C a -C b log', 'git diff --ext x', 'git log --exec=x', 'git diff --no-index a b', 'git log --help', 'git log -h', 'git log --$"output=x"', 'git ls-files *'])
+    expect(await bash(c, 'lean-agent:reader-sonnet'), c).toContain('granted')
+  for (const c of ['git ls-files --exclude-standard', 'git ls-files -o', 'git log --oneline --grep=x', 'git log -Sdone', 'git rev-parse --git-dir', 'git --no-pager log -2', 'git log --output-indicator-new=+'])
+    expect(await bash(c, 'lean-agent:reader-sonnet'), c).toBeNull()
   for (const t of ['other:explorer', 'explorer', 'other:reader-haiku', 'reader-haiku'])
     expect(await bash('git log -3', t), t).toContain('granted')
   expect(await bash('git log -3', 'lean-agent:worker-sonnet')).toBeNull() // a worker is unchanged

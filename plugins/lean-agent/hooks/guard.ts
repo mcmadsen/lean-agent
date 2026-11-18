@@ -342,7 +342,9 @@ async function grantFor($: Host, ctx: Ctx): Promise<Grants> {
 // Built-in read-only commands, so a reader never depends on a brief: only OUR agent types (exact `lean-agent:` prefix) get them;
 // other:explorer, a bare explorer and every other type get nothing (an allow-cmd grant adds on top). One plain `git` command
 // (shell.ts lexer, no meta character, no expansion), the only global options are --no-pager and -C <dir inside the session cwd>,
-// and no option that writes a file, runs a program or reads outside the repository.
+// and no option that writes a file, runs a program or reads outside the repository. Accepted residual risk: the repository's own
+// config can run programs for status (core.fsmonitor) and diff/show/log -p (diff.external, textconv drivers), git status refreshes
+// .git/index, and `git diff A B` with paths outside the work tree reads them; -c / --ext-diff / -C escapes are what is refused.
 const GIT_EXPLORER = ['log', 'ls-files']
 const GIT_READER = ['log', 'ls-files', 'show', 'diff', 'status', 'rev-parse']
 export const builtinGit = (t?: string): string[] => {
@@ -350,18 +352,24 @@ export const builtinGit = (t?: string): string[] => {
   return n === 'explorer' ? GIT_EXPLORER : /^reader-/.test(n) || n === 'reviewer' ? GIT_READER : []
 }
 // long options git accepts by any unambiguous prefix: --out, --output=f, --ext, --ext-diff, --exec, --exec-path ...
-const BAD_LONG = (o: string) => /^(output|ext-d|exec|config|git-dir|work-tree|no-index|upload-pack|receive-pack|paginate)/.test(o) || (o.length > 0 && ('output'.startsWith(o) || 'ext-diff'.startsWith(o) || 'exec-path'.startsWith(o)))
-// -o <file> and clusters like -po (a short cluster with an o is refused, even -Sfoo: write --pickaxe-all style long options instead)
-const SHORT_O = (a: string) => a.startsWith('-o') || /^-[A-Za-z]{2,4}$/.test(a) && a.includes('o')
+const BAD_LONG = (o: string, sub: string) =>
+  /^(config|work-tree|no-index|upload-pack|receive-pack|paginate|help|textconv-)/.test(o) || (sub !== 'rev-parse' && /^git-dir/.test(o)) || (/^output/.test(o) && !/^output-indicator-/.test(o)) ||
+  (o.length > 0 && ('output'.startsWith(o) || 'ext-diff'.startsWith(o) || 'exec-path'.startsWith(o) || 'help'.startsWith(o))) || /^exec/.test(o) || /^ext-d/.test(o)
+// -o <file> (git has no -o for log/diff/show, the spec refuses it anyway) and -h (help starts a pager)
+const SHORT_O = (a: string) => a.startsWith('-o') || a === '-h'
 async function builtinReadOnly($: Host, ctx: Ctx, c: string): Promise<boolean> {
   const allowed = builtinGit(ctx.agentType)
-  if (!allowed.length || hasMeta(c)) return false
+  // hasMeta also refuses ; | < > inside quotes; { } ~ $ * ? [ \ are refused anywhere too: the shell expands them after this check
+  // (brace expansion `--{output=x,}`, `-C ~`, globs that could name a file `--output=x`). Quote-free pathspecs only.
+  if (!allowed.length || hasMeta(c) || /[{}~$*?[\\]/.test(c)) return false
   const w = plainWords(c)
   if (!w || w[0] !== 'git') return false
   let i = 1
+  let seenC = false // one -C only (git chains them)
   for (; i < w.length && w[i]!.startsWith('-'); ) {
     if (w[i] === '--no-pager') i++
-    else if (w[i] === '-C' && w[i + 1]) {
+    else if (w[i] === '-C' && w[i + 1] && !seenC && !w[i + 1]!.split('/').includes('..')) {
+      seenC = true
       const d = await resolve($, w[i + 1]!, ctx.cwd)
       if (!(within(d, norm(ctx.cwd)) || within(d, norm(await realPath($, ctx.cwd))))) return false
       i += 2
@@ -371,7 +379,7 @@ async function builtinReadOnly($: Host, ctx: Ctx, c: string): Promise<boolean> {
   if (!sub || !allowed.includes(sub)) return false
   for (const a of w.slice(i)) {
     if (a === '--') break
-    if (a.startsWith('--')) { if (BAD_LONG(a.slice(2).split('=')[0]!)) return false }
+    if (a.startsWith('--')) { if (BAD_LONG(a.slice(2).split('=')[0]!, sub)) return false }
     else if (a.startsWith('-') && SHORT_O(a) && ['log', 'diff', 'show'].includes(sub)) return false
   }
   return true
