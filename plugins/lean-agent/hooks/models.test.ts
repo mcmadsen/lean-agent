@@ -38,6 +38,12 @@ test('setup lets the desk open files in ~/.lean-agent: the folder is merged into
   h.files.set(DESK, JSON.stringify({ model: 'sonnet', effortLevel: 'high', permissions: { additionalDirectories: 'oops' } }))
   await fix(h.host, '/p')
   expect(JSON.parse(h.files.get(DESK)!).permissions.additionalDirectories).toEqual(['/h/.lean-agent'])
+  h.files.set(DESK, JSON.stringify({ model: 'sonnet', effortLevel: 'high', permissions: null }))
+  await fix(h.host, '/p')
+  expect(JSON.parse(h.files.get(DESK)!).permissions).toEqual({ additionalDirectories: ['/h/.lean-agent'] })
+  h.files.set(DESK, JSON.stringify({ model: 'sonnet', effortLevel: 'high', permissions: { additionalDirectories: [1, null, '/x'] } }))
+  await fix(h.host, '/p')
+  expect(JSON.parse(h.files.get(DESK)!).permissions.additionalDirectories).toEqual([1, null, '/x', '/h/.lean-agent']) // the user's entries are not judged
 })
 
 test('a desk settings file that does not parse is left alone, and setup says so', async () => {

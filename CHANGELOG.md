@@ -19,6 +19,8 @@
   numeric-string or ISO time) are understood, and every section is printed with `none` when empty (notes, doctor problems, drafts,
   reports by status, reports naming missing context, `missing`, `refused`, `unverified`, `unreached`, guard refusals, script
   candidates, blocked threads), plus a `Read:` line with the row count of each file, so a missing section can no longer hide a bug.
+  A feedback, gap, refusal or inbox row with no readable time is counted by the first export only. Drafts keep every line but the one
+  used as the title, and a long title is cut after anonymising.
 - **The public repo path survives the anonymiser.** `github.com/mcmadsen/lean-agent` and `mcmadsen/lean-agent` became
   `<user>/lean-agent` when the OS user name equals the repo owner. The exact public repo path now passes before the user-name rule
   (another repo of the owner, a longer name such as `mcmadsen/lean-agent-extras`, and the plain name are still masked).

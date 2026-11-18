@@ -328,6 +328,26 @@ test('a draft is titled by its first heading; a long date-slug file name is neve
   expect(JSON.parse(h.files.get(`${EXP}/state.json`)!).drafts).toContain(`${slug}.md`) // the raw name is remembered, so it is exported once
 })
 
+test('a draft whose heading is not its first line keeps every other line; a long title is anonymised before it is cut', async () => {
+  const h = setup()
+  h.files.set(lean(h, 'feedback-drafts/a.md'), 'Steps in alpha\n## The real title\nmore\n')
+  h.files.set(lean(h, 'feedback-drafts/b.md'), `# ${'word '.repeat(22)}mail ${EMAIL}\nbody\n`) // the address would straddle a cut at 120 characters
+  const t = read(h, await run(h))
+  expect(t).toContain('### The real title\n\nSteps in project-A\nmore')
+  expect(t).not.toContain('<emai\n') // a cut never leaves half a placeholder
+  expect(t.match(/The real title/g)).toHaveLength(1)
+  expect(t).not.toContain(EMAIL.slice(0, 6))
+  expect(t).not.toContain('example') // no fragment of the address is left
+  expect(t).toMatch(/### (word ){22}mail\s*\n/) // cut at 120 characters after anonymising: the address is gone, not half of it
+})
+
+test('the same report in the old and the new feedback file counts once, whatever the key order or the unit of its time; identical rows inside one file stay separate', async () => {
+  const h = setup()
+  h.files.set(lean(h, 'feedback/feedback.jsonl'), jl([{ ts: 1_700_000_000, status: 'done', thread: 't1' }, { ts: 1_700_000_100, status: 'done', thread: 't2' }, { ts: 1_700_000_100, status: 'done', thread: 't2' }]))
+  h.files.set(lean(h, 'feedback.jsonl'), jl([{ thread: 't1', status: 'done', ts: 1_700_000_000_000 }, { ts: 1_700_000_100_000, thread: 't2', status: 'done' }, { ts: 1_700_000_100_000, thread: 't2', status: 'done' }, { ts: 1_700_000_100_000, thread: 't2', status: 'done' }]))
+  expect(read(h, await run(h))).toContain('Reports: 4 (done 4)') // t1 once; t2 three times (the larger count of the two files)
+})
+
 test('the name rules mask a project, the user and a home path in a file name and never the secret or hash rules', async () => {
   const h = setup('/q/zeldaquux')
   const a = await makeAnonymiser(h.host)

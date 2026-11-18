@@ -202,12 +202,16 @@ const isNew = (r: Record<string, unknown> | null | undefined, st: { at: number }
 // the worker feedback rows: 1.0.x writes ~/.lean-agent/feedback.jsonl, 0.45 wrote ~/.lean-agent/feedback/feedback.jsonl; both are read
 // (a row present in both is counted once)
 const feedbackFiles = (lean: string) => [`${lean}/feedback.jsonl`, `${lean}/feedback/feedback.jsonl`]
-// a draft's title: its first Markdown heading, else its first line; empty when the draft has no text
-const draftTitle = (raw: string): string => {
+// a draft's title: its first Markdown heading, else its first line; `at` is the line it came from (the body is the draft without that
+// line, so the title is not said twice and no other line is lost); no line = no text. The title is cut AFTER anonymising, never before.
+const draftTitle = (raw: string): { text: string; at: number } => {
   const lines = raw.split('\n').map(l => l.trim())
-  const heading = lines.find(l => /^#{1,6}\s+\S/.test(l)) ?? lines.find(l => l.length)
-  return (heading ?? '').replace(/^#{1,6}\s*/, '').replace(/\s+/g, ' ').trim().slice(0, 120)
+  let at = lines.findIndex(l => /^#{1,6}\s+\S/.test(l))
+  if (at < 0) at = lines.findIndex(l => l.length)
+  return at < 0 ? { text: '', at } : { text: lines[at]!.replace(/^#{1,6}\s*/, '').replace(/\s+/g, ' ').trim(), at }
 }
+// one row as a comparable key: sorted keys, the time normalised (a row copied between the two files may differ in both)
+const rowKey = (r: Record<string, unknown>) => JSON.stringify(Object.keys(r).sort().map(k => [k, k === 'ts' ? tsOf(r) : r[k]]))
 // what a draft shows when it has no text to take a title from: its file name as words (no extension, no leading date)
 const nameWords = (file: string) => file.replace(/\.md$/i, '').replace(/^\d{4}-\d{2}-\d{2}[-_]?/, '').replace(/[-_]+/g, ' ').trim()
 
@@ -251,11 +255,11 @@ async function collect(h: Host, root: string, o: { notes?: string; version: stri
   for (const f of (await h.fs.list(`${lean}/feedback-drafts`).catch(() => [])).filter(f => f.kind === 'file' && f.name.endsWith('.md')).sort((a, b) => a.name.localeCompare(b.name)))
     if (!st.drafts.includes(f.name)) {
       const raw = String(await h.fs.read(`${lean}/feedback-drafts/${f.name}`).catch(() => ''))
-      const first = raw.split('\n').findIndex(l => l.trim())
-      const body = first >= 0 ? raw.split('\n').slice(first + 1).join('\n') : raw // the first line is the title: not said twice
-      // the title is the draft's own first heading (anonymised as text); a draft without text falls back to its file name as words, which
-      // only the name rules see: a long date-slug name is not a secret
-      drafts.push({ raw: f.name, title: draftTitle(raw) ? A(draftTitle(raw)) : an.name(nameWords(f.name)) || 'untitled draft', text: A(body) })
+      const t = draftTitle(raw)
+      const body = t.at >= 0 ? raw.split('\n').filter((_, i) => i !== t.at).join('\n') : raw // exactly the title's line is dropped
+      // the title is the draft's own first heading (anonymised as text, then cut); a draft without text falls back to its file name as
+      // words, which only the name rules see: a long date-slug name is not a secret
+      drafts.push({ raw: f.name, title: t.text ? A(t.text).slice(0, 120).replace(/<[a-z]*$/, '') : an.name(nameWords(f.name)) || 'untitled draft', text: A(body) })
     }
   // worker feedback rows from both places (and the file that was not there is said, not skipped)
   // (a row that sits in an earlier file too is counted once; identical rows inside ONE file are separate reports)
@@ -267,7 +271,7 @@ async function collect(h: Host, root: string, o: { notes?: string; version: stri
     sources.push(`${file.slice(lean.length + 1)}: ${(await h.fs.exists(file).catch(() => false)) ? `${rows.length} row(s)` : 'not found'}`)
     const here = new Map<string, number>()
     for (const r of rows) {
-      const k = JSON.stringify(r)
+      const k = rowKey(r)
       here.set(k, (here.get(k) ?? 0) + 1)
       if ((earlier.get(k) ?? 0) >= here.get(k)!) continue // the same row, already read from an earlier file
       if (r.kind !== 'core-candidate' && isNew(r, st)) fb.push(r)
