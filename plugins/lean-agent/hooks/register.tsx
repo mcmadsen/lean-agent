@@ -521,7 +521,7 @@ export const register: Register = on => {
     await feedbackOf(host, e, r).catch(() => undefined)
     // a script auditor's LEAN-AUDIT line: the mod records the verdict (and tells the thread what the rules made of it)
     if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined && /^(lean-agent:)?auditor$/.test(String(e.subagent_type ?? ''))) {
-      const said = await auditFromReply(host, role.id, texts(r?.result).join('\n')).catch(() => null)
+      const said = await auditFromReply(host, role.id, texts(r?.result).join('\n'), String(e.prompt ?? '')).catch(() => null)
       if (said) r = { ...r, context: [...(r.context ?? []), said] }
     }
     if (e.agentId || r?.deny !== undefined) return r

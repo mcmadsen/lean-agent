@@ -19,7 +19,13 @@
     does it. The auditor ends with a `LEAN-AUDIT` line and **the mod records the verdict** when the Agent call returns, applying
     its own rules: network, deletes or overwrites, writes outside the declared outputs, hardcoded values, a home path or email in
     the text, or a script right only for its original data are never `adopt` (they become `adapt` with the concrete changes); a
-    secret is `reject`. Verdicts are `adopt`, `adapt` (changes), `reject` (reason); a tampered copy (sha256) is refused.
+    secret is `reject`. Verdicts are `adopt`, `adapt` (changes), `reject` (reason); a tampered copy (sha256) is refused. There is
+    no way to hand the mod a verdict: it is taken only from an auditor's Agent reply, only for the candidate folder that call's
+    prompt names, once per script content.
+  - The `run` line is a bare interpreter (python3, node, bash, sh, ruby, perl ...) then `{script}`, no inline-code flags, quotes or
+    shell operators; `outputs` may not be a catch-all; inputs/outputs/purpose are one line and scanned like the script; a thread
+    proposes only for its own project or `global`. The store is changed under a lock folder (threads and the desk are separate
+    processes) and `lean_rules sync` ships a script's skill only while it is still adopted and still the audited text.
   - `adopt` moves the script to `~/.lean-agent/scripts/<name>/` or `~/.lean-agent/<project>/scripts/<name>/` and writes a recipe
     skill `lean-agent-script-<name>` with `run: <command>`; `lean_rules sync` copies it into checkouts (git-excluded).
     `list`, `show`, `retire` (kept under `scripts/retired/`); a Bash run of an adopted script is counted in `scripts/uses.jsonl`.

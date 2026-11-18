@@ -4,6 +4,9 @@
 // .claude/skills/lean-agent-<n>/SKILL.md).
 import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, readJsonl, writeJson } from './state'
 import type { Host } from './state'
+import { sha256 } from './reviews'
+
+const hashHex = (t: string) => Array.from(sha256(new TextEncoder().encode(t)), x => x.toString(16).padStart(2, '0')).join('')
 
 export const MAX_RULE_FILES = 40
 export const MAX_RULE_LINES = 25
@@ -92,6 +95,10 @@ export async function syncRules(h: Host, project: string, repo: string): Promise
   // adopted scripts (scripts.ts) are recipe skills too: the project's own, then the global ones
   for (const base of [`${pdir}/scripts`, `${leanDir(home)}/scripts`]) {
     for (const d of (await h.fs.list(base).catch(() => [])).filter(f => f.kind === 'dir' && f.name !== 'candidates' && f.name !== 'retired')) {
+      // only a script that is still adopted and still the audited text (a retired one, or one edited in place, ships no skill)
+      const meta = await readJson<{ status?: string; file?: string; sha256?: string } | null>(h, `${base}/${d.name}/meta.json`, null)
+      const code = meta?.file ? await h.fs.read(`${base}/${d.name}/${meta.file}`).catch(() => null) : null
+      if (meta?.status !== 'adopted' || typeof code !== 'string' || hashHex(code) !== meta.sha256) continue
       const t = await h.fs.read(`${base}/${d.name}/SKILL.md`).catch(() => null)
       const name = `lean-agent-script-${d.name}`
       if (t !== null && slugOk(d.name) && !recipes.some(r => r.name === name)) recipes.push({ name, text: String(t) })

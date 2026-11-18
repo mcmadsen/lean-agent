@@ -13,13 +13,15 @@ adopted script with its verdict and use count.
 | action | who | input | effect |
 |---|---|---|---|
 | `propose` | thread | `path` (absolute), `name`, `purpose`, `run`, `inputs`, `outputs`, `project?` (default this thread's, or `global`) | the mod copies the script into `~/.lean-agent/scripts/candidates/<name>/` with `meta.json` (purpose, run, author, project, created, sha256). It never executes it. Secrets in the text refuse the proposal |
-| `audit` | thread, desk | `name` | thread: returns the auditor brief; start ONE `lean-agent:auditor` with it. The mod records the verdict from the auditor's `LEAN-AUDIT` line when the Agent call returns (`report` = that line, only if the mod said it could not read it). Desk: starts a thread that does this |
+| `audit` | thread, desk | `name` | thread: returns the auditor brief; start ONE `lean-agent:auditor` with it. The mod records the verdict from the auditor's `LEAN-AUDIT` line when the Agent call returns, only for the folder the prompt names, once per script content (there is no way to hand the mod a verdict). Desk: starts a thread that does this |
 | `list` / `show` | thread, desk | `name` for show | candidates, adopted, verdicts, uses |
 | `retire` | thread, desk | `name`, `reason?` | moves it to `scripts/retired/`; its skill goes at the next `sync` |
 | `decide` | desk only | `name`, `verdict` adopt or reject, `reason`, `confirm?` | the user overrides a verdict; logged in `scripts/decisions.jsonl` |
 
-`run` is the command with `{script}` where the script's path goes and an interpreter first, e.g. `python3 {script} <ledger.jsonl>`;
-no `;`, `&`, `|`, redirects or substitution. `outputs` lists every file it writes (`stdout` if it only prints).
+`run` is the command with `{script}` where the script's path goes and a bare interpreter first (python3, node, bash, sh, ruby,
+perl ...), e.g. `python3 {script} <ledger.jsonl>`; no inline-code flags (`-c`, `-e`), quotes, `;`, `&`, `|`, redirects or
+substitution. `outputs` lists every file it writes (`stdout` if it only prints); a catch-all entry (`/`, `~`, `*`, `..`) is refused.
+`project` is this thread's own project or `global`. The mod keeps the store under a lock, one change at a time across sessions.
 
 Verdicts (`adopt`, `adapt` with the concrete changes, `reject` with the reason) are enforced by the mod, not the auditor: a
 script that uses the network, deletes or overwrites, writes outside its declared outputs, hardcodes paths/ids/names (a home path

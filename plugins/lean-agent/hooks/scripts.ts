@@ -13,7 +13,7 @@ export const MAX_SCRIPT_BYTES = 256 * 1024
 export const scriptsDir = (home: string) => `${leanDir(home)}/scripts`
 // folder names the stores use themselves, and the top-level folders of ~/.lean-agent: never a script or project name here
 const RESERVED = new Set(['candidates', 'retired'])
-const LEAN_DIRS = new Set(['scripts', 'threads', 'worktrees', 'logs', 'memory', 'output', 'desk', 'bin', 'recipes', 'legacy-0.45', 'feedback-drafts', 'global'])
+const LEAN_DIRS = new Set(['scripts', 'threads', 'worktrees', 'logs', 'memory', 'output', 'desk', 'bin', 'recipes', 'legacy-0.45', 'feedback-drafts', 'handovers', 'global'])
 
 export type Verdict = 'adopt' | 'adapt' | 'reject'
 export type Audit = {
@@ -59,15 +59,40 @@ export type Out = { ok: boolean; text: string; data?: unknown }
 export type Io = { startThread?: (title: string, text: string, project: string) => Promise<Out> }
 
 const err = (text: string): Out => ({ ok: false, text })
-const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
-const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').map(x => x.trim()).filter(Boolean) : typeof v === 'string' && v.trim() ? [v.trim()] : [])
+// every text field is one line: a newline in inputs/outputs/purpose could add lines to the recipe skill or the auditor brief
+const one = (s: string) => s.replace(/\s+/g, ' ').trim()
+const str = (v: unknown) => (typeof v === 'string' ? one(v) : '')
+const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').map(one).filter(Boolean) : typeof v === 'string' && one(v) ? [one(v)] : [])
 const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
 export const hashText = (t: string) => hex(sha256(new TextEncoder().encode(t)))
 
-// one script action at a time (the mod is one process): read-modify-write of a store folder never interleaves
+// One store mutation at a time: in this process by a queue, across sessions (every thread and the desk is its own process) by
+// a lock folder (`mkdir` is atomic). A lock older than a minute, or one that never got its timestamp, is taken over.
+// Every mutation reads the meta again inside the lock.
+const LOCK_STALE_MS = 60_000
+async function withLock<T>(h: Host, f: () => Promise<T>): Promise<T> {
+  const home = await homeDir(h)
+  const lock = `${scriptsDir(home)}/.lock`
+  await mkdirp(h, scriptsDir(home))
+  let got = false
+  for (let n = 0; n < 25 && !got; n++) {
+    got = (await h.process.run(['mkdir', lock])).exitCode === 0
+    if (got) break
+    const at = Number(await h.fs.read(`${lock}/at`).catch(() => 0)) || 0
+    if ((at && (await h.clock.now()) - at > LOCK_STALE_MS) || (!at && n >= 20)) await h.process.run(['rm', '-rf', lock])
+    else await h.process.run(['sleep', '0.2'])
+  }
+  if (!got) throw new Error('the script store is busy: try again')
+  try {
+    await h.fs.write(`${lock}/at`, String(await h.clock.now()))
+    return await f()
+  } finally {
+    await h.process.run(['rm', '-rf', lock]).catch(() => undefined)
+  }
+}
 let queue: Promise<unknown> = Promise.resolve()
-const queued = <T,>(f: () => Promise<T>): Promise<T> => {
-  const r = queue.then(f, f)
+const queued = <T,>(h: Host, f: () => Promise<T>): Promise<T> => {
+  const r = queue.then(() => withLock(h, f), () => withLock(h, f))
   queue = r.catch(() => undefined)
   return r
 }
@@ -79,7 +104,8 @@ const SECRETS: [RegExp, string][] = [
   [/\bgh[pousr]_[A-Za-z0-9]{30,}/, 'a code-host token'],
   [/\bsk-[A-Za-z0-9_-]{20,}/, 'an API key'],
   [/\bxox[abprs]-[A-Za-z0-9-]{10,}/, 'a chat token'],
-  [/\b(?:password|passwd|secret|token|api[_-]?key)\w*\s*[:=]\s*["'][^"'\s]{8,}["']/i, 'a literal credential assignment'],
+  [/\b(?:password|passwd|secret|token|api[_-]?key)\w*["']?\s*[:=]\s*["'][^"'\s]{8,}["']/i, 'a literal credential assignment'],
+  [/\bAuthorization["']?\s*[:=]\s*["']?(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/i, 'an authorization header'],
 ]
 // a user's home path (a parameterised one, $HOME or expanduser, has no user name after the /Users or /home folder) and an email address
 export function scan(text: string, home = ''): { privacy: string[]; secrets: string[] } {
@@ -97,13 +123,20 @@ export function scan(text: string, home = ''): { privacy: string[]; secrets: str
 const OWN = /\.lean-agent\b|\b(?:ledger|feedback|gaps|inbox|questions|answers|goals|scheduled)\.jsonl?\b|\brules-loaded\b|\blearn\.json\b|\bnotes\.jsonl\b/
 export const ownData = (...texts: string[]) => texts.some(t => OWN.test(t))
 
+const INTERP = /^(?:python[0-9.]*|node|nodejs|bash|sh|zsh|ruby|perl|deno|bun|tsx|ts-node)$/
+const INLINE = /^-[a-zA-Z]*[cemEp]$/ // an interpreter flag that takes inline code or a module (-c, -e, -m, -p ...)
+
 // the run line shows the command with {script} where the script's path goes: an interpreter first, plain words, <placeholders> for arguments
 export function runProblem(run: string): string | null {
   if (!run) return 'run is required: the command with {script} where the script goes, e.g. `python3 {script} <input.jsonl>`'
   if (run.length > 300) return 'run is over 300 characters'
   if (!run.includes('{script}')) return 'run must contain {script} where the script goes, e.g. `python3 {script} <input.jsonl>`'
-  if (run.trimStart().startsWith('{script}')) return 'run must start with the interpreter (python3, node, bash ...), not with {script}'
-  if (/[;&|`\n\r<>]|\$\(|\$\{/.test(run.replace(/<[A-Za-z0-9_. -]{1,30}>/g, ' ').replace(/\{script\}/g, ' '))) return 'run is one plain command: no ; & | redirects or substitution (write arguments as <placeholders>)'
+  const w = run.trim().split(/\s+/)
+  if (!INTERP.test(w[0]!)) return 'run must start with a bare interpreter (python3, node, bash, sh, ruby, perl ...), then {script}'
+  const k = w.indexOf('{script}')
+  if (w.slice(1, k < 0 ? 1 : k).some(x => !/^-[A-Za-z]{1,3}$/.test(x) || INLINE.test(x))) return 'run: only plain flags (-u, -B ...) may sit between the interpreter and {script}, never -c / -e / -m (inline code)'
+  const rest = run.replace(/<[A-Za-z0-9_. -]{1,30}>/g, ' ').replace(/\{script\}/g, ' ')
+  if (/[;&|`\n\r<>"'\\#~*?!(){}[\]]|\$/.test(rest.slice(w[0]!.length))) return 'run is one plain command: no quotes, ; & | redirects, substitution or expansion (write arguments as <placeholders>)'
   return null
 }
 
@@ -111,8 +144,12 @@ export function runProblem(run: string): string | null {
 const candDir = (home: string, name: string) => `${scriptsDir(home)}/candidates/${name}`
 const adoptedDir = (home: string, project: string, name: string) => (project === 'global' ? `${scriptsDir(home)}/${name}` : `${leanDir(home)}/${project}/scripts/${name}`)
 const nameOk = (n: string) => slugOk(n) && n.length <= 48 && !RESERVED.has(n)
-const projectOk = (p: string) => p === 'global' || (slugOk(p) && !LEAN_DIRS.has(p) && p.length <= 48)
-const fileOk = (f: string) => f.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_').slice(0, 64) || 'script'
+const projectOk = (p: string) => p === 'global' || (slugOk(p) && !LEAN_DIRS.has(p) && p.length <= 48 && !/\.(?:jsonl?|md|txt|log)$/.test(p))
+// the stored file never takes the name of the store's own files
+const fileOk = (f: string) => {
+  const n = f.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_').slice(0, 64) || 'script'
+  return n === 'meta.json' || n === 'SKILL.md' ? `script-${n}` : n
+}
 
 type Found = { meta: Meta; dir: string }
 async function readMeta(h: Host, dir: string): Promise<Meta | null> {
@@ -154,7 +191,8 @@ const verdictOf = (m: Meta) => m.decision?.value ?? m.audit?.verdict ?? 'unaudit
 const note = (m: Meta, ts: number, what: string) => ({ ...m, history: [...(m.history ?? []), { ts, what }].slice(-30) })
 export const expandRun = (meta: Meta, dir: string) => {
   const p = `${dir}/${meta.file}`
-  return meta.run.replace(/\{script\}/g, /^[\w./@+-]+$/.test(p) ? p : `'${p.replace(/'/g, `'\\''`)}'`)
+  const q = /^[\w./@+-]+$/.test(p) ? p : `'${p.replace(/'/g, `'\\''`)}'`
+  return meta.run.replace(/\{script\}/g, () => q)
 }
 
 // ---- the recipe skill an adopted script becomes ----------------------------------------------------------------------
@@ -202,8 +240,14 @@ async function propose(h: Host, who: Who, i: any): Promise<Out> {
   const outputs = strs(i.outputs)
   if (!inputs.length || !outputs.length) return err('propose needs inputs and outputs (what it reads, what it writes; "stdout" if it only prints)')
   if ([...inputs, ...outputs].some(x => x.length > 300)) return err('an inputs/outputs entry is over 300 characters')
-  const project = str(i.project) || (await threadProject(h, home, who.id)) || 'global'
+  const own = await threadProject(h, home, who.id)
+  const project = str(i.project) || own || 'global'
   if (!projectOk(project)) return err(`project must be a project name or "global" (got ${project})`)
+  if (project !== 'global' && project !== own) return err(`project must be this thread's own project${own ? ` (${own})` : ''} or "global"`)
+  const broad = outputs.find(broadOutput)
+  if (broad) return err(`outputs entry "${broad}" is too broad to declare what the script writes: name the files or a folder of its own`)
+  const fields = scan([purpose, run, ...inputs, ...outputs].join('\n'), home)
+  if (fields.secrets.length || fields.privacy.length) return err(`purpose, run, inputs or outputs ${[...fields.secrets, ...fields.privacy].join('; ')}: use $HOME or a <placeholder> instead`)
   const st = await h.fs.stat(path).catch(() => null)
   if (!st) return err(`no such file: ${path}`)
   if (st.kind && st.kind !== 'file') return err(`${path} is not a file`)
@@ -251,7 +295,7 @@ export function auditBrief(meta: Meta, dir: string): string {
     `Project: ${meta.project}`,
     'Judge by reading; end your reply with the LEAN-AUDIT line your agent definition describes.',
     '--- end ---',
-    'The mod records the verdict from the auditor\'s LEAN-AUDIT line when its Agent call returns. If it says the line was missing or refused, call lean_script audit again with name and report = that line.',
+    'The mod records the verdict from the auditor\'s LEAN-AUDIT line when its Agent call returns, and only for the folder the prompt names. A script is audited once per content: after an adapt, fix it and propose it again.',
   ].join('\n')
 }
 
@@ -272,8 +316,10 @@ export function parseAudit(text: string): Reply | null {
   return { name: str(o.name), verdict, reads: strs(o.reads), writes: strs(o.writes), network: bool(o.network), deletes: bool(o.deletes), secrets: bool(o.secrets), hardcoded: strs(o.hardcoded), deterministic: o.deterministic !== false, errorsHandled: o.errors_handled !== false, generalises: bool(o.generalises), changes: strs(o.changes), reason: str(o.reason).slice(0, 400) }
 }
 
-// an output entry covers a written thing: equal, a glob match, or a folder prefix; stdout/stderr are always fine
-const covered = (w: string, outputs: string[]) => /^(?:stdout|stderr)$/i.test(w) || outputs.some(o => o === w || (o.endsWith('/') && w.startsWith(o)) || (o.includes('*') && globRe(o).test(w)))
+// an output entry that would cover (nearly) anything is no declaration
+export const broadOutput = (o: string) => /^(?:~|\$HOME|\.|\/)?\/?\*{0,2}$/.test(o) || /^\*/.test(o) || /(?:^|\/)\.\.(?:\/|$)/.test(o) || /^(?:\/(?:Users|home|root|tmp|var|etc))\/?(?:\*{1,2})?$/.test(o) || o === '~/'
+// an output entry covers a written thing: equal, a glob match, or a folder prefix; stdout/stderr are always fine. A `..` never counts.
+const covered = (w: string, outputs: string[]) => /^(?:stdout|stderr)$/i.test(w) || (!/(?:^|\/)\.\.(?:\/|$)/.test(w) && outputs.some(o => o === w || (o.endsWith('/') && w.startsWith(o)) || (o.includes('*') && globRe(o).test(w))))
 
 // The verdict rules (the mod, not the model): network, deletes/overwrites, writes outside the declared outputs, hardcoded
 // paths/ids/names, a scrub hit or a script that is right only for its original data are never `adopt`; a secret is `reject`.
@@ -290,10 +336,14 @@ export function judge(meta: Meta, r: Reply & { verdict: Verdict }, now: { privac
   return { verdict: r.verdict === 'adopt' && blockers.length ? 'adapt' : r.verdict, blockers }
 }
 
-async function recordAudit(h: Host, by: string, reply: Reply): Promise<Out> {
+// `prompt` is what the auditor was asked: only a script whose folder it names is audited by this reply, and one sha is audited once
+// (a revised script has a new sha). The reply comes from a real auditor Agent call; there is no way to hand the mod a verdict.
+async function recordAudit(h: Host, by: string, reply: Reply, prompt: string): Promise<Out> {
   const f = await find(h, reply.name)
   if (!f) return err(`no candidate ${reply.name || '(no name in the audit)'}`)
   if (f.meta.status !== 'candidate') return err(`${reply.name} is ${f.meta.status}: only a candidate is audited`)
+  if (!prompt.includes(`${f.dir}/`)) return err(`${reply.name}: the auditor was not pointed at ${f.dir}, so its reply is not an audit of this script; use the brief lean_script audit gives`)
+  if (f.meta.audit && f.meta.audit.sha === f.meta.sha256) return err(`${reply.name} was already audited at this content (${f.meta.audit.verdict}); propose a revised script to audit again`)
   if (reply.verdict === null) return err('audit verdict must be adopt, adapt or reject')
   const r = reply as Reply & { verdict: Verdict }
   if (r.network === null || r.deletes === null || r.secrets === null || r.generalises === null) return err('audit incomplete: network, deletes, secrets and generalises must each be answered true or false')
@@ -305,7 +355,7 @@ async function recordAudit(h: Host, by: string, reply: Reply): Promise<Out> {
   if (j.verdict === 'adapt' && !changes.length) return err('an adapt verdict needs the concrete changes (changes: [...])')
   if (j.verdict === 'reject' && !r.reason && !j.blockers.length) return err('a reject verdict needs a reason')
   const ts = await h.clock.now()
-  const audit: Audit = { ts, by, sha: f.meta.sha256, claimed: r.verdict, verdict: j.verdict, reads: r.reads, writes: r.writes, network: r.network, deletes: r.deletes, secrets: r.secrets, hardcoded: r.hardcoded, deterministic: r.deterministic, errorsHandled: r.errorsHandled, generalises: r.generalises, changes, blockers: j.blockers, reason: r.reason }
+  const audit: Audit = { ts, by, sha: f.meta.sha256, claimed: r.verdict, verdict: j.verdict, reads: r.reads, writes: r.writes, network: r.network, deletes: r.deletes, secrets: r.secrets, hardcoded: r.hardcoded, deterministic: r.deterministic, errorsHandled: r.errorsHandled, generalises: r.generalises, changes, blockers: j.blockers, reason: r.reason || (j.verdict === 'reject' ? j.blockers.join('; ') : '') }
   let meta: Meta = note({ ...f.meta, audit, scan: now.privacy }, ts, `audited: ${j.verdict}${j.verdict !== r.verdict ? ` (auditor said ${r.verdict})` : ''}`)
   const why = j.verdict !== r.verdict ? ` The auditor said ${r.verdict}; the mod's rules say ${j.verdict}: ${j.blockers.join('; ')}.` : ''
   if (j.verdict === 'reject') meta = { ...meta, status: 'rejected' }
@@ -335,11 +385,11 @@ async function adopt(h: Host, f: Found, via: 'audit' | 'user'): Promise<Out> {
 }
 
 // An auditor's Agent reply: when it ends with a LEAN-AUDIT line the mod records the verdict. null = no such line.
-export async function auditFromReply(h: Host, by: string, text: string): Promise<string | null> {
+export async function auditFromReply(h: Host, by: string, text: string, prompt: string): Promise<string | null> {
   const r = parseAudit(text)
   if (!r) return null
-  return queued(async () => {
-    const o = await recordAudit(h, by, r)
+  return queued(h, async () => {
+    const o = await recordAudit(h, by, r, prompt)
     return `[lean-agent] ${o.ok ? '' : 'audit refused: '}${o.text}`
   })
 }
@@ -431,7 +481,6 @@ export const SCRIPT_SCHEMA = {
     inputs: { type: 'array', items: { type: 'string' }, description: 'propose: what it reads (arguments, files)' },
     outputs: { type: 'array', items: { type: 'string' }, description: 'propose: what it writes ("stdout" if it only prints; any file it writes must be listed)' },
     project: { type: 'string', description: 'propose: project name, or "global" (default: this thread\'s project)' },
-    report: { type: 'string', description: 'audit (thread): the auditor\'s LEAN-AUDIT line, only when the mod said it could not read it' },
     verdict: { type: 'string', enum: ['adopt', 'reject'], description: 'decide (desk): the user\'s decision' },
     reason: { type: 'string', description: 'decide / retire: why' },
     confirm: { type: 'boolean', description: 'decide adopt over an audit that said otherwise: only after the user was told and agreed' },
@@ -448,25 +497,19 @@ export async function scriptTool(h: Host, who: Who, i: any, io: Io = {}): Promis
   try {
     switch (i?.action) {
       case 'propose':
-        return await queued(() => propose(h, who, i))
+        return await queued(h, () => propose(h, who, i))
       case 'list':
         return await list(h)
       case 'show':
         return await show(h, i)
       case 'retire':
-        return await queued(() => retire(h, who, i))
+        return await queued(h, () => retire(h, who, i))
       case 'decide':
-        return await queued(() => decide(h, who, i))
+        return await queued(h, () => decide(h, who, i))
       case 'audit': {
         const name = str(i.name)
         const f = await find(h, name)
         if (!f) return err(`no script ${name || '(name missing)'}`)
-        if (str(i.report)) {
-          if (who.kind !== 'thread') return err('only a thread records an audit report')
-          const r = parseAudit(str(i.report))
-          if (!r) return err('report is not a LEAN-AUDIT line (LEAN-AUDIT {json})')
-          return await queued(() => recordAudit(h, who.id, { ...r, name }))
-        }
         if (f.meta.status !== 'candidate') return err(`${name} is ${f.meta.status}: only a candidate is audited`)
         const brief = auditBrief(f.meta, f.dir)
         if (who.kind === 'thread') return { ok: true, text: brief }
@@ -485,7 +528,7 @@ export async function scriptTool(h: Host, who: Who, i: any, io: Io = {}): Promis
 // ---- the nudge: a scratch script that ran and was never proposed -------------------------------------------------------
 const created = new Set<string>() // files written this session (Write tool, shell redirect, tee)
 const ran = new Map<string, { nudged: boolean }>()
-const INTERP = /^(?:python[0-9.]*|node|nodejs|bash|sh|zsh|ruby|perl|deno|bun|tsx|ts-node)$/
+const SEG = /&&|\|\||[;|\n]/
 export const resetScripts = () => {
   created.clear()
   ran.clear()
@@ -494,19 +537,30 @@ export const resetScripts = () => {
 export const noteWrite = (path: unknown) => {
   if (typeof path === 'string' && path.startsWith('/')) created.add(path)
 }
-const scratch = (p: string, lean: string, thread: string) => /^\/(?:private\/)?(?:tmp|var\/tmp|var\/folders)\//.test(p) || /\/(?:tmp|scratch|scratchpad)\//.test(p) || p.startsWith(`${lean}/threads/${thread}/`)
+// scratch = a temp root, a `tmp` / `scratchpad` folder under ~/.claude (job and session scratchpads), or the thread's own folder; a repo's own tmp folder is not
+const scratch = (p: string, lean: string, thread: string) => /^\/(?:private\/)?(?:tmp|var\/tmp|var\/folders)\//.test(p) || /\/\.claude\/(?:[^/]+\/)*(?:tmp|scratch|scratchpad)\//.test(p) || p.startsWith(`${lean}/threads/${thread}/`)
+
+// -c / -m / -e / -p and --eval are inline code or a module for that interpreter (bash -e or -x is not)
+const inlineFlag = (base: string, a: string) =>
+  /^(?:ba|z)?sh$/.test(base) ? /^-[a-zA-Z]*c[a-zA-Z]*$/.test(a) : /^python/.test(base) ? /^-[a-zA-Z]*[cm]$/.test(a) : /^-[a-zA-Z]*[eEp]$/.test(a) || a === '--eval' || a === '--print'
+// the file a command segment runs: `python3 /abs/file`, `node file`, `bash file ...`, or an absolute path run directly; null = inline code or no file
+function runTarget(seg: string): string | null {
+  const w = seg.trim().split(/\s+/)
+  while (w.length && /^(?:[A-Za-z_]\w*=\S*|env|time|nohup|exec)$/.test(w[0]!)) w.shift()
+  const k = w.findIndex(x => INTERP.test(x.split('/').pop() ?? ''))
+  if (k < 0) return w[0]?.startsWith('/') ? w[0].replace(/^["']|["']$/g, '') : null
+  const base = w[k]!.split('/').pop() ?? ''
+  const args = w.slice(k + 1)
+  if (args.some(a => inlineFlag(base, a))) return null
+  return args.find(a => !a.startsWith('-'))?.replace(/^["']|["']$/g, '') ?? null
+}
 
 // A Bash command: files it writes count as created; `python3 /abs/file` (and node, bash, sh ...) of a file created this session
-// in a scratch place is remembered for the nudge. Inline code (-c, -e) and relative paths are not tracked.
+// in a scratch place is remembered for the nudge. Inline code and relative paths are not tracked.
 export function noteBash(cmd: string, lean: string, thread: string): void {
   for (const m of cmd.matchAll(/(?:>>?|\btee\s+(?:-a\s+)?)\s*(["']?)(\/[^\s"';&|<>]+)\1/g)) created.add(m[2]!)
-  for (const seg of cmd.split(/&&|\|\||[;|\n]/)) {
-    const w = seg.trim().split(/\s+/)
-    const k = w.findIndex(x => INTERP.test(x.split('/').pop() ?? ''))
-    if (k < 0) continue
-    const args = w.slice(k + 1)
-    if (args.some(a => /^-[a-zA-Z]*[ceEm]$/.test(a))) continue // inline code or a module: no file
-    const file = args.find(a => !a.startsWith('-'))?.replace(/^["']|["']$/g, '')
+  for (const seg of cmd.split(SEG)) {
+    const file = runTarget(seg)
     if (file && file.startsWith('/') && created.has(file) && scratch(file, lean, thread) && !ran.has(file)) ran.set(file, { nudged: false })
   }
 }
@@ -525,16 +579,24 @@ export async function takeNudges(h: Host): Promise<string | null> {
 }
 
 // ---- uses: a Bash run of an adopted script counts ----------------------------------------------------------------------
+// (only a command that RUNS the adopted script file counts, not a cat or ls of its folder)
 export async function noteUse(h: Host, cmd: string, thread: string): Promise<void> {
   if (!cmd.includes('/scripts/')) return
   const home = await homeDir(h)
+  const lean = leanDir(home)
   const seen = new Set<string>()
-  for (const m of cmd.matchAll(/\/\.lean-agent\/(?:([A-Za-z0-9._-]+)\/)?scripts\/([A-Za-z0-9._-]+)\//g)) {
-    const project = m[1] ?? 'global'
-    const name = m[2]!
-    if (RESERVED.has(name) || seen.has(`${project}/${name}`) || (m[1] && (m[1] === 'scripts' || LEAN_DIRS.has(m[1])))) continue
+  for (const seg of cmd.split(SEG)) {
+    const file = runTarget(seg)
+    if (!file || !file.startsWith(`${lean}/`) || file.includes('..')) continue
+    const rel = file.slice(lean.length + 1)
+    const m = /^scripts\/([A-Za-z0-9._-]+)\/[^/]+$/.exec(rel) ?? /^([A-Za-z0-9._-]+)\/scripts\/([A-Za-z0-9._-]+)\/[^/]+$/.exec(rel)
+    if (!m) continue
+    const project = m.length === 3 && m[2] ? m[1]! : 'global'
+    const name = m[2] ?? m[1]!
+    if (RESERVED.has(name) || (project !== 'global' && LEAN_DIRS.has(project)) || seen.has(`${project}/${name}`)) continue
     seen.add(`${project}/${name}`)
-    const meta = await readMeta(h, adoptedDir(home, project, name))
-    if (meta && meta.status === 'adopted') await appendJsonl(h, `${scriptsDir(home)}/uses.jsonl`, { ts: await h.clock.now(), name, project, thread })
+    const dir = adoptedDir(home, project, name)
+    const meta = await readMeta(h, dir)
+    if (meta && meta.status === 'adopted' && file === `${dir}/${meta.file}`) await appendJsonl(h, `${scriptsDir(home)}/uses.jsonl`, { ts: await h.clock.now(), name, project, thread })
   }
 }
