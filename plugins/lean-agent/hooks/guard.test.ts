@@ -399,3 +399,12 @@ test('git -C reaches the session folder, ~/.lean-agent and registered projects o
   expect(await bash('git -C /h/code/other ls-files')).toContain('granted')
   expect(await bash('git -C /etc log')).toContain('granted')
 })
+
+test('an unknown or root session cwd widens no git -C root; a desk subagent without a type is refused as unresolved', async () => {
+  const h = fakeHost(null)
+  const thread = { kind: 'thread', id: 't1' } as any
+  for (const cwd of ['', '/'])
+    expect(await run(h, thread, { tool: 'Bash', command: 'git -C /h/other log' }, cwd, 'lean-agent:explorer', 'e1'), cwd).toContain('granted')
+  const desk = { kind: 'desk' } as any
+  expect(await run(h, desk, { tool: 'Bash', command: 'git log' }, '/r', undefined as any, 'x1')).toContain('type unresolved')
+})

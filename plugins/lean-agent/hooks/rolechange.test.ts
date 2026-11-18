@@ -200,6 +200,8 @@ test('a thread session that cd\'s into the repo is still a thread (lean_rules an
   expect(refused(await callRules($))).toBe(false)
   expect(refused(await callReport($))).toBe(false)
   s.set('/h/code/proj/src') // a cd the hook never reported
+  await $.prompt.submit({ text: 'hi' } as any) // the lazy re-detection must not demote
+  await $.turn.start({} as any).catch(() => undefined)
   expect(refused(await callRules($))).toBe(false)
   await s.move('/h/.lean-agent/threads/t1')
   expect(refused(await callRules($))).toBe(false)
@@ -222,4 +224,21 @@ test('a session whose id is a thread\'s sid is that thread from any directory', 
   expect(refused(await callRules($))).toBe(false) // the refusal path resolves by sid first
   await s.move('/h/code/other')
   expect(refused(await callReport($))).toBe(false)
+})
+
+const rec = (id: string, sid: string, state = 'open') => JSON.stringify({ id, title: 'x', project: 'proj', state, sid, created: 1, lastWake: 0, delivered: 0 })
+test('a sid match never demotes a desk', async ($, on) => {
+  const d = await start($, on, '/h/lean-agent-desk')
+  d.h.files.set('/h/.lean-agent/threads/t1/thread.json', rec('t1', 'sess-x'))
+  await d.move('/h/code/proj')
+  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any))).not.toContain('only the desk')
+})
+
+test('a sid match ignores closed records, and two records with one sid match nobody', async ($, on) => {
+  const p = await start($, on, '/h/code/proj')
+  p.h.files.set('/h/.lean-agent/threads/t1/thread.json', rec('t1', 'sess-x', 'closed'))
+  expect(refused(await callRules($))).toBe(true)
+  p.h.files.set('/h/.lean-agent/threads/t1/thread.json', rec('t1', 'sess-x'))
+  p.h.files.set('/h/.lean-agent/threads/t2/thread.json', rec('t2', 'sess-x'))
+  expect(refused(await callRules($))).toBe(true)
 })

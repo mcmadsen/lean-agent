@@ -361,7 +361,8 @@ const SHORT_O = (a: string) => a.startsWith('-o') || a === '-h'
 async function cRoots($: Host, ctx: Ctx): Promise<string[]> {
   const home = await homeDir($)
   const projs = await readJson<Record<string, { path?: unknown }>>($, `${leanDir(home)}/projects.json`, {})
-  const raw = [ctx.cwd, leanDir(home), ...Object.values(projs && typeof projs === 'object' ? projs : {}).map(x => x?.path).filter((x): x is string => typeof x === 'string' && x.startsWith('/'))]
+  const raw = [...(ctx.cwd && ctx.cwd !== '/' ? [ctx.cwd] : []), leanDir(home), // an unknown or root cwd widens nothing
+     ...Object.values(projs && typeof projs === 'object' ? projs : {}).map(x => x?.path).filter((x): x is string => typeof x === 'string' && x.startsWith('/'))]
   const out: string[] = []
   for (const r of raw) out.push(norm(r), norm(await realPath($, r)))
   return out
@@ -423,11 +424,11 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
 
 // ---- entry ---------------------------------------------------------------------------------------------------
 export async function decide($: Host, ctx: Ctx, e: Call): Promise<string | null> {
-  if (ctx.role.kind === 'desk' && !ctx.agentType) {
+  if (ctx.role.kind === 'desk' && !ctx.agentType && !ctx.agentId) {
     const d = await deskDenial($, ctx, e)
     if (d) return d
   }
-  if (ctx.role.kind === 'thread' && !ctx.agentType && e.tool === 'AskUserQuestion') return 'lean-agent: a thread never asks the user directly; use lean_ask (the desk relays it)'
+  if (ctx.role.kind === 'thread' && !ctx.agentType && !ctx.agentId && e.tool === 'AskUserQuestion') return 'lean-agent: a thread never asks the user directly; use lean_ask (the desk relays it)'
   if (ctx.agentType || ctx.agentId) {
     const d = await workerDenial($, ctx, e)
     if (d) return d

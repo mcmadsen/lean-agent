@@ -30,6 +30,7 @@ let grantSeq = 0
 export const resetModState = () => {
   notified = 0
   spent.clear()
+  shown.clear()
   stopTimers()
   role = { kind: 'plain' }
   applied = ''
