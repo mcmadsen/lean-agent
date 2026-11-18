@@ -2,7 +2,54 @@
 
 ## Unreleased
 
+### Changed (desk, threads, pane)
+- **Effort defaults go up where mistakes are expensive.** Threads default to sonnet / effort **high** (was medium); `config.json`
+  `threads.effort` and `lean_thread new|start` `effort` still override. `worker-sonnet` and `reviewer` run at effort high,
+  `reader-sonnet` at medium (was low), `worker-opus` stays high, `worker-haiku`, `reader-haiku` and `explorer` stay low.
+- **Reopen is a fresh session, never a resume.** `lean_thread reopen` (and the pane's Reopen) on a CLOSED thread starts a new
+  background session in the same folder (same tN, project, worktree, branch; `--model` / `--effort` from `thread.json`) with a
+  handover the mod builds: brief, project / worktree / branch, goal (a close keeps the cleared goal's text), notes.md, the thread's
+  report history (oldest first, about 4k tokens, the newest report whole), its `lean_remember` items and queued desk messages. The
+  old session id stays in `sids`; its conversation is never resumed. It also regenerates the thread's own CLAUDE.md from the current
+  template (only when lean-agent wrote it), so a fresh session runs today's code and rules. Result: "tN reopened as a new session
+  (old conversation kept read-only)". A parked thread's `reopen` still only flips the state.
+- `resume` of a thread that is not closed stays a resume, except when `thread.json` `version` (the lean-agent version installed when
+  its session started or was resumed) is older than the installed one: then it starts fresh the same way and says why. An unrecorded
+  version is unknown and resumes. `close` clears the thread's goal itself; it never deletes anything.
+- A `done` report is a handover: the thread template asks for branch, worktree path, last commit, pushed or not, open items and next
+  step, and `lean_report` answers a done report that lacks most of them with a one-line reminder.
+- **Thread -> desk direct.** `lean_report` (done, blocked, or `important: true`) and `lean_ask` still write the inbox (source of truth,
+  pane, dedupe) and also `$.session.send` one compact line (`[lean-agent] t3 done: ... (close t3 when nothing is left)`) to the
+  desk's session; the desk records its session id in `~/.lean-agent/desk.json` when it resolves as desk. The desk's `session.receive`
+  hook (origin plugin lean-agent) marks that inbox row delivered, so the next prompt does not repeat it. A missing desk id or a refused
+  or failed send falls back to the inbox alone (and the desk's own 10 s `prompt.submit` relay, `desk.autoRelay`), and the tool result
+  says so. Verified live: a message sent from one background session to another session id on the same machine arrives as a peer
+  message and starts a turn in an idle session. Desk -> thread keeps the inbox queue (read at the thread's next tool step, a wake for
+  an idle one): for a running thread `$.session.send` would add nothing and could deliver twice.
+- **Pane.** Every section header (Goals, Answers, Projects, Threads, Closed) is a toggle button with a count (`▾ Answers (14, 2
+  unread)`); the fold state lives in `$.state` (declared in `types/index.d.ts`), so it survives redraws and mod reloads. Defaults:
+  Goals open when there is a goal, Answers open, Projects folded, Threads open, Closed folded. Answers show the newest 5 and "show all
+  (N)"; with more than 8 rows "show all" groups them by thread (foldable, the folded group shows its newest line). A row is a button
+  that expands to the full report text; unread rows come first with a dot, read ones are dimmed.
+- **Pane: Close.** Each thread row has Close (first press arms "Confirm close tN" for 10 s, the second closes through
+  `lean_thread close`: stops a finished-but-alive session, clears the goal, no model turn); a working thread shows "busy" instead. A
+  "Close all done" button appears when 2+ threads reported done and closes only those whose last report is done and whose session is
+  not working (blocked, asking and working threads stay; the check is repeated at the second press). Closed threads move to a
+  collapsed "Closed (N)" with a Reopen button each. A session waiting on a prompt nobody answers (`claude agents` `waitingFor`) is
+  marked "needs you: open it in the app".
+
 ### Fixed
+- Background threads blocked silently on permission prompts nobody answers. The `worktree` skill and the thread template say to create
+  worktrees with `git -C <repo> worktree add <abs path>` under `~/.lean-agent/worktrees` and never with Claude Code's EnterWorktree
+  tool (it asks for a path outside `.claude/worktrees/`); the thread template adds three work rules (edit files only with Edit / Write,
+  one simple command per Bash call with absolute paths and `git -C`, never `cd`, no EnterWorktree). The skills contract fails when a
+  skill, template or command names EnterWorktree without forbidding it.
+- A worktree or branch folder no longer lands in `projects.json`: `project-add` refuses a path that is a linked git worktree, lives
+  under `~/.lean-agent/worktrees` or is in `worktrees.json` (it names the main checkout to register instead), and `lean_doctor check`
+  flags an existing entry whose path is a worktree (offering `project-remove`, which never deletes files).
+- Rebased on 1.0.4 (the merge restores `plainWords` on the strict pipeline scanner for the desk's gh / az reads).
+
+### Fixed (earlier in this release)
 - The `pr` skill no longer promises the desk what strict mode refuses. Every step names its role: the desk only reads status
   (`gh pr view|list|status`, `gh search prs`, `az repos pr list|show`); create, comments, update and every push are "route to the
   thread that owns the branch". The host comes from the project's origin URL: github.com uses `gh`; dev.azure.com and

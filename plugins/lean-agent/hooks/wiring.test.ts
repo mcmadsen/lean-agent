@@ -92,3 +92,22 @@ test('the first session.start of any local session unloads a leftover 0.45 launc
   expect(h.files.has('/h/.lean-agent/migrated-1.0.json')).toBe(true)
   expect(h.files.has('/h/Library/LaunchAgents/com.lean-agent.up.plist')).toBe(false)
 })
+
+test('the desk records its session id; a thread report goes out through $.session.send and the desk marks the arrival delivered', async ($, on) => {
+  const h = fakeHost(on)
+  resetLocks()
+  h.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
+  on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__lean-agent__${e.name}` } }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'desk-sess-1' }))
+  on('session.receive', (_: any, e: any) => ({ text: e.text })) // the engine's own queueing, beneath the plugin's hook
+  await $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
+  expect(JSON.parse(h.files.get('/h/.lean-agent/desk.json') ?? '{}').sid).toBe('desk-sess-1')
+  // the desk receives a thread's direct line: its row is marked delivered
+  h.files.set('/h/.lean-agent/desk/inbox.jsonl', JSON.stringify({ ts: 77, from: 't1', kind: 'report', text: 'merged', state: 'done' }) + '\n')
+  await $.session.receive({ origin: { kind: 'peer', plugin: 'lean-agent' }, text: '[lean-agent] t1 done: merged <!-- lean:r=77:t1:report -->' } as any)
+  expect(h.files.get('/h/.lean-agent/desk/inbox-delivered.json')).toContain('77:t1:report')
+  // a message that is not from this plugin marks nothing
+  await $.session.receive({ origin: { kind: 'peer', plugin: 'other' }, text: '<!-- lean:r=78:t1:report -->' } as any)
+  expect(h.files.get('/h/.lean-agent/desk/inbox-delivered.json')).not.toContain('78:t1')
+})

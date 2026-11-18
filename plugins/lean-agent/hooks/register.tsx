@@ -6,7 +6,7 @@ import { deskClaudeMd, leanThread } from './threads'
 import { ensureGitHooks } from './githooks'
 import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
-import { BUSY_MAX_MS, THREAD_TOOLS, consumeWake, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
+import { BUSY_MAX_MS, THREAD_TOOLS, consumeWake, markDelivered, recordDeskSid, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide } from './guard'
 import { dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
@@ -305,6 +305,7 @@ async function settle($: any, host: Host, dir: string, root: string, useRoot = t
     if (!startDir) startDir = dir
     r = await resolveRole(host, { cwd: dir, root, sid: lastSid, current: role, useRoot })
     if (r.kind === 'thread') await recordSid(host, r.id, lastSid).catch(() => false)
+    if (r.kind === 'desk' && lastSid) await recordDeskSid(host, lastSid).catch(() => undefined) // threads send their reports straight to it
   })
   if (ok) {
     seen = `${dir}\n${root}`
@@ -478,11 +479,19 @@ export const register: Register = on => {
     on('tool.call', { tool: `mcp__lean-agent__${t.name}` }, async ($, e: any) => {
       if (role.kind !== 'thread') await redetect($, undefined, true) // a stale role never refuses: look once more (session id, folder)
       if (role.kind !== 'thread') return { result: await roleReport(hostOf($), { tool: t.name, need: 'thread', role, startDir, sid: lastSid }), isError: true } as any
-      const out = await threadTool(hostOf($), role.id, t.name, e)
+      // a done / blocked report and every question also goes straight to the desk's session (the inbox keeps it either way)
+      const out = await threadTool(hostOf($), role.id, t.name, e, (sid, text) => $.session.send({ to: { sessionId: sid }, text }))
       await ensureGitHooks(hostOf($)).catch(() => undefined) // lean_* tools may change projects.json
       return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
     })
   }
+
+  // desk: a thread's direct message (this plugin's own `$.session.send`) arrived, so its inbox row is delivered and the next prompt
+  // does not hand it over again. Everything is passed on unchanged.
+  on('session.receive', async ($, e: any, next) => {
+    if (role.kind === 'desk' && e?.origin?.plugin === 'lean-agent' && typeof e.text === 'string') await markDelivered(hostOf($), e.text).catch(() => false)
+    return next(e)
+  }).catch(($, e: any, next) => next(e))
 
   // every tool: guards first (fail closed), then delivery of queued messages to a busy session
   on('tool.call', async ($, e: any, next) => {

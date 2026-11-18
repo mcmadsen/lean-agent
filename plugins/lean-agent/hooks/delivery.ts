@@ -83,7 +83,7 @@ export const handoverGaps = (text: string): string[] => HANDOVER_FIELDS.filter((
 const obj = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required })
 export const THREAD_TOOLS: Tool[] = [
   { name: 'lean_review', description: 'Record the review verdict for a commit (the push gate reads it; only this tool can write it). green only when tests pass and no blocker/major finding is open.', inputSchema: obj({ project: { type: 'string' }, sha: { type: 'string', description: 'full HEAD sha that was reviewed' }, green: { type: 'boolean' }, passes: { type: 'number' }, findings: { type: 'array', items: { type: 'string' } } }, ['project', 'sha', 'green']) },
-  { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done. A done report is a handover for whoever continues the thread: branch, worktree path, last commit, pushed or not, open items, next step.', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done'] }, superseded: { type: 'boolean', description: 'true: the brief you were given is superseded by a later message from the user (say which in text); the desk shows it' } }, ['text']) },
+  { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done. A done report is a handover for whoever continues the thread: branch, worktree path, last commit, pushed or not, open items, next step.', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done'] }, superseded: { type: 'boolean', description: 'true: the brief you were given is superseded by a later message from the user (say which in text); the desk shows it' }, important: { type: 'boolean', description: 'true: a working progress report the desk should see at once (done, blocked and questions always reach it directly)' } }, ['text']) },
   { name: 'lean_ask', description: 'Ask the user a question through the desk, with optional answer options.', inputSchema: obj({ question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, ['question']) },
   { name: 'lean_goal', description: 'Update the goal this thread serves (one line).', inputSchema: obj({ update: { type: 'string' } }, ['update']) },
   { name: 'lean_remember', description: 'Save a durable fact for future sessions.', inputSchema: obj({ text: { type: 'string' }, project: { type: 'string' } }, ['text']) },
@@ -94,7 +94,63 @@ export const THREAD_TOOLS: Tool[] = [
   },
 ]
 
-export async function threadTool(h: Host, id: string, name: string, i: any): Promise<{ ok: boolean; text: string }> {
+// ---- thread -> desk, direct --------------------------------------------------------------------------------------------
+// The inbox stays the source of truth (pane, dedupe, fallback). On top of it a done / blocked report and every question is ALSO
+// sent to the desk's session with `$.session.send` (an idle desk starts a turn for it; a busy one reads it at its next step). The line
+// carries a hidden row key; the desk's `session.receive` hook reads it and marks that inbox row delivered, so the next prompt does not
+// hand it over a second time. No desk session id known, or a refused send: the inbox alone, and the tool result says so.
+export type Send = (sid: string, text: string) => Promise<{ isDelivered: boolean; reason?: string } | void>
+export const deskFile = (home: string) => `${leanDir(home)}/desk.json`
+const DELIVERED = (home: string) => `${deskState(home)}/inbox-delivered.json`
+const ROW_KEY = /<!--\s*lean:r=(\d+):(t\d+):(report|ask)\s*-->/
+const oneLine = (s: string, n: number) => (s.replace(/\s+/g, ' ').trim().length > n ? s.replace(/\s+/g, ' ').trim().slice(0, n - 1) + '…' : s.replace(/\s+/g, ' ').trim())
+
+export async function recordDeskSid(h: Host, sid: string): Promise<void> {
+  if (!sid) return
+  const home = await homeDir(h)
+  const cur = await readJson<{ sid?: string }>(h, deskFile(home), {})
+  if (cur?.sid !== sid) await writeJson(h, deskFile(home), { ...(cur && typeof cur === 'object' ? cur : {}), sid })
+}
+
+export const directLine = (r: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[] }) =>
+  `[lean-agent] ${r.from} ${r.kind === 'ask' ? 'asking' : r.state === 'done' ? 'done' : r.state === 'blocked' ? 'blocked' : 'progress'}: ${oneLine(r.text, 240)}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''} <!-- lean:r=${r.ts}:${r.from}:${r.kind} -->`
+
+// '' = nothing to add to the tool result (not sent on purpose); else the sentence to append
+async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[] }, important: boolean): Promise<string> {
+  if (!send) return ''
+  const worth = rec.kind === 'ask' || rec.state === 'done' || rec.state === 'blocked' || important
+  if (!worth) return ''
+  const sid = (await readJson<{ sid?: string }>(h, deskFile(home), {}))?.sid
+  if (!sid) return ' (the desk session id is not known yet: it reads this from its inbox)'
+  try {
+    const r = await send(sid, directLine(rec))
+    if (r && r.isDelivered === false) return ` (direct send to the desk refused: ${oneLine(String(r.reason ?? 'no reason'), 120)}; it reads this from its inbox)`
+    return ' (also sent to the desk)'
+  } catch (e) {
+    return ` (direct send to the desk failed: ${oneLine(String((e as Error)?.message ?? e), 120)}; it reads this from its inbox)`
+  }
+}
+
+// Desk side, a delivery from our own plugin arrived: its row is delivered, so no prompt hands it over again.
+export async function markDelivered(h: Host, text: string): Promise<boolean> {
+  const m = ROW_KEY.exec(text)
+  if (!m) return false
+  return serial('reports', async () => {
+    const home = await homeDir(h)
+    const cur = await readJson<{ keys?: string[] }>(h, DELIVERED(home), {})
+    const keys = Array.isArray(cur?.keys) ? cur.keys : []
+    const k = `${m[1]}:${m[2]}:${m[3]}`
+    if (!keys.includes(k)) await writeJson(h, DELIVERED(home), { keys: [...keys, k].slice(-500) })
+    return true
+  })
+}
+async function deliveredKeys(h: Host, home: string): Promise<Set<string>> {
+  const cur = await readJson<{ keys?: string[] }>(h, DELIVERED(home), {})
+  return new Set(Array.isArray(cur?.keys) ? cur.keys : [])
+}
+const keyOf = (r: DeskRec) => `${r.ts}:${r.from}:${r.kind}`
+
+export async function threadTool(h: Host, id: string, name: string, i: any, send?: Send): Promise<{ ok: boolean; text: string }> {
   try {
     const home = await homeDir(h)
     const ts = await h.clock.now()
@@ -103,14 +159,16 @@ export async function threadTool(h: Host, id: string, name: string, i: any): Pro
       if (!str(i.text)) return { ok: false, text: 'lean_report needs text' }
       await appendJsonl(h, `${deskState(home)}/inbox.jsonl`, { ts, from: id, kind: 'report', text: str(i.text), state: str(i.state) || 'working', ...(i.superseded === true ? { superseded: true } : {}) } satisfies DeskRec)
       const missing = str(i.state) === 'done' ? handoverGaps(str(i.text)) : []
-      return { ok: true, text: missing.length >= 3 ? `reported to the desk. Reminder: a done report is the handover (a closed thread is reopened as a new session from it): also say ${missing.join(', ')}.` : 'reported to the desk' }
+      const sent = await tellDesk(h, home, send, { ts, from: id, kind: 'report', state: str(i.state) || 'working', text: str(i.text) }, i.important === true)
+      return { ok: true, text: (missing.length >= 3 ? `reported to the desk${sent}. Reminder: a done report is the handover (a closed thread is reopened as a new session from it): also say ${missing.join(', ')}.` : `reported to the desk${sent}`) }
     }
     if (name === 'lean_ask') {
       if (!str(i.question)) return { ok: false, text: 'lean_ask needs a question' }
       const options = Array.isArray(i.options) ? i.options.filter((x: unknown) => typeof x === 'string') : undefined
       await appendJsonl(h, `${leanDir(home)}/questions.jsonl`, { ts, from: id, question: str(i.question), options, answered: false })
       await appendJsonl(h, `${deskState(home)}/inbox.jsonl`, { ts, from: id, kind: 'ask', text: str(i.question), options } satisfies DeskRec)
-      return { ok: true, text: 'question sent; the answer arrives as a desk message' }
+      const sent = await tellDesk(h, home, send, { ts, from: id, kind: 'ask', text: str(i.question), options }, true)
+      return { ok: true, text: `question sent${sent}; the answer arrives as a desk message` }
     }
     if (name === 'lean_review') {
       const project = str(i.project) || (await readJson<Partial<Thread>>(h, `${tdir(home, id)}/thread.json`, {})).project || ''
@@ -158,7 +216,8 @@ export async function unreadReports(h: Host): Promise<{ recs: DeskRec[]; upTo: n
   const home = await homeDir(h)
   const all = await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)
   const read = (await readJson<{ n: number }>(h, `${deskState(home)}/inbox-read.json`, { n: 0 })).n || 0
-  return { recs: all.slice(read), upTo: all.length }
+  const got = await deliveredKeys(h, home) // rows the desk already received as a direct message
+  return { recs: all.slice(read).filter(r => !got.has(keyOf(r))), upTo: all.length }
 }
 
 export async function markRead(h: Host, upTo: number): Promise<void> {

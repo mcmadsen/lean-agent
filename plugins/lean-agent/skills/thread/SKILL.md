@@ -15,10 +15,11 @@ ever touches threads through the `lean_thread` tool (full name `mcp__lean-agent_
 | `new` | `title`, `project?` (a registered project, see `projects`), `text` (the brief), `model?` (haiku/sonnet/opus), `effort?` (low/medium/high) | creates the folder, trusts it, starts the session, records its id |
 | `send` | `tN`, `text` | queues the message; wakes the thread once if it is idle |
 | `wake` | `tN` | resumes an idle thread with everything queued |
-| `resume` | `tN` | same, with no message (after a restart) |
+| `resume` | `tN` | same, with no message (after a restart). When the session ran an older lean-agent version than the installed one (`thread.json` `version`), it starts a fresh session with a handover instead and says why |
 | `start` | `tN`, `model?`, `effort?` | starts a thread that has no session yet (brief + queued messages) |
 | `approve-push` | `tN`, `sha` (full), `reason?` | desk only, ONLY after the user explicitly approved that push in the chat: one sha, single use, 2 h, signed, logged in the thread's `history.jsonl`; a private project is never pushed |
-| `park` / `reopen` / `close` | `tN` | flips the state; close also stops a running session |
+| `park` / `close` | `tN` | flips the state; close also stops a finished-but-alive session and clears the thread's goal (never deletes the folder) |
+| `reopen` | `tN`, `model?`, `effort?` | a parked thread: back to open (then `resume`). A CLOSED thread: a NEW session in the same folder with a handover (brief, goal, notes, report history, remembered items, queued messages, branch/worktree); the old conversation is never resumed, its session id stays in `thread.json` `sids` |
 | `list` | none | every thread with its project, state, running flag and queued count |
 | `projects` | `all?` | every registered project: path, private, guards, learned rules (areas, last learned, stale), open threads; private ones hidden by the private switch (`config.json` `private: "off"`) only with `all: true` |
 | `project-add` | `project`, `path` | registers an existing folder (its real path) in `projects.json` |

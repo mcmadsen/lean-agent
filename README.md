@@ -83,9 +83,13 @@ Talk to the desk in plain language. It starts a thread for anything that touches
   reports; the report appears in the pane and in the desk's next answer.
 - "Tell t2 to also update the changelog": queued for t2, handed over at its next step.
 - "What is everyone working on?": the `goals` skill lists one line per thread.
-- "Park t3", "close t1", "reopen t3": flips the thread's state; closing also stops a running session.
+- "Park t3", "close t1", "reopen t3": flips the thread's state; closing also stops a finished-but-alive session and clears
+  the goal. Reopening a **closed** thread starts a new session in the same folder with a handover built from its brief, notes,
+  reports and remembered items (the old conversation is never resumed).
 - After a restart nothing is running. The pane offers **Resume** for threads that had a session and **Start** for the
-  ones that never started.
+  ones that never started. **Close** (press twice) and **Close all done** never touch a working thread; closed threads sit in a
+  collapsed "Closed (N)" with **Reopen**. Section headers fold and unfold; an answer row expands to its full text.
+- Threads send a question or a done / blocked report straight to the desk's session; the inbox and the pane keep every report.
 
 `/lean-agent` opens the pane. Threads run with an allow-list: Edit, Write and Bash inside their own worktrees and the
 lean-agent folder without asking. Pushes stay behind the review gate and the private-project rule.
