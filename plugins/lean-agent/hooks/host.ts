@@ -13,5 +13,6 @@ export function hostOf($: any): Host {
     process: { run: (argv: readonly string[], init?: any) => $.process.run(argv, init) },
     env: { get: () => $.env.get('HOME') }, // the only variable the mod reads (the engine wants it as a literal)
     clock: { now: () => $.clock.now() },
+    store: { get: (k: string) => $.store.get(k), set: (k: string, v: unknown) => $.store.set(k, v) },
   }
 }

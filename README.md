@@ -200,6 +200,7 @@ Writes are atomic (temp file then rename); appends are single `O_APPEND` writes;
 claude plugin validate plugins/lean-agent
 sh plugins/lean-agent/opener/open-desk.test.sh   # opener, with a fake pgrep and claude
 sh plugins/lean-agent/hooks/rules-loaded.test.sh
+sh plugins/lean-agent/hooks/githooks.test.sh   # pre-push hook, real git in temp repos
 claude plugin test plugins/lean-agent            # mod specs (*.test.ts, *.test.tsx); no sign-in needed
 ```
 

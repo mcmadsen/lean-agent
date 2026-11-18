@@ -2,7 +2,8 @@
 // read-only and --allow-edit grants for worker subagents. `decide` answers a deny text or null (allow).
 // register.tsx wraps it fail-closed: a throwing guard denies.
 import { homeDir, leanDir, readJson, realPath, threadsDir, writeJson } from './state'
-import { greenReview, keyFile } from './reviews'
+import { greenReview } from './reviews'
+import { analyze } from './shell'
 import type { Host } from './state'
 import type { Role } from './role'
 
@@ -41,70 +42,16 @@ function words(c: string): string[] {
 
 // The command reaches git push / gh publishing anywhere in its text (quotes, eval and bash -c included).
 export const PUSH = /\bgit\b[^;&|\n]*\bpush\b/
-// PRIVATE projects: an ALLOW-list. A Bash command is denied (no override) when ANY invocation found anywhere in its text
-// (inside bash -c / sh -c strings, $(...), backticks, ( ... ) subshells, after ; && || | and env assignments, with global
-// flags such as gh -R o/r or az --only-show-errors before the subcommand) is not read-only:
-//   gh: pr view|list|diff|checks|status; issue view|list|status; repo view|list; run view|list; auth status;
-//       api with no write method (-X/--method other than GET) and no -f/-F/--field/--raw-field/--input.
-//   az: only commands whose verb is list/show/query/get (list-*, show-*).
-//   git push and git remote add|set-url are always refused; so are lean-agent worktree push / pr create / review --post|--comment.
-// Subcommands are matched by position (after global flags), never by a bare word: `gh issue list --label release` passes.
-// A command that cannot be parsed confidently (unbalanced quotes, eval, a $variable as the program name) is denied too.
-// Other outward tools (gh gist, workflow run, secret set, label create ...) are not on the list, so they are denied as well.
+// PRIVATE projects (structure in shell.ts): the command is lexed like a shell; quotes, heredocs, here-strings and
+// redirections are data. It is denied (no override) only when a gh/az WRITE is positively found at a program position
+// (also inside bash -c / eval / $(...) / backticks / subshells / pipes, after env, sudo, command, exec ... prefixes),
+// or git push / git remote add|set-url / lean-agent worktree push|pr create|review --post, or a variable / command
+// substitution is used as the program name ($GH pr create, $(echo gh) pr create). Read-only gh/az stay allowed:
+//   gh: pr view|list|diff|checks|status; issue view|list|status; repo view|list; run view|list; auth status; api without
+//       a write method or -f/-F/--field/--raw-field/--input; no subcommand (gh, gh --version).  az: list/show/query/get verbs.
+// Unlexable commands are denied only if they also mention a gh/az token or a variable program. This is the fast first
+// line; git itself refuses a push through the pre-push hook (githooks.ts) whatever the shell form.
 // In non-private projects none of this applies: only the push gate and the protected-branch / --force guard do.
-const GIT_REMOTE_WRITE = /\bgit\b[^;&|\n]*\bremote\s+(add|set-url)\b/
-const LEAN_OUT = /\blean-agent\b[^;&|\n]*(\bworktree\s+push\b|\bpr\s+create\b|\breview\b[^;&|\n]*--(post|comment)\b)/
-const VALUE_FLAGS = new Set(['-R', '--repo', '--hostname', '--subscription', '-o', '--output', '--query', '--organization', '--org', '--project', '--resource-group', '-g'])
-const GH_READ: Record<string, string[]> = { pr: ['view', 'list', 'diff', 'checks', 'status'], issue: ['view', 'list', 'status'], repo: ['view', 'list'], run: ['view', 'list'], auth: ['status'] }
-
-function balanced(c: string): boolean {
-  let q = ''
-  for (let i = 0; i < c.length; i++) {
-    const ch = c[i]!
-    if (q) { if (ch === q) q = ''; else if (q === '"' && ch === '\\') i++ }
-    else if (ch === '\\') i++
-    else if (ch === '"' || ch === "'") q = ch
-  }
-  return !q
-}
-function ghDenied(rest: string[]): boolean {
-  const pos: string[] = []
-  for (let i = 0; i < rest.length; i++) {
-    const x = rest[i]!
-    if (VALUE_FLAGS.has(x)) i++
-    else if (!x.startsWith('-')) pos.push(x)
-  }
-  if (pos[0] === 'api') {
-    const m = rest.map((x, i) => (/^(-X|--method)$/.test(x) ? rest[i + 1] : /^(-X|--method)=/.test(x) ? x.split('=')[1] : /^-X\S/.test(x) ? x.slice(2) : '')).filter(Boolean).pop()
-    if (m) return !/^GET$/i.test(m)
-    return rest.some(x => /^(-f|-F|--field|--raw-field|--input)(=|$)/.test(x) || /^-[fF]\S/.test(x))
-  }
-  return !(GH_READ[pos[0] ?? '']?.includes(pos[1] ?? ''))
-}
-function azDenied(rest: string[]): boolean {
-  let i = 0
-  while (i < rest.length && rest[i]!.startsWith('-')) i += VALUE_FLAGS.has(rest[i]!) ? 2 : 1
-  const pos: string[] = []
-  for (; i < rest.length && !rest[i]!.startsWith('-'); i++) pos.push(rest[i]!)
-  return !/^(list|show|query|get|list-.*|show-.*)$/.test(pos[pos.length - 1] ?? '')
-}
-function privateOutward(c: string): boolean {
-  if (PUSH.test(c) || GIT_REMOTE_WRITE.test(c) || LEAN_OUT.test(c)) return true
-  if (!balanced(c)) return true
-  const flat = c.replace(/["'\\]/g, '')
-  for (const seg of flat.split(/\$\(|[;&|\n\r`(){}<>]+/)) {
-    const w = seg.trim().split(/\s+/).filter(Boolean)
-    if (w.includes('eval')) return true
-    const first = w.find(x => !/^[A-Za-z_]\w*=/.test(x))
-    if (first && /^\$/.test(first)) return true
-    for (let at = 0; at < w.length; at++) {
-      const base = w[at]!.split('/').pop()
-      if (base === 'gh' && ghDenied(w.slice(at + 1))) return true
-      if (base === 'az' && azDenied(w.slice(at + 1))) return true
-    }
-  }
-  return false
-}
 // Directories a command works in: `git -C dir`, `cd dir`, `--git-dir`-less; the session cwd is always one.
 export function dirsOf(c: string, cwd: string): string[] {
   const out = [cwd]
@@ -152,9 +99,9 @@ async function protectedDenial($: Host, c: string, dir: string): Promise<string 
 }
 
 async function pushDenial($: Host, c: string, cwd: string): Promise<string | null> {
-  const outward = privateOutward(c)
-  const pushing = PUSH.test(c)
-  if (!outward) return null
+  const a = analyze(c)
+  const pushing = a.push
+  if (!a.push && !a.write) return null
   const dirs = dirsOf(c, cwd)
   for (const d of dirs) {
     const p = await projectOf($, d)
@@ -171,33 +118,6 @@ async function pushDenial($: Host, c: string, cwd: string): Promise<string | nul
   if (!/^[0-9a-f]{7,64}$/.test(sha)) return 'lean-agent push gate: cannot read HEAD here, so no review can unlock the push'
   if (await greenReview($, p.slug, sha)) return null
   return `lean-agent push gate: no green review for ${sha.slice(0, 8)} (project ${p.slug}); run the review skill first (an override needs the user's approval)`
-}
-
-// ---- review records and the signing key are the mod's alone -----------------------------------------------------
-async function reviewStoreDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
-  const home = await homeDir($)
-  const lean = leanDir(home)
-  // only lean-agent's own store: ~/.lean-agent/<project>/reviews/** and the key; never worktrees/threads/project folders
-  const isStore = (p: string) => {
-    if (p === keyFile(home)) return true
-    if (!within(p, lean)) return false
-    const seg = p.slice(lean.length + 1).split('/')
-    return seg.length >= 2 && seg[1] === 'reviews' && seg[0] !== 'worktrees' && seg[0] !== 'threads'
-  }
-  const NO = 'lean-agent: review records are written only by the lean_review tool'
-  const pathTools = ['Edit', 'Write', 'NotebookEdit', 'Read', 'Grep', 'Glob']
-  if (pathTools.includes(e.tool)) {
-    const raw: string = e.file_path ?? e.notebook_path ?? e.path ?? ''
-    if (!raw) return null
-    const p = await resolve($, raw, ctx.cwd)
-    return isStore(p) || isStore(norm(raw)) ? NO : null
-  }
-  if (e.tool === 'Bash') {
-    const c = String(e.command ?? '')
-    if (/review\.key/.test(c) || /\breview\.[\w]*[*?[]|\brev[\w.]*[*?[]/.test(c) || /\.lean-agent\/(?!worktrees\/|threads\/)[^\s"']*[*?[]/.test(c) || /\.lean-agent\/(?!worktrees\/|threads\/)[^\s/]+\/reviews\b/.test(c)) return NO
-    if (/(^|[\s;&|(])cd\s+["']?\S*\.lean-agent(\/(?!worktrees\b|threads\b)[^\s\/"']+)?\/?["']?(\s|;|&|$)/.test(c) && /\breviews\b/.test(c)) return NO
-  }
-  return null
 }
 
 // ---- strict mode (desk): an allow-list, every other tool is denied ----------------------------------------------
@@ -321,8 +241,6 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
 
 // ---- entry ---------------------------------------------------------------------------------------------------
 export async function decide($: Host, ctx: Ctx, e: Call): Promise<string | null> {
-  const store = await reviewStoreDenial($, ctx, e)
-  if (store) return store
   if (ctx.role.kind === 'desk' && !ctx.agentType) {
     const d = await deskDenial($, ctx, e)
     if (d) return d

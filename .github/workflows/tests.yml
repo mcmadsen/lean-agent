@@ -26,6 +26,8 @@ jobs:
         run: claude plugin validate plugins/lean-agent
       - name: Shell hook spec
         run: sh plugins/lean-agent/hooks/rules-loaded.test.sh
+      - name: Git pre-push hook spec
+        run: sh plugins/lean-agent/hooks/githooks.test.sh
       - name: Skills contract
         run: sh plugins/lean-agent/hooks/skills-contract.test.sh
       - name: Opener spec

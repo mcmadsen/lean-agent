@@ -13,6 +13,7 @@ export type Host = {
   process: { run: (argv: readonly string[], init?: any) => Promise<{ exitCode: number; stdout: string; stderr: string }> }
   env: { get: (n: string) => Promise<string | undefined> }
   clock: { now: () => Promise<number> }
+  store: { get: (k: string) => Promise<unknown>; set: (k: string, v: unknown) => Promise<void> } // the mod's own key-value store (not a file)
 }
 
 let seq = 0

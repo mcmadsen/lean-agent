@@ -75,22 +75,39 @@ test('push gate: only a signed green review for HEAD unlocks that sha, and only 
   expect(await run(h, thread, { tool: 'Bash', command: 'git commit -m x' })).toBeNull()
 })
 
-test('review records and the key are the mod\'s alone', async () => {
+test('review records are HMAC-signed with a key only in the mod store: forged, copied or legacy-keyed records fail', async () => {
   const h = setup()
+  const push = { tool: 'Bash', command: 'git push origin feature' }
+  const file = `/h/.lean-agent/app/reviews/${SHA}.json`
   await writeReview(h.host, { green: true, sha: SHA, project: 'app' })
-  for (const e of [
-    { tool: 'Write', file_path: `/h/.lean-agent/app/reviews/${SHA}.json` },
-    { tool: 'Edit', file_path: '/h/.lean-agent/app/reviews/x.json' },
-    { tool: 'Read', file_path: '/h/.lean-agent/review.key' },
-    { tool: 'Bash', command: `echo '{}' > ~/.lean-agent/app/reviews/${SHA}.json` },
-    { tool: 'Bash', command: 'cat /h/.lean-agent/review.key' },
-  ])
-    for (const role of [thread, plain]) expect([e.tool, await run(h, role, e)]).toEqual([e.tool, expect.stringContaining('lean_review')])
-  expect(await run(h, thread, { tool: 'Write', file_path: '/h/.lean-agent/app/notes.md' })).toBeNull()
-  // a project's own folder named reviews is not the store
-  for (const p of ['/h/.lean-agent/worktrees/app/t1/src/reviews/a.ts', '/h/.lean-agent/threads/t1/reviews/x'])
-    expect([p, await run(h, thread, { tool: 'Write', file_path: p })]).toEqual([p, null])
-  expect(await run(h, thread, { tool: 'Bash', command: 'ls /h/.lean-agent/worktrees/app/t1/src/reviews' })).toBeNull()
+  expect(await run(h, thread, push)).toBeNull()
+  expect(h.store.get('review.key')).toMatch(/^[0-9a-f]{64}$/)
+  expect([...h.files.keys()].some(k => k.includes('review.key'))).toBe(false) // no file holds the key
+  const good = JSON.parse(h.files.get(file)!)
+  // copied to another project / another sha, or turned green by hand: the signature no longer matches
+  h.files.set('/h/.lean-agent/app/reviews/' + 'f'.repeat(40) + '.json', JSON.stringify(good))
+  h.files.set(file, JSON.stringify({ ...good, project: 'other' }))
+  expect(await run(h, thread, push)).toBeNull() // project/sha come from the path, the sig still verifies
+  h.git.handler = a => (a.includes('rev-parse') ? { exitCode: 0, stdout: 'f'.repeat(40) + '\n' } : { exitCode: 1, stdout: '' })
+  expect(await run(h, thread, push)).toContain('no green review')
+  h.git.handler = a => (a.includes('rev-parse') ? { exitCode: 0, stdout: SHA + '\n' } : { exitCode: 1, stdout: '' })
+  h.files.set(file, JSON.stringify({ ...good, sig: good.sig.replace(/.$/, (c: string) => (c === '0' ? '1' : '0')) }))
+  expect(await run(h, thread, push)).toContain('no green review')
+  h.files.set(file, JSON.stringify({ green: false, sig: good.sig }))
+  expect(await run(h, thread, push)).toContain('no green review')
+  // a session that guesses a key cannot sign; a lost store key voids every record
+  h.files.set(file, JSON.stringify(good))
+  expect(await run(h, thread, push)).toBeNull()
+  h.store.delete?.('review.key'); h.store.clear()
+  expect(await run(h, thread, push)).toContain('no green review')
+  // a legacy key file is deleted when the mod next writes a record
+  h.files.set('/h/.lean-agent/review.key', 'x'.repeat(64) + '\n')
+  await writeReview(h.host, { green: true, sha: SHA, project: 'app' })
+  expect(h.files.has('/h/.lean-agent/review.key')).toBe(false)
+  expect(await run(h, thread, push)).toBeNull()
+  // no path or glob guard remains: ordinary review*/rev* commands and Read/Write are not denied
+  for (const e of [{ tool: 'Bash', command: 'ls docs/review*.md' }, { tool: 'Bash', command: 'cat reviewer*.md' }, { tool: 'Bash', command: 'cat ~/.lean-agent/memory/*.md' }, { tool: 'Bash', command: 'cd ~/.lean-agent && cat *.key' }, { tool: 'Read', file_path: '/h/.lean-agent/app/reviews/x.json' }])
+    expect([JSON.stringify(e), await run(h, thread, e)]).toEqual([JSON.stringify(e), null])
 })
 
 test('protected branches are never force-pushed or deleted, in any repo', async () => {
@@ -121,17 +138,20 @@ test('private projects never push or publish, review or not', async () => {
     'az repos pr create --title x', 'az repos create --name x', 'az devops project create', 'az boards work-item create',
     'bash -c "gh api -X POST repos/o/r/issues"', "sh -c 'gh pr merge 3'", 'x=$(gh api -X POST repos/o/r/issues)', '(gh api repos/o/r -f a=b)', 'echo `gh pr merge 3`',
     'gh -R o/r api -X POST repos/o/r/issues', 'gh --repo o/r pr merge 3', 'az repos pr create --title list', 'az --only-show-errors repos pr create --title x',
-    'FOO=1 gh pr view 3 && gh pr merge 3', 'gh pr view 3; gh gist create f', 'gh workflow run x', 'gh secret set X', 'gh label create x', '$GH pr view 3', 'eval "gh pr view 3"', 'echo "unbalanced',
+    'FOO=1 gh pr view 3 && gh pr merge 3', 'gh pr view 3; gh gist create f', 'gh workflow run x', 'gh secret set X', 'gh label create x', '$GH pr view 3', 'eval "gh pr merge 3"', 'echo "unbalanced gh',
+    '$(echo gh) pr create', 'command $GH pr create', 'sudo $GH pr create', 'env $GH pr create', '"$GH" pr create', '${GH} pr create', 'command gh pr create --fill', 'sudo -u me gh pr merge 3', 'env FOO=1 gh pr merge 3', 'exec gh pr merge 3', 'timeout 5 gh pr merge 3', 'echo a | xargs gh pr close',
+    'find . -exec gh pr merge 3 ;', 'if true; then gh pr merge 3; fi', "g''h pr merge 3", '\\gh pr merge 3', '/usr/bin/gh pr create', 'bash -c \'echo "x"; gh pr merge 3\'', 'echo ok <<< "$(gh pr merge 3)"',
+    "cat <<EOF\n$(gh pr merge 3)\nEOF", "bash <<'EOF'\ngh pr merge 3\nEOF", 'echo "gh pr merge 3" | bash', 'bash <<< "gh pr merge 3"', 'git -C x push', 'git -c a=b push', 'echo "it\'s" > "$f"; gh pr merge 3',
     'lean-agent worktree push vault feature', 'lean-agent review vault --post']
   for (const command of denied)
     expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/secret')]).toEqual([command, expect.stringContaining('private project')])
   expect(await run(h, thread, { tool: 'Bash', command: 'git -C /r/secret push' }, '/r/app')).toContain('private project')
-  for (const command of ['cat /h/.lean-agent/rev*/x.json', 'cat /h/.lean-agent/review.k?y', 'cat /h/.lean-agent/secret/reviews/*'])
-    expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/app')]).toEqual([command, expect.stringContaining('review records')])
   for (const command of ['gh pr view 3', 'gh pr list', 'gh api repos/o/r/pulls/3/comments', 'gh api user --jq .login', 'gh api -X GET repos/o/r -f per_page=1',
     'git fetch origin', 'git pull', 'git log', 'git status', 'git ls-remote origin', 'git remote -v', 'az repos pr list', 'az repos show',
     'gh issue list --label release', 'gh pr list --search release', 'gh api repos/o/r', 'gh -R o/r pr view 3', 'gh auth status', 'gh run list', 'gh pr diff 3', 'az --only-show-errors repos pr list',
-    'bash -c "gh pr view 3"', 'x=$(gh pr list)'])
+    'bash -c "gh pr view 3"', 'x=$(gh pr list)', 'which gh', 'command -v gh', 'command -v az', 'type az', 'gh --version', 'gh', 'az', 'az --version', 'gh help', 'gh pr', 'cd src/gh', 'ls gh az', 'echo gh pr create', 'echo "gh pr create"',
+    'git commit -m "docs: gh pr create and git push"', "git commit -m 'run gh pr merge later'", 'echo x > "$f"', 'echo x >> $f 2>&1', 'echo x &> "$f"', 'grep p <<< "$o"', 'cat <<EOF\nit\'s fine, gh pr create\nEOF', "cat <<'EOF' > \"$f\"\ndon't gh pr merge\nEOF",
+    'echo "unbalanced', 'echo it\'s', 'for f in gh az; do echo $f; done', 'echo $(date)', 'FOO=1 ls', 'sudo ls', '$HOME/bin/tool x', 'bash script.sh', 'eval "echo hi"', 'cat file | grep gh', 'grep -r "gh pr create" .', 'ls src/az', 'gh pr view 3 --json title | jq .title'])
     expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/secret')]).toEqual([command, null])
   // non-private: no publishing denial
   for (const command of ['gh pr create --fill', 'gh release create v1', 'gh api -X POST x', 'git remote add x u'])

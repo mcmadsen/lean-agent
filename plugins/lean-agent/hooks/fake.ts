@@ -18,6 +18,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     return d
   }
 
+  const store = new Map<string, unknown>()
   const clock = { t: 1_000_000 }
   const ok = (stdout = '') => ({ exitCode: 0, stdout, stderr: '' })
   const impl = {
@@ -60,6 +61,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     fs: { read: async (p: string) => impl.read(p), write: async (p: string, t: string) => impl.write(p, t), exists: async (p: string) => impl.exists(p), list: async (p: string) => impl.list(p), stat: async (p: string) => impl.stat(p) },
     process: { run: async (argv: string[], init?: any) => impl.run(argv, init) },
     clock: { now: async () => clock.t },
+    store: { get: async (k: string) => store.get(k), set: async (k: string, v: unknown) => { store.set(k, v) } },
   }
   // and the engine's ops, for specs that go through a registered tool
   if (on) {
@@ -72,6 +74,6 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     on('process.run', (_: any, e: any) => ({ value: impl.run(e.argv, e.init) }))
   }
   if (on) on('clock.now', () => ({ value: clock.t }))
-  return { host, files, links, calls, writes, claude, git, clock, home, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
+  return { host, store, files, links, calls, writes, claude, git, clock, home, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
 }
 
