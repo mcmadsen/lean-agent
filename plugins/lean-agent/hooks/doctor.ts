@@ -97,8 +97,9 @@ export async function check(h: Host, root: string): Promise<string[]> {
   row(asObj(asObj(doc.projects)[real]).hasTrustDialogAccepted === true, 'desk folder trusted')
   const sh = await text(h, `${leanDir(home)}/bin/open-desk.sh`)
   row(sh !== null && sh === (await text(h, `${root}/opener/open-desk.sh`)), 'opener script current')
-  if ((await run(h, ['uname', '-s'])).out === 'Darwin') row(await h.fs.exists(`${home}/Library/LaunchAgents/${DESK_LABEL}.plist`), 'launch agent installed')
-  if ((await run(h, ['uname', '-s'])).out !== 'Darwin') out.push('FIX  lean-agent 1.0 needs Claude Desktop (macOS)')
+  const mac = (await run(h, ['uname', '-s'])).out === 'Darwin'
+  if (mac) row(await h.fs.exists(`${home}/Library/LaunchAgents/${DESK_LABEL}.plist`), 'launch agent installed')
+  if (!mac) out.push('FIX  lean-agent 1.0 needs Claude Desktop (macOS)')
   const log = ((await text(h, `${leanDir(home)}/logs/opener.log`)) || '').trim().split('\n').pop()
   out.push(`last opener run: ${log || 'never'}`)
   row(await h.fs.exists(`${leanDir(home)}/migrated-1.0.json`) || !(await legacyPresent(h, home)), 'state is 1.0 (no 0.45 leftovers)')

@@ -10,6 +10,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
   const calls: Call[] = []
   const writes: string[] = []
   const git = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 1, stdout: '' }) }
+  const os = { name: 'Darwin' } // what `uname` answers
   const app = { running: true } // is the Claude app running (pgrep)
   const claude = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 0, stdout: '' }) }
   const res = (p: string) => links.get(p) ?? p
@@ -52,7 +53,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       if (c === 'openssl') return ok('ab'.repeat(32))
       if (c === 'pgrep') return app.running ? ok('123') : { exitCode: 1, stdout: '', stderr: '' }
       if (c === 'id') return ok('501')
-      if (c === 'uname') return ok('Darwin')
+      if (c === 'uname') return ok(os.name)
       if (c === 'wc') { const t = files.get(a[a.length - 1]); return t === undefined ? { exitCode: 1, stdout: '', stderr: 'no such file' } : ok(new TextEncoder().encode(t).length + ' ' + a[a.length - 1]) }
       if (c === 'tee') { const p = a[a.length - 1]; files.set(p, (files.get(p) ?? '') + (call.stdin ?? '')); return ok(call.stdin) }
       if (c === 'claude') { const r = claude.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
@@ -79,6 +80,6 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     on('process.run', (_: any, e: any) => ({ value: impl.run(e.argv, e.init) }))
   }
   if (on) on('clock.now', () => ({ value: clock.t }))
-  return { host, store, files, links, calls, writes, claude, git, app, clock, home, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
+  return { host, store, files, links, calls, writes, claude, git, app, os, clock, home, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
 }
 

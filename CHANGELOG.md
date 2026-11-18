@@ -4,7 +4,7 @@
 
 ### Added
 - Setup without a model turn: `/lean-agent-setup` (check + fix, any session) and a **Set up lean-agent** button in the
-  `/lean-agent` pane, which now opens in every session: setup first, **Open desk** in a session that is not the desk,
+  `/lean-agent` pane, which now works in every session (it opens by itself only in the desk): setup first, **Open desk** in a session that is not the desk,
   **Setup / repair** in the desk. One code path with `lean_doctor fix`.
 
 ### Changed
@@ -14,8 +14,9 @@
 ### Fixed
 - A desk (or thread) session the Claude app pre-starts in a spare folder and then moves into the chosen folder now gets
   its tools, timers and git hooks: the role is decided again when the directory changes (`CwdChanged`, checked lazily at
-  each turn and prompt too). Session start is fail-soft: one failing setup step no longer stops tool registration. `tool.list` now answers the engine's `{ value }` shape, so
-  `tools.<role>.drop` takes effect.
+  each turn and prompt too).
+- Session start is fail-soft: one failing setup step no longer stops tool registration.
+- `tool.list` now answers the engine's `{ value }` shape, so `tools.<role>.drop` takes effect.
 
 ## 1.0.0
 

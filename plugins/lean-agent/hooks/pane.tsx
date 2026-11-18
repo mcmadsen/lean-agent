@@ -5,7 +5,7 @@ import { ackRows, loadView, resetViewCache, threadStatus } from './view'
 import type { GoalTone, View } from './view'
 import { leanThread } from './threads'
 import { hostOf } from './host'
-import { NEXT_STEP, openDesk, setupCheck, setupFix, setupText } from './setup'
+import { NEXT_STEP, bounded, openDesk, setupCheck, setupFix, setupText } from './setup'
 import type { Role } from './role'
 
 export const PANE = 'lean-agent'
@@ -16,12 +16,18 @@ let lastError = ''
 let lastRefresh = ''
 let notice = ''
 // setup state: the last doctor check (kept 30 s; any press drops it), the lines of the last fix, a press in flight
-let chk: { at: number; problems: string[] } | null = null
+let chk: { at: number; problems: string[]; notes: string[]; failed?: boolean } | null = null
+let checking: Promise<void> | null = null // a check in flight (a second pane shares it)
 let lastSetup: string[] = []
 let busy = false
 const CHECK_MS = 30_000
+// the pane's remembered doctor check is stale after a setup run elsewhere (the command, lean_doctor)
+export const dropSetupCheck = () => {
+  chk = null
+}
 export const resetPaneState = () => {
   chk = null
+  checking = null
   lastSetup = []
   busy = false
   lastError = ''
@@ -46,7 +52,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
   // /lean-agent-setup: check + fix with no model turn and no lean_doctor tool, in every session
   on('command.run', { command: 'lean-agent-setup' }, async ($: any) => {
     try {
-      const o = await setupFix(hostOf($), $.plugin.root)
+      const o = await bounded($, setupFix(hostOf($), $.plugin.root), 'setup', 60_000)
       chk = null
       return { text: setupText(o, roleOf().kind === 'desk') }
     } catch (err) {
@@ -81,20 +87,31 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const kind = roleOf().kind
     const now = await host.clock.now()
     if (!chk || now - chk.at > CHECK_MS) {
-      try {
-        chk = { at: now, problems: (await setupCheck(host, $.plugin.root)).problems }
-      } catch (err) {
-        chk = { at: now, problems: [`check failed: ${String((err as Error)?.message ?? err).slice(0, 120)}`] }
-      }
+      checking ??= (async () => {
+        try {
+          const c = await bounded($, setupCheck(host, $.plugin.root), 'check', 20_000)
+          chk = { at: now, problems: c.problems, notes: c.notes }
+        } catch (err) {
+          chk = { at: now, problems: [], notes: [`check failed: ${String((err as Error)?.message ?? err).slice(0, 120)}`], failed: true }
+        }
+      })().finally(() => {
+        checking = null
+      })
+      await checking
     }
-    const problems = chk.problems
+    const problems = chk?.problems ?? []
+    const notes = chk?.notes ?? []
     // one press at a time; a press that finds a run in flight does nothing
     const setupPress = (label: string, f: () => Promise<{ ok: boolean; text: string } | void>) => async () => {
-      if (busy) return
+      if (busy) {
+        notice = 'Setup is already running…'
+        $.ui.invalidate('ui.render')
+        return
+      }
       busy = true
       try {
-        const r = await f()
-        notice = r && !r.ok ? r.text : r?.text ?? ''
+        const r = await bounded($, Promise.resolve(f()), label, label === 'open desk' ? 15_000 : 60_000)
+        notice = r?.text ?? ''
       } catch (err) {
         notice = lastError = `${label} failed: ${String((err as Error)?.message ?? err).slice(0, 160)}`
       } finally {
@@ -106,7 +123,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       resetViewCache()
       const o = await setupFix(host, $.plugin.root)
       lastSetup = o.fixed
-      chk = { at: await host.clock.now(), problems: o.problems }
+      chk = { at: await host.clock.now(), problems: o.problems, notes: o.notes }
     })
     const openIt = setupPress('open desk', () => openDesk(host))
     const setupRows = lastSetup.map((l, i) => (
@@ -119,6 +136,11 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         lean-agent {VERSION} · refreshed {lastRefresh || 'never'} · last error: {lastError || 'none'}
       </Text>
     )
+    const noteRows = notes.map((m, i) => (
+      <Text key={`nt-${i}`} color="red">
+        {m}
+      </Text>
+    ))
     const problemRows = (
       <Box flexDirection="column">
         <Text bold color="yellow">
@@ -130,6 +152,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {m}
           </Text>
         ))}
+        {noteRows}
       </Box>
     )
     if (kind !== 'desk') {
@@ -141,6 +164,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           ) : (
             <Box flexDirection="column">
               <Text bold>This is not the desk</Text>
+              {noteRows}
               <Text>{NEXT_STEP}</Text>
               <Box>
                 <Button key="open-desk" label="Open desk" onPress={openIt} />
@@ -157,7 +181,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const thread = (action: 'resume' | 'start', tN: string) => act(`${action} ${tN}`, () => leanThread(host, $.plugin.root, { action, tN }))
     return (
       <Box flexDirection="column">
-        {problems.length > 0 && problemRows}
+        {problems.length > 0 ? problemRows : noteRows}
         <Text bold>Goals</Text>
         {v && !v.goals.length && <Text dimColor>No open goals.</Text>}
         {v?.goals.map(g => (

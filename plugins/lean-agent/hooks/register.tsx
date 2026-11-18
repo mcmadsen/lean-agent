@@ -8,14 +8,14 @@ import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
 import { THREAD_TOOLS, consumeWake, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide } from './guard'
-import { paneRole, registerPane, resetPaneState } from './pane'
+import { dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
 import { checkStale, syncRules } from './rules'
 import { leanDir, readJson, threadsDir } from './state'
 import { chase } from './chaser'
 import { autoMigrate, check, migrate } from './doctor'
-import { setupFix, setupText } from './setup'
+import { bounded, setupFix, setupText } from './setup'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
 import { hostOf } from './host'
@@ -45,6 +45,7 @@ export const resetModState = () => {
   resetPaneState()
 }
 let role: Role = { kind: 'plain' }
+let tries = 0
 let attempted = '' // the role key whose steps `done` lists
 const done = new Set<string>()
 let applied = '' // the role applyRole last set up ('' = none yet, or a step failed and wants a retry)
@@ -107,28 +108,8 @@ async function feedbackOf(host: Host, e: any, r: any): Promise<void> {
   await applyFeedback(host, { thread: role.kind === 'thread' ? role.id : undefined, project, agent: String(e.subagent_type ?? e.agent ?? '') || undefined }, fb)
 }
 
-// a step that hangs is given up after this long: it is reported like a failure and the queue goes on
-const STEP_MS = 5_000
-function bounded<T>($: any, p: Promise<T>, label: string): Promise<T> {
-  let timer: any
-  let limit: Promise<never> | null = null
-  try {
-    limit = new Promise<never>((_, rej) => {
-      timer = $.clock.after(STEP_MS, () => rej(new Error(`${label} timed out`)))
-    })
-  } catch {
-    /* no timer: the step runs unbounded */
-  }
-  return (limit ? Promise.race([p, limit]) : p).finally(() => {
-    try {
-      timer?.cancel?.()
-    } catch {
-      /* already fired */
-    }
-  })
-}
-
 // one failing step is reported (status line + debug log) and never stops the next one
+// (a step that hangs is given up after 5 s and counts as failed; the queue goes on)
 async function soft($: any, label: string, fn: () => Promise<unknown>): Promise<boolean> {
   try {
     await bounded($, Promise.resolve().then(fn), label)
@@ -180,6 +161,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
     stopTimers()
     notified = 0
     attempted = key
+    tries = 0
     done.clear()
   }
   applied = key
@@ -259,7 +241,8 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
   }
   // the tool pool depends on the role (the desk's is trimmed): ask the engine for it again
   await step('tool pool refresh', async () => void $.ui.invalidate('tool.list')) // once per role; retried if it failed
-  if (!ok) applied = '' // a failed step is tried again at the next check
+  // a failed step is tried again at the next check, three times at most per role (then it waits for a role change)
+  if (!ok && ++tries < 3) applied = ''
   return ctx
 }
 
@@ -382,7 +365,11 @@ export const register: Register = on => {
     try {
       await ensureGitHooks(host).catch(() => undefined)
       if (e.action === 'check') return { result: (await check(host, $.plugin.root)).join('\n') } as any
-      if (e.action === 'fix') return { result: setupText(await setupFix(host, $.plugin.root), true) } as any
+      if (e.action === 'fix') {
+        const o = await setupFix(host, $.plugin.root)
+        dropSetupCheck()
+        return { result: setupText(o, true) } as any
+      }
       if (e.action === 'migrate') return { result: (await migrate(host, $.plugin.root)).lines.join('\n') } as any
       return { result: 'doctor: action must be check, fix or migrate', isError: true } as any
     } catch (err) {

@@ -89,3 +89,36 @@ test('the desk pane shows the Setup / repair button and the fix lines after pres
   expect(h.files.get('/h/.lean-agent/bin/open-desk.sh')).toContain('echo open')
   await ui.unmount()
 })
+
+test('a check no press can repair (not macOS) is shown without the Set up button; the pane still offers Open desk', async ($, on) => {
+  const { h, start } = fresh(on, '/h/.claude/spares/spare-abc')
+  h.os.name = 'Linux'
+  await start($)
+  const ui = await $.ui.mount(PANE as any)
+  await ui.press({ key: 'setup' })
+  expect(await ui.find({ type: 'Text', text: /needs Claude Desktop/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /Set up lean-agent/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', text: /Open desk/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('two setup runs that overlap share one fix', async ($, on) => {
+  const { h, start } = fresh(on, '/h/.claude/spares/spare-abc')
+  await start($)
+  const [a, b]: any[] = await Promise.all([$.command.run({ command: 'lean-agent-setup' } as any), $.command.run({ command: 'lean-agent-setup' } as any)])
+  expect(a.text).toContain('desk folder ready')
+  expect(b.text).toContain('desk folder ready')
+  expect(h.calls.filter((c: any) => c.argv[0] === 'mkdir' && c.argv.includes('/h/lean-agent-desk')).length).toBe(1)
+})
+
+test('claude --desktop failing says what to do instead', async ($, on) => {
+  const { h, start } = fresh(on, '/h/.claude/spares/spare-abc')
+  const base = h.claude.handler
+  h.claude.handler = (a: string[], c: any) => (a[0] === '--desktop' ? { exitCode: 2, stdout: '' } : base(a, c))
+  await start($)
+  const ui = await $.ui.mount(PANE as any)
+  await ui.press({ key: 'setup' })
+  await ui.press({ key: 'open-desk' })
+  expect(await ui.find({ type: 'Text', text: /exited 2/ })).toBeTruthy()
+  await ui.unmount()
+})
