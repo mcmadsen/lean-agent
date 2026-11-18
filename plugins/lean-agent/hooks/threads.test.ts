@@ -182,3 +182,25 @@ test('trust writer refuses an unreadable or non-object ~/.claude.json and never 
   expect(await trustFolder(h.host, '/x')).toBe(false)
   expect(h.files.get('/h/.claude.json')).toBe('{"projects": [broken')
 })
+
+test('the private list follows projects.json on every action (resume, wake, list); writes are chmod+rename, never in place', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  const list = '/h/.lean-agent/githooks/private.list'
+  expect(h.files.get(list)).not.toContain('/r/vault')
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ vault: { path: '/r/vault', private: true, remote: 'https://h/V.git' } }))
+  state.rows = [{ sessionId: SID, name: 't1 · a', cwd: '/h/.lean-agent/threads/t1', status: 'idle', startedAt: 1 }]
+  await call({ action: 'list' })
+  expect(h.files.get(list)).toContain('path /r/vault')
+  expect(h.files.get(list)).toContain('url https://h/v')
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ vault: { path: '/r/vault2', private: true } }))
+  h.clock.t += 60_000
+  await call({ action: 'resume', tN: 't1' })
+  expect(h.files.get(list)).toContain('path /r/vault2')
+  expect(h.files.get(list)).not.toContain('/r/vault\n')
+  // atomic: temp file -> chmod 755 (wrappers) -> mv; no temp left behind; direct writes only go to temp names
+  const argvs = h.calls.map((c: any) => c.argv)
+  expect(argvs.some((a: string[]) => a[0] === 'chmod' && a[1] === '755' && /githooks\/.*\.tmp-/.test(a[2]!))).toBe(true)
+  expect(argvs.some((a: string[]) => a[0] === 'mv' && a[3] === list)).toBe(true)
+  expect([...h.files.keys()].filter(k => k.includes('.tmp-') && k.includes('githooks'))).toEqual([])
+})

@@ -263,6 +263,7 @@ async function list(h: Host, home: string): Promise<Out> {
 export async function leanThread(h: Host, root: string, i: Input): Promise<Out> {
   try {
     const home = await homeDir(h)
+    await ensureGitHooks(h).catch(() => undefined) // every action (resume and wake too) refreshes the private registry
     if (i.action === 'list') return await list(h, home)
     if (i.action === 'new') return await create(h, root, home, i)
     const id = i.tN ?? ''

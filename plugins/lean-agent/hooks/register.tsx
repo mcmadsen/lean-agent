@@ -3,6 +3,7 @@ import type { Register } from 'claude-code'
 import { detectRole } from './role'
 import type { Role } from './role'
 import { deskClaudeMd, leanThread } from './threads'
+import { ensureGitHooks } from './githooks'
 import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
 import { THREAD_TOOLS, consumeWake, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
@@ -84,6 +85,7 @@ export const register: Register = on => {
     if (role.kind === 'thread') {
       for (const t of THREAD_TOOLS) await $.tool.register({ ...t, isDeferred: false } as any)
     }
+    if (role.kind === 'desk' || role.kind === 'thread') await ensureGitHooks(host).catch(() => undefined)
     if (role.kind === 'desk') {
       await $.tool.register({
         name: TOOL,
@@ -101,6 +103,7 @@ export const register: Register = on => {
       const timer = $.clock.every(10_000, async () => {
         try {
           const host2 = hostOf($)
+          await ensureGitHooks(host2).catch(() => undefined) // watch: projects.json may change behind the mod's back
           await sweep(host2, id => leanThread(host2, $.plugin.root, { action: 'wake', tN: id }))
           const n = (await unreadReports(host2)).recs.length
           if (n && n !== notified) $.ui.notify(`${n} unread report(s) from threads`, { key: 'lean-reports' })
@@ -194,6 +197,7 @@ export const register: Register = on => {
   on('tool.call', { tool: `mcp__lean-agent__${TOOL}` }, async ($, e: any) => {
     const host = hostOf($)
     const out = await leanThread(host, $.plugin.root, e)
+    await ensureGitHooks(host).catch(() => undefined)
     if (out.ok && e.action === 'send' && typeof e.tN === 'string' && typeof e.text === 'string') await recordAnswer(host, e.tN, e.text).catch(() => undefined)
     return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
   })
@@ -202,6 +206,7 @@ export const register: Register = on => {
     if (role.kind !== 'desk') return { result: 'lean-agent: the doctor runs in the desk', isError: true } as any
     const host = hostOf($)
     try {
+      await ensureGitHooks(host).catch(() => undefined)
       if (e.action === 'check') return { result: (await check(host, $.plugin.root)).join('\n') } as any
       if (e.action === 'fix') return { result: (await fix(host, $.plugin.root)).lines.join('\n') } as any
       if (e.action === 'migrate') return { result: (await migrate(host, $.plugin.root)).lines.join('\n') } as any
@@ -215,6 +220,7 @@ export const register: Register = on => {
     on('tool.call', { tool: `mcp__lean-agent__${t.name}` }, async ($, e: any) => {
       if (role.kind !== 'thread') return { result: 'lean-agent: only a thread can use this tool', isError: true } as any
       const out = await threadTool(hostOf($), role.id, t.name, e)
+      await ensureGitHooks(hostOf($)).catch(() => undefined) // lean_* tools may change projects.json
       return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
     })
   }
