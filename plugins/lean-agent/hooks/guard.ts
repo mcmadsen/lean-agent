@@ -4,6 +4,7 @@
 import { homeDir, leanDir, readJson, realPath, threadsDir, writeJson } from './state'
 import { greenReview, hasApproval, takeApproval } from './reviews'
 import { analyze, plainPipeline, privateText, type Verdict } from './shell'
+import { unauditedRun } from './scripts'
 import type { Host } from './state'
 import type { Role } from './role'
 
@@ -556,6 +557,10 @@ export async function decide($: Host, ctx: Ctx, e: Call): Promise<string | null>
     if (d) return d
   }
   if (ctx.role.kind === 'thread' && !ctx.agentType && !ctx.agentId && e.tool === 'AskUserQuestion') return 'lean-agent: a thread never asks the user directly; use lean_ask (the desk relays it)'
+  if ((ctx.agentType || ctx.agentId) && e.tool === 'Bash') {
+    const u = await unauditedRun($, String(e.command ?? '')) // a subagent never runs an adopted script that was edited by hand
+    if (u) return u
+  }
   if (ctx.agentType || ctx.agentId) {
     const d = await workerDenial($, ctx, e)
     if (d) return d

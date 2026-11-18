@@ -36,6 +36,21 @@
     `scripts/decisions.jsonl`) lets the user override a verdict. Adopting over an audit that said otherwise needs `confirm: true`;
     a script with a secret or a hardcoded home path or email is never adopted, not even by the user, and a script that was never
     audited cannot be adopted.
+- **Scripts are easy to update.** An adopted script keeps versions (`scripts/<name>/v1/`, `v2/` ..., sha256, author, date and audit
+  verdict per version, `current` in `meta.json`) and a stable `scripts/<name>/run` that the rule line and the recipe skill always
+  name, so an update never edits a rule or a skill. `lean_script update <name>` (thread or desk; a new file or exact `edits`) stores a
+  pending version with a diff and the auditor audits only the change plus the checklist; a changed purpose or run line is shown in
+  the verdict and needs the desk's `decide`. On adopt `current` switches and `run` is overwritten. `rollback <name> [version]` (desk;
+  a thread gives a reason) switches back at once and is logged; `diff` and `show` print versions, verdicts, uses and failures.
+  A failed Bash run of an adopted script is counted, two failures (or `report-bad <name> <why>`) mark it `needs-update` (rule line,
+  `list`, desk pane; the next thread that uses it is nudged once to send a fix). A script edited by hand (sha mismatch) is
+  `edited, unaudited`: no skill is shipped for it, the rule line says so, a thread run is warned about, a subagent may not run it.
+- **"Can this be a script" lives in the rules.** On adopt, and at every `lean_rules sync`, the mod writes ONE line per adopted
+  script between `<!-- lean-agent:scripts -->` markers into the rule of its area (else `_project`), regenerated from the store so
+  learn/trim rewrites keep it, within the rule caps (overflow goes to `_project`, then one "N more scripts" pointer); retire removes
+  it. `_project` gets once the line "Prefer scripts over model work ...". A thread's `lean_report` with state `done` is asked once per
+  session whether a step could have been a script. `lean_rules stats` lists `scriptCandidates`: reported gaps that read like
+  mechanical work (count, list, sum, find all, which files).
 - The `auditor` agent type gets the explorer's built-in read-only commands; an Agent call for it with `allow-*` lines from a
   session that cannot own grants is refused like the other agent types.
 

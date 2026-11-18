@@ -7,10 +7,12 @@ import { appendJsonl, homeDir, leanDir, mkdirp, readJson, readJsonl, threadsDir,
 import type { Host } from './state'
 import { globRe, slugOk } from './rules'
 import { expandRun, hashText, recipeText } from './recipe'
-import type { Audit, Meta, Verdict } from './recipe'
+import type { Audit, Decision, Meta, Verdict, Version } from './recipe'
+import { refreshScriptRules } from './rulelines'
+import { unifiedDiff } from './textdiff'
 
 export { expandRun, hashText, recipeText }
-export type { Audit, Meta, Verdict }
+export type { Audit, Meta, Verdict, Version }
 
 export const SCRIPT_TOOL = 'lean_script'
 export const MAX_SCRIPT_BYTES = 256 * 1024
@@ -171,6 +173,29 @@ async function find(h: Host, name: string): Promise<Found | null> {
 }
 const verdictOf = (m: Meta) => m.decision?.value ?? m.audit?.verdict ?? 'unaudited'
 const note = (m: Meta, ts: number, what: string) => ({ ...m, history: [...(m.history ?? []), { ts, what }].slice(-30) })
+const readText = async (h: Host, p: string): Promise<string | null> => {
+  const t = await h.fs.read(p).catch(() => null)
+  return typeof t === 'string' ? t : null
+}
+
+// An adopted script is trusted only while its stable copy (`run`) and its current version file are still the audited text.
+// A hand edit is never trusted silently: it shows as "edited, unaudited" everywhere until a new audit (update) or a rollback.
+export async function integrity(h: Host, dir: string, meta: Meta): Promise<{ ok: boolean; why: string }> {
+  if (meta.status !== 'adopted') return { ok: true, why: '' }
+  const run = await readText(h, `${dir}/${meta.file}`)
+  if (run === null || hashText(run) !== meta.sha256) return { ok: false, why: `${meta.file} differs from the audited version` }
+  const cur = meta.versions?.find(v => v.v === meta.current)
+  if (cur) {
+    const t = await readText(h, `${dir}/${cur.v}/${cur.file}`)
+    if (t === null || hashText(t) !== cur.sha256) return { ok: false, why: `${cur.v}/${cur.file} was edited` }
+  }
+  return { ok: true, why: '' }
+}
+export type Health = 'ok' | 'needs-update' | 'edited, unaudited'
+const healthOf = (meta: Meta, ok: boolean): Health => (!ok ? 'edited, unaudited' : meta.state === 'needs-update' ? 'needs-update' : 'ok')
+const refresh = (h: Host, project: string) => refreshScriptRules(h, project).catch(() => undefined) // rule lines and the copy into the checkout
+const ver = (m: Meta, v?: string) => m.versions?.find(x => x.v === (v ?? m.current))
+const vnum = (v: string) => Number(v.slice(1)) || 0
 
 // ---- propose -------------------------------------------------------------------------------------------------------
 const proposed = new Set<string>() // source paths this session proposed (the nudge leaves them alone)
@@ -302,27 +327,47 @@ export function judge(meta: Meta, r: Reply & { verdict: Verdict }, now: { privac
 
 // `prompt` is what the auditor was asked: only a script whose folder it names is audited by this reply, and one sha is audited once
 // (a revised script has a new sha). The reply comes from a real auditor Agent call; there is no way to hand the mod a verdict.
+// The subject is a candidate (its script file) or, for an adopted script, its pending update (the new version file): the folder the
+// auditor must be pointed at, the sha it must still have, and what the update changes in purpose or run line (never auto-adopted).
 async function recordAudit(h: Host, by: string, reply: Reply, prompt: string): Promise<Out> {
   const f = await find(h, reply.name)
-  if (!f) return err(`no candidate ${reply.name || '(no name in the audit)'}`)
-  if (f.meta.status !== 'candidate') return err(`${reply.name} is ${f.meta.status}: only a candidate is audited`)
-  const named = new Set(prompt.match(/\/scripts\/candidates\/[A-Za-z0-9._-]+\//g) ?? [])
-  if (!prompt.includes(`${f.dir}/`) || named.size !== 1) return err(`${reply.name}: the auditor must be pointed at exactly this candidate folder (${f.dir}/), so its reply is not an audit of this script; use the brief lean_script audit gives`)
-  if (f.meta.audit && f.meta.audit.sha === f.meta.sha256) return err(`${reply.name} was already audited at this content (${f.meta.audit.verdict}); propose a revised script to audit again`)
+  if (!f) return err(`no script ${reply.name || '(no name in the audit)'}`)
+  const pend = f.meta.status === 'adopted' ? f.meta.pending : undefined
+  if (f.meta.status !== 'candidate' && !pend) return err(`${reply.name} is ${f.meta.status}${f.meta.status === 'adopted' ? ' with no update waiting' : ''}: only a candidate or an update is audited`)
+  const folder = pend ? `${f.dir}/${pend.v}/` : `${f.dir}/`
+  const path = pend ? `${f.dir}/${pend.v}/${pend.file}` : `${f.dir}/${f.meta.file}`
+  const sha = pend ? pend.sha256 : f.meta.sha256
+  const prior = pend ? pend.audit : f.meta.audit
+  const named = new Set(prompt.match(/\/scripts\/(?:candidates\/[A-Za-z0-9._-]+|[A-Za-z0-9._-]+\/v\d+)\//g) ?? [])
+  if (!prompt.includes(folder) || named.size !== 1) return err(`${reply.name}: the auditor must be pointed at exactly this folder (${folder}), so its reply is not an audit of this script; use the brief lean_script audit gives`)
+  if (prior && prior.sha === sha) return err(`${reply.name} was already audited at this content (${prior.verdict}); ${pend ? 'send a revised update' : 'propose a revised script'} to audit again`)
   if (reply.verdict === null) return err('audit verdict must be adopt, adapt or reject')
   const r = reply as Reply & { verdict: Verdict }
   if (r.network === null || r.deletes === null || r.secrets === null || r.generalises === null) return err('audit incomplete: network, deletes, secrets and generalises must each be answered true or false')
-  const text = await h.fs.read(`${f.dir}/${f.meta.file}`).catch(() => null)
-  if (typeof text !== 'string' || hashText(text) !== f.meta.sha256) return err(`${r.name}: the stored script changed since it was proposed, so this audit does not apply; propose it again`)
+  const text = await readText(h, path)
+  if (text === null || hashText(text) !== sha) return err(`${r.name}: the stored script changed since it was ${pend ? 'sent as an update' : 'proposed'}, so this audit does not apply; ${pend ? 'send the update again' : 'propose it again'}`)
   const now = scan(text, await homeDir(h))
-  const j = judge(f.meta, r, { ...now, risky: riskyText(text) })
+  const moved = pend ? (pend.changes ?? []) : []
+  const j = judge(f.meta, r, { ...now, risky: [...riskyText(text), ...moved] })
   const changes = [...r.changes, ...(j.verdict === 'adapt' && r.verdict === 'adopt' ? j.blockers.map(b => `mod: it ${b}`) : [])]
   if (j.verdict === 'adapt' && !changes.length) return err('an adapt verdict needs the concrete changes (changes: [...])')
   if (j.verdict === 'reject' && !r.reason && !j.blockers.length) return err('a reject verdict needs a reason')
   const ts = await h.clock.now()
-  const audit: Audit = { ts, by, sha: f.meta.sha256, claimed: r.verdict, verdict: j.verdict, reads: r.reads, writes: r.writes, network: r.network, deletes: r.deletes, secrets: r.secrets, hardcoded: r.hardcoded, deterministic: r.deterministic, errorsHandled: r.errorsHandled, generalises: r.generalises, changes, blockers: j.blockers, reason: r.reason || (j.verdict === 'reject' ? j.blockers.join('; ') : '') }
-  let meta: Meta = note({ ...f.meta, audit, scan: now.privacy }, ts, `audited: ${j.verdict}${j.verdict !== r.verdict ? ` (auditor said ${r.verdict})` : ''}`)
+  const audit: Audit = { ts, by, sha, claimed: r.verdict, verdict: j.verdict, reads: r.reads, writes: r.writes, network: r.network, deletes: r.deletes, secrets: r.secrets, hardcoded: r.hardcoded, deterministic: r.deterministic, errorsHandled: r.errorsHandled, generalises: r.generalises, changes, blockers: j.blockers, reason: r.reason || (j.verdict === 'reject' ? j.blockers.join('; ') : '') }
   const why = j.verdict !== r.verdict ? ` The auditor said ${r.verdict}; the mod's rules say ${j.verdict}: ${j.blockers.join('; ')}.` : ''
+  const said = `audited: ${j.verdict}${j.verdict !== r.verdict ? ` (auditor said ${r.verdict})` : ''}`
+  if (pend) {
+    if (j.verdict === 'reject') {
+      await h.process.run(['rm', '-rf', `${f.dir}/${pend.v}`])
+      await writeJson(h, `${f.dir}/meta.json`, note({ ...f.meta, pending: undefined }, ts, `update ${pend.v} rejected: ${audit.reason}`))
+      return { ok: true, text: `${r.name}: the update ${pend.v} is rejected and dropped (${audit.reason}); ${f.meta.current} stays current.${why}` }
+    }
+    const meta: Meta = note({ ...f.meta, pending: { ...pend, audit } }, ts, `update ${pend.v} ${said}`)
+    await writeJson(h, `${f.dir}/meta.json`, meta) // the audit is kept first, adopted or not
+    if (j.verdict === 'adopt') return await adoptVersion(h, { meta, dir: f.dir }, 'audit')
+    return { ok: true, text: `${r.name}: the update ${pend.v} is adapt. Change: ${changes.join('; ')}. Then send the revised update again (lean_script update ${r.name}).${why}` }
+  }
+  let meta: Meta = note({ ...f.meta, audit, scan: now.privacy }, ts, said)
   if (j.verdict === 'reject') meta = { ...meta, status: 'rejected' }
   await writeJson(h, `${f.dir}/meta.json`, meta) // the audit is kept first, adopted or not
   if (j.verdict === 'adopt') return await adopt(h, { meta, dir: f.dir }, 'audit')
@@ -343,10 +388,42 @@ async function adopt(h: Host, f: Found, via: 'audit' | 'user'): Promise<Out> {
   await mkdirp(h, dest.replace(/\/[^/]+$/, ''))
   const mv = await h.process.run(['mv', f.dir, dest])
   if (mv.exitCode !== 0) return err(`could not move ${f.meta.name} into ${dest}`)
-  const meta: Meta = note({ ...f.meta, status: 'adopted', adopted: ts, scan: [] }, ts, via === 'user' ? 'adopted by the user' : 'adopted after audit')
+  // versions: v1/<file> is the audited text; `run` is the stable copy of the current version (rules and skills point at it)
+  const orig = f.meta.file
+  await mkdirp(h, `${dest}/v1`)
+  await h.process.run(['mv', `${dest}/${orig}`, `${dest}/v1/${orig}`])
+  await h.fs.write(`${dest}/run`, text)
+  const v1: Version = { v: 'v1', file: orig, sha256: f.meta.sha256, author: f.meta.author, ts, purpose: f.meta.purpose, run: f.meta.run, audit: f.meta.audit, decision: f.meta.decision }
+  const meta: Meta = note({ ...f.meta, status: 'adopted', adopted: ts, scan: [], file: 'run', current: 'v1', versions: [v1], failures: 0 }, ts, via === 'user' ? 'adopted by the user' : 'adopted after audit')
   await writeJson(h, `${dest}/meta.json`, meta)
   await h.fs.write(`${dest}/SKILL.md`, recipeText(meta, dest))
-  return { ok: true, text: `${meta.name} adopted (${meta.project === 'global' ? 'global' : meta.project}): ${dest}. It is now the recipe skill lean-agent-script-${meta.name}; run lean_rules sync to copy it into a checkout. run: ${expandRun(meta, dest)}`, data: { name: meta.name, dir: dest } }
+  await refresh(h, meta.project)
+  return { ok: true, text: `${meta.name} adopted (${meta.project === 'global' ? 'global' : meta.project}): ${dest}. It is now the recipe skill lean-agent-script-${meta.name} and a line in the project rules (rules synced). run: ${expandRun(meta, dest)}`, data: { name: meta.name, dir: dest } }
+}
+
+// Switch an adopted script to its audited pending version: the version file is already stored; `run` is overwritten with its text,
+// `current` and the mirror fields move, the failure counters reset. Rules and skills point at `run`, so they need no edit.
+async function adoptVersion(h: Host, f: Found, via: 'audit' | 'user'): Promise<Out> {
+  const pend = f.meta.pending
+  if (!pend || f.meta.status !== 'adopted') return err(`${f.meta.name} has no update waiting`)
+  const text = await readText(h, `${f.dir}/${pend.v}/${pend.file}`)
+  if (text === null || hashText(text) !== pend.sha256) return err(`${f.meta.name}: the stored update changed since it was sent; send it again`)
+  const now = scan(text, await homeDir(h))
+  if (now.secrets.length || now.privacy.length) return err(`${f.meta.name} ${pend.v} cannot be adopted: it ${[...now.secrets, ...now.privacy].join('; ')}`)
+  if (!pend.audit || pend.audit.sha !== pend.sha256) return err(`${f.meta.name} ${pend.v} was never audited`)
+  const ts = await h.clock.now()
+  await h.fs.write(`${f.dir}/${f.meta.file}`, text)
+  const entry: Version = { ...pend, changes: pend.changes }
+  const meta: Meta = note(
+    { ...f.meta, versions: [...(f.meta.versions ?? []), entry], current: pend.v, sha256: pend.sha256, purpose: pend.purpose, run: pend.run, audit: pend.audit, decision: pend.decision, pending: undefined, failures: 0, state: undefined, badWhy: undefined },
+    ts,
+    via === 'user' ? `${pend.v} adopted by the user` : `${pend.v} adopted after audit`,
+  )
+  await writeJson(h, `${f.dir}/meta.json`, meta)
+  await h.fs.write(`${f.dir}/SKILL.md`, recipeText(meta, f.dir))
+  await refresh(h, meta.project)
+  const moved = (pend.changes ?? []).length ? ` Note: ${(pend.changes ?? []).join('; ')}.` : ''
+  return { ok: true, text: `${meta.name} is now ${pend.v} (rules and skill unchanged: they point at ${f.dir}/run).${moved}`, data: { name: meta.name, dir: f.dir } }
 }
 
 // An auditor's Agent reply: when it ends with a LEAN-AUDIT line the mod records the verdict. null = no such line.
@@ -372,23 +449,29 @@ async function decide(h: Host, who: Who, i: any): Promise<Out> {
   if (!reason) return err('decide needs reason (why the user decided so)')
   const f = await find(h, str(i.name))
   if (!f) return err(`no script ${str(i.name)}`)
-  if (f.meta.status === 'adopted' || f.meta.status === 'retired') return err(`${f.meta.name} is ${f.meta.status}: use retire to take an adopted script out`)
+  const pend = f.meta.status === 'adopted' ? f.meta.pending : undefined // for an adopted script the decision is about its waiting update
+  if (f.meta.status === 'retired' || (f.meta.status === 'adopted' && !pend)) return err(`${f.meta.name} is ${f.meta.status}${pend === undefined && f.meta.status === 'adopted' ? ' with no update waiting' : ''}: use retire to take an adopted script out, rollback to go back a version`)
   const ts = await h.clock.now()
-  const log = async (extra: object) => appendJsonl(h, `${scriptsDir(await homeDir(h))}/decisions.jsonl`, { ts, name: f.meta.name, by: 'user', value, reason, prior: verdictOf(f.meta), ...extra })
+  const log = async (extra: object) => appendJsonl(h, `${scriptsDir(await homeDir(h))}/decisions.jsonl`, { ts, name: f.meta.name, by: 'user', value, reason, prior: pend ? `update ${pend.v}: ${pend.audit?.verdict ?? 'unaudited'}` : verdictOf(f.meta), ...(pend ? { version: pend.v } : {}), ...extra })
   if (value === 'reject') {
-    await writeJson(h, `${f.dir}/meta.json`, note({ ...f.meta, status: 'rejected', decision: { value, by: 'user', reason, ts } }, ts, `rejected by the user: ${reason}`))
+    if (pend) {
+      await h.process.run(['rm', '-rf', `${f.dir}/${pend.v}`])
+      await writeJson(h, `${f.dir}/meta.json`, note({ ...f.meta, pending: undefined }, ts, `update ${pend.v} rejected by the user: ${reason}`))
+    } else await writeJson(h, `${f.dir}/meta.json`, note({ ...f.meta, status: 'rejected', decision: { value, by: 'user', reason, ts } }, ts, `rejected by the user: ${reason}`))
     await log({})
-    return { ok: true, text: `${f.meta.name} rejected (the user's decision, logged)` }
+    return { ok: true, text: `${f.meta.name}${pend ? ` update ${pend.v}` : ''} rejected (the user's decision, logged)` }
   }
-  if (!f.meta.audit) return err(`${f.meta.name} was never audited: audit it first (lean_script audit); a verdict can be overridden, a missing one cannot`)
-  const text = await h.fs.read(`${f.dir}/${f.meta.file}`).catch(() => null)
-  if (typeof text !== 'string') return err(`${f.meta.name}: the stored script is unreadable`)
+  const audit = pend ? pend.audit : f.meta.audit
+  if (!audit) return err(`${f.meta.name}${pend ? ` ${pend.v}` : ''} was never audited: audit it first (lean_script audit); a verdict can be overridden, a missing one cannot`)
+  const text = await readText(h, pend ? `${f.dir}/${pend.v}/${pend.file}` : `${f.dir}/${f.meta.file}`)
+  if (text === null) return err(`${f.meta.name}: the stored script is unreadable`)
   const now = scan(text, await homeDir(h))
   if (now.secrets.length || now.privacy.length) return err(`${f.meta.name} cannot be adopted, not even by the user: it ${[...now.secrets, ...now.privacy].join('; ')}. Have a thread fix it and propose it again`)
-  if (f.meta.audit.secrets) return err(`${f.meta.name}: the audit found secrets in it, so it is not adopted, not even by the user. Have a thread remove them and propose it again`)
-  const over = [...(f.meta.audit.verdict === 'adopt' && !f.meta.audit.blockers.length ? [] : [`the audit said ${f.meta.audit.verdict}`]), ...f.meta.audit.blockers]
-  if (over.length && i.confirm !== true) return err(`adopting ${f.meta.name} overrides the audit (${over.join('; ')}). Tell the user that, and only if they still want it call decide again with confirm: true`)
-  const out = await adopt(h, { meta: { ...f.meta, decision: { value, by: 'user', reason, ts, ...(over.length ? { overrode: over } : {}) } }, dir: f.dir }, 'user')
+  if (audit.secrets) return err(`${f.meta.name}: the audit found secrets in it, so it is not adopted, not even by the user. Have a thread remove them and propose it again`)
+  const over = [...(audit.verdict === 'adopt' && !audit.blockers.length ? [] : [`the audit said ${audit.verdict}`]), ...audit.blockers]
+  if (over.length && i.confirm !== true) return err(`adopting ${f.meta.name}${pend ? ` ${pend.v}` : ''} overrides the audit (${over.join('; ')}). Tell the user that, and only if they still want it call decide again with confirm: true`)
+  const decision: Decision = { value, by: 'user', reason, ts, ...(over.length ? { overrode: over } : {}) }
+  const out = pend ? await adoptVersion(h, { meta: { ...f.meta, pending: { ...pend, decision } }, dir: f.dir }, 'user') : await adopt(h, { meta: { ...f.meta, decision }, dir: f.dir }, 'user')
   if (out.ok) await log({ overrode: over })
   return out
 }
@@ -405,7 +488,152 @@ async function retire(h: Host, who: Who, i: any): Promise<Out> {
   await h.fs.write(`${dest}/meta.json`, JSON.stringify(note({ ...f.meta, status: 'retired' }, ts, `retired by ${who.kind === 'thread' ? who.id : 'the desk'}`), null, 2) + '\n')
   await h.process.run(['rm', '-f', `${dest}/SKILL.md`]) // the recipe skill goes at the next lean_rules sync
   await appendJsonl(h, `${scriptsDir(home)}/decisions.jsonl`, { ts, name: f.meta.name, by: who.kind === 'thread' ? who.id : 'desk', value: 'retire', reason: txt(i.reason).slice(0, 300), prior: f.meta.status })
-  return { ok: true, text: `${f.meta.name} retired (kept in ${dest}); run lean_rules sync to drop its skill from checkouts` }
+  await refresh(h, f.meta.project) // its rule line and its skill go with the next sync, done now
+  return { ok: true, text: `${f.meta.name} retired (kept in ${dest}); its rule line and skill are removed at the next sync` }
+}
+
+// ---- versions: update, rollback, report-bad, diff -------------------------------------------------------------------------
+export function updateBrief(meta: Meta, dir: string, pend: Version): string {
+  const cur = ver(meta)
+  const was = (a: string, b: string) => (a === b ? '' : ` (was: ${a})`)
+  return [
+    `Audit the UPDATE ${pend.v} of the adopted script "${meta.name}" (current ${meta.current}). Start ONE \`lean-agent:auditor\` subagent (Agent tool) with the block below as its prompt. Never run the script yourself.`,
+    '--- auditor brief ---',
+    `Audit the update ${pend.v} of script ${meta.name}. Folder: ${dir}/${pend.v}/ (the new script is ${dir}/${pend.v}/${pend.file}).`,
+    `The change against the current version is ${dir}/${pend.v}/.changes.diff: read it first. Audit ONLY the change plus the checklist: apply every item to the changed lines, and to the rest of the script only where the change touches it, then answer the checklist for the resulting script.`,
+    `Declared purpose: ${pend.purpose}${was(cur?.purpose ?? '', pend.purpose)}`,
+    `Declared run: ${pend.run}${was(cur?.run ?? '', pend.run)}`,
+    `Declared inputs: ${meta.inputs.join('; ')}`,
+    `Declared outputs: ${meta.outputs.join('; ')}`,
+    `Project: ${meta.project}`,
+    'End your reply with the LEAN-AUDIT line your agent definition describes.',
+    '--- end ---',
+    'The mod records the verdict from the auditor\'s LEAN-AUDIT line when its Agent call returns, and only for the folder the prompt names. A changed purpose or run line is shown in the verdict and is never adopted without the desk\'s decision.',
+  ].join('\n')
+}
+
+// The new text: a file the thread wrote (`path`) or exact `edits` [{find, replace}] on the current version (each `find` must occur once).
+async function newText(h: Host, i: any, base: string): Promise<string | Out> { // the new text, or the refusal (an object)
+  if (str(i.path)) {
+    const path = str(i.path)
+    if (!path.startsWith('/') || path.split('/').includes('..')) return err('update needs path: the absolute path of the new script file')
+    const st = await h.fs.stat(path).catch(() => null)
+    if (!st) return err(`no such file: ${path}`)
+    if (st.kind && st.kind !== 'file') return err(`${path} is not a file`)
+    const t = await readText(h, path)
+    if (t === null || t.includes('\0')) return err(`${path} is not a text file`)
+    return t
+  }
+  if (Array.isArray(i.edits) && i.edits.length) {
+    let t = base
+    for (const [n, e] of (i.edits as any[]).entries()) {
+      const find = typeof e?.find === 'string' ? e.find : ''
+      const rep = typeof e?.replace === 'string' ? e.replace : ''
+      const at = find ? t.split(find).length - 1 : 0
+      if (at !== 1) return err(`edit ${n + 1}: "find" must occur exactly once in the current script (found ${at})`)
+      t = t.replace(find, () => rep)
+    }
+    return t
+  }
+  return err('update needs path (the new script file) or edits: [{find, replace}] applied to the current version')
+}
+
+async function update(h: Host, who: Who, i: any, io: Io): Promise<Out> {
+  const f = await find(h, str(i.name))
+  if (!f) return err(`no script ${str(i.name)}`)
+  const m = f.meta
+  if (m.status !== 'adopted') return err(`${m.name} is ${m.status}: only an adopted script is updated (a candidate is proposed again)`)
+  const cur = ver(m)
+  const curText = cur ? await readText(h, `${f.dir}/${cur.v}/${cur.file}`) : null
+  if (!cur || curText === null || hashText(curText) !== cur.sha256) return err(`${m.name}: the stored ${m.current} file is missing or was edited, so there is nothing sound to update: roll back to an older version`)
+  const made = await newText(h, i, curText)
+  if (typeof made !== 'string') return made
+  const text = made
+  if (text.length > MAX_SCRIPT_BYTES) return err(`the update is over ${MAX_SCRIPT_BYTES / 1024} KiB: a reusable script is small`)
+  const found = scan(text, await homeDir(h))
+  if (found.secrets.length) return err(`not stored: the update ${found.secrets.join(', ')}. Take it out and send it again`)
+  const sha = hashText(text)
+  const dup = m.versions?.find(v => v.sha256 === sha)
+  if (dup) return err(dup.v === m.current ? `the update is identical to the current version ${m.current}` : `the update is identical to ${dup.v}: use rollback ${m.name} ${dup.v}`)
+  const purpose = txt(i.purpose) || m.purpose
+  const run = str(i.run) || m.run
+  if (purpose.length > 300) return err('purpose is over 300 characters')
+  if (run !== m.run) {
+    const rp = runProblem(run)
+    if (rp) return err(rp)
+  }
+  const fields = scan(`${purpose}\n${run}`, await homeDir(h))
+  if (fields.secrets.length || fields.privacy.length) return err(`purpose or run ${[...fields.secrets, ...fields.privacy].join('; ')}`)
+  const changes = [...(purpose !== m.purpose ? [`changes the purpose (was: ${m.purpose})`] : []), ...(run !== m.run ? [`changes the run line (was: ${m.run})`] : [])]
+  const ts = await h.clock.now()
+  const v = m.pending?.v ?? `v${Math.max(0, ...(m.versions ?? []).map(x => vnum(x.v))) + 1}`
+  if (m.pending) await h.process.run(['rm', '-rf', `${f.dir}/${m.pending.v}`]) // a newer update replaces the one still waiting
+  await h.fs.write(`${f.dir}/${v}/${cur.file}`, text)
+  await h.fs.write(`${f.dir}/${v}/.changes.diff`, unifiedDiff(curText, text, `${cur.v}/${cur.file}`, `${v}/${cur.file}`))
+  const pend: Version = { v, file: cur.file, sha256: sha, author: who.kind === 'thread' ? who.id : 'desk', ts, purpose, run, changes }
+  const meta: Meta = note({ ...m, pending: pend }, ts, `update ${v} sent by ${pend.author}`)
+  await writeJson(h, `${f.dir}/meta.json`, meta)
+  const brief = updateBrief(meta, f.dir, pend)
+  const head = `${m.name}: update ${v} stored (not run, not current; ${m.current} stays current until it is audited).${changes.length ? ` Shown for the verdict: ${changes.join('; ')}.` : ''}`
+  if (who.kind === 'thread') return { ok: true, text: `${head}\n${brief}` }
+  if (!io.startThread) return { ok: true, text: `${head}\nRoute this to a thread (lean_thread new) with this brief:\n${brief}` }
+  const t = await io.startThread(`audit update of script ${m.name}`, brief, m.project === 'global' ? '' : m.project)
+  return t.ok ? { ok: true, text: `${head} The audit started in a thread: ${t.text}` } : t
+}
+
+async function rollback(h: Host, who: Who, i: any): Promise<Out> {
+  const f = await find(h, str(i.name))
+  if (!f) return err(`no script ${str(i.name)}`)
+  const m = f.meta
+  if (m.status !== 'adopted' || !m.versions?.length) return err(`${m.name} is ${m.status}: only an adopted script has versions to go back to`)
+  const reason = txt(i.reason).slice(0, 300)
+  if (who.kind === 'thread' && !reason) return err('a thread gives a reason to roll back (reason: why)')
+  const idx = m.versions.findIndex(v => v.v === m.current)
+  const target = str(i.version) ? ver(m, str(i.version)) : m.versions[idx - 1]
+  if (!target) return err(`${str(i.version) ? `no version ${str(i.version)}` : `${m.name} has no version before ${m.current}`}; versions: ${m.versions.map(v => v.v).join(', ')}`)
+  if (!target.audit || target.audit.sha !== target.sha256 || (target.audit.verdict !== 'adopt' && target.decision?.value !== 'adopt')) return err(`${target.v} was never adopted by an audit or by the user, so it is not a version to go back to`)
+  const text = await readText(h, `${f.dir}/${target.v}/${target.file}`)
+  if (text === null || hashText(text) !== target.sha256) return err(`${target.v}/${target.file} is missing or was edited by hand: it is no longer the audited text`)
+  const ts = await h.clock.now()
+  await h.fs.write(`${f.dir}/${m.file}`, text)
+  const meta: Meta = note({ ...m, current: target.v, sha256: target.sha256, purpose: target.purpose, run: target.run, audit: target.audit, decision: target.decision, failures: 0, state: undefined, badWhy: undefined }, ts, `rolled back to ${target.v}${target.v === m.current ? ' (restored)' : ` from ${m.current}`} by ${who.kind === 'thread' ? who.id : 'the desk'}${reason ? `: ${reason}` : ''}`)
+  await writeJson(h, `${f.dir}/meta.json`, meta)
+  await h.fs.write(`${f.dir}/SKILL.md`, recipeText(meta, f.dir))
+  await appendJsonl(h, `${scriptsDir(await homeDir(h))}/decisions.jsonl`, { ts, name: m.name, by: who.kind === 'thread' ? who.id : 'desk', value: 'rollback', from: m.current, to: target.v, reason })
+  await refresh(h, m.project)
+  return { ok: true, text: `${m.name} is back to ${target.v} (${target.v === m.current ? 'restored from its stored version' : `was ${m.current}`}); rules and skill point at the same ${f.dir}/${m.file}` }
+}
+
+async function reportBad(h: Host, who: Who, i: any): Promise<Out> {
+  if (who.kind !== 'thread') return err('report-bad is for threads that ran the script')
+  const f = await find(h, str(i.name))
+  if (!f) return err(`no script ${str(i.name)}`)
+  if (f.meta.status !== 'adopted') return err(`${f.meta.name} is ${f.meta.status}: only an adopted script is reported`)
+  const why = txt(i.why).slice(0, 200)
+  if (!why) return err('report-bad needs why: what was wrong')
+  const ts = await h.clock.now()
+  await writeJson(h, `${f.dir}/meta.json`, note({ ...f.meta, failures: (f.meta.failures ?? 0) + 1, state: 'needs-update', badWhy: why }, ts, `reported wrong by ${who.id}: ${why}`))
+  await refresh(h, f.meta.project)
+  return { ok: true, text: `${f.meta.name} is marked needs-update (${why}). If you can fix it: lean_script update ${f.meta.name} with the fixed file or edits; ${f.meta.current} stays current until the update is audited` }
+}
+
+async function diffOf(h: Host, i: any): Promise<Out> {
+  const f = await find(h, str(i.name))
+  if (!f) return err(`no script ${str(i.name)}`)
+  const m = f.meta
+  if (m.status !== 'adopted' || !m.versions?.length) return err(`${m.name} is ${m.status}: only an adopted script has versions to compare`)
+  const idx = m.versions.findIndex(v => v.v === m.current)
+  const all = [...m.versions, ...(m.pending ? [m.pending] : [])]
+  const find2 = (v: string) => all.find(x => x.v === v)
+  const a = str(i.a) ? find2(str(i.a)) : m.pending ? m.versions[idx] : m.versions[idx - 1]
+  const b = str(i.b) ? find2(str(i.b)) : m.pending ?? m.versions[idx]
+  if (!a || !b) return err(`give two versions (a, b) that exist: ${all.map(v => v.v).join(', ')}${m.versions.length < 2 && !m.pending ? '; there is only one version' : ''}`)
+  const ta = await readText(h, `${f.dir}/${a.v}/${a.file}`)
+  const tb = await readText(h, `${f.dir}/${b.v}/${b.file}`)
+  if (ta === null || tb === null) return err('a version file is missing')
+  const d = unifiedDiff(ta, tb, `${a.v}/${a.file}`, `${b.v}/${b.file}`)
+  const lines = d.split('\n')
+  return { ok: true, text: d ? (lines.length > 300 ? `${lines.slice(0, 300).join('\n')}\n[... ${lines.length - 300} more lines]` : d) : `${a.v} and ${b.v} are identical` }
 }
 
 export async function useCounts(h: Host): Promise<Record<string, number>> {
@@ -421,28 +649,38 @@ async function list(h: Host): Promise<Out> {
   const uses = await useCounts(h)
   const c = all.filter(x => x.meta.status === 'candidate').length
   const a = all.filter(x => x.meta.status === 'adopted').length
-  const rows = all.map(x => ({ name: x.meta.name, project: x.meta.project, status: x.meta.status, verdict: verdictOf(x.meta), overridden: !!x.meta.decision, uses: uses[x.meta.name] ?? 0, core: !!x.meta.core, purpose: x.meta.purpose }))
-  const lines = rows.map(r => `${r.name} · ${r.project} · ${r.status} · ${r.verdict}${r.overridden ? ' (user decision)' : ''} · ${r.uses} use(s)${r.core ? ' · core candidate' : ''} · ${short(r.purpose, 80)}`)
-  return { ok: true, text: [`Scripts: ${c} candidates, ${a} adopted`, ...lines].join('\n'), data: rows }
+  const rows = []
+  for (const x of all) {
+    const health = x.meta.status === 'adopted' ? healthOf(x.meta, (await integrity(h, x.dir, x.meta)).ok) : null
+    rows.push({ name: x.meta.name, project: x.meta.project, status: x.meta.status, verdict: verdictOf(x.meta), overridden: !!x.meta.decision, uses: uses[x.meta.name] ?? 0, core: !!x.meta.core, purpose: x.meta.purpose, version: x.meta.current ?? null, health, update: x.meta.pending ? x.meta.pending.v : null })
+  }
+  const bad = rows.filter(r => r.health && r.health !== 'ok').length
+  const lines = rows.map(r => `${r.name} · ${r.project} · ${r.status}${r.version ? ` ${r.version}` : ''} · ${r.verdict}${r.overridden ? ' (user decision)' : ''} · ${r.uses} use(s)${r.health && r.health !== 'ok' ? ` · ${r.health.toUpperCase()}` : ''}${r.update ? ` · update ${r.update} waiting` : ''}${r.core ? ' · core candidate' : ''} · ${short(r.purpose, 80)}`)
+  return { ok: true, text: [`Scripts: ${c} candidates, ${a} adopted${bad ? `, ${bad} need attention (needs-update or edited)` : ''}`, ...lines].join('\n'), data: rows }
 }
 
 async function show(h: Host, i: any): Promise<Out> {
   const f = await find(h, str(i.name))
   if (!f) return err(`no script ${str(i.name)}`)
   const uses = (await useCounts(h))[f.meta.name] ?? 0
-  return { ok: true, text: JSON.stringify({ ...f.meta, dir: f.dir, script: `${f.dir}/${f.meta.file}`, verdict: verdictOf(f.meta), uses, ...(f.meta.status === 'adopted' ? { command: expandRun(f.meta, f.dir) } : {}) }, null, 2), data: f.meta }
+  const ig = await integrity(h, f.dir, f.meta)
+  const versions = (f.meta.versions ?? []).map(v => `${v.v}${v.v === f.meta.current ? ' (current)' : ''} · ${v.sha256.slice(0, 8)} · ${v.author} · ${new Date(v.ts).toISOString().slice(0, 10)} · ${v.decision ? `user: ${v.decision.value}` : (v.audit?.verdict ?? 'unaudited')}${v.changes?.length ? ` · ${v.changes.join('; ')}` : ''}`)
+  const extra = f.meta.status === 'adopted' ? { command: expandRun(f.meta, f.dir), health: healthOf(f.meta, ig.ok), ...(ig.ok ? {} : { integrity: ig.why }), versionList: versions, failures: f.meta.failures ?? 0 } : {}
+  return { ok: true, text: JSON.stringify({ ...f.meta, dir: f.dir, script: `${f.dir}/${f.meta.file}`, verdict: verdictOf(f.meta), uses, ...extra }, null, 2), data: f.meta }
 }
 
-export async function scriptCounts(h: Host): Promise<{ candidates: number; adopted: number }> {
+export async function scriptCounts(h: Host): Promise<{ candidates: number; adopted: number; needsUpdate: number }> {
   const all = await allScripts(h)
-  return { candidates: all.filter(x => x.meta.status === 'candidate').length, adopted: all.filter(x => x.meta.status === 'adopted').length }
+  let needsUpdate = 0
+  for (const x of all) if (x.meta.status === 'adopted' && (x.meta.state === 'needs-update' || !(await integrity(h, x.dir, x.meta)).ok)) needsUpdate++
+  return { candidates: all.filter(x => x.meta.status === 'candidate').length, adopted: all.filter(x => x.meta.status === 'adopted').length, needsUpdate }
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------------
 export const SCRIPT_SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['propose', 'audit', 'list', 'show', 'retire', 'decide'] },
+    action: { type: 'string', enum: ['propose', 'audit', 'list', 'show', 'retire', 'decide', 'update', 'rollback', 'report-bad', 'diff'] },
     name: { type: 'string', description: 'script name (letters, digits . _ -)' },
     path: { type: 'string', description: 'propose: absolute path of the script file (copied, never run)' },
     purpose: { type: 'string', description: 'propose: what it does, one sentence' },
@@ -451,14 +689,19 @@ export const SCRIPT_SCHEMA = {
     outputs: { type: 'array', items: { type: 'string' }, description: 'propose: what it writes ("stdout" if it only prints; any file it writes must be listed)' },
     project: { type: 'string', description: 'propose: project name, or "global" (default: this thread\'s project)' },
     verdict: { type: 'string', enum: ['adopt', 'reject'], description: 'decide (desk): the user\'s decision' },
-    reason: { type: 'string', description: 'decide / retire: why' },
+    reason: { type: 'string', description: 'decide / retire / rollback: why (a thread must give one to roll back)' },
+    edits: { type: 'array', items: { type: 'object', properties: { find: { type: 'string' }, replace: { type: 'string' } } }, description: 'update: exact replacements on the current version (each find occurs once), instead of a new file' },
+    version: { type: 'string', description: 'rollback: the version to go back to, like v1 (default: the one before the current)' },
+    a: { type: 'string', description: 'diff: first version (default: the one before current, or current when an update waits)' },
+    b: { type: 'string', description: 'diff: second version (default: the update, or current)' },
+    why: { type: 'string', description: 'report-bad: what was wrong with the script\'s result' },
     confirm: { type: 'boolean', description: 'decide adopt over an audit that said otherwise: only after the user was told and agreed' },
   },
   required: ['action'],
 }
 export const SCRIPT_SPEC = {
   name: SCRIPT_TOOL,
-  description: 'Scripts over models: propose (copy a script you wrote into the candidate store, never run), audit (a read-only auditor judges it; the mod applies the rules), list, show, retire; decide (desk, the user overrides a verdict). An adopted script becomes a recipe skill (lean-agent-script-<name>) with its run command.',
+  description: 'Scripts over models: propose (copy a script you wrote into the candidate store, never run), audit (a read-only auditor judges it; the mod applies the rules), list, show, diff, retire; update (a new file or edits for an adopted script: audited as a diff, then current), rollback, report-bad (it was wrong); decide (desk, the user overrides a verdict). An adopted script becomes a rule line and a recipe skill (lean-agent-script-<name>) with its stable run command.',
   inputSchema: SCRIPT_SCHEMA,
 }
 
@@ -475,12 +718,21 @@ export async function scriptTool(h: Host, who: Who, i: any, io: Io = {}): Promis
         return await queued(h, () => retire(h, who, i))
       case 'decide':
         return await queued(h, () => decide(h, who, i))
+      case 'update':
+        return await queued(h, () => update(h, who, i, io))
+      case 'rollback':
+        return await queued(h, () => rollback(h, who, i))
+      case 'report-bad':
+        return await queued(h, () => reportBad(h, who, i))
+      case 'diff':
+        return await diffOf(h, i)
       case 'audit': {
         const name = str(i.name)
         const f = await find(h, name)
         if (!f) return err(`no script ${name || '(name missing)'}`)
-        if (f.meta.status !== 'candidate') return err(`${name} is ${f.meta.status}: only a candidate is audited`)
-        const brief = auditBrief(f.meta, f.dir)
+        const pend = f.meta.status === 'adopted' ? f.meta.pending : undefined
+        if (f.meta.status !== 'candidate' && !pend) return err(`${name} is ${f.meta.status}${f.meta.status === 'adopted' ? ' with no update waiting (lean_script update sends one)' : ''}: only a candidate or an update is audited`)
+        const brief = pend ? updateBrief(f.meta, f.dir, pend) : auditBrief(f.meta, f.dir)
         if (who.kind === 'thread') return { ok: true, text: brief }
         if (!io.startThread) return { ok: true, text: `Route this to a thread (lean_thread new) with this brief:\n${brief}` }
         const t = await io.startThread(`audit script ${name}`, brief, f.meta.project === 'global' ? '' : f.meta.project)
@@ -502,6 +754,8 @@ export const resetScripts = () => {
   created.clear()
   ran.clear()
   proposed.clear()
+  warned.clear()
+  asked.clear()
 }
 export const noteWrite = (path: unknown) => {
   if (typeof path === 'string' && path.startsWith('/')) created.add(path)
@@ -548,11 +802,13 @@ export async function takeNudges(h: Host): Promise<string | null> {
 
 // ---- uses: a Bash run of an adopted script counts ----------------------------------------------------------------------
 // (only a command that RUNS the adopted script file counts, not a cat or ls of its folder)
-export async function noteUse(h: Host, cmd: string, thread: string): Promise<void> {
-  if (!cmd.includes('/scripts/')) return
+type Run = { name: string; project: string; dir: string; meta: Meta }
+async function adoptedRuns(h: Host, cmd: string): Promise<Run[]> {
+  if (!cmd.includes('/scripts/')) return []
   const home = await homeDir(h)
   const lean = leanDir(home)
   const seen = new Set<string>()
+  const out: Run[] = []
   for (const seg of cmd.split(SEG)) {
     const file = runTarget(seg)
     if (!file || !file.startsWith(`${lean}/`) || file.includes('..')) continue
@@ -565,6 +821,71 @@ export async function noteUse(h: Host, cmd: string, thread: string): Promise<voi
     seen.add(`${project}/${name}`)
     const dir = adoptedDir(home, project, name)
     const meta = await readMeta(h, dir)
-    if (meta && meta.status === 'adopted' && file === `${dir}/${meta.file}`) await appendJsonl(h, `${scriptsDir(home)}/uses.jsonl`, { ts: await h.clock.now(), name, project, thread })
+    if (meta && meta.status === 'adopted' && file === `${dir}/${meta.file}`) out.push({ name, project, dir, meta })
   }
+  return out
+}
+
+// did a Bash result fail? (an error flag, or the "Exit code N" line the Bash tool prints for a non-zero exit)
+export function bashFailed(r: any): boolean {
+  if (!r || r.deny !== undefined) return false
+  if (r.isError === true) return true
+  const t = typeof r.result === 'string' ? r.result : Array.isArray(r.result) ? r.result.map((b: any) => (typeof b?.text === 'string' ? b.text : '')).join('\n') : ''
+  return /(?:^|\n)Exit code [1-9]\d*/.test(t)
+}
+
+const warned = new Set<string>() // needs-update nudges given this session, once per script
+// A thread's Bash ran an adopted script: count the use; a hand-edited copy is warned about (one line, every run); a failed run is
+// counted and the second failure marks the script needs-update; a script that needs an update nudges once per session to propose a fix.
+// Returns the lines to add to the tool result, or null.
+export async function noteUse(h: Host, cmd: string, thread: string, failed = false): Promise<string | null> {
+  const runs = await adoptedRuns(h, cmd)
+  if (!runs.length) return null
+  const home = await homeDir(h)
+  const notes: string[] = []
+  for (const r of runs) {
+    await appendJsonl(h, `${scriptsDir(home)}/uses.jsonl`, { ts: await h.clock.now(), name: r.name, project: r.project, thread, ...(failed ? { failed: true } : {}) })
+    const ig = await integrity(h, r.dir, r.meta)
+    if (!ig.ok) notes.push(`[lean-agent] WARNING: ${r.name} was edited by hand since its audit (${ig.why}): unaudited. Trust this run only if you made or reviewed the edit; propose it with lean_script update ${r.name} to have the change audited.`)
+    let meta = r.meta
+    if (failed) {
+      const flagged = await queued(h, async () => {
+        const m = await readMeta(h, r.dir)
+        if (!m || m.status !== 'adopted') return null
+        const n = (m.failures ?? 0) + 1
+        const flag = n >= 2 && m.state !== 'needs-update'
+        const next = note({ ...m, failures: n, ...(flag ? { state: 'needs-update' as const } : {}) }, await h.clock.now(), `run failed (${n})`)
+        await writeJson(h, `${r.dir}/meta.json`, next)
+        if (flag) await refresh(h, m.project)
+        return { n, flag, next }
+      }).catch(() => null)
+      if (flagged) {
+        meta = flagged.next
+        notes.push(`[lean-agent] ${r.name} failed (${flagged.n} failure${flagged.n > 1 ? 's' : ''}${flagged.flag ? '; it is now marked needs-update' : '; two mark it needs-update'}).`)
+      }
+    }
+    if (meta.state === 'needs-update' && !warned.has(r.name)) {
+      warned.add(r.name)
+      notes.push(`[lean-agent] ${r.name} is marked needs-update (${meta.badWhy ?? `${meta.failures ?? 0} failed run(s)`}): if you can fix it, propose the fix with lean_script update ${r.name} (a new file or edits); it is audited as a diff.`)
+    }
+  }
+  return notes.length ? notes.join('\n') : null
+}
+
+// A subagent never runs an adopted script that was edited by hand (it is unaudited); the built-in commands run no script at all.
+export async function unauditedRun(h: Host, cmd: string): Promise<string | null> {
+  for (const r of await adoptedRuns(h, cmd)) {
+    const ig = await integrity(h, r.dir, r.meta)
+    if (!ig.ok) return `lean-agent: ${r.name} was edited by hand since its audit (${ig.why}), so it is unaudited and a subagent does not run it; audit it (lean_script update) or roll it back first`
+  }
+  return null
+}
+
+// When a thread reports done: one question per thread and session, never for workers (the caller passes only a thread's own call).
+const asked = new Set<string>()
+export const DONE_QUESTION = 'Could any step of this task have been a script? If yes: lean_script propose.'
+export function doneQuestion(thread: string): string | null {
+  if (asked.has(thread)) return null
+  asked.add(thread)
+  return DONE_QUESTION
 }

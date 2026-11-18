@@ -5,7 +5,8 @@
 import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import type { Inbox, Thread } from './threads'
-import { checkStale, recordLearn, rulesStats, slugOk, syncRules } from './rules'
+import { checkStale, recordLearn, rulesStats, slugOk } from './rules'
+import { syncWithScripts } from './rulelines'
 import { writeReview } from './reviews'
 
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
@@ -126,7 +127,7 @@ export async function threadTool(h: Host, id: string, name: string, i: any): Pro
         return { ok: true, text: 'recorded' }
       }
       if (!repo.startsWith('/')) return { ok: false, text: `${i.action} needs repo (an absolute path)` }
-      if (i.action === 'sync') return { ok: true, text: JSON.stringify(await syncRules(h, project, repo)) }
+      if (i.action === 'sync') return { ok: true, text: JSON.stringify(await syncWithScripts(h, project, repo)) }
       if (i.action === 'stale') return { ok: true, text: JSON.stringify(await checkStale(h, project, repo)) }
       return { ok: false, text: `unknown lean_rules action ${String(i.action)}` }
     }

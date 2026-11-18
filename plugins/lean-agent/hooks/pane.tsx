@@ -218,8 +218,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           </Text>
         ))}
         {!!v && (
-          <Text dimColor={!v.scripts.candidates && !v.scripts.adopted}>
-            Scripts: {v.scripts.candidates} candidates, {v.scripts.adopted} adopted
+          <Text dimColor={!v.scripts.candidates && !v.scripts.adopted} color={v.scripts.needsUpdate ? 'yellow' : undefined}>
+            Scripts: {v.scripts.candidates} candidates, {v.scripts.adopted} adopted{v.scripts.needsUpdate ? `, ${v.scripts.needsUpdate} need an update` : ''}
           </Text>
         )}
         <Text bold>Threads</Text>

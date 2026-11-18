@@ -116,15 +116,21 @@ test('a clean adopt verdict moves the script to the project folder and writes it
   expect(msg).toContain('adopted')
   const dir = '/h/.lean-agent/proj/scripts/count-lines'
   expect(h.files.has(`${CAND}/meta.json`)).toBe(false)
-  expect(h.files.has(`${dir}/count.py`)).toBe(true)
+  expect(h.files.get(`${dir}/v1/count.py`)).toBe(h.files.get(SRC)) // the audited version
+  expect(h.files.get(`${dir}/run`)).toBe(h.files.get(SRC)) // the stable copy the rule line and the skill point at
+  expect(h.files.has(`${dir}/count.py`)).toBe(false)
   const m = meta(h, dir)
+  expect(m).toMatchObject({ current: 'v1', file: 'run', failures: 0 })
+  expect(m.versions).toHaveLength(1)
+  expect(m.versions[0]).toMatchObject({ v: 'v1', file: 'count.py', author: 't1', sha256: m.sha256 })
+  expect(m.versions[0].audit.verdict).toBe('adopt')
   expect(m.status).toBe('adopted')
   expect(m.audit.verdict).toBe('adopt')
   const skill = h.files.get(`${dir}/SKILL.md`)!
   expect(skill).toContain('name: lean-agent-script-count-lines')
-  expect(skill).toContain(`run: python3 ${dir}/count.py <file>`)
+  expect(skill).toContain(`run: python3 ${dir}/run <file>`)
   expect(skill).toContain('Count the lines of a file')
-  expect(await scriptCounts(h.host)).toEqual({ candidates: 0, adopted: 1 })
+  expect(await scriptCounts(h.host)).toEqual({ candidates: 0, adopted: 1, needsUpdate: 0 })
 })
 
 test('a global script is adopted under scripts/<name> and synced into every project checkout as a skill', async () => {
@@ -132,10 +138,10 @@ test('a global script is adopted under scripts/<name> and synced into every proj
   h.git.handler = a => (a[0] === 'rev-parse' ? { exitCode: 0, stdout: '/repo/.git\n' } : { exitCode: 1, stdout: '' })
   await propose(h, { project: 'global' })
   await auditFromReply(h.host, 't1', line())
-  expect(h.files.has('/h/.lean-agent/scripts/count-lines/count.py')).toBe(true)
+  expect(h.files.has('/h/.lean-agent/scripts/count-lines/v1/count.py')).toBe(true)
   await syncRules(h.host, 'proj', '/repo')
   const s = h.files.get('/repo/.claude/skills/lean-agent-script-count-lines/SKILL.md')!
-  expect(s).toContain('run: python3 /h/.lean-agent/scripts/count-lines/count.py <file>')
+  expect(s).toContain('run: python3 /h/.lean-agent/scripts/count-lines/run <file>')
   expect(h.files.get('/repo/.git/info/exclude')).toContain('.claude/skills/lean-agent-*/')
   // candidates are never skills
   h.files.set('/h/.lean-agent/scripts/candidates/zzz/SKILL.md', 'x')
@@ -195,7 +201,7 @@ test('secrets are reject; adapt needs concrete changes; reject needs a reason; t
   h = setup()
   await propose(h)
   expect(await auditFromReply(h.host, 't1', line({ verdict: 'reject', reason: 'reads secrets' }))).toContain('reject (reads secrets)')
-  expect(await auditFromReply(h.host, 't1', line())).toContain('only a candidate is audited') // a rejected one is not audited again
+  expect(await auditFromReply(h.host, 't1', line())).toContain('only a candidate or an update is audited') // a rejected one is not audited again
 })
 
 test('an audit of text the script no longer has is refused; so is an audit of something that is not a candidate', async () => {
@@ -203,7 +209,7 @@ test('an audit of text the script no longer has is refused; so is an audit of so
   await propose(h)
   h.files.set(`${CAND}/count.py`, 'print("tampered")\n')
   expect(await auditFromReply(h.host, 't1', line())).toContain('changed since it was proposed')
-  expect(await auditFromReply(h.host, 't1', line({ name: 'ghost' }))).toContain('no candidate ghost')
+  expect(await auditFromReply(h.host, 't1', line({ name: 'ghost' }))).toContain('no script ghost')
   expect(await auditFromReply(h.host, 't1', 'no audit line here')).toBeNull()
 })
 
@@ -223,10 +229,10 @@ test('there is no way to hand the mod a verdict: no report parameter, and a repl
   const r = await scriptTool(h.host, T, { action: 'audit', name: 'count-lines', report: line() }) // an old parameter: it only returns the brief
   expect(r.text).toContain('lean-agent:auditor')
   expect(meta(h).audit).toBeUndefined()
-  expect(await auditFromReply(h.host, 't1', line(), 'audit something else')).toContain('exactly this candidate folder')
-  expect(await auditFromReply(h.host, 't1', line(), `see ${CAND}`)).toContain('exactly this candidate folder') // the folder, with its slash
+  expect(await auditFromReply(h.host, 't1', line(), 'audit something else')).toContain('exactly this folder')
+  expect(await auditFromReply(h.host, 't1', line(), `see ${CAND}`)).toContain('exactly this folder') // the folder, with its slash
   const two = '/h/.lean-agent/scripts/candidates/other-one/'
-  expect(await auditFromReply(h.host, 't1', line(), `audit ${CAND}/ and ${two}`)).toContain('exactly this candidate folder') // one prompt, one script
+  expect(await auditFromReply(h.host, 't1', line(), `audit ${CAND}/ and ${two}`)).toContain('exactly this folder') // one prompt, one script
   expect(meta(h).audit).toBeUndefined()
   expect(await auditFromReply(h.host, 't1', line())).toContain('adopted')
 })
@@ -288,7 +294,8 @@ test('a thread proposes only for its own project or global; a script named meta.
   expect(await auditFromReply(h.host, 't1', line({ name: 'm2' }), `audit ${dir}/m2/`)).toContain('adopted')
   const skill = h.files.get('/h/.lean-agent/scripts/m2/SKILL.md')!
   expect(skill).toContain('name: lean-agent-script-m2')
-  expect(skill).toContain('run: python3 /h/.lean-agent/scripts/m2/script-SKILL.md <file>')
+  expect(skill).toContain('run: python3 /h/.lean-agent/scripts/m2/run <file>')
+  expect(h.files.get('/h/.lean-agent/scripts/m2/v1/script-SKILL.md')).toBe('print(6)\n')
   expect(skill).not.toContain('print(6)')
 })
 
@@ -386,16 +393,16 @@ test('sync ships a recipe only for a script that is still adopted and still the 
   const skill = '/repo/.claude/skills/lean-agent-script-count-lines/SKILL.md'
   await syncRules(h.host, 'proj', '/repo')
   expect(h.files.has(skill)).toBe(true)
-  h.files.set('/h/.lean-agent/scripts/count-lines/count.py', 'print("edited in place")\n') // no longer the audited text
+  h.files.set('/h/.lean-agent/scripts/count-lines/run', 'print("edited in place")\n') // no longer the audited text
   await syncRules(h.host, 'proj', '/repo')
   expect(h.files.has(skill)).toBe(false)
-  h.files.set('/h/.lean-agent/scripts/count-lines/count.py', 'import sys\nprint(sum(1 for _ in open(sys.argv[1])))\n')
+  h.files.set('/h/.lean-agent/scripts/count-lines/run', 'import sys\nprint(sum(1 for _ in open(sys.argv[1])))\n')
   await syncRules(h.host, 'proj', '/repo')
   expect(h.files.has(skill)).toBe(true)
   // the skill is generated from the verified meta: an edited SKILL.md in the store changes nothing
   h.files.set('/h/.lean-agent/scripts/count-lines/SKILL.md', 'run: rm -rf everything\n')
   await syncRules(h.host, 'proj', '/repo')
-  expect(h.files.get(skill)).toContain('run: python3 /h/.lean-agent/scripts/count-lines/count.py <file>')
+  expect(h.files.get(skill)).toContain('run: python3 /h/.lean-agent/scripts/count-lines/run <file>')
   expect(h.files.get(skill)).not.toContain('rm -rf')
   // an audit that is not for this text, or a meta that points its file elsewhere, ships nothing
   const good = meta(h, '/h/.lean-agent/scripts/count-lines')
@@ -469,18 +476,19 @@ test('retire moves an adopted script aside and keeps it; list and show report th
   await propose(h)
   await auditFromReply(h.host, 't1', line())
   const dir = '/h/.lean-agent/proj/scripts/count-lines'
-  await noteUse(h.host, `python3 ${dir}/count.py /tmp/x.log`, 't1')
-  await noteUse(h.host, `python3 ${dir}/count.py /tmp/y.log`, 't1')
+  await noteUse(h.host, `python3 ${dir}/run /tmp/x.log`, 't1')
+  await noteUse(h.host, `python3 ${dir}/run /tmp/y.log`, 't1')
   const l = await scriptTool(h.host, D, { action: 'list' })
   expect(l.text.split('\n')[0]).toBe('Scripts: 0 candidates, 1 adopted')
-  expect(l.text).toContain('count-lines · proj · adopted · adopt · 2 use(s)')
+  expect(l.text).toContain('count-lines · proj · adopted v1 · adopt · 2 use(s)')
   const s = JSON.parse((await scriptTool(h.host, D, { action: 'show', name: 'count-lines' })).text)
   expect(s.uses).toBe(2)
-  expect(s.command).toBe(`python3 ${dir}/count.py <file>`)
+  expect(s.command).toBe(`python3 ${dir}/run <file>`)
+  expect(s.versionList[0]).toContain('v1 (current)')
   const r = await scriptTool(h.host, D, { action: 'retire', name: 'count-lines', reason: 'replaced' })
   expect(r.ok).toBe(true)
-  expect(h.files.has(`${dir}/count.py`)).toBe(false)
-  expect([...h.files.keys()].some(k => k.includes('/scripts/retired/count-lines-') && k.endsWith('/count.py'))).toBe(true)
+  expect(h.files.has(`${dir}/run`)).toBe(false)
+  expect([...h.files.keys()].some(k => k.includes('/scripts/retired/count-lines-') && k.endsWith('/v1/count.py'))).toBe(true) // every version is kept
   expect((await allScripts(h.host)).length).toBe(0)
   expect((await scriptTool(h.host, D, { action: 'retire', name: 'count-lines' })).ok).toBe(false)
 })
@@ -494,7 +502,7 @@ test('uses: only a Bash command that names an adopted script folder counts', asy
   await noteUse(h.host, 'python3 /h/.lean-agent/proj/scripts/ghost/x.py', 't1')
   await noteUse(h.host, 'echo hi', 't1')
   expect(await useCounts(h.host)).toEqual({})
-  await noteUse(h.host, `cd /tmp && python3 ${dir}/count.py a`, 't1')
+  await noteUse(h.host, `cd /tmp && python3 ${dir}/run a`, 't1')
   expect(await useCounts(h.host)).toEqual({ 'count-lines': 1 })
   const rows = await readJsonl<any>(h.host, '/h/.lean-agent/scripts/uses.jsonl')
   expect(rows[0]).toMatchObject({ name: 'count-lines', project: 'proj', thread: 't1' })
@@ -663,6 +671,6 @@ test('through the engine: a scratch script that ran is nudged once at the next p
   expect(JSON.stringify(b.context ?? '')).not.toContain('you ran')
   await propose(s.h)
   await auditFromReply(s.h.host, 't1', line())
-  await $.tool.call({ tool: 'Bash', command: 'python3 /h/.lean-agent/proj/scripts/count-lines/count.py /tmp/x' } as any)
+  await $.tool.call({ tool: 'Bash', command: 'python3 /h/.lean-agent/proj/scripts/count-lines/run /tmp/x' } as any)
   expect(await useCounts(s.h.host)).toEqual({ 'count-lines': 1 })
 })

@@ -104,7 +104,7 @@ test('stats: counts loads of lean-agent rules from the hook log and lists rules 
   h.files.set(`${SRC}/rules/api.md`, rule())
   const ev = (f: string) => JSON.stringify({ ts: 1, e: { file_path: f } })
   h.files.set('/h/.lean-agent/logs/rules-loaded.jsonl', [ev('/r/.claude/rules/lean-agent/billing.md'), ev('/r/.claude/rules/lean-agent/billing.md')].join('\n') + '\n')
-  expect(await rulesStats(h.host, 'proj')).toEqual({ loaded: { 'billing.md': 2 }, never: ['api.md'] })
+  expect(await rulesStats(h.host, 'proj')).toEqual({ loaded: { 'billing.md': 2 }, never: ['api.md'], scriptCandidates: [] })
 })
 
 test('lean_rules tool: sync, record and stale through the thread tool; bad input is refused', async () => {

@@ -38,7 +38,7 @@ export const matches = (globs: string[], path: string) => globs.some(g => globRe
 
 export const lineCount = (t: string) => t.replace(/<!--[\s\S]*?-->/g, '').split('\n').filter(l => l.trim()).length
 // the body of a rule: frontmatter and the lean-agent footer do not count against the cap
-function bodyLines(t: string): number {
+export function bodyLines(t: string): number {
   return lineCount(t.replace(/^---\n[\s\S]*?\n---\n/, ''))
 }
 
@@ -178,7 +178,11 @@ export async function addGap(h: Host, project: string, path: string, text = ''):
 }
 
 // Which lean-agent rules loaded (hooks/rules-loaded.sh logs one line per load) and which never did.
-export async function rulesStats(h: Host, project: string): Promise<{ loaded: Record<string, number>; never: string[] }> {
+// A reported gap that reads like mechanical work (count, list, sum, find all, which files ...): a script could have done it.
+const MECHANICAL = /\b(?:count(?:ing)?|how many|number of|list(?:ing)? (?:all|every|the)|find(?:ing)? all|every (?:file|place|usage|caller)|all (?:the )?(?:files|usages|occurrences|callers)|sum(?:ming)?|total(?:s|ling)?|which files|aggregat\w*|tally|enumerat\w*)\b/i
+export const looksMechanical = (text: string) => MECHANICAL.test(text)
+
+export async function rulesStats(h: Host, project: string): Promise<{ loaded: Record<string, number>; never: string[]; scriptCandidates: string[] }> {
   const home = await homeDir(h)
   const log = await readJsonl<{ e?: { file_path?: string } }>(h, `${leanDir(home)}/logs/rules-loaded.jsonl`)
   const loaded: Record<string, number> = {}
@@ -188,5 +192,16 @@ export async function rulesStats(h: Host, project: string): Promise<{ loaded: Re
     if (i >= 0) loaded[f.slice(i + 18)] = (loaded[f.slice(i + 18)] ?? 0) + 1
   }
   const have = (await h.fs.list(`${projectDir(home, project)}/rules`).catch(() => [])).map(f => f.name).filter(n => n.endsWith('.md') && n !== '_project.md')
-  return { loaded, never: have.filter(n => !loaded[n]) }
+  // gaps whose text looks mechanical are candidates for a script (lean_script propose); one line each, repeats counted once
+  const seen = new Set<string>()
+  const scriptCandidates: string[] = []
+  for (const g of await readJsonl<{ path?: string; text?: string }>(h, `${projectDir(home, project)}/gaps.jsonl`)) {
+    const t = String(g?.text ?? '').replace(/\s+/g, ' ').trim()
+    const key = t.toLowerCase()
+    if (t && looksMechanical(t) && !seen.has(key) && scriptCandidates.length < 10) {
+      seen.add(key)
+      scriptCandidates.push(`${g.path ? `${g.path}: ` : ''}${t.slice(0, 160)}`)
+    }
+  }
+  return { loaded, never: have.filter(n => !loaded[n]), scriptCandidates }
 }

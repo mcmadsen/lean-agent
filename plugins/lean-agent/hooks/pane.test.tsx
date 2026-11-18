@@ -51,12 +51,12 @@ test('view: goals by tone, answers unread first, threads with state and last lin
 test('view: the scripts line counts candidates and adopted scripts', async () => {
   const h = setup()
   const meta = (status: string) => JSON.stringify({ name: 'n', sha256: 'x', status })
-  expect((await loadView(h.host)).scripts).toEqual({ candidates: 0, adopted: 0 })
+  expect((await loadView(h.host)).scripts).toEqual({ candidates: 0, adopted: 0, needsUpdate: 0 })
   h.files.set('/h/.lean-agent/scripts/candidates/a/meta.json', meta('candidate'))
   h.files.set('/h/.lean-agent/scripts/candidates/b/meta.json', meta('rejected'))
   h.files.set('/h/.lean-agent/scripts/c/meta.json', meta('adopted'))
   h.files.set('/h/.lean-agent/p/scripts/d/meta.json', meta('adopted'))
-  expect((await loadView(h.host)).scripts).toEqual({ candidates: 1, adopted: 2 })
+  expect((await loadView(h.host)).scripts).toEqual({ candidates: 1, adopted: 2, needsUpdate: 2 }) // adopted scripts without their files are not intact
 })
 
 test('view: ack one row and ack all move the read marker', async () => {

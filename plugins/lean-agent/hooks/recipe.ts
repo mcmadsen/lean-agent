@@ -22,6 +22,9 @@ export type Audit = {
   blockers: string[]
   reason: string
 }
+export type Decision = { value: 'adopt' | 'reject'; by: 'user'; reason: string; ts: number; overrode?: string[] }
+// One version of an adopted script: scripts/<name>/v<N>/<file>. The stable copy of the current one is scripts/<name>/run.
+export type Version = { v: string; file: string; sha256: string; author: string; ts: number; purpose: string; run: string; audit?: Audit; decision?: Decision; changes?: string[] }
 export type Meta = {
   name: string
   purpose: string
@@ -31,14 +34,20 @@ export type Meta = {
   project: string // a project slug or "global"
   author: string // tN
   created: number
-  sha256: string
-  file: string
+  sha256: string // of the current version (a candidate: of its file)
+  file: string // a candidate: its file; adopted: always `run`, the stable path
   status: 'candidate' | 'adopted' | 'rejected' | 'retired'
   core?: boolean
   scan?: string[] // privacy findings of the stored text (they block adoption)
-  audit?: Audit
-  decision?: { value: 'adopt' | 'reject'; by: 'user'; reason: string; ts: number; overrode?: string[] }
+  audit?: Audit // of the current version
+  decision?: Decision // of the current version
   adopted?: number
+  current?: string // adopted: the current version, `v1` ...
+  versions?: Version[]
+  pending?: Version // an update waiting for its audit (never run, never current)
+  failures?: number // failed runs since the last update or rollback
+  state?: 'needs-update'
+  badWhy?: string
   history?: { ts: number; what: string }[]
 }
 

@@ -11,7 +11,7 @@ import { decide } from './guard'
 import { dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
-import { checkStale, syncRules } from './rules'
+import { checkStale } from './rules'
 import { leanDir, readJson, threadsDir } from './state'
 import { chase } from './chaser'
 import { autoMigrate, check, migrate } from './doctor'
@@ -22,7 +22,8 @@ import { hostOf } from './host'
 import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, noteSection, skillsSeen, trimListing } from './skilltrim'
 import { parseGrants, recordGrant, releaseGrant } from './guard'
 import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
-import { SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
+import { SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
+import { syncWithScripts } from './rulelines'
 
 export { hostOf }
 
@@ -267,7 +268,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       const projs = await readJson<Record<string, { path?: string }>>(host, `${leanDir(await homeDir(host))}/projects.json`, {})
       const repo = th.project ? projs?.[th.project]?.path : undefined
       if (th.project && typeof repo === 'string' && repo.startsWith('/')) {
-        await syncRules(host, th.project, repo)
+        await syncWithScripts(host, th.project, repo) // the learned rules, the adopted scripts' rule lines and recipe skills
         const stale = await checkStale(host, th.project, repo)
         if (stale.length && !noticed.has(newRole.id)) {
           noticed.add(newRole.id)
@@ -460,13 +461,15 @@ export const register: Register = on => {
     return r
   })
   on('tool.call', { tool: 'Bash' }, async ($, e: any, next) => {
-    const r: any = await next(e)
+    let r: any = await next(e)
     const rl = role
     if (rl.kind === 'thread' && r?.deny === undefined && typeof e.command === 'string') {
       try {
         const host = hostOf($)
         noteBash(e.command, leanDir(await homeDir(host)), rl.id)
-        await noteUse(host, e.command, rl.id)
+        // an adopted script ran: counted; a failed run is counted toward needs-update, an edited copy is warned about
+        const said = await noteUse(host, e.command, rl.id, bashFailed(r))
+        if (said) r = { ...r, context: [...(r.context ?? []), said] }
       } catch {
         /* tracking never stops a command */
       }
@@ -499,7 +502,9 @@ export const register: Register = on => {
       if (role.kind !== 'thread') return { result: await roleReport(hostOf($), { tool: t.name, need: 'thread', role, startDir, sid: lastSid }), isError: true } as any
       const out = await threadTool(hostOf($), role.id, t.name, e)
       await ensureGitHooks(hostOf($)).catch(() => undefined) // lean_* tools may change projects.json
-      return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
+      // a thread that reports done is asked once per session whether a step could have been a script (never a worker's call)
+      const ask = t.name === 'lean_report' && out.ok && e.state === 'done' && !e.agentId ? doneQuestion(role.id) : null
+      return { result: ask ? `${out.text}\n${ask}` : out.text, ...(out.ok ? {} : { isError: true as const }) } as any
     })
   }
 

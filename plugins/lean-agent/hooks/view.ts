@@ -16,7 +16,7 @@ export type ThreadRow = { id: string; title: string; model?: string; effort?: st
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
 import { scriptCounts } from './scripts'
-export type View = { scripts: { candidates: number; adopted: number }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; budget: string; errors: string[] }
+export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; budget: string; errors: string[] }
 
 import { STALE_MS } from './chaser'
 export { STALE_MS }
@@ -53,7 +53,7 @@ async function paneAck(h: Host, home: string): Promise<PaneAck> {
 }
 
 export async function loadView(h: Host): Promise<View> {
-  const v: View = { scripts: { candidates: 0, adopted: 0 }, projects: [], goals: [], answers: [], openQuestions: [], unread: 0, total: 0, threads: [], budget: 'n/a', errors: [] }
+  const v: View = { scripts: { candidates: 0, adopted: 0, needsUpdate: 0 }, projects: [], goals: [], answers: [], openQuestions: [], unread: 0, total: 0, threads: [], budget: 'n/a', errors: [] }
   const guard = async (what: string, f: () => Promise<void>) => {
     try {
       await f()
