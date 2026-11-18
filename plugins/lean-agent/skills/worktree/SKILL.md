@@ -13,6 +13,8 @@ Layout: `~/.lean-agent/worktrees/<project>/<branch-dir>` (slashes in the branch 
   `git -C <repo> worktree add <path> -b <branch> <base>` (existing branch: omit `-b`). Then copy learned rules
   into it: call `lean_rules` `sync` with `project` and `repo` = the new worktree path (rules are copied files, git-excluded, and a
   worktree is its own checkout). Add the registry entry (Read, edit the JSON, Write).
+- **reuse**: when the registry already has `<project>/<branch>` and its path exists, use that worktree (say its path)
+  instead of creating another; a registry entry without a usable `path` is an error to report, not a path to guess.
 - **shared**: two threads may use one worktree only if the registry entry says `shared: true`; otherwise refuse
   and make a new one.
 - **list**: read the registry, check each path exists, and show `git -C <path> status -sb` for the live ones.

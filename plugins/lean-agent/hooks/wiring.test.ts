@@ -41,3 +41,39 @@ test('turn.step writes a ledger row and refuses past the daily cap', async ($, o
   const b: any = await step(1)
   expect(b.answer).toContain('daily $1.00')
 })
+
+test('an Agent call records the thread\'s grants while it runs and removes them after', async ($, on) => {
+  let during = ''
+  let h: any
+  h = await threadSession($, on, () =>
+    on('tool.call', { tool: 'Agent' }, () => {
+      during = h.files.get('/h/.lean-agent/threads/t1/grants.json') ?? ''
+      return { result: 'done' } as any
+    }),
+  )
+  await $.tool.call({ tool: 'Agent', subagent_type: 'worker-sonnet', prompt: 'do it\nallow-edit: /w/t1' } as any)
+  expect(during).toContain('/w/t1')
+  const after = JSON.parse(h.files.get('/h/.lean-agent/threads/t1/grants.json'))
+  expect(after.pending).toEqual([])
+})
+
+test('a thread cannot ask the user directly', async ($, on) => {
+  await threadSession($, on, () => on('tool.call', () => ({ result: 'asked' }) as any))
+  const r: any = await $.tool.call({ tool: 'AskUserQuestion' } as any)
+  expect(r.deny).toContain('lean_ask')
+})
+
+test('prompt.compose adds the project memory to a thread\'s session section', async ($, on) => {
+  const h = await threadSession($, on, () => on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'hi', scope: 'shared' }] }) as any))
+  h.files.set('/h/.lean-agent/memory/notes.jsonl', JSON.stringify({ project: 'proj', text: 'use pnpm' }) + '\n')
+  const r: any = await $.prompt.compose({ model: 'haiku', promptModel: 'haiku', surfaces: [], tools: [], outputStyle: null, traits: [] } as any)
+  const mem = r.sections.find((s: any) => s.id === 'lean-agent:memory')
+  expect(mem.scope).toBe('session')
+  expect(mem.text).toContain('use pnpm')
+})
+
+test('session.compact writes the thread\'s notes first', async ($, on) => {
+  const h = await threadSession($, on, () => on('session.compact', () => ({ messages: [{ role: 'user', text: 'summary', toolUses: [] }] }) as any))
+  await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'remember this', toolUses: [] }] } as any)
+  expect(h.files.get('/h/.lean-agent/threads/t1/notes.md')).toContain('remember this')
+})
