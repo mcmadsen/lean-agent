@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.1
+
+### Fixed
+- A desk (or thread) session the Claude app pre-starts in a spare folder and then moves into the chosen folder now gets
+  its tools, timers and git hooks: the role is decided again when the directory changes (`CwdChanged`, checked lazily at
+  each turn and prompt too). Session start is fail-soft: one failing setup step no longer stops tool registration.
+
 ## 1.0.0
 
 One major release: lean-agent is now pure Claude Code.

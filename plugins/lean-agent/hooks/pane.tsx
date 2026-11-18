@@ -111,11 +111,17 @@ export function registerPane(on: any) {
 
 // Called by the mod's session.start once the role is known: /lean-agent exists everywhere, the pane opens by itself
 // only in the desk (and refreshes every 5 s); a thread gets its status line instead.
-export async function paneStart($: any, role: { kind: string; id?: string }): Promise<void> {
+export async function paneStart($: any, role: { kind: string; id?: string }): Promise<Array<() => void>> {
   await $.command.register({ name: 'lean-agent', description: 'Open the lean-agent desk pane (goals, answers, threads)' })
+  return paneRole($, role)
+}
+
+// the role-dependent part of the pane: the desk opens it, a thread gets a status line; returns the timers' cancels
+export async function paneRole($: any, role: { kind: string; id?: string }): Promise<Array<() => void>> {
+  const cancels: Array<() => void> = []
   if (role.kind === 'desk') {
     await openPane($).catch(() => undefined)
-    $.clock.every(5_000, () => $.ui.invalidate('ui.render'))
+    cancels.push($.clock.every(5_000, () => $.ui.invalidate('ui.render')).cancel)
   } else if (role.kind === 'thread' && role.id) {
     const id = role.id
     const tick = async () => {
@@ -126,6 +132,7 @@ export async function paneStart($: any, role: { kind: string; id?: string }): Pr
       }
     }
     await tick()
-    $.clock.every(5_000, tick)
+    cancels.push($.clock.every(5_000, tick).cancel)
   }
+  return cancels
 }

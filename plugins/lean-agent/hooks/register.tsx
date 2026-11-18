@@ -8,7 +8,7 @@ import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
 import { THREAD_TOOLS, consumeWake, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide } from './guard'
-import { paneStart, registerPane, resetPaneState } from './pane'
+import { paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
 import { checkStale, syncRules } from './rules'
@@ -28,11 +28,34 @@ let grantSeq = 0
 export const resetModState = () => {
   notified = 0
   spent.clear()
+  stopTimers()
   role = { kind: 'plain' }
+  applied = ''
+  attempted = ''
+  done.clear()
+  seen = ''
+  registered.clear()
   cwd = ''
   resetPaneState()
 }
 let role: Role = { kind: 'plain' }
+let attempted = '' // the role key whose steps `done` lists
+const done = new Set<string>()
+let applied = '' // the role applyRole last set up ('' = none yet, or a step failed and wants a retry)
+let seen = '' // the directories the role was last decided from
+let timers: Array<() => void> = []
+const registered = new Set<string>()
+let chain: Promise<unknown> = Promise.resolve()
+const roleKey = (r: Role) => (r.kind === 'thread' ? `thread:${r.id}` : r.kind)
+const stopTimers = () => {
+  for (const c of timers.splice(0)) {
+    try {
+      c()
+    } catch {
+      /* already stopped */
+    }
+  }
+}
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
@@ -75,90 +98,183 @@ async function feedbackOf(host: Host, e: any, r: any): Promise<void> {
   await applyFeedback(host, { thread: role.kind === 'thread' ? role.id : undefined, project, agent: String(e.subagent_type ?? e.agent ?? '') || undefined }, fb)
 }
 
-export const register: Register = on => {
-  on('session.start', async ($, e, next) => {
-    // $ is only ever spelled $.noun.event(...): the helpers get this thin host instead of $ itself
-    const host = hostOf($)
-    resetModState()
-    role = await detectRole(host, e.cwd)
-    cwd = e.cwd
-    if (role.kind === 'thread') {
-      for (const t of THREAD_TOOLS) await $.tool.register({ ...t, isDeferred: false } as any)
+// one failing step is reported (status line + debug log) and never stops the next one
+async function soft($: any, label: string, fn: () => Promise<unknown>): Promise<boolean> {
+  try {
+    await fn()
+    return true
+  } catch (err) {
+    const msg = `lean-agent: ${label} failed: ${String((err as Error)?.message ?? err).slice(0, 120)}`
+    try {
+      $.ui.status(msg)
+    } catch {
+      /* no status line */
     }
-    await autoMigrate(host, $.plugin.root).catch(() => undefined) // leftover 0.45 service: unloaded at once, then the idempotent migrate
-    if (role.kind === 'desk' || role.kind === 'thread') await ensureGitHooks(host).catch(() => undefined)
-    if (role.kind === 'desk') {
-      await $.tool.register({
+    try {
+      $.ui.log(msg, { to: 'debug' })
+    } catch {
+      /* no debug log */
+    }
+    return false
+  }
+}
+
+async function registerOnce($: any, spec: { name: string }): Promise<void> {
+  if (registered.has(spec.name)) return
+  await $.tool.register(spec as any)
+  registered.add(spec.name)
+}
+
+// every timer asks the CURRENT role, so a stray tick after a role change does nothing
+function every($: any, ms: number, want: Role['kind'], fn: (host: Host) => Promise<void>): void {
+  const t = $.clock.every(ms, async () => {
+    if (role.kind !== want) return
+    try {
+      await fn(hostOf($))
+    } catch {
+      /* the next tick tries again */
+    }
+  })
+  if (t?.cancel) timers.push(() => t.cancel())
+}
+
+// All role-dependent setup, idempotent: the same role again does nothing; a changed role stops the old role's
+// timers and sets the new one up. Tools registered for an earlier role stay (their handlers refuse by role).
+// Returns session context lines (stale learned rules).
+export async function applyRole($: any, host: Host, newRole: Role): Promise<string[]> {
+  const key = roleKey(newRole)
+  role = newRole
+  if (key === applied) return []
+  if (key !== attempted) {
+    stopTimers()
+    attempted = key
+    done.clear()
+  }
+  applied = key
+  const ctx: string[] = []
+  let ok = true
+  // a step that succeeded for this role is never repeated; a failed one is retried at the next check
+  const step = async (label: string, fn: () => Promise<unknown>) => {
+    if (done.has(label)) return
+    if (await soft($, label, fn)) done.add(label)
+    else ok = false
+  }
+  if (newRole.kind === 'thread') {
+    await step('thread tools', async () => {
+      for (const t of THREAD_TOOLS) await registerOnce($, { ...t, isDeferred: false })
+    })
+  }
+  await step('0.45 migration check', () => autoMigrate(host, $.plugin.root)) // leftover 0.45 service: unloaded at once, then the idempotent migrate
+  if (newRole.kind === 'desk' || newRole.kind === 'thread') await step('git hooks', () => ensureGitHooks(host))
+  if (newRole.kind === 'desk') {
+    await step('desk tools', async () => {
+      await registerOnce($, {
         name: TOOL,
         description:
           'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, start. A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
-      })
-      await $.tool.register({
+      } as any)
+      await registerOnce($, {
         name: DOCTOR,
         description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent).',
         inputSchema: DOCTOR_SCHEMA,
         isDeferred: false,
+      } as any)
+    })
+    await step('desk timers', async () => {
+      every($, 10_000, 'desk', async host2 => {
+        await ensureGitHooks(host2).catch(() => undefined) // watch: projects.json may change behind the mod's back
+        await sweep(host2, id => leanThread(host2, $.plugin.root, { action: 'wake', tN: id }))
+        const n = (await unreadReports(host2)).recs.length
+        if (n && n !== notified) $.ui.notify(`${n} unread report(s) from threads`, { key: 'lean-reports' })
+        notified = n
       })
-      const timer = $.clock.every(10_000, async () => {
-        try {
-          const host2 = hostOf($)
-          await ensureGitHooks(host2).catch(() => undefined) // watch: projects.json may change behind the mod's back
-          await sweep(host2, id => leanThread(host2, $.plugin.root, { action: 'wake', tN: id }))
-          const n = (await unreadReports(host2)).recs.length
-          if (n && n !== notified) $.ui.notify(`${n} unread report(s) from threads`, { key: 'lean-reports' })
-          notified = n
-        } catch {
-          /* the next tick tries again */
-        }
-      })
-      void timer
       // the chaser: a goal untouched for an hour gets one status message to its open thread
-      $.clock.every(60_000, async () => {
-        try {
-          const host2 = hostOf($)
-          await chase(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }))
-        } catch {
-          /* the next tick tries again */
-        }
-      })
+      every($, 60_000, 'desk', host2 => chase(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text })))
       // scheduled sends: due lines of scheduled.jsonl go to their thread while the desk runs
-      $.clock.every(30_000, async () => {
-        try {
-          const host2 = hostOf($)
-          await runSchedule(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }))
-        } catch {
-          /* the next tick tries again */
-        }
-      })
-      // the desk folder's CLAUDE.md is generated: written only when it changed
-      try {
-        const want = await deskClaudeMd(host, $.plugin.root)
-        const file = `${deskDir(await homeDir(host))}/CLAUDE.md`
-        const have = await host.fs.read(file).catch(() => null)
-        if (want && have !== want) await atomicWrite(host, file, want)
-      } catch {
-        /* a desk without its CLAUDE.md still has the skill and the tool */
+      every($, 30_000, 'desk', host2 => runSchedule(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text })))
+    })
+    // the desk folder's CLAUDE.md is generated: written only when it changed
+    await step('desk CLAUDE.md', async () => {
+      const want = await deskClaudeMd(host, $.plugin.root)
+      const file = `${deskDir(await homeDir(host))}/CLAUDE.md`
+      const have = await host.fs.read(file).catch(() => null)
+      if (want && have !== want) await atomicWrite(host, file, want)
+    })
+  }
+  await step('pane', async () => {
+    for (const c of await paneRole($, newRole)) timers.push(c)
+  })
+  if (newRole.kind === 'thread') {
+    // learned rules: copied into the project's checkout (registered in projects.json), and told when they went stale;
+    // a thread's own worktree gets its copy from the worktree skill (lean_rules sync)
+    try {
+      const th = await readJson<{ project?: string }>(host, `${threadsDir(await homeDir(host))}/${newRole.id}/thread.json`, {})
+      const projs = await readJson<Record<string, { path?: string }>>(host, `${leanDir(await homeDir(host))}/projects.json`, {})
+      const repo = th.project ? projs?.[th.project]?.path : undefined
+      if (th.project && typeof repo === 'string' && repo.startsWith('/')) {
+        await syncRules(host, th.project, repo)
+        const stale = await checkStale(host, th.project, repo)
+        if (stale.length) ctx.push(`[lean-agent] ${stale.join('; ')}`)
       }
+    } catch {
+      /* rules are optional */
     }
-    await paneStart($, role).catch(() => undefined)
-    if (role.kind === 'thread') {
-      // learned rules: copied into the project's checkout (registered in projects.json), and told when they went stale;
-      // a thread's own worktree gets its copy from the worktree skill (lean_rules sync)
-      try {
-        const th = await readJson<{ project?: string }>(host, `${threadsDir(await homeDir(host))}/${role.id}/thread.json`, {})
-        const projs = await readJson<Record<string, { path?: string }>>(host, `${leanDir(await homeDir(host))}/projects.json`, {})
-        const repo = th.project ? projs?.[th.project]?.path : undefined
-        if (th.project && typeof repo === 'string' && repo.startsWith('/')) {
-          await syncRules(host, th.project, repo)
-          const stale = await checkStale(host, th.project, repo)
-          if (stale.length) return next({ ...e, context: [...((e as any).context ?? []), `[lean-agent] ${stale.join('; ')}`] } as any)
-        }
-      } catch {
-        /* rules are optional */
-      }
-    }
+  }
+  if (!ok) applied = '' // a failed step is tried again at the next check
+  return ctx
+}
+
+// Decide the role from the session's directories and apply it. A failed detection leaves the role as it is.
+async function settle($: any, host: Host, dir: string, root: string): Promise<string[]> {
+  seen = `${dir}\n${root}`
+  let r: Role | null = null
+  await soft($, 'role detection', async () => {
+    r = await detectRole(host, dir)
+    if (r.kind === 'plain' && root && root !== dir) r = await detectRole(host, root)
+  })
+  cwd = dir
+  return applyRole($, host, r ?? role)
+}
+
+// Re-check the directory (CwdChanged, turn.start, prompt.submit): nothing happens unless it changed.
+function redetect($: any, hint?: string): Promise<unknown> {
+  chain = chain
+    .then(async () => {
+      const dir = hint ?? (await $.session.cwd().catch(() => ''))
+      const root = await $.session.root().catch(() => '')
+      if (!dir && !root) return
+      const d = typeof dir === 'string' && dir ? dir : String(root)
+      const rt = typeof root === 'string' ? root : ''
+      if (applied && seen === `${d}\n${rt}`) return
+      await settle($, hostOf($), d, rt)
+    })
+    .catch(() => undefined)
+  return chain
+}
+
+export const register: Register = on => {
+  on('session.start', async ($, e, next) => {
+    // $ is only ever spelled $.noun.event(...): the helpers get this thin host instead of $ itself
+    const host = hostOf($)
+    resetModState()
+    const root = await $.session.root().catch(() => '')
+    const ctx = await settle($, host, e.cwd, typeof root === 'string' ? root : '')
+    // the command is role-free: registered once here
+    await $.command.register({ name: 'lean-agent', description: 'Open the lean-agent desk pane (goals, answers, threads)' }).catch(() => undefined)
+    if (ctx.length) return next({ ...e, context: [...((e as any).context ?? []), ...ctx] } as any)
+    return next(e)
+  })
+
+  // the app moves a pre-started session from a spare folder into the user's folder: the role is decided again
+  on('classic.CwdChanged', async ($, e: any, next) => {
+    await redetect($, typeof e?.new_cwd === 'string' ? e.new_cwd : undefined)
+    return next(e)
+  })
+  // fallback when the hook is not delivered: a cheap compare of the session's directory
+  on('turn.start', async ($, e: any, next) => {
+    await redetect($)
     return next(e)
   })
 
@@ -196,6 +312,7 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Bash' }, async ($, e: any, next) => squeezeResult(hostOf($), await next(e)))
 
   on('tool.call', { tool: `mcp__lean-agent__${TOOL}` }, async ($, e: any) => {
+    if (role.kind !== 'desk') return { result: 'lean-agent: only the desk can use this tool', isError: true } as any
     const host = hostOf($)
     const out = await leanThread(host, $.plugin.root, e)
     await ensureGitHooks(host).catch(() => undefined)
@@ -276,6 +393,7 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e: any, next) => {
     const host = hostOf($)
+    await redetect($)
     let extra: string | null = null
     try {
       if (role.kind === 'thread') extra = (await consumeWake(host, role.id, e.text)) ? null : await takeBatch(host, role.id)

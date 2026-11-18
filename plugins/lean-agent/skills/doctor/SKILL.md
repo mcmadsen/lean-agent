@@ -8,6 +8,10 @@ description: Check and repair the lean-agent install (desk folder, login opener,
 Everything goes through the desk's `lean_doctor` tool (full name `mcp__lean-agent__lean_doctor`). It only works in the
 desk session; report what it returned, never what you assume.
 
+If the tool is missing (no `lean_doctor` / `lean_thread`), this session is not the desk: tell the user to start a NEW
+session in `~/lean-agent-desk`. On 1.0.0 a session the app moved there from a spare folder never gets the tools; that
+needs 1.0.1 (`claude plugin update lean-agent`).
+
 | action | effect |
 |---|---|
 | `check` | read-only report: `claude` on PATH, desk folder `~/lean-agent-desk`, folder trusted, opener script current, launch agent installed, last line of the opener log, 0.45 leftovers. Lines starting `FIX` need `fix` |
