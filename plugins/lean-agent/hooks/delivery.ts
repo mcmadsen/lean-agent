@@ -19,6 +19,9 @@ function serial<T>(key: string, f: () => Promise<T>): Promise<T> {
   return run
 }
 
+// every writer of goals.json (lean_goal, the desk's goal-set/-clear, the chaser) reads and writes under this one lock
+export const goalsLocked = <T>(f: () => Promise<T>): Promise<T> => serial('goals', f)
+
 export type Consumed = { n: number }
 export const WAKE_MARK = /<!--\s*lean:n=(\d+)\s*-->/
 
@@ -104,9 +107,11 @@ export async function threadTool(h: Host, id: string, name: string, i: any): Pro
     }
     if (name === 'lean_goal') {
       if (!str(i.update)) return { ok: false, text: 'lean_goal needs update' }
-      const goals = await readJson<Record<string, { text: string; ts: number }>>(h, `${leanDir(home)}/goals.json`, {})
-      goals[id] = { text: str(i.update), ts }
-      await writeJson(h, `${leanDir(home)}/goals.json`, goals)
+      await goalsLocked(async () => {
+        const goals = await readJson<Record<string, { text: string; ts: number }>>(h, `${leanDir(home)}/goals.json`, {})
+        goals[id] = { text: str(i.update), ts }
+        await writeJson(h, `${leanDir(home)}/goals.json`, goals)
+      })
       return { ok: true, text: 'goal updated' }
     }
     if (name === 'lean_remember') {
@@ -172,7 +177,8 @@ export async function relayReports(h: Host, o: { busy: boolean; last: number; su
     await markRead(h, upTo)
     Promise.resolve()
       .then(() => o.submit(`${RELAY_LEAD}\n${renderReports(recs)}`))
-      .catch(() => serial('reports', () => markRead(h, was)).catch(() => undefined)) // refused: they show again at the next prompt
+      // refused: they show again at the next prompt, unless something was marked read meanwhile (then nothing is rewound: no repeats)
+      .catch(() => serial('reports', async () => { if ((await readJson<{ n: number }>(h, `${deskState(await homeDir(h))}/inbox-read.json`, { n: 0 })).n === upTo) await markRead(h, was) }).catch(() => undefined))
     return true
   })
 }

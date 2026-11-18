@@ -2,7 +2,7 @@
 // is left alone for another STALE_MS. A thread that has an unread question to the user is waiting, not stuck.
 import { homeDir, leanDir, readJson, writeJson } from './state'
 import type { Host } from './state'
-import { unreadReports } from './delivery'
+import { goalsLocked, unreadReports } from './delivery'
 import type { Thread } from './threads'
 import { threadsDir } from './state'
 
@@ -29,9 +29,11 @@ export async function chase(h: Host, send: (id: string, text: string) => Promise
   }
   if (chased.length) {
     // sends can be slow: re-read, so a goal updated meanwhile is not overwritten; only `chased` is set
-    const fresh = await readJson<Record<string, Goal>>(h, file, {})
-    for (const id of chased) if (fresh[id]) fresh[id]!.chased = now
-    await writeJson(h, file, fresh)
+    await goalsLocked(async () => {
+      const fresh = await readJson<Record<string, Goal>>(h, file, {})
+      for (const id of chased) if (fresh[id]) fresh[id]!.chased = now
+      await writeJson(h, file, fresh)
+    })
   }
   return chased
 }

@@ -1,6 +1,6 @@
 import { appendJsonl, atomicWrite, homeDir, leanDir, mkdirp, readJson, readJsonl, realPath, threadsDir, writeJson } from './state'
 import type { Host } from './state'
-import { unconsumed, wakeMark } from './delivery'
+import { goalsLocked, unconsumed, wakeMark } from './delivery'
 import { projectsAction, unknownProject } from './projects'
 import { settingsKeys, threadChoice } from './models'
 import type { Choice } from './models'
@@ -371,17 +371,21 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
         case 'goal-set': {
           const text = (i.text ?? '').trim()
           if (!text) return err('goal-set needs text')
-          const goals = await readJson<Record<string, unknown>>(h, `${leanDir(home)}/goals.json`, {})
-          goals[id] = { text, ts: await h.clock.now() }
-          await writeJson(h, `${leanDir(home)}/goals.json`, goals)
+          await goalsLocked(async () => {
+            const goals = await readJson<Record<string, unknown>>(h, `${leanDir(home)}/goals.json`, {})
+            goals[id] = { text, ts: await h.clock.now() }
+            await writeJson(h, `${leanDir(home)}/goals.json`, goals)
+          })
           return { ok: true, text: `${id} goal set` }
         }
         case 'goal-clear': {
-          const goals = await readJson<Record<string, unknown>>(h, `${leanDir(home)}/goals.json`, {})
-          if (!Object.prototype.hasOwnProperty.call(goals, id)) return { ok: true, text: `${id} has no goal` }
-          delete goals[id]
-          await writeJson(h, `${leanDir(home)}/goals.json`, goals)
-          return { ok: true, text: `${id} goal cleared` }
+          return await goalsLocked(async () => {
+            const goals = await readJson<Record<string, unknown>>(h, `${leanDir(home)}/goals.json`, {})
+            if (!Object.prototype.hasOwnProperty.call(goals, id)) return { ok: true, text: `${id} has no goal` }
+            delete goals[id]
+            await writeJson(h, `${leanDir(home)}/goals.json`, goals)
+            return { ok: true, text: `${id} goal cleared` }
+          })
         }
         case 'park':
           t.state = 'parked'
