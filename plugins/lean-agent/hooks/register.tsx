@@ -8,7 +8,7 @@ import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
 import { THREAD_TOOLS, consumeWake, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide } from './guard'
-import { dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
+import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
 import { checkStale, syncRules } from './rules'
@@ -22,6 +22,9 @@ import { hostOf } from './host'
 import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, noteSection, skillsSeen, trimListing } from './skilltrim'
 import { parseGrants, recordGrant, releaseGrant } from './guard'
 import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
+import { resetSkew, setRunning, skewNote } from './skew'
+
+setRunning(VERSION) // the code in this session; skew.ts compares it with what is installed
 
 export { hostOf }
 
@@ -47,7 +50,10 @@ export const resetModState = () => {
   cwd = ''
   resetPaneState()
   resetSkillStat()
+  resetSkew()
+  skew = null
 }
+let skew: string | null = null // the version-skew sentence of this session, or null
 let role: Role = { kind: 'plain' }
 let tries = 0
 let attempted = '' // the role key whose steps `done` lists
@@ -140,7 +146,7 @@ async function feedbackOf(host: Host, e: any, r: any): Promise<void> {
   if (!fb) return
   let project: string | undefined
   if (role.kind === 'thread') project = (await readJson<{ project?: string }>(host, `${threadsDir(await homeDir(host))}/${role.id}/thread.json`, {})).project
-  await applyFeedback(host, { thread: role.kind === 'thread' ? role.id : undefined, project, agent: String(e.subagent_type ?? e.agent ?? '') || undefined }, fb)
+  await applyFeedback(host, { thread: role.kind === 'thread' ? role.id : undefined, project, agent: String(e.subagent_type ?? e.agent ?? '') || undefined, version: VERSION }, fb)
 }
 
 // one failing step is reported (status line + debug log) and never stops the next one
@@ -329,6 +335,17 @@ export async function poolFor<T extends { name: string }>(host: Host, tools: T[]
   return trimTools(tools, kind, cfg.tools)
 }
 
+// Running code older (or newer) than the installed plugin: a status line now and at every turn (a pane tick may have replaced
+// it), one prompt line in prompt.compose. A failed look changes nothing.
+async function showSkew($: any): Promise<void> {
+  try {
+    skew = await skewNote(hostOf($), String($.plugin.root))
+    if (skew) $.ui.status(skew)
+  } catch {
+    /* no status line, or the manifest could not be read */
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     // $ is only ever spelled $.noun.event(...): the helpers get this thin host instead of $ itself
@@ -336,6 +353,7 @@ export const register: Register = on => {
     resetModState()
     const root = await bounded($, Promise.resolve($.session.root()), 'session.root').catch(() => '')
     const ctx = await serial(() => settle($, host, e.cwd, typeof root === 'string' ? root : ''))
+    await showSkew($)
     // the command is role-free: registered once here
     await $.command.register({ name: 'lean-agent', description: 'Open the lean-agent pane (setup, desk, threads)' }).catch(() => undefined)
     await $.command.register({ name: 'lean-agent-setup', description: 'Set up or repair lean-agent (desk folder, login opener, trust); no model turn needed' }).catch(() => undefined)
@@ -351,6 +369,7 @@ export const register: Register = on => {
   // fallback when the hook is not delivered: a cheap compare of the session's directory
   on('turn.start', async ($, e: any, next) => {
     await redetect($)
+    await showSkew($)
     return next(e)
   })
 
@@ -471,7 +490,7 @@ export const register: Register = on => {
   // every tool: guards first (fail closed), then delivery of queued messages to a busy session
   on('tool.call', async ($, e: any, next) => {
     const host = hostOf($)
-    const why = await decide(host, { role, cwd, agentType: await agentType($, e.agentId, e), agentId: e.agentId }, e)
+    const why = await decide(host, { role, cwd, agentType: await agentType($, e.agentId, e), agentId: e.agentId, version: VERSION }, e)
     if (why) return { deny: why } as any
     // the thread's grants for the worker it spawns: recorded while the Agent call runs, removed when it returns
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null
@@ -499,7 +518,8 @@ export const register: Register = on => {
     const r: any = await next(e)
     try {
       const text = await memorySection(hostOf($), role)
-      if (text && r?.sections) return { ...r, sections: [...r.sections, { id: 'lean-agent:memory', text, scope: 'session' }] }
+      const sections = [...(text ? [{ id: 'lean-agent:memory', text, scope: 'session' }] : []), ...(skew ? [{ id: 'lean-agent:skew', text: `[lean-agent] ${skew}`, scope: 'session' }] : [])]
+      if (sections.length && r?.sections) return { ...r, sections: [...r.sections, ...sections] }
     } catch {
       /* the prompt goes out without it */
     }

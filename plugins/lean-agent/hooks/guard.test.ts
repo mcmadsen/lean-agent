@@ -570,3 +570,13 @@ test('search: every flag must be on the command\'s own list (the reviewers\' byp
   for (const c of ['find -newer /h/code/app/a.ts -name x', 'grep --null-data x src', 'rg -vnA 2 .lean-agent', 'grep -rvnA 2 .lean-agent', 'find -name .lean-agent/x', 'ls -w 80', 'ls', 'rg -v pat', 'grep -r pat', 'grep pat']) expect(await home(c), c).toContain('granted')
   for (const c of ['rg -- -x src', 'grep -rv -e -x src', 'grep -rn -A 2 -m 3 foo .', 'find . -newer a.ts -name x', 'find src -type f -mtime -1 -name "*.ts"', 'ls -RFh src', 'ls -1 src', 'head -n 5 a.ts', 'tail -c 20 a.ts', 'wc -lw a.ts', 'cat -n a.ts', 'rg -C3 foo', 'rg --max-count=2 -ni foo src']) expect(await app(c), c).toBeNull()
 })
+
+test('every refusal names the code that refused it (version skew); an allow stays null', async () => {
+  const h = setup()
+  const ctx = { role: desk, cwd: '/r/app', version: '1.0.3' }
+  expect(await decide(h.host, ctx, { tool: 'Edit', file_path: '/h/x' })).toMatch(/^lean-agent.* \(lean-agent 1\.0\.3\)$/)
+  expect(await decide(h.host, { ...ctx, role: plain, agentType: 'lean-agent:explorer', agentId: 'a1' }, { tool: 'Bash', command: 'make clean' })).toMatch(/\(lean-agent 1\.0\.3\)$/)
+  expect(await decide(h.host, { ...ctx, role: plain, agentType: 'lean-agent:explorer', agentId: 'a1' }, { tool: 'Bash', command: 'git -C /r/app ls-files | head -3' })).toBeNull()
+  expect(await decide(h.host, { ...ctx, role: plain }, { tool: 'Bash', command: 'git -C /r/app push --force origin main' })).toMatch(/\(lean-agent 1\.0\.3\)$/)
+  expect(await decide(h.host, { role: desk, cwd: '/r/app' }, { tool: 'Edit', file_path: '/h/x' })).not.toContain('(lean-agent') // no version known (a spec, a helper): text unchanged
+})

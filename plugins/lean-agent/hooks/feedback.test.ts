@@ -48,3 +48,22 @@ test('the feedback log names an agent without the plugin prefix', async () => {
   await applyFeedback(h.host, { thread: 't1', project: 'proj', agent: 'lean-agent:worker-haiku' }, { status: 'done', missing: '', remember: [] } as any)
   expect(h.files.get('/h/.lean-agent/feedback.jsonl')).toContain('"agent":"worker-haiku"')
 })
+
+test('refused, unverified and unreached parse (strings or objects), are capped, and are filed with the running version', async () => {
+  const fb = parseFeedback(line({ status: 'partial', refused: [{ command: 'rg -n x f', text: 'only git is allowed (lean-agent 1.0.3)' }, 'ls -la', 5, { text: 'no command' }], unverified: ['retries are 3', 7], unreached: ['services/old', 'tools'], remember: [] }))!
+  expect(fb.refused).toEqual([{ command: 'rg -n x f', text: 'only git is allowed (lean-agent 1.0.3)' }, { command: 'ls -la', text: '' }])
+  expect(fb.unverified).toEqual(['retries are 3'])
+  expect(fb.unreached).toEqual(['services/old', 'tools'])
+  const many = parseFeedback(line({ status: 'done', unreached: Array.from({ length: 50 }, (_, i) => `d${i}`) }))!
+  expect(many.unreached.length).toBe(20)
+  const none = parseFeedback(line({ status: 'done' }))!
+  expect([none.refused, none.unverified, none.unreached]).toEqual([[], [], []])
+
+  const h = fakeHost(null)
+  await applyFeedback(h.host, { thread: 't1', project: 'proj', agent: 'lean-agent:explorer', version: '1.0.3' }, fb)
+  const row = JSON.parse(h.files.get('/h/.lean-agent/feedback.jsonl')!.trim())
+  expect(row).toMatchObject({ agent: 'explorer', version: '1.0.3', refused: 2, unverified: 1, unreached: 2, unreachedFolders: ['services/old', 'tools'] })
+  const ref = h.files.get('/h/.lean-agent/refusals.jsonl')!.trim().split('\n').map(l => JSON.parse(l))
+  expect(ref.map(r => r.command)).toEqual(['rg -n x f', 'ls -la'])
+  expect(ref[0]).toMatchObject({ version: '1.0.3', agent: 'explorer', text: 'only git is allowed (lean-agent 1.0.3)' })
+})

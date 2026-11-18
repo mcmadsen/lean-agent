@@ -87,7 +87,7 @@ test('stale: many changed files or a changed manifest mark an area; untouched ar
   const learn = JSON.parse(h.files.get(`${SRC}/learn.json`)!)
   expect(learn.areas.api.stale).toContain('manifest')
   expect(learn.areas.web.stale).toBeUndefined()
-  expect(h.calls.find(c => c.argv[0] === 'git' && c.argv[1] === 'diff')?.argv[3]).toBe('abc..HEAD')
+  expect(h.calls.find(c => c.argv[0] === 'git' && c.argv[1] === 'diff')?.argv.slice(2)).toEqual(['--name-status', '--no-renames', 'abc..HEAD'])
 })
 
 test('gaps: the area is found by glob; pathsIn picks paths, not urls', async () => {
