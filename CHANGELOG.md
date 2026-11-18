@@ -14,9 +14,11 @@
   the thread is closed anyway. The CLI has no command to rename a background session, so closed sessions are not labelled
   "[closed] tN".
 - **A long report arrives once.** A report longer than `DIRECT_MAX` (1500 characters) used to arrive twice: cut as a direct line, then
-  in full at the next prompt. The cut line now carries its row key too, so the row counts as delivered and nothing hands it over again;
-  the line says where the full text is (the pane's Answers list and the `desk/inbox.jsonl` row with that ts), and a refused send still
-  leaves the row for the next prompt.
+  in full at the next prompt. The full text is now written to `~/.lean-agent/desk/reports/<ts>-<tN>.md` (plain lines the desk can
+  Read), the cut line names that file and carries its row key too, so the row counts as delivered and nothing hands it over again
+  (the pane's Answers list still has it). When the file cannot be written, or the send is refused, the row stays unread for the next
+  prompt as before. A question is never cut. The generated thread guide leaves the `model:` line out when it is built without a
+  choice (compare's throw-away folder), and `close` also removes the session when the listing prints the real path of a linked home.
 
 ### Fixed (desk, feedback export)
 - **The desk can open lean-agent files in the app.** The app refused `~/.lean-agent/feedback-export/<file>.md` ("This file is outside

@@ -119,10 +119,13 @@ export const deskFile = (home: string) => `${leanDir(home)}/desk.json`
 const DELIVERED = (home: string) => `${deskState(home)}/inbox-delivered.json`
 const ROW_KEY = /<!--\s*lean:r=(\d+):(t\d+):(report|ask)\s*-->\s*$/ // the LAST thing on the line: text a thread wrote can never carry it there
 const oneLine = (s: string, n: number) => (s.replace(/\s+/g, ' ').trim().length > n ? s.replace(/\s+/g, ' ').trim().slice(0, n - 1) + '…' : s.replace(/\s+/g, ' ').trim())
-// A report longer than this is sent cut. The cut line carries the row key too, so its inbox row counts as delivered and the full
-// report is NOT handed over a second time at the next prompt (a long done report used to arrive twice). The full text stays in
-// the pane's Answers list and in desk/inbox.jsonl, and the line says so.
+// A REPORT longer than this is sent cut. The full text is first written to its own file, desk/reports/<ts>-<from>.md (plain lines the
+// desk can Read; the inbox is one JSON line per row), and the cut line names that file and carries the row key too: the row counts as
+// delivered and the full report is NOT handed over a second time at the next prompt (a long done report used to arrive twice). The
+// pane's Answers list still shows it. When the file cannot be written the cut line has no key and the row stays unread (nothing is lost).
+// A question is never cut: the real question may be its last sentence.
 export const DIRECT_MAX = 1500
+export const reportFile = (home: string, r: { ts: number; from: string }) => `${deskState(home)}/reports/${r.ts}-${r.from}.md`
 
 export async function recordDeskSid(h: Host, sid: string): Promise<void> {
   if (!sid) return
@@ -131,15 +134,18 @@ export async function recordDeskSid(h: Host, sid: string): Promise<void> {
   if (cur?.sid !== sid) await writeJson(h, deskFile(home), { ...(cur && typeof cur === 'object' ? cur : {}), sid })
 }
 
-// The line sent to the desk: the report (cut at DIRECT_MAX with a pointer to the full text) and ALWAYS the row key, so the row is marked
-// delivered and no prompt hands the same report over again. `cut`: the report was longer than DIRECT_MAX.
-export function directLine(r: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[] }): { line: string; cut: boolean } {
+// The line sent to the desk. `cut`: a report longer than DIRECT_MAX (cut, with a pointer). `keyed`: the line carries the row key, so the
+// row may be marked delivered: always, except a cut report whose full text has no file (`file` = the display path of the written
+// file; none = it could not be written).
+export function directLine(r: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[] }, file?: string): { line: string; cut: boolean; keyed: boolean } {
   const flat = r.text.replace(/\s+/g, ' ').trim().replace(/<!--|-->/g, '‹comment›') // no comment marker of a thread's can pose as the key
-  const cut = flat.length > DIRECT_MAX
+  const cut = r.kind === 'report' && flat.length > DIRECT_MAX
+  const keyed = !cut || !!file
   const head = `[lean-agent] ${r.from} ${r.kind === 'ask' ? 'asking' : r.state === 'done' ? 'done' : r.state === 'blocked' ? 'blocked' : 'progress'}: `
   const tail = `${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`
-  const body = cut ? `${flat.slice(0, DIRECT_MAX - 1).replace(/[\ud800-\udbff]$/, '')}… (cut: the full text is in the pane's Answers list and in ~/.lean-agent/desk/inbox.jsonl, the row with ts ${r.ts})` : flat
-  return { line: `${head}${body}${tail} <!-- lean:r=${r.ts}:${r.from}:${r.kind} -->`, cut }
+  const pointer = file ? `(cut: the full text is in ${file}: Read it; the pane's Answers list has it too)` : '(cut: the full report is in the desk inbox / pane)'
+  const body = cut ? `${flat.slice(0, DIRECT_MAX - 1).replace(/[\ud800-\udbff]$/, '')}… ${pointer}` : flat
+  return { line: `${head}${body}${tail}${keyed ? ` <!-- lean:r=${r.ts}:${r.from}:${r.kind} -->` : ''}`, cut, keyed }
 }
 
 async function setKey(h: Host, home: string, key: string, on: boolean): Promise<void> {
@@ -159,18 +165,24 @@ async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts
   if (!worth) return ''
   const sid = (await readJson<{ sid?: string }>(h, deskFile(home), {}))?.sid
   if (!sid) return ' (the desk session id is not known yet: it reads this from its inbox)'
-  const { line, cut } = directLine(rec)
+  // a long report: its full text goes to its own file first (the cut line points at it)
+  let file: string | undefined
+  if (rec.kind === 'report' && rec.text.replace(/\s+/g, ' ').trim().length > DIRECT_MAX) {
+    const path = reportFile(home, rec)
+    file = await atomicWrite(h, path, `# Report from ${rec.from} (${rec.state ?? 'progress'})\n\n${rec.text.trim()}\n`).then(() => `~/.lean-agent/desk/reports/${rec.ts}-${rec.from}.md`, () => undefined)
+  }
+  const { line, cut, keyed } = directLine(rec, file)
   const key = `${rec.ts}:${rec.from}:${rec.kind}`
   try {
-    await setKey(h, home, key, true)
+    if (keyed) await setKey(h, home, key, true)
     const r = await send(sid, line)
     if (r && r.isDelivered === false) {
-      await setKey(h, home, key, false)
+      if (keyed) await setKey(h, home, key, false)
       return ` (direct send to the desk refused: ${oneLine(String(r.reason ?? 'no reason'), 120)}; it reads this from its inbox)`
     }
-    return cut ? ' (sent to the desk cut short; the full report is in its pane and inbox, not handed over again)' : ' (also sent to the desk)'
+    return !cut ? ' (also sent to the desk)' : keyed ? ' (sent to the desk cut short; the full report is in a file the desk can read, and is not handed over again)' : ' (sent to the desk cut short; the full report is in its inbox and is handed over at its next prompt)'
   } catch (e) {
-    await setKey(h, home, key, false).catch(() => undefined)
+    if (keyed) await setKey(h, home, key, false).catch(() => undefined)
     return ` (direct send to the desk failed: ${oneLine(String((e as Error)?.message ?? e), 120)}; it reads this from its inbox)`
   }
 }

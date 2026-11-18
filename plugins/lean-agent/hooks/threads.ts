@@ -3,7 +3,7 @@ import { appendJsonl, atomicWrite, homeDir, leanDir, mkdirp, readJson, readJsonl
 import type { Host } from './state'
 import { goalsLocked, unconsumed, wakeMark } from './delivery'
 import { projectsAction, unknownProject } from './projects'
-import { THREAD_DEFAULT, settingsKeys, threadChoice } from './models'
+import { settingsKeys, threadChoice } from './models'
 import type { Choice } from './models'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { buildHandover, olderVersion, pluginVersion } from './handover'
@@ -154,13 +154,13 @@ async function template(h: Host, root: string, name: string): Promise<string> {
 }
 
 // the CLAUDE.md a new thread gets (compare builds a throw-away thread-shaped folder with the same text)
-// `choice`: the model and effort the session starts with (written into the guide as one line: a thread cannot see its own settings);
-// without one, the configured or default choice
+// `choice`: the model and effort the session starts with (written into the guide as one line: a thread cannot see its own settings).
+// Without one (compare's throw-away folder: no thread.json, the arm's model comes from flags) the line is left out, never guessed.
 export async function threadClaudeMd(h: Host, root: string, id: string, title: string, project: string, choice?: Choice): Promise<string> {
   const home = await homeDir(h)
   const cfg = await readJson<{ attribution?: unknown }>(h, `${leanDir(home)}/config.json`, {})
-  const c = choice ?? (await threadChoice(h, home, {}).then(x => (typeof x === 'string' ? THREAD_DEFAULT : x)))
-  return fill(await template(h, root, 'thread.md'), { id, title, project, lean: leanDir(home), attribution: attributionLine(cfg?.attribution === true), model: c.model, effort: c.effort })
+  const tpl = choice ? await template(h, root, 'thread.md') : (await template(h, root, 'thread.md')).split('\n').filter(l => !/\{\{(model|effort)\}\}/.test(l)).join('\n')
+  return fill(tpl, { id, title, project, lean: leanDir(home), attribution: attributionLine(cfg?.attribution === true), model: choice?.model ?? '', effort: choice?.effort ?? '' })
 }
 
 export async function deskClaudeMd(h: Host, root: string): Promise<string> {
@@ -495,7 +495,8 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           // Take the stopped session out of the app's list when the CLI can (`claude rm`: it keeps the conversation and never discards
           // unpushed work, because no --discard-unpushed / --force-remove-worktree is ever passed). Only a session that lives in the thread's own
           // folder: `rm` also deletes a worktree the session was started in, and that is never ours to remove.
-          if (t.sid && lrow && lrow.cwd === tpath(home, id)) {
+          const own = tpath(home, id)
+          if (t.sid && lrow && (lrow.cwd === own || (!!lrow.cwd && (await realPath(h, lrow.cwd)) === (await realPath(h, own))))) { // (the listing may print the real path of a linked home)
             const rm = await h.process.run(['claude', 'rm', lrow.id || t.sid.slice(0, 8)]).catch(() => null)
             outcome += rm && rm.exitCode === 0 ? ' and removed from the app\'s list (its conversation is kept)' : `; the app keeps stopped sessions in its list${rm ? ` (claude rm: ${(rm.stderr || rm.stdout).trim().replace(/\s+/g, ' ').slice(0, 120) || `exit ${rm.exitCode}`})` : ''}`
           } else if (t.sid && lrow) outcome += "; the app keeps stopped sessions in its list"

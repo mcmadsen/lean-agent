@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { readJsonl } from './state'
-import { DIRECT_MAX, RELAY_GAP_MS, consumeWake, markDelivered, markRead, recordDeskSid, relayReports, renderReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
+import { DIRECT_MAX, RELAY_GAP_MS, consumeWake, directLine, markDelivered, markRead, recordDeskSid, relayReports, renderReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { leanThread, resetLocks } from './threads'
 
 const SID = '11111111-2222-3333-4444-555555555555'
@@ -210,8 +210,11 @@ test('a long report is sent cut WITH its row key: it arrives once, the full text
   expect(r.text).toContain('not handed over again')
   expect(lines).toHaveLength(1)
   expect(lines[0]).toMatch(/<!-- lean:r=\d+:t1:report -->$/) // keyed, like a short one
-  expect(lines[0]).toContain("cut: the full text is in the pane's Answers list and in ~/.lean-agent/desk/inbox.jsonl, the row with ts ")
+  const ts = /lean:r=(\d+):t1:report/.exec(lines[0])![1]!
+  expect(lines[0]).toContain(`(cut: the full text is in ~/.lean-agent/desk/reports/${ts}-t1.md: Read it; the pane's Answers list has it too)`)
   expect(lines[0].length).toBeLessThan(DIRECT_MAX + 400)
+  // the file the pointer names holds the whole report as plain lines the desk can Read
+  expect(h.files.get(`/h/.lean-agent/desk/reports/${ts}-t1.md`)).toBe(`# Report from t1 (done)\n\n${long.trim()}\n`)
   // the desk hook marks it delivered; no prompt and no relay hands the full report over a second time
   expect(await markDelivered(h.host, lines[0])).toBe(true)
   expect((await unreadReports(h.host)).recs).toHaveLength(0)
@@ -223,6 +226,29 @@ test('a long report is sent cut WITH its row key: it arrives once, the full text
   h.clock.t += 10
   await threadTool(h.host, 't2', 'lean_report', { text: long, state: 'done' }, async () => ({ isDelivered: false, reason: 'busy' }))
   expect((await unreadReports(h.host)).recs.map(x => x.from)).toEqual(['t2'])
+})
+
+test('a long question is never cut and keeps its options; a cut never splits a surrogate pair; a long report whose file cannot be written goes unkeyed (its row stays unread)', async () => {
+  const { h } = setup()
+  await recordDeskSid(h.host, 'd')
+  const lines: string[] = []
+  const longAsk = `${'context '.repeat(300)}which database should it use?`
+  await threadTool(h.host, 't1', 'lean_ask', { question: longAsk, options: ['postgres', 'sqlite'] }, async (_s, t) => void lines.push(t))
+  expect(lines[0]).toContain('which database should it use? [options: postgres | sqlite]')
+  expect(lines[0]).not.toContain('cut:')
+  expect(lines[0]).toMatch(/<!-- lean:r=\d+:t1:ask -->$/)
+  // an emoji straddling the cut
+  const rec = { ts: 5, from: 't2', kind: 'report' as const, state: 'done', text: `${'a'.repeat(DIRECT_MAX - 2)}😀 and more ${'b'.repeat(200)}` }
+  const d = directLine(rec, '~/x.md')
+  expect(d.cut).toBe(true)
+  expect(d.line).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/) // no lone high surrogate
+  expect(d.line).not.toMatch(/(?<![\ud800-\udbff])[\udc00-\udfff]/) // no lone low surrogate
+  // no file: the cut line has no key, so the row stays for the next prompt
+  const nofile = directLine(rec)
+  expect(nofile.keyed).toBe(false)
+  expect(nofile.line).not.toContain('lean:r=')
+  expect(nofile.line).toContain('(cut: the full report is in the desk inbox / pane)')
+  expect(directLine({ ...rec, text: 'short' }).keyed).toBe(true)
 })
 
 test('direct send: a forged key in text cannot hide another row; a failed send unmarks; a refused relay rewinds to the real pointer', async () => {

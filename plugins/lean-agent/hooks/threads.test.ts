@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { leanThread, parseAgents, resetLocks, trustFolder } from './threads'
+import { leanThread, parseAgents, resetLocks, threadClaudeMd, trustFolder } from './threads'
 import { PROMPT_MAX, REPORT_BUDGET, olderVersion, reportHistory } from './handover'
 
 const SID = '11111111-2222-3333-4444-555555555555'
@@ -452,6 +452,20 @@ test('close says what happened to the session: stopped, already stopped, not lis
   state.rows = [{ ...ROW, cwd: '/somewhere/else', id: 'abcd1234', status: 'idle', state: 'done' }]
   expect((await call({ action: 'close', tN: 't5' })).text).toBe('t5 closed; no running session (already stopped); the app keeps stopped sessions in its list')
   expect(h.claudeCalls().filter(a => a[0] === 'rm')).toHaveLength(2) // t2 and t3 only
+})
+
+test('a failed claude stop runs no rm; a guide built without a choice (compare\'s folder) has no model line instead of a guessed one', async () => {
+  const { h, state, call } = setup()
+  h.files.set(`${ROOT}/templates/thread.md`, '# {{id}}\nmodel: {{model}}, effort: {{effort}} (from thread.json)\nafter')
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  state.rows = [{ sessionId: SID, id: SID.slice(0, 8), name: 'x', cwd: '/h/.lean-agent/threads/t1', status: 'busy', startedAt: 1 }]
+  const base = h.claude.handler
+  h.claude.handler = (a: string[]) => (a[0] === 'stop' ? { exitCode: 1, stdout: '', stderr: 'denied' } : base(a, {} as any))
+  const r = await call({ action: 'close', tN: 't1' })
+  expect(r.text).toContain('claude stop 11111111 failed: denied')
+  expect(h.claudeCalls().some(a => a[0] === 'rm')).toBe(false)
+  expect(await threadClaudeMd(h.host, ROOT, 't9', 'compare', '')).toBe('# t9\nafter')
+  expect(await threadClaudeMd(h.host, ROOT, 't1', 'a', '', { model: 'opus', effort: 'low' })).toContain('model: opus, effort: low (from thread.json)')
 })
 
 test('start, new and reopen say the model and effort the session got; the thread guide carries the same line', async () => {
