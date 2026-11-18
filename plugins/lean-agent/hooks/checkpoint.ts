@@ -26,6 +26,7 @@ export const GAP_MS = 20 * 60_000 // at most one checkpoint per thread in this t
 export const DESK_RETRY_MS = 10 * 60_000 // after a vetoed or failed desk compaction
 export const TRY_GAP_MS = 60_000 // a failed fresh start of a checkpoint is tried again after this
 export const MAX_TRIES = 5
+export const MAX_AGE_MS = 30 * 60_000 // a ready request the desk could not take in this time is dropped
 
 export type CheckpointCfg = { enabled: boolean; threadTokens: number; deskTokens: number }
 const tokensOf = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= MIN_TOKENS ? Math.floor(v) : DEFAULT_TOKENS)
@@ -73,8 +74,8 @@ export const REMIND_TEXT = `[lean-agent] Checkpoint: call lean_report now with s
 export const REPORTED_TEXT = 'checkpoint recorded: the desk starts a fresh session for this thread from it. End your turn now with one short line and start no new work.'
 
 // ---- thread side: what the mod watches ---------------------------------------------------------------------------
-export type Watch = { asked: boolean; reported: boolean; reminded: boolean; ready: boolean; agents: number; pushes: number }
-const fresh = (): Watch => ({ asked: false, reported: false, reminded: false, ready: false, agents: 0, pushes: 0 })
+export type Watch = { asked: boolean; reported: boolean; reminded: boolean; ready: boolean; started: boolean; agents: number; pushes: number }
+const fresh = (): Watch => ({ asked: false, reported: false, reminded: false, ready: false, started: false, agents: 0, pushes: 0 })
 let w: Watch = fresh()
 export const watch = (): Watch => w
 export const resetCheckpoints = (): void => {
@@ -141,7 +142,16 @@ async function markReady(h: Host, id: string, source: 'report' | 'fallback', sid
 // A new main turn started in a session whose checkpoint was ready but not yet taken (the user typed in the app, a wake, a resume):
 // the report predates that work, so the request is withdrawn and the thread is asked again at a later boundary.
 export async function turnStarted(h: Host, id: string): Promise<void> {
-  if (!w.ready) return
+  if (!w.ready) {
+    // the first turn of a process that was resumed outside the desk's wake (the app): a ready file of an earlier process is stale too
+    if (w.started) return
+    w.started = true
+    const home = await homeDir(h)
+    const old = await readRequest(h, home, id)
+    if (old?.phase === 'ready') await writeRequest(h, home, id, { ...old, phase: 'done' })
+    return
+  }
+  w.started = true
   w.ready = false
   w.asked = false
   w.reported = false
@@ -168,7 +178,9 @@ export async function turnEnded(h: Host, id: string, o: { reason?: string; sid: 
   // asked, never reported. A thread whose last report is done has finished its work: no reminder, no fresh session for it.
   const home = await homeDir(h)
   const mine = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r && r.from === id)
-  if (mine[mine.length - 1]?.state === 'done') return null
+  const askedAt = (await readRequest(h, home, id))?.ts ?? 0
+  const lastRep = mine[mine.length - 1]
+  if (lastRep?.state === 'done' && lastRep.ts > askedAt) return null // (a done report from before the ask was followed by more work)
   // one reminder turn, then a checkpoint from the reports the thread has already written
   if (!w.reminded && o.submit) {
     w.reminded = true
@@ -211,7 +223,8 @@ async function sweepAll(h: Host, run: (id: string) => Promise<{ ok: boolean; tex
     if (!t || t.state !== 'open' || !t.sid) continue
     const rq = await readRequest(h, home, e.name)
     if (rq?.phase !== 'ready') continue
-    if (staleRequest(rq, t)) {
+    // stale: the session worked on since, or the desk could not take it for MAX_AGE_MS (a row that never goes idle)
+    if (staleRequest(rq, t) || now - rq.ts > MAX_AGE_MS) {
       await writeRequest(h, home, e.name, { ...rq, phase: 'done' })
       continue
     }
@@ -243,7 +256,7 @@ export type DeskDeps = {
 type Desk = { retryAt: number; fallback: number; rejected: number } // fallback: the context size the handover file was written at (0 = none)
 const freshDesk = (): Desk => ({ retryAt: 0, fallback: 0, rejected: 0 })
 // an engine without session.compact (a TypeError, "not available"): no retry will help
-const hopeless = (e: unknown) => e instanceof TypeError || /not (a function|available|supported)|unsupported|no implementation/i.test(String((e as Error)?.message ?? e))
+const hopeless = (e: unknown) => e instanceof TypeError || /not a function|session\.compact is not available|no implementation/i.test(String((e as Error)?.message ?? e))
 let ds: Desk = freshDesk()
 // the sentence the pane footer and the status line carry while only the handover file is possible
 export const deskNote = (): string => (ds.fallback ? `desk context ${kTokens(ds.fallback)}: start a new desk session (it reads the handover)` : '')

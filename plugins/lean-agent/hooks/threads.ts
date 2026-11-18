@@ -487,7 +487,11 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
             t.checkpoints = was.checkpoints
             t.lastCheckpoint = was.lastCheckpoint
             // an error counts as a try (checkpoint.ts retries after a minute, gives up after five); "still running" does not
-            if (!r.ok) await writeRequest(h, home, id, { ...rq, tries: (rq.tries ?? 0) + 1, lastTry: now })
+            // (re-read: the session may have worked on meanwhile and withdrawn the request, which a failure must not bring back)
+            if (!r.ok) {
+              const cur = await readRequest(h, home, id)
+              if (cur?.phase === 'ready') await writeRequest(h, home, id, { ...cur, tries: (cur.tries ?? 0) + 1, lastTry: now })
+            }
             return r
           }
           await writeRequest(h, home, id, { phase: 'done', ts: now, n })

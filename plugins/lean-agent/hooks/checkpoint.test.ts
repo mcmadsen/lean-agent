@@ -3,7 +3,7 @@ import { fakeHost } from './fake'
 import { leanThread, resetLocks } from './threads'
 import { statsText } from './stats'
 import { loadView } from './view'
-import { DEFAULT_TOKENS, DESK_COMPACT_INSTRUCTIONS, DESK_RETRY_MS, GAP_MS, MAX_TRIES, askText, checkpointConfig, contextTokens, deskNote, deskTick, enter, isPush, noteReported, noteUsage, readRequest, resetCheckpoints, sweepCheckpoints, takeAsk, turnEnded, turnStarted, watch } from './checkpoint'
+import { DEFAULT_TOKENS, DESK_COMPACT_INSTRUCTIONS, DESK_RETRY_MS, GAP_MS, MAX_AGE_MS, MAX_TRIES, askText, checkpointConfig, contextTokens, deskNote, deskTick, enter, isPush, noteReported, noteUsage, readRequest, resetCheckpoints, sweepCheckpoints, takeAsk, turnEnded, turnStarted, watch } from './checkpoint'
 
 const SID = '11111111-2222-3333-4444-555555555555'
 const NEW = '99999999-8888-7777-6666-555555555555'
@@ -197,7 +197,7 @@ test('a checkpoint is a progress report when checkpoints are off or one was just
 
 test('a start that fails is tried again after a minute and given up after five tries, with a notice; a running session waits without a try', async () => {
   const { h, st, run } = setup()
-  await h.host.fs.write(`${T1}/checkpoint.json`, JSON.stringify({ phase: 'ready', ts: 1, tokens: 130_000 }))
+  await h.host.fs.write(`${T1}/checkpoint.json`, JSON.stringify({ phase: 'ready', ts: h.clock.t, tokens: 130_000 }))
   st.rows[0].status = 'busy' // working: nothing is stopped or replaced
   expect(await sweepCheckpoints(h.host, id => run({ action: 'checkpoint', tN: id }))).toEqual(['t1'])
   expect(h.claudeCalls().filter(a => a[0] === '--bg').length).toBe(0)
@@ -219,7 +219,7 @@ test('a start that fails is tried again after a minute and given up after five t
 
 test('while a checkpoint waits, a message is queued and the old session is not woken; a reopen settles a stale request', async () => {
   const { h, st, run } = setup()
-  await h.host.fs.write(`${T1}/checkpoint.json`, JSON.stringify({ phase: 'ready', ts: 1, tokens: 130_000, sid: SID }))
+  await h.host.fs.write(`${T1}/checkpoint.json`, JSON.stringify({ phase: 'ready', ts: h.clock.t, tokens: 130_000, sid: SID }))
   const r = await run({ action: 'send', tN: 't1', text: 'one more thing' })
   expect(r.text).toContain('continue in a fresh session')
   expect(h.claudeCalls().filter(a => a.includes('--resume')).length).toBe(0)
@@ -258,7 +258,7 @@ test('a ready request is withdrawn when the session works on (new turn, a wake s
   expect(b.h.claudeCalls().filter(x => x[0] === '--bg').length).toBe(0)
   // parked: never later
   const c = setup()
-  await c.h.host.fs.write(`${T1}/checkpoint.json`, JSON.stringify({ phase: 'ready', ts: 1, tokens: 130_000 }))
+  await c.h.host.fs.write(`${T1}/checkpoint.json`, JSON.stringify({ phase: 'ready', ts: c.h.clock.t, tokens: 130_000 }))
   await c.run({ action: 'park', tN: 't1' })
   await c.run({ action: 'reopen', tN: 't1' })
   expect(await sweepCheckpoints(c.h.host, id => c.run({ action: 'checkpoint', tN: id }))).toEqual([])
@@ -266,21 +266,42 @@ test('a ready request is withdrawn when the session works on (new turn, a wake s
   const d = setup()
   over()
   await takeAsk(d.h.host, 't1', idle)
-  d.h.files.set(`${L}/desk/inbox.jsonl`, JSON.stringify({ ts: 5, from: 't1', kind: 'report', state: 'done', text: 'all done' }) + '\n')
+  d.h.files.set(`${L}/desk/inbox.jsonl`, JSON.stringify({ ts: d.h.clock.t + 5, from: 't1', kind: 'report', state: 'done', text: 'all done' }) + '\n')
   const sent: string[] = []
   expect(await turnEnded(d.h.host, 't1', { reason: 'answer', sid: SID, submit: async t => void sent.push(t) })).toBeNull()
   expect(sent).toEqual([])
+  // a done report from BEFORE the ask (the thread got more work since) does not excuse it
+  const e = setup()
+  e.h.files.set(`${L}/desk/inbox.jsonl`, JSON.stringify({ ts: e.h.clock.t - 5, from: 't1', kind: 'report', state: 'done', text: 'all done' }) + '\n')
+  over()
+  await takeAsk(e.h.host, 't1', idle)
+  e.h.clock.t += 1000
+  expect(await turnEnded(e.h.host, 't1', { reason: 'answer', sid: SID, submit: async t => void sent.push(t) })).toBe('reminded')
+  // the first turn of a process that was resumed outside the desk withdraws a ready file of an earlier process; only once
+  const f = setup()
+  await f.h.host.fs.write(`${T1}/checkpoint.json`, JSON.stringify({ phase: 'ready', ts: f.h.clock.t, tokens: 130_000 }))
+  await turnStarted(f.h.host, 't1')
+  expect((await readRequest(f.h.host, '/h', 't1'))?.phase).toBe('done')
+  await f.h.host.fs.write(`${T1}/checkpoint.json`, JSON.stringify({ phase: 'ready', ts: f.h.clock.t, tokens: 130_000 }))
+  await turnStarted(f.h.host, 't1') // a later turn of the same process: its own ready request is only withdrawn through w.ready
+  expect((await readRequest(f.h.host, '/h', 't1'))?.phase).toBe('ready')
+  // a ready request the desk could not take for half an hour is dropped (a row that never goes idle)
+  const g = setup()
+  await g.h.host.fs.write(`${T1}/checkpoint.json`, JSON.stringify({ phase: 'ready', ts: g.h.clock.t, tokens: 130_000 }))
+  g.h.clock.t += MAX_AGE_MS + 1000
+  expect(await sweepCheckpoints(g.h.host, id => g.run({ action: 'checkpoint', tN: id }))).toEqual([])
+  expect((await readRequest(g.h.host, '/h', 't1'))?.phase).toBe('done')
 })
 
 test('overlapping desk ticks do not start twice or count a try twice', async () => {
   const { h, run } = setup()
-  await h.host.fs.write(`${T1}/checkpoint.json`, JSON.stringify({ phase: 'ready', ts: 1, tokens: 130_000 }))
+  await h.host.fs.write(`${T1}/checkpoint.json`, JSON.stringify({ phase: 'ready', ts: h.clock.t, tokens: 130_000 }))
   const [a, b] = await Promise.all([sweepCheckpoints(h.host, id => run({ action: 'checkpoint', tN: id })), sweepCheckpoints(h.host, id => run({ action: 'checkpoint', tN: id }))])
   expect([a.length, b.length].sort()).toEqual([0, 1])
   expect(h.claudeCalls().filter(x => x[0] === '--bg').length).toBe(1)
   // a try that just failed is not repeated by a second action call inside the minute (the lock re-checks)
   const f = setup()
-  await f.h.host.fs.write(`${T1}/checkpoint.json`, JSON.stringify({ phase: 'ready', ts: 1, tokens: 130_000, tries: 1, lastTry: f.h.clock.t - 1000 }))
+  await f.h.host.fs.write(`${T1}/checkpoint.json`, JSON.stringify({ phase: 'ready', ts: f.h.clock.t - 2000, tokens: 130_000, tries: 1, lastTry: f.h.clock.t - 1000 }))
   expect((await f.run({ action: 'checkpoint', tN: 't1' })).text).toContain('less than a minute')
   expect(f.h.claudeCalls().filter(x => x[0] === '--bg').length).toBe(0)
 })
@@ -343,7 +364,7 @@ test('a hook veto is retried later, not turned into a handover; a rejected compa
   r.h.files.set(`${L}/goals.json`, JSON.stringify({ t1: { text: 'ship the login fix', ts: 1 } }))
   r.h.files.set(`${L}/desk/inbox.jsonl`, JSON.stringify({ ts: 5, from: 't1', kind: 'report', state: 'working', text: 'form | found' }) + '\n')
   r.h.files.set(`${L}/questions.jsonl`, JSON.stringify({ ts: 4, from: 't1', question: 'which login page?', answered: false }) + '\n')
-  const bad = deskDeps({ compact: async () => { throw new Error('not available') } })
+  const bad = deskDeps({ compact: async () => { throw new Error('session.compact is not available') } })
   expect(await deskTick(r.h.host, bad.deps)).toBe('fallback')
   const md = r.h.files.get(`${L}/desk/handover.md`)!
   expect(md).toContain('context 150k')
