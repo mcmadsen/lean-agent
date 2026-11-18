@@ -13,7 +13,9 @@ const exportDir = (home: string) => `${leanDir(home)}/feedback-export`
 const privateDir = (home: string) => `${leanDir(home)}/.private` // real project names live here, never next to the files a user sends
 export const REPO_URL = /^https:\/\/github\.com\/mcmadsen\/lean-agent(?:[/?#].*)?$/
 // user names too common to be identifying (replacing them would only mangle prose)
-const GENERIC_USERS = new Set(['root', 'user', 'users', 'admin', 'home', 'ubuntu', 'runner', 'claude', 'test', 'tests', 'build', 'builder', 'code', 'data', 'guest', 'work', 'node', 'docker', 'deploy', 'jenkins', 'github', 'vagrant', 'ec2-user', 'app', 'www'])
+const GENERIC_USERS = new Set(['root', 'user', 'users', 'admin', 'home', 'ubuntu', 'runner', 'claude', 'test', 'tests', 'build', 'builder', 'code', 'data', 'guest', 'work', 'node', 'docker', 'deploy', 'jenkins', 'github', 'vagrant', 'ec2-user', 'app', 'www', 'system', 'master', 'server', 'python', 'public', 'default', 'shared', 'service', 'support', 'office', 'student', 'default', 'developer', 'shared'])
+// folder names too common to mask as "a project" (a project's folder basename is masked as the project; these would mangle prose)
+const COMMON_FOLDERS = new Set(['repo', 'repos', 'src', 'app', 'apps', 'code', 'main', 'work', 'tmp', 'git', 'project', 'projects', 'lean-agent', 'source', 'sources', 'dev', 'web', 'api', 'lib', 'docs'])
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 // ---- anonymisation ------------------------------------------------------------------------------------------------------------
@@ -34,9 +36,14 @@ const LONG_TOKEN = /\b[A-Za-z0-9_-]{32,}\b/g
 const URL_RE = /(?:https?|ssh|git|ftp):\/\/[^\s)>\]"'`]+/g
 const SCP_RE = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s:]+/g // git@host:org/repo.git
 const EMAIL_RE = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g
-const IP_RE = /(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])/g
-const HOST_RE = /(?<![A-Za-z0-9@/.-])(?:[A-Za-z0-9-]+\.)+(?:com|net|org|io|dev|co|app|cloud|local|internal|corp|lan|ai)\b/g
+const OCTET = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)'
+const IP_RE = new RegExp(`(?<![\\d.])${OCTET}(?:\\.${OCTET}){3}(?![\\d.])`, 'g') // a real address, not a 10.0.19045.3693 build number
+// a host name: a known TLD, not followed by more name (settings.local.json is a file, not a host)
+const HOST_RE = /(?<![A-Za-z0-9@/.-])(?:[A-Za-z0-9-]+\.)+(?:com|net|org|io|dev|cloud|local|internal|corp|lan)\b(?![\w-]|\.\w)/g
 const HOST_OK = /^(?:github\.com|dev\.azure\.com)$/i
+// github.com/<org>/<repo>: only the lean-agent repo is kept
+const GH_PATH = /(?<![A-Za-z0-9])github\.com\/([A-Za-z0-9._-]+)(?:\/([A-Za-z0-9._-]+))?/g
+const ghKept = (org: string, repo?: string) => org.toLowerCase() === 'mcmadsen' && (repo ?? '').toLowerCase() === 'lean-agent'
 const HEX_RE = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,}\b/g
 const ID_WORD_RE = /\b(PR|pull request|issue|ticket|story)(\s*#?\s*)\d+\b/gi
 const ID_KEY_RE = /\b(?!(?:UTF|SHA|ISO|MD|AES|RSA|TLS|SSL|HTTP|ECMA|RFC|GPT|TCP|UDP|IPV)-)[A-Z][A-Z0-9]{1,9}-\d+\b/g // a tracker key like ABC-123, not UTF-8
@@ -55,7 +62,7 @@ const label = (n: number) => (n < 26 ? `project-${String.fromCharCode(65 + n)}` 
 async function projectNames(h: Host, home: string): Promise<[string, string][]> {
   const names: string[] = []
   const extra: [string, string][] = [] // alias -> project name
-  const ok = (n: unknown): n is string => typeof n === 'string' && n.trim().length >= 3 && n.trim() !== 'global'
+  const ok = (n: unknown): n is string => typeof n === 'string' && n.trim().length >= 3 && n.trim() !== 'global' && n.trim().toLowerCase() !== 'lean-agent'
   const add = (n: unknown) => {
     if (ok(n) && !names.includes(n.trim())) names.push(n.trim())
   }
@@ -63,7 +70,8 @@ async function projectNames(h: Host, home: string): Promise<[string, string][]> 
   for (const [k, v] of Object.entries(projs)) {
     add(k)
     const p = typeof v?.path === 'string' ? v.path.replace(/\/+$/, '') : ''
-    if (ok(k) && p) for (const a of [p, p.split('/').pop() ?? '']) if (ok(a) && a !== k) extra.push([a.trim(), k.trim()])
+    // the folder (whole path, and its last name unless that is a common word) is masked as the same project
+    if (ok(k) && p) for (const a of [p, p.split('/').pop() ?? '']) if (ok(a) && a !== k && !COMMON_FOLDERS.has(a.toLowerCase())) extra.push([a.trim(), k.trim()])
   }
   for (const e of await h.fs.list(threadsDir(home)).catch(() => [])) add((await readJson<{ project?: string }>(h, `${threadsDir(home)}/${e.name}/thread.json`, {})).project)
   const file = `${privateDir(home)}/projects.map.json`
@@ -90,7 +98,7 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
   const hidden = (t: string) => t.replace(/project-(?:[A-Z]|\d+)\b/g, '') // our own labels are not leaks
 
   const anonymise = (input: string): string => {
-    let t = input
+    let t = input.replace(/[\u0001\u0002]/g, '') // our placeholder characters can never come from the text
     for (const re of SECRET_RES) t = t.replace(re, (m, g1) => (typeof g1 === 'string' ? `${g1}<secret>` : '<secret>'))
     t = t.replace(URL_RE, u => {
       const core = u.replace(/[.,;:!?]+$/, '') // sentence punctuation after a URL is not part of it
@@ -100,9 +108,11 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
     t = t.replace(AZURE_PATH, 'dev.azure.com/<org>/<org>').replace(AZURE_HOST, '<org>.visualstudio.com')
     t = t.replace(SCP_RE, '<url>').replace(EMAIL_RE, '<email>')
     t = t.replace(IP_RE, '<ip>').replace(HOST_RE, m => (HOST_OK.test(m) ? m : '<host>'))
+    t = t.replace(GH_PATH, (m, org: string, repo?: string) => (ghKept(org, repo) ? m : 'github.com/<org>/<repo>'))
     if (homeRe) t = t.replace(homeRe, '~')
     t = t.replace(USER_PATH, '~$1')
-    if (userOk) t = t.replace(new RegExp(`(?<![A-Za-z0-9])${esc(user)}(?![A-Za-z0-9])`, 'gi'), '<user>') // zeldaquux-laptop yes, zeldaquuxbox is left for the check
+    // the user name: a word when short; a long one (6+ letters) also inside longer words (a host name like <name>box)
+    if (userOk) t = t.replace(new RegExp(user.length < 6 ? `(?<![A-Za-z0-9])${esc(user)}(?![A-Za-z0-9])` : esc(user), 'gi'), '<user>')
     // projects: names become a private token first, then their labels, so a label is never re-matched by a name (labels already in
     // the text are left alone: running this twice changes nothing). The token is control characters only: no name can match it.
     t = t
@@ -134,6 +144,7 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
     if (new RegExp(EMAIL_RE.source).test(t) || new RegExp(SCP_RE.source).test(t)) out.push('email address')
     if (new RegExp(IP_RE.source).test(t)) out.push('IP address')
     if ((t.match(HOST_RE) ?? []).some(m => !HOST_OK.test(m))) out.push('host name')
+    if (Array.from(t.matchAll(GH_PATH)).some(m => !ghKept(m[1]!, m[2]))) out.push('code-host path')
     if (CRED_LEFT.test(t) || SECRET_RES.some(re => { const hit = new RegExp(re.source, re.flags.replace('g', '')).exec(t); return !!hit && !/<secret>$/.test(hit[0]) })) out.push('token or key')
     if (/dev\.azure\.com\/(?!<org>)[^/\s]/.test(t) || /\b(?!<org>)[A-Za-z0-9-]+\.visualstudio\.com/.test(t)) out.push('azure organisation')
     if ((t.match(URL_RE) ?? []).some(u => !REPO_URL.test(u.replace(/[.,;:!?]+$/, '')))) out.push('URL')
@@ -272,13 +283,15 @@ export function fit(c: Collected, at: number, cap = EXPORT_CAP): string {
 }
 
 // ---- the export ---------------------------------------------------------------------------------------------------------------
-export async function exportFeedback(h: Host, root: string, o: { notes?: string; version: string }): Promise<{ ok: boolean; text: string; path?: string }> {
+// `deps.wrap` lets a spec hand in a faulty anonymiser (a rule that regressed) to prove the final check refuses
+export async function exportFeedback(h: Host, root: string, o: { notes?: string; version: string }, deps: { wrap?: (a: Anonymiser) => Anonymiser } = {}): Promise<{ ok: boolean; text: string; path?: string }> {
   try {
     const home = await homeDir(h)
     const dir = exportDir(home)
     const st = { ...emptyState(), ...(await readJson<Partial<State>>(h, `${dir}/state.json`, {})) } as State
     const startedAt = await h.clock.now() // taken BEFORE collecting: what is written meanwhile belongs to the next export
-    const an = await makeAnonymiser(h)
+    const real = await makeAnonymiser(h)
+    const an = deps.wrap ? deps.wrap(real) : real
     const c = await collect(h, root, o, st, an)
     const body = an.anonymise(fit(c, st.at)) // once more over the whole file: nothing reaches it unscrubbed
     const miss = an.missed(body)

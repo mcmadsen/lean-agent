@@ -33,7 +33,7 @@ async function lineOf(h: Host, r: Row): Promise<string> {
   const code = await h.fs.read(`${r.dir}/${r.meta.file}`).catch(() => null)
   const edited = typeof code !== 'string' || hashText(code) !== r.meta.sha256
   const suffix = edited ? ' (edited, unaudited)' : r.meta.state === 'needs-update' ? ' (needs update)' : ''
-  const purpose = r.meta.purpose.replace(/<!|-->|`/g, '').replace(/\s+/g, ' ').slice(0, 140) // nothing that could open or close a comment or a code span
+  const purpose = r.meta.purpose.replace(/[<>`]/g, '').replace(/\s+/g, ' ').slice(0, 140) // no angle bracket or backtick at all: nothing can open or close a comment or a code span
   return `- ${purpose}: run \`${expandRun(r.meta, r.dir)}\` (script, do not compute this by reading files)${suffix}`
 }
 

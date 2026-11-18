@@ -87,6 +87,23 @@ test('review round: env-style credentials, scp remotes, IPs and hosts, a registe
   expect(s.missed('kimbos and kimboard')).toEqual([])
 })
 
+test('second review round: github paths, file names that look like hosts, build numbers, placeholder characters, common folder names', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ alpha: { path: '/work/repo' }, gamma: { path: '/work/lean-agent' }, kappa: { path: '/work/kappa-tools' } }))
+  const a = await makeAnonymiser(h.host)
+  expect(a.anonymise('see github.com/acme/private-repo and github.com/mcmadsen/lean-agent and https://github.com/mcmadsen/lean-agent/issues/9')).toBe('see github.com/<org>/<repo> and github.com/mcmadsen/lean-agent and https://github.com/mcmadsen/lean-agent/issues/9')
+  expect(a.anonymise(a.anonymise('github.com/acme/x'))).toBe('github.com/<org>/<repo>') // twice: the same
+  expect(a.missed('github.com/acme/x')).toContain('code-host path')
+  expect(a.missed('github.com/mcmadsen/lean-agent')).toEqual([])
+  expect(a.anonymise('edit settings.local.json and .claude/settings.json; build 10.0.19045.3693 on 2.1.327; srv.example.dev up')).toBe('edit settings.local.json and .claude/settings.json; build 10.0.19045.3693 on 2.1.327; <host> up')
+  expect(a.anonymise('ip 192.168.1.20 and 999.1.1.1')).toBe('ip <ip> and 999.1.1.1')
+  expect(a.anonymise('a\u0001b\u0002c alpha')).toBe('abc project-A') // the placeholder characters cannot come from the text
+  // a common folder name is not masked as a project (the project itself still is); "lean-agent" is never a project name here
+  expect(a.anonymise('in /work/repo and repo and kappa-tools and lean-agent running')).toBe('in project-A and repo and project-C and lean-agent running')
+  const u = await makeAnonymiser(setup('/q/systemx').host)
+  expect(u.anonymise('systemx and filesystemx')).toBe('<user> and file<user>')
+})
+
 test('thread ids stay; hashes, ticket and PR numbers, tokens and keys are replaced', async () => {
   const a = await makeAnonymiser(setup().host)
   expect(a.anonymise('t12 and t3 reported')).toBe('t12 and t3 reported')
@@ -116,9 +133,12 @@ test('a private string the rules cannot catch makes the export refuse: nothing i
   const h = setup('/q/zeldaquux')
   h.files.set('/q/zeldaquux/.lean-agent/feedback-drafts/2026-11-18-bug.md', '# bug\nthe laptop is called zeldaquuxbox and it hangs\n')
   const a = await makeAnonymiser(h.host)
-  expect(a.missed('zeldaquuxbox')).toEqual(['user name']) // embedded in a longer word: the replacement leaves it, the check does not
+  expect(a.anonymise('zeldaquuxbox')).toBe('<user>box') // a long name is masked inside longer words too
+  expect(a.missed('zeldaquuxbox')).toEqual(['user name']) // and the check would still flag it
   expect(a.missed('fine ~/code <user> project-A <url> <email>')).toEqual([])
-  const r = await run(h)
+  // a rule that regressed (the user name is no longer masked): the final check refuses, whatever the rules did
+  const faulty = (real: any) => ({ anonymise: (t: string) => real.anonymise(t).replace(/<user>/g, 'zeldaquux'), missed: real.missed })
+  const r = await exportFeedback(h.host, ROOT, { version: '1.0.4' }, { wrap: faulty })
   expect(r.ok).toBe(false)
   expect(r.text).toContain('refused')
   expect(r.text).toContain('user name')
