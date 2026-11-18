@@ -107,7 +107,7 @@ lean-agent folder without asking. Pushes stay behind the review gate and the pri
 | `todo` | the user's to-do list in `~/.lean-agent/todo.json` |
 | `stats`, `budget` | what sessions and workers cost, which rules load, caps |
 | `find` | search lean-agent's own state (threads, notes, memory, handovers, saved output, reviews) |
-| `feedback` | draft a bug report; posting needs the user's OK |
+| `feedback` | draft a bug report (posting needs the user's OK), or `/lean-agent-feedback`: one anonymised export file written by the mod |
 | `lean-mode` | work frugally on long unattended runs |
 | `doctor` | check and repair the install, migrate from 0.45 |
 

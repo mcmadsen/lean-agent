@@ -36,6 +36,19 @@
     `scripts/decisions.jsonl`) lets the user override a verdict. Adopting over an audit that said otherwise needs `confirm: true`;
     a script with a secret or a hardcoded home path or email is never adopted, not even by the user, and a script that was never
     audited cannot be adopted.
+- **Feedback export, done by the mod.** `/lean-agent-feedback [notes]` (a mod command, any session, no model turn) and the desk's
+  `lean_doctor` action `export` write ONE markdown file `~/.lean-agent/feedback-export/<YYYY-MM-DD-HHMM>.md` and print its path:
+  the notes, the environment (running vs installed lean-agent version with a SKEW flag, `claude --version`, OS family), the doctor's
+  problem lines, every draft in `feedback-drafts/` not exported before, the LEAN-FEEDBACK since the last export (counts by status;
+  the `missing` / `refused` / `unverified` / `unreached` texts grouped and de-duplicated with counts; gap lines count as `missing`),
+  the guard refusals (text, agent type, counts; the mod now logs each refusal to `logs/refusals.jsonl`), the script candidates
+  flagged for lean-agent core and the threads that reported `blocked`. It is anonymised by code, deterministically: home dir and
+  any user's home folder (macOS or Linux style) to `~`, the OS user name, registered project names to project-A, B ... (a stable local map in
+  `feedback-export/projects.map.json`, never exported; thread ids stay), emails, URLs other than the lean-agent repo, azure
+  organisations, hex of 7+ characters, numbers after PR / issue / ticket words and `#`, tokens and keys. A final check REFUSES to write
+  the file when a known private string survived and names the rule that missed. Over 40 KB the oldest and least repeated items are
+  summarised. It never posts and uses no network; `skills/feedback` says: a single report is a draft as before (post with `gh` only
+  if installed and only on an explicit yes), "export" is this.
 - **Scripts are easy to update.** An adopted script keeps versions (`scripts/<name>/v1/`, `v2/` ..., sha256, author, date and audit
   verdict per version, `current` in `meta.json`) and a stable `scripts/<name>/run` that the rule line and the recipe skill always
   name, so an update never edits a rule or a skill. `lean_script update <name>` (thread or desk; a new file or exact `edits`) stores a

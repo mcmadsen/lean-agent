@@ -8,7 +8,7 @@ import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
 import { THREAD_TOOLS, consumeWake, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide } from './guard'
-import { dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
+import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
 import { checkStale } from './rules'
@@ -24,6 +24,7 @@ import { parseGrants, recordGrant, releaseGrant } from './guard'
 import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
 import { SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 import { syncWithScripts } from './rulelines'
+import { exportFeedback, logRefusal } from './feedbackexport'
 
 export { hostOf }
 
@@ -78,7 +79,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate'] } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'export'] }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
 const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
@@ -230,7 +231,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       } as any)
       await registerOnce($, {
         name: DOCTOR,
-        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent).',
+        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent), export (write ONE anonymised feedback file, print its path; never posts).',
         inputSchema: DOCTOR_SCHEMA,
         isDeferred: false,
       } as any)
@@ -343,6 +344,7 @@ export const register: Register = on => {
     const ctx = await serial(() => settle($, host, e.cwd, typeof root === 'string' ? root : ''))
     // the command is role-free: registered once here
     await $.command.register({ name: 'lean-agent', description: 'Open the lean-agent pane (setup, desk, threads)' }).catch(() => undefined)
+    await $.command.register({ name: 'lean-agent-feedback', description: 'Write ONE anonymised feedback export file and print its path (never posts); optional notes as the argument' }).catch(() => undefined)
     await $.command.register({ name: 'lean-agent-setup', description: 'Set up or repair lean-agent (desk folder, login opener, trust); no model turn needed' }).catch(() => undefined)
     if (ctx.length) return next({ ...e, context: [...((e as any).context ?? []), ...ctx] } as any)
     return next(e)
@@ -490,7 +492,11 @@ export const register: Register = on => {
         return { result: setupText(o, true) } as any
       }
       if (e.action === 'migrate') return { result: (await migrate(host, $.plugin.root)).lines.join('\n') } as any
-      return { result: 'doctor: action must be check, fix or migrate', isError: true } as any
+      if (e.action === 'export') {
+        const o = await exportFeedback(host, $.plugin.root, { notes: typeof e.notes === 'string' ? e.notes : undefined, version: VERSION })
+        return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any
+      }
+      return { result: 'doctor: action must be check, fix, migrate or export', isError: true } as any
     } catch (err) {
       return { result: `doctor failed: ${String((err as Error)?.message ?? err)}`, isError: true } as any
     }
@@ -511,8 +517,12 @@ export const register: Register = on => {
   // every tool: guards first (fail closed), then delivery of queued messages to a busy session
   on('tool.call', async ($, e: any, next) => {
     const host = hostOf($)
-    const why = await decide(host, { role, cwd, agentType: await agentType($, e.agentId, e), agentId: e.agentId }, e)
-    if (why) return { deny: why } as any
+    const atype = await agentType($, e.agentId, e)
+    const why = await decide(host, { role, cwd, agentType: atype, agentId: e.agentId }, e)
+    if (why) {
+      await logRefusal(host, { text: why, agent: atype, tool: e.tool, thread: role.kind === 'thread' ? role.id : undefined }).catch(() => undefined) // for the feedback export
+      return { deny: why } as any
+    }
     // the thread's grants for the worker it spawns: recorded while the Agent call runs, removed when it returns
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null
     const gcall = g && (g.edit?.length || g.cmds?.length) ? String(e.toolUseId ?? `g${++grantSeq}`) : ''
