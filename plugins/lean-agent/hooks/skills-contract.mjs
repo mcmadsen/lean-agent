@@ -59,11 +59,12 @@ for (const name of readdirSync(`${root}/skills`).sort()) {
 
 //  3. nothing a background thread reads (skills, templates, commands) tells it to use Claude Code's EnterWorktree tool: for a path
 //     outside .claude/worktrees/ it asks a permission prompt nobody answers in a background session. A mention must be negated.
-for (const dir of ['skills', 'templates', 'commands']) {
+for (const dir of ['skills', 'templates', 'commands', 'agents']) {
   const files = dir === 'skills' ? readdirSync(`${root}/skills`).map(n => `skills/${n}/SKILL.md`) : readdirSync(`${root}/${dir}`).filter(n => n.endsWith('.md')).map(n => `${dir}/${n}`)
   for (const f of files) {
     const text = readFileSync(`${root}/${f}`, 'utf8').replace(/\n[ \t]+(?=\S)/g, ' ') // a wrapped bullet is one line
-    for (const line of text.split('\n')) if (/EnterWorktree/.test(line) && !/\b(never|not|no|without)\b/i.test(line)) fail(`${f}: names EnterWorktree without forbidding it: ${line.trim().slice(0, 80)}`)
+    // a mention must be forbidden right where it stands: "never ... EnterWorktree", "no EnterWorktree", "not the EnterWorktree tool"
+    for (const line of text.split('\n')) if (/EnterWorktree/.test(line) && !/\b(never|not|no|without)\b[^.;]{0,60}EnterWorktree/i.test(line)) fail(`${f}: names EnterWorktree without forbidding it: ${line.trim().slice(0, 80)}`)
   }
 }
 

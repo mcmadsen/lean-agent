@@ -8,6 +8,10 @@ import type { Inbox, Thread } from './threads'
 
 export const REPORT_BUDGET = 16_000 // chars of report history (about 4k tokens); the newest report is always kept whole
 const OLD_REPORT_MAX = 700 // an older report is cut to this
+const NEWEST_REPORT_MAX = 20_000 // the newest is whole up to this (the prompt is one argv string: Linux caps a single one at 128 KB)
+const QUEUED_MAX = 20 // queued desk messages, each cut to QUEUED_EACH
+const QUEUED_EACH = 1_000
+export const PROMPT_MAX = 80_000 // hard cap on the whole handover prompt (the parts above add up to about 60k at most)
 const BRIEF_MAX = 6_000
 const NOTES_MAX = 3_000
 const REMEMBER_MAX = 20
@@ -21,7 +25,7 @@ export function reportHistory(recs: DeskRec[], budget = REPORT_BUDGET): { lines:
   let used = 0
   let omitted = 0
   for (let i = recs.length - 1; i >= 0; i--) {
-    const l = line(recs[i]!, i === recs.length - 1 ? Number.MAX_SAFE_INTEGER : OLD_REPORT_MAX)
+    const l = line(recs[i]!, i === recs.length - 1 ? NEWEST_REPORT_MAX : OLD_REPORT_MAX)
     if (kept.length && used + l.length > budget) {
       omitted = i + 1
       break
@@ -60,9 +64,10 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     hist.lines.length && `## Your reports so far (oldest first${hist.omitted ? `; ${hist.omitted} older omitted` : ''})\n${hist.lines.join('\n')}`,
     notes && `## Your notes (end of notes.md)\n${cut(notes, NOTES_MAX, true)}`,
     mem.length && `## What you asked to remember\n${mem.map(m => `- ${cut(flat(m.text!), 300)}`).join('\n')}`,
-    queued.length && `## Messages from the desk that were queued for you\n${queued.map(m => `- ${m.from ? `[${m.from}] ` : ''}${flat(m.text)}`).join('\n')}`,
+    queued.length && `## Messages from the desk that were queued for you\n${queued.slice(-QUEUED_MAX).map(m => `- ${m.from ? `[${m.from}] ` : ''}${cut(flat(m.text), QUEUED_EACH)}`).join('\n')}${queued.length > QUEUED_MAX ? `\n(${queued.length - QUEUED_MAX} older messages omitted)` : ''}`,
   ].filter(Boolean)
-  return { prompt: parts.join('\n\n'), worktree: wt?.path, branch: wt?.branch }
+  const prompt = parts.join('\n\n')
+  return { prompt: prompt.length > PROMPT_MAX ? prompt.slice(0, PROMPT_MAX) + '\n…(handover cut: read brief.md, notes.md and the desk inbox for the rest)' : prompt, worktree: wt?.path, branch: wt?.branch }
 }
 
 // "1.0.4" < "1.0.10": numeric by part; an empty or unreadable version is unknown (never older)

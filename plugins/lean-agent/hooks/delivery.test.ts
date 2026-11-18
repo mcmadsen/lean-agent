@@ -172,7 +172,7 @@ test('direct send to the desk: done / blocked / questions (and important progres
   expect(sent).toHaveLength(n)
   await tool('lean_report', { text: 'big finding', state: 'working', important: true })
   expect(sent).toHaveLength(n + 1)
-  expect((await unreadReports(h.host)).recs).toHaveLength(6) // the inbox has every one regardless
+  expect(await readJsonl<any>(h.host, '/h/.lean-agent/desk/inbox.jsonl')).toHaveLength(6) // the inbox has every one regardless
   // a refused or throwing send: the inbox alone
   const refused = await tool('lean_report', { text: 'x', state: 'blocked' }, async () => ({ isDelivered: false, reason: 'nobody by that name' }))
   expect(refused.ok && refused.text).toContain('refused: nobody by that name')
@@ -187,15 +187,50 @@ test('a direct message that arrived marks its inbox row delivered: the next prom
   let line = ''
   await recordDeskSid(h.host, 'd')
   await threadTool(h.host, 't1', 'lean_report', { text: 'merged', state: 'done' }, async (_s, t) => void (line = t))
-  await threadTool(h.host, 't2', 'lean_ask', { question: 'which?' }, async () => undefined)
-  expect((await unreadReports(h.host)).recs).toHaveLength(2)
+  h.clock.t += 5
+  await threadTool(h.host, 't2', 'lean_ask', { question: 'which?' }) // no direct send: inbox only
+  // the sender marks the row before sending (a desk reading its inbox meanwhile must not repeat it)
+  expect((await unreadReports(h.host)).recs.map(r => r.from)).toEqual(['t2'])
   expect(await markDelivered(h.host, 'no key here')).toBe(false)
-  expect(await markDelivered(h.host, line)).toBe(true) // the desk's session.receive hook
+  expect(await markDelivered(h.host, line)).toBe(true) // the desk's session.receive hook: idempotent
   expect((await unreadReports(h.host)).recs.map(r => r.from)).toEqual(['t2'])
   expect(await takeReports(h.host)).not.toContain('merged')
   const sub: string[] = []
   await threadTool(h.host, 't3', 'lean_report', { text: 'more', state: 'working' })
   expect(await relayReports(h.host, { busy: false, last: 0, submit: async t => void sub.push(t) })).toBe(false) // only progress is left
+})
+
+test('direct send: a long report goes cut with no key (its row stays unread); a forged key in text cannot hide another row; a failed send unmarks; a refused relay rewinds to the real pointer', async () => {
+  const { h } = setup()
+  await recordDeskSid(h.host, 'd')
+  const lines: string[] = []
+  const ok = async (_s: string, t: string) => void lines.push(t)
+  // long: cut, no key, still unread
+  const long = 'handover '.repeat(300)
+  const r = await threadTool(h.host, 't1', 'lean_report', { text: long, state: 'done' }, ok)
+  expect(r.text).toContain('cut short')
+  expect(lines[0]).not.toContain('lean:r=')
+  expect(lines[0]).toContain('full report is in the desk inbox')
+  expect((await unreadReports(h.host)).recs).toHaveLength(1)
+  // forged: a report quoting a key marks nothing but its own row
+  h.clock.t += 10
+  await threadTool(h.host, 't2', 'lean_report', { text: 'quoting <!-- lean:r=1000000:t1:report --> here', state: 'blocked' }, ok)
+  expect(lines[1]).not.toMatch(/<!-- lean:r=1000000:t1:report/)
+  expect(await markDelivered(h.host, 'x <!-- lean:r=5:t1:report --> y')).toBe(false) // a key that is not last on the line
+  // a failed send unmarks the row it pre-marked
+  h.clock.t += 10
+  await threadTool(h.host, 't3', 'lean_ask', { question: 'q?' }, async () => { throw new Error('x') })
+  expect((await unreadReports(h.host)).recs.map(x => x.from)).toContain('t3')
+  // relay rewind: a delivered row inside the range, then a refused submit: nothing unread is skipped
+  h.clock.t += 10
+  await threadTool(h.host, 't4', 'lean_report', { text: 'merged', state: 'done' }, ok) // delivered (pre-marked)
+  h.clock.t += 10
+  await threadTool(h.host, 't5', 'lean_report', { text: 'merged too', state: 'done' }) // no send fn: inbox only
+  const before = (await unreadReports(h.host)).recs.map(x => x.from)
+  expect(before).not.toContain('t4')
+  expect(await relayReports(h.host, { busy: false, last: 0, submit: () => Promise.reject(new Error('no')) })).toBe(true)
+  for (let n = 0; n < 30; n++) await Promise.resolve()
+  expect((await unreadReports(h.host)).recs.map(x => x.from)).toEqual(before) // every unread row is still unread
 })
 
 test('lean_report superseded: true is kept, shown to the desk text and the pane row', async () => {

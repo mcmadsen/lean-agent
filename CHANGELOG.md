@@ -47,7 +47,6 @@
 - A worktree or branch folder no longer lands in `projects.json`: `project-add` refuses a path that is a linked git worktree, lives
   under `~/.lean-agent/worktrees` or is in `worktrees.json` (it names the main checkout to register instead), and `lean_doctor check`
   flags an existing entry whose path is a worktree (offering `project-remove`, which never deletes files).
-- Rebased on 1.0.4 (the merge restores `plainWords` on the strict pipeline scanner for the desk's gh / az reads).
 
 ### Fixed (earlier in this release)
 - The `pr` skill no longer promises the desk what strict mode refuses. Every step names its role: the desk only reads status

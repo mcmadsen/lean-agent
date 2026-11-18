@@ -226,7 +226,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       const closed: string[] = []
       const skipped: string[] = []
       for (const t of want) {
-        if (t.working) {
+        if (t.working || t.needsYou) {
           skipped.push(t.id)
           continue
         }
@@ -366,8 +366,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
                 </Text>
                 {t.resumable && <Button key={`resume-${t.id}`} label="Resume" onPress={thread('resume', t.id)} />}
                 {t.resumable && <Button key={`start-${t.id}`} label="Start" onPress={thread('start', t.id)} />}
-                {t.working ? (
-                  <Text dimColor>busy</Text>
+                {t.working || t.needsYou ? (
+                  <Text dimColor>{t.needsYou ? 'waiting for you' : 'busy'}</Text>
                 ) : (
                   <Button key={`close-${t.id}`} label={confirming(ui, `close:${t.id}`, now2) ? `Confirm close ${t.id}` : 'Close'} onPress={closeOne(t.id)} />
                 )}

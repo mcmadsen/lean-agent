@@ -246,10 +246,34 @@ test('a working thread has no Close (a busy label); needs-you shows for a sessio
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   expect(await ui.find({ type: 'Button', key: 'close-t1' })).toBeFalsy()
-  expect(await ui.find({ type: 'Text', text: /busy/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /waiting for you/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /needs you: open it in the app/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', key: 'close-t2' })).toBeTruthy() // an idle one still offers it
   void h
+  await ui.unmount()
+})
+
+test('a session waiting on a prompt gets no Close; arming one Close then pressing another re-arms without closing either; a thread that turned busy between the presses is not closed', async ($, on) => {
+  const rows: any[] = [{ sessionId: SID, name: 'x', cwd: '/x', status: 'idle', state: 'done', startedAt: 1, waitingFor: 'permission prompt' }]
+  const h = setup(on, rows)
+  thr(h, 't4', { sid: SID_OF(4) })
+  rows.push({ sessionId: SID_OF(4), name: 'y', cwd: '/y', status: 'idle', state: 'done', startedAt: 1 })
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Button', key: 'close-t1' })).toBeFalsy() // needs you: not offered
+  expect(await ui.find({ type: 'Text', text: /waiting for you/ })).toBeTruthy()
+  const st = (id: string) => JSON.parse(h.files.get(`/h/.lean-agent/threads/${id}/thread.json`)!).state
+  await ui.press({ key: 'close-t2' })
+  await ui.press({ key: 'close-t4' }) // another button: arms t4, t2 is not closed
+  expect([st('t2'), st('t4')]).toEqual(['open', 'open'])
+  expect(await ui.find({ type: 'Button', text: /Confirm close t4/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /Confirm close t2/ })).toBeFalsy()
+  rows[1].status = 'busy' // t4 turns busy before the second press
+  rows[1].state = 'working'
+  resetViewCache()
+  await ui.press({ key: 'close-t4' })
+  expect(st('t4')).toBe('open') // re-checked at the second press: nothing live is stopped
+  expect(h.claudeCalls().some((a: string[]) => a[0] === 'stop')).toBe(false)
   await ui.unmount()
 })
 

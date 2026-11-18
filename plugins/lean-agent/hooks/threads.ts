@@ -301,7 +301,7 @@ async function freshSession(h: Host, root: string, home: string, t: Thread, inst
   const listed = t.sid ? await agents(h) : []
   if (!listed) return err(`${t.id}: cannot list sessions (claude agents failed), so no new session is started`)
   const row = t.sid ? listed.find(a => a.sid === t.sid) : undefined
-  if (isRunning(row)) return { ok: true, text: `${t.id} is running: no new session started (stop it from the Claude app first)` }
+  if (isWorking(row)) return { ok: true, text: `${t.id} is running: no new session started (stop it from the Claude app first)` }
   if (row && row.pid > 0) {
     const stopped = await stopAlive(h, t, '', 'started fresh')
     if (stopped) return stopped
@@ -413,10 +413,10 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           const text = (i.text ?? '').trim()
           if (!text) return err('send needs text')
           await appendJsonl(h, `${tpath(home, id)}/inbox.jsonl`, { ts: await h.clock.now(), text } satisfies Inbox)
-          return await wake(h, home, t, { installed })
+          return await wake(h, home, t) // (a message wake does not stamp the version: only start and an explicit resume do)
         }
         case 'wake':
-          return await wake(h, home, t, { installed })
+          return await wake(h, home, t)
         case 'resume': {
           // A session keeps the lean-agent code it started with. When this one ran an older version than the installed one, a resume
           // would continue old behaviour: start a fresh session with a handover instead and say why (an unrecorded version is unknown: resume).

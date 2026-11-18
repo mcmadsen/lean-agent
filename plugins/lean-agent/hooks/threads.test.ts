@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { leanThread, parseAgents, resetLocks, trustFolder } from './threads'
-import { REPORT_BUDGET, olderVersion, reportHistory } from './handover'
+import { PROMPT_MAX, REPORT_BUDGET, olderVersion, reportHistory } from './handover'
 
 const SID = '11111111-2222-3333-4444-555555555555'
 const ROOT = '/p'
@@ -613,6 +613,20 @@ test('a fresh session regenerates the thread CLAUDE.md only when lean-agent wrot
   h.files.set(tfile(h, 'CLAUDE.md'), 'my own notes')
   await call({ action: 'reopen', tN: 't1' })
   expect(h.files.get(tfile(h, 'CLAUDE.md'))).toBe('my own notes')
+})
+
+test('a huge report and queue cannot blow the handover past one argv string; a close with an empty goal text still says cleared', async () => {
+  const { h, state, bg, call } = fresh()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  h.files.set('/h/.lean-agent/desk/inbox.jsonl', JSON.stringify({ ts: 1, from: 't1', kind: 'report', text: 'Z'.repeat(200_000), state: 'done' }) + '\n')
+  h.files.set('/h/.lean-agent/goals.json', JSON.stringify({ t1: { text: '', ts: 1 } }))
+  expect((await call({ action: 'close', tN: 't1' })).text).toBe('t1 closed, goal cleared')
+  for (let n = 0; n < 40; n++) await call({ action: 'send', tN: 't1', text: 'q'.repeat(10_000) })
+  state.rows = []
+  expect((await call({ action: 'reopen', tN: 't1' })).ok).toBe(true)
+  const prompt = bg[1]![bg[1]!.length - 1]!
+  expect(prompt.length).toBeLessThanOrEqual(PROMPT_MAX + 200)
+  expect(prompt).toContain('older messages omitted')
 })
 
 test('the handover keeps the newest report whole and cuts older ones to the budget', () => {

@@ -102,8 +102,9 @@ export const THREAD_TOOLS: Tool[] = [
 export type Send = (sid: string, text: string) => Promise<{ isDelivered: boolean; reason?: string } | void>
 export const deskFile = (home: string) => `${leanDir(home)}/desk.json`
 const DELIVERED = (home: string) => `${deskState(home)}/inbox-delivered.json`
-const ROW_KEY = /<!--\s*lean:r=(\d+):(t\d+):(report|ask)\s*-->/
+const ROW_KEY = /<!--\s*lean:r=(\d+):(t\d+):(report|ask)\s*-->\s*$/ // the LAST thing on the line: text a thread wrote can never carry it there
 const oneLine = (s: string, n: number) => (s.replace(/\s+/g, ' ').trim().length > n ? s.replace(/\s+/g, ' ').trim().slice(0, n - 1) + '…' : s.replace(/\s+/g, ' ').trim())
+export const DIRECT_MAX = 1500 // a report longer than this is sent cut, with no row key: its inbox row stays unread so nothing is lost
 
 export async function recordDeskSid(h: Host, sid: string): Promise<void> {
   if (!sid) return
@@ -112,37 +113,60 @@ export async function recordDeskSid(h: Host, sid: string): Promise<void> {
   if (cur?.sid !== sid) await writeJson(h, deskFile(home), { ...(cur && typeof cur === 'object' ? cur : {}), sid })
 }
 
-export const directLine = (r: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[] }) =>
-  `[lean-agent] ${r.from} ${r.kind === 'ask' ? 'asking' : r.state === 'done' ? 'done' : r.state === 'blocked' ? 'blocked' : 'progress'}: ${oneLine(r.text, 240)}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''} <!-- lean:r=${r.ts}:${r.from}:${r.kind} -->`
+// The line sent to the desk. `keyed`: it carries the whole report plus the row key (so the row may be marked delivered); a longer
+// report is cut with a pointer and no key.
+export function directLine(r: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[] }): { line: string; keyed: boolean } {
+  const flat = r.text.replace(/\s+/g, ' ').trim().replace(/<!--|-->/g, '‹comment›') // no comment marker of a thread's can pose as the key
+  const keyed = flat.length <= DIRECT_MAX
+  const head = `[lean-agent] ${r.from} ${r.kind === 'ask' ? 'asking' : r.state === 'done' ? 'done' : r.state === 'blocked' ? 'blocked' : 'progress'}: `
+  const tail = `${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`
+  return keyed
+    ? { line: `${head}${flat}${tail} <!-- lean:r=${r.ts}:${r.from}:${r.kind} -->`, keyed }
+    : { line: `${head}${flat.slice(0, DIRECT_MAX - 1)}… (cut: the full report is in the desk inbox / pane)${tail}`, keyed }
+}
 
-// '' = nothing to add to the tool result (not sent on purpose); else the sentence to append
+async function setKey(h: Host, home: string, key: string, on: boolean): Promise<void> {
+  await serial('reports', async () => {
+    const cur = await readJson<{ keys?: string[] }>(h, DELIVERED(home), {})
+    const keys = (Array.isArray(cur?.keys) ? cur.keys : []).filter(k => k !== key)
+    await writeJson(h, DELIVERED(home), { keys: (on ? [...keys, key] : keys).slice(-500) })
+  })
+}
+
+// '' = nothing to add to the tool result (not sent on purpose); else the sentence to append.
+// The row is marked delivered BEFORE the send (a desk that reads its inbox meanwhile must not hand it over a second time) and
+// unmarked again if the send fails or is refused.
 async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[] }, important: boolean): Promise<string> {
   if (!send) return ''
   const worth = rec.kind === 'ask' || rec.state === 'done' || rec.state === 'blocked' || important
   if (!worth) return ''
   const sid = (await readJson<{ sid?: string }>(h, deskFile(home), {}))?.sid
   if (!sid) return ' (the desk session id is not known yet: it reads this from its inbox)'
+  const { line, keyed } = directLine(rec)
+  const key = `${rec.ts}:${rec.from}:${rec.kind}`
   try {
-    const r = await send(sid, directLine(rec))
-    if (r && r.isDelivered === false) return ` (direct send to the desk refused: ${oneLine(String(r.reason ?? 'no reason'), 120)}; it reads this from its inbox)`
-    return ' (also sent to the desk)'
+    if (keyed) await setKey(h, home, key, true)
+    const r = await send(sid, line)
+    if (r && r.isDelivered === false) {
+      if (keyed) await setKey(h, home, key, false)
+      return ` (direct send to the desk refused: ${oneLine(String(r.reason ?? 'no reason'), 120)}; it reads this from its inbox)`
+    }
+    return keyed ? ' (also sent to the desk)' : ' (sent to the desk cut short; the full report is in its inbox)'
   } catch (e) {
+    if (keyed) await setKey(h, home, key, false).catch(() => undefined)
     return ` (direct send to the desk failed: ${oneLine(String((e as Error)?.message ?? e), 120)}; it reads this from its inbox)`
   }
 }
 
-// Desk side, a delivery from our own plugin arrived: its row is delivered, so no prompt hands it over again.
+// Desk side, a delivery from our own plugin arrived: its row is delivered, so no prompt hands it over again (idempotent: the sender
+// marked it before sending).
 export async function markDelivered(h: Host, text: string): Promise<boolean> {
   const m = ROW_KEY.exec(text)
   if (!m) return false
-  return serial('reports', async () => {
-    const home = await homeDir(h)
-    const cur = await readJson<{ keys?: string[] }>(h, DELIVERED(home), {})
-    const keys = Array.isArray(cur?.keys) ? cur.keys : []
-    const k = `${m[1]}:${m[2]}:${m[3]}`
-    if (!keys.includes(k)) await writeJson(h, DELIVERED(home), { keys: [...keys, k].slice(-500) })
-    return true
-  })
+  const home = await homeDir(h)
+  const k = `${m[1]}:${m[2]}:${m[3]}`
+  if (!(await deliveredKeys(h, home)).has(k)) await setKey(h, home, k, true)
+  return true
 }
 async function deliveredKeys(h: Host, home: string): Promise<Set<string>> {
   const cur = await readJson<{ keys?: string[] }>(h, DELIVERED(home), {})
@@ -212,12 +236,13 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
 }
 
 // ---- desk side -----------------------------------------------------------------------------------------------
-export async function unreadReports(h: Host): Promise<{ recs: DeskRec[]; upTo: number }> {
+// `from` is the real read pointer (rows before it were handed over); recs skips rows the desk already got as a direct message
+export async function unreadReports(h: Host): Promise<{ recs: DeskRec[]; upTo: number; from: number }> {
   const home = await homeDir(h)
   const all = await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)
   const read = (await readJson<{ n: number }>(h, `${deskState(home)}/inbox-read.json`, { n: 0 })).n || 0
   const got = await deliveredKeys(h, home) // rows the desk already received as a direct message
-  return { recs: all.slice(read).filter(r => !got.has(keyOf(r))), upTo: all.length }
+  return { recs: all.slice(read).filter(r => !got.has(keyOf(r))), upTo: all.length, from: read }
 }
 
 export async function markRead(h: Host, upTo: number): Promise<void> {
@@ -242,9 +267,9 @@ export async function relayReports(h: Host, o: { busy: boolean; last: number; su
   if (o.busy) return false
   return serial('reports', async () => {
     if ((await h.clock.now()) - o.last < RELAY_GAP_MS) return false
-    const { recs, upTo } = await unreadReports(h)
+    const { recs, upTo, from } = await unreadReports(h)
     if (!worthRelay(recs)) return false
-    const was = upTo - recs.length
+    const was = from // a refused submit rewinds to the real pointer (delivered rows are not part of recs)
     await markRead(h, upTo)
     Promise.resolve()
       .then(() => o.submit(`${RELAY_LEAD}\n${renderReports(recs)}`))

@@ -5,7 +5,7 @@ export type PaneUi = {
   open: Record<string, boolean> // section name -> unfolded (absent = the section's default)
   more: boolean // Answers: show all rows, not just the newest few
   rows: Record<string, boolean> // `a<n>` an answer row expanded; `g<tN>` an answer group unfolded
-  confirm: { key: string; until: number } | null // a first press of Close / Close all done / Reopen waits for its second
+  confirm: { key: string; until: number } | null // a first press of Close / Close all done waits for its second
 }
 export const EMPTY_UI: PaneUi = { open: {}, more: false, rows: {}, confirm: null }
 export const CONFIRM_MS = 10_000
