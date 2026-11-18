@@ -1,6 +1,6 @@
 import type { Register } from 'claude-code'
 
-import { resolveRole } from './role'
+import { recordSid, resolveRole, roleReport } from './role'
 import type { Role } from './role'
 import { deskClaudeMd, leanThread } from './threads'
 import { ensureGitHooks } from './githooks'
@@ -33,6 +33,8 @@ export const resetModState = () => {
   shown.clear()
   stopTimers()
   role = { kind: 'plain' }
+  startDir = ''
+  lastSid = ''
   applied = ''
   attempted = ''
   done.clear()
@@ -51,6 +53,8 @@ let tries = 0
 let attempted = '' // the role key whose steps `done` lists
 const done = new Set<string>()
 let applied = '' // the role applyRole last set up ('' = none yet, or a step failed and wants a retry)
+let startDir = '' // the folder the session first resolved from, for refusal texts
+let lastSid = ''
 let seenRoot = '' // the root the role was last decided with
 let seen = '' // the directories the role was last decided from
 let timers: Array<() => void> = []
@@ -76,11 +80,13 @@ const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'approve-push'] },
     tN: { type: 'string', description: 'thread id, like t3 (every action except new and list)' },
     text: { type: 'string', description: 'new: the brief; send: the message' },
     title: { type: 'string', description: 'new: short title' },
     project: { type: 'string', description: 'new / project-*: project name' },
+    sha: { type: 'string', description: 'approve-push: the full commit sha the user approved pushing (only after the user said so in the chat)' },
+    reason: { type: 'string', description: 'approve-push: why, in a few words' },
     model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'new/start: default sonnet' },
     effort: { type: 'string', enum: ['low', 'medium', 'high'], description: 'new/start: default medium' },
     path: { type: 'string', description: 'project-add: folder (must exist)' },
@@ -284,7 +290,10 @@ async function settle($: any, host: Host, dir: string, root: string, useRoot = t
   let r: Role | null = null
   const ok = await soft($, 'role detection', async () => {
     const sid = await bounded($, Promise.resolve($.session.id()), 'session.id').catch(() => '')
-    r = await resolveRole(host, { cwd: dir, root, sid: typeof sid === 'string' ? sid : '', current: role, useRoot })
+    lastSid = typeof sid === 'string' ? sid : ''
+    if (!startDir) startDir = dir
+    r = await resolveRole(host, { cwd: dir, root, sid: lastSid, current: role, useRoot })
+    if (r.kind === 'thread') await recordSid(host, r.id, lastSid).catch(() => false)
   })
   if (ok) {
     seen = `${dir}\n${root}`
@@ -422,7 +431,7 @@ export const register: Register = on => {
 
   on('tool.call', { tool: `mcp__lean-agent__${TOOL}` }, async ($, e: any) => {
     if (role.kind !== 'desk') await redetect($, undefined, true)
-    if (role.kind !== 'desk') return { result: 'lean-agent: only the desk can use this tool', isError: true } as any
+    if (role.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: e.tool.replace('mcp__lean-agent__', ''), need: 'desk', role, startDir, sid: lastSid }), isError: true } as any
     const host = hostOf($)
     const out = await leanThread(host, $.plugin.root, e)
     await ensureGitHooks(host).catch(() => undefined)
@@ -432,7 +441,7 @@ export const register: Register = on => {
 
   on('tool.call', { tool: `mcp__lean-agent__${DOCTOR}` }, async ($, e: any) => {
     if (role.kind !== 'desk') await redetect($, undefined, true)
-    if (role.kind !== 'desk') return { result: 'lean-agent: the doctor runs in the desk', isError: true } as any
+    if (role.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: 'lean_doctor', need: 'desk', role, startDir, sid: lastSid }), isError: true } as any
     const host = hostOf($)
     try {
       await ensureGitHooks(host).catch(() => undefined)
@@ -452,7 +461,7 @@ export const register: Register = on => {
   for (const t of THREAD_TOOLS) {
     on('tool.call', { tool: `mcp__lean-agent__${t.name}` }, async ($, e: any) => {
       if (role.kind !== 'thread') await redetect($, undefined, true) // a stale role never refuses: look once more (session id, folder)
-      if (role.kind !== 'thread') return { result: 'lean-agent: only a thread can use this tool', isError: true } as any
+      if (role.kind !== 'thread') return { result: await roleReport(hostOf($), { tool: t.name, need: 'thread', role, startDir, sid: lastSid }), isError: true } as any
       const out = await threadTool(hostOf($), role.id, t.name, e)
       await ensureGitHooks(hostOf($)).catch(() => undefined) // lean_* tools may change projects.json
       return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any

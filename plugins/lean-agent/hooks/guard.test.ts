@@ -1,7 +1,8 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { decide, isWorker, parseGrants, recordGrant, releaseGrant } from './guard'
-import { writeReview } from './reviews'
+import { writeReview, writeApproval, APPROVAL_TTL_MS } from './reviews'
+import { leanThread } from './threads'
 
 const SHA = 'abc1234def5678abc1234def5678abc1234def56'
 const desk = { kind: 'desk' } as const
@@ -409,4 +410,33 @@ test('an unknown or root session cwd widens no git -C root; a desk subagent with
     expect(await run(h, thread, { tool: 'Bash', command: 'git -C /h/other log' }, cwd, 'lean-agent:explorer', 'e1'), cwd).toContain('granted')
   const desk = { kind: 'desk' } as any
   expect(await run(h, desk, { tool: 'Bash', command: 'git log' }, '/r', undefined as any, 'x1')).toContain('type unresolved')
+})
+
+test('approve-push: the desk approves one sha once, for 2 h; forged, wrong-sha and expired records fail; the refusal names it and the manual command', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
+  const push = { tool: 'Bash', command: 'git push origin feature' }
+  const refusal = (await run(h, thread, push)) as string
+  expect(refusal).toContain(`ask the desk: approve-push t1 ${SHA}`)
+  expect(refusal).toContain('git -C /r/app push origin feature')
+  // a thread-written record carries no valid signature
+  h.files.set(`/h/.lean-agent/app/approvals/${SHA}.json`, JSON.stringify({ project: 'app', sha: SHA, exp: h.clock.t + 1e6, sig: 'f'.repeat(64) }))
+  expect(await run(h, thread, push)).toContain('no green review')
+  expect((await leanThread(h.host, '/p', { action: 'approve-push', tN: 't1', sha: 'abc' })).ok).toBe(false) // a short sha
+  expect((await leanThread(h.host, '/p', { action: 'approve-push', tN: 't1', sha: SHA, reason: 'user said yes' })).ok).toBe(true)
+  expect(String(h.files.get('/h/.lean-agent/threads/t1/history.jsonl'))).toContain('approve-push')
+  expect(await run(h, thread, push)).toBeNull() // accepted like a green review
+  expect(await run(h, thread, push)).toContain('no green review') // single use
+  await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
+  h.clock.t += APPROVAL_TTL_MS + 1
+  expect(await run(h, thread, push)).toContain('no green review') // expired
+  await writeApproval(h.host, { project: 'other', sha: SHA, thread: 't1' })
+  expect(await run(h, thread, push)).toContain('no green review') // another project's record
+})
+
+test('a private project is never pushed, approval or not', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app', private: true } }))
+  await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
+  expect(await run(h, thread, { tool: 'Bash', command: 'git push origin feature' })).toContain('private project')
 })

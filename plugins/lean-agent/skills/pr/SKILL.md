@@ -11,7 +11,7 @@ has recorded a green review for HEAD (the push guard enforces it).
 
 - **create**: `git push -u origin <branch>` (after a green review), then
   `gh pr create --title "<title>" --body-file <file>`; the body is what changed and why, plus how it was tested.
-  Add the attribution lines only if `~/.lean-agent/config.json` `attribution` says so. Report the URL with
+  Add the attribution lines only if `~/.lean-agent/config.json` `attribution` is true (your thread CLAUDE.md states the value; default off). Report the URL with
   `lean_report`.
 - **status**: `gh pr view <n> --json state,reviewDecision,statusCheckRollup,url,isDraft,mergeable`; for a thread, find
   the PR with `gh pr list --head <branch> --json number,url,state`. One row per PR: `tN | #n | state | checks | review`.

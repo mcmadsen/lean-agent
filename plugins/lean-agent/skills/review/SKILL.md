@@ -8,7 +8,8 @@ argument-hint: [base-branch]
 
 Run in a thread, in the repo or worktree to push. The push guard allows `git push` only when
 `lean_review` recorded a green verdict for the full HEAD sha (registered projects only); any new commit changes the sha, so
-the review must be redone after every change.
+the review must be redone after every change. Without a green review the refusal says what to do: ask the desk for
+`approve-push <tN> <sha>` (the user's yes, one sha, single use, 2 hours) or push by hand with the printed `git -C ... push` command.
 
 1. `git rev-parse HEAD` (full sha), `git diff <base>...HEAD --stat`; base defaults to the default branch.
 2. Pass 1: spawn the `lean-agent:reviewer` agent with the diff command and the project's test command. It lists findings by

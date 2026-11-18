@@ -2,7 +2,7 @@
 // read-only and --allow-edit grants for worker subagents. `decide` answers a deny text or null (allow).
 // register.tsx wraps it fail-closed: a throwing guard denies.
 import { homeDir, leanDir, readJson, realPath, threadsDir, writeJson } from './state'
-import { greenReview } from './reviews'
+import { greenReview, takeApproval } from './reviews'
 import { analyze, plainWords, privateText, type Verdict } from './shell'
 import type { Host } from './state'
 import type { Role } from './role'
@@ -199,7 +199,7 @@ async function protectedOne($: Host, args: string[], dir: string): Promise<strin
   return bad ? `lean-agent: ${force ? 'force-pushing' : 'deleting'} protected branch ${bad} is never allowed` : null
 }
 
-async function pushDenial($: Host, c: string, cwd: string): Promise<string | null> {
+async function pushDenial($: Host, c: string, cwd: string, role?: Role): Promise<string | null> {
   const a = analyze(c)
   const pushing = a.push
   const text = privateText(c)
@@ -233,7 +233,14 @@ async function pushDenial($: Host, c: string, cwd: string): Promise<string | nul
     if (!/^[0-9a-f]{7,64}$/.test(sha)) return `lean-agent push gate: cannot resolve ${ref} here, so no review can unlock the push`
     shas.push(sha)
   }
-  for (const sha of shas) if (!(await greenReview($, p.slug, sha))) return `lean-agent push gate: no green review for ${sha.slice(0, 8)} (project ${p.slug}); run the review skill first (an override needs the user's approval)`
+  for (const sha of shas) {
+    if (await greenReview($, p.slug, sha)) continue
+    if (await takeApproval($, p.slug, sha)) continue // the user's approval from the desk, single use
+    const first = pushArgs(segs[0] ?? []).rest
+    const manual = `git -C ${dir} push ${first[0] ?? '<remote>'} ${first[1] ?? '<branch>'}`
+    const who = role?.kind === 'thread' ? `ask the desk: approve-push ${role.id} ${sha}` : `the desk's lean_thread approve-push <tN> ${sha}`
+    return `lean-agent push gate: no green review for ${sha.slice(0, 8)} (project ${p.slug}). Run the review skill first, or have the user approve this exact commit (${who}); or the user can push by hand: ${manual}`
+  }
   return null
 }
 
@@ -433,6 +440,6 @@ export async function decide($: Host, ctx: Ctx, e: Call): Promise<string | null>
     const d = await workerDenial($, ctx, e)
     if (d) return d
   }
-  if (e.tool === 'Bash') return await pushDenial($, String(e.command ?? ''), ctx.cwd)
+  if (e.tool === 'Bash') return await pushDenial($, String(e.command ?? ''), ctx.cwd, ctx.role)
   return null
 }

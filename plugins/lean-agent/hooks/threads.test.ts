@@ -399,3 +399,16 @@ test('close stops a finished session whose process is still alive, by the listed
   await call({ action: 'close', tN: 't1' })
   expect(calls).toEqual(['stop abcd1234'])
 })
+
+test('new writes the attribution line into the thread CLAUDE.md: off by default, on from config.json', async () => {
+  const mk = async (cfg?: unknown) => {
+    const s = setup()
+    s.h.files.set(`${ROOT}/templates/thread.md`, '{{attribution}}')
+    if (cfg) s.h.files.set('/h/.lean-agent/config.json', JSON.stringify(cfg))
+    await leanThread(s.h.host, ROOT, { action: 'new', title: 'x' })
+    return String(s.h.files.get('/h/.lean-agent/threads/t1/CLAUDE.md'))
+  }
+  expect(await mk()).toContain('attribution: off - no Co-Authored-By trailers')
+  expect(await mk({ attribution: false })).toContain('attribution: off')
+  expect(await mk({ attribution: true })).toContain('attribution: on')
+})

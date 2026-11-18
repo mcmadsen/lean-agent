@@ -1,3 +1,4 @@
+import { writeApproval } from './reviews'
 import { appendJsonl, atomicWrite, homeDir, leanDir, mkdirp, readJson, readJsonl, realPath, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { unconsumed, wakeMark } from './delivery'
@@ -15,6 +16,7 @@ export type Thread = {
   project: string
   state: ThreadState
   sid: string // the background session's id, empty until started
+  sids?: string[] // every session id that was resolved as this thread (mod reload, compaction, resume): the mod appends
   created: number
   lastWake: number // ms of the last start/wake, 0 = never
   delivered: number // inbox.jsonl lines already handed to the session
@@ -108,6 +110,8 @@ export async function trustFolder(h: Host, folder: string): Promise<boolean> {
 }
 
 // ---- templates -----------------------------------------------------------------------------------------------
+// config.json `attribution` (default false) as one line for the thread's CLAUDE.md: a thread cannot read the setting otherwise
+export const attributionLine = (on: boolean) => (on ? 'attribution: on - end commits and PR text with the attribution lines the session was given' : 'attribution: off - no Co-Authored-By trailers, no generated-with lines')
 const fill = (t: string, vars: Record<string, string>) => t.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? '')
 
 export async function threadSettings(h: Host, id: string, hooks = true, choice?: Choice): Promise<string> {
@@ -140,7 +144,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; all?: boolean; confirm?: boolean }
+export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -213,7 +217,8 @@ async function create(h: Host, root: string, home: string, i: Input): Promise<Ou
   const dir = tpath(home, id)
   await mkdirp(h, dir)
   const t: Thread = { id, title, project: i.project ?? '', state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0 }
-  const vars = { id, title, project: t.project, lean: leanDir(home) }
+  const cfg = await readJson<{ attribution?: unknown }>(h, `${leanDir(home)}/config.json`, {})
+  const vars = { id, title, project: t.project, lean: leanDir(home), attribution: attributionLine(cfg?.attribution === true) }
   await h.fs.write(`${dir}/CLAUDE.md`, fill(await template(h, root, 'thread.md'), vars))
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
   await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id, hooks, pre))
@@ -361,6 +366,18 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
             if (st.exitCode !== 0) return { ok: true, text: `${id} closed, but claude stop ${stopId} failed: ${(st.stderr || st.stdout).trim().slice(0, 200)}. Stop it from the Claude app.` }
           }
           return { ok: true, text: `${id} closed` }
+        }
+        case 'approve-push': {
+          // the user said yes in the desk chat; only the desk's lean_thread reaches this. One sha, one push, two hours.
+          const sha = (i.sha ?? '').trim().toLowerCase()
+          if (!t.project) return err(`${id} has no project, so there is nothing to approve a push for`)
+          try {
+            await writeApproval(h, { project: t.project, sha, thread: id, reason: (i.reason ?? '').trim().slice(0, 200) || undefined })
+          } catch (e) {
+            return err(String((e as Error)?.message ?? e))
+          }
+          await appendJsonl(h, `${tpath(home, id)}/history.jsonl`, { ts: await h.clock.now(), kind: 'approve-push', sha, project: t.project, reason: (i.reason ?? '').trim().slice(0, 200) || undefined })
+          return { ok: true, text: `approved: one push of ${sha.slice(0, 8)} for ${t.project} by ${id}, valid 2 h, single use` }
         }
         case 'park':
           t.state = 'parked'

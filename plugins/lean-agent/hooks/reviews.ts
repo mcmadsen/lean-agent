@@ -1,7 +1,8 @@
 // Review records (the push gate's input). A record carries an HMAC-SHA256 over project, sha and verdict, keyed with a
 // secret that lives ONLY in the mod's own store ($.store, a file outside every project and outside what a session can
 // read through the mod's tools): no file a session can read holds the key, so a forged or copied record fails
-// verification and no path or glob guard is needed. The only writer is the mod tool `lean_review` (delivery.ts).
+// verification and no path or glob guard is needed. The writers are the mod tool `lean_review` (delivery.ts) and, for a push the
+// user approved in the desk chat, `approve-push` of the desk's lean_thread (threads.ts): a signed, single-use, expiring record.
 import { homeDir, leanDir, readJson, writeJson } from './state'
 import type { Host } from './state'
 import { slugOk } from './rules'
@@ -91,4 +92,36 @@ export async function greenReview(h: Host, project: string, sha: string): Promis
   if (!key) return false
   const want = await sign(key, project, sha, true)
   return rec.sig.length === want.length && rec.sig === want
+}
+
+// ---- push approval: the user's yes for ONE sha, given in the desk (a thread has no tool that writes it) ----------------
+export const APPROVAL_TTL_MS = 2 * 60 * 60 * 1000
+export type Approval = { project: string; sha: string; thread: string; reason?: string; ts: number; exp: number; used?: boolean; sig: string }
+export const approvalFile = (home: string, project: string, sha: string) => `${leanDir(home)}/${project}/approvals/${sha}.json`
+const signApproval = async (key: string, project: string, sha: string, exp: number): Promise<string> => {
+  const enc = new TextEncoder()
+  return hex(hmac(enc.encode(key), enc.encode(`approve-push\n${project}\n${sha}\n${exp}`)))
+}
+export async function writeApproval(h: Host, a: { project: string; sha: string; thread: string; reason?: string }): Promise<string> {
+  if (!/^[0-9a-f]{40,64}$/.test(a.sha)) throw new Error('approve-push needs the full commit sha (git rev-parse <ref>)')
+  if (!slugOk(a.project)) throw new Error('approve-push needs a project name')
+  const home = await homeDir(h)
+  const key = await secret(h, true)
+  const ts = await h.clock.now()
+  const exp = ts + APPROVAL_TTL_MS
+  const file = approvalFile(home, a.project, a.sha)
+  await writeJson(h, file, { ...a, ts, exp, used: false, sig: await signApproval(key, a.project, a.sha, exp) } satisfies Approval)
+  return file
+}
+// true once: a valid, unused, unexpired record is marked used as it is accepted
+export async function takeApproval(h: Host, project: string, sha: string): Promise<boolean> {
+  const home = await homeDir(h)
+  const file = approvalFile(home, project, sha)
+  const rec = await readJson<Partial<Approval> | null>(h, file, null)
+  if (!rec || rec.used || typeof rec.sig !== 'string' || typeof rec.exp !== 'number' || rec.project !== project || rec.sha !== sha) return false
+  if ((await h.clock.now()) > rec.exp) return false
+  const key = await secret(h, false)
+  if (!key || rec.sig !== (await signApproval(key, project, sha, rec.exp))) return false
+  await writeJson(h, file, { ...rec, used: true, usedAt: await h.clock.now() })
+  return true
 }
