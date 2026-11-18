@@ -1,6 +1,6 @@
 // Backstop for PRIVATE projects: thread sessions run with GIT_CONFIG_* (core.hooksPath) pointing at ~/.lean-agent/githooks.
 // Every standard git hook name there is a small POSIX sh wrapper that (1) runs lean-agent's own check (only pre-push has
-// one: a repo listed in private.list is never pushed) and then (2) chains to the repo's own hook, so husky, pre-commit,
+// one: a repo listed in private.list is never pushed, nor is a push its own/deny lines refuse; a stale list refuses too) and then (2) chains to the repo's own hook, so husky, pre-commit,
 // commit-msg, git-lfs ... keep running. This is a backstop, not a guarantee: `git push --no-verify`, `-c core.hooksPath=`
 // or other GIT_CONFIG_* overrides skip it, so the shell check in guard.ts refuses those in private projects too.
 import { homeDir, leanDir, mkdirp, readJson, realPath } from './state'
@@ -142,7 +142,8 @@ exit 0
 type Proj = { path?: string; private?: boolean; remote?: string; url?: string; guards?: { 'push-deny'?: unknown } }
 const normUrl = (u: string) => u.trim().toLowerCase().replace(/\/+$/, '').replace(/\.git$/, '')
 
-// the cache of projects.json's private entries (the pre-push hook also reads projects.json itself when it is newer)
+// the list the pre-push hook reads: projects.json's private entries plus the own/deny lines. The hook fails closed: it
+// refuses the push when projects.json is newer than this list, until the list is regenerated.
 export async function privateList(h: Host, home: string): Promise<string> {
   const projs = await readJson<Record<string, Proj>>(h, `${leanDir(home)}/projects.json`, {})
   const lean = await realPath(h, leanDir(home))

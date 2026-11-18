@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { autoMigrate, check, fix, migrate, plist, MIGRATE_NOTICE } from './doctor'
-import { readNotices } from './notices'
+import { readNotices, setNotice } from './notices'
 
 const L = '/h/.lean-agent'
 function legacy() {
@@ -171,4 +171,14 @@ test('autoMigrate: a systemd unit is disabled; a failing migrate leaves the "run
   await autoMigrate(h.host, '/plug')
   expect(seen).toContain('systemctl --user disable --now lean-agent.service')
   expect(await readNotices(h.host)).toContain(MIGRATE_NOTICE)
+})
+
+test('the migrate notice is cleared by a manual migrate and by the early-return path', async () => {
+  const h = fakeHost(null)
+  await setNotice(h.host, 'migrate', MIGRATE_NOTICE)
+  await migrate(h.host, '/plug')
+  expect(await readNotices(h.host)).not.toContain(MIGRATE_NOTICE)
+  await setNotice(h.host, 'migrate', MIGRATE_NOTICE)
+  await autoMigrate(h.host, '/plug')
+  expect(await readNotices(h.host)).not.toContain(MIGRATE_NOTICE)
 })

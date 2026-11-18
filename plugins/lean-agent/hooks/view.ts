@@ -5,6 +5,7 @@ import { deskState, unconsumed } from './delivery'
 import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
 import { readNotices } from './notices'
+import { spentToday } from './budget'
 import { isRunning, parseAgents } from './threads'
 import type { Thread } from './threads'
 
@@ -35,10 +36,7 @@ export const resetViewCache = () => {
 async function loadBudget(h: Host, home: string): Promise<string | null> {
   const now = await h.clock.now()
   if (budgetCache && now - budgetCache.at < BUDGET_TTL && now >= budgetCache.at) return budgetCache.text
-  const rows = await readJsonl<{ ts: number; usd?: number }>(h, `${leanDir(home)}/ledger.jsonl`)
-  const today = new Date(now).toISOString().slice(0, 10)
-  const total = rows.filter(r => new Date(r.ts).toISOString().slice(0, 10) === today).reduce((a, r) => a + (r.usd || 0), 0)
-  const text = rows.length ? `$${total.toFixed(2)}` : null
+  const text = (await h.fs.exists(`${leanDir(home)}/ledger.jsonl`)) ? `$${(await spentToday(h)).toFixed(2)}` : null
   budgetCache = { at: now, text }
   return text
 }

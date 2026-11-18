@@ -40,6 +40,40 @@ function words(c: string): string[] {
   return (c.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map(w => w.replace(/^(["'])(.*)\1$/, '$2'))
 }
 
+// Split a command into simple-command segments at ; & && || | ( ) $( ` and newlines outside quotes (heredoc bodies dropped).
+export function segments(c: string): string[] {
+  const t = c.replace(/<<-?[ \t]*(['"]?)([A-Za-z_]\w*)\1[^\n]*\n[\s\S]*?(\n[ \t]*\2[ \t]*(?=\n|$)|$)/g, m => m.slice(0, m.indexOf('\n')) + '\n')
+  const out: string[] = []
+  let cur = ''
+  let q = ''
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i]!
+    if (q) {
+      cur += ch
+      if (ch === '\\' && q === '"' && i + 1 < t.length) cur += t[++i]!
+      else if (ch === q) q = ''
+    } else if (ch === '\\' && i + 1 < t.length) cur += ch + t[++i]!
+    else if (ch === '"' || ch === "'") { q = ch; cur += ch }
+    else if (';&|()`\n\r'.includes(ch)) { out.push(cur); cur = '' }
+    else if (ch === '$' && t[i + 1] === '(') { out.push(cur); cur = ''; i++ }
+    else cur += ch
+  }
+  out.push(cur)
+  return out.map(x => x.trim()).filter(Boolean)
+}
+// the words after `push` of every `git [global flags] push` segment
+export function pushSegments(c: string): string[][] {
+  const out: string[][] = []
+  for (const seg of segments(c)) {
+    const w = words(seg)
+    const g = w.findIndex(x => x === 'git' || x.endsWith('/git'))
+    if (g < 0 || w.slice(0, g).some(x => !/^\w+=/.test(x) && !/^(env|sudo|command|exec|nohup|time)$/.test(x) && !x.startsWith('-'))) continue
+    const p = w.indexOf('push', g + 1)
+    if (p > 0) out.push(w.slice(p + 1))
+  }
+  return out
+}
+
 // The command reaches git push / gh publishing anywhere in its text (quotes, eval and bash -c included).
 export const PUSH = /\bgit\b[^;&|\n]*\bpush\b/
 // PRIVATE projects (structure in shell.ts): the command is lexed like a shell; quotes, heredocs, here-strings and
@@ -157,17 +191,16 @@ async function pushIsLocal($: Host, args: string[], dir: string): Promise<boolea
 // the refusal text, or null: `git push` words (the whole command) run in dir
 async function guardedDenial($: Host, c: string, dir: string): Promise<string | null> {
   if ((await $.env.get('LEAN_AGENT_PUSH_GUARD_OVERRIDE')) === '1') return null
-  const w = words(c)
-  const at = w.indexOf('push')
-  if (at < 0) return null
-  const args = w.slice(at + 1)
   const pats = await patternsFor($, dir)
-  if (!pats.length || (await pushIsLocal($, args, dir))) return null
-  const dests = await pushDestinations($, args, dir)
-  if (dests === null) return `lean-agent: \`git push --all/--mirror\` would update every branch, including guarded ones (${pats.join(', ')}). Push only your own branch.`
-  for (const d of dests) {
-    const hit = guardedBy(d, pats)
-    if (hit) return `lean-agent: \`git push\` would update ${d}, which lean-agent never pushes to (guard '${hit}'). Push your own branch and open a pull request.`
+  if (!pats.length) return null
+  for (const args of pushSegments(c)) {
+    if (await pushIsLocal($, args, dir)) continue
+    const dests = await pushDestinations($, args, dir)
+    if (dests === null) return `lean-agent: \`git push --all/--mirror\` would update every branch, including guarded ones (${pats.join(', ')}). Push only your own branch.`
+    for (const d of dests) {
+      const hit = guardedBy(d, pats)
+      if (hit) return `lean-agent: \`git push\` would update ${d}, which lean-agent never pushes to (guard '${hit}'). Push your own branch and open a pull request.`
+    }
   }
   return null
 }
@@ -175,10 +208,13 @@ async function guardedDenial($: Host, c: string, dir: string): Promise<string | 
 // A push that rewrites or deletes a shared branch is refused in every repo, registered or not.
 export const PROTECTED = /^(main|master|develop|dev|trunk|prod|production|stable|release([/-].*)?)$/
 async function protectedDenial($: Host, c: string, dir: string): Promise<string | null> {
-  const w = words(c)
-  const at = w.indexOf('push')
-  if (at < 0) return null
-  const args = w.slice(at + 1)
+  for (const args of pushSegments(c)) {
+    const r = await protectedOne($, args, dir)
+    if (r) return r
+  }
+  return null
+}
+async function protectedOne($: Host, args: string[], dir: string): Promise<string | null> {
   const flags = args.filter(a => a.startsWith('-') && a.length > 1)
   const rest = args.filter(a => !a.startsWith('-'))
   const force = flags.some(f => /^--force(-with-lease|-if-includes)?(=.*)?$/.test(f) || /^-[a-zA-Z]*f[a-zA-Z]*$/.test(f)) || rest.slice(1).some(a => a.startsWith('+'))
@@ -213,11 +249,15 @@ async function pushDenial($: Host, c: string, cwd: string): Promise<string | nul
   const p = await projectOf($, dir)
   if (!p) return null // the review gate is for registered projects; other repos push as before
   // the review is for the commit each pushed ref points at (the refspec's source), HEAD when the push names none
-  const w = words(c)
-  const { flags, rest } = pushArgs(w.indexOf('push') < 0 ? [] : w.slice(w.indexOf('push') + 1))
-  const srcs = flags.some(f => ['--all', '--mirror', '--branches'].includes(f)) ? [] : rest.slice(1).map(x => x.replace(/^\+/, '')).filter(x => !x.startsWith(':') && !x.startsWith('refs/tags/')).map(x => (x.includes(':') ? x.split(':')[0]! : x))
+  const segs = pushSegments(c)
+  const refs: string[] = []
+  for (const args of segs.length ? segs : [[]]) {
+    const { flags, rest } = pushArgs(args)
+    const srcs = flags.some(f => ['--all', '--mirror', '--branches'].includes(f)) ? [] : rest.slice(1).map(x => x.replace(/^\+/, '')).filter(x => !x.startsWith(':') && !x.startsWith('refs/tags/')).map(x => (x.includes(':') ? x.split(':')[0]! : x))
+    refs.push(...(srcs.length ? srcs : ['HEAD']))
+  }
   const shas: string[] = []
-  for (const ref of srcs.length ? srcs : ['HEAD']) {
+  for (const ref of refs) {
     const r = await $.process.run(['git', '-C', dir, 'rev-parse', '--verify', '--end-of-options', `${ref === '@' ? 'HEAD' : ref}^{commit}`])
     const sha = r.exitCode === 0 ? r.stdout.trim() : ''
     if (!/^[0-9a-f]{7,64}$/.test(sha)) return `lean-agent push gate: cannot resolve ${ref} here, so no review can unlock the push`

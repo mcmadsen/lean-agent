@@ -117,7 +117,10 @@ export async function migrate(h: Host, root: string): Promise<Migrated> {
   const home = await homeDir(h)
   const lean = leanDir(home)
   const flag = `${lean}/migrated-1.0.json`
-  if (await h.fs.exists(flag)) return { done: true, already: true, lines: ['already migrated'] }
+  if (await h.fs.exists(flag)) {
+    await setNotice(h, 'migrate', null)
+    return { done: true, already: true, lines: ['already migrated'] }
+  }
   const lines: string[] = []
   const leg = `${lean}/${LEGACY}`
   await mkdirp(h, leg)
@@ -228,6 +231,7 @@ export async function migrate(h: Host, root: string): Promise<Migrated> {
   const f = await fix(h, root)
   lines.push(...f.lines)
   await writeJson(h, flag, { at: now, date: ISO(now), threadsClosed: ts.length, learn })
+  await setNotice(h, 'migrate', null)
   return { done: true, lines }
 }
 
@@ -255,7 +259,10 @@ export async function autoMigrate(h: Host, root: string): Promise<{ found: strin
   const lean = leanDir(home)
   const found = await leftover45(h)
   const migrated = await h.fs.exists(`${lean}/migrated-1.0.json`)
-  if (!found.length && (migrated || !(await legacyPresent(h, home)))) return { found, lines: [] }
+  if (!found.length && (migrated || !(await legacyPresent(h, home)))) {
+    await setNotice(h, 'migrate', null)
+    return { found, lines: [] }
+  }
   const lines: string[] = []
   if (found.includes('launch agent')) {
     const uid = (await run(h, ['id', '-u'])).out

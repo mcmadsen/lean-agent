@@ -75,6 +75,26 @@ test('push gate: only a signed green review for HEAD unlocks that sha, and only 
   expect(await run(h, thread, { tool: 'Bash', command: 'git commit -m x' })).toBeNull()
 })
 
+test('push parsing is per git push segment: chained commands are neither over- nor under-matched', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
+  h.git.handler = a => {
+    if (a.includes('get-url')) return { exitCode: 0, stdout: 'git@github.com:o/r.git\n' }
+    if (a.includes('symbolic-ref')) return { exitCode: 0, stdout: 'feature\n' }
+    if (a.includes('--abbrev-ref') || a.includes('config')) return { exitCode: 1, stdout: '' }
+    return { exitCode: 0, stdout: SHA + '\n' }
+  }
+  await writeReview(h.host, { green: true, sha: SHA, project: 'app' })
+  const r = (command: string) => run(h, thread, { tool: 'Bash', command })
+  expect(await r('git push -u origin HEAD && gh pr create --fill')).toBeNull()
+  expect(await r('git push origin feature && gh pr create --base main')).toBeNull()
+  expect(await r('git push origin feature && echo main')).toBeNull()
+  expect(await r('echo "a; b" && git -C /r/app push origin feature')).toBeNull()
+  expect(await r('echo push; git push origin main')).toContain('never pushes')
+  expect(await r('echo x; git push origin main')).toContain('never pushes')
+  expect(await r('git status && git push --force origin main')).toContain('protected')
+})
+
 test('review records are HMAC-signed with a key only in the mod store: forged, copied or legacy-keyed records fail', async () => {
   const h = setup()
   const push = { tool: 'Bash', command: 'git push origin feature' }

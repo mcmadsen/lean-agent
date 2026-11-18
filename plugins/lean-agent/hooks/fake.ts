@@ -49,6 +49,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       if (c === 'openssl') return ok('ab'.repeat(32))
       if (c === 'id') return ok('501')
       if (c === 'uname') return ok('Darwin')
+      if (c === 'wc') { const t = files.get(a[a.length - 1]); return t === undefined ? { exitCode: 1, stdout: '', stderr: 'no such file' } : ok(new TextEncoder().encode(t).length + ' ' + a[a.length - 1]) }
       if (c === 'tee') { const p = a[a.length - 1]; files.set(p, (files.get(p) ?? '') + (call.stdin ?? '')); return ok(call.stdin) }
       if (c === 'claude') { const r = claude.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
       if (c === 'git') { const r = git.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }

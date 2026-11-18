@@ -65,3 +65,15 @@ test('the daily sum is cached in the store: new rows are added, the ledger is re
   expect(await spentToday(h.host, 'desk')).toBe(0)
   expect(n).toBe(first + 1)
 })
+
+test('the daily cache loses no row when another writer appended behind its back', async () => {
+  const h = fakeHost(null)
+  await record(h.host, { role: 'desk' }, 'sonnet', { input_tokens: 1_000_000 })
+  expect(await spentToday(h.host)).toBe(3)
+  // a parallel session appends (its cache update never reaches this store)
+  const f = '/h/.lean-agent/ledger.jsonl'
+  h.files.set(f, h.files.get(f)! + JSON.stringify({ ts: 10, role: 'thread', model: 'haiku', in: 0, out: 0, cache_read: 0, cache_write: 0, usd: 2 }) + '\n')
+  await record(h.host, { role: 'desk' }, 'sonnet', { input_tokens: 1_000_000 })
+  expect(await spentToday(h.host)).toBe(8)
+  expect(await spentToday(h.host, 'thread')).toBe(2)
+})

@@ -39,32 +39,64 @@ export async function record(h: Host, ctx: { role: string; tN?: string; agentId?
     usd: costUsd(model, u),
   }
   await appendJsonl(h, ledgerFile(home), row)
-  // the ledger is append-only: add the new row to today's cached sum (spentToday rebuilds the cache when the day changes)
-  const c = await cache(h)
-  if (c && c.day === day(row.ts)) {
-    c.byRole[row.role] = (c.byRole[row.role] ?? 0) + (row.usd || 0)
-    await h.store.set(CACHE, c).catch(() => undefined)
-  }
+  await syncCache(h, home, row.ts, row)
   return row
 }
 
-// daily sums per role, kept in the mod's store: the ledger is read (once) only when the day changes
+// Daily sums per role, kept in the mod's store with the ledger byte offset they cover. Writers (other threads' sessions)
+// only append, so a cache whose offset is behind the file size is topped up from the ledger tail: no row is lost to a
+// concurrent read-modify-write, and the whole ledger is read again only when the day changes or the file shrank.
+const enc = new TextEncoder()
 const CACHE = 'ledger-today'
-type Cache = { day: string; byRole: Record<string, number> }
+type Cache = { day: string; byRole: Record<string, number>; offset?: number }
 async function cache(h: Host): Promise<Cache | null> {
   const c = (await h.store.get(CACHE).catch(() => null)) as Cache | null
   return c && typeof c.day === 'string' && c.byRole && typeof c.byRole === 'object' ? c : null
 }
+async function ledgerSize(h: Host, home: string): Promise<number | null> {
+  const r = await h.process.run(['wc', '-c', ledgerFile(home)]).catch(() => null)
+  const n = r && r.exitCode === 0 ? parseInt(r.stdout.trim(), 10) : NaN
+  return Number.isFinite(n) ? n : null
+}
+function addRows(c: Cache, text: string): number {
+  const end = text.lastIndexOf('\n') + 1 // a torn last line waits for the next sync
+  for (const line of text.slice(0, end).split('\n')) {
+    try {
+      const r = JSON.parse(line) as Row
+      if (day(r.ts) === c.day) c.byRole[r.role] = (c.byRole[r.role] ?? 0) + (r.usd || 0)
+    } catch {
+      /* damaged line */
+    }
+  }
+  return enc.encode(text.slice(0, end)).length
+}
+async function readLedger(h: Host, home: string): Promise<string> {
+  return String((await h.fs.read(ledgerFile(home)).catch(() => '')) ?? '')
+}
+async function syncCache(h: Host, home: string, now: number, own?: Row): Promise<Cache> {
+  const today = day(now)
+  let c = await cache(h)
+  const size = await ledgerSize(h, home)
+  if (c && c.day === today && typeof c.offset === 'number' && size !== null && size >= c.offset) {
+    if (size === c.offset) return c
+    const ownLen = own ? enc.encode(JSON.stringify(own)).length + 1 : -1
+    if (own && size === c.offset + ownLen) {
+      c.byRole[own.role] = (c.byRole[own.role] ?? 0) + (own.usd || 0) // only our row is new
+      c.offset = size
+    } else {
+      c.offset += addRows(c, new TextDecoder().decode(enc.encode(await readLedger(h, home)).subarray(c.offset)))
+    }
+  } else {
+    c = { day: today, byRole: {}, offset: 0 }
+    c.offset = addRows(c, size === null ? '' : await readLedger(h, home))
+  }
+  await h.store.set(CACHE, c).catch(() => undefined)
+  return c
+}
 
 export async function spentToday(h: Host, role?: string): Promise<number> {
   const home = await homeDir(h)
-  const today = day(await h.clock.now())
-  let c = await cache(h)
-  if (!c || c.day !== today) {
-    c = { day: today, byRole: {} }
-    for (const r of await readJsonl<Row>(h, ledgerFile(home))) if (day(r.ts) === today) c.byRole[r.role] = (c.byRole[r.role] ?? 0) + (r.usd || 0)
-    await h.store.set(CACHE, c).catch(() => undefined)
-  }
+  const c = await syncCache(h, home, await h.clock.now())
   return role ? c.byRole[role] ?? 0 : Object.values(c.byRole).reduce((a, b) => a + b, 0)
 }
 
