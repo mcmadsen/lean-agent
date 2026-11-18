@@ -87,7 +87,7 @@ test('stale: many changed files or a changed manifest mark an area; untouched ar
   const learn = JSON.parse(h.files.get(`${SRC}/learn.json`)!)
   expect(learn.areas.api.stale).toContain('manifest')
   expect(learn.areas.web.stale).toBeUndefined()
-  expect(h.calls.find(c => c.argv[0] === 'git' && c.argv[1] === 'diff')?.argv[3]).toBe('abc..HEAD')
+  expect(h.calls.find(c => c.argv[0] === 'git' && c.argv[1] === 'diff')?.argv.slice(2)).toEqual(['--name-status', '--no-renames', 'abc..HEAD'])
 })
 
 test('gaps: the area is found by glob; pathsIn picks paths, not urls', async () => {
@@ -102,8 +102,8 @@ test('stats: counts loads of lean-agent rules from the hook log and lists rules 
   const h = setup()
   h.files.set(`${SRC}/rules/billing.md`, rule())
   h.files.set(`${SRC}/rules/api.md`, rule())
-  const ev = (f: string) => JSON.stringify({ ts: 1, e: { file_path: f } })
-  h.files.set('/h/.lean-agent/logs/rules-loaded.jsonl', [ev('/r/.claude/rules/lean-agent/billing.md'), ev('/r/.claude/rules/lean-agent/billing.md')].join('\n') + '\n')
+  const ev = (f: string, ts = 1) => JSON.stringify({ ts, e: { file_path: f } })
+  h.files.set('/h/.lean-agent/logs/rules-loaded.jsonl', [ev('/r/.claude/rules/lean-agent/billing.md'), ev('/r/.claude/rules/lean-agent/billing.md', 2)].join('\n') + '\n')
   expect(await rulesStats(h.host, 'proj')).toEqual({ loaded: { 'billing.md': 2 }, never: ['api.md'] })
 })
 

@@ -8,10 +8,10 @@ import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
 import { THREAD_TOOLS, consumeWake, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide } from './guard'
-import { dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
+import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
-import { checkStale, syncRules } from './rules'
+import { checkStale, logRuleLoad, syncRules } from './rules'
 import { leanDir, readJson, threadsDir } from './state'
 import { chase } from './chaser'
 import { autoMigrate, check, migrate } from './doctor'
@@ -22,6 +22,12 @@ import { hostOf } from './host'
 import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, noteSection, skillsSeen, trimListing } from './skilltrim'
 import { parseGrants, recordGrant, releaseGrant } from './guard'
 import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
+import { resetSkew, setRunning, skewNote } from './skew'
+import { statsText } from './stats'
+import { compare } from './compare'
+import { rotateLedger } from './ledger'
+
+setRunning(VERSION) // the code in this session; skew.ts compares it with what is installed
 
 export { hostOf }
 
@@ -47,7 +53,10 @@ export const resetModState = () => {
   cwd = ''
   resetPaneState()
   resetSkillStat()
+  resetSkew()
+  skew = null
 }
+let skew: string | null = null // the version-skew sentence of this session, or null
 let role: Role = { kind: 'plain' }
 let tries = 0
 let attempted = '' // the role key whose steps `done` lists
@@ -75,7 +84,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate'] } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare'] }, days: { type: 'number', description: 'stats: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' } }, required: ['action'] }
 const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
@@ -140,7 +149,7 @@ async function feedbackOf(host: Host, e: any, r: any): Promise<void> {
   if (!fb) return
   let project: string | undefined
   if (role.kind === 'thread') project = (await readJson<{ project?: string }>(host, `${threadsDir(await homeDir(host))}/${role.id}/thread.json`, {})).project
-  await applyFeedback(host, { thread: role.kind === 'thread' ? role.id : undefined, project, agent: String(e.subagent_type ?? e.agent ?? '') || undefined }, fb)
+  await applyFeedback(host, { thread: role.kind === 'thread' ? role.id : undefined, project, agent: String(e.subagent_type ?? e.agent ?? '') || undefined, version: VERSION }, fb)
 }
 
 // one failing step is reported (status line + debug log) and never stops the next one
@@ -226,7 +235,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       } as any)
       await registerOnce($, {
         name: DOCTOR,
-        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent).',
+        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent), stats (spend by model/role/agent/thread, caps, rule loads, feedback: computed here, never read the ledger yourself), compare (what a session costs at start: clean vs thread vs desk, from a few one-turn runs; project required; mode history lists saved reports).',
         inputSchema: DOCTOR_SCHEMA,
         isDeferred: false,
       } as any)
@@ -329,6 +338,17 @@ export async function poolFor<T extends { name: string }>(host: Host, tools: T[]
   return trimTools(tools, kind, cfg.tools)
 }
 
+// Running code older (or newer) than the installed plugin: a status line now and at every turn (a pane tick may have replaced
+// it), one prompt line in prompt.compose. A failed look changes nothing.
+async function showSkew($: any): Promise<void> {
+  try {
+    skew = await skewNote(hostOf($), String($.plugin.root), VERSION)
+    if (skew) $.ui.status(skew)
+  } catch {
+    /* no status line, or the manifest could not be read */
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     // $ is only ever spelled $.noun.event(...): the helpers get this thin host instead of $ itself
@@ -336,6 +356,9 @@ export const register: Register = on => {
     resetModState()
     const root = await bounded($, Promise.resolve($.session.root()), 'session.root').catch(() => '')
     const ctx = await serial(() => settle($, host, e.cwd, typeof root === 'string' ? root : ''))
+    await showSkew($)
+    // the ledger grows with every model request: a past month (or a file that starts with a 0.45 row) is renamed away, never rewritten
+    await soft($, 'ledger rotation', () => rotateLedger(host))
     // the command is role-free: registered once here
     await $.command.register({ name: 'lean-agent', description: 'Open the lean-agent pane (setup, desk, threads)' }).catch(() => undefined)
     await $.command.register({ name: 'lean-agent-setup', description: 'Set up or repair lean-agent (desk folder, login opener, trust); no model turn needed' }).catch(() => undefined)
@@ -348,9 +371,16 @@ export const register: Register = on => {
     await redetect($, typeof e?.new_cwd === 'string' ? e.new_cwd : undefined)
     return next(e)
   })
+  // a lean-agent rule was loaded into context: counted for `stats` (the shell hook in hooks.json logs the same event;
+  // rulesStats counts a load seen by both once)
+  on('classic.InstructionsLoaded', async ($, e: any, next) => {
+    await logRuleLoad(hostOf($), e).catch(() => false)
+    return next(e)
+  })
   // fallback when the hook is not delivered: a cheap compare of the session's directory
   on('turn.start', async ($, e: any, next) => {
     await redetect($)
+    await showSkew($)
     return next(e)
   })
 
@@ -452,7 +482,12 @@ export const register: Register = on => {
         return { result: setupText(o, true) } as any
       }
       if (e.action === 'migrate') return { result: (await migrate(host, $.plugin.root)).lines.join('\n') } as any
-      return { result: 'doctor: action must be check, fix or migrate', isError: true } as any
+      if (e.action === 'stats') return { result: await statsText(host, { days: e.days, project: typeof e.project === 'string' && e.project ? e.project : undefined }) } as any
+      if (e.action === 'compare') {
+        const out = await compare(host, $.plugin.root, { project: typeof e.project === 'string' ? e.project : undefined, mode: typeof e.mode === 'string' ? e.mode : undefined }, 'desk')
+        return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
+      }
+      return { result: 'doctor: action must be check, fix, migrate, stats or compare', isError: true } as any
     } catch (err) {
       return { result: `doctor failed: ${String((err as Error)?.message ?? err)}`, isError: true } as any
     }
@@ -462,7 +497,10 @@ export const register: Register = on => {
     on('tool.call', { tool: `mcp__lean-agent__${t.name}` }, async ($, e: any) => {
       if (role.kind !== 'thread') await redetect($, undefined, true) // a stale role never refuses: look once more (session id, folder)
       if (role.kind !== 'thread') return { result: await roleReport(hostOf($), { tool: t.name, need: 'thread', role, startDir, sid: lastSid }), isError: true } as any
-      const out = await threadTool(hostOf($), role.id, t.name, e)
+      // lean_compare needs the plugin root (the thread-shaped folder's CLAUDE.md, --plugin-dir for a dev copy): answered here
+      const out = t.name === 'lean_compare'
+        ? await compare(hostOf($), $.plugin.root, { project: str(e.project) || str((await readJson<{ project?: string }>(hostOf($), `${threadsDir(await homeDir(hostOf($)))}/${role.id}/thread.json`, {})).project), mode: str(e.mode) || 'task', task: typeof e.task === 'string' ? e.task : '', model: str(e.model) || undefined, maxUsd: typeof e.maxUsd === 'number' ? e.maxUsd : undefined }, 'thread')
+        : await threadTool(hostOf($), role.id, t.name, e)
       await ensureGitHooks(hostOf($)).catch(() => undefined) // lean_* tools may change projects.json
       return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
     })
@@ -471,7 +509,7 @@ export const register: Register = on => {
   // every tool: guards first (fail closed), then delivery of queued messages to a busy session
   on('tool.call', async ($, e: any, next) => {
     const host = hostOf($)
-    const why = await decide(host, { role, cwd, agentType: await agentType($, e.agentId, e), agentId: e.agentId }, e)
+    const why = await decide(host, { role, cwd, agentType: await agentType($, e.agentId, e), agentId: e.agentId, version: VERSION }, e)
     if (why) return { deny: why } as any
     // the thread's grants for the worker it spawns: recorded while the Agent call runs, removed when it returns
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null
@@ -499,7 +537,8 @@ export const register: Register = on => {
     const r: any = await next(e)
     try {
       const text = await memorySection(hostOf($), role)
-      if (text && r?.sections) return { ...r, sections: [...r.sections, { id: 'lean-agent:memory', text, scope: 'session' }] }
+      const sections = [...(text ? [{ id: 'lean-agent:memory', text, scope: 'session' }] : []), ...(skew ? [{ id: 'lean-agent:skew', text: `[lean-agent] ${skew}`, scope: 'session' }] : [])]
+      if (sections.length && r?.sections) return { ...r, sections: [...r.sections, ...sections] }
     } catch {
       /* the prompt goes out without it */
     }

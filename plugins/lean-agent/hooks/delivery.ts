@@ -5,7 +5,8 @@
 import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import type { Inbox, Thread } from './threads'
-import { checkStale, recordLearn, rulesStats, slugOk, syncRules } from './rules'
+import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, syncAll, verifyRules } from './rules'
+import { readConfig } from './budget'
 import { writeReview } from './reviews'
 
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
@@ -73,10 +74,23 @@ export const THREAD_TOOLS: Tool[] = [
   { name: 'lean_ask', description: 'Ask the user a question through the desk, with optional answer options.', inputSchema: obj({ question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, ['question']) },
   { name: 'lean_goal', description: 'Update the goal this thread serves (one line).', inputSchema: obj({ update: { type: 'string' } }, ['update']) },
   { name: 'lean_remember', description: 'Save a durable fact for future sessions.', inputSchema: obj({ text: { type: 'string' }, project: { type: 'string' } }, ['text']) },
+  { name: 'lean_compare', description: 'Compare a project clean vs as a lean-agent thread: mode task runs one read-only task both ways and a haiku judge compares them (costs money: only when the brief says so); overhead and history as lean_doctor compare.', inputSchema: obj({ project: { type: 'string' }, mode: { type: 'string', enum: ['task', 'overhead', 'history'] }, task: { type: 'string', description: 'task mode: the read-only task' }, model: { type: 'string' }, maxUsd: { type: 'number', description: 'task mode: cap per run (default 1)' } }, ['mode']) },
   {
     name: 'lean_rules',
-    description: 'Learned project rules: sync (copy rules and recipe skills into a checkout or worktree), stale (areas to re-learn), record (area, globs, sha, lines after learning), stats (which rules load).',
-    inputSchema: obj({ action: { type: 'string', enum: ['sync', 'stale', 'record', 'stats'] }, project: { type: 'string' }, repo: { type: 'string', description: 'absolute path of the checkout or worktree' }, area: { type: 'string' }, globs: { type: 'array', items: { type: 'string' } }, sha: { type: 'string' }, lines: { type: 'number' } }, ['action']),
+    description: 'Learned project rules: check (dry run: lines and chars per rule against the caps, before any sync), sync (copy rules and recipe skills into a checkout, or with all: true into every worktree of the project; one summary line per checkout), stale (areas to re-learn), record (area, globs, sha, relies, covered_by after learning; lines are counted from the file), verify (do the names a rule mentions still exist in the repo), stats (which rules load).',
+    inputSchema: obj({
+      action: { type: 'string', enum: ['sync', 'stale', 'record', 'stats', 'check', 'verify'] },
+      project: { type: 'string' },
+      repo: { type: 'string', description: 'absolute path of the checkout or worktree (sync, stale, verify)' },
+      area: { type: 'string', description: 'record: the area (its rule file is rules/<area>.md); verify: only this rule' },
+      globs: { type: 'array', items: { type: 'string' }, description: 'record: the paths the area covers (several globs wire an area to the ones it depends on)' },
+      sha: { type: 'string' },
+      lines: { type: 'number', description: 'record: ignored (counted from the file); a differing value is reported' },
+      relies: { type: 'array', items: { type: 'string' }, description: 'record: files and symbols the rule relies on (written to its footer as relies-on:)' },
+      covered_by: { type: 'string', description: 'record: the repo doc that already covers this area: no rule file, never stale' },
+      all: { type: 'boolean', description: 'sync: every worktree of the project, not just repo' },
+      verbose: { type: 'boolean', description: 'sync: every path copied/removed/skipped, as JSON' },
+    }, ['action']),
   },
 ]
 
@@ -120,14 +134,24 @@ export async function threadTool(h: Host, id: string, name: string, i: any): Pro
       if (!slugOk(project)) return { ok: false, text: 'lean_rules needs a project name' }
       const repo = str(i.repo)
       if (i.action === 'stats') return { ok: true, text: JSON.stringify(await rulesStats(h, project)) }
+      if (i.action === 'check') {
+        const lim = Number(((await readConfig(h, home)) as any)?.learn?.maxExplorers)
+        return { ok: true, text: (await checkRules(h, project, Number.isInteger(lim) && lim > 0 ? lim : MAX_EXPLORERS)).lines.join('\n') }
+      }
       if (i.action === 'record') {
         if (!str(i.area) || !Array.isArray(i.globs) || !str(i.sha)) return { ok: false, text: 'record needs area, globs and sha' }
-        await recordLearn(h, project, str(i.area), { globs: i.globs.filter((x: unknown) => typeof x === 'string'), sha: str(i.sha), lines: Number(i.lines) || 0 })
-        return { ok: true, text: 'recorded' }
+        if (str(i.area) !== '_project' && !slugOk(str(i.area))) return { ok: false, text: 'record: the area must be a plain name (letters, digits, . _ -)' }
+        const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : undefined)
+        const covered = str(i.covered_by) || str(i.coveredBy) || str(i['covered-by'])
+        return { ok: true, text: await recordRule(h, project, str(i.area), { globs: strs(i.globs) ?? [], sha: str(i.sha), lines: typeof i.lines === 'number' ? i.lines : undefined, relies: strs(i.relies), coveredBy: covered || undefined }) }
       }
       if (!repo.startsWith('/')) return { ok: false, text: `${i.action} needs repo (an absolute path)` }
-      if (i.action === 'sync') return { ok: true, text: JSON.stringify(await syncRules(h, project, repo)) }
+      if (i.action === 'sync') {
+        const r = await syncAll(h, project, repo, i.all === true)
+        return { ok: true, text: i.verbose === true ? JSON.stringify(r.detail) : r.lines.join('\n') }
+      }
       if (i.action === 'stale') return { ok: true, text: JSON.stringify(await checkStale(h, project, repo)) }
+      if (i.action === 'verify') return { ok: true, text: (await verifyRules(h, project, repo, str(i.area) || undefined)).lines.join('\n') }
       return { ok: false, text: `unknown lean_rules action ${String(i.action)}` }
     }
     return { ok: false, text: `unknown tool ${name}` }

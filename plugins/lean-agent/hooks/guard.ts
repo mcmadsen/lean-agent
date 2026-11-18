@@ -7,7 +7,7 @@ import { analyze, plainPipeline, privateText, type Verdict } from './shell'
 import type { Host } from './state'
 import type { Role } from './role'
 
-export type Ctx = { role: Role; cwd: string; agentType?: string; agentId?: string } // agentType/agentId: set inside a subagent loop
+export type Ctx = { role: Role; cwd: string; agentType?: string; agentId?: string; version?: string } // agentType/agentId: set inside a subagent loop
 export type Call = { tool: string; [k: string]: any }
 export type Grants = { edit?: string[]; cmds?: string[] }
 type GrantRec = Grants & { call: string; type?: string }
@@ -540,7 +540,12 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
 }
 
 // ---- entry ---------------------------------------------------------------------------------------------------
+// every refusal names the code that refused: a session may run an older guard than the skills it reads say (version skew)
 export async function decide($: Host, ctx: Ctx, e: Call): Promise<string | null> {
+  const why = await decideRaw($, ctx, e)
+  return why && ctx.version ? `${why} (lean-agent ${ctx.version})` : why
+}
+async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   // grants are owned by a thread's own loop: an Agent call with allow-cmd / allow-edit lines from anyone else would start a
   // subagent that can do nothing, so it is refused up front with the reason
   const sub = typeof e.subagent_type === 'string' ? e.subagent_type : ''

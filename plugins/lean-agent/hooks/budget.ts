@@ -1,7 +1,8 @@
 // Budgets and the ledger (design 2.7). Every model request of a turn (main or subagent) is priced from its usage and
 // appended to ledger.jsonl; caps come from config.json. No verified plan-window source exists (R6), so the budget is
 // cost-only: a daily USD cap per role and an optional cap per worker.
-import { appendJsonl, homeDir, leanDir, readJson, readJsonl } from './state'
+import { appendJsonl, homeDir, leanDir, readJson } from './state'
+import { LEDGER, fileSize, normalizeRow, readFrom, syncRollup } from './ledger'
 import type { Host } from './state'
 
 export type Usage = { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }
@@ -23,10 +24,10 @@ export function costUsd(model: string, u: Usage | null | undefined): number {
   return Math.round(usd * 1e6) / 1e6
 }
 
-export type Config = { dailyCapUsd?: { desk?: number; thread?: number; plain?: number }; workerCapUsd?: number; workerCaps?: Record<string, number>; attribution?: boolean }
+export type Config = { dailyCapUsd?: { desk?: number; thread?: number; plain?: number }; workerCapUsd?: number; workerCaps?: Record<string, number>; attribution?: boolean; learn?: { maxExplorers?: number } }
 export type Row = { ts: number; role: string; tN?: string; agentId?: string; agent?: string; model: string; in: number; out: number; cache_read: number; cache_write: number; usd: number }
 
-export const ledgerFile = (home: string) => `${leanDir(home)}/ledger.jsonl`
+export const ledgerFile = (home: string) => `${leanDir(home)}/${LEDGER}`
 export const readConfig = (h: Host, home: string) => readJson<Config>(h, `${leanDir(home)}/config.json`, {})
 const day = (ts: number) => new Date(ts).toISOString().slice(0, 10)
 
@@ -38,15 +39,18 @@ export async function record(h: Host, ctx: { role: string; tN?: string; agentId?
     in: u.input_tokens ?? 0, out: u.output_tokens ?? 0, cache_read: u.cache_read_input_tokens ?? 0, cache_write: u.cache_creation_input_tokens ?? 0,
     usd: costUsd(model, u),
   }
-  await appendJsonl(h, ledgerFile(home), row)
-  await syncCache(h, home, row.ts, row)
+  const line: any = { ...row } // zero token counts are left out: a row is about 100 bytes shorter, every reader takes a missing number as 0
+  for (const k of ['in', 'out', 'cache_read', 'cache_write'] as const) if (!line[k]) delete line[k]
+  await appendJsonl(h, ledgerFile(home), line)
+  await syncCache(h, home, row.ts, line)
   return row
 }
 
-// Daily sums per role, kept in the mod's store with the ledger byte offset they cover (record and spentToday both call
-// syncCache; the file size comes from fs.stat, wc only where stat has no size). Writers (other threads' sessions)
-// only append, so a cache whose offset is behind the file size is topped up from the ledger tail: no row is lost to a
-// concurrent read-modify-write, and the whole ledger is read again only when the day changes or the file shrank.
+// Today's sums per role, kept in the mod's store with the byte offset of ledger.jsonl they cover (record and spentToday both
+// call syncCache; the size comes from fs.stat). Writers (other threads' sessions) only append, so a cache whose offset is
+// behind the file size is topped up from the file's tail: no row is lost to a concurrent read-modify-write. When the day changes,
+// the cache is missing, or the file is shorter than the offset (rotated: ledger.jsonl is a fresh file), it is rebuilt from the
+// rollup (ledger.ts, the one reader: incremental, both row schemas, every ledger file), never by reading the whole ledger again.
 const enc = new TextEncoder()
 const CACHE = 'ledger-today'
 type Cache = { day: string; byRole: Record<string, number>; offset?: number }
@@ -54,32 +58,24 @@ async function cache(h: Host): Promise<Cache | null> {
   const c = (await h.store.get(CACHE).catch(() => null)) as Cache | null
   return c && typeof c.day === 'string' && c.byRole && typeof c.byRole === 'object' ? c : null
 }
-async function ledgerSize(h: Host, home: string): Promise<number | null> {
-  const st = await h.fs.stat(ledgerFile(home)).catch(() => null)
-  if (typeof st?.size === 'number') return st.size
-  const r = await h.process.run(['wc', '-c', ledgerFile(home)]).catch(() => null) // engines whose stat has no size
-  const n = r && r.exitCode === 0 ? parseInt(r.stdout.trim(), 10) : NaN
-  return Number.isFinite(n) ? n : null
-}
+// caps count 1.0 rows by role; a row with role "unknown" (a 0.45 row, or a 1.0 row without a role) is never capped, here and in
+// the rollup path of syncCache alike
 function addRows(c: Cache, text: string): number {
   const end = text.lastIndexOf('\n') + 1 // a torn last line waits for the next sync
   for (const line of text.slice(0, end).split('\n')) {
     try {
-      const r = JSON.parse(line) as Row
-      if (day(r.ts) === c.day) c.byRole[r.role] = (c.byRole[r.role] ?? 0) + (r.usd || 0)
+      const r = normalizeRow(JSON.parse(line))
+      if (r && r.role !== 'unknown' && day(r.ts) === c.day) c.byRole[r.role] = (c.byRole[r.role] ?? 0) + (r.usd || 0)
     } catch {
       /* damaged line */
     }
   }
   return enc.encode(text.slice(0, end)).length
 }
-async function readLedger(h: Host, home: string): Promise<string> {
-  return String((await h.fs.read(ledgerFile(home)).catch(() => '')) ?? '')
-}
-async function syncCache(h: Host, home: string, now: number, own?: Row): Promise<Cache> {
+async function syncCache(h: Host, home: string, now: number, own?: { role: string; usd: number }): Promise<Cache> {
   const today = day(now)
   let c = await cache(h)
-  const size = await ledgerSize(h, home)
+  const size = await fileSize(h, ledgerFile(home))
   if (c && c.day === today && typeof c.offset === 'number' && size !== null && size >= c.offset) {
     if (size === c.offset) return c
     const ownLen = own ? enc.encode(JSON.stringify(own)).length + 1 : -1
@@ -87,11 +83,13 @@ async function syncCache(h: Host, home: string, now: number, own?: Row): Promise
       c.byRole[own.role] = (c.byRole[own.role] ?? 0) + (own.usd || 0) // only our row is new
       c.offset = size
     } else {
-      c.offset += addRows(c, new TextDecoder().decode(enc.encode(await readLedger(h, home)).subarray(c.offset)))
+      c.offset += addRows(c, await readFrom(h, ledgerFile(home), c.offset))
     }
   } else {
-    c = { day: today, byRole: {}, offset: 0 }
-    c.offset = addRows(c, size === null ? '' : await readLedger(h, home))
+    const ro = await syncRollup(h, now)
+    c = { day: today, byRole: {}, offset: ro.files[LEDGER] ?? size ?? 0 }
+    for (const [k, a] of Object.entries(ro.days[today]?.role ?? {})) if (k !== 'unknown') c.byRole[k] = a[0]
+    if (size !== null && c.offset! > size) c.offset = size // (cannot happen: the rollup folded what the file holds)
   }
   await h.store.set(CACHE, c).catch(() => undefined)
   return c

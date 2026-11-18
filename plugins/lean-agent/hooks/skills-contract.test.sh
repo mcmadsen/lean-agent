@@ -42,4 +42,39 @@ need review 'only the tool'
 need review 'allow-cmd: git diff <base>...<sha>, git log <base>..<sha>, git show <sha>, git merge-base <base> <sha>'
 grep -q 'allow-cmd' "$root/agents/reviewer.md" || fail "reviewer.md does not mention the allow-cmd limit"
 if grep -q 'Write `~/.lean-agent/<project>/reviews' "$here/review/SKILL.md"; then echo "FAIL: review skill still writes the record by hand"; exit 1; fi
+# the learn flow's promises
+need learn 'legacy-0.45/index.md'
+need learn 'candidate facts, not rules'
+need learn 'covered_by'
+need learn 'learn.maxExplorers'
+need learn 'UNVERIFIED'
+need learn 'CONFLICT'
+need learn '`--gaps`'
+need learn '`--full`'
+need learn '`--verify`'
+need learn 'all: true'
+need learn 'Preflight, ONE explorer'
+need learn 'lean-agent:reader-sonnet'
+need learn 'capped file list'
+need learn 'relies'
+need learn '<!-- lean-agent:scripts -->'
+need learn 'SCRIPT CANDIDATES'
+need learn 'MECHANICAL'
+grep -q 'MECHANICAL' "$root/agents/explorer.md" || fail "explorer.md does not ask for script knowledge"
+need compare 'lean_compare'
+need compare 'lean_doctor'
+need compare 'enabledPlugins'
+need compare 'never file contents'
+need compare 'The desk never runs it'
+grep -q 'compare' "$root/../../README.md" || fail "README has no compare section"
+for a in explorer reader-haiku reader-sonnet; do
+  for k in refused unverified unreached; do grep -q "\"$k\"" "$root/agents/$a.md" || fail "$a.md: LEAN-FEEDBACK lacks $k"; done
+done
+grep -q 'Grep and Glob may not exist' "$root/agents/explorer.md" || fail "explorer.md does not say Grep/Glob may be missing"
+grep -q 'STOP trying variants' "$root/agents/explorer.md" || fail "explorer.md does not say to stop on a refusal"
+# one version: plugin.json, marketplace.json and the pane's VERSION agree (the mod compares its own VERSION with the installed plugin)
+pv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" | head -1)
+mv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/../../.claude-plugin/marketplace.json" | head -1)
+vv=$(sed -n "s/^export const VERSION = '\([^']*\)'.*/\1/p" "$root/hooks/pane.tsx")
+[ -n "$pv" ] && [ "$pv" = "$mv" ] && [ "$pv" = "$vv" ] || fail "version mismatch: plugin.json=$pv marketplace.json=$mv pane.tsx=$vv"
 echo "ok skills-contract"

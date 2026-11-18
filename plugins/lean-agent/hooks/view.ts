@@ -5,7 +5,7 @@ import { deskState, unconsumed } from './delivery'
 import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
 import { readNotices } from './notices'
-import { spentToday } from './budget'
+import { spendLine } from './stats'
 import { isRunning, parseAgents } from './threads'
 import type { Thread } from './threads'
 
@@ -34,11 +34,11 @@ export const resetViewCache = () => {
   budgetCache = null
 }
 
-// USD spent today from ledger.jsonl (rows carry usd, not tokens); null when there is no ledger.
+// "$today · 7d $week" from the rollup (the pane prints it after "budget today:"); null when there is no ledger.
 async function loadBudget(h: Host, home: string): Promise<string | null> {
   const now = await h.clock.now()
   if (budgetCache && now - budgetCache.at < BUDGET_TTL && now >= budgetCache.at) return budgetCache.text
-  const text = (await h.fs.exists(`${leanDir(home)}/ledger.jsonl`)) ? `$${(await spentToday(h)).toFixed(2)}` : null
+  const text = await spendLine(h)
   budgetCache = { at: now, text }
   return text
 }

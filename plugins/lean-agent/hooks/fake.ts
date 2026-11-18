@@ -1,7 +1,7 @@
 // @ts-nocheck
 // A fake host for the specs: an in-memory file system and a scripted process table, answering the engine's
 // ops beneath the plugin. Not used by the mod itself.
-export type Call = { argv: string[]; cwd?: string; stdin?: string }
+export type Call = { argv: string[]; cwd?: string; stdin?: string; env?: Record<string, string> }
 
 export function fakeHost(on: any, opts: { home?: string } = {}) {
   const home = opts.home ?? '/h'
@@ -41,7 +41,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       return [...names].map(([name, kind]) => ({ name, kind, size: 0, mtimeMs: 0, isLink: false }))
     },
     run: (argv: readonly string[], init?: any) => {
-      const call: Call = { argv: [...argv], cwd: init?.cwd, stdin: init?.stdin }
+      const call: Call = { argv: [...argv], cwd: init?.cwd, stdin: init?.stdin, env: init?.env }
       calls.push(call)
       const [c, ...rest] = argv
       const a = c === 'mv' ? rest.filter(y => !y.startsWith('-')) : rest
@@ -56,6 +56,9 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       if (c === 'id') return ok('501')
       if (c === 'uname') return ok(os.name)
       if (c === 'wc') { const t = files.get(a[a.length - 1]); return t === undefined ? { exitCode: 1, stdout: '', stderr: 'no such file' } : ok(new TextEncoder().encode(t).length + ' ' + a[a.length - 1]) }
+      if (c === 'tail' && a[0] === '-c' && /^\+\d+$/.test(a[1] ?? '')) { const t = files.get(a[2]); if (t === undefined) return { exitCode: 1, stdout: '', stderr: 'no such file' }; return ok(new TextDecoder().decode(new TextEncoder().encode(t).subarray(Number(a[1].slice(1)) - 1))) }
+      if (c === 'head' && a[0] === '-n' && a[1] === '1') { const t = files.get(a[2]); return t === undefined ? { exitCode: 1, stdout: '', stderr: 'no such file' } : ok(t.split('\n')[0] + '\n') }
+      if (c === 'head' && a[0] === '-c' && /^\d+$/.test(a[1] ?? '')) { const t = files.get(a[2]); return t === undefined ? { exitCode: 1, stdout: '', stderr: 'no such file' } : ok(new TextDecoder().decode(new TextEncoder().encode(t).subarray(0, Number(a[1])))) }
       if (c === 'tee') { const p = a[a.length - 1]; files.set(p, (files.get(p) ?? '') + (call.stdin ?? '')); return ok(call.stdin) }
       if (c === 'claude') { const r = claude.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
       if (c === 'git') { const r = git.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }

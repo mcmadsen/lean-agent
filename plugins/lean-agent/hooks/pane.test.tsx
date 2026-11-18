@@ -113,7 +113,7 @@ test('view: the pane ack never moves the desk marker, and one row acks only itse
 test('view: the budget footer sums usd from ledger rows', async () => {
   const h = setup()
   h.files.set('/h/.lean-agent/ledger.jsonl', JSON.stringify({ ts: h.clock.t, role: 'desk', model: 'x', in: 1, out: 1, cache_read: 0, cache_write: 0, usd: 1.5 }) + '\n')
-  expect((await loadView(h.host)).budget).toBe('$1.50')
+  expect((await loadView(h.host)).budget).toBe('$1.50 · 7d $1.50') // the pane prints it after "budget today:"
 })
 
 test('view and pane: an open question shows until an answer row closes it', async ($, on) => {

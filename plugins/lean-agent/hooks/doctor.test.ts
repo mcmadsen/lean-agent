@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { autoMigrate, check, fix, migrate, plist, MIGRATE_NOTICE } from './doctor'
+import { autoMigrate, check, fix, legacyIndex, migrate, plist, tidyLegacy, MIGRATE_NOTICE } from './doctor'
+import { running, setRunning } from './skew'
 import { readNotices, setNotice } from './notices'
 
 const L = '/h/.lean-agent'
@@ -213,4 +214,49 @@ test('tidy (also for users already on 1.0.x): 0.45 guide files and current-threa
   h.files.set(`${L}/CLAUDE.md`, 'lean-agent new again')
   expect((await autoMigrate(h.host, '/plug')).lines).toEqual([]) // done for this version
   expect((await migrate(h.host, '/plug')).lines.join('\n')).toContain('moved to legacy-0.45') // migrate forces it
+})
+
+test('check reports version skew as a FIX row, and "ok" when the code is the installed version', async () => {
+  const h = fakeHost(null)
+  h.files.set('/plug/.claude-plugin/plugin.json', JSON.stringify({ version: '1.0.4' }))
+  const before = running.version
+  setRunning('1.0.3')
+  try {
+    expect((await check(h.host, '/plug')).filter(l => /lean-agent code/.test(l))).toEqual(['FIX  lean-agent code 1.0.3 is running but 1.0.4 is installed: start a new session (threads: close and Start)'])
+    setRunning('1.0.4')
+    expect((await check(h.host, '/plug')).filter(l => /lean-agent code/.test(l))).toEqual(['ok   lean-agent code 1.0.4 = installed'])
+    setRunning('')
+    expect((await check(h.host, '/plug')).some(l => /lean-agent code/.test(l))).toBe(false)
+  } finally {
+    setRunning(before)
+  }
+})
+
+test('legacy index: one line per card (title, size, area guess); migrate and the versioned tidy write it; unchanged = no rewrite', async () => {
+  const h = legacy()
+  h.files.set(`${L}/a/cards/db.md`, '# Database access\nuse the pool in services/billing/db.ts\n')
+  h.files.set(`${L}/a/cards/web.json`, JSON.stringify({ title: 'Web build', paths: ['apps/web/**'] }))
+  const r = await migrate(h.host, '/plug')
+  expect(r.lines.join('\n')).toContain('legacy cards indexed in legacy-0.45/index.md (3 card(s))')
+  const idx = h.files.get(`${L}/legacy-0.45/index.md`)!
+  expect(idx).toContain('## a')
+  expect(idx).toContain('- db.md | Database access | 57 bytes | area? services')
+  expect(idx).toContain('- web.json | Web build |')
+  expect(idx).toContain('area? apps')
+  expect(idx).toContain('- c1.md | card |')
+  h.files.set(`${L}/legacy-0.45/cards-a/huge.md`, '# Huge\n' + 'x'.repeat(70_000))
+  await legacyIndex(h.host)
+  expect(h.files.get(`${L}/legacy-0.45/index.md`)).toMatch(/- huge\.md \| huge \| 70\d{3} bytes/) // listed by name, not read
+  const n = h.calls.length
+  await legacyIndex(h.host)
+  expect(h.calls.length).toBe(n)
+  // someone migrated by 1.0.4 (tidy v1 done): the next start indexes the cards that are already in legacy-0.45
+  const g = fakeHost(null)
+  g.files.set(`${L}/legacy-0.45/cards-p/x.md`, '# Card X\n')
+  await g.store.set('tidy.v', 1)
+  expect((await tidyLegacy(g.host)).join('\n')).toContain('indexed')
+  expect(g.files.get(`${L}/legacy-0.45/index.md`)).toContain('x.md | Card X')
+  await g.store.set('tidy.v', 2)
+  g.files.delete(`${L}/legacy-0.45/index.md`)
+  expect(await tidyLegacy(g.host)).toEqual([]) // done for this version
 })

@@ -1,5 +1,105 @@
 # Changelog
 
+## Unreleased
+
+Learn flow (the 1.0.6 work; the version lines in `plugin.json`, `marketplace.json` and `pane.tsx` are left to the desk, which also
+builds 1.0.5).
+
+### Fixed
+- **Version skew is visible.** A session keeps the hooks module it loaded at start, while skills, agents and templates are read from
+  the plugin folder again after `claude plugin update`: the skill text could say 1.0.4 while the guard refused like 1.0.3 (an explorer
+  was refused `rg`, `ls` and `cat`). The mod now compares its own version with the installed one (the plugin root's
+  `.claude-plugin/plugin.json` and Claude Code's `installed_plugins.json`, the higher wins; cached for a minute) at `session.start`
+  and every `turn.start`: a status line and one `prompt.compose` line say "lean-agent code X is running but Y is installed: start a
+  new session (threads: close and Start)". `lean_doctor check` reports it as a FIX row. Every refusal of the guard (`decide`) ends with
+  "(lean-agent <running version>)", and `feedback.jsonl` rows and `refusals.jsonl` carry the running version.
+
+### Added
+- **An explorer that can explore.** The learn skill runs ONE preflight explorer (`git -C <repo> ls-files <folder> | head -3`,
+  `rg -n <word> <file>`) before launching the rest; on a refusal the lead lists the files itself and hands each explorer a capped
+  `git ls-files` list, or uses `lean-agent:reader-sonnet`. The lead always passes the capped list. `agents/explorer.md` says Grep/Glob
+  may not exist, to use the read-only Bash commands and to stop and report a refused command. Small areas are explored inline by the
+  lead; explorers are for big ones. Judgment-heavy areas use `reader-sonnet`, listing work stays on the haiku explorer.
+- **LEAN-FEEDBACK `refused`, `unverified`, `unreached`** (explorer and readers): commands the guard refused with its text, claims not
+  checked, folders not covered. Counts and the first entries go to `feedback.jsonl`, refusals to `refusals.jsonl`.
+- **Deltas, not restatements.** The brief carries the area's folders, the capped file list and the repo's own docs
+  (`CLAUDE.md`, `.claude/rules`): "read these first, return only what they do not say, contradictions as `CONFLICT` with both sides".
+  A rule bullet may point at a doc (`see <path>`) but never restates it.
+- **Modes and budgets.** `--gaps` (default when the repo has its own docs) and `--full`. Size budget next to the line cap: 2,000
+  characters per rule (about 500 tokens), 600 for `_project` (about 150), no line wider than 240; lines count non-empty body lines.
+  `lean_rules check` is a dry run (lines, chars, cap violations, rules without `paths:`, covered and missing areas); `sync` skips a
+  rule over any cap and says why. `record` counts `lines` from the file itself (a differing caller value is reported) and warns when a
+  rule is over a cap. A rule's `paths:` takes several globs (and `{a,b}` braces): the way to wire areas together.
+- **Areas covered by repo docs** are recorded with `covered_by: <doc>` (no rule file): never stale, skipped by the next run.
+- **Verification.** Hard rule: a rule line is written or kept only if checked against the code in the run; the rest goes to an
+  `UNVERIFIED` list in the report. `lean_rules verify` extracts every backticked path, symbol and number of each rule (and its
+  `relies-on` list) and searches the repo with `git grep -F` / `git ls-files` (read-only, at most 150 names per call, 40 per rule); the
+  skill's `--verify` mode then re-checks semantically only what it cannot judge (KEEP / FIX / DROP).
+- **`relies-on:`** in the rule footer (written by `record` from `relies`): an area is stale when a relied-on file changed or vanished
+  since the recorded sha, not only by changed-file count; the count limit is `max(15, 10% of the area's files)`.
+- **Legacy 0.45 cards.** learn step 0 reads `legacy-0.45/index.md` and the project's cards as candidate facts (drop hashes, PR status,
+  sizes, counts, dates, diaries, `file:line` cites; keep mechanisms, invariants, commands, traps; narrative to `lean_remember`). The
+  migration, and the versioned tidy (now v2, so people migrated earlier get it too), write that index: per card file, title, size and
+  area guess.
+- **Subagent caps.** `learn.maxExplorers` in `config.json` (default 4) or a cap from the user's `CLAUDE.md`: areas are grouped into at
+  most that many assignments, 25 lines per area each; the explorer reports `unreached`.
+- **Sync of every worktree.** `lean_rules sync` with `all: true` syncs every worktree of the project (`git worktree list --porcelain`
+  plus `worktrees.json`) and answers one line per checkout ("<path>: copied N, removed M, skipped K, exclude ok") and the skipped
+  rules once; `verbose: true` lists every path. The skill says recipe skills are synced together with rules.
+- **Stats are computed by the mod.** The desk could not answer "stats" itself: the skill had a model read and sum a ledger that was
+  about 27 MB after a day. `lean_doctor` has a new action `stats` (`days` default 7, max 90; `project`): spend today and for the
+  window with request counts, today against `dailyCapUsd`, tables by model, role x model, role, agent and thread (top 10 + rest),
+  rule loads per project (never-loaded rules listed, `_project.md` included), worker feedback and gaps, and the count of 0.45 and
+  unparsable ledger lines. The `stats` skill says "call it; never read `ledger.jsonl` yourself". The pane footer reads
+  "budget today: $x · 7d $y" (view.ts, no pane change).
+- **One ledger reader, with rollups.** `hooks/ledger.ts` folds the ledger into per-day aggregates (by model, agent, role, thread and
+  role x model: dollars, tokens, requests) kept in `~/.lean-agent/rollup.json` with a byte offset per ledger file; a sync reads only
+  the bytes past the offset (`tail -c +N`), never the file from the top. It is rebuilt from the files only when missing, damaged or a
+  file is shorter than its offset. The daily-cap cache of `budget.ts` is rebuilt from the same rollup on a new day, so the day change
+  no longer reads the whole ledger either.
+- **Both ledger schemas.** The 0.45 rows (ISO `ts`, `cost_usd`, `usage{...}`, no `role`/`usd`; about 2 KB each, most of an old
+  ledger) were skipped, so "7 days" showed only today. They are read now: `cost_usd` is the dollars, role is `unknown`, the 0.45
+  worker role is the agent, the thread is `thread` or `-`. They are never counted against a daily cap.
+- **Ledger rotation, no row lost.** At session start a `ledger.jsonl` that begins with a 0.45 row is renamed once to
+  `ledger-legacy.jsonl`, and one that begins in a past month to `ledger-YYYY-MM.jsonl`; a fresh `ledger.jsonl` follows. It is a
+  rename (a concurrent writer lands in the old or the new file), the rollup offset moves with the file, and every reader (stats,
+  caps) reads all `ledger*.jsonl`. The rollup also remembers each file's first line: a renamed file (a crash between the rename and
+  the rollup write, another session in between) is recognised by it and not folded twice, and a fresh `ledger.jsonl` that outgrew an
+  old offset rebuilds instead of being read mid-line; the cap cache is dropped by a rotation. (0.45 wrote naive timestamps: read as
+  UTC, which only moves an old row across midnight.) New rows leave out zero token counts (about 100 bytes shorter; a missing number reads as 0).
+- **Rule loads are counted again.** `lean_rules stats` showed no load for rules that had loaded. The `InstructionsLoaded` shell hook
+  was the only path, so the mod now also logs `classic.InstructionsLoaded` itself into the same log; a load seen by both counts once,
+  and `_project.md` is listed (it was left out of "never loaded"). Not checked on a live Claude Code session in this work (a nested
+  session was not allowed): confirm with a learned rule and a Read of a matching file.
+- **Unexpected models are visible.** The stats table shows role x model, and `lean_doctor check` lists spend today of the desk on a
+  model other than the one lean-agent pins, of threads on a model no thread was started on, and live sessions
+  (`claude agents --json`, when it reports a model) that differ from what lean-agent started. Those rows need a new session, not a
+  setup press.
+- **Learn collects script knowledge.** Explorers also report the repo's own scripts for an area (`SCRIPTS`: package.json scripts,
+  Makefile/justfile targets, tools/ and scripts/ folders, CI steps that run locally, each with the question it answers) and
+  mechanical work a thread would otherwise spend model time on (`MECHANICAL`); rules then say "for X run `<script>`" instead of
+  describing how to find X. A `<!-- lean-agent:scripts -->` ... `<!-- /lean-agent:scripts -->` block in a rule (a later release writes
+  adopted scripts there) is kept byte for byte by rewrites and never deleted by `--trim`; the footer matcher no longer takes it for
+  the footer. `--trim` lists mechanical-looking gaps as `SCRIPT CANDIDATES` in the report.
+- **Compare is back (rebuilt the 1.0 way).** `lean_doctor` `compare` (desk; `project`, `mode` overhead or history) and a thread's
+  `lean_compare` (task mode) run `claude -p "Reply with OK." --output-format json` and `claude -p "/context"` (local, free) in the
+  project folder with lean-agent switched off (`--settings` `enabledPlugins` false for the installed `lean-agent@...`, checked live: a
+  disabled plugin's tokens drop out of the first turn), in a throw-away thread-shaped folder and in the desk folder: clean / thread /
+  desk side by side (first-turn input tokens measured, cost, and `/context`'s categories), skills and MCP switched off one at a time on
+  the clean column, suggestions with the concrete step (plugins to switch off, `tools.thread.drop`, memory files into path rules,
+  rules that never loaded, script candidates), capped at $0.25. Task mode (the `compare` skill, run in a thread after the user agrees to
+  the cost) runs one read-only task clean and as a thread on the same model and effort and a haiku judge compares correctness and
+  completeness. Reports: `~/.lean-agent/compare/<date>-<project>.md` and `history.jsonl`, names and numbers only; a private project is
+  never compared. README section "Compare".
+
+### Fixed (2)
+- **A long failing Bash command failed the whole tool call.** `squeezeResult` rewrote the Bash result as a string. The engine validates
+  a hook's answer against the tool's output schema, and Bash's result is the record `{ stdout, stderr, interrupted, ... }` (a failed
+  call's is its error text): the string answer was refused ("expected object, received string"), so any long output of a command that
+  exited non-zero failed outright, and the successful ones, being records, were never squeezed at all. It now squeezes `stdout` and
+  `stderr` of the record, keeps its shape and every other field, saves the full text first, and leaves every other shape (error text,
+  content blocks) untouched.
+
 ## 1.0.4
 
 ### Added
