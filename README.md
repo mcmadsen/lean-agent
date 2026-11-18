@@ -55,7 +55,8 @@ claude plugin install lean-agent@lean-agent
 
 1. Quit a hosted 0.45 desk if one is running.
 2. `claude plugin update lean-agent`.
-3. In the Claude app open a local session in `~/lean-agent-desk` and type `migrate`.
+3. Nothing else: the first local Claude session you start unloads the old `com.lean-agent.up` service at once and runs the
+   migration. Only if the status line or the desk pane says "lean-agent 1.0: run migrate in the desk", open the desk and type `migrate`.
 
 Migration is one-time and idempotent (it writes `~/.lean-agent/migrated-1.0.json`):
 
@@ -159,7 +160,12 @@ step is a row in `ledger.jsonl`. There is no plan-window percentage (no verified
 All fail closed (a guard that throws denies):
 
 - **Desk strict mode**: the desk may read lean-agent state and use its own tools; it may not edit code or run builds.
-- **Push gate**: see above.
+- **Push gate**: see above. The review must be green for the commit each pushed ref points at (not just HEAD).
+- **Guarded branches** (every repo): a plain `git push` to `main`, `master`, `develop` or `release/*` (or a project's own `guards.push-deny`
+  list in `projects.json`, even an empty one) is refused in the shell guard and in the pre-push hook: "Push your own branch and open a
+  pull request". Pushes to a local path or `file://` URL are not checked (`LEAN_AGENT_PUSH_GUARD_LOCAL=1` checks them); the session
+  env `LEAN_AGENT_PUSH_GUARD_OVERRIDE=1` skips the check. The hook trusts only `private.list` and refuses pushes (fail closed) when it
+  is missing or older than `projects.json`; open any lean-agent session to refresh it.
 - **Private projects**: an allow-list, review or not, no override. `git push` and `git remote add|set-url` are refused. Every `gh` or `az`
   call found anywhere in a command (also inside `bash -c`, `$(...)`, backticks, subshells, after `;` `&&` `|`, with global flags such as
   `gh -R o/r`) must be read-only, or the whole command is denied: `gh pr view|list|diff|checks|status`, `gh issue view|list|status`,
