@@ -22,6 +22,6 @@ Also check that the declared `run` line runs only this script.
 Verdict: `adopt` (use as is), `adapt` (usable after the concrete changes you list), `reject` (with the reason). The mod applies its own rules on top: network, deletes, writes outside the declared outputs, hardcoded values or secrets are never `adopt`, so do not argue past them.
 
 End your reply with exactly these two lines, nothing after them (the first is recorded by the mod; every answer is required, `network`, `deletes`, `secrets` and `generalises` must be true or false):
-`LEAN-AUDIT {"name": "<script name>", "verdict": "adopt|adapt|reject", "reads": [], "writes": [], "network": false, "deletes": false, "secrets": false, "hardcoded": [], "deterministic": true, "errors_handled": true, "generalises": true, "changes": [], "reason": ""}`
+`LEAN-AUDIT {"name": "<script name>", "sha": "<the Script sha256 from the brief>", "verdict": "adopt|adapt|reject", "reads": [], "writes": [], "network": false, "deletes": false, "secrets": false, "hardcoded": [], "deterministic": true, "errors_handled": true, "generalises": true, "changes": [], "reason": ""}`
 `LEAN-FEEDBACK {"status": "done|partial|failed", "missing": "context you had to discover that the brief should have given, or empty", "remember": []}`
 `remember` holds durable facts only (user corrections, decisions, where external info lives), never anything derivable from the code.

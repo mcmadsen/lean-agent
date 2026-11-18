@@ -47,7 +47,8 @@
   `feedback-export/projects.map.json`, never exported; thread ids stay), emails, URLs other than the lean-agent repo, azure
   organisations, hex of 7+ characters, numbers after PR / issue / ticket words and `#`, tokens and keys. A final check REFUSES to write
   the file when a known private string survived and names the rule that missed. Over 40 KB the oldest and least repeated items are
-  summarised. It never posts and uses no network; `skills/feedback` says: a single report is a draft as before (post with `gh` only
+  summarised. The stable project-name map lives in `~/.lean-agent/.private/`, not in the export folder; scp-style remotes, IPs,
+  host names, env-style credentials (`DB_PASSWORD=...`) and a registered project's folder name are masked too. It never posts and uses no network; `skills/feedback` says: a single report is a draft as before (post with `gh` only
   if installed and only on an explicit yes), "export" is this.
 - **Scripts are easy to update.** An adopted script keeps versions (`scripts/<name>/v1/`, `v2/` ..., sha256, author, date and audit
   verdict per version, `current` in `meta.json`) and a stable `scripts/<name>/run` that the rule line and the recipe skill always
@@ -58,6 +59,11 @@
   A failed Bash run of an adopted script is counted, two failures (or `report-bad <name> <why>`) mark it `needs-update` (rule line,
   `list`, desk pane; the next thread that uses it is nudged once to send a fix). A script edited by hand (sha mismatch) is
   `edited, unaudited`: no skill is shipped for it, the rule line says so, a thread run is warned about, a subagent may not run it.
+  Hardening: the auditor echoes the sha256 of the text it read (`"sha"` in its `LEAN-AUDIT` line, taken from the brief) and the mod
+  refuses a reply that does not match the stored text, so an audit started on an older text is never recorded against a newer one;
+  version numbers are never reused (not after a replaced, rejected or rolled-back update); a rollback drops the update that waits; a
+  thread changes only its own project's scripts and global ones (update, rollback, report-bad, retire, as propose); the desk's
+  audit thread is started after the store lock is released.
 - **"Can this be a script" lives in the rules.** On adopt, and at every `lean_rules sync`, the mod writes ONE line per adopted
   script between `<!-- lean-agent:scripts -->` markers into the rule of its area (else `_project`), regenerated from the store so
   learn/trim rewrites keep it, within the rule caps (overflow goes to `_project`, then one "N more scripts" pointer); retire removes

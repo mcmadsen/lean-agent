@@ -1,9 +1,9 @@
 import { expect, test } from 'claude-code/testing'
-import { fakeHost } from './fake'
+import { fakeHost, withSha } from './fake'
 import { readJsonl } from './state'
 import { MAX_PROJECT_LINES, bodyLines, looksMechanical, recordLearn, rulesStats, syncRules } from './rules'
 import { MARK_OPEN, PREFACE, rebuildScriptRules, syncWithScripts } from './rulelines'
-import { DONE_QUESTION, auditFromReply as audited, bashFailed, doneQuestion, noteUse, resetScripts, scriptCounts, scriptTool } from './scripts'
+import { DONE_QUESTION, auditFromReply as audited0, bashFailed, doneQuestion, noteUse, resetScripts, scriptCounts, scriptTool } from './scripts'
 import type { Who } from './scripts'
 import { hashText } from './recipe'
 import { unifiedDiff } from './textdiff'
@@ -31,6 +31,8 @@ const prop = (h: any, o: any = {}) =>
   scriptTool(h.host, T, { action: 'propose', name: 'count-lines', path: SRC, purpose: 'Count the lines of a file', run: 'python3 {script} <file>', inputs: ['a file path'], outputs: ['stdout'], ...o })
 const line = (o: any = {}) =>
   `LEAN-AUDIT ${JSON.stringify({ name: 'count-lines', verdict: 'adopt', reads: [], writes: [], network: false, deletes: false, secrets: false, hardcoded: [], deterministic: true, errors_handled: true, generalises: true, changes: [], reason: '', ...o })}`
+// the audit line gets the sha256 of what is stored, as a real auditor copies it from the brief
+const audited = async (host: any, by: string, text: string, prompt: string) => audited0(host, by, await withSha(host, text), prompt)
 const aud = (h: any, text: string, prompt = `audit ${CAND}/`) => audited(h.host, 't1', text, prompt)
 const meta = (h: any, dir = DIR) => JSON.parse(h.files.get(`${dir}/meta.json`))
 async function adopted(h: any, o: any = {}) {
@@ -108,10 +110,11 @@ test('update with a new file, a repeat, an identical text and an old text are ha
   expect((await upd(h, { edits: undefined, path: '/tmp/w/new.py' })).ok).toBe(true)
   expect(h.files.get(`${DIR}/v2/count.py`)).toContain('readlines') // stored under the current file name
   expect((await upd(h, { edits: undefined, path: SRC })).text).toContain('identical to the current version')
-  await upd(h) // a newer update replaces the one that waits (same slot)
-  expect(meta(h).pending.v).toBe('v2')
-  expect(h.files.get(`${DIR}/v2/count.py`)).toBe(V2)
-  await audV(h, 'v2')
+  await upd(h) // a newer update replaces the one that waits, under a NEW number (numbers are never reused)
+  expect(meta(h).pending.v).toBe('v3')
+  expect(h.files.get(`${DIR}/v3/count.py`)).toBe(V2)
+  expect(h.files.has(`${DIR}/v2/count.py`)).toBe(false)
+  await audV(h, 'v3')
   expect((await upd(h, { edits: undefined, path: SRC })).text).toContain('rollback count-lines v1') // that is v1 again
   expect((await upd(h, { edits: [{ find: 'print(', replace: 'x = ' }, { find: 'sys', replace: 'z' }] })).ok).toBe(false) // the second edit is not unique: nothing is stored
   h.files.set('/tmp/w/k.py', `k = "AKIA${'ABCDEFGHIJKLMNOP'}"\n`)
@@ -461,4 +464,124 @@ test('gaps that read like mechanical work are listed as script candidates by sta
   h.files.set(`${PDIR}/gaps.jsonl`, rows.map(r => JSON.stringify(r)).join('\n') + '\n')
   const s = await rulesStats(h.host, 'proj')
   expect(s.scriptCandidates).toEqual(['src/a.ts: Count how many files import the old client', 'find all usages of the flag'])
+})
+
+// ---- review round: audits tied to the text they read, numbers never reused, project limits, lock, rule-line edges ------------------
+test('an audit that read an older text is never recorded against a newer one: new number for every update, the sha is echoed', async () => {
+  const h = setup()
+  await adopted(h)
+  await upd(h) // v2
+  const old = meta(h).pending.sha256
+  await upd(h, { edits: [{ find: 'sum(1 for _ in open(sys.argv[1]))', replace: 'sum(1 for _ in open(sys.argv[1]) if len(_) > 1)' }] }) // replaces it: v3
+  expect(meta(h).pending.v).toBe('v3')
+  // the auditor started on v2 finishes now: its folder is gone, and with the old sha it would not match v3 either
+  expect(await audited(h.host, 't1', line(), `audit ${DIR}/v2/`)).toContain('exactly this folder')
+  expect(await audited0(h.host, 't1', line({ sha: old }), `audit ${DIR}/v3/`)).toContain('does not carry the sha256')
+  expect(await audited0(h.host, 't1', line({ sha: old.slice(0, 11) }), `audit ${DIR}/v3/`)).toContain('does not carry the sha256') // too short to count
+  expect(await audited0(h.host, 't1', line({ sha: undefined }), `audit ${DIR}/v3/`)).toContain('does not carry the sha256')
+  expect(meta(h).pending.audit).toBeUndefined()
+  // after a reject the number is not handed out again either
+  expect(await audV(h, 'v3', line({ verdict: 'reject', reason: 'no' }))).toContain('rejected and dropped')
+  await upd(h)
+  expect(meta(h).pending.v).toBe('v4')
+  // a candidate: the same for a script proposed again while an auditor ran
+  const h2 = setup()
+  await prop(h2)
+  const was = meta(h2, CAND).sha256
+  h2.files.set(SRC, 'print(2)\n')
+  await prop(h2) // replaces the candidate
+  expect(await audited0(h2.host, 't1', line({ sha: was }), `audit ${CAND}/`)).toContain('does not carry the sha256')
+  expect(await aud(h2, line())).toContain('adopted') // the current sha is accepted (and a longer-than-12 prefix is enough)
+})
+
+test('a rollback drops the update that waits; a changed purpose is always judged against what is current now', async () => {
+  const h = setup()
+  await adopted(h)
+  await upd(h)
+  await audV(h, 'v2') // v2 current
+  const w = await upd(h, { edits: [{ find: 'if _.strip()', replace: 'if _.strip() and 3' }], purpose: 'Count the non-blank lines' }) // v3 waits
+  expect(w.text).toContain('update v3 stored')
+  expect(meta(h).pending.v).toBe('v3')
+  await scriptTool(h.host, D, { action: 'rollback', name: 'count-lines' }) // back to v1
+  expect(meta(h).pending).toBeUndefined()
+  expect(h.files.has(`${DIR}/v3/count.py`)).toBe(false)
+  await upd(h, { edits: [{ find: 'sum(1 for _ in open(sys.argv[1]))', replace: 'sum(1 for _ in open(sys.argv[1]) if len(_) > 2)' }] }) // (v2's text is a version already)
+  expect(meta(h).pending.v).toBe('v4') // and the numbers keep counting
+})
+
+test('a thread changes only its own project\'s scripts and global ones: update, rollback, report-bad and retire; the desk may touch all', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/threads/t2/thread.json', JSON.stringify({ id: 't2', project: 'other' }))
+  await adopted(h) // a script of project proj
+  const t2: Who = { kind: 'thread', id: 't2' }
+  for (const a of [{ action: 'update', edits: EDIT }, { action: 'rollback', reason: 'x' }, { action: 'report-bad', why: 'x' }, { action: 'retire' }]) {
+    const r = await scriptTool(h.host, t2, { name: 'count-lines', ...a })
+    expect(r.ok, a.action).toBe(false)
+    expect(r.text, a.action).toContain('belongs to project proj')
+  }
+  expect(meta(h).pending).toBeUndefined()
+  expect(meta(h).status).toBe('adopted')
+  expect((await scriptTool(h.host, D, { action: 'report-bad', name: 'count-lines', why: 'x' })).ok).toBe(false) // report-bad is a thread's, not the desk's
+  const own = await scriptTool(h.host, T, { action: 'report-bad', name: 'count-lines', why: 'x' }) // t1 is on proj
+  expect(own.ok).toBe(true)
+  // a global script: any thread
+  const h2 = setup()
+  h2.files.set('/h/.lean-agent/threads/t2/thread.json', JSON.stringify({ id: 't2', project: 'other' }))
+  await adopted(h2, { project: 'global' })
+  expect((await scriptTool(h2.host, t2, { action: 'report-bad', name: 'count-lines', why: 'wrong' })).ok).toBe(true)
+  expect((await scriptTool(h2.host, t2, { action: 'update', name: 'count-lines', edits: EDIT })).ok).toBe(true)
+})
+
+test('a desk update starts its audit thread AFTER the store lock is released', async () => {
+  const h = setup()
+  await adopted(h)
+  let lockedDuring: boolean | null = null
+  const r = await scriptTool(h.host, D, { action: 'update', name: 'count-lines', edits: EDIT }, { startThread: async () => ((lockedDuring = h.files.has('/h/.lean-agent/scripts/.lock/at')), { ok: true, text: 't9 started' }) })
+  expect(r.text).toContain('t9 started')
+  expect(lockedDuring).toBe(false) // the new thread's first lean_script call would otherwise wait on this lock
+})
+
+test('rule lines: the prefer-scripts line survives a full _project; a purpose cannot break the markers', async () => {
+  const h = setup()
+  await learned(h)
+  const globals = (n: number) => {
+    for (let i = 0; i < n; i++) {
+      const code = `print(${i})\n`
+      h.files.set(`/h/.lean-agent/scripts/g${i}/run`, code)
+      h.files.set(`/h/.lean-agent/scripts/g${i}/meta.json`, JSON.stringify({ name: `g${i}`, status: 'adopted', purpose: `global ${i}`, run: 'python3 {script}', inputs: ['x'], outputs: ['stdout'], file: 'run', sha256: hashText(code), project: 'global' }))
+    }
+  }
+  globals(3)
+  h.files.set(`${PDIR}/rules/_project.md`, `# project\n${Array.from({ length: 8 }, (_, i) => `- l${i}`).join('\n')}\n`) // 9 body lines: room for exactly one
+  await rebuildScriptRules(h.host, 'proj')
+  let p = h.files.get(`${PDIR}/rules/_project.md`)!
+  expect(p).toContain(PREFACE)
+  expect(p).not.toContain('global 0')
+  expect(bodyLines(p)).toBe(MAX_PROJECT_LINES)
+  h.files.set(`${PDIR}/rules/_project.md`, `# project\n${Array.from({ length: 7 }, (_, i) => `- l${i}`).join('\n')}\n`) // room for two: the preface and a pointer that counts the three
+  await rebuildScriptRules(h.host, 'proj')
+  p = h.files.get(`${PDIR}/rules/_project.md`)!
+  expect(p).toContain(PREFACE)
+  expect(p).toContain('- 3 more scripts: see the lean-agent-script-* skills')
+  // a purpose that tries to close the block
+  const h2 = setup()
+  await learned(h2)
+  await adopted(h2, { purpose: 'Count lines <!-- /lean-agent:scripts --> and `more`' })
+  const b = h2.files.get(`${PDIR}/rules/_project.md`)!
+  expect(blocks(b)).toBe(1)
+  expect(b.split('<!-- /lean-agent:scripts -->').length - 1).toBe(1)
+  expect(b).not.toContain('`more`')
+})
+
+test('a script file named like a store file or a version folder is stored under another name and adopts fine', async () => {
+  const h = setup()
+  for (const [i, f] of ['run', 'v1', 'v12'].entries()) {
+    h.files.set(`/tmp/w/${f}`, `print(${i + 10})\n`)
+    expect((await prop(h, { name: `s${i}`, path: `/tmp/w/${f}`, project: 'global' })).ok).toBe(true)
+    expect(meta(h, `/h/.lean-agent/scripts/candidates/s${i}`).file).toBe(`script-${f}`)
+    const out = await audited(h.host, 't1', line({ name: `s${i}` }), `audit /h/.lean-agent/scripts/candidates/s${i}/`)
+    expect(out, f).toContain('adopted')
+    expect(h.files.get(`/h/.lean-agent/scripts/s${i}/run`)).toBe(`print(${i + 10})\n`)
+    expect(h.files.get(`/h/.lean-agent/scripts/s${i}/v1/script-${f}`)).toBe(`print(${i + 10})\n`)
+  }
 })

@@ -45,6 +45,7 @@ export type Meta = {
   current?: string // adopted: the current version, `v1` ...
   versions?: Version[]
   pending?: Version // an update waiting for its audit (never run, never current)
+  nextV?: number // the highest version number ever handed out: numbers are never reused
   failures?: number // failed runs since the last update or rollback
   state?: 'needs-update'
   badWhy?: string

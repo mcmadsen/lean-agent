@@ -132,7 +132,7 @@ const projectOk = (p: string) => p === 'global' || (slugOk(p) && !LEAN_DIRS.has(
 // the stored file never takes the name of the store's own files
 const fileOk = (f: string) => {
   const n = f.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_').slice(0, 64) || 'script'
-  return n === 'meta.json' || n === 'SKILL.md' ? `script-${n}` : n
+  return n === 'meta.json' || n === 'SKILL.md' || n === 'run' || /^v\d+$/.test(n) ? `script-${n}` : n // never a store file or a version folder
 }
 
 type Found = { meta: Meta; dir: string }
@@ -269,6 +269,7 @@ export function auditBrief(meta: Meta, dir: string): string {
     `Audit the candidate script "${meta.name}" for lean-agent. Start ONE \`lean-agent:auditor\` subagent (Agent tool) with the block below as its prompt. Never run the script yourself.`,
     '--- auditor brief ---',
     `Audit the candidate script ${meta.name}. Folder: ${dir} (the script is ${dir}/${meta.file}; meta.json beside it).`,
+    `Script sha256: ${meta.sha256} (put it in the LEAN-AUDIT line as "sha")`,
     `Declared purpose: ${meta.purpose}`,
     `Declared run: ${meta.run}`,
     `Declared inputs: ${meta.inputs.join('; ')}`,
@@ -280,7 +281,7 @@ export function auditBrief(meta: Meta, dir: string): string {
   ].join('\n')
 }
 
-export type Reply = { name: string; verdict: Verdict | null; reads: string[]; writes: string[]; network: boolean | null; deletes: boolean | null; secrets: boolean | null; hardcoded: string[]; deterministic: boolean; errorsHandled: boolean; generalises: boolean | null; changes: string[]; reason: string }
+export type Reply = { name: string; sha: string; verdict: Verdict | null; reads: string[]; writes: string[]; network: boolean | null; deletes: boolean | null; secrets: boolean | null; hardcoded: string[]; deterministic: boolean; errorsHandled: boolean; generalises: boolean | null; changes: string[]; reason: string }
 export function parseAudit(text: string): Reply | null {
   const all = [...String(text ?? '').matchAll(/^\s*`?LEAN-AUDIT\s+(\{.*\})`?\s*$/gm)]
   const last = all[all.length - 1]
@@ -294,7 +295,7 @@ export function parseAudit(text: string): Reply | null {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return null
   const bool = (v: unknown): boolean | null => (typeof v === 'boolean' ? v : null)
   const verdict: Verdict | null = o.verdict === 'adopt' || o.verdict === 'adapt' || o.verdict === 'reject' ? o.verdict : null
-  return { name: str(o.name), verdict, reads: strs(o.reads), writes: strs(o.writes), network: bool(o.network), deletes: bool(o.deletes), secrets: bool(o.secrets), hardcoded: strs(o.hardcoded), deterministic: o.deterministic !== false, errorsHandled: o.errors_handled !== false, generalises: bool(o.generalises), changes: strs(o.changes), reason: txt(o.reason).slice(0, 400) }
+  return { name: str(o.name), sha: str(o.sha).toLowerCase(), verdict, reads: strs(o.reads), writes: strs(o.writes), network: bool(o.network), deletes: bool(o.deletes), secrets: bool(o.secrets), hardcoded: strs(o.hardcoded), deterministic: o.deterministic !== false, errorsHandled: o.errors_handled !== false, generalises: bool(o.generalises), changes: strs(o.changes), reason: txt(o.reason).slice(0, 400) }
 }
 
 // an output entry that would cover (nearly) anything is no declaration
@@ -341,13 +342,17 @@ async function recordAudit(h: Host, by: string, reply: Reply, prompt: string): P
   const named = new Set(prompt.match(/\/scripts\/(?:candidates\/[A-Za-z0-9._-]+|[A-Za-z0-9._-]+\/v\d+)\//g) ?? [])
   if (!prompt.includes(folder) || named.size !== 1) return err(`${reply.name}: the auditor must be pointed at exactly this folder (${folder}), so its reply is not an audit of this script; use the brief lean_script audit gives`)
   if (prior && prior.sha === sha) return err(`${reply.name} was already audited at this content (${prior.verdict}); ${pend ? 'send a revised update' : 'propose a revised script'} to audit again`)
+  // the auditor echoes the sha256 of the text it was given: a reply that read an older text (the script was proposed or updated again
+  // while the auditor ran) is never recorded against the newer one
+  if (reply.sha.length < 12 || !sha.startsWith(reply.sha)) return err(`${reply.name}: the audit does not carry the sha256 of the stored text (${sha.slice(0, 12)}...), so it may be about an older text; run the auditor again with the current brief`)
   if (reply.verdict === null) return err('audit verdict must be adopt, adapt or reject')
   const r = reply as Reply & { verdict: Verdict }
   if (r.network === null || r.deletes === null || r.secrets === null || r.generalises === null) return err('audit incomplete: network, deletes, secrets and generalises must each be answered true or false')
   const text = await readText(h, path)
   if (text === null || hashText(text) !== sha) return err(`${r.name}: the stored script changed since it was ${pend ? 'sent as an update' : 'proposed'}, so this audit does not apply; ${pend ? 'send the update again' : 'propose it again'}`)
   const now = scan(text, await homeDir(h))
-  const moved = pend ? (pend.changes ?? []) : []
+  // what the update changes in purpose or run line, against what is current NOW (a rollback may have moved current since it was sent)
+  const moved = pend ? [...(pend.purpose !== f.meta.purpose ? [`changes the purpose (was: ${f.meta.purpose})`] : []), ...(pend.run !== f.meta.run ? [`changes the run line (was: ${f.meta.run})`] : [])] : []
   const j = judge(f.meta, r, { ...now, risky: [...riskyText(text), ...moved] })
   const changes = [...r.changes, ...(j.verdict === 'adapt' && r.verdict === 'adopt' ? j.blockers.map(b => `mod: it ${b}`) : [])]
   if (j.verdict === 'adapt' && !changes.length) return err('an adapt verdict needs the concrete changes (changes: [...])')
@@ -479,6 +484,8 @@ async function decide(h: Host, who: Who, i: any): Promise<Out> {
 async function retire(h: Host, who: Who, i: any): Promise<Out> {
   const f = await find(h, str(i.name))
   if (!f) return err(`no script ${str(i.name)}`)
+  const no = await mayTouch(h, who, f.meta)
+  if (no) return no
   const home = await homeDir(h)
   const ts = await h.clock.now()
   const dest = `${scriptsDir(home)}/retired/${f.meta.name}-${ts}`
@@ -500,6 +507,7 @@ export function updateBrief(meta: Meta, dir: string, pend: Version): string {
     `Audit the UPDATE ${pend.v} of the adopted script "${meta.name}" (current ${meta.current}). Start ONE \`lean-agent:auditor\` subagent (Agent tool) with the block below as its prompt. Never run the script yourself.`,
     '--- auditor brief ---',
     `Audit the update ${pend.v} of script ${meta.name}. Folder: ${dir}/${pend.v}/ (the new script is ${dir}/${pend.v}/${pend.file}).`,
+    `Script sha256: ${pend.sha256} (put it in the LEAN-AUDIT line as "sha")`,
     `The change against the current version is ${dir}/${pend.v}/.changes.diff: read it first. Audit ONLY the change plus the checklist: apply every item to the changed lines, and to the rest of the script only where the change touches it, then answer the checklist for the resulting script.`,
     `Declared purpose: ${pend.purpose}${was(cur?.purpose ?? '', pend.purpose)}`,
     `Declared run: ${pend.run}${was(cur?.run ?? '', pend.run)}`,
@@ -538,11 +546,14 @@ async function newText(h: Host, i: any, base: string): Promise<string | Out> { /
   return err('update needs path (the new script file) or edits: [{find, replace}] applied to the current version')
 }
 
-async function update(h: Host, who: Who, i: any, io: Io): Promise<Out> {
+type Started = Out & { start?: { title: string; brief: string; project: string } }
+async function update(h: Host, who: Who, i: any, io: Io): Promise<Started> {
   const f = await find(h, str(i.name))
   if (!f) return err(`no script ${str(i.name)}`)
   const m = f.meta
   if (m.status !== 'adopted') return err(`${m.name} is ${m.status}: only an adopted script is updated (a candidate is proposed again)`)
+  const no = await mayTouch(h, who, m)
+  if (no) return no
   const cur = ver(m)
   const curText = cur ? await readText(h, `${f.dir}/${cur.v}/${cur.file}`) : null
   if (!cur || curText === null || hashText(curText) !== cur.sha256) return err(`${m.name}: the stored ${m.current} file is missing or was edited, so there is nothing sound to update: roll back to an older version`)
@@ -566,19 +577,28 @@ async function update(h: Host, who: Who, i: any, io: Io): Promise<Out> {
   if (fields.secrets.length || fields.privacy.length) return err(`purpose or run ${[...fields.secrets, ...fields.privacy].join('; ')}`)
   const changes = [...(purpose !== m.purpose ? [`changes the purpose (was: ${m.purpose})`] : []), ...(run !== m.run ? [`changes the run line (was: ${m.run})`] : [])]
   const ts = await h.clock.now()
-  const v = m.pending?.v ?? `v${Math.max(0, ...(m.versions ?? []).map(x => vnum(x.v))) + 1}`
+  // a version number is never reused (not after a replaced or rejected update either): an auditor still running on an older text
+  // names an older folder, which no longer matches
+  const n = Math.max(m.nextV ?? 0, ...(m.versions ?? []).map(x => vnum(x.v)), m.pending ? vnum(m.pending.v) : 0) + 1
+  const v = `v${n}`
   if (m.pending) await h.process.run(['rm', '-rf', `${f.dir}/${m.pending.v}`]) // a newer update replaces the one still waiting
   await h.fs.write(`${f.dir}/${v}/${cur.file}`, text)
   await h.fs.write(`${f.dir}/${v}/.changes.diff`, unifiedDiff(curText, text, `${cur.v}/${cur.file}`, `${v}/${cur.file}`))
   const pend: Version = { v, file: cur.file, sha256: sha, author: who.kind === 'thread' ? who.id : 'desk', ts, purpose, run, changes }
-  const meta: Meta = note({ ...m, pending: pend }, ts, `update ${v} sent by ${pend.author}`)
+  const meta: Meta = note({ ...m, pending: pend, nextV: n }, ts, `update ${v} sent by ${pend.author}`)
   await writeJson(h, `${f.dir}/meta.json`, meta)
   const brief = updateBrief(meta, f.dir, pend)
   const head = `${m.name}: update ${v} stored (not run, not current; ${m.current} stays current until it is audited).${changes.length ? ` Shown for the verdict: ${changes.join('; ')}.` : ''}`
   if (who.kind === 'thread') return { ok: true, text: `${head}\n${brief}` }
   if (!io.startThread) return { ok: true, text: `${head}\nRoute this to a thread (lean_thread new) with this brief:\n${brief}` }
-  const t = await io.startThread(`audit update of script ${m.name}`, brief, m.project === 'global' ? '' : m.project)
-  return t.ok ? { ok: true, text: `${head} The audit started in a thread: ${t.text}` } : t
+  // the thread is started by the caller after the lock is released (its first lean_script call needs the lock)
+  return { ok: true, text: head, start: { title: `audit update of script ${m.name}`, brief, project: m.project === 'global' ? '' : m.project } }
+}
+
+// a thread changes only its own project's scripts and the global ones (as propose does)
+async function mayTouch(h: Host, who: Who, meta: Meta): Promise<Out | null> {
+  if (who.kind !== 'thread' || meta.project === 'global') return null
+  return (await threadProject(h, await homeDir(h), who.id)) === meta.project ? null : err(`${meta.name} belongs to project ${meta.project}: a thread changes only its own project's scripts and global ones`)
 }
 
 async function rollback(h: Host, who: Who, i: any): Promise<Out> {
@@ -586,6 +606,8 @@ async function rollback(h: Host, who: Who, i: any): Promise<Out> {
   if (!f) return err(`no script ${str(i.name)}`)
   const m = f.meta
   if (m.status !== 'adopted' || !m.versions?.length) return err(`${m.name} is ${m.status}: only an adopted script has versions to go back to`)
+  const no = await mayTouch(h, who, m)
+  if (no) return no
   const reason = txt(i.reason).slice(0, 300)
   if (who.kind === 'thread' && !reason) return err('a thread gives a reason to roll back (reason: why)')
   const idx = m.versions.findIndex(v => v.v === m.current)
@@ -596,7 +618,8 @@ async function rollback(h: Host, who: Who, i: any): Promise<Out> {
   if (text === null || hashText(text) !== target.sha256) return err(`${target.v}/${target.file} is missing or was edited by hand: it is no longer the audited text`)
   const ts = await h.clock.now()
   await h.fs.write(`${f.dir}/${m.file}`, text)
-  const meta: Meta = note({ ...m, current: target.v, sha256: target.sha256, purpose: target.purpose, run: target.run, audit: target.audit, decision: target.decision, failures: 0, state: undefined, badWhy: undefined }, ts, `rolled back to ${target.v}${target.v === m.current ? ' (restored)' : ` from ${m.current}`} by ${who.kind === 'thread' ? who.id : 'the desk'}${reason ? `: ${reason}` : ''}`)
+  if (m.pending) await h.process.run(['rm', '-rf', `${f.dir}/${m.pending.v}`]) // an update that waits was written against the version being left: it is dropped
+  const meta: Meta = note({ ...m, current: target.v, sha256: target.sha256, purpose: target.purpose, run: target.run, audit: target.audit, decision: target.decision, failures: 0, state: undefined, badWhy: undefined, pending: undefined, nextV: Math.max(m.nextV ?? 0, ...(m.pending ? [vnum(m.pending.v)] : [])) || undefined }, ts, `rolled back to ${target.v}${target.v === m.current ? ' (restored)' : ` from ${m.current}`} by ${who.kind === 'thread' ? who.id : 'the desk'}${reason ? `: ${reason}` : ''}`)
   await writeJson(h, `${f.dir}/meta.json`, meta)
   await h.fs.write(`${f.dir}/SKILL.md`, recipeText(meta, f.dir))
   await appendJsonl(h, `${scriptsDir(await homeDir(h))}/decisions.jsonl`, { ts, name: m.name, by: who.kind === 'thread' ? who.id : 'desk', value: 'rollback', from: m.current, to: target.v, reason })
@@ -609,6 +632,8 @@ async function reportBad(h: Host, who: Who, i: any): Promise<Out> {
   const f = await find(h, str(i.name))
   if (!f) return err(`no script ${str(i.name)}`)
   if (f.meta.status !== 'adopted') return err(`${f.meta.name} is ${f.meta.status}: only an adopted script is reported`)
+  const no = await mayTouch(h, who, f.meta)
+  if (no) return no
   const why = txt(i.why).slice(0, 200)
   if (!why) return err('report-bad needs why: what was wrong')
   const ts = await h.clock.now()
@@ -718,8 +743,12 @@ export async function scriptTool(h: Host, who: Who, i: any, io: Io = {}): Promis
         return await queued(h, () => retire(h, who, i))
       case 'decide':
         return await queued(h, () => decide(h, who, i))
-      case 'update':
-        return await queued(h, () => update(h, who, i, io))
+      case 'update': {
+        const u = await queued(h, () => update(h, who, i, io))
+        if (!u.start || !io.startThread) return u
+        const t = await io.startThread(u.start.title, u.start.brief, u.start.project) // after the lock: the new thread needs it
+        return t.ok ? { ok: true, text: `${u.text} The audit started in a thread: ${t.text}` } : t
+      }
       case 'rollback':
         return await queued(h, () => rollback(h, who, i))
       case 'report-bad':

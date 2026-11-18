@@ -33,7 +33,7 @@ async function lineOf(h: Host, r: Row): Promise<string> {
   const code = await h.fs.read(`${r.dir}/${r.meta.file}`).catch(() => null)
   const edited = typeof code !== 'string' || hashText(code) !== r.meta.sha256
   const suffix = edited ? ' (edited, unaudited)' : r.meta.state === 'needs-update' ? ' (needs update)' : ''
-  const purpose = r.meta.purpose.replace(/\s+/g, ' ').slice(0, 140)
+  const purpose = r.meta.purpose.replace(/<!|-->|`/g, '').replace(/\s+/g, ' ').slice(0, 140) // nothing that could open or close a comment or a code span
   return `- ${purpose}: run \`${expandRun(r.meta, r.dir)}\` (script, do not compute this by reading files)${suffix}`
 }
 
@@ -71,10 +71,12 @@ export async function rebuildScriptRules(h: Host, project: string): Promise<stri
   }
   const ptext = files.includes('_project.md') ? String(await h.fs.read(`${pdir}/rules/_project.md`).catch(() => '')) : null
   const pbase = ptext === null ? '# project\n' : BLOCK.test(ptext) ? ptext.replace(BLOCK, '\n') : ptext
-  const all = [PREFACE, ...(lines.get('_project.md') ?? []), ...overflow]
+  const scripts = [...(lines.get('_project.md') ?? []), ...overflow]
   const room = MAX_PROJECT_LINES - bodyLines(pbase)
   if (room >= 1) {
-    const shown = all.length > room ? [...all.slice(0, room - 1), `- ${all.length - room + 1} more scripts: see the lean-agent-script-* skills`] : all
+    // the prefer-scripts line always stays; of the script lines what fits, then one pointer that counts the rest
+    const kept = Math.max(0, room - 2)
+    const shown = 1 + scripts.length <= room ? [PREFACE, ...scripts] : room >= 2 ? [PREFACE, ...scripts.slice(0, kept), `- ${scripts.length - kept} more scripts: see the lean-agent-script-* skills`] : [PREFACE]
     await save('_project.md', ptext, withBlock(pbase, shown))
   }
   return written

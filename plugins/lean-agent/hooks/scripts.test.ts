@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { fakeHost } from './fake'
+import { fakeHost, withSha } from './fake'
 import { readJsonl } from './state'
 import { syncRules } from './rules'
 import { allScripts, auditFromReply as audited, broadOutput, judge, noteBash, noteUse, noteWrite, ownData, parseAudit, resetScripts, runProblem, scan, scriptCounts, scriptTool, takeNudges, useCounts } from './scripts'
@@ -17,7 +17,8 @@ const T: Who = { kind: 'thread', id: 't1' }
 const D: Who = { kind: 'desk' }
 const CAND = '/h/.lean-agent/scripts/candidates/count-lines'
 // an auditor's reply is recorded only for the folder its prompt names
-const auditFromReply = (host: any, by: string, text: string, prompt = `Audit the script in ${CAND}/ (count.py)`) => audited(host, by, text, prompt)
+// (the audit line gets the sha256 of what is stored, as a real auditor copies it from the brief)
+const auditFromReply = async (host: any, by: string, text: string, prompt = `Audit the script in ${CAND}/ (count.py)`) => audited(host, by, await withSha(host, text), prompt)
 
 function setup() {
   resetScripts()
@@ -647,8 +648,10 @@ test('lean_script refuses in a plain session', async ($, on) => {
 })
 
 test('an auditor\'s Agent reply with a LEAN-AUDIT line is recorded by the mod, whatever the thread does next', async ($, on) => {
-  const s = await session($, on, '/h/.lean-agent/threads/t1', () => on('tool.call', { tool: 'Agent' }, () => ({ result: `fine\n${line({ network: true })}\nLEAN-FEEDBACK {"status":"done","missing":"","remember":[]}` }) as any))
+  let sha = '' // what the auditor read: the stored text's sha256, copied from the brief
+  const s = await session($, on, '/h/.lean-agent/threads/t1', () => on('tool.call', { tool: 'Agent' }, () => ({ result: `fine\n${line({ network: true, sha })}\nLEAN-FEEDBACK {"status":"done","missing":"","remember":[]}` }) as any))
   await propose(s.h)
+  sha = meta(s.h).sha256
   const no: any = await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:auditor', prompt: 'audit it' } as any) // does not name the candidate folder
   expect(JSON.stringify(no.context)).toContain('audit refused')
   expect(meta(s.h).audit).toBeUndefined()

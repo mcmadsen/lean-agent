@@ -14,6 +14,7 @@ const GH = `ghp_${'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6'}`
 const LONG = 'Zq'.repeat(20)
 const T0 = Date.UTC(2026, 10, 18, 14, 7)
 const EXP = '/h/.lean-agent/feedback-export'
+const PRIVATE = '/h/.lean-agent/.private/projects.map.json'
 const ROOT = '/p'
 
 function setup(home = '/h') {
@@ -52,12 +53,38 @@ test('project names become project-A, B ... through a stable local map that is n
   const h = setup()
   const a = await makeAnonymiser(h.host)
   expect(a.anonymise('alpha failed, beta ok, alpha-api and alpha/src, Alpha again, alphabet')).toBe('project-A failed, project-B ok, project-A-api and project-A/src, project-A again, alphabet')
-  expect(JSON.parse(h.files.get(`${EXP}/projects.map.json`)!)).toEqual({ alpha: 'project-A', beta: 'project-B' })
+  expect(JSON.parse(h.files.get(PRIVATE)!)).toEqual({ alpha: 'project-A', beta: 'project-B' })
+  expect([...h.files.keys()].some(k => k.startsWith(`${EXP}/`))).toBe(false) // the real names are not next to the files a user sends
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ gamma: {}, beta: {}, alpha: {} })) // another order, one more
   const b = await makeAnonymiser(h.host)
   expect(b.anonymise('gamma alpha beta')).toBe('project-C project-A project-B') // the labels stay with their names
   h.files.set('/h/.lean-agent/threads/t3/thread.json', JSON.stringify({ id: 't3', project: 'delta' })) // a thread's project counts too
   expect((await makeAnonymiser(h.host)).anonymise('delta t3')).toBe('project-D t3')
+})
+
+test('review round: env-style credentials, scp remotes, IPs and hosts, a registered project\'s folder, case, short and numeric names', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ alpha: { path: '/r/alpha' }, ledgerx: { path: '/work/ledger-repo' }, '123': { path: '/w/n' }, delta: {}, ab: {} }))
+  const a = await makeAnonymiser(h.host)
+  expect(a.anonymise('DB_PASSWORD=hunter22hunter and MY_API_KEY: abcdefgh12345678 and {"token": "abcdefgh12345678"}')).toBe('DB_PASSWORD=<secret> and MY_API_KEY: <secret> and {"token": "<secret>"}')
+  expect(a.missed('DB_PASSWORD=hunter22hunter')).toContain('token or key') // the check does not depend on the rule
+  expect(a.anonymise('remote git@github.com:acme/repo.git and also dev@host.example.org:/srv/x')).toBe('remote <url> and also <url>')
+  expect(a.anonymise('box 10.1.2.3, build.internal.corp, and https://github.com/mcmadsen/lean-agent plus github.com')).toBe('box <ip>, <host>, and https://github.com/mcmadsen/lean-agent plus github.com')
+  expect(a.missed('box 10.1.2.3')).toContain('IP address')
+  expect(a.missed('build.internal.corp')).toContain('host name')
+  // labels follow the order the names were first seen (a JSON object lists "123" first): 123 = A, alpha = B, ledgerx = C, delta = D
+  expect(a.anonymise('repo at /work/ledger-repo, dir ledger-repo, name ledgerx')).toBe('repo at project-C, dir project-C, name project-C')
+  expect(a.anonymise('id 123 and delta, ab stays')).toBe('id project-A and project-D, ab stays') // a numeric name is fine; a 2-letter name is too short to mask
+  expect(a.anonymise('Alpha ALPHA')).toBe('project-B project-B')
+  const u = await makeAnonymiser(setup('/q/Zeldaquux').host)
+  expect(u.anonymise('zeldaquux ZELDAQUUX')).toBe('<user> <user>')
+  // a short, common user name is not a leak by itself: "tests" does not make the export refuse
+  const t = await makeAnonymiser(setup('/q/test').host)
+  expect(t.anonymise('the tests ran')).toBe('the tests ran')
+  expect(t.missed('the tests ran')).toEqual([])
+  const s = await makeAnonymiser(setup('/q/kimbo').host) // 5 letters, not generic: a word is a leak, a longer word is not
+  expect(s.missed('kimbo is here')).toContain('user name')
+  expect(s.missed('kimbos and kimboard')).toEqual([])
 })
 
 test('thread ids stay; hashes, ticket and PR numbers, tokens and keys are replaced', async () => {

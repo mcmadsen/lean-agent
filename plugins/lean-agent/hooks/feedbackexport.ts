@@ -10,8 +10,10 @@ import { allScripts } from './scripts'
 
 export const EXPORT_CAP = 40 * 1024
 const exportDir = (home: string) => `${leanDir(home)}/feedback-export`
+const privateDir = (home: string) => `${leanDir(home)}/.private` // real project names live here, never next to the files a user sends
 export const REPO_URL = /^https:\/\/github\.com\/mcmadsen\/lean-agent(?:[/?#].*)?$/
-const GENERIC_USERS = new Set(['root', 'user', 'users', 'admin', 'home', 'ubuntu', 'runner', 'claude'])
+// user names too common to be identifying (replacing them would only mangle prose)
+const GENERIC_USERS = new Set(['root', 'user', 'users', 'admin', 'home', 'ubuntu', 'runner', 'claude', 'test', 'tests', 'build', 'builder', 'code', 'data', 'guest', 'work', 'node', 'docker', 'deploy', 'jenkins', 'github', 'vagrant', 'ec2-user', 'app', 'www'])
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 // ---- anonymisation ------------------------------------------------------------------------------------------------------------
@@ -19,18 +21,25 @@ const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const SECRET_RES: RegExp[] = [
   /AKIA[0-9A-Z]{16}/g,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
-  /\bgh[pousr]_[A-Za-z0-9]{30,}/g,
-  /\bsk-[A-Za-z0-9_-]{20,}/g,
-  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
-  /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{12,}/g,
-  /\b((?:password|passwd|secret|token|api[_-]?key)\w*["']?\s*[:=]\s*["']?)[^\s"']{6,}/gi,
+  /(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{30,}/g,
+  /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}/g,
+  /(?<![A-Za-z0-9])xox[abprs]-[A-Za-z0-9-]{10,}/g,
+  /(?<![A-Za-z0-9])(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{12,}/g,
+  // DB_PASSWORD=..., MY_API_KEY: ..., "token": "..." (an underscore before the word does not hide it)
+  /(?<![A-Za-z0-9])((?:password|passwd|secret|token|api[_-]?key)\w*["']?\s*[:=]\s*["']?)[^\s"']{6,}/gi,
 ]
+// a credential assignment still carrying its value (alphanumerics): checked on the OUTPUT, independent of the rules above
+const CRED_LEFT = /(?<![A-Za-z0-9])(?:password|passwd|secret|token|api[_-]?key)\w*["']?\s*[:=]\s*["']?[A-Za-z0-9+/_-]{8,}/i
 const LONG_TOKEN = /\b[A-Za-z0-9_-]{32,}\b/g
-const URL_RE = /https?:\/\/[^\s)>\]"'`]+/g
-const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g
+const URL_RE = /(?:https?|ssh|git|ftp):\/\/[^\s)>\]"'`]+/g
+const SCP_RE = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s:]+/g // git@host:org/repo.git
+const EMAIL_RE = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g
+const IP_RE = /(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])/g
+const HOST_RE = /(?<![A-Za-z0-9@/.-])(?:[A-Za-z0-9-]+\.)+(?:com|net|org|io|dev|co|app|cloud|local|internal|corp|lan|ai)\b/g
+const HOST_OK = /^(?:github\.com|dev\.azure\.com)$/i
 const HEX_RE = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,}\b/g
-const ID_WORD_RE = /\b(PR|pull request|issue|ticket|bug|story|task|case)(\s*#?\s*)\d+\b/gi
-const ID_KEY_RE = /\b(?!(?:UTF|SHA|ISO|MD|AES|RSA|TLS|SSL|HTTP|ECMA|RFC)-)[A-Z][A-Z0-9]{1,9}-\d+\b/g // a tracker key like ABC-123, not UTF-8
+const ID_WORD_RE = /\b(PR|pull request|issue|ticket|story)(\s*#?\s*)\d+\b/gi
+const ID_KEY_RE = /\b(?!(?:UTF|SHA|ISO|MD|AES|RSA|TLS|SSL|HTTP|ECMA|RFC|GPT|TCP|UDP|IPV)-)[A-Z][A-Z0-9]{1,9}-\d+\b/g // a tracker key like ABC-123, not UTF-8
 const LABEL_RE = /(project-(?:[A-Z]|\d+)\b)/
 const AZURE_PATH = /dev\.azure\.com\/[^/\s]+(?:\/[^/\s]+)?/g
 const AZURE_HOST = /\b([A-Za-z0-9-]+)\.visualstudio\.com/g
@@ -40,15 +49,24 @@ export type Anonymiser = { anonymise: (t: string) => string; missed: (t: string)
 
 const label = (n: number) => (n < 26 ? `project-${String.fromCharCode(65 + n)}` : `project-${n + 1}`)
 
-// project names -> project-A, project-B ... through a stable map kept locally (feedback-export/projects.map.json, never exported)
-async function projectNames(h: Host, home: string): Promise<string[]> {
+// project names -> project-A, project-B ... through a stable map kept locally (~/.lean-agent/.private/projects.map.json: it holds the
+// real names, so it is not in the export folder). A name under 3 characters, or "global", is too short or too common to mask.
+// A registered project's folder and the folder's name are masked as the same project. Returns [text, label] pairs, longest first.
+async function projectNames(h: Host, home: string): Promise<[string, string][]> {
   const names: string[] = []
+  const extra: [string, string][] = [] // alias -> project name
+  const ok = (n: unknown): n is string => typeof n === 'string' && n.trim().length >= 3 && n.trim() !== 'global'
   const add = (n: unknown) => {
-    if (typeof n === 'string' && n.trim() && !names.includes(n.trim())) names.push(n.trim())
+    if (ok(n) && !names.includes(n.trim())) names.push(n.trim())
   }
-  for (const k of Object.keys((await readJson<Record<string, unknown>>(h, `${leanDir(home)}/projects.json`, {})) ?? {})) add(k)
+  const projs = (await readJson<Record<string, { path?: unknown } | null>>(h, `${leanDir(home)}/projects.json`, {})) ?? {}
+  for (const [k, v] of Object.entries(projs)) {
+    add(k)
+    const p = typeof v?.path === 'string' ? v.path.replace(/\/+$/, '') : ''
+    if (ok(k) && p) for (const a of [p, p.split('/').pop() ?? '']) if (ok(a) && a !== k) extra.push([a.trim(), k.trim()])
+  }
   for (const e of await h.fs.list(threadsDir(home)).catch(() => [])) add((await readJson<{ project?: string }>(h, `${threadsDir(home)}/${e.name}/thread.json`, {})).project)
-  const file = `${exportDir(home)}/projects.map.json`
+  const file = `${privateDir(home)}/projects.map.json`
   const map = await readJson<Record<string, string>>(h, file, {})
   let changed = false
   for (const n of names) {
@@ -58,16 +76,13 @@ async function projectNames(h: Host, home: string): Promise<string[]> {
     }
   }
   if (changed) await writeJson(h, file, map)
-  return Object.keys(map).sort((a, b) => b.length - a.length)
+  const pairs: [string, string][] = [...Object.entries(map), ...extra.filter(([, p]) => map[p]).map(([a, p]): [string, string] => [a, map[p]!])]
+  return pairs.filter(([n]) => n.length >= 3).sort((a, b) => b[0].length - a[0].length)
 }
 
 export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
   const home = await homeDir(h)
-  const map = await (async () => {
-    await projectNames(h, home)
-    return readJson<Record<string, string>>(h, `${exportDir(home)}/projects.map.json`, {})
-  })()
-  const projects = Object.keys(map).sort((a, b) => b.length - a.length)
+  const projects = await projectNames(h, home)
   const user = home.split('/').pop() ?? ''
   const userOk = user.length >= 4 && !GENERIC_USERS.has(user.toLowerCase())
   const homeRe = home.length > 1 ? new RegExp(`${esc(home)}(?![A-Za-z0-9._-])`, 'g') : null
@@ -83,21 +98,22 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
     })
     // what is left of azure hosts (written without a scheme): the organisation and project segments go
     t = t.replace(AZURE_PATH, 'dev.azure.com/<org>/<org>').replace(AZURE_HOST, '<org>.visualstudio.com')
-    t = t.replace(EMAIL_RE, '<email>')
+    t = t.replace(SCP_RE, '<url>').replace(EMAIL_RE, '<email>')
+    t = t.replace(IP_RE, '<ip>').replace(HOST_RE, m => (HOST_OK.test(m) ? m : '<host>'))
     if (homeRe) t = t.replace(homeRe, '~')
     t = t.replace(USER_PATH, '~$1')
-    if (userOk) t = t.replace(new RegExp(`(?<![A-Za-z0-9])${esc(user)}(?![A-Za-z0-9])`, 'g'), '<user>') // zeldaquux-laptop yes, zeldaquuxbox is left for the check
+    if (userOk) t = t.replace(new RegExp(`(?<![A-Za-z0-9])${esc(user)}(?![A-Za-z0-9])`, 'gi'), '<user>') // zeldaquux-laptop yes, zeldaquuxbox is left for the check
     // projects: names become a private token first, then their labels, so a label is never re-matched by a name (labels already in
-    // the text are left alone: running this twice changes nothing)
+    // the text are left alone: running this twice changes nothing). The token is control characters only: no name can match it.
     t = t
       .split(LABEL_RE)
       .map((part, k) => {
         if (k % 2) return part
         let p = part
-        projects.forEach((n, i) => {
-          p = p.replace(nameRe(n), `\u0001${i}\u0001`)
+        projects.forEach(([n], i) => {
+          p = p.replace(nameRe(n), `${'\u0001'.repeat(i + 1)}\u0002`)
         })
-        return p.replace(/\u0001(\d+)\u0001/g, (_, i) => map[projects[Number(i)]!]!)
+        return p.replace(/(\u0001+)\u0002/g, (_, c: string) => projects[c.length - 1]![1])
       })
       .join('')
     t = t.replace(ID_WORD_RE, '$1$2<id>').replace(/#\d+\b/g, '#<id>').replace(ID_KEY_RE, '<id>')
@@ -112,10 +128,13 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
     const out: string[] = []
     if (homeRe && new RegExp(homeRe.source).test(t)) out.push('home directory')
     if (/\/(?:Users|home)\/[A-Za-z0-9._-]+/.test(t)) out.push('/Users or /home path')
-    if (userOk && new RegExp(esc(user), 'i').test(t)) out.push('user name')
-    if (projects.some(n => nameRe(n).test(t))) out.push('project name')
-    if (new RegExp(EMAIL_RE.source).test(t)) out.push('email address')
-    if (SECRET_RES.some(re => { const hit = new RegExp(re.source, re.flags.replace('g', '')).exec(t); return !!hit && !/<secret>$/.test(hit[0]) })) out.push('token or key')
+    // the user name: a substring for a long one (it may sit inside a host name), a word for a short one (so "tests" is not a leak)
+    if (userOk && new RegExp(user.length < 6 ? `(?<![A-Za-z0-9])${esc(user)}(?![A-Za-z0-9])` : esc(user), 'i').test(t)) out.push('user name')
+    if (projects.some(([n]) => nameRe(n).test(t))) out.push('project name')
+    if (new RegExp(EMAIL_RE.source).test(t) || new RegExp(SCP_RE.source).test(t)) out.push('email address')
+    if (new RegExp(IP_RE.source).test(t)) out.push('IP address')
+    if ((t.match(HOST_RE) ?? []).some(m => !HOST_OK.test(m))) out.push('host name')
+    if (CRED_LEFT.test(t) || SECRET_RES.some(re => { const hit = new RegExp(re.source, re.flags.replace('g', '')).exec(t); return !!hit && !/<secret>$/.test(hit[0]) })) out.push('token or key')
     if (/dev\.azure\.com\/(?!<org>)[^/\s]/.test(t) || /\b(?!<org>)[A-Za-z0-9-]+\.visualstudio\.com/.test(t)) out.push('azure organisation')
     if ((t.match(URL_RE) ?? []).some(u => !REPO_URL.test(u.replace(/[.,;:!?]+$/, '')))) out.push('URL')
     return [...new Set(out)]
@@ -247,7 +266,8 @@ export function fit(c: Collected, at: number, cap = EXPORT_CAP): string {
     if (bytes(t) <= cap) return t
   }
   const t = render(c, at, { draft: 600, top: 3 })
-  const cut = t.slice(0, Math.max(0, cap - 200))
+  let cut = t.slice(0, Math.max(0, cap - 200))
+  while (bytes(cut) > cap - 200 && cut.length) cut = cut.slice(0, Math.floor(cut.length * 0.9)) // by bytes, not characters
   return `${cut.slice(0, cut.lastIndexOf('\n'))}\n\n_... the rest was cut to keep the file under ${Math.round(cap / 1024)} KB._\n`
 }
 
@@ -257,6 +277,7 @@ export async function exportFeedback(h: Host, root: string, o: { notes?: string;
     const home = await homeDir(h)
     const dir = exportDir(home)
     const st = { ...emptyState(), ...(await readJson<Partial<State>>(h, `${dir}/state.json`, {})) } as State
+    const startedAt = await h.clock.now() // taken BEFORE collecting: what is written meanwhile belongs to the next export
     const an = await makeAnonymiser(h)
     const c = await collect(h, root, o, st, an)
     const body = an.anonymise(fit(c, st.at)) // once more over the whole file: nothing reaches it unscrubbed
@@ -268,7 +289,7 @@ export async function exportFeedback(h: Host, root: string, o: { notes?: string;
     for (let n = 2; await h.fs.exists(path).catch(() => false); n++) path = `${dir}/${stamp}-${n}.md`
     await mkdirp(h, dir)
     await atomicWrite(h, path, body)
-    await writeJson(h, `${dir}/state.json`, { at: now, drafts: [...st.drafts, ...c.drafts.map(d => d.raw)], core: [...st.core, ...c.core.map(x => x.name)] } satisfies State)
+    await writeJson(h, `${dir}/state.json`, { at: startedAt, drafts: [...st.drafts, ...c.drafts.map(d => d.raw)], core: [...st.core, ...c.core.map(x => x.name)] } satisfies State)
     return { ok: true, path, text: `feedback export written: ${path} (${Math.ceil(bytes(body) / 1024)} KB, anonymised by code). Nothing was posted: show the path; the user pastes the file to the maintainers, or posts it only after an explicit yes (gh if it is installed, otherwise say it is not).` }
   } catch (e) {
     return { ok: false, text: `feedback export failed: ${String((e as Error)?.message ?? e).slice(0, 200)}` }
