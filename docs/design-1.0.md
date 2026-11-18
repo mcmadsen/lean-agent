@@ -45,11 +45,12 @@ Legend: **KEEP** (how in pure Claude Code), **CHANGE** (what changes), **DROP** 
 | 9 | `lean-agent run` workers with model choice | CHANGE | subagents: `agents/worker-haiku.md`, `worker-sonnet.md`, `worker-opus.md` (model + tools), called by threads via the Agent tool |
 | 10 | read-only workers (`--read-only`, `--allow-cmd`) | CHANGE | `agents/reader-*.md` with `tools: Read, Grep, Glob` (+ Bash only with a mod `tool.call` allowlist keyed on `e.agentId`) |
 | 11 | `--allow-edit` path grants | CHANGE | mod `tool.call` on Edit/Write for subagents: allow only paths in the grant written by the thread to `$.state` |
-| 12 | Worker cards (`--cards`, `suggest`) | KEEP | mod tool `lean_cards(project, task)` returns the selected cards; worker agents' prompt says "call lean_cards first"; stats in `cards.json` |
-| 13 | `learn` / `unlearn` / `projects` / `cards` / `optimize` / `card shorten` | CHANGE | one skill `learn`: a haiku subagent indexes CLAUDE.md/rules/docs into `~/.lean-agent/<project>/cards.json`; optimize = same skill with a "trim" step |
-| 14 | `LEAN-FEEDBACK` line + card stats | KEEP | mod `turn.complete` with `e.agentId` parses the worker's last line, updates card stats and `memory/` |
+| 12 | Worker cards (`--cards`, `suggest`, card selection per task) | DROP | replaced by native path-scoped rules (2.8): a rule loads by itself when a session or subagent reads a matching file, so no selection step, no `lean_cards` tool |
+| 13 | `learn` / `unlearn` / `projects` / `cards` / `optimize` / `card shorten` | CHANGE | `/lean-agent:learn` skill + `agents/explorer.md` write small `paths:`-scoped rule files (2.8); `unlearn` removes the link; `optimize` = `learn --trim`; `projects` = `projects.json` |
+| 14 | `LEAN-FEEDBACK` line + card stats | CHANGE | mod `turn.complete` (`e.agentId`) parses the worker's last line: `missing` -> `<project>/gaps.jsonl` (input for the next learn), `remember` -> `memory/`. Card stats -> rule-load stats from the `InstructionsLoaded` hook (2.8) |
 | 15 | Budgets per run (`--max-reads`, tokens, timeout, escalate) | CHANGE | mod `turn.step` per `agentId` sums `usage`; over budget -> answer without `next` (no request) and a notice. Escalation = thread re-runs with a bigger agent (rule, not code) |
-| 16 | Recipes / `do` | CHANGE | per-project skills under `~/.lean-agent/<project>/recipes/*.md`, run by the thread skill `recipe` |
+| 16 | Recipes / `do` | CHANGE | become project skills: `~/.lean-agent/<project>/skills/<name>/SKILL.md`, linked into checkouts like the rules (2.8) so Claude Code lists and runs them natively; `recipe` skill dropped |
+| 16a | `suggest` (pick model/cards for a task) | DROP | the thread picks the worker agent by the rule in its CLAUDE.md; context comes from path rules |
 | 17 | `runs` / `runs --wait/--lost/--resume` | DROP | the Agent tool is synchronous inside a thread; no detached worker processes to track |
 | 18 | `review` + reviewer quality gate | KEEP | skill `review` + `agents/reviewer.md` (opus, read-only); result `~/.lean-agent/<project>/reviews/<sha>.json` |
 | 19 | Review passes / fix loop (full, then deltas) | KEEP | skill `review` keeps `passes.json` per branch; delta mode passes the last reviewed sha |
@@ -80,7 +81,7 @@ Legend: **KEEP** (how in pure Claude Code), **CHANGE** (what changes), **DROP** 
 | 44 | Attribution asked once | KEEP | `config.json` `attribution`; the thread CLAUDE.md states it |
 | 45 | schedule | CHANGE | desk mod `$.clock` reads `scheduled.jsonl`, sends the message to a thread at its time (only while the desk runs) |
 | 46 | find / grep-log / output / text-len | CHANGE | `find` = skill over `~/.lean-agent` with Grep; `output`/`grep-log` = Read/Grep on saved output; text-len dropped |
-| 47 | advise | DROP | the desk answers routing questions itself; workers do the rest |
+| 47 | advise | DROP | project know-how is in path rules that load when the files are read; routing is the desk's job |
 | 48 | Browser tasks / draft-first | KEEP | thread CLAUDE.md rule (draft, then ask) |
 | 49 | MCP servers in workers (`mcp-env`, `mcp preset/check/ignore`) | CHANGE | agent `tools:` names `mcp__server__tool`; `mcp check` folded into doctor |
 | 50 | Sign-in handling (`lean_auth`) | DROP | bg sessions use the app's sign-in |
@@ -101,7 +102,8 @@ Legend: **KEEP** (how in pure Claude Code), **CHANGE** (what changes), **DROP** 
     thread.json             {id, title, project, state: open|parked|closed, sid, sids[], started, last_turn}
     inbox.jsonl             desk -> thread messages {id, ts, text, consumed_ts?}
     notes.md                thread's running notes (written before compaction and on close)
-  <project>/                cards.json, recipes/, reviews/, passes.json, handovers/ (as today)
+  <project>/                rules/ (learned, 2.8), skills/ (ex-recipes), learn.json, gaps.jsonl,
+                            reviews/, passes.json, handovers/ (as today)
   projects.json goals.json questions.jsonl todo.json worktrees.json config.json ledger.jsonl
   memory/  output/  logs/opener.log
 ```
@@ -115,9 +117,9 @@ file except `ledger.jsonl`, which is append-only).
   AskUserQuestion". About 60 lines (today's front-desk.md minus CLI lines).
 - The plugin (user scope, enabled in `~/.claude/settings.json`), loaded by local Desktop sessions and bg sessions:
   - skills: `thread`, `goals`, `todo`, `review`, `review-learn`, `worktree`, `learn`, `pr`, `branch`, `handover`,
-    `stats`, `doctor`, `feedback`, `recipe`, `find`.
+    `stats`, `doctor`, `feedback`, `find`.
   - commands: `/lean-agent` (toggle pane), `/lean-agent:new`, `/lean-agent:threads`, `/lean-agent:doctor`.
-  - agents: `worker-haiku|sonnet|opus`, `reader-haiku|sonnet`, `reviewer`, `learner`.
+  - agents: `worker-haiku|sonnet|opus`, `reader-haiku|sonnet`, `reviewer`, `explorer`.
   - mod `hooks/register.tsx`: `session.start` decides the role from `session.cwd`: desk folder -> **desk**,
     `threads/tN` -> **thread tN**, anything else -> **plain** (only squeeze, push guard, ledger).
 - Skills the desk must not use (review, worktree, learn) say so in their first line; strict mode enforces it.
@@ -190,6 +192,81 @@ Same mechanism in threads for push guard / private projects and in workers for r
 - Daily cap per role from `config.json`; the pane footer shows today's spend; `stats` skill summarizes the ledger.
 - Plan window %: `$.session.usage` first; if it exposes no plan window, see R6.
 
+### 2.8 Learned project rules (replaces cards, advise, suggest)
+
+**Native mechanism (verified in the installed Claude Code 2.1.327 and its types).** Besides the root `CLAUDE.md`,
+Claude Code loads instruction files lazily: a nested `CLAUDE.md` in a subfolder loads when the session works under that
+folder (`load_reason: "nested_traversal"`), and a `.claude/rules/*.md` file with `paths:` frontmatter loads only when
+the session reads or edits a file matching one of its globs (`load_reason: "path_glob_match"`, the globs reported in
+`globs`). A rules file without `paths:` is always loaded. The `InstructionsLoaded` command-hook event reports every load
+(`file_path`, `load_reason`, `globs`, `trigger_file_path`). Format:
+
+```markdown
+---
+paths:
+  - "services/billing/**/*.ts"
+  - "services/billing/**/*.sql"
+---
+# billing
+- Test: `pnpm --filter billing test -- <file>`; integration tests need `docker compose up db` first.
+- Money is integer cents (`Cents` type); never use float arithmetic.
+- Gotcha: migrations run in filename order; new files get the next number from `migrations/INDEX`.
+```
+
+So a worker that reads `services/billing/x.ts` gets exactly the billing rule and nothing else: the same token saving as
+selected cards, with no selection call and no `lean_cards` / `advise` / `suggest` step.
+
+**Where the rules live: options compared.**
+
+| Option | Loads natively | Files in the repo | Worktrees | Verdict |
+|---|---|---|---|---|
+| A. Real files in `<repo>/.claude/rules/` (committed) | yes | yes, visible, team-shared | come with git | only on request (`commit` mode) |
+| B. Nested `CLAUDE.md` in subfolders | yes | yes, scattered in every area | come with git if committed | no: litters many folders, clashes with the team's own CLAUDE.md files |
+| C. `~/.lean-agent/<project>/rules/` linked as `<repo>/.claude/rules/lean-agent/` + `.git/info/exclude` | yes (R9) | one symlink, invisible to git | the worktree skill adds the link per worktree; `info/exclude` is shared by all worktrees | **default** |
+| D. Additional directory (`--add-dir` + `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD`) | loads that dir's rules, but `paths:` would match files of *that* dir, not the repo | none | n/a | no: path scoping breaks |
+| E. User rules `~/.claude/rules/*.md` | yes | none | n/a | no: loads in every project; relative globs would fire in the wrong repo |
+
+Pick **C**: lean-agent owns the source of truth outside the repo, nothing appears in `git status`, nothing gets
+committed by accident, and path scoping works because the link sits in the repo's own `.claude/rules/`. A project can
+opt into **A** (`projects.json` `"rules": "commit"`): learn then writes the same files as real files for the team to
+review and commit. Private projects default to C as well.
+
+**How `/lean-agent:learn <project> [--area <dir>] [--trim]` produces them** (run in a thread, never the desk):
+1. The skill lists areas: top-level packages/services from the workspace manifest (`package.json` workspaces,
+   `go.work`, `Cargo.toml`, `pyproject`), else first-level source folders; skips areas already covered by the repo's
+   own CLAUDE.md / `.claude/rules` (no duplicates).
+2. Per area one `explorer` subagent (`agents/explorer.md`: model haiku or sonnet, tools Read, Grep, Glob and Bash
+   limited by the mod to `git log|ls-files`, read-only manifests). It returns at most ~25 lines: build/test/lint
+   commands for that area, conventions that are not obvious from the code, gotchas (from `gaps.jsonl`, review
+   comments learned by `review-learn`, and `memory/` entries for that path).
+3. The skill writes `rules/<area>.md` with `paths:` globs for the area and a footer
+   `<!-- lean-agent: learned <sha> <date> sources: <globs> -->`, plus one always-loaded `rules/_project.md` of at most
+   10 lines (how to build/test the whole repo). Caps: 25 lines per rule, 40 rule files; the mod refuses Writes outside
+   `~/.lean-agent/<project>/rules/` during learn.
+4. Links it (`ln -s ~/.lean-agent/<project>/rules <repo>/.claude/rules/lean-agent`, `echo .claude/rules/lean-agent >>
+   .git/info/exclude` once) and records `learn.json` `{sha, areas: {area: {globs, sha, lines}}}`.
+`--trim` rewrites rules that loaded often but were flagged in `gaps.jsonl`, and deletes rules that never loaded in
+30 days (stats below).
+
+**Freshness.**
+- On demand: `/lean-agent:learn <project> --area <dir>`; the desk routes "re-learn X" to a thread.
+- Changed-file trigger: the thread mod at `session.start` (and the worktree skill after a pull) runs
+  `git diff --name-only <area sha>..HEAD` per area; areas whose source globs changed in more than N files (default 15)
+  or whose build manifest changed are marked stale in `learn.json`, shown in the pane, and the thread gets one line
+  "rules for billing are stale: re-learn when you touch it". No automatic background re-learn (it costs tokens).
+- Feedback: a worker's `LEAN-FEEDBACK missing` naming a path goes to `gaps.jsonl`; three gaps for one area mark it stale.
+- Stats: an `InstructionsLoaded` command hook in `hooks.json` (one line: `cat >> ~/.lean-agent/logs/rules-loaded.jsonl`)
+  logs which lean-agent rules load and for which file; `stats` and `--trim` read it.
+
+**How threads and subagents get them.** Nothing to do: a thread or worker that reads `services/billing/x.ts` in the
+checkout or a linked worktree gets `billing.md` from Claude Code itself (R10, R11 verify subagents, bg sessions and
+worktrees). The thread CLAUDE.md says only: "project rules load when you read files; do not paste them into briefs".
+`lean_remember` with a path appends to that area's rule (or `gaps.jsonl` if the rule is at its cap) instead of global
+memory; memory without a path stays in `memory/`.
+
+**Recipes** become skills the same way: `~/.lean-agent/<project>/skills/` linked as `<repo>/.claude/skills/lean-agent-*`
+(excluded from git), so Claude Code lists and runs them natively.
+
 ## 3. Login opener and trust
 
 `~/Library/LaunchAgents/com.lean-agent.desk.plist` (written by the `doctor --fix` step / migration):
@@ -227,8 +304,10 @@ Done by the `doctor` skill's `migrate` step on first 1.0 start (idempotent, writ
 
 | Data | Action |
 |---|---|
-| `projects.json`, `<project>/cards`, recipes, handovers, reviews, passes, `memory/`, `todo.json`, `worktrees.json`, `config.json`, `ledger.jsonl` | kept as is (formats read by the mod) |
+| `projects.json`, handovers, reviews, passes, `memory/`, `todo.json`, `worktrees.json`, `config.json`, `ledger.jsonl` | kept as is (formats read by the mod) |
 | `goals` / `questions` (myq) / waiting | converted to `goals.json` / `questions.jsonl` (open items only) |
+| `<project>/cards` | not converted (cards were selected per task, rules are per path): moved to `legacy-0.45/`; the pane offers "Learn <project>" per registered project. Hand-written cards (no source file) are fed to that learn run as input |
+| recipes | converted to `<project>/skills/<name>/SKILL.md` (task file -> body, model/read-only -> frontmatter `model`/`allowed-tools`) |
 | `threads.json` | each open thread -> `threads/tN/thread.json` + `brief.md` (title, last report) + `notes.md` (handoff notes); state `open`, `sid` empty -> pane shows **Start** only (old sessions lived in another cwd and cannot be resumed from the new folder) |
 | `service.json`, `up.json`, `desk.json`, `windows.json`, `session-cap.json`, self-update files, `*.lock` | moved to `~/.lean-agent/legacy-0.45/` |
 
@@ -255,13 +334,14 @@ skills/agents via `claude plugin validate`; the shell opener via `sh -n` + a fak
 | 3 | Delivery: thread `tool.call` append + `prompt.submit` consume; `lean_report`/`lean_ask`/`lean_goal`; desk sweep and desk-side delivery | M | message consumed exactly once; message after last tool call delivered by sweep; report shows in desk tool result / prompt context |
 | 4 | Strict mode + push guard + private projects + read-only/allow-edit for workers (`tool.call`, fail-closed `.catch`) | M | table of allowed/denied calls per role; a throwing guard denies |
 | 5 | Pane: goals, answers (ack), threads with Resume/Start; status line | M | render snapshot (like examples/pane.test.tsx); press Resume -> one `claude --bg --resume` argv |
-| 6 | Workers: agents/*.md, `lean_cards`, LEAN-FEEDBACK parsing, budgets via `turn.step`, ledger | M | `turn.step` refusal at cap; feedback line updates card stats; ledger row per step |
-| 7 | Skills port: review (+passes, push gate record), review-learn (owner exclusion), worktree, learn, pr, branch, todo, goals+chaser, handover, stats, find, recipe, feedback | L | validate; review record unlocks the push guard for that sha only; chaser wakes a stale idle thread |
+| 6 | Workers: agents/*.md, LEAN-FEEDBACK parsing (gaps, memory), budgets via `turn.step`, ledger | M | `turn.step` refusal at cap; feedback `missing` lands in `gaps.jsonl`; ledger row per step |
+| 6a | Learned rules: `learn` skill, `agents/explorer.md`, rule linker (symlink + `.git/info/exclude`), worktree hook-up, staleness check, `InstructionsLoaded` stats hook, recipe -> skill conversion | M | fixture repo: learn writes rules with valid `paths:` frontmatter and size caps; link created + excluded (`git status` clean); stale area detected after a commit touching its globs; never writes outside `.claude/rules/lean-agent/` |
+| 7 | Skills port: review (+passes, push gate record), review-learn (owner exclusion), worktree, pr, branch, todo, goals+chaser, handover, stats, find, feedback | L | validate; review record unlocks the push guard for that sha only; chaser wakes a stale idle thread |
 | 8 | Squeeze (`tool.call` Bash post-processing) + `tool.list` trimming | S | long output squeezed and saved; errors kept; trimmed tools absent per role |
 | 9 | Opener + doctor + migrate | M | fake-`pgrep` loop timeout logs; migrate idempotent on a 0.45 fixture home |
 | 10 | README rewrite (~300 lines), CHANGELOG, version 1.0.0 | S | link check |
 
-Order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 8 -> 7 -> 9 -> 10. Verify R1-R5 on the Mac before WP2 is finished.
+Order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 6a -> 8 -> 7 -> 9 -> 10. Verify R1-R5 on the Mac before WP2 is finished, R9-R11 before WP6a.
 
 ### Riskiest assumptions (verify on the Mac)
 
@@ -275,6 +355,9 @@ Order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 8 -> 7 -> 9 -> 10. Verify R1-R5 on the Mac 
 | R6 | A plan-window usage source exists for a mod (`$.session.usage` or the status line input) | test mod logging `await $.session.usage({})` on `turn.complete` |
 | R7 | `tool.call` post-processing can append text to any tool's result without breaking structured results (Edit, Agent) | `claude plugin test` with a hook returning the modified `next(e)` result for Read, Edit, Agent |
 | R8 | `claude --desktop` from a launchd job (no TTY, minimal env) opens the draft | `launchctl kickstart gui/$(id -u)/com.lean-agent.desk; tail ~/.lean-agent/logs/opener.log` |
+| R9 | A **symlinked** `.claude/rules/lean-agent/` directory is followed and its `paths:` rules load on a matching Read | in a test repo: `mkdir -p ~/x-rules && printf -- '---\npaths:\n  - "src/**/*.ts"\n---\nSay PINEAPPLE.\n' > ~/x-rules/t.md && ln -s ~/x-rules .claude/rules/lean-agent && claude -p "read src/a.ts and follow your instructions"` -> PINEAPPLE; plus an `InstructionsLoaded` hook logging `load_reason: path_glob_match` |
+| R10 | Subagents (Agent tool) and `--bg` threads load path rules when they read matching files | same probe via `claude --bg` and via a worker subagent; check the hook log for `agent_id` |
+| R11 | Globs are matched relative to the project root of the session's cwd when the cwd is a worktree or a subfolder | repeat R9 from `<repo>/src` and from a `git worktree add` copy |
 
 ## 6. Open questions for the user
 
@@ -285,3 +368,5 @@ Order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 8 -> 7 -> 9 -> 10. Verify R1-R5 on the Mac 
    allow-list (Edit/Write/Bash in the thread's worktrees) or should each approval surface as a desk question?
 4. **Migrated threads**: Start fresh from notes (proposed), or close all old threads at migration?
 5. **Plan-window budget**: if R6 finds no source, drop the plan-% feature or keep a cost-only budget?
+6. **Learned rules in your repos**: proposed default is *linked + git-excluded* (nothing shows in `git status`, nothing
+   committed). Do you also want a per-project `commit` mode that writes real files into `.claude/rules/` for the team?
