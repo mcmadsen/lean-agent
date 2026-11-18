@@ -1,11 +1,13 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { leanThread, resetLocks } from './threads'
+import { resetProjectsQueue } from './projects'
 import { loadView } from './view'
 
 const L = '/h/.lean-agent'
 function setup() {
   resetLocks()
+  resetProjectsQueue()
   const h = fakeHost(null)
   h.files.set('/p/templates/thread.md', '# {{id}}')
   h.files.set('/w/app/README', 'x') // a folder
@@ -80,7 +82,7 @@ test('project-private flips the flag and refreshes the private list; it needs on
   expect((await call({ action: 'project-private', project: 'app', on: true })).ok).toBe(true)
   expect(projects().app).toMatchObject({ private: true, path: '/w/app' })
   expect(h.files.get(`${L}/githooks/private.list`)).toContain('path /w/app')
-  await call({ action: 'project-private', project: 'app', on: false })
+  await call({ action: 'project-private', project: 'app', on: false, confirm: true })
   expect(projects().app.private).toBe(false)
 })
 
@@ -97,4 +99,50 @@ test('an empty registry says how to add one', async () => {
   const { h, call } = setup()
   h.files.delete(`${L}/projects.json`)
   expect((await call({ action: 'projects' })).text).toContain('project-add')
+})
+
+test('project-remove refuses a private project; turning private off needs confirm', async () => {
+  const { call, projects } = setup()
+  const rm = await call({ action: 'project-remove', project: 'secret' })
+  expect(rm.ok).toBe(false)
+  expect(rm.text).toContain('private')
+  expect(projects().secret.private).toBe(true)
+  const off = await call({ action: 'project-private', project: 'secret', on: false })
+  expect(off.ok).toBe(false)
+  expect(projects().secret.private).toBe(true)
+  expect((await call({ action: 'project-private', project: 'secret', on: false, confirm: true })).ok).toBe(true)
+  expect(projects().secret.private).toBe(false)
+})
+
+test('__proto__ and friends are not project names', async () => {
+  const { h, call } = setup()
+  h.files.set('/w/new/README', 'x')
+  for (const n of ['__proto__', 'constructor', 'prototype']) expect((await call({ action: 'project-add', project: n, path: '/w/new' })).ok).toBe(false)
+})
+
+test('parallel project actions do not lose each other\'s update', async () => {
+  const { h, call, projects } = setup()
+  h.files.set('/w/new/README', 'x')
+  await Promise.all([call({ action: 'project-add', project: 'new', path: '/w/new' }), call({ action: 'project-private', project: 'app', on: true })])
+  expect(projects().new).toBeTruthy()
+  expect(projects().app.private).toBe(true)
+})
+
+test('a hidden private project is neither named nor reachable without all: true', async () => {
+  const { h, call, projects } = setup()
+  h.files.set(`${L}/config.json`, JSON.stringify({ private: 'off' }))
+  h.files.set('/w/dup/README', 'x')
+  const dup = await call({ action: 'project-add', project: 'copy', path: '/w/secret' })
+  expect(dup.ok).toBe(false)
+  expect(dup.text).not.toContain('as secret')
+  expect((await call({ action: 'project-private', project: 'secret', on: false, confirm: true })).ok).toBe(false)
+  expect(projects().secret.private).toBe(true)
+})
+
+test('a damaged projects.json is reported by projects, not shown as empty', async () => {
+  const { h, call } = setup()
+  h.files.set(`${L}/projects.json`, '{"app": [broken')
+  const r = await call({ action: 'projects' })
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain('unreadable')
 })

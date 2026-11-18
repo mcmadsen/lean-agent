@@ -91,3 +91,19 @@ test('a desk role asks the engine for the cached listing, sections and descripti
   const all = asked.join(' ')
   for (const ev of ['tool.list', 'prompt.attachment', 'prompt.section', 'tool.describe']) expect(all).toContain(ev)
 })
+
+test('only the contiguous listing is filtered: usage bullets around it stay, prose bullets are not skills', () => {
+  const text = ['- NEVER mention the plan', '', 'Skills:', '- lean-agent:thread: route', '- other:big: x', '', '- Use the Skill tool when asked', '- other:late: kept, after the block'].join('\n')
+  const t = trimListing(text)
+  expect(t.text).toBe(['- NEVER mention the plan', '', 'Skills:', '- lean-agent:thread: route', '', '- Use the Skill tool when asked', '- other:late: kept, after the block'].join('\n'))
+  expect(t.reason).toBe('trimmed 2 -> 1')
+})
+
+test('an MCP-instructions drop does not overwrite the skill listing record', async ($, on) => {
+  const { start } = desk(on)
+  await start($)
+  await $.prompt.attachment({ type: 'skill_listing', text: LIST, origin: ORIGIN } as any)
+  await $.prompt.attachment({ type: 'mcp_instructions_delta', text: 'server says', origin: ORIGIN } as any)
+  await $.prompt.attachment({ type: 'invoked_skills', text: LIST, origin: ORIGIN } as any)
+  expect(await stat($)).toContain('desk skill listing: trimmed 5 -> 2 (skill_listing)')
+})

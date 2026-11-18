@@ -130,8 +130,8 @@ test('trust writer keeps every other key and survives a damaged file', async () 
 
 test('agents JSON parser is tolerant', () => {
   const row = { sessionId: 'a', name: 'n', cwd: '/c', status: 'Busy', startedAt: 5, extra: { z: 1 } }
-  expect(parseAgents(JSON.stringify([row]))).toEqual([{ sid: 'a', name: 'n', cwd: '/c', status: 'busy', startedAt: 5 }])
-  expect(parseAgents(JSON.stringify({ sessions: [{ session_id: 'b', state: 'idle' }, null, 7, {}] }))).toEqual([{ sid: 'b', name: '', cwd: '', status: 'idle', startedAt: 0 }])
+  expect(parseAgents(JSON.stringify([row]))).toEqual([{ sid: 'a', name: 'n', cwd: '/c', status: 'busy', startedAt: 5, pid: 0, id: '' }])
+  expect(parseAgents(JSON.stringify({ sessions: [{ session_id: 'b', state: 'idle' }, null, 7, {}] }))).toEqual([{ sid: 'b', name: '', cwd: '', status: 'idle', startedAt: 0, pid: 0, id: '' }])
   expect(parseAgents('not json')).toEqual([])
   expect(parseAgents('')).toEqual([])
   expect(parseAgents('{"agents":5}')).toEqual([])
@@ -167,7 +167,7 @@ test('a resume that forks follows the new session id', async () => {
   h.clock.t += 60_000
   h.claude.handler = (a: string[]) => {
     if (a[0] === '--bg') state.rows.push({ sessionId: 'aaaaaaaa-2222-3333-4444-555555555555', name: 't1 · a', cwd: '/h/.lean-agent/threads/t1', status: 'busy', startedAt: 99 })
-    return { exitCode: 0, stdout: a[0] === 'agents' ? JSON.stringify(state.rows) : '' }
+    return { exitCode: 0, stdout: a[0] === 'agents' ? JSON.stringify(state.rows) : a[0] === '--bg' ? 'note: session is already running in the background, so this started a copy as aaaaaaaa\n' : '' }
   }
   await call({ action: 'send', tN: 't1', text: 'one' })
   expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t1/thread.json')!).sid).toBe('aaaaaaaa-2222-3333-4444-555555555555')
@@ -263,4 +263,75 @@ test('the CLI\'s "woke session X with its saved options" line is not a copy: the
   const r = await call({ action: 'send', tN: 't1', text: 'one' })
   expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t1/thread.json')!).sid).toBe(SID)
   expect(JSON.stringify(r)).not.toContain('copy')
+})
+
+// a scripted CLI where a finished session may still have its process (pid) until `claude stop`
+function alive(state: any, h: any, row: any) {
+  state.rows = [row]
+  const calls: string[] = []
+  h.claude.handler = (a: string[]) => {
+    if (a[0] === 'agents') return { exitCode: 0, stdout: JSON.stringify(state.rows) }
+    calls.push(a.slice(0, 2).join(' '))
+    if (a[0] === 'stop') { delete state.rows[0].pid; state.rows[0].state = 'stopped'; delete state.rows[0].status; return { exitCode: 0, stdout: 'stopped' } }
+    return { exitCode: 0, stdout: '' }
+  }
+  return calls
+}
+const ROW = { sessionId: SID, id: SID.slice(0, 8), name: 't1 · a', cwd: '/h/.lean-agent/threads/t1', startedAt: 1 }
+
+test('a finished session whose process is still alive is stopped first, then resumed without flags', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  const calls = alive(state, h, { ...ROW, pid: 42, status: 'idle', state: 'done' })
+  h.clock.t += 60_000
+  await call({ action: 'send', tN: 't1', text: 'one' })
+  expect(calls).toEqual(['stop 11111111', '--bg --resume'])
+  expect(h.claudeCalls().find(a => a.includes('--resume'))!.filter(x => x.startsWith('-'))).toEqual(['--bg', '--resume', '--'])
+})
+
+test('a session whose process exited is resumed with no stop', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  const calls = alive(state, h, { ...ROW, state: 'done' })
+  h.clock.t += 60_000
+  await call({ action: 'send', tN: 't1', text: 'one' })
+  expect(calls).toEqual(['--bg --resume'])
+})
+
+test('a working session (alive) is never stopped or resumed; the message stays queued', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  const calls = alive(state, h, { ...ROW, pid: 42, status: 'busy', state: 'working' })
+  h.clock.t += 60_000
+  const r = await call({ action: 'send', tN: 't1', text: 'one' })
+  expect(calls).toEqual([])
+  expect(r.text).toContain('queued')
+})
+
+test('a stop that fails or does not end the process leaves the messages queued and resumes nothing', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  const calls = alive(state, h, { ...ROW, pid: 42, status: 'idle', state: 'done' })
+  const base = h.claude.handler
+  h.claude.handler = (a: string[]) => (a[0] === 'stop' ? { exitCode: 1, stdout: '', stderr: 'nope' } : base(a, {} as any))
+  h.clock.t += 60_000
+  const r = await call({ action: 'send', tN: 't1', text: 'one' })
+  expect(r.ok).toBe(false)
+  expect(h.claudeCalls().some(a => a.includes('--resume'))).toBe(false)
+  h.claude.handler = (a: string[]) => (a[0] === 'agents' ? { exitCode: 0, stdout: JSON.stringify(state.rows) } : { exitCode: 0, stdout: '' }) // stop "works" but the process stays
+  const r2 = await call({ action: 'resume', tN: 't1' })
+  expect(r2.ok).toBe(false)
+  expect(r2.text).toContain('still running')
+  expect(h.claudeCalls().some(a => a.includes('--resume'))).toBe(false)
+})
+
+test('an ambiguous short copy id keeps the old sid and says it matches several sessions', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  state.rows = [{ ...ROW, state: 'done' }, { sessionId: 'cafe0001-0000-0000-0000-000000000000', name: 'x', cwd: 'y', status: 'busy', startedAt: 0 }, { sessionId: 'cafe0002-0000-0000-0000-000000000000', name: 'z', cwd: 'y', status: 'busy', startedAt: 0 }]
+  h.clock.t += 60_000
+  h.claude.handler = (a: string[]) => (a[0] === 'agents' ? { exitCode: 0, stdout: JSON.stringify(state.rows) } : a.includes('--resume') ? { exitCode: 0, stdout: 'started a copy as cafe00' } : { exitCode: 0, stdout: '' })
+  const r = await call({ action: 'send', tN: 't1', text: 'one' })
+  expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t1/thread.json')!).sid).toBe(SID)
+  expect(r.text).toContain('several sessions')
 })

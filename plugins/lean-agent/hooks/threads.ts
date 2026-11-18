@@ -23,7 +23,7 @@ export type Inbox = { ts: number; text: string; from?: string }
 // Fields used (Claude Code 2.1.x prints an array): sessionId, name, cwd, status ("idle" | "busy" | ...), startedAt (ms),
 // kind, pid. Tolerated: a wrapper object ({agents|sessions|items: [...]}), snake_case ids (session_id, id), stray
 // non-object entries, damaged JSON (-> []).
-export type AgentRow = { sid: string; name: string; cwd: string; status: string; startedAt: number }
+export type AgentRow = { sid: string; name: string; cwd: string; status: string; startedAt: number; pid: number; id: string }
 
 export function parseAgents(text: string): AgentRow[] {
   let v: unknown
@@ -45,6 +45,8 @@ export function parseAgents(text: string): AgentRow[] {
       cwd: String(r.cwd ?? ''),
       status: String(r.status ?? r.state ?? '').toLowerCase(),
       startedAt: Number(r.startedAt ?? r.started_at ?? 0) || 0,
+      pid: Number(r.pid) || 0, // a listed process: set while the background process is alive, absent once it exited
+      id: String(r.id ?? ''),
     })
   }
   return out
@@ -53,6 +55,7 @@ export function parseAgents(text: string): AgentRow[] {
 // Only these mean "no live work": anything else (busy, running, waiting, an unknown word) counts as running,
 // so an uncertain session is never resumed (a resume of a running session forks it).
 const IDLE = new Set(['idle', 'done', 'completed', 'complete', 'finished', 'stopped', 'exited', 'failed', 'error', 'dead'])
+const FINISHED = new Set(['idle', 'done', 'completed', 'complete', 'finished'])
 export const isRunning = (r: AgentRow | undefined) => !!r && !IDLE.has(r.status)
 
 // null = the listing failed or was not JSON: the caller must not treat that as "nothing is running"
@@ -133,7 +136,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; path?: string; on?: boolean; all?: boolean }
+export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; path?: string; on?: boolean; all?: boolean; confirm?: boolean }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -230,23 +233,36 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
   if (isRunning(row)) return { ok: true, text: `${t.id} is running: ${msgs.length} message(s) queued, it reads them itself` }
   const now = await h.clock.now()
   if (t.lastWake && now - t.lastWake < WAKE_GAP_MS) return { ok: true, text: `${t.id} was woken ${Math.round((now - t.lastWake) / 1000)} s ago: queued for the next wake` }
+  // `claude --bg --resume` continues the session itself only once its process has exited; while the process still lives (finished,
+  // idle) the same command starts a copy. So a finished-but-alive one is stopped first (never a working one), then resumed.
+  if (row && row.pid > 0) {
+    if (!FINISHED.has(row.status)) return { ok: true, text: `${t.id} is not finished (${row.status || 'unknown'}): ${msgs.length} message(s) queued, no stop, no resume` }
+    const short = row.id || t.sid.slice(0, 8)
+    const st = await h.process.run(['claude', 'stop', short])
+    if (st.exitCode !== 0) return err(`${t.id}: claude stop ${short} failed (${(st.stderr || st.stdout).trim().slice(0, 200)}): not resumed, messages stay queued`)
+    let gone = false
+    for (let n = 0; n < 8 && !gone; n++) {
+      const l = await agents(h)
+      const cur = l?.find(a => a.sid === t.sid)
+      gone = !!l && (!cur || cur.pid === 0)
+      if (!gone) await h.process.run(['sleep', '1'])
+    }
+    if (!gone) return err(`${t.id}: the session is still running after claude stop ${short}: not resumed, messages stay queued`)
+  }
   const upTo = u.upTo
   const prompt = [opts.lead, batchPrompt(msgs), wakeMark(upTo)].filter(Boolean).join('\n\n')
   const r = await h.process.run(['claude', '--bg', '--resume', t.sid, '--', prompt], { cwd: tpath(home, t.id), timeoutMs: 120_000 })
   if (r.exitCode !== 0) return err(`claude --bg --resume failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
-  // the resume may carry a new session id: follow the newest session of this thread
-  // (any extra flag on --resume makes the CLI start a copy and print "started a copy as <id>": follow it)
+  // safety net: the CLI prints "started a copy as <id>" when it forked after all; the thread follows the copy
   const after = (await agents(h)) ?? []
   const copy = /started a copy as\s+([0-9a-f][0-9a-f-]{5,})/i.exec(`${r.stdout}\n${r.stderr ?? ''}`)?.[1]?.toLowerCase()
-  // the CLI may print the short id: accept it only when it names exactly one listed session, never store a bare prefix
   const hits = copy ? after.filter(a => a.sid.toLowerCase() === copy || a.sid.toLowerCase().startsWith(copy)) : []
   const copied = hits.length === 1 ? hits[0]!.sid : copy && copy.length >= 32 ? copy : undefined
-  const next = copied ? { sid: copied } : after.filter(a => a.sid !== t.sid && (a.name === label(t) || a.cwd === tpath(home, t.id)) && a.startedAt > (row?.startedAt ?? 0)).sort((a, b) => b.startedAt - a.startedAt)[0]
-  if (next) t.sid = next.sid
+  if (copied) t.sid = copied
   t.lastWake = now
   t.delivered = upTo
   await save(h, home, t)
-  return { ok: true, text: `${t.id} woken with ${msgs.length} message(s)${copied ? `; the CLI started a copy, the thread now follows session ${copied.slice(0, 8)}` : copy ? `; the CLI started a copy as ${copy}, which is not in the session list yet: the thread keeps its old session id, check ${t.id} with threads` : ''}` }
+  return { ok: true, text: `${t.id} woken with ${msgs.length} message(s)${copied ? `; the CLI started a copy, the thread now follows session ${copied.slice(0, 8)}` : copy ? `; the CLI started a copy as ${copy}, which ${hits.length > 1 ? 'matches several sessions' : 'is not in the session list yet'}: the thread keeps its old session id, check ${t.id} with threads` : ''}` }
 }
 
 async function list(h: Host, home: string): Promise<Out> {

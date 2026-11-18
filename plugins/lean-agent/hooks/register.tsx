@@ -83,6 +83,7 @@ const SCHEMA = {
     path: { type: 'string', description: 'project-add: folder (must exist)' },
     on: { type: 'boolean', description: 'project-private: true or false' },
     all: { type: 'boolean', description: 'projects: include private ones hidden by the private switch' },
+    confirm: { type: 'boolean', description: 'project-private off: only after the user agreed' },
   },
   required: ['action'],
 }
@@ -355,8 +356,7 @@ export const register: Register = on => {
     noteAttachment(type)
     if (typeof r?.text !== 'string') return r
     if (role.kind === 'desk' && isMcpInstructions(type)) {
-      skillsSeen(type, `dropped (${r.text.length} chars)`)
-      return { ...r, text: null }
+      return { ...r, text: null } // (not the skill stat: that one is the listing's alone)
     }
     if (!isSkillAttachment(type)) return r
     if (role.kind !== 'desk') {
@@ -383,7 +383,7 @@ export const register: Register = on => {
     const r: any = await next(e)
     const name = String(e?.name ?? '')
     noteSection(name)
-    if (role.kind === 'desk' && isMcpInstructions(name) && typeof r?.text === 'string') return { ...r, text: null }
+    if (role.kind === 'desk' && isMcpInstructions(name) && typeof r?.text === 'string') return { ...r, text: null, breakPromptCache: true }
     return r
   }).catch(($, e: any, next) => next(e))
 

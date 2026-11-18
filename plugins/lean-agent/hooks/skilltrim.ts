@@ -1,6 +1,7 @@
 // The desk's skill listing, trimmed to lean-agent's own skills, and a record of what happened to it (names and counts
 // only: no skill descriptions, no file contents). Pure helpers plus per-process state (one process = one session).
-const NAME = /^\s{0,3}(?:[-*•])\s+[`*_]*([A-Za-z0-9_.@-]+(?::[A-Za-z0-9_.@-]+)*)/
+// a skill line: a bullet, then a lowercase skill name (optionally plugin:name) followed by a colon or a dash before its description
+const NAME = /^\s{0,3}(?:[-*\u2022])\s+[`*_]*([a-z0-9][a-z0-9_.@-]*(?::[a-z0-9_.@-]+)*)[`*_]*(?::\s|\s+[-\u2013\u2014]\s|$)/
 const OWN = 'lean-agent:'
 
 export type Trim = { text: string | null; reason: string }
@@ -12,9 +13,12 @@ export function trimListing(text: string): Trim {
   let total = 0
   let kept = 0
   let dropping = false
+  let block: 'before' | 'in' | 'after' = 'before' // only the contiguous listing is filtered; bullets after it are kept
   for (const l of text.split('\n')) {
-    const m = NAME.exec(l)
+    const m = block === 'after' ? null : NAME.exec(l)
+    if (block === 'in' && !m && !/^\s+\S/.test(l)) block = 'after'
     if (m) {
+      block = 'in'
       total++
       dropping = !m[1]!.startsWith(OWN)
       if (!dropping) kept++
@@ -47,5 +51,5 @@ export const resetSkillStat = () => {
 }
 
 // attachment types that carry a skill listing: the engine's name, or any name holding "skill" (a build may rename it)
-export const isSkillAttachment = (type: string) => type === 'skill_listing' || /skill/i.test(type)
+export const isSkillAttachment = (type: string) => /^(available_)?skills?(_listing)?$/.test(type)
 export const isMcpInstructions = (name: string) => /mcp.*instruction|instruction.*mcp/i.test(name)
