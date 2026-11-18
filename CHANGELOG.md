@@ -78,8 +78,8 @@ version lines in `plugin.json`, `marketplace.json` and `pane.tsx` are left to th
 - **Learn collects script knowledge.** Explorers also report the repo's own scripts for an area (`SCRIPTS`: package.json scripts,
   Makefile/justfile targets, tools/ and scripts/ folders, CI steps that run locally, each with the question it answers) and
   mechanical work a thread would otherwise spend model time on (`MECHANICAL`); rules then say "for X run `<script>`" instead of
-  describing how to find X. A `<!-- lean-agent:scripts -->` ... `<!-- /lean-agent:scripts -->` block in a rule (a later release writes
-  adopted scripts there) is kept byte for byte by rewrites and never deleted by `--trim`; the footer matcher no longer takes it for
+  describing how to find X. A `<!-- lean-agent:scripts -->` ... `<!-- /lean-agent:scripts -->` block in a rule (the mod writes
+  adopted scripts there at every sync) is kept byte for byte by rewrites and never deleted by `--trim`; the footer matcher no longer takes it for
   the footer. `--trim` lists mechanical-looking gaps as `SCRIPT CANDIDATES` in the report.
 - **Compare is back (rebuilt the 1.0 way).** `lean_doctor` `compare` (desk; `project`, `mode` overhead or history) and a thread's
   `lean_compare` (task mode) run `claude -p "Reply with OK." --output-format json` and `claude -p "/context"` (local, free) in the

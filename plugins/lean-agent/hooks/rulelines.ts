@@ -87,6 +87,8 @@ export async function rebuildScriptRules(h: Host, project: string): Promise<stri
     const rest = scripts.length - kept.length
     const shown = [PREFACE, ...kept, ...(rest && fits('_project.md', pbase, [PREFACE, ...kept, pointer(rest)]) ? [pointer(rest)] : [])]
     await save('_project.md', ptext, withBlock(pbase, shown))
+  } else if (ptext !== null && BLOCK.test(ptext)) {
+    await save('_project.md', ptext, pbase) // not even the one line fits: the old block (a retired script's line) must not stay
   }
   return written
 }

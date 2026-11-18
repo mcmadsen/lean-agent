@@ -88,7 +88,7 @@ export function pathsOf(t: string): string[] {
   return items.filter(Boolean)
 }
 // The footer is the comment `<!-- lean-agent: learned ... -->` (a space after the colon). The marker comments of an adopted-
-// scripts block, `<!-- lean-agent:scripts -->` ... `<!-- /lean-agent:scripts -->` (written by a later release; learn keeps the
+// scripts block, `<!-- lean-agent:scripts -->` ... `<!-- /lean-agent:scripts -->` (written by the mod at every sync, rulelines.ts; learn keeps the
 // block intact and trim never deletes it), are not the footer and are never touched here.
 const FOOTER = /<!--\s*lean-agent:(?=\s)([\s\S]*?)-->/
 export const SCRIPTS_BLOCK = /<!--\s*lean-agent:scripts\s*-->[\s\S]*?<!--\s*\/lean-agent:scripts\s*-->/
@@ -551,7 +551,7 @@ export async function rulesStats(h: Host, project: string): Promise<{ loaded: Re
     seen.add(key)
     loaded[f.slice(i + 18)] = (loaded[f.slice(i + 18)] ?? 0) + 1
   }
-  const have = (await h.fs.list(`${projectDir(home, project)}/rules`).catch(() => [])).map(f => f.name).filter(n => n.endsWith('.md')) // _project.md included (1.0.6)
+  const have = (await h.fs.list(`${projectDir(home, project)}/rules`).catch(() => [])).map(f => f.name).filter(n => n.endsWith('.md')) // _project.md included: it is listed when it never loaded
   // gaps whose text looks mechanical are candidates for a script (lean_script propose); one line each, repeats counted once
   const seenGap = new Set<string>()
   const scriptCandidates: string[] = []

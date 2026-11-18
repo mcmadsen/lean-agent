@@ -355,6 +355,31 @@ test('the character and width caps hold for the script lines: what does not fit 
   expect(s.detail[0]!.out!.skipped).toEqual([])
 })
 
+test('an audit of another project\'s candidate adopts nothing (a thread audits its own project and global scripts only)', async () => {
+  const h = setup()
+  await prop(h)
+  h.files.set('/h/.lean-agent/threads/t2/thread.json', JSON.stringify({ id: 't2', project: 'other' }))
+  const out = await audited(h.host, 't2', line(), `audit ${CAND}/`)
+  expect(out).toContain('belongs to project proj')
+  expect(h.files.has(`${CAND}/meta.json`)).toBe(true) // still a candidate
+  expect(meta(h, CAND).status).toBe('candidate')
+  expect(meta(h, CAND).audit).toBeUndefined()
+})
+
+test('a _project rule with no room for even the one line loses its old script block, never keeps a retired script\'s line', async () => {
+  const h = setup()
+  await learned(h)
+  await adopted(h, { inputs: ['a log file'] })
+  expect(h.files.get(`${PDIR}/rules/_project.md`)).toContain(MARK_OPEN)
+  const ten = Array.from({ length: MAX_PROJECT_LINES }, (_, i) => `- fact ${i}`).join('\n')
+  h.files.set(`${PDIR}/rules/_project.md`, `# project\n${ten}\n${MARK_OPEN}\n- an old script line\n<!-- /lean-agent:scripts -->\n`)
+  await rebuildScriptRules(h.host, 'proj')
+  const p = h.files.get(`${PDIR}/rules/_project.md`)!
+  expect(p).not.toContain(MARK_OPEN)
+  expect(p).not.toContain('an old script line')
+  expect(p).toContain('- fact 9') // the learned lines stay
+})
+
 test('adopt writes ONE marked line into the rule of the script\'s area and syncs it into the checkout; _project gets its line once', async () => {
   const h = setup()
   await learned(h)

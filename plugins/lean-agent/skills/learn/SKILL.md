@@ -83,8 +83,8 @@ goes to an `UNVERIFIED` list in your final report, never into a rule.
    - **Scripts, not descriptions.** Where a script answers a question, the rule says "for X run `<script>`" (the command as it
      is run from the repo root) instead of describing how to find X by hand; `SCRIPTS` entries that a thread will need go in,
      the rest stay out. `MECHANICAL` entries with no script are not rules: they go to the report as script candidates.
-   - **Keep the scripts block.** A rule may hold `<!-- lean-agent:scripts -->` ... `<!-- /lean-agent:scripts -->` (a later release
-     writes adopted scripts there). When you rewrite a rule, copy that block through byte for byte, in place; never merge it
+   - **Keep the scripts block.** A rule may hold `<!-- lean-agent:scripts -->` ... `<!-- /lean-agent:scripts -->` (the mod
+     writes adopted scripts there at every sync). When you rewrite a rule, copy that block through byte for byte, in place; never merge it
      into the bullets, shorten it or drop it. The footer is the OTHER comment (`<!-- lean-agent: learned ... -->`, with a space
      after the colon); the block counts toward the caps like any other body lines.
    - Keep a `CONFLICT` as one line only if the user should know; otherwise it belongs in your report.

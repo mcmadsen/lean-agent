@@ -19,7 +19,7 @@ export const MAX_SCRIPT_BYTES = 256 * 1024
 export const scriptsDir = (home: string) => `${leanDir(home)}/scripts`
 // folder names the stores use themselves, and the top-level folders of ~/.lean-agent: never a script or project name here
 const RESERVED = new Set(['candidates', 'retired'])
-const LEAN_DIRS = new Set(['scripts', 'threads', 'worktrees', 'logs', 'memory', 'output', 'desk', 'bin', 'recipes', 'legacy-0.45', 'feedback-drafts', 'handovers', 'global'])
+const LEAN_DIRS = new Set(['scripts', 'threads', 'worktrees', 'logs', 'memory', 'output', 'desk', 'bin', 'recipes', 'legacy-0.45', 'feedback-drafts', 'handovers', 'global', 'compare', 'feedback-export'])
 
 export type Who = { kind: 'thread'; id: string } | { kind: 'desk' }
 export type Out = { ok: boolean; text: string; data?: unknown }
@@ -333,6 +333,9 @@ export function judge(meta: Meta, r: Reply & { verdict: Verdict }, now: { privac
 async function recordAudit(h: Host, by: string, reply: Reply, prompt: string): Promise<Out> {
   const f = await find(h, reply.name)
   if (!f) return err(`no script ${reply.name || '(no name in the audit)'}`)
+  // a thread's auditor audits only its own project's scripts and global ones, as propose and update do (an audit may adopt)
+  const no = await mayTouch(h, { kind: 'thread', id: by }, f.meta)
+  if (no) return no
   const pend = f.meta.status === 'adopted' ? f.meta.pending : undefined
   if (f.meta.status !== 'candidate' && !pend) return err(`${reply.name} is ${f.meta.status}${f.meta.status === 'adopted' ? ' with no update waiting' : ''}: only a candidate or an update is audited`)
   const folder = pend ? `${f.dir}/${pend.v}/` : `${f.dir}/`
