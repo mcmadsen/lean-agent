@@ -302,7 +302,7 @@ function reliesHit(a: Area, changed: Map<string, string>): string | null {
   for (const r0 of a.relies ?? []) {
     const r = r0.replace(/^\.\//, '')
     if (!looksLikePath(r)) continue
-    if (/[*?[]/.test(r) || r.endsWith('/') || ![...changed.keys()].includes(r) && [...changed.keys()].some(p => p.startsWith(`${r}/`))) { // a glob or a folder: any change under it
+    if (!changed.has(r) && (/[*?[]/.test(r) || r.endsWith('/')) || ![...changed.keys()].includes(r) && [...changed.keys()].some(p => p.startsWith(`${r}/`))) { // a glob or a folder: any change under it
       const hit = [...changed].find(([p]) => (/[*?[]/.test(r) ? matches([r], p) : p.startsWith(r.endsWith('/') ? r : `${r}/`)))
       if (hit) return `relied-on ${hit[1] === 'D' ? 'file gone' : 'file changed'}: ${hit[0]}`
       continue

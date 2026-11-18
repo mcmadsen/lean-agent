@@ -297,3 +297,11 @@ test('paths: zero-indent and flow lists parse; relies folders without a slash, a
   h.git.handler = x => (x[0] === 'diff' ? ST({ 'a/core/m.ts': 'M', 'b/x.cfg': 'M' }) : { exitCode: 1, stdout: '' })
   expect(await checkStale(h.host, 'proj', '/repo')).toHaveLength(2)
 })
+
+test('a relied-on file with brackets in its name is compared literally', async () => {
+  const h = setup()
+  await recordRule(h.host, 'proj', 'web', { globs: ['app/**'], sha: 'abc', relies: ['app/[id]/page.tsx'] })
+  h.git.handler = x => (x[0] === 'diff' ? ST({ 'app/[id]/page.tsx': 'D' }) : { exitCode: 1, stdout: '' })
+  await checkStale(h.host, 'proj', '/repo')
+  expect(JSON.parse(h.files.get(`${SRC}/learn.json`)!).areas.web.stale).toBe('relied-on file gone: app/[id]/page.tsx')
+})
