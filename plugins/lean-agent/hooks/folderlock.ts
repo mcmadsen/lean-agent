@@ -17,8 +17,12 @@ async function hold<T>(h: Host, lock: string, f: () => Promise<T>): Promise<T> {
   for (let n = 0; n < 25 && !got; n++) {
     got = (await h.process.run(['mkdir', lock])).exitCode === 0
     if (got) break
-    const at = Number(String(await h.fs.read(`${lock}/at`).catch(() => '')).split(':')[0]) || 0
+    const raw = String(await h.fs.read(`${lock}/at`).catch(() => ''))
+    const at = Number(raw.split(':')[0]) || 0
     if (at ? (await h.clock.now()) - at > LOCK_STALE_MS : n >= 20) {
+      // look again right before moving: another waiter may already have taken the dead lock over and a new holder written its own
+      // token meanwhile; moving that one would break a live lock
+      if (String(await h.fs.read(`${lock}/at`).catch(() => '')) !== raw) continue
       const aside = `${lock}.stale-${token.replace(':', '-')}`
       await h.process.run(['mv', lock, aside])
       await h.process.run(['rm', '-rf', aside])

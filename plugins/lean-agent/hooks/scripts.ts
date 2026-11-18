@@ -73,14 +73,24 @@ export function scan(text: string, home = ''): { privacy: string[]; secrets: str
 // What the mod itself sees in the text, whatever the auditor says: network tools and libraries, deleting or moving over files.
 // A hit makes the verdict `adapt` at best (the user can still decide with confirm). Not a proof either way: the auditor reads it too.
 const RISKY: [RegExp, string][] = [
-  [/\b(?:curl|wget|ncat|scp|rsync|ssh|sftp|ftp)\s|\b(?:requests|urllib|urllib3|httpx|aiohttp|http\.client|socket|smtplib|ftplib|XMLHttpRequest)\b|\bfetch\s*\(|\bgit\s+(?:push|fetch|pull|clone)\b|\b(?:pip3?|npm|yarn|pnpm|apt(?:-get)?|brew)\s+install\b/, 'uses the network (the mod\'s text scan)'],
+  [/\b(?:curl|wget|nc|ncat|netcat|telnet|scp|rsync|ssh|sftp|ftp)\b|\b(?:requests|urllib|urllib3|httpx|aiohttp|http\.client|socket|smtplib|ftplib|XMLHttpRequest)\b|\bfetch\s*\(|\bgit\s+(?:push|fetch|pull|clone)\b|\b(?:pip3?|npm|yarn|pnpm|apt(?:-get)?|brew)\s+install\b/, 'uses the network (the mod\'s text scan)'],
+  // runs other programs or builds code at run time: whatever it does is out of the scan's sight, so it never adopts on its own
+  [/\bsubprocess\b|\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\bPopen\b|\bchild_process\b|\bexecSync\b|\b(?:exec|eval)\s*\(|\b__import__\b|\bimportlib\b|\bFunction\s*\(|\bRuntime\.getRuntime\b|\bcompile\s*\(/, 'runs other programs or builds code at run time (the mod\'s text scan)'],
+  // addressed at the auditor instead of doing the job: an instruction to answer adopt is a reason not to adopt on its own
+  [/LEAN-AUDIT|\b(?:answer|reply|respond|verdict|return)\b[^\n]{0,40}\badopt\b|\bignore (?:all |any |the |your )?(?:previous|above|prior|earlier) (?:instructions|rules|checks)|\byou (?:must|should) (?:answer|reply|say) /i, 'contains text addressed to the auditor (the mod\'s text scan)'],
   [/\brm\s+-|\bos\.(?:remove|unlink|rmdir)\b|\bshutil\.(?:rmtree|move)\b|\b(?:unlink|rmdir)(?:Sync)?\s*\(|\bfs\.(?:rm|rmSync|unlink|rmdir)\b|\bRemove-Item\b|-delete\b|\bmv\s+-f\b|\.truncate\s*\(/, 'deletes or moves over files (the mod\'s text scan)'],
 ]
 export const riskyText = (text: string): string[] => RISKY.filter(([re]) => re.test(text)).map(([, what]) => what)
 // a script that declares only stdout/stderr as outputs but opens a file for writing: its declaration is wrong (not a proof either way
 // for a script that declares files: the auditor's list is checked against those)
-const WRITE_API = /\bopen\s*\([^)\n]*,\s*(?:mode\s*=\s*)?['"][^'"]*[wax+][^'"]*['"]|\.write_(?:text|bytes)\s*\(|\bfs\.(?:writeFile|appendFile|createWriteStream)(?:Sync)?\b|\btee\s+\S/
-export const strayWriteText = (text: string, outputs: string[]): string[] => (outputs.every(o => /^(?:stdout|stderr)$/i.test(o)) && WRITE_API.test(text) ? ['writes a file although it declares only stdout/stderr (the mod\'s text scan)'] : [])
+// (a heuristic, not a proof: a write through a variable mode, a program it starts or code it builds is not seen; those are what the
+// "runs other programs" scan above sends to the desk)
+const WRITE_API = /\bopen\s*\([^)\n]*,\s*(?:mode\s*=\s*)?['"][^'"]*[wax+][^'"]*['"]|\bopen\s*\([^)\n]*,\s*(?:mode\s*=\s*)?[A-Za-z_]\w*\s*[,)]|\.(?:write_text|write_bytes|touch|mkdir|rename|replace|unlink|symlink_to|hardlink_to)\s*\(|\bos\.(?:rename|replace|makedirs|mkdir|link|symlink|truncate|chmod|chown|utime)\b|\bshutil\.(?:copy\w*|move)\b|\bfs\.(?:writeFile|appendFile|createWriteStream|rename|copyFile|mkdir|symlink|truncate|chmod)(?:Sync)?\b|\b(?:tee|cp|mv|touch|mkdir|install|dd|truncate)\s+\S|\bsed\s+-[A-Za-z]*i\b/
+// a shell redirect to a file (not `2>&1`, `>&2`, `> /dev/null`): only looked for in a shell script, where `>` is not a comparison
+const SHELL_REDIRECT = /(?<![0-9&<>-])>>?\s*(?!&|\/dev\/null\b)[^\s&|;>]/
+const isShell = (run: string) => /^(?:ba|z)?sh$/.test((run.trim().split(/\s+/)[0] ?? '').split('/').pop() ?? '')
+export const strayWriteText = (text: string, outputs: string[], run = ''): string[] =>
+  outputs.every(o => /^(?:stdout|stderr)$/i.test(o)) && (WRITE_API.test(text) || (isShell(run) && SHELL_REDIRECT.test(text.replace(/^\s*#.*$/gm, '')))) ? ['writes a file although it declares only stdout/stderr (the mod\'s text scan)'] : []
 
 // lean-agent's OWN data (the ledger, reports, rules stats ...): such a script belongs in the mod itself
 const OWN = /\.lean-agent\b|\b(?:ledger|feedback|gaps|inbox|questions|answers|goals|scheduled)\.jsonl?\b|\brules-loaded\b|\blearn\.json\b|\bnotes\.jsonl\b/
@@ -225,6 +235,9 @@ async function propose(h: Host, who: Who, i: any): Promise<Out> {
   const same = all.find(x => x.meta.sha256 === sha && x.meta.name !== name)
   if (same) return err(`this exact script is already ${same.meta.status} as ${same.meta.name}`)
   const have = all.find(x => x.meta.name === name)
+  // a name another project (or the global store) holds is not this thread's to replace: a waiting script of project A is never
+  // overwritten by a proposal of project B under the same name
+  if (have && have.meta.project !== project) return err(`${name} is already used by ${have.meta.project === 'global' ? 'a global script' : `project ${have.meta.project}`}: use another name`)
   if (have && have.meta.status === 'adopted') return err(`${name} is already adopted: use another name, or retire it first`)
   if (have && have.meta.status !== 'candidate' && have.meta.status !== 'audited' && have.meta.status !== 'rejected') return err(`${name} exists (${have.meta.status})`)
   if (have && have.meta.sha256 === sha) return { ok: true, text: `${name} is already proposed with this content (${verdictOf(have.meta)}); next: lean_script audit ${name}` }
@@ -363,7 +376,7 @@ async function recordAudit(h: Host, by: string, reply: Reply, prompt: string): P
   // scan), no write outside its declared outputs (the auditor's list against the declaration; a stdout-only declaration against the
   // text scan), and nothing hardcoded or specific to its first data. Anything else is not adopted automatically.
   const runBad = runProblem(pend ? pend.run : f.meta.run)
-  const j = judge(f.meta, r, { ...now, risky: [...riskyText(text), ...strayWriteText(text, f.meta.outputs), ...(runBad ? [`its run line is not on the allowlist (${runBad})`] : []), ...moved] })
+  const j = judge(f.meta, r, { ...now, risky: [...riskyText(text), ...strayWriteText(text, f.meta.outputs, pend ? pend.run : f.meta.run), ...riskyText([f.meta.purpose, pend?.purpose ?? '', ...f.meta.inputs, ...f.meta.outputs].join('\n')).filter(x => x.includes('addressed to the auditor')), ...(runBad ? [`its run line is not on the allowlist (${runBad})`] : []), ...moved] })
   const changes = [...r.changes, ...(j.verdict === 'adapt' && r.verdict === 'adopt' ? j.blockers.map(b => `mod: it ${b}`) : [])]
   if (j.verdict === 'adapt' && !changes.length) return err('an adapt verdict needs the concrete changes (changes: [...])')
   if (j.verdict === 'reject' && !r.reason && !j.blockers.length) return err('a reject verdict needs a reason')
@@ -473,6 +486,11 @@ async function decide(h: Host, who: Who, i: any): Promise<Out> {
   if (!f) return err(`no script ${str(i.name)}`)
   const pend = f.meta.status === 'adopted' ? f.meta.pending : undefined // for an adopted script the decision is about its waiting update
   if (f.meta.status === 'retired' || (f.meta.status === 'adopted' && !pend)) return err(`${f.meta.name} is ${f.meta.status}${pend === undefined && f.meta.status === 'adopted' ? ' with no update waiting' : ''}: use retire to take an adopted script out, rollback to go back a version`)
+  // the decision is about the text the user saw: a caller that names its sha256 (the pane does) is refused when the script was
+  // replaced meanwhile (proposed again under the same name, or a newer update)
+  const cur = pend ? pend.sha256 : f.meta.sha256
+  const seen = str(i.sha)
+  if (seen && (seen.length < 12 || !cur.startsWith(seen))) return err(`${f.meta.name} changed since it was looked at (now ${cur.slice(0, 12)}): look at it again before deciding`)
   const ts = await h.clock.now()
   const log = async (extra: object) => appendJsonl(h, `${scriptsDir(await homeDir(h))}/decisions.jsonl`, { ts, name: f.meta.name, by: 'user', value, reason, prior: pend ? `update ${pend.v}: ${pend.audit?.verdict ?? 'unaudited'}` : verdictOf(f.meta), ...(pend ? { version: pend.v } : {}), ...extra })
   if (value === 'reject') {
@@ -490,6 +508,8 @@ async function decide(h: Host, who: Who, i: any): Promise<Out> {
   const now = scan(text, await homeDir(h))
   if (now.secrets.length || now.privacy.length) return err(`${f.meta.name} cannot be adopted, not even by the user: it ${[...now.secrets, ...now.privacy].join('; ')}. Have a thread fix it and propose it again`)
   if (audit.secrets) return err(`${f.meta.name}: the audit found secrets in it, so it is not adopted, not even by the user. Have a thread remove them and propose it again`)
+  const badRun = runProblem(pend ? pend.run : f.meta.run)
+  if (badRun) return err(`${f.meta.name}: its run line is not on the allowlist (${badRun}), so it is not adopted, not even by the user. Have a thread fix the run line and propose it again`)
   const over = [...(audit.verdict === 'adopt' && !audit.blockers.length ? [] : [`the audit said ${audit.verdict}`]), ...audit.blockers]
   if (over.length && i.confirm !== true) return err(`adopting ${f.meta.name}${pend ? ` ${pend.v}` : ''} overrides the audit (${over.join('; ')}). Tell the user that, and only if they still want it call decide again with confirm: true`)
   const decision: Decision = { value, by: 'user', reason, ts, ...(over.length ? { overrode: over } : {}) }
@@ -705,7 +725,8 @@ async function list(h: Host, who: Who): Promise<Out> {
   }
   const bad = rows.filter(r => r.health && r.health !== 'ok').length
   const lines = rows.map(r => `${r.name} · ${r.project} · ${r.status}${r.version ? ` ${r.version}` : ''} · ${r.verdict}${r.overridden ? ' (user decision)' : ''} · ${r.uses} use(s)${r.health && r.health !== 'ok' ? ` · ${r.health.toUpperCase()}` : ''}${r.update ? ` · update ${r.update} waiting` : ''}${r.core ? ' · core candidate' : ''} · ${short(r.purpose, 80)}`)
-  return { ok: true, text: [`Scripts: ${c} candidates, ${a} adopted${bad ? `, ${bad} need attention (needs-update or edited)` : ''}`, ...lines].join('\n'), data: rows }
+  const w = all.filter(x => x.meta.status === 'audited').length
+  return { ok: true, text: [`Scripts: ${c} candidates, ${a} adopted${w ? `, ${w} audited and waiting for the desk` : ''}${bad ? `, ${bad} need attention (needs-update or edited)` : ''}`, ...lines].join('\n'), data: rows }
 }
 
 async function show(h: Host, who: Who, i: any): Promise<Out> {
@@ -720,14 +741,14 @@ async function show(h: Host, who: Who, i: any): Promise<Out> {
 
 // scripts the auditor judged adopt that the mod's rules did not adopt on their own: they wait for the desk (candidates in status
 // `audited`, and updates whose audit waits). What the pane shows with Adopt / Reject.
-export type Waiting = { name: string; project: string; why: string; update?: string }
+export type Waiting = { name: string; project: string; why: string; sha: string; update?: string }
 export async function waitingScripts(h: Host): Promise<Waiting[]> {
   const out: Waiting[] = []
   for (const x of await allScripts(h)) {
     const m = x.meta
     const pend = m.status === 'adopted' ? m.pending : undefined
     const a = pend ? pend.audit : m.status === 'audited' ? m.audit : undefined
-    if (a?.waits && a.sha === (pend ? pend.sha256 : m.sha256)) out.push({ name: m.name, project: m.project, why: short(a.blockers.join('; ') || a.reason || 'the mod\'s rules', 140), ...(pend ? { update: pend.v } : {}) })
+    if (a?.waits && a.sha === (pend ? pend.sha256 : m.sha256)) out.push({ name: m.name, project: m.project, why: short(a.blockers.join('; ') || a.reason || 'the mod\'s rules', 140), sha: a.sha, ...(pend ? { update: pend.v } : {}) })
   }
   return out.sort((a, b) => a.name.localeCompare(b.name))
 }
@@ -758,6 +779,7 @@ export const SCRIPT_SCHEMA = {
     a: { type: 'string', description: 'diff: first version (default: the one before current, or current when an update waits)' },
     b: { type: 'string', description: 'diff: second version (default: the update, or current)' },
     why: { type: 'string', description: 'report-bad: what was wrong with the script\'s result' },
+    sha: { type: 'string', description: 'decide: the sha256 (at least 12 characters) of the text the user looked at; refused when the script changed since' },
     confirm: { type: 'boolean', description: 'decide adopt over an audit that said otherwise: only after the user was told and agreed' },
   },
   required: ['action'],

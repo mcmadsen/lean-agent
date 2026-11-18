@@ -268,6 +268,16 @@ version lines in `plugin.json`, `marketplace.json` and `pane.tsx` are left to th
   Adopt / Reject (two presses, like Close), `lean_script decide` does the same, both logged as the user's decision (adopting over
   the mod's rules needs confirm; a secret, a privacy finding or a bad run line is never adoptable). `lean_script` `list`, `show`,
   `diff` and `audit` show a thread only its own project's scripts and the global ones.
+  The proof is a heuristic, not a guarantee: the text scan sends to the desk whatever it cannot see (a program the script starts,
+  code built at run time, a write through a variable mode, a shell redirect, a copy, text addressed to the auditor), and for a script
+  that declares files the auditor's list of writes is the only check. The pane's Adopt / Reject are bound to the sha256 of the text
+  that was shown (a script proposed again under the same name between the two presses is refused), `decide` refuses a run line off
+  the allowlist, and a thread cannot replace another project's script by proposing under its name.
+- Review fixes elsewhere: the handover prompt of a reopen is cut by bytes as well as characters (3-byte characters could pass the
+  argv limit); a submodule or `--separate-git-dir` checkout (a `.git` file that is not `.git/worktrees/...`) is no longer taken for a
+  linked worktree by `project-add` and the doctor; the daily-cap cache no longer counts a row appended during its own rebuild twice;
+  `lean_doctor stats` ignores a `project` that is not a plain name; the folder lock re-reads the stale token right before taking a
+  dead lock over.
 - Rules: `lean_rules stats` counts only the loads from the project's own checkouts (a same-named rule of another project no longer
   hides this project's never-loaded one; a project with no registered folder counts every load, as before). The script-rule rebuild
   and a learn `record` take one lock folder per project (`.rules-lock`, shared lock code in `folderlock.ts`, also used by the script

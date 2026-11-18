@@ -54,10 +54,13 @@ export async function worktreeInfo(h: Host, home: string, path: string): Promise
   let linked = false
   const st = await h.fs.stat(`${real}/.git`).catch(() => null)
   if (st && st.kind === 'file') {
-    linked = true
+    // a `.git` FILE is also what a submodule or a --separate-git-dir checkout has: only "<main>/.git/worktrees/<name>" is a linked worktree
     const body = await h.fs.read(`${real}/.git`).catch(() => '')
     const m = typeof body === 'string' ? /^gitdir:\s*(.+?)\/\.git\/worktrees\/[^/\n]+\s*$/m.exec(body) : null
-    if (m) repo = m[1]
+    if (m) {
+      repo = m[1]
+      linked = true
+    }
   }
   const under = `${await realPath(h, `${leanDir(home)}/worktrees`)}/`
   if (real.startsWith(under)) return { repo, why: 'it lives under ~/.lean-agent/worktrees' }

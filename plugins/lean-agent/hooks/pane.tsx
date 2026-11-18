@@ -257,9 +257,12 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const reopen = (id: string) => act(`reopen ${id}`, () => leanThread(host, $.plugin.root, { action: 'reopen', tN: id }))
     // a script the auditor judged adopt that the mod's rules did not adopt on their own: the user's two presses decide (logged as the
     // user's decision; a secret or privacy finding is never adopted, whatever is pressed)
-    const scriptDecide = (name: string, verdict: 'adopt' | 'reject') =>
-      twoStep(`script:${verdict}:${name}`, async () => {
-        const r = await scriptTool(host, { kind: 'desk' }, { action: 'decide', name, verdict, reason: 'decided in the pane', confirm: true })
+    // (the press is bound to the text that was shown: its sha256 is in the arm key and in the decision, so a script proposed again
+    // under the same name between the two presses is refused, not adopted)
+    const armKey = (w: { name: string; sha: string; update?: string }, verdict: 'adopt' | 'reject') => `script:${verdict}:${w.name}:${w.update ?? ''}:${w.sha.slice(0, 12)}`
+    const scriptDecide = (w: { name: string; sha: string; update?: string }, verdict: 'adopt' | 'reject') =>
+      twoStep(armKey(w, verdict), async () => {
+        const r = await scriptTool(host, { kind: 'desk' }, { action: 'decide', name: w.name, verdict, sha: w.sha, reason: 'decided in the pane', confirm: true })
         resetViewCache()
         notice = short(r.text, 200)
         if (!r.ok) lastError = notice
@@ -377,13 +380,13 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             Scripts: {v.scripts.candidates} candidates, {v.scripts.adopted} adopted{v.scripts.needsUpdate ? `, ${v.scripts.needsUpdate} need an update` : ''}{v.scripts.waiting.length ? `, ${v.scripts.waiting.length} waiting for you` : ''}
           </Text>
         )}
-        {v?.scripts.waiting.map(w => (
+        {v?.scripts.waiting.slice(0, 8).map(w => (
           <Box key={`sw-${w.name}-${w.update ?? ''}`}>
             <Text color="yellow">
               {w.name}{w.update ? ` ${w.update}` : ''} ({w.project}) waits for you: <Text dimColor>{short(w.why, 60)}</Text>
             </Text>
-            <Button key={`sa-${w.name}`} label={confirming(ui, `script:adopt:${w.name}`, now2) ? `Confirm adopt ${w.name}` : 'Adopt'} onPress={scriptDecide(w.name, 'adopt')} />
-            <Button key={`sr-${w.name}`} label={confirming(ui, `script:reject:${w.name}`, now2) ? `Confirm reject ${w.name}` : 'Reject'} onPress={scriptDecide(w.name, 'reject')} />
+            <Button key={`sa-${w.name}`} label={confirming(ui, armKey(w, 'adopt'), now2) ? `Confirm adopt ${w.name}` : 'Adopt'} onPress={scriptDecide(w, 'adopt')} />
+            <Button key={`sr-${w.name}`} label={confirming(ui, armKey(w, 'reject'), now2) ? `Confirm reject ${w.name}` : 'Reject'} onPress={scriptDecide(w, 'reject')} />
           </Box>
         ))}
         <Box>

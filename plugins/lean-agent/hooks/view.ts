@@ -78,7 +78,7 @@ export async function loadView(h: Host): Promise<View> {
     v.projects = (await listProjects(h)).rows
   })
   await guard('scripts', async () => {
-    v.scripts = { ...(await scriptCounts(h)), waiting: (await waitingScripts(h)).slice(0, 8) }
+    v.scripts = { ...(await scriptCounts(h)), waiting: await waitingScripts(h) }
   })
   const now = await h.clock.now().catch(() => Date.now())
   const recs: DeskRec[] = []

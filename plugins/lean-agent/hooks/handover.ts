@@ -67,7 +67,18 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     queued.length && `## Messages from the desk that were queued for you\n${queued.slice(-QUEUED_MAX).map(m => `- ${m.from ? `[${m.from}] ` : ''}${cut(flat(m.text), QUEUED_EACH)}`).join('\n')}${queued.length > QUEUED_MAX ? `\n(${queued.length - QUEUED_MAX} older messages omitted)` : ''}`,
   ].filter(Boolean)
   const prompt = parts.join('\n\n')
-  return { prompt: prompt.length > PROMPT_MAX ? prompt.slice(0, PROMPT_MAX) + '\n…(handover cut: read brief.md, notes.md and the desk inbox for the rest)' : prompt, worktree: wt?.path, branch: wt?.branch }
+  return { prompt: cutPrompt(prompt), worktree: wt?.path, branch: wt?.branch }
+}
+
+// The cap is in characters AND in bytes: the prompt is one argv string, and with 3-byte characters (CJK, emoji) 80,000 characters
+// are 240 KB, past what the OS passes to a process (E2BIG: the reopen would fail to start).
+export const PROMPT_MAX_BYTES = 100_000
+const utf8 = new TextEncoder()
+export function cutPrompt(prompt: string): string {
+  if (prompt.length <= PROMPT_MAX && utf8.encode(prompt).length <= PROMPT_MAX_BYTES) return prompt
+  let cut = prompt.slice(0, PROMPT_MAX)
+  while (utf8.encode(cut).length > PROMPT_MAX_BYTES) cut = cut.slice(0, Math.max(0, cut.length - Math.ceil((utf8.encode(cut).length - PROMPT_MAX_BYTES) / 3) - 1))
+  return cut.replace(/[\ud800-\udbff]$/, '') + '\n…(handover cut: read brief.md, notes.md and the desk inbox for the rest)'
 }
 
 // "1.0.4" < "1.0.10": numeric by part; an empty or unreadable version is unknown (never older)

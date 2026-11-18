@@ -87,9 +87,11 @@ async function syncCache(h: Host, home: string, now: number, own?: { role: strin
     }
   } else {
     const ro = await syncRollup(h, now)
+    // the offset is where the rollup stopped folding, whatever `size` said a moment earlier: a row appended between the stat and the
+    // sync is in the sums AND behind that offset (clamping to the older size would count it a second time at the next top-up); a
+    // file shorter than the offset is rebuilt from the rollup at the next call
     c = { day: today, byRole: {}, offset: ro.files[LEDGER] ?? size ?? 0 }
     for (const [k, a] of Object.entries(ro.days[today]?.role ?? {})) if (k !== 'unknown') c.byRole[k] = a[0]
-    if (size !== null && c.offset! > size) c.offset = size // (cannot happen: the rollup folded what the file holds)
   }
   await h.store.set(CACHE, c).catch(() => undefined)
   return c

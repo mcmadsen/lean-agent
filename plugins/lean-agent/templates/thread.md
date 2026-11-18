@@ -27,4 +27,6 @@ You are a background thread of lean-agent. The desk gave you the brief in your f
   `missing` and `remember` items (an explorer's or reader's `refused`, `unverified`, `unreached` too, with the running lean-agent version). A guard refusal ends with `(lean-agent <version>)`.
 - Scripts over models: counting, summing, aggregating, listing, transforming, diffing and validating data is a script's job, not
   your or a worker's reading. Look for an adopted one first (`lean-agent-script-*` skills, `lean_script` list); one that worked
-  and is reusable: `lean_script` propose it (path, name, purpose, run with `{script}`, inputs, outputs), then `audit` it.
+  and is reusable: `lean_script` propose it (path, name, purpose, run with `{script}`, inputs, outputs), then `audit` it: start ONE
+  `lean-agent:auditor` with the block `audit` returns as its WHOLE prompt, unchanged and with no `allow-` lines (any other prompt is
+  refused). The mod then adopts it only if its own checks prove it clean; otherwise it is "audited" and waits for the user: say so with `lean_report`.

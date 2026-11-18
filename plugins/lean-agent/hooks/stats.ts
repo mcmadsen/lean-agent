@@ -71,7 +71,7 @@ export async function statsText(h: Host, opts: { days?: number; project?: string
   out.push(...table(`by thread (${n}d)`, sum.tN))
   // rules
   const projects = await readJson<Record<string, unknown>>(h, `${leanDir(home)}/projects.json`, {})
-  const names = opts.project ? [opts.project] : Object.keys(projects && typeof projects === 'object' ? projects : {}).filter(p => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p))
+  const names = opts.project ? [opts.project].filter(p => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p) && !p.includes('..')) : Object.keys(projects && typeof projects === 'object' ? projects : {}).filter(p => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p))
   for (const p of names) {
     const r = await rulesStats(h, p)
     const have = (await h.fs.list(`${projectDir(home, p)}/rules`).catch(() => [])).filter(f => f.name.endsWith('.md')).length
