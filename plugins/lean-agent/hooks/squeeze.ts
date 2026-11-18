@@ -29,24 +29,30 @@ export function squeezeText(text: string, o: SqueezeOpts = {}): { text: string; 
   return { text: out.join('\n'), squeezed: true }
 }
 
-const textOf = (r: any): string | null => (typeof r === 'string' ? r : Array.isArray(r) && r.every(b => b && b.type === 'text' && typeof b.text === 'string') ? r.map((b: any) => b.text).join('\n') : null)
-
-// Squeeze a Bash tool result; the full text is saved under ~/.lean-agent/output/. Anything else passes unchanged.
+// Squeeze a Bash tool result; the full text is saved under ~/.lean-agent/output/.
+// The engine validates what a hook answers against the tool's OUTPUT SCHEMA: for Bash a successful call's `result` is the record
+// `{ stdout, stderr, interrupted, ... }` (BuiltinToolResults.Bash), so that is what is squeezed, and the answer keeps that shape
+// (every other field is carried over). Any other shape passes unchanged: in particular a failed call's `result` is the error TEXT
+// (a string), and a string answer is refused by the schema ("expected object, received string": the whole call then failed
+// for any long output of a command that exited non-zero). A result that cannot be saved in full is never squeezed.
 export async function squeezeResult(h: Host, r: any, o: SqueezeOpts = {}): Promise<any> {
   if (!r || r.deny !== undefined) return r
-  const t = textOf(r.result)
-  if (t === null) return r
-  const s = squeezeText(t, o)
-  if (!s.squeezed) return r
+  const res = r.result
+  if (!res || typeof res !== 'object' || Array.isArray(res) || typeof res.stdout !== 'string') return r
+  const err = typeof res.stderr === 'string' ? res.stderr : ''
+  const so = squeezeText(res.stdout, o)
+  const se = squeezeText(err, o)
+  if (!so.squeezed && !se.squeezed) return r
   const dir = `${leanDir(await homeDir(h))}/output`
   const file = `${dir}/${await h.clock.now()}-${Math.random().toString(36).slice(2, 8)}.txt`
   try {
     await mkdirp(h, dir)
-    await atomicWrite(h, file, t)
+    await atomicWrite(h, file, err ? `${res.stdout}\n--- stderr ---\n${err}` : res.stdout)
   } catch {
     return r // cannot save the full text: never drop it
   }
-  return { ...r, result: `${s.text}\n[lean-agent: output squeezed from ${t.split('\n').length} lines; full text in ${file}]` }
+  const note = (t: string) => `\n[lean-agent: output squeezed from ${t.split('\n').length} lines; full text in ${file}]`
+  return { ...r, result: { ...res, stdout: so.squeezed ? so.text + note(res.stdout) : res.stdout, stderr: se.squeezed ? se.text + note(err) : err } }
 }
 
 // ---- tool trimming: config.json `tools: { desk|thread|plain: { drop: ["Glob", "mcp__x__*"] } }` -------------------
