@@ -119,7 +119,7 @@ export const deskFile = (home: string) => `${leanDir(home)}/desk.json`
 const DELIVERED = (home: string) => `${deskState(home)}/inbox-delivered.json`
 const ROW_KEY = /<!--\s*lean:r=(\d+):(t\d+):(report|ask)\s*-->\s*$/ // the LAST thing on the line: text a thread wrote can never carry it there
 const oneLine = (s: string, n: number) => (s.replace(/\s+/g, ' ').trim().length > n ? s.replace(/\s+/g, ' ').trim().slice(0, n - 1) + '…' : s.replace(/\s+/g, ' ').trim())
-// A REPORT longer than this is sent cut. The full text is first written to its own file, desk/reports/<ts>-<from>.md (plain lines the
+// A REPORT longer than this is sent cut. The full text is first written to its own file, desk/reports/<ts>-<from>-<kind>.md (plain lines the
 // desk can Read; the inbox is one JSON line per row), and the cut line names that file and carries the row key too: the row counts as
 // delivered and the full report is NOT handed over a second time at the next prompt (a long done report used to arrive twice). The
 // pane's Answers list still shows it. When the file cannot be written the cut line has no key and the row stays unread (nothing is lost).
@@ -128,7 +128,7 @@ const oneLine = (s: string, n: number) => (s.replace(/\s+/g, ' ').trim().length 
 export const DIRECT_MAX = 1500
 export const ASK_MAX = 8000
 const OPTIONS_MAX = 1000
-export const reportFile = (home: string, r: { ts: number; from: string }) => `${deskState(home)}/reports/${r.ts}-${r.from}.md`
+export const reportFile = (home: string, r: { ts: number; from: string; kind: 'report' | 'ask' }) => `${deskState(home)}/reports/${r.ts}-${r.from}-${r.kind}.md` // (the kind: a report and a question of one thread in one millisecond never share a file)
 
 export async function recordDeskSid(h: Host, sid: string): Promise<void> {
   if (!sid) return

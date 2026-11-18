@@ -14,7 +14,7 @@
   the thread is closed anyway. The CLI has no command to rename a background session, so closed sessions are not labelled
   "[closed] tN".
 - **A long report arrives once.** A report longer than `DIRECT_MAX` (1500 characters) used to arrive twice: cut as a direct line, then
-  in full at the next prompt. The full text is now written to `~/.lean-agent/desk/reports/<ts>-<tN>.md` (plain lines the desk can
+  in full at the next prompt. The full text is now written to `~/.lean-agent/desk/reports/<ts>-<tN>-<report|ask>.md` (plain lines the desk can
   Read), the cut line names that file and carries its row key too, so the row counts as delivered and nothing hands it over again
   (the pane's Answers list still has it). When the file cannot be written, or the send is refused, the row stays unread for the next
   prompt as before. The pointer is an absolute path, and the file is only written for a real thread id. A question is cut only past

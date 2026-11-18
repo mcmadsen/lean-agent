@@ -211,10 +211,10 @@ test('a long report is sent cut WITH its row key: it arrives once, the full text
   expect(lines).toHaveLength(1)
   expect(lines[0]).toMatch(/<!-- lean:r=\d+:t1:report -->$/) // keyed, like a short one
   const ts = /lean:r=(\d+):t1:report/.exec(lines[0])![1]!
-  expect(lines[0]).toContain(`(cut: the full text is in /h/.lean-agent/desk/reports/${ts}-t1.md: Read it; the pane's Answers list has it too)`)
+  expect(lines[0]).toContain(`(cut: the full text is in /h/.lean-agent/desk/reports/${ts}-t1-report.md: Read it; the pane's Answers list has it too)`)
   expect(lines[0].length).toBeLessThan(DIRECT_MAX + 400)
   // the file the pointer names holds the whole report as plain lines the desk can Read
-  expect(h.files.get(`/h/.lean-agent/desk/reports/${ts}-t1.md`)).toBe(`# Report from t1 (done)\n\n${long.trim()}\n`)
+  expect(h.files.get(`/h/.lean-agent/desk/reports/${ts}-t1-report.md`)).toBe(`# Report from t1 (done)\n\n${long.trim()}\n`)
   // the desk hook marks it delivered; no prompt and no relay hands the full report over a second time
   expect(await markDelivered(h.host, lines[0])).toBe(true)
   expect((await unreadReports(h.host)).recs).toHaveLength(0)
@@ -269,7 +269,7 @@ test('one decision to cut: comment markers cannot make the line longer than the 
   await threadTool(h.host, 't2', 'lean_ask', { question: `${'q'.repeat(9000)} really?`, options: opts }, ok)
   expect(lines[1]!.length).toBeLessThan(ASK_MAX + 2000)
   const ts = /lean:r=(\d+):t2:ask/.exec(lines[1]!)![1]!
-  const file = h.files.get(`/h/.lean-agent/desk/reports/${ts}-t2.md`)!
+  const file = h.files.get(`/h/.lean-agent/desk/reports/${ts}-t2-ask.md`)!
   expect(file).toContain('really?')
   expect(file).toContain('- option 499 ')
   // options alone over the clamp: the question is whole, the options are clamped, the file has them all
@@ -279,7 +279,7 @@ test('one decision to cut: comment markers cannot make the line longer than the 
   expect(lines[2]).toContain('[options: option 0 ')
   expect(lines[2]!.length).toBeLessThan(1600)
   expect(lines[2]).toContain('/h/.lean-agent/desk/reports/')
-  expect(h.files.get(`/h/.lean-agent/desk/reports/${/lean:r=(\d+):t3:ask/.exec(lines[2]!)![1]}-t3.md`)).toContain('- option 499 ')
+  expect(h.files.get(`/h/.lean-agent/desk/reports/${/lean:r=(\d+):t3:ask/.exec(lines[2]!)![1]}-t3-ask.md`)).toContain('- option 499 ')
   // a "from" that is not a thread id is not written into a file name: no file, no key, the row stays unread
   h.clock.t += 10
   await threadTool(h.host, 'odd name', 'lean_report', { text: 'z'.repeat(2000), state: 'done' }, ok)
