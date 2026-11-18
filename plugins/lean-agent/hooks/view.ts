@@ -3,6 +3,7 @@ import { homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './
 import type { Host } from './state'
 import { deskState, unconsumed } from './delivery'
 import type { DeskRec } from './delivery'
+import { openQuestions } from './extras'
 import { isRunning, parseAgents } from './threads'
 import type { Thread } from './threads'
 
@@ -10,7 +11,7 @@ export type GoalTone = 'working' | 'waiting' | 'stuck' | 'quiet'
 export type GoalRow = { id: string; text: string; ts: number; tone: GoalTone }
 export type AnswerRow = { n: number; rec: DeskRec; unread: boolean }
 export type ThreadRow = { id: string; title: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean }
-export type View = { goals: GoalRow[]; answers: AnswerRow[]; unread: number; total: number; threads: ThreadRow[]; budget: string; errors: string[] }
+export type View = { goals: GoalRow[]; answers: AnswerRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; budget: string; errors: string[] }
 
 import { STALE_MS } from './chaser'
 export { STALE_MS }
@@ -50,7 +51,7 @@ async function paneAck(h: Host, home: string): Promise<PaneAck> {
 }
 
 export async function loadView(h: Host): Promise<View> {
-  const v: View = { goals: [], answers: [], unread: 0, total: 0, threads: [], budget: 'n/a', errors: [] }
+  const v: View = { goals: [], answers: [], openQuestions: [], unread: 0, total: 0, threads: [], budget: 'n/a', errors: [] }
   const guard = async (what: string, f: () => Promise<void>) => {
     try {
       await f()
@@ -78,6 +79,7 @@ export async function loadView(h: Host): Promise<View> {
       .sort((a, b) => Number(b.unread) - Number(a.unread) || b.n - a.n)
       .slice(0, 30)
   })
+  await guard('questions', async () => { v.openQuestions = await openQuestions(h) })
   const rows = new Map<string, { run: boolean }>()
   let agentsOk = true
   await guard('agents', async () => {

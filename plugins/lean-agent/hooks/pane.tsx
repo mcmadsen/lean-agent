@@ -68,6 +68,11 @@ export function registerPane(on: any) {
           </Text>
         ))}
         <Text bold>Answers{v ? ` (${v.unread} unread)` : ''}</Text>
+        {v?.openQuestions.map(q => (
+          <Text key={`q-${q.q}`} color="yellow">
+            open ? {q.from ?? 'desk'}: {short(q.question ?? '', 70)}
+          </Text>
+        ))}
         {v && !v.answers.length && <Text dimColor>Nothing from the threads yet.</Text>}
         {v?.answers.map(a => (
           <Box key={`a-${a.n}`}>

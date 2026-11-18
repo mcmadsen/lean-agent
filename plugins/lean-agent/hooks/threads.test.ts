@@ -97,7 +97,7 @@ test('park and close only queue; close stops a running session', async () => {
 })
 
 test('close with a failing agents listing retries once, then stays closing and says how to stop it', async () => {
-  const { h, state, call } = setup()
+  const { h, call } = setup()
   await call({ action: 'new', title: 'a', text: 'brief' })
   let n = 0
   h.claude.handler = (a: string[]) => (a[0] === 'agents' && a[1] === '--json' ? (++n === 1 ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: JSON.stringify([{ sessionId: SID, name: 'x', cwd: 'x', status: 'busy', startedAt: 1 }]) }) : { exitCode: 0, stdout: '' })
@@ -109,7 +109,6 @@ test('close with a failing agents listing retries once, then stays closing and s
   expect(r.ok).toBe(false)
   expect(r.text).toContain('Stop it from the Claude app')
   expect((await call({ action: 'list' })).text).toContain('closing')
-  void state
 })
 
 test('trust writer keeps every other key and survives a damaged file', async () => {
@@ -155,7 +154,6 @@ test('a failed agents listing is not "idle": no resume, messages stay queued', a
   const r = await call({ action: 'send', tN: 't1', text: 'one' })
   expect(r.ok).toBe(false)
   expect(h.claudeCalls().filter(a => a.includes('--resume')).length).toBe(0)
-  void state
 })
 
 test('a resume that forks follows the new session id', async () => {

@@ -160,7 +160,11 @@ All fail closed (a guard that throws denies):
 
 - **Desk strict mode**: the desk may read lean-agent state and use its own tools; it may not edit code or run builds.
 - **Push gate**: see above.
-- **Private projects**: never pushed or published, review or not.
+- **Private projects**: every outward action is refused, review or not, no override: `git push`, `git remote add|set-url`,
+  `gh pr create|comment|merge|edit|close|reopen|ready|review`, `gh issue create|comment|edit|close|reopen|delete|transfer|pin|lock`,
+  `gh release *`, `gh repo create|edit|fork|delete|rename|archive`, `gh api` writes (`-X/--method POST|PUT|PATCH|DELETE`, or
+  `-f/-F/--field/--raw-field/--input` without an explicit GET), `az repos|devops|boards` unless list/show/query/get. Read-only calls
+  (`gh pr view|list`, `gh api` GET, `git fetch|log|status`) pass. Other projects only get the push gate and the protected-branch / `--force` guard.
 - **Workers**: readers are read-only; an edit grant is explicit (`allow-edit`).
 
 ## State files

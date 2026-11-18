@@ -20,8 +20,8 @@ for f in "$root"/agents/*.md; do
 done
 for f in "$root"/commands/*.md; do [ -n "$(field "$f" description)" ] || fail "command $(basename "$f"): no description"; done
 # every lean_* tool a skill, agent or command relies on is defined by the mod
-for t in $(grep -rhoE '\blean_[a-z_]+' "$here" "$root/agents" "$root/commands" | sort -u); do
-  grep -qE "['\"]$t['\"]" "$root"/hooks/*.ts "$root"/hooks/*.tsx 2>/dev/null || fail "tool $t is used in a skill/agent/command but defined nowhere in hooks/"
+for t in $(grep -rhoE '(^|[^a-z_])lean_[a-z_]+' "$here" "$root/agents" "$root/commands" | sed 's/^[^l]*//' | sort -u); do
+  grep -qE "['\"]$t['\"]" $(ls "$root"/hooks/*.ts "$root"/hooks/*.tsx 2>/dev/null | grep -v '\.test\.ts') 2>/dev/null || fail "tool $t is used in a skill/agent/command but defined nowhere in hooks/"
 done
 need() { [ -f "$here/$1/SKILL.md" ] || fail "no skill $1";  grep -q -- "$2" "$here/$1/SKILL.md" || { echo "FAIL: $1 lacks: $2"; exit 1; }; }
 need review-learn 'gh api user --jq .login'

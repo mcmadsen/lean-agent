@@ -113,11 +113,22 @@ test('threads never ask the user directly; neither do subagents', async () => {
 test('private projects never push or publish, review or not', async () => {
   const h = setup()
   h.files.set(`/h/.lean-agent/secret/reviews/${SHA}.json`, JSON.stringify({ green: true }))
-  for (const command of ['git push', 'git -C /r/secret push origin x', 'gh pr create --fill', 'gh pr comment 3 -b hi', 'gh issue comment 4 -b hi', 'gh pr merge 3'])
+  const denied = ['git push', 'git -C /r/secret push origin x', 'git remote add x http://h/r', 'git remote set-url origin http://h/r',
+    'gh pr create --fill', 'gh pr comment 3 -b hi', 'gh pr merge 3', 'gh pr edit 3 -t x', 'gh pr close 3', 'gh pr review 3 --approve',
+    'gh issue create -t x', 'gh issue comment 4 -b hi', 'gh issue edit 4', 'gh issue close 4', 'gh release create v1', 'gh release delete v1',
+    'gh repo create foo', 'gh repo edit', 'gh repo fork',
+    'gh api -X POST repos/o/r/issues', 'gh api --method DELETE repos/o/r', 'gh api repos/o/r/issues -f title=x', 'gh api repos/o/r --input f.json',
+    'az repos pr create --title x', 'az repos create --name x', 'az devops project create', 'az boards work-item create',
+    'lean-agent worktree push vault feature', 'lean-agent review vault --post']
+  for (const command of denied)
     expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/secret')]).toEqual([command, expect.stringContaining('private project')])
   expect(await run(h, thread, { tool: 'Bash', command: 'git -C /r/secret push' }, '/r/app')).toContain('private project')
-  for (const command of ['gh pr view 3', 'gh api repos/o/r/pulls/3/comments', 'gh api user --jq .login', 'gh issue create -t x', 'gh release create v1'])
+  for (const command of ['gh pr view 3', 'gh pr list', 'gh api repos/o/r/pulls/3/comments', 'gh api user --jq .login', 'gh api -X GET repos/o/r -f per_page=1',
+    'git fetch origin', 'git pull', 'git log', 'git status', 'git ls-remote origin', 'git remote -v', 'az repos pr list', 'az repos show'])
     expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/secret')]).toEqual([command, null])
+  // non-private: no publishing denial
+  for (const command of ['gh pr create --fill', 'gh release create v1', 'gh api -X POST x', 'git remote add x u'])
+    expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/app')]).toEqual([command, null])
 })
 
 test('workers: readers are read-only; unknown subagent types are readers; grants come from the Agent call', async () => {

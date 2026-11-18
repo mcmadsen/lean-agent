@@ -52,10 +52,10 @@ export async function openQuestions(h: Host): Promise<{ q: number; from?: string
 export async function recordAnswer(h: Host, thread: string, text: string): Promise<number | null> {
   const home = await homeDir(h)
   const qs = await openQuestions(h)
-  const i = qs.findIndex(q => q.from === thread) === -1 ? -1 : qs.find(q => q.from === thread)!.q - 1
-  if (i < 0) return null
-  await appendJsonl(h, `${leanDir(home)}/answers.jsonl`, { ts: await h.clock.now(), q: i + 1, thread, text })
-  return i + 1
+  const open = qs.find(q => q.from === thread)
+  if (!open) return null
+  await appendJsonl(h, `${leanDir(home)}/answers.jsonl`, { ts: await h.clock.now(), q: open.q, thread, text })
+  return open.q
 }
 
 // ---- scheduled sends -----------------------------------------------------------------------------------------

@@ -41,8 +41,36 @@ function words(c: string): string[] {
 
 // The command reaches git push / gh publishing anywhere in its text (quotes, eval and bash -c included).
 export const PUSH = /\bgit\b[^;&|\n]*\bpush\b/
-// What 0.45 guarded (pr create/comment, issue comment, review comments) plus `gh pr merge`; read-only `gh api` passes.
-export const PUBLISH = /\bgh\b[^;&|\n]*\b(pr\s+(create|comment|merge)|issue\s+comment|comment|review\s+[^;&|\n]*--(comment|body|approve|request-changes))\b/
+// PRIVATE projects: every outward action is refused (no override). The exact list:
+//   git push; git remote add / set-url;
+//   gh pr create|comment|merge|edit|close|reopen|ready|review; gh issue create|comment|edit|close|reopen|delete|transfer|pin|unpin|lock|unlock;
+//   gh release <anything>; gh repo create|edit|fork|delete|rename|archive; gh api with a write method (-X/--method POST|PUT|PATCH|DELETE,
+//   or -f/-F/--field/--raw-field/--input without an explicit GET); az repos|devops|boards unless the verb is list/show/query/get;
+//   lean-agent worktree push / pr create / review --post|--comment (0.45 CLI forms).
+// Read-only calls (gh pr view/list, gh api GET, git fetch/log/status, az ... list/show) pass.
+// In non-private projects none of this applies: only the push gate and the protected-branch / --force guard do.
+const GH_WRITE = /\bgh\b[^;&|\n]*\b(pr\s+(create|comment|merge|edit|close|reopen|ready|review)|issue\s+(create|comment|edit|close|reopen|delete|transfer|pin|unpin|lock|unlock)|release|repo\s+(create|edit|fork|delete|rename|archive))\b/
+const GIT_REMOTE_WRITE = /\bgit\b[^;&|\n]*\bremote\s+(add|set-url)\b/
+const LEAN_OUT = /\blean-agent\b[^;&|\n]*(\bworktree\s+push\b|\bpr\s+create\b|\breview\b[^;&|\n]*--(post|comment)\b)/
+function privateOutward(c: string): boolean {
+  if (PUSH.test(c) || GH_WRITE.test(c) || GIT_REMOTE_WRITE.test(c) || LEAN_OUT.test(c)) return true
+  for (const seg of c.split(/[;&|\n]+/)) {
+    const w = words(seg)
+    const at = w.findIndex(x => x === 'gh' || x === 'az' || x.endsWith('/gh') || x.endsWith('/az'))
+    if (at < 0) continue
+    const rest = w.slice(at + 1)
+    const pos = rest.filter(x => !x.startsWith('-'))
+    if (w[at]!.endsWith('az') && ['repos', 'devops', 'boards'].includes(pos[0] ?? '')) {
+      if (!pos.slice(1).some(x => /^(list|show|query|get|list-.*|show-.*)$/.test(x))) return true
+    }
+    if (w[at]!.endsWith('gh') && pos[0] === 'api') {
+      const m = rest.map((x, i) => (/^(-X|--method)$/.test(x) ? rest[i + 1] : /^(-X|--method)=/.test(x) ? x.split('=')[1] : /^-X\S/.test(x) ? x.slice(2) : '')).filter(Boolean).pop()
+      if (m) { if (/^(POST|PUT|PATCH|DELETE)$/i.test(m)) return true }
+      else if (rest.some(x => /^(-f|-F|--field|--raw-field|--input)(=|$)/.test(x) || /^-[fF]\S/.test(x))) return true
+    }
+  }
+  return false
+}
 // Directories a command works in: `git -C dir`, `cd dir`, `--git-dir`-less; the session cwd is always one.
 export function dirsOf(c: string, cwd: string): string[] {
   const out = [cwd]
@@ -90,9 +118,9 @@ async function protectedDenial($: Host, c: string, dir: string): Promise<string 
 }
 
 async function pushDenial($: Host, c: string, cwd: string): Promise<string | null> {
-  const publishing = PUBLISH.test(c)
+  const outward = privateOutward(c)
   const pushing = PUSH.test(c)
-  if (!publishing && !pushing) return null
+  if (!outward) return null
   const dirs = dirsOf(c, cwd)
   for (const d of dirs) {
     const p = await projectOf($, d)
