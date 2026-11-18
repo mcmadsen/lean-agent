@@ -138,10 +138,11 @@ test('a private string the rules cannot catch makes the export refuse: nothing i
   expect(a.missed('zeldaquuxbox')).toEqual(['user name']) // and the check would still flag it
   expect(a.missed('fine ~/code <user> project-A <url> <email>')).toEqual([])
   // a rule that regressed (the user name is no longer masked): the final check refuses, whatever the rules did
-  const faulty = (real: any) => ({ anonymise: (t: string) => real.anonymise(t).replace(/<user>/g, 'zeldaquux'), missed: real.missed })
+  const faulty = (real: any) => ({ anonymise: (t: string) => real.anonymise(t).replace(/<user>/g, 'zeldaquux'), name: real.name, missed: real.missed })
   const r = await exportFeedback(h.host, ROOT, { version: '1.0.4' }, { wrap: faulty })
   expect(r.ok).toBe(false)
-  expect(r.text).toContain('refused')
+  expect(r.text).toContain('not written')
+  expect(r.text).toContain('Nothing was posted')
   expect(r.text).toContain('user name')
   expect(r.text).not.toContain('zeldaquuxbox')
   expect([...h.files.keys()].some(k => k.includes('feedback-export/2'))).toBe(false)
@@ -252,8 +253,8 @@ test('drafts, core candidates and blocked reports go in once; the next export ha
     { ts: 3, from: 't3', kind: 'report', state: 'blocked', text: 'needs a decision about alpha' }, { ts: 4, from: 't4', kind: 'ask', state: 'blocked', text: 'a question' },
   ]))
   const first = read(h, await run(h))
-  expect(first).toContain('### 2026-11-18-a.md')
-  expect(first).toContain('steps in project-A')
+  expect(first).toContain('### draft a\n\nsteps in project-A') // titled by its first heading, which is not said twice
+  expect(first).not.toContain('# draft a\nsteps')
   expect(first).toContain('## Script candidates for lean-agent core')
   expect(first).toContain('ledger-total: Total the cost ledger')
   expect(first).not.toContain('- plain:')
@@ -269,9 +270,9 @@ test('drafts, core candidates and blocked reports go in once; the next export ha
   const second = await run(h)
   expect(second.path).toBe(`${EXP}/2026-11-18-1407-2.md`)
   const t = read(h, second)
-  expect(t).toContain('### 2026-11-18-b.md')
-  expect(t).not.toContain('2026-11-18-a.md')
-  expect(t).not.toContain('Script candidates')
+  expect(t).toContain('### draft b')
+  expect(t).not.toContain('draft a')
+  expect(t).toContain('## Script candidates for lean-agent core\n\nnone')
   expect(t).toContain('- t9: new block')
   expect(t).not.toContain('t1: cannot reach')
   expect(h.files.get(`${EXP}/2026-11-18-1407.md`)).toBe(first) // the first file is untouched
@@ -280,7 +281,8 @@ test('drafts, core candidates and blocked reports go in once; the next export ha
   h.clock.t = T0 + 120_000
   const third = read(h, await run(h))
   expect(third).toContain('since the last export')
-  expect(third).not.toContain('## Drafts')
+  expect(third).toContain('## Drafts not exported before\n\nnone')
+  expect(third).not.toContain('draft b')
 })
 
 test('a size cap of 40 KB: the oldest and least repeated items are summarised, long drafts are cut', async () => {
@@ -309,6 +311,107 @@ test('no network and no posting: the only processes are claude --version, uname 
   expect(h.calls.filter(c => c.argv[0] === 'claude').every(c => c.argv[1] === '--version' || (c.argv[1] === 'agents' && c.argv.includes('--json')))).toBe(true)
 })
 
+// ---- what the first real export showed (1.0.5) ---------------------------------------------------------------------------------
+test('a draft is titled by its first heading; a long date-slug file name is never taken for a secret, and a draft without text shows its name as words', async () => {
+  const h = setup()
+  const slug = '2026-11-18-the-desk-did-not-open-the-export-file-from-the-app'
+  expect(slug.length).toBeGreaterThan(40) // long enough for the secret rule
+  h.files.set(lean(h, `feedback-drafts/${slug}.md`), '\n## Export file not openable in alpha\nSteps in alpha\n')
+  h.files.set(lean(h, 'feedback-drafts/2026-11-19-the-alpha-opener-failed-after-a-restart-of-the-app-today.md'), '\n\n') // no text to take a title from
+  h.files.set(lean(h, 'feedback-drafts/2026-11-20-plain-first-line.md'), 'no heading here, just a line\nmore\n')
+  const t = read(h, await run(h))
+  expect(t).not.toContain('<secret>')
+  expect(t).toContain('### Export file not openable in project-A\n\nSteps in project-A') // the first heading is the title, not said twice
+  expect(t).toContain('### the project-A opener failed after a restart of the app today\n\nnone') // the name rules (project) ran, the secret rule did not
+  expect(t).toContain('### no heading here, just a line\n\nmore')
+  expect(t).not.toContain(slug)
+  expect(JSON.parse(h.files.get(`${EXP}/state.json`)!).drafts).toContain(`${slug}.md`) // the raw name is remembered, so it is exported once
+})
+
+test('a draft whose heading is not its first line keeps every other line; a long title is anonymised before it is cut', async () => {
+  const h = setup()
+  h.files.set(lean(h, 'feedback-drafts/a.md'), 'Steps in alpha\n## The real title\nmore\n')
+  h.files.set(lean(h, 'feedback-drafts/b.md'), `# ${'word '.repeat(22)}mail ${EMAIL}\nbody\n`) // the address would straddle a cut at 120 characters
+  const t = read(h, await run(h))
+  expect(t).toContain('### The real title\n\nSteps in project-A\nmore')
+  expect(t).not.toContain('<emai\n') // a cut never leaves half a placeholder
+  expect(t.match(/The real title/g)).toHaveLength(1)
+  expect(t).not.toContain(EMAIL.slice(0, 6))
+  expect(t).not.toContain('example') // no fragment of the address is left
+  expect(t).toMatch(/### (word ){22}mail\s*\n/) // cut at 120 characters after anonymising: the address is gone, not half of it
+})
+
+test('a first line that is not a heading keeps its # so the id rule still masks it', async () => {
+  const h = setup()
+  h.files.set(lean(h, 'feedback-drafts/x.md'), '#4821 login broken\nbody\n')
+  const t = read(h, await run(h))
+  expect(t).toContain('### #<id> login broken')
+  expect(t).not.toContain('4821')
+})
+
+test('the same report in the old and the new feedback file counts once, whatever the key order or the unit of its time; identical rows inside one file stay separate', async () => {
+  const h = setup()
+  h.files.set(lean(h, 'feedback/feedback.jsonl'), jl([{ ts: 1_700_000_000, status: 'done', thread: 't1' }, { ts: 1_700_000_100, status: 'done', thread: 't2' }, { ts: 1_700_000_100, status: 'done', thread: 't2' }]))
+  h.files.set(lean(h, 'feedback.jsonl'), jl([{ thread: 't1', status: 'done', ts: 1_700_000_000_000 }, { ts: 1_700_000_100_000, thread: 't2', status: 'done' }, { ts: 1_700_000_100_000, thread: 't2', status: 'done' }, { ts: 1_700_000_100_000, thread: 't2', status: 'done' }]))
+  expect(read(h, await run(h))).toContain('Reports: 4 (done 4)') // t1 once; t2 three times (the larger count of the two files)
+})
+
+test('the name rules mask a project, the user and a home path in a file name and never the secret or hash rules', async () => {
+  const h = setup('/q/zeldaquux')
+  const a = await makeAnonymiser(h.host)
+  const long = 'zeldaquux-alpha-deadbeefcafe-and-a-name-longer-than-thirty-two-characters'
+  expect(a.name(long)).toBe('<user>-project-A-deadbeefcafe-and-a-name-longer-than-thirty-two-characters')
+  expect(a.anonymise(long)).toContain('<secret>') // the whole-text rules would have masked it
+  expect(a.name(`/q/zeldaquux/code/${long}`)).toMatch(/^~\/code\//)
+})
+
+test('every section is printed, "none" when empty, and the old feedback/feedback.jsonl is read with its old row shapes', async () => {
+  const empty = setup()
+  const e = read(empty, await run(empty))
+  for (const s of ['## Notes\n\nnone', '## Drafts not exported before\n\nnone', 'Reports: none', 'Reports naming missing context: none', '### missing\n\nnone', '### refused\n\nnone', '### unverified\n\nnone', '### unreached\n\nnone', '## Guard refusals since the last export\n\nnone', '## Script candidates for lean-agent core\n\nnone', '## Threads blocked since the last export\n\nnone'])
+    expect(e, s).toContain(s)
+  expect(e).toContain('## Doctor check: problems')
+  expect(e).toContain('Read: feedback.jsonl: not found; feedback/feedback.jsonl: not found')
+  // 133 rows in the 0.45 place, with the old shapes: seconds and ISO dates as time, strings for `missing` and `refused`, no status on some
+  const h = setup()
+  const rows: unknown[] = []
+  for (let i = 0; i < 100; i++) rows.push({ ts: 1_700_000_000 + i, status: 'done', missing: i % 10 === 0 ? 'no build command for alpha' : '' })
+  for (let i = 0; i < 20; i++) rows.push({ ts: new Date(1_700_100_000_000 + i).toISOString(), status: 'partial', refused: i < 3 ? 'ls was refused' : undefined })
+  for (let i = 0; i < 12; i++) rows.push({ status: 'failed', missing: true }) // no time at all
+  rows.push({ ts: 1_700_200_000, note: 'no status' })
+  h.files.set(lean(h, 'feedback/feedback.jsonl'), jl(rows))
+  h.files.set(lean(h, 'feedback.jsonl'), jl([{ ts: T0 - 1000, status: 'done' }, rows[0]])) // the new place; a row in both is counted once
+  const t = read(h, await run(h))
+  expect(t).toContain('Read: feedback.jsonl: 2 row(s); feedback/feedback.jsonl: 133 row(s)')
+  expect(t).toContain('Reports: 134 (done 101, partial 20, failed 12, unknown 1)')
+  expect(t).toContain('Reports naming missing context: 22')
+  expect(t).toContain('### missing\n\n- (x10) no build command for project-A')
+  expect(t).toContain('### refused\n\n- (x3) ls was refused')
+  expect(t).not.toContain('Reports: none')
+  // only what is new at the next export (a row without a time was counted by the first)
+  h.clock.t = T0 + 60_000
+  expect(read(h, await run(h))).toContain('Reports: none')
+})
+
+test('the public repo path passes even when the OS user name is the repo owner; another repo, a longer name or the plain name does not', async () => {
+  const h = setup('/q/mcmadsen')
+  const a = await makeAnonymiser(h.host)
+  for (const s of ['https://github.com/mcmadsen/lean-agent', 'github.com/mcmadsen/lean-agent', 'mcmadsen/lean-agent', 'see https://github.com/mcmadsen/lean-agent/issues/new.', 'gh issue create --repo mcmadsen/lean-agent --body-file x'])
+    expect(a.anonymise(s), s).toBe(s)
+  expect(a.anonymise('mcmadsen/lean-agent-extras')).toBe('<user>/lean-agent-extras')
+  expect(a.anonymise('github.com/mcmadsen/other')).toBe('github.com/<org>/<repo>')
+  expect(a.anonymise('mcmadsen and MCMADSEN-laptop')).toBe('<user> and <user>-laptop')
+  const once = a.anonymise('repo mcmadsen/lean-agent, owner mcmadsen, /q/mcmadsen/code')
+  expect(once).toBe('repo mcmadsen/lean-agent, owner <user>, ~/code')
+  expect(a.anonymise(once)).toBe(once)
+  expect(a.missed('https://github.com/mcmadsen/lean-agent and mcmadsen/lean-agent')).toEqual([])
+  expect(a.missed('mcmadsen/lean-agent-extras')).toContain('user name')
+  expect(a.missed('owner mcmadsen')).toContain('user name')
+  const r = await run(h, { notes: 'see https://github.com/mcmadsen/lean-agent and github.com/mcmadsen/lean-agent, mcmadsen/lean-agent' })
+  expect(r.ok).toBe(true)
+  expect(read(h, r)).toContain('see https://github.com/mcmadsen/lean-agent and github.com/mcmadsen/lean-agent, mcmadsen/lean-agent')
+})
+
 // ---- wiring -----------------------------------------------------------------------------------------------------------------
 const PLUGIN = decodeURIComponent(new URL('..', (import.meta as any).url).pathname).replace(/\/$/, '')
 async function session($: any, on: any, cwd: string) {
@@ -333,7 +436,9 @@ async function session($: any, on: any, cwd: string) {
 test('/lean-agent-feedback works in any session: writes the file, prints its path, takes the notes as the argument', async ($, on) => {
   const h = await session($, on, '/h/.claude/spares/spare-abc') // a plain session
   const r: any = await $.command.run({ command: 'lean-agent-feedback', args: 'the opener failed in alpha' } as any)
-  expect(r.text).toContain(`${EXP}/2026-11-18-1407.md`)
+  // what the user sees: plain words, no instruction to a model
+  expect(r.text).toMatch(new RegExp(`^Feedback export written: ${EXP}/2026-11-18-1407\\.md \\(\\d+ KB, anonymised\\)\\. Nothing was posted\\. Paste it to the maintainers, or ask the desk to post it\\.$`))
+  expect(r.text).not.toMatch(/show the path|the user |explicit yes|gh /i)
   const t = h.files.get(`${EXP}/2026-11-18-1407.md`)!
   expect(t).toContain('the opener failed in project-A')
   expect(t).not.toContain('alpha')
@@ -343,7 +448,7 @@ test('the desk\'s lean_doctor export writes the same file; a refusal is an error
   const h = await session($, on, '/h/lean-agent-desk')
   const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_doctor', action: 'export', notes: 'from the desk' } as any)
   expect(r.isError).toBeUndefined()
-  expect(r.result).toContain('feedback export written')
+  expect(r.result).toContain('Feedback export written')
   expect(h.files.get(`${EXP}/2026-11-18-1407.md`)).toContain('from the desk')
 })
 

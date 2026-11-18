@@ -45,6 +45,11 @@ const HOST_OK = /^(?:github\.com|dev\.azure\.com)$/i
 // github.com/<org>/<repo>: only the lean-agent repo is kept
 const GH_PATH = /(?<![A-Za-z0-9])github\.com\/([A-Za-z0-9._-]+)(?:\/([A-Za-z0-9._-]+))?/g
 const ghKept = (org: string, repo?: string) => org.toLowerCase() === 'mcmadsen' && (repo ?? '').toLowerCase() === 'lean-agent'
+// the public repo path (with or without github.com/): it passes the user-name and project rules untouched, because the OS user name
+// may be the same as the public repo owner's. Only the exact path: another repo of the owner, or a longer name, is not let through.
+const PUBLIC_REPO = 'mcmadsen/lean-agent'
+const PUBLIC_REPO_RE = /(?<![A-Za-z0-9._-])mcmadsen\/lean-agent(?![A-Za-z0-9_-])(?!\.[A-Za-z0-9])/gi
+const KEEP = '\u0003' // stands for PUBLIC_REPO while the name rules run (control character: no name can match it)
 const HEX_RE = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,}\b/g
 const ID_WORD_RE = /\b(PR|pull request|issue|ticket|story)(\s*#?\s*)\d+\b/gi
 const ID_KEY_RE = /\b(?!(?:UTF|SHA|ISO|MD|AES|RSA|TLS|SSL|HTTP|ECMA|RFC|GPT|TCP|UDP|IPV)-)[A-Z][A-Z0-9]{1,9}-\d+\b/g // a tracker key like ABC-123, not UTF-8
@@ -53,7 +58,9 @@ const AZURE_PATH = /dev\.azure\.com\/[^/\s]+(?:\/[^/\s]+)?/g
 const AZURE_HOST = /\b([A-Za-z0-9-]+)\.visualstudio\.com/g
 const USER_PATH = /\/(?:Users|home)\/[A-Za-z0-9._-]+(\/|(?![A-Za-z0-9._-]))/g
 
-export type Anonymiser = { anonymise: (t: string) => string; missed: (t: string) => string[] }
+// anonymise: the whole rule set; name: only the home / user / project / path rules, for a file name (a date-slug draft name is long
+// and looks like a secret, but it is not one: the secret and hash rules never see it); missed: the final check
+export type Anonymiser = { anonymise: (t: string) => string; name: (t: string) => string; missed: (t: string) => string[] }
 
 const label = (n: number) => (n < 26 ? `project-${String.fromCharCode(65 + n)}` : `project-${n + 1}`)
 
@@ -98,20 +105,12 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
   const nameRe = (n: string) => new RegExp(`(?<![A-Za-z0-9])${esc(n)}(?![A-Za-z0-9])`, 'gi') // a name as a word (my-proj-api and proj/x match, projection does not)
   const hidden = (t: string) => t.replace(/project-(?:[A-Z]|\d+)\b/g, '') // our own labels are not leaks
 
-  const anonymise = (input: string): string => {
-    let t = input.replace(/[\u0001\u0002]/g, '') // our placeholder characters can never come from the text
-    for (const re of SECRET_RES) t = t.replace(re, (m, g1) => (typeof g1 === 'string' ? `${g1}<secret>` : '<secret>'))
-    t = t.replace(URL_RE, u => {
-      const core = u.replace(/[.,;:!?]+$/, '') // sentence punctuation after a URL is not part of it
-      return (REPO_URL.test(core) ? core : '<url>') + u.slice(core.length)
-    })
-    // what is left of azure hosts (written without a scheme): the organisation and project segments go
-    t = t.replace(AZURE_PATH, 'dev.azure.com/<org>/<org>').replace(AZURE_HOST, '<org>.visualstudio.com')
-    t = t.replace(SCP_RE, '<url>').replace(EMAIL_RE, '<email>')
-    t = t.replace(IP_RE, '<ip>').replace(HOST_RE, m => (HOST_OK.test(m) ? m : '<host>'))
-    t = t.replace(GH_PATH, (m, org: string, repo?: string) => (ghKept(org, repo) ? m : 'github.com/<org>/<repo>'))
+  // the home, user-name and project rules (shared by a whole text and a file name); the public repo path goes through untouched
+  const names = (input: string): string => {
+    let t = input.replace(/[\u0001\u0002\u0003]/g, '') // our placeholder characters can never come from the text
     if (homeRe) t = t.replace(homeRe, '~')
     t = t.replace(USER_PATH, '~$1')
+    t = t.replace(PUBLIC_REPO_RE, KEEP)
     // the user name: a word when short; a long one (6+ letters) also inside longer words (a host name like <name>box)
     if (userOk) t = t.replace(new RegExp(user.length < 6 ? `(?<![A-Za-z0-9])${esc(user)}(?![A-Za-z0-9])` : esc(user), 'gi'), '<user>')
     // projects: names become a private token first, then their labels, so a label is never re-matched by a name (labels already in
@@ -127,21 +126,40 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
         return p.replace(/(\u0001+)\u0002/g, (_, c: string) => projects[c.length - 1]![1])
       })
       .join('')
+    return t
+  }
+  const restore = (t: string) => t.split(KEEP).join(PUBLIC_REPO)
+
+  const anonymise = (input: string): string => {
+    let t = input.replace(/[\u0001\u0002\u0003]/g, '')
+    for (const re of SECRET_RES) t = t.replace(re, (m, g1) => (typeof g1 === 'string' ? `${g1}<secret>` : '<secret>'))
+    t = t.replace(URL_RE, u => {
+      const core = u.replace(/[.,;:!?]+$/, '') // sentence punctuation after a URL is not part of it
+      return (REPO_URL.test(core) ? core : '<url>') + u.slice(core.length)
+    })
+    // what is left of azure hosts (written without a scheme): the organisation and project segments go
+    t = t.replace(AZURE_PATH, 'dev.azure.com/<org>/<org>').replace(AZURE_HOST, '<org>.visualstudio.com')
+    t = t.replace(SCP_RE, '<url>').replace(EMAIL_RE, '<email>')
+    t = t.replace(IP_RE, '<ip>').replace(HOST_RE, m => (HOST_OK.test(m) ? m : '<host>'))
+    t = t.replace(GH_PATH, (m, org: string, repo?: string) => (ghKept(org, repo) ? m : 'github.com/<org>/<repo>'))
+    t = names(t)
     t = t.replace(ID_WORD_RE, '$1$2<id>').replace(/#\d+\b/g, '#<id>').replace(ID_KEY_RE, '<id>')
     t = t.replace(HEX_RE, '<sha>')
     t = t.replace(LONG_TOKEN, '<secret>')
-    return t
+    return restore(t)
   }
+  const name = (input: string): string => restore(names(input))
 
   // the final check: names the rules that missed. Stricter than the rules on purpose (a user name inside a longer word, say).
   const missed = (text: string): string[] => {
     const t = hidden(text)
+    const tn = t.replace(PUBLIC_REPO_RE, '') // the exact public repo path is no leak of a user or project name that equals its owner
     const out: string[] = []
     if (homeRe && new RegExp(homeRe.source).test(t)) out.push('home directory')
     if (/\/(?:Users|home)\/[A-Za-z0-9._-]+/.test(t)) out.push('/Users or /home path')
     // the user name: a substring for a long one (it may sit inside a host name), a word for a short one (so "tests" is not a leak)
-    if (userOk && new RegExp(user.length < 6 ? `(?<![A-Za-z0-9])${esc(user)}(?![A-Za-z0-9])` : esc(user), 'i').test(t)) out.push('user name')
-    if (projects.some(([n]) => nameRe(n).test(t))) out.push('project name')
+    if (userOk && new RegExp(user.length < 6 ? `(?<![A-Za-z0-9])${esc(user)}(?![A-Za-z0-9])` : esc(user), 'i').test(tn)) out.push('user name')
+    if (projects.some(([n]) => nameRe(n).test(tn))) out.push('project name')
     if (new RegExp(EMAIL_RE.source).test(t) || new RegExp(SCP_RE.source).test(t)) out.push('email address')
     if (new RegExp(IP_RE.source).test(t)) out.push('IP address')
     if ((t.match(HOST_RE) ?? []).some(m => !HOST_OK.test(m))) out.push('host name')
@@ -151,7 +169,7 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
     if ((t.match(URL_RE) ?? []).some(u => !REPO_URL.test(u.replace(/[.,;:!?]+$/, '')))) out.push('URL')
     return [...new Set(out)]
   }
-  return { anonymise, missed }
+  return { anonymise, name, missed }
 }
 
 // ---- sources ------------------------------------------------------------------------------------------------------------------
@@ -171,6 +189,31 @@ function group(items: { text: string; ts: number }[]): Group[] {
   return [...m.values()].sort((a, b) => b.n - a.n || b.first - a.first) // most repeated first; among equals the newest
 }
 const FB_FIELDS = ['missing', 'refused', 'unverified', 'unreached'] as const
+// A row's time in ms: a number (seconds from 0.45 are scaled), a numeric string or an ISO date; 0 when it has none. A row without a
+// readable time is still counted by the FIRST export (nothing read it before) and by no later one.
+const tsOf = (r: Record<string, unknown> | null | undefined): number => {
+  const v = r?.ts
+  const ms = (n: number) => (Number.isFinite(n) && n > 0 ? (n < 1e12 ? n * 1000 : n) : 0)
+  if (typeof v === 'number') return ms(v)
+  if (typeof v === 'string' && v.trim()) return Number.isFinite(Number(v)) ? ms(Number(v)) : ms(Date.parse(v))
+  return 0
+}
+const isNew = (r: Record<string, unknown> | null | undefined, st: { at: number }) => st.at === 0 || tsOf(r) > st.at
+// the worker feedback rows: 1.0.x writes ~/.lean-agent/feedback.jsonl, 0.45 wrote ~/.lean-agent/feedback/feedback.jsonl; both are read
+// (a row present in both is counted once)
+const feedbackFiles = (lean: string) => [`${lean}/feedback.jsonl`, `${lean}/feedback/feedback.jsonl`]
+// a draft's title: its first Markdown heading, else its first line; `at` is the line it came from (the body is the draft without that
+// line, so the title is not said twice and no other line is lost); no line = no text. The title is cut AFTER anonymising, never before.
+const draftTitle = (raw: string): { text: string; at: number } => {
+  const lines = raw.split('\n').map(l => l.trim())
+  let at = lines.findIndex(l => /^#{1,6}\s+\S/.test(l))
+  if (at < 0) at = lines.findIndex(l => l.length)
+  return at < 0 ? { text: '', at } : { text: lines[at]!.replace(/^#{1,6}\s+/, '').replace(/\s+/g, ' ').trim(), at }
+}
+// one row as a comparable key: sorted keys, the time normalised (a row copied between the two files may differ in both)
+const rowKey = (r: Record<string, unknown>) => JSON.stringify(Object.keys(r).sort().map(k => [k, k === 'ts' ? tsOf(r) : r[k]]))
+// what a draft shows when it has no text to take a title from: its file name as words (no extension, no leading date)
+const nameWords = (file: string) => file.replace(/\.md$/i, '').replace(/^\d{4}-\d{2}-\d{2}[-_]?/, '').replace(/[-_]+/g, ' ').trim()
 
 type State = { at: number; drafts: string[]; core: string[] }
 const emptyState = (): State => ({ at: 0, drafts: [], core: [] })
@@ -182,8 +225,10 @@ type Collected = {
   notes: string
   env: string[]
   problems: string[]
-  drafts: { name: string; raw: string; text: string }[]
+  drafts: { raw: string; title: string; text: string }[]
+  sources: string[] // "feedback.jsonl: 120 rows" ...: what was read, so an empty section can be told from a file that was not found
   statuses: [string, number][]
+  missingReports: number // reports that name missing context (the texts come from the gap logs and from older rows that carry them)
   fields: Record<(typeof FB_FIELDS)[number], Group[]>
   refusals: { text: string; agent: string; n: number }[]
   core: { name: string; line: string }[]
@@ -208,8 +253,31 @@ async function collect(h: Host, root: string, o: { notes?: string; version: stri
   const problems = ((await check(h, root).catch(() => ['FIX  the doctor check failed to run'])) as string[]).filter(l => l.startsWith('FIX')).map(l => A(l.replace(/^FIX\s+/, '')))
   const drafts: Collected['drafts'] = []
   for (const f of (await h.fs.list(`${lean}/feedback-drafts`).catch(() => [])).filter(f => f.kind === 'file' && f.name.endsWith('.md')).sort((a, b) => a.name.localeCompare(b.name)))
-    if (!st.drafts.includes(f.name)) drafts.push({ name: f.name, raw: f.name, text: String(await h.fs.read(`${lean}/feedback-drafts/${f.name}`).catch(() => '')) })
-  const fb = (await readJsonl<Record<string, unknown>>(h, `${lean}/feedback.jsonl`)).filter(r => r && Number(r.ts) > st.at && r.kind !== 'core-candidate')
+    if (!st.drafts.includes(f.name)) {
+      const raw = String(await h.fs.read(`${lean}/feedback-drafts/${f.name}`).catch(() => ''))
+      const t = draftTitle(raw)
+      const body = t.at >= 0 ? raw.split('\n').filter((_, i) => i !== t.at).join('\n') : raw // exactly the title's line is dropped
+      // the title is the draft's own first heading (anonymised as text, then cut); a draft without text falls back to its file name as
+      // words, which only the name rules see: a long date-slug name is not a secret
+      drafts.push({ raw: f.name, title: t.text ? A(t.text).slice(0, 120).replace(/<[a-z]*$/, '') : an.name(nameWords(f.name)) || 'untitled draft', text: A(body) })
+    }
+  // worker feedback rows from both places (and the file that was not there is said, not skipped)
+  // (a row that sits in an earlier file too is counted once; identical rows inside ONE file are separate reports)
+  const earlier = new Map<string, number>()
+  const fb: Record<string, unknown>[] = []
+  const sources: string[] = []
+  for (const file of feedbackFiles(lean)) {
+    const rows = (await readJsonl<Record<string, unknown>>(h, file)).filter(r => r && typeof r === 'object' && !Array.isArray(r))
+    sources.push(`${file.slice(lean.length + 1)}: ${(await h.fs.exists(file).catch(() => false)) ? `${rows.length} row(s)` : 'not found'}`)
+    const here = new Map<string, number>()
+    for (const r of rows) {
+      const k = rowKey(r)
+      here.set(k, (here.get(k) ?? 0) + 1)
+      if ((earlier.get(k) ?? 0) >= here.get(k)!) continue // the same row, already read from an earlier file
+      if (r.kind !== 'core-candidate' && isNew(r, st)) fb.push(r)
+    }
+    for (const [k, n] of here) earlier.set(k, Math.max(earlier.get(k) ?? 0, n))
+  }
   const counts = new Map<string, number>()
   for (const r of fb) counts.set(String(r.status ?? 'unknown'), (counts.get(String(r.status ?? 'unknown')) ?? 0) + 1)
   const texts: Record<string, { text: string; ts: number }[]> = { missing: [], refused: [], unverified: [], unreached: [] }
@@ -217,22 +285,24 @@ async function collect(h: Host, root: string, o: { notes?: string; version: stri
   // `unverifiedClaims` / `unreachedFolders`; the refused commands are in refusals.jsonl (worker rows, below). A string value is the
   // older shape and is taken as the text itself.
   const arr = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
+  let missingReports = 0
   for (const r of fb) {
-    for (const f of FB_FIELDS) if (typeof r[f] === 'string') texts[f]!.push({ text: A(String(r[f])), ts: Number(r.ts) || 0 })
-    for (const t of arr(r.unverifiedClaims)) texts.unverified!.push({ text: A(t), ts: Number(r.ts) || 0 })
-    for (const t of arr(r.unreachedFolders)) texts.unreached!.push({ text: A(t), ts: Number(r.ts) || 0 })
+    if (r.missing === true || (typeof r.missing === 'string' && r.missing.trim())) missingReports++
+    for (const f of FB_FIELDS) if (typeof r[f] === 'string') texts[f]!.push({ text: A(String(r[f])), ts: tsOf(r) })
+    for (const t of arr(r.unverifiedClaims)) texts.unverified!.push({ text: A(t), ts: tsOf(r) })
+    for (const t of arr(r.unreachedFolders)) texts.unreached!.push({ text: A(t), ts: tsOf(r) })
   }
   const refRows = await readJsonl<{ ts?: number; text?: string; agent?: string; command?: string; src?: string }>(h, `${lean}/refusals.jsonl`)
   // a refusal a worker reported: its command and the refusal text, as the worker quoted them
-  for (const r of refRows) if (r?.src === 'worker' && typeof r.command === 'string' && Number(r.ts) > st.at) texts.refused!.push({ text: A(`${r.command}${r.text ? ` -> ${r.text}` : ''}`), ts: Number(r.ts) })
+  for (const r of refRows) if (r?.src === 'worker' && typeof r.command === 'string' && isNew(r, st)) texts.refused!.push({ text: A(`${r.command}${r.text ? ` -> ${r.text}` : ''}`), ts: tsOf(r) })
   // `missing` also comes from the gap logs (one line per gap a worker reported)
   const gapFiles = [`${lean}/gaps.jsonl`]
   for (const d of await h.fs.list(lean).catch(() => [])) if (d.kind === 'dir') gapFiles.push(`${lean}/${d.name}/gaps.jsonl`)
-  for (const f of gapFiles) for (const g of await readJsonl<{ ts?: number; text?: string }>(h, f)) if (typeof g?.text === 'string' && Number(g.ts) > st.at) texts.missing!.push({ text: A(g.text), ts: Number(g.ts) })
+  for (const f of gapFiles) for (const g of await readJsonl<{ ts?: number; text?: string }>(h, f)) if (typeof g?.text === 'string' && isNew(g, st)) texts.missing!.push({ text: A(g.text), ts: tsOf(g) })
   const fields = Object.fromEntries(FB_FIELDS.map(f => [f, group(texts[f]!)])) as Collected['fields']
   const ref = new Map<string, { text: string; agent: string; n: number }>()
   for (const r of refRows) {
-    if (typeof r?.text !== 'string' || !(Number(r.ts) > st.at) || r.src === 'worker' || r.command !== undefined) continue // the guard's own rows only
+    if (typeof r?.text !== 'string' || !isNew(r, st) || r.src === 'worker' || r.command !== undefined) continue // the guard's own rows only
     const agent = (r.agent ?? 'session').replace(/^lean-agent:/, '')
     const t = A(r.text).replace(/\s+/g, ' ').trim()
     const k = `${agent}\u0000${key(t)}`
@@ -242,9 +312,9 @@ async function collect(h: Host, root: string, o: { notes?: string; version: stri
   }
   const core = (await allScripts(h).catch(() => [])).filter(x => x.meta.core && !st.core.includes(x.meta.name)).map(x => ({ name: x.meta.name, line: A(`${x.meta.name}: ${x.meta.purpose} (run: ${x.meta.run}; inputs: ${x.meta.inputs.join('; ')}; ${x.meta.status})`) }))
   const blocked = (await readJsonl<{ ts?: number; from?: string; kind?: string; state?: string; text?: string }>(h, `${lean}/desk/inbox.jsonl`))
-    .filter(r => r?.kind === 'report' && r.state === 'blocked' && Number(r.ts) > st.at)
+    .filter(r => r?.kind === 'report' && r.state === 'blocked' && isNew(r, st))
     .map(r => `${r.from ?? '?'}: ${A(String(r.text ?? '').split('\n')[0]!.trim().slice(0, 200))}`)
-  return { notes: A(o.notes ?? '').trim(), env, problems, drafts: drafts.map(d => ({ name: A(d.name), raw: d.raw, text: A(d.text) })), statuses: [...counts], fields, refusals: [...ref.values()].sort((a, b) => b.n - a.n), core, blocked }
+  return { notes: A(o.notes ?? '').trim(), env, problems, drafts, sources, statuses: [...counts], missingReports, fields, refusals: [...ref.values()].sort((a, b) => b.n - a.n), core, blocked }
 }
 
 // ---- rendering with the size cap ------------------------------------------------------------------------------------------------
@@ -253,32 +323,26 @@ function render(c: Collected, at: number, lim: Limits): string {
   const out: string[] = ['# lean-agent feedback export', '', `Anonymised by the mod (no model, nothing posted). Covers ${at ? `everything since the last export (${new Date(at).toISOString().slice(0, 16).replace('T', ' ')} UTC)` : 'everything so far (no earlier export)'}.`, '']
   const more = (n: number, what: string) => (n > 0 ? [`_... ${n} more ${what} summarised (oldest / least repeated)._`] : [])
   const top = <T,>(xs: T[]): [T[], number] => [xs.slice(0, lim.top), Math.max(0, xs.length - lim.top)]
-  if (c.notes) out.push('## Notes', '', c.notes, '')
+  // every section is always printed, "none" when it is empty: a section that is missing from the file can never hide a bug
+  const none = ['none', '']
+  out.push('## Notes', '', ...(c.notes ? [c.notes, ''] : none))
   out.push('## Environment', '', ...c.env, '')
-  if (c.problems.length) out.push('## Doctor check: problems', '', ...c.problems.map(p => `- ${p}`), '')
-  if (c.drafts.length) {
-    out.push('## Drafts not exported before', '')
-    for (const d of c.drafts) out.push(`### ${d.name}`, '', d.text.length > lim.draft ? `${d.text.slice(0, lim.draft)}\n\n_(truncated at ${lim.draft} characters)_` : d.text.trim(), '')
-  }
+  out.push('## Doctor check: problems', '', ...(c.problems.length ? [...c.problems.map(p => `- ${p}`), ''] : none))
+  out.push('## Drafts not exported before', '')
+  if (!c.drafts.length) out.push(...none)
+  for (const d of c.drafts) out.push(`### ${d.title}`, '', d.text.length > lim.draft ? `${d.text.slice(0, lim.draft)}\n\n_(truncated at ${lim.draft} characters)_` : d.text.trim() || 'none', '')
   const fbTotal = c.statuses.reduce((n, [, k]) => n + k, 0)
-  if (fbTotal || FB_FIELDS.some(f => c.fields[f].length)) {
-    out.push('## LEAN-FEEDBACK since the last export', '')
-    if (fbTotal) out.push(`Reports: ${fbTotal} (${c.statuses.map(([s, k]) => `${s} ${k}`).join(', ')})`, '')
-    for (const f of FB_FIELDS) {
-      if (!c.fields[f].length) continue
-      const [shown, rest] = top(c.fields[f])
-      out.push(`### ${f}`, '', ...shown.map(g => `- ${g.n > 1 ? `(x${g.n}) ` : ''}${g.text}`), ...more(rest, 'entries'), '')
-    }
+  out.push('## LEAN-FEEDBACK since the last export', '', `Read: ${c.sources.join('; ')}`, '', fbTotal ? `Reports: ${fbTotal} (${c.statuses.map(([s, k]) => `${s} ${k}`).join(', ')})` : 'Reports: none', '', `Reports naming missing context: ${c.missingReports || 'none'}`, '')
+  for (const f of FB_FIELDS) {
+    const [shown, rest] = top(c.fields[f])
+    out.push(`### ${f}`, '', ...(shown.length ? [...shown.map(g => `- ${g.n > 1 ? `(x${g.n}) ` : ''}${g.text}`), ...more(rest, 'entries'), ''] : none))
   }
-  if (c.refusals.length) {
-    const [shown, rest] = top(c.refusals)
-    out.push('## Guard refusals since the last export', '', ...shown.map(r => `- (x${r.n}) [${r.agent}] ${r.text}`), ...more(rest, 'refusals'), '')
-  }
-  if (c.core.length) out.push('## Script candidates for lean-agent core', '', ...top(c.core)[0].map(x => `- ${x.line}`), ...more(top(c.core)[1], 'candidates'), '')
-  if (c.blocked.length) {
-    const [shown, rest] = top(c.blocked.slice().reverse())
-    out.push('## Threads blocked since the last export', '', ...shown.map(b => `- ${b}`), ...more(rest, 'reports'), '')
-  }
+  const [rShown, rRest] = top(c.refusals)
+  out.push('## Guard refusals since the last export', '', ...(rShown.length ? [...rShown.map(r => `- (x${r.n}) [${r.agent}] ${r.text}`), ...more(rRest, 'refusals'), ''] : none))
+  const [cShown, cRest] = top(c.core)
+  out.push('## Script candidates for lean-agent core', '', ...(cShown.length ? [...cShown.map(x => `- ${x.line}`), ...more(cRest, 'candidates'), ''] : none))
+  const [bShown, bRest] = top(c.blocked.slice().reverse())
+  out.push('## Threads blocked since the last export', '', ...(bShown.length ? [...bShown.map(b => `- ${b}`), ...more(bRest, 'reports'), ''] : none))
   return out.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n'
 }
 const bytes = (s: string) => new TextEncoder().encode(s).length
@@ -306,7 +370,7 @@ export async function exportFeedback(h: Host, root: string, o: { notes?: string;
     const c = await collect(h, root, o, st, an)
     const body = an.anonymise(fit(c, st.at)) // once more over the whole file: nothing reaches it unscrubbed
     const miss = an.missed(body)
-    if (miss.length) return { ok: false, text: `feedback export refused, nothing written: a private string survived the anonymiser (missed rule: ${miss.join(', ')}). Say so in a bug report without the text; nothing was posted.` }
+    if (miss.length) return { ok: false, text: `Feedback export not written: a private string survived anonymising (rule that missed: ${miss.join(', ')}). Nothing was posted. Please report this to the maintainers without pasting the text.` }
     const now = await h.clock.now()
     const stamp = new Date(now).toISOString().slice(0, 16).replace('T', '-').replace(':', '')
     let path = `${dir}/${stamp}.md`
@@ -314,8 +378,8 @@ export async function exportFeedback(h: Host, root: string, o: { notes?: string;
     await mkdirp(h, dir)
     await atomicWrite(h, path, body)
     await writeJson(h, `${dir}/state.json`, { at: startedAt, drafts: [...st.drafts, ...c.drafts.map(d => d.raw)], core: [...st.core, ...c.core.map(x => x.name)] } satisfies State)
-    return { ok: true, path, text: `feedback export written: ${path} (${Math.ceil(bytes(body) / 1024)} KB, anonymised by code). Nothing was posted: show the path; the user pastes the file to the maintainers, or posts it only after an explicit yes (gh if it is installed, otherwise say it is not).` }
+    return { ok: true, path, text: `Feedback export written: ${path} (${Math.ceil(bytes(body) / 1024)} KB, anonymised). Nothing was posted. Paste it to the maintainers, or ask the desk to post it.` }
   } catch (e) {
-    return { ok: false, text: `feedback export failed: ${String((e as Error)?.message ?? e).slice(0, 200)}` }
+    return { ok: false, text: `Feedback export failed: ${String((e as Error)?.message ?? e).slice(0, 200)}. Nothing was posted.` }
   }
 }

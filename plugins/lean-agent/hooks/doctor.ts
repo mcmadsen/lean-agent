@@ -3,7 +3,7 @@
 import { appendJsonl, atomicWrite, deskDir, homeDir, leanDir, mkdirp, readJson, readJsonl, realPath, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { trustFolder } from './threads'
-import { deskChoice, mergeModelSettings, readModelSettings } from './models'
+import { deskChoice, hasAdditionalDirectory, mergeAdditionalDirectory, mergeModelSettings, readModelSettings } from './models'
 import { setNotice } from './notices'
 import { worktreeProjects } from './projects'
 import { seenNames, skillStat } from './skilltrim'
@@ -77,6 +77,8 @@ export async function fix(h: Host, root: string): Promise<FixOut> {
   const want = await deskChoice(h, home)
   const pinned = await mergeModelSettings(h, `${deskDir(home)}/.claude/settings.json`, want)
   lines.push(pinned ? `desk pinned to ${want.model} / effort ${want.effort}` : 'desk .claude/settings.json does not parse: model not pinned, fix the file by hand')
+  const opened = await mergeAdditionalDirectory(h, `${deskDir(home)}/.claude/settings.json`, leanDir(home))
+  lines.push(opened ? 'desk can open files in ~/.lean-agent' : 'desk .claude/settings.json does not parse: ~/.lean-agent not added to the desk\'s folders, fix the file by hand')
   const trusted = await trustFolder(h, deskDir(home))
   lines.push(trusted ? 'desk folder trusted (real path)' : '~/.claude.json does not parse: desk folder not trusted, accept the dialog once')
   try {
@@ -113,6 +115,8 @@ export async function check(h: Host, root: string): Promise<string[]> {
   const same = have?.model === want.model && have?.effort === want.effort
   const exists = await h.fs.exists(`${deskDir(home)}/.claude/settings.json`)
   row(same, same ? `desk model ${want.model} / effort ${want.effort}` : exists && have === null ? 'desk .claude/settings.json does not parse: fix the file by hand' : `desk model is ${have?.model ?? 'not set'} / effort ${have?.effort ?? 'not set'}, want ${want.model} / ${want.effort}`)
+  const access = await hasAdditionalDirectory(h, `${deskDir(home)}/.claude/settings.json`, leanDir(home))
+  row(access, access ? 'desk can open files in ~/.lean-agent' : 'desk cannot open files in ~/.lean-agent (the app says "outside this session\'s folders"): ~/.lean-agent is missing from the desk settings permissions.additionalDirectories')
   const odd = await modelMismatches(h).catch(() => [] as string[])
   for (const m of odd) row(false, m)
   if (!odd.length) out.push('ok   no session on an unexpected model today')

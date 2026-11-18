@@ -26,6 +26,48 @@
     `lean_doctor stats` counts checkpoints per thread.
   - `lean_report` `state` accepts `checkpoint` (it never wakes the desk: it is recorded like a progress report).
 
+### Fixed (threads: replies and delivery)
+- **`new` / `start` / `reopen` say what the session got.** The reply is now `t12 started (<sid>) · sonnet/high`, and the generated thread
+  `CLAUDE.md` has the line `model: sonnet, effort: high (from thread.json)` (a reopen rewrites it with the choice the new session
+  starts with), so neither the desk nor the thread has to look it up.
+- **`close` says what happened to the session** (`t3 closed; session stopped`, `... no running session (already stopped)`,
+  `... no session in the list (already removed)`, `... no session was ever started`). After the stop it runs `claude rm <id>` so the
+  stopped session leaves the app's list (its conversation is kept: `claude --resume` lists it), only for a session whose folder is the
+  thread's own (`rm` also deletes a worktree the session was started in) and never with `--discard-unpushed` or
+  `--force-remove-worktree`; when `rm` refuses, the reply says so ("the app keeps stopped sessions in its list (claude rm: ...)") and
+  the thread is closed anyway. The CLI has no command to rename a background session, so closed sessions are not labelled
+  "[closed] tN".
+- **A long report arrives once.** A report longer than `DIRECT_MAX` (1500 characters) used to arrive twice: cut as a direct line, then
+  in full at the next prompt. The full text is now written to `~/.lean-agent/desk/reports/<ts>-<tN>-<report|ask>.md` (plain lines the desk can
+  Read), the cut line names that file and carries its row key too, so the row counts as delivered and nothing hands it over again
+  (the pane's Answers list still has it). When the file cannot be written, or the send is refused, the row stays unread for the next
+  prompt as before. The pointer is an absolute path, and the file is only written for a real thread id. A question is cut only past
+  8,000 characters (its options are clamped to 1,000 in the line); the file has all of it. The generated thread guide leaves the `model:` line out when it is built without a
+  choice (compare's throw-away folder), and `close` also removes the session when the listing prints the real path of a linked home.
+
+### Fixed (desk, feedback export)
+- **The desk can open lean-agent files in the app.** The app refused `~/.lean-agent/feedback-export/<file>.md` ("This file is outside
+  this session's folders"). Setup (`/lean-agent-setup`, the pane button, `lean_doctor fix`) now merges `~/.lean-agent` into the desk
+  folder's `.claude/settings.json` `permissions.additionalDirectories` (every other key and folder of the user stays; a file that does
+  not parse is left alone and said so), and the doctor check flags it as a FIX row when it is missing.
+- **`/lean-agent-feedback` talks to the user.** The reply was wording meant for a model ("show the path; the user pastes ..."). It is
+  now "Feedback export written: <path> (36 KB, anonymised). Nothing was posted. Paste it to the maintainers, or ask the desk to post
+  it."; the refused and failed replies are plain words too (they say nothing was posted).
+- **Draft headings in the export.** A draft was titled `### <secret>.md` because its long date-slug file name looked like a secret. The
+  title is now the draft's first heading (its first line when there is no heading; the file name as words when the draft is empty).
+  File names only go through the home, user-name, project and path rules, never the secret or hash rules.
+- **The export always has its aggregate sections.** A first real export had none although `feedback.jsonl` held 133 rows: the 0.45
+  rows lived in `~/.lean-agent/feedback/feedback.jsonl`, which was not read, and a row's time in seconds or as a date string was not
+  understood. Both files are read (a row in both counts once), old shapes (`missing` and `refused` as strings, a status-less row, a
+  numeric-string or ISO time) are understood, and every section is printed with `none` when empty (notes, doctor problems, drafts,
+  reports by status, reports naming missing context, `missing`, `refused`, `unverified`, `unreached`, guard refusals, script
+  candidates, blocked threads), plus a `Read:` line with the row count of each file, so a missing section can no longer hide a bug.
+  A feedback, gap, refusal or inbox row with no readable time is counted by the first export only. Drafts keep every line but the one
+  used as the title, and a long title is cut after anonymising.
+- **The public repo path survives the anonymiser.** `github.com/mcmadsen/lean-agent` and `mcmadsen/lean-agent` became
+  `<user>/lean-agent` when the OS user name equals the repo owner. The exact public repo path now passes before the user-name rule
+  (another repo of the owner, a longer name such as `mcmadsen/lean-agent-extras`, and the plain name are still masked).
+
 ## 1.0.5
 
 One combined release: the desk, thread and pane work, the learn flow, stats and compare work, and scripts over models with the
