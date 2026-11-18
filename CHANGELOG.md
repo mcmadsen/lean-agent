@@ -20,7 +20,7 @@
   cluster letter refuses the command, so there is no `-exec`, `-delete`, `-fprint*`, `-L`/`-H`/`--follow`, `-f`/`--file`,
   `--pre`, `-z`, `tail -f`, `--files0-from`; any `..` word is refused. The desk may run the same under `~/.lean-agent`.
   The agent prompts, the learn / review / find / lean-mode skills and the templates say so.
-- An Agent call for one of our agent types with `allow-cmd` / `allow-edit` lines from a session that cannot own grants (not a
+- An Agent call for one of our agent types (`lean-agent:` or the bare name a grant also binds to) with `allow-cmd` / `allow-edit` lines from a session that cannot own grants (not a
   thread's own loop) is refused up front, with the reason.
 - The worktree skill installs dependencies in a fresh worktree from the lockfile (`yarn install --frozen-lockfile` / `--immutable`
   by yarn version, `npm ci`, `pnpm install --frozen-lockfile`) through a worker and reports it; it never symlinks

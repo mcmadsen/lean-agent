@@ -403,7 +403,7 @@ const SPECS: Record<string, Spec> = {
     lnone: ['hidden', 'files', 'no-ignore', 'no-ignore-vcs', 'no-ignore-parent', 'no-ignore-dot', 'ignore-case', 'case-sensitive', 'smart-case', 'line-number', 'no-line-number', 'count', 'files-with-matches', 'files-without-match', 'fixed-strings', 'word-regexp', 'line-regexp', 'invert-match', 'only-matching', 'heading', 'no-heading', 'column', 'with-filename', 'no-filename', 'no-messages', 'sort-files', 'trim', 'type-list', 'stats', 'text', 'multiline', 'unrestricted', 'vimgrep', 'no-config', 'crlf'],
     lval: ['max-count', 'glob', 'iglob', 'type', 'type-not', 'context', 'after-context', 'before-context', 'regexp', 'max-depth'] },
   grep: { no: 'rnilLcvwxFEGoqsHhIaTbU', val: 'ABCme', digits: true,
-    lnone: ['ignore-case', 'no-ignore-case', 'line-number', 'recursive', 'count', 'files-with-matches', 'files-without-match', 'no-filename', 'with-filename', 'invert-match', 'word-regexp', 'fixed-strings', 'extended-regexp', 'perl-regexp', 'basic-regexp', 'only-matching', 'quiet', 'silent', 'no-messages', 'null', 'color', 'colour', 'text', 'line-buffered', 'initial-tab', 'byte-offset', 'null-data'],
+    lnone: ['ignore-case', 'no-ignore-case', 'line-number', 'recursive', 'count', 'files-with-matches', 'files-without-match', 'no-filename', 'with-filename', 'invert-match', 'word-regexp', 'fixed-strings', 'extended-regexp', 'perl-regexp', 'basic-regexp', 'only-matching', 'quiet', 'silent', 'no-messages', 'null', 'color', 'colour', 'text', 'line-buffered', 'initial-tab', 'byte-offset'],
     lval: ['include', 'exclude', 'exclude-dir', 'max-count', 'context', 'after-context', 'before-context', 'regexp'] },
   ls: { no: 'laAhrRtSsd1FpiknGCxXuUcvmq', val: '', lnone: ['all', 'almost-all', 'human-readable', 'recursive', 'reverse', 'directory', 'classify', 'color'], lval: [] },
   cat: { no: 'nbsAETv', val: '', lnone: ['number', 'number-nonblank', 'squeeze-blank', 'show-all', 'show-ends', 'show-tabs'], lval: [] },
@@ -441,8 +441,8 @@ function parseFlags(cmd: string, rest: string[]): { pos: string[]; given: boolea
     }
     for (let k = 1; k < x.length; k++) { // a short cluster, letter by letter
       const c = x[k]!
-      if (/\d/.test(c)) { if (sp.digits) continue; return null }
       if (sp.no.includes(c)) { if (c === 'r' && cmd === 'grep') recursive = true; if (c === 'R' && cmd === 'ls') recursive = true; continue }
+      if (/\d/.test(c) && sp.digits) continue
       if (sp.val.includes(c)) {
         if (c === 'e') given = true
         if (k === x.length - 1) { if (i + 1 >= rest.length) return null; i++ } // the value is the next word
@@ -460,13 +460,14 @@ async function searchOk($: Host, ctx: Ctx, w: string[], roots: string[], first =
   if (cmd === 'find') {
     let i = 0
     const starts: string[] = []
+    const newer: string[] = [] // -newer names a file to compare with: a path, but not a starting point
     for (; i < rest.length && !rest[i]!.startsWith('-'); i++) starts.push(rest[i]!)
     for (; i < rest.length; i++) {
       const n = FIND_PRED[rest[i]!]
       if (n === undefined) return false // -exec, -delete, -fprint*, -L, -files0-from ... and anything unknown
-      if (n === 1) { if (i + 1 >= rest.length) return false; i++; if (rest[i - 1] === '-newer') starts.push(rest[i]!) } // -newer names a file to compare with: a path
+      if (n === 1) { if (i + 1 >= rest.length) return false; i++; if (rest[i - 1] === '-newer') newer.push(rest[i]!) }
     }
-    for (const p of starts) if (!(await pathOk($, ctx, roots, p))) return false
+    for (const p of [...starts, ...newer]) if (!(await pathOk($, ctx, roots, p))) return false
     return starts.length > 0 || (await pathOk($, ctx, roots, '.')) // no starting point: the cwd
   }
   const f = parseFlags(cmd, rest)
