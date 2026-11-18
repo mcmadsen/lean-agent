@@ -341,6 +341,14 @@ test('a draft whose heading is not its first line keeps every other line; a long
   expect(t).toMatch(/### (word ){22}mail\s*\n/) // cut at 120 characters after anonymising: the address is gone, not half of it
 })
 
+test('a first line that is not a heading keeps its # so the id rule still masks it', async () => {
+  const h = setup()
+  h.files.set(lean(h, 'feedback-drafts/x.md'), '#4821 login broken\nbody\n')
+  const t = read(h, await run(h))
+  expect(t).toContain('### #<id> login broken')
+  expect(t).not.toContain('4821')
+})
+
 test('the same report in the old and the new feedback file counts once, whatever the key order or the unit of its time; identical rows inside one file stay separate', async () => {
   const h = setup()
   h.files.set(lean(h, 'feedback/feedback.jsonl'), jl([{ ts: 1_700_000_000, status: 'done', thread: 't1' }, { ts: 1_700_000_100, status: 'done', thread: 't2' }, { ts: 1_700_000_100, status: 'done', thread: 't2' }]))

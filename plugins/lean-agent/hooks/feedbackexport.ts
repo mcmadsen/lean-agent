@@ -208,7 +208,7 @@ const draftTitle = (raw: string): { text: string; at: number } => {
   const lines = raw.split('\n').map(l => l.trim())
   let at = lines.findIndex(l => /^#{1,6}\s+\S/.test(l))
   if (at < 0) at = lines.findIndex(l => l.length)
-  return at < 0 ? { text: '', at } : { text: lines[at]!.replace(/^#{1,6}\s*/, '').replace(/\s+/g, ' ').trim(), at }
+  return at < 0 ? { text: '', at } : { text: lines[at]!.replace(/^#{1,6}\s+/, '').replace(/\s+/g, ' ').trim(), at }
 }
 // one row as a comparable key: sorted keys, the time normalised (a row copied between the two files may differ in both)
 const rowKey = (r: Record<string, unknown>) => JSON.stringify(Object.keys(r).sort().map(k => [k, k === 'ts' ? tsOf(r) : r[k]]))
