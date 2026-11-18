@@ -139,12 +139,9 @@ const prune = (ro: Rollup, now: number) => {
 export async function syncRollup(h: Host, now?: number): Promise<Rollup> {
   const home = await homeDir(h)
   const t = now ?? (await h.clock.now())
-  let ro = await readJson<unknown>(h, rollupFile(home), null)
-  let rebuilt = false
-  if (!valid(ro)) {
-    ro = emptyRollup()
-    rebuilt = true
-  }
+  const stored = await readJson<unknown>(h, rollupFile(home), null)
+  let ro: Rollup = valid(stored) ? stored : emptyRollup()
+  let rebuilt = !valid(stored)
   const names = await ledgerFiles(h, home)
   for (let pass = 0; pass < 3; pass++) {
     let changed = rebuilt

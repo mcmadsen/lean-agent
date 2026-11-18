@@ -75,6 +75,30 @@ builds 1.0.5).
   model other than the one lean-agent pins, of threads on a model no thread was started on, and live sessions
   (`claude agents --json`, when it reports a model) that differ from what lean-agent started. Those rows need a new session, not a
   setup press.
+- **Learn collects script knowledge.** Explorers also report the repo's own scripts for an area (`SCRIPTS`: package.json scripts,
+  Makefile/justfile targets, tools/ and scripts/ folders, CI steps that run locally, each with the question it answers) and
+  mechanical work a thread would otherwise spend model time on (`MECHANICAL`); rules then say "for X run `<script>`" instead of
+  describing how to find X. A `<!-- lean-agent:scripts -->` ... `<!-- /lean-agent:scripts -->` block in a rule (a later release writes
+  adopted scripts there) is kept byte for byte by rewrites and never deleted by `--trim`; the footer matcher no longer takes it for
+  the footer. `--trim` lists mechanical-looking gaps as `SCRIPT CANDIDATES` in the report.
+- **Compare is back (rebuilt the 1.0 way).** `lean_doctor` `compare` (desk; `project`, `mode` overhead or history) and a thread's
+  `lean_compare` (task mode) run `claude -p "Reply with OK." --output-format json` and `claude -p "/context"` (local, free) in the
+  project folder with lean-agent switched off (`--settings` `enabledPlugins` false for the installed `lean-agent@...`, checked live: a
+  disabled plugin's tokens drop out of the first turn), in a throw-away thread-shaped folder and in the desk folder: clean / thread /
+  desk side by side (first-turn input tokens measured, cost, and `/context`'s categories), skills and MCP switched off one at a time on
+  the clean column, suggestions with the concrete step (plugins to switch off, `tools.thread.drop`, memory files into path rules,
+  rules that never loaded, script candidates), capped at $0.25. Task mode (the `compare` skill, run in a thread after the user agrees to
+  the cost) runs one read-only task clean and as a thread on the same model and effort and a haiku judge compares correctness and
+  completeness. Reports: `~/.lean-agent/compare/<date>-<project>.md` and `history.jsonl`, names and numbers only; a private project is
+  never compared. README section "Compare".
+
+### Fixed (2)
+- **A long failing Bash command failed the whole tool call.** `squeezeResult` rewrote the Bash result as a string. The engine validates
+  a hook's answer against the tool's output schema, and Bash's result is the record `{ stdout, stderr, interrupted, ... }` (a failed
+  call's is its error text): the string answer was refused ("expected object, received string"), so any long output of a command that
+  exited non-zero failed outright, and the successful ones, being records, were never squeezed at all. It now squeezes `stdout` and
+  `stderr` of the record, keeps its shape and every other field, saves the full text first, and leaves every other shape (error text,
+  content blocks) untouched.
 
 ## 1.0.4
 

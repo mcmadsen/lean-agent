@@ -60,6 +60,18 @@ export async function installedVersion(h: Host, root: string): Promise<string | 
   return found.sort(compareVersions).pop() ?? null
 }
 
+// The install keys (`lean-agent@<marketplace>`) in Claude Code's registry: what `enabledPlugins` names to switch the plugin off
+// for one run (compare's clean column). Empty = not installed (a dev copy loaded by folder).
+export async function installedKeys(h: Host): Promise<string[]> {
+  try {
+    const reg = JSON.parse(String(await h.fs.read(`${await homeDir(h)}/.claude/plugins/installed_plugins.json`)))
+    const plugins = reg?.plugins && typeof reg.plugins === 'object' ? reg.plugins : reg
+    return Object.keys(plugins ?? {}).filter(k => k.split('@')[0] === 'lean-agent')
+  } catch {
+    return []
+  }
+}
+
 export const skewText = (run: string, installed: string) =>
   `lean-agent code ${run} is running but ${installed} is installed: start a new session (threads: close and Start)`
 

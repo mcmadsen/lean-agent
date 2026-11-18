@@ -140,6 +140,13 @@ async function template(h: Host, root: string, name: string): Promise<string> {
   return typeof t === 'string' ? t : ''
 }
 
+// the CLAUDE.md a new thread gets (compare builds a throw-away thread-shaped folder with the same text)
+export async function threadClaudeMd(h: Host, root: string, id: string, title: string, project: string): Promise<string> {
+  const home = await homeDir(h)
+  const cfg = await readJson<{ attribution?: unknown }>(h, `${leanDir(home)}/config.json`, {})
+  return fill(await template(h, root, 'thread.md'), { id, title, project, lean: leanDir(home), attribution: attributionLine(cfg?.attribution === true) })
+}
+
 export async function deskClaudeMd(h: Host, root: string): Promise<string> {
   return fill(await template(h, root, 'front-desk.md'), { lean: leanDir(await homeDir(h)) })
 }

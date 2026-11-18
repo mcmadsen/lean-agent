@@ -24,6 +24,7 @@ import { parseGrants, recordGrant, releaseGrant } from './guard'
 import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
 import { resetSkew, setRunning, skewNote } from './skew'
 import { statsText } from './stats'
+import { compare } from './compare'
 import { rotateLedger } from './ledger'
 
 setRunning(VERSION) // the code in this session; skew.ts compares it with what is installed
@@ -83,7 +84,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats'] }, days: { type: 'number', description: 'stats: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules" } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare'] }, days: { type: 'number', description: 'stats: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' } }, required: ['action'] }
 const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
@@ -234,7 +235,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       } as any)
       await registerOnce($, {
         name: DOCTOR,
-        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent), stats (spend by model/role/agent/thread, caps, rule loads, feedback: computed here, never read the ledger yourself).',
+        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent), stats (spend by model/role/agent/thread, caps, rule loads, feedback: computed here, never read the ledger yourself), compare (what a session costs at start: clean vs thread vs desk, from a few one-turn runs; project required; mode history lists saved reports).',
         inputSchema: DOCTOR_SCHEMA,
         isDeferred: false,
       } as any)
@@ -482,7 +483,11 @@ export const register: Register = on => {
       }
       if (e.action === 'migrate') return { result: (await migrate(host, $.plugin.root)).lines.join('\n') } as any
       if (e.action === 'stats') return { result: await statsText(host, { days: e.days, project: typeof e.project === 'string' && e.project ? e.project : undefined }) } as any
-      return { result: 'doctor: action must be check, fix, migrate or stats', isError: true } as any
+      if (e.action === 'compare') {
+        const out = await compare(host, $.plugin.root, { project: typeof e.project === 'string' ? e.project : undefined, mode: typeof e.mode === 'string' ? e.mode : undefined }, 'desk')
+        return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
+      }
+      return { result: 'doctor: action must be check, fix, migrate, stats or compare', isError: true } as any
     } catch (err) {
       return { result: `doctor failed: ${String((err as Error)?.message ?? err)}`, isError: true } as any
     }
@@ -492,7 +497,10 @@ export const register: Register = on => {
     on('tool.call', { tool: `mcp__lean-agent__${t.name}` }, async ($, e: any) => {
       if (role.kind !== 'thread') await redetect($, undefined, true) // a stale role never refuses: look once more (session id, folder)
       if (role.kind !== 'thread') return { result: await roleReport(hostOf($), { tool: t.name, need: 'thread', role, startDir, sid: lastSid }), isError: true } as any
-      const out = await threadTool(hostOf($), role.id, t.name, e)
+      // lean_compare needs the plugin root (the thread-shaped folder's CLAUDE.md, --plugin-dir for a dev copy): answered here
+      const out = t.name === 'lean_compare'
+        ? await compare(hostOf($), $.plugin.root, { project: str(e.project) || str((await readJson<{ project?: string }>(hostOf($), `${threadsDir(await homeDir(hostOf($)))}/${role.id}/thread.json`, {})).project), mode: str(e.mode) || 'task', task: typeof e.task === 'string' ? e.task : '', model: str(e.model) || undefined, maxUsd: typeof e.maxUsd === 'number' ? e.maxUsd : undefined }, 'thread')
+        : await threadTool(hostOf($), role.id, t.name, e)
       await ensureGitHooks(hostOf($)).catch(() => undefined) // lean_* tools may change projects.json
       return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
     })

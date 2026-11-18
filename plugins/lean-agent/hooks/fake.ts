@@ -1,7 +1,7 @@
 // @ts-nocheck
 // A fake host for the specs: an in-memory file system and a scripted process table, answering the engine's
 // ops beneath the plugin. Not used by the mod itself.
-export type Call = { argv: string[]; cwd?: string; stdin?: string }
+export type Call = { argv: string[]; cwd?: string; stdin?: string; env?: Record<string, string> }
 
 export function fakeHost(on: any, opts: { home?: string } = {}) {
   const home = opts.home ?? '/h'
@@ -41,7 +41,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       return [...names].map(([name, kind]) => ({ name, kind, size: 0, mtimeMs: 0, isLink: false }))
     },
     run: (argv: readonly string[], init?: any) => {
-      const call: Call = { argv: [...argv], cwd: init?.cwd, stdin: init?.stdin }
+      const call: Call = { argv: [...argv], cwd: init?.cwd, stdin: init?.stdin, env: init?.env }
       calls.push(call)
       const [c, ...rest] = argv
       const a = c === 'mv' ? rest.filter(y => !y.startsWith('-')) : rest

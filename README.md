@@ -103,6 +103,7 @@ lean-agent folder without asking. Pushes stay behind the review gate and the pri
 | `review` | review the branch diff in passes and record the verdict for HEAD |
 | `review-learn` | learn from review comments on pull requests |
 | `learn` | write path-scoped rules for a project |
+| `compare` | what a session costs at start vs a clean Claude Code session (overhead), or one read-only task both ways with a judge |
 | `todo` | the user's to-do list in `~/.lean-agent/todo.json` |
 | `stats`, `budget` | what sessions and workers cost, which rules load, caps |
 | `find` | search lean-agent's own state (threads, notes, memory, handovers, saved output, reviews) |
@@ -137,6 +138,23 @@ into `<repo>/.claude/rules/lean-agent/` (symlinked rule folders do not load) and
 
 An area is stale after a commit touches many of its files, its manifest changes or workers report gaps for it; the
 desk then says "rules for X are stale: re-learn when you touch it". `stats` lists rules that never loaded.
+
+## Compare
+
+"Is lean-agent worth its overhead on this project?" `lean_doctor` `compare` (the desk) answers it without a model judging
+anything: in the project folder with lean-agent switched off (`--settings` with `enabledPlugins` false for the installed
+`lean-agent@...`), in a throw-away thread-shaped folder and in the desk folder it runs `claude -p "Reply with OK."
+--output-format json` and `claude -p "/context"` (local, free) and prints clean / thread / desk side by side: the first
+turn's input tokens (measured) and cost, and `/context`'s categories (system prompt, system tools, MCP tools, custom agents,
+memory files, skills, messages). On the clean column it switches skills and MCP servers off one at a time to show each share.
+The suggestions below the table name the concrete step: another plugin's skills to switch off for the project, an MCP server
+to drop (`tools.thread.drop` in `config.json`), a big memory file to move into path rules, rules that never loaded, gaps that
+look like script candidates. Runs cost a few cents and are capped at $0.25.
+
+Task mode (the `compare` skill, run in a thread, only after the user agrees to the cost) runs one read-only task clean and as
+a thread on the same model and effort, then a haiku judge compares correctness and completeness only. Reports are saved as
+`~/.lean-agent/compare/<date>-<project>.md` with a `history.jsonl`: names and numbers only, never file contents, the task or
+the answers; a private project is never compared. `lean_doctor` `compare` with `mode: history` lists them.
 
 ## Reviews and the push gate
 

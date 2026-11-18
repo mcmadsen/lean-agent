@@ -61,6 +61,12 @@ need learn '<!-- lean-agent:scripts -->'
 need learn 'SCRIPT CANDIDATES'
 need learn 'MECHANICAL'
 grep -q 'MECHANICAL' "$root/agents/explorer.md" || fail "explorer.md does not ask for script knowledge"
+need compare 'lean_compare'
+need compare 'lean_doctor'
+need compare 'enabledPlugins'
+need compare 'never file contents'
+need compare 'The desk never runs it'
+grep -q 'compare' "$root/../../README.md" || fail "README has no compare section"
 for a in explorer reader-haiku reader-sonnet; do
   for k in refused unverified unreached; do grep -q "\"$k\"" "$root/agents/$a.md" || fail "$a.md: LEAN-FEEDBACK lacks $k"; done
 done
