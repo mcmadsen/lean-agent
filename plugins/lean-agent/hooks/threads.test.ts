@@ -33,7 +33,7 @@ test('new records the sid, writes the folder, settings and trust', async () => {
   expect(s.permissions.allow).toContain('Edit(//h/.lean-agent/**)')
   expect(JSON.parse(h.files.get('/h/.claude.json')!).projects['/h/.lean-agent/threads/t1'].hasTrustDialogAccepted).toBe(true)
   const argv = h.claudeCalls().find(a => a[0] === '--bg')!
-  expect(argv).toEqual(['--bg', '-n', 't1 · fix login', 'fix the login bug'])
+  expect(argv).toEqual(['--bg', '-n', 't1 · fix login', '--', 'fix the login bug'])
   expect(h.calls.find(c => c.argv[0] === 'claude' && c.argv[1] === '--bg')!.cwd).toBe('/h/.lean-agent/threads/t1')
   expect((await call({ action: 'new', title: 'second' })).ok).toBe(true)
   expect(h.files.has('/h/.lean-agent/threads/t2/thread.json')).toBe(true)
@@ -62,7 +62,7 @@ test('send to an idle thread resumes exactly once with the batch', async () => {
   await call({ action: 'send', tN: 't1', text: 'one' })
   const resumes = h.claudeCalls().filter(a => a.includes('--resume'))
   expect(resumes.length).toBe(1)
-  expect(resumes[0]).toEqual(['--bg', '--resume', SID, '-n', 't1 · a', 'one\n\n<!-- lean:n=1 -->'])
+  expect(resumes[0]).toEqual(['--bg', '--resume', SID, '-n', 't1 · a', '--', 'one\n\n<!-- lean:n=1 -->'])
 })
 
 test('two sends within 30 s make one wake; the second waits queued', async () => {
@@ -129,4 +129,38 @@ test('the desk gets lean_thread at session start, and the tool answers', async (
   await $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
   const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any)
   expect(JSON.stringify(r)).toContain('no threads')
+})
+
+test('a failed agents listing is not "idle": no resume, messages stay queued', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  h.clock.t += 60_000
+  h.claude.handler = (a: string[]) => (a[0] === 'agents' ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: '' })
+  const r = await call({ action: 'send', tN: 't1', text: 'one' })
+  expect(r.ok).toBe(false)
+  expect(h.claudeCalls().filter(a => a.includes('--resume')).length).toBe(0)
+  void state
+})
+
+test('a resume that forks follows the new session id', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  state.rows = [{ sessionId: SID, name: 't1 · a', cwd: '/h/.lean-agent/threads/t1', status: 'idle', startedAt: 1 }]
+  h.clock.t += 60_000
+  h.claude.handler = (a: string[]) => {
+    if (a[0] === '--bg') state.rows.push({ sessionId: 'aaaaaaaa-2222-3333-4444-555555555555', name: 't1 · a', cwd: '/h/.lean-agent/threads/t1', status: 'busy', startedAt: 99 })
+    return { exitCode: 0, stdout: a[0] === 'agents' ? JSON.stringify(state.rows) : '' }
+  }
+  await call({ action: 'send', tN: 't1', text: 'one' })
+  expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t1/thread.json')!).sid).toBe('aaaaaaaa-2222-3333-4444-555555555555')
+})
+
+test('trust writer refuses an unreadable or non-object ~/.claude.json and never overwrites it', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.claude.json', '{"projects": [broken')
+  expect(await trustFolder(h.host, '/x')).toBe(false)
+  expect(h.files.get('/h/.claude.json')).toBe('{"projects": [broken')
+  h.host.fs.read = async () => { throw new Error('EACCES') }
+  expect(await trustFolder(h.host, '/x')).toBe(false)
+  expect(h.files.get('/h/.claude.json')).toBe('{"projects": [broken')
 })

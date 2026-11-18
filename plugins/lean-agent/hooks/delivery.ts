@@ -10,6 +10,14 @@ import { checkStale, recordLearn, rulesStats, slugOk, syncRules } from './rules'
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
 export const deskState = (home: string) => `${leanDir(home)}/desk`
 
+// read-then-mark runs one at a time per key (the mod is one process), so overlapping calls never hand over the same lines
+const tails = new Map<string, Promise<unknown>>()
+function serial<T>(key: string, f: () => Promise<T>): Promise<T> {
+  const run = (tails.get(key) ?? Promise.resolve()).then(f, f)
+  tails.set(key, run.catch(() => undefined))
+  return run
+}
+
 export type Consumed = { n: number }
 export const WAKE_MARK = /<!--\s*lean:n=(\d+)\s*-->/
 
@@ -36,11 +44,13 @@ const render = (msgs: Inbox[]) => msgs.map(m => `[lean-agent] message from ${m.f
 
 // Thread side, after a tool call: the batch as extra context, marked consumed first (once only).
 export async function takeBatch(h: Host, id: string): Promise<string | null> {
-  const home = await homeDir(h)
-  const { msgs, upTo } = await unconsumed(h, home, id)
-  if (!msgs.length) return null
-  await markConsumed(h, home, id, upTo)
-  return render(msgs)
+  return serial(`batch:${id}`, async () => {
+    const home = await homeDir(h)
+    const { msgs, upTo } = await unconsumed(h, home, id)
+    if (!msgs.length) return null
+    await markConsumed(h, home, id, upTo)
+    return render(msgs)
+  })
 }
 
 // Thread side, a prompt: a wake prompt names its inbox position; those lines are already in the prompt.
@@ -136,10 +146,12 @@ export const renderReports = (recs: DeskRec[]) =>
 
 // Desk busy (a tool call) or the user typing: hand over pending reports once.
 export async function takeReports(h: Host): Promise<string | null> {
-  const { recs, upTo } = await unreadReports(h)
-  if (!recs.length) return null
-  await markRead(h, upTo)
-  return renderReports(recs)
+  return serial('reports', async () => {
+    const { recs, upTo } = await unreadReports(h)
+    if (!recs.length) return null
+    await markRead(h, upTo)
+    return renderReports(recs)
+  })
 }
 
 // The desk's 10 s sweep: threads with unconsumed messages that are not running are woken (wake itself refuses a

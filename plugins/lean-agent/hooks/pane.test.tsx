@@ -46,7 +46,7 @@ test('view: goals by tone, answers unread first, threads with state and last lin
 
 test('view: ack one row and ack all move the read marker', async () => {
   const h = setup()
-  await ackRows(h.host, 1)
+  await ackRows(h.host, 0)
   expect((await loadView(h.host)).unread).toBe(1)
   await ackRows(h.host, 'all')
   expect((await loadView(h.host)).unread).toBe(0)
@@ -95,4 +95,17 @@ test('pane shows the error instead of going blank', async ($, on) => {
   const ui = await $.ui.mount(PANE as any)
   expect((await ui.find({ type: 'Text', text: /error: agents/ }))?.text).toContain('exited 3')
   await ui.unmount()
+})
+
+test('view: the pane ack never moves the desk marker, and one row acks only itself', async () => {
+  const h = setup()
+  await ackRows(h.host, 1)
+  expect((await loadView(h.host)).answers.find(a => a.n === 0)!.unread).toBe(true)
+  expect(h.files.has('/h/.lean-agent/desk/inbox-read.json')).toBe(false)
+})
+
+test('view: the budget footer sums usd from ledger rows', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/ledger.jsonl', JSON.stringify({ ts: h.clock.t, role: 'desk', model: 'x', in: 1, out: 1, cache_read: 0, cache_write: 0, usd: 1.5 }) + '\n')
+  expect((await loadView(h.host)).budget).toBe('$1.50')
 })

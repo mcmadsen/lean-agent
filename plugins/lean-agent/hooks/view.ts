@@ -1,7 +1,8 @@
 // The desk pane's data (design 2.5): read straight from the files, never throws; every failure becomes a line in `errors`.
-import { homeDir, leanDir, readJson, readJsonl, threadsDir } from './state'
+import { homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
-import { deskState, markRead, unreadReports, unconsumed } from './delivery'
+import { deskState, unconsumed } from './delivery'
+import { spentToday } from './budget'
 import type { DeskRec } from './delivery'
 import { isRunning, parseAgents } from './threads'
 import type { Thread } from './threads'
@@ -18,12 +19,18 @@ const ID = /^t\d+$/
 
 const lastLine = (t: string) => t.split('\n').map(s => s.trim()).filter(Boolean).pop() ?? ''
 
-// Tokens spent today from ledger.jsonl (written by the budget package); null when there is no ledger.
+// USD spent today from ledger.jsonl (rows carry usd, not tokens); null when there is no ledger.
 async function loadBudget(h: Host, home: string): Promise<string | null> {
-  const rows = await readJsonl<{ ts: number; tokens?: number }>(h, `${leanDir(home)}/ledger.jsonl`)
-  if (!rows.length) return null
-  const day = new Date(await h.clock.now()).toISOString().slice(0, 10)
-  return `${rows.filter(r => new Date(r.ts).toISOString().slice(0, 10) === day).reduce((s, r) => s + (r.tokens || 0), 0)} tokens`
+  if (!(await readJsonl(h, `${leanDir(home)}/ledger.jsonl`)).length) return null
+  return `$${(await spentToday(h)).toFixed(2)}`
+}
+
+// The pane's own read marker (never the desk's inbox-read.json): rows below `upTo` plus single acked rows.
+type PaneAck = { upTo: number; ns: number[] }
+const paneAckFile = (home: string) => `${deskState(home)}/pane-ack.json`
+async function paneAck(h: Host, home: string): Promise<PaneAck> {
+  const a = await readJson<Partial<PaneAck>>(h, paneAckFile(home), {})
+  return { upTo: Number(a.upTo) || 0, ns: Array.isArray(a.ns) ? a.ns.filter(x => Number.isInteger(x)) : [] }
 }
 
 export async function loadView(h: Host): Promise<View> {
@@ -47,9 +54,11 @@ export async function loadView(h: Host): Promise<View> {
     recs.push(...(await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)))
     read = (await readJson<{ n: number }>(h, `${deskState(home)}/inbox-read.json`, { n: 0 })).n || 0
     v.total = recs.length
-    v.unread = Math.max(0, recs.length - read)
+    const pa = await paneAck(h, home)
+    const isUnread = (n: number) => n >= pa.upTo && !pa.ns.includes(n)
+    v.unread = recs.filter((_, n) => isUnread(n)).length
     v.answers = recs
-      .map((rec, n) => ({ n, rec, unread: n >= read }))
+      .map((rec, n) => ({ n, rec, unread: isUnread(n) }))
       .sort((a, b) => Number(b.unread) - Number(a.unread) || b.n - a.n)
       .slice(0, 30)
   })
@@ -105,9 +114,13 @@ export async function loadView(h: Host): Promise<View> {
   return v
 }
 
-export async function ackRows(h: Host, upTo: number | 'all'): Promise<void> {
-  const u = await unreadReports(h)
-  await markRead(h, upTo === 'all' ? u.upTo : Math.min(Math.max(upTo, 0), u.upTo))
+// Pane ack: one row (its index) or all; moves only the pane's marker, so the desk's delivery is unaffected.
+export async function ackRows(h: Host, which: number | 'all'): Promise<void> {
+  const home = await homeDir(h)
+  const total = (await readJsonl(h, `${deskState(home)}/inbox.jsonl`)).length
+  const a = await paneAck(h, home)
+  if (which === 'all') await writeJson(h, paneAckFile(home), { upTo: total, ns: [] } satisfies PaneAck)
+  else if (Number.isInteger(which) && which >= 0 && which < total && !a.ns.includes(which)) await writeJson(h, paneAckFile(home), { upTo: a.upTo, ns: [...a.ns, which] } satisfies PaneAck)
 }
 
 // A thread's status line: its id, today's budget, lines in its inbox it has not seen.

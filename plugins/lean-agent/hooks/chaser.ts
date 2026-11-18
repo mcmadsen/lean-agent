@@ -27,7 +27,12 @@ export async function chase(h: Host, send: (id: string, text: string) => Promise
     chased.push(id)
     await send(id, CHASE_TEXT)
   }
-  if (chased.length) await writeJson(h, file, goals)
+  if (chased.length) {
+    // sends can be slow: re-read, so a goal updated meanwhile is not overwritten; only `chased` is set
+    const fresh = await readJson<Record<string, Goal>>(h, file, {})
+    for (const id of chased) if (fresh[id]) fresh[id]!.chased = now
+    await writeJson(h, file, fresh)
+  }
   return chased
 }
 

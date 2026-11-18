@@ -68,7 +68,7 @@ export function registerPane(on: any) {
               {a.rec.kind === 'ask' ? '? ' : ''}
               {a.rec.from}: {short(a.rec.text, 70)}
             </Text>
-            {a.unread && <Button key={`ack-${a.n}`} label="ack" onPress={act('ack', async () => ackRows(host, a.n + 1))} />}
+            {a.unread && <Button key={`ack-${a.n}`} label="ack" onPress={act('ack', async () => ackRows(host, a.n))} />}
           </Box>
         ))}
         {!!v?.unread && <Button key="ack-all" label="ack all" onPress={act('ack', async () => ackRows(host, 'all'))} />}

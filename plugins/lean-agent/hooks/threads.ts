@@ -53,9 +53,16 @@ export function parseAgents(text: string): AgentRow[] {
 const IDLE = new Set(['idle', 'done', 'completed', 'complete', 'finished', 'stopped', 'exited', 'failed', 'error', 'dead'])
 export const isRunning = (r: AgentRow | undefined) => !!r && !IDLE.has(r.status)
 
-async function agents(h: Host): Promise<AgentRow[]> {
+// null = the listing failed or was not JSON: the caller must not treat that as "nothing is running"
+async function agents(h: Host): Promise<AgentRow[] | null> {
   const r = await h.process.run(['claude', 'agents', '--json', '--all'])
-  return r.exitCode === 0 ? parseAgents(r.stdout) : []
+  if (r.exitCode !== 0) return null
+  try {
+    JSON.parse(r.stdout)
+  } catch {
+    return null
+  }
+  return parseAgents(r.stdout)
 }
 
 // ---- trust ---------------------------------------------------------------------------------------------------
@@ -64,11 +71,15 @@ async function agents(h: Host): Promise<AgentRow[]> {
 export async function trustFolder(h: Host, folder: string): Promise<boolean> {
   const file = `${await homeDir(h)}/.claude.json`
   let text = ''
-  try {
-    const t = await h.fs.read(file)
-    text = typeof t === 'string' ? t : ''
-  } catch {
-    text = ''
+  if (await h.fs.exists(file)) {
+    // present but unreadable (or not text): refuse, never overwrite with a guess
+    try {
+      const t = await h.fs.read(file)
+      if (typeof t !== 'string') return false
+      text = t
+    } catch {
+      return false
+    }
   }
   let doc: any = {}
   if (text.trim()) {
@@ -161,11 +172,11 @@ function batchPrompt(msgs: Inbox[]): string {
 
 async function startSession(h: Host, home: string, t: Thread, prompt: string): Promise<Out> {
   const folder = tpath(home, t.id)
-  const r = await h.process.run(['claude', '--bg', '-n', label(t), prompt], { cwd: folder, timeoutMs: 120_000 })
+  const r = await h.process.run(['claude', '--bg', '-n', label(t), '--', prompt], { cwd: folder, timeoutMs: 120_000 })
   if (r.exitCode !== 0) return err(`claude --bg failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
   let sid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(r.stdout + '\n' + r.stderr)?.[0] ?? ''
   if (!sid) {
-    const rows = (await agents(h)).filter(a => a.cwd === folder || a.name === label(t))
+    const rows = ((await agents(h)) ?? []).filter(a => a.cwd === folder || a.name === label(t))
     rows.sort((a, b) => b.startedAt - a.startedAt)
     sid = rows[0]?.sid ?? ''
   }
@@ -202,16 +213,23 @@ async function pending(h: Host, home: string, t: Thread): Promise<Inbox[]> {
 async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; lead?: string } = {}): Promise<Out> {
   if (t.state !== 'open') return { ok: true, text: `${t.id} is ${t.state}: message queued, no wake` }
   if (!t.sid) return { ok: true, text: `${t.id} has no session yet: queued; use start` }
-  const msgs = await pending(h, home, t)
+  const u = await unconsumed(h, home, t.id) // one read: the messages and the position they end at
+  const msgs = u.msgs
   if (!msgs.length && !opts.force) return { ok: true, text: `${t.id}: nothing queued` }
-  const row = (await agents(h)).find(a => a.sid === t.sid)
+  const listed = await agents(h)
+  if (!listed) return err(`${t.id}: cannot list sessions (claude agents failed), so it is not resumed; messages stay queued`)
+  const row = listed.find(a => a.sid === t.sid)
   if (isRunning(row)) return { ok: true, text: `${t.id} is running: ${msgs.length} message(s) queued, it reads them itself` }
   const now = await h.clock.now()
   if (t.lastWake && now - t.lastWake < WAKE_GAP_MS) return { ok: true, text: `${t.id} was woken ${Math.round((now - t.lastWake) / 1000)} s ago: queued for the next wake` }
-  const upTo = (await unconsumed(h, home, t.id)).upTo
+  const upTo = u.upTo
   const prompt = [opts.lead, batchPrompt(msgs), wakeMark(upTo)].filter(Boolean).join('\n\n')
-  const r = await h.process.run(['claude', '--bg', '--resume', t.sid, '-n', label(t), prompt], { cwd: tpath(home, t.id), timeoutMs: 120_000 })
+  const r = await h.process.run(['claude', '--bg', '--resume', t.sid, '-n', label(t), '--', prompt], { cwd: tpath(home, t.id), timeoutMs: 120_000 })
   if (r.exitCode !== 0) return err(`claude --bg --resume failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
+  // the resume may carry a new session id: follow the newest session of this thread
+  const after = (await agents(h)) ?? []
+  const next = after.filter(a => a.sid !== t.sid && (a.name === label(t) || a.cwd === tpath(home, t.id)) && a.startedAt > (row?.startedAt ?? 0)).sort((a, b) => b.startedAt - a.startedAt)[0]
+  if (next) t.sid = next.sid
   t.lastWake = now
   t.delivered = upTo
   await save(h, home, t)
@@ -219,7 +237,7 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
 }
 
 async function list(h: Host, home: string): Promise<Out> {
-  const rows = await agents(h)
+  const rows = (await agents(h)) ?? []
   const out: unknown[] = []
   let ents: { name: string }[] = []
   try {
@@ -260,12 +278,15 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           return await wake(h, home, t, { force: true, lead: 'Continue where you left off.' })
         case 'start': {
           if (t.state === 'closed') return err(`${id} is closed; reopen it first`)
-          if (t.sid && isRunning((await agents(h)).find(a => a.sid === t.sid))) return { ok: true, text: `${id} is already running` }
+          const live = t.sid ? await agents(h) : []
+          if (!live) return err(`${id}: cannot list sessions (claude agents failed), so it is not started`)
+          if (t.sid && isRunning(live.find(a => a.sid === t.sid))) return { ok: true, text: `${id} is already running` }
           const brief = (await h.fs.read(`${tpath(home, id)}/brief.md`).catch(() => t.title)) as string
-          const msgs = await pending(h, home, t)
+          const u = await unconsumed(h, home, id)
+          const msgs = u.msgs
           const r = await startSession(h, home, t, [brief.trim(), batchPrompt(msgs)].filter(Boolean).join('\n\n'))
           if (r.ok && msgs.length) {
-            t.delivered = (await unconsumed(h, home, id)).upTo
+            t.delivered = u.upTo
             await save(h, home, t)
           }
           return r
@@ -273,7 +294,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
         case 'close': {
           t.state = 'closed'
           await save(h, home, t)
-          if (t.sid && isRunning((await agents(h)).find(a => a.sid === t.sid))) await h.process.run(['claude', 'agents', 'stop', t.sid])
+          if (t.sid && isRunning(((await agents(h)) ?? []).find(a => a.sid === t.sid))) await h.process.run(['claude', 'agents', 'stop', t.sid])
           return { ok: true, text: `${id} closed` }
         }
         case 'park':
