@@ -2,6 +2,11 @@
 
 ## 1.0.2
 
+### Added
+- The desk records what happened to its skill listing ("trimmed 5 -> 2", "format not recognised", "no skill_listing
+  attachment seen"; names and counts only, never text) and shows it in the pane footer and in `lean_doctor check`, with the
+  attachment and section names seen this session, so a report needs no debug log.
+
 ### Fixed
 - **Open desk** no longer says "The Claude app is not running" inside the Claude app: a pane drawn on the desktop surface
   skips the check. Elsewhere the check calls `/usr/bin/pgrep` (`-x Claude`, then `-f` on the app binary path), and if the
@@ -9,6 +14,11 @@
 - Thread resume ran `claude --bg --resume <sid> -n <label> -- <prompt>`; any extra flag makes the CLI start a copy of the
   session. It now passes only `--resume <sid> -- <prompt>`, and if the CLI still prints "started a copy as <id>" the
   thread follows the copy and the result says so.
+- The desk's skill-listing trim did not take effect on a real Mac: the engine caches `prompt.attachment`, and a listing built
+  while the session was still in its spare folder (role not yet the desk) stayed. The role change now asks for the
+  attachments, sections and tool descriptions again. The filter also accepts renamed listing types (any name holding
+  "skill"), backticked and `*` bullets, and a listing in the Skill tool's description; an unknown format is still left untouched.
+- On the desk, the agent listing (`agent.offer`) and MCP-instructions sections/attachments are left out; the desk never spawns subagents.
 - Closing a thread ran the nonexistent `claude agents stop <sid>`; it now runs `claude stop <id>` (first 8 chars of the sid).
 
 ## 1.0.1

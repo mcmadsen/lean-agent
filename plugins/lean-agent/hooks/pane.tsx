@@ -5,6 +5,7 @@ import { ackRows, loadView, resetViewCache, threadStatus } from './view'
 import type { GoalTone, View } from './view'
 import { leanThread } from './threads'
 import { hostOf } from './host'
+import { skillStat } from './skilltrim'
 import { NEXT_STEP, bounded, openDesk, setupCheck, setupFix, setupText } from './setup'
 import type { Role } from './role'
 
@@ -134,6 +135,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const footer = (
       <Text dimColor>
         lean-agent {VERSION} · refreshed {lastRefresh || 'never'} · last error: {lastError || 'none'}
+        {kind === 'desk' ? ` · skills: ${skillStat()}` : ''}
       </Text>
     )
     const noteRows = notes.map((m, i) => (

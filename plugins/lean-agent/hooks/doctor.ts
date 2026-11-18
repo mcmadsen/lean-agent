@@ -4,6 +4,7 @@ import { appendJsonl, atomicWrite, deskDir, homeDir, leanDir, mkdirp, readJson, 
 import type { Host } from './state'
 import { trustFolder } from './threads'
 import { setNotice } from './notices'
+import { seenNames, skillStat } from './skilltrim'
 
 export const OLD_LABEL = 'com.lean-agent.up'
 export const DESK_LABEL = 'com.lean-agent.desk'
@@ -103,6 +104,8 @@ export async function check(h: Host, root: string): Promise<string[]> {
   const log = ((await text(h, `${leanDir(home)}/logs/opener.log`)) || '').trim().split('\n').pop()
   out.push(`last opener run: ${log || 'never'}`)
   row(await h.fs.exists(`${leanDir(home)}/migrated-1.0.json`) || !(await legacyPresent(h, home)), 'state is 1.0 (no 0.45 leftovers)')
+  out.push(`desk skill listing: ${skillStat()}`)
+  out.push(`seen this session - ${seenNames()}`)
   return out
 }
 

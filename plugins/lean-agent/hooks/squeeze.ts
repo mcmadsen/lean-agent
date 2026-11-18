@@ -62,22 +62,4 @@ export function trimTools<T extends { name: string }>(tools: T[], role: 'desk' |
   return tools.filter(t => t.name.startsWith('mcp__lean-agent__') || !drops.some(re => re.test(t.name)))
 }
 
-// A skill listing keeps its non-skill lines and the `lean-agent:` skill lines; null when it names no lean-agent skill
-// (then the engine's text stands untouched, so a format change never empties the list).
-export function leanSkillsOnly(text: string): string | null {
-  const isSkill = (l: string) => /^- \S/.test(l)
-  const out: string[] = []
-  let dropping = false
-  let dropped = false
-  let kept = false
-  for (const l of text.split('\n')) {
-    if (isSkill(l)) {
-      dropping = !l.startsWith('- lean-agent:')
-      if (dropping) dropped = true
-      else kept = true
-    } else if (dropping && /^\s+\S/.test(l)) continue // a wrapped description of a dropped skill
-    else dropping = false
-    if (!dropping) out.push(l)
-  }
-  return kept && dropped ? out.join('\n') : null
-}
+export { leanSkillsOnly } from './skilltrim'

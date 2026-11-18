@@ -19,7 +19,7 @@ import { bounded, setupFix, setupText } from './setup'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
 import { hostOf } from './host'
-import { leanSkillsOnly } from './squeeze'
+import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, noteSection, skillsSeen, trimListing } from './skilltrim'
 import { parseGrants, recordGrant, releaseGrant } from './guard'
 import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
 
@@ -43,6 +43,7 @@ export const resetModState = () => {
   registered.clear()
   cwd = ''
   resetPaneState()
+  resetSkillStat()
 }
 let role: Role = { kind: 'plain' }
 let tries = 0
@@ -241,6 +242,10 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
   }
   // the tool pool depends on the role (the desk's is trimmed): ask the engine for it again
   await step('tool pool refresh', async () => void $.ui.invalidate('tool.list')) // once per role; retried if it failed
+  // the engine caches the skill listing and sections: one built before the role was known (a pre-started spare session) is asked again
+  await step('prompt refresh', async () => {
+    for (const ev of ['prompt.attachment', 'prompt.section', 'tool.describe']) $.ui.invalidate(ev)
+  })
   // a failed step is tried again at the next check, three times at most per role (then it waits for a role change)
   if (!ok && ++tries < 3) applied = ''
   return ctx
@@ -339,12 +344,50 @@ export const register: Register = on => {
     return { ...listed, value: await poolFor(hostOf($), listed.value) }
   }).catch(($, e: any, next) => next(e))
 
-  // the desk reads only lean-agent's skills: another plugin's skill listing is dead weight there
-  on('prompt.attachment', { type: 'skill_listing' }, async ($, e: any, next) => {
+  // the desk reads only lean-agent's skills: another plugin's skill listing is dead weight there. Every attachment type is
+  // noted by name (never its text); a skill listing is trimmed on the desk, whatever it is called, and what happened is recorded.
+  on('prompt.attachment', async ($, e: any, next) => {
     const r: any = await next(e)
-    if (role.kind !== 'desk' || typeof r?.text !== 'string') return r
-    const text = leanSkillsOnly(r.text)
-    return text === null ? r : { ...r, text }
+    const type = String(e?.type ?? '')
+    noteAttachment(type)
+    if (typeof r?.text !== 'string') return r
+    if (role.kind === 'desk' && isMcpInstructions(type)) {
+      skillsSeen(type, `dropped (${r.text.length} chars)`)
+      return { ...r, text: null }
+    }
+    if (!isSkillAttachment(type)) return r
+    if (role.kind !== 'desk') {
+      skillsSeen(type, `not the desk (role ${role.kind}): untouched`)
+      return r
+    }
+    const t = trimListing(r.text)
+    skillsSeen(type, t.reason)
+    return t.text === null ? r : { ...r, text: t.text }
+  }).catch(($, e: any, next) => next(e))
+
+  // a build may list skills in the Skill tool's description instead: same filter, same safety rule
+  on('tool.describe', { tool: 'Skill' }, async ($, e: any, next) => {
+    const r: any = await next(e)
+    if (role.kind !== 'desk' || typeof r?.description !== 'string') return r
+    const t = trimListing(r.description)
+    if (t.text === null) return r
+    skillsSeen('Skill tool description', t.reason)
+    return { ...r, description: t.text, breakPromptCache: true }
+  }).catch(($, e: any, next) => next(e))
+
+  // system-prompt sections: noted by id; an MCP-instructions section is left out on the desk
+  on('prompt.section', async ($, e: any, next) => {
+    const r: any = await next(e)
+    const name = String(e?.name ?? '')
+    noteSection(name)
+    if (role.kind === 'desk' && isMcpInstructions(name) && typeof r?.text === 'string') return { ...r, text: null }
+    return r
+  }).catch(($, e: any, next) => next(e))
+
+  // the desk never spawns subagents (no Agent tool in its pool): the agent listing is dead weight there
+  on('agent.offer', async ($, e: any, next) => {
+    if (role.kind === 'desk') return { isOffered: false }
+    return next(e)
   }).catch(($, e: any, next) => next(e))
 
   // a long Bash result is squeezed after the call; the full text is saved under ~/.lean-agent/output/

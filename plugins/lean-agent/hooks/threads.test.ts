@@ -252,3 +252,15 @@ test('close reports a failing claude stop', async () => {
   h.claude.handler = (a: string[]) => (a[0] === 'stop' ? { exitCode: 1, stdout: '', stderr: 'no such session' } : base(a, {} as any))
   expect((await call({ action: 'close', tN: 't1' })).text).toContain('no such session')
 })
+
+test('the CLI\'s "woke session X with its saved options" line is not a copy: the sid stays', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  state.rows = [{ sessionId: SID, name: 't1 · a', cwd: '/h/.lean-agent/threads/t1', status: 'done', startedAt: 1 }]
+  h.clock.t += 60_000
+  const base = h.claude.handler
+  h.claude.handler = (a: string[]) => (a.includes('--resume') ? { exitCode: 0, stdout: `woke session ${SID.slice(0, 8)} with its saved options\n` } : base(a, {} as any))
+  const r = await call({ action: 'send', tN: 't1', text: 'one' })
+  expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t1/thread.json')!).sid).toBe(SID)
+  expect(JSON.stringify(r)).not.toContain('copy')
+})
