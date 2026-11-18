@@ -3,7 +3,7 @@ import type { Register } from 'claude-code'
 import { recordSid, resolveRole, roleReport } from './role'
 import type { Role } from './role'
 import { deskClaudeMd, leanThread, listAgents } from './threads'
-import { limitFromUsage, limitTick, readLimit, writeLimit } from './limits'
+import { limitFromUsage, limitTick, readLimit, sameReset, writeLimit } from './limits'
 import { ensureGitHooks } from './githooks'
 import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
@@ -195,7 +195,11 @@ async function noteLimit($: any, id: string): Promise<void> {
   if (!resetAt || !lastSid) return
   const home = await homeDir(host)
   const old = await readLimit(host, home, id)
-  if (old && old.sid === lastSid && old.resetAt === resetAt) return
+  if (old && sameReset(resetAt, old.resetAt)) {
+    // the same reset, whatever the seconds: its "already resumed" mark stays (only a changed session id is followed)
+    if (old.sid !== lastSid) await writeLimit(host, home, id, { ...old, sid: lastSid })
+    return
+  }
   await writeLimit(host, home, id, { resetAt, seenAt: now, source: 'mod', sid: lastSid })
 }
 
@@ -543,9 +547,9 @@ export const register: Register = on => {
       if (role.kind !== 'thread') await redetect($, undefined, true) // a stale role never refuses: look once more (session id, folder)
       if (role.kind !== 'thread') return { result: await roleReport(hostOf($), { tool: t.name, need: 'thread', role, startDir, sid: lastSid }), isError: true } as any
       // lean_compare needs the plugin root (the thread-shaped folder's CLAUDE.md, --plugin-dir for a dev copy): answered here
-      // a done / blocked report and every question also goes straight to the desk's session (the inbox keeps it either way)
       const out = t.name === 'lean_compare'
         ? await compare(hostOf($), $.plugin.root, { project: str(e.project) || str((await readJson<{ project?: string }>(hostOf($), `${threadsDir(await homeDir(hostOf($)))}/${role.id}/thread.json`, {})).project), mode: str(e.mode) || 'task', task: typeof e.task === 'string' ? e.task : '', model: str(e.model) || undefined, maxUsd: typeof e.maxUsd === 'number' ? e.maxUsd : undefined }, 'thread')
+        // every other tool: a done / blocked report and every question also goes straight to the desk's session (the inbox keeps it either way)
         : await threadTool(hostOf($), role.id, t.name, e, (sid, text) => $.session.send({ to: { sessionId: sid }, text }))
       await ensureGitHooks(hostOf($)).catch(() => undefined) // lean_* tools may change projects.json
       return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any

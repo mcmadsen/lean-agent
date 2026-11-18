@@ -26,7 +26,7 @@ test('scrub, shortName and redactor keep folders out: whole path words only, eve
   expect(scrub('no path here, 12/3 ratio')).toBe('no path here, 12/3 ratio')
   expect(scrub('see `/a/b/c.md` and [/x/y/z] and <</p/q/r> and {/m/n/o}')).toBe('see `…/c.md` and […/z] and <<…/r> and {…/o}')
   expect(scrub('open file:///a/b/c now')).toBe('open …/c now')
-  expect(scrub('read /Users/John Smith/x/y.md (denied)')).toBe('read …/y.md (denied)')
+  expect(scrub('read /home/some user/x/y.md (denied)')).toBe('read …/y.md (denied)')
   expect(scrub('url https://host/a/b stays? and key=/p/q')).toBe('url https://host/a/b stays? and key=…/q')
   expect(shortName('/work/acme/CLAUDE.md')).toBe('…/CLAUDE.md')
   expect(shortName('CLAUDE.md')).toBe('CLAUDE.md')

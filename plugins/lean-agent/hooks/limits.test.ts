@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { leanThread, listAgents, resetLocks } from './threads'
-import { LIMIT_PROMPT, MAX_TRIES, RESUME_DELAY_MS, findLimitLine, fmtUntil, limitFromUsage, limitTick, parseResetText, readLimit, resetLimitCache, writeLimit } from './limits'
+import { LIMIT_PROMPT, MAX_TRIES, RESUME_DELAY_MS, findLimitLine, fmtUntil, limitFromUsage, limitTick, parseResetText, readLimit, resetLimitCache, sameReset, writeLimit } from './limits'
 import { loadView, resetViewCache } from './view'
 
 const SID = '11111111-2222-3333-4444-555555555555'
@@ -17,13 +17,15 @@ test('reset text: clock times with a zone, dates, relative; the next occurrence 
   expect(p('16:00 (UTC)')).toBe('2026-11-18T16:00:00.000Z')
   expect(p('4pm (UTC).')).toBe('2026-11-18T16:00:00.000Z')
   expect(p('at 4pm (UTC)')).toBe('2026-11-18T16:00:00.000Z')
-  expect(p('4pm (UTC)', Date.UTC(2026, 10, 18, 17, 0))).toBe('2026-11-19T16:00:00.000Z') // already past: tomorrow
-  expect(p('12am (UTC)')).toBe('2026-11-19T00:00:00.000Z')
-  expect(p('12pm (UTC)')).toBe('2026-11-19T12:00:00.000Z')
+  expect(p('4pm (UTC)', Date.UTC(2026, 10, 18, 17, 0))).toBe('2026-11-18T16:00:00.000Z') // just past (the desk slept through it): already reset
+  expect(p('4pm (UTC)', Date.UTC(2026, 10, 18, 23, 0))).toBe('2026-11-19T16:00:00.000Z') // 7 h past: the next one
+  expect(p('12am (UTC)')).toBe('2026-11-19T00:00:00.000Z') // 15 h past: the next one
+  expect(p('12pm (UTC)')).toBe('2026-11-18T12:00:00.000Z') // 3 h past
   expect(p('6:30pm (GMT+2)')).toBe('2026-11-18T16:30:00.000Z')
-  expect(p('9:00 (UTC-05:00)')).toBe('2026-11-19T14:00:00.000Z')
+  expect(p('9:00 (UTC-05:00)')).toBe('2026-11-18T14:00:00.000Z') // an hour past: already reset
+  expect(p('9:00 (UTC-05:00)', Date.UTC(2026, 10, 18, 22, 0))).toBe('2026-11-19T14:00:00.000Z')
   expect(p('4pm (Europe/Berlin)', Date.UTC(2026, 10, 18, 12, 0))).toBe('2026-11-18T15:00:00.000Z') // CET
-  expect(p('4pm (Europe/Berlin)')).toBe('2026-11-19T15:00:00.000Z') // 16:00 in Berlin is the very second of the seen moment: the next one
+  expect(p('4pm (Europe/Berlin)')).toBe('2026-11-18T15:00:00.000Z') // 16:00 in Berlin is the very second of the seen moment: due now
   expect(p('4pm (Europe/Berlin)', Date.UTC(2026, 6, 1, 10, 0))).toBe('2026-07-01T14:00:00.000Z') // CEST
   expect(p('Nov 20, 4pm (UTC)')).toBe('2026-11-20T16:00:00.000Z')
   expect(p('Nov 20 at 4pm (UTC)')).toBe('2026-11-20T16:00:00.000Z')
@@ -34,11 +36,12 @@ test('reset text: clock times with a zone, dates, relative; the next occurrence 
   expect(p('in 45 minutes')).toBe('2026-11-18T15:45:00.000Z')
   // no zone: the desk machine's own
   expect(parseResetText('4pm', new Date(2026, 10, 18, 15, 0).getTime())).toBe(new Date(2026, 10, 18, 16, 0).getTime())
-  expect(parseResetText('16:00', new Date(2026, 10, 18, 17, 0).getTime())).toBe(new Date(2026, 10, 19, 16, 0).getTime())
+  expect(parseResetText('16:00', new Date(2026, 10, 18, 17, 0).getTime())).toBe(new Date(2026, 10, 18, 16, 0).getTime())
+  expect(parseResetText('16:00', new Date(2026, 10, 18, 23, 0).getTime())).toBe(new Date(2026, 10, 19, 16, 0).getTime())
 })
 
 test('reset text it does not understand is no answer, never a guess', () => {
-  for (const s of ['', 'soon', 'tomorrow', '4 (UTC)', '4pm (Mars/Base)', '25:00 (UTC)', '13pm (UTC)', '4:75pm (UTC)', 'Feb 31, 4pm (UTC)', 'Thu 4pm (UTC)', 'Nov 30, 4pm (UTC)', 'in 0m', 'in 300h', '4pm (../../etc)'])
+  for (const s of ['', 'soon', 'tomorrow', '4 (UTC)', '4pm (Mars/Base)', '25:00 (UTC)', '13pm (UTC)', '4:75pm (UTC)', 'Feb 31, 4pm (UTC)', 'Thu 4pm (UTC)', 'Nov 30, 4pm (UTC)', 'Nov 17, 4pm (UTC)', '('.repeat(500) + '4pm', 'in 0m', 'in 300h', '4pm (../../etc)'])
     expect([s, parseResetText(s, NOW)]).toEqual([s, null])
 })
 
@@ -49,6 +52,14 @@ test('the limit line in `claude logs` output: ANSI and boxes stripped, the last 
   expect(findLimitLine("You've hit your limit")).toBeNull()
   expect(findLimitLine('all fine\nlimit of 3 retries')).toBeNull()
   expect(findLimitLine('')).toBeNull()
+})
+
+test('hostile log text is cheap to scan: long lines, endless repeats and unterminated escapes', () => {
+  const t0 = Date.now()
+  const bad = ['hit your limit '.repeat(20_000), '(' .repeat(50_000), '\x1b]' + 'x'.repeat(50_000), '\x1b[' + '9;'.repeat(20_000), 'hit your ' + 'limit resets '.repeat(5_000)].join('\n')
+  expect(findLimitLine(bad)).toBeNull()
+  expect(findLimitLine(bad + "\nYou've hit your session limit · resets 4pm (UTC)")?.resets).toBe('4pm (UTC)')
+  expect(Date.now() - t0).toBeLessThan(2000)
 })
 
 test('the exhausted rate-limit windows give the reset: the later one, nothing when none is spent or the time is absurd', () => {
@@ -269,6 +280,10 @@ test('limit-resume never stops or resumes a session that is working again', asyn
   await x.tick()
   x.h.clock.t = DUE
   x.s.rows = [{ ...ROW, state: 'working', status: 'busy' }]
+  // without the tick's mark the action refuses (the desk's model could not use it either)
+  expect((await x.call({ action: 'limit-resume', tN: 't1' })).ok).toBe(false)
+  const rec = (await readLimit(x.h.host, '/h', 't1'))!
+  await writeLimit(x.h.host, '/h', 't1', { ...rec, resumedFor: rec.resetAt, resumedAt: DUE })
   const r = await x.call({ action: 'limit-resume', tN: 't1' })
   expect(r.ok).toBe(true)
   expect((r.data as any).resumed).toBe(false)
@@ -286,6 +301,51 @@ test('queued desk messages ride along with the resume and are marked delivered o
   expect(prompt).toContain(LIMIT_PROMPT)
   expect(prompt).toContain('also update the notes')
   expect(prompt).toContain('<!-- lean:n=1 -->')
+})
+
+test('two resume calls for one mark (overlapping ticks, a second desk) start one session', async () => {
+  const x = setup()
+  await blocked(x)
+  await x.tick()
+  x.h.clock.t = DUE
+  const rec = (await readLimit(x.h.host, '/h', 't1'))!
+  await writeLimit(x.h.host, '/h', 't1', { ...rec, resumedFor: rec.resetAt, resumedAt: DUE })
+  const [a, b] = await Promise.all([x.call({ action: 'limit-resume', tN: 't1' }), x.call({ action: 'limit-resume', tN: 't1' })])
+  expect(resumes(x)).toHaveLength(1)
+  expect([a, b].filter(r => (r.data as any)?.resumed === true)).toHaveLength(1)
+  x.s.rows = [{ ...ROW }] // the process is back, still showing blocked: a third call, later, for the same mark
+  x.h.clock.t += 5_000
+  expect(((await x.call({ action: 'limit-resume', tN: 't1' })).data as any).resumed).toBe(false)
+  expect(resumes(x)).toHaveLength(1)
+})
+
+test('a reset time that moves by seconds between readings is the same reset; a session id that changed keeps its mark', async () => {
+  const x = setup()
+  await blocked(x)
+  await x.tick()
+  x.h.clock.t = DUE
+  await x.tick() // resumed; the log's line stays
+  expect(resumes(x)).toHaveLength(1)
+  const rec = (await readLimit(x.h.host, '/h', 't1'))!
+  // the mod sees the same window a few seconds off
+  expect(sameReset(rec.resetAt + 7_000, rec.resetAt)).toBe(true)
+  expect(sameReset(rec.resetAt + 3_600_000, rec.resetAt)).toBe(false)
+  // the resume started a copy: the thread follows another session id, the old line is still in the log
+  const f = '/h/.lean-agent/threads/t1/thread.json'
+  const COPY = 'aaaaaaaa-2222-3333-4444-555555555555'
+  x.h.files.set(f, JSON.stringify({ ...JSON.parse(x.h.files.get(f)!), sid: COPY }))
+  x.s.rows = [{ ...ROW, sessionId: COPY }]
+  x.h.clock.t += 6 * 60_000
+  expect(await x.tick()).toEqual([])
+  expect(resumes(x)).toHaveLength(1)
+})
+
+test('first seen after the reset (the desk was off or asleep): due at once, not tomorrow', async () => {
+  const x = setup()
+  await blocked(x)
+  x.h.clock.t = NOW + 2 * 3_600_000 // 17:00, the line says 4pm
+  expect(await x.tick()).toEqual(['t1: usage limit until 2026-11-18T16:00:00.000Z', 't1: resumed after the usage limit'])
+  expect(resumes(x)).toHaveLength(1)
 })
 
 test('the pane view: paused until the reset, then needs you again once the one resume was spent', async () => {

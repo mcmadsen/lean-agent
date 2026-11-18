@@ -439,10 +439,14 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
         }
         case 'limit-resume': {
           // only the desk's tick calls this (not in the tool's schema): the session was seen blocked by the usage limit and its reset
-          // has passed. Checked again here, inside the lock: an open thread, a record for this very session that no parking cancelled.
+          // has passed. Checked again here, inside the lock: an open thread, a record for this very session that no parking cancelled,
+          // and the tick's mark for this reset ("resumedFor", set just before this call: a call without it is refused). A thread woken
+          // since the mark (lastWake past resumedAt) was resumed by an earlier call for this very mark: never a second one.
           if (t.state !== 'open') return err(`${id} is ${t.state}: not resumed after the usage limit`)
           const rec = await readLimit(h, home, id)
           if (!usable(rec, t.sid, await h.clock.now()) || rec.cancelled) return err(`${id}: no usable usage-limit record for its session, nothing resumed`)
+          if (rec.resumedFor !== rec.resetAt || typeof rec.resumedAt !== 'number') return err(`${id}: the usage-limit resume was not marked by the desk's check, nothing resumed`)
+          if (t.lastWake >= rec.resumedAt) return { ok: true, text: `${id} was already resumed for this usage limit`, data: { resumed: false } }
           return await wake(h, home, t, { force: true, lead: LIMIT_PROMPT, limit: true })
         }
         case 'start': {

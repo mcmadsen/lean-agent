@@ -21,8 +21,10 @@ reset.
 3. **When text is parsed** (`parseResetText`): `4pm`, `4:30pm`, `16:00`, with an optional `(UTC)` / `(GMT+2)` / `(Europe/Berlin)`
    zone (no zone = the desk machine's zone; an unknown zone is no answer, never a guess), an optional date (`Nov 20`, `Nov 20,
    2026`, `20 Nov`, with or without `at` / `,`), and `in 2h 30m`. Without a date the time is the next occurrence after the moment
-   the limit was first seen (a time already past means tomorrow). A bare hour (`4`) is ambiguous: no answer. A result more than 8
-   days ahead, or not after the seen time, is no answer.
+   the limit was first seen, except that today's occurrence at most 6 hours past counts as a reset that already happened (the desk
+   was off or the machine asleep when it was hit: it resumes at once instead of waiting a day). A bare hour (`4`) is ambiguous: no
+   answer. A result more than 8 days ahead, or more than 6 hours past, is no answer. Text longer than 80 characters, and log lines
+   longer than 500, are skipped (the log is untrusted text; nothing of it reaches a command line or a path).
 4. **Resume at reset + 2 minutes.** The desk calls its own `lean_thread` action `limit-resume tN` (not in the tool's schema: only
    the mod calls it). Inside the thread's one-action-at-a-time lock it lists sessions again, and if the process lingers runs
    `claude stop <id>`, waits (up to 8 polls) until no pid, then `claude --bg --resume <sid> -- "<prompt>"` with no other flag.
@@ -33,9 +35,13 @@ reset.
 
 ## Rules
 
-- **Once per reset.** `limit.json` keeps `resetAt`; before the resume it stores `resumedFor = resetAt`. The same `resetAt` is never
-  resumed twice, whatever the session does afterwards (a resume that fails to start clears the mark and counts a try; three tries,
-  then it stops and says why). A new limit has a different `resetAt` and is handled again.
+- **Once per reset.** `limit.json` keeps `resetAt`; before the resume it stores `resumedFor = resetAt` and `resumedAt`. The same
+  `resetAt` is never resumed twice, whatever the session does afterwards (a resume that fails to start clears the mark and counts a
+  try; three tries, then it stops and says why). The `limit-resume` action refuses a call without that mark, and a call when the
+  thread was woken since the mark (`lastWake >= resumedAt`): overlapping ticks or a second desk start one session. Reset times
+  within 10 minutes of each other are one reset (the engine's figure can move by seconds). A log line that is still in the log after
+  its reset was handled is recognised by its text and count of limit lines (not by re-parsing it, which would give the next day),
+  also across a session id that changed with a copy start; a new limit is a new line (count up) or another reset time.
 - **Never for a parked or closed thread.** A thread that is not `open` is skipped, and its record is marked `cancelled` (so a later
   reopen does not trigger an old pause). The state is checked again inside the lock right before the stop.
 - **Never over live work.** The stop applies only to a session that is `blocked` without `waitingFor`; a session that is running
