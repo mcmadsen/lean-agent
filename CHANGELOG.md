@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Fixed (threads: replies and delivery)
+- **`new` / `start` / `reopen` say what the session got.** The reply is now `t12 started (<sid>) · sonnet/high`, and the generated thread
+  `CLAUDE.md` has the line `model: sonnet, effort: high (from thread.json)` (a reopen rewrites it with the choice the new session
+  starts with), so neither the desk nor the thread has to look it up.
+- **`close` says what happened to the session** (`t3 closed; session stopped`, `... no running session (already stopped)`,
+  `... no session in the list (already removed)`, `... no session was ever started`). After the stop it runs `claude rm <id>` so the
+  stopped session leaves the app's list (its conversation is kept: `claude --resume` lists it), only for a session whose folder is the
+  thread's own (`rm` also deletes a worktree the session was started in) and never with `--discard-unpushed` or
+  `--force-remove-worktree`; when `rm` refuses, the reply says so ("the app keeps stopped sessions in its list (claude rm: ...)") and
+  the thread is closed anyway. The CLI has no command to rename a background session, so closed sessions are not labelled
+  "[closed] tN".
+- **A long report arrives once.** A report longer than `DIRECT_MAX` (1500 characters) used to arrive twice: cut as a direct line, then
+  in full at the next prompt. The cut line now carries its row key too, so the row counts as delivered and nothing hands it over again;
+  the line says where the full text is (the pane's Answers list and the `desk/inbox.jsonl` row with that ts), and a refused send still
+  leaves the row for the next prompt.
+
 ### Fixed (desk, feedback export)
 - **The desk can open lean-agent files in the app.** The app refused `~/.lean-agent/feedback-export/<file>.md` ("This file is outside
   this session's folders"). Setup (`/lean-agent-setup`, the pane button, `lean_doctor fix`) now merges `~/.lean-agent` into the desk

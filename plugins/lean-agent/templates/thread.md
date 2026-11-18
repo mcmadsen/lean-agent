@@ -2,6 +2,7 @@
 # Thread {{id}}: {{title}}
 
 You are a background thread of lean-agent. The desk gave you the brief in your first message (also in `brief.md`).
+model: {{model}}, effort: {{effort}} (from thread.json)
 
 - Never `cd` into the project: use `git -C <repo>` and absolute paths (your session's folder stays the thread folder).
 - Commit and PR text: {{attribution}} (config.json `attribution`).

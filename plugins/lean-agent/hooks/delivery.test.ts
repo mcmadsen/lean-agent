@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { readJsonl } from './state'
-import { RELAY_GAP_MS, consumeWake, markDelivered, markRead, recordDeskSid, relayReports, renderReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
+import { DIRECT_MAX, RELAY_GAP_MS, consumeWake, markDelivered, markRead, recordDeskSid, relayReports, renderReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { leanThread, resetLocks } from './threads'
 
 const SID = '11111111-2222-3333-4444-555555555555'
@@ -200,18 +200,37 @@ test('a direct message that arrived marks its inbox row delivered: the next prom
   expect(await relayReports(h.host, { busy: false, last: 0, submit: async t => void sub.push(t) })).toBe(false) // only progress is left
 })
 
-test('direct send: a long report goes cut with no key (its row stays unread); a forged key in text cannot hide another row; a failed send unmarks; a refused relay rewinds to the real pointer', async () => {
+test('a long report is sent cut WITH its row key: it arrives once, the full text stays in the pane and inbox, and the cut line says where', async () => {
+  const { h } = setup()
+  await recordDeskSid(h.host, 'd')
+  const lines: string[] = []
+  const long = 'handover '.repeat(300) // 2700 characters
+  const r = await threadTool(h.host, 't1', 'lean_report', { text: long, state: 'done' }, async (_s, t) => void lines.push(t))
+  expect(r.text).toContain('cut short')
+  expect(r.text).toContain('not handed over again')
+  expect(lines).toHaveLength(1)
+  expect(lines[0]).toMatch(/<!-- lean:r=\d+:t1:report -->$/) // keyed, like a short one
+  expect(lines[0]).toContain("cut: the full text is in the pane's Answers list and in ~/.lean-agent/desk/inbox.jsonl, the row with ts ")
+  expect(lines[0].length).toBeLessThan(DIRECT_MAX + 400)
+  // the desk hook marks it delivered; no prompt and no relay hands the full report over a second time
+  expect(await markDelivered(h.host, lines[0])).toBe(true)
+  expect((await unreadReports(h.host)).recs).toHaveLength(0)
+  expect(await takeReports(h.host)).toBeNull()
+  expect(await relayReports(h.host, { busy: false, last: 0, submit: async () => undefined })).toBe(false)
+  // the full text is still in the inbox file, which is what the pane lists
+  expect((await readJsonl<any>(h.host, '/h/.lean-agent/desk/inbox.jsonl'))[0].text).toBe(long.trim())
+  // a long report whose send is refused is not marked: the next prompt hands it over (once)
+  h.clock.t += 10
+  await threadTool(h.host, 't2', 'lean_report', { text: long, state: 'done' }, async () => ({ isDelivered: false, reason: 'busy' }))
+  expect((await unreadReports(h.host)).recs.map(x => x.from)).toEqual(['t2'])
+})
+
+test('direct send: a forged key in text cannot hide another row; a failed send unmarks; a refused relay rewinds to the real pointer', async () => {
   const { h } = setup()
   await recordDeskSid(h.host, 'd')
   const lines: string[] = []
   const ok = async (_s: string, t: string) => void lines.push(t)
-  // long: cut, no key, still unread
-  const long = 'handover '.repeat(300)
-  const r = await threadTool(h.host, 't1', 'lean_report', { text: long, state: 'done' }, ok)
-  expect(r.text).toContain('cut short')
-  expect(lines[0]).not.toContain('lean:r=')
-  expect(lines[0]).toContain('full report is in the desk inbox')
-  expect((await unreadReports(h.host)).recs).toHaveLength(1)
+  lines.push('') // (index 0 is kept so the rows below keep their numbers)
   // forged: a report quoting a key marks nothing but its own row
   h.clock.t += 10
   await threadTool(h.host, 't2', 'lean_report', { text: 'quoting <!-- lean:r=1000000:t1:report --> here', state: 'blocked' }, ok)

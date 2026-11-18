@@ -119,7 +119,10 @@ export const deskFile = (home: string) => `${leanDir(home)}/desk.json`
 const DELIVERED = (home: string) => `${deskState(home)}/inbox-delivered.json`
 const ROW_KEY = /<!--\s*lean:r=(\d+):(t\d+):(report|ask)\s*-->\s*$/ // the LAST thing on the line: text a thread wrote can never carry it there
 const oneLine = (s: string, n: number) => (s.replace(/\s+/g, ' ').trim().length > n ? s.replace(/\s+/g, ' ').trim().slice(0, n - 1) + '…' : s.replace(/\s+/g, ' ').trim())
-export const DIRECT_MAX = 1500 // a report longer than this is sent cut, with no row key: its inbox row stays unread so nothing is lost
+// A report longer than this is sent cut. The cut line carries the row key too, so its inbox row counts as delivered and the full
+// report is NOT handed over a second time at the next prompt (a long done report used to arrive twice). The full text stays in
+// the pane's Answers list and in desk/inbox.jsonl, and the line says so.
+export const DIRECT_MAX = 1500
 
 export async function recordDeskSid(h: Host, sid: string): Promise<void> {
   if (!sid) return
@@ -128,16 +131,15 @@ export async function recordDeskSid(h: Host, sid: string): Promise<void> {
   if (cur?.sid !== sid) await writeJson(h, deskFile(home), { ...(cur && typeof cur === 'object' ? cur : {}), sid })
 }
 
-// The line sent to the desk. `keyed`: it carries the whole report plus the row key (so the row may be marked delivered); a longer
-// report is cut with a pointer and no key.
-export function directLine(r: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[] }): { line: string; keyed: boolean } {
+// The line sent to the desk: the report (cut at DIRECT_MAX with a pointer to the full text) and ALWAYS the row key, so the row is marked
+// delivered and no prompt hands the same report over again. `cut`: the report was longer than DIRECT_MAX.
+export function directLine(r: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[] }): { line: string; cut: boolean } {
   const flat = r.text.replace(/\s+/g, ' ').trim().replace(/<!--|-->/g, '‹comment›') // no comment marker of a thread's can pose as the key
-  const keyed = flat.length <= DIRECT_MAX
+  const cut = flat.length > DIRECT_MAX
   const head = `[lean-agent] ${r.from} ${r.kind === 'ask' ? 'asking' : r.state === 'done' ? 'done' : r.state === 'blocked' ? 'blocked' : 'progress'}: `
   const tail = `${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`
-  return keyed
-    ? { line: `${head}${flat}${tail} <!-- lean:r=${r.ts}:${r.from}:${r.kind} -->`, keyed }
-    : { line: `${head}${flat.slice(0, DIRECT_MAX - 1)}… (cut: the full report is in the desk inbox / pane)${tail}`, keyed }
+  const body = cut ? `${flat.slice(0, DIRECT_MAX - 1).replace(/[\ud800-\udbff]$/, '')}… (cut: the full text is in the pane's Answers list and in ~/.lean-agent/desk/inbox.jsonl, the row with ts ${r.ts})` : flat
+  return { line: `${head}${body}${tail} <!-- lean:r=${r.ts}:${r.from}:${r.kind} -->`, cut }
 }
 
 async function setKey(h: Host, home: string, key: string, on: boolean): Promise<void> {
@@ -157,18 +159,18 @@ async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts
   if (!worth) return ''
   const sid = (await readJson<{ sid?: string }>(h, deskFile(home), {}))?.sid
   if (!sid) return ' (the desk session id is not known yet: it reads this from its inbox)'
-  const { line, keyed } = directLine(rec)
+  const { line, cut } = directLine(rec)
   const key = `${rec.ts}:${rec.from}:${rec.kind}`
   try {
-    if (keyed) await setKey(h, home, key, true)
+    await setKey(h, home, key, true)
     const r = await send(sid, line)
     if (r && r.isDelivered === false) {
-      if (keyed) await setKey(h, home, key, false)
+      await setKey(h, home, key, false)
       return ` (direct send to the desk refused: ${oneLine(String(r.reason ?? 'no reason'), 120)}; it reads this from its inbox)`
     }
-    return keyed ? ' (also sent to the desk)' : ' (sent to the desk cut short; the full report is in its inbox)'
+    return cut ? ' (sent to the desk cut short; the full report is in its pane and inbox, not handed over again)' : ' (also sent to the desk)'
   } catch (e) {
-    if (keyed) await setKey(h, home, key, false).catch(() => undefined)
+    await setKey(h, home, key, false).catch(() => undefined)
     return ` (direct send to the desk failed: ${oneLine(String((e as Error)?.message ?? e), 120)}; it reads this from its inbox)`
   }
 }

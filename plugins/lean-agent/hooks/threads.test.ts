@@ -110,8 +110,9 @@ test('close with a failing agents listing retries once, then stays closing and s
   await call({ action: 'new', title: 'a', text: 'brief' })
   let n = 0
   h.claude.handler = (a: string[]) => (a[0] === 'agents' && a[1] === '--json' ? (++n === 1 ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: JSON.stringify([{ sessionId: SID, name: 'x', cwd: 'x', status: 'busy', startedAt: 1 }]) }) : { exitCode: 0, stdout: '' })
-  expect((await call({ action: 'close', tN: 't1' })).text).toBe('t1 closed')
+  expect((await call({ action: 'close', tN: 't1' })).text).toBe("t1 closed; session stopped; the app keeps stopped sessions in its list") // (its folder is not the thread's: no rm)
   expect(h.claudeCalls()).toContainEqual(['stop', SID.slice(0, 8)])
+  expect(h.claudeCalls().some(a => a[0] === 'rm')).toBe(false)
   await call({ action: 'reopen', tN: 't1' })
   h.claude.handler = (a: string[]) => (a[0] === 'agents' ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: '' })
   const r = await call({ action: 'close', tN: 't1' })
@@ -412,8 +413,65 @@ test('close stops a finished session whose process is still alive, by the listed
   const { h, state, call } = setup()
   await call({ action: 'new', title: 'a', text: 'brief' })
   const calls = alive(state, h, { ...ROW, id: 'abcd1234', pid: 42, status: 'idle', state: 'done' })
+  const r = await call({ action: 'close', tN: 't1' })
+  expect(calls).toEqual(['stop abcd1234', 'rm abcd1234']) // stopped, then taken out of the app's list
+  expect(r.text).toBe("t1 closed; session stopped and removed from the app's list (its conversation is kept)")
+})
+
+test('close says what happened to the session: stopped, already stopped, not listed, never started; rm only for a session in the thread folder, never with discard flags', async () => {
+  const { h, state, call } = setup()
+  expect((await call({ action: 'new', title: 'never', text: 'b' })).ok).toBe(true)
+  const t = (n: string) => JSON.parse(h.files.get(`/h/.lean-agent/threads/${n}/thread.json`)!)
+  // never started: no sid
+  h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ ...t('t1'), sid: '' }))
+  expect((await call({ action: 'close', tN: 't1' })).text).toBe('t1 closed; no session was ever started')
+  // a finished session without a process: nothing to stop, still taken out of the list
+  await call({ action: 'new', title: 'b', text: 'b' })
+  const orig = h.claude.handler // (prints the sid for --bg)
+  const calls = alive(state, h, { ...ROW, name: 't2 · b', cwd: '/h/.lean-agent/threads/t2', id: 'abcd1234', status: 'idle', state: 'done' })
+  const scripted = h.claude.handler
+  h.claude.handler = (a: string[], x: any) => (a[0] === '--bg' ? orig(a, x) : scripted(a, x))
+  expect((await call({ action: 'close', tN: 't2' })).text).toBe("t2 closed; no running session (already stopped) and removed from the app's list (its conversation is kept)")
+  expect(calls).toEqual(['rm abcd1234']) // no `--discard-unpushed`, no `--force-remove-worktree`
+  // rm refused: the reply says so and the thread is closed anyway
+  await call({ action: 'new', title: 'c', text: 'b' })
+  state.rows = [{ ...ROW, cwd: '/h/.lean-agent/threads/t3', id: 'abcd1234', status: 'idle', state: 'done' }]
+  const base = h.claude.handler
+  h.claude.handler = (a: string[]) => (a[0] === 'rm' ? { exitCode: 1, stdout: '', stderr: 'has unpushed commits' } : base(a, {} as any))
+  const r = await call({ action: 'close', tN: 't3' })
+  expect(r.ok).toBe(true)
+  expect(r.text).toBe('t3 closed; no running session (already stopped); the app keeps stopped sessions in its list (claude rm: has unpushed commits)')
+  expect(t('t3').state).toBe('closed')
+  // a session not in the list at all (already removed)
+  await call({ action: 'new', title: 'd', text: 'b' })
+  state.rows = []
+  expect((await call({ action: 'close', tN: 't4' })).text).toBe('t4 closed; no session in the list (already removed)')
+  // a session listed from another folder (a worktree session, say) is never removed
+  await call({ action: 'new', title: 'e', text: 'b' })
+  h.claude.handler = base
+  state.rows = [{ ...ROW, cwd: '/somewhere/else', id: 'abcd1234', status: 'idle', state: 'done' }]
+  expect((await call({ action: 'close', tN: 't5' })).text).toBe('t5 closed; no running session (already stopped); the app keeps stopped sessions in its list')
+  expect(h.claudeCalls().filter(a => a[0] === 'rm')).toHaveLength(2) // t2 and t3 only
+})
+
+test('start, new and reopen say the model and effort the session got; the thread guide carries the same line', async () => {
+  const { h, state, call } = setup()
+  h.files.set(`${ROOT}/templates/thread.md`, '# {{id}}\nmodel: {{model}}, effort: {{effort}} (from thread.json)')
+  const r = await call({ action: 'new', title: 'a', text: 'brief' })
+  expect(r.text).toBe(`t1 started (${SID}) · sonnet/high`)
+  expect(h.files.get('/h/.lean-agent/threads/t1/CLAUDE.md')).toContain('model: sonnet, effort: high (from thread.json)')
+  const o = await call({ action: 'new', title: 'b', text: 'brief', model: 'opus', effort: 'low' })
+  expect(o.text).toBe(`t2 started (${SID}) · opus/low`)
+  expect(h.files.get('/h/.lean-agent/threads/t2/CLAUDE.md')).toContain('model: opus, effort: low (from thread.json)')
+  // start of a thread that has no running session, and a reopen with another choice (the guide is rewritten when lean-agent wrote it)
+  h.files.set(`${ROOT}/templates/thread.md`, '<!-- generated by lean-agent for thread {{id}} -->\nmodel: {{model}}, effort: {{effort}} (from thread.json)')
+  h.files.set('/h/.lean-agent/threads/t1/CLAUDE.md', '<!-- generated by lean-agent for thread t1 -->\nold')
+  state.rows = []
+  expect((await call({ action: 'start', tN: 't1' })).text).toBe(`t1 started (${SID}) · sonnet/high`)
   await call({ action: 'close', tN: 't1' })
-  expect(calls).toEqual(['stop abcd1234'])
+  const re = await call({ action: 'reopen', tN: 't1', model: 'haiku' })
+  expect(re.text).toContain(`t1 reopened as a new session (old conversation kept read-only). t1 started (${SID}) · haiku/high`)
+  expect(h.files.get('/h/.lean-agent/threads/t1/CLAUDE.md')).toContain('model: haiku, effort: high (from thread.json)')
 })
 
 test('new refuses an unknown project with the known names and creates nothing; list shows the project', async () => {
@@ -503,10 +561,10 @@ test('close clears the thread goal (and says so); the folder and the reports sta
   await call({ action: 'new', title: 'a', text: 'brief' })
   h.files.set('/h/.lean-agent/goals.json', JSON.stringify({ t1: { text: 'ship it', ts: 1 }, t2: { text: 'other', ts: 2 } }))
   const r = await call({ action: 'close', tN: 't1' })
-  expect(r.text).toBe('t1 closed, goal cleared')
+  expect(r.text).toBe('t1 closed, goal cleared; no session in the list (already removed)')
   expect(Object.keys(jf(h, '/h/.lean-agent/goals.json'))).toEqual(['t2'])
   expect(h.files.has(tfile(h, 'brief.md'))).toBe(true)
-  expect((await call({ action: 'close', tN: 't1' })).text).toBe('t1 closed') // nothing left to clear
+  expect((await call({ action: 'close', tN: 't1' })).text).toBe('t1 closed; no session in the list (already removed)') // nothing left to clear
 })
 
 test('reopen of a closed thread starts a NEW session (claude --bg, never --resume) with a handover; the old sid stays as history', async () => {
@@ -620,7 +678,7 @@ test('a huge report and queue cannot blow the handover past one argv string; a c
   await call({ action: 'new', title: 'a', text: 'brief' })
   h.files.set('/h/.lean-agent/desk/inbox.jsonl', JSON.stringify({ ts: 1, from: 't1', kind: 'report', text: 'Z'.repeat(200_000), state: 'done' }) + '\n')
   h.files.set('/h/.lean-agent/goals.json', JSON.stringify({ t1: { text: '', ts: 1 } }))
-  expect((await call({ action: 'close', tN: 't1' })).text).toBe('t1 closed, goal cleared')
+  expect((await call({ action: 'close', tN: 't1' })).text).toBe('t1 closed, goal cleared; no session in the list (already removed)')
   for (let n = 0; n < 40; n++) await call({ action: 'send', tN: 't1', text: 'q'.repeat(10_000) })
   state.rows = []
   expect((await call({ action: 'reopen', tN: 't1' })).ok).toBe(true)
