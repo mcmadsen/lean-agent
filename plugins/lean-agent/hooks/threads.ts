@@ -231,16 +231,19 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
   if (t.lastWake && now - t.lastWake < WAKE_GAP_MS) return { ok: true, text: `${t.id} was woken ${Math.round((now - t.lastWake) / 1000)} s ago: queued for the next wake` }
   const upTo = u.upTo
   const prompt = [opts.lead, batchPrompt(msgs), wakeMark(upTo)].filter(Boolean).join('\n\n')
-  const r = await h.process.run(['claude', '--bg', '--resume', t.sid, '-n', label(t), '--', prompt], { cwd: tpath(home, t.id), timeoutMs: 120_000 })
+  const r = await h.process.run(['claude', '--bg', '--resume', t.sid, '--', prompt], { cwd: tpath(home, t.id), timeoutMs: 120_000 })
   if (r.exitCode !== 0) return err(`claude --bg --resume failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
   // the resume may carry a new session id: follow the newest session of this thread
+  // (any extra flag on --resume makes the CLI start a copy and print "started a copy as <id>": follow it)
   const after = (await agents(h)) ?? []
-  const next = after.filter(a => a.sid !== t.sid && (a.name === label(t) || a.cwd === tpath(home, t.id)) && a.startedAt > (row?.startedAt ?? 0)).sort((a, b) => b.startedAt - a.startedAt)[0]
+  const copy = /started a copy as\s+([0-9a-f][0-9a-f-]{5,})/i.exec(`${r.stdout}\n${r.stderr ?? ''}`)?.[1]
+  const copied = copy ? (after.find(a => a.sid === copy || a.sid.startsWith(copy))?.sid ?? copy) : undefined
+  const next = copied ? { sid: copied } : after.filter(a => a.sid !== t.sid && (a.name === label(t) || a.cwd === tpath(home, t.id)) && a.startedAt > (row?.startedAt ?? 0)).sort((a, b) => b.startedAt - a.startedAt)[0]
   if (next) t.sid = next.sid
   t.lastWake = now
   t.delivered = upTo
   await save(h, home, t)
-  return { ok: true, text: `${t.id} woken with ${msgs.length} message(s)` }
+  return { ok: true, text: `${t.id} woken with ${msgs.length} message(s)${copied ? `; the CLI started a copy, the thread now follows session ${copied.slice(0, 8)}` : ''}` }
 }
 
 async function list(h: Host, home: string): Promise<Out> {
@@ -310,7 +313,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           }
           t.state = 'closed'
           await save(h, home, t)
-          if (t.sid && isRunning((live ?? []).find(a => a.sid === t.sid))) await h.process.run(['claude', 'agents', 'stop', t.sid])
+          if (t.sid && isRunning((live ?? []).find(a => a.sid === t.sid))) await h.process.run(['claude', 'stop', t.sid.slice(0, 8)])
           return { ok: true, text: `${id} closed` }
         }
         case 'park':

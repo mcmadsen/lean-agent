@@ -66,7 +66,7 @@ test('send to an idle thread resumes exactly once with the batch', async () => {
   await call({ action: 'send', tN: 't1', text: 'one' })
   const resumes = h.claudeCalls().filter(a => a.includes('--resume'))
   expect(resumes.length).toBe(1)
-  expect(resumes[0]).toEqual(['--bg', '--resume', SID, '-n', 't1 · a', '--', 'one\n\n<!-- lean:n=1 -->'])
+  expect(resumes[0]).toEqual(['--bg', '--resume', SID, '--', 'one\n\n<!-- lean:n=1 -->'])
 })
 
 test('two sends within 30 s make one wake; the second waits queued', async () => {
@@ -96,7 +96,7 @@ test('park and close only queue; close stops a running session', async () => {
   await call({ action: 'reopen', tN: 't1' })
   state.rows = [{ sessionId: SID, name: 'x', cwd: 'x', status: 'busy', startedAt: 1 }]
   await call({ action: 'close', tN: 't1' })
-  expect(h.claudeCalls()).toContainEqual(['agents', 'stop', SID])
+  expect(h.claudeCalls()).toContainEqual(['stop', SID.slice(0, 8)])
   expect((await call({ action: 'list' })).text).toContain('closed')
 })
 
@@ -106,7 +106,7 @@ test('close with a failing agents listing retries once, then stays closing and s
   let n = 0
   h.claude.handler = (a: string[]) => (a[0] === 'agents' && a[1] === '--json' ? (++n === 1 ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: JSON.stringify([{ sessionId: SID, name: 'x', cwd: 'x', status: 'busy', startedAt: 1 }]) }) : { exitCode: 0, stdout: '' })
   expect((await call({ action: 'close', tN: 't1' })).text).toBe('t1 closed')
-  expect(h.claudeCalls()).toContainEqual(['agents', 'stop', SID])
+  expect(h.claudeCalls()).toContainEqual(['stop', SID.slice(0, 8)])
   await call({ action: 'reopen', tN: 't1' })
   h.claude.handler = (a: string[]) => (a[0] === 'agents' ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: '' })
   const r = await call({ action: 'close', tN: 't1' })
@@ -203,4 +203,31 @@ test('the private list follows projects.json on every action (resume, wake, list
   expect(argvs.some((a: string[]) => a[0] === 'chmod' && a[1] === '755' && /githooks\/.*\.tmp-/.test(a[2]!))).toBe(true)
   expect(argvs.some((a: string[]) => a[0] === 'mv' && a[3] === list)).toBe(true)
   expect([...h.files.keys()].filter(k => k.includes('.tmp-') && k.includes('githooks'))).toEqual([])
+})
+
+test('a resume carries no flag besides --resume (any extra flag starts a copy)', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  state.rows = [{ sessionId: SID, name: 't1 · a', cwd: '/h/.lean-agent/threads/t1', status: 'done', startedAt: 1 }]
+  h.clock.t += 60_000
+  await call({ action: 'send', tN: 't1', text: 'one' })
+  const r = h.claudeCalls().find(a => a.includes('--resume'))!
+  expect(r.filter(x => x.startsWith('-') && x !== '--resume' && x !== '--bg' && x !== '--')).toEqual([])
+  expect(r).not.toContain('-n')
+})
+
+test('"started a copy as <id>" in the resume output moves the thread to the copy and says so', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  const COPY = 'cafe1234-2222-3333-4444-555555555555'
+  state.rows = [{ sessionId: SID, name: 't1 · a', cwd: '/h/.lean-agent/threads/t1', status: 'done', startedAt: 1 }]
+  h.clock.t += 60_000
+  h.claude.handler = (a: string[]) => {
+    if (a[0] === 'agents') return { exitCode: 0, stdout: JSON.stringify([...state.rows, { sessionId: COPY, name: 'other', cwd: 'y', status: 'busy', startedAt: 0 }]) }
+    if (a.includes('--resume')) return { exitCode: 0, stdout: 'the flags you passed started a copy as cafe1234\n' }
+    return { exitCode: 0, stdout: '' }
+  }
+  const r = await call({ action: 'send', tN: 't1', text: 'one' })
+  expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t1/thread.json')!).sid).toBe(COPY)
+  expect(JSON.stringify(r)).toContain('started a copy')
 })

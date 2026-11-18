@@ -122,3 +122,32 @@ test('claude --desktop failing says what to do instead', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /exited 2/ })).toBeTruthy()
   await ui.unmount()
 })
+
+test('Open desk from a pane on the desktop surface skips pgrep (the app is running)', async ($, on) => {
+  const { h, start } = fresh(on, '/h/.claude/spares/spare-abc')
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' } as any)
+  await ui.press({ key: 'setup' })
+  h.app.running = false
+  await ui.press({ key: 'open-desk' })
+  expect(h.calls.filter((c: any) => c.argv[0].endsWith('pgrep'))).toHaveLength(0)
+  expect(h.calls.filter((c: any) => c.argv[0] === 'claude' && c.argv[1] === '--desktop')).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('Open desk elsewhere: second pgrep form finds the app; a pgrep that errors still tries claude --desktop and shows its real error', async ($, on) => {
+  const { h, start } = fresh(on, '/h/.claude/spares/spare-abc')
+  await start($)
+  const ui = await $.ui.mount(PANE as any)
+  await ui.press({ key: 'setup' })
+  h.app.pgrep = (a: string[]) => (a[0] === '-f' ? { exitCode: 0, stdout: '1', stderr: '' } : { exitCode: 1, stdout: '', stderr: '' })
+  await ui.press({ key: 'open-desk' })
+  expect(h.calls.filter((c: any) => c.argv[0] === 'claude' && c.argv[1] === '--desktop')).toHaveLength(1)
+  h.app.pgrep = () => { throw new Error('spawn pgrep ENOENT') }
+  h.claude.handler = (a: string[]) => (a[0] === '--desktop' ? { exitCode: 3, stdout: '', stderr: 'no app window' } : { exitCode: 0, stdout: a[0] === 'agents' ? '[]' : '' })
+  await ui.press({ key: 'open-desk' })
+  expect(h.calls.filter((c: any) => c.argv[0] === 'claude' && c.argv[1] === '--desktop')).toHaveLength(2)
+  expect(await ui.find({ type: 'Text', text: /no app window/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /not running/ })).toBeFalsy()
+  await ui.unmount()
+})

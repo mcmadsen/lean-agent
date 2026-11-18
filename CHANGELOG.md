@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.2
+
+### Fixed
+- **Open desk** no longer says "The Claude app is not running" inside the Claude app: a pane drawn on the desktop surface
+  skips the check. Elsewhere the check calls `/usr/bin/pgrep` (`-x Claude`, then `-f` on the app binary path), and if the
+  check itself errors `claude --desktop` is tried anyway and its real error is shown. The login opener uses the same two checks.
+- Thread resume ran `claude --bg --resume <sid> -n <label> -- <prompt>`; any extra flag makes the CLI start a copy of the
+  session. It now passes only `--resume <sid> -- <prompt>`, and if the CLI still prints "started a copy as <id>" the
+  thread follows the copy and the result says so.
+- Closing a thread ran the nonexistent `claude agents stop <sid>`; it now runs `claude stop <id>` (first 8 chars of the sid).
+
 ## 1.0.1
 
 ### Added

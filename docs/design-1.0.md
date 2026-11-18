@@ -39,7 +39,7 @@ Legend: **KEEP** (how in pure Claude Code), **CHANGE** (what changes), **DROP** 
 | 3 | `thread new` | KEEP | skill `thread` (+ `/lean-agent:new`): creates `threads/tN/`, writes `brief.md`, runs `claude --bg -n "tN · title"` |
 | 4 | `thread send` | KEEP | skill `thread`: append to `threads/tN/inbox.jsonl`; wake if idle (2.4) |
 | 5 | thread report back to the desk | KEEP | mod tool `lean_report` registered in thread sessions; writes `desk/inbox.jsonl` |
-| 6 | `thread close` / `reopen` / `park` | KEEP | skill `thread`: flip `thread.json.state`; close = `claude agents stop <sid>` if running; reopen = Resume |
+| 6 | `thread close` / `reopen` / `park` | KEEP | skill `thread`: flip `thread.json.state`; close = `claude stop <id>` (the first 8 chars of the sid) if running; reopen = Resume |
 | 7 | `thread list` / status table | KEEP | skill `thread` reads `threads/*/thread.json` + `claude agents --json --all` |
 | 8 | Clearing / compaction of threads | CHANGE | Claude Code's own auto-compaction; mod `session.compact` writes `notes.md` first so Resume/Start can rebuild |
 | 9 | `lean-agent run` workers with model choice | CHANGE | subagents: `agents/worker-haiku.md`, `worker-sonnet.md`, `worker-opus.md` (model + tools), called by threads via the Agent tool |
@@ -151,7 +151,7 @@ Thread -> desk:
 
 - Start: `cd ~/.lean-agent/threads/tN && claude --bg -n "tN · <title>" "$(cat brief.md)"`. The sid comes from
   `claude agents --json --cwd .` (newest entry) and is written to `thread.json`.
-- Wake an idle thread: `cd ~/.lean-agent/threads/tN && claude --bg --resume <sid> -n "tN · <title>" "<batch>"`.
+- Wake an idle thread: `cd ~/.lean-agent/threads/tN && claude --bg --resume <sid> -- "<batch>"`.
   The new sid (if `claude agents` lists a new one) is appended to `sids[]`; `sid` = the latest.
 - Never resume a running thread (it forks a copy). Running = an entry in `claude agents --json --cwd <folder>` with a
   running state, cross-checked by the thread mod's heartbeat (`thread.json.last_turn`, written at `turn.start` /

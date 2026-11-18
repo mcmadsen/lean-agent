@@ -29,6 +29,15 @@ ok "runs --desktop with no prompt in the desk folder" "$(sed 's/ in .*//' "$t/ca
 ok "cwd is the desk" "$(sed 's/.* in //' "$t/calls" | sed 's#.*/##')" "lean-agent-desk"
 ok "opened logged" "$(tail -1 "$log" | grep -c 'desk opened')" "1"
 
+# the app's process name may differ: the second form (pgrep -f on the binary path) is enough
+cat >"$t/bin/pgrep" <<'X'
+#!/bin/sh
+case "$*" in *-fq*"/Claude.app/Contents/MacOS/Claude"*) exit 0 ;; esac
+exit 1
+X
+rm -f "$t/calls" "$t/n"; run 999 2
+ok "opens when only pgrep -f finds the app" "$(sed 's/ in .*//' "$t/calls")" "claude --desktop"
+
 rm -rf "$t/home/lean-agent-desk"; rm -f "$t/calls" "$t/n"; run 1 3
 ok "missing desk folder: no claude" "$(cat "$t/calls" 2>/dev/null)" ""
 ok "missing desk logged" "$(tail -1 "$log" | grep -c 'desk folder missing')" "1"

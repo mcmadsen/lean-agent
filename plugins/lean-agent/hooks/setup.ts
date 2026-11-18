@@ -62,13 +62,32 @@ export function setupText(o: SetupOut, isDesk: boolean): string {
   return out.join('\n')
 }
 
+// Is the Claude app running? GUI apps have a minimal PATH, so pgrep is called by absolute path. null = the check itself failed.
+async function appRunning(h: Host): Promise<boolean | null> {
+  try {
+    for (const argv of [['/usr/bin/pgrep', '-x', 'Claude'], ['/usr/bin/pgrep', '-f', '/Claude.app/Contents/MacOS/Claude']]) {
+      if ((await h.process.run(argv)).exitCode === 0) return true
+    }
+    return false
+  } catch {
+    return null
+  }
+}
+
 // Opens the desk the way the login agent does (`claude --desktop` in the desk folder), and never launches the Claude app
-// itself: without a running app there is nothing to open it in.
-export async function openDesk(h: Host): Promise<{ ok: boolean; text: string }> {
+// itself: without a running app there is nothing to open it in. A pane drawn on the 'desktop' surface is inside the app,
+// so the app is running and the check is skipped; if the check itself errors, `claude --desktop` is tried anyway.
+export async function openDesk(h: Host, surface?: string): Promise<{ ok: boolean; text: string }> {
   const dir = deskDir(await homeDir(h))
   if (!(await h.fs.exists(dir))) return { ok: false, text: 'The desk folder is missing: press Set up first.' }
-  const app = await h.process.run(['pgrep', '-x', 'Claude']).catch(() => ({ exitCode: 1 }) as any)
-  if (app.exitCode !== 0) return { ok: false, text: 'The Claude app is not running: open it, then press Open desk again.' }
-  const r = await h.process.run(['claude', '--desktop'], { cwd: dir })
-  return r.exitCode === 0 ? { ok: true, text: 'Desk opened in the Claude app.' } : { ok: false, text: `claude --desktop exited ${r.exitCode}: start a new session in ~/lean-agent-desk instead.` }
+  if (surface !== 'desktop' && (await appRunning(h)) === false) return { ok: false, text: 'The Claude app is not running: open it, then press Open desk again.' }
+  let r: { exitCode: number; stdout?: string; stderr?: string }
+  try {
+    r = await h.process.run(['claude', '--desktop'], { cwd: dir })
+  } catch (e) {
+    return { ok: false, text: `claude --desktop failed: ${String((e as Error)?.message ?? e).slice(0, 200)}` }
+  }
+  if (r.exitCode === 0) return { ok: true, text: 'Desk opened in the Claude app.' }
+  const why = (r.stderr || r.stdout || '').trim().slice(0, 200)
+  return { ok: false, text: `claude --desktop exited ${r.exitCode}${why ? `: ${why}` : ''}. Start a new session in ~/lean-agent-desk instead.` }
 }

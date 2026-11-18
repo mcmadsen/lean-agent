@@ -9,7 +9,7 @@ import { NEXT_STEP, bounded, openDesk, setupCheck, setupFix, setupText } from '.
 import type { Role } from './role'
 
 export const PANE = 'lean-agent'
-export const VERSION = '1.0.1'
+export const VERSION = '1.0.2'
 const TONE: Record<GoalTone, string> = { working: 'green', waiting: 'yellow', stuck: 'red', quiet: 'gray' }
 
 let lastError = ''
@@ -125,7 +125,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       lastSetup = o.fixed
       chk = { at: await host.clock.now(), problems: o.problems, notes: o.notes }
     })
-    const openIt = setupPress('open desk', () => openDesk(host))
+    const openIt = setupPress('open desk', () => openDesk(host, e.surface))
     const setupRows = lastSetup.map((l, i) => (
       <Text key={`su-${i}`} dimColor>
         {l}

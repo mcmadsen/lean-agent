@@ -11,7 +11,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
   const writes: string[] = []
   const git = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 1, stdout: '' }) }
   const os = { name: 'Darwin' } // what `uname` answers
-  const app = { running: true } // is the Claude app running (pgrep)
+  const app = { running: true, pgrep: null as null | ((a: string[]) => any) } // is the Claude app running (pgrep)
   const claude = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 0, stdout: '' }) }
   const res = (p: string) => links.get(p) ?? p
   const made = new Set<string>() // folders a `mkdir` made (a folder alone has no file in `files`)
@@ -51,7 +51,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       if (c === 'chmod' || c === 'systemctl' || c === 'launchctl') return ok()
       if (c === 'shasum') { let x = 5381; for (const ch of call.stdin ?? '') x = ((x * 33) ^ ch.charCodeAt(0)) >>> 0; return ok(x.toString(16).padStart(8, '0').repeat(8) + '  -') }
       if (c === 'openssl') return ok('ab'.repeat(32))
-      if (c === 'pgrep') return app.running ? ok('123') : { exitCode: 1, stdout: '', stderr: '' }
+      if (c === 'pgrep' || c === '/usr/bin/pgrep') { if (app.pgrep) return app.pgrep(a); return app.running ? ok('123') : { exitCode: 1, stdout: '', stderr: '' } }
       if (c === 'id') return ok('501')
       if (c === 'uname') return ok(os.name)
       if (c === 'wc') { const t = files.get(a[a.length - 1]); return t === undefined ? { exitCode: 1, stdout: '', stderr: 'no such file' } : ok(new TextEncoder().encode(t).length + ' ' + a[a.length - 1]) }

@@ -11,7 +11,7 @@ if ! desk="$(cd "$home/lean-agent-desk" 2>/dev/null && pwd -P)"; then
   exit 0
 fi
 interval="${LEAN_OPEN_INTERVAL:-5}"; tries="${LEAN_OPEN_TRIES:-120}"; i=0
-until pgrep -xq "Claude"; do
+until pgrep -xq Claude || pgrep -fq "/Claude.app/Contents/MacOS/Claude"; do
   i=$((i + 1))
   if [ "$i" -ge "$tries" ]; then
     echo "$(stamp) Claude Desktop not running after $((tries * interval))s: desk not opened" >>"$log"
