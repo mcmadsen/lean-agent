@@ -13,6 +13,7 @@ import { applyFeedback, parseFeedback } from './feedback'
 import { checkStale, syncRules } from './rules'
 import { readJson, threadsDir } from './state'
 import { chase } from './chaser'
+import { check, fix, migrate } from './doctor'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
 
@@ -20,6 +21,8 @@ let notified = 0
 let role: Role = { kind: 'plain' }
 export const currentRole = () => role
 
+const DOCTOR = 'lean_doctor'
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate'] } }, required: ['action'] }
 const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
@@ -89,6 +92,12 @@ export const register: Register = on => {
         description:
           'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, start. A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
+        isDeferred: false,
+      })
+      await $.tool.register({
+        name: DOCTOR,
+        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent).',
+        inputSchema: DOCTOR_SCHEMA,
         isDeferred: false,
       })
       const timer = $.clock.every(10_000, async () => {
@@ -176,6 +185,19 @@ export const register: Register = on => {
     const h = hostOf($)
     const out = await leanThread(h, $.plugin.root, e)
     return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
+  })
+
+  on('tool.call', { tool: `mcp__lean-agent__${DOCTOR}` }, async ($, e: any) => {
+    if (role.kind !== 'desk') return { result: 'lean-agent: the doctor runs in the desk', isError: true } as any
+    const h = hostOf($)
+    try {
+      if (e.action === 'check') return { result: (await check(h, $.plugin.root)).join('\n') } as any
+      if (e.action === 'fix') return { result: (await fix(h, $.plugin.root)).lines.join('\n') } as any
+      if (e.action === 'migrate') return { result: (await migrate(h, $.plugin.root)).lines.join('\n') } as any
+      return { result: 'doctor: action must be check, fix or migrate', isError: true } as any
+    } catch (err) {
+      return { result: `doctor failed: ${String((err as Error)?.message ?? err)}`, isError: true } as any
+    }
   })
 
   for (const t of THREAD_TOOLS) {
