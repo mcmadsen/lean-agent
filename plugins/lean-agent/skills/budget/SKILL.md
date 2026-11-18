@@ -1,12 +1,9 @@
 ---
 name: budget
-description: Show how many tokens this Claude Code session has used, per model and in total, against the lean-agent budget. Use when the user asks about token usage, cost, or remaining budget.
+description: Show today's lean-agent spend against the daily cap and set caps. Use when the user asks about remaining budget or wants to change a cap.
 ---
 
-Run `lean-budget` with the Bash tool and show its table to the user unchanged.
-Then add one or two sentences on where the tokens went, for example whether
-cache reads dominate (cheap, from long context), output dominates (long replies
-or edits), or a subagent model is the biggest line.
-
-If `lean-budget` is not found, run
-`python3 ~/.claude/plugins/*/lean-agent/*/scripts/usage.py report` instead.
+Today's spend is the sum of `usd` for today in `~/.lean-agent/ledger.jsonl`, per `role` (desk, thread, plain). Caps live in
+`~/.lean-agent/config.json`: `{"dailyCapUsd": {"desk": 5, "thread": 20}, "workerCapUsd": 2, "workerCaps": {"worker-opus": 4}}`.
+Past a cap the next model request is refused with a notice; a worker past its cap ends and reports what is left.
+Show spend against each cap that is set; to change a cap, edit that file. There is no plan-window percentage (no verified source).

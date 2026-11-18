@@ -8,6 +8,10 @@ import type { Host } from './state'
 import { THREAD_TOOLS, consumeWake, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide } from './guard'
 import { paneStart, registerPane } from './pane'
+import { overBudget, record } from './budget'
+import { applyFeedback, parseFeedback } from './feedback'
+import { checkStale, syncRules } from './rules'
+import { readJson, threadsDir } from './state'
 
 let notified = 0
 let role: Role = { kind: 'plain' }
@@ -54,6 +58,19 @@ async function agentType($: any, id?: string): Promise<string | undefined> {
   }
 }
 
+const spent = new Map<string, number>() // usd per subagent id, this session
+
+// a worker's reply ends with LEAN-FEEDBACK: gaps and memory go to the files, the thread's own turn is unchanged
+async function feedbackOf(h: Host, e: any, r: any): Promise<void> {
+  if (e.agentId || (e.tool !== 'Agent' && e.tool !== 'Task') || r?.deny !== undefined) return
+  const texts = (v: any): string[] => (typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(texts) : v && typeof v === 'object' ? Object.values(v).flatMap(texts) : [])
+  const fb = parseFeedback(texts(r?.result).join('\n'))
+  if (!fb) return
+  let project: string | undefined
+  if (role.kind === 'thread') project = (await readJson<{ project?: string }>(h, `${threadsDir(await homeDir(h))}/${role.id}/thread.json`, {})).project
+  await applyFeedback(h, { thread: role.kind === 'thread' ? role.id : undefined, project, agent: String(e.subagent_type ?? e.agent ?? '') || undefined }, fb)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     // $ is only ever spelled $.noun.event(...): the helpers get this thin host instead of $ itself
@@ -94,7 +111,36 @@ export const register: Register = on => {
       }
     }
     await paneStart($, role).catch(() => undefined)
+    if (role.kind === 'thread') {
+      // learned rules: copy into this folder (a worktree is its own checkout) and say when they went stale
+      try {
+        const th = await readJson<{ project?: string }>(h, `${threadsDir(await homeDir(h))}/${role.id}/thread.json`, {})
+        if (th.project) {
+          await syncRules(h, th.project, e.cwd)
+          const stale = await checkStale(h, th.project, e.cwd)
+          if (stale.length) return next({ ...e, context: [...((e as any).context ?? []), `[lean-agent] ${stale.join('; ')}`] } as any)
+        }
+      } catch {
+        /* rules are optional */
+      }
+    }
     return next(e)
+  })
+
+  // every model request: refuse past a cap, then price its usage into ledger.jsonl
+  on('turn.step', async function* ($, e: any, next) {
+    const h = hostOf($)
+    const type = e.agentId ? await agentType($, e.agentId) : undefined
+    const why = await overBudget(h, role.kind, e.agentId ? { type, spent: spent.get(e.agentId) ?? 0 } : null).catch(() => null)
+    if (why) return { turnId: e.turnId, index: e.index, answer: why, toolUses: [], stopReason: 'end_turn', usage: null } as any
+    const r: any = yield* next(e)
+    try {
+      const row = await record(h, { role: role.kind, tN: role.kind === 'thread' ? role.id : undefined, agentId: e.agentId, agent: type }, r?.usage?.model ?? e.model, r?.usage)
+      if (row && e.agentId) spent.set(e.agentId, (spent.get(e.agentId) ?? 0) + row.usd)
+    } catch {
+      /* a ledger write that fails never stops the turn */
+    }
+    return r
   })
 
   registerPane(on)
@@ -119,6 +165,7 @@ export const register: Register = on => {
     const why = await decide(h, { role, cwd, agentType: await agentType($, e.agentId) }, e)
     if (why) return { deny: why } as any
     const r: any = await next(e)
+    await feedbackOf(h, e, r).catch(() => undefined)
     if (e.agentId || r?.deny !== undefined) return r
     try {
       const batch = role.kind === 'thread' ? await takeBatch(h, role.id) : role.kind === 'desk' ? await takeReports(h) : null
