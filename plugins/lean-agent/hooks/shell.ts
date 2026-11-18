@@ -11,7 +11,7 @@ export type Verdict = { push: boolean; write: boolean; unsure: boolean; pushes: 
 
 const EXP = '\u0001' // stands for any expansion inside a word
 const PUSH_TEXT = /\bgit\b[^;&|\n]*\bpush\b/
-// cheap whole-text check for private projects (wrappers like python -c / ssh are not parsed; a documented residual risk).
+// cheap whole-text check for private projects (ssh/flock/parallel are parsed; python -c, other interpreters' strings and eval with variables are not: documented residual risk).
 // It runs on the command with quoted strings and heredoc bodies stripped, and matches `git push` / `gh <create|comment|merge>`
 // only at COMMAND positions (start, ; & && || | ( $( ` newline, after env assignments and env/sudo/command/exec/nohup/time
 // prefixes), so `git commit -m 'add push notifications'`, `git log --grep=push` and `ls src/gh && git merge main` pass.

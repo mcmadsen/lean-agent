@@ -157,6 +157,13 @@ test('protected branches are never force-pushed or deleted, in any repo', async 
   expect(await run(h, plain, { tool: 'Bash', command: 'git push --force' }, '/elsewhere')).toBeNull()
 })
 
+test('an unlexable git push fails closed, in any repo', async () => {
+  const h = setup()
+  h.git.handler = a => (a.includes('--abbrev-ref') ? { exitCode: 0, stdout: 'feature\n' } : { exitCode: 0, stdout: SHA + '\n' })
+  for (const command of ['git push origin "feature', "echo it's; git push origin feature"])
+    for (const cwd of ['/r/app', '/elsewhere']) expect([command, cwd, await run(h, plain, { tool: 'Bash', command }, cwd)]).toEqual([command, cwd, expect.stringContaining('could not read this git push safely')])
+})
+
 // ported from 0.45 tests (test_push_guards): plain pushes to guarded branches are refused, shell level
 test('guarded branches: a plain push to main/master/develop/release/* is refused; per-project guards.push-deny; local and override pass', async () => {
   const h = setup()

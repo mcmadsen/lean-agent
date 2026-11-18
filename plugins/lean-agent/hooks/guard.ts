@@ -3,7 +3,7 @@
 // register.tsx wraps it fail-closed: a throwing guard denies.
 import { homeDir, leanDir, readJson, realPath, threadsDir, writeJson } from './state'
 import { greenReview } from './reviews'
-import { analyze, privateText } from './shell'
+import { analyze, privateText, type Verdict } from './shell'
 import type { Host } from './state'
 import type { Role } from './role'
 
@@ -51,7 +51,7 @@ export const PUSH = /\bgit\b[^;&|\n]*\bpush\b/
 //       a write method or -f/-F/--field/--raw-field/--input; no subcommand (gh, gh --version).  az: list/show/query/get verbs.
 // Unlexable commands are denied only if they also mention a gh/az token or a variable program. This is the fast first
 // line; the pre-push hook (githooks.ts) is only a backstop (--no-verify and config overrides skip it, so those are refused here).
-// Wrappers such as python -c / ssh / flock are not parsed (documented residual risk); a whole-text check still catches `git push` and `gh ... create|comment|merge`.
+// ssh / flock / parallel and similar wrappers are parsed; not parsed (residual risk): python -c and other interpreters' strings, eval with variables; a whole-text check still catches `git push` and `gh ... create|comment|merge`.
 // In non-private projects none of this applies: only the push gate and the protected-branch / --force guard do.
 // Directories a command works in: `git -C dir`, `cd dir`, `--git-dir`-less; the session cwd is always one.
 export function dirsOf(c: string, cwd: string): string[] {
@@ -155,11 +155,12 @@ async function pushIsLocal($: Host, args: string[], dir: string): Promise<boolea
 }
 
 // the refusal text, or null: `git push` words (the whole command) run in dir
-async function guardedDenial($: Host, c: string, dir: string): Promise<string | null> {
+async function guardedDenial($: Host, a: Verdict, dir: string): Promise<string | null> {
   if ((await $.env.get('LEAN_AGENT_PUSH_GUARD_OVERRIDE')) === '1') return null
   const pats = await patternsFor($, dir)
   if (!pats.length) return null
-  for (const { args } of analyze(c).pushes) {
+  for (const { args, known } of a.pushes) {
+    if (!known) return UNREADABLE
     if (await pushIsLocal($, args, dir)) continue
     const dests = await pushDestinations($, args, dir)
     if (dests === null) return `lean-agent: \`git push --all/--mirror\` would update every branch, including guarded ones (${pats.join(', ')}). Push only your own branch.`
@@ -171,10 +172,12 @@ async function guardedDenial($: Host, c: string, dir: string): Promise<string | 
   return null
 }
 
+export const UNREADABLE = 'lean-agent: could not read this git push safely; write it as a plain `git push <remote> <branch>`'
 // A push that rewrites or deletes a shared branch is refused in every repo, registered or not.
 export const PROTECTED = /^(main|master|develop|dev|trunk|prod|production|stable|release([/-].*)?)$/
-async function protectedDenial($: Host, c: string, dir: string): Promise<string | null> {
-  for (const { args } of analyze(c).pushes) {
+async function protectedDenial($: Host, a: Verdict, dir: string): Promise<string | null> {
+  for (const { args, known } of a.pushes) {
+    if (!known) return UNREADABLE
     const r = await protectedOne($, args, dir)
     if (r) return r
   }
@@ -208,9 +211,10 @@ async function pushDenial($: Host, c: string, cwd: string): Promise<string | nul
   }
   if (!pushing) return null
   const dir = dirs[dirs.length - 1]!
-  const prot = await protectedDenial($, c, dir)
+  if (a.pushes.some(x => !x.known)) return UNREADABLE
+  const prot = await protectedDenial($, a, dir)
   if (prot) return prot
-  const gd = await guardedDenial($, c, dir)
+  const gd = await guardedDenial($, a, dir)
   if (gd) return gd
   const p = await projectOf($, dir)
   if (!p) return null // the review gate is for registered projects; other repos push as before
