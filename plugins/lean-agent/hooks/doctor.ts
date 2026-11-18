@@ -3,6 +3,7 @@
 import { appendJsonl, atomicWrite, deskDir, homeDir, leanDir, mkdirp, readJson, readJsonl, realPath, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { trustFolder } from './threads'
+import { deskChoice, mergeModelSettings, readModelSettings } from './models'
 import { setNotice } from './notices'
 import { seenNames, skillStat } from './skilltrim'
 
@@ -70,6 +71,9 @@ export async function fix(h: Host, root: string): Promise<FixOut> {
       }
     } else lines.push('login opener already in place')
   } else lines.push('not macOS: no login opener (Claude Desktop is macOS/Windows only)')
+  const want = await deskChoice(h, home)
+  const pinned = await mergeModelSettings(h, `${deskDir(home)}/.claude/settings.json`, want)
+  lines.push(pinned ? `desk pinned to ${want.model} / effort ${want.effort}` : 'desk .claude/settings.json does not parse: model not pinned, fix the file by hand')
   const trusted = await trustFolder(h, deskDir(home))
   lines.push(trusted ? 'desk folder trusted (real path)' : '~/.claude.json does not parse: desk folder not trusted, accept the dialog once')
   try {
@@ -96,6 +100,9 @@ export async function check(h: Host, root: string): Promise<string[]> {
     /* unreadable: reported as not trusted */
   }
   row(asObj(asObj(doc.projects)[real]).hasTrustDialogAccepted === true, 'desk folder trusted')
+  const want = await deskChoice(h, home)
+  const have = await readModelSettings(h, `${deskDir(home)}/.claude/settings.json`)
+  row(have?.model === want.model && have?.effort === want.effort, have?.model === want.model && have?.effort === want.effort ? `desk model ${want.model} / effort ${want.effort}` : `desk model is ${have?.model ?? 'not set'} / effort ${have?.effort ?? 'not set'}, want ${want.model} / ${want.effort}`)
   const sh = await text(h, `${leanDir(home)}/bin/open-desk.sh`)
   row(sh !== null && sh === (await text(h, `${root}/opener/open-desk.sh`)), 'opener script current')
   const mac = (await run(h, ['uname', '-s'])).out === 'Darwin'

@@ -3,6 +3,12 @@
 ## 1.0.2
 
 ### Added
+- Model and effort are pinned. The desk folder's `.claude/settings.json` gets `model: sonnet`, `effortLevel: high` (setup /
+  `lean_doctor fix`, merged into an existing file; `lean_doctor check` reports a missing or different value; config.json
+  `desk.model` / `desk.effort` override). Threads start with `--model sonnet --effort medium` instead of the user's default
+  model (config.json `threads.model` / `threads.effort`, or `model` / `effort` on `lean_thread` `new` / `start`); the choice is
+  recorded in `thread.json`, written to the thread folder's settings, and shown in `list` and the pane row. A resume passes
+  no flags. The plugin's agents set `effort` (workers haiku low / sonnet medium / opus high, readers and explorer low, reviewer medium).
 - The desk can answer "what projects do we have?": `lean_thread` gets `projects` (path, private, guards, learned rules with
   areas / last learned / stale, open threads; private projects hidden by the 0.45 private switch only with `all: true`),
   `project-add` (existing folder, real path), `project-remove` (unregisters only, refused while a thread uses it) and

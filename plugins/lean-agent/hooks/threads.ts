@@ -2,6 +2,8 @@ import { appendJsonl, atomicWrite, homeDir, leanDir, mkdirp, readJson, readJsonl
 import type { Host } from './state'
 import { unconsumed, wakeMark } from './delivery'
 import { projectsAction } from './projects'
+import { settingsKeys, threadChoice } from './models'
+import type { Choice } from './models'
 import { ensureGitHooks, gitEnv } from './githooks'
 
 export const WAKE_GAP_MS = 30_000
@@ -16,6 +18,8 @@ export type Thread = {
   created: number
   lastWake: number // ms of the last start/wake, 0 = never
   delivered: number // inbox.jsonl lines already handed to the session
+  model?: string // haiku | sonnet | opus, as started (a resume keeps the session's saved options)
+  effort?: string // low | medium | high
 }
 export type Inbox = { ts: number; text: string; from?: string }
 
@@ -107,7 +111,7 @@ export async function trustFolder(h: Host, folder: string): Promise<boolean> {
 // ---- templates -----------------------------------------------------------------------------------------------
 const fill = (t: string, vars: Record<string, string>) => t.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? '')
 
-export async function threadSettings(h: Host, id: string, hooks = true): Promise<string> {
+export async function threadSettings(h: Host, id: string, hooks = true, choice?: Choice): Promise<string> {
   const lean = leanDir(await homeDir(h))
   // Edit/Write/Bash without asking, inside the lean-agent folder (which holds the worktrees); nothing global.
   const abs = `//${lean.replace(/^\//, '')}`
@@ -120,6 +124,7 @@ export async function threadSettings(h: Host, id: string, hooks = true): Promise
       // git itself refuses a push from a private project (githooks.ts); without working wrappers core.hooksPath is not set,
       // so the repo's own hooks keep running (the failure shows as a notice)
       ...(hooks ? { env: gitEnv(await homeDir(h)) } : {}),
+      ...(choice ? settingsKeys(choice) : {}), // a session opened in the folder from the app matches
     },
     null,
     2,
@@ -136,7 +141,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; path?: string; on?: boolean; all?: boolean; confirm?: boolean }
+export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; all?: boolean; confirm?: boolean }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -178,11 +183,15 @@ function batchPrompt(msgs: Inbox[]): string {
   return msgs.map(m => (m.from ? `[${m.from}] ` : '') + m.text).join('\n\n')
 }
 
-async function startSession(h: Host, home: string, t: Thread, prompt: string): Promise<Out> {
+async function startSession(h: Host, home: string, t: Thread, prompt: string, given: { model?: string; effort?: string } = {}): Promise<Out> {
   const folder = tpath(home, t.id)
+  const choice = await threadChoice(h, home, given, t)
+  if (typeof choice === 'string') return err(choice)
+  t.model = choice.model
+  t.effort = choice.effort
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
-  await h.fs.write(`${folder}/.claude/settings.json`, await threadSettings(h, t.id, hooks))
-  const r = await h.process.run(['claude', '--bg', '-n', label(t), '--', prompt], { cwd: folder, timeoutMs: 120_000 })
+  await h.fs.write(`${folder}/.claude/settings.json`, await threadSettings(h, t.id, hooks, choice))
+  const r = await h.process.run(['claude', '--bg', '-n', label(t), '--model', choice.model, '--effort', choice.effort, '--', prompt], { cwd: folder, timeoutMs: 120_000 })
   if (r.exitCode !== 0) return err(`claude --bg failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
   let sid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(r.stdout + '\n' + r.stderr)?.[0] ?? ''
   if (!sid) {
@@ -199,6 +208,8 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string): P
 async function create(h: Host, root: string, home: string, i: Input): Promise<Out> {
   const title = (i.title ?? '').trim()
   if (!title) return err('new needs a title')
+  const pre = await threadChoice(h, home, i)
+  if (typeof pre === 'string') return err(pre) // a bad model/effort stops here, before any folder exists
   const id = await nextId(h, home)
   const dir = tpath(home, id)
   await mkdirp(h, dir)
@@ -206,12 +217,12 @@ async function create(h: Host, root: string, home: string, i: Input): Promise<Ou
   const vars = { id, title, project: t.project, lean: leanDir(home) }
   await h.fs.write(`${dir}/CLAUDE.md`, fill(await template(h, root, 'thread.md'), vars))
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
-  await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id, hooks))
+  await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id, hooks, pre))
   const brief = (i.text ?? '').trim() || title
   await h.fs.write(`${dir}/brief.md`, brief + '\n')
   await save(h, home, t)
   await trustFolder(h, dir)
-  const r = await startSession(h, home, t, brief)
+  const r = await startSession(h, home, t, brief, i)
   return r.ok ? { ...r, data: t } : r
 }
 
@@ -278,9 +289,9 @@ async function list(h: Host, home: string): Promise<Out> {
     const t = await load(h, home, e.name)
     if (!t) continue
     const q = (await pending(h, home, t)).length
-    out.push({ id: t.id, title: t.title, project: t.project, state: t.state, running: isRunning(rows.find(a => a.sid === t.sid)), sid: t.sid, queued: q })
+    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(rows.find(a => a.sid === t.sid)), sid: t.sid, queued: q })
   }
-  const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title} [${o.state}${o.running ? ', running' : ''}${o.queued ? `, ${o.queued} queued` : ''}]`).join('\n') : 'no threads'
+  const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title} [${o.state}${o.running ? ', running' : ''}${o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}`).join('\n') : 'no threads'
   return { ok: true, text, data: out }
 }
 
@@ -319,7 +330,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           const brief = (await h.fs.read(`${tpath(home, id)}/brief.md`).catch(() => t.title)) as string
           const u = await unconsumed(h, home, id)
           const msgs = u.msgs
-          const r = await startSession(h, home, t, [brief.trim(), batchPrompt(msgs)].filter(Boolean).join('\n\n'))
+          const r = await startSession(h, home, t, [brief.trim(), batchPrompt(msgs)].filter(Boolean).join('\n\n'), i)
           if (r.ok && msgs.length) {
             t.delivered = u.upTo
             await save(h, home, t)

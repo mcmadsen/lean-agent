@@ -12,7 +12,7 @@ import type { Thread } from './threads'
 export type GoalTone = 'working' | 'waiting' | 'stuck' | 'quiet'
 export type GoalRow = { id: string; text: string; ts: number; tone: GoalTone }
 export type AnswerRow = { n: number; rec: DeskRec; unread: boolean }
-export type ThreadRow = { id: string; title: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean }
+export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
 export type View = { projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; budget: string; errors: string[] }
@@ -119,6 +119,8 @@ export async function loadView(h: Host): Promise<View> {
       v.threads.push({
         id: t.id,
         title: t.title,
+        model: t.model,
+        effort: t.effort,
         state: t.state,
         run: t.state === 'parked' ? 'parked' : running ? 'running' : 'idle',
         last: lastLine(typeof notes === 'string' ? notes : '') || owner.get(t.id) || '',

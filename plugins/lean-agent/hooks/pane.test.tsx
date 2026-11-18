@@ -143,3 +143,12 @@ test('pane Projects section: name, private, open threads, stale rules; hidden pr
   expect(await ui.find({ type: 'Text', text: /secret/ })).toBeFalsy()
   await ui.unmount()
 })
+
+test('pane thread row shows the thread\'s model/effort', async ($, on) => {
+  const h = setup(on, [])
+  h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'one', project: 'p', state: 'open', sid: SID, created: 1, lastWake: 0, delivered: 0, model: 'opus', effort: 'high' }))
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Text', text: /t1 · opus\/high/ })).toBeTruthy()
+  await ui.unmount()
+})

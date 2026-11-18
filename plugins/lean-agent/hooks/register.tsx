@@ -80,6 +80,8 @@ const SCHEMA = {
     text: { type: 'string', description: 'new: the brief; send: the message' },
     title: { type: 'string', description: 'new: short title' },
     project: { type: 'string', description: 'new / project-*: project name' },
+    model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'new/start: default sonnet' },
+    effort: { type: 'string', enum: ['low', 'medium', 'high'], description: 'new/start: default medium' },
     path: { type: 'string', description: 'project-add: folder (must exist)' },
     on: { type: 'boolean', description: 'project-private: true or false' },
     all: { type: 'boolean', description: 'projects: include private ones hidden by the private switch' },

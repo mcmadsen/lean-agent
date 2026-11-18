@@ -221,7 +221,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         {v?.threads.map(t => (
           <Box key={`t-${t.id}`}>
             <Text>
-              {t.id} {short(t.title, 30)} [{t.run}] <Text dimColor>{short(t.last, 50)}</Text>
+              {t.id}{t.model ? ` · ${t.model}/${t.effort}` : ''} {short(t.title, 30)} [{t.run}] <Text dimColor>{short(t.last, 50)}</Text>
             </Text>
             {t.resumable && <Button key={`resume-${t.id}`} label="Resume" onPress={thread('resume', t.id)} />}
             {t.resumable && <Button key={`start-${t.id}`} label="Start" onPress={thread('start', t.id)} />}

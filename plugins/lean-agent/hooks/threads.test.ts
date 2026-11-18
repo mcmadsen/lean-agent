@@ -37,7 +37,10 @@ test('new records the sid, writes the folder, settings and trust', async () => {
   expect(h.files.has('/h/.lean-agent/githooks/private.list')).toBe(true)
   expect(JSON.parse(h.files.get('/h/.claude.json')!).projects['/h/.lean-agent/threads/t1'].hasTrustDialogAccepted).toBe(true)
   const argv = h.claudeCalls().find(a => a[0] === '--bg')!
-  expect(argv).toEqual(['--bg', '-n', 't1 · fix login', '--', 'fix the login bug'])
+  expect(argv).toEqual(['--bg', '-n', 't1 · fix login', '--model', 'sonnet', '--effort', 'medium', '--', 'fix the login bug'])
+  expect(s.model).toBe('sonnet')
+  expect(s.effortLevel).toBe('medium')
+  expect([t.model, t.effort]).toEqual(['sonnet', 'medium'])
   expect(h.calls.find(c => c.argv[0] === 'claude' && c.argv[1] === '--bg')!.cwd).toBe('/h/.lean-agent/threads/t1')
   expect((await call({ action: 'new', title: 'second' })).ok).toBe(true)
   expect(h.files.has('/h/.lean-agent/threads/t2/thread.json')).toBe(true)
@@ -334,4 +337,32 @@ test('an ambiguous short copy id keeps the old sid and says it matches several s
   const r = await call({ action: 'send', tN: 't1', text: 'one' })
   expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t1/thread.json')!).sid).toBe(SID)
   expect(r.text).toContain('several sessions')
+})
+
+test('new and start pass --model/--effort (call > config.json > default), record them, and list shows them; resume passes none', async () => {
+  const { h, state, call } = setup()
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ threads: { model: 'haiku' } }))
+  await call({ action: 'new', title: 'cheap', text: 'x' })
+  expect(h.claudeCalls().find(a => a[0] === '--bg')!.slice(3, 7)).toEqual(['--model', 'haiku', '--effort', 'medium'])
+  await call({ action: 'new', title: 'hard', text: 'x', model: 'opus', effort: 'high' })
+  expect(h.claudeCalls().filter(a => a[0] === '--bg')[1]!.slice(3, 7)).toEqual(['--model', 'opus', '--effort', 'high'])
+  const t2 = JSON.parse(h.files.get('/h/.lean-agent/threads/t2/thread.json')!)
+  expect([t2.model, t2.effort]).toEqual(['opus', 'high'])
+  expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t2/.claude/settings.json')!)).toMatchObject({ model: 'opus', effortLevel: 'high' })
+  expect((await call({ action: 'list' })).text).toContain('t2 · hard')
+  expect((await call({ action: 'list' })).text).toContain('opus/high')
+  // a bad value stops before any folder exists
+  const bad = await call({ action: 'new', title: 'x', model: 'gpt' })
+  expect(bad.ok).toBe(false)
+  expect(h.files.has('/h/.lean-agent/threads/t3/thread.json')).toBe(false)
+  // start with a lighter task overrides the recorded choice
+  h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ ...JSON.parse(h.files.get('/h/.lean-agent/threads/t1/thread.json')!), sid: '' }))
+  await call({ action: 'start', tN: 't1', effort: 'low' })
+  expect(h.claudeCalls().filter(a => a[0] === '--bg').pop()!.slice(3, 7)).toEqual(['--model', 'haiku', '--effort', 'low'])
+  // resume: saved options, no flags
+  state.rows = [{ sessionId: SID, name: 'x', cwd: 'x', status: 'idle', startedAt: 1 }]
+  h.clock.t += 60_000
+  await call({ action: 'send', tN: 't2', text: 'again' })
+  const resumes = h.claudeCalls().filter(a => a.includes('--resume'))
+  for (const r of resumes) expect(r.some(x => x === '--model' || x === '--effort')).toBe(false)
 })
